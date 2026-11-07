@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import inspect
 import logging
 from collections.abc import Mapping
@@ -93,7 +94,7 @@ class DeployEnvTaskStep(TaskStep):
         base["metadata"] = self.metadata
         base["env_params"] = self.env_params
         if self.child_envs:
-            base["child_envs"] = self.child_envs
+            base["child_envs"] = copy.deepcopy(self.child_envs)  # a bundle export prunes the dict in place
         return base
 
     @classmethod
@@ -128,6 +129,8 @@ class DeployEnvTaskStep(TaskStep):
             return [f"deploy_env '{self.id}': {e}"]  # the words execute() would raise
         try:
             env = Env.get(self.env_id, self.env_version)
+            if self.child_envs and not _takes(env.deploy, "child_envs"):
+                return [f"deploy_env '{self.id}': {env.type} envs have no child envs"]
             # As stored: run-time overrides aren't known at save. Every run passes an attribution, so the check does too, whatever it
             # will hold.
             refusal = env.deploy_refusal(ttl_seconds=self.ttl_seconds, disk_size_gb=self.disk_size_gb, gateway_mode=self.gateway_mode, cpu=self.cpu,
@@ -195,7 +198,7 @@ class DeployEnvTaskStep(TaskStep):
                 raise ValueError(f"deploy_env '{self.id}': {env.type} envs take no env_params")
             deploy_kwargs["env_params"] = await env.run_env_params(self.env_params, context.deployed_envs)
         if self.child_envs:
-            if "child_envs" not in params and not accepts_kwargs:
+            if not _takes(env.deploy, "child_envs"):
                 raise ValueError(f"deploy_env '{self.id}': {env.type} envs have no child envs")
             deploy_kwargs["child_envs"] = self.child_envs
         deployed_env = await env.deploy(**deploy_kwargs)
@@ -229,3 +232,9 @@ class DeployEnvTaskStep(TaskStep):
                 instance_id=agent_info.get("instance_id") or deployed_env.instance_id,
             ))
         return context
+
+
+def _takes(deploy, name: str) -> bool:
+    """Whether ``deploy`` takes the keyword ``name``: it names it, or takes ``**kwargs``."""
+    params = inspect.signature(deploy).parameters
+    return name in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())

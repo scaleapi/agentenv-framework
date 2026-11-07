@@ -480,14 +480,27 @@ def test_writing_a_step_out_for_elsewhere_drops_each_child_envs_sandbox_type_as_
     assert prune({"child_envs": ["desktop"]}, DeployEnvTaskStep.field_scopes, frozenset({FieldScope.TASK})) == []
 
 
-@pytest.mark.parametrize("kind, refusal", [
-    ("server", "env 'mcp-email' has env_provider_type 'server', which doesn't take child_envs"),
-    ("gateway", "env 'mcp-email' has env_provider_type 'gateway', which doesn't take child_envs"),
-    ("other", "other envs have no child envs"),
-])
-def test_preflight_refuses_child_envs_for_an_env_with_no_child_envs(kind, refusal):
+@pytest.mark.parametrize("kind", ["server", "gateway", "other"])
+def test_preflight_refuses_child_envs_for_an_env_with_no_child_envs(kind):
     env = _OtherEnv("other", 1) if kind == "other" else _mcp_env(kind)
-    assert _preflight(env, child_envs={"desktop": {"cpu": 4}}) == [f"deploy_env 'd': {refusal}"]
+    assert _preflight(env, child_envs={"desktop": {"cpu": 4}}) == [f"deploy_env 'd': {env.type} envs have no child envs"]
+
+
+def test_preflight_refuses_child_envs_at_save_behind_a_provider_that_takes_every_option():
+    class _TakesEverything:
+        async def deploy(self, env, sandbox_provider, **options): ...
+
+    with patch("agent_env.env.envs.mcp_server.provider_or_class", return_value=_TakesEverything):
+        assert _preflight(_mcp_env("plugin_kw"), child_envs={"desktop": {"cpu": 4}}) == [
+            "deploy_env 'd': mcp_server envs have no child envs"]
+
+
+def test_exporting_a_step_leaves_the_steps_own_child_envs_as_they_were():
+    from agent_env.entity.scopes import FieldScope, prune
+
+    step = DeployEnvTaskStep(id="d", version=None, env_id="office", child_envs={"desktop": {"sandbox_type": "modal_vm"}})
+    prune(step.to_dict(), DeployEnvTaskStep.field_scopes, frozenset({FieldScope.TASK}))
+    assert step.child_envs == {"desktop": {"sandbox_type": "modal_vm"}}
 
 
 _ENTRY = "an entry is a table of sandbox_type, cpu, memory_mb, disk_size_gb, env_params, not"
