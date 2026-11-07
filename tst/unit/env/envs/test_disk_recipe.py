@@ -617,7 +617,8 @@ def test_a_thin_disk_is_exported_with_its_guest_file_and_its_base_once_for_every
         return "container1" if args[0] == "create" else "3 sha256:base" if args[0] == "image" else ""
 
     def run(argv, stdin=None, stdout=None, **kwargs):
-        stdout.write(b"zstd:" + stdin.read())
+        if argv[:2] == ["docker", "run"]:
+            stdout.write(b"zstd:" + stdin.read())
         return subprocess.CompletedProcess(argv, 0, b"", b"")
 
     monkeypatch.setattr(local_disk, "docker", docker)
