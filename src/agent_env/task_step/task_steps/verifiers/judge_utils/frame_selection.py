@@ -11,10 +11,12 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 
 from agent_env.task_step.task_steps.verifiers.judge_utils.trajectory_filter import (
+    DEFAULT_ACTION_LOG_MAX_ARGS_CHARS,
     DEFAULT_ACTION_LOG_MAX_LINES,
+    DEFAULT_ACTION_LOG_MAX_RESULT_CHARS,
     DEFAULT_FRAME_BUDGET,
     FINAL_FRAMES_RESERVED,
     ImageFrame,
@@ -23,11 +25,16 @@ from agent_env.task_step.task_steps.verifiers.judge_utils.trajectory_filter impo
     strip_base64_images,
 )
 
-# Cuts (with an ellipsis) applied to the rendered JSON of tool arguments — the same text the action log,
-# the regex knobs and criterion matching see — tool results and agent messages.
-MAX_ARGS_CHARS = 110
-MAX_RESULT_CHARS = 160
+# Cuts (with an ellipsis) applied to the rendered JSON of tool arguments — the text the regex knobs and
+# criterion matching see, and the action log's default — tool results and agent messages.
+MAX_ARGS_CHARS = DEFAULT_ACTION_LOG_MAX_ARGS_CHARS
+MAX_RESULT_CHARS = DEFAULT_ACTION_LOG_MAX_RESULT_CHARS
 MAX_AGENT_MESSAGE_CHARS = 200
+# Claude Code names an MCP tool ``mcp__<server>__<tool>``; OpenCode names it ``<server>_<tool>``.
+_CLAUDE_MCP_NAME = re.compile(r"^mcp__(.+?)__(.+)$")
+# A server alias drawn at random per deploy (``random_mcp_server_name``: ``env`` + 4 digits) or the older
+# random hex one: meaningless, and different in every run. A declared server name (``hg``) is kept.
+_RANDOM_SERVER_PREFIX = re.compile(r"^(?:env\d{4}|mcp_[0-9a-f]+)_(?=.)")
 # Replaces a base64 image payload in rendered text before any cut, so the cut lands on text.
 _IMAGE_PLACEHOLDER = "<image>"
 # A second candidate scoring at least this fraction of a criterion's best match is kept as a near-tie.
@@ -64,10 +71,13 @@ class AgentMessage:
 
 @dataclass(frozen=True)
 class Transcript:
-    """What the RAW trajectory records the agent doing (``actions``) and saying (``messages``)."""
+    """What the RAW trajectory records the agent doing (``actions``) and saying (``messages``). ``source``
+    names the format it was read from (``otel`` / ``stream-json`` / ``opencode``; ``empty`` for an empty
+    list, ``malformed`` for text that is not JSON); None means JSON in no format this module reads."""
 
     actions: list[TrajectoryAction]
     messages: list[AgentMessage]
+    source: str | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -102,15 +112,150 @@ def _text_blocks(completion: object) -> list[str]:
 
 
 def transcript_from_raw(raw_text: str) -> Transcript:
+    """The tool calls and agent text of a raw trajectory, in run order. Reads OTel span lists, the
+    stream-json rows of coding-agent CLIs (``type`` system / assistant / user / result) and OpenCode event
+    lists (``part.type`` tool / text). Malformed or unrecognised input gives an empty transcript; ``source``
+    tells the two apart, and both from a run that recorded nothing."""
+    try:
+        rows = json.loads(raw_text)
+    except (json.JSONDecodeError, TypeError):
+        return Transcript([], [], source="malformed")
+    if not isinstance(rows, list):
+        return Transcript([], [])
+    if not rows:
+        return Transcript([], [], source="empty")
+    dicts = [r for r in rows if isinstance(r, dict)]
+    if any(isinstance(r.get("attributes"), dict) for r in dicts):
+        return replace(_transcript_from_otel(dicts), source="otel")
+    if any(_is_claude_stream_row(r) for r in dicts):
+        return replace(_transcript_from_stream_json(dicts), source="stream-json")
+    if any(isinstance(r.get("part"), dict) for r in dicts):
+        return replace(_transcript_from_opencode(dicts), source="opencode")
+    return Transcript([], [])
+
+
+def _tool_name(name: str) -> str:
+    """One spelling of an MCP tool name across CLIs and deploys: ``<server>_<tool>``, without a random
+    server alias. ``mcp__hg__slack_post`` and OpenCode's ``hg_slack_post`` both give ``hg_slack_post``;
+    ``mcp__env7948__slack_post`` and ``env0123_slack_post`` both give ``slack_post``."""
+    m = _CLAUDE_MCP_NAME.match(name)
+    if m:
+        name = f"{m.group(1)}_{m.group(2)}"
+    return _RANDOM_SERVER_PREFIX.sub("", name)
+
+
+def _is_claude_stream_row(row: dict) -> bool:
+    """A row only Claude Code's stream-json writes: a ``system`` row, or an assistant / user turn whose
+    ``message`` is an object. Other CLIs share some row types (Gemini also closes on ``{"type": "result"}``)
+    but not these, and must not be read as an empty Claude run."""
+    kind = row.get("type")
+    return kind == "system" or (kind in ("assistant", "user") and isinstance(row.get("message"), dict))
+
+
+def _decoded(value: object, depth: int = 3) -> object:
+    """``value`` with JSON text decoded, also inside dict and list values, ``depth`` levels deep: CLI tool
+    results are often JSON wrapped in a JSON string, which rendered as text is mostly escape characters."""
+    if depth <= 0:
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if text[:1] in ("{", "[") and text[-1:] in ("}", "]"):
+            try:
+                return _decoded(json.loads(text), depth - 1)
+            except json.JSONDecodeError:
+                return value
+        return value
+    if isinstance(value, dict):
+        return {k: _decoded(v, depth) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_decoded(v, depth) for v in value]
+    return value
+
+
+def _tool_result_text(content: object) -> str:
+    """A stream-json ``tool_result`` body as text: text blocks joined, images as the placeholder."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return "" if content is None else json.dumps(content, ensure_ascii=False)
+    parts = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
+            parts.append(block["text"])
+        elif isinstance(block, dict) and block.get("type") == "image":
+            parts.append(_IMAGE_PLACEHOLDER)
+    return "\n".join(parts)
+
+
+def _transcript_from_stream_json(rows: list[dict]) -> Transcript:
+    """``tool_use`` blocks of assistant rows as actions, each completed by the ``tool_result`` with its id
+    (JSON text decoded; an ``is_error`` result is recorded as ``{"error": ...}``); assistant ``text`` blocks
+    as messages. The closing ``result`` row is skipped: it is the final response the judge already gets."""
+    actions: list[TrajectoryAction] = []
+    messages: list[AgentMessage] = []
+    position: dict[str, int] = {}
+    for row in rows:
+        message = row.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            kind = block.get("type")
+            if row.get("type") == "assistant" and kind == "text" and str(block.get("text") or "").strip():
+                messages.append(AgentMessage(len(actions), block["text"]))
+            elif row.get("type") == "assistant" and kind == "tool_use":
+                args = block.get("input") if isinstance(block.get("input"), dict) else {}
+                position[str(block.get("id"))] = len(actions)
+                actions.append(TrajectoryAction(index=len(actions) + 1, tool=_tool_name(str(block.get("name") or "")),
+                                                args=args, screenshot=None))
+            elif row.get("type") == "user" and kind == "tool_result" and str(block.get("tool_use_id")) in position:
+                i = position[str(block["tool_use_id"])]
+                body = _decoded(_tool_result_text(block.get("content")))
+                # An empty list or object is a real result (a search with no matches); only no text is none.
+                result = {"error": body} if block.get("is_error") else (None if body == "" else body)
+                actions[i] = replace(actions[i], result=result)
+    return Transcript(actions, messages)
+
+
+def _transcript_from_opencode(events: list[dict]) -> Transcript:
+    """``tool`` parts as actions (input, then output or error) and ``text`` parts as messages. A part that is
+    re-emitted as its state advances keeps its first position and its latest state."""
+    actions: list[TrajectoryAction] = []
+    messages: list[AgentMessage] = []
+    position: dict[str, int] = {}
+    for event in events:
+        part = event.get("part")
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") == "text" and str(part.get("text") or "").strip():
+            messages.append(AgentMessage(len(actions), part["text"]))
+        elif part.get("type") == "tool":
+            state = part.get("state") if isinstance(part.get("state"), dict) else {}
+            args = state.get("input") if isinstance(state.get("input"), dict) else {}
+            if state.get("status") == "error":
+                # OpenCode puts the reason in ``error`` or, for some tools, in ``output``.
+                reason = state.get("error") if state.get("error") not in ("", None) else state.get("output")
+                result = {"error": _decoded(reason)}
+            else:
+                result = _decoded(state.get("output")) if state.get("output") not in ("", None) else None
+            tool = _tool_name(str(part.get("tool") or ""))
+            key = str(part.get("id") or len(actions))
+            if key in position:
+                i = position[key]
+                actions[i] = replace(actions[i], tool=tool, args=args, result=result)
+                continue
+            position[key] = len(actions)
+            actions.append(TrajectoryAction(index=len(actions) + 1, tool=tool, args=args, screenshot=None,
+                                            result=result))
+    return Transcript(actions, messages)
+
+
+def _transcript_from_otel(spans: list[dict]) -> Transcript:
     """Every ``execute_tool`` span as a ``TrajectoryAction`` and every text block of a ``chat`` span as an
     ``AgentMessage``, in span order. The ``chain`` root is skipped: its completion is the final response the
-    judge already gets. Malformed input gives an empty transcript."""
-    try:
-        spans = json.loads(raw_text)
-    except (json.JSONDecodeError, TypeError):
-        return Transcript([], [])
-    if not isinstance(spans, list):
-        return Transcript([], [])
+    judge already gets."""
     actions: list[TrajectoryAction] = []
     messages: list[AgentMessage] = []
     for span in spans:
@@ -150,14 +295,14 @@ def _render_json(value: object, max_chars: int) -> str:
 def rendered_action(a: TrajectoryAction) -> str:
     """``"<tool> <args json>"``, the arguments cut to ``MAX_ARGS_CHARS`` — the text the regex knobs
     (``evidence_exclude_pattern``, ``always_show_actions``) and criterion matching see, and what the action
-    log shows, so a value past the cut cannot be matched."""
+    log shows at its default cut, so a value past the cut cannot be matched."""
     return f"{a.tool} {_render_json(a.args, MAX_ARGS_CHARS)}"
 
 
-def _action_line(a: TrajectoryAction) -> str:
-    line = f"{a.index}. {rendered_action(a)}"
+def _action_line(a: TrajectoryAction, args_chars: int, result_chars: int) -> str:
+    line = f"{a.index}. {a.tool} {_render_json(a.args, args_chars)}"
     if a.result is not None:
-        line += f" -> {_render_json(a.result, MAX_RESULT_CHARS)}"
+        line += f" -> {_render_json(a.result, result_chars)}"
     return line
 
 
@@ -169,17 +314,19 @@ def _message_line(m: AgentMessage) -> str:
 
 
 def action_log(actions: Iterable[TrajectoryAction], *, messages: Iterable[AgentMessage] = (),
-               max_lines: int = DEFAULT_ACTION_LOG_MAX_LINES) -> str:
-    """The run as text: ``"<i>. <tool> <args> -> <result>"`` per tool call and, in run order between them,
-    ``'agent said: "..."'`` per agent message — the tool lines are facts, the agent's lines its claims.
-    Over ``max_lines`` the head and the tail are kept (half each, the head taking the odd line) around one
-    ``"... (N lines not shown) ..."`` marker, so the final actions are always in the log."""
+               max_lines: int = DEFAULT_ACTION_LOG_MAX_LINES, max_args_chars: int = MAX_ARGS_CHARS,
+               max_result_chars: int = MAX_RESULT_CHARS) -> str:
+    """The run as text: ``"<i>. <tool> <args> -> <result>"`` per tool call, arguments and result cut to
+    ``max_args_chars`` / ``max_result_chars``, and, in run order between them, ``'agent said: "..."'`` per
+    agent message — the tool lines are facts, the agent's lines its claims. Over ``max_lines`` the head and
+    the tail are kept (half each, the head taking the odd line) around one ``"... (N lines not shown) ..."``
+    marker, so the final actions are always in the log."""
     pending = sorted(messages, key=lambda m: m.after_action)
     lines: list[str] = []
     for a in actions:
         while pending and pending[0].after_action < a.index:
             lines.append(_message_line(pending.pop(0)))
-        lines.append(_action_line(a))
+        lines.append(_action_line(a, max_args_chars, max_result_chars))
     lines.extend(_message_line(m) for m in pending)
     if len(lines) <= max_lines:
         return "\n".join(lines)

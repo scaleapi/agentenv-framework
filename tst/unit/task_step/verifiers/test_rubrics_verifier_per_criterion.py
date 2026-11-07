@@ -28,8 +28,11 @@ from agent_env.task_step.task_steps.verifiers.rubrics_verifier import (
     trajectory_mistakes_key,
 )
 from agent_env.task_step.task_steps.verifiers.judge_utils.trajectory_filter import (
+    DEFAULT_ACTION_LOG_MAX_ARGS_CHARS,
     DEFAULT_ACTION_LOG_MAX_LINES,
+    DEFAULT_ACTION_LOG_MAX_RESULT_CHARS,
     MAX_FRAME_BUDGET,
+    MIN_ACTION_LOG_FIELD_CHARS,
     MIN_ACTION_LOG_MAX_LINES,
     MIN_FRAME_BUDGET,
     CompactionType,
@@ -152,6 +155,20 @@ def test_action_log_line_cap_round_trips_and_is_validated():
         with pytest.raises(ValueError, match="action_log_max_lines"):
             _filter(action_log_max_lines=bad)
     _filter(action_log_max_lines=MIN_ACTION_LOG_MAX_LINES)
+
+
+def test_action_log_field_cuts_round_trip_and_are_validated():
+    f = _filter(action_log_max_args_chars=300, action_log_max_result_chars=900)
+    back = TrajectoryFilter.from_dict(f.to_dict())
+    assert (back.action_log_max_args_chars, back.action_log_max_result_chars) == (300, 900)
+    default = TrajectoryFilter.from_dict({"compaction_type": "screenshot"})
+    assert (default.action_log_max_args_chars, default.action_log_max_result_chars) == (
+        DEFAULT_ACTION_LOG_MAX_ARGS_CHARS, DEFAULT_ACTION_LOG_MAX_RESULT_CHARS)
+    for name in ("action_log_max_args_chars", "action_log_max_result_chars"):
+        for bad in (MIN_ACTION_LOG_FIELD_CHARS - 1, 0, "300", 300.0, True):
+            with pytest.raises(ValueError, match=name):
+                _filter(**{name: bad})
+        _filter(**{name: MIN_ACTION_LOG_FIELD_CHARS})
 
 
 # --------------------------------------------------------------------------- execute wiring
@@ -613,3 +630,51 @@ def test_evidence_correction_prompt_asks_for_the_evidence_fields_and_the_binary_
         format_evidence_judge_correction_prompt(**{**kw, "discrepancy": parse})
     spec = get_judge_output_format_spec("rubric_evidence")
     assert spec.format_correction_prompt is format_evidence_judge_correction_prompt
+
+
+def _cli_run(result_len: int) -> str:
+    """A coding-agent CLI trajectory (stream-json rows), no screenshots: one tool call with a long result."""
+    return json.dumps([
+        {"type": "system", "subtype": "init"},
+        {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "Closing the ticket."},
+            {"type": "tool_use", "id": "t1", "name": "linear_update_issue", "input": {"id": "ENG-1", "state": "Done"}}]}},
+        {"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": "x" * result_len}]}},
+        {"type": "result", "result": "Closed ENG-1."},
+    ])
+
+
+@pytest.mark.asyncio
+async def test_a_cli_trajectory_reaches_the_direct_judge_as_an_action_log_cut_at_the_filter_widths(monkeypatch):
+    tf = TrajectoryFilter(compaction_type=CompactionType.SCREENSHOT, trajectory_text=TrajectoryText.ACTION_LOG,
+                          action_log_max_result_chars=500)
+    v = _verifier(output_format=JudgeOutputFormat.RUBRIC_BINARY, grading_policy_prompt=None, trajectory_filter=tf)
+    captured = _capture_judge(monkeypatch, v, _passing_list)
+    monkeypatch.setattr(v, "_read_trajectory_text", lambda uri: _cli_run(2000))
+    await v.execute(_ctx())
+    text = captured["eval_prompt"]
+    assert 'agent said: "Closing the ticket."' in text
+    assert '1. linear_update_issue {"id": "ENG-1", "state": "Done"} -> "' + "x" * 499 + "…" in text
+    assert "x" * 600 not in text and captured["image_blocks"] == []
+
+
+@pytest.mark.asyncio
+async def test_an_unrecognised_trajectory_format_fails_the_action_log_instead_of_grading_an_empty_log(monkeypatch):
+    tf = TrajectoryFilter(compaction_type=CompactionType.SCREENSHOT, trajectory_text=TrajectoryText.ACTION_LOG)
+    v = _verifier(output_format=JudgeOutputFormat.RUBRIC_BINARY, grading_policy_prompt=None, trajectory_filter=tf)
+    captured = _capture_judge(monkeypatch, v, _passing_list)
+    monkeypatch.setattr(v, "_read_trajectory_text", lambda uri: json.dumps([{"event": "tool", "name": "x"}]))
+    with pytest.raises(RuntimeError, match="no format the action log reads"):
+        await v.execute(_ctx())
+    assert captured == {}
+
+
+@pytest.mark.asyncio
+async def test_an_empty_trajectory_still_reaches_the_judge_with_an_empty_action_log(monkeypatch):
+    tf = TrajectoryFilter(compaction_type=CompactionType.SCREENSHOT, trajectory_text=TrajectoryText.ACTION_LOG)
+    v = _verifier(output_format=JudgeOutputFormat.RUBRIC_BINARY, grading_policy_prompt=None, trajectory_filter=tf)
+    captured = _capture_judge(monkeypatch, v, _passing_list)
+    monkeypatch.setattr(v, "_read_trajectory_text", lambda uri: "[]")
+    await v.execute(_ctx())
+    assert "eval_prompt" in captured
