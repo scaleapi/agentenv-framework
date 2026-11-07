@@ -201,3 +201,26 @@ def test_a_service_runs_its_relative_program_from_the_layers_prefix():
     assert windows_disk.argv("venv/Scripts/python.exe driver.py", prefix) == [
         "C:\\agentenv\\drivers\\desk\\venv\\Scripts\\python.exe", "driver.py"]
     assert windows_disk.argv("C:/Windows/notepad.exe x", prefix) == ["C:/Windows/notepad.exe", "x"]
+
+
+@pytest.mark.parametrize("days_left, installs", [(30, 0), (3, 1)])
+def test_a_base_is_reused_until_its_evaluation_nears_its_end_then_installed_afresh(monkeypatch, tmp_path, days_left,
+                                                                                    installs):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    key = "sha256:" + "12" * 32
+    keys = tmp_path / "agentenv" / "windows" / "bases" / key[7:23]
+    keys.mkdir(parents=True)
+    (keys / "id").write_text("key")
+    expires = datetime.now(timezone.utc) + timedelta(days=days_left)
+    installed = []
+    monkeypatch.setattr(windows_disk, "present", lambda image: True)
+    monkeypatch.setattr(windows_disk, "_label", lambda image, name: expires.isoformat(timespec="seconds"))
+    monkeypatch.setattr(windows_disk.subprocess, "run", lambda argv, **kwargs: (keys / "id").write_text("new"))
+    monkeypatch.setattr(windows_disk, "_installed", lambda *args: installed.append(args) or {
+        "grace_minutes": 90 * 24 * 60, "build": "26200.6584"})
+    monkeypatch.setattr(windows_disk, "_pack", lambda folder, image, labels, base_image: None)
+
+    base = windows_disk.base(key, tmp_path / "windows.iso", 64, "user", lambda line: None)
+
+    assert len(installed) == installs and base.image == f"agentenv-windows-base:{key[7:23]}"
+    assert (base.expires - datetime.now(timezone.utc)).days == (days_left - 1 if not installs else 89)
