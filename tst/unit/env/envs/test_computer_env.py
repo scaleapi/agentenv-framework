@@ -25,6 +25,7 @@ from agentenv_protocol import CONTROL_TOKEN_ENV
 from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_READY, COMPUTER_RECORDING
 from agentenv_protocol.computer.app import COMPUTER_APP
 from agentenv_protocol.computer.app_runtime import HOLD_BOOT_LAUNCH_ENV
+from agentenv_protocol.computer.conformance import CheckResult, ProbeReport
 from agentenv_protocol.tool_access import DISABLE_TOOL_EXTENSION_URI, ENABLE_TOOL_EXTENSION_URI
 from click.testing import CliRunner
 
@@ -303,6 +304,43 @@ def test_the_probe_boots_a_build_at_the_envs_settings_with_a_token_of_its_own_as
         "AGENTENV_SETTING_RESOLUTION": "1600x900", "AGENTENV_SETTING_TIMEZONE": "Europe/Paris"}
     assert len(booted[0]["token"]) >= 32
     probed.assert_awaited_once_with("http://computer", "full", token=booted[0]["token"])
+
+
+def test_a_build_the_probe_cant_boot_for_a_setting_that_doesnt_resolve_stays_unverified_until_a_compose_where_it_does(
+        base, driver, docker, tmp_path, monkeypatch):
+    monkeypatch.delenv("MAIL_TOKEN", raising=False)
+    booted = _probing_for_real(monkeypatch)
+    env = _put(base, driver, apps=[_app(base, driver, tmp_path / "mail", compose=False,
+                                        defaults={"token": "env:MAIL_TOKEN"})])
+    unprobed = Env.get(env.id).metadata["composed"]["container"]["arm64"]
+    left = composer.pending(Env.get(env.id))
+    monkeypatch.setenv("MAIL_TOKEN", "t0ken")
+    composer.compose(Env.get(env.id), left)
+    probed = Env.get(env.id).metadata["composed"]["container"]["arm64"]
+
+    assert (unprobed["status"], unprobed["reason"]) == ("unverified", "not probed: a setting it boots with didn't "
+                                                        "resolve here: Unresolved env:MAIL_TOKEN reference (no value "
+                                                        "and no default)")
+    assert left == [("container", "arm64")]
+    assert probed["status"] == "ready" and probed["image"] == unprobed["image"]
+    assert len(booted) == 1 and json.loads(booted[0]["AGENTENV_APP_SETTINGS"])["mail"]["token"] == "t0ken"
+
+
+def _probing_for_real(monkeypatch) -> list[dict]:
+    """Gate 3's own probe, which resolves the settings it boots with, over a boot and a probe that pass: the
+    environment of each boot it makes."""
+    booted = []
+
+    async def fake_boot(link, **kwargs):
+        booted.append(kwargs["environment"])
+        return boot.Booted(sandbox=None, url="http://computer", card=CARD)
+
+    monkeypatch.setattr(probing, "_probe", _probe)
+    monkeypatch.setattr(boot, "boot", fake_boot)
+    monkeypatch.setattr(boot, "discard", AsyncMock())
+    monkeypatch.setattr(probing, "run_probe", AsyncMock(return_value=ProbeReport.of("full", "desk", [CheckResult(
+        check="P0", name="the card", status="passed", extensions=[CARD_EXTENSION])], [CARD_EXTENSION])))
+    return booted
 
 
 def test_a_build_whose_probe_fails_or_that_never_gets_ready_fails_at_the_probe_and_isnt_deployed(base, driver, docker,
@@ -726,6 +764,65 @@ async def test_a_deploy_composes_again_what_an_agent_env_that_composes_different
     assert {arch: (r["status"], r["composer"]) for arch, r in record.items()} == {
         "amd64": ("unverified", "sha256:a-later-agent-env"), "arm64": ("ready", "sha256:a-later-agent-env")}
     assert booted["image"] == record["arm64"]["image"]
+
+
+@pytest.mark.asyncio
+async def test_a_deploy_probes_a_container_left_unprobed_once_its_setting_resolves_and_boots_it_only_once_ready(
+        base, driver, docker, boots, tmp_path, monkeypatch):
+    monkeypatch.delenv("MAIL_TOKEN", raising=False)
+    probed = _probing_for_real(monkeypatch)
+    env = _put(base, driver, display={"width": 1600, "height": 900}, apps=[_app(
+        base, driver, tmp_path / "mail", compose=False, defaults={"token": "env:MAIL_TOKEN"})])
+    unprobed = Env.get(env.id).metadata["composed"]["container"]["arm64"]
+    monkeypatch.setenv("MAIL_TOKEN", "t0ken")
+
+    deployed = await Env.get(env.id).deploy()
+
+    build = Env.get(env.id).metadata["composed"]["container"]["arm64"]
+    (booted,) = boots.boots
+    assert unprobed["status"] == "unverified" and build["status"] == "ready"
+    assert build["image"] == unprobed["image"] == booted["image"] == deployed.metadata["computer"]["image"]
+    assert len(probed) == 1 and json.loads(probed[0]["AGENTENV_APP_SETTINGS"])["mail"]["token"] == "t0ken"
+
+
+@pytest.mark.asyncio
+async def test_a_deploy_refuses_a_container_still_unprobed_for_a_setting_that_doesnt_resolve_saying_why(
+        base, driver, docker, boots, tmp_path, monkeypatch):
+    monkeypatch.delenv("MAIL_TOKEN", raising=False)
+    probed = _probing_for_real(monkeypatch)
+    env = _put(base, driver, apps=[_app(base, driver, tmp_path / "mail", compose=False,
+                                        defaults={"token": "env:MAIL_TOKEN"})])
+
+    with pytest.raises(DeployRefused) as refused:
+        await Env.get(env.id).deploy()
+
+    assert str(refused.value) == (
+        f"{env.id} has no ready build to deploy; its builds are {{'container/amd64': 'unverified', 'container/arm64': "
+        "'unverified'}; container/arm64: not probed: a setting it boots with didn't resolve here: Unresolved "
+        f"env:MAIL_TOKEN reference (no value and no default); compose it with: agent-env env build --id {env.id}")
+    assert probed == [] and boots.boots == []
+
+
+@pytest.mark.asyncio
+async def test_a_deploy_says_why_its_native_container_is_unprobed_though_another_arch_it_cant_run_is_ready(
+        base, driver, docker, boots, tmp_path, monkeypatch):
+    monkeypatch.delenv("MAIL_TOKEN", raising=False)
+    probed = _probing_for_real(monkeypatch)
+    env = _put(base, driver, apps=[_app(base, driver, tmp_path / "mail", compose=False,
+                                        defaults={"token": "env:MAIL_TOKEN"})])
+    stored = Env.get(env.id)
+    composed = stored.metadata["composed"]
+    composed["container"]["amd64"] = {**composed["container"]["amd64"], "status": "ready"}
+    stored.update_metadata({**stored.metadata, "composed": composed})
+
+    with pytest.raises(DeployRefused) as refused:
+        await Env.get(env.id).deploy()
+
+    assert str(refused.value) == (
+        f"{env.id} has no ready build to deploy; its builds are {{'container/amd64': 'ready', 'container/arm64': "
+        "'unverified'}; container/arm64: not probed: a setting it boots with didn't resolve here: Unresolved "
+        f"env:MAIL_TOKEN reference (no value and no default); compose it with: agent-env env build --id {env.id}")
+    assert probed == [] and boots.boots == []
 
 
 @pytest.mark.asyncio
