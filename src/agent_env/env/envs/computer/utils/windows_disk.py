@@ -17,6 +17,7 @@ import io
 import json
 import re
 import secrets
+import shlex
 import shutil
 import subprocess
 import tarfile
@@ -54,6 +55,8 @@ EXPIRES_LABEL, BUILD_LABEL, KEY_LABEL = "dev.agentenv.windows.expires", "dev.age
 INSTALL_TIMEOUT_S, COMPOSE_TIMEOUT_S, SETTLE_S = 3600, 3600, 60
 #: How long a guest may take to power off once told.
 SHUTDOWN_TIMEOUT_S = 300
+#: How often an install looks for setup's end, a compose for the base's ssh, and a shutdown for the guest's.
+INSTALL_POLL_S, BOOT_POLL_S, SHUTDOWN_POLL_S = 15, 5, 2
 CPUS, MEMORY_MB = 4, 8192
 #: What every service runs with: Python reading and writing files as UTF-8, as on Linux, not in Windows' code page.
 UTF8 = {"PYTHONUTF8": "1"}
@@ -169,7 +172,7 @@ def _installed(work: Path, iso: Path, keys: Path, disk_gb: int, user: str, say: 
         deadline = started + INSTALL_TIMEOUT_S
         while not _signed_in(port, keys, user):
             _alive(container, "installing", deadline)
-            time.sleep(15)
+            time.sleep(INSTALL_POLL_S)
         say(f"installed and signed in as {user} after {time.monotonic() - started:.0f} s; settling")
         time.sleep(SETTLE_S)
         facts = json.loads(ssh(port, keys, powershell(_FACTS)).stdout.strip().splitlines()[-1])
@@ -193,7 +196,7 @@ def compose(base_: Base, build: Path, image: str, labels: dict[str, str], say: C
             port, deadline = _ssh_port(container), time.monotonic() + COMPOSE_TIMEOUT_S
             while ssh(port, base_.keys, "echo ready", check=False, timeout=60).returncode != 0:
                 _alive(container, "booting", deadline)
-                time.sleep(5)
+                time.sleep(BOOT_POLL_S)
             say("installing its layers over ssh")
             ssh(port, base_.keys, f'(if exist "{BUILD}" rmdir /s /q "{BUILD}") & mkdir "{BUILD}"')
             ssh(port, base_.keys, f'tar -xf - -C "{BUILD}"', input=_tarred(build), timeout=600)
@@ -216,6 +219,12 @@ def compose(base_: Base, build: Path, image: str, labels: dict[str, str], say: C
 def held(image: str) -> bool:
     """Whether this machine's Docker holds ``image``."""
     return present(image)
+
+
+def expiring(expires: str | None) -> bool:
+    """Whether an evaluation that ends at ``expires`` has fewer than ``RENEW_DAYS`` left, as a disk with none recorded
+    is taken to."""
+    return expires is None or datetime.fromisoformat(expires) - datetime.now(timezone.utc) < timedelta(days=RENEW_DAYS)
 
 
 def image_id(image: str) -> str:
@@ -273,8 +282,10 @@ def _installed_part(part: Part) -> list[str]:
 
 
 def argv(command: str, prefix: PureWindowsPath) -> list[str]:
-    """A service's ``command`` as the argv agentenv-session runs, a relative program named under ``prefix``."""
-    words = command.split()
+    """A service's ``command`` as the argv agentenv-session runs, split as Windows quotes it, a word in double quotes
+    one word without them, and a relative program named under ``prefix``."""
+    words = [word[1:-1] if len(word) > 1 and word[0] == word[-1] == '"' else word
+             for word in shlex.split(command, posix=False)]
     if "/" in words[0] and not PureWindowsPath(words[0]).is_absolute():
         words[0] = str(prefix / PureWindowsPath(words[0]))
     return words
@@ -347,7 +358,7 @@ def _shut_down(container: str, port: int, keys: Path) -> None:
     while docker("inspect", "-f", "{{.State.Running}}", container) == "true":
         if time.monotonic() > deadline:
             raise RuntimeError(f"windows: the guest didn't power off within {SHUTDOWN_TIMEOUT_S} s")
-        time.sleep(2)
+        time.sleep(SHUTDOWN_POLL_S)
     if (code := docker("inspect", "-f", "{{.State.ExitCode}}", container)) != "0":
         raise RuntimeError(f"windows: its launcher exited {code} as the guest powered off")
 

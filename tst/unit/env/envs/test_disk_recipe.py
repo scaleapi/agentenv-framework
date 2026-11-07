@@ -301,6 +301,27 @@ def test_a_windows_disk_boots_from_secure_boot_on_ahci_and_e1000e_with_a_fresh_t
     assert running.wait(10) == 143
 
 
+def test_a_windows_display_is_its_resolution_setting_at_each_boot(launcher, tmp_path):
+    """Windows' display is the mode the VGA's EDID prefers; a value that isn't a size leaves it at 1920x1080."""
+    launch, calls = launcher
+    disk = tmp_path / "disk" / "disk.img"
+    disk.parent.mkdir()
+    (disk.parent / "guest").write_text("windows\n")
+    b64 = lambda text: base64.b64encode(text.encode()).decode()  # noqa: E731
+    running = launch(VM_DISK=str(disk), VM_ENV_AGENTENV_SETTING_RESOLUTION=b64("1280x800"))
+    _logged(calls, "qemu-system-x86_64")
+
+    assert launch("reset", input=f"VM_ENV_AGENTENV_SETTING_RESOLUTION={b64('1024x768')}\n").wait(10) == 0
+    _logged(calls, "qemu-system-x86_64", 2)
+    assert launch("reset", input=f"VM_ENV_AGENTENV_SETTING_RESOLUTION={b64('big; rm -rf /')}\n").wait(10) == 0
+
+    boots = _logged(calls, "qemu-system-x86_64", 3)
+    assert ["-device VGA,xres=1280,yres=800 " in boots[0], "-device VGA,xres=1024,yres=768 " in boots[1],
+            "-device VGA,xres=1920,yres=1080 " in boots[2]] == [True, True, True]
+    running.terminate()
+    assert running.wait(10) == 143
+
+
 @pytest.mark.parametrize("guest, arch, why", [("windows", "arm64", "a windows guest boots on amd64 alone, not arm64"),
                                               ("plan9", "amd64", "no guest plan9")])
 def test_the_launcher_refuses_a_guest_it_cant_boot(launcher, tmp_path, guest, arch, why):
@@ -528,12 +549,28 @@ async def test_a_machine_copies_a_thin_disks_base_in_a_step_of_its_own_so_machin
     built = []
     monkeypatch.setattr(local_disk, "launcher", lambda: "launcher:1")
     monkeypatch.setattr(local_disk, "present", lambda tag: False)
-    monkeypatch.setattr(local_disk, "docker", lambda *args: layers)
+    monkeypatch.setattr(local_disk, "docker", lambda *args: f"sha256:1 {layers}")
     monkeypatch.setattr(local_disk, "_build", lambda text, tag: built.append(text))
 
     await local_disk.machine_image("disk:1")
 
     assert built == [dockerfile]
+
+
+@pytest.mark.asyncio
+async def test_a_disk_built_again_under_its_tag_gets_a_machine_of_its_own(monkeypatch):
+    """As a Windows base installed afresh is, under the tag the one it replaces had."""
+    identity = "sha256:1"
+    monkeypatch.setattr(local_disk, "launcher", lambda: "launcher:1")
+    monkeypatch.setattr(local_disk, "present", lambda tag: True)
+    monkeypatch.setattr(local_disk, "docker", lambda *args: f"{identity} 2")
+
+    first = await local_disk.machine_image("disk:1")
+    again = await local_disk.machine_image("disk:1")
+    identity = "sha256:2"
+    rebuilt = await local_disk.machine_image("disk:1")
+
+    assert first == again != rebuilt
 
 
 def test_a_disk_is_exported_compressed_into_the_cache_once_for_each_ref(tmp_path, monkeypatch):

@@ -176,7 +176,7 @@ def pending(env: ComputerEnv, sandbox_provider: SandboxProvider | None = None,
         if status == "unverified":
             return bool(boot.native_links(provider, arch, form, env.stored_id, env.computer.os.type))
         if form == "disk" and env.computer.os.type == "windows":
-            return not windows_disk.held(record["image"])
+            return not windows_disk.held(record["image"]) or windows_disk.expiring(record.get("expires"))
         if form != "vm_bundle":
             return False
         links = boot.native_links(provider, arch, form, env.stored_id)
@@ -383,7 +383,8 @@ def _composed_windows_disk(env: ComputerEnv, base: ComputerArtifact, driver: Com
                 pair, "waiting", f"waiting for the compose or probe of {image} under way on this machine")):
             if windows_disk.held(image):
                 progress.at(pair, "reusing", "reusing the disk of the same key, composed on this machine earlier")
-                result = {"status": "unverified", "key": key, "image": image, "reused": True, "built_at": now()}
+                result = {"status": "unverified", "key": key, "image": image, "reused": True,
+                          "expires": made.expires.isoformat(timespec="seconds"), "built_at": now()}
             else:
                 progress.at(pair, "composing", "composing on this machine's Docker")
                 windows_disk.compose(made, build, image, {KEY_LABEL: key, windows_disk.EXPIRES_LABEL:

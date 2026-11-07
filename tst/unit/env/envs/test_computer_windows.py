@@ -195,12 +195,22 @@ def test_a_windows_install_fetches_by_sha256_and_runs_powershell_elevated(instal
         WindowsInstall(services=[WindowsService(name="driver", command=SERVE)], **install)
 
 
-def test_a_service_runs_its_relative_program_from_the_layers_prefix():
+def test_a_service_runs_its_relative_program_from_the_layers_prefix_its_quoted_words_whole():
     prefix = PureWindowsPath("C:/agentenv/drivers/desk")
 
     assert windows_disk.argv("venv/Scripts/python.exe driver.py", prefix) == [
         "C:\\agentenv\\drivers\\desk\\venv\\Scripts\\python.exe", "driver.py"]
     assert windows_disk.argv("C:/Windows/notepad.exe x", prefix) == ["C:/Windows/notepad.exe", "x"]
+    assert windows_disk.argv('"C:/Program Files/Tool/tool.exe" --config "settings file.json"', prefix) == [
+        "C:/Program Files/Tool/tool.exe", "--config", "settings file.json"]
+
+
+def test_a_disk_whose_evaluation_nears_its_end_is_composed_again(docker, tmp_path, monkeypatch):
+    env = _put(_driver(tmp_path / "desk"), FakeLinux())
+    assert composer.pending(env, FakeLinux()) == []
+
+    monkeypatch.setattr(windows_disk, "RENEW_DAYS", 100)
+    assert composer.pending(env, FakeLinux()) == [("disk", "amd64")]
 
 
 @pytest.mark.parametrize("days_left, installs", [(30, 0), (3, 1)])

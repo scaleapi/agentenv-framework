@@ -2,8 +2,8 @@
 Each service a composed layer declares (C:\\agentenv\\services\\<name>.json: its prefix, command and environment) starts
 in its prefix with the build-phase settings the disk fixes, the deploy's environment over them, read from the NoCloud
 seed the launcher attaches (the CIDATA volume; agentenv_protocol.computer.seed, version 1), and its own environment over
-that; one that exits starts again after a pause. It waits for the seed, and refuses one that carries only versions it
-doesn't read, as an init does."""
+that; one that exits, or couldn't start, starts again after a pause, what kept it from starting written to its log. It
+waits for the seed, and refuses one that carries only versions it doesn't read, as an init does."""
 
 import base64
 import ctypes
@@ -70,14 +70,24 @@ def main() -> None:
     while True:
         time.sleep(RESTART_S)
         for spec in specs:
-            if running[spec["name"]].poll() is not None:
+            if (process := running[spec["name"]]) is None or process.poll() is not None:
                 running[spec["name"]] = start(spec, base)
 
 
-def start(spec: dict, base: dict[str, str]) -> subprocess.Popen:
-    log = open(LOGS / f"{spec['name']}.log", "ab")
-    return subprocess.Popen(spec["command"], cwd=spec["prefix"], env={**base, **spec.get("env", {})}, stdout=log,
-                            stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, creationflags=NO_WINDOW)
+def start(spec: dict, base: dict[str, str]) -> subprocess.Popen | None:
+    """``spec``'s service started, its output to its log; None when it couldn't be, the reason in its log if that
+    opens."""
+    try:
+        with open(LOGS / f"{spec['name']}.log", "ab") as log:
+            try:
+                return subprocess.Popen(spec["command"], cwd=spec["prefix"], env={**base, **spec.get("env", {})},
+                                        stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                        creationflags=NO_WINDOW)
+            except OSError as e:
+                log.write(f"agentenv-session: couldn't start {spec['command']}: {e}\n".encode())
+    except OSError:
+        pass
+    return None
 
 
 if __name__ == "__main__":

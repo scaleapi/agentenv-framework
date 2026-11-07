@@ -1,7 +1,7 @@
 """The Windows test bundle through ``agent-env run``, on local Docker with KVM: its desktop, cua-driver on windows-11,
 composed on this machine, its base installed from the evaluation ISO in this machine's cache unless one is held here,
-passes the conformance probe at full, the checks that need computer-exec unverified; and an agent drives Notepad on it
-through cua-driver's tools. Needs Docker, KVM and the ISO; the agent's task, a model endpoint too."""
+passes the conformance probe at full, cua-driver's known failure on Windows waived, before and after a reset in place;
+and an agent drives Notepad on it through cua-driver's tools. Needs Docker, KVM and the ISO; the agent's task, a model endpoint too."""
 
 import pytest
 from click.testing import CliRunner
@@ -19,6 +19,13 @@ def test_the_windows_desktop_passes_the_probe_at_full(state):
 
     assert ran.exit_code == 0, ran.output
     assert "passed (probe: 1)" in ran.output, ran.output
+
+
+def test_a_reset_boots_the_windows_desktop_afresh_and_it_passes_the_probe_again(state):
+    ran = _run("reset")
+
+    assert ran.exit_code == 0, ran.output
+    assert "passed (before: 1, after: 1)" in ran.output, ran.output
 
 
 @skip_without_model_endpoint()

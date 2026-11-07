@@ -34,13 +34,16 @@ def kvm_platforms() -> frozenset[str]:
 
 
 async def machine_image(disk: str) -> str:
-    """An image of the launcher holding ``disk``'s files for this machine's platform, built unless held. A disk of more
-    than one layer is a thin one on ``DISK_BASE_FILE``, which gets a step of its own, so every machine on that base
-    shares one copy of it."""
+    """An image of the launcher holding ``disk``'s files for this machine's platform, built unless held: one for each
+    image ``disk`` names, by its id, so a disk built again under its tag gets a machine of its own. A disk of more than
+    one layer is a thin one on ``DISK_BASE_FILE``, which gets a step of its own, so every machine on that base shares
+    one copy of it."""
     source = await asyncio.to_thread(launcher)
-    tag = "agentenv-vm:" + hashlib.sha256(f"{source} {disk}".encode()).hexdigest()[:16]
+    identity, layers = (await asyncio.to_thread(docker, "image", "inspect", "-f", "{{.Id}} {{len .RootFS.Layers}}",
+                                                disk)).split()
+    tag = "agentenv-vm:" + hashlib.sha256(f"{source} {disk} {identity}".encode()).hexdigest()[:16]
     if not await asyncio.to_thread(present, tag):
-        layers = int(await asyncio.to_thread(docker, "image", "inspect", "-f", "{{len .RootFS.Layers}}", disk))
+        layers = int(layers)
         await asyncio.to_thread(_build, _machine_dockerfile(source, disk, layers), tag)
     return tag
 
