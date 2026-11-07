@@ -25,8 +25,12 @@ KVM = "/dev/kvm"
 
 
 def kvm_platforms() -> frozenset[str]:
-    """This machine's platform when its Docker can pass KVM to a container: /dev/kvm here, readable and writable."""
-    return frozenset({host_platform()}) if os.access(KVM, os.R_OK | os.W_OK) else frozenset()
+    """This machine's platform when its Docker can pass KVM to a container: /dev/kvm here, readable and writable; and
+    windows/amd64 on an amd64 machine, whose launcher boots a Windows guest too."""
+    if not os.access(KVM, os.R_OK | os.W_OK):
+        return frozenset()
+    here = host_platform()
+    return frozenset({here, "windows/amd64"} if here == "linux/amd64" else {here})
 
 
 async def machine_image(disk: str) -> str:

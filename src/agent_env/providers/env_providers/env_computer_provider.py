@@ -108,7 +108,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         from agent_env.env.envs.computer.env import ComputerEnv
 
         pairs = [(form, arch) for form, arch, _ in builds]
-        if (picked := first_native(sandbox_provider, pairs, env.stored_id)) is None:
+        if (picked := first_native(sandbox_provider, pairs, env.stored_id, env.computer.os.type)) is None:
             raise ValueError(f"{type(sandbox_provider).__name__} runs none of {env.id}'s ready builds natively "
                              f"({', '.join(f'{form}/{arch}' for form, arch, _ in builds)})")
         if env.serves_website_browser() and not sandbox_provider.WEBSOCKETS:
@@ -133,7 +133,8 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
             sandbox_provider, image=build["image"], port=env.driver.port, network_policy=policy, token=token,
             environment=_environment(env, computer, values, params), timeout=ttl_seconds, attribution=attribution,
             disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb,
-            ready_s=ready_timeout(env.composed_apps(), env.computer.os.type), form=form, held=bool(params.site_routing))
+            ready_s=ready_timeout(env.composed_apps(), env.computer.os.type), form=form, held=bool(params.site_routing),
+            os_type=env.computer.os.type)
         self._container_sandboxes.append(booted.sandbox)
         self._environment_sandboxes[name] = booted.sandbox
         try:

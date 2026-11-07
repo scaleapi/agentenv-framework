@@ -211,6 +211,16 @@ def held(image: str) -> bool:
     return present(image)
 
 
+def image_id(image: str) -> str:
+    """The id of ``image`` in this machine's Docker, which a base installed afresh under its tag changes."""
+    return docker("image", "inspect", "-f", "{{.Id}}", image)
+
+
+def remove(image: str) -> None:
+    """``image`` removed from this machine's Docker, so no deploy here boots it."""
+    subprocess.run(["docker", "image", "rm", "-f", image], capture_output=True)
+
+
 def write(build: Path, parts: list[Part], build_settings: dict[str, Any], image: dict) -> str:
     """Write ``build``'s ``provision.ps1``, which installs ``parts`` from ``build/context``, their services for
     agentenv-session, ``build_settings`` as every service's ``AGENTENV_SETTING_<NAME>`` and ``image`` as what the disk
@@ -290,8 +300,12 @@ def powershell(script: str) -> str:
 
 
 def _signed_in(port: int, keys: Path, user: str) -> bool:
-    """Whether setup has finished and ``user`` has an active session on the console."""
-    done = ssh(port, keys, f'if exist "{ROOT}\\setup-done" (quser) else (echo setting-up)', check=False, timeout=60)
+    """Whether setup has finished and ``user`` has an active session on the console; refused, with setup's error, when
+    setup failed."""
+    done = ssh(port, keys, f'if exist "{ROOT}\\setup-failed" (type "{ROOT}\\setup-failed" & exit 3) else '
+                           f'if exist "{ROOT}\\setup-done" (quser) else (echo setting-up)', check=False, timeout=60)
+    if done.returncode == 3:
+        raise RuntimeError(f"windows: setup failed in the guest: {done.stdout.strip()[-2000:]}")
     return re.search(rf"^\s*>?{re.escape(user)}\s+console\s+\d+\s+Active", done.stdout,
                      re.MULTILINE | re.IGNORECASE) is not None
 
