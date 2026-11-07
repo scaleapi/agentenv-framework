@@ -187,16 +187,34 @@ def pending(env: ComputerEnv, sandbox_provider: SandboxProvider | None = None,
 
 def unstarted(env: ComputerEnv, sandbox_provider: SandboxProvider, form: str | None = None) -> list[tuple[str, str]]:
     """The pairs a deploy on ``sandbox_provider`` boots that no compose has started, as a run for another sandbox
-    leaves them, or that an agent-env that composes differently recorded."""
-    return _pairs(env, booted_forms(env, sandbox_provider, form),
-                  lambda form, arch, record: record is None or stale(record))
+    leaves them, that an agent-env that composes differently recorded, or that are ``unprobed`` there."""
+    return _pairs(env, booted_forms(env, sandbox_provider, form), lambda form, arch, record: (
+        record is None or stale(record) or _unprobed(env, sandbox_provider, form, arch, record)))
 
 
 def unstarted_or_building(env: ComputerEnv, sandbox_provider: SandboxProvider,
                           form: str | None = None) -> list[tuple[str, str]]:
     """Those, and the ones a compose is building now, which a deploy waits for."""
-    return _pairs(env, booted_forms(env, sandbox_provider, form),
-                  lambda form, arch, record: record is None or stale(record) or record.get("status") == "building")
+    return _pairs(env, booted_forms(env, sandbox_provider, form), lambda form, arch, record: (
+        record is None or stale(record) or record.get("status") == "building"
+        or _unprobed(env, sandbox_provider, form, arch, record)))
+
+
+def unprobed(env: ComputerEnv, sandbox_provider: SandboxProvider,
+             form: str | None = None) -> list[tuple[str, str, dict]]:
+    """Each container a deploy on ``sandbox_provider`` boots that was built but not probed though the deploy runs it
+    natively, as (form, arch, record): one whose probe couldn't boot it for a setting that didn't resolve, say. A deploy
+    composes it again first, which reuses its image and probes it, since a container deploys only once ready."""
+    composed = env.metadata.get("composed", {})
+    return [(name, arch, composed[name][arch]) for name, arch in _pairs(
+        env, booted_forms(env, sandbox_provider, form),
+        lambda form, arch, record: _unprobed(env, sandbox_provider, form, arch, record))]
+
+
+def _unprobed(env: ComputerEnv, sandbox_provider: SandboxProvider, form: str, arch: str, record: dict | None) -> bool:
+    # A disk or VM bundle left unverified deploys already, its first boot probing it (probing.probe_first_boot).
+    return (form == "container" and record is not None and record.get("status") == "unverified" and not stale(record)
+            and bool(boot.native_links(sandbox_provider, arch, form, env.stored_id, env.computer.os.type)))
 
 
 def booted_forms(env: ComputerEnv, sandbox_provider: SandboxProvider, form: str | None = None) -> list[str]:

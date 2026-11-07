@@ -88,8 +88,11 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
                                 "deploy_env names in env_params.sites; give them there to deploy it any other way")
         await env.compose_unstarted(sandbox_provider, params.form)
         if not (builds := env.deployable_builds(params.form)):
+            why = "".join(f"; {name}/{arch}: {record.get('reason', 'not probed')}"
+                          for name, arch, record in composer.unprobed(env, sandbox_provider, params.form))
             raise DeployRefused(f"{env.id} has no ready build to deploy; its builds are "
-                                f"{env.build_statuses() or 'none yet'}; compose it with: agent-env env build --id {env.id}")
+                                f"{env.build_statuses() or 'none yet'}{why}; compose it with: agent-env env build --id "
+                                f"{env.id}")
         if params.site_routing and not (builds := [build for build in builds if build[0] != "disk"]):
             raise DeployRefused(f"{env.id}: env_params.site_routing installs into the computer's container, and a disk "
                                 "computer runs inside a launcher container it can't reach; deploy a container form")
