@@ -16,7 +16,7 @@ Only the pure, stateless helpers are reused from modal_sandbox (no class couplin
 
 With a computer's disk form as its image, ``create_vm`` makes a VM sandbox with nested virtualization whose own image
 is the QEMU launcher, with no Docker in it, booting the disk mounted at create from its export on this machine
-(``local_docker.disk.exported_disk``); ``reset_vm`` boots it afresh in the same sandbox. ``[sandbox.providers.modal_vm]``
+(``local_docker.disk.exported_disk``), with a thin disk's base and guest file beside it; ``reset_vm`` boots it afresh in the same sandbox. ``[sandbox.providers.modal_vm]``
 takes ``region``, where every sandbox it makes goes, and ``idle_timeout``, in seconds, after which an idle one ends.
 """
 
@@ -114,7 +114,8 @@ while true; do sleep 3600; done
 '''
 _KEEPALIVE_CMD = ("sh", "-c", _MAIN_SCRIPT)
 #: Where a computer's disk is mounted on the launcher's image, compressed; the launcher expands it onto the sandbox's disk.
-_MOUNTED_DISK = "/disk/disk.img.zst"
+#: A thin disk's base is mounted beside it, compressed too, and expanded beside it; its guest file, beside both.
+_MOUNTED_DISK, _MOUNTED_BASE, _MOUNTED_GUEST = "/disk/disk.img.zst", "/disk/base.img.zst", "/disk/guest"
 #: The memory a disk's sandbox has beyond its VM's: QEMU's own, and the sandbox's.
 _DISK_HOST_MEMORY_MB = 2048
 #: How long a disk's sandbox stays up with no connection open and no command running, when the config sets no
@@ -300,8 +301,9 @@ class ModalVmSandboxProvider(SandboxProvider):
 
     @classmethod
     def disk_image_platforms(cls) -> frozenset[str]:
-        """Modal's VM sandboxes are amd64, and run QEMU with KVM under nested virtualization."""
-        return frozenset({"linux/amd64"})
+        """Modal's VM sandboxes are amd64, and run QEMU with KVM under nested virtualization: a Linux disk, or a Windows
+        one, thin on its base."""
+        return frozenset({"linux/amd64", "windows/amd64"})
 
     def __init__(self, app_name: Optional[str] = None, environment_name: Optional[str] = None,
                  region: Optional[str] = None, idle_timeout: Optional[int] = None):
@@ -364,11 +366,16 @@ class ModalVmSandboxProvider(SandboxProvider):
                                        attribution=attribution, network_policy=network_policy,
                                        setup_for_gateway=setup_for_gateway, idle_timeout=self._idle_timeout,
                                        experimental_options={"vm_runtime": True})
-        (platform,) = self.disk_image_platforms()
-        disk = await asyncio.to_thread(exported_disk, image, platform)
+        exported = await asyncio.to_thread(exported_disk, image, "linux/amd64")
         variables = {**launcher_variables(ports, env or {}, cpu, memory), "VM_DISK": _MOUNTED_DISK}
+        launcher = (await _launcher()).add_local_file(exported.disk, _MOUNTED_DISK, copy=False)
+        if exported.base is not None:
+            launcher = launcher.add_local_file(exported.base, _MOUNTED_BASE, copy=False)
+            variables["VM_BASE"] = _MOUNTED_BASE
+        if exported.guest is not None:
+            launcher = launcher.add_local_file(exported.guest, _MOUNTED_GUEST, copy=False)
         return await self._created(
-            (LAUNCH,), (await _launcher()).add_local_file(disk, _MOUNTED_DISK, copy=False), cpu=cpu,
+            (LAUNCH,), launcher, cpu=cpu,
             memory=memory + _DISK_HOST_MEMORY_MB, timeout=timeout, ports=ports, attribution=attribution,
             network_policy=network_policy, setup_for_gateway=False, runtime="vm",
             experimental_options={"enable_nested_virt": True}, secrets=[modal.Secret.from_dict(variables)],

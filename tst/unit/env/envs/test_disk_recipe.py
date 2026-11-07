@@ -267,13 +267,16 @@ def test_the_launcher_fails_rather_than_emulate_where_kvm_is_required_and_cant_r
     assert emulated.wait(10) == 0 and "-machine virt,accel=tcg" in _logged(calls, "qemu-system-aarch64")[0]
 
 
-def test_the_launcher_expands_a_compressed_disk_onto_its_state_folder_and_boots_that(launcher, tmp_path):
+@pytest.mark.parametrize("base", [None, "/disk/base.img.zst"], ids=["whole", "thin"])
+def test_the_launcher_expands_a_compressed_disk_onto_its_state_folder_and_boots_that(launcher, tmp_path, base):
+    """A thin disk's base, carried beside it, is expanded beside it, as the base.img it's backed by."""
     launch, calls = launcher
 
-    done = launch(VM_DISK="/disk/disk.img.zst", QEMU_RUNS_S="0.1")
+    done = launch(VM_DISK="/disk/disk.img.zst", QEMU_RUNS_S="0.1", **({"VM_BASE": base} if base else {}))
 
     assert done.wait(10) == 0
-    assert _logged(calls, "zstd") == [f"zstd -q -d -f /disk/disk.img.zst -o {tmp_path}/state/disk.img"]
+    assert _logged(calls, "zstd") == [f"zstd -q -d -f /disk/disk.img.zst -o {tmp_path}/state/disk.img"] + (
+        [f"zstd -q -d -f {base} -o {tmp_path}/state/base.img"] if base else [])
     assert f"-b {tmp_path}/state/disk.img -F qcow2" in _logged(calls, "qemu-img")[0]
 
 
@@ -568,9 +571,11 @@ def test_a_disk_is_exported_compressed_into_the_cache_once_for_each_ref(tmp_path
 
     def docker(*args):
         ran.append(args)
+        if args[0] == "cp" and args[1].endswith("/disk/guest"):
+            raise DockerFailed("Could not find the file /disk/guest in container container1", 1)
         if args[0] == "cp":
             Path(args[2]).write_bytes(b"disk of " + args[1].encode())
-        return "container1" if args[0] == "create" else ""
+        return "container1" if args[0] == "create" else "1 sha256:linux" if args[0] == "image" else ""
 
     def run(argv, stdin=None, stdout=None, **kwargs):
         if argv[:2] == ["docker", "run"]:
@@ -584,10 +589,46 @@ def test_a_disk_is_exported_compressed_into_the_cache_once_for_each_ref(tmp_path
 
     exported = [local_disk.exported_disk(image, "linux/amd64") for image in (first, first, first.replace("1", "2"))]
 
-    assert exported[0] == exported[1] != exported[2] and exported[0].parent == tmp_path / "cache" / "agentenv" / "disks"
-    assert exported[0].read_bytes() == b"zstd:disk of container1:/disk/disk.img" and exported[0].name.endswith(".img.zst")
-    assert [args[0] for args in ran] == ["login", "create", "cp", "login", "create", "cp"]
+    assert exported[0] == exported[1] != exported[2] and exported[0].disk.parent == tmp_path / "cache" / "agentenv" / "disks"
+    assert exported[0].disk.read_bytes() == b"zstd:disk of container1:/disk/disk.img"
+    assert exported[0].disk.name.endswith(".img.zst") and exported[0].base is exported[0].guest is None
+    assert [args[0] for args in ran] == ["login", "create", "cp", "image", "cp"] * 2
     assert ran[0] == ("login", f"credentials for {first}") and ran[1][1:] == ("--platform", "linux/amd64", first, "disk")
     assert compressed[0] == ["docker", "run", "--rm", "-i", "--entrypoint", "zstd", "agentenv-qemu-launcher:src-1",
                              "-q", "-3", "-T0", "-c"] and len(compressed) == 2
-    assert sorted(p.name for p in exported[0].parent.iterdir()) == sorted({exported[0].name, exported[2].name})
+    assert sorted(p.name for p in exported[0].disk.parent.iterdir()) == sorted({exported[0].disk.name,
+                                                                                exported[2].disk.name})
+
+
+def test_a_thin_disk_is_exported_with_its_guest_file_and_its_base_once_for_every_disk_on_that_base(tmp_path,
+                                                                                                    monkeypatch):
+    """A Windows disk is a layer on its base, whose first layer every disk composed on it shares."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setattr(local_disk, "launcher", lambda: "agentenv-qemu-launcher:src-1")
+    monkeypatch.setattr(local_disk, "get_config", lambda: SimpleNamespace(get_image_store=lambda: SimpleNamespace(
+        auth=lambda ref: None)))
+    monkeypatch.setattr(local_disk, "docker_login", lambda auth: None)
+    copied = []
+
+    def docker(*args):
+        if args[0] == "cp":
+            copied.append(args[1])
+            Path(args[2]).write_bytes(b"windows" if args[1].endswith("guest") else b"copy of " + args[1].encode())
+        return "container1" if args[0] == "create" else "3 sha256:base" if args[0] == "image" else ""
+
+    def run(argv, stdin=None, stdout=None, **kwargs):
+        stdout.write(b"zstd:" + stdin.read())
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    monkeypatch.setattr(local_disk, "docker", docker)
+    monkeypatch.setattr(local_disk.subprocess, "run", run)
+    first = "localhost:5000/agentenv-computers:" + "1" * 64 + "@sha256:" + "a" * 64
+
+    one, two = (local_disk.exported_disk(image, "windows/amd64") for image in (first, first.replace("1", "2")))
+
+    assert one.disk != two.disk and one.base == two.base and one.base.parent == one.disk.parent
+    assert one.base.read_bytes() == b"zstd:copy of container1:/disk/base.img"
+    assert one.disk.read_bytes() == b"zstd:copy of container1:/disk/disk.img" and one.guest.read_text() == "windows"
+    assert copied == ["container1:/disk/guest", "container1:/disk/base.img", "container1:/disk/disk.img",
+                      "container1:/disk/guest", "container1:/disk/disk.img"]
+    assert local_disk.exported_disk(first, "windows/amd64") == one and len(copied) == 5

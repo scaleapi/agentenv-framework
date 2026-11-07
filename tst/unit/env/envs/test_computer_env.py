@@ -1480,7 +1480,7 @@ def test_an_app_that_requires_nothing_still_gets_a_venv_for_its_own_server(base,
         build["dockerfile"])
     assert build["confs"]["agentenv-app-mail.conf"] == MAIL_SERVER
     assert boot.ready_timeout([app], "linux") == (270.0 if at == "boot" else boot.READY_TIMEOUT_S)
-    assert boot.ready_timeout([app], "windows") == boot.READY_TIMEOUT_S
+    assert boot.ready_timeout([app], "windows") == boot.WINDOWS_READY_TIMEOUT_S
 
 
 def test_an_apps_packages_downloads_scripts_and_steps_are_fetched_at_put_and_installed_offline(base, driver, docker,

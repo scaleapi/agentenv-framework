@@ -8,6 +8,8 @@
 # and, under KVM, Hyper-V enlightenments.
 #   VM_DISK        the disk, /disk/disk.img by default, which may be backed by another beside it; one ending .zst is
 #                  expanded onto this machine's disk first
+#   VM_BASE        the base of a thin VM_DISK ending .zst, compressed too, which a provider carries beside it: expanded
+#                  beside the expanded disk, as the base.img it's backed by
 #   VM_ENV_<NAME>  the computer's variable NAME, its value base64'd, for its NoCloud seed (CIDATA; see seed)
 #   VM_PORTS       guest TCP ports, each served on the same port here by socat, whose listen backlog takes a burst of
 #                  connections, in front of QEMU's forward on 127.0.0.1 at the port plus 10000, whose backlog is 1;
@@ -111,6 +113,9 @@ trap 'kill "$(cat "$control/qemu.pid" 2>/dev/null)" 2>/dev/null; exit 143' TERM 
 if [[ "$disk" == *.zst ]]; then
     zstd -q -d -f "$disk" -o "$state/disk.img"
     disk=$state/disk.img
+    if [ -n "${VM_BASE:-}" ]; then
+        zstd -q -d -f "$VM_BASE" -o "$state/base.img"
+    fi
 fi
 
 boot() {

@@ -8,6 +8,7 @@ import hashlib
 import os
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from agent_env.artifact.artifacts.computer import DISK_BASE_FILE, DISK_FILE, DISK_GUEST_FILE
@@ -17,7 +18,7 @@ from agent_env.config.paths import cache_root
 from agent_env.env.published_images import LAUNCHER_IMAGE, published_pinned
 from agent_env.providers.sandbox_providers.disk_launcher import launcher_variables
 from agent_env.providers.sandbox_providers.host_images import host_platform, present
-from agent_env.providers.sandbox_providers.local_docker.cli import docker
+from agent_env.providers.sandbox_providers.local_docker.cli import DockerFailed, docker
 from agent_env.store.local_state import holding_locks
 from agent_env.utils.docker.build import build_image
 
@@ -62,35 +63,72 @@ def launcher_args(ports: list[int], env: dict[str, str], cpu: float, memory: int
                                for arg in ("-e", f"{name}={value}"))]
 
 
-def exported_disk(image: str, platform: str) -> Path:
-    """``image``'s ``DISK_FILE`` compressed with zstd in this machine's cache, exported from its image store by this
-    machine's Docker unless an export of it is there already: once for each composed disk, by its ref, whose tag is its
-    composer's key. ``platform`` is the disk's own, which this machine's Docker may not be."""
+@dataclass(frozen=True)
+class Exported:
+    """A disk exported for a provider elsewhere to carry: its ``DISK_FILE``, compressed; for a thin disk, its base,
+    compressed, exported once for each base; and its guest file, when it names one."""
+
+    disk: Path
+    base: Path | None = None
+    guest: Path | None = None
+
+
+def exported_disk(image: str, platform: str) -> Exported:
+    """``image``'s disk compressed with zstd in this machine's cache, exported from its image store by this machine's
+    Docker unless an export of it is there already: once for each composed disk, by its ref, whose tag is its composer's
+    key; a thin disk's base once for each base, by its layer, which every disk composed on it shares. ``platform`` is
+    the disk's own, which this machine's Docker may not be."""
     path = cache_root() / "disks" / f"{hashlib.sha256(image.encode()).hexdigest()[:32]}.img.zst"
     with holding_locks([f"disk-export:{path.name}"]):
         if not path.exists():
             _export(image, platform, path)
-    return path
+    base, guest = path.with_name(path.name + ".base"), path.with_name(path.name + ".guest")
+    return Exported(path, path.with_name(base.read_text()) if base.exists() else None, guest if guest.exists() else None)
 
 
 def _export(image: str, platform: str, path: Path) -> None:
     """Signed in to the image store first, as a boot's pull is, since ``docker create`` pulls ``image`` when it isn't
-    here; for ``platform``, as the image's index holds that one alone, which a pull for this machine's wouldn't find."""
+    here; for ``platform``, as the image's index holds that one alone, which a pull for this machine's wouldn't find.
+    The disk is placed last, so one that's there was exported whole, with its base and guest file."""
     path.parent.mkdir(parents=True, exist_ok=True)
     docker_login(get_config().get_image_store().auth(image))
     container = docker("create", "--platform", platform, image, "disk")
     try:
         with tempfile.TemporaryDirectory(prefix="export-", dir=path.parent) as work:
-            raw, compressed = Path(work) / "disk.img", Path(work) / path.name
-            docker("cp", f"{container}:/{DISK_FILE}", str(raw))
-            with raw.open("rb") as source, compressed.open("wb") as out:
-                done = subprocess.run(["docker", "run", "--rm", "-i", "--entrypoint", "zstd", launcher(), "-q", "-3",
-                                       "-T0", "-c"], stdin=source, stdout=out, stderr=subprocess.PIPE, text=False)
-            if done.returncode:
-                raise RuntimeError(f"compressing {image}'s disk failed: {done.stderr.decode().strip()}")
-            os.replace(compressed, path)
+            if (guest := _copied(container, DISK_GUEST_FILE, Path(work) / "guest")) is not None:
+                guest.replace(path.with_name(path.name + ".guest"))
+            layers = docker("image", "inspect", "-f", "{{len .RootFS.Layers}} {{index .RootFS.Layers 0}}", image)
+            if int(layers.split()[0] if layers else 1) > 1:
+                base = path.with_name(f"base-{hashlib.sha256(layers.split()[1].encode()).hexdigest()[:32]}.img.zst")
+                with holding_locks([f"disk-export:{base.name}"]):
+                    if not base.exists():
+                        _compressed(container, DISK_BASE_FILE, base, Path(work), image)
+                path.with_name(path.name + ".base").write_text(base.name)
+            _compressed(container, DISK_FILE, path, Path(work), image)
     finally:
         subprocess.run(["docker", "rm", container], capture_output=True)
+
+
+def _copied(container: str, file: str, to: Path) -> Path | None:
+    """``file`` copied out of ``container`` to ``to``; None when the container has no such file."""
+    try:
+        docker("cp", f"{container}:/{file}", str(to))
+    except DockerFailed:
+        return None
+    return to
+
+
+def _compressed(container: str, file: str, path: Path, work: Path, image: str) -> None:
+    """``file`` of ``container`` compressed with zstd to ``path``, through ``work``."""
+    raw, compressed = work / PurePosixPath(file).name, work / path.name
+    docker("cp", f"{container}:/{file}", str(raw))
+    with raw.open("rb") as source, compressed.open("wb") as out:
+        done = subprocess.run(["docker", "run", "--rm", "-i", "--entrypoint", "zstd", launcher(), "-q", "-3", "-T0", "-c"],
+                              stdin=source, stdout=out, stderr=subprocess.PIPE, text=False)
+    if done.returncode:
+        raise RuntimeError(f"compressing {image}'s {file} failed: {done.stderr.decode().strip()}")
+    raw.unlink()
+    os.replace(compressed, path)
 
 
 def launcher() -> str:
