@@ -1,9 +1,10 @@
 # setup.ps1: a Windows base readied for agent-env, once, elevated, at agentadmin's first sign-in. OpenSSH comes first
 # (agentadmin by agent-env's key alone), which is how agent-env composes the base and reads this setup's log when it
 # fails (setup-failed). Then nothing of Windows' own is left in an agent's way: no updates, lock screen, notifications,
-# widgets, Copilot or first-run pages, and no page file, which would grow every layer composed on the base. The pinned
-# Python, with Tk, is what layers' venvs and the probe's fixture run on; agentenv-session starts the session's services,
-# windowless, at the session user's sign-in. Then the session user signs in at every boot.
+# widgets, Copilot, first-run pages or apps Windows installs in the background, and no page file, all of which would grow
+# every layer composed on the base. The pinned Python, with Tk, is what layers' venvs and the probe's fixture run on;
+# agentenv-session starts the session's services, windowless, at the session user's sign-in. Then the session user signs
+# in at every boot.
 param([string]$Media, [string]$User, [string]$UserPassword)
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -65,6 +66,18 @@ try {
         SubscribedContentEnabled = 0; SystemPaneSuggestionsEnabled = 0; SilentInstalledAppsEnabled = 0; SoftLandingEnabled = 0 } -BestEffort
     [gc]::Collect()
     reg.exe unload HKU\AgentenvDefault | Out-Null
+
+    # Windows' background installs: Edge's updater, which brings the Copilot app, and the new Outlook and Dev Home, which
+    # Windows installs after a first sign-in. Each would land in every composed layer and run at every boot.
+    Set-Values 'HKLM\SOFTWARE\Policies\Microsoft\EdgeUpdate' @{ UpdateDefault = 0; InstallDefault = 0; AutoUpdateCheckPeriodMinutes = 0 }
+    foreach ($service in 'edgeupdate', 'edgeupdatem') {
+        Stop-Service $service -Force -ErrorAction SilentlyContinue
+        Set-Service $service -StartupType Disabled -ErrorAction SilentlyContinue
+    }
+    Get-ScheduledTask -TaskName 'MicrosoftEdgeUpdate*' -ErrorAction SilentlyContinue | Disable-ScheduledTask | Out-Null
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue `
+        'HKLM:\SOFTWARE\Microsoft\WindowsUpdate\Orchestrator\UScheduler_Oobe\OutlookUpdate',
+        'HKLM:\SOFTWARE\Microsoft\WindowsUpdate\Orchestrator\UScheduler_Oobe\DevHomeUpdate'
 
     powercfg /change standby-timeout-ac 0
     powercfg /change monitor-timeout-ac 0

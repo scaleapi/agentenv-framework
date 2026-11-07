@@ -291,7 +291,8 @@ def test_a_windows_disk_boots_from_secure_boot_on_ahci_and_e1000e_with_a_fresh_t
     assert reset.wait(10) == 0, reset.stderr.read()
     work = tmp_path / "state" / "boot"
     assert "-machine q35,smm=on,accel=" in qemu and "file=/usr/share/OVMF/OVMF_CODE_4M.secboot.fd " in qemu
-    assert "-device tpm-tis,tpmdev=tpm " in qemu and "-device ide-hd,drive=disk,bus=ide.0,bootindex=1 " in qemu
+    assert "-device tpm-tis,tpmdev=tpm " in qemu and "-device ide-hd,drive=disk,bus=ide.0,bootindex=1,rotation_rate=1 " in qemu
+    assert ",id=disk,discard=unmap,detect-zeroes=unmap " in qemu
     assert "-device e1000e,netdev=net " in qemu and "-device VGA,xres=1920,yres=1080 " in qemu and "virtio" not in qemu
     assert "-device usb-storage,bus=usb.0,drive=seed,removable=on " in qemu
     assert _logged(calls, "swtpm", 2) == 2 * [f"swtpm socket --tpm2 --tpmstate dir={work}/tpm --ctrl"
@@ -351,7 +352,7 @@ def test_a_windows_install_boots_its_iso_first_pressing_enter_and_finds_its_answ
     (qemu,) = _logged(calls, "qemu-system-x86_64")
     assert ("-drive file=/in/win11.iso,format=raw,if=none,id=media,media=cdrom,readonly=on"
             " -device ide-cd,drive=media,bus=ide.2,bootindex=0 ") in qemu
-    assert "-device ide-hd,drive=disk,bus=ide.0,bootindex=1 " in qemu
+    assert "-device ide-hd,drive=disk,bus=ide.0,bootindex=1,rotation_rate=1 " in qemu
     assert "-device usb-storage,bus=usb.0,drive=files,removable=on " in qemu
     assert _logged(calls, "socat - UNIX-CONNECT:")
     assert _logged(calls, "mcopy -s")[0].startswith(f"mcopy -s -i {tmp_path}/state/boot/files.img {answers}/")
