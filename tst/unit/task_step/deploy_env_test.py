@@ -267,13 +267,30 @@ def test_preflight_passes_what_the_env_takes(kind, options):
     assert _preflight(env, **options) == []
 
 
-@pytest.mark.parametrize("kind, refusal", [
-    ("server", "env 'mcp-email' has env_provider_type 'server', which doesn't take env_params"),
-    ("other", "other envs take no env_params"),
-])
-def test_preflight_refuses_env_params_an_env_doesnt_take(kind, refusal):
+@pytest.mark.parametrize("kind", ["server", "gateway", "other"])
+def test_preflight_refuses_env_params_an_env_doesnt_take(kind):
     env = _OtherEnv("other", 1) if kind == "other" else _mcp_env(kind)
-    assert _preflight(env, env_params={"form": "container"}) == [f"deploy_env 'd': {refusal}"]
+    assert _preflight(env, env_params={"form": "container"}) == [f"deploy_env 'd': {env.type} envs take no env_params"]
+
+
+class _TakesEverything:
+    """A plugin provider whose deploy() takes every option."""
+
+    async def deploy(self, env, sandbox_provider, **options): ...
+
+
+@pytest.mark.parametrize("option, refusal", [
+    ({"env_params": {"form": "container"}}, "mcp_server envs take no env_params"),
+    ({"child_envs": {"desktop": {"cpu": 4}}}, "mcp_server envs have no child envs"),
+], ids=["env-params", "child-envs"])
+@pytest.mark.asyncio
+async def test_what_a_run_refuses_behind_a_provider_that_takes_every_option_is_refused_at_save_too(option, refusal):
+    step = DeployEnvTaskStep(id="d", version=None, env_id="mcp-email", **option)
+    with patch("agent_env.env.envs.mcp_server.provider_or_class", return_value=_TakesEverything), \
+            patch("agent_env.env.env.Env.get", return_value=_mcp_env("plugin_kw")):
+        assert step.preflight() == [f"deploy_env 'd': {refusal}"]
+        with pytest.raises(ValueError, match=refusal):
+            await step.execute(TaskStepContext())
 
 
 @pytest.mark.parametrize("kind", ["server", "gateway", "other"])
@@ -484,15 +501,6 @@ def test_writing_a_step_out_for_elsewhere_drops_each_child_envs_sandbox_type_as_
 def test_preflight_refuses_child_envs_for_an_env_with_no_child_envs(kind):
     env = _OtherEnv("other", 1) if kind == "other" else _mcp_env(kind)
     assert _preflight(env, child_envs={"desktop": {"cpu": 4}}) == [f"deploy_env 'd': {env.type} envs have no child envs"]
-
-
-def test_preflight_refuses_child_envs_at_save_behind_a_provider_that_takes_every_option():
-    class _TakesEverything:
-        async def deploy(self, env, sandbox_provider, **options): ...
-
-    with patch("agent_env.env.envs.mcp_server.provider_or_class", return_value=_TakesEverything):
-        assert _preflight(_mcp_env("plugin_kw"), child_envs={"desktop": {"cpu": 4}}) == [
-            "deploy_env 'd': mcp_server envs have no child envs"]
 
 
 def test_exporting_a_step_leaves_the_steps_own_child_envs_as_they_were():

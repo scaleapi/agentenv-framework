@@ -129,6 +129,9 @@ class DeployEnvTaskStep(TaskStep):
             return [f"deploy_env '{self.id}': {e}"]  # the words execute() would raise
         try:
             env = Env.get(self.env_id, self.env_version)
+            # The words execute() raises, whatever the env's provider would take.
+            if self.env_params and not _takes(env.deploy, "env_params"):
+                return [f"deploy_env '{self.id}': {env.type} envs take no env_params"]
             if self.child_envs and not _takes(env.deploy, "child_envs"):
                 return [f"deploy_env '{self.id}': {env.type} envs have no child envs"]
             # As stored: run-time overrides aren't known at save. Every run passes an attribution, so the check does too, whatever it
@@ -184,17 +187,15 @@ class DeployEnvTaskStep(TaskStep):
         # sidecars attribute spend to the same key as the agent. Guard on the
         # signature — most envs' deploy() takes a fixed param list and would
         # TypeError on an unexpected kwarg.
-        params = inspect.signature(env.deploy).parameters
-        accepts_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
         model_api_key = user_overrides.get("litellm_api_key")
-        if model_api_key and ("litellm_api_key" in params or accepts_kwargs):
+        if model_api_key and _takes(env.deploy, "litellm_api_key"):
             deploy_kwargs["litellm_api_key"] = get_config().resolve_reference(model_api_key)
-        if self.artifact_id is not None and ("artifact_id" in params or accepts_kwargs):
+        if self.artifact_id is not None and _takes(env.deploy, "artifact_id"):
             deploy_kwargs["artifact_id"] = self.artifact_id
-        if self.artifact_version is not None and ("artifact_version" in params or accepts_kwargs):
+        if self.artifact_version is not None and _takes(env.deploy, "artifact_version"):
             deploy_kwargs["artifact_version"] = self.artifact_version
         if self.env_params:
-            if "env_params" not in params and not accepts_kwargs:
+            if not _takes(env.deploy, "env_params"):
                 raise ValueError(f"deploy_env '{self.id}': {env.type} envs take no env_params")
             deploy_kwargs["env_params"] = await env.run_env_params(self.env_params, context.deployed_envs)
         if self.child_envs:
