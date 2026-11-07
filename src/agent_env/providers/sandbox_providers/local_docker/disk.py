@@ -97,9 +97,10 @@ def _export(image: str, platform: str, path: Path) -> None:
         with tempfile.TemporaryDirectory(prefix="export-", dir=path.parent) as work:
             if (guest := _copied(container, DISK_GUEST_FILE, Path(work) / "guest")) is not None:
                 guest.replace(path.with_name(path.name + ".guest"))
-            layers = docker("image", "inspect", "-f", "{{len .RootFS.Layers}} {{index .RootFS.Layers 0}}", image)
-            if int(layers.split()[0] if layers else 1) > 1:
-                base = path.with_name(f"base-{hashlib.sha256(layers.split()[1].encode()).hexdigest()[:32]}.img.zst")
+            layers, first = docker("image", "inspect", "-f", "{{len .RootFS.Layers}} {{index .RootFS.Layers 0}}",
+                                   image).split()
+            if int(layers) > 1:
+                base = path.with_name(f"base-{hashlib.sha256(first.encode()).hexdigest()[:32]}.img.zst")
                 with holding_locks([f"disk-export:{base.name}"]):
                     if not base.exists():
                         _compressed(container, DISK_BASE_FILE, base, Path(work), image)

@@ -116,6 +116,8 @@ _KEEPALIVE_CMD = ("sh", "-c", _MAIN_SCRIPT)
 #: Where a computer's disk is mounted on the launcher's image, compressed; the launcher expands it onto the sandbox's disk.
 #: A thin disk's base is mounted beside it, compressed too, and expanded beside it; its guest file, beside both.
 _MOUNTED_DISK, _MOUNTED_BASE, _MOUNTED_GUEST = "/disk/disk.img.zst", "/disk/base.img.zst", "/disk/guest"
+#: The platform of a disk's image in the image store, a Windows disk's too: its guest file names the OS it boots.
+_DISK_IMAGE_PLATFORM = "linux/amd64"
 #: The memory a disk's sandbox has beyond its VM's: QEMU's own, and the sandbox's.
 _DISK_HOST_MEMORY_MB = 2048
 #: How long a disk's sandbox stays up with no connection open and no command running, when the config sets no
@@ -366,7 +368,7 @@ class ModalVmSandboxProvider(SandboxProvider):
                                        attribution=attribution, network_policy=network_policy,
                                        setup_for_gateway=setup_for_gateway, idle_timeout=self._idle_timeout,
                                        experimental_options={"vm_runtime": True})
-        exported = await asyncio.to_thread(exported_disk, image, "linux/amd64")
+        exported = await asyncio.to_thread(exported_disk, image, _DISK_IMAGE_PLATFORM)
         variables = {**launcher_variables(ports, env or {}, cpu, memory), "VM_DISK": _MOUNTED_DISK}
         launcher = (await _launcher()).add_local_file(exported.disk, _MOUNTED_DISK, copy=False)
         if exported.base is not None:
