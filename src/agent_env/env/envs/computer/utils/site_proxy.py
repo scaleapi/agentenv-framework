@@ -21,13 +21,16 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import pwd
 import shutil
 import socket
 import ssl
 import struct
 import subprocess
 import sys
+try:
+    import pwd
+except ImportError:
+    pwd = None
 import time
 import urllib.error
 import urllib.request
@@ -611,7 +614,7 @@ def serve_user(session_user: Optional[str]) -> Optional[str]:
     """The user ``serve`` drops to: ``SERVE_USER`` where the base has it, else the session user."""
     try:
         pwd.getpwnam(SERVE_USER)
-    except KeyError:
+    except (KeyError, AttributeError):
         return session_user
     return SERVE_USER
 
