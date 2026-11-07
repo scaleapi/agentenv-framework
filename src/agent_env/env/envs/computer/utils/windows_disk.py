@@ -366,9 +366,8 @@ def _pack(folder: Path, image: str, labels: dict[str, str], base_image: str | No
     for name in ("answers", "out"):
         shutil.rmtree(folder / name, ignore_errors=True)
     (folder / "Dockerfile").write_text(dockerfile)
-    # Labelled as built here from its key, so a deploy boots this machine's image and pulls none of the name.
-    build_image(folder / "Dockerfile", folder, image, platform="linux/amd64",
-                labels={**labels, SOURCES_LABEL: labels[KEY_LABEL]})
+    # Labelled as built here, so a deploy boots this machine's image and pulls none of its name.
+    build_image(folder / "Dockerfile", folder, image, platform="linux/amd64", labels={**labels, SOURCES_LABEL: image})
 
 
 def _tarred(folder: Path) -> bytes:
