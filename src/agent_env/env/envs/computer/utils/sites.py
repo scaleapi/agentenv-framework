@@ -28,6 +28,8 @@ from typing import TYPE_CHECKING, Iterable, Optional
 from urllib.parse import urlsplit
 
 import httpx
+from agentenv_protocol import client as protocol_client
+from agentenv_protocol.website import WEBSITE_EXTENSION_URI as WEBSITE
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -468,9 +470,10 @@ async def require_ready(deployed_envs: list[DeployedEnv], only: Optional[list[st
                         timeout_s: float = SITES_READY_TIMEOUT_S, poll_s: float = SITES_READY_POLL_S) -> None:
     """Back once each deployed env whose websites a computer routes, those of the env ids ``only`` names or all, says
     through ``website/v1``'s ``ready`` that every site of it is ready; RuntimeError naming each one still not, and why,
-    once ``timeout_s`` has passed. An env with no address to ask isn't waited on, nor one with no site serving
-    ``ready``, which is ready."""
-    waiting = [record for record in deployed_envs if only is None or record.env_id in only]
+    once ``timeout_s`` has passed. An env that serves no website isn't asked, nor one with no address to ask, and one
+    with no site serving ``ready`` is ready."""
+    waiting = [record for record in deployed_envs
+               if (only is None or record.env_id in only) and serves_websites(record)]
     deadline = time.monotonic() + timeout_s
     while True:
         why: dict[str, str] = {}
@@ -491,6 +494,14 @@ async def require_ready(deployed_envs: list[DeployedEnv], only: Optional[list[st
                                + "; ".join(f"{env_id} ({reason})" for env_id, reason in why.items()))
         waiting = [record for record in waiting if record.env_id in why]
         await asyncio.sleep(poll_s)
+
+
+def serves_websites(record: DeployedEnv) -> bool:
+    """Whether ``record`` serves websites a computer routes, as ``deployed_sites`` finds them: a named ``website/v1``
+    child on its stored card, or a website frontend it lists."""
+    card = getattr(record, "environment_card", None) or {}
+    return bool(getattr(record, "website_frontend_urls", None)) or any(
+        child.find_extension(WEBSITE) is not None and child.name for child in protocol_client.children(card))
 
 
 def _env_qualified(found: list[tuple[str, dict]]) -> list[dict]:

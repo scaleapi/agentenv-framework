@@ -11,8 +11,8 @@ accepted for it, and each launch, exit and stop with its cause, across a kill an
 cookies, local storage and downloads; and its data plane signs it in, snapshots it, resets it and loads a
 snapshot back; and the browser task steps set its cookies and storage and open, activate and close its tabs by URL.
 Its start tabs open in order, the first active, a deploy recording each one's outcome and going on past a live page
-that never answers; and with the run's sites routed to it, a start tab on one must load, so a site answering 503
-fails the deploy, naming it. Needs Docker and the local registry on localhost:5000."""
+that never answers; and with the run's sites routed to it, a start tab on one must load, judged by the page it
+lands on when it sends itself elsewhere before it loads, so a site answering 503 fails the deploy, naming it. Needs Docker and the local registry on localhost:5000."""
 
 import asyncio
 import hashlib
@@ -378,7 +378,7 @@ async def test_its_start_tabs_open_in_order_the_first_active_and_a_live_one_that
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", [200, 503], ids=["loads", "answers-503"])
-async def test_a_start_tab_on_a_routed_site_must_load_so_a_site_answering_an_error_fails_the_deploy(
+async def test_a_start_tab_on_a_routed_site_must_load_where_it_lands_so_a_site_answering_503_fails_the_deploy(
         chromium_desktop, status):
     with host_pages(site_status=status) as port, namespace_routing():
         params = {"site_routing": True, "sites": [{"name": "shop", "url": f"http://127.0.0.1:{port}/website/shop/",
@@ -398,8 +398,8 @@ async def test_a_start_tab_on_a_routed_site_must_load_so_a_site_answering_an_err
 
     (tab,) = deployed.metadata["computer"]["start_tabs"]["chromium"]
     assert (tab["url"], tab["final_url"], tab["status"], tab["site"], tab["outcome"]) == (
-        "https://shop.test/", "https://shop.test/", 200, "shop", "loaded")
-    assert [(open_tab["url"], open_tab["title"]) for open_tab in tabs] == [("https://shop.test/", "shop")]
+        "https://shop.test/", "https://shop.test/landed", 200, "shop", "loaded")
+    assert [(open_tab["url"], open_tab["title"]) for open_tab in tabs] == [("https://shop.test/landed", "landed")]
     assert not report.failed
 
 

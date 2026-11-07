@@ -1,5 +1,6 @@
 """Pages a computer's start tabs open, served on this machine, which a computer reaches as ``host.docker.internal``: a
-site's route, answering its status, two pages titled by name, and one that never answers."""
+site's route, whose home page sends itself elsewhere before it loads, or answers an error; two pages titled by name;
+and one that never answers."""
 
 import contextlib
 import http.server
@@ -13,23 +14,27 @@ from agentenv_protocol import client as protocol_v1
 from agentenv_protocol.types import WELL_KNOWN_PATH
 from agentenv_protocol.website_browser import BROWSER
 
-#: How long the page that never answers holds its request.
-HANG_S = 120
+#: How long the page that never answers holds its request, and the image that holds the site's home page from loading.
+HANG_S, SLOW_S = 120, 30
+#: The site's home page: it replaces itself with /landed by script as it's read, while an image keeps it from loading.
+LEAVING = b"<title>leaving</title><script>location.replace('/landed')</script><img src='/slow'>"
 
 
 @contextlib.contextmanager
 def host_pages(site_status: int = 200) -> Iterator[int]:
-    """The pages served on every address of this machine while the block runs, at the port it yields: ``/website/
-    shop/``, a site's route, answering ``site_status``; ``/alpha`` and ``/bravo``; and ``/hang``, which never
-    answers."""
+    """The pages served on every address of this machine while the block runs, at the port it yields: under
+    ``/website/shop/``, a site's route, its home page, which sends itself to ``landed`` before it loads, or with any
+    other ``site_status`` answers it, and ``landed``; ``/alpha`` and ``/bravo``; and ``/hang``, which never answers."""
 
     class Page(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
-            if self.path == "/hang":
-                time.sleep(HANG_S)
+            if self.path in ("/hang", "/website/shop/slow"):
+                time.sleep(HANG_S if self.path == "/hang" else SLOW_S)
                 return
-            status = site_status if self.path.startswith("/website/shop/") else 200
-            body = f"<title>{self.path.strip('/').rsplit('/', 1)[-1] or 'shop'}</title>".encode()
+            home = self.path == "/website/shop/"
+            status = site_status if home else 200
+            title = self.path.strip("/").rsplit("/", 1)[-1]
+            body = LEAVING if home and status == 200 else f"<title>{title}</title>".encode()
             self.send_response(status)
             self.send_header("Content-Type", "text/html")
             self.send_header("Content-Length", str(len(body)))
