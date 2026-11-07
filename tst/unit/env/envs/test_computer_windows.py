@@ -244,3 +244,22 @@ def test_a_windows_computers_display_is_1920x1080_for_now(local_stores, cli_rout
         "computer_settings.resolution: a Windows computer's display is 1920x1080 for now, not 1280x800"]
     assert gate._display(base, {"width": 1280, "height": 800}, None) == [
         "display: a Windows computer's display is 1920x1080 for now"]
+
+
+@pytest.mark.parametrize("backing, over", [(None, []), ("/disk/base.img", ["-B", "/disk/base.img", "-F", "qcow2"])],
+                         ids=["a-base", "a-layer-over-its-base"])
+def test_a_disk_is_rewritten_keeping_only_the_clusters_it_uses(monkeypatch, tmp_path, backing, over):
+    ran = []
+
+    def run(argv, **kwargs):
+        ran.append(argv)
+        (tmp_path / "compact.img").write_text("compacted")
+
+    (tmp_path / "disk.img").write_text("as Windows left it")
+    monkeypatch.setattr(windows_disk.subprocess, "run", run)
+
+    windows_disk._converted(tmp_path, "machine:1", backing=backing)
+
+    assert ran == [["docker", "run", "--rm", "-v", f"{tmp_path}:/out", "--entrypoint", "qemu-img", "machine:1", "convert",
+                    "-O", "qcow2", *over, "/out/disk.img", "/out/compact.img"]]
+    assert (tmp_path / "disk.img").read_text() == "compacted" and not (tmp_path / "compact.img").exists()
