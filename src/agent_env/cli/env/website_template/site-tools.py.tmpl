@@ -1,0 +1,43 @@
+"""{{title}}: a site on ``agentenv_protocol.website.WebsiteEnvironment``, made by ``agent-env env website new`` from
+the tools of {{source}}. Each tool is a stub ``@api`` route of the same name, which answers 501 until it is written; the
+seed in ``data/seed.json`` has a collection for each of them to fill. A browser with no session is signed in as the
+acting user, the seed's ``current_user``, and can sign in as another seeded user. The site keeps its data itself,
+behind one lock, and serves it through the data plane (``data/get``, ``data/reset``, ``data/add``).
+
+Run it with ``agent-env env website dev``, or with ``python site.py`` after building ``web/`` into ``web/dist``; it
+serves on ``PORT`` (8000)."""
+from __future__ import annotations
+
+import base64
+import copy
+import json
+import threading
+from pathlib import Path
+{{typing_import}}from urllib.parse import unquote, urlparse
+
+from pydantic import BaseModel, Field
+
+from agentenv_protocol import DataPart, FilePart, TextPart, add_data, environment_card, get_data, reset_data
+from agentenv_protocol.website import ApiContext, ApiError, NotFound, WebsiteEnvironment, api, ready_check, website
+
+USERS = "users"
+SEED = Path(__file__).resolve().parent / "data" / "seed.json"
+
+
+class SignIn(BaseModel):
+    user: str
+{{models}}
+
+@environment_card(name="{{name}}")
+@website(domains=["{{domain}}"], static="web/dist")
+class {{class_name}}(WebsiteEnvironment):
+{{state}}{{routes}}
+
+def _stub(tool: str) -> ApiError:
+    return ApiError(f"{tool} is a stub: write what it does in site.py", status=501, code="not_implemented")
+
+
+{{part_data}}
+
+if __name__ == "__main__":
+    {{class_name}}().serve()

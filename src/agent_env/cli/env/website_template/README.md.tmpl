@@ -1,0 +1,45 @@
+# {{title}}
+
+{{title}} is a website environment on `agentenv_protocol.website.WebsiteEnvironment`, made by
+`agent-env env website new`{{source_note}}. It meets the `urn:agentenv:website/v1` server contract.
+
+| File | What it is |
+| --- | --- |
+| `site.py` | The server: the `{{class_name}}` WebsiteEnvironment, its `@api` routes, its `@ready_check`, which its card's website/v1 `ready` answers by, and its data plane hooks, and `serve()` on `PORT` (8000). |
+| `data/seed.json` | The seed data the site starts with and the data plane loads: `current_user`, the acting user, the `users` a browser can sign in as, and the site's collections. |
+| `web/` | A minimal Vite app. Its assets (`base: "./"`) and API calls are relative to the page, so it works at `/` and under the gateway's `/website/{{name}}/` alike; opened at a path without its final slash, such as `/website/{{name}}`, the page first reloads itself with it. `src/site-client.js` is the SDK's browser client: `api()`, `universeNow()`, `followUniverseClock()`, `session()`, `signIn()` and `signOut()`. |
+| `Dockerfile` | The server image, built with this folder as its context: Node builds `web/`, then Python installs `agentenv-framework-protocol` with uvicorn. Its health check reads the card. |
+| `env.toml` | The website env as a bundle entry: `type`, `environment_name` and `backend_image`, and `domains` when `--domain` named any. |
+
+## Develop it
+
+```bash
+agent-env env website dev
+```
+
+It builds `web/` when it is out of date (and rebuilds it as it changes), serves `site.py` on http://localhost:8000 with
+reload, syncs the site to a local clock and loads `data/seed.json` through the data plane, then runs the conformance
+check once. The local clock answers `/clock/time` as the gateway's does, and `PUT /clock/set-time`
+(`{"virtual_time": "..."}`) and `PUT /clock/advance` (`{"virtual_time": "..."}` or `{"seconds": 3600}`) move it.
+Ctrl-C stops it all. For Vite's own dev server, run `npm run dev` in `web/` while the site runs; it proxies `/api` to
+`SITE_URL` (http://127.0.0.1:8000).
+
+To check a running server against the contract:
+
+```bash
+python -m agentenv_protocol.website.conformance http://localhost:8000
+```
+
+## Register it
+
+In a bundle, `env.toml` declares the env: copied to a bundle's `envs/{{name}}/`, `agent-env bundle register <bundle>`
+builds the image with that folder as its context. It may name `domains`, the names the site is reached by, such as
+`domains = ["{{name}}.example"]`; these win over the card's (`{{name}}.test`). Without a bundle (`--domain` names the
+site, and can be repeated):
+
+```bash
+agent-env env website put --id {{name}} --server-dockerfile Dockerfile
+```
+
+`environment_name` comes from the card (`@environment_card(name="{{name}}")`). The image installs
+`{{protocol}}`; pass `--build-arg PROTOCOL=...` to `docker build` for another source of the package.

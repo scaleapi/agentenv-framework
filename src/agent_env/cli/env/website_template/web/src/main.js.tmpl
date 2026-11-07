@@ -1,0 +1,85 @@
+import "./style.css";
+import { api, followUniverseClock, session, signIn, universeNow } from "./site-client.js";
+
+const $ = (id) => document.getElementById(id);
+
+function showError(error) {
+  $("error").textContent = error ? error.error || error.message : "";
+  $("error").hidden = !error;
+}
+
+function formatTime(value) {
+  return new Date(value).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" });
+}
+
+function tick() {
+  $("universe-now").textContent = `${formatTime(universeNow())} UTC`;
+  $("universe-now").dateTime = universeNow().toISOString();
+}
+
+async function render() {
+  const items = await api("api/items");
+  const list = document.createElement("ul");
+  list.id = "items";
+  for (const item of items) {
+    const row = document.createElement("li");
+    row.className = "card";
+    row.textContent = item.title;
+    const meta = document.createElement("small");
+    meta.textContent = ` · ${formatTime(item.created_at)}`;
+    row.append(meta);
+    list.append(row);
+  }
+  if (!items.length) {
+    const empty = document.createElement("li");
+    empty.className = "empty";
+    empty.textContent = "Nothing here yet.";
+    list.append(empty);
+  }
+  $("items")?.remove();
+  $("app").append(list);
+}
+
+async function run(action) {
+  try {
+    await action();
+    showError(null);
+    await render();
+  } catch (error) {
+    showError(error);
+  }
+}
+
+async function start() {
+  const [signedIn, users] = await Promise.all([session(), api("api/users")]);
+  $("user").replaceChildren(...users.map((user) => new Option(user.name || user.id, user.id)));
+  $("user").value = signedIn.user ?? "";
+  $("user").addEventListener("change", (event) => run(() => signIn(event.target.value)));
+
+  const form = document.createElement("form");
+  form.id = "new-item";
+  form.className = "card";
+  const title = document.createElement("input");
+  title.placeholder = "New item";
+  title.required = true;
+  title.setAttribute("aria-label", "New item");
+  const add = document.createElement("button");
+  add.type = "submit";
+  add.textContent = "Add";
+  form.append(title, add);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    run(async () => {
+      await api("api/items", { method: "POST", body: { title: title.value } });
+      form.reset();
+    });
+  });
+  $("app").append(form);
+
+  tick();
+  setInterval(tick, 1000);
+  followUniverseClock({ path: "api/users" });
+  await render();
+}
+
+start().catch(showError);

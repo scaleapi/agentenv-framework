@@ -1,0 +1,54 @@
+    def __init__(self) -> None:
+        super().__init__()
+        self._lock = threading.Lock()
+        self.data: dict = json.loads(SEED.read_text(encoding="utf-8"))
+
+    def acting_user(self) -> Optional[str]:
+        with self._lock:
+            return self.data.get("current_user")
+
+    @ready_check
+    def seeded(self) -> bool:
+        """The site is usable once it knows who may sign in."""
+        with self._lock:
+            return bool(self.data.get(USERS))
+
+    @reset_data
+    def reset(self) -> None:
+        with self._lock:
+            self.data = {}
+
+    @add_data
+    def add(self, parts: list) -> None:
+        """Each part's JSON, its collections' records added by id and its other fields set, as the seed is."""
+        loaded = [_part_data(part) for part in parts]
+        with self._lock:
+            for data in loaded:
+                for key, value in data.items():
+                    if isinstance(value, list):
+                        kept = {record["id"]: record for record in self.data.get(key, [])}
+                        kept.update({record["id"]: copy.deepcopy(record) for record in value})
+                        self.data[key] = list(kept.values())
+                    else:
+                        self.data[key] = copy.deepcopy(value)
+
+    @get_data
+    def export(self) -> list:
+        with self._lock:
+            return [DataPart(data=copy.deepcopy(self.data))]
+
+    @api.get("/api/users", name="list_users")
+    def list_users(self) -> list:
+        """The users a browser can sign in as."""
+        with self._lock:
+            return copy.deepcopy(self.data.get(USERS, []))
+
+    @api.post("/api/sign-in", name="sign_in")
+    def sign_in(self, body: SignIn, ctx: ApiContext) -> dict:
+        """Sign the browser in as one of the site's users."""
+        with self._lock:
+            known = any(user["id"] == body.user for user in self.data.get(USERS, []))
+        if not known:
+            raise NotFound(f"no user {body.user!r}")
+        ctx.sign_in(body.user)
+        return {"user": ctx.user}

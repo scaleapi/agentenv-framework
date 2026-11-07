@@ -1,11 +1,14 @@
 import asyncio
 import os
+import subprocess
 import sys
 from pathlib import Path
 
 import click
 
 from agent_env.artifact import DockerImageArtifact, EnvironmentArtifact
+from agent_env.cli.env import website_dev
+from agent_env.cli.env.website_scaffold import ScaffoldError, scaffold, tools_from_json, tools_from_mcp
 from agent_env.cli.utils import (
     deployed_env_from_instance,
     build_platform_option,
@@ -27,6 +30,141 @@ from agent_env.store.ids import derive_id, image_repository
 def website():
     """Website environment commands."""
     pass
+
+
+@website.command()
+@click.argument("name")
+@click.option("--dir", "directory", default=None, type=click.Path(file_okay=False, path_type=Path),
+              help="Where to write the site (defaults to ./NAME)")
+@click.option("--from-mcp", "from_mcp", default=None, type=click.Path(exists=True, path_type=Path),
+              help="An MCP server's source, a folder or .py file, whose @tool methods become stub @api routes; read "
+                   "without running it")
+@click.option("--from-tools-json", "from_tools_json", default=None, type=click.Path(exists=True, dir_okay=False,
+              path_type=Path), help="A JSON file of the tools to make stub @api routes of: tools/list's answer, a "
+                                    "list of {name, description, inputSchema}, or an environment card")
+@click.option("--domain", "domains", multiple=True,
+              help="A name a deploy reaches the site by, such as shop.example or *.shop.example (repeatable), written "
+                   "to env.toml's domains; the card declares NAME.test")
+@click.option("--force", is_flag=True, default=False, help="Write into a directory that isn't empty")
+def new(name: str, directory: Path | None, from_mcp: Path | None, from_tools_json: Path | None,
+        domains: tuple[str, ...], force: bool):
+    """Make a new website env NAME like the Notes example: site.py, data/seed.json, a Vite app in web/ with the SDK's
+    browser client, a Dockerfile, env.toml and a README. With --from-mcp or --from-tools-json, each of a server's tools
+    is a stub @api route of the same name, and the seed has a collection for each."""
+    if from_mcp and from_tools_json:
+        click.echo("Error: --from-mcp and --from-tools-json are mutually exclusive", err=True)
+        sys.exit(1)
+    target = directory or Path(name)
+    try:
+        tools, source = None, None
+        if from_mcp:
+            tools, source = tools_from_mcp(from_mcp), str(from_mcp)
+        elif from_tools_json:
+            tools, source = tools_from_json(from_tools_json), str(from_tools_json)
+        written = scaffold(target, name, domains=list(domains), tools=tools, source=source, force=force)
+    except ScaffoldError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+    click.echo(f"Created website env {name!r} in {target} ({len(written)} files"
+               + (f", {len(tools)} stub route(s) from {source}" if tools is not None else "") + ").")
+    click.echo(f"\nNext:\n  cd {target}\n  agent-env env website dev\n"
+               f"  agent-env env website put --id {name} --server-dockerfile Dockerfile")
+
+
+@website.command()
+@click.option("--dir", "directory", default=".", show_default=True, type=click.Path(exists=True, file_okay=False,
+              path_type=Path), help="The site's folder, with its site.py")
+@click.option("--site", "site_file", default="site.py", show_default=True, help="The site's server, in --dir")
+@click.option("--host", default="127.0.0.1", show_default=True, help="The address the site listens on")
+@click.option("--port", default=8000, show_default=True, type=int, help="The port the site listens on")
+@click.option("--clock-port", default=0, type=int, help="The local clock's port (default: any free one)")
+@click.option("--clock-time", default=None, help="The universe's time the local clock starts at, RFC3339 (default: now)")
+@click.option("--seed", default="data/seed.json", show_default=True,
+              help="The seed loaded through the data plane, in --dir; skipped when the file isn't there")
+@click.option("--web/--no-web", "build_web", default=True, show_default=True,
+              help="Build web/ when it is out of date, if it has a package.json")
+@click.option("--watch/--no-watch", default=True, show_default=True, help="Rebuild web/ as its sources change")
+@click.option("--check/--no-check", default=True, show_default=True,
+              help="Run the website/v1 conformance check once the site is up")
+def dev(directory: Path, site_file: str, host: str, port: int, clock_port: int, clock_time: str | None, seed: str,
+        build_web: bool, watch: bool, check: bool):
+    """Run a site locally for authoring, without Docker: check the folder's env.toml, when it has one, as a bundle
+    would read it, build web/ when it is out of date, serve site.py with uvicorn's reload, start a local clock standing in for the gateway's, sync the site to it with clock/v1's
+    sync_time and load the seed through the data plane (again after every reload), print the URLs, and run the
+    conformance check once. Ctrl-C stops it all."""
+    import uvicorn
+
+    from agentenv_protocol.website.clock import parse_time
+
+    site_dir = directory.resolve()
+    site_path = site_dir / site_file
+    if not site_path.is_file():
+        click.echo(f"Error: no {site_file} in {site_dir}", err=True)
+        sys.exit(1)
+    try:
+        start = parse_time(clock_time) if clock_time else None
+    except ValueError:
+        click.echo(f"Error: --clock-time {clock_time!r} is not an RFC3339 time", err=True)
+        sys.exit(1)
+    try:
+        declared = website_dev.env_toml(site_dir)
+    except website_dev.DevError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+    try:
+        website_dev.site_class(site_path)
+    except Exception as e:
+        click.echo(f"Error: can't load {site_path}: {e}", err=True)
+        sys.exit(1)
+
+    web = site_dir / "web"
+    watcher = None
+    if build_web and (web / "package.json").is_file():
+        if not website_dev.npm_available():
+            click.echo("Warning: web/ has a package.json but npm isn't on PATH; serving web/dist as it is", err=True)
+        else:
+            commands, watch_command = website_dev.web_plan(web, watch=watch)
+            for command in commands:
+                click.echo(f"[dev] web/: {' '.join(command)}")
+                try:
+                    website_dev.run_npm(command, web)
+                except subprocess.CalledProcessError as e:
+                    click.echo(f"Error: {' '.join(command)} failed with exit code {e.returncode}", err=True)
+                    sys.exit(1)
+            if watch_command:
+                click.echo(f"[dev] web/: {' '.join(watch_command)} (in the background)")
+                watcher = website_dev.run_npm(watch_command, web, background=True)
+
+    seed_path = site_dir / seed
+    clock = website_dev.DevClock(start, port=clock_port).start()
+    base_url = f"http://{'127.0.0.1' if host in ('0.0.0.0', '::') else host}:{port}"
+    supervisor = website_dev.Supervisor(base_url, clock.url, seed_path if seed_path.is_file() else None, check=check,
+                                        echo=click.echo).start()
+    clock_base = clock.url.rsplit("/clock/", 1)[0]
+    click.echo(f"""
+[dev] Site:   {base_url}/
+[dev] Card:   {base_url}/.well-known/agent-env.json
+[dev] Clock:  {clock.url}
+[dev]   curl -X PUT {clock_base}/clock/advance -d '{{"seconds": 3600}}'
+[dev]   curl -X PUT {clock_base}/clock/set-time -d '{{"virtual_time": "2030-01-01T09:00:00Z"}}'
+[dev] Check:  python -m agentenv_protocol.website.conformance {base_url}
+""")
+    if declared and declared.get("domains"):
+        click.echo(f"[dev] env.toml names it {', '.join(declared['domains'])}, which a deploy reaches it by over the card's")
+    excludes = [str(web)] if web.is_dir() else []
+    os.environ[website_dev.SITE_ENV] = str(site_path)
+    try:
+        uvicorn.run("agent_env.cli.env.website_dev:create_app", factory=True, host=host, port=port, reload=True,
+                    reload_dirs=[str(site_dir)], reload_includes=website_dev.RELOAD_INCLUDES, reload_excludes=excludes or None)
+    finally:
+        supervisor.stop()
+        clock.close()
+        if watcher is not None:
+            watcher.terminate()
+            try:
+                watcher.wait(timeout=website_dev.WATCHER_STOP_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                watcher.kill()
 
 
 @website.command()

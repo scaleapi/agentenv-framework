@@ -1,6 +1,6 @@
 import "./style.css";
+import { api, followUniverseClock, session, signIn, universeNow } from "./site-client.js";
 
-let offsetMs = 0;
 let filter = "all";
 let renders = 0;
 const saving = new Map();
@@ -8,27 +8,6 @@ const lastSent = new Map();
 const landed = new Map();
 const drafts = new Map();
 const CLOCK_REFRESH_MS = 5000;
-
-export function universeNow() {
-  return new Date(Date.now() + offsetMs);
-}
-
-function followUniverse(response) {
-  const at = Date.parse(response.headers.get("X-Universe-Now") || "");
-  if (!Number.isNaN(at)) offsetMs = at - Date.now();
-}
-
-async function api(path, { method = "GET", body } = {}) {
-  const response = await fetch(path, {
-    method,
-    headers: body === undefined ? {} : { "Content-Type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  followUniverse(response);
-  const data = await response.json().catch(() => null);
-  if (!response.ok) throw new Error(data?.error || `${method} ${path}: ${response.status}`);
-  return data;
-}
 
 const $ = (id) => document.getElementById(id);
 
@@ -77,7 +56,7 @@ function queueSave(id, fields) {
 }
 
 function showError(error) {
-  $("error").textContent = error ? error.message : "";
+  $("error").textContent = error ? error.error || error.message : "";
   $("error").hidden = !error;
 }
 
@@ -193,9 +172,9 @@ async function run(action) {
 }
 
 async function start() {
-  const [session, users] = await Promise.all([api("api/session"), api("api/users")]);
+  const [signedIn, users] = await Promise.all([session(), api("api/users")]);
   $("user").replaceChildren(...users.map((user) => new Option(user.name || user.id, user.id)));
-  let signedInAs = session.user ?? "";
+  let signedInAs = signedIn.user ?? "";
   $("user").value = signedInAs;
   $("user").addEventListener("change", (event) => {
     const user = event.target.value;
@@ -208,7 +187,7 @@ async function start() {
           const failed = pending.find((state) => state.error);
           if (failed) throw failed.error;
         }
-        await api("api/sign-in", { method: "POST", body: { user } });
+        await signIn(user);
         signedInAs = user;
         drafts.clear();
       } finally {
@@ -245,7 +224,7 @@ async function start() {
 
   tick();
   setInterval(tick, 1000);
-  setInterval(() => fetch("api/users").then(followUniverse).catch(() => {}), CLOCK_REFRESH_MS);
+  followUniverseClock({ path: "api/users", everyMs: CLOCK_REFRESH_MS });
   await render();
 }
 

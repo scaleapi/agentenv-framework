@@ -8,7 +8,7 @@ them. The page shows the universe's time.
 | --- | --- |
 | `site.py` | The server: the `Notes` WebsiteEnvironment, its `@api` routes, and `serve()` on `PORT` (8000). |
 | `data/seed.json` | The seed data: two users (`ann`, `ben`), their notes, and `current_user`, the acting user. |
-| `web/` | A minimal Vite app (`index.html`, `src/main.js`, `src/style.css`). Its assets (`base: "./"`) and API calls are relative to the page, so it works at `/` and under the gateway's `/website/notes/` alike; opened at a path without its final slash, such as `/website/notes` or `/website/notes/index.html`, the page first reloads itself at its folder's address. |
+| `web/` | A minimal Vite app (`index.html`, `src/main.js`, `src/style.css`, and `src/site-client.js`, a copy of the SDK's browser client). Its assets (`base: "./"`) and API calls are relative to the page, so it works at `/` and under the gateway's `/website/notes/` alike; opened at a path without its final slash, such as `/website/notes` or `/website/notes/index.html`, the page first reloads itself at its folder's address. |
 | `Dockerfile` | The server image, built with this folder as its context: Node builds `web/`, then Python installs the released protocol (`agentenv-framework-protocol`) with uvicorn. It installs `curl`, which the gateway's compose health check runs against the card. |
 | `env.toml` | The website env as a bundle entry. |
 
@@ -33,7 +33,9 @@ them. The page shows the universe's time.
 - **Time.** Notes are stamped with `self.now()`, which follows the gateway's clock once `clock/v1`'s `sync_time` names
   it. The frontend reads `X-Universe-Now` from every API response into `universeNow()` and shows it in the header.
   It uses this helper rather than `clock_patch=True`, so the page works the same against a server written without the
-  SDK.
+  SDK. The helper and the page's `api()`, `session()` and `signIn()` come from `src/site-client.js`, a copy of
+  `agentenv_protocol/website/client/site-client.js`, which a test keeps it the same as. An idle page follows the clock
+  with `followUniverseClock()`, which reads `api/users` every five seconds.
 - **Readiness.** website/v1's `ready`, through the card, says not ready (`@ready_check seeded`) until the site has
   users, for example after a `data/reset` and before the next `data/add`. The site serves no health path.
 
@@ -48,6 +50,10 @@ PYTHONPATH=<repo>/packages/agentenv-protocol/src python site.py
 
 Open http://localhost:8000. To work on the frontend, run `npm run dev` in `web/` while `site.py` runs; Vite proxies
 `/api` to port 8000.
+
+Or run `agent-env env website dev` from this folder: it builds `web/` when it is out of date and rebuilds it as it
+changes, serves `site.py` with reload, syncs it to a local stand-in for the gateway's clock, loads `data/seed.json`
+through the data plane after every reload, and runs the conformance check once.
 
 ## Test it
 

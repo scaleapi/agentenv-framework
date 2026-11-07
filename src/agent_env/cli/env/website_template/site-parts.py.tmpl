@@ -1,0 +1,14 @@
+def _part_data(part) -> dict:
+    """A part's JSON: a data part's data, a text part's text, or a file part's bytes or ``file://`` file."""
+    if isinstance(part, DataPart):
+        return part.data
+    if isinstance(part, TextPart):
+        return json.loads(part.text)
+    if isinstance(part, FilePart):
+        if getattr(part.file, "bytes", None) is not None:
+            return json.loads(base64.b64decode(part.file.bytes))
+        uri = urlparse(part.file.uri)
+        if uri.scheme == "file":
+            return json.loads(Path(unquote(uri.path)).read_text(encoding="utf-8"))
+        raise ValueError(f"the site reads a file part by its bytes or a file:// URI, not {part.file.uri!r}")
+    raise ValueError(f"the site can't read a {type(part).__name__}")

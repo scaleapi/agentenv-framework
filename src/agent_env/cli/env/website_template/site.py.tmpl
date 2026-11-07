@@ -1,0 +1,81 @@
+"""{{title}}: a site on ``agentenv_protocol.website.WebsiteEnvironment``, made by ``agent-env env website new``. Each
+user keeps a list of items; a browser with no session is signed in as the acting user, the seed's ``current_user``, and
+can sign in as another seeded user. The site keeps its users and items itself, behind one lock since plain ``def``
+handlers run in worker threads, starting from ``data/seed.json``, and serves them through the data plane
+(``data/get``, ``data/reset``, ``data/add``); it stamps each item with the universe's time.
+
+Run it with ``agent-env env website dev``, or with ``python site.py`` after building ``web/`` into ``web/dist``; it
+serves on ``PORT`` (8000)."""
+from __future__ import annotations
+
+import base64
+import copy
+import json
+import threading
+from pathlib import Path
+from typing import Optional
+from urllib.parse import unquote, urlparse
+
+from pydantic import BaseModel
+
+from agentenv_protocol import DataPart, FilePart, TextPart, add_data, environment_card, get_data, reset_data
+from agentenv_protocol.website import (
+    ApiContext,
+    BadRequest,
+    NotFound,
+    Unauthorized,
+    WebsiteEnvironment,
+    api,
+    ready_check,
+    website,
+)
+from agentenv_protocol.website.clock import iso
+
+ITEMS = "items"
+USERS = "users"
+SEED = Path(__file__).resolve().parent / "data" / "seed.json"
+
+
+class NewItem(BaseModel):
+    title: str
+
+
+class SignIn(BaseModel):
+    user: str
+
+
+@environment_card(name="{{name}}")
+@website(domains=["{{domain}}"], static="web/dist")
+class {{class_name}}(WebsiteEnvironment):
+{{state}}
+    @api.get("/api/items", name="list_items")
+    def list_items(self, ctx: ApiContext) -> list:
+        """The signed-in user's items, newest first."""
+        user = self._user(ctx)
+        with self._lock:
+            mine = [copy.deepcopy(item) for item in self.data.get(ITEMS, []) if item["owner"] == user]
+        return sorted(mine, key=lambda item: item["created_at"], reverse=True)
+
+    @api.post("/api/items", name="create_item", status=201)
+    def create_item(self, item: NewItem, ctx: ApiContext) -> dict:
+        """Add an item for the signed-in user, created now."""
+        if not item.title.strip():
+            raise BadRequest("an item needs a title", code="empty_title")
+        owner, now = self._user(ctx), iso(self.now())
+        with self._lock:
+            items = self.data.setdefault(ITEMS, [])
+            created = {"id": max((i["id"] for i in items), default=0) + 1, "owner": owner,
+                       "title": item.title.strip(), "created_at": now}
+            items.append(created)
+            return copy.deepcopy(created)
+
+    def _user(self, ctx: ApiContext) -> str:
+        if ctx.user is None:
+            raise Unauthorized("sign in first")
+        return ctx.user
+
+
+{{part_data}}
+
+if __name__ == "__main__":
+    {{class_name}}().serve()

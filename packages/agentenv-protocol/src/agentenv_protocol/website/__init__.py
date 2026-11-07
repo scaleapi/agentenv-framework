@@ -3,7 +3,10 @@ site with ``@website(domains=[...], static="dist/")``, mark its API with ``@api.
 ``serve()`` it; it needs only the plain package, and uvicorn to serve. The class is optional: a server in any language
 that meets the contract works, which ``python -m agentenv_protocol.website.conformance <url>`` checks. Whether a site
 is ready is its ``WebsiteReadiness`` answer to ``ready``, which ``website_readiness`` reads of one site and
-``env_readiness`` of every site of an env. What a task left a site with is its data plane's ``data/get``."""
+``env_readiness`` of every site of an env. What a task left a site with is its data plane's ``data/get``. A site's pages
+can call its API with ``client/site-client.js``, a dependency-free ES module (with its ``.d.ts``) to copy into them:
+``api()``, ``universeNow()`` from ``X-Universe-Now``, ``followUniverseClock()``, ``session()``, ``signIn()``
+and ``signOut()``."""
 
 from __future__ import annotations
 
