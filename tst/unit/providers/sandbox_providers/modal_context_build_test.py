@@ -235,10 +235,10 @@ async def test_an_image_modal_pulls_drops_one_prepared_earlier_under_its_name(lo
 
 
 def _fake_create():
-    """A patched ``modal.Sandbox._experimental_create`` that stops right after recording its call."""
+    """A patched ``modal.Sandbox.create`` that stops right after recording its call."""
     create = MagicMock()
     create.aio = AsyncMock(side_effect=RuntimeError("stop"))
-    return patch.object(modal_sandbox.modal.Sandbox, "_experimental_create", create)
+    return patch.object(modal_sandbox.modal.Sandbox, "create", create)
 
 
 @pytest.mark.asyncio

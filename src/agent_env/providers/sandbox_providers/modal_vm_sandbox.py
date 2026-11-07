@@ -2,7 +2,7 @@
 
 This is the Modal analogue of a KubeVirt-style one-VM provider rather than of the
 container-per-service ModalSandboxProvider. It provisions a single Modal VM sandbox
-(`experimental_options={"vm_runtime": True}` → real Linux kernel + nested Docker),
+(`runtime="vm"` → real Linux kernel + nested Docker),
 so the gateway's VM path (`EnvironmentGatewayProvider._deploy_via_vm`) can `docker compose up`
 the whole stack (postgres + N MCP servers + gateway) inside one box behind one tunnel.
 
@@ -123,7 +123,7 @@ _DISK_IDLE_TIMEOUT_S = 30 * 60
 
 
 class ModalVmSandbox(VmSandbox):
-    """A Modal VM sandbox (vm_runtime) presented through the VmSandbox contract.
+    """A Modal VM sandbox (runtime="vm") presented through the VmSandbox contract.
 
     Subclasses VmSandbox so it inherits exec_script / load_docker_images / load_object_file /
     write_file_* unchanged — they are built on exec_with_output ->
@@ -363,7 +363,7 @@ class ModalVmSandboxProvider(SandboxProvider):
             return await self._created(_KEEPALIVE_CMD, _VM_IMAGE, cpu=cpu, memory=memory, timeout=timeout, ports=ports,
                                        attribution=attribution, network_policy=network_policy,
                                        setup_for_gateway=setup_for_gateway, idle_timeout=self._idle_timeout,
-                                       experimental_options={"vm_runtime": True})
+                                       runtime="vm")
         (platform,) = self.disk_image_platforms()
         disk = await asyncio.to_thread(exported_disk, image, platform)
         variables = {**launcher_variables(ports, env or {}, cpu, memory), "VM_DISK": _MOUNTED_DISK}
@@ -404,7 +404,7 @@ class ModalVmSandboxProvider(SandboxProvider):
         # (retry_transient is documented for read-only calls only). Modal's client already
         # retries RESOURCE_EXHAUSTED / queueing internally, which is the real high-load case.
         try:
-            sb = await modal.Sandbox._experimental_create.aio(
+            sb = await modal.Sandbox.create.aio(
                 *command,
                 app=app, image=image, cpu=cpu, memory=memory, timeout=timeout,
                 encrypted_ports=ports, client=client,
