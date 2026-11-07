@@ -53,6 +53,9 @@ from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_
 from agent_env.attribution import Attribution
 
 
+# A child_envs entry's options: a deploy_env step's for that env alone, less the multi env's (lifetime, gateway, state).
+CHILD_ENV_OPTIONS = ("sandbox_type", "cpu", "memory_mb", "disk_size_gb", "env_params")
+
 # The servicedb's image line in a deploy's compose file, as the local Postgres state renders it.
 _SERVICE_DB_IMAGE = re.compile(rf"^(  {re.escape(DATABASE_SERVICE_NAME)}:\n    image: ).*$", re.MULTILINE)
 
@@ -161,7 +164,10 @@ class MultiEnv(Env):
             ctx.refuse(problems)
         return fields
 
-    async def deploy(self, ttl_seconds: int = 10800, disk_size_gb: float = 10, gateway_mode: GatewayMode = GatewayMode.PERFORMANCE, cpu: float | None = None, memory_mb: int | None = None, sandbox_type: str | None = None, env_state_type: str | None = None, env_state_instance_id: str | None = None, artifact_id: str | None = None, artifact_version: int | None = None, *, attribution: Optional[Attribution] = None) -> DeployedEnv:
+    async def deploy(self, ttl_seconds: int = 10800, disk_size_gb: float = 10, gateway_mode: GatewayMode = GatewayMode.PERFORMANCE, cpu: float | None = None, memory_mb: int | None = None, sandbox_type: str | None = None, env_state_type: str | None = None, env_state_instance_id: str | None = None, artifact_id: str | None = None, artifact_version: int | None = None, *, attribution: Optional[Attribution] = None,
+                     child_envs: Optional[dict] = None) -> DeployedEnv:
+        if refusal := self.child_envs_refusal(child_envs):
+            raise ValueError(refusal)
         deployed_env = await deploy_through_provider(
             self, environment_name=None, ttl_seconds=ttl_seconds, sandbox_type=sandbox_type,
             disk_size_gb=disk_size_gb, gateway_mode=gateway_mode, cpu=cpu, memory_mb=memory_mb,
@@ -174,10 +180,31 @@ class MultiEnv(Env):
         _hand_record_to_child_envs(self, deployed_env)
         return deployed_env
 
-    def deploy_refusal(self, *, sandbox_type: str | None = None, **options) -> str | None:
+    def deploy_refusal(self, *, sandbox_type: str | None = None, child_envs: Optional[dict] = None, **options) -> str | None:
         """Why deploy() would refuse these options before building anything, or None; raises, as deploy() does, for a type this process can't find.
-        ``sandbox_type`` is deploy()'s own, which no provider takes."""
-        return deploy_refusal(self, provider_or_class(self), options)
+        ``sandbox_type`` and ``child_envs`` are deploy()'s own, which no provider takes."""
+        return deploy_refusal(self, provider_or_class(self), options) or self.child_envs_refusal(child_envs)
+
+    def child_envs_refusal(self, child_envs: Optional[dict]) -> str | None:
+        """Why a deploy would refuse ``child_envs``, each child env's options by its environment name, or None."""
+        if not child_envs:
+            return None
+        if not isinstance(child_envs, dict):
+            return f"child_envs is a table of child env names, not {type(child_envs).__name__}"
+        names = list(dict.fromkeys(env.environment_name for env in (*self.mcp_server_envs, *self.website_envs)))
+        problems = []
+        for name, entry in child_envs.items():
+            extra = sorted(map(str, set(entry) - set(CHILD_ENV_OPTIONS))) if isinstance(entry, dict) else []
+            if name not in names:
+                problems.append(f"child_envs.{name}: env '{self.id}' has no child env named {name!r}; its child envs "
+                                f"are {', '.join(names)}")
+            elif not isinstance(entry, dict) or extra:
+                problems.append(f"child_envs.{name}: an entry is a table of {', '.join(CHILD_ENV_OPTIONS)}, not " +
+                                (', '.join(extra) if extra else f"a {type(entry).__name__}"))
+            else:
+                problems.append(f"child_envs.{name}: {name} runs on the multi env's own sandbox, which the step's own "
+                                "fields set, so it takes no entry")
+        return "; ".join(problems)
 
     @classmethod
     async def from_deployed_env(cls, deployed: DeployedEnv) -> MultiEnv:
