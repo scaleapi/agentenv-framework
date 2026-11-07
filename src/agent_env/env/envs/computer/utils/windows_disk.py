@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import io
 import json
@@ -19,10 +20,9 @@ import secrets
 import shutil
 import subprocess
 import tarfile
-import tempfile
 import time
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PureWindowsPath
@@ -131,12 +131,12 @@ def base(key: str, iso: Path, disk_gb: int, user: str, say: Callable[[str], None
         keys.mkdir(parents=True)
         subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", f"agentenv {image}", "-f",
                         str(keys / "id")], check=True)
-        with tempfile.TemporaryDirectory(prefix="agentenv-windows-", dir=cache_root() / "windows") as work:
-            facts = _installed(Path(work), iso, keys, disk_gb, user, say)
+        with _working(f"base-{key[7:23]}") as work:
+            facts = _installed(work, iso, keys, disk_gb, user, say)
             say("packing the base")
             expires = datetime.now(timezone.utc) + timedelta(minutes=facts["grace_minutes"])
-            _pack(Path(work), image, {KEY_LABEL: key, EXPIRES_LABEL: expires.isoformat(timespec="seconds"),
-                                      BUILD_LABEL: facts["build"]}, base_image=None)
+            _pack(work, image, {KEY_LABEL: key, EXPIRES_LABEL: expires.isoformat(timespec="seconds"),
+                                BUILD_LABEL: facts["build"]}, base_image=None)
         return Base(image, keys, expires)
 
 
@@ -183,8 +183,8 @@ def _installed(work: Path, iso: Path, keys: Path, disk_gb: int, user: str, say: 
 def compose(base_: Base, build: Path, image: str, labels: dict[str, str], say: Callable[[str], None]) -> None:
     """``image``, a disk composed on ``base_``: the base booted on an overlay kept in a folder of this machine, ``build``
     copied in and its ``provision.ps1`` run as the admin over ssh, then shut down and packed onto the base's image."""
-    with tempfile.TemporaryDirectory(prefix="agentenv-windows-", dir=cache_root() / "windows") as work:
-        out = Path(work) / "out"
+    with _working(f"disk-{image.rpartition(':')[2]}") as work:
+        out = work / "out"
         out.mkdir()
         name = f"agentenv-windows-compose-{image.rpartition(':')[2]}"
         say(f"booting its base in {name}")
@@ -370,6 +370,19 @@ def _pack(folder: Path, image: str, labels: dict[str, str], base_image: str | No
     (folder / "Dockerfile").write_text(dockerfile)
     # Labelled as built here, so a deploy boots this machine's image and pulls none of its name.
     build_image(folder / "Dockerfile", folder, image, platform="linux/amd64", labels={**labels, SOURCES_LABEL: image})
+
+
+@contextlib.contextmanager
+def _working(name: str) -> Iterator[Path]:
+    """A work folder of ``name`` in this machine's cache, emptied first of what a build killed in it left, and removed
+    after; its caller holds the lock of its build, so one build works in it at a time."""
+    work = cache_root() / "windows" / "work" / name
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+    try:
+        yield work
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def _tarred(folder: Path) -> bytes:
