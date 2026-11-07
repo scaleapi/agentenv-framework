@@ -323,6 +323,58 @@ def test_the_fixture_counts_a_scroll_tk_9_reports_in_pixels_by_the_lines_it_move
     assert _fixture(monkeypatch).touchpad_steps(delta) == steps
 
 
+class _Root:
+    """A Tk root stood in for: the attributes set on it in order, its bindings, the calls made to it, and what
+    ``after`` was given to run, with its delay."""
+
+    def __init__(self):
+        self.set, self.calls, self.bound, self.timers = [], [], {}, []
+
+    def attributes(self, name, value):
+        self.set.append((name, value))
+
+    def bind(self, sequence, handler, add=None):
+        self.bound[sequence] = handler
+
+    def after(self, ms, callback):
+        self.timers.append((ms, callback))
+        return f"after#{len(self.timers)}"
+
+    def lift(self):
+        self.calls.append("lift")
+
+    def focus_force(self):
+        self.calls.append("focus_force")
+
+
+def test_the_fixture_on_x11_stays_maximized_above_other_windows_and_takes_the_top_back_once_one_covers_it(monkeypatch):
+    """A window an app keeps above, as Typora's licence dialog is for its first seconds, otherwise takes the clicks the
+    probe aims at the fixture."""
+    fixture = _fixture(monkeypatch)
+    now = [100.0]
+    monkeypatch.setattr(fixture.time, "monotonic", lambda: now[0])
+    root = _Root()
+    fixture.keep_on_top(root)
+    seen = root.bound["<Visibility>"]
+
+    seen(SimpleNamespace(widget="a child", state="VisibilityFullyObscured"))
+    for_child = list(root.timers)
+    seen(SimpleNamespace(widget=root, state="VisibilityPartiallyObscured"))
+    seen(SimpleNamespace(widget=root, state="VisibilityPartiallyObscured"))
+    (first, lift), = root.timers
+    lift()
+    lifted = (root.set[2:], list(root.calls))
+    now[0] += 0.1
+    seen(SimpleNamespace(widget=root, state="VisibilityFullyObscured"))
+    second, again = root.timers[1]
+    seen(SimpleNamespace(widget=root, state="VisibilityUnobscured"))
+    again()
+
+    assert root.set[:2] == [("-zoomed", True), ("-topmost", True)] and for_child == []
+    assert first == 0 and lifted == ([("-topmost", False), ("-topmost", True)], ["lift", "focus_force"])
+    assert second == round((fixture.LIFT_GAP_S - 0.1) * 1000) and root.calls == ["lift", "focus_force"]
+
+
 def _fixture(monkeypatch):
     """The fixture module, which runs in the computer, read with Tk stood in for, as this Python may have none."""
     monkeypatch.setitem(sys.modules, "tkinter", ModuleType("tkinter"))
