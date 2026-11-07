@@ -148,8 +148,8 @@ def test_the_launcher_gets_kvm_the_vms_ports_and_size_and_its_environment_under_
 _STAND_INS = {
     "dpkg": "echo amd64",
     "qemu-img": 'echo "qemu-img $*" >> "$CALLS"',
-    "mkfs.vfat": ":",
-    "mcopy": ":",
+    "mkfs.vfat": 'echo "mkfs.vfat $*" >> "$CALLS"',
+    "mcopy": 'echo "mcopy $*" >> "$CALLS"',
     "cp": 'echo "cp $*" >> "$CALLS"; touch "${@: -1}"',
     "swtpm": 'echo "swtpm $*" >> "$CALLS"',
     "zstd": 'echo "zstd $*" >> "$CALLS"; sleep "${ZSTD_TAKES_S:-0}"; touch "${@: -1}"',
@@ -291,7 +291,7 @@ def test_a_windows_disk_boots_from_secure_boot_on_ahci_and_e1000e_with_a_fresh_t
     assert reset.wait(10) == 0, reset.stderr.read()
     work = tmp_path / "state" / "boot"
     assert "-machine q35,smm=on,accel=" in qemu and "file=/usr/share/OVMF/OVMF_CODE_4M.secboot.fd " in qemu
-    assert "-device tpm-tis,tpmdev=tpm " in qemu and "-device ide-hd,drive=disk,bus=ide.0 " in qemu
+    assert "-device tpm-tis,tpmdev=tpm " in qemu and "-device ide-hd,drive=disk,bus=ide.0,bootindex=1 " in qemu
     assert "-device e1000e,netdev=net " in qemu and "-device VGA,xres=1920,yres=1080 " in qemu and "virtio" not in qemu
     assert _logged(calls, "swtpm", 2) == 2 * [f"swtpm socket --tpm2 --tpmstate dir={work}/tpm --ctrl"
                                               f" type=unixio,path={work}/tpm.sock --daemon --terminate"]
@@ -310,6 +310,60 @@ def test_the_launcher_refuses_a_guest_it_cant_boot(launcher, tmp_path, guest, ar
 
     assert refused.wait(10) == 2 and why in refused.stderr.read()
     assert not calls.exists() or "qemu" not in calls.read_text()
+
+
+def test_a_builder_boots_on_a_kept_overlay_made_on_the_disk_or_empty_where_theres_none_and_may_restart(
+        launcher, tmp_path):
+    """A base's install and a composition both keep what the guest writes, through the restarts its setup makes."""
+    launch, calls = launcher
+    out, disk = tmp_path / "out", tmp_path / "disk" / "disk.img"
+    out.mkdir()
+    disk.parent.mkdir()
+    disk.touch()
+    (out / "guest").write_text("windows")
+
+    empty = launch(VM_KEEP=str(out / "base.img"), VM_DISK=str(tmp_path / "none.img"), VM_DISK_GB="80",
+                   QEMU_RUNS_S="0.1")
+    assert empty.wait(10) == 0, empty.stderr.read()
+    backed = launch(VM_KEEP=str(out / "layer.img"), VM_DISK=str(disk), QEMU_RUNS_S="0.1")
+    assert backed.wait(10) == 0, backed.stderr.read()
+
+    assert _logged(calls, "qemu-img", 2) == [f"qemu-img create -q -f qcow2 {out}/base.img 80G",
+                                             f"qemu-img create -q -f qcow2 -b {disk} -F qcow2 {out}/layer.img"]
+    first, second = _logged(calls, "qemu-system-x86_64", 2)
+    assert f"file={out}/base.img,format=qcow2" in first and f"file={out}/layer.img,format=qcow2" in second
+    assert "-no-reboot" not in first + second and "-device tpm-tis" in first
+
+
+def test_a_windows_install_boots_its_iso_first_pressing_enter_and_finds_its_answers_on_a_removable_drive(
+        launcher, tmp_path):
+    launch, calls = launcher
+    out, answers = tmp_path / "out", tmp_path / "answers"
+    out.mkdir()
+    answers.mkdir()
+    (out / "guest").write_text("windows")
+    (answers / "autounattend.xml").write_text("<unattend/>")
+
+    running = launch(VM_KEEP=str(out / "base.img"), VM_DISK=str(tmp_path / "none.img"), VM_MEDIA="/in/win11.iso",
+                     VM_FILES=str(answers))
+
+    (qemu,) = _logged(calls, "qemu-system-x86_64")
+    assert ("-drive file=/in/win11.iso,format=raw,if=none,id=media,media=cdrom,readonly=on"
+            " -device ide-cd,drive=media,bus=ide.2,bootindex=0 ") in qemu
+    assert "-device ide-hd,drive=disk,bus=ide.0,bootindex=1 " in qemu
+    assert "-device usb-storage,drive=files,removable=on " in qemu
+    assert _logged(calls, "socat - UNIX-CONNECT:")
+    assert _logged(calls, "mcopy -s")[0].startswith(f"mcopy -s -i {tmp_path}/state/boot/files.img {answers}/")
+    running.terminate()
+    assert running.wait(10) == 143
+
+
+def test_install_media_is_for_a_windows_guest(launcher):
+    launch, _ = launcher
+
+    refused = launch(VM_MEDIA="/in/installer.iso")
+
+    assert refused.wait(10) == 2 and "VM_MEDIA and VM_FILES are for a windows guest, not linux" in refused.stderr.read()
 
 
 def test_a_reset_boots_the_computer_afresh_with_its_new_environment_while_its_ports_stay_up(launcher):
@@ -471,7 +525,7 @@ async def test_a_disk_isnt_booted_where_docker_cant_pass_kvm(launched, monkeypat
 async def test_a_machine_copies_a_thin_disks_base_in_a_step_of_its_own_so_machines_on_one_base_share_it(
         monkeypatch, layers, dockerfile):
     built = []
-    monkeypatch.setattr(local_disk, "_launcher", lambda: "launcher:1")
+    monkeypatch.setattr(local_disk, "launcher", lambda: "launcher:1")
     monkeypatch.setattr(local_disk, "present", lambda tag: False)
     monkeypatch.setattr(local_disk, "docker", lambda *args: layers)
     monkeypatch.setattr(local_disk, "_build", lambda text, tag: built.append(text))
@@ -485,7 +539,7 @@ def test_a_disk_is_exported_compressed_into_the_cache_once_for_each_ref(tmp_path
     """By this machine's Docker, signed in to the image store as a boot's pull is: the disk copied out of a container of
     its image, then compressed in the launcher."""
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
-    monkeypatch.setattr(local_disk, "_launcher", lambda: "agentenv-qemu-launcher:src-1")
+    monkeypatch.setattr(local_disk, "launcher", lambda: "agentenv-qemu-launcher:src-1")
     ran, compressed = [], []
     store = SimpleNamespace(auth=lambda ref: f"credentials for {ref}")
     monkeypatch.setattr(local_disk, "get_config", lambda: SimpleNamespace(get_image_store=lambda: store))
