@@ -82,9 +82,14 @@ class Part:
     wants: tuple[str, ...] = ()
 
 
+def media_path() -> Path:
+    """Where this machine's cache keeps the evaluation ISO."""
+    return cache_root() / "windows" / "windows-11-enterprise-evaluation-x64.iso"
+
+
 def media(say: Callable[[str], None]) -> Path:
     """The evaluation ISO in this machine's cache, fetched from Microsoft first when it isn't there."""
-    iso = cache_root() / "windows" / "windows-11-enterprise-evaluation-x64.iso"
+    iso = media_path()
     with holding_locks([f"windows-media:{iso}"]):
         if not iso.exists():
             iso.parent.mkdir(parents=True, exist_ok=True)
