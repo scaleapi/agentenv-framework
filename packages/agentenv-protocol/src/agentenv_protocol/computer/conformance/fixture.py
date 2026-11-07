@@ -2,13 +2,15 @@
 Desk, whose widgets' screen boxes are written to <state-dir>/layout.json and every effect that reaches it, with
 whatever lands in <state-dir>/inbox.txt, to <state-dir>/state.json, so the probe can aim at it and read back what
 arrived. It records the same effects under X11, macOS's Aqua and Windows, whose Tk names keys, binds select-all and
-reports the wheel differently. Run as ``python3 fixture.py <state-dir>``; it needs a 1280x800 screen or larger."""
+reports the wheel differently. On X11 it stays above an app's windows (``keep_on_top``); elsewhere it's full screen.
+Run as ``python3 fixture.py <state-dir>``; it needs a 1280x800 screen or larger."""
 from __future__ import annotations
 
 import ctypes
 import json
 import os
 import sys
+import time
 import tkinter as tk
 from pathlib import Path
 
@@ -29,6 +31,8 @@ NOTCH_DELTA = 120
 Y_BITS = 16
 #: The pixels of a scrolled line, macOS's for a scroll posted in lines.
 LINE_PX = 10
+#: The least time between two of the fixture's raises over other windows, so it can't fight one that raises itself.
+LIFT_GAP_S = 0.5
 
 
 def main(state_dir: Path) -> None:
@@ -37,7 +41,10 @@ def main(state_dir: Path) -> None:
     root.title("Fixture Desk")
     width, height = root.winfo_screenwidth(), root.winfo_screenheight()
     root.geometry(f"{width}x{height}+0+0")
-    root.attributes("-fullscreen", True)
+    if root.tk.call("tk", "windowingsystem") == "x11":
+        keep_on_top(root)
+    else:
+        root.attributes("-fullscreen", True)
     root.configure(bg="#f0f0f0")
     state: dict = {"name": "", "notes": "", "keys": [], "saved_count": 0, "subscribed": False, "selected": None,
                    "scroll_top": 0.0, "cells": {}, "right_clicks": 0, "double_clicks": 0, "drags": [],
@@ -225,6 +232,38 @@ def main(state_dir: Path) -> None:
     root.after(300, write_layout)
     root.after(500, poll_inbox)
     root.mainloop()
+
+
+def keep_on_top(root: tk.Tk) -> None:
+    """Keep the fixture over the windows an app opens, which would take the probe's clicks: maximized and above other
+    windows rather than full screen, since xfwm4 keeps a window an app puts above over a full-screen one, and raised
+    again, giving the focus back to the widget that last had it, whenever another window covers some of it, at most once
+    each LIFT_GAP_S."""
+    root.attributes("-zoomed", True)
+    root.attributes("-topmost", True)
+    seen: dict = {"state": "VisibilityUnobscured", "lifted": 0.0, "pending": None}
+
+    def lift() -> None:
+        seen["pending"] = None
+        if seen["state"] == "VisibilityUnobscured":
+            return
+        seen["lifted"] = time.monotonic()
+        # Taking the layer above again restacks it on top, which a raise request alone doesn't get from xfwm4.
+        root.attributes("-topmost", False)
+        root.attributes("-topmost", True)
+        root.lift()
+        # The widget that last had the focus gets it back, so keys the probe types into a text box still reach it.
+        (root.focus_lastfor() or root).focus_force()
+
+    def visibility(event: tk.Event) -> None:
+        if event.widget is not root:
+            return
+        seen["state"] = event.state
+        if event.state != "VisibilityUnobscured" and seen["pending"] is None:
+            wait = max(0.0, seen["lifted"] + LIFT_GAP_S - time.monotonic())
+            seen["pending"] = root.after(round(wait * 1000), lift)
+
+    root.bind("<Visibility>", visibility, add="+")
 
 
 def wheel_steps(delta: int) -> int:
