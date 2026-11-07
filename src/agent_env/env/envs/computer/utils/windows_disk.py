@@ -55,6 +55,8 @@ EXPIRES_LABEL, BUILD_LABEL, KEY_LABEL = "dev.agentenv.windows.expires", "dev.age
 INSTALL_TIMEOUT_S, COMPOSE_TIMEOUT_S, SETTLE_S = 3600, 3600, 60
 #: How long a guest may take to power off once told.
 SHUTDOWN_TIMEOUT_S = 300
+#: How long trimming a disk's free space may take.
+COMPACT_TIMEOUT_S = 1800
 #: How often an install looks for setup's end, a compose for the base's ssh, and a shutdown for the guest's.
 INSTALL_POLL_S, BOOT_POLL_S, SHUTDOWN_POLL_S = 15, 5, 2
 CPUS, MEMORY_MB = 4, 8192
@@ -176,9 +178,11 @@ def _installed(work: Path, iso: Path, keys: Path, disk_gb: int, user: str, say: 
         say(f"installed and signed in as {user} after {time.monotonic() - started:.0f} s; settling")
         time.sleep(SETTLE_S)
         facts = json.loads(ssh(port, keys, powershell(_FACTS)).stdout.strip().splitlines()[-1])
+        _compacted(port, keys, say)
         _shut_down(container, port, keys)
     finally:
         subprocess.run(["docker", "rm", "-f", container], capture_output=True)
+    _converted(out, launcher())
     shutil.move(out / "disk.img", work / "base.img")
     return facts
 
@@ -191,7 +195,8 @@ def compose(base_: Base, build: Path, image: str, labels: dict[str, str], say: C
         out.mkdir()
         name = f"agentenv-windows-compose-{image.rpartition(':')[2]}"
         say(f"booting its base in {name}")
-        container = _launched(name, {"VM_KEEP": "/out/disk.img"}, ["-v", f"{out}:/out"], asyncio.run(machine_image(base_.image)))
+        machine = asyncio.run(machine_image(base_.image))
+        container = _launched(name, {"VM_KEEP": "/out/disk.img"}, ["-v", f"{out}:/out"], machine)
         try:
             port, deadline = _ssh_port(container), time.monotonic() + COMPOSE_TIMEOUT_S
             while ssh(port, base_.keys, "echo ready", check=False, timeout=60).returncode != 0:
@@ -205,9 +210,11 @@ def compose(base_: Base, build: Path, image: str, labels: dict[str, str], say: C
             if done.returncode != 0:
                 raise RuntimeError(f"provisioning exited {done.returncode}: {(done.stderr + done.stdout).strip()[-3000:]}")
             ssh(port, base_.keys, f'rmdir /s /q "{BUILD}"')
+            _compacted(port, base_.keys, say)
             _shut_down(container, port, base_.keys)
         finally:
             subprocess.run(["docker", "rm", "-f", container], capture_output=True)
+        _converted(out, machine, backing=f"/{DISK_BASE_FILE}")
         subprocess.run(["docker", "run", "--rm", "-v", f"{out}:/out", "--entrypoint", "qemu-img", launcher(), "rebase",
                         "-u", "-b", PureWindowsPath(DISK_BASE_FILE).name, "-F", "qcow2", "/out/disk.img"],
                        check=True, capture_output=True)
@@ -325,6 +332,24 @@ def _signed_in(port: int, keys: Path, user: str) -> bool:
         raise RuntimeError(f"windows: setup failed in the guest: {done.stdout.strip()[-2000:]}")
     return re.search(rf"^\s*>?{re.escape(user)}\s+console\s+\d+\s+Active", done.stdout,
                      re.MULTILINE | re.IGNORECASE) is not None
+
+
+def _compacted(port: int, keys: Path, say: Callable[[str], None]) -> None:
+    """What the guest keeps that a computer doesn't need removed and its free space trimmed (``compact.ps1``), so its
+    disk's image, rewritten after it shuts down, keeps only what Windows uses."""
+    say("trimming its free space")
+    done = ssh(port, keys, powershell((RECIPE / "compact.ps1").read_text()), check=False, timeout=COMPACT_TIMEOUT_S)
+    if done.returncode != 0:
+        say(f"trimming exited {done.returncode}, so its image keeps what it held: {(done.stderr + done.stdout)[-300:]}")
+
+
+def _converted(folder: Path, image: str, backing: str | None = None) -> None:
+    """``folder``'s ``disk.img`` rewritten by ``qemu-img convert`` in ``image``, which holds its backing file, keeping
+    only the clusters it uses: a base's whole, a layer's over ``backing``, the backing file ``image`` holds."""
+    over = ["-B", backing, "-F", "qcow2"] if backing else []
+    subprocess.run(["docker", "run", "--rm", "-v", f"{folder}:/out", "--entrypoint", "qemu-img", image, "convert", "-O",
+                    "qcow2", *over, "/out/disk.img", "/out/compact.img"], check=True, capture_output=True)
+    (folder / "compact.img").replace(folder / "disk.img")
 
 
 def _launched(name: str, variables: dict[str, str], mounts: list[str], image: str) -> str:
