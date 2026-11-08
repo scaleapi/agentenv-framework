@@ -137,8 +137,10 @@ class SyncEnvClockTaskStep(TaskStep):
         synced, skipped = [], []
         for server in await self._backing_servers(deployed):
             service = server.environment_name
-            outcome = await self._sync_one(deployed, gateway_url_of(deployed), service, env_get_time_url, mcp=server.mcp,
-                                           tolerate=self.tolerate_missing_sync_time or not server.mcp, server=server)
+            # A server on a sandbox of its own, a multi env's computer, takes its own record's control token.
+            outcome = await self._sync_one(server.record or deployed, gateway_url_of(deployed), service, env_get_time_url,
+                                           mcp=server.mcp, tolerate=self.tolerate_missing_sync_time or not server.mcp,
+                                           server=server)
             entry = {"service": service, "environment": service, **({} if server.mcp else {"website": True}), **outcome}
             (synced if outcome.get("synced") else skipped).append(entry)
 

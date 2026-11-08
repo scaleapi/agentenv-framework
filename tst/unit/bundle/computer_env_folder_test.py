@@ -243,3 +243,39 @@ def test_a_multi_env_whose_gateway_cant_tell_its_computers_apart_by_name_is_refu
 
     assert problem in refused.value.problems, refused.value
     assert composed == []
+
+
+def _office_with_apps(root, computers, extra=None):
+    """``_office`` with the app folders ``APPS``, mail and notes, which its computers may name."""
+    return layout(root, {**{f"envs/{folder}/env.toml": toml for folder, toml in computers.items()}, **APPS,
+                         "envs/office/env.toml": f'type = "multi"\ncomputer_envs = {json.dumps(list(computers))}\n',
+                         **(extra or {})})
+
+
+def test_a_universe_loaded_into_a_multi_env_seeds_its_computer_and_each_of_the_computers_apps(tmp_path, composed):
+    def loading(root, *seeded):
+        return _office_with_apps(root, {"desktop": WITH_APPS}, {
+            "artifacts/world/artifact.toml": 'type = "environment_universe"\n',
+            **{f"artifacts/world/{name}/a.json": "{}" for name in ("desktop", "mail", *seeded)},
+            "tasks/t.json": json.dumps([{"id": "load", "type": "load_artifact", "env_id": "office", "artifact_id": "world"}])})
+
+    _plan(loading(tmp_path / "seeds"))
+    with pytest.raises(BundleError) as refused:
+        _plan(loading(tmp_path / "typo", "mial"))
+
+    assert refused.value.problems == (
+        "tasks/t.json: step 'load': artifacts/world/mial seeds an environment named 'mial', and envs/office has no server "
+        "by that name ('desktop', 'mail', 'notes'); name it after the server it seeds, or leave it out",)
+
+
+def test_a_multi_env_whose_computers_share_an_apps_name_is_refused_before_any_write(tmp_path, composed):
+    laptop = WITH_APPS.replace('apps = ["notes", { env = "mail", install = "build" }]', 'apps = ["mail"]')
+    with pytest.raises(BundleError) as refused:
+        _plan(_office_with_apps(tmp_path / "desk", {"desktop": WITH_APPS, "laptop": laptop}, {
+            "tasks/t.json": json.dumps([{"id": "load", "type": "load_artifact", "env_id": "office", "artifact_id": "notes"}]),
+            "artifacts/notes/notes.txt": "a note\n"}))
+
+    assert [problem for problem in refused.value.problems if "app 'mail'" in problem] == [
+        f"envs/office: computer_envs: app 'mail' of computer '{name}' has the name of another of its child envs, and "
+        "loads and snapshots find an environment by its name" for name in ("desktop", "laptop")]
+    assert composed == []

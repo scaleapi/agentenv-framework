@@ -293,3 +293,28 @@ async def test_a_stored_cards_website_and_mcp_server_sharing_a_name_are_each_rea
     assert await legacy_protocol.v1_base_url(deployed, None, "mail", mcp=True) == "http://gw:18765/svc/mcp-mail"
     assert (await legacy_protocol.child_env_card(deployed, None, "mail", mcp=False))[1] is site
     assert (await legacy_protocol.child_env_card(deployed, None, "mail", mcp=True))[1] is server
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("gateway", ["http://gw", None])
+async def test_backing_servers_list_a_multi_envs_computer_and_its_apps_from_its_own_record(gateway):
+    """Not at the gateway's /svc/<computer>/, which carries no token of the computer's and reads as a website's route."""
+    import dataclasses
+    from types import SimpleNamespace
+
+    gateway_card = {"name": "office", "url": RPC_PATH, "children_environments": [
+        {"name": "slack", "url": "/svc/mcp-slack/agentenv"}, {"name": "desktop", "url": "/svc/desktop/agentenv"}]}
+    computer_card = {"name": "desktop", "url": RPC_PATH, "capabilities": {"operations": ["data/get"]},
+                     "children_environments": [{"name": "notes", "url": "/svc/notes/agentenv"}]}
+    computer = DeployedSandboxEnv(env_id="desk", env_version=1, sandbox_id="sb-desk", control_token="desk-token",
+                                  environment_card_url=f"https://desk.example{WELL_KNOWN_PATH}", environment_card=computer_card)
+    record = _record(gateway_card)
+    record.child_envs = {"desktop": dataclasses.asdict(computer)}
+    env = SimpleNamespace(mcp_server_envs=[SimpleNamespace(environment_name="slack")], website_envs=[])
+
+    servers = await legacy_protocol.backing_servers(record, gateway, env)
+
+    assert [(s.environment_name, s.address, s.record.control_token if s.record else None) for s in servers] == [
+        ("slack", "https://env.example", None), ("desktop", "https://desk.example", "desk-token"),
+        ("notes", "https://desk.example", "desk-token")]
+    assert await legacy_protocol.server_v1_base_url(servers[2], gateway) == "https://desk.example/svc/notes"

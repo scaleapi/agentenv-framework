@@ -102,9 +102,14 @@ class MultiEnv(Env):
                                               for name in dict.fromkeys(env.domains)]):
             raise sites.SiteConflict(f"multi env {id!r}: its websites claim names twice: {'; '.join(conflicts)}")
         self._computers = _multi_computers.Computers(computer_envs or [], owner=id)
-        if problems := _multi_computers.name_problems([env.environment_name for env in self.computer_envs],
-                                                      mcp_servers=[env.environment_name for env in self.mcp_server_envs],
-                                                      websites=[env.environment_name for env in self.website_envs]):
+        servers = [env.environment_name for env in (*self.mcp_server_envs, *self.website_envs)]
+        computers = [env.environment_name for env in self.computer_envs]
+        if problems := [*_multi_computers.name_problems(computers,
+                                                        mcp_servers=[env.environment_name for env in self.mcp_server_envs],
+                                                        websites=[env.environment_name for env in self.website_envs]),
+                        *_multi_computers.app_name_problems({env.environment_name: [app.environment_name
+                                                                                    for app in env.composed_apps()]
+                                                             for env in self.computer_envs}, [*servers, *computers])]:
             raise ValueError(f"multi env {id!r}: {'; '.join(problems)}")
         self._sandbox = None
         self._gateway_url = None
@@ -290,6 +295,9 @@ class MultiEnv(Env):
             if env.environment_name == environment_artifact.environment_name:
                 await env.load_environment_artifact(environment_artifact)
                 return
+        if (computer := self._computers.holding(environment_artifact.environment_name)) is not None:
+            await computer.load_environment_artifact(environment_artifact)
+            return
         logger.warning(f"No env with environment_name '{environment_artifact.environment_name}' — skipping")
 
     async def load_environment_universe_artifact(
@@ -301,6 +309,7 @@ class MultiEnv(Env):
 
         A snapshot restore swaps a pre-ingested servicedb image; a miss re-ingests every
         service over HTTP under a fixed 600s per-service cap.
+        Either way each computer's environments then load into it, in its own order.
 
         Restore is NOT reliably faster. Measured on a 13-service / ~8.7GB universe:
         restore ~4min (an image pull plus recreating every service container) versus
@@ -361,7 +370,9 @@ class MultiEnv(Env):
         else:
             import asyncio
             import time
-            environment_artifacts = environment_universe_artifact.get_environment_artifacts()
+            # The services' alone: the computers' load after them, in each computer's own order.
+            environment_artifacts = [artifact for artifact in environment_universe_artifact.get_environment_artifacts()
+                                     if self._computers.holding(artifact.environment_name) is None]
             total = len(environment_artifacts)
             # WARNING, not info: this is the path that can FAIL. Every service is
             # re-ingested over HTTP under a fixed per-service timeout, and one service
@@ -450,6 +461,8 @@ class MultiEnv(Env):
                         for i, name, e in failed
                     )
                 )
+        # Every time, never skipped as a resumed service is: the changelog a resume reads doesn't see a computer's files.
+        await self._computers.load(environment_universe_artifact.get_environment_artifacts())
         if self._instance_id:
             from agent_env.env.store import update_env_instance_environment_universe
             update_env_instance_environment_universe(self._instance_id, environment_universe_artifact.id, environment_universe_artifact.version)
@@ -866,6 +879,13 @@ class MultiEnv(Env):
         # Note: the merged UNIVERSE_COMPATIBILITY result is written by CombineUniverseVerdictsStep
         # (the final task step), so it persists wherever the Task runs — not only via this method.
         return context.instance_id
+
+    async def reset(self, deployed: DeployedEnv) -> None:
+        """Reset each computer as it resets alone: rebooted, and its ``tools`` given again. Its MCP servers and websites
+        have no reset alone, so they stay as they are, and a multi env with no computers has none."""
+        if not self.computer_envs:
+            raise NotImplementedError(f"multi env '{self.id}' has no computers to reset")
+        await self._computers.reset(deployed)
 
     async def close(self) -> None:
         await self._computers.close()

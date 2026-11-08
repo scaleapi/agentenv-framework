@@ -42,12 +42,16 @@ class BackingServer:
     One the env's card lists (``card_servers``) carries that ``child`` and the ``address`` its paths resolve against.
     One the card lists none for, a server serving no card, carries the ``address`` alone: it has no card, and none is
     read for it. One named by the env definition of a record whose card can't be read carries neither, so its card is
-    read live at its gateway path, ``/svc/mcp-{name}`` or a website's ``/svc/{name}`` (``server_card``)."""
+    read live at its gateway path, ``/svc/mcp-{name}`` or a website's ``/svc/{name}`` (``server_card``). One on a
+    sandbox of its own, a multi env's computer or one of its apps, carries the ``record`` of the env it runs in, whose
+    card lists it and whose control token its routes take, which the env's own doesn't."""
 
     environment_name: str
     mcp: bool = True
     child: Optional[protocol_v1.ChildEnv] = None
     address: Optional[str] = None
+    # Not compared: a record isn't hashable, and a server's address already tells it apart.
+    record: Optional[DeployedEnv] = dataclasses.field(default=None, compare=False)
 
     @property
     def card(self) -> Optional[dict]:
@@ -113,15 +117,34 @@ async def backing_servers(deployed: Optional[DeployedEnv], gateway_url: Optional
     elif deployed is not None:
         why = "its record has no card URL"
     named = definition_servers(env)
+    own = getattr(deployed, "child_envs", None) or {}
     if not isinstance(card, dict):
         logger.info(f"env {getattr(env, 'id', None)!r}: {why}, so its servers are the ones its definition names, "
                     f"each read live at its gateway path: {[(s.environment_name, s.mcp) for s in named]}")
-        return named
+        return _on_own_sandboxes(named, own)
     servers = card_servers(card, address)
     if not gateway:
-        return servers
+        return _on_own_sandboxes(servers, own)
     listed = {(s.environment_name, s.mcp) for s in servers}
-    return servers + [dataclasses.replace(s, address=address) for s in named if (s.environment_name, s.mcp) not in listed]
+    return _on_own_sandboxes(servers + [dataclasses.replace(s, address=address) for s in named
+                                        if (s.environment_name, s.mcp) not in listed], own)
+
+
+def _on_own_sandboxes(servers: list[BackingServer], child_envs: dict[str, dict]) -> list[BackingServer]:
+    """``servers``, each child env on a sandbox of its own (``DeployedGatewayEnv.child_envs``, a multi env's computers)
+    listed from its own record instead of as the gateway fronts it: its card's servers at its address, each carrying the
+    record, whose control token the gateway doesn't send. One whose record keeps no card is left out, and logged."""
+    from agent_env.env.env import DeployedEnv
+
+    own = []
+    for name, data in child_envs.items():
+        record = DeployedEnv.from_dict(data)
+        if not record.environment_card or not record.environment_url:
+            logger.warning(f"child env {name!r}: its record keeps no card, so none of its servers is listed")
+            continue
+        own += [dataclasses.replace(server, record=record)
+                for server in card_servers(record.environment_card, record.environment_url)]
+    return [server for server in servers if server.environment_name not in child_envs] + own
 
 
 async def server_card(server: BackingServer, gateway_url: Optional[str], timeout: int = 10) -> tuple[Optional[str], Optional[dict]]:

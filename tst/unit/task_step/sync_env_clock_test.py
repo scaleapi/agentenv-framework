@@ -439,6 +439,33 @@ async def test_a_website_sharing_an_mcp_servers_name_is_synced_with_the_envs_con
     assert [s["service"] for s in context.metadata["clock_configurations"][0]["synced"]] == ["email", "email"]
 
 
+@pytest.mark.asyncio
+async def test_a_multi_envs_computer_is_synced_at_its_own_address_with_its_own_control_token(monkeypatch):
+    """Not through the gateway's /svc/desktop/, which carries the gateway's token, not the computer's."""
+    import dataclasses
+    from unittest.mock import patch
+
+    from agent_env.env.env import DeployedSandboxEnv
+    from agent_env.env.gateway.constants import WELL_KNOWN_PATH
+
+    sent = _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL})
+    computer = DeployedSandboxEnv(env_id="desk", env_version=1, sandbox_id="sb-desk", control_token="desk-token",
+                                  environment_card_url=f"https://desk.example{WELL_KNOWN_PATH}",
+                                  environment_card={"name": "desktop", "url": "/agentenv",
+                                                    "capabilities": {"extensions": [_CLOCK_EXT]}})
+    record = dataclasses.replace(_carded(await _composed_card({"mcp-email": [_CLOCK_EXT], "desktop": [_CLOCK_EXT]})),
+                                 control_token="gateway-token", child_envs={"desktop": dataclasses.asdict(computer)})
+    env = SimpleNamespace(mcp_server_envs=[SimpleNamespace(environment_name="email")], website_envs=[])
+
+    with patch("agent_env.env.env.Env.get", return_value=env):
+        await _step().execute(TaskStepContext(deployed_envs=[record]))
+
+    syncs = {str(r.url): r.headers for r in sent if r.url.path.endswith("/sync_time")}
+    assert set(syncs) == {f"{_CARD}/svc/mcp-email/agentenv/ext/sync_time", "https://desk.example/agentenv/ext/sync_time"}
+    assert {k: syncs["https://desk.example/agentenv/ext/sync_time"].get(k) for k in computer.control_headers} == \
+        computer.control_headers
+
+
 def test_a_padded_zone_is_stored_and_sent_stripped():
     s = _zoned(timezone=" America/New_York ")
     assert s.timezone == "America/New_York" and s.to_dict()["timezone"] == "America/New_York"
