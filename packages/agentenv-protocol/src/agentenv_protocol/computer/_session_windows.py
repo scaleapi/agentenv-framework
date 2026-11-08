@@ -29,6 +29,9 @@ PYTHON = Path(sys.base_prefix) / "python.exe"
 START_TIMEOUT_S = 30.0
 #: How often a stopping app is looked at for having ended.
 POLL_S = 0.2
+#: How long a job ended by force is waited on to hold no process, so whatever its app had open is closed once a stop
+#: returns, as a reset then puts the app's files back.
+ENDED_TIMEOUT_S = 5.0
 WM_CLOSE = 0x0010
 #: A Start Menu shortcut, from its path, program, arguments and folder in the environment, as PowerShell writes one.
 SHORTCUT = ("$s = (New-Object -ComObject WScript.Shell).CreateShortcut($env:AGENTENV_SHORTCUT); "
@@ -69,13 +72,14 @@ async def launch(argv: list[str], cwd: Path, env: dict[str, str], fds: Optional[
 
 async def stop(pid: int, timeout_s: float) -> None:
     """End the job the helper ``pid`` holds, every process in it: its windows asked to close, then the job ended after
-    ``timeout_s``, or at once when it has no window to close. No one asks how it exited once it's stopped."""
+    ``timeout_s``, or at once when it has no window to close, and waited on until it holds none. No one asks how it
+    exited once it's stopped."""
     _reaping.forget(pid)
     job = _win32.open_job(pid)
     if job is None:
         return
     try:
-        windows = [window for window in _win32.windows() if window.pid in _app_pids(job, pid)]
+        windows = [window for window in await asyncio.to_thread(_win32.windows) if window.pid in _app_pids(job, pid)]
         for window in windows:
             _win32.post_close(window.handle)
         deadline = time.monotonic() + (timeout_s if windows else 0)
@@ -83,6 +87,9 @@ async def stop(pid: int, timeout_s: float) -> None:
             await asyncio.sleep(POLL_S)
         if _app_pids(job, pid):
             _win32.terminate_job(job)
+            deadline = time.monotonic() + ENDED_TIMEOUT_S
+            while _win32.job_pids(job) and time.monotonic() < deadline:
+                await asyncio.sleep(POLL_S)
     finally:
         _win32.close(job)
 
