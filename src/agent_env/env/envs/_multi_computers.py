@@ -1,0 +1,144 @@
+"""A multi env's computers: each on a sandbox of its own, deployed as it would be alone, which the multi env's gateway
+fronts by its name. ``Computers`` holds them across deploys; the rules a computer's name and child_envs entry follow are
+here too. Nothing here imports the computer env, which imports the env providers that import this package."""
+from __future__ import annotations
+
+import asyncio
+import dataclasses
+import logging
+from collections import Counter
+from collections.abc import Awaitable, Callable, Iterable
+from typing import TYPE_CHECKING, Optional
+
+from agentenv_protocol.computer import tool_prefix_problem
+
+from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, Env
+from agent_env.env.gateway import ExternalChild
+from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider, get_env_sandbox_provider
+
+if TYPE_CHECKING:
+    from agent_env.attribution import Attribution
+    from agent_env.env.envs.computer.env import ComputerEnv
+
+logger = logging.getLogger(__name__)
+
+
+def name_problems(computers: Iterable[str], *, mcp_servers: Iterable[str] = (), websites: Iterable[str] = ()) -> list[str]:
+    """What's wrong with ``computers``, the environment names of a multi env's computers, beside the names of its
+    ``mcp_servers`` and ``websites``: a computer serves its tools under its name and ``_``, which must make a tool prefix,
+    and the gateway knows a computer by its name alone, which no other child env and no route of the gateway's to an
+    MCP server (``mcp-<server>``) may have."""
+    computers, mcp_servers = list(computers), list(dict.fromkeys(mcp_servers))
+    problems = [f"computer {name!r} serves its tools under its name and '_': {problem}"
+                for name in dict.fromkeys(computers) if (problem := tool_prefix_problem(f"{name}_"))]
+    counts = Counter([*computers, *dict.fromkeys([*mcp_servers, *websites])])
+    routes = {f"mcp-{server}": server for server in mcp_servers}
+    problems += [f"{name!r} names {counts[name]} of its child envs, and the gateway knows a computer by its name alone"
+                 for name in dict.fromkeys(computers) if counts[name] > 1]
+    problems += [f"{name!r} is the gateway's route to MCP server {routes[name]!r}, and the gateway knows a computer by its "
+                 "name alone" for name in dict.fromkeys(computers) if name in routes]
+    return problems
+
+
+def deploy_options(entry: Optional[dict], sandbox_type: str | None) -> dict:
+    """A computer's deploy options from its child_envs entry: on ``sandbox_type``, the multi env's, unless it names one."""
+    return {"sandbox_type": sandbox_type, **(entry or {})}
+
+
+def refusal(computer: ComputerEnv, entry: dict, sandbox_type: str | None) -> str | None:
+    """Why ``computer`` wouldn't deploy in a multi env with ``entry``, its child_envs entry: why it wouldn't alone, a
+    site it would route, which only a later change routes to the multi env's websites, or a sandbox provider whose URLs
+    take credentials, which the gateway doesn't send to a child env."""
+    options = deploy_options(entry, sandbox_type)
+    params = options.get("env_params")
+    if isinstance(params, dict) and (routed := [key for key in ("site_routing", "sites") if params.get(key)]):
+        return (f"env_params.{routed[0]}: a computer in a multi env doesn't route sites yet; deploy it beside the multi "
+                "env to route them")
+    links = (build_sandbox_provider(options["sandbox_type"]) if options["sandbox_type"] else get_env_sandbox_provider()).links
+    if headed := [type(link).__name__ for link in links if link.REQUEST_HEADERS]:
+        return (f"{', '.join(headed)} takes credentials on each request to a sandbox's URL, which the multi env's gateway "
+                f"doesn't send to a child env; set child_envs.{computer.environment_name}.sandbox_type to a sandbox type "
+                "whose URLs take none")
+    return computer.deploy_refusal(**options)
+
+
+class Computers:
+    """A multi env's computers, and those of each deployment a later deploy replaced, which ``close`` ends too.
+
+    A deploy's computers are its own, as its provider and sandbox are (``deploy_through_provider``): ``begin`` gives it
+    fresh ones when these already have a deployment and sets the earlier ones aside, so its failure closes only what it
+    made and ``rollback`` puts them back; ``commit`` keeps them for ``close``."""
+
+    def __init__(self, envs: list[ComputerEnv], owner: str) -> None:
+        self.envs = envs
+        self._owner = owner  # the multi env's id, for what's logged
+        self._replaced: list[ComputerEnv] = []
+        self._earlier: Optional[tuple[list[ComputerEnv], list[ComputerEnv]]] = None
+
+    def begin(self) -> None:
+        self._earlier = (self.envs, self._replaced)
+        if any(env._deployed is not None for env in self.envs):
+            self.envs = [Env.get(env.id, env.version) for env in self.envs]
+        self._replaced = []
+
+    def rollback(self) -> None:
+        (self.envs, self._replaced), self._earlier = self._earlier, None
+
+    def commit(self) -> None:
+        (earlier, replaced), self._earlier = self._earlier, None
+        self._replaced = [*replaced, *(earlier if self.envs is not earlier else [])]
+
+    def deployer(self, child_envs: Optional[dict], *, sandbox_type: str | None, ttl_seconds: int,
+                 attribution: Optional[Attribution]) -> Callable[[Optional[str]], Awaitable[list[ExternalChild]]]:
+        """The gateway's ``children``: every computer deployed as its child_envs entry says, its tools served under its
+        name and ``_``, and its network allowing ``reach``, the gateway's address when the gateway has one yet; then each
+        as the gateway fronts it. A gateway deploy tried again deploys them again, after closing the earlier try's."""
+        tries = 0
+
+        async def deploy(reach: Optional[str]) -> list[ExternalChild]:
+            nonlocal tries
+            if tries:
+                await self.close()
+            tries += 1
+            results = await asyncio.gather(*(env.deploy(
+                ttl_seconds=ttl_seconds, attribution=attribution, tool_prefix=f"{env.environment_name}_",
+                reach=reach or "", **deploy_options((child_envs or {}).get(env.environment_name), sandbox_type))
+                for env in self.envs), return_exceptions=True)
+            if failed := [result for result in results if isinstance(result, BaseException)]:
+                for error in failed[1:]:
+                    logger.warning(f"multi env '{self._owner}': another computer failed to deploy too: {error!r}")
+                raise failed[0]
+            return [ExternalChild(env.environment_name, record.mcp_url, record.environment_url)
+                    for env, record in zip(self.envs, results)]
+        return deploy
+
+    async def record(self, deployed: DeployedEnv) -> None:
+        """Keep each computer's own record in ``deployed``, the multi env's, before it is registered: whole in its
+        ``child_envs``, for ``reattach``, and its sandbox in its ``sandbox_ids`` under the backend that made it, for
+        teardown."""
+        if not isinstance(deployed, DeployedGatewayEnv):
+            raise TypeError(f"multi env '{self._owner}': its computers are recorded in a gateway's record, not a "
+                            f"{type(deployed).__name__}")
+        records = {env.environment_name: env._deployed for env in self.envs}
+        deployed.child_envs = {name: dataclasses.asdict(record) for name, record in records.items()}
+        for name, record in records.items():
+            deployed.sandbox_ids.setdefault(record.sandbox_type, {})[name] = record.sandbox_id
+
+    async def reattach(self, deployed: DeployedEnv) -> None:
+        """Each computer ``deployed``, the multi env's record, holds, reattached from its own record."""
+        records = getattr(deployed, "child_envs", None) or {}
+        reattached = await asyncio.gather(*(type(env).from_deployed_env(DeployedEnv.from_dict(records[env.environment_name]))
+                                            for env in self.envs if env.environment_name in records))
+        by_name = {env.environment_name: env for env in reattached}
+        self.envs = [by_name.get(env.environment_name, env) for env in self.envs]
+
+    async def close(self) -> None:
+        """Close each computer, and those of the deployments a later deploy replaced, their recordings ended first; one
+        that fails to close is logged."""
+        envs = [*self._replaced, *self.envs]
+        results = await asyncio.gather(*(env.close() for env in envs), return_exceptions=True)
+        for env, result in zip(envs, results):
+            if isinstance(result, Exception):
+                logger.warning(f"multi env '{self._owner}': failed to close computer {env.environment_name!r}: {result!r}")
+            elif isinstance(result, BaseException):
+                raise result

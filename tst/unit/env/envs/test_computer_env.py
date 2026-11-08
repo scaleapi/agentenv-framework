@@ -920,6 +920,34 @@ async def test_a_tool_prefix_a_tool_name_cant_hold_is_refused_before_anything_bo
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("allow, reach, allowed", [
+    (["pypi.org"], "https://gw.example/mcp", ("pypi.org", "gw.example")),
+    (["pypi.org"], "http://localhost:18765", ("pypi.org", "host.docker.internal")),
+    (["gw.example"], "https://gw.example", ("gw.example",)),
+    (["pypi.org"], "", ("pypi.org",)),
+], ids=["added", "as-its-sandbox-reaches-it", "already-allowed", "nothing-to-reach"])
+async def test_a_deploy_given_a_url_to_reach_allows_its_host_on_a_network_that_lists_the_hosts_allowed(
+        base, driver, docker, boots, monkeypatch, allow, reach, allowed):
+    class Enforces(local_sandbox.LocalSandboxProvider):
+        @classmethod
+        def supports_network_policy(cls, policy):
+            return True
+
+    monkeypatch.setattr(providers, "build_sandbox_provider", lambda spec: Enforces())
+    env = _put(base, driver, display={"width": 1600, "height": 900}, network={"mode": "allowlist", "allow_hosts": allow})
+
+    await Env.get(env.id).deploy(sandbox_type="enforcing", reach=reach)
+
+    assert boots.boots[0]["network_policy"].allow_hosts == allowed
+
+
+@pytest.mark.asyncio
+async def test_a_deploy_given_a_url_to_reach_leaves_a_network_it_doesnt_restrict_as_it_is(base, driver, docker, boots):
+    await Env.get(_put(base, driver, display={"width": 1600, "height": 900}).id).deploy(reach="https://gw.example")
+    assert boots.boots[0]["network_policy"] is None
+
+
+@pytest.mark.asyncio
 async def test_a_deploy_whose_tools_the_driver_cant_take_fails_and_tears_down_its_computer_alone(
         base, driver, docker, boots, monkeypatch):
     live = Env.get(_put(base, driver, display={"width": 1600, "height": 900}, tools="standard").id)

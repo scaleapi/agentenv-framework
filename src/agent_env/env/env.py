@@ -235,6 +235,9 @@ class DeployedGatewayEnv(DeployedSandboxEnv):
     # Ids of the EnvStateInstance record(s) this deploy's state was provisioned into
     # (one today — one backend per deploy). The forward pointer deploy -> state store.
     env_state_instance_ids: list[str] = field(default_factory=list)
+    # Each child env on a sandbox of its own, which the gateway fronts (a multi env's computers): its own deploy record,
+    # by its environment name.
+    child_envs: dict[str, dict] = field(default_factory=dict)
 
     @classmethod
     def _fields_from(cls, data: dict) -> dict:
@@ -248,6 +251,7 @@ class DeployedGatewayEnv(DeployedSandboxEnv):
             "website_frontend_urls": data.get("website_frontend_urls"),
             "vnc_url": data.get("vnc_url"),
             "env_state_instance_ids": data.get("env_state_instance_ids") or [],
+            "child_envs": data.get("child_envs") or {},
         }
 
 
@@ -562,4 +566,5 @@ def _record_class(data: dict) -> type[DeployedEnv]:
 
 
 # A record carrying any of these is a gateway's. Not gateway_mode: an older kernel writes its default into any record it round-trips.
-_GATEWAY_ONLY_FIELDS = ("gateway_url", "db_web_url", "db_mcp_url", "website_frontend_urls", "vnc_url", "env_state_instance_ids")
+_GATEWAY_ONLY_FIELDS = ("gateway_url", "db_web_url", "db_mcp_url", "website_frontend_urls", "vnc_url", "env_state_instance_ids",
+                        "child_envs")
