@@ -126,7 +126,7 @@ def _driver(folder: Path) -> ComputerDriverEnv:
     return Env.get(put.id, put.version)
 
 
-def _notes(base: ComputerArtifact, driver: ComputerDriverEnv, folder: Path,
+def _notes(base: ComputerArtifact | None, driver: ComputerDriverEnv | None, folder: Path,
            steps: tuple = (("stamp", "system", None),)) -> ComputerAppEnv:
     """A notes app on Windows: a sync service in the venv its own server gets, an elevated run script, ``steps``, its
     install steps by name, scope and the OS types they run on, and the edition its env fixes."""
@@ -225,17 +225,16 @@ def test_an_app_is_a_layer_of_its_own_its_server_on_its_venv_its_folder_the_sess
     assert {"context/apps/notes/app.py", "context/apps/notes/.agentenv/build_settings.json"} <= set(files)
 
 
-def test_an_apps_install_step_for_the_session_user_is_refused_on_windows_before_anything_is_composed(docker,
-                                                                                                    tmp_path):
+def test_an_apps_install_step_for_the_session_user_is_refused_on_windows_alone_or_composed(docker, tmp_path):
     base = _base()
     driver = _driver(tmp_path / "desk")
-    notes = _notes(base, driver, tmp_path / "notes", steps=(("stamp", "system", None),
-                                                            ("remember", "session", ["linux"]),
-                                                            ("greet", "session", None)))
+    steps = (("stamp", "system", None), ("remember", "session", ["linux"]), ("greet", "session", None))
+    refused = "@local/~/kit/notes's install steps greet run as the session user, which a Windows computer can't"
 
-    with pytest.raises(ValueError, match=r"apps\[0\]: @local/~/kit/notes's install steps greet run as the session "
-                                         r"user, which a Windows computer can't as it's composed"):
-        _put(driver, FakeLinux(), apps=[notes], base=base)
+    with pytest.raises(ValueError, match=f"computer app env '@local/~/kit/notes': app: {refused}"):
+        _notes(base, driver, tmp_path / "notes", steps)
+    with pytest.raises(ValueError, match=rf"apps\[0\]: {refused}"):
+        _put(driver, FakeLinux(), apps=[_notes(None, None, tmp_path / "notes", steps)], base=base)
     assert docker.composed == []
 
 
