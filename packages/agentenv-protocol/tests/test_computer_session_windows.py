@@ -1,9 +1,10 @@
 """The Windows session's own logic, its Win32 calls faked and its job helper stood in for: a launch goes through the
 helper and returns its pid once the app has started, or fails saying why it couldn't, and hands no fds; stopping asks
-the app's windows to close, then ends the job after the timeout, or at once with no window to ask; pausing suspends each
-of the app's processes but the helper's, and any one starts as they're suspended, and resumes them, even when the block
-raises; a job that's gone is neither alive, stopped nor paused; the windows listed are those shown, by program, class
-and title; and the menu launcher is a Start Menu shortcut PowerShell writes, named for the app."""
+the app's windows to close, then ends the job after the timeout, or at once with no window to ask, and waits until it
+holds no process; pausing suspends each of the app's processes but the helper's, and any one starts as they're
+suspended, and resumes them, even when the block raises; a job that's gone is neither alive, stopped nor paused; the
+windows listed are those shown, by program, class and title; and the menu launcher is a Start Menu shortcut PowerShell
+writes, named for the app."""
 from __future__ import annotations
 
 import subprocess
@@ -30,26 +31,32 @@ sys.exit(int(command[0]))
 
 class FakeWin32:
     """Jobs by their helper's pid, each a list of the pids in it, the helper's first; the session's windows; and every
-    call that acts, recorded. An app whose window is asked to close ``closes`` or doesn't, and a process ``spawns`` one
-    into its job just before it's suspended."""
+    call that acts, recorded. An app whose window is asked to close ``closes`` or doesn't, a process ``spawns`` one
+    into its job just before it's suspended, and a job ended by force holds its processes for ``lingers`` more looks;
+    one that holds none is gone, as its handles close."""
 
     def __init__(self, jobs: dict[int, list[int]], windows: list[Window], closes: bool = True,
-                 spawns: dict[int, int] | None = None) -> None:
-        self.jobs, self._windows, self.closes, self.spawns = jobs, windows, closes, spawns or {}
+                 spawns: dict[int, int] | None = None, lingers: int = 0) -> None:
+        self.jobs, self._windows, self.closes, self.spawns, self.lingers = jobs, windows, closes, spawns or {}, lingers
+        self.ending: dict[int, int] = {}
         self.posted, self.terminated, self.suspended, self.resumed, self.open = [], [], [], [], 0
 
     def open_job(self, helper):
-        if helper not in self.jobs:
+        if not self.jobs.get(helper):
             return None
         self.open += 1
         return helper
 
     def job_pids(self, job):
+        if job in self.ending:
+            self.ending[job] -= 1
+            if self.ending[job] < 0:
+                self.jobs[job] = []
         return list(self.jobs[job])
 
     def terminate_job(self, job):
         self.terminated.append(job)
-        self.jobs[job] = []
+        self.ending[job] = self.lingers
 
     def close(self, handle):
         self.open -= 1
@@ -93,12 +100,13 @@ def win32(monkeypatch):
 async def test_stopping_asks_the_apps_windows_to_close_and_ends_the_job_only_if_they_dont(win32):
     obliging = win32({HELPER: [HELPER, 901, 902]}, [_window(1, 901), _window(2, 777), _window(3, 902, shown=False)])
     await _session_windows.stop(HELPER, timeout_s=5)
-    stubborn = win32({HELPER: [HELPER, 901]}, [_window(1, 901)], closes=False)
+    stubborn = win32({HELPER: [HELPER, 901]}, [_window(1, 901)], closes=False, lingers=3)
     started = time.monotonic()
     await _session_windows.stop(HELPER, timeout_s=0.2)
 
     assert obliging.posted == [1, 3] and obliging.terminated == [] and obliging.open == 0
     assert stubborn.posted == [1] and stubborn.terminated == [HELPER] and time.monotonic() - started >= 0.2
+    assert stubborn.jobs[HELPER] == [] and not _session_windows.alive(HELPER)
 
 
 @pytest.mark.asyncio
