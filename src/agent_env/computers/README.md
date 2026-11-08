@@ -176,9 +176,11 @@ media alone, and starts each layer's services in that session, again whenever on
 with 4 vCPUs and 8 GB, on local Docker with KVM and on `modal_vm`; it has computer-exec and data/add, through the
 protocol's Windows defaults, so the probe runs its fixture there as on Linux, with Python one-liners for the commands it
 would give a shell. On `modal_vm` it runs in your own Modal workspace, under the evaluation's terms or a licence of your
-own; whether they allow it there is yours to check. An app's own server runs in the session as its services do, on a
-loopback port it writes with a token to its `.agentenv` folder, which only the session user, SYSTEM and Administrators
-reach; it launches the app in a Job object, which ends whatever the app started. Composing signs in as `agentadmin`, so
+own; whether they allow it there is yours to check. Composing leaves `C:\agentenv` the admins', as `/opt/agentenv` is
+root's on Linux: every user reads and runs what's there, and the session user writes only the services' logs and each
+app's `.agentenv` folder. An app's own server runs in the session as its services do, on a loopback port it writes
+with a token to that folder, which only the session user, SYSTEM and Administrators reach; it launches the app in a
+Job object, which ends whatever the app started. Composing signs in as `agentadmin`, so
 an app's install step for the session user can't run on Windows, and gate 1 refuses an app that declares one there.
 
 This bundle has no tasks of its own: other bundles pull its computers by alias, and `agent-env run computers` has

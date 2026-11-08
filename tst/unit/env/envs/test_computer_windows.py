@@ -1,9 +1,10 @@
 """A Windows computer env, composed on this machine's Docker with KVM: its base installed from Microsoft's media once and
 kept here, then the driver and each app installed over ssh by a provision script as their ``[install.windows]`` says
 and packed as a thin layer on the base, under a tag of its key, which a compose of the same inputs reuses while this
-machine holds it; the env's computer is a disk of the base's form. An app's own server runs from its venv, its own
-folder the session user's alone, its install steps elevated; one it runs as the session user is refused. A Windows
-base is amd64, disk-only and started by agentenv-session."""
+machine holds it, its agentenv folder left the admins' and the session user's to read; the env's computer is a disk
+of the base's form. An app's own server runs from its venv, its own folder the session user's alone, its install steps
+elevated; one it runs as the session user is refused. A Windows base is amd64, disk-only and started by
+agentenv-session."""
 
 import json
 import threading
@@ -179,6 +180,10 @@ def test_a_windows_env_composes_a_thin_disk_on_its_base_here_the_driver_installe
     assert json.loads(daemon.split(", '", 1)[1].rsplit("')", 1)[0].replace("''", "'")) == {
         "name": "driver-desk-daemon", "prefix": str(prefix), "command": [str(prefix / "venv/Scripts/python.exe"),
                                                                          "driver.py"], "env": {"PYTHONUTF8": "1", "MCP_PORT": "18765"}}
+    assert lines[-3:] == [
+        "Checked { icacls 'C:\\agentenv' /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' "
+        "'*S-1-5-32-545:(OI)(CI)RX' | Out-Null }",
+        "Checked { icacls 'C:\\agentenv\\logs' /grant 'user:(OI)(CI)M' | Out-Null }", ""]
     assert {"provision.ps1", "context/driver/driver.py", "context/driver/install.ps1"} <= set(files)
     computer = env.computer_artifact()
     assert computer.os.type == "windows" and computer.forms.disk.init == "agentenv-session"

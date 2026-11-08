@@ -328,18 +328,27 @@ def expiring(expires: str | None) -> bool:
 def write(build: Path, parts: list[Part], user: str, build_settings: dict[str, Any], image: dict) -> str:
     """Write ``build``'s ``provision.ps1``, which installs ``parts`` from ``build/context``, each app's own folder the
     session user ``user``'s, their services for agentenv-session, ``build_settings`` as every service's
-    ``AGENTENV_SETTING_<NAME>`` and ``image`` as what the disk says it holds; its text, which a composed disk's key
-    covers."""
+    ``AGENTENV_SETTING_<NAME>`` and ``image`` as what the disk says it holds, then leaves ``ROOT`` the admins'
+    (``_locked``); its text, which a composed disk's key covers."""
     lines = ["$ErrorActionPreference = 'Stop'", "$ProgressPreference = 'SilentlyContinue'",
              f"$build = '{BUILD}'", _CHECKED, _FETCH]
     for part in parts:
         lines += [f"# {part.folder}", *_installed_part(part, user)]
     settings = {f"AGENTENV_SETTING_{name.upper()}": str(value) for name, value in build_settings.items()}
     lines += [_written(ROOT / "build-settings.json", json.dumps(settings)),
-              _written(ROOT / "image.json", json.dumps(image, sort_keys=True))]
+              _written(ROOT / "image.json", json.dumps(image, sort_keys=True)), *_locked(user)]
     script = "\r\n".join(lines) + "\r\n"
     (build / "provision.ps1").write_text(script)
     return script
+
+
+def _locked(user: str) -> list[str]:
+    """The lines that leave ``ROOT`` the admins', as on Linux ``/opt/agentenv`` is root's: every user reads and runs
+    what's there, none of the access ``C:\\`` gives every user to change it is left, and the session user ``user``
+    writes only the services' logs, and each app's own folder, which keeps its own access."""
+    return [f"Checked {{ icacls '{ROOT}' /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' "
+            "'*S-1-5-32-545:(OI)(CI)RX' | Out-Null }",
+            f"Checked {{ icacls '{ROOT / 'logs'}' /grant {_ps(f'{user}:(OI)(CI)M')} | Out-Null }}"]
 
 
 def _installed_part(part: Part, user: str) -> list[str]:
