@@ -204,8 +204,8 @@ class MultiEnv(Env):
             raise ValueError(refusal)
         self._computers.begin()
         computers = dict(children=self._computers.deployer(child_envs, sandbox_type=sandbox_type, ttl_seconds=ttl_seconds,
-                                                           attribution=attribution),
-                         then=self._computers.record) if self.computer_envs else {}
+                                                           attribution=attribution, websites=self._websites()),
+                         then=self._computers.finish) if self.computer_envs else {}
         try:
             deployed_env = await deploy_through_provider(
                 self, environment_name=None, ttl_seconds=ttl_seconds, sandbox_type=sandbox_type,
@@ -222,6 +222,10 @@ class MultiEnv(Env):
         _hand_provider_to_child_envs(self)
         _hand_record_to_child_envs(self, deployed_env)
         return deployed_env
+
+    def _websites(self) -> dict[str, str]:
+        """Its websites' environment names by env id, the ids a computer's ``site_routing`` may name."""
+        return {env.id: env.environment_name for env in self.website_envs}
 
     def save_refusal(self) -> str | None:
         """Why saving the env would be refused, or None: its env_provider_type can't deploy it. How each computer fits a
@@ -258,7 +262,7 @@ class MultiEnv(Env):
         for name, computer in computers.items():
             entry = child_envs.get(name)
             if entry is None or (isinstance(entry, dict) and set(entry) <= set(CHILD_ENV_OPTIONS)):
-                if refusal := _multi_computers.refusal(computer, entry or {}, sandbox_type):
+                if refusal := _multi_computers.refusal(computer, entry or {}, sandbox_type, self._websites()):
                     problems.append(f"child_envs.{name}: {refusal}" if name in child_envs else refusal)
         return "; ".join(problems) or None
 

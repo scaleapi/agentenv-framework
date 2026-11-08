@@ -42,11 +42,11 @@ class FakeComputer:
     type = COMPUTER_ENV_TYPE
 
     def __init__(self, name: str, *, fails: Exception | None = None, refusal: str | None = None, log: list | None = None,
-                 apps: tuple[str, ...] = (), resets: Exception | None = None):
+                 apps: tuple[str, ...] = (), resets: Exception | None = None, routes: Exception | None = None):
         self.id, self.version, self.environment_name = f"{name}-computer", 1, name
         self.fails, self.refusal, self.log = fails, refusal, [] if log is None else log
         self.deploys, self.refusals, self._deployed, self.closes = [], [], None, 0
-        self.apps, self.reset_fails = apps, resets
+        self.apps, self.reset_fails, self.route_fails = apps, resets, routes
 
     def composed_apps(self):
         return [SimpleNamespace(environment_name=app) for app in self.apps]
@@ -61,6 +61,12 @@ class FakeComputer:
     async def load_environment_artifact(self, environment_artifact):
         inspect.signature(ComputerEnv.load_environment_artifact).bind(self, environment_artifact)
         self.log.append(("loaded", self.environment_name, [environment_artifact.environment_name]))
+
+    async def route_sites(self, sites):
+        inspect.signature(ComputerEnv.route_sites).bind(self, sites)
+        self.log.append(("routed", self.environment_name, [site["name"] for site in sites]))
+        if self.route_fails:
+            raise self.route_fails
 
     async def reset(self, deployed):
         inspect.signature(ComputerEnv.reset).bind(self, deployed)
@@ -97,7 +103,7 @@ class FakeComputer:
 
 def _multi(*computers, mcp=(), websites=(), **kwargs) -> MultiEnv:
     return MultiEnv(id="office", version=1, mcp_server_envs=[MagicMock(environment_name=name) for name in mcp],
-                    website_envs=[MagicMock(environment_name=name, domains=[]) for name in websites],
+                    website_envs=[MagicMock(id=f"{name}-site", environment_name=name, domains=[]) for name in websites],
                     computer_envs=list(computers), **kwargs)
 
 
@@ -165,8 +171,8 @@ def test_each_computer_is_checked_as_it_would_deploy_alone_on_its_entrys_sandbox
     refusal = env.deploy_refusal(sandbox_type="modal", child_envs={
         "desktop": {"sandbox_type": "modal_vm", "cpu": 4, "env_params": {"form": "disk"}}})
 
-    assert desktop.refusals == [{"sandbox_type": "modal_vm", "cpu": 4, "env_params": {"form": "disk"}}]
-    assert laptop.refusals == [{"sandbox_type": "modal"}]
+    assert desktop.refusals == [{"sandbox_type": "modal_vm", "cpu": 4, "env_params": {"form": "disk"}, "sites_later": False}]
+    assert laptop.refusals == [{"sandbox_type": "modal", "sites_later": False}]
     assert refusal == "computer env 'laptop-computer': no arch"
     laptop.refusal = None
     assert env.child_envs_refusal({"laptop": {"memory_mb": 8192}}) is None
@@ -179,21 +185,30 @@ def test_saving_a_multi_env_leaves_how_each_computer_fits_a_sandbox_to_a_deploy_
     assert _multi(desktop).save_refusal() is None and desktop.refusals == []
 
 
-@pytest.mark.parametrize("child_envs, problem", [
-    ({"desktop": {"env_params": {"site_routing": True}}}, "child_envs.desktop: env_params.site_routing: a computer in a multi env "
-                                                          "doesn't route sites yet; deploy it beside the multi env to route them"),
-    ({"desktop": {"env_params": {"sites": [{"name": "shop"}]}}}, "child_envs.desktop: env_params.sites: a computer in a multi "
-                                                                 "env doesn't route sites yet; deploy it beside the multi env to "
-                                                                 "route them"),
-    ({"desktop": {"tools": "standard"}}, "child_envs.desktop: an entry is a table of sandbox_type, cpu, memory_mb, disk_size_gb, "
-                                         "env_params, not tools"),
-    ({"slack": {"cpu": 4}}, "child_envs.slack: slack runs on the multi env's own sandbox, which the step's own fields set, so "
-                            "it takes no entry"),
-], ids=["site-routing", "sites", "unknown-key", "mcp-server"])
-def test_a_computer_entry_that_routes_sites_or_holds_what_a_step_doesnt_take_is_refused(providers, child_envs, problem):
+@pytest.mark.parametrize("websites, child_envs, problem", [
+    ((), {"desktop": {"env_params": {"site_routing": True}}},
+     "child_envs.desktop: env_params.site_routing routes the multi env's websites, and it has none"),
+    (("shop",), {"desktop": {"env_params": {"site_routing": ["shop-site", "blog-site"]}}},
+     "child_envs.desktop: env_params.site_routing names 'blog-site', which isn't one of the multi env's websites ('shop-site')"),
+    ((), {"desktop": {"tools": "standard"}}, "child_envs.desktop: an entry is a table of sandbox_type, cpu, memory_mb, "
+                                             "disk_size_gb, env_params, not tools"),
+    ((), {"slack": {"cpu": 4}}, "child_envs.slack: slack runs on the multi env's own sandbox, which the step's own fields set, "
+                                "so it takes no entry"),
+], ids=["site-routing-without-websites", "site-routing-naming-another", "unknown-key", "mcp-server"])
+def test_a_computer_entry_whose_sites_the_multi_env_lacks_or_that_holds_what_a_step_doesnt_take_is_refused(
+        providers, websites, child_envs, problem):
     desktop = FakeComputer("desktop")
-    assert _multi(desktop, mcp=["slack"]).child_envs_refusal(child_envs) == problem
-    assert desktop.refusals == ([] if "desktop" in child_envs else [{"sandbox_type": None}])  # a refused entry deploys nothing
+    assert _multi(desktop, mcp=["slack"], websites=websites).child_envs_refusal(child_envs) == problem
+    assert desktop.refusals == ([] if "desktop" in child_envs else [{"sandbox_type": None, "sites_later": False}])
+
+
+@pytest.mark.parametrize("env_params, later", [({"site_routing": True}, True), ({"site_routing": ["shop-site"]}, True),
+                                                ({"site_routing": True, "sites": [{"name": "shop"}]}, False)],
+                         ids=["all", "named", "its-own-sites"])
+def test_a_computer_routing_the_multi_envs_websites_is_checked_as_routing_them_later(providers, env_params, later):
+    desktop = FakeComputer("desktop")
+    assert _multi(desktop, websites=["shop"]).child_envs_refusal({"desktop": {"env_params": env_params}}) is None
+    assert desktop.refusals == [{"sandbox_type": None, "env_params": env_params, "sites_later": later}]
 
 
 def test_a_computer_on_a_sandbox_provider_whose_urls_take_credentials_is_refused(providers):
@@ -253,9 +268,9 @@ async def test_deploy_hands_the_gateway_each_computer_deployed_under_its_name_an
         child_envs={"desktop": {"sandbox_type": "modal", "cpu": 4, "env_params": {"form": "container"}}})
 
     assert desktop.deploys == [{"ttl_seconds": 600, "attribution": attribution, "tool_prefix": "desktop_", "reach": GATEWAY,
-                                "sandbox_type": "modal", "cpu": 4, "env_params": {"form": "container"}}]
+                                "sites_later": False, "sandbox_type": "modal", "cpu": 4, "env_params": {"form": "container"}}]
     assert laptop.deploys == [{"ttl_seconds": 600, "attribution": attribution, "tool_prefix": "laptop_", "reach": GATEWAY,
-                               "sandbox_type": "modal_vm"}]
+                               "sites_later": False, "sandbox_type": "modal_vm"}]
     assert gateway.started == [[ExternalChild("desktop", "https://desktop.example/mcp", "https://desktop.example"),
                                 ExternalChild("laptop", "https://laptop.example/mcp", "https://laptop.example")]]
     assert deployed.child_envs == {name: dataclasses.asdict(_record(name)) for name in ("desktop", "laptop")}
@@ -472,3 +487,38 @@ async def test_a_computer_that_fails_to_reset_fails_the_reset_once_every_compute
 
     assert sorted(log) == [("reset", "desktop", "sb-desktop"), ("reset", "laptop", "sb-laptop")]
     assert "failed to reset computer 'laptop' too: RuntimeError('no reboot either')" in caplog.text
+
+
+# --- routing the multi env's websites ---
+
+@pytest.mark.asyncio
+async def test_a_computer_routing_sites_boots_held_and_routes_the_multi_envs_websites_once_the_gateway_is_up(
+        gateway, providers, monkeypatch):
+    log = gateway.log
+    found = [{"name": "shop", "url": f"{GATEWAY}/website/shop/"}, {"name": "blog", "url": f"{GATEWAY}/website/blog/"}]
+    read = AsyncMock(side_effect=lambda records: log.append(("sites read", records[0].env_id)) or found)
+    ready = AsyncMock()
+    monkeypatch.setattr(_multi_computers.sites, "deployed_sites", read)
+    monkeypatch.setattr(_multi_computers.sites, "require_ready", ready)
+    desktop, laptop, kiosk = (FakeComputer(name, log=log) for name in ("desktop", "laptop", "kiosk"))
+
+    deployed = await _multi(desktop, laptop, kiosk, websites=["shop", "blog"]).deploy(child_envs={
+        "desktop": {"env_params": {"site_routing": True}}, "laptop": {"env_params": {"site_routing": ["blog-site"]}}})
+
+    assert [deploy["sites_later"] for deploy in (desktop.deploys + laptop.deploys + kiosk.deploys)] == [True, True, False]
+    assert log[3] == ("sites read", "office") and [r.env_id for r in ready.await_args.args[0]] == ["office"]
+    assert sorted(log[4:]) == [("routed", "desktop", ["shop", "blog"]), ("routed", "laptop", ["blog"])]
+    assert set(deployed.child_envs) == {"desktop", "laptop", "kiosk"}
+
+
+@pytest.mark.asyncio
+async def test_a_computer_that_fails_to_route_its_sites_fails_the_deploy_and_closes_everything(gateway, providers,
+                                                                                               monkeypatch):
+    monkeypatch.setattr(_multi_computers.sites, "deployed_sites", AsyncMock(return_value=[{"name": "shop", "url": "u"}]))
+    monkeypatch.setattr(_multi_computers.sites, "require_ready", AsyncMock())
+    desktop = FakeComputer("desktop", log=gateway.log, routes=RuntimeError("shop.test didn't load"))
+
+    with pytest.raises(RuntimeError, match="^shop.test didn't load$"):
+        await _multi(desktop, websites=["shop"]).deploy(child_envs={"desktop": {"env_params": {"site_routing": True}}})
+
+    assert gateway.log[-2:] == [("close", "desktop"), ("close", "gateway")]

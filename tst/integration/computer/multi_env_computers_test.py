@@ -10,7 +10,10 @@ mid-deploy, or an entry the multi env refuses, leaves nothing up. Needs Docker a
 import asyncio
 import json
 import re
+import shutil
+import tempfile
 import uuid
+from pathlib import Path
 
 import httpx
 import pytest
@@ -21,13 +24,16 @@ from agentenv_protocol.types import WELL_KNOWN_PATH
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
-from agent_env.artifact import EnvironmentArtifact, EnvironmentUniverseArtifact, FileArtifact
+from agent_env.artifact import DockerImageArtifact, EnvironmentArtifact, EnvironmentUniverseArtifact, FileArtifact
+from agent_env.config import get_config, website_browser_env_id
 from agent_env.env import Env
 from agent_env.env.env import DeployedEnv
 from agent_env.env.envs.computer.env import COMPUTER_TOOLS, ComputerEnv
 from agent_env.env.envs.computer.utils import inside
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
+from agent_env.env.envs.playwright_mcp import PLAYWRIGHT_MCP_ENVIRONMENT_NAME
+from agent_env.env.envs.website import WebsiteEnv
 from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
 from agent_env.store.routing import namespace_routing
@@ -57,9 +63,44 @@ def items(desktop):
                                 docker_image_artifact=_put_items_image(f"office-items-{uid}"))
 
 
-def _multi(items, *computers) -> MultiEnv:
+def _image(fixture: str, tag: str) -> DockerImageArtifact:
+    """The image of the ``tst/data`` server ``fixture``, built with this checkout's agentenv_protocol."""
+    repo = Path(__file__).resolve().parents[3]
+    with tempfile.TemporaryDirectory() as build_dir:
+        context = Path(build_dir)
+        shutil.copytree(repo / "packages" / "agentenv-protocol" / "src" / "agentenv_protocol", context / "agentenv_protocol",
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        for name in ("server.py", "Dockerfile"):
+            shutil.copy(repo / "tst" / "data" / fixture / name, context / name)
+        built = _docker("build", "-t", tag, str(context))
+        assert built.returncode == 0, built.stderr[-2000:]
+    return DockerImageArtifact.put(id=tag, description="multi env sites e2e", image_name=tag)
+
+
+@pytest.fixture(scope="module")
+def shop(items):
+    """A website whose backend is the small agentenv website, named shop.test, under a local id as ``items`` is. A gateway
+    in front of websites also runs the website browser's MCP server; a small one stands in for it, since only the
+    routing of the site is under test here."""
+    uid = uuid.uuid4().hex[:8]
+    with namespace_routing():
+        MCPServerEnv.put(id=website_browser_env_id(get_config()), environment_name=PLAYWRIGHT_MCP_ENVIRONMENT_NAME,
+                         docker_image_artifact=_image("cardless_mcp", f"office-browser-{uid}"))
+        return WebsiteEnv.put(id=f"{items.id.rsplit('/', 1)[0]}/shop", environment_name="shop", domains=["shop.test"],
+                              backend_docker_image_artifact=_image("agentenv_website", f"office-shop-{uid}"))
+
+
+def _multi(items, *computers, websites=()) -> MultiEnv:
     return MultiEnv.put(id=f"@local/~/office-{uuid.uuid4().hex[:8]}/office", mcp_server_envs=[items],
-                        computer_envs=list(computers), name="office")
+                        website_envs=list(websites), computer_envs=list(computers), name="office")
+
+
+async def _reaches(computer, url: str) -> str:
+    """The HTTP status ``url`` answers inside the computer, through its site proxy, over HTTPS, trusting the deploy's CA
+    from the system's store."""
+    load = "import sys, urllib.request; print(urllib.request.urlopen(sys.argv[1], timeout=20).status)"
+    answer = await inside.run(computer, ["python3", "-c", load, url], timeout_s=40)
+    return answer["stdout"].strip() or answer.get("stderr", "")[-300:]
 
 
 async def _tools(deployed) -> tuple[set[str], bool]:
@@ -128,11 +169,12 @@ def _gateway(deployed) -> str:
 
 
 @pytest.mark.asyncio
-async def test_a_computer_in_a_multi_env_is_served_through_its_gateway_under_its_name_and_torn_down_with_it(desktop, items):
+async def test_a_computer_in_a_multi_env_is_served_through_its_gateway_under_its_name_and_torn_down_with_it(desktop, items,
+                                                                                                         shop):
     with namespace_routing():
-        office = _multi(items, Env.get(desktop.id))
+        office = _multi(items, Env.get(desktop.id), websites=[shop])
         step = DeployEnvTaskStep(id="office", version=None, env_id=office.id, sandbox_type="local", ttl_seconds=900,
-                                 child_envs={"desktop": CONTAINER})
+                                 child_envs={"desktop": {**CONTAINER, "env_params": {"form": "container", "site_routing": True}}})
         assert step.preflight() == []
         context = TaskStepContext()
         try:
@@ -143,6 +185,7 @@ async def test_a_computer_in_a_multi_env_is_served_through_its_gateway_under_its
                 card = (await client.get(f"{deployed.gateway_url}/svc/desktop{WELL_KNOWN_PATH}")).json()
             # Load, snapshot and reset reach the computer through the multi env, beside its MCP server.
             uid, own = uuid.uuid4().hex[:8], DeployedEnv.from_dict(computer)
+            routed = await _reaches(own, "https://shop.test/api/health")
             await LoadArtifactTaskStep(id="seed", version=None, env_id=office.id,
                                        artifact_id=_universe(uid, {"Documents/note.txt": b"from the universe"}).id
                                        ).execute(context)
@@ -155,6 +198,7 @@ async def test_a_computer_in_a_multi_env_is_served_through_its_gateway_under_its
             after_reset = (await inside.run(own, ["sh", "-c", "test -e Documents/note.txt && echo kept || echo gone"],
                                             timeout_s=30))["stdout"].strip()
             reset_answers = await _answers(deployed, ["desktop_computer_screenshot"])
+            routed_after_reset = await _reaches(own, "https://shop.test/api/health")
 
             await deployed.invoke(DISABLE_TOOL_EXTENSION_URI, DISABLE, {"role": DEFAULT_ROLE, "tools": [WILDCARD]})
             await deployed.invoke(ENABLE_TOOL_EXTENSION_URI, ENABLE, {"role": DEFAULT_ROLE,
@@ -179,6 +223,8 @@ async def test_a_computer_in_a_multi_env_is_served_through_its_gateway_under_its
     assert note == "from the universe" and "snap-x" in listed_items
     assert {"items", "desktop"} <= set(snapshot) and snapshot["desktop"]["Documents/note.txt"] == b"from the universe"
     assert after_reset == "gone" and all(reset_answers.values()), reset_answers
+    assert computer["metadata"]["computer"]["sites"]["names"]["routes"] == {"shop": ["shop.test"]}
+    assert routed == routed_after_reset == "200"
 
 
 @pytest.mark.asyncio
@@ -259,8 +305,7 @@ async def test_a_computer_entry_the_multi_env_refuses_makes_no_sandbox(desktop, 
         office = _multi(items, Env.get(desktop.id))
         refused = [
             ({"desktop": {**CONTAINER, "env_params": {"site_routing": True}}},
-             "child_envs.desktop: env_params.site_routing: a computer in a multi env doesn't route sites yet; deploy it "
-             "beside the multi env to route them"),
+             "child_envs.desktop: env_params.site_routing routes the multi env's websites, and it has none"),
             ({"desktop": {"tools": "standard"}},
              "child_envs.desktop: an entry is a table of sandbox_type, cpu, memory_mb, disk_size_gb, env_params, not tools"),
         ]

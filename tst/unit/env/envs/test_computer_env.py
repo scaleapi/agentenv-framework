@@ -1035,6 +1035,33 @@ async def test_a_computer_with_site_routing_reaches_the_websites_the_run_deploye
 
 
 @pytest.mark.asyncio
+async def test_a_computer_deployed_to_route_its_sites_later_boots_held_and_routes_them_when_given_as_a_multi_env_does(
+        base, driver, docker, boots, routes):
+    env = Env.get(_put(base, driver, display={"width": 1600, "height": 900}).id)
+
+    deployed = await env.deploy(ttl_seconds=3600, env_params={"site_routing": True}, sites_later=True)
+    held, routed_before = boots.boots[0]["environment"][HOLD_BOOT_LAUNCH_ENV], list(routes)
+    await env.route_sites([{"name": "notes", "url": "http://localhost:8080/website/notes/", "domains": ["notes.test"]}])
+
+    assert held == "1" and routed_before == []
+    ((sandbox, sites, options),) = routes
+    assert sandbox is boots.sandboxes[0] and [site.name for site in sites] == ["notes"]
+    assert options["valid_for"] == timedelta(seconds=3600)
+    record = deployed.metadata["computer"]
+    assert record["env_params"]["sites"][0]["name"] == "notes" and record["sites"]["valid_for_s"] == 3600
+
+
+@pytest.mark.asyncio
+async def test_a_computer_given_its_sites_later_still_refuses_sites_its_params_cant_hold(base, driver, docker, boots, routes):
+    env = Env.get(_put(base, driver, display={"width": 1600, "height": 900}).id)
+    await env.deploy(env_params={"site_routing": True}, sites_later=True)
+
+    with pytest.raises(ValueError, match="sites"):
+        await env.route_sites([{"name": "notes"}])
+    assert routes == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("routing", ["web-env", 1, ["web-env", 2], {"web-env": True}])
 async def test_a_site_routing_that_is_neither_true_nor_a_list_of_env_ids_is_refused_before_it_is_read(
         base, driver, routing):

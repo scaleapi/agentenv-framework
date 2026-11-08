@@ -38,7 +38,7 @@ from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.envs.computer.utils import params as computer_params
 from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
 from agent_env.env.gateway import GatewayMode
-from agent_env.env.store import get_env_store
+from agent_env.env.store import get_env_store, update_env_instance_metadata
 from agent_env.store.local_state import awaiting_lock
 from agent_env.utils.progress import current_progress
 from agent_env.providers.env_providers.env_computer_provider import end_recordings
@@ -278,14 +278,23 @@ class ComputerEnv(Env):
                      gateway_mode: GatewayMode = GatewayMode.PERFORMANCE, cpu: float | None = None,
                      memory_mb: int | None = None, sandbox_type: str | None = None, env_state_type: str | None = None,
                      env_state_instance_id: str | None = None, *, attribution: Optional[Attribution] = None,
-                     env_params: Optional[dict] = None, tool_prefix: str = "", reach: str = "") -> DeployedEnv:
-        """With ``tool_prefix``, its driver serves its tools under it, and with ``reach``, a network that restricts its
-        egress allows that URL's host too: what a multi env gives each of its computers."""
+                     env_params: Optional[dict] = None, tool_prefix: str = "", reach: str = "",
+                     sites_later: bool = False) -> DeployedEnv:
+        """With ``tool_prefix``, its driver serves its tools under it, with ``reach``, a network that restricts its
+        egress allows that URL's host too, and with ``sites_later`` it routes the sites ``env_params.site_routing``
+        reaches when ``route_sites`` gives them: what a multi env gives each of its computers."""
         return await deploy_through_provider(
             self, environment_name=self.environment_name, ttl_seconds=ttl_seconds, sandbox_type=sandbox_type,
             then=self._give_tools, disk_size_gb=disk_size_gb, gateway_mode=gateway_mode, cpu=cpu, memory_mb=memory_mb,
             env_state_type=env_state_type, env_state_instance_id=env_state_instance_id, attribution=attribution,
-            env_params=env_params, tool_prefix=tool_prefix, reach=reach)
+            env_params=env_params, tool_prefix=tool_prefix, reach=reach, sites_later=sites_later)
+
+    async def route_sites(self, sites: list[dict]) -> None:
+        """Route ``sites`` on this computer, deployed with ``sites_later``, launch its held apps and finish its boot;
+        its record, and the instance store's, then keep them."""
+        await as_builtin(self._env_provider).route_sites(self, self._deployed, sites)
+        if self._deployed.instance_id:
+            update_env_instance_metadata(self._deployed.instance_id, {"computer": self._deployed.metadata["computer"]})
 
     async def run_env_params(self, env_params: Optional[dict], deployed_envs: list[DeployedEnv]) -> Optional[dict]:
         """With ``site_routing`` and no ``sites``, ``env_params`` naming as its sites the websites the run deployed
