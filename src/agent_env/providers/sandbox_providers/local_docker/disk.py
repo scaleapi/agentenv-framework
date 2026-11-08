@@ -59,17 +59,22 @@ async def machine_for(disk: str) -> Machine:
     return Machine(await machine_image(disk))
 
 
-@functools.cache
 def mounts_images() -> bool:
     """Whether this machine's Docker mounts an image's files into a container (``--mount type=image``, with its
     ``image-subpath``): its client, which parses the option, and its server both 28 or later, on the containerd image
-    store. A Docker that fails to say, or doesn't within ``_DOCKER_INFO_SECONDS``, gets the copy."""
+    store. A Docker that fails to say, or doesn't within ``_DOCKER_INFO_SECONDS``, gets the copy this time and is asked
+    again next time; an answer is kept for the process."""
     try:
-        client, server, status = docker("info", "--format",
-                                        "{{.ClientInfo.Version}} {{.ServerVersion}} {{json .DriverStatus}}",
-                                        timeout=_DOCKER_INFO_SECONDS).split(" ", 2)
+        return _docker_mounts_images()
     except (DockerFailed, subprocess.TimeoutExpired):
         return False
+
+
+@functools.cache
+def _docker_mounts_images() -> bool:
+    client, server, status = docker("info", "--format",
+                                    "{{.ClientInfo.Version}} {{.ServerVersion}} {{json .DriverStatus}}",
+                                    timeout=_DOCKER_INFO_SECONDS).split(" ", 2)
     return _major(client) >= 28 and _major(server) >= 28 and "io.containerd.snapshotter.v1" in status
 
 

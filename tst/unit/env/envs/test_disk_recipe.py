@@ -567,7 +567,7 @@ async def test_a_disk_is_mounted_into_the_launcher_where_docker_mounts_images_el
          "a-client-too-old-to-say", "no-answer"])
 def test_docker_mounts_images_from_28_on_both_ends_on_the_containerd_image_store(monkeypatch, info, mounts):
     """A Docker that fails to say, or doesn't in time, gets the copy."""
-    local_disk.mounts_images.cache_clear()
+    local_disk._docker_mounts_images.cache_clear()
     asked = []
 
     def docker(*args, timeout=None):
@@ -579,7 +579,27 @@ def test_docker_mounts_images_from_28_on_both_ends_on_the_containerd_image_store
     monkeypatch.setattr(local_disk, "docker", docker)
 
     assert local_disk.mounts_images() is mounts and asked == [local_disk._DOCKER_INFO_SECONDS]
-    local_disk.mounts_images.cache_clear()
+    local_disk._docker_mounts_images.cache_clear()
+
+
+def test_a_docker_that_failed_to_say_is_asked_again_and_an_answer_is_kept(monkeypatch):
+    """A daemon busy for a moment doesn't leave a long-lived process copying disks for good."""
+    local_disk._docker_mounts_images.cache_clear()
+    answers = [subprocess.TimeoutExpired(["docker", "info"], 30),
+               '29.9.3 29.9.3 [["driver-type","io.containerd.snapshotter.v1"]]']
+    asked = []
+
+    def docker(*args, timeout=None):
+        asked.append(args)
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(local_disk, "docker", docker)
+
+    assert [local_disk.mounts_images() for _ in range(3)] == [False, True, True] and len(asked) == 2
+    local_disk._docker_mounts_images.cache_clear()
 
 
 @pytest.mark.asyncio
