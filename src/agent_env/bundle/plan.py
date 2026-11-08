@@ -929,8 +929,8 @@ class _Planner:
                                          f"{clash!r}, as {taken[clash]}'s does; each env of a multi needs its own")
                 else:
                     taken.update(dict.fromkeys(containers, ref.where))
-            others = [*named.get("mcp_server_envs", ()), *named.get("website_envs", ())]
-            self.problems += [f"{where}: computer_envs: {problem}" for problem in computer_name_problems(computers, others)]
+            self.problems += [f"{where}: computer_envs: {problem}" for problem in computer_name_problems(
+                computers, mcp_servers=named.get("mcp_server_envs", ()), websites=named.get("website_envs", ()))]
             provider_type = source.config.get("env_provider_type", EnvironmentGatewayProvider.type)
             try:
                 provider = _env_provider_class(provider_type)

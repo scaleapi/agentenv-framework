@@ -41,7 +41,7 @@ class FakeComputer:
     def __init__(self, name: str, *, fails: Exception | None = None, refusal: str | None = None, log: list | None = None):
         self.id, self.version, self.environment_name = f"{name}-computer", 1, name
         self.fails, self.refusal, self.log = fails, refusal, [] if log is None else log
-        self.deploys, self.refusals, self._deployed = [], [], None
+        self.deploys, self.refusals, self._deployed, self.closes = [], [], None, 0
 
     def deploy_refusal(self, **options):
         self.refusals.append(options)
@@ -57,6 +57,7 @@ class FakeComputer:
         return self._deployed
 
     async def close(self):
+        self.closes += 1
         self.log.append(("close", self.environment_name))
 
     @classmethod
@@ -114,13 +115,18 @@ def test_a_computer_name_of_fifteen_characters_is_taken():
     assert _multi(FakeComputer("desktop-number1")).computer_envs[0].environment_name == "desktop-number1"
 
 
-@pytest.mark.parametrize("computers, others, problems", [
-    (["desktop", "desktop"], [], ["'desktop' names 2 of its child envs, and the gateway knows a computer by its name alone"]),
-    (["slack"], ["slack"], ["'slack' names 2 of its child envs, and the gateway knows a computer by its name alone"]),
-    (["desktop"], ["shop", "shop"], []),  # an MCP server and a website may share a name, as before
-])
-def test_a_computer_needs_a_name_no_other_child_env_has(computers, others, problems):
-    assert computer_name_problems(computers, others) == problems
+@pytest.mark.parametrize("computers, children, problems", [
+    (["desktop", "desktop"], {}, ["'desktop' names 2 of its child envs, and the gateway knows a computer by its name alone"]),
+    (["slack"], {"mcp_servers": ["slack"]},
+     ["'slack' names 2 of its child envs, and the gateway knows a computer by its name alone"]),
+    (["shop"], {"websites": ["shop"]}, ["'shop' names 2 of its child envs, and the gateway knows a computer by its name alone"]),
+    (["mcp-slack"], {"mcp_servers": ["slack"]},
+     ["'mcp-slack' is the gateway's route to MCP server 'slack', and the gateway knows a computer by its name alone"]),
+    (["mcp-slack"], {"websites": ["slack"]}, []),
+    (["desktop"], {"mcp_servers": ["shop"], "websites": ["shop"]}, []),  # an MCP server and a website may share a name
+], ids=["two-computers", "a-server", "a-website", "a-servers-route", "a-websites-isnt", "server-and-website"])
+def test_a_computer_needs_a_name_no_other_child_env_or_route_of_the_gateways_has(computers, children, problems):
+    assert computer_name_problems(computers, **children) == problems
 
 
 # --- child_envs: a computer's entry is what a deploy_env step takes to deploy it alone ---
@@ -257,6 +263,32 @@ async def test_a_gateway_deploy_tried_again_closes_the_computers_the_earlier_try
 
     assert gateway.log == [("deployed", "desktop"), ("close", "desktop"), ("deployed", "desktop")]
     assert len(desktop.deploys) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_redeploy_deploys_computers_of_its_own_so_a_failure_leaves_the_earlier_ones_and_close_ends_both(
+        gateway, providers):
+    env = _multi(FakeComputer("desktop"))
+    await env.deploy()
+    [earlier] = env.computer_envs
+    fresh = []
+
+    def get(id, version=None):
+        fresh.append(FakeComputer(id.removesuffix("-computer")))
+        return fresh[-1]
+
+    gateway.fails = RuntimeError("no gateway")
+    with patch("agent_env.env.env.Env.get", side_effect=get), pytest.raises(RuntimeError, match="^no gateway$"):
+        await env.deploy()
+    assert env.computer_envs == [earlier] and earlier.closes == 0 and [computer.closes for computer in fresh] == [1]
+
+    gateway.fails = None
+    with patch("agent_env.env.env.Env.get", side_effect=get):
+        await env.deploy()
+    assert env.computer_envs == [fresh[1]] and earlier.closes == 0
+
+    await env.close()
+    assert earlier.closes == 1 and [computer.closes for computer in fresh] == [1, 1]
 
 
 @pytest.mark.asyncio
