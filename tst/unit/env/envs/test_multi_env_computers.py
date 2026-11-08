@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import inspect
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -14,9 +15,10 @@ from click.testing import CliRunner
 
 from agent_env.cli.env.multi import multi
 from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, DeployedSandboxEnv
-from agent_env.env.envs import _deployment
+from agent_env.env.envs import _deployment, _multi_computers
 from agent_env.env.envs.computer import COMPUTER_ENV_TYPE
-from agent_env.env.envs.multi_env import COMPUTERS_KEY, MultiEnv, computer_name_problems
+from agent_env.env.envs.computer.env import ComputerEnv
+from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.gateway import ExternalChild
 from agent_env.env.gateway.constants import WELL_KNOWN_PATH
 from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider
@@ -44,10 +46,12 @@ class FakeComputer:
         self.deploys, self.refusals, self._deployed, self.closes = [], [], None, 0
 
     def deploy_refusal(self, **options):
+        inspect.signature(ComputerEnv.deploy_refusal).bind(self, **options)  # only what the real one takes
         self.refusals.append(options)
         return self.refusal
 
     async def deploy(self, **options):
+        inspect.signature(ComputerEnv.deploy).bind(self, **options)  # only what the real one takes
         self.deploys.append(options)
         await asyncio.sleep(0.01)
         if self.fails:
@@ -81,9 +85,8 @@ def providers(monkeypatch):
     def build(sandbox_type=None):
         return made.setdefault(sandbox_type, mock_provider(REQUEST_HEADERS={}))
 
-    from agent_env.env.envs import multi_env
-    monkeypatch.setattr(multi_env, "build_sandbox_provider", build)
-    monkeypatch.setattr(multi_env, "get_env_sandbox_provider", build)
+    monkeypatch.setattr(_multi_computers, "build_sandbox_provider", build)
+    monkeypatch.setattr(_multi_computers, "get_env_sandbox_provider", build)
     monkeypatch.setattr("agent_env.providers.build_sandbox_provider", build)
     monkeypatch.setattr("agent_env.providers.get_env_sandbox_provider", build)
     return made
@@ -126,7 +129,7 @@ def test_a_computer_name_of_fifteen_characters_is_taken():
     (["desktop"], {"mcp_servers": ["shop"], "websites": ["shop"]}, []),  # an MCP server and a website may share a name
 ], ids=["two-computers", "a-server", "a-website", "a-servers-route", "a-websites-isnt", "server-and-website"])
 def test_a_computer_needs_a_name_no_other_child_env_or_route_of_the_gateways_has(computers, children, problems):
-    assert computer_name_problems(computers, **children) == problems
+    assert _multi_computers.name_problems(computers, **children) == problems
 
 
 # --- child_envs: a computer's entry is what a deploy_env step takes to deploy it alone ---
@@ -231,7 +234,8 @@ async def test_deploy_hands_the_gateway_each_computer_deployed_under_its_name_an
                                "sandbox_type": "modal_vm"}]
     assert gateway.started == [[ExternalChild("desktop", "https://desktop.example/mcp", "https://desktop.example"),
                                 ExternalChild("laptop", "https://laptop.example/mcp", "https://laptop.example")]]
-    assert deployed.metadata[COMPUTERS_KEY] == {name: dataclasses.asdict(_record(name)) for name in ("desktop", "laptop")}
+    assert deployed.child_envs == {name: dataclasses.asdict(_record(name)) for name in ("desktop", "laptop")}
+    assert DeployedEnv.from_dict(dataclasses.asdict(deployed)).child_envs == deployed.child_envs
     assert deployed.sandbox_ids == {"gateway_server": "gw", "modal_vm": {"desktop": "sb-desktop", "laptop": "sb-laptop"}}
     assert sorted(env_sandbox_ids(DeployedEnv.from_dict(dataclasses.asdict(deployed)))) == [
         ("gw", "modal_vm"), ("gw", "modal_vm"), ("sb-desktop", "modal_vm"), ("sb-laptop", "modal_vm")]

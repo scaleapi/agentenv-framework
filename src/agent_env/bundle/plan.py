@@ -39,7 +39,8 @@ from agent_env.env.envs.computer.app_env import ComputerAppEnv
 from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
 from agent_env.env.envs.computer.utils import sites
 from agent_env.env.envs.mcp_server import MCPServerEnv
-from agent_env.env.envs.multi_env import MultiEnv, computer_name_problems
+from agent_env.env.envs import _multi_computers
+from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.envs.website import WebsiteEnv
 from agent_env.env.published_images import published_bundle_image
 from agent_env.env.registry import get_env_registry
@@ -895,7 +896,7 @@ class _Planner:
         website as its backend's and frontend's. No two of a multi's envs may name one container, and a provider
         other than the core's, which gives a multi one env card, can't tell an MCP server and a website of one name
         apart. Nor may two of its websites claim one name. A computer runs on a sandbox of its own, which the gateway
-        knows by its name alone, and serves its tools under it (``computer_name_problems``)."""
+        knows by its name alone, and serves its tools under it (``_multi_computers.name_problems``)."""
         for key in sorted(closure, key=self.rank.__getitem__):
             source = self.nodes[key]
             if isinstance(source, BundleImage) or source.entry.kind is not BundleKind.ENV:
@@ -929,7 +930,7 @@ class _Planner:
                                          f"{clash!r}, as {taken[clash]}'s does; each env of a multi needs its own")
                 else:
                     taken.update(dict.fromkeys(containers, ref.where))
-            self.problems += [f"{where}: computer_envs: {problem}" for problem in computer_name_problems(
+            self.problems += [f"{where}: computer_envs: {problem}" for problem in _multi_computers.name_problems(
                 computers, mcp_servers=named.get("mcp_server_envs", ()), websites=named.get("website_envs", ()))]
             provider_type = source.config.get("env_provider_type", EnvironmentGatewayProvider.type)
             try:

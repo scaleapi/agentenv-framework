@@ -2748,6 +2748,21 @@ def test_compose_fronts_each_external_child_as_an_mcp_server_and_a_rest_route_by
     assert "desktop=https://desk.example" in env["REST_PROXY_URLS"].split(",")
 
 
+def test_no_service_depends_on_the_gateway_so_a_vm_deploy_can_start_them_all_before_it():
+    """A VM deploy with children runs ``compose up --scale gateway=0`` first, which starts a service that depends on the
+    gateway with it, before its children answer."""
+    from agent_env.env.envs.service_db import ServiceDBConfig
+
+    compose = yaml.safe_load(EnvironmentGatewayProvider().create_docker_compose(
+        mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")], gateway_image="agent-gateway",
+        website_configs=[WebsiteConfig(backend_image="shop-back", frontend_image="shop-front", environment_name="shop")],
+        state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig(db_web_image="pgweb", db_mcp_image="db-mcp")),
+        state_instance=LocalPostgresStateProvider.default_instance()))
+
+    assert {name: service.get("depends_on") for name, service in compose["services"].items()
+            if GATEWAY_SERVICE_NAME in (service.get("depends_on") or ())} == {}
+
+
 @pytest.mark.asyncio
 async def test_a_vm_deploy_starts_its_children_beside_its_services_and_the_gateway_after_them_fronting_each():
     """The children get the gateway's address before the gateway starts, which then waits for each to answer; every

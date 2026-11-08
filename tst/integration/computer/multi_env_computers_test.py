@@ -20,7 +20,7 @@ from mcp.client.streamable_http import streamablehttp_client
 from agent_env.env import Env
 from agent_env.env.envs.computer.env import COMPUTER_TOOLS
 from agent_env.env.envs.mcp_server import MCPServerEnv
-from agent_env.env.envs.multi_env import COMPUTERS_KEY, MultiEnv
+from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.store.routing import namespace_routing
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
@@ -63,7 +63,7 @@ async def test_a_computer_in_a_multi_env_is_served_through_its_gateway_under_its
         context = TaskStepContext()
         try:
             [deployed] = (await step.execute(context)).deployed_envs
-            computer = deployed.metadata[COMPUTERS_KEY]["desktop"]
+            computer = deployed.child_envs["desktop"]
             listed, shot = await _tools(deployed)
             async with httpx.AsyncClient(timeout=30) as client:
                 card = (await client.get(f"{deployed.gateway_url}/svc/desktop{WELL_KNOWN_PATH}")).json()
@@ -85,4 +85,4 @@ async def test_a_computer_in_a_multi_env_is_served_through_its_gateway_under_its
     assert deployed.sandbox_ids["local"] == {"desktop": computer["sandbox_id"]} and up
     assert [env._deployed.sandbox_id for env in reattached.computer_envs] == [computer["sandbox_id"]]
     assert _containers(computer["sandbox_id"]) == []
-    assert json.dumps(deployed.metadata)  # the record stores as JSON
+    assert json.dumps(deployed.child_envs)  # the record stores as JSON
