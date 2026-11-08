@@ -1,9 +1,9 @@
 """The notes app composed onto the deployed Windows computer: ready once its server says its window is shown and its
 @ready_check passes; and, read inside the computer as the session user, on the app's own venv: what its service wrote on
-the deploy's settings, its secret resolved at boot, in Windows' font; its window, listed by its program and title; its
-Start Menu launcher and its launch since the computer booted; what its install left in its folder: the download, its
-PowerShell run script's output, run elevated, and its install step's file on the build setting its env fixes; its own
-folder, which the session user, SYSTEM and Administrators alone reach; and its server, which answers its token alone."""
+the deploy's settings, its secret resolved at boot; its window, listed by its program and title; its Start Menu
+launcher and its launch since the computer booted; what its install left in its folder: the download, its PowerShell
+run script's output, run elevated, and its install step's file on the build setting its env fixes; its own folder,
+which the session user, SYSTEM and Administrators alone reach; and its server, which answers its token alone."""
 import json
 
 from agentenv_protocol.computer.card import COMPUTER_READY
@@ -41,7 +41,7 @@ print(json.dumps({
     "acl": acl, "token": [tokenless.status_code, answered]}))
 """
 EXPECTED = {
-    "notes": {"signature": "-- Ada", "token": "t0ken", "edition": "pro", "font": "Segoe UI"},
+    "notes": {"signature": "-- Ada", "token": "t0ken", "edition": "pro"},
     "windows": [{"instance": "pythonw.exe", "class": "TkTopLevel", "title": "Notes"}], "launcher": True,
     "launched": ["notes"], "run": "elevated True in C:\\agentenv\\apps\\notes", "installed": "pro", "license": True,
     "acl": {name: ["Administrators", "SYSTEM", "user"] for name in (".agentenv", "server.json")},

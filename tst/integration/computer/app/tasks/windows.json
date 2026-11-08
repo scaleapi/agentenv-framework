@@ -1,9 +1,0 @@
-[
-  {"id": "env", "type": "deploy_env", "env_id": "windows-desk",
-   "env_params": {"app_settings": {"notes": {"signature": "-- Ada", "token": "env:NOTES_TOKEN"}}}},
-  {"id": "before", "type": "env_outcome_verifier", "env_id": "windows-desk", "file_artifact_id": "check_windows_notes",
-   "verifier_id": "before"},
-  {"id": "reset", "type": "reset_env", "env_id": "windows-desk", "depends_on": ["before"]},
-  {"id": "after", "type": "env_outcome_verifier", "env_id": "windows-desk", "file_artifact_id": "check_windows_notes",
-   "verifier_id": "after", "depends_on": ["reset"]}
-]

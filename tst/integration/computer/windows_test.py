@@ -1,9 +1,9 @@
 """The Windows test bundle through ``agent-env run``, on local Docker with KVM: its desktop, cua-driver on windows-11,
 composed on this machine, its base installed from the evaluation ISO in this machine's cache unless one is held here,
 passes the conformance probe at full, cua-driver's known failure on Windows waived, before and after a reset in place;
-and an agent drives Notepad on it through cua-driver's tools. And the app bundle's notes app, composed onto it as a
-layer, runs on its deploy's settings, its window up and its install done as its Windows install says, its own folder
-and server the session user's alone, before and after a reset. Needs Docker, KVM and the ISO; the agent's task, a model
+and an agent drives Notepad on it through cua-driver's tools. And the bundle's notes app, composed onto it as a layer,
+runs on its deploy's settings, its window up and its install done as its Windows install says, its own folder and
+server the session user's alone, before and after a reset. Needs Docker, KVM and the ISO; the agent's task, a model
 endpoint too."""
 
 from pathlib import Path
@@ -17,7 +17,6 @@ from tst.util.capabilities import skip_without_model_endpoint, skip_without_wind
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow, skip_without_windows_media()]
 
 BUNDLE = Path(__file__).parent / "windows"
-APPS = Path(__file__).parent / "app"
 
 
 def test_the_windows_desktop_passes_the_probe_at_full(state):
@@ -45,11 +44,11 @@ def test_an_agent_saves_a_line_in_notepad_through_cua_drivers_tools(state):
 def test_the_notes_app_composed_onto_windows_runs_as_installed_before_and_after_a_reset(state, monkeypatch):
     monkeypatch.setenv("NOTES_TOKEN", "t0ken")
 
-    ran = _run("windows", APPS)
+    ran = _run("notes")
 
     assert ran.exit_code == 0, ran.output
     assert "passed (before: 1, after: 1)" in ran.output, ran.output
 
 
-def _run(task: str, bundle: Path = BUNDLE):
-    return CliRunner().invoke(cli, ["run", str(bundle), "--task", task])
+def _run(task: str):
+    return CliRunner().invoke(cli, ["run", str(BUNDLE), "--task", task])
