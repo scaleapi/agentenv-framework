@@ -152,7 +152,7 @@ setup that fails is read back over ssh at once (`setup-failed`), then turns off 
 QEMU's network, which reaches the guest at the ports the launcher forwards alone), installs the pinned Python with Tk
 and `agentenv-session`, and switches the sign-in to `user`. Setup takes about 13 minutes. The installed disk, trimmed,
 becomes the base's image, `disk/base.img` in a layer of its own under an empty overlay of it, with the date its 90-day
-evaluation expires, the ISO's sha256 and the key to `agentadmin`; it's pushed to the env's image store, as Linux disks
+evaluation expires and the key to `agentadmin`; it's pushed to the env's image store, as Linux disks
 are, under a tag of its recipe, so another machine composing on it pulls it rather than installing Windows, and fetches
 no ISO. A compose installs a base afresh once fewer than 7 days of its evaluation are left, from the ISO Microsoft's
 link serves then. Name it as `windows-11`, or by its id, `@local/agentenv-framework/computers/windows-11`.

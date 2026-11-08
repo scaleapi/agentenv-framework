@@ -10,6 +10,7 @@ from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import get_artifact_store
 from agent_env.env.envs.computer.utils import builder, composer, probing
 from agent_env.providers.sandbox_providers.local_docker import provider as local_sandbox
+from agent_env.store.image_store import registry_api
 from agent_env.store.image_store.image_store import OciRegistryImageStore
 from agent_env.store.image_store.local_registry_image_store import LocalRegistryImageStore
 from agent_env.store.object_store.local.store import LocalFilesystemObjectStore
@@ -27,6 +28,7 @@ def docker(local_stores, cli_routing, monkeypatch):
     monkeypatch.setattr(builder, "docker_login", lambda auth: None)
     monkeypatch.setattr(composer, "write_index", fake.joined)
     monkeypatch.setattr(composer, "pin_digest", registry.pin_digest)
+    monkeypatch.setattr(registry_api, "pin_digest", registry.pin_digest)
     monkeypatch.setattr(docker_image, "pin_digest", registry.pin_digest)
     monkeypatch.setattr(builder, "host_platform", lambda: "linux/arm64")
     monkeypatch.setattr(local_sandbox, "host_platform", lambda: "linux/arm64")

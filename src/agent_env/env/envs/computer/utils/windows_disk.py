@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
-import hashlib
 import io
 import json
 import re
@@ -27,7 +26,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any
+from typing import Any, NamedTuple
 
 from agent_env.artifact.artifacts.computer import DISK_BASE_FILE, DISK_FILE, DISK_OWNER
 from agent_env.artifact.artifacts.docker_image import docker_login, push_local_image
@@ -36,8 +35,9 @@ from agent_env.env.envs.computer.utils.install import WindowsInstall
 from agent_env.providers.sandbox_providers.host_images import present
 from agent_env.providers.sandbox_providers.local_docker.cli import docker
 from agent_env.providers.sandbox_providers.local_docker.disk import KVM, launcher, machine_image
-from agent_env.store.image_store.image_contents import labels
-from agent_env.store.image_store.registry_api import NoSuchImageError, pin_digest
+from agent_env.store.image_store.image_contents import labels as image_labels
+from agent_env.store.image_store.image_store import ImageStore
+from agent_env.store.image_store.registry_api import pin_digest, pin_if_served
 from agent_env.store.local_state import holding_locks
 from agent_env.utils.docker.build import build_image
 
@@ -54,8 +54,6 @@ BUILD = ROOT / "build"
 #: The fewest days of its evaluation a base may have left, as a deploy needs some.
 RENEW_DAYS = 7
 EXPIRES_LABEL, BUILD_LABEL, KEY_LABEL = "dev.agentenv.windows.expires", "dev.agentenv.windows.build", "dev.agentenv.key"
-#: The sha256 of the ISO a base was installed from.
-ISO_LABEL = "dev.agentenv.windows.iso"
 #: Where a base's image keeps the key to its admin, which composing a layer on it takes over ssh. The image is in the
 #: user's own image store, and the guest's ssh is reached only on this machine's loopback while a layer is composed.
 ADMIN_KEY = PurePosixPath("/disk/admin.key")
@@ -80,19 +78,16 @@ class Registry:
     """The env's image store as Windows disks are kept in it: by tag in ``repository``, pinned by digest, as Linux
     disks are."""
 
-    store: Any
+    store: ImageStore
     repository: str
 
     def served(self, tag: str) -> str | None:
         """``tag``'s ref, pinned to the digest the store serves for it now; None when it serves none."""
         ref = self.store.image_ref(self.repository, tag)
-        try:
-            return pin_digest(ref, self.store.auth(ref))
-        except NoSuchImageError:
-            return None
+        return pin_if_served(ref, self.store.auth(ref))
 
     def labels(self, pinned: str) -> dict[str, str]:
-        return labels(pinned, "amd64", self.store.auth(pinned))
+        return image_labels(pinned, "amd64", self.store.auth(pinned))
 
     def push(self, local: str, tag: str) -> str:
         """``local`` pushed as ``tag``; its ref there, pinned."""
@@ -103,6 +98,26 @@ class Registry:
     def pull(self, pinned: str) -> None:
         docker_login(self.store.auth(pinned))
         docker("pull", "-q", pinned)
+
+
+class Names(NamedTuple):
+    """What a base or a disk is called: ``local`` in this machine's Docker, ``tag`` in the image store."""
+
+    local: str
+    tag: str
+
+
+def base_names(key: str) -> Names:
+    return Names(f"agentenv-windows-base:{_short(key)}", f"windows-base-{_short(key)}")
+
+
+def disk_names(key: str) -> Names:
+    """A disk's names, its tag in the image store being its key, as a Linux disk's is."""
+    return Names(f"agentenv-windows:{_short(key)}", key.removeprefix("sha256:"))
+
+
+def _short(key: str) -> str:
+    return key.removeprefix("sha256:")[:16]
 
 
 @dataclass(frozen=True)
@@ -148,28 +163,13 @@ def media(say: Callable[[str], None]) -> Path:
     return iso
 
 
-def sha256(path: Path) -> str:
-    """``path``'s sha256, kept beside it for its size and mtime, since an ISO takes a while to read."""
-    stat, kept = path.stat(), path.with_name(path.name + ".sha256")
-    stamp = f"{stat.st_size} {stat.st_mtime_ns}"
-    if kept.exists() and (lines := kept.read_text().split("\n"))[0] == stamp:
-        return lines[1]
-    hashed = hashlib.sha256()
-    with path.open("rb") as source:
-        while chunk := source.read(1 << 20):
-            hashed.update(chunk)
-    kept.write_text(f"{stamp}\n{hashed.hexdigest()}\n")
-    return hashed.hexdigest()
-
-
 def base(key: str, iso: Callable[[], Path], disk_gb: int, user: str, say: Callable[[str], None],
          registry: Registry) -> Base:
     """The base of ``key``: this machine's, pushed to the image store unless it holds one of ``key``; else the one the
     store holds, pulled, with the key to its admin it carries, when a layer is composed on it; else Windows installed
     from the ISO ``iso`` gives, and pushed there. One with fewer than ``RENEW_DAYS`` of its evaluation left is installed
     afresh. One install of a key runs at once on a machine, and another waits for it."""
-    image, keys = f"agentenv-windows-base:{key[7:23]}", cache_root() / "windows" / "bases" / key[7:23]
-    tag = f"windows-base-{key[7:23]}"
+    (image, tag), keys = base_names(key), cache_root() / "windows" / "bases" / _short(key)
     with holding_locks([_base_lock(image)], lambda: say("waiting for the install of the same base under way")):
         if present(image) and (keys / "id").exists():
             expires = datetime.fromisoformat(_label(image, EXPIRES_LABEL))
@@ -187,13 +187,13 @@ def base(key: str, iso: Callable[[], Path], disk_gb: int, user: str, say: Callab
         subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", f"agentenv {image}", "-f",
                         str(keys / "id")], check=True)
         media = iso()
-        with _working(f"base-{key[7:23]}") as work:
+        with _working(f"base-{_short(key)}") as work:
             facts = _installed(work, media, keys, disk_gb, user, say)
             say("packing the base")
             expires = datetime.now(timezone.utc) + timedelta(minutes=facts["grace_minutes"])
             shutil.copy(keys / "id", work / ADMIN_KEY.name)
             _pack(work, image, {KEY_LABEL: key, EXPIRES_LABEL: expires.isoformat(timespec="seconds"),
-                                BUILD_LABEL: facts["build"], ISO_LABEL: sha256(media)}, base_image=None)
+                                BUILD_LABEL: facts["build"]}, base_image=None)
         say("pushing the base to the image store")
         registry.push(image, tag)
         return Base(image, keys, expires)
@@ -271,16 +271,18 @@ def _installed(work: Path, iso: Path, keys: Path, disk_gb: int, user: str, say: 
     return facts
 
 
-def compose(base_: Base, build: Path, image: str, labels: dict[str, str], say: Callable[[str], None],
-            registry: Registry, tag: str) -> str:
-    """``image``, a disk composed on ``base_``: the base booted on an overlay kept in a folder of this machine, ``build``
-    copied in and its ``provision.ps1`` run as the admin over ssh, then shut down, packed onto the base's image and
-    pushed to the image store as ``tag``; its ref there, pinned. A base the store holds is pulled first."""
+def compose(base_: Base, build: Path, key: str, labels: dict[str, str], say: Callable[[str], None],
+            registry: Registry) -> str:
+    """The disk of ``key`` composed on ``base_``: the base booted on an overlay kept in a folder of this machine,
+    ``build`` copied in and its ``provision.ps1`` run as the admin over ssh, then shut down, packed onto the base's
+    image with ``labels`` and pushed to the image store; its ref there, pinned. A base the store holds is pulled
+    first."""
+    image, tag = disk_names(key)
     _here(base_, registry, say)
-    with _working(f"disk-{image.rpartition(':')[2]}") as work:
+    with _working(f"disk-{_short(key)}") as work:
         out = work / "out"
         out.mkdir()
-        name = f"agentenv-windows-compose-{image.rpartition(':')[2]}"
+        name = f"agentenv-windows-compose-{_short(key)}"
         say(f"booting its base in {name}")
         machine = asyncio.run(machine_image(base_.image))
         container = _launched(name, {"VM_KEEP": "/out/disk.img"}, ["-v", f"{out}:/out"], machine)
