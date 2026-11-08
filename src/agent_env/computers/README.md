@@ -38,10 +38,12 @@ before reset in place started is refused a reset, to be redeployed. It boots on 
 Docker can pass it `/dev/kvm`, and on `modal_vm`, amd64 only, whose sandbox runs the launcher as its image under nested
 virtualization: the provider exports the disk from the image store with this machine's Docker, compressed, once for each
 composed disk, into the per-user cache, and mounts it on the sandbox at create, which Modal uploads once for each
-content and the launcher expands onto the sandbox's disk. Such a sandbox is ended once it has been idle, with no
-connection open, for the provider's `idle_timeout`, 30 minutes unless its config sets another, as a running QEMU isn't
-activity. A gate 3 probe that ends with the connection to the driver dropped, refused or timed out runs again on a fresh
-boot, up to three in all, and the record keeps each attempt; one with a failed check is recorded as it is.
+content and the launcher expands onto the sandbox's disk; a thin disk, a Windows one, carries its base too, exported
+once for each base and expanded beside it there, so another computer on that base adds its layer alone. Such a sandbox
+is ended once it has been idle, with no connection open, for the provider's `idle_timeout`, 30 minutes unless its config
+sets another, as a running QEMU isn't activity. A gate 3 probe that ends with the connection to the driver dropped,
+refused or timed out runs again on a fresh boot, up to three in all, and the record keeps each attempt; one with a
+failed check is recorded as it is.
 
 A put, `env build` and the release compose every form; a run composes only the forms its sandbox's deploys boot: on each
 link of a chain, the first form it boots natively, as a deploy picks, so local Docker composes containers, and a sandbox
@@ -170,10 +172,10 @@ pulls it. Gate 3 probes it at full. At the session user's sign-in,
 `agentenv-session`, run windowless by `pythonw`, reads the deploy's environment from the NoCloud seed, which the
 launcher attaches as a removable USB drive, since Windows mounts a FAT filesystem with no partition table on removable
 media alone, and starts each layer's services in that session, again whenever one exits. A Windows computer boots
-with 4 vCPUs and 8 GB, on local Docker with KVM; it has computer-exec and data/add, through the protocol's Windows
-defaults, so the probe runs its fixture there as on Linux, with Python one-liners for the commands it would give a
-shell. A Windows computer composes its driver alone for now, no app, and boots on no Modal VM sandbox yet, whose export
-carries a disk's top layer alone.
+with 4 vCPUs and 8 GB, on local Docker with KVM and on `modal_vm`; it has computer-exec and data/add, through the
+protocol's Windows defaults, so the probe runs its fixture there as on Linux, with Python one-liners for the commands it
+would give a shell. On `modal_vm` it runs in your own Modal workspace, under the evaluation's terms or a licence of your
+own; whether they allow it there is yours to check. A Windows computer composes its driver alone for now, no app.
 
 This bundle has no tasks of its own: other bundles pull its computers by alias, and `agent-env run computers` has
 nothing to run.
