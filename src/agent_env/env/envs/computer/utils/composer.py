@@ -188,16 +188,34 @@ def pending(env: ComputerEnv, sandbox_provider: SandboxProvider | None = None,
 
 def unstarted(env: ComputerEnv, sandbox_provider: SandboxProvider, form: str | None = None) -> list[tuple[str, str]]:
     """The pairs a deploy on ``sandbox_provider`` boots that no compose has started, as a run for another sandbox
-    leaves them, or that an agent-env that composes differently recorded."""
-    return _pairs(env, booted_forms(env, sandbox_provider, form),
-                  lambda form, arch, record: record is None or stale(record))
+    leaves them, that an agent-env that composes differently recorded, or that are ``unprobed`` there."""
+    return _pairs(env, booted_forms(env, sandbox_provider, form), lambda form, arch, record: (
+        record is None or stale(record) or _unprobed(env, sandbox_provider, form, arch, record)))
 
 
 def unstarted_or_building(env: ComputerEnv, sandbox_provider: SandboxProvider,
                           form: str | None = None) -> list[tuple[str, str]]:
     """Those, and the ones a compose is building now, which a deploy waits for."""
-    return _pairs(env, booted_forms(env, sandbox_provider, form),
-                  lambda form, arch, record: record is None or stale(record) or record.get("status") == "building")
+    return _pairs(env, booted_forms(env, sandbox_provider, form), lambda form, arch, record: (
+        record is None or stale(record) or record.get("status") == "building"
+        or _unprobed(env, sandbox_provider, form, arch, record)))
+
+
+def unprobed(env: ComputerEnv, sandbox_provider: SandboxProvider,
+             form: str | None = None) -> list[tuple[str, str, dict]]:
+    """Each container a deploy on ``sandbox_provider`` boots that was built but not probed though the deploy runs it
+    natively, as (form, arch, record): one whose probe couldn't boot it for a setting that didn't resolve, say. A deploy
+    composes it again first, which reuses its image and probes it, since a container deploys only once ready."""
+    composed = env.metadata.get("composed", {})
+    return [(name, arch, composed[name][arch]) for name, arch in _pairs(
+        env, booted_forms(env, sandbox_provider, form),
+        lambda form, arch, record: _unprobed(env, sandbox_provider, form, arch, record))]
+
+
+def _unprobed(env: ComputerEnv, sandbox_provider: SandboxProvider, form: str, arch: str, record: dict | None) -> bool:
+    # A disk or VM bundle left unverified deploys already, its first boot probing it (probing.probe_first_boot).
+    return (form == "container" and record is not None and record.get("status") == "unverified" and not stale(record)
+            and bool(boot.native_links(sandbox_provider, arch, form, env.stored_id, env.computer.os.type)))
 
 
 def booted_forms(env: ComputerEnv, sandbox_provider: SandboxProvider, form: str | None = None) -> list[str]:
@@ -848,7 +866,8 @@ def _build_settings(env: ComputerEnv, base: ComputerArtifact) -> dict[str, Any]:
 def _dockerfile(source: str, layers: list[_Layer], base: ComputerArtifact, build_settings: dict,
                 lock: packages.Lock | None) -> str:
     """The composed image's Dockerfile but its key's label, which the key is a digest of: the build-phase settings, the
-    lock's .debs, then each layer's files under its prefix, its venv beside them from the lock's wheels, its run scripts
+    lock's .debs, mounted into the RUN that installs them, then each layer's files under its prefix, its venv beside
+    them from the lock's wheels, mounted the same way, its run scripts
     and an app's install steps, each run as root or the session user, every install with the network closed; then its
     programs, and an app's server's folder owned by the session user."""
     user = base.session.user
@@ -856,8 +875,8 @@ def _dockerfile(source: str, layers: list[_Layer], base: ComputerArtifact, build
              *(f"ENV AGENTENV_SETTING_{name.upper()}={json.dumps(str(value))}" for name, value in build_settings.items())]
     if lock is not None and lock.apt:
         debs = f"/tmp/agentenv-{packages.STAGED_APT}"
-        lines += [f"COPY {packages.STAGED_APT}/ {debs}/",
-                  f"RUN --network=none apt-get install -y --no-install-recommends {debs}/*.deb && rm -rf {debs}"]
+        lines.append(f"RUN --network=none {_mounted(packages.STAGED_APT, debs)} apt-get install -y "
+                     f"--no-install-recommends {debs}/*.deb")
     for layer in layers:
         prefix = layer.prefix
         lines.append(f"COPY {layer.folder}/ {prefix}/")
@@ -865,10 +884,9 @@ def _dockerfile(source: str, layers: list[_Layer], base: ComputerArtifact, build
             staged = packages.staged_wheels(layer.folder)
             wheels = f"/tmp/agentenv-{staged}"
             if lock is not None and lock.wheels.get(layer.folder):
-                lines += [f"COPY {staged}/ {wheels}/",
-                          f"RUN --network=none python3 -m venv {prefix}/venv && {prefix}/venv/bin/pip install "
-                          f"--no-index --no-deps {wheels}/*.whl && {prefix}/venv/bin/pip list --format=json > "
-                          f"{prefix}/installed.json && rm -rf {wheels}"]
+                lines.append(f"RUN --network=none {_mounted(staged, wheels)} python3 -m venv {prefix}/venv && "
+                             f"{prefix}/venv/bin/pip install --no-index --no-deps {wheels}/*.whl && {prefix}/venv/bin/pip "
+                             f"list --format=json > {prefix}/installed.json")
             else:
                 lines.append(f"RUN --network=none python3 -m venv {prefix}/venv && {prefix}/venv/bin/pip list "
                              f"--format=json > {prefix}/installed.json")
@@ -883,6 +901,12 @@ def _dockerfile(source: str, layers: list[_Layer], base: ComputerArtifact, build
         lines.append(f"RUN {' && '.join(checks)}")
     lines.append(f"USER {user}")
     return "\n".join(lines) + "\n"
+
+
+def _mounted(source: str, target: str) -> str:
+    """A RUN's mount of the build context's ``source`` at ``target``, read-only, so files an install reads once never
+    stay in a layer of the image, as a COPY's would after the next RUN removed them."""
+    return f"--mount=type=bind,source={source},target={target}"
 
 
 def _runs(layer: _Layer) -> list[tuple[str, str]]:

@@ -139,10 +139,8 @@ class AppRuntime:
         return _running() is not None
 
     def paused(self) -> contextlib.AbstractContextManager:
-        """The app this server launched last, every process of it, paused while the block runs, so a copy of its files
-        taken meanwhile is of one moment."""
-        pid = _running()
-        return session.paused(pid) if pid is not None else contextlib.nullcontext()
+        """The app this server launched last paused while the block runs (``paused_app``)."""
+        return paused_app()
 
     def exited(self) -> bool:
         """Log that the app this server launched last ended on its own, with its exit code or the signal that ended
@@ -240,6 +238,13 @@ def _running() -> Optional[int]:
     """The pid of the app this server launched last, while it runs."""
     pid = _recorded_pid()
     return pid if pid is not None and session.alive(pid) else None
+
+
+def paused_app() -> contextlib.AbstractContextManager:
+    """The app this server launched last, every process of it, paused while the block runs, so a copy of its files
+    taken meanwhile is of one moment; nothing when it isn't running."""
+    pid = _running()
+    return session.paused(pid) if pid is not None else contextlib.nullcontext()
 
 
 async def _bounded(name: str, check: Awaitable[Optional[str]]) -> Optional[str]:

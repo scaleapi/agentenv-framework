@@ -34,7 +34,8 @@ FAKE = textwrap.dedent('''\
         print("Window: \\"BenchLab\\", App: BenchLab.\\n\\t5 button Next\\n")
         print(f"Screenshot (2x1 px): {state / 'shot.jpeg'}")
     elif "slow" in sys.argv:
-        (state / "pid").write_text(str(os.getpid()))
+        (state / "pid.tmp").write_text(str(os.getpid()))
+        os.replace(state / "pid.tmp", state / "pid")  # whole, so a reader that sees the file sees the pid
         import time
         time.sleep(60)
     elif "fail" in sys.argv:

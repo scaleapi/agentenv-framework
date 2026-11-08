@@ -50,7 +50,10 @@ names another, never on the sandbox it deploys on. A compose of a disk also comp
 unless that's built. A deploy that boots a form no compose has started, a disk named by `env_params` included, composes
 it first on that same provider, saying which, reusing what's built, as every build is reused by its key; deploys of one
 env at once compose it once, the others
-waiting for it, a deploy that finds it building included. In `agent-env run` it says why and each stage as it goes, and
+waiting for it, a deploy that finds it building included. A container built but left unverified though the deploy's
+sandbox runs it natively, as one is when a setting its probe boots with doesn't resolve, is composed again the same way:
+its image reused and probed, and booted only once ready; a deploy that still has no ready build names why each such
+container wasn't probed. In `agent-env run` it says why and each stage as it goes, and
 a deploy waiting for another's compose says what it waits for and since when. A local run doesn't compose a registered
 env's form at deploy where a configured store isn't the per-user one, since the run's fence refuses its record: the
 deploy refuses for want of a ready build and names `agent-env env build`.
