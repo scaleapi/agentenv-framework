@@ -62,8 +62,8 @@ def deploy_options(entry: Optional[dict], sandbox_type: str | None) -> dict:
 def routes_later(entry: Optional[dict]) -> bool:
     """Whether a computer with ``entry``, its child_envs entry, routes the multi env's websites, which come up with its
     gateway, after it: ``site_routing`` with no ``sites`` of its own."""
-    params = (entry or {}).get("env_params") or {}
-    return bool(params.get("site_routing")) and not params.get("sites")
+    params = (entry or {}).get("env_params")  # one that isn't a table is the computer's own params check to refuse
+    return isinstance(params, dict) and bool(params.get("site_routing")) and not params.get("sites")
 
 
 def refusal(computer: ComputerEnv, entry: dict, sandbox_type: str | None, websites: Mapping[str, str]) -> str | None:

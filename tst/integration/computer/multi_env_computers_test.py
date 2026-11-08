@@ -95,11 +95,15 @@ def _multi(items, *computers, websites=()) -> MultiEnv:
                         website_envs=list(websites), computer_envs=list(computers), name="office")
 
 
+LOAD_TIMEOUT_S = 20  # a site's answer inside the computer
+RUN_TIMEOUT_S = LOAD_TIMEOUT_S + 20  # the command that loads it, which must outlast the load
+
+
 async def _reaches(computer, url: str) -> str:
     """The HTTP status ``url`` answers inside the computer, through its site proxy, over HTTPS, trusting the deploy's CA
     from the system's store."""
-    load = "import sys, urllib.request; print(urllib.request.urlopen(sys.argv[1], timeout=20).status)"
-    answer = await inside.run(computer, ["python3", "-c", load, url], timeout_s=40)
+    load = f"import sys, urllib.request; print(urllib.request.urlopen(sys.argv[1], timeout={LOAD_TIMEOUT_S}).status)"
+    answer = await inside.run(computer, ["python3", "-c", load, url], timeout_s=RUN_TIMEOUT_S)
     return answer["stdout"].strip() or answer.get("stderr", "")[-300:]
 
 

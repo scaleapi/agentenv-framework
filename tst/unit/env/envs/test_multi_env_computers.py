@@ -202,6 +202,13 @@ def test_a_computer_entry_whose_sites_the_multi_env_lacks_or_that_holds_what_a_s
     assert desktop.refusals == ([] if "desktop" in child_envs else [{"sandbox_type": None, "sites_later": False}])
 
 
+def test_env_params_that_arent_a_table_are_left_to_the_computers_own_check_to_refuse(providers):
+    desktop = FakeComputer("desktop", refusal="computer env 'desktop-computer': env_params is a table")
+    refusal = _multi(desktop, websites=["shop"]).child_envs_refusal({"desktop": {"env_params": "invalid"}})
+    assert refusal == "child_envs.desktop: computer env 'desktop-computer': env_params is a table"
+    assert desktop.refusals == [{"sandbox_type": None, "env_params": "invalid", "sites_later": False}]
+
+
 @pytest.mark.parametrize("env_params, later", [({"site_routing": True}, True), ({"site_routing": ["shop-site"]}, True),
                                                 ({"site_routing": True, "sites": [{"name": "shop"}]}, False)],
                          ids=["all", "named", "its-own-sites"])
