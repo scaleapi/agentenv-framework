@@ -115,12 +115,15 @@ def paused(pid: int) -> Iterator[None]:
 
 
 def alive(pid: int) -> bool:
-    """Whether the job the helper ``pid`` holds is there, which it is while any process of the app runs."""
+    """Whether a process of the job the helper ``pid`` holds runs, the helper or one of the app's; a job a stop just
+    ended is there, empty, until its last handle closes."""
     job = _win32.open_job(pid)
     if job is None:
         return False
-    _win32.close(job)
-    return True
+    try:
+        return bool(_win32.job_pids(job))
+    finally:
+        _win32.close(job)
 
 
 def add_launcher(name: str, folder: Path) -> Path:
