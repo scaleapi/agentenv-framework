@@ -286,8 +286,9 @@ def trust_environment(os_type: str, sites: list[Site]) -> dict[str, str]:
 
 def proxy_config(table: SiteTable, issued: Issued, *, user: Optional[str], os_type: str,
                  upstream_headers: Optional[dict[str, dict[str, str]]] = None) -> dict:
-    """What ``site_proxy.py install`` reads: the session user, the CA, the trust files on an ``os_type`` computer, and
-    each route with its certificate and key, and the headers its gateway's sandbox provider asks requests to it to carry
+    """What ``site_proxy.py install`` reads: the session user, the CA, the trust files on an ``os_type`` computer and
+    the variables naming them, which its profile script sets as the computer's boot environment does, each route with
+    its certificate and key, and the headers its gateway's sandbox provider asks requests to it to carry
     (``upstream_headers``, by site), which the proxy sends upstream alone."""
     sites = []
     for route in table.routes:
@@ -298,7 +299,7 @@ def proxy_config(table: SiteTable, issued: Issued, *, user: Optional[str], os_ty
             site["upstream_headers"] = dict(upstream_headers[route.site])
         sites.append(site)
     return {"user": user, "ca_pem": issued.ca_pem, "sites": sites, "log": str(LOG),
-            "trust_files": trust_files(os_type)}
+            "trust_files": trust_files(os_type), "trust_environment": dict(TRUST_ENVIRONMENTS[os_type])}
 
 
 def reachable_problem(policy: Optional[NetworkPolicy], routes: list[Route]) -> Optional[str]:

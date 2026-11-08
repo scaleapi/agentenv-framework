@@ -928,14 +928,9 @@ def install(config_path: str, paths: Paths = Paths()) -> dict:
         trust["chromium"] = [str(policy) for policy in paths.chromium_policies]
         trust["nss"] = trust_nss(user, ca)
         trust["java"] = trust_java(paths, ca, given["ca_pem"])
-        if added := given.get("trust_files"):
-            trust["added"] = add_trust_files(paths, added, given["ca_pem"])
-            variables = {"SSL_CERT_FILE": added["bundle"], "REQUESTS_CA_BUNDLE": added["bundle"],
-                         "NODE_EXTRA_CA_CERTS": added["ca"]}
-        else:
-            bundle = public_roots(paths)
-            variables = {"NODE_EXTRA_CA_CERTS": ca, **({"REQUESTS_CA_BUNDLE": str(bundle)} if bundle else {})}
-        write_in_place(paths.profile, "".join(f"export {name}={value}\n" for name, value in variables.items()))
+        trust["added"] = add_trust_files(paths, given["trust_files"], given["ca_pem"])
+        write_in_place(paths.profile, "".join(f"export {name}={value}\n"
+                                              for name, value in given["trust_environment"].items()))
         trust["environment"] = str(paths.profile)
     serving = {"user": user, "serve_user": serve_user(user), "sites": sites, **{key: given[key] for key in ("listen", "https_port", "http_port")
                                                  if key in given}}

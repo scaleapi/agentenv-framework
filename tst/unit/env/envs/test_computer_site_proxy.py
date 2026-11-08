@@ -614,9 +614,8 @@ def test_install_writes_the_sites_files_names_and_trust_then_starts_the_proxy_on
     for added in ("etc/agentenv/ca.pem", "etc/agentenv/ca-bundle.pem"):
         assert (root / added).stat().st_mode & 0o777 == 0o644
     assert report["trust"]["added"] == [str(root / "etc/agentenv/ca.pem"), str(root / "etc/agentenv/ca-bundle.pem")]
-    assert (root / "etc/profile.d/agentenv-sites.sh").read_text() == (
-        "export SSL_CERT_FILE=/etc/agentenv/ca-bundle.pem\nexport REQUESTS_CA_BUNDLE=/etc/agentenv/ca-bundle.pem\n"
-        "export NODE_EXTRA_CA_CERTS=/etc/agentenv/ca.pem\n")
+    assert (root / "etc/profile.d/agentenv-sites.sh").read_text() == "".join(
+        f"export {name}={value}\n" for name, value in sites.TRUST_ENVIRONMENTS["linux"].items())
 
 
 def test_install_keeps_the_upstream_headers_in_a_file_root_alone_reads_and_serve_json_names_it(tmp_path, monkeypatch):
