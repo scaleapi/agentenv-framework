@@ -29,8 +29,8 @@ PYTHON = Path(sys.base_prefix) / "python.exe"
 START_TIMEOUT_S = 30.0
 #: How often a stopping app is looked at for having ended.
 POLL_S = 0.2
-#: How long a job ended by force is waited on to hold no process, so whatever its app had open is closed once a stop
-#: returns, as a reset then puts the app's files back.
+#: How long a job ended by force is waited on for each of its processes to have exited, so none still writes once a
+#: stop returns and whatever they had open is closed, as a reset then puts the app's files back.
 ENDED_TIMEOUT_S = 5.0
 WM_CLOSE = 0x0010
 #: A Start Menu shortcut, from its path, program, arguments and folder in the environment, as PowerShell writes one.
@@ -72,8 +72,8 @@ async def launch(argv: list[str], cwd: Path, env: dict[str, str], fds: Optional[
 
 async def stop(pid: int, timeout_s: float) -> None:
     """End the job the helper ``pid`` holds, every process in it: its windows asked to close, then the job ended after
-    ``timeout_s``, or at once when it has no window to close, and waited on until it holds none. No one asks how it
-    exited once it's stopped."""
+    ``timeout_s``, or at once when it has no window to close, and waited on until each process it held has exited and
+    it holds none. No one asks how it exited once it's stopped."""
     _reaping.forget(pid)
     job = _win32.open_job(pid)
     if job is None:
@@ -86,10 +86,16 @@ async def stop(pid: int, timeout_s: float) -> None:
         while _app_pids(job, pid) and time.monotonic() < deadline:
             await asyncio.sleep(POLL_S)
         if _app_pids(job, pid):
-            _win32.terminate_job(job)
-            deadline = time.monotonic() + ENDED_TIMEOUT_S
-            while _win32.job_pids(job) and time.monotonic() < deadline:
-                await asyncio.sleep(POLL_S)
+            ending = _win32.open_processes(_win32.job_pids(job))
+            try:
+                _win32.terminate_job(job)
+                deadline = time.monotonic() + ENDED_TIMEOUT_S
+                await asyncio.to_thread(_win32.wait_exited, ending, ENDED_TIMEOUT_S)
+                while _win32.job_pids(job) and time.monotonic() < deadline:
+                    await asyncio.sleep(POLL_S)
+            finally:
+                for process in ending:
+                    _win32.close(process)
     finally:
         _win32.close(job)
 
@@ -169,7 +175,9 @@ class Window:
 class _Win32:
     """The Win32 calls this module makes, each a method, so its logic is tested apart from them."""
 
-    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SUSPEND_RESUME = 0x1000, 0x0800
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SUSPEND_RESUME, SYNCHRONIZE = 0x1000, 0x0800, 0x00100000
+    #: The most handles one wait takes (``MAXIMUM_WAIT_OBJECTS``).
+    WAIT_HANDLES = 64
     DWMWA_CLOAKED = 14
     #: How many process ids a job's list is read with room for, before it's read again with room for all.
     PIDS = 64
@@ -202,6 +210,20 @@ class _Win32:
 
     def close(self, handle: int) -> None:
         self._api().kernel32.CloseHandle(handle)
+
+    def open_processes(self, pids: list[int]) -> list[int]:
+        """Handles to wait on each process of ``pids`` that's there; one that's gone has none."""
+        kernel32 = self._api().kernel32
+        return [process for pid in pids if (process := kernel32.OpenProcess(self.SYNCHRONIZE, False, pid))]
+
+    def wait_exited(self, processes: list[int], timeout_s: float) -> None:
+        """Wait until each of ``processes``, handles, has exited, every thread of it ended, or ``timeout_s`` passes: a
+        process's own handle says it has, where its job's list says only that it's no longer in the job."""
+        kernel32, deadline = self._api().kernel32, time.monotonic() + timeout_s
+        for first in range(0, len(processes), self.WAIT_HANDLES):
+            some = processes[first:first + self.WAIT_HANDLES]
+            kernel32.WaitForMultipleObjects(len(some), (ctypes.c_void_p * len(some))(*some), True,
+                                            max(0, int((deadline - time.monotonic()) * 1000)))
 
     def suspend(self, pid: int) -> bool:
         """Whether the process ``pid`` was there to suspend, and was."""

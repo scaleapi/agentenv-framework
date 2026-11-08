@@ -67,6 +67,8 @@ def kernel32() -> ctypes.WinDLL:
     dll.CloseHandle.argtypes = [handle]
     dll.OpenProcess.argtypes, dll.OpenProcess.restype = [dword, ctypes.c_int, dword], handle
     dll.QueryFullProcessImageNameW.argtypes = [handle, dword, wide, ctypes.c_void_p]
+    dll.WaitForMultipleObjects.argtypes, dll.WaitForMultipleObjects.restype = [dword, ctypes.c_void_p, ctypes.c_int,
+                                                                               dword], dword
     return dll
 
 
