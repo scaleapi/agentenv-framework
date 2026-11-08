@@ -297,17 +297,19 @@ def deploy_refusal(env: Env, provider: EnvironmentProvider | type[EnvironmentPro
     provider_class = provider if isinstance(provider, type) else type(provider)
     reason = provider_refusal(provider_class, type(env),
                               mcp_names=[child.environment_name for child in getattr(env, "mcp_server_envs", ())],
-                              website_names=[child.environment_name for child in getattr(env, "website_envs", ())])
+                              website_names=[child.environment_name for child in getattr(env, "website_envs", ())],
+                              computer_names=[child.environment_name for child in getattr(env, "computer_envs", ())])
     if reason is not None:
         return f"env '{env.id}' has env_provider_type '{env.env_provider_type}', which {reason}"
     return option_refusal(env, provider, options)
 
 
 def provider_refusal(provider_class: type[EnvironmentProvider], env_class: type[Env], *, mcp_names: Iterable[str] = (),
-                     website_names: Iterable[str] = ()) -> str | None:
+                     website_names: Iterable[str] = (), computer_names: Iterable[str] = ()) -> str | None:
     """Why a provider of provider_class can't deploy an env of env_class, a multi's with children of these environment_names, worded
-    to follow the provider's type, or None: the server provider deploys one MCP server, and a plugin's provider gives a multi one
-    env card, which can't tell an MCP server and a website of one name apart. It needs no env, so a bundle checks it before writing one."""
+    to follow the provider's type, or None: the server provider deploys one MCP server, a plugin's provider gives a multi one
+    env card, which can't tell an MCP server and a website of one name apart, and only a provider whose deploy() takes
+    ``children`` deploys a multi's computers. It needs no env, so a bundle checks it before writing one."""
     from agent_env.env.envs.mcp_server import MCPServerEnv
     from agent_env.env.envs.multi_env import MultiEnv
     from agent_env.providers.env_providers.env_provider import _SandboxEnvironmentProvider
@@ -315,6 +317,9 @@ def provider_refusal(provider_class: type[EnvironmentProvider], env_class: type[
 
     if issubclass(provider_class, EnvironmentServerProvider) and not issubclass(env_class, MCPServerEnv):
         return f"deploys one MCP server, not a {env_class.type} env"
+    computer_names = list(computer_names)
+    if computer_names and "children" not in inspect.signature(provider_class.deploy).parameters:
+        return f"deploys no computers, so not its {', '.join(map(repr, computer_names))}"
     if issubclass(env_class, MultiEnv) and not issubclass(provider_class, _SandboxEnvironmentProvider):
         if shared := set(mcp_names) & set(website_names):
             return (f"gives a multi one env card, so it can't tell an MCP server and a website apart by name, and both are named "

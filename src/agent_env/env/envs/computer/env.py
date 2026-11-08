@@ -31,6 +31,7 @@ from agent_env.env.envs._deployment import (
     deploy_through_provider,
     provider_or_class,
 )
+from agent_env.env.envs.computer import COMPUTER_ENV_TYPE
 from agent_env.env.envs.computer.utils import boot, composer, gate, inside, sites
 from agent_env.env.envs.computer.utils.composed import stale
 from agent_env.env.envs.computer.utils.composer import Composing
@@ -69,7 +70,7 @@ _TOOL_ACCESS_URIS = {DISABLE: DISABLE_TOOL_EXTENSION_URI, ENABLE: ENABLE_TOOL_EX
 
 
 class ComputerEnv(Env):
-    type: ClassVar[str] = "computer"
+    type: ClassVar[str] = COMPUTER_ENV_TYPE
     description = "A computer: a base computer and a driver, composed at put into an image for each form and arch"
     env_provider_type: ClassVar[str] = "computer"
     toml_refs: ClassVar[tuple[EntityRef, ...]] = (EntityRef.artifact("computer", artifact_type="computer"),
@@ -277,13 +278,14 @@ class ComputerEnv(Env):
                      gateway_mode: GatewayMode = GatewayMode.PERFORMANCE, cpu: float | None = None,
                      memory_mb: int | None = None, sandbox_type: str | None = None, env_state_type: str | None = None,
                      env_state_instance_id: str | None = None, *, attribution: Optional[Attribution] = None,
-                     env_params: Optional[dict] = None, tool_prefix: str = "") -> DeployedEnv:
-        """With ``tool_prefix``, its driver serves its tools under it, as a multi env's computers serve theirs."""
+                     env_params: Optional[dict] = None, tool_prefix: str = "", reach: str = "") -> DeployedEnv:
+        """With ``tool_prefix``, its driver serves its tools under it, and with ``reach``, a network that restricts its
+        egress allows that URL's host too: what a multi env gives each of its computers."""
         return await deploy_through_provider(
             self, environment_name=self.environment_name, ttl_seconds=ttl_seconds, sandbox_type=sandbox_type,
             then=self._give_tools, disk_size_gb=disk_size_gb, gateway_mode=gateway_mode, cpu=cpu, memory_mb=memory_mb,
             env_state_type=env_state_type, env_state_instance_id=env_state_instance_id, attribution=attribution,
-            env_params=env_params, tool_prefix=tool_prefix)
+            env_params=env_params, tool_prefix=tool_prefix, reach=reach)
 
     async def run_env_params(self, env_params: Optional[dict], deployed_envs: list[DeployedEnv]) -> Optional[dict]:
         """With ``site_routing`` and no ``sites``, ``env_params`` naming as its sites the websites the run deployed

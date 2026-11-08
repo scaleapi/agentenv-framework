@@ -215,7 +215,7 @@ def _website(name, toml=""):
     ({**_mcp("x"), "envs/x/env.toml": 'image = { dockerfile = "Dockerfile", build_args = { A = "1" } }\n'},
      "envs/x: image: an image built from this folder takes only dockerfile, not build_args"),
     ({"envs/x/env.toml": 'type = "multi"\nname = "suite"\n'},
-     "envs/x: env.toml: a multi env needs at least one env in mcp_server_envs or website_envs"),
+     "envs/x: env.toml: a multi env needs at least one env in mcp_server_envs, website_envs or computer_envs"),
     ({**_mcp("crm"), "envs/x/env.toml": 'type = "multi"\nmcp_server_envs = ["crm"]\nname = "my suite"\n'},
      "envs/x: env.toml: name must be non-empty with no whitespace, not 'my suite'"),
     ({**_website("shop"), "envs/x/env.toml": 'type = "multi"\nmcp_server_envs = ["shop"]\n'},
