@@ -69,7 +69,8 @@ COMPACT_TIMEOUT_S = 1800
 #: How often an install looks for setup's end, a compose for the base's ssh, and a shutdown for the guest's.
 INSTALL_POLL_S, BOOT_POLL_S, SHUTDOWN_POLL_S = 15, 5, 2
 #: How many times a compose tries a layer's download, and how long it waits between, as the base's setup does: a
-#: server's errors can last minutes, as GitHub's release downloads' 504s have.
+#: server's errors can last minutes, as GitHub's release downloads' 504s have. A client error, 4xx, but a timeout or
+#: a rate limit, fails at once, as no retry mends a wrong URL.
 FETCH_TRIES, FETCH_PAUSE_S = 30, 10
 CPUS, MEMORY_MB = 4, 8192
 #: What every service runs with: Python reading and writing files as UTF-8, as on Linux, not in Windows' code page.
@@ -558,6 +559,8 @@ $g = (Get-CimInstance SoftwareLicensingProduct -Filter 'PartialProductKey IS NOT
 _CHECKED = ("function Checked([scriptblock]$Run) { & $Run; if ($LASTEXITCODE) { throw \"provision: $Run exited "
             "$LASTEXITCODE\" } }")
 _FETCH = ("function Fetch([string]$Url, [string]$Sha256, [string]$To) { for ($try = 1; ; $try++) { try { "
-          "Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $To; break } catch { if ($try -ge "
-          f"{FETCH_TRIES}) {{ throw }}; Start-Sleep {FETCH_PAUSE_S} }} }}; $got = (Get-FileHash -Algorithm SHA256 $To)"
-          ".Hash.ToLower(); if ($got -ne $Sha256) { throw \"provision: $Url came with sha256 $got, not $Sha256\" } }")
+          "Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $To; break } catch { "
+          "$status = [int]$_.Exception.Response.StatusCode; "
+          f"if ($try -ge {FETCH_TRIES} -or ($status -ge 400 -and $status -lt 500 -and $status -notin 408, 429)) "
+          f"{{ throw }}; Start-Sleep {FETCH_PAUSE_S} }} }}; $got = (Get-FileHash -Algorithm SHA256 $To).Hash.ToLower(); "
+          "if ($got -ne $Sha256) { throw \"provision: $Url came with sha256 $got, not $Sha256\" } }")
