@@ -452,7 +452,9 @@ class SiteProxy:
                                          "computer\n", FAILED))
             return False
         if scheme == "http" and site.tls(split_host(host).lower()):
-            location = f"https://{split_host(host)}{target if target.startswith('/') else urlsplit(target).path}"
+            parts = urlsplit(target)
+            path = target if target.startswith("/") else urlunsplit(("", "", parts.path or "/", parts.query, ""))
+            location = f"https://{split_host(host)}{path}"
             writer.write(simple_response("308 Permanent Redirect", f"{location}\n", (("Location", location),)))
             return False
         upgrade = header(headers, "upgrade") if "upgrade" in tokens(headers, "connection") else None

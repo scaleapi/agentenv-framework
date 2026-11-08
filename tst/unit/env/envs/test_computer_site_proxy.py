@@ -341,13 +341,13 @@ async def test_the_forward_port_serves_a_localhost_name_named_by_its_url_and_sen
         async with _forward_port(config) as port:
             local = await _exchange(port, b"GET http://notes.localhost/a?b=1 HTTP/1.1\r\nHost: notes.localhost\r\n\r\n")
             local[3][1].close()
-            real = await _exchange(port, b"GET http://shop.test/cart HTTP/1.1\r\nHost: shop.test\r\n\r\n")
+            real = await _exchange(port, b"GET http://shop.test/cart?q=book&n=2 HTTP/1.1\r\nHost: shop.test\r\n\r\n")
             real[3][1].close()
 
     assert (local[0], local[2]) == ("HTTP/1.1 200 OK", b"hello")
     assert upstream.requests[0][0] == "GET /website/notes/a?b=1 HTTP/1.1"
     assert upstream.requests[0][1]["x-forwarded-proto"] == "http" and len(upstream.requests) == 1
-    assert (real[0], real[1]["location"]) == ("HTTP/1.1 308 Permanent Redirect", "https://shop.test/cart")
+    assert (real[0], real[1]["location"]) == ("HTTP/1.1 308 Permanent Redirect", "https://shop.test/cart?q=book&n=2")
 
 
 @pytest.mark.asyncio

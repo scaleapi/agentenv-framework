@@ -48,6 +48,7 @@ from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.env import Env
 from agent_env.env.envs.computer.utils import inside
 from agent_env.env.store import get_env_store
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
 from agent_env.store.routing import namespace_routing
 from agent_env.task import Task
 from agent_env.task.teardown import teardown_run
@@ -538,12 +539,9 @@ async def _through_port(deployed, url: str) -> str:
     return done["stdout"].strip()
 
 
-def _routing_container() -> str:
-    """The container whose computer runs the shared site proxy, found from this machine's Docker."""
-    names = subprocess.run(["docker", "ps", "--format", "{{.Names}}"], capture_output=True, text=True,
-                           check=True).stdout.split()
-    return next(name for name in names if subprocess.run(
-        ["docker", "exec", name, "pgrep", "-f", "[s]ite_proxy.py keep"], capture_output=True).returncode == 0)
+async def _container_of(deployed) -> str:
+    """The Docker container ``deployed``'s computer runs in, on this machine's local provider."""
+    return (await LocalSandboxProvider().get_sandbox(deployed.sandbox_id)).container_name
 
 
 async def _serve_pid(deployed) -> str:
@@ -570,10 +568,10 @@ async def test_routing_sites_it_goes_out_only_through_the_forward_port_which_the
             tabs = await tabs_of(deployed)
             named = (await inside.run(deployed, ["sh", "-c", "echo $AGENTENV_SITE_PROXY"], timeout_s=30))["stdout"]
             pages = {url: await _through_port(deployed, url) for url in (
-                "https://shop.test/alpha", "http://notes.localhost/bravo", "http://shop.test/charlie",
+                "https://shop.test/alpha", "http://notes.localhost/bravo", "http://shop.test/charlie?x=1",
                 "https://shop.test/events", "https://example.com/", "http://127.0.0.1:18765/",
                 "https://127.0.0.1:18765/")}
-            container = _routing_container()
+            container = await _container_of(deployed)
             logged = _as_root(container, "cat /etc/agentenv/sites/site-proxy.log")
             serving = await _serve_pid(deployed)
             stopped = await inside.run(deployed, ["pkill", "-f", "[s]ite_proxy.py serve"], timeout_s=30)
@@ -597,7 +595,7 @@ async def test_routing_sites_it_goes_out_only_through_the_forward_port_which_the
     assert pages["https://shop.test/alpha"].startswith("200 ") and pages["https://shop.test/alpha"].endswith(
         "<title>alpha</title>"), pages
     assert pages["http://notes.localhost/bravo"].endswith("<title>bravo</title>"), pages
-    assert pages["http://shop.test/charlie"].endswith("<title>charlie</title>"), pages
+    assert pages["http://shop.test/charlie?x=1"].endswith("<title>charlie?x=1</title>"), pages
     status, seconds, line = pages["https://shop.test/events"].split(" ", 2)
     assert (status, line) == ("200", "data: first") and int(seconds) < 15, pages
     assert all(pages[url].startswith("error") and "403" in pages[url] for url in (
