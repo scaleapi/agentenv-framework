@@ -58,11 +58,36 @@ _COMPUTER_RUN_DIR = ".agentenv/run_code"
 _RUNNER_SLACK_S = 10
 # What a POSIX extended regular expression, as `pkill -f` reads one, gives a meaning to outside brackets.
 _ERE_SPECIAL = re.compile(r"[.\[\\()*+?{|^$]")
-# Inside a Windows computer, which has no POSIX tools: what ends the processes whose command line holds a path (the
-# PowerShell running it aside), removes a folder, and sizes a file, as pkill -f, rm -rf and wc -c do elsewhere.
-_WIN_END = ("Get-CimInstance Win32_Process | Where-Object {{ $_.ProcessId -ne $PID -and $_.CommandLine -and "
-            "$_.CommandLine.Contains('{}') }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force "
-            "-ErrorAction SilentlyContinue; Wait-Process -Id $_.ProcessId -Timeout 10 -ErrorAction SilentlyContinue }}")
+# Inside a Windows computer, which has no POSIX tools: Python programs, as a shell started in the user's session reads
+# as an agent leaving the GUI, that end the processes whose command line holds argv[1], this one and its parent aside,
+# remove a folder, and size a file, as pkill -f, rm -rf and wc -c do elsewhere.
+_WIN_END = """
+import ctypes, os, sys
+from ctypes import wintypes as w
+kernel32, ntdll, psapi = ctypes.WinDLL("kernel32"), ctypes.WinDLL("ntdll"), ctypes.WinDLL("psapi")
+kernel32.OpenProcess.restype = w.HANDLE
+kernel32.OpenProcess.argtypes = (w.DWORD, w.BOOL, w.DWORD)
+kernel32.TerminateProcess.argtypes = (w.HANDLE, w.UINT)
+kernel32.WaitForSingleObject.argtypes = (w.HANDLE, w.DWORD)
+kernel32.CloseHandle.argtypes = (w.HANDLE,)
+ntdll.NtQueryInformationProcess.argtypes = (w.HANDLE, ctypes.c_int, ctypes.c_void_p, w.ULONG, ctypes.POINTER(w.ULONG))
+pids, size = (w.DWORD * 65536)(), w.DWORD()
+psapi.EnumProcesses(pids, ctypes.sizeof(pids), ctypes.byref(size))
+for pid in set(pids[:size.value // 4]) - {0, os.getpid(), os.getppid()}:
+    handle = kernel32.OpenProcess(0x101001, False, pid)
+    if not handle:
+        continue
+    need = w.ULONG()
+    ntdll.NtQueryInformationProcess(handle, 60, None, 0, ctypes.byref(need))
+    line = ctypes.create_string_buffer(need.value)
+    if need.value and ntdll.NtQueryInformationProcess(handle, 60, line, need, ctypes.byref(need)) == 0:
+        text = ctypes.wstring_at(ctypes.c_void_p.from_buffer(line, ctypes.sizeof(ctypes.c_void_p)).value,
+                                 ctypes.c_ushort.from_buffer(line).value // 2)
+        if sys.argv[1] in text:
+            kernel32.TerminateProcess(handle, 1)
+            kernel32.WaitForSingleObject(handle, 10000)
+    kernel32.CloseHandle(handle)
+"""
 _WIN_REMOVE = ("python3", "-c", "import os,shutil,sys;os.path.isdir(sys.argv[1]) and shutil.rmtree(sys.argv[1])")
 _WIN_SIZE = ("python3", "-c", "import os,sys;print(os.path.getsize(sys.argv[1]))")
 
@@ -669,8 +694,7 @@ class _DriverTarget:
         """End whatever still runs from the folder, as a run whose driver died leaves going, then remove it."""
         runner = f"{path}/runner.py"
         if self.windows:
-            await self.run("powershell", "-NoProfile", "-NonInteractive", "-Command",
-                           _WIN_END.format(runner.replace("'", "''")))
+            await self.run("python3", "-c", _WIN_END, runner)
         else:
             await self.run("pkill", "-f", _ERE_SPECIAL.sub(r"\\\g<0>", runner))
         await self.remove_dir(path)

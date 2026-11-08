@@ -1385,9 +1385,13 @@ async def test_a_run_whose_call_drops_fails_naming_why_and_the_next_one_runs_afr
 
 
 @pytest.mark.asyncio
-async def test_a_script_for_a_windows_computer_is_staged_ended_sized_and_removed_with_windows_own_tools(computer):
+async def test_a_script_for_a_windows_computer_is_staged_ended_sized_and_removed_with_python_alone(computer,
+                                                                                                  monkeypatch):
     card = {**CARD, "capabilities": {**CARD["capabilities"], "extensions": [
         *CARD["capabilities"]["extensions"], {"uri": COMPUTER, "params": {"platform": {"os": "windows"}}}]}}
+    monkeypatch.setattr(computer, "_run", lambda params: {"exit_code": 0, "stdout": "", "stderr": "", "truncated": False,
+                                                          "timed_out": False}
+                        if "EnumProcesses" in params["argv"][2] else Computer._run(computer, params))
 
     ctx = await _run_in(computer, b"def run(inp):\n    return {'ok': True}\n", deployed=computer.deployed(card=card),
                         id="arm")
@@ -1395,9 +1399,8 @@ async def test_a_script_for_a_windows_computer_is_staged_ended_sized_and_removed
     assert ctx.metadata["script_results"]["arm"] == {"ok": True}
     run_dir = ".agentenv/run_code/arm"
     argvs = [params["argv"] for kind, params, *_ in computer.calls if kind == "run"]
-    assert [argv[0] for argv in argvs] == ["powershell", "python3", "python3", "python3", "python3"]
-    assert argvs[0][:4] == ["powershell", "-NoProfile", "-NonInteractive", "-Command"]
-    assert f"$_.CommandLine.Contains('{run_dir}/runner.py')" in argvs[0][4] and "$_.ProcessId -ne $PID" in argvs[0][4]
+    assert {argv[0] for argv in argvs} == {"python3"} and len(argvs) == 5
+    assert argvs[0][1] == "-c" and "NtQueryInformationProcess" in argvs[0][2] and argvs[0][3] == f"{run_dir}/runner.py"
     assert argvs[1] == argvs[4] and argvs[1][-1] == run_dir and "shutil.rmtree" in argvs[1][2]
     assert argvs[2][1:] == [f"{run_dir}/runner.py", run_dir, "run", "script.py", "600"]
     assert argvs[3][-1] == f"{run_dir}/output.json" and "getsize" in argvs[3][2]
