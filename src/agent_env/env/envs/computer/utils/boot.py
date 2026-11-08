@@ -28,14 +28,12 @@ if TYPE_CHECKING:
     from agent_env.artifact.artifacts.computer import ComputerArtifact
     from agent_env.attribution import Attribution
     from agent_env.env.envs.computer.app_env import ComputerAppEnv
+    from agent_env.env.envs.computer.env import ComputerEnv
     from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, Sandbox
     from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
 
 #: How long a computer may take from its container starting to its driver saying it's ready.
 READY_TIMEOUT_S = 180.0
-#: How long a Windows computer may take: its first boot from a composed disk signs its session user in, and a provider
-#: that carries its disk compressed expands the base first.
-WINDOWS_READY_TIMEOUT_S = 600.0
 #: How much longer than the slowest starting app's own readiness timeout a computer may take, for the rest of it first.
 APP_READY_MARGIN_S = 30.0
 #: How long one computer-ready status may take: the driver's own checks, then every app's server at once.
@@ -194,12 +192,14 @@ async def discard(sandbox: Sandbox) -> None:
             await asyncio.to_thread(remove_local_work_dir, sandbox.sandbox_id)
 
 
-def ready_timeout(apps: list[ComputerAppEnv], os_type: str) -> float:
-    """How long a computer of ``os_type`` and ``apps`` may take to be ready: ``READY_TIMEOUT_S``, Windows'
-    ``WINDOWS_READY_TIMEOUT_S``, or longer when an app that starts with it there gives itself longer."""
-    least = WINDOWS_READY_TIMEOUT_S if os_type == "windows" else READY_TIMEOUT_S
-    return max([least, *(launch.ready.timeout_s + APP_READY_MARGIN_S for app in apps
-                                   if (launch := app.launch(os_type)) and launch.at == "boot" and launch.ready)])
+def ready_timeout(env: ComputerEnv, form: Optional[str]) -> float:
+    """How long ``env``'s computer booted in ``form`` may take to be ready: as long as its disk form says
+    (``ready_timeout_s``) when it boots that, else ``READY_TIMEOUT_S``, or longer when an app that starts with it there
+    gives itself longer."""
+    disk, os_type = env.computer.forms.disk, env.computer.os.type
+    least = (disk.ready_timeout_s if form == "disk" and disk is not None else None) or READY_TIMEOUT_S
+    return max([least, *(launch.ready.timeout_s + APP_READY_MARGIN_S for app in env.composed_apps()
+                         if (launch := app.launch(os_type)) and launch.at == "boot" and launch.ready)])
 
 
 async def ready(url: str, timeout: float, token: Optional[str] = None, *, answering: bool = False) -> dict:

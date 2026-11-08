@@ -172,11 +172,12 @@ pulls it. Gate 3 probes it at full. At the session user's sign-in,
 `agentenv-session`, run windowless by `pythonw`, reads the deploy's environment from the NoCloud seed, which the
 launcher attaches as a removable USB drive, since Windows mounts a FAT filesystem with no partition table on removable
 media alone, and starts each layer's services in that session, again whenever one exits. A Windows computer boots
-with 4 vCPUs and 8 GB, on local Docker with KVM and on `modal_vm`, and may take 10 minutes to be ready, for its first
-sign-in and, on `modal_vm`, its base expanded first; it has computer-exec and data/add, through the protocol's Windows
-defaults, so the probe runs its fixture there as on Linux, with Python one-liners for the commands it would give a
-shell. On `modal_vm` it runs in your own Modal workspace, under the evaluation's terms or a licence of your own;
-whether they allow it there is yours to check. A Windows computer composes its driver alone for now, no app.
+with 4 vCPUs and 8 GB, on local Docker with KVM and on `modal_vm`, and may take 10 minutes to be ready, as its disk
+form's `ready_timeout_s` says, for its first sign-in and, on `modal_vm`, its base expanded first; it has computer-exec
+and data/add, through the protocol's Windows defaults, so the probe runs its fixture there as on Linux, with Python
+one-liners for the commands it would give a shell. On `modal_vm` it runs in your own Modal workspace, under the
+evaluation's terms or a licence of your own; whether they allow it there is yours to check. A Windows computer composes
+its driver alone for now, no app.
 
 This bundle has no tasks of its own: other bundles pull its computers by alias, and `agent-env run computers` has
 nothing to run.

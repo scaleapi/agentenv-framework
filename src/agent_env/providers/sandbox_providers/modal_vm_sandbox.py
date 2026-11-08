@@ -16,8 +16,9 @@ Only the pure, stateless helpers are reused from modal_sandbox (no class couplin
 
 With a computer's disk form as its image, ``create_vm`` makes a VM sandbox with nested virtualization whose own image
 is the QEMU launcher, with no Docker in it, booting the disk mounted at create from its export on this machine
-(``local_docker.disk.exported_disk``), with a thin disk's base and guest file beside it; ``reset_vm`` boots it afresh in the same sandbox. ``[sandbox.providers.modal_vm]``
-takes ``region``, where every sandbox it makes goes, and ``idle_timeout``, in seconds, after which an idle one ends.
+(``local_docker.disk.exported_disk``), with a thin disk's base and guest file beside it; ``reset_vm`` boots it
+afresh in the same sandbox. ``[sandbox.providers.modal_vm]`` takes ``region``, where every sandbox it makes goes, and
+``idle_timeout``, in seconds, after which an idle one ends.
 """
 
 from __future__ import annotations
@@ -41,6 +42,7 @@ from agent_env.providers.sandbox_providers.modal_sandbox import (
     _tunnel_url,
     _modal_network_kwargs,
 )
+from agent_env.artifact.artifacts.computer import DISK_BASE_FILE, DISK_FILE, DISK_GUEST_FILE
 from agent_env.attribution import Attribution
 from agent_env.config import get_config
 from agent_env.env.published_images import LAUNCHER_IMAGE, published_digest
@@ -113,9 +115,10 @@ _MAIN_SCRIPT = r'''
 while true; do sleep 3600; done
 '''
 _KEEPALIVE_CMD = ("sh", "-c", _MAIN_SCRIPT)
-#: Where a computer's disk is mounted on the launcher's image, compressed; the launcher expands it onto the sandbox's disk.
-#: A thin disk's base is mounted beside it, compressed too, and expanded beside it; its guest file, beside both.
-_MOUNTED_DISK, _MOUNTED_BASE, _MOUNTED_GUEST = "/disk/disk.img.zst", "/disk/base.img.zst", "/disk/guest"
+#: Where a computer's disk, compressed, a thin disk's base, compressed too, and its guest file are mounted on the
+#: launcher's image: where a disk's own image holds them, as the launcher reads the guest file beside the disk. It
+#: expands the disk and the base onto the sandbox's disk.
+_MOUNTED_DISK, _MOUNTED_BASE, _MOUNTED_GUEST = f"/{DISK_FILE}.zst", f"/{DISK_BASE_FILE}.zst", f"/{DISK_GUEST_FILE}"
 #: The platform of a disk's image in the image store, a Windows disk's too: its guest file names the OS it boots.
 _DISK_IMAGE_PLATFORM = "linux/amd64"
 #: The memory a disk's sandbox has beyond its VM's: QEMU's own, and the sandbox's.

@@ -6,6 +6,7 @@ the env's computer is a disk of the base's form. A Windows base is amd64, disk-o
 import json
 import threading
 import time
+import tomllib
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PureWindowsPath
@@ -21,7 +22,7 @@ from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniv
 from agent_env.env.env import Env
 from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
 from agent_env.env.envs.computer.env import ComputerEnv
-from agent_env.env.envs.computer.utils import composer, gate, windows_disk
+from agent_env.env.envs.computer.utils import boot, composer, gate, windows_disk
 from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.envs.computer.utils.install import WindowsInstall, WindowsService
 from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
@@ -313,6 +314,15 @@ def test_a_machine_without_the_base_takes_the_image_stores_unless_its_evaluation
 
     assert base.pinned == pinned and base.image == f"agentenv-windows-base:{key[7:23]}" and fetched == []
     assert (base.expires - datetime.now(timezone.utc)).days == 59
+
+
+def test_a_windows_computer_is_waited_on_as_long_as_its_disk_form_says(local_stores, cli_routing):
+    """The shipped base says 10 minutes; a base that says nothing gets agent-env's default."""
+    shipped = tomllib.loads((windows_disk.RECIPE.parents[1] / "artifacts" / "windows-11" / "artifact.toml").read_text())
+    declared = _base(forms={"disk": shipped["forms"]["disk"]})
+
+    assert boot.ready_timeout(SimpleNamespace(computer=declared, composed_apps=list), "disk") == 600
+    assert boot.ready_timeout(SimpleNamespace(computer=_base(), composed_apps=list), "disk") == boot.READY_TIMEOUT_S
 
 
 def test_a_windows_computers_display_is_1920x1080_for_now(local_stores, cli_routing):
