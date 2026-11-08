@@ -32,8 +32,8 @@ sys.exit(int(command[0]))
 class FakeWin32:
     """Jobs by their helper's pid, each a list of the pids in it, the helper's first; the session's windows; and every
     call that acts, recorded. An app whose window is asked to close ``closes`` or doesn't, a process ``spawns`` one
-    into its job just before it's suspended, and a job ended by force holds its processes for ``lingers`` more looks;
-    one that holds none is gone, as its handles close."""
+    into its job just before it's suspended, and a job ended by force holds its processes for ``lingers`` more looks,
+    then none, though it's there until its handles close."""
 
     def __init__(self, jobs: dict[int, list[int]], windows: list[Window], closes: bool = True,
                  spawns: dict[int, int] | None = None, lingers: int = 0) -> None:
@@ -42,7 +42,7 @@ class FakeWin32:
         self.posted, self.terminated, self.suspended, self.resumed, self.open = [], [], [], [], 0
 
     def open_job(self, helper):
-        if not self.jobs.get(helper):
+        if helper not in self.jobs:
             return None
         self.open += 1
         return helper
