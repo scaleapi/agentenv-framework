@@ -1,13 +1,12 @@
-"""A stand-in for the shared site proxy in this base, for a browser computer that routes no sites: it forwards every
-request the browser sends it, absolute-form HTTP and CONNECT tunnels alike, to wherever it names, refusing nothing, on
-127.0.0.1:3129. A computer routing sites names the shared site proxy's forward port (3128) to the browser instead."""
+"""A stand-in for the shared site proxy in this base: it forwards every request the browser sends it, absolute-form
+HTTP and CONNECT tunnels alike, to wherever it names, refusing nothing, on 127.0.0.1:3128."""
 import http.server
 import select
 import socket
 import socketserver
 import urllib.parse
 
-PORT = 3129
+PORT = 3128
 IDLE_S = 60
 HOP = {"connection", "keep-alive", "proxy-connection", "proxy-authorization"}
 

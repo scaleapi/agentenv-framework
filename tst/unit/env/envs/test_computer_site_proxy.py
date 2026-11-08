@@ -693,7 +693,7 @@ def test_install_writes_the_sites_files_names_and_trust_then_starts_the_proxy_on
     assert [(s.name, s.domains, bool(s.cert)) for s in config.sites] == [
         ("notes", ["notes.test"], True), ("chat", ["*.chat.test"], True), ("bare", ["bare.localhost"], False)]
     assert (config.dns_port, config.nameservers) == (53, ["127.0.0.11"])
-    assert config.proxy_port == sites.FORWARD_PROXY_PORT == 3128
+    assert config.proxy_port == sites.FORWARD_PROXY_PORT == 3129
     assert [(folder / name).stat().st_mode & 0o777 for name in ("notes.key", "config.json")] == [0o600, 0o600]
     assert folder.stat().st_mode & 0o777 == 0o755
     assert "key_pem" not in (folder / "serve.json").read_text()

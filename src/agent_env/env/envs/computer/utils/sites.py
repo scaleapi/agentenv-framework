@@ -56,9 +56,9 @@ CONFIG = FOLDER / "config.json"
 #: By the OS type of each computer site routing reaches, the variables naming the trust files agentenv adds, which a
 #: computer routing sites boots with.
 TRUST_ENVIRONMENTS = {"linux": dict(LOCAL_TRUST_ENV)}
-#: The site proxy's forward port, a browser alone's only route out when its computer routes sites, and the display of
-#: the computer a browser runs alone on.
-FORWARD_PROXY_PORT = 3128
+#: The site proxy's forward port, a browser alone's only route out when its computer routes sites (the base's own
+#: stand-in, for a computer that routes none, keeps 3128), and the display of the computer a browser runs alone on.
+FORWARD_PROXY_PORT = 3129
 FORWARD_PROXY = f"http://127.0.0.1:{FORWARD_PROXY_PORT}"
 ALONE_DISPLAY = "none"
 LOG = FOLDER / "site-proxy.log"

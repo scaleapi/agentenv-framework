@@ -203,7 +203,7 @@ async def test_its_tools_see_and_drive_the_page_that_is_its_screen(browser_compu
     assert clicked["c"] == 1 and doubled["d"] == 1 and typed["v"] == "Hello, World!" and replaced["v"] == "x"
     assert "C-a" in replaced["k"] and "Enter" in entered["k"] and scrolled["y"] >= 300
     assert after.getpixel((200, 150)) != (255, 0, 0)
-    assert json.loads(listening) == [3129, 18765] and x_server.strip() == "False"
+    assert json.loads(listening) == [3128, 18765] and x_server.strip() == "False"
     assert "--headless=new" in command and "--window-size=1280,800" in command
     assert not report.failed
 
@@ -536,7 +536,7 @@ except Exception as e:
 
 
 async def _through_port(deployed, url: str) -> str:
-    done = await inside.run(deployed, ["python3", "-c", THROUGH_PROXY, url, "http://127.0.0.1:3128"], timeout_s=60)
+    done = await inside.run(deployed, ["python3", "-c", THROUGH_PROXY, url, "http://127.0.0.1:3129"], timeout_s=60)
     return done["stdout"].strip()
 
 
@@ -599,7 +599,7 @@ async def test_routing_sites_it_goes_out_only_through_the_forward_port_which_the
         ("https://shop.test/", "shop", "loaded"), ("http://notes.localhost/", "notes", "loaded")], start_tabs
     assert [(tab["url"], tab["title"]) for tab in tabs] == [("https://shop.test/landed", "landed"),
                                                             ("http://notes.localhost/", "notes")], tabs
-    assert named.strip() == "http://127.0.0.1:3128"
+    assert named.strip() == "http://127.0.0.1:3129"
     assert pages["https://shop.test/alpha"].startswith("200 ") and pages["https://shop.test/alpha"].endswith(
         "<title>alpha</title>"), pages
     assert pages["http://notes.localhost/bravo"].endswith("<title>bravo</title>"), pages
@@ -614,7 +614,7 @@ async def test_routing_sites_it_goes_out_only_through_the_forward_port_which_the
     assert back.startswith("200 ") and restarted and restarted != serving, (back, restarted)
     assert after_reset.startswith("200 ") and after_reset.endswith("<title>alpha</title>"), after_reset
     assert refused_after_reset.startswith("error") and "403" in refused_after_reset, refused_after_reset
-    assert named_after_reset.strip() == "http://127.0.0.1:3128"
+    assert named_after_reset.strip() == "http://127.0.0.1:3129"
     assert [(tab["url"], tab["title"]) for tab in tabs_after_reset] == [("https://shop.test/landed", "landed"),
                                                                         ("http://notes.localhost/", "notes")]
     assert not report.failed

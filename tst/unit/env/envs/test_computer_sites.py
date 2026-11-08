@@ -213,7 +213,7 @@ async def test_route_gives_a_browser_alone_the_forward_port_and_a_computer_with_
                           valid_for=timedelta(hours=1), label="desktop", os_type="linux", display=display)
 
     configs = [json.loads(sandbox.written["/etc/agentenv/sites/config.json"]) for sandbox in (alone, desktop)]
-    assert [config.get("proxy_port") for config in configs] == [3128, None]
+    assert [config.get("proxy_port") for config in configs] == [3129, None]
 
 
 @pytest.mark.asyncio
@@ -585,7 +585,7 @@ def test_the_trust_a_routing_linux_computer_boots_with_is_the_local_providers_so
 
 
 def test_a_browser_alone_routing_sites_is_named_the_forward_port_and_a_computer_with_a_display_is_named_none():
-    assert sites.browser_environment("none") == {"AGENTENV_SITE_PROXY": "http://127.0.0.1:3128"}
+    assert sites.browser_environment("none") == {"AGENTENV_SITE_PROXY": "http://127.0.0.1:3129"}
     assert sites.browser_environment("x11") == {}
 
 
