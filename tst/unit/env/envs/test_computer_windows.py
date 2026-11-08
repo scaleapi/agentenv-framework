@@ -4,6 +4,9 @@ thin layer on the base, under a tag of its key, which a compose of the same inpu
 the env's computer is a disk of the base's form. A Windows base is amd64, disk-only and started by agentenv-session."""
 
 import json
+import threading
+import time
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PureWindowsPath
 
@@ -43,37 +46,49 @@ class FakeLinux(SandboxProvider):
         return self.platforms
 
 
+class FakeRegistry:
+    """The env's image store as Windows disks are kept in it: what it serves, by tag, pinned."""
+
+    def __init__(self):
+        self.held = {}
+
+    def served(self, tag):
+        return self.held.get(tag)
+
+    def push(self, local, tag):
+        self.held[tag] = f"registry.test/agentenv-computers:{tag}@sha256:{len(self.held):064x}"
+        return self.held[tag]
+
+
 class FakeDocker:
-    """windows_disk on this machine's Docker: bases installed and disks composed, as images it holds."""
+    """windows_disk on one machine's Docker: bases installed and disks composed and pushed to the image store."""
 
-    def __init__(self, tmp_path: Path):
-        self.tmp, self.images, self.installs, self.composed = tmp_path, set(), [], []
+    def __init__(self, tmp_path: Path, registry: FakeRegistry):
+        self.tmp, self.registry, self.bases, self.installs, self.composed = tmp_path, registry, {}, [], []
 
-    def base(self, key, iso, disk_gb, user, say):
-        image = f"agentenv-windows-base:{key[7:23]}"
-        if image not in self.images:
-            self.installs.append((key, iso, disk_gb, user))
-            self.images.add(image)
-        return windows_disk.Base(image, self.tmp / "keys", datetime.now(timezone.utc) + timedelta(days=89))
+    def base(self, key, iso, disk_gb, user, say, registry):
+        if key not in self.bases:
+            self.installs.append((key, iso(), disk_gb, user))
+            self.bases[key] = datetime.now(timezone.utc) + timedelta(days=89)
+        return windows_disk.Base(f"agentenv-windows-base:{key[7:23]}", self.tmp / "keys", self.bases[key])
 
-    def compose(self, base, build, image, labels, say):
+    def compose(self, base, build, key, labels, say, registry):
         self.composed.append((base.image, (build / "provision.ps1").read_bytes().decode(),
                               sorted(p.relative_to(build).as_posix() for p in build.rglob("*") if p.is_file()), labels))
-        self.images.add(image)
+        return registry.push(*windows_disk.disk_names(key))
 
 
 @pytest.fixture
 def docker(local_stores, cli_routing, monkeypatch, tmp_path):
-    fake = FakeDocker(tmp_path)
+    fake = FakeDocker(tmp_path, FakeRegistry())
     iso = tmp_path / "windows.iso"
     iso.write_bytes(b"iso")
     monkeypatch.setattr(windows_disk, "media", lambda say: iso)
-    monkeypatch.setattr(windows_disk, "sha256", lambda path: "ab" * 32)
     monkeypatch.setattr(windows_disk, "base", fake.base)
     monkeypatch.setattr(windows_disk, "compose", fake.compose)
-    monkeypatch.setattr(windows_disk, "held", lambda image: image in fake.images)
-    monkeypatch.setattr(windows_disk, "image_id", lambda image: f"sha256:{image}")
-    monkeypatch.setattr(windows_disk, "remove", fake.images.discard)
+    monkeypatch.setattr(windows_disk, "Registry", lambda store, repository: fake.registry)
+    monkeypatch.setattr(composer, "get_config", lambda: SimpleNamespace(
+        get_image_store_for=lambda stored_id: SimpleNamespace(ensure_repository=lambda repository: None)))
     monkeypatch.setattr(composer, "_probed", lambda env, driver, form, arch, result, provider, progress: {
         **result, "status": "ready"})
     return fake
@@ -118,7 +133,8 @@ def test_a_windows_env_composes_a_thin_disk_on_its_base_here_the_driver_installe
     env = _put(_driver(tmp_path / "desk"), FakeLinux(), theme="dark")
 
     built = env.metadata["composed"]["disk"]["amd64"]
-    assert built["status"] == "ready" and built["image"].startswith("agentenv-windows:") and not built["reused"]
+    assert built["status"] == "ready" and not built["reused"]
+    assert built["image"] == docker.registry.held[built["key"].removeprefix("sha256:")]
     (installed,) = docker.installs
     assert installed[1:] == (tmp_path / "windows.iso", 64, "user")
     ((base, script, files, labels),) = docker.composed
@@ -143,18 +159,16 @@ def test_a_windows_env_composes_a_thin_disk_on_its_base_here_the_driver_installe
     assert computer.forms.disk.image is None and env.metadata["computer"]["disks"] == {"amd64": built["image"]}
 
 
-def test_a_compose_of_the_same_inputs_reuses_the_disk_this_machine_holds_and_composes_one_it_lost(docker, tmp_path):
+def test_a_compose_of_the_same_inputs_reuses_the_disk_the_image_store_holds(docker, tmp_path):
     driver = _driver(tmp_path / "desk")
     first = _put(driver, FakeLinux())
     image = first.metadata["composed"]["disk"]["amd64"]["image"]
 
     again = _put(driver, FakeLinux())
-    assert again.metadata["composed"]["disk"]["amd64"]["reused"] and len(docker.composed) == 1
-    assert composer.pending(again, FakeLinux()) == []
 
-    docker.images.discard(image)
-    assert composer.pending(again, FakeLinux()) == [("disk", "amd64")]
-    assert len(docker.installs) == 1
+    built = again.metadata["composed"]["disk"]["amd64"]
+    assert built["reused"] and built["image"] == image and len(docker.composed) == 1 and len(docker.installs) == 1
+    assert composer.pending(again, FakeLinux()) == []
 
 
 def test_a_machine_that_boots_no_windows_disk_composes_none(docker, tmp_path):
@@ -216,6 +230,7 @@ def test_a_disk_whose_evaluation_nears_its_end_is_composed_again(docker, tmp_pat
 @pytest.mark.parametrize("days_left, installs", [(30, 0), (3, 1)])
 def test_a_base_is_reused_until_its_evaluation_nears_its_end_then_installed_afresh(monkeypatch, tmp_path, days_left,
                                                                                     installs):
+    """Either way the image store gets it, which a push that failed after an install, or another env's store, lacks."""
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     key = "sha256:" + "12" * 32
     keys = tmp_path / "agentenv" / "windows" / "bases" / key[7:23]
@@ -229,11 +244,75 @@ def test_a_base_is_reused_until_its_evaluation_nears_its_end_then_installed_afre
     monkeypatch.setattr(windows_disk, "_installed", lambda *args: installed.append(args) or {
         "grace_minutes": 90 * 24 * 60, "build": "26200.6584"})
     monkeypatch.setattr(windows_disk, "_pack", lambda folder, image, labels, base_image: None)
+    registry = FakeRegistry()
 
-    base = windows_disk.base(key, tmp_path / "windows.iso", 64, "user", lambda line: None)
+    base = windows_disk.base(key, lambda: tmp_path / "windows.iso", 64, "user", lambda line: None, registry)
 
     assert len(installed) == installs and base.image == f"agentenv-windows-base:{key[7:23]}"
     assert (base.expires - datetime.now(timezone.utc)).days == (days_left - 1 if not installs else 89)
+    assert list(registry.held) == [f"windows-base-{key[7:23]}"]
+
+
+def test_a_base_this_machine_holds_goes_to_an_image_store_lacking_it_once(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    key = "sha256:" + "56" * 32
+    keys = tmp_path / "agentenv" / "windows" / "bases" / key[7:23]
+    keys.mkdir(parents=True)
+    (keys / "id").write_text("key")
+    expires = datetime.now(timezone.utc) + timedelta(days=30)
+    monkeypatch.setattr(windows_disk, "present", lambda image: True)
+    monkeypatch.setattr(windows_disk, "_label", lambda image, name: expires.isoformat(timespec="seconds"))
+    registry, pushed = FakeRegistry(), []
+    push = registry.push
+    registry.push = lambda local, tag: pushed.append(local) or push(local, tag)
+
+    for _ in range(2):
+        windows_disk.base(key, lambda: tmp_path / "windows.iso", 64, "user", lambda line: None, registry)
+
+    assert pushed == [f"agentenv-windows-base:{key[7:23]}"]
+
+
+def test_composes_of_two_disks_on_a_base_the_store_holds_pull_it_and_take_its_key_once(monkeypatch, tmp_path):
+    """The second waits for the first's pull, then finds the base here."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    keys = tmp_path / "keys"
+    made, pulls = threading.Event(), []
+
+    def pull(pinned):
+        pulls.append(pinned)
+        time.sleep(0.2)
+
+    monkeypatch.setattr(windows_disk, "present", lambda image: made.is_set())
+    monkeypatch.setattr(windows_disk, "docker", lambda *args: None)
+    monkeypatch.setattr(windows_disk, "_take_admin_key", lambda image, at: (at.mkdir(), (at / "id").write_text("key"),
+                                                                            made.set()))
+    registry = SimpleNamespace(pull=pull)
+    base = windows_disk.Base("agentenv-windows-base:1", keys, datetime.now(timezone.utc), "registry.test/base@sha256:1")
+
+    composes = [threading.Thread(target=windows_disk._here, args=(base, registry, lambda line: None)) for _ in range(2)]
+    for compose in composes:
+        compose.start()
+    for compose in composes:
+        compose.join(10)
+
+    assert pulls == ["registry.test/base@sha256:1"] and (keys / "id").read_text() == "key"
+
+
+def test_a_machine_without_the_base_takes_the_image_stores_unless_its_evaluation_nears_its_end(monkeypatch, tmp_path):
+    """Found without the ISO, which only an install fetches; pulled only when a layer is composed on it."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    key = "sha256:" + "34" * 32
+    registry = FakeRegistry()
+    pinned = registry.push("agentenv-windows-base:x", f"windows-base-{key[7:23]}")
+    expires = datetime.now(timezone.utc) + timedelta(days=60)
+    registry.labels = lambda ref: {windows_disk.EXPIRES_LABEL: expires.isoformat(timespec="seconds")}
+    monkeypatch.setattr(windows_disk, "present", lambda image: False)
+    fetched = []
+
+    base = windows_disk.base(key, lambda: fetched.append("iso"), 64, "user", lambda line: None, registry)
+
+    assert base.pinned == pinned and base.image == f"agentenv-windows-base:{key[7:23]}" and fetched == []
+    assert (base.expires - datetime.now(timezone.utc)).days == 59
 
 
 def test_a_windows_computers_display_is_1920x1080_for_now(local_stores, cli_routing):

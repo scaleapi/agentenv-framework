@@ -54,7 +54,8 @@ from agent_env.providers.sandbox_providers.host_images import platform_tag
 from agent_env.store.ids import derive_id
 from agent_env.store.image_store.image_contents import image_config, labels
 from agent_env.store.image_store.oci_registry_credentials import names_registry
-from agent_env.store.image_store.registry_api import NoSuchImageError, pin_digest, write_index
+from agent_env.store.image_store.image_store import ImageStore
+from agent_env.store.image_store.registry_api import pin_digest, pin_if_served, write_index
 from agent_env.store.local_state import holding_locks
 from agent_env.utils.docker.build import DockerBuildError
 
@@ -176,7 +177,7 @@ def pending(env: ComputerEnv, sandbox_provider: SandboxProvider | None = None,
         if status == "unverified":
             return bool(boot.native_links(provider, arch, form, env.stored_id, env.computer.os.type))
         if form == "disk" and env.computer.os.type == "windows":
-            return not windows_disk.held(record["image"]) or windows_disk.expiring(record.get("expires"))
+            return windows_disk.expiring(record.get("expires"))
         if form != "vm_bundle":
             return False
         links = boot.native_links(provider, arch, form, env.stored_id)
@@ -354,11 +355,11 @@ def _composed_vm_bundle(env: ComputerEnv, base: ComputerArtifact, driver: Comput
 
 def _composed_windows_disk(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, arch: str,
                            provider: SandboxProvider, progress: _Progress) -> dict:
-    """The Windows disk of ``arch`` composed with this machine's Docker and KVM (``windows_disk``), which keeps it: its
-    base installed from Microsoft's media first unless held, then the driver installed over ssh as a layer on it and
-    packed under a tag of its key; or one of that key reused, held here already. Then probed at full (gate 3), and
-    removed when that fails, so no deploy here boots it. All of it holds a lock of its tag, which keeps two composes of
-    one key from breaking each other: the other waits, then reuses it."""
+    """The Windows disk of ``arch``: one of its key the env's image store holds, reused; else composed with this
+    machine's Docker and KVM (``windows_disk``), on its base, this machine's, the store's or installed from Microsoft's
+    media, the driver installed over ssh as a layer on it, packed and pushed to the store under its key, as Linux disks
+    are. Then probed at full (gate 3). All of it holds a lock of its key, which keeps two composes of one key on this
+    machine from breaking each other: the other waits, then reuses it."""
     pair = f"disk/{arch}"
     with (_attempting(env, "disk", arch) as attempt,
           tempfile.TemporaryDirectory(prefix="agentenv-compose-") as work):
@@ -387,33 +388,29 @@ def _composed_windows_disk(env: ComputerEnv, base: ComputerArtifact, driver: Com
             progress.say(f"{pair}: {line}")
 
         attempt.stage = "base"
-        iso = windows_disk.media(say)
+        registry = windows_disk.Registry(_image_store(env), REPOSITORY)
         disk_gb, user = base.forms.disk.min_disk_gb, base.session.user
-        made = windows_disk.base(_key(iso=windows_disk.sha256(iso), recipe=_digest(windows_disk.RECIPE),
-                                      disk_gb=disk_gb, user=user, form="windows-base", format=FORMAT),
-                                 iso, disk_gb, user, say)
+        made = windows_disk.base(_key(recipe=_digest(windows_disk.RECIPE), disk_gb=disk_gb, user=user,
+                                      form="windows-base", format=FORMAT),
+                                 lambda: windows_disk.media(say), disk_gb, user, say, registry)
         script = windows_disk.write(build, [part], settings, {"base": made.image, "layers": [part.folder]})
-        key = attempt.key = _key(base=windows_disk.image_id(made.image), provision=script, context=_digest(context),
+        expires = made.expires.isoformat(timespec="seconds")
+        key = attempt.key = _key(base=made.image, base_expires=expires, provision=script, context=_digest(context),
                                  build_settings=settings, form="disk", arch=arch, format=FORMAT)
-        image = f"agentenv-windows:{key[7:23]}"
         attempt.stage = "build"
-        with holding_locks([f"windows-disk:{image}"], lambda: progress.at(
-                pair, "waiting", f"waiting for the compose or probe of {image} under way on this machine")):
-            if windows_disk.held(image):
-                progress.at(pair, "reusing", "reusing the disk of the same key, composed on this machine earlier")
-                result = {"status": "unverified", "key": key, "image": image, "reused": True,
-                          "expires": made.expires.isoformat(timespec="seconds"), "built_at": now()}
+        with holding_locks([f"windows-disk:{key}"], lambda: progress.at(
+                pair, "waiting", "waiting for the compose of the same disk under way on this machine")):
+            if (pinned := registry.served(windows_disk.disk_names(key).tag)) is not None:
+                progress.at(pair, "reusing", "reusing the disk of the same key, composed earlier")
+                result = {"status": "unverified", "key": key, "image": pinned, "reused": True, "expires": expires,
+                          "built_at": now()}
             else:
                 progress.at(pair, "composing", "composing on this machine's Docker")
-                windows_disk.compose(made, build, image, {KEY_LABEL: key, windows_disk.EXPIRES_LABEL:
-                                                          made.expires.isoformat(timespec="seconds")}, say)
-                result = {"status": "unverified", "key": key, "image": image, "reused": False,
-                          "builder": "LocalSandboxProvider", "expires": made.expires.isoformat(timespec="seconds"),
-                          "built_at": now()}
-            probed = _probed(env, driver, "disk", arch, result, provider, progress)
-            if probed["status"] == "failed":
-                windows_disk.remove(image)
-            return probed
+                pinned = windows_disk.compose(made, build, key,
+                                              {KEY_LABEL: key, windows_disk.EXPIRES_LABEL: expires}, say, registry)
+                result = {"status": "unverified", "key": key, "image": pinned, "reused": False,
+                          "builder": "LocalSandboxProvider", "expires": expires, "built_at": now()}
+            return _probed(env, driver, "disk", arch, result, provider, progress)
     return attempt.result
 
 
@@ -672,13 +669,19 @@ def _key(**inputs: Any) -> str:
     return "sha256:" + hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
 
 
-def _stored(env: ComputerEnv, key: str) -> tuple[Any, str, str | None]:
+def _stored(env: ComputerEnv, key: str) -> tuple[ImageStore, str, str | None]:
     """The env's image store, the ref there of the image of ``key``, and that ref pinned when the store serves one
     already, for any env that built it."""
+    store = _image_store(env)
+    ref = store.image_ref(REPOSITORY, key.removeprefix("sha256:"))
+    return store, ref, pin_if_served(ref, store.auth(ref))
+
+
+def _image_store(env: ComputerEnv) -> ImageStore:
+    """The env's image store, with the repository its computers' images are kept in."""
     store = get_config().get_image_store_for(env.stored_id)
     store.ensure_repository(REPOSITORY)
-    ref = store.image_ref(REPOSITORY, key.removeprefix("sha256:"))
-    return store, ref, _served(ref, store)
+    return store
 
 
 def _base_disk(base: ComputerArtifact, arch: str) -> tuple[str | None, str]:
@@ -934,14 +937,6 @@ def _wants(layers: list[_Layer], protocol: bool) -> list[packages.Want]:
                 (f"{_PROTOCOL}{extra}=={importlib.metadata.version(_PROTOCOL)}",) if layer.app else ())
         wants.append(packages.Want(layer.folder, layer.install, _venv(layer), adds if _venv(layer) else ()))
     return wants
-
-
-def _served(ref: str, store) -> str | None:
-    """``ref`` pinned to the digest the image store serves for it, or None when it serves none."""
-    try:
-        return pin_digest(ref, store.auth(ref))
-    except NoSuchImageError:
-        return None
 
 
 def _computer(env: ComputerEnv, base: ComputerArtifact, built: dict[str, str], disks: dict[str, str],

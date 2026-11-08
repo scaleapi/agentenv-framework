@@ -153,19 +153,20 @@ the desktop signs in as at every boot; `setup.ps1` runs once at `agentadmin`'s f
 setup that fails is read back over ssh at once (`setup-failed`), then turns off what would get in an agent's way
 (updates, the lock screen, notifications, Widgets, Copilot, first-run pages, the page file and the firewall, behind
 QEMU's network, which reaches the guest at the ports the launcher forwards alone), installs the pinned Python with Tk
-and `agentenv-session`, and switches the sign-in to `user`. Setup takes about 13 minutes. The installed disk is kept
-in this machine's Docker as the base's image, `disk/base.img` in a layer of its own under an empty overlay of it, with
-the date its 90-day evaluation expires; a compose installs a base afresh once fewer than 7 days are left, and every
-input of an install (the ISO's sha256 and the recipe) is part of its key, so a newer ISO installs a new base. Name it
-as `windows-11`, or by its id, `@local/agentenv-framework/computers/windows-11`.
+and `agentenv-session`, and switches the sign-in to `user`. Setup takes about 13 minutes. The installed disk, trimmed,
+becomes the base's image, `disk/base.img` in a layer of its own under an empty overlay of it, with the date its 90-day
+evaluation expires and the key to `agentadmin`; it's pushed to the env's image store, as Linux disks
+are, under a tag of its recipe, so another machine composing on it pulls it rather than installing Windows, and fetches
+no ISO. A compose installs a base afresh once fewer than 7 days of its evaluation are left, from the ISO Microsoft's
+link serves then. Name it as `windows-11`, or by its id, `@local/agentenv-framework/computers/windows-11`.
 
 A Windows computer env is composed on the same machine (`env/envs/computer/utils/windows_disk.py`): the base booted on
 an overlay kept in a folder of its own, each layer installed over ssh as `agentadmin` by a PowerShell script composing
 writes, as its `[install.windows]` says (its files under `C:\agentenv\drivers\<name>`, its downloads checked by
 sha256, its venv on the pinned Python, its PowerShell run scripts, elevated, and its services), then shut down and
-packed onto the base's image, so every computer composed on a base shares one copy of it. A composed disk stays in this
-machine's Docker, as a VM bundle stays on its Mac, under a tag of its key, which a compose of the same inputs reuses
-while it's there; gate 3 probes it at full, and one that fails is removed. At the session user's sign-in,
+packed onto the base's image, so every computer composed on a base shares one copy of it, and pushed to the env's image
+store under its key, pinned, as a Linux disk is; a compose of the same inputs on any machine reuses it, and a deploy
+pulls it. Gate 3 probes it at full. At the session user's sign-in,
 `agentenv-session`, run windowless by `pythonw`, reads the deploy's environment from the NoCloud seed, which the
 launcher attaches as a removable USB drive, since Windows mounts a FAT filesystem with no partition table on removable
 media alone, and starts each layer's services in that session, again whenever one exits. A Windows computer boots

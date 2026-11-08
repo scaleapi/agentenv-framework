@@ -668,7 +668,7 @@ def test_builds_of_one_env_at_once_keep_each_others_pairs_and_a_failure_doesnt_r
 
     composer.compose(first, [("container", "amd64")])
     composer.compose(second, [("container", "arm64")])
-    monkeypatch.setattr(composer, "_served", lambda ref, store: None)
+    monkeypatch.setattr(composer, "pin_if_served", lambda ref, auth: None)
     docker.fail["linux/arm64"] = "boom"
     composer.compose(third, [("container", "arm64")])
 
