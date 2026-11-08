@@ -154,11 +154,12 @@ def test_the_menu_launcher_is_a_start_menu_shortcut_powershell_writes_named_for_
 
 @pytest.fixture
 def helper(tmp_path, monkeypatch):
-    """The job helper stood in for by a script that starts the app named by its exit code, or can't start
-    ``missing``; process flags only Windows takes, as none."""
+    """The job helper stood in for by a script, on this interpreter, that starts the app named by its exit code, or
+    can't start ``missing``; process flags only Windows takes, as none."""
     script = tmp_path / "_job.py"
     script.write_text(FAKE_HELPER)
     monkeypatch.setattr(_session_windows, "JOB", script)
+    monkeypatch.setattr(_session_windows, "PYTHON", Path(sys.executable))
     for flag in ("CREATE_NEW_PROCESS_GROUP", "CREATE_NO_WINDOW"):
         monkeypatch.setattr(subprocess, flag, 0, raising=False)
     return script

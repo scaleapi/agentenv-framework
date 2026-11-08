@@ -22,6 +22,9 @@ from . import _job, _reaping
 
 #: The helper that runs an app in its job, run on its own so it loads nothing but the standard library.
 JOB = Path(__file__).with_name("_job.py")
+#: The interpreter the helper runs on: the base one, as a venv's python.exe is a launcher that runs it as a child, and
+#: the helper names its job for its own pid, which must be the pid a launch returns.
+PYTHON = Path(sys.base_prefix) / "python.exe"
 #: How long the helper may take to start the app and say so.
 START_TIMEOUT_S = 30.0
 #: How often a stopping app is looked at for having ended.
@@ -45,7 +48,7 @@ async def launch(argv: list[str], cwd: Path, env: dict[str, str], fds: Optional[
     if fds:
         raise NotImplementedError("a Windows app can't be handed the server's fds")
     process = await asyncio.create_subprocess_exec(
-        sys.executable, "-I", "-S", str(JOB), "--", *argv, cwd=cwd, env={**os.environ, **env},
+        str(PYTHON), "-I", "-S", str(JOB), "--", *argv, cwd=cwd, env={**os.environ, **env},
         stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW)
     try:
