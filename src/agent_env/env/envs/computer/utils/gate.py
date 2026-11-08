@@ -66,7 +66,8 @@ def arches(base: ComputerArtifact, driver: ComputerDriverEnv, apps: Sequence[Com
 
 def check_app(base: ComputerArtifact, driver: ComputerDriverEnv, app: ComputerAppEnv, at: str = "app") -> list[str]:
     """Every way ``app`` doesn't fit a composition of ``base`` and ``driver``, each named from ``at``: a platform it
-    doesn't support, no architecture in common, no install for the base's OS, or a port the driver listens on too."""
+    doesn't support, no architecture in common, no install for the base's OS, a port the driver listens on too, or on
+    Windows an install step for the session user, as a Windows computer is composed over ssh as its admin."""
     os = base.os
     if not _matching(base, app.declaration.supports):
         named = ", ".join(_shown(platform) for entry in app.declaration.supports for platform in supported(entry))
@@ -78,6 +79,11 @@ def check_app(base: ComputerArtifact, driver: ComputerDriverEnv, app: ComputerAp
         problems.append(f"{at}: {app.id} declares no install for {os.type}")
     elif taken := sorted(set(_ports(app, os.type)) & set(_driver_ports(driver, os.type))):
         problems.append(f"{at}: {app.id} listens on {', '.join(map(str, taken))}, as {driver.id} does")
+    if os.type == "windows" and (session := [step.name for step in app.declaration.install_steps
+                                             if step.scope == "session" and (step.os is None or os.type in step.os)]):
+        problems.append(f"{at}: {app.id}'s install steps {', '.join(session)} run as the session user, which a Windows "
+                        "computer can't as it's composed, over ssh as its admin; give them scope \"system\" for "
+                        "Windows")
     return problems
 
 

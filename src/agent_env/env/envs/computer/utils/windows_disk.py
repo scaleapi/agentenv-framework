@@ -28,6 +28,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, NamedTuple
 
+from agentenv_protocol.computer.served import ADDRESS
+
 from agent_env.artifact.artifacts.computer import DISK_BASE_FILE, DISK_FILE, DISK_OWNER
 from agent_env.artifact.artifacts.docker_image import docker_login, push_local_image
 from agent_env.config.paths import cache_root
@@ -134,7 +136,8 @@ class Base:
 @dataclass(frozen=True)
 class Part:
     """A layer as a Windows disk installs it: its folder under ``context/``, its prefix, its install, its services'
-    argv by name, the environment they're given, and what its venv installs beside its requirements."""
+    argv by name, the environment they're given, what its venv installs beside its requirements, and for an app, the
+    ``<file>:<Class>`` its own server serves and its install steps by name, each run elevated."""
 
     folder: str
     prefix: PureWindowsPath
@@ -142,6 +145,8 @@ class Part:
     services: dict[str, list[str]]
     environment: dict[str, Any]
     wants: tuple[str, ...] = ()
+    served: str | None = None
+    steps: tuple[str, ...] = ()
 
 
 def media_path() -> Path:
@@ -320,14 +325,15 @@ def expiring(expires: str | None) -> bool:
     return expires is None or datetime.fromisoformat(expires) - datetime.now(timezone.utc) < timedelta(days=RENEW_DAYS)
 
 
-def write(build: Path, parts: list[Part], build_settings: dict[str, Any], image: dict) -> str:
-    """Write ``build``'s ``provision.ps1``, which installs ``parts`` from ``build/context``, their services for
-    agentenv-session, ``build_settings`` as every service's ``AGENTENV_SETTING_<NAME>`` and ``image`` as what the disk
-    says it holds; its text, which a composed disk's key covers."""
+def write(build: Path, parts: list[Part], user: str, build_settings: dict[str, Any], image: dict) -> str:
+    """Write ``build``'s ``provision.ps1``, which installs ``parts`` from ``build/context``, each app's own folder the
+    session user ``user``'s, their services for agentenv-session, ``build_settings`` as every service's
+    ``AGENTENV_SETTING_<NAME>`` and ``image`` as what the disk says it holds; its text, which a composed disk's key
+    covers."""
     lines = ["$ErrorActionPreference = 'Stop'", "$ProgressPreference = 'SilentlyContinue'",
              f"$build = '{BUILD}'", _CHECKED, _FETCH]
     for part in parts:
-        lines += [f"# {part.folder}", *_installed_part(part)]
+        lines += [f"# {part.folder}", *_installed_part(part, user)]
     settings = {f"AGENTENV_SETTING_{name.upper()}": str(value) for name, value in build_settings.items()}
     lines += [_written(ROOT / "build-settings.json", json.dumps(settings)),
               _written(ROOT / "image.json", json.dumps(image, sort_keys=True))]
@@ -336,8 +342,11 @@ def write(build: Path, parts: list[Part], build_settings: dict[str, Any], image:
     return script
 
 
-def _installed_part(part: Part) -> list[str]:
-    """The lines that install ``part``: its files, downloads, venv, run scripts and services."""
+def _installed_part(part: Part, user: str) -> list[str]:
+    """The lines that install ``part``: its files, downloads, venv, an app's own folder, its run scripts and install
+    steps, and its services. An app's own folder, where its server writes its address and token, holds none of the
+    access its parents give: only ``user``, the session user its server runs as, SYSTEM and Administrators have it, as
+    on Linux the session user alone reaches the server's socket."""
     prefix, install = part.prefix, part.install
     lines = [f"New-Item -ItemType Directory -Force '{prefix}' | Out-Null",
              f"Copy-Item -Recurse -Force \"$build\\context\\{PureWindowsPath(part.folder)}\\*\" '{prefix}'"]
@@ -354,9 +363,17 @@ def _installed_part(part: Part) -> list[str]:
                      + " ".join(_ps(want) for want in wants) + " }")
         lines.append(f"Checked {{ & '{venv / 'Scripts' / 'python.exe'}' -m pip list --format=json | "
                      f"Set-Content -Encoding utf8 '{prefix / 'installed.json'}' }}")
+    if part.served is not None:
+        own = prefix / ADDRESS.parent.as_posix()
+        lines += [f"New-Item -ItemType Directory -Force '{own}' | Out-Null",
+                  f"Checked {{ icacls '{own}' /inheritance:r /grant:r {_ps(f'{user}:(OI)(CI)F')} '*S-1-5-18:(OI)(CI)F' "
+                  "'*S-1-5-32-544:(OI)(CI)F' | Out-Null }"]
     for run in install.run or []:
         lines.append(f"$env:PREFIX = '{prefix}'; Push-Location '{prefix}'; Checked {{ & powershell -NoProfile "
                      f"-ExecutionPolicy Bypass -File '{prefix / PureWindowsPath(run.script)}' }}; Pop-Location")
+    for step in part.steps:
+        lines.append(f"Push-Location '{prefix}'; Checked {{ & '{prefix / 'venv' / 'Scripts' / 'python.exe'}' -m "
+                     f"agentenv_protocol.computer.run_install_step {_ps(part.served)} {_ps(step)} }}; Pop-Location")
     for name, argv in part.services.items():
         spec = {"name": name, "prefix": str(prefix), "command": argv,
                 "env": {**UTF8, **{key: str(value) for key, value in part.environment.items()}}}
