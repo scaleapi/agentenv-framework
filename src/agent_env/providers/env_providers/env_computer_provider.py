@@ -8,6 +8,7 @@ import functools
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, ClassVar, Optional
+from urllib.parse import urlsplit
 
 from agentenv_protocol import client as protocol_v1
 from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_RECORDING, tool_prefix_problem
@@ -73,10 +74,12 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         attribution: Optional[Attribution] = None,
         env_params: Optional[dict] = None,
         tool_prefix: str = "",
+        reach: str = "",
     ) -> DeployedSandboxEnv:
         """The env's first ready build, in its base's order of forms and arches (or of ``env_params.form``), that the sandbox
         provider runs natively, booted, once what it boots that no compose started is composed; returns the record once
-        the driver is ready with the env's display. With ``tool_prefix``, its driver serves its tools under it."""
+        the driver is ready with the env's display. With ``tool_prefix``, its driver serves its tools under it; with ``reach``,
+        a URL this process reaches, a network that restricts the computer's egress allows its host too."""
         from agent_env.env.envs.computer.env import ComputerEnv
 
         if not isinstance(env, ComputerEnv):
@@ -108,7 +111,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
                                 "computer runs inside a launcher container it can't reach; deploy a container form")
         attempt = functools.partial(self._boot, env, builds, params, values, ttl_seconds=ttl_seconds,
                                     disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb, attribution=attribution,
-                                    tool_prefix=tool_prefix)
+                                    tool_prefix=tool_prefix, reach=reach)
         return await self._run(sandbox_provider, env.id, attempt)
 
     async def install_changelog_triggers(self, environment_name: str) -> None:
@@ -117,7 +120,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
     async def _boot(self, env: ComputerEnv, builds: list[tuple[str, str, dict]], params: computer_params.ComputerParams,
                     values: dict, sandbox_provider: SandboxProvider, *, ttl_seconds: int,
                     disk_size_gb: float, cpu: float | None, memory_mb: int | None,
-                    attribution: Optional[Attribution], tool_prefix: str = "") -> DeployedSandboxEnv:
+                    attribution: Optional[Attribution], tool_prefix: str = "", reach: str = "") -> DeployedSandboxEnv:
         """One attempt on one sandbox provider: the first build it runs natively, booted and readied; its record."""
         from agent_env.env.envs.computer.env import ComputerEnv
 
@@ -142,7 +145,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         values = _values(computer, values)
         app_settings = recorded_app_settings(env.composed_apps(), computer_params.app_settings(env, params.app_settings),
                                              env.computer.os.type)
-        policy = NetworkPolicy.from_dict(env.network) if env.network else None
+        policy = _reaching(NetworkPolicy.from_dict(env.network) if env.network else None, sandbox_provider, reach)
         booted = await boot(
             sandbox_provider, image=build["image"], port=env.driver.port, network_policy=policy, token=token,
             environment=_environment(env, computer, values, params, tool_prefix), timeout=ttl_seconds,
@@ -304,6 +307,12 @@ async def end_recordings(record: DeployedSandboxEnv, reason: str) -> None:
         return
     except Exception as e:
         logger.warning(f"'{record.env_id}': its recordings weren't ended before its computer went: {e}")
+
+
+def _reaching(policy: Optional[NetworkPolicy], sandbox_provider: SandboxProvider, url: str) -> Optional[NetworkPolicy]:
+    """``policy``, also allowing ``url``'s host as the sandbox provider's sandboxes reach it when it lists the hosts allowed."""
+    host = urlsplit(sandbox_provider.url_from_sandbox(url)).hostname if url else None
+    return policy.with_hosts([host]) if policy is not None and host else policy
 
 
 def _values(computer: ComputerArtifact, values: dict) -> dict:

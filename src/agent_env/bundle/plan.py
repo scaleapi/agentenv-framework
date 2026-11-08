@@ -39,7 +39,7 @@ from agent_env.env.envs.computer.app_env import ComputerAppEnv
 from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
 from agent_env.env.envs.computer.utils import sites
 from agent_env.env.envs.mcp_server import MCPServerEnv
-from agent_env.env.envs.multi_env import MultiEnv
+from agent_env.env.envs.multi_env import MultiEnv, computer_name_problems
 from agent_env.env.envs.website import WebsiteEnv
 from agent_env.env.published_images import published_bundle_image
 from agent_env.env.registry import get_env_registry
@@ -894,7 +894,8 @@ class _Planner:
         """Each env of a multi runs as containers its environment_name names: an MCP server as one by that name, a
         website as its backend's and frontend's. No two of a multi's envs may name one container, and a provider
         other than the core's, which gives a multi one env card, can't tell an MCP server and a website of one name
-        apart. Nor may two of its websites claim one name."""
+        apart. Nor may two of its websites claim one name. A computer runs on a sandbox of its own, which the gateway
+        knows by its name alone, and serves its tools under it (``computer_name_problems``)."""
         for key in sorted(closure, key=self.rank.__getitem__):
             source = self.nodes[key]
             if isinstance(source, BundleImage) or source.entry.kind is not BundleKind.ENV:
@@ -904,6 +905,7 @@ class _Planner:
             where = self._path(source.entry)
             taken: dict[str, str] = {}  # each container a child runs as, by the field naming the child
             named: dict[str, set[str]] = {}  # the environment_names of each list's envs
+            computers: list[str] = []  # the computers' environment_names, in order
             claimed = [sites.Claim(domain, sites.SYNTHETIC, ref.where) for ref in source.references
                        if ref.where.startswith("website_envs[")
                        for domain in dict.fromkeys(self._domains(ref, store_latest))]
@@ -916,6 +918,9 @@ class _Planner:
                     continue
                 group = ref.where.partition("[")[0]
                 named.setdefault(group, set()).add(name)
+                if group == "computer_envs":
+                    computers.append(name)
+                    continue
                 containers = [name] if group == "mcp_server_envs" else [
                     f"{name}-{AGENT_ENV_WEBSITE_BACKEND_SUFFIX}", f"{name}-{AGENT_ENV_WEBSITE_FRONTEND_SUFFIX}"]
                 clash = next((container for container in containers if container in taken), None)
@@ -924,6 +929,8 @@ class _Planner:
                                          f"{clash!r}, as {taken[clash]}'s does; each env of a multi needs its own")
                 else:
                     taken.update(dict.fromkeys(containers, ref.where))
+            others = [*named.get("mcp_server_envs", ()), *named.get("website_envs", ())]
+            self.problems += [f"{where}: computer_envs: {problem}" for problem in computer_name_problems(computers, others)]
             provider_type = source.config.get("env_provider_type", EnvironmentGatewayProvider.type)
             try:
                 provider = _env_provider_class(provider_type)
@@ -935,6 +942,8 @@ class _Planner:
                                       website_names=named.get("website_envs", ()))
             if reason is not None:
                 self.problems.append(f"{where}: env_provider_type {provider_type!r} {reason}; rename one")
+            if (reason := provider_refusal(provider, MultiEnv, computer_names=computers)) is not None:
+                self.problems.append(f"{where}: env_provider_type {provider_type!r} {reason}")
 
     def _check_environment_names(self, closure: set[_Key],
                                  store_latest: dict[tuple[EntityKind, str], int] | None) -> None:

@@ -27,6 +27,16 @@ class InternalMCPServer:
     mcp_url: str
 
 
+@dataclass(frozen=True)
+class ExternalChild:
+    """A child env on a sandbox of its own, which the gateway fronts as it does an MCP server: its name, and its MCP
+    endpoint and base URL as the process holding it reaches them."""
+
+    name: str
+    mcp_url: str
+    base_url: str
+
+
 __all__ = [
     "AGENT_ENV_GATEWAY_MCP_PORT",
     "AGENT_ENV_HIDDEN_BY_DEFAULT_META_KEY",
@@ -34,6 +44,7 @@ __all__ = [
     "AGENT_ENV_ROLE_META_KEY",
     "AGENT_ENV_SESSION_META_KEY",
     "DEFAULT_ROLE",
+    "ExternalChild",
     "GATEWAY_TRAJECTORY_FILE",
     "GatewayMode",
     "InternalMCPServer",
