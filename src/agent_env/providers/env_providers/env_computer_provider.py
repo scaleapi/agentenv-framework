@@ -142,7 +142,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
             sandbox_provider, image=build["image"], port=env.driver.port, network_policy=policy, token=token,
             environment=_environment(env, computer, values, params), timeout=ttl_seconds, attribution=attribution,
             disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb,
-            ready_s=ready_timeout(env, form), form=form, held=bool(params.site_routing),
+            ready_s=ready_timeout(env.composed_apps(), env.computer.os.type), form=form, held=bool(params.site_routing),
             os_type=env.computer.os.type)
         self._container_sandboxes.append(booted.sandbox)
         self._environment_sandboxes[name] = booted.sandbox
@@ -189,7 +189,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
                                                        env=environment)
         except NotImplementedError as e:  # a reset the env supports, which this provider can't carry out
             raise RuntimeError(f"'{env.id}' can't be reset on {type(sandbox_provider).__name__}: {e}") from None
-        card = await ready(deployed.environment_url, ready_timeout(env, record.get("form")),
+        card = await ready(deployed.environment_url, ready_timeout(env.composed_apps(), env.computer.os.type),
                            deployed.control_token, answering=bool(params.site_routing))
         _require_name(env, card)
         valid_for_s = (record.get("sites") or {}).get("valid_for_s", 0)
@@ -227,7 +227,7 @@ async def _launch_held_apps(env: ComputerEnv, record: DeployedSandboxEnv, url: s
     answers then, as its boot's card may list an app by its name alone. Each is launched as the child its card lists,
     as a computer named for its app, a browser alone, has that name too."""
     os_type = env.computer.os.type
-    timeout = ready_timeout(env, record.metadata["computer"].get("form"))
+    timeout = ready_timeout(env.composed_apps(), os_type)
     held = [app for app in env.composed_apps() if (launch := app.launch(os_type)) is not None and launch.at == "boot"]
     launchers: dict[str, protocol_v1.ChildEnv] = {}
     if held:

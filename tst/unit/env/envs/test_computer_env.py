@@ -1043,8 +1043,7 @@ async def test_a_computer_routing_sites_launches_its_held_boot_apps_once_listed_
     order = []
     apps = [SimpleNamespace(environment_name=name, launch=lambda os_type, at=at: SimpleNamespace(at=at))
             for name, at in [("mail", "boot"), ("music", "demand"), ("notes", "boot")]]
-    env = SimpleNamespace(computer=SimpleNamespace(os=SimpleNamespace(type="linux"), forms=SimpleNamespace(disk=None)),
-                          composed_apps=lambda: apps)
+    env = SimpleNamespace(computer=SimpleNamespace(os=SimpleNamespace(type="linux")), composed_apps=lambda: apps)
 
     def app_card(name):
         return {"name": name, "url": f"/svc/{name}/agentenv", "capabilities": {"extensions": [
@@ -1067,8 +1066,7 @@ async def test_a_computer_routing_sites_launches_its_held_boot_apps_once_listed_
     monkeypatch.setattr(env_computer_provider, "listed", listed)
     monkeypatch.setattr(env_computer_provider, "ready", ready)
     monkeypatch.setattr(env_computer_provider, "ready_timeout", lambda apps, os_type: 30.0)
-    record = SimpleNamespace(invoke=invoke, control_token="t0ken", environment_card={"name": "booted"},
-                             metadata={"computer": {"form": "container"}})
+    record = SimpleNamespace(invoke=invoke, control_token="t0ken", environment_card={"name": "booted"})
     await env_computer_provider._launch_held_apps(env, record, "http://computer")
 
     assert order == [("listed", "http://computer", ["mail", "notes"]), (COMPUTER_APP, "launch", "mail", True, "mail"),
@@ -1579,8 +1577,8 @@ def test_an_app_that_requires_nothing_still_gets_a_venv_for_its_own_server(base,
     assert "/opt/agentenv/apps/mail/venv/bin/pip install --no-index --no-deps /tmp/agentenv-packages/wheels/apps-mail/*.whl" in (
         build["dockerfile"])
     assert build["confs"]["agentenv-app-mail.conf"] == MAIL_SERVER
-    assert boot.ready_timeout(SimpleNamespace(computer=base, composed_apps=lambda: [app]), "container") == (
-        270.0 if at == "boot" else boot.READY_TIMEOUT_S)
+    assert boot.ready_timeout([app], "linux") == (270.0 if at == "boot" else boot.READY_TIMEOUT_S)
+    assert boot.ready_timeout([app], "windows") == boot.READY_TIMEOUT_S
 
 
 def test_the_locks_debs_and_wheels_are_mounted_into_the_runs_that_install_them_never_copied_into_a_layer(

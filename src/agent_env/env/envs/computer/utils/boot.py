@@ -28,7 +28,6 @@ if TYPE_CHECKING:
     from agent_env.artifact.artifacts.computer import ComputerArtifact
     from agent_env.attribution import Attribution
     from agent_env.env.envs.computer.app_env import ComputerAppEnv
-    from agent_env.env.envs.computer.env import ComputerEnv
     from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, Sandbox
     from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
 
@@ -192,14 +191,11 @@ async def discard(sandbox: Sandbox) -> None:
             await asyncio.to_thread(remove_local_work_dir, sandbox.sandbox_id)
 
 
-def ready_timeout(env: ComputerEnv, form: Optional[str]) -> float:
-    """How long ``env``'s computer booted in ``form`` may take to be ready: as long as its disk form says
-    (``ready_timeout_s``) when it boots that, else ``READY_TIMEOUT_S``, or longer when an app that starts with it there
-    gives itself longer."""
-    disk, os_type = env.computer.forms.disk, env.computer.os.type
-    least = (disk.ready_timeout_s if form == "disk" and disk is not None else None) or READY_TIMEOUT_S
-    return max([least, *(launch.ready.timeout_s + APP_READY_MARGIN_S for app in env.composed_apps()
-                         if (launch := app.launch(os_type)) and launch.at == "boot" and launch.ready)])
+def ready_timeout(apps: list[ComputerAppEnv], os_type: str) -> float:
+    """How long a computer of ``os_type`` and ``apps`` may take to be ready: ``READY_TIMEOUT_S``, or longer when an app
+    that starts with it there gives itself longer."""
+    return max([READY_TIMEOUT_S, *(launch.ready.timeout_s + APP_READY_MARGIN_S for app in apps
+                                   if (launch := app.launch(os_type)) and launch.at == "boot" and launch.ready)])
 
 
 async def ready(url: str, timeout: float, token: Optional[str] = None, *, answering: bool = False) -> dict:

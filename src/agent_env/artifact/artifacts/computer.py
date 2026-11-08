@@ -146,9 +146,6 @@ class DiskForm(BaseModel):
     input_channel: Literal["nocloud"]
     firmware: list[Literal["efi"]] = Field(default=["efi"], min_length=1)
     min_disk_gb: int = Field(ge=1, description="Its virtual size, which a deploy's disk is at least")
-    ready_timeout_s: float | None = Field(default=None, gt=0, exclude_if=lambda value: value is None, description=(
-        "How long a boot of it may take to be ready, for a computer agent-env's default isn't long enough for; left "
-        "out when unset, so a disk form without it is stored as it was before it existed"))
 
 
 class VmBundleForm(BaseModel):

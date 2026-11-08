@@ -9,7 +9,6 @@ init = "agentenv-session"
 input_channel = "nocloud"
 firmware = ["efi"]
 min_disk_gb = 64
-ready_timeout_s = 600
 
 [config.resolution]
 default = "1920x1080"
