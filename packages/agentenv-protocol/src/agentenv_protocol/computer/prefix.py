@@ -43,8 +43,8 @@ class ToolPrefix:
         example = next(iter(others), None)
         if not self.prefix or example is None:
             return None
-        return (f"This computer serves its tools under `{self.prefix}`: a tool this text calls `X` is `{self.prefix}X`, "
-                f"so `{example}` is `{self.prefix}{example}`. Names inside a tool's arguments stay as written.")
+        return (f"This computer serves its tools under `{self.prefix}`: a tool this text names without `{self.prefix}` is "
+                f"served with it, so `{example}` is `{self.prefix}{example}`. Names inside a tool's arguments stay as written.")
 
     def instructions(self, text: str, others: Iterable[str]) -> str:
         """An MCP server's instructions as the computer serves them: after the rule, if there is one, its names served."""
