@@ -14,12 +14,18 @@ KEPT_EXITS = 16
 
 
 def reap(process: asyncio.subprocess.Process) -> None:
-    """Reap ``process`` once it exits, its exit kept until it's asked for or ``KEPT_EXITS`` later ones push it out."""
-    reaped = asyncio.ensure_future(process.wait())
+    """Reap ``process`` once it exits, its exit kept until it's asked for or ``KEPT_EXITS`` later ones push it out; any
+    pipe it was started with is read to its end, so it closes with the process."""
+    reaped = asyncio.ensure_future(_exited(process))
     _running.add(reaped)
     reaped.add_done_callback(_running.discard)
     _exits[process.pid] = reaped
     reaped.add_done_callback(lambda _: _forget_old_exits())
+
+
+async def _exited(process: asyncio.subprocess.Process) -> int:
+    await process.communicate()
+    return process.returncode
 
 
 def forget(pid: int) -> None:

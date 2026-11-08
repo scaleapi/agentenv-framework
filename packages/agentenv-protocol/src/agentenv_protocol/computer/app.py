@@ -145,6 +145,20 @@ class Linux(BaseModel):
     ports: Optional[list[int]] = None
 
 
+class Windows(BaseModel):
+    """How a Windows computer installs the app: as on Linux, with no apt; ``run`` scripts are PowerShell (``.ps1``), run
+    elevated as the computer is composed, and ``services`` run in the session user's sign-in."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    files: LayerPath = "."
+    python: Optional[LayerPath] = None
+    downloads: Optional[list[Download]] = None
+    run: Optional[list[RunScript]] = None
+    services: list[Service] = Field(default_factory=list)
+    ports: Optional[list[int]] = None
+
+
 class Ready(BaseModel):
     """When the app is ready: its window shown, a port answering or a command exiting 0, within ``timeout_s``."""
 
@@ -169,7 +183,8 @@ class Launch(BaseModel):
 
     at: Literal["boot", "demand"] = "boot"
     command: list[str]
-    #: Matches the app's window by its WM_CLASS ``class`` or ``instance`` and its ``title``, as given.
+    #: Matches the app's window by ``class``, ``instance`` and ``title``, as given: on X11 its WM_CLASS class and
+    #: instance; on Windows its window class and its program's file name, lowercased, such as ``notepad.exe``.
     window: Optional[dict[str, str]] = None
     ready: Optional[Ready] = None
     #: Variables set in the app's environment, over its server's.
@@ -334,6 +349,18 @@ def linux(*, files: str = ".", packages: Optional[Packages] = None, python: Opti
     """``@install`` for Linux: how a Linux computer installs the app, ``Linux``'s fields, and what is its own there."""
     return install("linux", Linux(files=files, packages=packages, python=python, sources=sources, downloads=downloads,
                                   run=run, services=services or [], ports=ports),
+                   launch=launch, paths=paths, skill=skill, settings=settings, build_settings=build_settings)
+
+
+def windows(*, files: str = ".", python: Optional[str] = None, downloads: Optional[list[Download]] = None,
+            run: Optional[list[RunScript]] = None, services: Optional[list[Service]] = None,
+            ports: Optional[list[int]] = None, launch: Optional[Launch] = None, paths: Optional[list[str]] = None,
+            skill: Optional[str] = None, settings: Optional[type[BaseModel]] = None,
+            build_settings: Optional[type[BaseModel]] = None) -> Callable:
+    """``@install`` for Windows: how a Windows computer installs the app, ``Windows``'s fields, and what is its own
+    there."""
+    return install("windows", Windows(files=files, python=python, downloads=downloads, run=run,
+                                      services=services or [], ports=ports),
                    launch=launch, paths=paths, skill=skill, settings=settings, build_settings=build_settings)
 
 
