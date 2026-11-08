@@ -25,6 +25,8 @@ from agent_env.store.local_state import holding_locks
 from agent_env.utils.docker.build import build_image
 
 KVM = "/dev/kvm"
+#: How long asking this machine's Docker whether it mounts images may take, before a boot copies the disk instead.
+_DOCKER_INFO_SECONDS = 30
 #: What ``docker cp`` says of a path its container lacks: Docker 23 and later, then earlier.
 _NO_SUCH_PATH = ("Could not find the file", "No such container:path")
 
@@ -60,10 +62,20 @@ async def machine_for(disk: str) -> Machine:
 @functools.cache
 def mounts_images() -> bool:
     """Whether this machine's Docker mounts an image's files into a container (``--mount type=image``, with its
-    ``image-subpath``): Docker 28 and later, on the containerd image store."""
-    version, status = docker("info", "--format", "{{.ServerVersion}} {{json .DriverStatus}}").split(" ", 1)
-    major = version.split(".", 1)[0]
-    return major.isdigit() and int(major) >= 28 and "io.containerd.snapshotter.v1" in status
+    ``image-subpath``): its client, which parses the option, and its server both 28 or later, on the containerd image
+    store. A Docker that fails to say, or doesn't within ``_DOCKER_INFO_SECONDS``, gets the copy."""
+    try:
+        client, server, status = docker("info", "--format",
+                                        "{{.ClientInfo.Version}} {{.ServerVersion}} {{json .DriverStatus}}",
+                                        timeout=_DOCKER_INFO_SECONDS).split(" ", 2)
+    except (DockerFailed, subprocess.TimeoutExpired):
+        return False
+    return _major(client) >= 28 and _major(server) >= 28 and "io.containerd.snapshotter.v1" in status
+
+
+def _major(version: str) -> int:
+    head = version.split(".", 1)[0]
+    return int(head) if head.isdigit() else 0
 
 
 async def machine_image(disk: str) -> str:

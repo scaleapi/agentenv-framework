@@ -555,16 +555,30 @@ async def test_a_disk_is_mounted_into_the_launcher_where_docker_mounts_images_el
 
 
 @pytest.mark.parametrize("info, mounts", [
-    ('29.9.3 [["driver-type","io.containerd.snapshotter.v1"]]', True),
-    ('28.0.0 [["driver-type","io.containerd.snapshotter.v1"]]', True),
-    ('27.5.1 [["driver-type","io.containerd.snapshotter.v1"]]', False),
-    ('29.9.3 [["Backing Filesystem","extfs"],["Supports d_type","true"]]', False),
-    ("4.9.3 null", False)], ids=["29-containerd", "28-containerd", "27", "29-overlay2", "podman"])
-def test_docker_mounts_images_from_28_on_the_containerd_image_store(monkeypatch, info, mounts):
+    ('29.9.3 29.9.3 [["driver-type","io.containerd.snapshotter.v1"]]', True),
+    ('28.0.0 28.0.0 [["driver-type","io.containerd.snapshotter.v1"]]', True),
+    ('27.5.1 27.5.1 [["driver-type","io.containerd.snapshotter.v1"]]', False),
+    ('27.5.1 29.9.3 [["driver-type","io.containerd.snapshotter.v1"]]', False),
+    ('29.9.3 29.9.3 [["Backing Filesystem","extfs"],["Supports d_type","true"]]', False),
+    ("4.9.3 4.9.3 null", False),
+    (DockerFailed("docker info failed: template: :1: can't evaluate field ClientInfo", 1), False),
+    (subprocess.TimeoutExpired(["docker", "info"], 30), False)],
+    ids=["29-containerd", "28-containerd", "27", "27-client-on-a-29-server", "29-overlay2", "podman",
+         "a-client-too-old-to-say", "no-answer"])
+def test_docker_mounts_images_from_28_on_both_ends_on_the_containerd_image_store(monkeypatch, info, mounts):
+    """A Docker that fails to say, or doesn't in time, gets the copy."""
     local_disk.mounts_images.cache_clear()
-    monkeypatch.setattr(local_disk, "docker", lambda *args: info)
+    asked = []
 
-    assert local_disk.mounts_images() is mounts
+    def docker(*args, timeout=None):
+        asked.append(timeout)
+        if isinstance(info, Exception):
+            raise info
+        return info
+
+    monkeypatch.setattr(local_disk, "docker", docker)
+
+    assert local_disk.mounts_images() is mounts and asked == [local_disk._DOCKER_INFO_SECONDS]
     local_disk.mounts_images.cache_clear()
 
 
