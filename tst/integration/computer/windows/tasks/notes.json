@@ -5,7 +5,9 @@
    "verifier_id": "before"},
   {"id": "session", "type": "env_outcome_verifier", "env_id": "notes-desk", "file_artifact_id": "check_session",
    "verifier_id": "session", "depends_on": ["before"]},
-  {"id": "reset", "type": "reset_env", "env_id": "notes-desk", "depends_on": ["session"]},
+  {"id": "inside", "type": "run_code", "env_id": "notes-desk", "script_artifact_id": "check_inside",
+   "depends_on": ["session"]},
+  {"id": "reset", "type": "reset_env", "env_id": "notes-desk", "depends_on": ["inside"]},
   {"id": "after", "type": "env_outcome_verifier", "env_id": "notes-desk", "file_artifact_id": "check_notes",
    "verifier_id": "after", "depends_on": ["reset"]}
 ]
