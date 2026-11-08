@@ -30,6 +30,7 @@ from .app_data import AppDataPlane
 from .app_runtime import AppRuntime
 from .errors import InvalidArgument
 from .platform import detect
+from .served import SOCKET as SOCKET
 
 #: The environment variable a computer delivers its apps' settings in: JSON of each app's values by its name.
 APP_SETTINGS_ENV = "AGENTENV_APP_SETTINGS"
@@ -41,11 +42,10 @@ _PATHS = TypeAdapter(list[RelativePath])
 WINDOW_KEYS = frozenset({"class", "instance", "title"})
 #: The framework extension an app's own server serves: its launch as params, and its ``launch`` and ``ready`` methods.
 COMPUTER_APP = "urn:agentenv:computer-app/v1"
-#: Where an app's own server listens, in the app's folder, and where it says why it last failed to start.
-SOCKET = Path(".agentenv/server.sock")
 #: Written in an app's folder by its computer's driver once an agent acts there, by a tool call or on a route the app
 #: opens to agents: a fresh computer starts without it, and an app that resets removes its own.
 AGENT_ACTED = Path(".agentenv/agent-acted")
+#: Where an app's server says why it last failed to start, in the app's folder.
 FAILURE = Path(".agentenv/server.failure")
 #: The values of an app's build settings its env fixes in its computer's image, in the app's folder.
 BUILD_SETTINGS = Path(".agentenv/build_settings.json")

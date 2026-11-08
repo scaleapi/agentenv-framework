@@ -30,7 +30,7 @@ import agentenv_protocol.computer.launch as launcher  # noqa: E402
 from agentenv_protocol import client  # noqa: E402
 from agentenv_protocol.computer import (ComputerAppEnvironment, Launch, ReadyCheck, Ready, linux,  # noqa: E402
                                         ready_check)
-from agentenv_protocol.computer import app, app_runtime, apps, session  # noqa: E402
+from agentenv_protocol.computer import _reaping, _session_posix, app, app_runtime, apps, session  # noqa: E402
 from agentenv_protocol.computer.app import COMPUTER_APP, FAILURE, SOCKET  # noqa: E402
 from agentenv_protocol.computer.platform import Platform  # noqa: E402
 from agentenv_protocol.types import CONTROL_TOKEN_ENV, DATA_OBJECTS_EXTENSION_URI, WELL_KNOWN_PATH  # noqa: E402
@@ -373,7 +373,7 @@ async def test_the_session_launches_an_app_in_a_session_of_its_own_from_its_fold
              "{os.environ['DISPLAY']} {os.getsid(0) == os.getpid()}\")"
 
     await session.launch([sys.executable, "-c", script], tmp_path, {"ENVIRONMENT_NAME": "notes"})
-    await asyncio.gather(*session._running)
+    await asyncio.gather(*_reaping._running)
 
     assert (tmp_path / "seen").read_text() == f"{os.path.realpath(tmp_path)} notes :99 True"
 
@@ -382,7 +382,7 @@ async def test_the_session_launches_an_app_in_a_session_of_its_own_from_its_fold
 async def test_a_stop_ends_what_the_app_started_though_its_first_process_exited(tmp_path):
     sleeper = f"{sys.executable} -c 'import time; time.sleep(60)' & exit 0"
     pid = await session.launch(["sh", "-c", sleeper], tmp_path, {})
-    await asyncio.gather(*session._running)
+    await asyncio.gather(*_reaping._running)
 
     running = session.alive(pid)
     await session.stop(pid, 5)
@@ -395,7 +395,7 @@ async def test_a_paused_session_runs_nothing_until_the_block_ends_and_a_stop_end
     counter = (f"{sys.executable} -c 'import os, time\nn = 0\nwhile True:\n    n += 1\n    open(\"count.new\", \"w\")"
                ".write(str(n))\n    os.replace(\"count.new\", \"count\")\n    time.sleep(0.02)' & exit 0")
     pid = await session.launch(["sh", "-c", counter], tmp_path, {})
-    await asyncio.gather(*session._running)
+    await asyncio.gather(*_reaping._running)
     await asyncio.sleep(0.5)
 
     def count() -> int:
@@ -440,7 +440,7 @@ async def test_the_sessions_windows_are_listed_by_class_instance_and_title_from_
     async def xprop(*args):
         return replies[args]
 
-    monkeypatch.setattr(session, "_xprop", xprop)
+    monkeypatch.setattr(_session_posix, "_xprop", xprop)
     assert await session.windows() == [{"instance": "mail", "class": "Mail", "title": 'Inbox "work"'},
                                        {"instance": "xcalc", "class": "XCalc", "title": "Calculator"}]
 

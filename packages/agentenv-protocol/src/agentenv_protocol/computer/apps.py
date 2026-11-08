@@ -1,5 +1,5 @@
 """The apps composed onto a computer, as its driver finds them, whether each is ready, and how the driver fronts them.
-Each app's own server answers on its folder's socket (``serve_app``): its card says how the app launches and which
+Each app's own server answers where its folder says (``served``): its card says how the app launches and which
 paths it owns, and its ``computer-app/v1`` ``ready`` whether it's ready. Every app's server must answer before the
 computer is ready; an app that starts with the computer must also be ready, and a ``demand`` app, or a boot app
 while the computer holds its launch (``boot_launch_held``), is checked once something launches it. The driver lists
@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -18,12 +19,13 @@ import httpx
 
 from .. import client
 from ..types import RPC_PATH, WELL_KNOWN_PATH, EnvironmentCard
-from .app import AGENT_ACTED, COMPUTER_APP, FAILURE, SOCKET
+from .app import AGENT_ACTED, COMPUTER_APP, FAILURE
 from .app_runtime import CHECK_TIMEOUT_S, LAUNCHES, AppReadiness, boot_launch_held
 from .operations import ReadyCheck
+from .served import served
 
 #: Where a composed computer installs its apps, a folder each.
-APPS = Path("/opt/agentenv/apps")
+APPS = Path("C:/agentenv/apps" if sys.platform == "win32" else "/opt/agentenv/apps")
 #: How long an app's server may take to answer, its checks run at once, before it counts as not answering.
 ANSWER_TIMEOUT_S = CHECK_TIMEOUT_S + 5
 
@@ -38,7 +40,7 @@ async def check(folder: Path) -> ReadyCheck:
     its card once the server answers."""
     name = folder.name
     try:
-        async with _client(folder / SOCKET) as http:
+        async with served(folder).client(ANSWER_TIMEOUT_S) as http:
             card = (await http.get(WELL_KNOWN_PATH)).raise_for_status().json()
             name = card["name"]
             launch = client.extension_params(card, COMPUTER_APP).get("launch")
@@ -109,7 +111,7 @@ def endpoint(card: dict, method: str) -> str:
 async def served_card(folder: Path) -> Optional[dict]:
     """The card the app in ``folder`` serves, or None while its server isn't answering."""
     try:
-        async with _client(folder / SOCKET) as http:
+        async with served(folder).client(ANSWER_TIMEOUT_S) as http:
             return (await http.get(WELL_KNOWN_PATH)).raise_for_status().json()
     except (httpx.HTTPError, OSError, ValueError):
         return None
@@ -147,11 +149,6 @@ def _unanswered(folder: Path) -> str:
         return f"its server failed to start: {(folder / FAILURE).read_text()}"
     except FileNotFoundError:
         return "its server isn't answering yet"
-
-
-def _client(socket: Path) -> httpx.AsyncClient:
-    return httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(uds=str(socket)), base_url="http://app",
-                             timeout=ANSWER_TIMEOUT_S)
 
 
 def note_agent_acted(folders: list[Path]) -> None:

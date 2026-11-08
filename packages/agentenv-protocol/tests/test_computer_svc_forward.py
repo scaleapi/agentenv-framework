@@ -1,4 +1,5 @@
-"""The driver's /svc/<app>/ in front of an app's own server on its socket: a WebSocket is relayed both ways, with the
+"""The driver's /svc/<app>/ in front of an app's own server, on its socket as on Linux and macOS and on a loopback port
+with its token as on Windows, alike: a WebSocket is relayed both ways, with the
 subprotocol the app picks, until the app closes it with its code, and only with the control token, off the routes the
 app opens to agents, and a Host that's a host; an answer streams through as the app sends it, 20 MB whole; every
 method and body goes on to the path as it came, still escaped, and the caller's headers, and only those, pass on as
@@ -36,6 +37,7 @@ from websockets.exceptions import ConnectionClosedError, InvalidStatus  # noqa: 
 from agentenv_protocol import CONTROL_TOKEN_ENV, client  # noqa: E402
 from agentenv_protocol.computer import ComputerAppEnvironment, apps, linux, svc  # noqa: E402
 from agentenv_protocol.computer.app import AGENT_ACTED, SOCKET  # noqa: E402
+from agentenv_protocol.computer.served import TOKEN_HEADER, bind, guarded  # noqa: E402
 from agentenv_protocol.tool_context import EMPTY  # noqa: E402
 
 MB = 1 << 20
@@ -107,19 +109,32 @@ class Echo(ComputerAppEnvironment):
                    else websocket.send_bytes(message["bytes"][::-1]))
 
 
+@pytest.fixture(params=["socket", "loopback"])
+def transport(request) -> str:
+    """Where the app's server answers: its folder's Unix socket, as on Linux and macOS, or a loopback port with a
+    token, as on Windows."""
+    return request.param
+
+
 @contextlib.asynccontextmanager
-async def _computer(monkeypatch):
-    """The Echo app served on its socket in a computer's apps folder, and a driver in front of it on loopback, with a
-    control token; the app, and the driver's URL."""
+async def _computer(monkeypatch, transport: str):
+    """The Echo app served in a computer's apps folder over ``transport``, and a driver in front of it on loopback, with
+    a control token; the app, and the driver's URL."""
     with tempfile.TemporaryDirectory(dir="/tmp", prefix="apps-") as root:
         folder = Path(root) / "echo"
         (folder / SOCKET).parent.mkdir(parents=True)
         monkeypatch.setattr(apps, "APPS", Path(root))
         monkeypatch.setenv("ENVIRONMENT_NAME", "echo")
         app = Echo()
-        server = uvicorn.Server(uvicorn.Config(app.create_app().streamable_http_app(), uds=str(folder / SOCKET),
-                                               log_level="warning", lifespan="off"))
-        serving = asyncio.create_task(server.serve())
+        asgi = app.create_app().streamable_http_app()
+        if transport == "loopback":
+            listening, token = bind(folder)
+            server = uvicorn.Server(uvicorn.Config(guarded(asgi, token), log_level="warning", lifespan="off"))
+            serving = asyncio.create_task(server.serve(sockets=[listening]))
+        else:
+            server = uvicorn.Server(uvicorn.Config(asgi, uds=str(folder / SOCKET), log_level="warning",
+                                                   lifespan="off"))
+            serving = asyncio.create_task(server.serve())
         while not server.started:
             await asyncio.sleep(0.01)
         monkeypatch.delenv("ENVIRONMENT_NAME")
@@ -133,8 +148,8 @@ async def _computer(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_websocket_through_svc_reaches_the_app_both_ways_until_it_closes_and_only_with_the_token(monkeypatch):
-    async with _computer(monkeypatch) as (_, url):
+async def test_a_websocket_through_svc_reaches_the_app_both_ways_until_it_closes_and_only_with_the_token(monkeypatch, transport):
+    async with _computer(monkeypatch, transport) as (_, url):
         ws = url.replace("http", "ws") + "/svc/echo/echo"
         async with connect(ws, additional_headers=client.control_headers(TOKEN), subprotocols=["cdp"]) as socket:
             hello = json.loads(await socket.recv())
@@ -168,8 +183,8 @@ async def test_a_websocket_through_svc_reaches_the_app_both_ways_until_it_closes
 
 @pytest.mark.asyncio
 async def test_an_agents_call_on_a_route_the_app_opens_and_a_tool_call_note_in_its_folder_that_an_agent_acted(
-        monkeypatch):
-    async with _computer(monkeypatch) as (_, url):
+        monkeypatch, transport):
+    async with _computer(monkeypatch, transport) as (_, url):
         marker = apps.APPS / "echo" / AGENT_ACTED
         async with httpx.AsyncClient() as http:
             await http.get(url + "/svc/echo/headers", headers=client.control_headers(TOKEN))
@@ -193,8 +208,8 @@ async def test_an_agents_call_on_a_route_the_app_opens_and_a_tool_call_note_in_i
 
 
 @pytest.mark.asyncio
-async def test_an_answer_streams_through_svc_as_the_app_sends_it_20_mb_whole(monkeypatch):
-    async with _computer(monkeypatch) as (app, url):
+async def test_an_answer_streams_through_svc_as_the_app_sends_it_20_mb_whole(monkeypatch, transport):
+    async with _computer(monkeypatch, transport) as (app, url):
         async with httpx.AsyncClient(base_url=url, headers=client.control_headers(TOKEN), timeout=30) as http:
             async with http.stream("GET", "/svc/echo/big") as answer:
                 chunks, first = answer.aiter_raw(), []
@@ -212,13 +227,13 @@ async def test_an_answer_streams_through_svc_as_the_app_sends_it_20_mb_whole(mon
 
 @pytest.mark.asyncio
 async def test_every_method_and_body_goes_on_and_headers_pass_but_the_hop_ones_token_and_forwarded_address(
-        monkeypatch):
+        monkeypatch, transport):
     payload = b"x" * (3 * MB)
-    async with _computer(monkeypatch) as (_, url):
+    async with _computer(monkeypatch, transport) as (_, url):
         async with httpx.AsyncClient(base_url=url, headers=client.control_headers(TOKEN), timeout=30) as http:
             seen = await http.get("/svc/echo/headers", headers={
                 "x-forwarded-host": "evil.test", "x-forwarded-prefix": "/elsewhere", "connection": "x-drop",
-                "x-drop": "1", "x-kept": "1"})
+                "x-drop": "1", "x-kept": "1", TOKEN_HEADER: "forged"})
             put = (await http.put("/svc/echo/upload", content=payload)).json()
             deleted = (await http.delete("/svc/echo/upload")).json()
             tokenless = httpx.AsyncClient(base_url=url)
@@ -235,7 +250,7 @@ async def test_every_method_and_body_goes_on_and_headers_pass_but_the_hop_ones_t
     assert seen.json()["host"] == host and got["x-kept"] == "1"
     assert {key: got[key] for key in svc.FORWARDED} == {
         "x-forwarded-host": host, "x-forwarded-proto": "http", "x-forwarded-prefix": "/svc/echo"}
-    assert "authorization" not in got and "x-drop" not in got
+    assert "authorization" not in got and "x-drop" not in got and TOKEN_HEADER not in got
     assert seen.headers.get_list("set-cookie") == ["a=1", "b=2"] and "x-secret" not in seen.headers
     assert seen.headers["x-kept"] == "1"
     assert put == {"method": "PUT", "bytes": 3 * MB, "sha256": hashlib.sha256(payload).hexdigest()}
@@ -248,10 +263,10 @@ async def test_every_method_and_body_goes_on_and_headers_pass_but_the_hop_ones_t
 
 
 @pytest.mark.asyncio
-async def test_the_drivers_server_logs_a_path_under_a_route_open_to_agents_only_up_to_the_route(monkeypatch, caplog):
+async def test_the_drivers_server_logs_a_path_under_a_route_open_to_agents_only_up_to_the_route(monkeypatch, transport, caplog):
     for logger in svc.SERVER_LOGGERS:
         monkeypatch.setattr(logging.getLogger(logger), "filters", [])
-    async with _computer(monkeypatch) as (_, url):
+    async with _computer(monkeypatch, transport) as (_, url):
         async with httpx.AsyncClient(base_url=url, headers=client.control_headers(TOKEN)) as http:
             with caplog.at_level(logging.INFO):
                 opened = await http.get("/svc/echo/raw/a-secret/open")

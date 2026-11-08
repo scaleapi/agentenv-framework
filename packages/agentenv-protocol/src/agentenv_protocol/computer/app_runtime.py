@@ -11,6 +11,7 @@ import os
 import shlex
 import signal
 import sys
+import tempfile
 import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
@@ -25,8 +26,10 @@ if TYPE_CHECKING:
     from .app import Launch
 
 #: Where an app's server marks that it launched the app since the computer booted, at boot or on demand: a folder a
-#: boot clears, under /tmp on macOS, which has no /run and lets the session user write nothing at its root.
-LAUNCHED = Path("/tmp/agentenv/apps" if sys.platform == "darwin" else "/run/agentenv/apps")
+#: boot clears, under /tmp on macOS, which has no /run and lets the session user write nothing at its root, and on
+#: Windows in the session user's temp folder, whose disk each boot starts afresh.
+LAUNCHED = (Path("/tmp/agentenv/apps") if sys.platform == "darwin" else
+            Path(tempfile.gettempdir()) / "agentenv" / "apps" if sys.platform == "win32" else Path("/run/agentenv/apps"))
 #: How long one readiness check may take; an app's checks run at once.
 CHECK_TIMEOUT_S = 10.0
 #: Where an app's server keeps the pid of the app it launched last, in the app's folder, so a server that restarts can

@@ -18,11 +18,11 @@ from starlette.background import BackgroundTask
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
 from starlette.websockets import WebSocket, WebSocketDisconnect
-from websockets.asyncio.client import ClientConnection, unix_connect
+from websockets.asyncio.client import ClientConnection, connect, unix_connect
 
 from ..agent_env_environment import _error_response
-from .app import SOCKET
 from .errors import DeliveryFailed
+from .served import TOKEN_HEADER, served
 
 #: The methods the route forwards.
 METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
@@ -57,9 +57,9 @@ def passed_on(headers: Iterable[tuple[str, str]], *dropped: str) -> list[tuple[s
 
 def to_app(headers: Iterable[tuple[str, str]], host: str, scheme: str, prefix: str) -> list[tuple[str, str]]:
     """A caller's headers as the app gets them: passed on without the control token's ``Authorization`` or any address
-    the caller forwarded, and with the one it reached the driver at, its ``host``, ``scheme`` and the app's
-    ``prefix``."""
-    return passed_on(headers, "authorization", *FORWARDED) + [
+    the caller forwarded, nor any app token, which the driver sets itself where the app takes one, and with the
+    address it reached the driver at, its ``host``, ``scheme`` and the app's ``prefix``."""
+    return passed_on(headers, "authorization", TOKEN_HEADER, *FORWARDED) + [
         ("x-forwarded-host", host), ("x-forwarded-proto", scheme), ("x-forwarded-prefix", prefix)]
 
 
@@ -119,8 +119,7 @@ async def forward(folder: Path, name: str, request: Request) -> Response:
     client's own, its body and its answer streamed; it takes as long as the app does."""
     headers = to_app(request.headers.items(), request.headers.get("host", ""), request.url.scheme, f"/svc/{name}")
     has_body = request.headers.get("content-length", "0") != "0" or "transfer-encoding" in request.headers
-    http = httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(uds=str(folder / SOCKET)), base_url="http://app",
-                             timeout=None)
+    http = served(folder).client(timeout=None)
     http.headers.clear()
     try:
         answer = await http.send(http.build_request(request.method, target(request), headers=_bytes(headers),
@@ -161,10 +160,14 @@ async def relay(folder: Path, name: str, websocket: WebSocket, opened: Optional[
         websocket.headers.items(), host, "https" if websocket.url.scheme == "wss" else "http", f"/svc/{name}")
         if key.lower() != "host" and not key.lower().startswith("sec-websocket-")]
     offered = [p.strip() for p in websocket.headers.get("sec-websocket-protocol", "").split(",") if p.strip()]
+    reached, uri = served(folder), f"ws://{host or 'app'}{target(websocket)}"
+    options = {"subprotocols": offered or None, "max_size": None, "compression": None, "ping_interval": None,
+               "user_agent_header": None}
     try:
-        upstream = await unix_connect(str(folder / SOCKET), f"ws://{host or 'app'}{target(websocket)}",
-                                      additional_headers=headers, subprotocols=offered or None, max_size=None,
-                                      compression=None, ping_interval=None, user_agent_header=None)
+        upstream = await (
+            unix_connect(str(reached.socket), uri, additional_headers=headers, **options) if reached.socket else
+            connect(uri, host="127.0.0.1", port=reached.port, proxy=None,
+                    additional_headers=[*headers, (TOKEN_HEADER, reached.token)], **options))
     except (OSError, ValueError, asyncio.TimeoutError, websockets.WebSocketException):
         await websocket.close(code=1011)
         return
