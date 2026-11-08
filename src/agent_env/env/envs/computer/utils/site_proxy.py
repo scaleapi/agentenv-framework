@@ -19,9 +19,12 @@ relayed, for an upstream that answers it."""
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import os
 import pwd
+import re
 import shutil
 import socket
 import ssl
@@ -59,6 +62,19 @@ LISTEN_TIMEOUT_S = 15.0
 # log the failure shows.
 LISTEN_PROBE_S, LISTEN_POLL_S, LOG_TAIL_CHARS = 1.0, 0.2, 2000
 CHECK_TIMEOUT_S = 15.0
+#: The checks after each site's: Python through ``SSL_CERT_FILE``, Node and curl.
+RUNTIME_CHECKS = 3
+#: What a JDK's store is opened with unless it says otherwise, how deep a JDK's store is looked for under its folders,
+#: the folders not looked in, and how long a ``keytool`` call may take.
+JAVA_STORE_PASSWORD = "changeit"
+JDK_SEARCH_DEPTH = 8
+JDK_SKIPPED = frozenset({"node_modules", ".git", "__pycache__", "site-packages"})
+KEYTOOL_TIMEOUT_S = 60.0
+#: A PEM certificate, from its BEGIN line to its END line.
+PEM_CERTIFICATE = re.compile(r"-----BEGIN CERTIFICATE-----.+?-----END CERTIFICATE-----", re.S)
+#: A Node program loading the URL it's given, printing the status it's answered, and failing with the error it meets.
+NODE_GET = ("require('https').get(process.argv[1], r => { console.log(r.statusCode); r.resume(); })"
+            ".on('error', e => { console.error(e.message); process.exit(1); })")
 RESTART_DELAY_S = 1.0
 SERVE_USER = "nobody"
 FAILED = (("X-Agentenv-Site-Proxy", "failed"),)
@@ -662,8 +678,21 @@ class Paths:
         return self.root / f"etc/profile.d/{CA_NAME}.sh"
 
     @property
-    def system_bundle(self) -> Path:
-        return self.root / "etc/ssl/certs/ca-certificates.crt"
+    def system_bundles(self) -> tuple[Path, ...]:
+        """Where the system store keeps its public roots in one file, Debian's then Red Hat's."""
+        return self.root / "etc/ssl/certs/ca-certificates.crt", self.root / "etc/pki/tls/certs/ca-bundle.crt"
+
+    @property
+    def java_hook_store(self) -> Path:
+        """The JDK store the system store's hook (``ca-certificates-java``) builds from it, which apt JDKs link to."""
+        return self.root / "etc/ssl/certs/java/cacerts"
+
+    @property
+    def jdk_folders(self) -> tuple[Path, ...]:
+        return self.root / "usr/lib/jvm", self.root / "opt"
+
+    def rooted(self, path: str) -> Path:
+        return self.root / path.lstrip("/")
 
 
 def hosts_text(current: str, names: list[str]) -> str:
@@ -729,6 +758,102 @@ def trust_system(paths: Paths, ca_pem: str) -> Optional[str]:
             subprocess.run(tool, check=True, capture_output=True)
             return str(anchor)
     return None
+
+
+def public_roots(paths: Paths) -> Optional[Path]:
+    """The system store's file of public roots, or None on a Linux with none of them."""
+    return next((bundle for bundle in paths.system_bundles if bundle.exists()), None)
+
+
+def add_trust_files(paths: Paths, files: dict, ca_pem: str) -> list[str]:
+    """The CA added to ``files["ca"]``, the CAs agentenv adds, and ``files["bundle"]`` made again from the system
+    store's public roots as they are now, which ``trust_system`` added the CA to where it could, and every CA in
+    ``files["ca"]``, so it also holds what apps added to the system store after the image or a provider made it. A
+    Linux with no file of public roots keeps the bundle the image or a provider made, and one with neither is refused
+    rather than given a bundle of the CA alone. Both, and their folder, readable by everyone."""
+    ca, bundle = paths.rooted(files["ca"]), paths.rooted(files["bundle"])
+    if (system := public_roots(paths)) is not None:
+        roots = system.read_text()
+    elif bundle.exists() and bundle.read_text().strip():
+        roots = bundle.read_text()
+    else:
+        raise SystemExit(f"there are no public roots to make {files['bundle']} from: none of "
+                         f"{', '.join(str(path) for path in paths.system_bundles)} is there")
+    added = ca.read_text() if ca.exists() else ""
+    if ca_pem.strip() not in added:
+        added = (added.rstrip("\n") + "\n" if added.strip() else "") + ca_pem.strip() + "\n"
+    missing = "".join(pem + "\n" for pem in PEM_CERTIFICATE.findall(added) if pem not in roots)
+    ca.parent.mkdir(parents=True, exist_ok=True)
+    ca.parent.chmod(0o755)
+    for path, text in ((ca, added), (bundle, roots.rstrip("\n") + "\n" + missing)):
+        write_in_place(path, text)
+        path.chmod(0o644)
+    return [str(ca), str(bundle)]
+
+
+def trust_java(paths: Paths, ca: str, ca_pem: str) -> dict:
+    """Each JDK's store trusting the CA, by its path, as ``keytool -list`` finds it there: the store the system store's
+    hook builds as ``trust_system`` updated it, and any other given the CA with ``keytool``, that JDK's own else any;
+    none on a computer with no JDK."""
+    fingerprint = sha256_fingerprint(ca_pem)
+    hook = paths.java_hook_store.resolve() if paths.java_hook_store.exists() else None
+    results: dict = {}
+    for store in java_stores(paths):
+        keytool = home_keytool(store) or shutil.which("keytool")
+        if keytool is None:
+            results[str(store)] = {"error": "there's no keytool to add the CA with"}
+            continue
+        opened = ["-keystore", str(store), "-storepass", JAVA_STORE_PASSWORD]
+        try:
+            if store.resolve() != hook:
+                subprocess.run([keytool, "-delete", "-alias", CA_NAME, *opened], capture_output=True, text=True,
+                               timeout=KEYTOOL_TIMEOUT_S)
+                subprocess.run([keytool, "-importcert", "-noprompt", "-trustcacerts", "-alias", CA_NAME, "-file", ca,
+                                *opened], check=True, capture_output=True, text=True, timeout=KEYTOOL_TIMEOUT_S)
+            listed = subprocess.run([keytool, "-list", "-v", *opened], check=True, capture_output=True, text=True,
+                                    timeout=KEYTOOL_TIMEOUT_S).stdout
+        except (OSError, subprocess.SubprocessError) as e:
+            results[str(store)] = {"error": _why(e)}
+            continue
+        results[str(store)] = {"trusted": True} if fingerprint in listed else {
+            "error": "keytool -list doesn't list the CA in it"}
+    return results
+
+
+def java_stores(paths: Paths) -> list[Path]:
+    """Each JDK's store, ``lib/security/cacerts``, a Java 8 JRE's among them, under the JDK folders and ``/opt`` to
+    ``JDK_SEARCH_DEPTH``: a store two paths lead to once."""
+    found, seen = [], set()
+    for top in paths.jdk_folders:
+        for folder, folders, files in os.walk(top):
+            here = Path(folder)
+            folders[:] = [] if len(here.relative_to(top).parts) >= JDK_SEARCH_DEPTH else [
+                name for name in folders if name not in JDK_SKIPPED]
+            if here.parts[-2:] == ("lib", "security") and "cacerts" in files:
+                store = here / "cacerts"
+                if (key := store.resolve()) not in seen:
+                    seen.add(key)
+                    found.append(store)
+    return found
+
+
+def home_keytool(store: Path) -> Optional[str]:
+    keytool = store.parents[2] / "bin" / "keytool"
+    return str(keytool) if keytool.exists() else None
+
+
+def sha256_fingerprint(pem: str) -> str:
+    """``pem``'s SHA-256 fingerprint as ``keytool -list -v`` prints it: hex pairs, upper case, joined by colons."""
+    body = "".join(line.strip() for line in pem.splitlines() if line.strip() and not line.startswith("-----"))
+    return ":".join(f"{byte:02X}" for byte in hashlib.sha256(base64.b64decode(body)).digest())
+
+
+def _why(error: Exception) -> str:
+    """What a program run with text output said it failed on, its last line; else the error."""
+    if isinstance(error, subprocess.CalledProcessError):
+        lines = (error.stderr or error.stdout or "").strip().splitlines()
+        return lines[-1] if lines else f"exited {error.returncode}"
+    return f"{type(error).__name__}: {error}"
 
 
 def trust_nss(user: Optional[str], ca: str) -> list[str]:
@@ -802,9 +927,10 @@ def install(config_path: str, paths: Paths = Paths()) -> dict:
             write_in_place(policy, chromium_policies(given["ca_pem"]))
         trust["chromium"] = [str(policy) for policy in paths.chromium_policies]
         trust["nss"] = trust_nss(user, ca)
-        bundle = paths.system_bundle if paths.system_bundle.exists() else None
-        write_in_place(paths.profile, f"export NODE_EXTRA_CA_CERTS={ca}\n"
-                       + (f"export REQUESTS_CA_BUNDLE={bundle}\n" if bundle else ""))
+        trust["java"] = trust_java(paths, ca, given["ca_pem"])
+        trust["added"] = add_trust_files(paths, given["trust_files"], given["ca_pem"])
+        write_in_place(paths.profile, "".join(f"export {name}={value}\n"
+                                              for name, value in given["trust_environment"].items()))
         trust["environment"] = str(paths.profile)
     serving = {"user": user, "serve_user": serve_user(user), "sites": sites, **{key: given[key] for key in ("listen", "https_port", "http_port")
                                                  if key in given}}
@@ -815,7 +941,8 @@ def install(config_path: str, paths: Paths = Paths()) -> dict:
     serve_path = folder / "serve.json"
     serve_path.write_text(json.dumps(serving))
     start(str(serve_path), given.get("log"))
-    return {"trust": trust, "names": names, "checks": checks_as(user, str(serve_path))}
+    checks = checks_as(user, str(serve_path))
+    return {"trust": trust, "names": names, "checks": checks["sites"], "runtimes": checks["runtimes"]}
 
 
 def start(serve_path: str, log: Optional[str]) -> None:
@@ -855,19 +982,22 @@ def keep(serve_path: str) -> None:
 
 
 def checks_as(user: Optional[str], serve_path: str) -> dict:
-    """``check`` run as ``user``, given each site's timeout one after another and a margin for its start."""
+    """``check`` run as ``user``, with the environment it's given, each site's timeout and each runtime's given one
+    after another and a margin for its start."""
     sites = len(Config.load(serve_path).sites)
     done = subprocess.run(as_user(user, [sys.executable, os.path.abspath(__file__), "check", serve_path]),
-                          capture_output=True, text=True, timeout=CHECK_TIMEOUT_S * (sites + 2))
+                          capture_output=True, text=True, timeout=CHECK_TIMEOUT_S * (sites + RUNTIME_CHECKS + 2))
     if done.returncode != 0:
-        return {"*": {"error": (done.stderr.strip().splitlines() or ["the check failed"])[-1]}}
+        return {"sites": {"*": {"error": (done.stderr.strip().splitlines() or ["the check failed"])[-1]}},
+                "runtimes": {}}
     return json.loads(done.stdout)
 
 
 def check(config: Config) -> dict:
-    """Each site's first name loaded, over HTTPS but for a ``.localhost`` name, through the system's resolver and
-    trust store: its status, or why it didn't load, which an answer the proxy made itself (it marks them ``FAILED``),
-    such as its 502 for a gateway it couldn't reach, is too."""
+    """``sites``: each site's first name loaded, over HTTPS but for a ``.localhost`` name, through the system's
+    resolver and trust store: its status, or why it didn't load, which an answer the proxy made itself (it marks them
+    ``FAILED``), such as its 502 for a gateway it couldn't reach, is too. ``runtimes``: the first of them over HTTPS
+    loaded through each other runtime's own trust (``check_runtimes``)."""
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     results = {}
     for site in config.sites:
@@ -885,7 +1015,43 @@ def check(config: Config) -> dict:
                 results[name] = {"url": url, "status": e.code}
         except (urllib.error.URLError, OSError, ssl.SSLError) as e:
             results[name] = {"url": url, "error": str(getattr(e, "reason", e))}
+    secure = next((result["url"] for result in results.values() if result["url"].startswith("https:")), None)
+    return {"sites": results, "runtimes": check_runtimes(secure) if secure else {}}
+
+
+def check_runtimes(url: str) -> dict:
+    """``url`` loaded through each runtime's own trust: Python through ``SSL_CERT_FILE`` alone, and Node and curl where
+    the computer has them, each by name with the status it was answered, any answer meaning the CA was trusted, or
+    why it couldn't."""
+    results = {"python SSL_CERT_FILE": _python_through_cert_file(url)}
+    for runtime, argv in (("node", ["-e", NODE_GET, url]),
+                          ("curl", ["-sS", "-o", "/dev/null", "-w", "%{http_code}", "--max-time",
+                                    str(int(CHECK_TIMEOUT_S)), url])):
+        if (program := shutil.which(runtime)) is None:
+            continue
+        try:
+            done = subprocess.run([program, *argv], check=True, capture_output=True, text=True,
+                                  timeout=CHECK_TIMEOUT_S + 5)
+            results[runtime] = {"url": url, "status": int(done.stdout.strip().splitlines()[-1])}
+        except (OSError, ValueError, IndexError, subprocess.SubprocessError) as e:
+            results[runtime] = {"url": url, "error": _why(e)}
     return results
+
+
+def _python_through_cert_file(url: str) -> dict:
+    cert_file = os.environ.get("SSL_CERT_FILE")
+    if not cert_file:
+        return {"url": url, "error": "SSL_CERT_FILE isn't set in the computer's environment"}
+    try:
+        context = ssl.create_default_context(cafile=cert_file)
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}),
+                                             urllib.request.HTTPSHandler(context=context))
+        with opener.open(url, timeout=CHECK_TIMEOUT_S) as response:
+            return {"url": url, "status": response.status}
+    except urllib.error.HTTPError as e:
+        return {"url": url, "status": e.code}
+    except (urllib.error.URLError, OSError, ssl.SSLError) as e:
+        return {"url": url, "error": str(getattr(e, "reason", e))}
 
 
 def main(argv: list[str]) -> None:
