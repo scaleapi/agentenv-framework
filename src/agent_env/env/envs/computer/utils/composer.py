@@ -372,10 +372,11 @@ def _composed_windows_disk(env: ComputerEnv, base: ComputerArtifact, driver: Com
         context.mkdir(parents=True)
         protocol = _stage_protocol(context)
         layer, name = _stage_driver(context, driver, base, {}), gate.folder_name(driver.id, "driver")
-        prefix = windows_disk.DRIVERS / name
-        parts = [_windows_part(layer, prefix, {program: windows_disk.argv(command, prefix) for program, command in
-                                               _services(f"driver-{name}", layer.install).items()},
-                               {"MCP_PORT": driver.port}, protocol)]
+        driver_prefix = windows_disk.DRIVERS / name
+        parts = [_windows_part(layer, driver_prefix, {
+            program: windows_disk.argv(command, driver_prefix)
+            for program, command in _services(f"driver-{name}", layer.install).items()}, {"MCP_PORT": driver.port},
+            protocol)]
         for app in env.composed_apps():
             staged, prefix = _stage_app(context, app, base, {}), windows_disk.APPS / gate.app_folder(app)
             server = [str(prefix / "venv" / "Scripts" / "python.exe"), "-m", "agentenv_protocol.computer.serve_app",
