@@ -228,7 +228,8 @@ async def _route_sites(env: ComputerEnv, sandbox: Sandbox, params: computer_para
     """The computer on ``sandbox`` routed to ``params.sites`` under a CA of its own, valid ``valid_for_s``; what its
     record keeps of it."""
     routed = await sites.route(sandbox, params.sites, user=env.computer.session.user, network=env.network,
-                               valid_for=timedelta(seconds=valid_for_s), label=env.environment_name)
+                               valid_for=timedelta(seconds=valid_for_s), label=env.environment_name,
+                               os_type=env.computer.os.type)
     return {**routed, "valid_for_s": valid_for_s}
 
 
@@ -318,7 +319,8 @@ def _environment(env: ComputerEnv, computer: ComputerArtifact, values: dict,
                                    driver_settings=params.driver_settings, tool_prefix=tool_prefix),
             **app_settings_environment(env.composed_apps(), computer_params.app_settings(env, params.app_settings),
                                        env.computer.os.type),
-            **({HOLD_BOOT_LAUNCH_ENV: "1"} if params.site_routing else {})}
+            **({HOLD_BOOT_LAUNCH_ENV: "1", **sites.trust_environment(env.computer.os.type, params.sites)}
+               if params.site_routing else {})}
 
 
 def _require_name(env: ComputerEnv, card: dict) -> None:

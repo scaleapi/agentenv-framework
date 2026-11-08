@@ -37,7 +37,7 @@ from agent_env.config.paths import cache_root
 from agent_env.env.envs.computer.utils.install import WindowsInstall
 from agent_env.providers.sandbox_providers.host_images import present
 from agent_env.providers.sandbox_providers.local_docker.cli import docker
-from agent_env.providers.sandbox_providers.local_docker.disk import KVM, launcher, machine_image
+from agent_env.providers.sandbox_providers.local_docker.disk import KVM, launcher, machine_for
 from agent_env.store.image_store.image_contents import labels as image_labels
 from agent_env.store.image_store.image_store import ImageStore
 from agent_env.store.image_store.registry_api import pin_digest, pin_if_served
@@ -293,8 +293,8 @@ def compose(base_: Base, build: Path, key: str, labels: dict[str, str], say: Cal
         out.mkdir()
         name = f"agentenv-windows-compose-{_short(key)}"
         say(f"booting its base in {name}")
-        machine = asyncio.run(machine_image(base_.image))
-        container = _launched(name, {"VM_KEEP": "/out/disk.img"}, ["-v", f"{out}:/out"], machine)
+        machine = asyncio.run(machine_for(base_.image))
+        container = _launched(name, {"VM_KEEP": "/out/disk.img"}, ["-v", f"{out}:/out", *machine.args], machine.image)
         try:
             port, deadline = _ssh_port(container), time.monotonic() + COMPOSE_TIMEOUT_S
             while ssh(port, base_.keys, "echo ready", check=False, timeout=60).returncode != 0:
@@ -312,7 +312,7 @@ def compose(base_: Base, build: Path, key: str, labels: dict[str, str], say: Cal
             _shut_down(container, port, base_.keys)
         finally:
             subprocess.run(["docker", "rm", "-f", container], capture_output=True)
-        _converted(out, machine, backing=f"/{DISK_BASE_FILE}")
+        _converted(out, machine.image, backing=f"/{DISK_BASE_FILE}", args=machine.args)
         subprocess.run(["docker", "run", "--rm", "-v", f"{out}:/out", "--entrypoint", "qemu-img", launcher(), "rebase",
                         "-u", "-b", PureWindowsPath(DISK_BASE_FILE).name, "-F", "qcow2", "/out/disk.img"],
                        check=True, capture_output=True)
@@ -449,12 +449,12 @@ def _compacted(port: int, keys: Path, say: Callable[[str], None]) -> None:
         say(f"trimming exited {done.returncode}, so its image keeps what it held: {(done.stderr + done.stdout)[-300:]}")
 
 
-def _converted(folder: Path, image: str, backing: str | None = None) -> None:
-    """``folder``'s ``disk.img`` rewritten by ``qemu-img convert`` in ``image``, which holds its backing file, keeping
-    only the clusters it uses: a base's whole, a layer's over ``backing``, the backing file ``image`` holds."""
+def _converted(folder: Path, image: str, backing: str | None = None, args: tuple[str, ...] = ()) -> None:
+    """``folder``'s ``disk.img`` rewritten by ``qemu-img convert`` in ``image`` run with ``args``, which give it its
+    backing file, keeping only the clusters it uses: a base's whole, a layer's over ``backing``."""
     over = ["-B", backing, "-F", "qcow2"] if backing else []
-    subprocess.run(["docker", "run", "--rm", "-v", f"{folder}:/out", "--entrypoint", "qemu-img", image, "convert", "-O",
-                    "qcow2", *over, "/out/disk.img", "/out/compact.img"], check=True, capture_output=True)
+    subprocess.run(["docker", "run", "--rm", "-v", f"{folder}:/out", *args, "--entrypoint", "qemu-img", image, "convert",
+                    "-O", "qcow2", *over, "/out/disk.img", "/out/compact.img"], check=True, capture_output=True)
     (folder / "compact.img").replace(folder / "disk.img")
 
 

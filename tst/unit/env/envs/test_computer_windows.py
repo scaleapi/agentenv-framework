@@ -409,9 +409,11 @@ def test_a_windows_computers_display_is_1920x1080_for_now(local_stores, cli_rout
         "display: a Windows computer's display is 1920x1080 for now"]
 
 
-@pytest.mark.parametrize("backing, over", [(None, []), ("/disk/base.img", ["-B", "/disk/base.img", "-F", "qcow2"])],
-                         ids=["a-base", "a-layer-over-its-base"])
-def test_a_disk_is_rewritten_keeping_only_the_clusters_it_uses(monkeypatch, tmp_path, backing, over):
+@pytest.mark.parametrize("backing, over, args", [
+    (None, [], ()), ("/disk/base.img", ["-B", "/disk/base.img", "-F", "qcow2"], ()),
+    ("/disk/base.img", ["-B", "/disk/base.img", "-F", "qcow2"], ("--mount", "type=image,source=base:1,target=/disk"))],
+    ids=["a-base", "a-layer-over-its-base", "a-layer-over-its-base-mounted"])
+def test_a_disk_is_rewritten_keeping_only_the_clusters_it_uses(monkeypatch, tmp_path, backing, over, args):
     ran = []
 
     def run(argv, **kwargs):
@@ -421,8 +423,8 @@ def test_a_disk_is_rewritten_keeping_only_the_clusters_it_uses(monkeypatch, tmp_
     (tmp_path / "disk.img").write_text("as Windows left it")
     monkeypatch.setattr(windows_disk.subprocess, "run", run)
 
-    windows_disk._converted(tmp_path, "machine:1", backing=backing)
+    windows_disk._converted(tmp_path, "machine:1", backing=backing, args=args)
 
-    assert ran == [["docker", "run", "--rm", "-v", f"{tmp_path}:/out", "--entrypoint", "qemu-img", "machine:1", "convert",
-                    "-O", "qcow2", *over, "/out/disk.img", "/out/compact.img"]]
+    assert ran == [["docker", "run", "--rm", "-v", f"{tmp_path}:/out", *args, "--entrypoint", "qemu-img", "machine:1",
+                    "convert", "-O", "qcow2", *over, "/out/disk.img", "/out/compact.img"]]
     assert (tmp_path / "disk.img").read_text() == "compacted" and not (tmp_path / "compact.img").exists()
