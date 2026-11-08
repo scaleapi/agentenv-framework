@@ -33,6 +33,7 @@ from urllib.parse import urlsplit
 import httpx
 from agentenv_protocol import client as protocol_client
 from agentenv_protocol.website import WEBSITE_EXTENSION_URI as WEBSITE
+from agentenv_protocol.website_browser import SITE_PROXY_ENV
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -55,6 +56,9 @@ CONFIG = FOLDER / "config.json"
 #: By the OS type of each computer site routing reaches, the variables naming the trust files agentenv adds, which a
 #: computer routing sites boots with.
 TRUST_ENVIRONMENTS = {"linux": dict(LOCAL_TRUST_ENV)}
+#: The site proxy's forward port, a browser alone's only route out when its computer routes sites.
+FORWARD_PROXY_PORT = 3128
+FORWARD_PROXY = f"http://127.0.0.1:{FORWARD_PROXY_PORT}"
 LOG = FOLDER / "site-proxy.log"
 SYNTHETIC, ALLOWLIST = "synthetic", "allowlist"
 RANKS = (SYNTHETIC, ALLOWLIST)
@@ -284,12 +288,18 @@ def trust_environment(os_type: str, sites: list[Site]) -> dict[str, str]:
     return dict(TRUST_ENVIRONMENTS[os_type]) if any(route.tls_names for route in site_table(sites).routes) else {}
 
 
+def browser_environment(display: str) -> dict[str, str]:
+    """For a computer routing sites, the variable naming the forward port to a browser alone, which runs on a computer
+    with no display; none on one with a display, whose apps reach the sites by name on the transparent listeners."""
+    return {SITE_PROXY_ENV: FORWARD_PROXY} if display == "none" else {}
+
+
 def proxy_config(table: SiteTable, issued: Issued, *, user: Optional[str], os_type: str,
                  upstream_headers: Optional[dict[str, dict[str, str]]] = None) -> dict:
     """What ``site_proxy.py install`` reads: the session user, the CA, the trust files on an ``os_type`` computer and
     the variables naming them, which its profile script sets as the computer's boot environment does, each route with
     its certificate and key, and the headers its gateway's sandbox provider asks requests to it to carry
-    (``upstream_headers``, by site), which the proxy sends upstream alone."""
+    (``upstream_headers``, by site), which the proxy sends upstream alone, and its forward port."""
     sites = []
     for route in table.routes:
         site = {"name": route.site, "upstream": route.url, "domains": list(route.domains)}
@@ -299,7 +309,8 @@ def proxy_config(table: SiteTable, issued: Issued, *, user: Optional[str], os_ty
             site["upstream_headers"] = dict(upstream_headers[route.site])
         sites.append(site)
     return {"user": user, "ca_pem": issued.ca_pem, "sites": sites, "log": str(LOG),
-            "trust_files": trust_files(os_type), "trust_environment": dict(TRUST_ENVIRONMENTS[os_type])}
+            "trust_files": trust_files(os_type), "trust_environment": dict(TRUST_ENVIRONMENTS[os_type]),
+            "proxy_port": FORWARD_PROXY_PORT}
 
 
 def reachable_problem(policy: Optional[NetworkPolicy], routes: list[Route]) -> Optional[str]:

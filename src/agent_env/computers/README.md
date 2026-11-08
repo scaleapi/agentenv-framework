@@ -13,10 +13,13 @@ building it. Name it from another bundle as `ubuntu-24.04`, the alias `aliases.t
 `artifacts/ubuntu-24.04-headless/` is Ubuntu 24.04 (`amd64` and `arm64`) with no display server or desktop
 (`display = "none"`), for one website browser, which runs headless there, and the `page` driver, whose screen is the
 browser's page: a browser computer, which agentenv's `chromium` deploys alone as. supervisord runs every program as the
-session user, among them a stand-in site proxy on `127.0.0.1:3128`, the browser's only route out, which forwards every
-request to wherever it names, refusing nothing: the sandbox's network policy is all that limits it until the shared
-site proxy replaces it. It has a container form only. Name it from another bundle as `ubuntu-24.04-headless`, or by
-its id, `@local/agentenv-framework/computers/ubuntu-24.04-headless`.
+session user.
+The browser goes out only through a site proxy. A computer that routes sites names the shared site proxy's forward port,
+`127.0.0.1:3128`, to it: that port serves the run's sites and refuses every other host, and it runs out of the agent's
+reach. A computer that routes no sites keeps the base's stand-in on `127.0.0.1:3129`, which forwards every request to
+wherever it names, refusing nothing: the sandbox's network policy is all that limits it. It has a container form only.
+Name it from another bundle as `ubuntu-24.04-headless`, or by its id,
+`@local/agentenv-framework/computers/ubuntu-24.04-headless`.
 
 It also has a disk form, a disk a VM boots from UEFI, which is the container form's root filesystem on the Linux boot
 recipe in `disk/linux/`: a GPT disk of an EFI system partition holding one UKI, Ubuntu's kernel with a busybox initramfs,

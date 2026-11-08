@@ -1056,6 +1056,7 @@ async def test_a_computer_routing_sites_boots_with_its_trust_until_its_driver_an
 
     assert boots.boots[0]["held"] is True and order == ["route", ("ready", {}), "display"]
     assert env_computer_provider.sites.TRUST_ENVIRONMENTS["linux"].items() <= boots.boots[0]["environment"].items()
+    assert "AGENTENV_SITE_PROXY" not in boots.boots[0]["environment"]
 
 
 @pytest.mark.asyncio

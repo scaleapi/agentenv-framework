@@ -572,6 +572,11 @@ def test_the_trust_a_routing_linux_computer_boots_with_is_the_local_providers_so
     assert sites.trust_files("linux") == {"ca": "/etc/agentenv/ca.pem", "bundle": "/etc/agentenv/ca-bundle.pem"}
 
 
+def test_a_browser_alone_routing_sites_is_named_the_forward_port_and_a_computer_with_a_display_is_named_none():
+    assert sites.browser_environment("none") == {"AGENTENV_SITE_PROXY": "http://127.0.0.1:3128"}
+    assert sites.browser_environment("x11") == {}
+
+
 def test_a_computer_boots_with_the_trust_variables_only_when_a_site_it_routes_is_served_over_https():
     local = [Site(name="notes", url="http://gw/website/notes/", domains=["notes.localhost"]),
              Site(name="bare", url="http://gw/website/bare/")]

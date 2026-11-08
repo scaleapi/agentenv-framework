@@ -1,6 +1,7 @@
 # The ubuntu-24.04-headless base computer: Ubuntu 24.04 with no display server or desktop (XDG_SESSION_TYPE=none),
 # for one website browser, which runs headless there, and a page driver whose screen is the browser's page. supervisord
-# runs every program as the session user, and the browser goes out only through the site proxy on 127.0.0.1:3128.
+# runs every program as the session user. The browser goes out only through a site proxy: the shared one's forward port
+# (127.0.0.1:3128) when the computer routes sites, else this base's stand-in on 127.0.0.1:3129.
 # Files a page's file chooser may be given go in ~/Uploads. Composing a driver or an app onto it adds its services as
 # programs in /etc/supervisor/conf.d. The trust files agentenv adds are in /etc/agentenv from boot: ca.pem, empty until
 # a deploy adds a CA, and ca-bundle.pem, the public roots and those CAs.
@@ -21,6 +22,6 @@ COPY start-computer /usr/local/bin/start-computer
 COPY site-proxy.py /usr/local/bin/agentenv-site-proxy
 USER user
 WORKDIR /home/user
-ENV LANG=C.UTF-8 XDG_SESSION_TYPE=none AGENTENV_SITE_PROXY=http://127.0.0.1:3128
+ENV LANG=C.UTF-8 XDG_SESSION_TYPE=none AGENTENV_SITE_PROXY=http://127.0.0.1:3129
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["/usr/local/bin/start-computer"]

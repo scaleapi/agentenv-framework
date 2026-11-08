@@ -89,6 +89,16 @@ async def _proxy(config, scheme="https"):
         server.close()
 
 
+@contextlib.asynccontextmanager
+async def _forward_port(config):
+    proxy = SiteProxy(config, tls=site_proxy.tls_context(config))
+    server = await asyncio.start_server(proxy.handle_forward, "127.0.0.1", 0)
+    try:
+        yield server.sockets[0].getsockname()[1]
+    finally:
+        server.close()
+
+
 async def _exchange(port, request: bytes, *, server_hostname=None, cadata=None, reader_writer=None):
     if reader_writer is None:
         context = None
@@ -299,6 +309,93 @@ async def test_an_answer_with_no_length_is_relayed_to_its_end_and_closes_the_con
 
     assert answer.startswith(b"HTTP/1.1 200 OK\r\n") and b"Connection: close" in answer
     assert answer.endswith(b"\r\n\r\nall of it")
+
+
+@pytest.mark.asyncio
+async def test_the_forward_port_tunnels_a_connect_to_a_sites_name_through_its_certificate_to_its_route(tmp_path):
+    async with Upstream() as upstream:
+        config, issued = _config(tmp_path, upstream.port)
+        async with _forward_port(config) as port:
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            writer.write(b"CONNECT notes.test:443 HTTP/1.1\r\nHost: notes.test:443\r\n\r\n")
+            established = await reader.readuntil(b"\r\n\r\n")
+            await writer.start_tls(ssl.create_default_context(cadata=issued.ca_pem), server_hostname="notes.test")
+            first = await _exchange(port, b"GET /a?b=1 HTTP/1.1\r\nHost: notes.test\r\n\r\n",
+                                    reader_writer=(reader, writer))
+            second = await _exchange(port, b"GET /c HTTP/1.1\r\nHost: notes.test\r\n\r\n",
+                                     reader_writer=(reader, writer))
+            writer.close()
+
+    assert established.startswith(b"HTTP/1.1 200 ")
+    assert (first[0], first[2], second[0]) == ("HTTP/1.1 200 OK", b"hello", "HTTP/1.1 200 OK")
+    assert [request[0] for request in upstream.requests] == ["GET /website/notes/a?b=1 HTTP/1.1",
+                                                             "GET /website/notes/c HTTP/1.1"]
+    assert (upstream.requests[0][1]["x-forwarded-host"], upstream.requests[0][1]["x-forwarded-proto"]) == (
+        "notes.test", "https")
+
+
+@pytest.mark.asyncio
+async def test_the_forward_port_serves_a_localhost_name_named_by_its_url_and_sends_a_real_name_to_https(tmp_path):
+    async with Upstream() as upstream:
+        config, _ = _config(tmp_path, upstream.port, notes=["notes.localhost"], shop=["shop.test"])
+        async with _forward_port(config) as port:
+            local = await _exchange(port, b"GET http://notes.localhost/a?b=1 HTTP/1.1\r\nHost: notes.localhost\r\n\r\n")
+            local[3][1].close()
+            real = await _exchange(port, b"GET http://shop.test/cart HTTP/1.1\r\nHost: shop.test\r\n\r\n")
+            real[3][1].close()
+
+    assert (local[0], local[2]) == ("HTTP/1.1 200 OK", b"hello")
+    assert upstream.requests[0][0] == "GET /website/notes/a?b=1 HTTP/1.1"
+    assert upstream.requests[0][1]["x-forwarded-proto"] == "http" and len(upstream.requests) == 1
+    assert (real[0], real[1]["location"]) == ("HTTP/1.1 308 Permanent Redirect", "https://shop.test/cart")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("request_line, named", [
+    (b"CONNECT example.com:443 HTTP/1.1", "example.com:443"),
+    (b"CONNECT 127.0.0.1:18765 HTTP/1.1", "127.0.0.1:18765"),
+    (b"GET http://127.0.0.1:18765/ HTTP/1.1", "127.0.0.1:18765"),
+    (b"GET http://example.com/ HTTP/1.1", "example.com"),
+], ids=["connect", "connect-loopback", "url-loopback", "url"])
+async def test_the_forward_port_refuses_any_other_host_at_once_and_logs_it(tmp_path, capsys, request_line, named):
+    async with Upstream() as upstream:
+        config, _ = _config(tmp_path, upstream.port)
+        async with _forward_port(config) as port:
+            start, headers, body, conn = await asyncio.wait_for(_exchange(
+                port, request_line + b"\r\nHost: " + named.encode() + b"\r\n\r\n"), 5)
+            conn[1].close()
+
+    assert start == "HTTP/1.1 403 Forbidden" and headers["x-agentenv-site-proxy"] == "failed"
+    assert body == f"{named} is no site of this computer, and the browser reaches its sites alone\n".encode()
+    assert upstream.requests == []
+    method = request_line.split(b" ")[0].decode()
+    assert f"site proxy: refused {method} {named}: no site of this computer" in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
+async def test_the_forward_port_streams_an_event_stream_as_it_comes(tmp_path):
+    release = asyncio.Event()
+
+    async def respond(start, headers, body, reader, writer):
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n"
+                     b"d\r\ndata: first\n\n\r\n")
+        await writer.drain()
+        await release.wait()
+        writer.write(b"0\r\n\r\n")
+
+    async with Upstream(respond) as upstream:
+        config, _ = _config(tmp_path, upstream.port, notes=["notes.localhost"])
+        async with _forward_port(config) as port:
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            writer.write(b"GET http://notes.localhost/events HTTP/1.1\r\nHost: notes.localhost\r\n\r\n")
+            head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 5)
+            first = await asyncio.wait_for(reader.readuntil(b"\n\n\r\n"), 5)
+            release.set()
+            rest = await asyncio.wait_for(reader.readuntil(b"0\r\n\r\n"), 5)
+            writer.close()
+
+    assert head.startswith(b"HTTP/1.1 200 OK\r\n") and b"text/event-stream" in head
+    assert first == b"d\r\ndata: first\n\n\r\n" and rest == b"0\r\n\r\n"
 
 
 @pytest.mark.asyncio
@@ -595,6 +692,7 @@ def test_install_writes_the_sites_files_names_and_trust_then_starts_the_proxy_on
     assert [(s.name, s.domains, bool(s.cert)) for s in config.sites] == [
         ("notes", ["notes.test"], True), ("chat", ["*.chat.test"], True), ("bare", ["bare.localhost"], False)]
     assert (config.dns_port, config.nameservers) == (53, ["127.0.0.11"])
+    assert config.proxy_port == sites.FORWARD_PROXY_PORT == 3128
     assert [(folder / name).stat().st_mode & 0o777 for name in ("notes.key", "config.json")] == [0o600, 0o600]
     assert folder.stat().st_mode & 0o777 == 0o755
     assert "key_pem" not in (folder / "serve.json").read_text()
