@@ -15,9 +15,8 @@ pytest.importorskip("uvicorn")
 
 from agentenv_protocol import CONTROL_TOKEN_ENV  # noqa: E402
 from agentenv_protocol.computer import ComputerDriverEnvironment, run_install_step, serve_app  # noqa: E402
-from agentenv_protocol.computer.app import BUILD_SETTINGS, FAILURE, SOCKET  # noqa: E402
+from agentenv_protocol.computer.app import ADDRESS, BUILD_SETTINGS, FAILURE, SOCKET  # noqa: E402
 from agentenv_protocol.computer.app_runtime import AppRuntime  # noqa: E402
-from agentenv_protocol.computer.served import ADDRESS  # noqa: E402
 from agentenv_protocol.computer.serve import USAGE, main  # noqa: E402
 
 DRIVER = '''from desk_helpers import SIZE

@@ -376,7 +376,7 @@ def test_an_apps_code_needs_only_the_plain_package():
 import importlib.abc, sys
 class Blocked(importlib.abc.MetaPathFinder):
     def find_spec(self, name, path, target=None):
-        if name.split(".")[0] in ("mcp", "av", "PIL", "uvicorn"):
+        if name.split(".")[0] in ("mcp", "av", "PIL", "uvicorn", "websockets"):
             raise ImportError(name)
 sys.meta_path.insert(0, Blocked())
 from agentenv_protocol.computer import ComputerAppEnvironment, Linux, computer_app

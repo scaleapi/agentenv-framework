@@ -16,7 +16,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Iterator, NamedTuple, Optional
 
 from . import _job, _reaping
 
@@ -177,15 +177,15 @@ class _Win32:
     CLASS_NAME_CHARS, PATH_CHARS = 256, 32768
 
     def __init__(self) -> None:
-        self._dlls: Optional[tuple] = None
+        self._dlls: Optional[_Dlls] = None
 
     def open_job(self, helper: int) -> Optional[int]:
         """A handle to the job the helper ``helper`` holds, to query and end it, or None when it isn't there."""
-        return self._api()[0].OpenJobObjectW(_job.JOB_OBJECT_QUERY | _job.JOB_OBJECT_TERMINATE, False,
-                                             _job.job_name(helper)) or None
+        return self._api().kernel32.OpenJobObjectW(_job.JOB_OBJECT_QUERY | _job.JOB_OBJECT_TERMINATE, False,
+                                                   _job.job_name(helper)) or None
 
     def job_pids(self, job: int) -> list[int]:
-        kernel32 = self._api()[0]
+        kernel32 = self._api().kernel32
         room = self.PIDS
         while True:
             listed = _pid_list(room)()
@@ -197,25 +197,26 @@ class _Win32:
             room = listed.NumberOfAssignedProcesses
 
     def terminate_job(self, job: int) -> None:
-        if not self._api()[0].TerminateJobObject(job, 1):
+        if not self._api().kernel32.TerminateJobObject(job, 1):
             raise ctypes.WinError(ctypes.get_last_error())
 
     def close(self, handle: int) -> None:
-        self._api()[0].CloseHandle(handle)
+        self._api().kernel32.CloseHandle(handle)
 
     def suspend(self, pid: int) -> bool:
         """Whether the process ``pid`` was there to suspend, and was."""
         return bool(self._on_process(pid, self.PROCESS_SUSPEND_RESUME,
-                                     lambda process: self._api()[3].NtSuspendProcess(process) == 0))
+                                     lambda process: self._api().ntdll.NtSuspendProcess(process) == 0))
 
     def resume(self, pid: int) -> None:
-        self._on_process(pid, self.PROCESS_SUSPEND_RESUME, lambda process: self._api()[3].NtResumeProcess(process))
+        self._on_process(pid, self.PROCESS_SUSPEND_RESUME, lambda process: self._api().ntdll.NtResumeProcess(process))
 
     def post_close(self, window: int) -> None:
-        self._api()[1].PostMessageW(window, WM_CLOSE, 0, 0)
+        self._api().user32.PostMessageW(window, WM_CLOSE, 0, 0)
 
     def windows(self) -> list[Window]:
-        _, user32, dwmapi, _ = self._api()
+        dlls = self._api()
+        user32, dwmapi = dlls.user32, dlls.dwmapi
         handles: list[int] = []
         listing = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)(
             lambda window, _: handles.append(window) or True)
@@ -237,7 +238,7 @@ class _Win32:
         """The file name of the program running as ``pid``, lowercased, or empty where it can't be read."""
         def read(process: int) -> str:
             path, size = ctypes.create_unicode_buffer(self.PATH_CHARS), ctypes.c_uint32(self.PATH_CHARS)
-            if not self._api()[0].QueryFullProcessImageNameW(process, 0, path, ctypes.byref(size)):
+            if not self._api().kernel32.QueryFullProcessImageNameW(process, 0, path, ctypes.byref(size)):
                 return ""
             return path.value.rpartition("\\")[2].lower()
         return self._on_process(pid, self.PROCESS_QUERY_LIMITED_INFORMATION, read) or ""
@@ -245,7 +246,7 @@ class _Win32:
     def _on_process(self, pid: int, access: int, act):
         """``act`` on a handle to the process ``pid`` opened for ``access``, closed after; None where it can't be
         opened, as for a process that has exited."""
-        kernel32 = self._api()[0]
+        kernel32 = self._api().kernel32
         process = kernel32.OpenProcess(access, False, pid)
         if not process:
             return None
@@ -254,14 +255,9 @@ class _Win32:
         finally:
             kernel32.CloseHandle(process)
 
-    def _api(self) -> tuple:
-        """``kernel32``, ``user32``, ``dwmapi`` and ``ntdll``, bound on first use, so this module imports anywhere."""
+    def _api(self) -> _Dlls:
+        """The DLLs this class calls, bound on first use, so this module imports anywhere."""
         if self._dlls is None:
-            kernel32 = _job.kernel32()
-            kernel32.OpenProcess.argtypes, kernel32.OpenProcess.restype = [ctypes.c_uint32, ctypes.c_int,
-                                                                           ctypes.c_uint32], ctypes.c_void_p
-            kernel32.QueryFullProcessImageNameW.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_wchar_p,
-                                                            ctypes.c_void_p]
             user32 = ctypes.WinDLL("user32", use_last_error=True)
             user32.EnumWindows.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
             user32.GetWindowThreadProcessId.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
@@ -274,8 +270,18 @@ class _Win32:
                                                      ctypes.c_uint32]
             ntdll = ctypes.WinDLL("ntdll")
             ntdll.NtSuspendProcess.argtypes = ntdll.NtResumeProcess.argtypes = [ctypes.c_void_p]
-            self._dlls = (kernel32, user32, dwmapi, ntdll)
+            self._dlls = _Dlls(_job.kernel32(), user32, dwmapi, ntdll)
         return self._dlls
+
+
+class _Dlls(NamedTuple):
+    """The DLLs ``_Win32`` calls, each with the calls it makes typed: ``kernel32``'s in ``_job``, as the helper makes
+    some of them too."""
+
+    kernel32: ctypes.WinDLL
+    user32: ctypes.WinDLL
+    dwmapi: ctypes.WinDLL
+    ntdll: ctypes.WinDLL
 
 
 def _pid_list(room: int) -> type[ctypes.Structure]:

@@ -18,7 +18,7 @@ from starlette.background import BackgroundTask
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
 from starlette.websockets import WebSocket, WebSocketDisconnect
-from websockets.asyncio.client import ClientConnection, connect, unix_connect
+from websockets.asyncio.client import ClientConnection
 
 from ..agent_env_environment import _error_response
 from .errors import DeliveryFailed
@@ -119,14 +119,17 @@ async def forward(folder: Path, name: str, request: Request) -> Response:
     client's own, its body and its answer streamed; it takes as long as the app does."""
     headers = to_app(request.headers.items(), request.headers.get("host", ""), request.url.scheme, f"/svc/{name}")
     has_body = request.headers.get("content-length", "0") != "0" or "transfer-encoding" in request.headers
-    http = served(folder).client(timeout=None)
+    try:
+        http = served(folder).client(timeout=None)
+    except OSError as e:
+        return _not_answering(name, e)
     http.headers.clear()
     try:
         answer = await http.send(http.build_request(request.method, target(request), headers=_bytes(headers),
                                                     content=request.stream() if has_body else None), stream=True)
     except (httpx.HTTPError, OSError) as e:
         await http.aclose()
-        return _error_response(DeliveryFailed(f"app {name}'s server isn't answering: {type(e).__name__}: {e}"))
+        return _not_answering(name, e)
     except BaseException:
         await http.aclose()
         raise
@@ -160,14 +163,10 @@ async def relay(folder: Path, name: str, websocket: WebSocket, opened: Optional[
         websocket.headers.items(), host, "https" if websocket.url.scheme == "wss" else "http", f"/svc/{name}")
         if key.lower() != "host" and not key.lower().startswith("sec-websocket-")]
     offered = [p.strip() for p in websocket.headers.get("sec-websocket-protocol", "").split(",") if p.strip()]
-    reached, uri = served(folder), f"ws://{host or 'app'}{target(websocket)}"
-    options = {"subprotocols": offered or None, "max_size": None, "compression": None, "ping_interval": None,
-               "user_agent_header": None}
     try:
-        upstream = await (
-            unix_connect(str(reached.socket), uri, additional_headers=headers, **options) if reached.socket else
-            connect(uri, host="127.0.0.1", port=reached.port, proxy=None,
-                    additional_headers=[*headers, (TOKEN_HEADER, reached.token)], **options))
+        upstream = await served(folder).websocket(
+            f"ws://{host or 'app'}{target(websocket)}", headers, subprotocols=offered or None, max_size=None,
+            compression=None, ping_interval=None, user_agent_header=None)
     except (OSError, ValueError, asyncio.TimeoutError, websockets.WebSocketException):
         await websocket.close(code=1011)
         return
@@ -176,6 +175,10 @@ async def relay(folder: Path, name: str, websocket: WebSocket, opened: Optional[
         if opened is not None:
             opened()
         await _both_ways(websocket, upstream)
+
+
+def _not_answering(name: str, e: BaseException) -> Response:
+    return _error_response(DeliveryFailed(f"app {name}'s server isn't answering: {type(e).__name__}: {e}"))
 
 
 def _utf8(value: str) -> str:

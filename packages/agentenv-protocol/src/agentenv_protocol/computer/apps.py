@@ -10,9 +10,8 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
-import sys
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Optional
 
 import httpx
@@ -22,10 +21,18 @@ from ..types import RPC_PATH, WELL_KNOWN_PATH, EnvironmentCard
 from .app import AGENT_ACTED, COMPUTER_APP, FAILURE
 from .app_runtime import CHECK_TIMEOUT_S, LAUNCHES, AppReadiness, boot_launch_held
 from .operations import ReadyCheck
+from .platform import detect
 from .served import served
 
-#: Where a composed computer installs its apps, a folder each.
-APPS = Path("C:/agentenv/apps" if sys.platform == "win32" else "/opt/agentenv/apps")
+
+def apps_folder(os_type: str) -> PurePath:
+    """Where a composed computer of ``os_type`` installs its apps, a folder each: what its computer finds them by, and
+    what composing one installs them under, whatever OS composes it."""
+    return PureWindowsPath("C:/agentenv/apps") if os_type == "windows" else PurePosixPath("/opt/agentenv/apps")
+
+
+#: Where this computer installs its apps.
+APPS = Path(apps_folder(detect().os))
 #: How long an app's server may take to answer, its checks run at once, before it counts as not answering.
 ANSWER_TIMEOUT_S = CHECK_TIMEOUT_S + 5
 

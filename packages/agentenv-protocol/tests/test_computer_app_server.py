@@ -1,7 +1,8 @@
 """A computer app's own server: it adds the app's launcher, launches a boot app once per boot and says whether the app
 is ready (``computer-app/v1``); its computer's driver finds it on the socket in the app's folder and asks it, lists it
 as a child environment and forwards its requests to it, only with the computer's control token when it has one, and
-leaves the paths it owns out of its own data/get."""
+leaves the paths it owns out of its own data/get. On Windows one that wrote no address isn't answering, or says why it
+failed to start."""
 from __future__ import annotations
 
 import asyncio
@@ -27,6 +28,7 @@ import base64  # noqa: E402
 import httpx  # noqa: E402
 
 import agentenv_protocol.computer.launch as launcher  # noqa: E402
+import agentenv_protocol.computer.served as transports  # noqa: E402
 from agentenv_protocol import client  # noqa: E402
 from agentenv_protocol.computer import (ComputerAppEnvironment, Launch, ReadyCheck, Ready, linux,  # noqa: E402
                                         ready_check)
@@ -241,6 +243,18 @@ async def test_a_boot_app_whose_launch_fails_says_why_and_is_launched_again_by_i
     assert (await mail._computer_app_ready())["problems"][0] == (
         "its launch failed: FileNotFoundError: No such file or directory: 'mail'")
     assert not (tmp_path / "launched").exists()
+
+
+@pytest.mark.asyncio
+async def test_on_windows_an_app_whose_server_wrote_no_address_isnt_answering_or_failed_to_start(tmp_path, monkeypatch):
+    monkeypatch.setattr(transports, "LOOPBACK", True)
+    (tmp_path / "gone").mkdir()
+    (tmp_path / "broken" / FAILURE).parent.mkdir(parents=True)
+    (tmp_path / "broken" / FAILURE).write_text("RuntimeError: no mailbox")
+
+    assert [await apps.check(tmp_path / name) for name in ("broken", "gone")] == [
+        ReadyCheck("app broken", False, "its server failed to start: RuntimeError: no mailbox"),
+        ReadyCheck("app gone", False, "its server isn't answering yet")]
 
 
 @pytest.mark.asyncio

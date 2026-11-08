@@ -1,9 +1,10 @@
-"""Where a computer app's own server answers, and how its computer reaches it (``serve_app``, ``apps``, ``svc``,
-``launch``). On Linux and macOS it serves on the Unix socket ``SOCKET`` in the app's folder, which only the computer
-reaches, so it takes no token. On Windows, whose asyncio serves no Unix socket, it serves on a free port of 127.0.0.1
-and writes that port, with a token it draws, to ``ADDRESS`` there, in a folder its computer keeps the session user's
-own; it answers only a request carrying the token, so no other user of the computer gets in, and whatever reaches the
-app reads both from that file."""
+"""How a computer app's own server is reached, over HTTP or a WebSocket, and how it serves (``serve_app``, ``apps``,
+``svc``, ``launch``). On Linux and macOS it serves on the Unix socket ``SOCKET`` in the app's folder, which only the
+computer reaches, so it takes no token. On Windows, whose asyncio serves no Unix socket, it serves on a free port of
+127.0.0.1 and writes that port, with a token it draws, to ``ADDRESS`` there, in a folder its computer keeps the session
+user's own; it answers only a request carrying the token, so no other user of the computer gets in, and whatever
+reaches the app reads both from that file. Needs the ``app`` or ``computer`` extra; an app's own code imports none of
+it."""
 from __future__ import annotations
 
 import hmac
@@ -17,11 +18,10 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Generator, Optional
 
 import httpx
+from websockets.asyncio.client import ClientConnection, connect, unix_connect
 
-#: Where an app's own server listens on Linux and macOS, in the app's folder.
-SOCKET = Path(".agentenv/server.sock")
-#: Where an app's server on Windows writes the port it serves on and its token, in the app's folder.
-ADDRESS = Path(".agentenv/server.json")
+from .app import ADDRESS, SOCKET
+
 #: The header a request to an app's server on loopback carries its token in.
 TOKEN_HEADER = "x-agentenv-app-token"
 #: Whether this OS's app servers serve on loopback rather than a Unix socket.
@@ -33,7 +33,7 @@ Asgi = Callable[[dict, Callable[[], Awaitable[dict]], Callable[[dict], Awaitable
 @dataclass(frozen=True)
 class Served:
     """An app's server as its computer reaches it: on its Unix ``socket``, or on ``port`` of 127.0.0.1 with ``token``,
-    through no proxy the environment names."""
+    through no proxy the environment names; over HTTP, or a WebSocket."""
 
     socket: Optional[Path] = None
     port: Optional[int] = None
@@ -45,6 +45,14 @@ class Served:
     def sync_client(self, timeout: Optional[float]) -> httpx.Client:
         return httpx.Client(**self._client_args(httpx.HTTPTransport), timeout=timeout)
 
+    async def websocket(self, uri: str, headers: list[tuple[str, str]], **options: Any) -> ClientConnection:
+        """A WebSocket opened to ``uri`` on the app's server, sending ``headers``, and the token where it takes one,
+        with websockets' ``options``."""
+        if self.socket is not None:
+            return await unix_connect(str(self.socket), uri, additional_headers=headers, **options)
+        return await connect(uri, host="127.0.0.1", port=self.port, proxy=None,
+                             additional_headers=[*headers, (TOKEN_HEADER, self.token)], **options)
+
     def _client_args(self, transport: type) -> dict[str, Any]:
         if self.socket is not None:
             return {"transport": transport(uds=str(self.socket)), "base_url": "http://app"}
@@ -52,12 +60,12 @@ class Served:
 
 
 def served(folder: Path) -> Served:
-    """How the server of the app in ``folder`` is reached: on the port and with the token it wrote, where it serves on
-    loopback, else on its socket. Nothing answering either way is an ``OSError`` once it's asked."""
-    try:
-        written = json.loads((folder / ADDRESS).read_text(encoding="utf-8"))
-    except FileNotFoundError:
+    """How the server of the app in ``folder`` is reached: on Windows, on the port and with the token it wrote there,
+    raising ``FileNotFoundError`` until it has; elsewhere on its socket. Nothing answering is an ``OSError`` either
+    way, once it's asked or here."""
+    if not LOOPBACK:
         return Served(socket=folder / SOCKET)
+    written = json.loads((folder / ADDRESS).read_text(encoding="utf-8"))
     return Served(port=written["port"], token=written["token"])
 
 

@@ -65,6 +65,8 @@ def kernel32() -> ctypes.WinDLL:
     dll.TerminateJobObject.argtypes = [handle, ctypes.c_uint]
     dll.GetCurrentProcess.restype = handle
     dll.CloseHandle.argtypes = [handle]
+    dll.OpenProcess.argtypes, dll.OpenProcess.restype = [dword, ctypes.c_int, dword], handle
+    dll.QueryFullProcessImageNameW.argtypes = [handle, dword, wide, ctypes.c_void_p]
     return dll
 
 
