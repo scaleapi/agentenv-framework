@@ -25,7 +25,7 @@ import time
 import urllib.parse
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -313,7 +313,7 @@ def _composed_vm_bundle(env: ComputerEnv, base: ComputerArtifact, driver: Comput
         parts = [_part(layer, _services(f"driver-{gate.folder_name(driver.id, 'driver')}", layer.install),
                        {"MCP_PORT": driver.port}, protocol, False)]
         parts += [_part(staged, dict(zip(gate.programs(app, base.os.type), [
-            f"venv/bin/python -m agentenv_protocol.computer.serve_app {staged.served}",
+            f"venv/bin/python -m agentenv_protocol.computer.serve_app {shlex.quote(staged.served)}",
             *(service.command for service in staged.install.services)])), {"ENVIRONMENT_NAME": app.environment_name},
             protocol, True) for app, staged in apps]
         if (lock := _vm_bundle_lock(env, base, link, parts, context, arch, progress)) is not None:
@@ -357,9 +357,9 @@ def _composed_windows_disk(env: ComputerEnv, base: ComputerArtifact, driver: Com
                            provider: SandboxProvider, progress: _Progress) -> dict:
     """The Windows disk of ``arch``: one of its key the env's image store holds, reused; else composed with this
     machine's Docker and KVM (``windows_disk``), on its base, this machine's, the store's or installed from Microsoft's
-    media, the driver installed over ssh as a layer on it, packed and pushed to the store under its key, as Linux disks
-    are. Then probed at full (gate 3). All of it holds a lock of its key, which keeps two composes of one key on this
-    machine from breaking each other: the other waits, then reuses it."""
+    media, the driver and each app installed over ssh as a layer on it, packed and pushed to the store under its key,
+    as Linux disks are. Then probed at full (gate 3). All of it holds a lock of its key, which keeps two composes of one
+    key on this machine from breaking each other: the other waits, then reuses it."""
     pair = f"disk/{arch}"
     with (_attempting(env, "disk", arch) as attempt,
           tempfile.TemporaryDirectory(prefix="agentenv-compose-") as work):
@@ -367,19 +367,24 @@ def _composed_windows_disk(env: ComputerEnv, base: ComputerArtifact, driver: Com
             raise builder.Unbuildable(f"no link of {' or '.join(type(link).__name__ for link in provider.links)} boots "
                                       f"windows/{arch} disks, so it can't be composed here: compose it on a Linux machine "
                                       "with KVM, with the local sandbox provider")
-        if env.composed_apps():
-            raise builder.Unbuildable("a Windows computer composes its driver alone for now, and no app")
         build = Path(work) / "build"
         context = build / "context"
         context.mkdir(parents=True)
         protocol = _stage_protocol(context)
-        layer = _stage_driver(context, driver, base, {})
-        prefix = windows_disk.DRIVERS / gate.folder_name(driver.id, "driver")
-        services = _services(f"driver-{gate.folder_name(driver.id, 'driver')}", layer.install)
-        part = windows_disk.Part(layer.folder, prefix, layer.install,
-                                 {name: windows_disk.argv(command, prefix) for name, command in services.items()},
-                                 {"MCP_PORT": driver.port},
-                                 (f"{windows_disk.BUILD}\\context\\protocol",) if protocol else ())
+        layer, name = _stage_driver(context, driver, base, {}), gate.folder_name(driver.id, "driver")
+        driver_prefix = windows_disk.DRIVERS / name
+        parts = [_windows_part(layer, driver_prefix, {
+            program: windows_disk.argv(command, driver_prefix)
+            for program, command in _services(f"driver-{name}", layer.install).items()}, {"MCP_PORT": driver.port},
+            protocol)]
+        for app in env.composed_apps():
+            staged = _stage_app(context, app, base, {})
+            prefix = PureWindowsPath(staged.prefix)
+            server = [str(prefix / "venv" / "Scripts" / "python.exe"), "-m", "agentenv_protocol.computer.serve_app",
+                      staged.served]
+            commands = [server, *(windows_disk.argv(service.command, prefix) for service in staged.install.services)]
+            parts.append(_windows_part(staged, prefix, dict(zip(gate.programs(app, base.os.type), commands)),
+                                       {"ENVIRONMENT_NAME": app.environment_name}, protocol))
         values = env.computer_values()
         settings = {name: values.get(name, setting.default) for name, setting in base.config.items()
                     if setting.phase == "build"}
@@ -393,7 +398,8 @@ def _composed_windows_disk(env: ComputerEnv, base: ComputerArtifact, driver: Com
         made = windows_disk.base(_key(recipe=_digest(windows_disk.RECIPE), disk_gb=disk_gb, user=user,
                                       form="windows-base", format=FORMAT),
                                  lambda: windows_disk.media(say), disk_gb, user, say, registry)
-        script = windows_disk.write(build, [part], settings, {"base": made.image, "layers": [part.folder]})
+        script = windows_disk.write(build, parts, user=user, build_settings=settings,
+                                    image={"base": made.image, "layers": [part.folder for part in parts]})
         expires = made.expires.isoformat(timespec="seconds")
         key = attempt.key = _key(base=made.image, base_expires=expires, provision=script, context=_digest(context),
                                  build_settings=settings, form="disk", arch=arch, format=FORMAT)
@@ -492,6 +498,18 @@ def _part(layer: _Layer, programs: dict[str, str], environment: dict[str, Any], 
     return macos_vm_bundle.Part(layer.folder, layer.prefix, layer.install,
                           {name: (command, direct.get(command)) for name, command in programs.items()},
                           environment, _venv(layer), spec if _venv(layer) else None, layer.served, layer.steps)
+
+
+def _windows_part(layer: _Layer, prefix: PureWindowsPath, services: dict[str, list[str]],
+                  environment: dict[str, Any], protocol: bool) -> windows_disk.Part:
+    """``layer`` as a Windows disk installs it under ``prefix``: its ``services``' argv by name, with ``environment``,
+    and a venv's protocol as on Linux: this checkout's source, else an app's pinned to this release, which a driver's
+    requirements name themselves."""
+    extra = "[app]" if layer.app else ""
+    spec = (f"{windows_disk.BUILD}\\context\\protocol{extra}" if protocol else
+            f"{_PROTOCOL}{extra}=={importlib.metadata.version(_PROTOCOL)}" if layer.app else None)
+    return windows_disk.Part(layer.folder, prefix, layer.install, services, environment, (spec,) if spec else (),
+                             layer.served, tuple(step for step, _ in layer.steps))
 
 
 def _probed(env: ComputerEnv, driver: ComputerDriverEnv, form: str, arch: str, result: dict,
@@ -745,8 +763,9 @@ def _base(base: ComputerArtifact, arch: str) -> tuple[str, str]:
 @dataclass(frozen=True)
 class _Layer:
     """A driver's or an app's part of a build: its folder in the build context, its prefix in the image, what it
-    installs, the file of its supervisord programs, and the id of its env. An app's venv also has the protocol's ``app`` extra, for the
-    app's own server, which listens in a folder of the app's the session user owns."""
+    installs, the file of its supervisord programs, and the id of its env. An app's venv also has the protocol's ``app``
+    extra, for the app's own server, which listens in a folder of the app's the session user owns; ``served`` is the
+    ``<file>:<Class>`` it serves, and ``steps`` its install steps, by name and scope."""
 
     folder: str
     prefix: str
@@ -778,13 +797,13 @@ def _stage_app(context: Path, app: ComputerAppEnv, base: ComputerArtifact,
     name."""
     install, name = app.install[base.os.type], gate.app_folder(app)
     file, _, cls = app.module.partition(":")
-    served = shlex.quote(f"{PurePosixPath(file).relative_to(install.files)}:{cls}")
+    served = f"{PurePosixPath(file).relative_to(install.files)}:{cls}"
     layer = _Layer(f"apps/{name}", str(apps_folder(base.os.type) / name), install, f"agentenv-app-{name}.conf", app.id,
                    app=True, served=served,
                    steps=tuple((step.name, step.scope) for step in app.declaration.install_steps
                                if step.os is None or base.os.type in step.os))
     programs = dict(zip(gate.programs(app, base.os.type), [
-        f"venv/bin/python -m agentenv_protocol.computer.serve_app {served}",
+        f"venv/bin/python -m agentenv_protocol.computer.serve_app {shlex.quote(served)}",
         *(service.command for service in install.services)]))
     _stage(context, layer, f"app {app.id}", app.files, programs, {"ENVIRONMENT_NAME": app.environment_name},
            from_store)
@@ -915,7 +934,7 @@ def _runs(layer: _Layer) -> list[tuple[str, str]]:
     a build that write outside the layer's folder."""
     return [*((run.scope, f"cd {layer.prefix} && {shlex.quote('./' + run.script)}") for run in layer.install.run or []),
             *((scope, f"cd {layer.prefix} && venv/bin/python -m agentenv_protocol.computer.run_install_step "
-                      f"{layer.served} {step}") for step, scope in layer.steps)]
+                      f"{shlex.quote(layer.served)} {step}") for step, scope in layer.steps)]
 
 
 def _as(scope: str, user: str, run: str) -> list[str]:

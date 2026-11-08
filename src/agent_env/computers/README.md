@@ -166,8 +166,9 @@ link serves then. Name it as `windows-11`, or by its id, `@local/agentenv-framew
 
 A Windows computer env is composed on the same machine (`env/envs/computer/utils/windows_disk.py`): the base booted on
 an overlay kept in a folder of its own, each layer installed over ssh as `agentadmin` by a PowerShell script composing
-writes, as its `[install.windows]` says (its files under `C:\agentenv\drivers\<name>`, its downloads checked by
-sha256, its venv on the pinned Python, its PowerShell run scripts, elevated, and its services), then shut down and
+writes, as its `[install.windows]` says (its files under `C:\agentenv\drivers\<name>`, or an app's under
+`C:\agentenv\apps\<name>`, its downloads checked by sha256, its venv on the pinned Python, its PowerShell run scripts,
+elevated, an app's install steps, elevated too, and its services), then shut down and
 packed onto the base's image, so every computer composed on a base shares one copy of it, and pushed to the env's image
 store under its key, pinned, as a Linux disk is; a compose of the same inputs on any machine reuses it, and a deploy
 pulls it. Gate 3 probes it at full. At the session user's sign-in,
@@ -177,7 +178,12 @@ media alone, and starts each layer's services in that session, again whenever on
 with 4 vCPUs and 8 GB, on local Docker with KVM and on `modal_vm`; it has computer-exec and data/add, through the
 protocol's Windows defaults, so the probe runs its fixture there as on Linux, with Python one-liners for the commands it
 would give a shell. On `modal_vm` it runs in your own Modal workspace, under the evaluation's terms or a licence of your
-own; whether they allow it there is yours to check. A Windows computer composes its driver alone for now, no app.
+own; whether they allow it there is yours to check. Composing leaves `C:\agentenv` the admins', as `/opt/agentenv` is
+root's on Linux: every user reads and runs what's there, and the session user writes only the services' logs and each
+app's `.agentenv` folder. An app's own server runs in the session as its services do, on a loopback port it writes
+with a token to that folder, which only the session user, SYSTEM and Administrators reach; it launches the app in a
+Job object, which ends whatever the app started. Composing signs in as `agentadmin`, so
+an app's install step for the session user can't run on Windows, and gate 1 refuses an app that declares one there.
 
 This bundle has no tasks of its own: other bundles pull its computers by alias, and `agent-env run computers` has
 nothing to run.
