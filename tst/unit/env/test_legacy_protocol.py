@@ -318,3 +318,22 @@ async def test_backing_servers_list_a_multi_envs_computer_and_its_apps_from_its_
         ("slack", "https://env.example", None), ("desktop", "https://desk.example", "desk-token"),
         ("notes", "https://desk.example", "desk-token")]
     assert await legacy_protocol.server_v1_base_url(servers[2], gateway) == "https://desk.example/svc/notes"
+
+
+@pytest.mark.asyncio
+async def test_backing_servers_use_a_records_computers_only_for_its_own_gateway(monkeypatch):
+    """Another gateway's card is another deployment's, whose computers this record doesn't hold."""
+    import dataclasses
+    from types import SimpleNamespace
+
+    computer = DeployedSandboxEnv(env_id="desk", env_version=1, sandbox_id="sb-desk", control_token="desk-token",
+                                  environment_card_url=f"https://desk.example{WELL_KNOWN_PATH}",
+                                  environment_card={"name": "desktop", "url": RPC_PATH})
+    record = _record({"name": "office", "url": RPC_PATH, "children_environments": [{"name": "desktop", "url": "/svc/desktop/agentenv"}]})
+    record.child_envs = {"desktop": dataclasses.asdict(computer)}
+    other = {"name": "office", "url": RPC_PATH, "children_environments": [{"name": "desktop", "url": "/svc/desktop/agentenv"}]}
+    monkeypatch.setattr(legacy_protocol.protocol_v1, "get_card", AsyncMock(return_value=other))
+
+    servers = await legacy_protocol.backing_servers(record, "http://another-gw", SimpleNamespace(mcp_server_envs=[], website_envs=[]))
+
+    assert [(s.environment_name, s.address, s.record) for s in servers] == [("desktop", "http://another-gw", None)]

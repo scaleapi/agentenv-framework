@@ -117,7 +117,9 @@ async def backing_servers(deployed: Optional[DeployedEnv], gateway_url: Optional
     elif deployed is not None:
         why = "its record has no card URL"
     named = definition_servers(env)
-    own = getattr(deployed, "child_envs", None) or {}
+    # A record's computers are its own deployment's: none when the gateway asked is another's.
+    own = ((getattr(deployed, "child_envs", None) or {})
+           if deployed is not None and (gateway is None or (gateway_url_of(deployed) or "").rstrip("/") == gateway) else {})
     if not isinstance(card, dict):
         logger.info(f"env {getattr(env, 'id', None)!r}: {why}, so its servers are the ones its definition names, "
                     f"each read live at its gateway path: {[(s.environment_name, s.mcp) for s in named]}")
