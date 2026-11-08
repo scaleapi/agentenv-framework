@@ -271,6 +271,12 @@ def _key_usage(**granted: bool) -> x509.KeyUsage:
     return x509.KeyUsage(**{usage: granted.get(usage, False) for usage in usages})
 
 
+def trust_environment(sites: list[Site]) -> dict[str, str]:
+    """The variables naming the trust agentenv adds, for a computer routing ``sites``: none when every name is served
+    over plain HTTP, as a ``.localhost`` one is, since no CA is made then to write the files they'd name."""
+    return dict(TRUST_ENVIRONMENT) if any(route.tls_names for route in site_table(sites).routes) else {}
+
+
 def proxy_config(table: SiteTable, issued: Issued, *, user: Optional[str],
                  upstream_headers: Optional[dict[str, dict[str, str]]] = None) -> dict:
     """What ``site_proxy.py install`` reads: the session user, the CA, and each route with its certificate and key, and

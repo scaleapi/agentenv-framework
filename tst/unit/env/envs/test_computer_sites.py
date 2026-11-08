@@ -570,3 +570,12 @@ def test_the_trust_a_routing_computer_boots_with_is_the_local_providers_so_the_t
         "SSL_CERT_FILE": "/etc/agentenv/ca-bundle.pem", "REQUESTS_CA_BUNDLE": "/etc/agentenv/ca-bundle.pem",
         "NODE_EXTRA_CA_CERTS": "/etc/agentenv/ca.pem"}
     assert (str(sites.CA_PATH), str(sites.BUNDLE_PATH)) == ("/etc/agentenv/ca.pem", "/etc/agentenv/ca-bundle.pem")
+
+
+def test_a_computer_boots_with_the_trust_variables_only_when_a_site_it_routes_is_served_over_https():
+    local = [Site(name="notes", url="http://gw/website/notes/", domains=["notes.localhost"]),
+             Site(name="bare", url="http://gw/website/bare/")]
+    secure = [*local, Site(name="shop", url="http://gw/website/shop/", domains=["shop.test"])]
+
+    assert sites.trust_environment(local) == {}
+    assert sites.trust_environment(secure) == sites.TRUST_ENVIRONMENT
