@@ -9,10 +9,11 @@ site's names (``issue``), and the site proxy (``site_proxy.py``) is installed th
 started (``route``), which a reset does again on its fresh computer. In the computer they live in
 ``/etc/agentenv/sites``, root's alone (0700) before the config and its keys are written into it, until the install has
 made the keys and the config private; the CA and certificates are valid for the deploy's ttl and a day more, from a few
-minutes back for a clock that's behind. The CA also joins the trust agentenv adds to a container, the local provider's
-convention (``LOCAL_TRUST_ENV``): ``/etc/agentenv/ca.pem``, every CA agentenv adds, at a fixed path for an app with a
-certificate list of its own, and ``/etc/agentenv/ca-bundle.pem``, the public roots and them. The computer's boot
-environment names them (``TRUST_ENVIRONMENT``), so every program in it trusts the sites however it was started."""
+minutes back for a clock that's behind. The CA also joins the trust agentenv adds, two files at fixed paths for each OS
+site routing reaches (``TRUST_ENVIRONMENTS``), which on Linux are the local provider's (``LOCAL_TRUST_ENV``):
+``/etc/agentenv/ca.pem``, every CA agentenv adds, for an app with a certificate list of its own, and
+``/etc/agentenv/ca-bundle.pem``, the public roots and them. The computer's boot environment names them, so every program
+in it trusts the sites however it was started. Site routing reaches Linux computers alone."""
 
 from __future__ import annotations
 
@@ -51,10 +52,9 @@ if TYPE_CHECKING:
 FOLDER = PurePosixPath("/etc/agentenv/sites")
 PROXY = FOLDER / "site_proxy.py"
 CONFIG = FOLDER / "config.json"
-#: The variables naming the trust agentenv adds, which a computer routing sites boots with, and the files they name.
-TRUST_ENVIRONMENT = dict(LOCAL_TRUST_ENV)
-CA_PATH = PurePosixPath(TRUST_ENVIRONMENT["NODE_EXTRA_CA_CERTS"])
-BUNDLE_PATH = PurePosixPath(TRUST_ENVIRONMENT["SSL_CERT_FILE"])
+#: By the OS type of each computer site routing reaches, the variables naming the trust files agentenv adds, which a
+#: computer routing sites boots with.
+TRUST_ENVIRONMENTS = {"linux": dict(LOCAL_TRUST_ENV)}
 LOG = FOLDER / "site-proxy.log"
 SYNTHETIC, ALLOWLIST = "synthetic", "allowlist"
 RANKS = (SYNTHETIC, ALLOWLIST)
@@ -271,17 +271,24 @@ def _key_usage(**granted: bool) -> x509.KeyUsage:
     return x509.KeyUsage(**{usage: granted.get(usage, False) for usage in usages})
 
 
-def trust_environment(sites: list[Site]) -> dict[str, str]:
-    """The variables naming the trust agentenv adds, for a computer routing ``sites``: none when every name is served
-    over plain HTTP, as a ``.localhost`` one is, since no CA is made then to write the files they'd name."""
-    return dict(TRUST_ENVIRONMENT) if any(route.tls_names for route in site_table(sites).routes) else {}
+def trust_files(os_type: str) -> dict[str, str]:
+    """The trust files agentenv adds on an ``os_type`` computer, as its variables name them: every CA it adds
+    (``ca``), and the public roots and them (``bundle``)."""
+    environment = TRUST_ENVIRONMENTS[os_type]
+    return {"ca": environment["NODE_EXTRA_CA_CERTS"], "bundle": environment["SSL_CERT_FILE"]}
 
 
-def proxy_config(table: SiteTable, issued: Issued, *, user: Optional[str],
+def trust_environment(os_type: str, sites: list[Site]) -> dict[str, str]:
+    """The variables naming the trust agentenv adds, for an ``os_type`` computer routing ``sites``: none when every name
+    is served over plain HTTP, as a ``.localhost`` one is, since no CA is made then to write the files they'd name."""
+    return dict(TRUST_ENVIRONMENTS[os_type]) if any(route.tls_names for route in site_table(sites).routes) else {}
+
+
+def proxy_config(table: SiteTable, issued: Issued, *, user: Optional[str], os_type: str,
                  upstream_headers: Optional[dict[str, dict[str, str]]] = None) -> dict:
-    """What ``site_proxy.py install`` reads: the session user, the CA, and each route with its certificate and key, and
-    the headers its gateway's sandbox provider asks requests to it to carry (``upstream_headers``, by site), which the
-    proxy sends upstream alone."""
+    """What ``site_proxy.py install`` reads: the session user, the CA, the trust files on an ``os_type`` computer, and
+    each route with its certificate and key, and the headers its gateway's sandbox provider asks requests to it to carry
+    (``upstream_headers``, by site), which the proxy sends upstream alone."""
     sites = []
     for route in table.routes:
         site = {"name": route.site, "upstream": route.url, "domains": list(route.domains)}
@@ -291,7 +298,7 @@ def proxy_config(table: SiteTable, issued: Issued, *, user: Optional[str],
             site["upstream_headers"] = dict(upstream_headers[route.site])
         sites.append(site)
     return {"user": user, "ca_pem": issued.ca_pem, "sites": sites, "log": str(LOG),
-            "trust_files": {"ca": str(CA_PATH), "bundle": str(BUNDLE_PATH)}}
+            "trust_files": trust_files(os_type)}
 
 
 def reachable_problem(policy: Optional[NetworkPolicy], routes: list[Route]) -> Optional[str]:
@@ -396,10 +403,10 @@ class RootChannel:
 
 
 async def route(sandbox: Sandbox, sites: list[Site], *, user: Optional[str], network: Optional[dict],
-                valid_for: timedelta, label: str) -> dict:
-    """Have the computer on ``sandbox`` reach each of ``sites`` by its names: the table made, the CA and certificates
-    issued, the proxy installed and started as root, and each name checked as ``user``; what the deploy record keeps of
-    it. Raises naming a name that didn't load."""
+                valid_for: timedelta, label: str, os_type: str) -> dict:
+    """Have the ``os_type`` computer on ``sandbox`` reach each of ``sites`` by its names: the table made, the CA and
+    certificates issued, the proxy installed and started as root, and each name checked as ``user``; what the deploy
+    record keeps of it. Raises naming a name that didn't load."""
     requested = NetworkPolicy.from_dict(network) if network else None
     table = site_table(sites, requested.allow_hosts if requested else ())
     table.routes = [Route(r.site, sandbox.url_from_sandbox(r.url), r.domains) for r in table.routes]
@@ -415,15 +422,15 @@ async def route(sandbox: Sandbox, sites: list[Site], *, user: Optional[str], net
     channel = RootChannel(sandbox)
     await channel.private_folder(FOLDER)
     await channel.write(PROXY, _PROXY_SOURCE.read_text())
-    await channel.write_secret(CONFIG, json.dumps(proxy_config(table, issued, user=user,
+    await channel.write_secret(CONFIG, json.dumps(proxy_config(table, issued, user=user, os_type=os_type,
                                                                upstream_headers=upstream_headers)))
     await channel.run(["chmod", "0600", str(CONFIG)])
     output = await channel.run(["python3", str(PROXY), "install", str(CONFIG)])
     report = json.loads(output.strip().splitlines()[-1])
     if failed := routing_problems(report):
         raise RuntimeError("site routing: " + "; ".join(failed))
-    return {"names": table.to_dict(), "ca": issued.ca_pem, "ca_path": str(CA_PATH), "trust": report["trust"],
-            "checks": report["checks"], "runtimes": report.get("runtimes", {})}
+    return {"names": table.to_dict(), "ca": issued.ca_pem, "ca_path": trust_files(os_type)["ca"],
+            "trust": report["trust"], "checks": report["checks"], "runtimes": report.get("runtimes", {})}
 
 
 def routing_problems(report: dict) -> list[str]:

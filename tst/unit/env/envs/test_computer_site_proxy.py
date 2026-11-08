@@ -575,12 +575,14 @@ def test_install_writes_the_sites_files_names_and_trust_then_starts_the_proxy_on
     folder.mkdir()
     (root / "etc/hosts").write_text("127.0.0.1 localhost\n")
     (root / "etc/resolv.conf").write_text("nameserver 127.0.0.11\n")
+    (root / "etc/pki/tls/certs").mkdir(parents=True)
+    (root / "etc/pki/tls/certs/ca-bundle.crt").write_text("RED HAT ROOTS\n")
     folder.chmod(0o700)
     table = sites.site_table([SiteParams(name="notes", url="http://gw/website/notes/", domains=["notes.test"]),
                               SiteParams(name="chat", url="http://gw/website/chat/", domains=["*.chat.test"]),
                               SiteParams(name="bare", url="http://gw/website/bare/")])
     issued = sites.issue(table.routes, valid_for=timedelta(hours=1), label="t")
-    (folder / "config.json").write_text(json.dumps(sites.proxy_config(table, issued, user=None)))
+    (folder / "config.json").write_text(json.dumps(sites.proxy_config(table, issued, user=None, os_type="linux")))
     started = []
     monkeypatch.setattr(site_proxy, "start", lambda path, log: started.append(Config.load(path)))
     monkeypatch.setattr(site_proxy, "checks_as", lambda user, path: {"sites": {"notes.test": {"status": 200}},
@@ -607,8 +609,9 @@ def test_install_writes_the_sites_files_names_and_trust_then_starts_the_proxy_on
     assert report["trust"]["system"] is None and report["trust"]["nss"] == [] and report["trust"]["java"] == {}
     assert len(report["trust"]["chromium"]) == 4
     assert report["checks"] == {"notes.test": {"status": 200}} and report["runtimes"] == {"node": {"status": 200}}
+    assert (root / "etc/agentenv/ca.pem").read_text() == issued.ca_pem.strip() + "\n"
+    assert (root / "etc/agentenv/ca-bundle.pem").read_text() == "RED HAT ROOTS\n" + issued.ca_pem.strip() + "\n"
     for added in ("etc/agentenv/ca.pem", "etc/agentenv/ca-bundle.pem"):
-        assert (root / added).read_text() == issued.ca_pem.strip() + "\n"
         assert (root / added).stat().st_mode & 0o777 == 0o644
     assert report["trust"]["added"] == [str(root / "etc/agentenv/ca.pem"), str(root / "etc/agentenv/ca-bundle.pem")]
     assert (root / "etc/profile.d/agentenv-sites.sh").read_text() == (
@@ -618,12 +621,14 @@ def test_install_writes_the_sites_files_names_and_trust_then_starts_the_proxy_on
 
 def test_install_keeps_the_upstream_headers_in_a_file_root_alone_reads_and_serve_json_names_it(tmp_path, monkeypatch):
     root, folder = tmp_path / "root", tmp_path / "sites"
-    (root / "etc").mkdir(parents=True)
+    (root / "etc/ssl/certs").mkdir(parents=True)
+    (root / "etc/ssl/certs/ca-certificates.crt").write_text("PUBLIC ROOTS\n")
     folder.mkdir()
     folder.chmod(0o700)
     table = sites.site_table([SiteParams(name="notes", url="http://gw/website/notes/", domains=["notes.test"])])
     issued = sites.issue(table.routes, valid_for=timedelta(hours=1), label="t")
-    given = sites.proxy_config(table, issued, user=None, upstream_headers={"notes": {"CF-Access-Client-Secret": "s3cret"}})
+    given = sites.proxy_config(table, issued, user=None, os_type="linux",
+                               upstream_headers={"notes": {"CF-Access-Client-Secret": "s3cret"}})
     (folder / "config.json").write_text(json.dumps(given))
     started = []
     monkeypatch.setattr(site_proxy, "start", lambda path, log: started.append(Config.load(path)))
@@ -686,6 +691,20 @@ def test_the_sites_ca_joins_the_trust_a_provider_added_and_a_bundle_made_here_st
     assert (tmp_path / "etc/agentenv").stat().st_mode & 0o777 == 0o755
     assert (tmp_path / "other/etc/agentenv/ca.pem").read_text() == ca_pem
     assert (tmp_path / "other/etc/agentenv/ca-bundle.pem").read_text() == "SYSTEM ROOTS\n" + ca_pem
+
+
+def test_a_bundle_with_no_public_roots_to_start_from_is_refused_before_either_file_is_written(tmp_path):
+    paths, ca_pem = site_proxy.Paths(tmp_path), "-----BEGIN CERTIFICATE-----\nU0lURVM=\n-----END CERTIFICATE-----\n"
+    files = {"ca": "/etc/agentenv/ca.pem", "bundle": "/etc/agentenv/ca-bundle.pem"}
+    (tmp_path / "etc/agentenv").mkdir(parents=True)
+    (tmp_path / "etc/agentenv/ca-bundle.pem").write_text("\n")
+
+    with pytest.raises(SystemExit, match="there are no public roots to make /etc/agentenv/ca-bundle.pem from: none "
+                                         "of .*etc/ssl/certs/ca-certificates.crt, .*etc/pki/tls/certs/ca-bundle.crt"):
+        site_proxy.add_trust_files(paths, files, ca_pem)
+
+    assert not (tmp_path / "etc/agentenv/ca.pem").exists()
+    assert (tmp_path / "etc/agentenv/ca-bundle.pem").read_text() == "\n"
 
 
 # A keytool whose store is a text file of the SHA-256 fingerprints it holds: -importcert adds the file's, -list -v
@@ -815,13 +834,14 @@ def test_each_runtime_loads_the_first_https_site_through_its_own_trust_and_says_
 @pytest.mark.parametrize("resolv", [None, "", "nameserver 127.0.0.1\n"], ids=["missing", "empty", "loopback-only"])
 def test_a_wildcard_name_starts_dns_even_when_resolv_conf_names_no_other_nameserver(tmp_path, monkeypatch, resolv):
     root, folder = tmp_path / "root", tmp_path / "sites"
-    (root / "etc").mkdir(parents=True)
+    (root / "etc/ssl/certs").mkdir(parents=True)
+    (root / "etc/ssl/certs/ca-certificates.crt").write_text("PUBLIC ROOTS\n")
     folder.mkdir()
     if resolv is not None:
         (root / "etc/resolv.conf").write_text(resolv)
     table = sites.site_table([SiteParams(name="chat", url="http://gw/website/chat/", domains=["*.chat.test"])])
     issued = sites.issue(table.routes, valid_for=timedelta(hours=1), label="t")
-    (folder / "config.json").write_text(json.dumps(sites.proxy_config(table, issued, user=None)))
+    (folder / "config.json").write_text(json.dumps(sites.proxy_config(table, issued, user=None, os_type="linux")))
     started = []
     monkeypatch.setattr(site_proxy, "start", lambda path, log: started.append(Config.load(path)))
     monkeypatch.setattr(site_proxy, "checks_as", lambda user, path: {"sites": {}, "runtimes": {}})
@@ -868,7 +888,8 @@ def test_keep_starts_serve_again_each_time_it_ends(monkeypatch):
 
 
 def test_the_log_is_root_owned_beside_the_config_and_a_link_at_its_path_is_refused(tmp_path):
-    assert sites.proxy_config(sites.site_table([]), SimpleNamespace(ca_pem=None, leaves={}), user=None)["log"] == str(sites.FOLDER / "site-proxy.log")
+    assert sites.proxy_config(sites.site_table([]), SimpleNamespace(ca_pem=None, leaves={}), user=None,
+                              os_type="linux")["log"] == str(sites.FOLDER / "site-proxy.log")
     target, log = tmp_path / "elsewhere", tmp_path / "site-proxy.log"
     target.write_text("kept")
     log.symlink_to(target)

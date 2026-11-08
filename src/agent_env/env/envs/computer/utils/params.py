@@ -83,6 +83,9 @@ def checked(env: ComputerEnv, env_params: Optional[dict]) -> tuple[ComputerParam
         problems += gate.check_app_settings(app, merged[name], f"env_params.app_settings.{name}", env.computer.os.type)
     if params.sites and not params.site_routing:
         problems.append("env_params.sites: a computer reaches sites only with site_routing")
+    if params.site_routing and (os_type := env.computer.os.type) not in sites.TRUST_ENVIRONMENTS:
+        problems.append(f"env_params.site_routing: site routing reaches Linux computers alone, and this computer runs "
+                        f"{os_type}")
     allow_hosts = (env.network or {}).get("allow_hosts") or ()
     problems += sites.table_problems(params.sites, allow_hosts) if params.sites else []
     return params, values, problems

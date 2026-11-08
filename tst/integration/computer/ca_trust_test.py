@@ -1,8 +1,9 @@
 """A computer routing a site trusts the deploy's CA in every runtime it has, however a program started: an app launched
 at boot loads the site through Node, an apt JDK, a JDK copied under /opt with a store of its own, and curl; a command
 the computer runs sees the trust variables and loads it through Python with SSL_CERT_FILE alone; the CA is at
-/etc/agentenv/ca.pem, among the CAs agentenv adds; and the deploy's record keeps each runtime's check and each JDK store
-it trusted. Needs Docker, the local registry on localhost:5000, and Ubuntu's archive for the app's packages."""
+/etc/agentenv/ca.pem, among the CAs agentenv adds, and in /etc/agentenv/ca-bundle.pem beside the public roots; and the
+deploy's record keeps each runtime's check and each JDK store it trusted. Needs Docker, the local registry on
+localhost:5000, and Ubuntu's archive for the app's packages."""
 
 import json
 
@@ -40,6 +41,7 @@ async def test_every_runtime_of_a_computer_routing_a_site_trusts_its_ca_launched
             through_cert_file = await inside.run(deployed, ["python3", "-c", THROUGH_CERT_FILE, URL], timeout_s=60)
             added = (await inside.run(deployed, ["cat", "/etc/agentenv/ca.pem"], timeout_s=30))["stdout"]
             mode = (await inside.run(deployed, ["stat", "-c", "%a", "/etc/agentenv/ca.pem"], timeout_s=30))["stdout"]
+            bundle = (await inside.run(deployed, ["cat", "/etc/agentenv/ca-bundle.pem"], timeout_s=30))["stdout"]
         finally:
             report = await teardown_run(context)
 
@@ -48,6 +50,7 @@ async def test_every_runtime_of_a_computer_routing_a_site_trusts_its_ca_launched
     assert variables.split() == ["/etc/agentenv/ca-bundle.pem", "/etc/agentenv/ca-bundle.pem", "/etc/agentenv/ca.pem"]
     assert through_cert_file["exit_code"] == 0 and through_cert_file["stdout"].strip() == "200", through_cert_file
     assert routed["ca_path"] == "/etc/agentenv/ca.pem" and routed["ca"].strip() in added and mode.strip() == "644"
+    assert routed["ca"].strip() in bundle and bundle.count("BEGIN CERTIFICATE") > 100
     assert {runtime: "status" in result for runtime, result in routed["runtimes"].items()} == {
         "python SSL_CERT_FILE": True, "node": True, "curl": True}, routed["runtimes"]
     stores = routed["trust"]["java"]

@@ -960,7 +960,8 @@ async def test_a_computer_with_site_routing_reaches_the_websites_the_run_deploye
     assert sandbox is boots.sandboxes[0]
     assert [site.model_dump() for site in sites] == [{"name": "notes", "url": "http://localhost:8080/website/notes/",
                                                       "domains": ["notes.test"]}]
-    assert options == {"user": "user", "network": None, "valid_for": timedelta(seconds=3600), "label": "desktop"}
+    assert options == {"user": "user", "network": None, "valid_for": timedelta(seconds=3600), "label": "desktop",
+                       "os_type": "linux"}
     assert boots.boots[0]["environment"][HOLD_BOOT_LAUNCH_ENV] == "1"
     record = context.deployed_envs[-1].metadata["computer"]
     assert record["sites"] == {"names": {"routes": {"notes": ["notes.test"]}}, "ca": "CA PEM", "valid_for_s": 3600}
@@ -986,7 +987,7 @@ async def test_a_computer_without_site_routing_routes_nothing_whatever_websites_
 
     assert routes == [] and "sites" not in context.deployed_envs[-1].metadata["computer"]
     assert HOLD_BOOT_LAUNCH_ENV not in boots.boots[0]["environment"] and boots.boots[0]["held"] is False
-    assert not set(env_computer_provider.sites.TRUST_ENVIRONMENT) & set(boots.boots[0]["environment"])
+    assert not set(env_computer_provider.sites.TRUST_ENVIRONMENTS["linux"]) & set(boots.boots[0]["environment"])
 
 
 @pytest.mark.asyncio
@@ -1016,7 +1017,7 @@ async def test_a_computer_routing_sites_boots_with_its_trust_until_its_driver_an
                             env_params={"site_routing": True}).execute(TaskStepContext(deployed_envs=[_sites_gateway()]))
 
     assert boots.boots[0]["held"] is True and order == ["route", ("ready", {}), "display"]
-    assert env_computer_provider.sites.TRUST_ENVIRONMENT.items() <= boots.boots[0]["environment"].items()
+    assert env_computer_provider.sites.TRUST_ENVIRONMENTS["linux"].items() <= boots.boots[0]["environment"].items()
 
 
 @pytest.mark.asyncio

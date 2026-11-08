@@ -675,8 +675,9 @@ class Paths:
         return self.root / f"etc/profile.d/{CA_NAME}.sh"
 
     @property
-    def system_bundle(self) -> Path:
-        return self.root / "etc/ssl/certs/ca-certificates.crt"
+    def system_bundles(self) -> tuple[Path, ...]:
+        """Where the system store keeps its public roots in one file, Debian's then Red Hat's."""
+        return self.root / "etc/ssl/certs/ca-certificates.crt", self.root / "etc/pki/tls/certs/ca-bundle.crt"
 
     @property
     def java_hook_store(self) -> Path:
@@ -756,16 +757,26 @@ def trust_system(paths: Paths, ca_pem: str) -> Optional[str]:
     return None
 
 
+def public_roots(paths: Paths) -> Optional[Path]:
+    """The system store's file of public roots, or None on a Linux with none of them."""
+    return next((bundle for bundle in paths.system_bundles if bundle.exists()), None)
+
+
 def add_trust_files(paths: Paths, files: dict, ca_pem: str) -> list[str]:
-    """The CA among those agentenv adds, ``files["ca"]``, and in the bundle of the public roots plus them,
-    ``files["bundle"]``: each kept as a provider made it, with its own CA in it, the bundle else started from the system
-    store's, which ``trust_system`` added the CA to where it could. Both, and their folder, readable by everyone."""
+    """The CA added to ``files["ca"]``, the CAs agentenv adds, and to ``files["bundle"]``, the public roots plus them,
+    each kept as the image or a provider made it. A missing or empty bundle starts from the system store's public
+    roots, which ``trust_system`` added the CA to where it could; a Linux with none of them is refused rather than left
+    with a bundle of the CA alone. Both, and their folder, readable by everyone."""
     ca, bundle = paths.rooted(files["ca"]), paths.rooted(files["bundle"])
+    roots = bundle.read_text() if bundle.exists() else ""
+    if not roots.strip():
+        if (system := public_roots(paths)) is None:
+            raise SystemExit(f"there are no public roots to make {files['bundle']} from: none of "
+                             f"{', '.join(str(path) for path in paths.system_bundles)} is there")
+        roots = system.read_text()
     ca.parent.mkdir(parents=True, exist_ok=True)
     ca.parent.chmod(0o755)
-    system = paths.system_bundle.read_text() if paths.system_bundle.exists() else ""
-    for path, current in ((ca, ca.read_text() if ca.exists() else ""),
-                          (bundle, bundle.read_text() if bundle.exists() else system)):
+    for path, current in ((ca, ca.read_text() if ca.exists() else ""), (bundle, roots)):
         write_in_place(path, current if ca_pem.strip() in current else
                        (current.rstrip("\n") + "\n" if current.strip() else "") + ca_pem.strip() + "\n")
         path.chmod(0o644)
@@ -914,7 +925,7 @@ def install(config_path: str, paths: Paths = Paths()) -> dict:
             variables = {"SSL_CERT_FILE": added["bundle"], "REQUESTS_CA_BUNDLE": added["bundle"],
                          "NODE_EXTRA_CA_CERTS": added["ca"]}
         else:
-            bundle = paths.system_bundle if paths.system_bundle.exists() else None
+            bundle = public_roots(paths)
             variables = {"NODE_EXTRA_CA_CERTS": ca, **({"REQUESTS_CA_BUNDLE": str(bundle)} if bundle else {})}
         write_in_place(paths.profile, "".join(f"export {name}={value}\n" for name, value in variables.items()))
         trust["environment"] = str(paths.profile)
