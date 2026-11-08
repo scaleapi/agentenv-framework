@@ -229,7 +229,7 @@ async def _route_sites(env: ComputerEnv, sandbox: Sandbox, params: computer_para
     record keeps of it."""
     routed = await sites.route(sandbox, params.sites, user=env.computer.session.user, network=env.network,
                                valid_for=timedelta(seconds=valid_for_s), label=env.environment_name,
-                               os_type=env.computer.os.type)
+                               os_type=env.computer.os.type, display=env.computer.os.display)
     return {**routed, "valid_for_s": valid_for_s}
 
 

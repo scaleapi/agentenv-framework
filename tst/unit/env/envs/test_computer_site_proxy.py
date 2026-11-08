@@ -679,7 +679,8 @@ def test_install_writes_the_sites_files_names_and_trust_then_starts_the_proxy_on
                               SiteParams(name="chat", url="http://gw/website/chat/", domains=["*.chat.test"]),
                               SiteParams(name="bare", url="http://gw/website/bare/")])
     issued = sites.issue(table.routes, valid_for=timedelta(hours=1), label="t")
-    (folder / "config.json").write_text(json.dumps(sites.proxy_config(table, issued, user=None, os_type="linux")))
+    (folder / "config.json").write_text(json.dumps(sites.proxy_config(table, issued, user=None, os_type="linux",
+                                                                      forward_port=True)))
     started = []
     monkeypatch.setattr(site_proxy, "start", lambda path, log: started.append(Config.load(path)))
     monkeypatch.setattr(site_proxy, "checks_as", lambda user, path: {"sites": {"notes.test": {"status": 200}},
@@ -724,7 +725,7 @@ def test_install_keeps_the_upstream_headers_in_a_file_root_alone_reads_and_serve
     folder.chmod(0o700)
     table = sites.site_table([SiteParams(name="notes", url="http://gw/website/notes/", domains=["notes.test"])])
     issued = sites.issue(table.routes, valid_for=timedelta(hours=1), label="t")
-    given = sites.proxy_config(table, issued, user=None, os_type="linux",
+    given = sites.proxy_config(table, issued, user=None, os_type="linux", forward_port=False,
                                upstream_headers={"notes": {"CF-Access-Client-Secret": "s3cret"}})
     (folder / "config.json").write_text(json.dumps(given))
     started = []
@@ -955,7 +956,8 @@ def test_a_wildcard_name_starts_dns_even_when_resolv_conf_names_no_other_nameser
         (root / "etc/resolv.conf").write_text(resolv)
     table = sites.site_table([SiteParams(name="chat", url="http://gw/website/chat/", domains=["*.chat.test"])])
     issued = sites.issue(table.routes, valid_for=timedelta(hours=1), label="t")
-    (folder / "config.json").write_text(json.dumps(sites.proxy_config(table, issued, user=None, os_type="linux")))
+    (folder / "config.json").write_text(json.dumps(sites.proxy_config(table, issued, user=None, os_type="linux",
+                                                                      forward_port=False)))
     started = []
     monkeypatch.setattr(site_proxy, "start", lambda path, log: started.append(Config.load(path)))
     monkeypatch.setattr(site_proxy, "checks_as", lambda user, path: {"sites": {}, "runtimes": {}})
@@ -1003,7 +1005,7 @@ def test_keep_starts_serve_again_each_time_it_ends(monkeypatch):
 
 def test_the_log_is_root_owned_beside_the_config_and_a_link_at_its_path_is_refused(tmp_path):
     assert sites.proxy_config(sites.site_table([]), SimpleNamespace(ca_pem=None, leaves={}), user=None,
-                              os_type="linux")["log"] == str(sites.FOLDER / "site-proxy.log")
+                              forward_port=False, os_type="linux")["log"] == str(sites.FOLDER / "site-proxy.log")
     target, log = tmp_path / "elsewhere", tmp_path / "site-proxy.log"
     target.write_text("kept")
     log.symlink_to(target)

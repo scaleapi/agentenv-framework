@@ -56,9 +56,11 @@ CONFIG = FOLDER / "config.json"
 #: By the OS type of each computer site routing reaches, the variables naming the trust files agentenv adds, which a
 #: computer routing sites boots with.
 TRUST_ENVIRONMENTS = {"linux": dict(LOCAL_TRUST_ENV)}
-#: The site proxy's forward port, a browser alone's only route out when its computer routes sites.
+#: The site proxy's forward port, a browser alone's only route out when its computer routes sites, and the display of
+#: the computer a browser runs alone on.
 FORWARD_PROXY_PORT = 3128
 FORWARD_PROXY = f"http://127.0.0.1:{FORWARD_PROXY_PORT}"
+ALONE_DISPLAY = "none"
 LOG = FOLDER / "site-proxy.log"
 SYNTHETIC, ALLOWLIST = "synthetic", "allowlist"
 RANKS = (SYNTHETIC, ALLOWLIST)
@@ -291,15 +293,16 @@ def trust_environment(os_type: str, sites: list[Site]) -> dict[str, str]:
 def browser_environment(display: str) -> dict[str, str]:
     """For a computer routing sites, the variable naming the forward port to a browser alone, which runs on a computer
     with no display; none on one with a display, whose apps reach the sites by name on the transparent listeners."""
-    return {SITE_PROXY_ENV: FORWARD_PROXY} if display == "none" else {}
+    return {SITE_PROXY_ENV: FORWARD_PROXY} if display == ALONE_DISPLAY else {}
 
 
-def proxy_config(table: SiteTable, issued: Issued, *, user: Optional[str], os_type: str,
+def proxy_config(table: SiteTable, issued: Issued, *, user: Optional[str], os_type: str, forward_port: bool,
                  upstream_headers: Optional[dict[str, dict[str, str]]] = None) -> dict:
     """What ``site_proxy.py install`` reads: the session user, the CA, the trust files on an ``os_type`` computer and
     the variables naming them, which its profile script sets as the computer's boot environment does, each route with
     its certificate and key, and the headers its gateway's sandbox provider asks requests to it to carry
-    (``upstream_headers``, by site), which the proxy sends upstream alone, and its forward port."""
+    (``upstream_headers``, by site), which the proxy sends upstream alone, and with ``forward_port``, for a browser
+    alone, the forward port."""
     sites = []
     for route in table.routes:
         site = {"name": route.site, "upstream": route.url, "domains": list(route.domains)}
@@ -310,7 +313,7 @@ def proxy_config(table: SiteTable, issued: Issued, *, user: Optional[str], os_ty
         sites.append(site)
     return {"user": user, "ca_pem": issued.ca_pem, "sites": sites, "log": str(LOG),
             "trust_files": trust_files(os_type), "trust_environment": dict(TRUST_ENVIRONMENTS[os_type]),
-            "proxy_port": FORWARD_PROXY_PORT}
+            **({"proxy_port": FORWARD_PROXY_PORT} if forward_port else {})}
 
 
 def reachable_problem(policy: Optional[NetworkPolicy], routes: list[Route]) -> Optional[str]:
@@ -415,10 +418,11 @@ class RootChannel:
 
 
 async def route(sandbox: Sandbox, sites: list[Site], *, user: Optional[str], network: Optional[dict],
-                valid_for: timedelta, label: str, os_type: str) -> dict:
+                valid_for: timedelta, label: str, os_type: str, display: str) -> dict:
     """Have the ``os_type`` computer on ``sandbox`` reach each of ``sites`` by its names: the table made, the CA and
-    certificates issued, the proxy installed and started as root, and each name checked as ``user``; what the deploy
-    record keeps of it. Raises naming a name that didn't load."""
+    certificates issued, the proxy installed and started as root, with its forward port on a computer with no
+    ``display``, a browser alone's, and each name checked as ``user``; what the deploy record keeps of it. Raises
+    naming a name that didn't load."""
     requested = NetworkPolicy.from_dict(network) if network else None
     table = site_table(sites, requested.allow_hosts if requested else ())
     table.routes = [Route(r.site, sandbox.url_from_sandbox(r.url), r.domains) for r in table.routes]
@@ -435,6 +439,7 @@ async def route(sandbox: Sandbox, sites: list[Site], *, user: Optional[str], net
     await channel.private_folder(FOLDER)
     await channel.write(PROXY, _PROXY_SOURCE.read_text())
     await channel.write_secret(CONFIG, json.dumps(proxy_config(table, issued, user=user, os_type=os_type,
+                                                               forward_port=display == ALONE_DISPLAY,
                                                                upstream_headers=upstream_headers)))
     await channel.run(["chmod", "0600", str(CONFIG)])
     output = await channel.run(["python3", str(PROXY), "install", str(CONFIG)])

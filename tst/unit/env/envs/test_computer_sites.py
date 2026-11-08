@@ -185,7 +185,7 @@ async def test_route_installs_the_proxy_as_root_with_each_sites_route_as_the_com
     sandbox = FakeVm(_REPORT)
 
     routed = await sites.route(sandbox, [_site("notes", "notes.test")], user="user", network=None,
-                               valid_for=timedelta(hours=1), label="desktop", os_type="linux")
+                               valid_for=timedelta(hours=1), label="desktop", os_type="linux", display="x11")
 
     assert set(sandbox.written) == {"/etc/agentenv/sites/site_proxy.py", "/etc/agentenv/sites/config.json"}
     config = json.loads(sandbox.written["/etc/agentenv/sites/config.json"])
@@ -199,9 +199,21 @@ async def test_route_installs_the_proxy_as_root_with_each_sites_route_as_the_com
                                "docker exec -u 0 computer-1 chmod 0600 /etc/agentenv/sites/config.json",
                                "docker exec -u 0 computer-1 python3 /etc/agentenv/sites/site_proxy.py install "
                                "/etc/agentenv/sites/config.json"]
-    assert "upstream_headers" not in site
+    assert "upstream_headers" not in site and "proxy_port" not in config
     assert routed["checks"] == _REPORT["checks"] and routed["names"]["routes"] == {"notes": ["notes.test"]}
     assert "PRIVATE KEY" not in json.dumps(routed)
+
+
+@pytest.mark.asyncio
+async def test_route_gives_a_browser_alone_the_forward_port_and_a_computer_with_a_display_none():
+    alone, desktop = FakeVm(_REPORT), FakeVm(_REPORT)
+
+    for sandbox, display in ((alone, "none"), (desktop, "x11")):
+        await sites.route(sandbox, [_site("notes", "notes.test")], user="user", network=None,
+                          valid_for=timedelta(hours=1), label="desktop", os_type="linux", display=display)
+
+    configs = [json.loads(sandbox.written["/etc/agentenv/sites/config.json"]) for sandbox in (alone, desktop)]
+    assert [config.get("proxy_port") for config in configs] == [3128, None]
 
 
 @pytest.mark.asyncio
@@ -209,7 +221,7 @@ async def test_the_config_holding_the_keys_is_written_over_stdin_into_a_private_
     sandbox = FakeVm(_REPORT)
 
     await sites.route(sandbox, [_site("notes", "notes.test")], user="user", network=None,
-                      valid_for=timedelta(hours=1), label="desktop", os_type="linux")
+                      valid_for=timedelta(hours=1), label="desktop", os_type="linux", display="x11")
 
     assert ("write", "/etc/agentenv/sites/config.json") not in sandbox.events
     secret = sandbox.events.index(("secret", "/tmp/secret-1/config.json"))
@@ -227,7 +239,7 @@ async def test_the_headers_the_gateways_provider_asks_for_go_in_the_private_conf
         "CF-Access-Client-Secret": "s3cret"} if url.startswith("http://host.docker.internal:8080/") else {})
 
     routed = await sites.route(sandbox, [_site("notes", "notes.test")], user="user", network=None,
-                               valid_for=timedelta(hours=1), label="desktop", os_type="linux")
+                               valid_for=timedelta(hours=1), label="desktop", os_type="linux", display="x11")
 
     (site,) = json.loads(sandbox.written["/etc/agentenv/sites/config.json"])["sites"]
     assert site["upstream_headers"] == {"CF-Access-Client-Secret": "s3cret"}
@@ -242,7 +254,7 @@ async def test_the_sites_keys_land_in_a_folder_root_alone_can_enter():
     sandbox = FakeVm(_REPORT)
 
     await sites.route(sandbox, [_site("notes", "notes.test")], user="user", network=None,
-                      valid_for=timedelta(hours=1), label="desktop", os_type="linux")
+                      valid_for=timedelta(hours=1), label="desktop", os_type="linux", display="x11")
 
     private = sandbox.events.index("docker exec -u 0 computer-1 chmod 0700 /etc/agentenv/sites")
     assert private < sandbox.events.index(("cp", "/tmp/secret-1/config.json", "computer-1:/etc/agentenv/sites/config.json"))
@@ -255,7 +267,7 @@ async def test_a_name_that_doesnt_load_in_the_computer_fails_the_route():
 
     with pytest.raises(RuntimeError, match="https://notes.test/ didn't load in the computer: certificate verify"):
         await sites.route(FakeVm(report), [_site("notes", "notes.test")], user="user", network=None,
-                          valid_for=timedelta(hours=1), label="desktop", os_type="linux")
+                          valid_for=timedelta(hours=1), label="desktop", os_type="linux", display="x11")
 
 
 @pytest.mark.asyncio
@@ -266,7 +278,7 @@ async def test_a_network_that_keeps_the_computer_from_the_gateway_is_refused_bef
                                            "host.docker.internal"):
         await sites.route(sandbox, [_site("notes", "notes.test")], user="user",
                           network={"mode": "allowlist", "allow_hosts": ["api.example"]}, valid_for=timedelta(hours=1),
-                          label="desktop", os_type="linux")
+                          label="desktop", os_type="linux", display="x11")
 
     assert sandbox.scripts == [] and sandbox.written == {}
 
@@ -280,7 +292,7 @@ async def test_a_gateway_the_sandboxs_applied_network_allows_by_its_address_rang
 
     routed = await sites.route(sandbox, [_site("notes", "notes.test")], user="user",
                                network={"mode": "allowlist", "allow_hosts": ["api.example"]},
-                               valid_for=timedelta(hours=1), label="desktop", os_type="linux")
+                               valid_for=timedelta(hours=1), label="desktop", os_type="linux", display="x11")
 
     assert routed["checks"] == _REPORT["checks"]
     routes = [sites.Route("notes", "http://10.0.0.7:8080/website/notes/", ("notes.test",))]
@@ -305,7 +317,7 @@ async def test_a_sandbox_that_is_the_container_is_reached_as_root_through_its_ow
                               write_file_from_text=write_file_from_text)
 
     await sites.route(sandbox, [_site("notes", "notes.test")], user="user", network=None,
-                      valid_for=timedelta(hours=1), label="desktop", os_type="linux")
+                      valid_for=timedelta(hours=1), label="desktop", os_type="linux", display="x11")
 
     assert calls == [("id", "-u"), ("mkdir", "-p", "/etc/agentenv/sites"), ("chmod", "0700", "/etc/agentenv/sites"),
                      ("mkdir", "-p", "/etc/agentenv/sites"), ("write", "/etc/agentenv/sites/site_proxy.py"),
@@ -330,7 +342,7 @@ async def test_a_container_sandbox_that_runs_the_computer_as_its_user_is_refused
 
     with pytest.raises(RuntimeError, match="the coreweave sandbox runs the computer's commands as uid 1000"):
         await sites.route(sandbox, [_site("notes", "notes.test")], user="user", network=None,
-                          valid_for=timedelta(hours=1), label="desktop", os_type="linux")
+                          valid_for=timedelta(hours=1), label="desktop", os_type="linux", display="x11")
 
     assert calls == [("id", "-u")]
 
@@ -343,7 +355,7 @@ async def test_a_site_naming_the_gateway_its_routes_are_on_is_refused_before_any
 
     with pytest.raises(RuntimeError, match=r"the gateway at gw.sites.test \(named by notes's .*sites.test\) would"):
         await sites.route(sandbox, [_site("notes", *domains)], user="user", network=None,
-                          valid_for=timedelta(hours=1), label="desktop", os_type="linux")
+                          valid_for=timedelta(hours=1), label="desktop", os_type="linux", display="x11")
 
     assert sandbox.scripts == [] and sandbox.written == {}
 

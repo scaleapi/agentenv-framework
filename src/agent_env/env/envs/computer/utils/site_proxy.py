@@ -7,16 +7,16 @@
 store, Firefox's policies, Chromium's managed policies and the session user's NSS databases, starts ``serve`` and
 checks, as the session user, that each name loads. ``serve`` listens on loopback: on 443 for a name served over HTTPS,
 on 80 to redirect those to HTTPS and to serve ``.localhost`` names over HTTP, on 53 for DNS, over UDP and TCP, when a
-name is a wildcard, which a hosts file can't list, and on ``proxy_port`` (3128) as a forward proxy, a browser alone's
-only route out, which serves the same sites to ``CONNECT`` and to requests naming their URLs and refuses any other host
-at once; it then drops to ``SERVE_USER`` (``nobody``), else the session user, so the agent, which runs as the session
-user, can't stop it, and ``keep``, as root, starts it again should it end. The site sees itself at ``/`` under its own
-name: the path goes upstream under the route's prefix, ``X-Forwarded-Host`` and ``X-Forwarded-Proto`` say the name and
-scheme the browser used, ``AgentEnv-Site-Root`` has the gateway tell the site no prefix, so the links it makes are
-rooted at ``/`` too, and a ``Location`` or cookie naming the route is rewritten back to the name. Hop-by-hop headers and
-the browser's own ``X-Forwarded-*`` never go upstream; ``Transfer-Encoding`` does, since bodies are relayed as framed,
-and an ``Alt-Svc`` offering HTTP/3, which the proxy doesn't serve, never reaches the browser. A WebSocket's upgrade is
-relayed, for an upstream that answers it."""
+name is a wildcard, which a hosts file can't list, and, on a browser computer, on ``proxy_port`` (3128) as a forward
+proxy, a browser alone's only route out, which serves the same sites to ``CONNECT`` and to requests naming their URLs
+and refuses any other host at once; it then drops to ``SERVE_USER`` (``nobody``), else the session user, so the agent,
+which runs as the session user, can't stop it, and ``keep``, as root, starts it again should it end. The site sees
+itself at ``/`` under its own name: the path goes upstream under the route's prefix, ``X-Forwarded-Host`` and
+``X-Forwarded-Proto`` say the name and scheme the browser used, ``AgentEnv-Site-Root`` has the gateway tell the site no
+prefix, so the links it makes are rooted at ``/`` too, and a ``Location`` or cookie naming the route is rewritten back
+to the name. Hop-by-hop headers and the browser's own ``X-Forwarded-*`` never go upstream; ``Transfer-Encoding`` does,
+since bodies are relayed as framed, and an ``Alt-Svc`` offering HTTP/3, which the proxy doesn't serve, never reaches the
+browser. A WebSocket's upgrade is relayed, for an upstream that answers it."""
 
 from __future__ import annotations
 

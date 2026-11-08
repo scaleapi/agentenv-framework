@@ -17,7 +17,8 @@ close its tabs by URL; a task whose deploy_env pins a version of the browser, it
 preflight on the version pinned and runs its browser steps through task.run; and each start tab's page sees the
 window's size from its first script. Routing sites, it goes out only through the shared site proxy's forward port:
 start tabs on a site over HTTPS and on a .localhost one load through it, an event stream comes through as it's sent,
-any other host and loopback are refused and logged, the session user can't stop the port, and killed it comes back.
+any other host and loopback are refused and logged, the session user can't stop the port, killed it comes back, and
+after a reset it serves the sites and refuses the rest again.
 Needs Docker and the local registry on
 localhost:5000, and Node 20 or later and npm for the CDP clients."""
 
@@ -583,6 +584,13 @@ async def test_routing_sites_it_goes_out_only_through_the_forward_port_which_the
                 await asyncio.sleep(1)
                 back = await _through_port(deployed, "https://shop.test/alpha")
             restarted = await _serve_pid(deployed)
+            await ResetEnvTaskStep(id="reset", version=None, env_id=browser_computer.id,
+                                   fail_task_on_error=True).execute(context)
+            after_reset = await _through_port(deployed, "https://shop.test/alpha")
+            refused_after_reset = await _through_port(deployed, "https://example.com/")
+            named_after_reset = (await inside.run(deployed, ["sh", "-c", "echo $AGENTENV_SITE_PROXY"],
+                                                  timeout_s=30))["stdout"]
+            tabs_after_reset = await tabs_of(deployed)
         finally:
             report = await teardown_run(context)
 
@@ -604,6 +612,11 @@ async def test_routing_sites_it_goes_out_only_through_the_forward_port_which_the
     assert "site proxy: refused GET 127.0.0.1:18765: no site of this computer" in logged
     assert stopped["exit_code"] != 0 and still == serving and after_stop.startswith("200 "), (stopped, after_stop)
     assert back.startswith("200 ") and restarted and restarted != serving, (back, restarted)
+    assert after_reset.startswith("200 ") and after_reset.endswith("<title>alpha</title>"), after_reset
+    assert refused_after_reset.startswith("error") and "403" in refused_after_reset, refused_after_reset
+    assert named_after_reset.strip() == "http://127.0.0.1:3128"
+    assert [(tab["url"], tab["title"]) for tab in tabs_after_reset] == [("https://shop.test/landed", "landed"),
+                                                                        ("http://notes.localhost/", "notes")]
     assert not report.failed
 
 
