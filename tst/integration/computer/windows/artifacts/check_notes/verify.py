@@ -15,7 +15,8 @@ import asyncio, json, os, subprocess, tempfile, time
 from pathlib import Path
 import httpx
 from agentenv_protocol.computer import session
-from agentenv_protocol.computer.served import ADDRESS, served
+from agentenv_protocol.computer.app import ADDRESS
+from agentenv_protocol.computer.served import served
 
 prefix = Path("C:/agentenv/apps/notes")
 written = Path.home() / ".notes.json"

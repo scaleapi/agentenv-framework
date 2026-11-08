@@ -28,7 +28,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, NamedTuple
 
-from agentenv_protocol.computer.served import ADDRESS
+from agentenv_protocol.computer.app import ADDRESS
+from agentenv_protocol.computer.apps import apps_folder
 
 from agent_env.artifact.artifacts.computer import DISK_BASE_FILE, DISK_FILE, DISK_OWNER
 from agent_env.artifact.artifacts.docker_image import docker_login, push_local_image
@@ -50,7 +51,7 @@ RECIPE = Path(__file__).resolve().parents[4] / "computers" / "disk" / "windows"
 ADMIN = "agentadmin"
 #: Where agent-env's own files are on a Windows computer, and each layer's folder under them.
 ROOT = PureWindowsPath("C:/agentenv")
-DRIVERS, APPS = ROOT / "drivers", ROOT / "apps"
+DRIVERS, APPS = ROOT / "drivers", apps_folder("windows")
 PYTHON = ROOT / "python" / "python.exe"
 BUILD = ROOT / "build"
 #: The fewest days of its evaluation a base may have left, as a deploy needs some.

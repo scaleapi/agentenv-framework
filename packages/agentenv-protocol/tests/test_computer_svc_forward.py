@@ -37,6 +37,7 @@ from websockets.exceptions import ConnectionClosedError, InvalidStatus  # noqa: 
 from agentenv_protocol import CONTROL_TOKEN_ENV, client  # noqa: E402
 from agentenv_protocol.computer import ComputerAppEnvironment, apps, linux, svc  # noqa: E402
 from agentenv_protocol.computer.app import AGENT_ACTED, SOCKET  # noqa: E402
+import agentenv_protocol.computer.served as transports  # noqa: E402
 from agentenv_protocol.computer.served import TOKEN_HEADER, bind, guarded  # noqa: E402
 from agentenv_protocol.tool_context import EMPTY  # noqa: E402
 
@@ -124,6 +125,7 @@ async def _computer(monkeypatch, transport: str):
         folder = Path(root) / "echo"
         (folder / SOCKET).parent.mkdir(parents=True)
         monkeypatch.setattr(apps, "APPS", Path(root))
+        monkeypatch.setattr(transports, "LOOPBACK", transport == "loopback")
         monkeypatch.setenv("ENVIRONMENT_NAME", "echo")
         app = Echo()
         asgi = app.create_app().streamable_http_app()

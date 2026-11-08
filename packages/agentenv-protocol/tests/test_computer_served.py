@@ -1,5 +1,5 @@
-"""Where an app's own server answers and how its computer reaches it: on its folder's Unix socket unless it wrote a
-loopback port and token there, as it does on Windows. On loopback it answers only a request or WebSocket carrying its
+"""Where an app's own server answers and how its computer reaches it: on its folder's Unix socket, or on Windows on
+the loopback port and token it wrote there, nothing answering till it has. On loopback it answers only a request or WebSocket carrying its
 token, once, which it takes out before the app sees the request, and a client reaches it through no proxy the
 environment names."""
 from __future__ import annotations
@@ -22,7 +22,9 @@ from starlette.websockets import WebSocket  # noqa: E402
 from websockets.asyncio.client import connect  # noqa: E402
 from websockets.exceptions import InvalidStatus  # noqa: E402
 
-from agentenv_protocol.computer.served import ADDRESS, SOCKET, TOKEN_HEADER, Served, bind, guarded, served  # noqa: E402
+import agentenv_protocol.computer.served as transports  # noqa: E402
+from agentenv_protocol.computer.app import ADDRESS, SOCKET  # noqa: E402
+from agentenv_protocol.computer.served import TOKEN_HEADER, Served, bind, guarded, served  # noqa: E402
 
 
 async def _headers(request: Request) -> JSONResponse:
@@ -52,12 +54,20 @@ async def _serving(folder: Path):
         await serving
 
 
-def test_an_app_that_wrote_no_loopback_address_is_reached_on_its_socket(tmp_path):
-    assert served(tmp_path) == Served(socket=tmp_path / SOCKET)
+def test_an_app_is_reached_on_its_socket_but_on_windows_none_answers_till_its_server_wrote_its_address(tmp_path,
+                                                                                                       monkeypatch):
+    monkeypatch.setattr(transports, "LOOPBACK", False)
+    on_its_socket = served(tmp_path)
+    monkeypatch.setattr(transports, "LOOPBACK", True)
+
+    with pytest.raises(FileNotFoundError):
+        served(tmp_path)
+    assert on_its_socket == Served(socket=tmp_path / SOCKET)
 
 
 @pytest.mark.asyncio
 async def test_an_app_on_loopback_answers_its_token_alone_and_the_app_never_sees_it(tmp_path, monkeypatch):
+    monkeypatch.setattr(transports, "LOOPBACK", True)
     monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
     monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:9")
     async with _serving(tmp_path) as token:
