@@ -9,6 +9,7 @@ import shutil
 import tempfile
 from pathlib import Path
 from typing import Any, Awaitable, Callable, ClassVar, Literal, Optional
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 from starlette.requests import Request
@@ -27,14 +28,16 @@ from ..computer.errors import DeviceUnavailable, InvalidArgument
 from ..transfers import WriteNamespaceGrant
 from ..types import METHOD_ADD, EnvironmentExtension, IntakeDeclaration, IntakeFormat, intake_extension
 from . import data
-from .control import AGENT, DOWNLOADS, EXIT, STOP, UPLOADS, BrowserControl, _now
+from .control import AGENT, DOWNLOADS, EXIT, LIVE_START_TAB_TIMEOUT_S, LOADED, STOP, UPLOADS, BrowserControl, _now
 from .devtools import PIPE_IN, PIPE_OUT, DevToolsError, DevToolsPipe
-from .shapes import BrowserRecord, BrowserState, CookieToSet, OriginStorage, StateToLoad
+from .shapes import BrowserRecord, BrowserState, CookieToSet, OriginStorage, SiteNames, StateToLoad
 
 logger = logging.getLogger(__name__)
 
 SITE_PROXY_ENV = "AGENTENV_SITE_PROXY"
 BROWSER = "urn:agentenv:browser/v1"
+#: Where its server keeps the env's sites ``sites/set`` hands it, which outlive a relaunch or the server's restart.
+SITES = SOCKET.parent / "sites.json"
 #: The flags agentenv sets, by prefix, which a subclass's command may not carry: among them every way to open a debugging
 #: port, since the browser is reached only over its pipe.
 OWNED_FLAGS = ("--user-data-dir", "--remote-debugging-", "--remote-allow-origins", "--proxy-", "--no-proxy-server",
@@ -46,6 +49,8 @@ SHM_MIN_BYTES = 1 << 30
 BLOCK = 2
 #: How often a call that waits for the browser to be ready checks it.
 READY_POLL_S = 0.5
+#: How much longer than its ready timeout, within which a launch's start tabs settle, a call waits for them.
+START_TABS_MARGIN_S = 30.0
 #: Alone, loopback goes through the proxy too. In a computer, the apps on loopback beside it stay reachable; ``<-loopback>``
 #: removes Chromium's own rule, so ``*.localhost`` names still don't.
 ALONE_BYPASS = "<-loopback>"
@@ -126,6 +131,8 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         #: Its CDP connection, over the pipe its server launches it with.
         self.devtools = DevToolsPipe()
         self._following: Optional[asyncio.Future] = None
+        #: The start tabs of each launch since this server started, newest last.
+        self.start_tab_launches: list[dict] = []
         super().__init__()
         for folder in (UPLOADS, DOWNLOADS):
             (Path.home() / folder).mkdir(exist_ok=True)
@@ -193,8 +200,9 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         return not _alone()
 
     def _command_line_tabs(self) -> list[str]:
-        """The start tabs its command line opens: headless Chromium takes one, and the rest open over its pipe."""
-        return self.settings.start_urls[:1] if _alone() else self.settings.start_urls
+        """The tab its command line opens, blank: its start tabs open over its pipe, so each is held to its window and
+        followed as it loads."""
+        return ["about:blank"]
 
     async def _launch_fds(self) -> dict[int, int]:
         """Before each launch, an empty cache and the deploy's prompt answers in its profile; and a new debugging pipe:
@@ -205,7 +213,8 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         to_browser_read, to_browser_write = os.pipe()
         from_browser_read, from_browser_write = os.pipe()
         await self.devtools.connect(to_browser_write, from_browser_read)
-        self._following = asyncio.ensure_future(self._follow(self.settings.start_urls[len(self._command_line_tabs()):]))
+        self._following = asyncio.ensure_future(self._follow(self.settings.start_urls, _now(),
+                                                             asyncio.get_running_loop().time()))
         self._following.add_done_callback(lambda done: done.cancelled() or done.exception())
         return {PIPE_IN: to_browser_read, PIPE_OUT: from_browser_write}
 
@@ -215,11 +224,23 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         self.control.ended(EXIT if self._computer_app.exited() else STOP)
         self.relay.ended()
 
-    async def _follow(self, urls: list[str]) -> None:
-        """Its control attached, then each of ``urls`` in a tab behind the active one, in order."""
+    async def _follow(self, urls: list[str], at: str, launched: float) -> None:
+        """Its control attached, then its start tabs at ``urls`` loaded, the launch's outcomes kept."""
         await self.control.attach()
-        for url in urls:
-            await self.devtools.call("Target.createTarget", {"url": url, "background": True})
+        await self._load_start_tabs(urls, at, launched)
+
+    async def _load_start_tabs(self, urls: list[str], at: str, since: Optional[float] = None) -> list[dict]:
+        """Its start tabs at ``urls``, as the control loads them, every one settled within the browser's ready timeout
+        of ``since``, its launch's start on the loop's clock, else of now: a tab on one of the env's sites waited on
+        what's left of it, any other on the live wait at most. A launch's setup counts against it, so its start tabs
+        settle before anything waiting that timeout and a margin on it gives up. Their outcomes, kept as a launch's
+        from ``at``."""
+        sites, now = _read_sites(), asyncio.get_running_loop().time()
+        left = max(0.0, self._computer_app.timeout_s - (now - (since if since is not None else now)))
+        tabs = await self.control.load_start_tabs(urls, lambda url: _site_of(url, sites), left,
+                                                  min(LIVE_START_TAB_TIMEOUT_S, left))
+        self.start_tab_launches.append({"at": at, "tabs": tabs})
+        return tabs
 
     def _write_prompt_answers(self) -> None:
         """Its profile's preferences, which it reads as it starts, denying location and notification prompts or
@@ -259,11 +280,17 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
 
     @ready_check
     async def devtools_answers(self) -> bool:
-        """It answers over its pipe, its control follows it and it has opened its start tabs."""
+        """It answers over its pipe."""
         try:
             await self.devtools.call("Browser.getVersion", timeout_s=self.devtools_timeout_s)
         except (ConnectionError, DevToolsError, asyncio.TimeoutError):
             return False
+        return True
+
+    @ready_check
+    async def start_tabs_loaded(self) -> bool:
+        """Its control follows it and every start tab of its launch has settled: loaded, failed or waited on its
+        time."""
         following = self._following
         return following is not None and following.done() and not following.cancelled() and \
             following.exception() is None
@@ -284,10 +311,26 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         "downloads/get are its downloads, get with its file, uploaded under a write_namespace grant or inline. cdp "
         "returns a user's CDP address, http_url to discover from and ws_url to connect to, "
         "with a token agentenv mints in its path: each connection to it gets its own browser-level session behind a "
-        "guard, and record lists them as cdp_connections, each with the commands the guard refused or changed."))
+        "guard, and record lists them as cdp_connections, each with the commands the guard refused or changed. "
+        "sites/set hands it the env's own sites, by name and domains: a start tab on one must load, its document's "
+        "status 2xx, or its launch counts it failed, while one on any other site is waited on 30 s at most. record "
+        "keeps each launch's start_tabs: the URL asked for and ended on, the status, any network error, the load time, "
+        "the env's site and the outcome, loaded, failed or timed_out."))
     async def browser_record(self) -> dict:
         return BrowserRecord(**await self.control.record(), launches=self._computer_app.launches(),
-                             cdp_connections=list(self.relay.connections)).model_dump()
+                             cdp_connections=list(self.relay.connections),
+                             start_tabs=self.start_tab_launches).model_dump()
+
+    @extension(BROWSER, op="sites/set")
+    async def browser_sites_set(self, sites: list[dict]) -> dict:
+        """The env's own sites, each by its name and domains, which it keeps for each launch after: a start tab on one
+        is waited on strictly."""
+        named = _parsed(SiteNames, sites, "sites")
+        SITES.parent.mkdir(parents=True, exist_ok=True)
+        written = SITES.with_name(f"{SITES.name}.part")
+        written.write_text(json.dumps([site.model_dump() for site in named]), encoding="utf-8")
+        written.replace(SITES)
+        return {}
 
     @extension(BROWSER, op="cdp")
     async def browser_cdp(self, user: str, request: Request) -> dict:
@@ -468,7 +511,8 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         state = BrowserState(cookies=await self.control.cookies(), local_storage=await self.control.local_storage(),
                              tabs=await self.control.tab_list(),
                              closed_tabs=(record := await self.control.record())["closed_tabs"],
-                             downloads=record["downloads"], clock={"mode": "real", "now": _now()})
+                             downloads=record["downloads"], clock={"mode": "real", "now": _now()},
+                             start_tabs=self.start_tab_launches[-1]["tabs"] if self.start_tab_launches else [])
         written = {**state.model_dump(), "cookies": [cookie.model_dump(exclude_none=True) for cookie in state.cookies]}
         (home / ".cache").mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=home / ".cache") as staging:
@@ -502,6 +546,7 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
                 await self._computer_app.stop_app()
                 await app_data.in_thread(data.restore_profile, Path.home(), self.profile, load.profile)
                 await self._computer_app.launch_app(METHOD_ADD)
+                _refuse_failed(await self._start_tabs_settled())
                 await self._until_ready()
                 applied.append("the profile")
             if load.files:
@@ -517,7 +562,7 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
                 await self.control.replace_tabs(state.tabs)
                 applied.append("the tabs")
             elif (state.cookies or state.local_storage) and not agent_acted():
-                await self.control.reopen_start_tabs(self.settings.start_urls)
+                _refuse_failed(await self._load_start_tabs(self.settings.start_urls, _now()))
                 applied.append("the start tabs again")
         except Exception as e:
             done = ", ".join(applied) or "nothing"
@@ -533,7 +578,25 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         await app_data.reset(self.paths)
         await app_data.in_thread(data.empty, Path.home(), DOWNLOADS, UPLOADS)
         self.control.forget()
+        self.start_tab_launches = []
         forget_agent_acted()
+
+    async def _relaunched(self, op: str) -> None:
+        """After a reset relaunches it: back once it's ready, InvalidArgument naming a start tab on one of the env's
+        sites that failed."""
+        _refuse_failed(await self._start_tabs_settled())
+        await self._until_ready()
+
+    async def _start_tabs_settled(self) -> list[dict]:
+        """The start tabs of its latest launch once they've settled, waited on its ready timeout and the margin its
+        setup takes before they load; DeviceUnavailable if they haven't by then."""
+        if (following := self._following) is not None:
+            timeout_s = self._computer_app.timeout_s + START_TABS_MARGIN_S
+            try:
+                await asyncio.wait_for(asyncio.shield(following), timeout_s)
+            except asyncio.TimeoutError:
+                raise DeviceUnavailable(f"the browser's start tabs hadn't settled after {timeout_s:g} s") from None
+        return self.start_tab_launches[-1]["tabs"] if self.start_tab_launches else []
 
     def extension_params(self, uri: str) -> dict:
         if uri == BROWSER:
@@ -546,6 +609,44 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
     @agent_skill
     def browser_skill(self) -> tuple[str, str]:
         return "How to use this website browser.", SKILL
+
+
+def _read_sites() -> list[SiteNames]:
+    """The env's sites ``sites/set`` handed it, none before it did or for a file it can't read."""
+    try:
+        return [SiteNames.model_validate(site) for site in json.loads(SITES.read_text(encoding="utf-8"))]
+    except (OSError, ValueError, TypeError, ValidationError):
+        return []
+
+
+def _site_of(url: str, sites: list[SiteNames]) -> Optional[str]:
+    """The name of the env's site among ``sites`` that serves ``url``'s host, None for any other."""
+    host = (urlsplit(url).hostname or "").rstrip(".")
+    return next((site.name for site in sites if any(_matches(domain.lower(), host) for domain in site.domains)), None)
+
+
+def _matches(pattern: str, host: str) -> bool:
+    """Whether ``host`` is the name ``pattern`` names: itself, or for ``*.example.com`` one label more."""
+    if pattern.startswith("*."):
+        head, dot, rest = host.partition(".")
+        return bool(head) and bool(dot) and rest == pattern[2:]
+    return host == pattern
+
+
+def _refuse_failed(tabs: list[dict]) -> None:
+    """InvalidArgument naming each start tab on one of the env's sites that didn't load."""
+    if failed := [tab for tab in tabs if tab["site"] is not None and tab["outcome"] != LOADED]:
+        raise InvalidArgument("; ".join(f"start tab {tab['url']} on the env's site {tab['site']} {start_tab_why(tab)}"
+                                        for tab in failed))
+
+
+def start_tab_why(tab: dict) -> str:
+    """Why a start tab didn't load, as its outcome says."""
+    if tab.get("error"):
+        return f"didn't load: {tab['error']}"
+    if tab.get("status") is not None and tab["status"] >= 400:
+        return f"answered {tab['status']}"
+    return f"was still loading after {tab['load_ms'] / 1000:g} s"
 
 
 def _alone() -> bool:

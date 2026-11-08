@@ -20,6 +20,7 @@ import json
 import logging
 import re
 import shlex
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -27,12 +28,14 @@ from typing import TYPE_CHECKING, Iterable, Optional
 from urllib.parse import urlsplit
 
 import httpx
+from agentenv_protocol import client as protocol_client
+from agentenv_protocol.website import WEBSITE_EXTENSION_URI as WEBSITE
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
-from agent_env.env.env import Env, gateway_url_of
+from agent_env.env.env import Env, EnvCapabilityUnsupported, gateway_url_of
 from agent_env.env.envs.computer.utils.site_proxy import is_local, matches
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, VmSandbox
 from agent_env.store.base import NotFoundError
@@ -53,6 +56,9 @@ VALID_MARGIN = timedelta(days=1)
 CLOCK_SKEW = timedelta(minutes=5)
 CARD_ATTEMPTS = 3
 CARD_RETRY_S = 1.0
+#: How long a computer's deploy waits for the run's websites it routes to say they're ready, as each said at its own
+#: deploy, and how often it asks meanwhile.
+SITES_READY_TIMEOUT_S, SITES_READY_POLL_S = 60.0, 2.0
 _LABEL = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
 _PROXY_SOURCE = Path(__file__).with_name("site_proxy.py")
 logger = logging.getLogger(__name__)
@@ -458,6 +464,44 @@ async def deployed_sites(deployed_envs: list[DeployedEnv], only: Optional[list[s
                 params = protocol_v1.extension_params(card, WEBSITE_EXTENSION_URI)
                 found.append((record.env_id, _found(name, url, params, stored.get(name))))
     return _env_qualified(found)
+
+
+async def require_ready(deployed_envs: list[DeployedEnv], only: Optional[list[str]] = None, *,
+                        timeout_s: float = SITES_READY_TIMEOUT_S, poll_s: float = SITES_READY_POLL_S) -> None:
+    """Back once each deployed env whose websites a computer routes, those of the env ids ``only`` names or all, says
+    through ``website/v1``'s ``ready`` that every site of it is ready; RuntimeError naming each one still not, and why,
+    once ``timeout_s`` has passed. An env that serves no website isn't asked, nor one with no address to ask, and one
+    with no site serving ``ready`` is ready."""
+    waiting = [record for record in deployed_envs
+               if (only is None or record.env_id in only) and serves_websites(record)]
+    deadline = time.monotonic() + timeout_s
+    while True:
+        why: dict[str, str] = {}
+        for record in waiting:
+            try:
+                readiness = await record.readiness()
+            except EnvCapabilityUnsupported:
+                continue
+            except (httpx.HTTPError, ValueError) as e:
+                why[record.env_id] = f"{type(e).__name__}: {e}"
+                continue
+            if not readiness.ready:
+                why[record.env_id] = "; ".join(readiness.problems) or "it says it isn't ready"
+        if not why:
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"site routing: the run's websites weren't ready after {timeout_s:g} s: "
+                               + "; ".join(f"{env_id} ({reason})" for env_id, reason in why.items()))
+        waiting = [record for record in waiting if record.env_id in why]
+        await asyncio.sleep(poll_s)
+
+
+def serves_websites(record: DeployedEnv) -> bool:
+    """Whether ``record`` serves websites a computer routes, as ``deployed_sites`` finds them: a named ``website/v1``
+    child on its stored card, or a website frontend it lists."""
+    card = getattr(record, "environment_card", None) or {}
+    return bool(getattr(record, "website_frontend_urls", None)) or any(
+        child.find_extension(WEBSITE) is not None and child.name for child in protocol_client.children(card))
 
 
 def _env_qualified(found: list[tuple[str, dict]]) -> list[dict]:

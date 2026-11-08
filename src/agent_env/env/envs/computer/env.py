@@ -287,7 +287,7 @@ class ComputerEnv(Env):
 
     async def run_env_params(self, env_params: Optional[dict], deployed_envs: list[DeployedEnv]) -> Optional[dict]:
         """With ``site_routing`` and no ``sites``, ``env_params`` naming as its sites the websites the run deployed
-        before the computer: all of them, or those of the env ids ``site_routing`` lists."""
+        before the computer, all of them or those of the env ids ``site_routing`` lists, once each says it's ready."""
         routing = (env_params or {}).get("site_routing")
         if routing is not None and routing is not False and routing is not True and not (
                 isinstance(routing, list) and all(isinstance(env_id, str) for env_id in routing)):
@@ -295,10 +295,12 @@ class ComputerEnv(Env):
                              f"{routing!r}")
         if not routing or env_params.get("sites"):
             return env_params
-        found = await sites.deployed_sites(deployed_envs, None if routing is True else list(routing))
+        only = None if routing is True else list(routing)
+        found = await sites.deployed_sites(deployed_envs, only)
         if not found:
             raise ValueError(f"computer env {self.id!r}: env_params.site_routing reaches the run's websites, and the "
                              "run deployed none before the computer")
+        await sites.require_ready(deployed_envs, only)
         return {**env_params, "sites": found}
 
     def deploy_refusal(self, *, sandbox_type: str | None = None, env_params: Optional[dict] = None,

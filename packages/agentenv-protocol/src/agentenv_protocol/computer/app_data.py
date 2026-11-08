@@ -11,7 +11,7 @@ import inspect
 import logging
 import shutil
 import tempfile
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -41,7 +41,8 @@ class AppDataPlane:
 
     def __init__(self, runtime: AppRuntime, hooks: dict[str, Callable], paths: list[str], timeout_s: float, *,
                  live: frozenset[str] = frozenset(), keeps_paths: bool = False,
-                 resets_failed_add: Callable[[], bool] = lambda: True) -> None:
+                 resets_failed_add: Callable[[], bool] = lambda: True,
+                 relaunched: Optional[Callable[[str], Awaitable[None]]] = None) -> None:
         self.runtime = runtime
         self.hooks = hooks
         self.paths = paths
@@ -49,6 +50,8 @@ class AppDataPlane:
         #: The operations served on the running app; whether a hook's reset needs the paths as installed; and whether
         #: a load that fails is followed by a reset now.
         self.live, self.keeps_paths, self.resets_failed_add = live, keeps_paths, resets_failed_add
+        #: What a call that stopped the app awaits once it has launched it again, whose error fails the call.
+        self.relaunched = relaunched
         self.turn = asyncio.Lock()
         self.changing: set[asyncio.Task] = set()
 
@@ -99,6 +102,8 @@ class AppDataPlane:
             finally:
                 if running:
                     await self.runtime.launch_app(_CAUSES[op])
+            if running and self.relaunched is not None:
+                await self.relaunched(op)
         except Exception as e:
             if not answer.done():
                 answer.set_exception(e)

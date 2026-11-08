@@ -9,7 +9,8 @@ build Playwright 1.64.1 pins, fetched by sha256 when a computer env that lists i
 (`agentenv_protocol.website_browser.WebsiteBrowserEnvironment`): agentenv launches it on a debugging pipe with its own
 flags, and writes managed policies to `/etc/opt/chrome_for_testing/policies/managed/` for unattended use. It runs
 without Chromium's sandbox, which a container can't give it. Its env.toml spells out its settings and their defaults
-under `[settings]`: `start_urls`, opened at boot, the first tab active; `window`, alone only; `locale`; `time_zone`; and
+under `[settings]`: `start_urls`, opened at boot in order, the first tab active, each waited on to load; `window`,
+alone only; `locale`; `time_zone`; and
 `geolocation` and `notifications`, `deny` or `ask`; and `dialogs`, `agent`, `accept` or `dismiss`. A computer env sets its own beside it
 (`apps = [{ env = "chromium", settings = { start_urls = ["https://example.test/"] } }]`), and a deploy overrides any of
 them (`env_params.app_settings = {chromium = {start_urls = [...]}}`). Its data is its profile, `~/.config/chromium`, which

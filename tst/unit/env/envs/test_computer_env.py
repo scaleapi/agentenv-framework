@@ -27,6 +27,7 @@ from agentenv_protocol.computer.app import COMPUTER_APP
 from agentenv_protocol.computer.app_runtime import HOLD_BOOT_LAUNCH_ENV
 from agentenv_protocol.computer.conformance import CheckResult, ProbeReport
 from agentenv_protocol.tool_access import DISABLE_TOOL_EXTENSION_URI, ENABLE_TOOL_EXTENSION_URI
+from agentenv_protocol.website_browser import BROWSER
 from click.testing import CliRunner
 
 from agent_env.artifact.artifacts.computer import ComputerArtifact
@@ -924,7 +925,7 @@ def _sites_gateway():
 @pytest.fixture
 def routes(monkeypatch):
     """Each site routing a deploy asks for, as (sandbox, sites, options), answering what the proxy's install would; the
-    gateway serving the notes site's card."""
+    gateway serving the notes site's card, its websites ready."""
     from agentenv_protocol import client as protocol_v1
 
     made = []
@@ -938,6 +939,7 @@ def routes(monkeypatch):
         return NOTES_CARD
 
     monkeypatch.setattr(env_computer_provider.sites, "route", route)
+    monkeypatch.setattr(env_computer_provider.sites, "require_ready", AsyncMock())
     monkeypatch.setattr(protocol_v1, "get_card", get_card)
     monkeypatch.setattr(env_computer_provider, "ready", AsyncMock(return_value=DRIVER_CARD))
     return made
@@ -1067,15 +1069,117 @@ async def test_a_computer_routing_sites_launches_its_held_boot_apps_once_listed_
     monkeypatch.setattr(env_computer_provider, "ready", ready)
     monkeypatch.setattr(env_computer_provider, "ready_timeout", lambda apps, os_type: 30.0)
     record = SimpleNamespace(invoke=invoke, control_token="t0ken", environment_card={"name": "booted"})
-    await env_computer_provider._launch_held_apps(env, record, "http://computer")
+    await env_computer_provider._launch_held_apps(env, record, "http://computer", [])
 
     assert order == [("listed", "http://computer", ["mail", "notes"]), (COMPUTER_APP, "launch", "mail", True, "mail"),
                      (COMPUTER_APP, "launch", "notes", True, "mail"), ("ready", "http://computer", "t0ken")]
     assert record.environment_card == {"name": "ready"} and record.environment_card_read_at_utc
     order.clear()
     apps[:] = [apps[1]]
-    await env_computer_provider._launch_held_apps(env, record, "http://computer")
+    await env_computer_provider._launch_held_apps(env, record, "http://computer", [])
     assert order == [("ready", "http://computer", "t0ken")]
+
+
+def _app_card(name, browser_methods=None):
+    """A held app's card, launched through computer-app/v1, a website browser when it serves ``browser_methods``."""
+    extensions = [{"uri": COMPUTER_APP, "params": {"endpoint": f"/svc/{name}/agentenv/ext/app",
+                                                   "methods": {"launch": {}}}}]
+    if browser_methods is not None:
+        extensions.append({"uri": BROWSER, "params": {"endpoint": f"/svc/{name}/agentenv/ext/browser",
+                                                      "methods": {method: {} for method in browser_methods}}})
+    return {"name": name, "url": f"/svc/{name}/agentenv", "capabilities": {"extensions": extensions}}
+
+
+@pytest.mark.asyncio
+async def test_each_held_browser_is_handed_the_routed_sites_before_its_launch_and_one_built_before_is_only_launched(
+        monkeypatch, caplog):
+    from agent_env.env.env import EnvCapabilityUnsupported
+    from agent_env.env.envs.computer.utils.params import Site
+
+    calls = []
+    apps = [SimpleNamespace(environment_name=name, launch=lambda os_type: SimpleNamespace(at="boot"))
+            for name in ("chromium", "older", "mail")]
+    env = SimpleNamespace(computer=SimpleNamespace(os=SimpleNamespace(type="linux")), composed_apps=lambda: apps)
+    listed_card = {"name": "desk", "children_environments": [
+        _app_card("chromium", ["record", "sites/set"]), _app_card("older", ["record"]), _app_card("mail")]}
+
+    async def invoke(uri, method, params=None, *, environment_name=None, child=None):
+        if method == "sites/set" and child.name == "older":
+            raise EnvCapabilityUnsupported(uri, method, "desk", None, child.name)
+        calls.append((uri, method, child.name, params))
+
+    monkeypatch.setattr(env_computer_provider, "listed", AsyncMock(return_value=listed_card))
+    monkeypatch.setattr(env_computer_provider, "ready", AsyncMock(return_value=listed_card))
+    monkeypatch.setattr(env_computer_provider, "ready_timeout", lambda apps, os_type: 30.0)
+    record = SimpleNamespace(invoke=invoke, control_token="t0ken", environment_card={}, env_id="desk")
+    routed = [Site(name="shop", url="http://gw/website/shop/", domains=["shop.test", "*.shop.test"]),
+              Site(name="bare", url="http://gw/website/bare/")]
+
+    with caplog.at_level(logging.WARNING):
+        await env_computer_provider._launch_held_apps(env, record, "http://computer", routed)
+
+    assert calls == [(BROWSER, "sites/set", "chromium", {"sites": [{"name": "shop", "domains": ["shop.test",
+                                                                                                  "*.shop.test"]}]}),
+                     (COMPUTER_APP, "launch", "chromium", None), (COMPUTER_APP, "launch", "older", None),
+                     (COMPUTER_APP, "launch", "mail", None)]
+    assert "older in desk serves no browser/v1 sites/set" in caplog.text
+
+
+def _start_tabs_record(card, launches_by_browser):
+    """A deployed computer whose card is ``card`` and whose browsers' ``record`` keeps ``launches_by_browser``, by the
+    browser's name, None for the computer's own card; a browser absent from it built before start tabs."""
+    from agent_env.env.env import EnvCapabilityUnsupported
+
+    async def invoke(uri, method, params=None, *, environment_name=None, child=None):
+        name = child.name if child is not None else None
+        if (uri, method) != (BROWSER, "record") or name not in launches_by_browser:
+            raise EnvCapabilityUnsupported(uri, method, "desk", None, name)
+        return {"start_tabs": [{"at": "t", "tabs": tabs} for tabs in launches_by_browser[name]]}
+
+    return SimpleNamespace(invoke=invoke, environment_card=card, env_id="@local/desk")
+
+
+def _tab(url, site=None, outcome="loaded", **fields):
+    return {"tab": "t1", "url": url, "final_url": url, "status": 200, "error": None, "load_ms": 120, "site": site,
+            "outcome": outcome, **fields}
+
+
+@pytest.mark.asyncio
+async def test_each_browsers_start_tabs_of_its_latest_launch_are_kept_and_one_built_before_them_is_left_out():
+    card = {"name": "desk", "children_environments": [_app_card("chromium", ["record"]), _app_card("older", []),
+                                                      _app_card("mail")]}
+    record = _start_tabs_record(card, {"chromium": [[_tab("about:blank")], [
+        _tab("https://shop.test/", "shop"), _tab("https://slack.com/", outcome="timed_out", status=None)]]})
+    alone = _start_tabs_record({"name": "chromium-driver", "capabilities": {"extensions": [
+        {"uri": BROWSER, "params": {"endpoint": "/ext/browser", "methods": {"record": {}}}}]}},
+        {None: [[_tab("https://linear.app/")]]})
+
+    assert await env_computer_provider._start_tabs(record) == {"chromium": [
+        _tab("https://shop.test/", "shop"), _tab("https://slack.com/", outcome="timed_out", status=None)]}
+    assert await env_computer_provider._start_tabs(alone) == {"chromium-driver": [_tab("https://linear.app/")]}
+
+
+@pytest.mark.asyncio
+async def test_a_start_tab_on_one_of_the_env_sites_that_didnt_load_fails_the_boot_naming_each_once_kept(
+        monkeypatch):
+    card = {"name": "desk", "children_environments": [_app_card("chromium", ["record"])]}
+    tabs = [_tab("https://shop.test/", "shop", "failed", status=503),
+            _tab("https://mail.test/", "mail", "failed", status=None, error="net::ERR_CONNECTION_REFUSED"),
+            _tab("https://notes.test/", "notes", "timed_out", status=None, load_ms=60000),
+            _tab("https://slack.com/", None, "failed", status=500)]
+    record = _start_tabs_record(card, {"chromium": [tabs]})
+    record.metadata = {"computer": {"start_tabs": {"chromium": [_tab("https://shop.test/", "shop")]}}}
+    monkeypatch.setattr(env_computer_provider, "_require_display", AsyncMock())
+
+    with pytest.raises(RuntimeError) as failed:
+        await env_computer_provider._finish_boot(SimpleNamespace(), record, None,
+                                                 SimpleNamespace(site_routing=False), 0, None)
+
+    assert record.metadata["computer"]["start_tabs"] == {"chromium": tabs}
+    assert str(failed.value) == (
+        "computer env '@local/desk': chromium's start tab https://shop.test/ on the env's site shop answered 503; "
+        "chromium's start tab https://mail.test/ on the env's site mail didn't load: net::ERR_CONNECTION_REFUSED; "
+        "chromium's start tab https://notes.test/ on the env's site notes was still loading after 60 s")
 
 
 @pytest.mark.asyncio

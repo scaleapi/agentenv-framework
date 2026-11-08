@@ -880,14 +880,14 @@ under the session user's home (`.config/chromium` by default), whose contents fr
 are the profile's template. The base class adds:
 
 - **Its settings**, `BrowserSettings`, which a subclass's `Settings` extends: `start_urls`, opened in
-  tabs at launch, the first active (`["about:blank"]` by default; none may start with `-`), headless
-  the first from its command line and the rest over its pipe, since headless Chromium takes one; `window`,
+  tabs at launch, the first active (`["about:blank"]` by default; none may start with `-`); `window`,
   1280 × 800, alone only; `locale`; `time_zone`, set as `TZ` in its launch's `env`; `geolocation` and
   `notifications`, `deny` (the default), which answers a page's prompt for it, or `ask`; and `dialogs`, who
   answers a page's JavaScript dialogs: `agent` (the default), or agentenv, accepting (`accept`, a `prompt()`
   with its default text) or dismissing (`dismiss`) each. Either way agentenv leaves a page that asks before
   it's left (`beforeunload`), so none of its answers blocks a navigation.
-- **The flags agentenv owns**, after the subclass's command and before the start tabs: its profile, its
+- **The flags agentenv owns**, after the subclass's command and before `about:blank`, the one tab its command line
+  opens: its profile, its
   HTTP cache under `~/.cache` (`--disk-cache-dir`), `--remote-debugging-pipe`, `--no-first-run`,
   `--no-default-browser-check`, `--lang` and, when `/dev/shm` holds under 1 GiB (Docker gives 64 MiB),
   `--disable-dev-shm-usage`, so it keeps its shared memory in files. With
@@ -946,6 +946,8 @@ are the profile's template. The base class adds:
   - `files/choose {paths}`, files in `~/Uploads` for the file chooser open on it, which headless, and so
     alone, it intercepts;
   - `page/state`, the active tab's id, URL and title and the dialog or file chooser open on it.
+  - `sites/set {sites}`, the env's own sites, each `{name, domains}`, a `*.` domain matching one label more, which
+    the deploy hands it before it launches the browser and its server keeps for every launch after.
   - `cookies/get {urls?}`, `cookies/set {cookies}` and `cookies/delete {name?, domain?, path?}`, on its default
     context, each cookie as Playwright's `storageState` has it, CDP's `Network.Cookie` fields (`name`, `value`,
     `domain`, `path`, `expires`, `httpOnly`, `secure`, `sameSite`), so a storage state exported from Playwright loads
@@ -968,9 +970,26 @@ are the profile's template. The base class adds:
     under the `write_namespace` grant when there is one, else inline, as `data/get` returns files. Inline, the whole
     file is read into memory and sent base64 in one answer, so a large one belongs under a grant.
 
+  **Start tabs.** At each launch its start tabs open over its pipe, in a computer and alone alike: the first in the
+  blank tab its command line opened, the rest in tabs it opens blank after it, each held to the window's size
+  (headless) before it goes to its URL, so its page sees that size from its first script; then the first is brought
+  to the front. They load at once, and each settles once it has loaded (its load event fired, its document's final
+  status read), once it failed (a network error, or on one of the env's sites, as `sites/set` named them, a 4xx or
+  5xx status, which settles it at once), or once it has been waited on: every one settles within the browser's
+  ready timeout of its launch, the launch's setup counted against it, a tab on one of the env's sites waited on what's
+  left of it and any other on 30 s at most, so `data/reset`, a load and a deploy, which wait that timeout and a margin,
+  always get its outcome. Its `start_tabs_loaded` ready check passes once all have settled, so `cdp` and a deploy wait
+  for them. `record`'s `start_tabs` keeps each launch's (`StartTabsLaunch`: `at` and its
+  `tabs`, each a `StartTab`: `tab`, `url`, `final_url`, `status`, `error`, `load_ms`, `site` — the env's site's
+  name, null for a live one — and `outcome`, `loaded`, `failed` or `timed_out`), and `data/get`'s state keeps its
+  latest launch's. A deploy of a computer reads them once it's ready, keeps them in its record and fails, naming
+  each, if one on the env's sites didn't load; `data/reset` and a load that opens the start tabs again fail
+  the same way, while a server's restart only records it.
+
   The browser's data plane is a file tree, every file by its path under the session user's home:
   - `data/get` returns its state as `browser-state.json` (`BrowserState`: `cookies` and `local_storage`
-    as above, `tabs`, `closed_tabs`, `downloads` and `clock`, `real` with its `now`); its profile's files,
+    as above, `tabs`, `closed_tabs`, `downloads`, `clock`, `real` with its `now`, and `start_tabs`); its
+    profile's files,
     each database with its journal or log, copied in one pass with the browser paused once its state is
     read, so the files are of one moment, without caches (`Cache`, `Code Cache`,
     `GPUCache`, the shader and Dawn caches, `CacheStorage`, `ScriptCache`, `Crashpad`) or locks

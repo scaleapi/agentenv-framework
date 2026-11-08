@@ -252,6 +252,37 @@ async def test_an_export_sends_a_linked_files_contents_from_inside_the_home_and_
     assert exported == {"Mail/latest.txt": b"archived"}
 
 
+@linux(paths=MAIL, launch=Launch(command=["mail"]))
+class CheckedMail(ComputerAppEnvironment):
+    """Mail that, once a data call relaunches it, checks it came back, failing while ``broken``."""
+    relaunched: list = []
+    broken = False
+
+    async def _relaunched(self, op: str) -> None:
+        type(self).relaunched.append(op)
+        if type(self).broken:
+            raise RuntimeError("it came back broken")
+
+
+@pytest.mark.asyncio
+async def test_a_call_that_relaunched_the_app_awaits_its_relaunch_check_whose_failure_fails_the_call(home, desktop):
+    mail = CheckedMail()
+    mail._computer_app_data_plane().keep_initial()
+    await mail._computer_app.launch_app()
+
+    async with _http(mail) as http:
+        await _rpc(http, "data/reset", {})
+        await _rpc(http, "data/get", {})
+        CheckedMail.broken = True
+        broken = await http.post(RPC_PATH, json=_call("data/reset", {}))
+    await mail._computer_app.stop_app()
+
+    assert CheckedMail.relaunched == ["reset_data", "reset_data"]
+    assert "it came back broken" in broken.json()["error"]["message"]
+    assert [event for event, _ in desktop] == ["launch", "stop", "launch", "pause", "continue", "stop", "launch",
+                                               "stop"]
+
+
 @pytest.mark.asyncio
 async def test_an_app_that_isnt_running_is_left_stopped(home, desktop):
     mail = PathsMail()

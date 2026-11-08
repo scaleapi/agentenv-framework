@@ -446,7 +446,7 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
         self._computer_app_data = AppDataPlane(
             self._computer_app, {op: getattr(self, name) for op, name in cls._data_hooks.items()}, self.paths,
             cls.data_timeout_s, live=cls.data_live, keeps_paths=cls.data_keeps_paths,
-            resets_failed_add=self._resets_failed_add)
+            resets_failed_add=self._resets_failed_add, relaunched=self._relaunched)
 
     def _launch_for(self, launch: Launch) -> Launch:
         """The launch its server uses, from the one declared for its OS, whose ``ready`` timeout it keeps: as
@@ -472,6 +472,9 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
     def _resets_failed_add(self) -> bool:
         """Whether a load that fails is followed by a reset, so the app isn't left half loaded: always."""
         return True
+
+    async def _relaunched(self, op: str) -> None:
+        """What a data call that stopped the app, ``op``, awaits once it has launched it again: nothing."""
 
     @classmethod
     def settings_on(cls, os_type: Optional[str]) -> type[BaseModel]:
