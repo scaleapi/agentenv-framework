@@ -109,7 +109,6 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
         self.tool_prefix = os.environ.get(TOOL_PREFIX_ENV, "") if tool_prefix is None else tool_prefix
         if problem := tool_prefix_problem(self.tool_prefix):
             raise ValueError(problem)
-        self._computer_served_tool_names: list[str] = []
         self._computer = ComputerRuntime(self)
         #: The routes each app's card opens to agents, by app, read once it answers.
         self._computer_agent_routes: dict[str, list[str]] = {}
@@ -212,9 +211,27 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
         return card.served_tools(self, tools)
 
     def serve_tools_as(self, tools: list[EnvironmentTool]) -> list[EnvironmentTool]:
-        self._computer_served_tool_names = [tool.name for tool in tools]
-        return [tool.model_copy(update={"name": self.served_name(tool.name), "description": self.served_text(tool.description)})
+        """Every tool under the tool prefix; only the SDK's ``computer_*`` tools have their descriptions rewritten, a
+        driver's own and forwarded tools keep theirs as written."""
+        return [tool.model_copy(update={"name": self.served_name(tool.name), **(
+            {"description": self.served_text(tool.description)} if tool.name.startswith("computer_") else {})})
                 for tool in tools]
+
+    def served_instructions(self, text: str) -> str:
+        """The MCP server's instructions as the computer serves them: after the prefix rule, if it has one, with the
+        ``computer_*`` names rewritten."""
+        return "\n\n".join(part for part in (self.prefix_rule(), self.served_text(text)) if part)
+
+    def prefix_rule(self) -> str | None:
+        """The sentence telling an agent how the computer serves the tools its driver names in its own text: with a
+        tool prefix, and tools other than ``computer_*`` to name; None otherwise."""
+        others = [marker.name for _member, marker in _marked_members(self, _TOOL_ATTR)
+                  if not marker.name.startswith("computer_")] + [forwarded.tool.name for forwarded in self.forwarded_tools()]
+        if not self.tool_prefix or not others:
+            return None
+        prefix, example = self.tool_prefix, others[0]
+        return (f"This computer serves its tools under `{prefix}`: a tool this text calls `X` is `{prefix}X`, so "
+                f"`{example}` is `{prefix}{example}`. Names inside a tool's arguments stay as written.")
 
     def served_name(self, name: str) -> str:
         """The name the tool ``name`` is served under: its own, after the tool prefix."""
@@ -225,11 +242,11 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
         return served.removeprefix(self.tool_prefix)
 
     def served_text(self, text: str | None) -> str | None:
-        """``text`` naming the computer's tools as it serves them: each tool's own name, and a ``computer_*`` family of
-        them, as a whole word, after the tool prefix."""
+        """``text`` naming the SDK's ``computer_*`` tools as the computer serves them: each one's own name, and a
+        ``computer_*`` family of them, as a whole word, after the tool prefix. Any other name stays as written."""
         if not self.tool_prefix or not text:
             return text
-        names = {marker.name for _member, marker in _marked_members(self, _TOOL_ATTR)} | set(self._computer_served_tool_names)
+        names = {marker.name for _member, marker in _marked_members(self, _TOOL_ATTR) if marker.name.startswith("computer_")}
         alternatives = [*map(re.escape, sorted(names, key=len, reverse=True)), r"computer_(?:[a-z]+_)*\*"]
         return re.sub(rf"(?<![\w-])(?:{'|'.join(alternatives)})(?![\w-])", lambda m: self.tool_prefix + m.group(0), text)
 

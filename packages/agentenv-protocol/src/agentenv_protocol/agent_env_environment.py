@@ -1108,11 +1108,15 @@ def _with_parts(method: Callable, parts: dict[str, str]) -> Callable:
 
 
 def _instructions(handler: Any) -> str | None:
-    """What the handler's @server_instructions method returns; None without one."""
+    """What the handler's @server_instructions method returns, as its ``served_instructions`` serves it; None without
+    one."""
     marked = [method for method, _marker in _marked_members(handler, _INSTRUCTIONS_ATTR)]
     if len(marked) > 1:
         raise ValueError(f"an environment has one @server_instructions method, not {sorted(m.__name__ for m in marked)}")
-    return marked[0]() if marked else None
+    if not marked:
+        return None
+    hook = getattr(handler, "served_instructions", None)
+    return hook(marked[0]()) if hook is not None else marked[0]()
 
 
 def _discover_methods(handler: Any) -> dict:

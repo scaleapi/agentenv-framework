@@ -10,7 +10,9 @@ pytest.importorskip("mcp.server.fastmcp")
 pytest.importorskip("PIL")
 
 from computer_fake import LINUX, FakeDriver, http_client, mcp_session  # noqa: E402
+from mcp.types import CallToolResult, TextContent  # noqa: E402
 
+from agentenv_protocol import EnvironmentTool, ForwardedTool, server_instructions  # noqa: E402
 from agentenv_protocol.computer import TOOL_PREFIX_ENV  # noqa: E402
 
 PREFIX = "desktop_"
@@ -54,7 +56,7 @@ async def test_its_skill_its_extensions_and_its_notes_name_the_tools_as_it_serve
     text = skill["description"] + skill["skill_md"]
     assert f"`{PREFIX}computer_screenshot`" in text and f"`{PREFIX}computer_*`" in text and f"`{PREFIX}computer_click`" in text
     assert "Take a desktop_computer_screenshot first; desktop_computer_click is already right." in text
-    assert not UNPREFIXED.search(text) and "desktop_desktop_" not in text
+    assert not UNPREFIXED.search(text) and "desktop_desktop_" not in text and "serves its tools under" not in text
     descriptions = " ".join(e["description"] for e in card["capabilities"]["extensions"] if e.get("description"))
     assert f"The seven {PREFIX}computer_* tools" in descriptions and not UNPREFIXED.search(descriptions)
     tools = " ".join(t.get("description") or "" for t in card["capabilities"]["tools"])
@@ -97,3 +99,43 @@ def test_a_prefix_a_tool_name_cant_hold_is_refused(monkeypatch, prefix):
     monkeypatch.setenv(TOOL_PREFIX_ENV, prefix)
     with pytest.raises(ValueError, match="holds characters a tool's name can't"):
         FakeDriver()
+
+
+class Forwarding(FakeDriver):
+    """A driver forwarding another program's batch tool, whose steps name that program's own actions."""
+
+    def forwarded_tools(self):
+        schema = {"type": "object", "properties": {"tool": {"type": "string", "enum": ["click", "double_click"]}}}
+        return [ForwardedTool(EnvironmentTool(name="run_steps", description="Run click or double_click in one call.",
+                                              inputSchema=schema), self.steps)]
+
+    async def steps(self, tool):
+        return CallToolResult(content=[TextContent(type="text", text=f"ran {tool}")])
+
+    @server_instructions
+    def instructions(self):
+        return "Act through run_steps, and take a computer_screenshot first."
+
+
+@pytest.mark.asyncio
+async def test_a_forwarded_tool_keeps_its_own_text_and_the_skill_and_instructions_lead_with_the_prefix_rule(monkeypatch):
+    monkeypatch.setenv(TOOL_PREFIX_ENV, PREFIX)
+    driver = Forwarding()
+    instructions = driver.create_app().instructions
+    async with http_client(driver) as http, mcp_session(driver) as session:
+        tools = {tool.name: tool for tool in (await session.list_tools()).tools}
+        ran = await session.call_tool(f"{PREFIX}run_steps", {"tool": "click"})
+        skill = (await http.get("/agentenv/ext/skill/get", params={"name": "desktop"})).json()
+    forwarded = tools[f"{PREFIX}run_steps"]
+    assert forwarded.description == "Run click or double_click in one call."
+    assert forwarded.inputSchema["properties"]["tool"]["enum"] == ["click", "double_click"]
+    assert not ran.isError and ran.content[0].text == "ran click"
+    rule = (f"This computer serves its tools under `{PREFIX}`: a tool this text calls `X` is `{PREFIX}X`, so `run_steps` is "
+            f"`{PREFIX}run_steps`. Names inside a tool's arguments stay as written.")
+    assert skill["skill_md"].partition("---\n\n")[2].startswith(rule)
+    assert instructions == f"{rule}\n\nAct through run_steps, and take a {PREFIX}computer_screenshot first."
+
+
+def test_without_a_prefix_a_forwarding_drivers_instructions_are_its_own(monkeypatch):
+    monkeypatch.delenv(TOOL_PREFIX_ENV, raising=False)
+    assert Forwarding().create_app().instructions == "Act through run_steps, and take a computer_screenshot first."

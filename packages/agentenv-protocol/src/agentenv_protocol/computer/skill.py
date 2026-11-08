@@ -61,12 +61,13 @@ async def skill(driver: ComputerDriverEnvironment) -> tuple[str, str, dict[str, 
     if notes := driver.notes.strip():
         sections += ["## Notes", notes]
     body = "\n\n".join(sections) + "\n"
+    lead = f"{rule}\n\n" if (rule := driver.prefix_rule()) else ""
     if bundled is None:
-        return driver.served_text(description), driver.served_text(body), {}
+        return driver.served_text(description), driver.served_text(lead + body), {}
     own_description, own_body, files = bundled
     return (driver.served_text(f"{own_description} This computer: {system}, {display.width}x{display.height}, and its "
                                "computer_* tools."),
-            driver.served_text(own_body.rstrip() + "\n\n" + body), files)
+            driver.served_text(lead + own_body.rstrip() + "\n\n" + body), files)
 
 
 def _input(driver: ComputerDriverEnvironment) -> str:
