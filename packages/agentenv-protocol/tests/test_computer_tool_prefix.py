@@ -94,11 +94,21 @@ async def test_setting_the_default_space_rewrites_the_prefixed_point_tools(monke
     assert "norm space by default: 0 to 1000" in after[f"{PREFIX}computer_click"]
 
 
-@pytest.mark.parametrize("prefix", ["desk top_", "desktop/", "décor_"])
-def test_a_prefix_a_tool_name_cant_hold_is_refused(monkeypatch, prefix):
+@pytest.mark.parametrize("prefix, problem", [
+    ("desk top_", "holds characters a tool's name can't"),
+    ("desktop/", "holds characters a tool's name can't"),
+    ("décor_", "holds characters a tool's name can't"),
+    ("accounting-desk1_", "is 17 characters, and a tool prefix is at most 16"),
+])
+def test_a_prefix_a_tool_name_cant_hold_or_that_is_too_long_is_refused(monkeypatch, prefix, problem):
     monkeypatch.setenv(TOOL_PREFIX_ENV, prefix)
-    with pytest.raises(ValueError, match="holds characters a tool's name can't"):
+    with pytest.raises(ValueError, match=problem):
         FakeDriver()
+
+
+def test_a_prefix_of_sixteen_characters_is_taken(monkeypatch):
+    monkeypatch.setenv(TOOL_PREFIX_ENV, "accounting-desk_")
+    assert FakeDriver().served_name("computer_pointer_position") == "accounting-desk_computer_pointer_position"
 
 
 class Forwarding(FakeDriver):
