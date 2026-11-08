@@ -1,10 +1,10 @@
 """The Windows session's own logic, its Win32 calls faked and its job helper stood in for: a launch goes through the
 helper and returns its pid once the app has started, or fails saying why it couldn't, and hands no fds; stopping asks
-the app's windows to close, then ends the job after the timeout, or at once with no window to ask, and waits until it
-holds no process; pausing suspends each of the app's processes but the helper's, and any one starts as they're
-suspended, and resumes them, even when the block raises; a job that's gone is neither alive, stopped nor paused; the
-windows listed are those shown, by program, class and title; and the menu launcher is a Start Menu shortcut PowerShell
-writes, named for the app."""
+the app's windows to close, then ends the job after the timeout, or at once with no window to ask, and waits until
+each process it held has exited and it holds none; pausing suspends each of the app's processes but the helper's, and
+any one starts as they're suspended, and resumes them, even when the block raises; a job that's gone is neither alive,
+stopped nor paused; the windows listed are those shown, by program, class and title; and the menu launcher is a Start
+Menu shortcut PowerShell writes, named for the app."""
 from __future__ import annotations
 
 import subprocess
@@ -39,7 +39,7 @@ class FakeWin32:
                  spawns: dict[int, int] | None = None, lingers: int = 0) -> None:
         self.jobs, self._windows, self.closes, self.spawns, self.lingers = jobs, windows, closes, spawns or {}, lingers
         self.ending: dict[int, int] = {}
-        self.posted, self.terminated, self.suspended, self.resumed, self.open = [], [], [], [], 0
+        self.posted, self.terminated, self.suspended, self.resumed, self.waited, self.open = [], [], [], [], [], 0
 
     def open_job(self, helper):
         if helper not in self.jobs:
@@ -53,6 +53,13 @@ class FakeWin32:
             if self.ending[job] < 0:
                 self.jobs[job] = []
         return list(self.jobs[job])
+
+    def open_processes(self, pids):
+        self.open += len(pids)
+        return list(pids)
+
+    def wait_exited(self, processes, timeout_s):
+        self.waited.append(list(processes))
 
     def terminate_job(self, job):
         self.terminated.append(job)
@@ -104,8 +111,9 @@ async def test_stopping_asks_the_apps_windows_to_close_and_ends_the_job_only_if_
     started = time.monotonic()
     await _session_windows.stop(HELPER, timeout_s=0.2)
 
-    assert obliging.posted == [1, 3] and obliging.terminated == [] and obliging.open == 0
+    assert obliging.posted == [1, 3] and obliging.terminated == obliging.waited == [] and obliging.open == 0
     assert stubborn.posted == [1] and stubborn.terminated == [HELPER] and time.monotonic() - started >= 0.2
+    assert stubborn.waited == [[HELPER, 901]] and stubborn.open == 0
     assert stubborn.jobs[HELPER] == [] and not _session_windows.alive(HELPER)
 
 
@@ -117,7 +125,8 @@ async def test_an_app_with_no_window_to_ask_is_ended_at_once_and_a_gone_job_is_l
     gone = win32({}, [])
     await _session_windows.stop(HELPER, timeout_s=10)
 
-    assert windowless.terminated == [HELPER] and time.monotonic() - started < 1
+    assert windowless.terminated == [HELPER] and windowless.waited == [[HELPER, 901]] and windowless.open == 0
+    assert time.monotonic() - started < 1
     assert gone.terminated == [] and gone.open == 0 and not _session_windows.alive(HELPER)
 
 
