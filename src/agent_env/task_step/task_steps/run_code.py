@@ -36,7 +36,8 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, ClassVar, Optional, Protocol
 
-from agentenv_protocol.computer import COMPUTER_EXEC
+from agentenv_protocol import client as protocol_v1
+from agentenv_protocol.computer import COMPUTER, COMPUTER_EXEC
 
 from agent_env.artifact import Artifact, FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
@@ -57,6 +58,13 @@ _COMPUTER_RUN_DIR = ".agentenv/run_code"
 _RUNNER_SLACK_S = 10
 # What a POSIX extended regular expression, as `pkill -f` reads one, gives a meaning to outside brackets.
 _ERE_SPECIAL = re.compile(r"[.\[\\()*+?{|^$]")
+# Inside a Windows computer, which has no POSIX tools: what ends the processes whose command line holds a path (the
+# PowerShell running it aside), removes a folder, and sizes a file, as pkill -f, rm -rf and wc -c do elsewhere.
+_WIN_END = ("Get-CimInstance Win32_Process | Where-Object {{ $_.ProcessId -ne $PID -and $_.CommandLine -and "
+            "$_.CommandLine.Contains('{}') }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force "
+            "-ErrorAction SilentlyContinue; Wait-Process -Id $_.ProcessId -Timeout 10 -ErrorAction SilentlyContinue }}")
+_WIN_REMOVE = ("python3", "-c", "import os,shutil,sys;os.path.isdir(sys.argv[1]) and shutil.rmtree(sys.argv[1])")
+_WIN_SIZE = ("python3", "-c", "import os,sys;print(os.path.getsize(sys.argv[1]))")
 
 # The bootstrap we run in the sandbox: `python3 runner.py <run_dir> <entrypoint> <script_file> <timeout_seconds>`.
 _RUNNER_SOURCE = (Path(__file__).parent / "run_code_runner.py").read_text(encoding="utf-8")
@@ -373,10 +381,11 @@ class RunCodeTaskStep(TaskStep):
         # rejected here rather than slurped into the worker — and we never decode a
         # truncated file (which would crash strict UTF-8 decode mid-codepoint).
         path = f"{run_dir}/output.json"
-        exit_code, size_out, stderr = await target.run("wc", "-c", path)
-        if exit_code != 0:
-            raise self._exec_error(f"wrote no result file: {self._stderr_tail(stderr)}")
-        if int(size_out.split()[0]) > self.MAX_OUTPUT_BYTES:
+        try:
+            size = await target.size(path)
+        except OSError as exc:
+            raise self._exec_error(f"wrote no result file: {self._stderr_tail(str(exc))}") from exc
+        if size > self.MAX_OUTPUT_BYTES:
             raise self._validation_error(
                 f"result exceeds {self.MAX_OUTPUT_BYTES}-byte cap"
             )
@@ -443,7 +452,9 @@ class RunCodeTaskStep(TaskStep):
                                          f"{limit - _RUNNER_SLACK_S} s a script in env '{self.env_id}' may run: it "
                                          f"runs a command for at most {limit} s, and the runner keeps "
                                          f"{_RUNNER_SLACK_S} s of that to stop the script")
-        return _DriverTarget(deployed, self.timeout_seconds + _RUNNER_SLACK_S)
+        windows = (protocol_v1.extension_params(deployed.environment_card or {}, COMPUTER).get("platform")
+                   or {}).get("os") == "windows"
+        return _DriverTarget(deployed, self.timeout_seconds + _RUNNER_SLACK_S, windows=windows)
 
     async def _sandbox_target(self, context: TaskStepContext) -> _ExecTarget:
         from agent_env.providers.sandbox_providers.sandbox import VmSandbox
@@ -554,12 +565,20 @@ async def _cat(target: _ExecTarget, path: str) -> str:
     return stdout
 
 
+async def _size(target: _ExecTarget, *command: str) -> int:
+    exit_code, stdout, stderr = await target.run(*command)
+    if exit_code != 0:
+        raise OSError(stderr)
+    return int(stdout.split()[0])
+
+
 class _ExecTarget(Protocol):
     def run_dir(self, step_id: str) -> str: ...
     def endpoints(self, deployed: DeployedSandboxEnv) -> dict: ...
     async def reset_dir(self, path: str) -> None: ...
     async def write_file(self, path: str, content: str) -> None: ...
     async def read_file(self, path: str) -> str: ...
+    async def size(self, path: str) -> int: ...
     async def run(self, *command: str) -> tuple[int, str, str]: ...
 
 
@@ -586,6 +605,9 @@ class _HostTarget:
 
     async def read_file(self, path: str) -> str:
         return await _cat(self, path)
+
+    async def size(self, path: str) -> int:
+        return await _size(self, "wc", "-c", path)
 
     async def run(self, *command: str) -> tuple[int, str, str]:
         # Files are written as root, so run as root too.
@@ -618,6 +640,9 @@ class _AgentTarget:
     async def read_file(self, path: str) -> str:
         return await _cat(self, path)
 
+    async def size(self, path: str) -> int:
+        return await _size(self, "wc", "-c", path)
+
     async def run(self, *command: str) -> tuple[int, str, str]:
         return await self.sandbox.exec_with_output(*self.prefix, *command)
 
@@ -626,11 +651,13 @@ class _AgentTarget:
 class _DriverTarget:
     """Runs the script inside a computer, as its session user, through its driver: files written with ``data/add`` and
     read with ``data/get``, commands run with computer-exec/v1 ``run`` for at most ``timeout_s``, with ``env`` added
-    to the driver's environment. Paths are relative to the home, where commands run."""
+    to the driver's environment, and on ``windows`` its own tools in place of POSIX ones. Paths are relative to the
+    home, where commands run."""
 
     deployed: DeployedSandboxEnv
     timeout_s: float
     env: dict[str, str] = field(default_factory=dict)
+    windows: bool = False
 
     def run_dir(self, step_id: str) -> str:
         return f"{_COMPUTER_RUN_DIR}/{step_id}"
@@ -640,13 +667,21 @@ class _DriverTarget:
 
     async def reset_dir(self, path: str) -> None:
         """End whatever still runs from the folder, as a run whose driver died leaves going, then remove it."""
-        await self.run("pkill", "-f", _ERE_SPECIAL.sub(r"\\\g<0>", f"{path}/runner.py"))
+        runner = f"{path}/runner.py"
+        if self.windows:
+            await self.run("powershell", "-NoProfile", "-NonInteractive", "-Command",
+                           _WIN_END.format(runner.replace("'", "''")))
+        else:
+            await self.run("pkill", "-f", _ERE_SPECIAL.sub(r"\\\g<0>", runner))
         await self.remove_dir(path)
 
     async def remove_dir(self, path: str) -> None:
-        exit_code, _, stderr = await self.run("rm", "-rf", path)
+        exit_code, _, stderr = await self.run(*(_WIN_REMOVE if self.windows else ("rm", "-rf")), path)
         if exit_code != 0:
             raise OSError(stderr)
+
+    async def size(self, path: str) -> int:
+        return await _size(self, *(_WIN_SIZE if self.windows else ("wc", "-c")), path)
 
     async def write_file(self, path: str, content: str) -> None:
         await inside.add_files(self.deployed, {path: content.encode("utf-8")})

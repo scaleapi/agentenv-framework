@@ -14,10 +14,12 @@ import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from agentenv_protocol.computer import COMPUTER
 
 from agent_env.artifact import FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
@@ -838,6 +840,16 @@ def test_runner_parses_as_python_3_9():
     ast.parse(_RUNNER.read_text(), feature_version=(3, 9))
 
 
+def test_on_windows_the_runner_ends_the_scripts_process_tree_as_it_has_no_process_groups():
+    ran = []
+    runner = {"os": SimpleNamespace(name="nt"), "subprocess": SimpleNamespace(run=lambda argv, **_: ran.append(argv))}
+    exec(_RUNNER.read_text().partition("\nif len(sys.argv) == 5:")[0], runner)
+
+    runner["_signal_group"](4242, signal.SIGTERM)
+
+    assert ran == [["taskkill", "/T", "/F", "/PID", "4242"]]
+
+
 def _runner_args(run_dir, body, timeout):
     """Stage the runner, script and input as run_code does, the runner inside the run dir."""
     (run_dir / "runner.py").write_text(_RUNNER.read_text())
@@ -1370,6 +1382,26 @@ async def test_a_run_whose_call_drops_fails_naming_why_and_the_next_one_runs_afr
     assert not re.search(staged[0][2], "python3 /home/u/.agentenv/run_code/read-v1/runner.py")
     scripts = [params["request_id"] for params in runs if params["argv"][0] == "python3"]
     assert len(scripts) == 1 and scripts[0] != dropped[0]
+
+
+@pytest.mark.asyncio
+async def test_a_script_for_a_windows_computer_is_staged_ended_sized_and_removed_with_windows_own_tools(computer):
+    card = {**CARD, "capabilities": {**CARD["capabilities"], "extensions": [
+        *CARD["capabilities"]["extensions"], {"uri": COMPUTER, "params": {"platform": {"os": "windows"}}}]}}
+
+    ctx = await _run_in(computer, b"def run(inp):\n    return {'ok': True}\n", deployed=computer.deployed(card=card),
+                        id="arm")
+
+    assert ctx.metadata["script_results"]["run-code-1"] == {"ok": True}
+    run_dir = ".agentenv/run_code/arm"
+    argvs = [params["argv"] for kind, params, *_ in computer.calls if kind == "run"]
+    assert [argv[0] for argv in argvs] == ["powershell", "python3", "python3", "python3", "python3"]
+    assert argvs[0][:4] == ["powershell", "-NoProfile", "-NonInteractive", "-Command"]
+    assert f"$_.CommandLine.Contains('{run_dir}/runner.py')" in argvs[0][4] and "$_.ProcessId -ne $PID" in argvs[0][4]
+    assert argvs[1] == argvs[4] and argvs[1][-1] == run_dir and "shutil.rmtree" in argvs[1][2]
+    assert argvs[2][1:] == [f"{run_dir}/runner.py", run_dir, "run", "script.py", "600"]
+    assert argvs[3][-1] == f"{run_dir}/output.json" and "getsize" in argvs[3][2]
+    assert not (computer.home / run_dir).exists()
 
 
 @pytest.mark.asyncio

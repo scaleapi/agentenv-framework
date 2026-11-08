@@ -1,7 +1,8 @@
 """A computer at its driver's boundary, for steps that reach inside one: its home a folder on this machine, ``data/add``
 writing there, ``data/get`` reading there, and computer-exec/v1 ``run`` running commands there; each call recorded,
 with the headers it sent, and the address each ``data/add`` is sent to.
-``pkill`` matches nothing, so one test never ends another's processes on this machine."""
+``pkill``, and the PowerShell a Windows computer ends processes with, match nothing, so one test never ends another's
+processes on this machine."""
 
 from __future__ import annotations
 
@@ -74,7 +75,7 @@ class Computer:
         return await asyncio.to_thread(self._run, params)
 
     def _run(self, params: dict) -> dict:
-        if params["argv"][0] == "pkill":
+        if params["argv"][0] in ("pkill", "powershell"):
             return {"exit_code": 1, "stdout": "", "stderr": "", "truncated": False, "timed_out": False}
         try:
             done = subprocess.run(params["argv"], cwd=self.home, env={**os.environ, **(params.get("env") or {})},
