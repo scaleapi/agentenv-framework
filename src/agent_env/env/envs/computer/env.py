@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self
 
 from agentenv_protocol import METHOD_ADD, RPC_PATH
 from agentenv_protocol import client as protocol_v1
-from agentenv_protocol.computer.tools import Tools
+from agentenv_protocol.computer.tools import COMPUTER_TOOLS
 from agentenv_protocol.tool_access import (DISABLE, DISABLE_TOOL_EXTENSION_URI, ENABLE, ENABLE_TOOL_EXTENSION_URI,
                                            WILDCARD)
 from agentenv_protocol.tool_context import DEFAULT_ROLE
@@ -61,7 +61,6 @@ APP_TYPE = "computer_app"
 #: so may a VM bundle, which a Mac probes.
 _DEPLOYABLE = {"container": ("ready",), "disk": ("ready", "unverified"), "vm_bundle": ("ready", "unverified")}
 #: Every ``computer_*`` tool a driver can serve.
-COMPUTER_TOOLS = tuple(sorted(name for name in vars(Tools) if name.startswith("computer_")))
 #: What a computer env's ``tools`` gives its agents, as the tool-access changes a deploy makes for them: ``standard``,
 #: AgentEnv's ``computer_*`` tools alone; ``driver``, the driver's own alone; ``both``, every tool it serves.
 TOOLS = {"standard": ((DISABLE, [WILDCARD]), (ENABLE, list(COMPUTER_TOOLS))), "driver": ((DISABLE, list(COMPUTER_TOOLS)),),
@@ -278,12 +277,13 @@ class ComputerEnv(Env):
                      gateway_mode: GatewayMode = GatewayMode.PERFORMANCE, cpu: float | None = None,
                      memory_mb: int | None = None, sandbox_type: str | None = None, env_state_type: str | None = None,
                      env_state_instance_id: str | None = None, *, attribution: Optional[Attribution] = None,
-                     env_params: Optional[dict] = None) -> DeployedEnv:
+                     env_params: Optional[dict] = None, tool_prefix: str = "") -> DeployedEnv:
+        """With ``tool_prefix``, its driver serves its tools under it, as a multi env's computers serve theirs."""
         return await deploy_through_provider(
             self, environment_name=self.environment_name, ttl_seconds=ttl_seconds, sandbox_type=sandbox_type,
             then=self._give_tools, disk_size_gb=disk_size_gb, gateway_mode=gateway_mode, cpu=cpu, memory_mb=memory_mb,
             env_state_type=env_state_type, env_state_instance_id=env_state_instance_id, attribution=attribution,
-            env_params=env_params)
+            env_params=env_params, tool_prefix=tool_prefix)
 
     async def run_env_params(self, env_params: Optional[dict], deployed_envs: list[DeployedEnv]) -> Optional[dict]:
         """With ``site_routing`` and no ``sites``, ``env_params`` naming as its sites the websites the run deployed
@@ -394,9 +394,12 @@ class ComputerEnv(Env):
         await self._give_tools(deployed)
 
     async def _give_tools(self, deployed: DeployedEnv) -> None:
-        """Make the tool-access changes ``tools`` makes for the agents' role, which a task's own then follow."""
+        """Make the tool-access changes ``tools`` makes for the agents' role, which a task's own then follow, naming
+        each tool as the deploy's tool prefix has the driver serve it."""
+        prefix = (deployed.metadata or {}).get("computer", {}).get("tool_prefix", "")
         for action, tools in TOOLS[self.tools or "both"]:
-            await deployed.invoke(_TOOL_ACCESS_URIS[action], action, {"role": DEFAULT_ROLE, "tools": tools})
+            served = [tool if tool == WILDCARD else f"{prefix}{tool}" for tool in tools]
+            await deployed.invoke(_TOOL_ACCESS_URIS[action], action, {"role": DEFAULT_ROLE, "tools": served})
 
     async def close(self) -> None:
         """End the computer's recordings, so what they recorded reaches the store, then tear it down."""

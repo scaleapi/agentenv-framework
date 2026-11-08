@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from agentenv_protocol import CONTROL_TOKEN_ENV
-from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_READY, COMPUTER_RECORDING
+from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_READY, COMPUTER_RECORDING, TOOL_PREFIX_ENV
 from agentenv_protocol.computer.app import COMPUTER_APP
 from agentenv_protocol.computer.app_runtime import HOLD_BOOT_LAUNCH_ENV
 from agentenv_protocol.computer.conformance import CheckResult, ProbeReport
@@ -879,6 +879,44 @@ async def test_a_computer_envs_tools_are_given_its_agents_at_deploy_and_again_af
 
     assert Env.get(env.id).tools == tools and given == changes
     assert [call for call in boots.calls if call[0] in (DISABLE_TOOL_EXTENSION_URI, ENABLE_TOOL_EXTENSION_URI)] == changes
+
+
+@pytest.mark.asyncio
+async def test_a_deploy_with_a_tool_prefix_has_its_driver_serve_its_tools_under_it_and_gives_them_by_those_names(
+        base, driver, docker, boots, monkeypatch):
+    env = _put(base, driver, display={"width": 1600, "height": 900}, tools="standard")
+    deployed = await Env.get(env.id).deploy(tool_prefix="desktop_")
+    (booted,), (sandbox,) = boots.boots, boots.sandboxes
+    given = [call for call in boots.calls if call[0] in (DISABLE_TOOL_EXTENSION_URI, ENABLE_TOOL_EXTENSION_URI)]
+    reset = AsyncMock()
+    monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "get_sandbox", AsyncMock(return_value=sandbox))
+    monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "reset_container", reset)
+    monkeypatch.setattr(env_computer_provider, "ready", AsyncMock(return_value=DRIVER_CARD))
+    boots.calls.clear()
+
+    await ResetEnvTaskStep(id="reset", version=None, env_id=env.id, fail_task_on_error=True).execute(
+        TaskStepContext(deployed_envs=[deployed]))
+
+    changes = [(DISABLE_TOOL_EXTENSION_URI, "disable", {"role": "default", "tools": ["*"]}),
+               (ENABLE_TOOL_EXTENSION_URI, "enable", {"role": "default",
+                                                      "tools": [f"desktop_{tool}" for tool in COMPUTER_TOOLS]})]
+    assert booted["environment"][TOOL_PREFIX_ENV] == "desktop_" == deployed.metadata["computer"]["tool_prefix"]
+    assert reset.call_args.kwargs["env"][TOOL_PREFIX_ENV] == "desktop_"
+    assert given == changes
+    assert [call for call in boots.calls if call[0] in (DISABLE_TOOL_EXTENSION_URI, ENABLE_TOOL_EXTENSION_URI)] == changes
+
+
+@pytest.mark.asyncio
+async def test_a_deploy_without_a_tool_prefix_gives_its_driver_none(base, driver, docker, boots):
+    deployed = await Env.get(_put(base, driver, display={"width": 1600, "height": 900}).id).deploy()
+    assert TOOL_PREFIX_ENV not in boots.boots[0]["environment"] and "tool_prefix" not in deployed.metadata["computer"]
+
+
+@pytest.mark.asyncio
+async def test_a_tool_prefix_a_tool_name_cant_hold_is_refused_before_anything_boots(base, driver, docker, boots):
+    with pytest.raises(Exception, match="tool prefix 'desk top_' holds characters a tool's name can't"):
+        await Env.get(_put(base, driver, display={"width": 1600, "height": 900}).id).deploy(tool_prefix="desk top_")
+    assert boots.boots == []
 
 
 @pytest.mark.asyncio
