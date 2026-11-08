@@ -1,9 +1,10 @@
 """Booting a computer's disk form on this machine's Docker: the QEMU launcher (the published image for the sources
-installed, else built here from its folder) with the disk copied in, as an image this machine keeps for the next boot,
-run with /dev/kvm; and a disk exported from the image store by this machine's Docker, for a provider elsewhere to
-carry."""
+installed, else built here from its folder) run with /dev/kvm, the disk image's files mounted into it where this
+machine's Docker mounts images, else copied into an image of it this machine keeps for the next boot; and a disk
+exported from the image store by this machine's Docker, for a provider elsewhere to carry."""
 
 import asyncio
+import functools
 import hashlib
 import os
 import shutil
@@ -24,6 +25,8 @@ from agent_env.store.local_state import holding_locks
 from agent_env.utils.docker.build import build_image
 
 KVM = "/dev/kvm"
+#: How long asking this machine's Docker whether it mounts images may take, before a boot copies the disk instead.
+_DOCKER_INFO_SECONDS = 30
 #: What ``docker cp`` says of a path its container lacks: Docker 23 and later, then earlier.
 _NO_SUCH_PATH = ("Could not find the file", "No such container:path")
 
@@ -35,6 +38,49 @@ def kvm_platforms() -> frozenset[str]:
         return frozenset()
     here = host_platform()
     return frozenset({here, "windows/amd64"} if here == "linux/amd64" else {here})
+
+
+@dataclass(frozen=True)
+class Machine:
+    """How the launcher boots a disk on this machine: ``image`` run with ``args``. Where Docker mounts images (28 and
+    later, on the containerd image store), the launcher itself with the disk image's folder of files mounted read-only
+    where the launcher finds them, so no copy of a disk, nor of its base, is made for each launcher; else a machine
+    image of the launcher with the disk copied in."""
+
+    image: str
+    args: tuple[str, ...] = ()
+
+
+async def machine_for(disk: str) -> Machine:
+    if await asyncio.to_thread(mounts_images):
+        folder = PurePosixPath(DISK_FILE).parent
+        return Machine(await asyncio.to_thread(launcher),
+                       ("--mount", f"type=image,source={disk},target=/{folder},image-subpath={folder}"))
+    return Machine(await machine_image(disk))
+
+
+def mounts_images() -> bool:
+    """Whether this machine's Docker mounts an image's files into a container (``--mount type=image``, with its
+    ``image-subpath``): its client, which parses the option, and its server both 28 or later, on the containerd image
+    store. A Docker that fails to say, or doesn't within ``_DOCKER_INFO_SECONDS``, gets the copy this time and is asked
+    again next time; an answer is kept for the process."""
+    try:
+        return _docker_mounts_images()
+    except (DockerFailed, subprocess.TimeoutExpired):
+        return False
+
+
+@functools.cache
+def _docker_mounts_images() -> bool:
+    client, server, status = docker("info", "--format",
+                                    "{{.ClientInfo.Version}} {{.ServerVersion}} {{json .DriverStatus}}",
+                                    timeout=_DOCKER_INFO_SECONDS).split(" ", 2)
+    return _major(client) >= 28 and _major(server) >= 28 and "io.containerd.snapshotter.v1" in status
+
+
+def _major(version: str) -> int:
+    head = version.split(".", 1)[0]
+    return int(head) if head.isdigit() else 0
 
 
 async def machine_image(disk: str) -> str:

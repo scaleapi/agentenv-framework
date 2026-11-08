@@ -34,16 +34,18 @@ partition kept, so nothing is emulated or privileged. A disk boots where `/dev/k
 KVM probes it. A deploy boots it with `env_params = { form = "disk" }`. The launcher serves each of the computer's ports
 through socat, whose listen backlog takes a burst of connections, in front of QEMU's own forward, whose backlog is 1, and
 a reset boots the disk afresh on a new overlay in the same launcher, at the same URLs; a container an agent-env from
-before reset in place started is refused a reset, to be redeployed. It boots on local Docker where
-Docker can pass it `/dev/kvm`, and on `modal_vm`, amd64 only, whose sandbox runs the launcher as its image under nested
-virtualization: the provider exports the disk from the image store with this machine's Docker, compressed, once for each
-composed disk, into the per-user cache, and mounts it on the sandbox at create, which Modal uploads once for each
-content and the launcher expands onto the sandbox's disk; a thin disk, a Windows one, carries its base too, exported
-once for each base and expanded beside it there, so another computer on that base adds its layer alone. Such a sandbox
-is ended once it has been idle, with no connection open, for the provider's `idle_timeout`, 30 minutes unless its config
-sets another, as a running QEMU isn't activity. A gate 3 probe that ends with the connection to the driver dropped,
-refused or timed out runs again on a fresh boot, up to three in all, and the record keeps each attempt; one with a
-failed check is recorded as it is.
+before reset in place started is refused a reset, to be redeployed. It boots on local Docker where Docker can pass it
+`/dev/kvm`, the disk image's files mounted read-only into the launcher where Docker mounts images (28 and later, on the
+containerd image store), so no copy of a disk, nor of a Windows disk's base, is made for each launcher, else copied into
+an image of the launcher it keeps for the next boot; and on `modal_vm`, amd64 only, whose sandbox runs the launcher as
+its image under nested virtualization: the provider exports the disk from the image store with this machine's Docker,
+compressed, once for each composed disk, into the per-user cache, and mounts it on the sandbox at create, which Modal
+uploads once for each content and the launcher expands onto the sandbox's disk; a thin disk, a Windows one, carries its
+base too, exported once for each base and expanded beside it there, so another computer on that base adds its layer
+alone. Such a sandbox is ended once it has been idle, with no connection open, for the provider's `idle_timeout`, 30
+minutes unless its config sets another, as a running QEMU isn't activity. A gate 3 probe that ends with the connection
+to the driver dropped, refused or timed out runs again on a fresh boot, up to three in all, and the record keeps each
+attempt; one with a failed check is recorded as it is.
 
 A put, `env build` and the release compose every form; a run composes only the forms its sandbox's deploys boot: on each
 link of a chain, the first form it boots natively, as a deploy picks, so local Docker composes containers, and a sandbox
