@@ -441,7 +441,7 @@ def launched(monkeypatch):
     ran = []
     monkeypatch.setattr(local_sandbox, "kvm_platforms", lambda: frozenset({"linux/arm64"}))
     monkeypatch.setattr(local_sandbox, "host_platform", lambda: "linux/arm64")
-    monkeypatch.setattr(local_sandbox, "machine_image", AsyncMock(return_value="agentenv-vm:0123"))
+    monkeypatch.setattr(local_sandbox, "machine_for", AsyncMock(return_value=local_disk.Machine("agentenv-vm:0123")))
     monkeypatch.setattr(local_sandbox, "_free_host_port", lambda: 20001)
     monkeypatch.setattr(local_sandbox, "_host_ips", lambda: ("127.0.0.1",))
     monkeypatch.setattr(local_sandbox, "docker", lambda *args, input=None, timeout=None: ran.append(
@@ -524,6 +524,48 @@ async def test_a_disk_isnt_booted_where_docker_cant_pass_kvm(launched, monkeypat
         await LocalSandboxProvider().create_vm(image="disk", exposed_ports=[18765], env={})
 
     assert launched == [] and LocalSandboxProvider.disk_image_platforms() == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_a_disk_boots_with_its_image_mounted_into_the_launcher_where_docker_mounts_images(launched, monkeypatch):
+    mounted = local_disk.Machine("launcher:1", ("--mount", "type=image,source=disk:1,target=/disk,image-subpath=disk"))
+    monkeypatch.setattr(local_sandbox, "machine_for", AsyncMock(return_value=mounted))
+
+    await LocalSandboxProvider().create_vm(image="disk:1", exposed_ports=[18765], env={}, cpu=2, memory=4096)
+
+    (run,) = launched
+    assert run[-1] == "launcher:1" and run[run.index("--mount"):run.index("--mount") + 2] == mounted.args
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mounts", [True, False], ids=["mounted", "copied"])
+async def test_a_disk_is_mounted_into_the_launcher_where_docker_mounts_images_else_copied_into_a_machine_image(
+        monkeypatch, mounts):
+    """No copy of a disk, nor of a Windows disk's base, is made for each launcher where Docker can mount it."""
+    monkeypatch.setattr(local_disk, "mounts_images", lambda: mounts)
+    monkeypatch.setattr(local_disk, "launcher", lambda: "launcher:1")
+    monkeypatch.setattr(local_disk, "machine_image", AsyncMock(return_value="agentenv-vm:1"))
+
+    machine = await local_disk.machine_for("disk:1")
+
+    assert machine == (local_disk.Machine("launcher:1", (
+        "--mount", "type=image,source=disk:1,target=/disk,image-subpath=disk")) if mounts else local_disk.Machine(
+        "agentenv-vm:1"))
+    assert local_disk.machine_image.await_count == (0 if mounts else 1)
+
+
+@pytest.mark.parametrize("info, mounts", [
+    ('29.9.3 [["driver-type","io.containerd.snapshotter.v1"]]', True),
+    ('28.0.0 [["driver-type","io.containerd.snapshotter.v1"]]', True),
+    ('27.5.1 [["driver-type","io.containerd.snapshotter.v1"]]', False),
+    ('29.9.3 [["Backing Filesystem","extfs"],["Supports d_type","true"]]', False),
+    ("4.9.3 null", False)], ids=["29-containerd", "28-containerd", "27", "29-overlay2", "podman"])
+def test_docker_mounts_images_from_28_on_the_containerd_image_store(monkeypatch, info, mounts):
+    local_disk.mounts_images.cache_clear()
+    monkeypatch.setattr(local_disk, "docker", lambda *args: info)
+
+    assert local_disk.mounts_images() is mounts
+    local_disk.mounts_images.cache_clear()
 
 
 @pytest.mark.asyncio

@@ -1,9 +1,10 @@
 """Booting a computer's disk form on this machine's Docker: the QEMU launcher (the published image for the sources
-installed, else built here from its folder) with the disk copied in, as an image this machine keeps for the next boot,
-run with /dev/kvm; and a disk exported from the image store by this machine's Docker, for a provider elsewhere to
-carry."""
+installed, else built here from its folder) run with /dev/kvm, the disk image's files mounted into it where this
+machine's Docker mounts images, else copied into an image of it this machine keeps for the next boot; and a disk
+exported from the image store by this machine's Docker, for a provider elsewhere to carry."""
 
 import asyncio
+import functools
 import hashlib
 import os
 import shutil
@@ -35,6 +36,34 @@ def kvm_platforms() -> frozenset[str]:
         return frozenset()
     here = host_platform()
     return frozenset({here, "windows/amd64"} if here == "linux/amd64" else {here})
+
+
+@dataclass(frozen=True)
+class Machine:
+    """How the launcher boots a disk on this machine: ``image`` run with ``args``. Where Docker mounts images (28 and
+    later, on the containerd image store), the launcher itself with the disk image's folder of files mounted read-only
+    where the launcher finds them, so no copy of a disk, nor of its base, is made for each launcher; else a machine
+    image of the launcher with the disk copied in."""
+
+    image: str
+    args: tuple[str, ...] = ()
+
+
+async def machine_for(disk: str) -> Machine:
+    if await asyncio.to_thread(mounts_images):
+        folder = PurePosixPath(DISK_FILE).parent
+        return Machine(await asyncio.to_thread(launcher),
+                       ("--mount", f"type=image,source={disk},target=/{folder},image-subpath={folder}"))
+    return Machine(await machine_image(disk))
+
+
+@functools.cache
+def mounts_images() -> bool:
+    """Whether this machine's Docker mounts an image's files into a container (``--mount type=image``, with its
+    ``image-subpath``): Docker 28 and later, on the containerd image store."""
+    version, status = docker("info", "--format", "{{.ServerVersion}} {{json .DriverStatus}}").split(" ", 1)
+    major = version.split(".", 1)[0]
+    return major.isdigit() and int(major) >= 28 and "io.containerd.snapshotter.v1" in status
 
 
 async def machine_image(disk: str) -> str:
