@@ -986,10 +986,11 @@ async def test_a_computer_without_site_routing_routes_nothing_whatever_websites_
 
     assert routes == [] and "sites" not in context.deployed_envs[-1].metadata["computer"]
     assert HOLD_BOOT_LAUNCH_ENV not in boots.boots[0]["environment"] and boots.boots[0]["held"] is False
+    assert not set(env_computer_provider.sites.TRUST_ENVIRONMENT) & set(boots.boots[0]["environment"])
 
 
 @pytest.mark.asyncio
-async def test_a_computer_routing_sites_boots_until_its_driver_answers_and_checks_its_display_once_ready(
+async def test_a_computer_routing_sites_boots_with_its_trust_until_its_driver_answers_and_checks_its_display(
         base, driver, docker, boots, routes, monkeypatch):
     """A page driver's screen is its browser's page, whose launch a deploy routing sites holds: the boot waits only for
     the driver to answer, and the display is checked once the sites are routed and the computer is ready."""
@@ -1015,6 +1016,7 @@ async def test_a_computer_routing_sites_boots_until_its_driver_answers_and_check
                             env_params={"site_routing": True}).execute(TaskStepContext(deployed_envs=[_sites_gateway()]))
 
     assert boots.boots[0]["held"] is True and order == ["route", ("ready", {}), "display"]
+    assert env_computer_provider.sites.TRUST_ENVIRONMENT.items() <= boots.boots[0]["environment"].items()
 
 
 @pytest.mark.asyncio

@@ -545,3 +545,28 @@ async def test_the_websites_a_computer_routes_are_waited_on_till_ready_one_never
     assert (on_its_card.asked, mcp_only.asked) == (1, 0)
     assert str(never.value).startswith("site routing: the run's websites weren't ready after 0.05 s: ")
     assert str(never.value).endswith("broken (shop: its database is down); unreachable (ConnectError: refused)")
+
+
+def test_routing_names_each_site_that_didnt_load_runtime_that_didnt_trust_the_ca_and_jdk_store_that_didnt_take_it():
+    report = {"checks": {"notes.test": {"url": "https://notes.test/", "status": 200},
+                         "chat.test": {"url": "https://chat.test/", "error": "502 Bad Gateway: no route"}},
+              "runtimes": {"node": {"url": "https://notes.test/", "status": 200},
+                           "curl": {"url": "https://notes.test/", "error": "curl: (60) SSL certificate problem"}},
+              "trust": {"java": {"/usr/lib/jvm/a/lib/security/cacerts": {"trusted": True},
+                                 "/opt/b/lib/security/cacerts": {"error": "keystore password was incorrect"}}}}
+
+    assert sites.routing_problems(report) == [
+        "https://chat.test/ didn't load in the computer: 502 Bad Gateway: no route",
+        "curl in the computer didn't trust the deploy's CA loading https://notes.test/: curl: (60) SSL certificate "
+        "problem",
+        "the JDK store /opt/b/lib/security/cacerts didn't take the deploy's CA: keystore password was incorrect"]
+    assert sites.routing_problems({"checks": {}, "trust": {}}) == []
+
+
+def test_the_trust_a_routing_computer_boots_with_is_the_local_providers_so_the_two_always_agree():
+    from agent_env.providers.sandbox_providers.local_docker.provider import LOCAL_TRUST_ENV
+
+    assert sites.TRUST_ENVIRONMENT == LOCAL_TRUST_ENV == {
+        "SSL_CERT_FILE": "/etc/agentenv/ca-bundle.pem", "REQUESTS_CA_BUNDLE": "/etc/agentenv/ca-bundle.pem",
+        "NODE_EXTRA_CA_CERTS": "/etc/agentenv/ca.pem"}
+    assert (str(sites.CA_PATH), str(sites.BUNDLE_PATH)) == ("/etc/agentenv/ca.pem", "/etc/agentenv/ca-bundle.pem")

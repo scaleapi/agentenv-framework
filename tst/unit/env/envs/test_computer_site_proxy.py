@@ -14,6 +14,7 @@ import os
 import socket
 import ssl
 import struct
+import sys
 import urllib.error
 from datetime import timedelta
 from pathlib import Path
@@ -396,12 +397,14 @@ def test_a_check_answered_by_the_proxys_own_bad_gateway_fails_and_a_sites_own_er
             raise urllib.error.HTTPError(url, 502, "Bad Gateway", headers, io.BytesIO(b"the site can't be reached\n"))
 
     monkeypatch.setattr(site_proxy.urllib.request, "build_opener", lambda *handlers: Opener())
+    monkeypatch.setattr(site_proxy, "check_runtimes", lambda url: {"node": {"url": url, "status": 502}})
     config = Config(user=None, sites=[Site("notes", "http://gw/website/notes/", ["notes.test"]),
                                       Site("chat", "http://gw/website/chat/", ["chat.test"])])
 
-    assert site_proxy.check(config) == {
+    assert site_proxy.check(config) == {"sites": {
         "notes.test": {"url": "https://notes.test/", "error": "502 Bad Gateway: the site can't be reached"},
-        "chat.test": {"url": "https://chat.test/", "status": 502}}
+        "chat.test": {"url": "https://chat.test/", "status": 502}},
+        "runtimes": {"node": {"url": "https://notes.test/", "status": 502}}}
 
 
 @pytest.mark.asyncio
@@ -580,7 +583,8 @@ def test_install_writes_the_sites_files_names_and_trust_then_starts_the_proxy_on
     (folder / "config.json").write_text(json.dumps(sites.proxy_config(table, issued, user=None)))
     started = []
     monkeypatch.setattr(site_proxy, "start", lambda path, log: started.append(Config.load(path)))
-    monkeypatch.setattr(site_proxy, "checks_as", lambda user, path: {"notes.test": {"status": 200}})
+    monkeypatch.setattr(site_proxy, "checks_as", lambda user, path: {"sites": {"notes.test": {"status": 200}},
+                                                                     "runtimes": {"node": {"status": 200}}})
     monkeypatch.setattr(site_proxy.shutil, "which", lambda tool: None)
 
     report = site_proxy.install(str(folder / "config.json"), site_proxy.Paths(root))
@@ -600,9 +604,16 @@ def test_install_writes_the_sites_files_names_and_trust_then_starts_the_proxy_on
     for policy in ("etc/opt/chrome_for_testing", "etc/chromium", "etc/chromium-browser", "etc/opt/chrome"):
         (der,) = json.loads((root / policy / "policies/managed/agentenv-sites.json").read_text())["CACertificates"]
         assert base64.b64decode(der) == ssl.PEM_cert_to_DER_cert(issued.ca_pem)
-    assert report["trust"]["system"] is None and report["trust"]["nss"] == []
+    assert report["trust"]["system"] is None and report["trust"]["nss"] == [] and report["trust"]["java"] == {}
     assert len(report["trust"]["chromium"]) == 4
-    assert report["checks"] == {"notes.test": {"status": 200}}
+    assert report["checks"] == {"notes.test": {"status": 200}} and report["runtimes"] == {"node": {"status": 200}}
+    for added in ("etc/agentenv/ca.pem", "etc/agentenv/ca-bundle.pem"):
+        assert (root / added).read_text() == issued.ca_pem.strip() + "\n"
+        assert (root / added).stat().st_mode & 0o777 == 0o644
+    assert report["trust"]["added"] == [str(root / "etc/agentenv/ca.pem"), str(root / "etc/agentenv/ca-bundle.pem")]
+    assert (root / "etc/profile.d/agentenv-sites.sh").read_text() == (
+        "export SSL_CERT_FILE=/etc/agentenv/ca-bundle.pem\nexport REQUESTS_CA_BUNDLE=/etc/agentenv/ca-bundle.pem\n"
+        "export NODE_EXTRA_CA_CERTS=/etc/agentenv/ca.pem\n")
 
 
 def test_install_keeps_the_upstream_headers_in_a_file_root_alone_reads_and_serve_json_names_it(tmp_path, monkeypatch):
@@ -616,7 +627,7 @@ def test_install_keeps_the_upstream_headers_in_a_file_root_alone_reads_and_serve
     (folder / "config.json").write_text(json.dumps(given))
     started = []
     monkeypatch.setattr(site_proxy, "start", lambda path, log: started.append(Config.load(path)))
-    monkeypatch.setattr(site_proxy, "checks_as", lambda user, path: {})
+    monkeypatch.setattr(site_proxy, "checks_as", lambda user, path: {"sites": {}, "runtimes": {}})
     monkeypatch.setattr(site_proxy.shutil, "which", lambda tool: None)
 
     site_proxy.install(str(folder / "config.json"), site_proxy.Paths(root))
@@ -655,6 +666,152 @@ def test_the_checks_are_given_each_sites_timeout_in_turn(tmp_path, monkeypatch):
     assert given[0] >= site_proxy.CHECK_TIMEOUT_S * 7
 
 
+def test_the_sites_ca_joins_the_trust_a_provider_added_and_a_bundle_made_here_starts_from_the_systems(tmp_path):
+    paths, ca_pem = site_proxy.Paths(tmp_path), "-----BEGIN CERTIFICATE-----\nU0lURVM=\n-----END CERTIFICATE-----\n"
+    files = {"ca": "/etc/agentenv/ca.pem", "bundle": "/etc/agentenv/ca-bundle.pem"}
+    (tmp_path / "etc/agentenv").mkdir(parents=True)
+    (tmp_path / "etc/agentenv/ca.pem").write_text("LOCAL CA\n")
+    (tmp_path / "etc/agentenv/ca-bundle.pem").write_text("PUBLIC ROOTS\nLOCAL CA\n")
+    (tmp_path / "etc/agentenv").chmod(0o700)
+    other = site_proxy.Paths(tmp_path / "other")
+    (tmp_path / "other/etc/ssl/certs").mkdir(parents=True)
+    (tmp_path / "other/etc/ssl/certs/ca-certificates.crt").write_text("SYSTEM ROOTS\n")
+
+    site_proxy.add_trust_files(paths, files, ca_pem)
+    site_proxy.add_trust_files(paths, files, ca_pem)
+    site_proxy.add_trust_files(other, files, ca_pem)
+
+    assert (tmp_path / "etc/agentenv/ca.pem").read_text() == "LOCAL CA\n" + ca_pem
+    assert (tmp_path / "etc/agentenv/ca-bundle.pem").read_text() == "PUBLIC ROOTS\nLOCAL CA\n" + ca_pem
+    assert (tmp_path / "etc/agentenv").stat().st_mode & 0o777 == 0o755
+    assert (tmp_path / "other/etc/agentenv/ca.pem").read_text() == ca_pem
+    assert (tmp_path / "other/etc/agentenv/ca-bundle.pem").read_text() == "SYSTEM ROOTS\n" + ca_pem
+
+
+# A keytool whose store is a text file of the SHA-256 fingerprints it holds: -importcert adds the file's, -list -v
+# prints them, -delete does nothing; each call's operation is logged beside the store. With FAIL in the store,
+# -importcert fails as a store with another password does.
+FAKE_KEYTOOL = """#!{python}
+import base64, hashlib, sys
+args = sys.argv[1:]
+store = args[args.index("-keystore") + 1]
+with open(store + ".calls", "a") as calls:
+    calls.write(args[0] + "\\n")
+if args[0] == "-importcert":
+    if "FAIL" in open(store).read():
+        sys.exit("keytool error: java.io.IOException: keystore password was incorrect")
+    pem = open(args[args.index("-file") + 1]).read()
+    body = "".join(line.strip() for line in pem.splitlines() if line.strip() and not line.startswith("-----"))
+    digest = hashlib.sha256(base64.b64decode(body)).digest()
+    with open(store, "a") as f:
+        f.write("SHA256: " + ":".join(f"{{byte:02X}}" for byte in digest) + "\\n")
+elif args[0] == "-list":
+    print(open(store).read())
+"""
+
+
+def _jdk(home: Path, store_text: str = "", keytool: bool = True) -> Path:
+    """A JDK at ``home``: its store, holding ``store_text``, and with ``keytool``, a fake one in its bin."""
+    store = home / "lib/security/cacerts"
+    store.parent.mkdir(parents=True)
+    store.write_text(store_text)
+    if keytool:
+        (home / "bin").mkdir()
+        (home / "bin/keytool").write_text(FAKE_KEYTOOL.format(python=sys.executable))
+        (home / "bin/keytool").chmod(0o755)
+    return store
+
+
+def _calls(store: Path) -> list[str]:
+    calls = Path(f"{store}.calls")
+    return calls.read_text().split() if calls.exists() else []
+
+
+def test_every_jdk_trusts_the_ca_an_apt_one_through_the_system_hook_the_rest_by_keytool(tmp_path, monkeypatch):
+    issued = sites.issue(sites.site_table([SiteParams(name="notes", url="http://gw/website/notes/",
+                                                      domains=["notes.test"])]).routes, valid_for=timedelta(hours=1),
+                         label="t")
+    fingerprint = site_proxy.sha256_fingerprint(issued.ca_pem)
+    ca = tmp_path / "ca.pem"
+    ca.write_text(issued.ca_pem)
+    root = tmp_path / "root"
+    hook = root / "etc/ssl/certs/java/cacerts"
+    hook.parent.mkdir(parents=True)
+    hook.write_text(f"SHA256: {fingerprint}\n")
+    temurin = _jdk(root / "usr/lib/jvm/temurin-21")
+    apt = _jdk(root / "usr/lib/jvm/java-21-openjdk-amd64")
+    apt.unlink()
+    apt.symlink_to(hook)
+    (root / "usr/lib/jvm/default-java").symlink_to(root / "usr/lib/jvm/java-21-openjdk-amd64")
+    bundled = _jdk(root / "opt/agentenv/apps/ide/idea/jbr", keytool=False)
+    locked = _jdk(root / "opt/locked/jdk", "FAIL\n")
+    skipped = _jdk(root / "opt/app/node_modules/jre")
+    monkeypatch.setattr(site_proxy.shutil, "which",
+                        lambda tool: str(root / "usr/lib/jvm/temurin-21/bin/keytool") if tool == "keytool" else None)
+
+    trusted = site_proxy.trust_java(site_proxy.Paths(root), str(ca), issued.ca_pem)
+
+    assert trusted == {str(temurin): {"trusted": True}, str(apt): {"trusted": True},
+                       str(bundled): {"trusted": True},
+                       str(locked): {"error": "keytool error: java.io.IOException: keystore password was incorrect"}}
+    assert _calls(temurin) == _calls(bundled) == ["-delete", "-importcert", "-list"]
+    assert _calls(apt) == ["-list"] and _calls(skipped) == []
+    assert fingerprint in temurin.read_text() and fingerprint in bundled.read_text()
+    assert site_proxy.trust_java(site_proxy.Paths(tmp_path / "bare"), str(ca), issued.ca_pem) == {}
+
+
+def test_a_jdk_store_the_ca_isnt_listed_in_after_routing_is_named(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    hook = root / "etc/ssl/certs/java/cacerts"
+    hook.parent.mkdir(parents=True)
+    hook.write_text("SHA256: 00:11\n")
+    apt = _jdk(root / "usr/lib/jvm/java-21-openjdk-amd64")
+    apt.unlink()
+    apt.symlink_to(hook)
+    issued = sites.issue(sites.site_table([SiteParams(name="notes", url="http://gw/website/notes/",
+                                                      domains=["notes.test"])]).routes, valid_for=timedelta(hours=1),
+                         label="t")
+
+    trusted = site_proxy.trust_java(site_proxy.Paths(root), str(tmp_path / "ca.pem"), issued.ca_pem)
+
+    assert trusted == {str(apt): {"error": "keytool -list doesn't list the CA in it"}}
+
+
+def test_each_runtime_loads_the_first_https_site_through_its_own_trust_and_says_why_one_couldnt(tmp_path, monkeypatch):
+    programs = {"node": "#!/bin/sh\necho 200\n",
+                "curl": "#!/bin/sh\necho 'curl: (60) SSL certificate problem: unable to get local issuer "
+                        "certificate' >&2\nexit 60\n"}
+    for name, text in programs.items():
+        (tmp_path / name).write_text(text)
+        (tmp_path / name).chmod(0o755)
+    monkeypatch.setattr(site_proxy.shutil, "which", lambda tool: str(tmp_path / tool) if tool in programs else None)
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+    unset = site_proxy.check_runtimes("https://notes.test/")
+    issued = sites.issue(sites.site_table([SiteParams(name="notes", url="http://gw/website/notes/",
+                                                      domains=["notes.test"])]).routes, valid_for=timedelta(hours=1),
+                         label="t")
+    (tmp_path / "bundle.pem").write_text(issued.ca_pem)
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "bundle.pem"))
+    opened = []
+
+    class Opener:
+        def open(self, url, timeout):
+            opened.append(url)
+            return contextlib.nullcontext(SimpleNamespace(status=200))
+
+    monkeypatch.setattr(site_proxy.urllib.request, "build_opener", lambda *handlers: Opener())
+    set_ = site_proxy.check_runtimes("https://notes.test/")
+
+    assert unset == {
+        "python SSL_CERT_FILE": {"url": "https://notes.test/",
+                                 "error": "SSL_CERT_FILE isn't set in the computer's environment"},
+        "node": {"url": "https://notes.test/", "status": 200},
+        "curl": {"url": "https://notes.test/",
+                 "error": "curl: (60) SSL certificate problem: unable to get local issuer certificate"}}
+    assert set_["python SSL_CERT_FILE"] == {"url": "https://notes.test/", "status": 200}
+    assert opened == ["https://notes.test/"]
+
+
 @pytest.mark.parametrize("resolv", [None, "", "nameserver 127.0.0.1\n"], ids=["missing", "empty", "loopback-only"])
 def test_a_wildcard_name_starts_dns_even_when_resolv_conf_names_no_other_nameserver(tmp_path, monkeypatch, resolv):
     root, folder = tmp_path / "root", tmp_path / "sites"
@@ -667,7 +824,7 @@ def test_a_wildcard_name_starts_dns_even_when_resolv_conf_names_no_other_nameser
     (folder / "config.json").write_text(json.dumps(sites.proxy_config(table, issued, user=None)))
     started = []
     monkeypatch.setattr(site_proxy, "start", lambda path, log: started.append(Config.load(path)))
-    monkeypatch.setattr(site_proxy, "checks_as", lambda user, path: {})
+    monkeypatch.setattr(site_proxy, "checks_as", lambda user, path: {"sites": {}, "runtimes": {}})
     monkeypatch.setattr(site_proxy.shutil, "which", lambda tool: None)
 
     site_proxy.install(str(folder / "config.json"), site_proxy.Paths(root))
@@ -727,5 +884,5 @@ def test_the_proxy_is_standard_library_alone_so_the_bases_own_python_runs_it():
     imported = {line.split()[1].split(".")[0] for line in source.splitlines()
                 if line.startswith(("import ", "from ")) and not line.startswith("from __future__")}
 
-    assert imported <= {"asyncio", "json", "os", "pwd", "shutil", "socket", "ssl", "struct", "subprocess", "sys",
-                        "time", "urllib", "dataclasses", "pathlib", "typing"}
+    assert imported <= {"asyncio", "base64", "hashlib", "json", "os", "pwd", "shutil", "socket", "ssl", "struct",
+                        "subprocess", "sys", "time", "urllib", "dataclasses", "pathlib", "typing"}

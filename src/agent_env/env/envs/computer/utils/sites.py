@@ -7,10 +7,12 @@ name is claimed once (``site_table``): a site's names are routed and the network
 a site's name winning over the allowlist; two sites claiming a name are refused. Once the computer is booted, a CA made for the deploy signs a certificate for each
 site's names (``issue``), and the site proxy (``site_proxy.py``) is installed through the sandbox's root channel and
 started (``route``), which a reset does again on its fresh computer. In the computer they live in
-``/etc/agentenv/sites``, readable by root alone but the CA, ``ca.pem``, at a fixed path for an app with a certificate
-list of its own: the folder is root's alone (0700) before the config and its keys are written into it, until the
-install has made the keys and the config private; the CA and certificates are valid for the deploy's ttl and a day more, from a few minutes back for a
-clock that's behind."""
+``/etc/agentenv/sites``, root's alone (0700) before the config and its keys are written into it, until the install has
+made the keys and the config private; the CA and certificates are valid for the deploy's ttl and a day more, from a few
+minutes back for a clock that's behind. The CA also joins the trust agentenv adds to a container, the local provider's
+convention (``LOCAL_TRUST_ENV``): ``/etc/agentenv/ca.pem``, every CA agentenv adds, at a fixed path for an app with a
+certificate list of its own, and ``/etc/agentenv/ca-bundle.pem``, the public roots and them. The computer's boot
+environment names them (``TRUST_ENVIRONMENT``), so every program in it trusts the sites however it was started."""
 
 from __future__ import annotations
 
@@ -37,6 +39,7 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 from agent_env.env.env import Env, EnvCapabilityUnsupported, gateway_url_of
 from agent_env.env.envs.computer.utils.site_proxy import is_local, matches
+from agent_env.providers.sandbox_providers.local_docker.provider import LOCAL_TRUST_ENV
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, VmSandbox
 from agent_env.store.base import NotFoundError
 
@@ -48,7 +51,10 @@ if TYPE_CHECKING:
 FOLDER = PurePosixPath("/etc/agentenv/sites")
 PROXY = FOLDER / "site_proxy.py"
 CONFIG = FOLDER / "config.json"
-CA_PATH = FOLDER / "ca.pem"
+#: The variables naming the trust agentenv adds, which a computer routing sites boots with, and the files they name.
+TRUST_ENVIRONMENT = dict(LOCAL_TRUST_ENV)
+CA_PATH = PurePosixPath(TRUST_ENVIRONMENT["NODE_EXTRA_CA_CERTS"])
+BUNDLE_PATH = PurePosixPath(TRUST_ENVIRONMENT["SSL_CERT_FILE"])
 LOG = FOLDER / "site-proxy.log"
 SYNTHETIC, ALLOWLIST = "synthetic", "allowlist"
 RANKS = (SYNTHETIC, ALLOWLIST)
@@ -278,7 +284,8 @@ def proxy_config(table: SiteTable, issued: Issued, *, user: Optional[str],
         if (upstream_headers or {}).get(route.site):
             site["upstream_headers"] = dict(upstream_headers[route.site])
         sites.append(site)
-    return {"user": user, "ca_pem": issued.ca_pem, "sites": sites, "log": str(LOG)}
+    return {"user": user, "ca_pem": issued.ca_pem, "sites": sites, "log": str(LOG),
+            "trust_files": {"ca": str(CA_PATH), "bundle": str(BUNDLE_PATH)}}
 
 
 def reachable_problem(policy: Optional[NetworkPolicy], routes: list[Route]) -> Optional[str]:
@@ -407,12 +414,21 @@ async def route(sandbox: Sandbox, sites: list[Site], *, user: Optional[str], net
     await channel.run(["chmod", "0600", str(CONFIG)])
     output = await channel.run(["python3", str(PROXY), "install", str(CONFIG)])
     report = json.loads(output.strip().splitlines()[-1])
-    failed = {name: result for name, result in report["checks"].items() if "error" in result}
-    if failed:
-        raise RuntimeError("site routing: " + "; ".join(f"{result.get('url', name)} didn't load in the computer: "
-                                                        f"{result['error']}" for name, result in failed.items()))
+    if failed := routing_problems(report):
+        raise RuntimeError("site routing: " + "; ".join(failed))
     return {"names": table.to_dict(), "ca": issued.ca_pem, "ca_path": str(CA_PATH), "trust": report["trust"],
-            "checks": report["checks"]}
+            "checks": report["checks"], "runtimes": report.get("runtimes", {})}
+
+
+def routing_problems(report: dict) -> list[str]:
+    """What the install's ``report`` says failed: a site that didn't load, a runtime that didn't trust the CA, and a
+    JDK's store that didn't take it."""
+    return ([f"{result.get('url', name)} didn't load in the computer: {result['error']}"
+             for name, result in report["checks"].items() if "error" in result]
+            + [f"{runtime} in the computer didn't trust the deploy's CA loading {result.get('url')}: {result['error']}"
+               for runtime, result in report.get("runtimes", {}).items() if "error" in result]
+            + [f"the JDK store {store} didn't take the deploy's CA: {result['error']}"
+               for store, result in report["trust"].get("java", {}).items() if "error" in result])
 
 
 async def deployed_sites(deployed_envs: list[DeployedEnv], only: Optional[list[str]] = None) -> list[dict]:
