@@ -6,7 +6,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
 from pathlib import Path
 from typing import Any, Callable, ClassVar, Literal, Optional
 
@@ -29,8 +28,9 @@ from .operations import ReadyCheck, check_class, default_for
 from .platform import Platform, detect
 from .recording import Recording
 from .runtime import ComputerRuntime
+from .prefix import ToolPrefix
 from .settings import TOOL_PREFIX_ENV, ComputerSettings, load_settings, tool_prefix_problem
-from .tools import Tools
+from .tools import COMPUTER_TOOLS, Tools
 
 #: The caller every call comes from until agents carry an identity of their own.
 DEFAULT_IDENTITY = "default"
@@ -105,10 +105,11 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
                  tool_prefix: str | None = None) -> None:
         self.settings = settings if settings is not None else load_settings(model=type(self).Settings)
         self.platform = platform if platform is not None else detect()
-        #: What the names of the tools it serves start with: the deploy's ``AGENTENV_TOOL_PREFIX``, none by default.
-        self.tool_prefix = os.environ.get(TOOL_PREFIX_ENV, "") if tool_prefix is None else tool_prefix
-        if problem := tool_prefix_problem(self.tool_prefix):
+        prefix = os.environ.get(TOOL_PREFIX_ENV, "") if tool_prefix is None else tool_prefix
+        if problem := tool_prefix_problem(prefix):
             raise ValueError(problem)
+        #: The start of every name it serves a tool under: the deploy's ``AGENTENV_TOOL_PREFIX``, none by default.
+        self._computer_prefix = ToolPrefix(prefix)
         self._computer = ComputerRuntime(self)
         #: The routes each app's card opens to agents, by app, read once it answers.
         self._computer_agent_routes: dict[str, list[str]] = {}
@@ -211,44 +212,15 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
         return card.served_tools(self, tools)
 
     def serve_tools_as(self, tools: list[EnvironmentTool]) -> list[EnvironmentTool]:
-        """Every tool under the tool prefix; only the SDK's ``computer_*`` tools have their descriptions rewritten, a
-        driver's own and forwarded tools keep theirs as written."""
-        return [tool.model_copy(update={"name": self.served_name(tool.name), **(
-            {"description": self.served_text(tool.description)} if tool.name.startswith("computer_") else {})})
-                for tool in tools]
+        return self._computer_prefix.tools(tools)
 
     def served_instructions(self, text: str) -> str:
-        """The MCP server's instructions as the computer serves them: after the prefix rule, if it has one, with the
-        ``computer_*`` names rewritten."""
-        return "\n\n".join(part for part in (self.prefix_rule(), self.served_text(text)) if part)
+        return self._computer_prefix.instructions(text, self._computer_other_tools())
 
-    def prefix_rule(self) -> str | None:
-        """The sentence telling an agent how the computer serves the tools its driver names in its own text: with a
-        tool prefix, and tools other than ``computer_*`` to name; None otherwise."""
-        others = [marker.name for _member, marker in _marked_members(self, _TOOL_ATTR)
-                  if not marker.name.startswith("computer_")] + [forwarded.tool.name for forwarded in self.forwarded_tools()]
-        if not self.tool_prefix or not others:
-            return None
-        prefix, example = self.tool_prefix, others[0]
-        return (f"This computer serves its tools under `{prefix}`: a tool this text calls `X` is `{prefix}X`, so "
-                f"`{example}` is `{prefix}{example}`. Names inside a tool's arguments stay as written.")
-
-    def served_name(self, name: str) -> str:
-        """The name the tool ``name`` is served under: its own, after the tool prefix."""
-        return f"{self.tool_prefix}{name}"
-
-    def own_name(self, served: str) -> str:
-        """A served tool's own name, without the tool prefix."""
-        return served.removeprefix(self.tool_prefix)
-
-    def served_text(self, text: str | None) -> str | None:
-        """``text`` naming the SDK's ``computer_*`` tools as the computer serves them: each one's own name, and a
-        ``computer_*`` family of them, as a whole word, after the tool prefix. Any other name stays as written."""
-        if not self.tool_prefix or not text:
-            return text
-        names = {marker.name for _member, marker in _marked_members(self, _TOOL_ATTR) if marker.name.startswith("computer_")}
-        alternatives = [*map(re.escape, sorted(names, key=len, reverse=True)), r"computer_(?:[a-z]+_)*\*"]
-        return re.sub(rf"(?<![\w-])(?:{'|'.join(alternatives)})(?![\w-])", lambda m: self.tool_prefix + m.group(0), text)
+    def _computer_other_tools(self) -> list[str]:
+        """Its driver's own and forwarded tools, whose text stays as written, by their own names."""
+        return [marker.name for _member, marker in _marked_members(self, _TOOL_ATTR) if marker.name not in COMPUTER_TOOLS] + [
+            forwarded.tool.name for forwarded in self.forwarded_tools()]
 
     def served_extensions(self, extensions: list[EnvironmentExtension]) -> list[EnvironmentExtension]:
         return card.served_extensions(self, extensions)
@@ -260,7 +232,7 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
         return card.extension_params(self, uri)
 
     def declared_extensions(self) -> list[EnvironmentExtension]:
-        return [extension.model_copy(update={"description": self.served_text(extension.description)})
+        return [extension.model_copy(update={"description": self._computer_prefix.text(extension.description)})
                 for extension in card.declared_extensions(self)]
 
     def _computer_require_init(self) -> None:

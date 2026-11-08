@@ -106,9 +106,11 @@ def test_a_prefix_a_tool_name_cant_hold_or_that_is_too_long_is_refused(monkeypat
         FakeDriver()
 
 
-def test_a_prefix_of_sixteen_characters_is_taken(monkeypatch):
+@pytest.mark.asyncio
+async def test_a_prefix_of_sixteen_characters_is_taken(monkeypatch):
     monkeypatch.setenv(TOOL_PREFIX_ENV, "accounting-desk_")
-    assert FakeDriver().served_name("computer_pointer_position") == "accounting-desk_computer_pointer_position"
+    card, _listed = await _names(FakeDriver())
+    assert "accounting-desk_computer_pointer_position" in card
 
 
 class Forwarding(FakeDriver):

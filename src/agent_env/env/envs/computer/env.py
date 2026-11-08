@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self
 
 from agentenv_protocol import METHOD_ADD, RPC_PATH
 from agentenv_protocol import client as protocol_v1
-from agentenv_protocol.computer.tools import Tools
+from agentenv_protocol.computer.tools import COMPUTER_TOOLS
 from agentenv_protocol.tool_access import (DISABLE, DISABLE_TOOL_EXTENSION_URI, ENABLE, ENABLE_TOOL_EXTENSION_URI,
                                            WILDCARD)
 from agentenv_protocol.tool_context import DEFAULT_ROLE
@@ -61,7 +61,6 @@ APP_TYPE = "computer_app"
 #: so may a VM bundle, which a Mac probes.
 _DEPLOYABLE = {"container": ("ready",), "disk": ("ready", "unverified"), "vm_bundle": ("ready", "unverified")}
 #: Every ``computer_*`` tool a driver can serve.
-COMPUTER_TOOLS = tuple(sorted(name for name in vars(Tools) if name.startswith("computer_")))
 #: What a computer env's ``tools`` gives its agents, as the tool-access changes a deploy makes for them: ``standard``,
 #: AgentEnv's ``computer_*`` tools alone; ``driver``, the driver's own alone; ``both``, every tool it serves.
 TOOLS = {"standard": ((DISABLE, [WILDCARD]), (ENABLE, list(COMPUTER_TOOLS))), "driver": ((DISABLE, list(COMPUTER_TOOLS)),),
