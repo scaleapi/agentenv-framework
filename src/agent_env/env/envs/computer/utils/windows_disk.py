@@ -29,7 +29,6 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, NamedTuple
 
 from agentenv_protocol.computer.app import ADDRESS
-from agentenv_protocol.computer.apps import apps_folder
 
 from agent_env.artifact.artifacts.computer import DISK_BASE_FILE, DISK_FILE, DISK_OWNER
 from agent_env.artifact.artifacts.docker_image import docker_login, push_local_image
@@ -51,7 +50,7 @@ RECIPE = Path(__file__).resolve().parents[4] / "computers" / "disk" / "windows"
 ADMIN = "agentadmin"
 #: Where agent-env's own files are on a Windows computer, and each layer's folder under them.
 ROOT = PureWindowsPath("C:/agentenv")
-DRIVERS, APPS = ROOT / "drivers", apps_folder("windows")
+DRIVERS = ROOT / "drivers"
 PYTHON = ROOT / "python" / "python.exe"
 BUILD = ROOT / "build"
 #: The fewest days of its evaluation a base may have left, as a deploy needs some.
@@ -73,6 +72,9 @@ INSTALL_POLL_S, BOOT_POLL_S, SHUTDOWN_POLL_S = 15, 5, 2
 #: a rate limit, fails at once, as no retry mends a wrong URL.
 FETCH_TRIES, FETCH_PAUSE_S = 30, 10
 CPUS, MEMORY_MB = 4, 8192
+#: The groups and the account the folders under ``ROOT`` grant access to, by their well-known SIDs, as icacls takes
+#: them.
+ADMINISTRATORS, SYSTEM, USERS = "*S-1-5-32-544", "*S-1-5-18", "*S-1-5-32-545"
 #: What every service runs with: Python reading and writing files as UTF-8, as on Linux, not in Windows' code page.
 UTF8 = {"PYTHONUTF8": "1"}
 #: What a base's install prints once, as it fetches Microsoft's media.
@@ -330,7 +332,7 @@ def expiring(expires: str | None) -> bool:
     return expires is None or datetime.fromisoformat(expires) - datetime.now(timezone.utc) < timedelta(days=RENEW_DAYS)
 
 
-def write(build: Path, parts: list[Part], user: str, build_settings: dict[str, Any], image: dict) -> str:
+def write(build: Path, parts: list[Part], *, user: str, build_settings: dict[str, Any], image: dict) -> str:
     """Write ``build``'s ``provision.ps1``, which installs ``parts`` from ``build/context``, each app's own folder the
     session user ``user``'s, their services for agentenv-session, ``build_settings`` as every service's
     ``AGENTENV_SETTING_<NAME>`` and ``image`` as what the disk says it holds, then leaves ``ROOT`` the admins'
@@ -351,8 +353,7 @@ def _locked(user: str) -> list[str]:
     """The lines that leave ``ROOT`` the admins', as on Linux ``/opt/agentenv`` is root's: every user reads and runs
     what's there, none of the access ``C:\\`` gives every user to change it is left, and the session user ``user``
     writes only the services' logs, and each app's own folder, which keeps its own access."""
-    return [f"Checked {{ icacls '{ROOT}' /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' "
-            "'*S-1-5-32-545:(OI)(CI)RX' | Out-Null }",
+    return [_granted_alone(ROOT, {ADMINISTRATORS: "F", SYSTEM: "F", USERS: "RX"}),
             f"Checked {{ icacls '{ROOT / 'logs'}' /grant {_ps(f'{user}:(OI)(CI)M')} | Out-Null }}"]
 
 
@@ -380,8 +381,7 @@ def _installed_part(part: Part, user: str) -> list[str]:
     if part.served is not None:
         own = prefix / ADDRESS.parent.as_posix()
         lines += [f"New-Item -ItemType Directory -Force '{own}' | Out-Null",
-                  f"Checked {{ icacls '{own}' /inheritance:r /grant:r {_ps(f'{user}:(OI)(CI)F')} '*S-1-5-18:(OI)(CI)F' "
-                  "'*S-1-5-32-544:(OI)(CI)F' | Out-Null }"]
+                  _granted_alone(own, {user: "F", SYSTEM: "F", ADMINISTRATORS: "F"})]
     for run in install.run or []:
         lines.append(f"$env:PREFIX = '{prefix}'; Push-Location '{prefix}'; Checked {{ & powershell -NoProfile "
                      f"-ExecutionPolicy Bypass -File '{prefix / PureWindowsPath(run.script)}' }}; Pop-Location")
@@ -393,6 +393,13 @@ def _installed_part(part: Part, user: str) -> list[str]:
                 "env": {**UTF8, **{key: str(value) for key, value in part.environment.items()}}}
         lines.append(_written(ROOT / "services" / f"{name}.json", json.dumps(spec)))
     return lines
+
+
+def _granted_alone(folder: PureWindowsPath, access: dict[str, str]) -> str:
+    """The line that leaves ``folder`` with only ``access``, rights by account, which what's under it inherits, and
+    none of the access its parents give."""
+    granted = " ".join(_ps(f"{account}:(OI)(CI){rights}") for account, rights in access.items())
+    return f"Checked {{ icacls '{folder}' /inheritance:r /grant:r {granted} | Out-Null }}"
 
 
 def argv(command: str, prefix: PureWindowsPath) -> list[str]:

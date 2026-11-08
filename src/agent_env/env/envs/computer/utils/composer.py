@@ -378,7 +378,8 @@ def _composed_windows_disk(env: ComputerEnv, base: ComputerArtifact, driver: Com
             for program, command in _services(f"driver-{name}", layer.install).items()}, {"MCP_PORT": driver.port},
             protocol)]
         for app in env.composed_apps():
-            staged, prefix = _stage_app(context, app, base, {}), windows_disk.APPS / gate.app_folder(app)
+            staged = _stage_app(context, app, base, {})
+            prefix = PureWindowsPath(staged.prefix)
             server = [str(prefix / "venv" / "Scripts" / "python.exe"), "-m", "agentenv_protocol.computer.serve_app",
                       staged.served]
             commands = [server, *(windows_disk.argv(service.command, prefix) for service in staged.install.services)]
@@ -397,8 +398,8 @@ def _composed_windows_disk(env: ComputerEnv, base: ComputerArtifact, driver: Com
         made = windows_disk.base(_key(recipe=_digest(windows_disk.RECIPE), disk_gb=disk_gb, user=user,
                                       form="windows-base", format=FORMAT),
                                  lambda: windows_disk.media(say), disk_gb, user, say, registry)
-        script = windows_disk.write(build, parts, user, settings,
-                                    {"base": made.image, "layers": [part.folder for part in parts]})
+        script = windows_disk.write(build, parts, user=user, build_settings=settings,
+                                    image={"base": made.image, "layers": [part.folder for part in parts]})
         expires = made.expires.isoformat(timespec="seconds")
         key = attempt.key = _key(base=made.image, base_expires=expires, provision=script, context=_digest(context),
                                  build_settings=settings, form="disk", arch=arch, format=FORMAT)

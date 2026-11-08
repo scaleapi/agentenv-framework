@@ -4,8 +4,9 @@ and packed as a thin layer on the base, under a tag of its key, which a compose 
 machine holds it, its agentenv folder left the admins' and the session user's to read; the env's computer is a disk
 of the base's form. An app's own server runs from its venv, its own folder the session user's alone, its install steps
 elevated; one it runs as the session user is refused. A Windows base is amd64, disk-only and started by
-agentenv-session."""
+agentenv-session. The scripts the Windows test bundle's verifiers run inside the computer are Python."""
 
+import ast
 import json
 import threading
 import time
@@ -31,6 +32,7 @@ from agent_env.env.envs.computer.utils.install import WindowsInstall, WindowsSer
 from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
 
 URL = "https://example.com/desk.zip"
+BUNDLE = Path(__file__).parents[3] / "integration" / "computer" / "windows"
 SERVE = "venv/Scripts/python.exe -m agentenv_protocol.computer.serve driver.py:Desk"
 WINDOWS = {"type": "windows", "version": "11", "edition": "Enterprise Evaluation"}
 DISK = {"init": "agentenv-session", "input_channel": "nocloud", "min_disk_gb": 64}
@@ -155,6 +157,11 @@ def _put(driver: ComputerDriverEnv, link: SandboxProvider, apps: list[ComputerAp
                            computer_settings=settings or None, apps=apps or [])
 
 
+def _written_json(line: str) -> object:
+    """The JSON a provision script's line writes to its file (``windows_disk._written``)."""
+    return json.loads(line.split(", '", 1)[1].rsplit("')", 1)[0].replace("''", "'"))
+
+
 def test_a_windows_env_composes_a_thin_disk_on_its_base_here_the_driver_installed_by_its_provision_script(
         docker, tmp_path):
     env = _put(_driver(tmp_path / "desk"), FakeLinux(), theme="dark")
@@ -177,7 +184,7 @@ def test_a_windows_env_composes_a_thin_disk_on_its_base_here_the_driver_installe
     assert any(line.startswith(f"Checked {{ & '{prefix}\\venv\\Scripts\\python.exe' -m pip install") and
                f"'-r' '{prefix}\\requirements-windows.txt'" in line for line in lines)
     daemon = next(line for line in lines if "services\\driver-desk-daemon.json" in line)
-    assert json.loads(daemon.split(", '", 1)[1].rsplit("')", 1)[0].replace("''", "'")) == {
+    assert _written_json(daemon) == {
         "name": "driver-desk-daemon", "prefix": str(prefix), "command": [str(prefix / "venv/Scripts/python.exe"),
                                                                          "driver.py"], "env": {"PYTHONUTF8": "1", "MCP_PORT": "18765"}}
     assert lines[-3:] == [
@@ -216,8 +223,7 @@ def test_an_app_is_a_layer_of_its_own_its_server_on_its_venv_its_folder_the_sess
         f"Bypass -File '{prefix}\\setup.ps1' }}; Pop-Location",
         f"Push-Location '{prefix}'; Checked {{ & '{python}' -m agentenv_protocol.computer.run_install_step "
         "'app.py:Notes' 'stamp' }; Pop-Location"]
-    services = {spec["name"]: spec for spec in (json.loads(line.split(", '", 1)[1].rsplit("')", 1)[0].replace(
-        "''", "'")) for line in installed if "\\services\\" in line)}
+    services = {spec["name"]: spec for spec in (_written_json(line) for line in installed if "\\services\\" in line)}
     environment = {"PYTHONUTF8": "1", "ENVIRONMENT_NAME": "notes"}
     assert services == {
         "app-notes": {"name": "app-notes", "prefix": str(prefix), "env": environment,
@@ -428,3 +434,12 @@ def test_a_disk_is_rewritten_keeping_only_the_clusters_it_uses(monkeypatch, tmp_
     assert ran == [["docker", "run", "--rm", "-v", f"{tmp_path}:/out", *args, "--entrypoint", "qemu-img", "machine:1",
                     "convert", "-O", "qcow2", *over, "/out/disk.img", "/out/compact.img"]]
     assert (tmp_path / "disk.img").read_text() == "compacted" and not (tmp_path / "compact.img").exists()
+
+
+@pytest.mark.parametrize("artifact, script", [("check_notes", "FACTS"), ("check_session", "SESSION")])
+def test_the_scripts_the_windows_bundles_verifiers_run_inside_the_computer_are_python(artifact, script):
+    verifier = ast.parse((BUNDLE / "artifacts" / artifact / "verify.py").read_text())
+    (text,) = [node.value.value for node in verifier.body
+               if isinstance(node, ast.Assign) and [target.id for target in node.targets] == [script]]
+
+    ast.parse(text)
