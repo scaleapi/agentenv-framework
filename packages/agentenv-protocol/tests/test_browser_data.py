@@ -68,7 +68,8 @@ class FakeControl:
     async def replace_tabs(self, tabs):
         await self._done("tabs", [(tab.url, tab.active) for tab in tabs])
 
-    async def load_start_tabs(self, urls, site_of, own_timeout_s):
+    async def load_start_tabs(self, urls, site_of, own_timeout_s, live_timeout_s):
+        self.waits = (own_timeout_s, live_timeout_s)
         await self._done("start_tabs", urls)
         return [{"tab": f"t{index}", "url": url, "final_url": url, "status": 503, "error": None, "load_ms": 40,
                  "site": site_of(url), "outcome": self.start_tabs_outcome} for index, url in enumerate(urls)]
@@ -297,6 +298,18 @@ async def test_a_load_whose_start_tab_on_an_env_site_doesnt_load_fails_naming_it
     else:
         await load
     assert browser.start_tab_launches[-1]["tabs"][0]["site"] == ("shop" if refused else None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("set_up_s, waits", [(None, (60, 30)), (45, (15, 15)), (75, (0, 0))],
+                         ids=["a-reopen", "a-launch-whose-setup-took-45-s", "a-launch-past-its-timeout"])
+async def test_start_tabs_settle_within_the_ready_timeout_of_their_launch_its_setup_counted(browser, set_up_s, waits):
+    loop = asyncio.get_running_loop()
+
+    await browser._load_start_tabs(["https://shop.test/"], "t", None if set_up_s is None else loop.time() - set_up_s)
+
+    own, live = browser.control.waits
+    assert (round(own), round(live)) == waits
 
 
 @pytest.mark.asyncio

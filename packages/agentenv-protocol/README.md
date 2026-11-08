@@ -975,9 +975,11 @@ are the profile's template. The base class adds:
   (headless) before it goes to its URL, so its page sees that size from its first script; then the first is brought
   to the front. They load at once, and each settles once it has loaded (its load event fired, its document's final
   status read), once it failed (a network error, or on one of the env's sites, as `sites/set` named them, a 4xx or
-  5xx status, which settles it at once), or once it has been waited on: as long as the browser may take to be ready
-  on one of the env's sites, 30 s on any other. Its `start_tabs_loaded` ready check passes once all have settled, so
-  `cdp` and a deploy wait for them. `record`'s `start_tabs` keeps each launch's (`StartTabsLaunch`: `at` and its
+  5xx status, which settles it at once), or once it has been waited on: every one settles within the browser's
+  ready timeout of its launch, the launch's setup counted against it, a tab on one of the env's sites waited on what's
+  left of it and any other on 30 s at most, so `data/reset`, a load and a deploy, which wait that timeout and a margin,
+  always get its outcome. Its `start_tabs_loaded` ready check passes once all have settled, so `cdp` and a deploy wait
+  for them. `record`'s `start_tabs` keeps each launch's (`StartTabsLaunch`: `at` and its
   `tabs`, each a `StartTab`: `tab`, `url`, `final_url`, `status`, `error`, `load_ms`, `site` — the env's site's
   name, null for a live one — and `outcome`, `loaded`, `failed` or `timed_out`), and `data/get`'s state keeps its
   latest launch's. A deploy of a computer reads them once it's ready, keeps them in its record and fails, naming

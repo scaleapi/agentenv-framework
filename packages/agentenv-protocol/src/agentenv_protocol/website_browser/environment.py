@@ -28,7 +28,7 @@ from ..computer.errors import DeviceUnavailable, InvalidArgument
 from ..transfers import WriteNamespaceGrant
 from ..types import METHOD_ADD, EnvironmentExtension, IntakeDeclaration, IntakeFormat, intake_extension
 from . import data
-from .control import AGENT, DOWNLOADS, EXIT, LOADED, STOP, UPLOADS, BrowserControl, _now
+from .control import AGENT, DOWNLOADS, EXIT, LIVE_START_TAB_TIMEOUT_S, LOADED, STOP, UPLOADS, BrowserControl, _now
 from .devtools import PIPE_IN, PIPE_OUT, DevToolsError, DevToolsPipe
 from .shapes import BrowserRecord, BrowserState, CookieToSet, OriginStorage, SiteNames, StateToLoad
 
@@ -49,8 +49,7 @@ SHM_MIN_BYTES = 1 << 30
 BLOCK = 2
 #: How often a call that waits for the browser to be ready checks it.
 READY_POLL_S = 0.5
-#: How much longer than its ready timeout a call waits for a launch's start tabs, for the browser's setup before they
-#: load.
+#: How much longer than its ready timeout, within which a launch's start tabs settle, a call waits for them.
 START_TABS_MARGIN_S = 30.0
 #: Alone, loopback goes through the proxy too. In a computer, the apps on loopback beside it stay reachable; ``<-loopback>``
 #: removes Chromium's own rule, so ``*.localhost`` names still don't.
@@ -214,7 +213,8 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         to_browser_read, to_browser_write = os.pipe()
         from_browser_read, from_browser_write = os.pipe()
         await self.devtools.connect(to_browser_write, from_browser_read)
-        self._following = asyncio.ensure_future(self._follow(self.settings.start_urls, _now()))
+        self._following = asyncio.ensure_future(self._follow(self.settings.start_urls, _now(),
+                                                             asyncio.get_running_loop().time()))
         self._following.add_done_callback(lambda done: done.cancelled() or done.exception())
         return {PIPE_IN: to_browser_read, PIPE_OUT: from_browser_write}
 
@@ -224,16 +224,21 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         self.control.ended(EXIT if self._computer_app.exited() else STOP)
         self.relay.ended()
 
-    async def _follow(self, urls: list[str], at: str) -> None:
+    async def _follow(self, urls: list[str], at: str, launched: float) -> None:
         """Its control attached, then its start tabs at ``urls`` loaded, the launch's outcomes kept."""
         await self.control.attach()
-        await self._load_start_tabs(urls, at)
+        await self._load_start_tabs(urls, at, launched)
 
-    async def _load_start_tabs(self, urls: list[str], at: str) -> list[dict]:
-        """Its start tabs at ``urls``, as the control loads them, a tab on one of the env's sites waited on for as long
-        as the browser may take to be ready; their outcomes, kept as a launch's from ``at``."""
-        sites = _read_sites()
-        tabs = await self.control.load_start_tabs(urls, lambda url: _site_of(url, sites), self._computer_app.timeout_s)
+    async def _load_start_tabs(self, urls: list[str], at: str, since: Optional[float] = None) -> list[dict]:
+        """Its start tabs at ``urls``, as the control loads them, every one settled within the browser's ready timeout
+        of ``since``, its launch's start on the loop's clock, else of now: a tab on one of the env's sites waited on
+        what's left of it, any other on the live wait at most. A launch's setup counts against it, so its start tabs
+        settle before anything waiting that timeout and a margin on it gives up. Their outcomes, kept as a launch's
+        from ``at``."""
+        sites, now = _read_sites(), asyncio.get_running_loop().time()
+        left = max(0.0, self._computer_app.timeout_s - (now - (since if since is not None else now)))
+        tabs = await self.control.load_start_tabs(urls, lambda url: _site_of(url, sites), left,
+                                                  min(LIVE_START_TAB_TIMEOUT_S, left))
         self.start_tab_launches.append({"at": at, "tabs": tabs})
         return tabs
 
