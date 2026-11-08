@@ -154,8 +154,9 @@ class BrowserControl:
         in tabs it opens blank after them; each held to the window's size, headless, before it goes to its URL, and
         all loading at once. A tab settles once it has loaded, once it has failed, which on one of the env's own sites,
         as ``site_of`` names them, an error status is too, or once it has been waited on ``own_timeout_s`` on such a
-        site, else ``live_timeout_s``. Each tab's outcome, in order. A page already loaded doesn't read cookies set
-        after it, so a tab a load signed in shows it only once it loads again."""
+        site, else ``live_timeout_s``. Each tab's outcome, in order, kept though the browser has gone and the first
+        can't come to the front. A page already loaded doesn't read cookies set after it, so a tab a load signed in
+        shows it only once it loads again."""
         if not urls:
             return []
         targets = list(self.tabs)[:len(urls)] or [await self._first_tab()]
@@ -170,7 +171,8 @@ class BrowserControl:
             loading.append(await self._start_load(target, url, site))
         outcomes = await asyncio.gather(*(self._settled(target, load, own_timeout_s if load.site is not None
                                                         else live_timeout_s) for target, load in zip(targets, loading)))
-        await self._bring_to_front(targets[0])
+        with contextlib.suppress(ConnectionError, DevToolsError):
+            await self._bring_to_front(targets[0])
         return outcomes
 
     async def _first_tab(self) -> str:

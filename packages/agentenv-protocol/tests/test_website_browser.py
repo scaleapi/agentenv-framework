@@ -713,8 +713,13 @@ async def test_a_start_page_that_sends_itself_elsewhere_before_it_loads_is_judge
 
 
 @pytest.mark.asyncio
-async def test_a_start_tab_still_loading_when_the_browser_ends_fails_naming_that():
-    control = await _started(Navigating({"https://shop.test/": "silent"}))
+async def test_a_start_tab_still_loading_when_the_browser_ends_fails_naming_that_and_is_kept_with_its_pipe_gone():
+    def gone(params, session):
+        raise ConnectionError("the browser closed its debugging pipe")
+
+    devtools = Navigating({"https://shop.test/": "silent"})
+    devtools.answers["Target.activateTarget"] = gone
+    control = await _started(devtools)
     loading = asyncio.ensure_future(control.load_start_tabs(["https://shop.test/"], _shop, own_timeout_s=5))
     for _ in range(100):
         if control._loading:
