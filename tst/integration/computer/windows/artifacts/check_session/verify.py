@@ -22,11 +22,19 @@ pythonw = str(Path(sys.executable).with_name("pythonw.exe"))
 (work / "window.py").write_text(
     "import sys, tkinter as tk\nroot = tk.Tk()\nroot.title(sys.argv[1])\n"
     "if sys.argv[2] == 'stubborn':\n    root.protocol('WM_DELETE_WINDOW', lambda: None)\nroot.mainloop()\n")
-facts = {}
+facts, written = {}, {}
 
 
 def sizes(*paths):
-    return [path.stat().st_size if path.exists() else 0 for path in paths]
+    '''Each file's size as an open handle reads it, which a stat by name can read behind.'''
+    read = []
+    for path in paths:
+        try:
+            with path.open("rb") as file:
+                read.append(file.seek(0, 2))
+        except FileNotFoundError:
+            read.append(0)
+    return read
 
 
 async def listed(title):
@@ -53,7 +61,8 @@ async def main():
     await session.stop(pid, 10)
     ended = sizes(*files)
     await asyncio.sleep(1)
-    facts["windowless stop"] = {"alive": session.alive(pid), "wrote after": sizes(*files) != ended}
+    written["windowless stop"] = [ended, sizes(*files)]
+    facts["windowless stop"] = {"alive": session.alive(pid), "wrote after": written["windowless stop"][1] != ended}
 
     for title, kind, timeout_s in (("Obliging", "obliging", 10), ("Stubborn", "stubborn", 4)):
         pid = await session.launch([pythonw, str(work / "window.py"), title, kind], work, {})
@@ -72,7 +81,8 @@ async def main():
     await asyncio.sleep(2)
     ended = sizes(out)
     await asyncio.sleep(1)
-    facts["helper killed"] = {"alive": session.alive(pid), "wrote after": sizes(out) != ended}
+    written["helper killed"] = [ended, sizes(out)]
+    facts["helper killed"] = {"alive": session.alive(pid), "wrote after": written["helper killed"][1] != ended}
 
     try:
         await session.launch(["no-such-program.exe"], work, {})
@@ -82,7 +92,7 @@ async def main():
 
 
 asyncio.run(main())
-print(json.dumps(facts))
+print(json.dumps({"facts": facts, "written": written}))
 """
 EXPECTED = {
     "exit": 7,
@@ -99,10 +109,13 @@ async def verify(mcp_url, env_url):
     driver = await Driver.connect(env_url, 120)
     out = await driver.run(PYTHON, "-c", SESSION, timeout_s=240)
     try:
-        facts = json.loads(out.get("stdout") or "")
+        read = json.loads(out.get("stdout") or "")
     except ValueError:
         return [{"id": "session", "result": False, "description": json.dumps(out)[-2000:]}]
+    facts, written = read["facts"], read["written"]
     missing = facts.get("missing program", "")
-    return [{"id": name, "result": facts.get(name) == expected, "description": json.dumps(facts.get(name))}
+    return [{"id": name, "result": facts.get(name) == expected,
+             "description": json.dumps({**facts.get(name, {}), "sizes": written[name]} if name in written
+                                       else facts.get(name))}
             for name, expected in EXPECTED.items()] + [
         {"id": "missing program", "result": missing.startswith(MISSING), "description": missing}]
