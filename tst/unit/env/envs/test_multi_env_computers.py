@@ -173,7 +173,8 @@ def test_a_computer_on_a_sandbox_provider_whose_urls_take_credentials_is_refused
     providers["scale"] = mock_provider(REQUEST_HEADERS={"*.example": {"x-token": "env:TOKEN"}})
     refusal = _multi(FakeComputer("desktop")).child_envs_refusal({"desktop": {"sandbox_type": "scale"}})
     assert refusal == ("child_envs.desktop: MagicMock takes credentials on each request to a sandbox's URL, which the multi "
-                       "env's gateway doesn't send to a child env")
+                       "env's gateway doesn't send to a child env; set child_envs.desktop.sandbox_type to a sandbox type "
+                       "whose URLs take none")
 
 
 def test_only_a_provider_whose_deploy_takes_children_deploys_computers():

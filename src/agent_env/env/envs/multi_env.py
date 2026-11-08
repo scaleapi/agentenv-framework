@@ -962,7 +962,8 @@ def _computer_refusal(computer: ComputerEnv, entry: dict, sandbox_type: str | No
     links = (build_sandbox_provider(options["sandbox_type"]) if options["sandbox_type"] else get_env_sandbox_provider()).links
     if headed := [type(link).__name__ for link in links if link.REQUEST_HEADERS]:
         return (f"{', '.join(headed)} takes credentials on each request to a sandbox's URL, which the multi env's gateway "
-                "doesn't send to a child env")
+                f"doesn't send to a child env; set child_envs.{computer.environment_name}.sandbox_type to a sandbox type "
+                "whose URLs take none")
     return computer.deploy_refusal(**options)
 
 
