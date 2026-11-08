@@ -693,6 +693,23 @@ def test_the_sites_ca_joins_the_trust_a_provider_added_and_a_bundle_made_here_st
     assert (tmp_path / "other/etc/agentenv/ca-bundle.pem").read_text() == "SYSTEM ROOTS\n" + ca_pem
 
 
+def test_the_bundle_is_made_again_from_the_system_store_with_a_ca_an_app_added_after_the_image_was_built(tmp_path):
+    paths, files = site_proxy.Paths(tmp_path), {"ca": "/etc/agentenv/ca.pem", "bundle": "/etc/agentenv/ca-bundle.pem"}
+    app, local, sites_ca = (f"-----BEGIN CERTIFICATE-----\n{name}\n-----END CERTIFICATE-----\n"
+                            for name in ("QVBQ", "TE9DQUw=", "U0lURVM="))
+    (tmp_path / "etc/agentenv").mkdir(parents=True)
+    (tmp_path / "etc/agentenv/ca.pem").write_text(local)
+    (tmp_path / "etc/agentenv/ca-bundle.pem").write_text("ROOTS AT BUILD\n")
+    (tmp_path / "etc/ssl/certs").mkdir(parents=True)
+    (tmp_path / "etc/ssl/certs/ca-certificates.crt").write_text("ROOTS AT BUILD\n" + app + sites_ca)
+
+    site_proxy.add_trust_files(paths, files, sites_ca)
+    site_proxy.add_trust_files(paths, files, sites_ca)
+
+    assert (tmp_path / "etc/agentenv/ca.pem").read_text() == local + sites_ca
+    assert (tmp_path / "etc/agentenv/ca-bundle.pem").read_text() == "ROOTS AT BUILD\n" + app + sites_ca + local
+
+
 def test_a_bundle_with_no_public_roots_to_start_from_is_refused_before_either_file_is_written(tmp_path):
     paths, ca_pem = site_proxy.Paths(tmp_path), "-----BEGIN CERTIFICATE-----\nU0lURVM=\n-----END CERTIFICATE-----\n"
     files = {"ca": "/etc/agentenv/ca.pem", "bundle": "/etc/agentenv/ca-bundle.pem"}
@@ -905,5 +922,5 @@ def test_the_proxy_is_standard_library_alone_so_the_bases_own_python_runs_it():
     imported = {line.split()[1].split(".")[0] for line in source.splitlines()
                 if line.startswith(("import ", "from ")) and not line.startswith("from __future__")}
 
-    assert imported <= {"asyncio", "base64", "hashlib", "json", "os", "pwd", "shutil", "socket", "ssl", "struct",
+    assert imported <= {"asyncio", "base64", "hashlib", "json", "os", "pwd", "re", "shutil", "socket", "ssl", "struct",
                         "subprocess", "sys", "time", "urllib", "dataclasses", "pathlib", "typing"}

@@ -24,6 +24,7 @@ import hashlib
 import json
 import os
 import pwd
+import re
 import shutil
 import socket
 import ssl
@@ -69,6 +70,8 @@ JAVA_STORE_PASSWORD = "changeit"
 JDK_SEARCH_DEPTH = 8
 JDK_SKIPPED = frozenset({"node_modules", ".git", "__pycache__", "site-packages"})
 KEYTOOL_TIMEOUT_S = 60.0
+#: A PEM certificate, from its BEGIN line to its END line.
+PEM_CERTIFICATE = re.compile(r"-----BEGIN CERTIFICATE-----.+?-----END CERTIFICATE-----", re.S)
 #: A Node program loading the URL it's given, printing the status it's answered, and failing with the error it meets.
 NODE_GET = ("require('https').get(process.argv[1], r => { console.log(r.statusCode); r.resume(); })"
             ".on('error', e => { console.error(e.message); process.exit(1); })")
@@ -763,22 +766,27 @@ def public_roots(paths: Paths) -> Optional[Path]:
 
 
 def add_trust_files(paths: Paths, files: dict, ca_pem: str) -> list[str]:
-    """The CA added to ``files["ca"]``, the CAs agentenv adds, and to ``files["bundle"]``, the public roots plus them,
-    each kept as the image or a provider made it. A missing or empty bundle starts from the system store's public
-    roots, which ``trust_system`` added the CA to where it could; a Linux with none of them is refused rather than left
-    with a bundle of the CA alone. Both, and their folder, readable by everyone."""
+    """The CA added to ``files["ca"]``, the CAs agentenv adds, and ``files["bundle"]`` made again from the system
+    store's public roots as they are now, which ``trust_system`` added the CA to where it could, and every CA in
+    ``files["ca"]``, so it also holds what apps added to the system store after the image or a provider made it. A
+    Linux with no file of public roots keeps the bundle the image or a provider made, and one with neither is refused
+    rather than given a bundle of the CA alone. Both, and their folder, readable by everyone."""
     ca, bundle = paths.rooted(files["ca"]), paths.rooted(files["bundle"])
-    roots = bundle.read_text() if bundle.exists() else ""
-    if not roots.strip():
-        if (system := public_roots(paths)) is None:
-            raise SystemExit(f"there are no public roots to make {files['bundle']} from: none of "
-                             f"{', '.join(str(path) for path in paths.system_bundles)} is there")
+    if (system := public_roots(paths)) is not None:
         roots = system.read_text()
+    elif bundle.exists() and bundle.read_text().strip():
+        roots = bundle.read_text()
+    else:
+        raise SystemExit(f"there are no public roots to make {files['bundle']} from: none of "
+                         f"{', '.join(str(path) for path in paths.system_bundles)} is there")
+    added = ca.read_text() if ca.exists() else ""
+    if ca_pem.strip() not in added:
+        added = (added.rstrip("\n") + "\n" if added.strip() else "") + ca_pem.strip() + "\n"
+    missing = "".join(pem + "\n" for pem in PEM_CERTIFICATE.findall(added) if pem not in roots)
     ca.parent.mkdir(parents=True, exist_ok=True)
     ca.parent.chmod(0o755)
-    for path, current in ((ca, ca.read_text() if ca.exists() else ""), (bundle, roots)):
-        write_in_place(path, current if ca_pem.strip() in current else
-                       (current.rstrip("\n") + "\n" if current.strip() else "") + ca_pem.strip() + "\n")
+    for path, text in ((ca, added), (bundle, roots.rstrip("\n") + "\n" + missing)):
+        write_in_place(path, text)
         path.chmod(0o644)
     return [str(ca), str(bundle)]
 
