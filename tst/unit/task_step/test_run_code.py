@@ -1392,7 +1392,7 @@ async def test_a_script_for_a_windows_computer_is_staged_ended_sized_and_removed
     ctx = await _run_in(computer, b"def run(inp):\n    return {'ok': True}\n", deployed=computer.deployed(card=card),
                         id="arm")
 
-    assert ctx.metadata["script_results"]["run-code-1"] == {"ok": True}
+    assert ctx.metadata["script_results"]["arm"] == {"ok": True}
     run_dir = ".agentenv/run_code/arm"
     argvs = [params["argv"] for kind, params, *_ in computer.calls if kind == "run"]
     assert [argv[0] for argv in argvs] == ["powershell", "python3", "python3", "python3", "python3"]
