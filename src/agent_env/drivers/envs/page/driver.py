@@ -50,7 +50,7 @@ from agentenv_protocol.computer import (
     upload,
 )
 from agentenv_protocol.computer import apps
-from agentenv_protocol.computer.app import SOCKET
+from agentenv_protocol.computer.served import served
 from agentenv_protocol.website_browser import BROWSER
 
 BUTTONS = {"left": 1, "right": 2, "middle": 4, "back": 8, "forward": 16}
@@ -310,8 +310,7 @@ def _ended(folder: Path) -> Optional[str]:
 
 
 def _http(folder: Path) -> httpx.AsyncClient:
-    return httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(uds=str(folder / SOCKET)), base_url="http://app",
-                             timeout=CALL_TIMEOUT_S)
+    return served(folder).client(CALL_TIMEOUT_S)
 
 
 def _mouse(kind: str, x: float, y: float, button: str = "none", buttons: int = 0, count: int = 0,

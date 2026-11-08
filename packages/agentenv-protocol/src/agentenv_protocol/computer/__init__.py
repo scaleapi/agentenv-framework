@@ -21,11 +21,13 @@ from .app import (
     Ready,
     RunScript,
     Service,
+    Windows,
     computer_app,
     install,
     install_step,
     linux,
     ready_check,
+    windows,
 )
 from .errors import (
     BackgroundUnavailable,
@@ -123,7 +125,8 @@ def __getattr__(name: str) -> Any:
 __all__ = [
     "ComputerDriverEnvironment", "computer_driver", "DEFAULT_IDENTITY", "DriverDeclaration", "MacOSDriver",
     "X11Driver",
-    "ComputerAppEnvironment", "computer_app", "install", "linux", "install_step", "ready_check", "Linux", "Service",
+    "ComputerAppEnvironment", "computer_app", "install", "linux", "windows", "install_step", "ready_check", "Linux",
+    "Windows", "Service",
     "Launch", "Ready", "Packages", "AptSource", "Download", "RunScript",
     "AppDeclaration", "AppOs",
     "APP_SETTINGS_ENV", "part_bytes",

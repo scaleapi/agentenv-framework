@@ -41,11 +41,14 @@ _PATHS = TypeAdapter(list[RelativePath])
 WINDOW_KEYS = frozenset({"class", "instance", "title"})
 #: The framework extension an app's own server serves: its launch as params, and its ``launch`` and ``ready`` methods.
 COMPUTER_APP = "urn:agentenv:computer-app/v1"
-#: Where an app's own server listens, in the app's folder, and where it says why it last failed to start.
+#: Where an app's own server listens on Linux and macOS, in the app's folder.
 SOCKET = Path(".agentenv/server.sock")
+#: Where an app's server on Windows writes the port it serves on and its token, in the app's folder.
+ADDRESS = Path(".agentenv/server.json")
 #: Written in an app's folder by its computer's driver once an agent acts there, by a tool call or on a route the app
 #: opens to agents: a fresh computer starts without it, and an app that resets removes its own.
 AGENT_ACTED = Path(".agentenv/agent-acted")
+#: Where an app's server says why it last failed to start, in the app's folder.
 FAILURE = Path(".agentenv/server.failure")
 #: The values of an app's build settings its env fixes in its computer's image, in the app's folder.
 BUILD_SETTINGS = Path(".agentenv/build_settings.json")
@@ -145,6 +148,20 @@ class Linux(BaseModel):
     ports: Optional[list[int]] = None
 
 
+class Windows(BaseModel):
+    """How a Windows computer installs the app: as on Linux, with no apt; ``run`` scripts are PowerShell (``.ps1``), run
+    elevated as the computer is composed, and ``services`` run in the session user's sign-in."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    files: LayerPath = "."
+    python: Optional[LayerPath] = None
+    downloads: Optional[list[Download]] = None
+    run: Optional[list[RunScript]] = None
+    services: list[Service] = Field(default_factory=list)
+    ports: Optional[list[int]] = None
+
+
 class Ready(BaseModel):
     """When the app is ready: its window shown, a port answering or a command exiting 0, within ``timeout_s``."""
 
@@ -169,7 +186,8 @@ class Launch(BaseModel):
 
     at: Literal["boot", "demand"] = "boot"
     command: list[str]
-    #: Matches the app's window by its WM_CLASS ``class`` or ``instance`` and its ``title``, as given.
+    #: Matches the app's window by ``class``, ``instance`` and ``title``, as given: on X11 its WM_CLASS class and
+    #: instance; on Windows its window class and its program's file name, lowercased, such as ``notepad.exe``.
     window: Optional[dict[str, str]] = None
     ready: Optional[Ready] = None
     #: Variables set in the app's environment, over its server's.
@@ -334,6 +352,18 @@ def linux(*, files: str = ".", packages: Optional[Packages] = None, python: Opti
     """``@install`` for Linux: how a Linux computer installs the app, ``Linux``'s fields, and what is its own there."""
     return install("linux", Linux(files=files, packages=packages, python=python, sources=sources, downloads=downloads,
                                   run=run, services=services or [], ports=ports),
+                   launch=launch, paths=paths, skill=skill, settings=settings, build_settings=build_settings)
+
+
+def windows(*, files: str = ".", python: Optional[str] = None, downloads: Optional[list[Download]] = None,
+            run: Optional[list[RunScript]] = None, services: Optional[list[Service]] = None,
+            ports: Optional[list[int]] = None, launch: Optional[Launch] = None, paths: Optional[list[str]] = None,
+            skill: Optional[str] = None, settings: Optional[type[BaseModel]] = None,
+            build_settings: Optional[type[BaseModel]] = None) -> Callable:
+    """``@install`` for Windows: how a Windows computer installs the app, ``Windows``'s fields, and what is its own
+    there."""
+    return install("windows", Windows(files=files, python=python, downloads=downloads, run=run,
+                                      services=services or [], ports=ports),
                    launch=launch, paths=paths, skill=skill, settings=settings, build_settings=build_settings)
 
 

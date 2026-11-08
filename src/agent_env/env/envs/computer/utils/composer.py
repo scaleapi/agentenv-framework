@@ -29,7 +29,7 @@ from pathlib import Path, PurePosixPath
 from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any, Literal
 
-from agentenv_protocol.computer import apps as installed_apps
+from agentenv_protocol.computer.apps import apps_folder
 from agentenv_protocol.computer.app import BUILD_SETTINGS, SOCKET
 
 from agent_env.artifact.artifacts.computer import LOCAL_IMAGE_PREFIX, ComputerArtifact
@@ -73,9 +73,9 @@ logger = logging.getLogger(__name__)
 #: holds some other way, its labels or how it's built, and leave it for any other, so images aren't built again for
 #: nothing.
 FORMAT = 1
-#: Where a driver's files go in a composed computer, in a folder named for the driver; an app's, under APPS.
+#: Where a driver's files go in a composed computer, in a folder named for the driver; an app's go under its OS's apps
+#: folder (``apps_folder``).
 DRIVERS = "/opt/agentenv/drivers"
-APPS = str(installed_apps.APPS)
 KEY_LABEL = "dev.agentenv.computer-key"
 # What a build installed and whether it was emulated, kept on its image for an env that reuses it.
 INSTALLED_LABEL, EMULATED_LABEL = "dev.agentenv.installed", "dev.agentenv.emulated"
@@ -774,12 +774,13 @@ def _stage_app(context: Path, app: ComputerAppEnv, base: ComputerArtifact,
                from_store: dict[str, tuple[str, str]]) -> _Layer:
     """Write the app's install files under ``context/apps/<name>/``, with the values of its build settings the env
     fixes, and its supervisord programs beside them, run under its name: its services and its own server, which serves
-    its class from its venv and launches the app. Its folder under ``APPS`` is named for its environment name."""
+    its class from its venv and launches the app. Its folder under its OS's apps folder is named for its environment
+    name."""
     install, name = app.install[base.os.type], gate.app_folder(app)
     file, _, cls = app.module.partition(":")
     served = shlex.quote(f"{PurePosixPath(file).relative_to(install.files)}:{cls}")
-    layer = _Layer(f"apps/{name}", f"{APPS}/{name}", install, f"agentenv-app-{name}.conf", app.id, app=True,
-                   served=served,
+    layer = _Layer(f"apps/{name}", str(apps_folder(base.os.type) / name), install, f"agentenv-app-{name}.conf", app.id,
+                   app=True, served=served,
                    steps=tuple((step.name, step.scope) for step in app.declaration.install_steps
                                if step.os is None or base.os.type in step.os))
     programs = dict(zip(gate.programs(app, base.os.type), [
