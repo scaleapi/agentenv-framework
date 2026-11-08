@@ -86,16 +86,17 @@ async def stop(pid: int, timeout_s: float) -> None:
 
 @contextlib.contextmanager
 def paused(pid: int) -> Iterator[None]:
-    """Every process of the job the helper ``pid`` holds suspended while the block runs, and resumed after."""
+    """Every process of the job the helper ``pid`` holds suspended while the block runs, and resumed after. One not yet
+    suspended can start another, so the job is listed again until it holds none that's new."""
     job = _win32.open_job(pid)
     if job is None:
         yield
         return
-    suspended = []
+    suspended, seen = [], {pid}
     try:
-        for app_pid in _app_pids(job, pid):
-            if _win32.suspend(app_pid):
-                suspended.append(app_pid)
+        while fresh := [app_pid for app_pid in _win32.job_pids(job) if app_pid not in seen]:
+            seen.update(fresh)
+            suspended += [app_pid for app_pid in fresh if _win32.suspend(app_pid)]
         yield
     finally:
         for app_pid in suspended:
@@ -159,6 +160,8 @@ class _Win32:
     DWMWA_CLOAKED = 14
     #: How many process ids a job's list is read with room for, before it's read again with room for all.
     PIDS = 64
+    #: The characters a window class's name and a program's full path take at most, with the closing NUL.
+    CLASS_NAME_CHARS, PATH_CHARS = 256, 32768
 
     def __init__(self) -> None:
         self._dlls: Optional[tuple] = None
@@ -208,7 +211,7 @@ class _Win32:
         for handle in handles:
             pid, cloaked = ctypes.c_uint32(), ctypes.c_uint32()
             user32.GetWindowThreadProcessId(handle, ctypes.byref(pid))
-            class_name, title = ctypes.create_unicode_buffer(256), ctypes.create_unicode_buffer(
+            class_name, title = ctypes.create_unicode_buffer(self.CLASS_NAME_CHARS), ctypes.create_unicode_buffer(
                 user32.GetWindowTextLengthW(handle) + 1)
             user32.GetClassNameW(handle, class_name, len(class_name))
             user32.GetWindowTextW(handle, title, len(title))
@@ -220,7 +223,7 @@ class _Win32:
     def _program(self, pid: int) -> str:
         """The file name of the program running as ``pid``, lowercased, or empty where it can't be read."""
         def read(process: int) -> str:
-            path, size = ctypes.create_unicode_buffer(32768), ctypes.c_uint32(32768)
+            path, size = ctypes.create_unicode_buffer(self.PATH_CHARS), ctypes.c_uint32(self.PATH_CHARS)
             if not self._api()[0].QueryFullProcessImageNameW(process, 0, path, ctypes.byref(size)):
                 return ""
             return path.value.rpartition("\\")[2].lower()

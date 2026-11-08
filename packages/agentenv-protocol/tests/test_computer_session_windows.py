@@ -1,9 +1,9 @@
 """The Windows session's own logic, its Win32 calls faked and its job helper stood in for: a launch goes through the
 helper and returns its pid once the app has started, or fails saying why it couldn't, and hands no fds; stopping asks
 the app's windows to close, then ends the job after the timeout, or at once with no window to ask; pausing suspends each
-of the app's processes but the helper's and resumes them, even when the block raises; a job that's gone is neither
-alive, stopped nor paused; the windows listed are those shown, by program, class and title; and the menu launcher is a
-Start Menu shortcut PowerShell writes, named for the app."""
+of the app's processes but the helper's, and any one starts as they're suspended, and resumes them, even when the block
+raises; a job that's gone is neither alive, stopped nor paused; the windows listed are those shown, by program, class
+and title; and the menu launcher is a Start Menu shortcut PowerShell writes, named for the app."""
 from __future__ import annotations
 
 import subprocess
@@ -30,10 +30,12 @@ sys.exit(int(command[0]))
 
 class FakeWin32:
     """Jobs by their helper's pid, each a list of the pids in it, the helper's first; the session's windows; and every
-    call that acts, recorded. An app whose window is asked to close ``closes`` or doesn't."""
+    call that acts, recorded. An app whose window is asked to close ``closes`` or doesn't, and a process ``spawns`` one
+    into its job just before it's suspended."""
 
-    def __init__(self, jobs: dict[int, list[int]], windows: list[Window], closes: bool = True) -> None:
-        self.jobs, self._windows, self.closes = jobs, windows, closes
+    def __init__(self, jobs: dict[int, list[int]], windows: list[Window], closes: bool = True,
+                 spawns: dict[int, int] | None = None) -> None:
+        self.jobs, self._windows, self.closes, self.spawns = jobs, windows, closes, spawns or {}
         self.posted, self.terminated, self.suspended, self.resumed, self.open = [], [], [], [], 0
 
     def open_job(self, helper):
@@ -53,6 +55,8 @@ class FakeWin32:
         self.open -= 1
 
     def suspend(self, pid):
+        if pid in self.spawns:
+            next(pids for pids in self.jobs.values() if pid in pids).append(self.spawns[pid])
         self.suspended.append(pid)
         return True
 
@@ -109,8 +113,8 @@ async def test_an_app_with_no_window_to_ask_is_ended_at_once_and_a_gone_job_is_l
     assert gone.terminated == [] and gone.open == 0 and not _session_windows.alive(HELPER)
 
 
-def test_pausing_suspends_every_process_but_the_helper_and_resumes_them_even_when_the_block_raises(win32):
-    fake = win32({HELPER: [HELPER, 901, 902]}, [])
+def test_pausing_suspends_every_process_but_the_helper_and_those_they_start_and_resumes_them_even_on_a_raise(win32):
+    fake = win32({HELPER: [HELPER, 901, 902]}, [], spawns={902: 903, 903: 904})
     with pytest.raises(RuntimeError):
         with _session_windows.paused(HELPER):
             paused_then = (list(fake.suspended), list(fake.resumed))
@@ -119,7 +123,7 @@ def test_pausing_suspends_every_process_but_the_helper_and_resumes_them_even_whe
     with _session_windows.paused(HELPER):
         pass
 
-    assert paused_then == ([901, 902], []) and fake.resumed == [901, 902] and fake.open == 0
+    assert paused_then == ([901, 902, 903, 904], []) and fake.resumed == [901, 902, 903, 904] and fake.open == 0
     assert gone.suspended == [] and _session_windows.alive(HELPER) is False
 
 

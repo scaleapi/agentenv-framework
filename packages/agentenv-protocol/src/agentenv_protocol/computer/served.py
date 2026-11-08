@@ -1,8 +1,9 @@
 """Where a computer app's own server answers, and how its computer reaches it (``serve_app``, ``apps``, ``svc``,
 ``launch``). On Linux and macOS it serves on the Unix socket ``SOCKET`` in the app's folder, which only the computer
 reaches, so it takes no token. On Windows, whose asyncio serves no Unix socket, it serves on a free port of 127.0.0.1
-and writes that port, with a token it draws, to ``ADDRESS`` there; it answers only a request carrying the token, so no
-other user of the computer gets in, and whatever reaches the app reads both from that file."""
+and writes that port, with a token it draws, to ``ADDRESS`` there, in a folder its computer keeps the session user's
+own; it answers only a request carrying the token, so no other user of the computer gets in, and whatever reaches the
+app reads both from that file."""
 from __future__ import annotations
 
 import hmac
