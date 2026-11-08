@@ -3,7 +3,9 @@
    "env_params": {"app_settings": {"notes": {"signature": "-- Ada", "token": "env:NOTES_TOKEN"}}}},
   {"id": "before", "type": "env_outcome_verifier", "env_id": "notes-desk", "file_artifact_id": "check_notes",
    "verifier_id": "before"},
-  {"id": "reset", "type": "reset_env", "env_id": "notes-desk", "depends_on": ["before"]},
+  {"id": "session", "type": "env_outcome_verifier", "env_id": "notes-desk", "file_artifact_id": "check_session",
+   "verifier_id": "session", "depends_on": ["before"]},
+  {"id": "reset", "type": "reset_env", "env_id": "notes-desk", "depends_on": ["session"]},
   {"id": "after", "type": "env_outcome_verifier", "env_id": "notes-desk", "file_artifact_id": "check_notes",
    "verifier_id": "after", "depends_on": ["reset"]}
 ]
