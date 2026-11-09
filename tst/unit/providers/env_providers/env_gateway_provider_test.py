@@ -1104,22 +1104,26 @@ def test_compose_reads_every_servers_card_and_mcp_on_its_mcp_port_the_website_br
 
 
 @pytest.mark.parametrize("browsing", [True, False], ids=["with-browser", "without"])
-def test_the_website_browser_reaches_only_the_gateway_and_the_sites(browsing):
+def test_the_website_browser_reaches_only_the_gateway_and_the_sites_and_no_database(browsing):
     from agent_env.env.envs.service_db import ServiceDBConfig
 
-    compose = yaml.safe_load(EnvironmentGatewayProvider().create_docker_compose(
-        mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack"),
-                     MCPServerConfig(image="browser", environment_name="website-browser", website_browser=browsing)],
+    sites = ["website-network"] if browsing else []
+    mcp_servers = [MCPServerConfig(image="mcp-slack", environment_name="slack"),
+                   MCPServerConfig(image="browser", environment_name="website-browser",
+                                   **({"networks": ("website-network",)} if browsing else {}))]
+    website_configs = [WebsiteConfig(backend_image="shop-be", frontend_image="shop-fe", environment_name="shop"),
+                       WebsiteConfig(backend_image="notes-be", frontend_image=None, environment_name="notes")]
+    provider = EnvironmentGatewayProvider()
+    compose = yaml.safe_load(provider.create_docker_compose(
+        mcp_servers=mcp_servers,
         gateway_image="agent-gateway",
         gateway_port=18765,
-        website_configs=[WebsiteConfig(backend_image="shop-be", frontend_image="shop-fe", environment_name="shop"),
-                         WebsiteConfig(backend_image="notes-be", frontend_image=None, environment_name="notes")],
+        website_configs=website_configs,
         state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig(db_web_image="pgweb", db_mcp_image="db-mcp")),
         state_instance=LocalPostgresStateProvider.default_instance(),
     ))
 
     networks = {name: service["networks"] for name, service in compose["services"].items()}
-    sites = ["website-network"] if browsing else []
     assert networks == {
         "servicedb": ["env-network"], "pgweb": ["env-network"], "db-mcp": ["env-network"],
         "slack": ["env-network"], "website-browser": sites or ["env-network"],
@@ -1128,6 +1132,11 @@ def test_the_website_browser_reaches_only_the_gateway_and_the_sites(browsing):
         "notes-website-backend": ["env-network", *sites],
     }
     assert list(compose["networks"]) == ["env-network", *sites]
+    browser = compose["services"]["website-browser"]
+    database = ("depends_on" in browser, any(e.startswith("DATABASE_URL=") for e in browser["environment"]))
+    assert database == (not browsing, not browsing)
+    assert provider._all_environments(mcp_servers, website_configs) == [
+        "slack", *([] if browsing else ["website-browser"]), "shop", "notes"]
 
 
 # --- sidecar rendering --------------------------------------------------------
@@ -1358,10 +1367,10 @@ def test_needs_local_postgres_reflects_provider_type():
     ({}, "website-browser"),
     ({"website_browser_env_id": "wb-run"}, "wb-run"),
 ], ids=["configured-default", "run-override"])
-async def test_deploy_via_vm_prepares_schemas_including_website_browser(overrides, browser_name):
-    """The gateway auto-adds the browser MCP when websites are present, the run's own when it names one, then drives
-    stage 2 (prepare) with the full post-append service list — so a remote store provisions the browser's
-    schema. This replaces the earlier band-aid that made Env.deploy compute that list."""
+async def test_deploy_via_vm_adds_the_website_browser_and_prepares_schemas_without_it(overrides, browser_name):
+    """The gateway auto-adds the browser MCP when websites are present, the run's own when it names one, on the sites'
+    network alone, then drives stage 2 (prepare) with the post-append service list, which leaves the browser out:
+    it reaches no database, so a remote store provisions it no schema."""
     from agent_env.config import run_env_ids
     from agent_env.env.gateway import GatewayMode
     from agent_env.providers.env_state import DatabaseStateProvider
@@ -1406,11 +1415,10 @@ async def test_deploy_via_vm_prepares_schemas_including_website_browser(override
 
     state_provider.prepare.assert_awaited_once()
     names = state_provider.prepare.call_args.args[0]
-    assert set(names) == {"slack", "shop", browser_name}
+    assert set(names) == {"slack", "shop"}
     assert compose.call_args.kwargs["mcp_server_name"] == "crm"
     browser = next(s for s in compose.call_args.kwargs["mcp_servers"] if s.environment_name == browser_name)
-    assert browser == MCPServerConfig(image=browser.image, environment_name=browser_name, website_browser=True)
-    assert [s.environment_name for s in compose.call_args.kwargs["mcp_servers"] if s.website_browser] == [browser_name]
+    assert browser == MCPServerConfig(image=browser.image, environment_name=browser_name, networks=("website-network",))
 
 
 @pytest.mark.asyncio

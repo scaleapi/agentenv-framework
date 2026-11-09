@@ -84,6 +84,8 @@ logger = logging.getLogger(__name__)
 
 _TRAJECTORY_READ_ATTEMPTS = 3
 
+# The network the env's services share, and the only one its database is on.
+_ENV_NETWORK = "env-network"
 # The network the website browser shares with the gateway and the sites, and with nothing else in the env.
 _SITES_NETWORK = "website-network"
 
@@ -111,7 +113,12 @@ class MCPServerConfig:
     image: str
     environment_name: str
     extra_env_vars: dict[str, str] | None = None
-    website_browser: bool = False  # the env's website browser, which joins only the gateway and the sites
+    networks: tuple[str, ...] = (_ENV_NETWORK,)
+
+    @property
+    def uses_database(self) -> bool:
+        """Only the env's network reaches its database, so a server off it gets no schema and no DATABASE_URL."""
+        return _ENV_NETWORK in self.networks
 
 
 @dataclass
@@ -270,11 +277,11 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             logger.warning(f"Failed to install changelog triggers for schema '{environment_name}': {type(e).__name__}: {e}")
 
     def _all_environments(self, mcp_servers, website_configs) -> list[str]:
-        """The DB-client services (one schema each) for a deploy: MCP servers + website backends,
-        deduped. This is the authoritative list — it reflects any servers the gateway auto-adds (e.g.
-        website_browser) — and drives both the rendered compose and the state provider's ``prepare``."""
+        """The DB-client services (one schema each) for a deploy: the MCP servers that use the database and the website
+        backends, deduped. This is the authoritative list: it drives the rendered compose, the local store's schemas
+        and the state provider's ``prepare``."""
         return list(dict.fromkeys(
-            [s.environment_name for s in mcp_servers]
+            [s.environment_name for s in mcp_servers if s.uses_database]
             + [wc.environment_name for wc in (website_configs or [])]
         ))
 
@@ -301,7 +308,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         Supports MCP servers, websites, or both. Website containers (backend + frontend) are added
         to the same docker network. The gateway receives WEBSITE_URLS env var for discovery. The website
         browser sits on a network of its own with the gateway and each site's frontend (its backend when it
-        has none), so it reaches no backing server and no database by name.
+        has none), so it reaches no backing server and no database, and it gets no schema or DATABASE_URL.
 
         Args:
             mcp_servers: List of MCP server configurations for internal servers.
@@ -414,18 +421,17 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
 
         # Add internal server services
         website_configs = website_configs or []
-        sites_network = [_SITES_NETWORK] if any(s.website_browser for s in mcp_servers) else []
+        sites_network = [_SITES_NETWORK] if any(_SITES_NETWORK in s.networks for s in mcp_servers) else []
         website_backend_servers = {
             wc.environment_name: f"{wc.environment_name}-{AGENT_ENV_WEBSITE_BACKEND_SUFFIX}"
             for wc in website_configs
         }
         for server in mcp_servers:
-            db_url = state_provider.url_for_environment(server.environment_name, instance=state_instance)
             lines.extend([
                 f"  {server.environment_name}:",
                 f"    image: {server.image}",
             ])
-            dep_lines = list(store_dep_lines)
+            dep_lines = list(store_dep_lines) if server.uses_database else []
             if server.environment_name in website_backend_servers:
                 dep_lines += [
                     f"      {website_backend_servers[server.environment_name]}:",
@@ -444,8 +450,10 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 # only for images that read it themselves, and a later pass drops it.
                 f"      - SERVICE_NAME={server.environment_name}",
                 f"      - ENVIRONMENT_NAME={server.environment_name}",
-                f"      - DATABASE_URL={db_url}",
             ])
+            if server.uses_database:
+                db_url = state_provider.url_for_environment(server.environment_name, instance=state_instance)
+                lines.append(f"      - DATABASE_URL={db_url}")
             if server.extra_env_vars:
                 for key, value in server.extra_env_vars.items():
                     lines.append(f"      - {key}={value}")
@@ -456,7 +464,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 "      timeout: 5s",
                 f"      retries: {MCP_HC_RETRIES}",
                 f"      start_period: {MCP_HC_START_PERIOD}",
-                *_network_lines(*([_SITES_NETWORK] if server.website_browser else ["env-network"])),
+                *_network_lines(*server.networks),
                 "",
             ])
 
@@ -527,7 +535,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             "      timeout: 5s",
             "      retries: 10",
             "      start_period: 15s",
-            *_network_lines("env-network", *sites_network),
+            *_network_lines(_ENV_NETWORK, *sites_network),
             "",
         ])
 
@@ -558,7 +566,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 "      timeout: 5s",
                 "      start_period: 30s",
                 "      retries: 3",
-                *_network_lines("env-network", *([] if wc.frontend_image else sites_network)),
+                *_network_lines(_ENV_NETWORK, *([] if wc.frontend_image else sites_network)),
                 "",
             ])
             if not wc.frontend_image:
@@ -569,7 +577,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 "    depends_on:",
                 f"      {backend_name}:",
                 "        condition: service_healthy",
-                *_network_lines("env-network", *sites_network),
+                *_network_lines(_ENV_NETWORK, *sites_network),
                 "",
             ])
 
@@ -588,17 +596,14 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 "    ports:",
                 *(f'      - "{spec}"' for spec in port_bindings(host_ips, publish(sc.host_port), sc.container_port)),
                 f"    restart: {sc.restart}",
-                "    networks:",
-                "      - env-network",
+                *_network_lines(_ENV_NETWORK),
                 "",
             ])
 
         # Add networks
         lines.extend([
             "networks:",
-            "  env-network:",
-            "    driver: bridge",
-            *(line for network in sites_network for line in (f"  {network}:", "    driver: bridge")),
+            *(line for network in (_ENV_NETWORK, *sites_network) for line in (f"  {network}:", "    driver: bridge")),
         ])
         return "\n".join(lines)
 
@@ -777,7 +782,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             browser_server = MCPServerConfig(
                 image=website_browser_env.docker_image_artifact.image_name,
                 environment_name=website_browser_env.environment_name,
-                website_browser=True,
+                networks=(_SITES_NETWORK,),
             )
             mcp_servers = list(mcp_servers) + [browser_server]
             mcp_server_images = list(mcp_server_images) + [website_browser_env.docker_image_artifact]
@@ -830,9 +835,9 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         )
         state_instance = self._state_instance
 
-        # Stage 2 (prepare): create per-service schemas now that the final service list is known —
-        # it includes the auto-added website_browser above. Local no-ops (its servicedb container
-        # runs the init script declaratively); remote/external stores create schemas here.
+        # Stage 2 (prepare): create per-service schemas now that the final service list is known. The website browser
+        # added above takes none. Local no-ops (its servicedb container runs the init script declaratively);
+        # remote/external stores create schemas here.
         if self._state_provider is not None:
             await self._state_provider.prepare(
                 self._all_environments(mcp_servers, website_configs), instance=state_instance
@@ -1314,10 +1319,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             LocalPostgresStateProvider,
         )
 
-        # MCP servers and websites are both DB clients (one schema each); the container path
-        # passes no websites, so normalize to a list once.
-        configs = [*mcp_servers, *(website_configs or [])]
-        environment_names = list(dict.fromkeys(c.environment_name for c in configs))
+        environment_names = self._all_environments(mcp_servers, website_configs)
         provider = self._state_provider  # set by _deploy_gateway
         assert isinstance(provider, LocalPostgresStateProvider)
         spec = provider.store_spec(environment_names)
