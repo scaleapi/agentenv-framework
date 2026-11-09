@@ -223,3 +223,23 @@ async def test_a_contact_still_replying_when_nothing_else_can_wake_the_agent_mak
     assert record["end_reason"] == "stuck"
     [env] = record["pending_at_end"]["contact_replies_in_progress"]["items"]
     assert env["triggers"][0]["id"] == "liveoak-estimate"
+
+
+@pytest.mark.asyncio
+async def test_messages_a_turn_sent_before_it_timed_out_are_in_the_graded_response_and_pending(monkeypatch, tmp_path):
+    def agent(n, texts, rig):
+        rig.message("found it: the blue house, $855")
+        raise TimeoutError("the agent's turn ran out")
+
+    rig = Rig(monkeypatch, tmp_path, agent=agent)
+    await rig.arm()
+    ctx = await rig.run(rig.step())
+
+    [response] = ctx.prompt_responses
+    assert response.response == "[Mon Nov 9, 2:00 PM UTC] found it: the blue house, $855"
+    assert response.error_type == "agent_turn_timeout"
+    [sent] = rig.events(ctx, "message_to_user")
+    assert sent["leftover"] is True
+    [unread] = rig.record(ctx)["pending_at_end"]["unread_by_user"]["items"]
+    assert unread["text"] == "found it: the blue house, $855" and unread["at"] == "2026-11-09T14:00:00Z"
+    assert "found it: the blue house" in " ".join(t for m in rig.chat(ctx) for t in m["texts"])

@@ -78,3 +78,72 @@ async def test_the_process_log_carries_no_one_s_words_only_the_timeline_does(mon
     stored = json.dumps(rig.timeline(ctx))
     for marker in ("SECRET-SENT", "SECRET-PLAIN", "SECRET-REPLY", "SECRET-ALERT", "SECRET-PROMPT"):
         assert marker in stored
+
+
+def _fails_after_fifty_long_messages(n, texts, rig):
+    for i in range(50):
+        rig.message(f"option {i}: " + "x" * 2000)
+    raise TimeoutError("the agent's turn ran out")
+
+
+@pytest.mark.asyncio
+async def test_when_storing_fails_the_kept_events_are_small_at_any_depth(monkeypatch, tmp_path):
+    rig = Rig(monkeypatch, tmp_path, agent=_fails_after_fifty_long_messages)
+    await rig.arm()
+    store = get_config().get_object_store()
+
+    def fail(*a, **kw):
+        raise OSError("bucket gone")
+
+    monkeypatch.setattr(type(store), "put", fail)
+    ctx = await rig.run(rig.step())
+
+    record = rig.record(ctx)
+    assert record["pending_at_end"]["unread_by_user"]["count"] == 50
+    end = record["timeline_tail"][-1]
+    assert end["event"] == "end" and end["pending"]["unread_by_user"][-1] == "(and 30 more)"
+
+    def strings(value):
+        if isinstance(value, str):
+            yield value
+        elif isinstance(value, dict):
+            for v in value.values():
+                yield from strings(v)
+        elif isinstance(value, list):
+            for v in value:
+                yield from strings(v)
+
+    assert max(len(s) for s in strings(record)) <= ao.PENDING_TEXT_CHARS + 1
+    assert len(json.dumps(record, default=str)) < 60_000
+
+
+@pytest.mark.asyncio
+async def test_the_prompt_response_keeps_each_wake_s_parts_cut_to_size(monkeypatch, tmp_path):
+    monkeypatch.setattr(ao, "TURN_TEXT_TOTAL_CHARS", 9000)
+    rig = Rig(monkeypatch, tmp_path)
+    await rig.arm()
+    for day in (10, 11, 12):
+        rig.triggers(rig.notify_at(f"news-{day}", f"2026-11-{day}T14:00:00Z", "y" * 10_000, channel="Gmail"))
+    ctx = await rig.run(rig.step())
+
+    kept = ctx.prompt_responses[0].source_agent_per_turn_prompt_parts
+    assert len(kept) == 4
+    alert = next(p["text"] for p in kept[1] if p["text"].startswith("[Tue Nov 10"))
+    assert len(alert) == ao.TURN_TEXT_CHARS + len("… (cut)") and alert.endswith("… (cut)")
+    assert kept[3][-1]["text"] == "(cut: the run's stored timeline has this wake's full text)"
+    assert "y" * 10_000 in rig.events(ctx, "wake")[1]["parts_text"]  # the timeline keeps it whole
+
+
+@pytest.mark.asyncio
+async def test_reads_whose_answer_broke_the_format_are_counted(monkeypatch, tmp_path):
+    def agent(n, texts, rig):
+        rig.message(f"question {n}?") if n <= 2 else rig.quiet()
+        return ""
+
+    rig = Rig(monkeypatch, tmp_path, agent=agent,
+              answers=[{"outcome": "reply", "message": "hm", "schema_errors": ["no JSON object in the answer"]},
+                       {"outcome": "no_reply", "message": "", "schema_errors": []}])
+    await rig.arm()
+    ctx = await rig.run(rig.step())
+
+    assert rig.record(ctx)["counts"]["user_sim_malformed_answers"] == 1

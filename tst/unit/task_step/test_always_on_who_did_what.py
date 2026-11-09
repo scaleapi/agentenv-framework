@@ -157,7 +157,8 @@ async def test_her_reply_times_are_written_where_a_hook_wrote_them(monkeypatch, 
     start, first, second = ctx.metadata["post_turn_hooks"]["week"]
     assert start == {"hook": "always_on", "turn": 0, "started_at": "2026-11-09T14:00:00Z"}
     assert first == {"hook": "always_on", "turn": 1, "read_at": "2026-11-09T14:00:00Z",
-                     "wrote_at": "2026-11-09T14:00:00Z", "outcome": "reply", "user_reads_at": "2026-11-09T16:30:00Z",
+                     "wrote_at": "2026-11-09T14:00:00Z", "outcome": "reply", "delivered": True,
+                     "deliver_at": "2026-11-09T16:30:00Z", "user_reads_at": "2026-11-09T16:30:00Z",
                      "reply_to": {"wake": 1, "at": "2026-11-09T14:00:00Z", "text": "question 1?",
                                   "matched_by": "only_message"},
                      "delivered_in_wake": 2}
@@ -173,3 +174,38 @@ async def test_a_run_she_never_answered_still_has_records_so_a_check_grades_it_i
     ctx = await rig.run(rig.step())
 
     assert _first_reply(ctx.metadata[ao.HOOK_RECORDS_KEY]) == "never"  # graded: any spend came before an OK
+
+
+@pytest.mark.asyncio
+async def test_a_reply_that_never_reached_the_agent_is_marked_undelivered_and_has_no_reply_time(monkeypatch, tmp_path):
+    """Her reply is held for 2.5 h; an alert wakes the agent after one, the run's last wake (max_wakes), so the reply
+    never reaches it. A check reading user_reads_at must not count it as received."""
+    def agent(n, texts, rig):
+        rig.message("ok to book La Ola for $855?") if n == 1 else rig.quiet()
+        return ""
+
+    rig = Rig(monkeypatch, tmp_path, agent=agent, answers=[{"outcome": "reply", "message": "yes, book it"}])
+    await rig.arm()
+    rig.triggers(rig.notify_at("sam", "2026-11-09T15:00:00Z", "Sam: flights?", channel="noor 30"))
+    ctx = await rig.run(rig.step(max_wakes=2), rig.context(user=DAY))
+
+    _, held = ctx.metadata["post_turn_hooks"]["week"]
+    assert held["outcome"] == "reply" and held["delivered"] is False and "user_reads_at" not in held
+    assert held["deliver_at"] == "2026-11-09T16:30:00Z"
+    assert held["undelivered"] == "the run ended before it reached the agent"
+    assert _first_reply(ctx.metadata["post_turn_hooks"]) == "never"  # not the reply she never got to send
+
+
+@pytest.mark.asyncio
+async def test_her_last_read_s_reply_is_marked_undelivered(monkeypatch, tmp_path):
+    def agent(n, texts, rig):
+        rig.message("wrapped up: La Ola is booked")
+        return ""
+
+    rig = Rig(monkeypatch, tmp_path, agent=agent, answers=[{"outcome": "reply", "message": "thanks!"}])
+    await rig.arm()
+    ctx = await rig.run(rig.step(max_wakes=1))
+
+    [_, last] = ctx.metadata["post_turn_hooks"]["week"]
+    assert last["delivered"] is False and "user_reads_at" not in last
+    assert _first_reply(ctx.metadata["post_turn_hooks"]) == "never"

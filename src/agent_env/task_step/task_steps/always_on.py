@@ -43,7 +43,8 @@ it in the run's metadata under its ``name``; a ``deploy_agent`` step deploys the
   loop's docstring), so a recurring trigger that never wakes the agent can't move the clock forever. What was still pending is recorded (``pending_at_end``): replies held, messages the user
   never read, user lines and alerts never delivered, the agent's checks not yet due, contact replies in progress.
 - Graders read what the user saw. The prompt response is every message_user text in order, each with its pretend
-  time, never the agent's closing text. The conversation (``metadata["a2a_conversations"][step_id]``) holds the user's
+  time, never the agent's closing text; messages no turn took (a turn that timed out after sending) are taken at the
+  end and included, and listed as never read. The conversation (``metadata["a2a_conversations"][step_id]``) holds the user's
   own messages and the agent's message_user texts, then the user's last word that never reached the agent and an end
   marker with the end reason. A failed or timed-out agent turn sets the response's ``error_type`` (as prompt_agent
   does), so verifiers skip the run.
@@ -51,7 +52,9 @@ it in the run's metadata under its ``name``; a ``deploy_agent`` step deploys the
   with who made it and the wake it was seen in, the agent's own with the wake that made it (``app_changes`` events);
   each reply records the agent's message it answers (``reply_to``: its wake, time and text); and each read leaves a
   record in ``metadata["post_turn_hooks"][step_id]`` in the shape the old psi-wake hook wrote, ``user_reads_at``
-  being when the reply reached the agent, so checks built on those records grade the run instead of skipping it.
+  being when the reply reached the agent, so checks built on those records grade the run instead of skipping it. A
+  reply that never reached it (her last read's, or one still held at the end) has ``delivered`` false and no
+  ``user_reads_at``.
 - The run's metadata keeps a summary in ``metadata["always_on"][step_id]`` (small enough for a running job to report
   back); the full timeline goes to the object store, at the summary's ``object_url``.
 - The agent: the message_user rules go in its system prompt when the step sets one and the agent's card takes it,
@@ -139,6 +142,8 @@ TURN_GRACE_SECONDS = 60.0
 TRAJECTORY_FETCH_SECONDS = 120.0
 READ_ASKS = 2
 GATEWAY_ALLOWANCE_SECONDS = 300.0
+# At the end, how long taking the agent's messages no turn took may take (the run's record comes first).
+LEFTOVER_TAKE_SECONDS = 60.0
 # The final check-in's line when the task sets no `final`: the step's, not the user's.
 FINAL_DEFAULT_TEXT = "Time's up on this job. Send {first} a short wrap-up: what's done, and anything still open."
 NOTHING_CAN_WAKE = "nothing_can_wake_the_agent"  # until finish() tells finished_nothing_pending from stuck
@@ -172,6 +177,11 @@ JUMPS_KEPT_PER_GAP = 20
 PENDING_KEPT = 20
 PENDING_TEXT_CHARS = 300
 BULKY_EVENT_FIELDS = ("input", "raw", "read", "parts_text", "changes")
+# What the prompt response keeps of each wake's parts (source_agent_per_turn_prompt_parts): each text part cut to
+# TURN_TEXT_CHARS, and past TURN_TEXT_TOTAL_CHARS in all, a note for the rest; every wake's full text is in the stored
+# timeline (its wake event's parts_text).
+TURN_TEXT_CHARS = 4000
+TURN_TEXT_TOTAL_CHARS = 400_000
 
 
 # ==================================================================================================================
@@ -1133,8 +1143,8 @@ class _Run:
                                "done": r.get("done", False)} for r in replies],
                            key=lambda m: _utc(m["at"]))
         for r in replies:
-            if r.get("hook") is not None:
-                r["hook"]["delivered_in_wake"] = self.wakes + 1
+            if r.get("hook") is not None:  # it reaches the agent now: the reply time the old psi-wake hook recorded
+                r["hook"].update(delivered=True, user_reads_at=_iso(r["deliver_at"]), delivered_in_wake=self.wakes + 1)
         if user_msgs:
             await self._chat_user([self._chat_part(_utc(m["at"]), m["text"], kind=m["kind"],
                                                    **({"done": True} if m.get("done") else {})) for m in user_msgs])
@@ -1178,7 +1188,7 @@ class _Run:
         await self._read_changes("before_turn")
 
         def record() -> None:
-            self.per_turn_parts.append(list(parts))
+            self.per_turn_parts.append(self._kept_parts(parts))
 
         self.log("wake", n=self.wakes, virtual_time=_iso(sent_at), woke_by=woke_by, notifications=notifications or [],
                  last=last, parts_text="\n".join(p.get("text", "") for p in parts if p.get("kind") == "text"))
@@ -1228,6 +1238,25 @@ class _Run:
         await self._read_changes("after_turn")
         await self._schedule_read()
 
+    def _kept_parts(self, parts: list[dict]) -> list[dict]:
+        """What the prompt response keeps of one wake's parts: TURN_TEXT_CHARS of each text, until
+        TURN_TEXT_TOTAL_CHARS in all; then a note. Other parts (files, data) as they are."""
+        kept, used = [], sum(len(p.get("text") or "") for turn in self.per_turn_parts for p in turn or [])
+        for part in parts:
+            if part.get("kind") != "text":
+                kept.append(part)
+                continue
+            text = part.get("text") or ""
+            room = min(TURN_TEXT_CHARS, TURN_TEXT_TOTAL_CHARS - used)
+            if room <= 0:
+                kept.append({"kind": "text", "text": "(cut: the run's stored timeline has this wake's full text)"})
+                break
+            if len(text) > room:
+                part = {**part, "text": text[:room] + "… (cut)"}
+            used += len(part["text"])
+            kept.append(part)
+        return kept
+
     async def _nudge(self, closing: str) -> None:
         """The wake ended with closing text and neither message_user nor stay_quiet, so give the agent one more short
         turn with ``nudge_text``; record what the closing text was and what it did after."""
@@ -1238,7 +1267,7 @@ class _Run:
         msg_id = uuid.uuid4().hex
 
         def record() -> None:
-            self.per_turn_parts.append(list(parts))
+            self.per_turn_parts.append(self._kept_parts(parts))
 
         t = time.time()
         try:
@@ -1344,11 +1373,12 @@ class _Run:
         messages.sort(key=lambda m: m.get("at") or "")
         return messages, quiet
 
-    def _sent(self, messages: list[dict], after_nudge: bool = False) -> None:
-        """Record what the agent sent the user: for her next read, the graded chat and the timeline."""
+    def _sent(self, messages: list[dict], after_nudge: bool = False, leftover: bool = False) -> None:
+        """Record what the agent sent the user: for her next read, the graded chat and the timeline. ``leftover``
+        marks messages no turn took (taken at the end), which she never reads."""
         for m in messages:
             self.log("message_to_user", virtual_time=m.get("at"), text=m["text"], wake=self.wakes,
-                     **({"after_nudge": True} if after_nudge else {}))
+                     **({"after_nudge": True} if after_nudge else {}), **({"leftover": True} if leftover else {}))
             sent = {"at": m.get("at"), "text": m["text"], "wake": self.wakes}
             self.unread.append(sent)
             self.all_messages.append(sent)
@@ -1412,8 +1442,10 @@ class _Run:
             deliver = now + latency
             reply_to = _reply_to(ans, seen)
             entry.update(deliver_at=_iso(deliver), reply_to=reply_to, reply_to_candidates=len(seen))
-            # user_reads_at: when her answer reaches the agent, the reply time the old psi-wake hook recorded
-            hook.update(user_reads_at=_iso(deliver), reply_to=_cut(reply_to))
+            # Not delivered until a wake carries it, which sets user_reads_at; one never delivered (her last read's
+            # reply, or one still held at the end) keeps delivered False and no user_reads_at, so a check can't count
+            # it as received.
+            hook.update(delivered=False, deliver_at=_iso(deliver), reply_to=_cut(reply_to))
             self.held.append({"deliver_at": deliver, "text": ans["message"], "done": outcome == "done",
                               "hook": hook})
             self.last_reply_at = deliver
@@ -1521,6 +1553,14 @@ class _Run:
     async def finish(self) -> None:
         step, ctx = self.step, self.ctx
         now = await self.now()
+        try:  # what the agent sent and no turn took: a turn that timed out or failed mid-way
+            leftover, _ = await asyncio.wait_for(self._take_messages(), LEFTOVER_TAKE_SECONDS)
+            self._sent(leftover, leftover=True)
+        except Exception as e:
+            logger.warning(f"always_on: could not take the agent's last messages: {type(e).__name__}: {e}")
+        for h in self.held:
+            if h.get("hook") is not None:
+                h["hook"]["undelivered"] = "the run ended before it reached the agent"
         await self._read_changes("end")
         try:
             self.pending = await self._pending_at_end()
@@ -1558,6 +1598,9 @@ class _Run:
             "clock_jumps": self.clock_jumps,
             "silent_wakes": sum(1 for e in self.timeline if e["event"] == "agent_turn_end"
                                 and not e.get("messages_to_user")),
+            # reads whose answer didn't match the user sim's answer format (the plug-in's schema_errors)
+            "user_sim_malformed_answers": sum(1 for e in self.timeline if e["event"] == "user_sim_read"
+                                              and e.get("schema_errors")),
         }
         if self.change_cursors:
             counts["app_changes"] = dict(self.change_counts)
@@ -1604,7 +1647,7 @@ class _Run:
         except Exception as e:
             logger.warning(f"always_on: could not store the timeline: {e}")
             record["timeline_store_error"] = f"{type(e).__name__}: {str(e)[:300]}"
-            record["timeline_tail"] = [{k: v for k, v in event.items() if k not in BULKY_EVENT_FIELDS}
+            record["timeline_tail"] = [_small({k: v for k, v in event.items() if k not in BULKY_EVENT_FIELDS})
                                        for event in self.timeline[-TIMELINE_TAIL:]]
 
     def _append_prompt_response(self, final_text: str) -> None:
@@ -1788,14 +1831,25 @@ def _cut(item: Optional[dict]) -> Optional[dict]:
 
 
 def _bounded(pending: dict) -> dict:
-    """``pending`` as the run's metadata keeps it: each list's count, and its first ``PENDING_KEPT`` items with their
-    texts cut to ``PENDING_TEXT_CHARS``; the stored timeline's end event has them all."""
-    out = {}
-    for kind, items in pending.items():
-        kept = [{k: (v[:PENDING_TEXT_CHARS] + "…" if isinstance(v, str) and len(v) > PENDING_TEXT_CHARS else v)
-                 for k, v in item.items()} for item in items[:PENDING_KEPT]]
-        out[kind] = {"count": len(items), "items": kept}
-    return out
+    """``pending`` as the run's metadata keeps it: each list's count, and its first ``PENDING_KEPT`` items, kept
+    small (``_small``) however deep; the stored timeline's end event has them all."""
+    return {kind: {"count": len(items), "items": [_small(item) for item in items[:PENDING_KEPT]]}
+            for kind, items in pending.items()}
+
+
+def _small(value: Any, depth: int = 0) -> Any:
+    """``value`` kept small for the run's metadata, at any depth: strings cut to ``PENDING_TEXT_CHARS``, lists to their
+    first ``PENDING_KEPT`` items and a count of the rest, nesting past six levels summed up."""
+    if isinstance(value, str):
+        return value[:PENDING_TEXT_CHARS] + "…" if len(value) > PENDING_TEXT_CHARS else value
+    if depth >= 6 and isinstance(value, (list, dict)):
+        return f"({len(value)} {'items' if isinstance(value, list) else 'fields'})"
+    if isinstance(value, dict):
+        return {k: _small(v, depth + 1) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        kept = [_small(v, depth + 1) for v in value[:PENDING_KEPT]]
+        return kept + [f"(and {len(value) - PENDING_KEPT} more)"] if len(value) > PENDING_KEPT else kept
+    return value
 
 
 # The timeline fields the process log may show as they are: names, ids, times, states and settings, never what a person
