@@ -1,5 +1,5 @@
-"""apply_sql, capture_env_rows and diff_env_rows: registration, (de)serialization, the scripts they build, and how
-they parse what psql prints. The SQL itself runs against a real PostgreSQL in
+"""apply_sql: registration, (de)serialization, the script it builds, the SQL it refuses, and how it parses what
+psql prints. The SQL itself runs against a real PostgreSQL in
 tst/integration/task_step/test_service_db_sql_postgres.py."""
 import json
 
@@ -11,17 +11,12 @@ from agent_env.task_step.task_steps import apply_sql as apply_sql_module
 from agent_env.task_step.task_steps.apply_sql import (
     SUMMARY_MARKER,
     ApplySqlTaskStep,
+    RefusedSqlError,
     build_script,
     parse_summary,
+    refusals,
     sql_relative_error,
     volatile_functions,
-)
-from agent_env.task_step.task_steps.env_rows import (
-    CaptureEnvRowsTaskStep,
-    DiffEnvRowsTaskStep,
-    diff_indexes,
-    parse_capture_index,
-    pg_text_array,
 )
 from agent_env.task_step.task_steps.service_db_sql import ServiceDbSqlError, _psql_error
 
@@ -29,19 +24,10 @@ from agent_env.task_step.task_steps.service_db_sql import ServiceDbSqlError, _ps
 def test_steps_registered_and_roundtrip():
     reg = get_task_step_registry()
     assert reg.get("apply_sql") is ApplySqlTaskStep
-    assert reg.get("capture_env_rows") is CaptureEnvRowsTaskStep
-    assert reg.get("diff_env_rows") is DiffEnvRowsTaskStep
 
     s = ApplySqlTaskStep.from_dict(ApplySqlTaskStep(id="a", version=1, env_id="e", sql="SELECT 1;").to_dict())
     assert (s.type, s.env_id, s.sql, s.fail_task_on_error) == ("apply_sql", "e", "SELECT 1;", True)
 
-    c = CaptureEnvRowsTaskStep.from_dict(
-        CaptureEnvRowsTaskStep(id="c", version=1, env_id="e", capture="expected", ignore_columns=["ts"]).to_dict())
-    assert (c.capture, c.ignore_columns) == ("expected", ["ts"])
-
-    d = DiffEnvRowsTaskStep.from_dict(DiffEnvRowsTaskStep(
-        id="d", version=1, env_id="e", expected="expected", actual="actual", fail_on_mismatch=True).to_dict())
-    assert (d.expected, d.actual, d.fail_on_mismatch, d.max_examples) == ("expected", "actual", True, 50)
 
 
 def test_apply_sql_null_sql_is_blank():
@@ -53,10 +39,6 @@ def test_apply_sql_null_sql_is_blank():
     lambda: ApplySqlTaskStep(id="a", version=1, env_id=""),
     lambda: ApplySqlTaskStep.from_dict({"id": "a"}),
     lambda: ApplySqlTaskStep(id="a", version=1, env_id="e", sql=["SELECT 1"]),
-    lambda: CaptureEnvRowsTaskStep(id="c", version=1, env_id="e", capture="../x"),
-    lambda: CaptureEnvRowsTaskStep(id="c", version=1, env_id="e", capture=""),
-    lambda: DiffEnvRowsTaskStep(id="d", version=1, env_id="e", expected="a", actual="a"),
-    lambda: DiffEnvRowsTaskStep(id="d", version=1, env_id="e", expected="a b", actual="c"),
 ])
 def test_config_errors(bad):
     with pytest.raises(ValueError):
@@ -99,32 +81,25 @@ def test_psql_error_keeps_error_lines_and_names_a_missing_service():
     assert "no running 'servicedb'" in _psql_error("service \"servicedb\" is not running", "")
 
 
-def test_pg_text_array_quotes():
-    assert pg_text_array([]) == "{}"
-    assert pg_text_array(["a", 'b"c', "d\\e"]) == '{"a","b\\"c","d\\\\e"}'
+@pytest.mark.parametrize("sql", [
+    "INSERT INTO s.t VALUES (1);\nUPDATE s.t SET a = 'COMMIT; BEGIN' WHERE id = 1;",
+    "DO $$ BEGIN PERFORM 1; END $$;",
+    "CREATE FUNCTION f() RETURNS int AS $body$ BEGIN RETURN 1; END $body$ LANGUAGE plpgsql;",
+    "-- COMMIT later\n/* ROLLBACK */ INSERT INTO s.t VALUES (E'it''s back\\tafter');",
+])
+def test_refusals_ignore_literals_comments_and_bodies(sql):
+    assert refusals(sql) == []
 
 
-def test_diff_indexes():
-    expected = parse_capture_index(
-        "s.t\t[1]\taaa\n"
-        "s.t\t[2]\tbbb\n"
-        "s.t\t[3]\tccc\n"
-        "s.nopk\trow:x\tx\n"
-    )
-    actual = parse_capture_index(
-        "s.t\t[1]\taaa\n"   # same
-        "s.t\t[2]\tBBB\n"   # changed
-        "s.t\t[4]\tddd\n"   # extra; [3] missing
-        "s.nopk\trow:x\tx\n"
-        "s.nopk\trow:x\tx\n"  # a duplicate row in a table without a primary key
-        "s.new\t[1]\teee\n"  # a whole table only in actual
-    )
-    assert diff_indexes(expected, actual) == {
-        "extra": [("s.new", "[1]"), ("s.nopk", "row:x"), ("s.t", "[4]")],
-        "missing": [("s.t", "[3]")],
-        "changed": [("s.t", "[2]")],
-    }
-    assert diff_indexes(expected, expected) == {"extra": [], "missing": [], "changed": []}
+@pytest.mark.parametrize(("sql", "found"), [
+    ("BEGIN;\nINSERT INTO s.t VALUES (1);\nCOMMIT;\nSELECT 1/0;", ["line 1 of the SQL: BEGIN", "line 3 of the SQL: COMMIT"]),
+    ("INSERT INTO s.t VALUES (1); savepoint x;", ["line 1 of the SQL: SAVEPOINT"]),
+    ("INSERT INTO s.t VALUES (1);\n\\! rm -rf /", ["line 2 of the SQL: psql meta-commands"]),
+])
+def test_refusals_name_transaction_control_and_meta_commands(sql, found):
+    problems = refusals(sql)
+    assert len(problems) == len(found)
+    assert all(p.startswith(f) for p, f in zip(problems, found))
 
 
 class _FakeHost:
@@ -178,4 +153,15 @@ async def test_apply_sql_failure_raises_psql_error(host):
     ctx = TaskStepContext()
     with pytest.raises(ServiceDbSqlError, match="syntax error at or near"):
         await ApplySqlTaskStep(id="inject", version=1, env_id="e", sql="INSRT INTO s.t VALUES (1);").execute(ctx)
+    assert ctx.metadata["applied_sql"]["inject"]["applied"] is False
+
+
+@pytest.mark.asyncio
+async def test_apply_sql_refuses_a_commit_before_running_anything(host):
+    host["host"] = h = _FakeHost()
+    ctx = TaskStepContext()
+    with pytest.raises(RefusedSqlError, match="line 2 of the SQL: COMMIT"):
+        await ApplySqlTaskStep(id="inject", version=1, env_id="e",
+                               sql="INSERT INTO s.t VALUES (1);\nCOMMIT;\nSELECT 1/0;").execute(ctx)
+    assert h.scripts == []
     assert ctx.metadata["applied_sql"]["inject"]["applied"] is False

@@ -17,7 +17,7 @@ from agent_env.task_step.context import TaskStepContext
 
 logger = logging.getLogger(__name__)
 
-# The directory on the env's VM host that holds the SQL files and row captures these steps write.
+# The directory on the env's VM host that holds the SQL files written for psql to read.
 WORK_DIR = "/tmp/agentenv-service-db-sql"
 
 

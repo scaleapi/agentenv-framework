@@ -10,6 +10,9 @@ step with psql's message (it names the statement's line). After it:
   happens after this step, as a freshly loaded universe does; nothing the SQL did shows up as an agent's change;
 - every serial / identity sequence in the services' schemas is advanced past its column's largest value, so an
   insert with explicit ids doesn't make the services' own later inserts collide;
+- SQL that would end or leave that transaction (``BEGIN``, ``COMMIT``, ``ROLLBACK``, ``SAVEPOINT``, ... at the start
+  of a statement) or holds a psql meta-command (a backslash outside a literal) is refused before anything runs, since
+  a ``COMMIT`` would keep the writes before a later failing statement;
 - ``context.metadata["applied_sql"][<step id>]`` records the SQL's sha256 and size, the rows it wrote per table and
   operation (read from the changelog before it was cleared), and any volatile functions (``now()``, ``random()``,
   ...) it calls: those give a different result on every apply, so a rebuild can't reproduce their rows exactly.
@@ -77,6 +80,40 @@ BEGIN
 END
 $agentenv_sync$;
 """
+
+
+# Comments, string literals, quoted identifiers and dollar-quoted bodies, which hold no statement of the script's own.
+_LITERAL = re.compile(
+    r"--[^\n]*|/\*.*?\*/|'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"|\$([A-Za-z_][A-Za-z0-9_]*|)\$.*?\$\1\$",
+    re.DOTALL,
+)
+_TRANSACTION_CONTROL = re.compile(
+    r"(?:\A|;)\s*(begin|commit|rollback|end|abort|savepoint|release|start\s+transaction|prepare\s+transaction)\b",
+    re.IGNORECASE,
+)
+
+
+class RefusedSqlError(ServiceDbSqlError):
+    """SQL ``apply_sql`` won't run, refused before it reaches the database."""
+
+    def __init__(self, what: str, message: str):
+        RuntimeError.__init__(self, f"{what} refused: {message}")
+        self.exit_code = None
+        self.message = message
+
+
+def refusals(sql: str) -> list[str]:
+    """Why ``sql`` can't run as one ``apply_sql`` transaction, each naming its line; empty when it can."""
+    code = _LITERAL.sub(lambda m: re.sub(r"[^\n]", " ", m.group(0)), sql)
+    found = []
+    for m in _TRANSACTION_CONTROL.finditer(code):
+        line = code.count("\n", 0, m.start(1)) + 1
+        found.append(f"line {line} of the SQL: {m.group(1).upper()} controls the transaction apply_sql runs the SQL "
+                     "in; remove it (the step commits on success and rolls everything back on an error)")
+    for m in re.finditer(r"\\", code):
+        line = code.count("\n", 0, m.start()) + 1
+        found.append(f"line {line} of the SQL: psql meta-commands (a backslash outside a literal) aren't allowed")
+    return found
 
 
 def volatile_functions(sql: str) -> list[str]:
@@ -185,7 +222,9 @@ async def apply_sql_on_host(host: ServiceDbHost, sql: str, record: dict, *, what
     """Apply ``sql`` to the service database on ``host`` as ``apply_sql`` does, filling in ``record`` (from
     ``sql_record``): the rows written per table, and ``applied``. For callers that restore an env outside a task,
     such as a trajectory editor rebuilding a run's start state. Raises ``ServiceDbSqlError`` with the failing line
-    counted in ``sql`` as given."""
+    counted in ``sql`` as given, or ``RefusedSqlError`` before anything runs."""
+    if problems := refusals(sql):
+        raise RefusedSqlError(what, "; ".join(problems))
     if record["volatile_functions"]:
         logger.warning("%s: the SQL calls %s, which give a different result on every apply", what,
                        ", ".join(record["volatile_functions"]))

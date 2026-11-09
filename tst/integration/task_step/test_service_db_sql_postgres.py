@@ -1,10 +1,10 @@
-"""apply_sql, capture_env_rows and diff_env_rows against a real PostgreSQL 16 holding a service schema set up the way a
+"""apply_sql against a real PostgreSQL 16 holding a service schema set up the way a
 gateway env's service database is: the shared changelog objects from the state provider's init script and changelog
 triggers on the service's tables.
 
-The steps reach the database through ``ServiceDbHost``; here its psql runs through ``docker exec`` into a local
+The step reaches the database through ``ServiceDbHost``; here its psql runs through ``docker exec`` into a local
 postgres container and its shell commands run on this machine, so everything but the env's VM is real: the scripts,
-psql's single transaction and ``\\gexec``, the triggers, and the ``cut`` / ``awk`` the diff reads captures with.
+psql's single transaction and ``\\gexec``, and the triggers.
 """
 import asyncio
 import os
@@ -17,10 +17,8 @@ import pytest
 from agent_env.providers.env_state.env_state_provider import DatabaseStateProvider
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps import apply_sql as apply_sql_module
-from agent_env.task_step.task_steps import env_rows as env_rows_module
 from agent_env.task_step.task_steps import service_db_sql
 from agent_env.task_step.task_steps.apply_sql import ApplySqlTaskStep
-from agent_env.task_step.task_steps.env_rows import CaptureEnvRowsTaskStep, DiffEnvRowsTaskStep
 from agent_env.task_step.task_steps.service_db_sql import ServiceDbHost, ServiceDbSqlError
 from tst.util.capabilities import missing_capability_reason
 
@@ -117,7 +115,6 @@ def base(pg, tmp_path, monkeypatch):
         return host
 
     monkeypatch.setattr(apply_sql_module, "service_db_host", fake)
-    monkeypatch.setattr(env_rows_module, "service_db_host", fake)
     return pg
 
 
@@ -161,78 +158,3 @@ async def test_failing_sql_rolls_back_everything_and_names_the_error(base):
     assert _sql(base, "SELECT count(*) FROM slack.channels") == "2"  # the first insert was rolled back too
     assert ctx.metadata["applied_sql"]["inject"]["applied"] is False
 
-
-async def _capture(name, **kw):
-    ctx = kw.pop("ctx")
-    await CaptureEnvRowsTaskStep(id=f"capture-{name}", version=1, env_id="test-env", capture=name, **kw).execute(ctx)
-
-
-@pytest.mark.asyncio
-async def test_diff_flags_extra_missing_and_changed_rows(base):
-    ctx = TaskStepContext()
-    await ApplySqlTaskStep(id="inject", version=1, env_id="test-env", sql=_INJECTION).execute(ctx)
-    await _capture("expected", ctx=ctx)
-    assert ctx.metadata["env_row_captures"]["expected"]["tables"] == {
-        "slack.channels": 3, "slack.messages": 4, "slack.reactions": 1}
-
-    # The universe a run started from: a stale sandbox with an extra message the SQL never wrote, one of the SQL's
-    # messages missing, and an edited body.
-    _sql(base, """
-        INSERT INTO slack.messages (id, channel_id, body) VALUES (99, 7, 'zombie: stale from an earlier injection');
-        DELETE FROM slack.messages WHERE id = 10;
-        UPDATE slack.messages SET body = 'login is broken' WHERE id = 2;
-        INSERT INTO slack.reactions VALUES (2, 'eyes');
-    """)
-    await _capture("actual", ctx=ctx)
-    await DiffEnvRowsTaskStep(id="diff", version=1, env_id="test-env", expected="expected",
-                              actual="actual").execute(ctx)
-    v = ctx.metadata["verifications"]["diff"]
-    assert v["match"] is False
-    assert v["counts"] == {"extra": 2, "missing": 1, "changed": 1}
-    assert v["by_table"] == {"slack.messages": {"extra": 1, "missing": 1, "changed": 1},
-                             "slack.reactions": {"extra": 1, "missing": 0, "changed": 0}}
-    extra = {(e["table"], e["key"]): e["row"] for e in v["examples"]["extra"]}
-    assert extra[("slack.messages", "[99]")]["body"] == "zombie: stale from an earlier injection"
-    assert v["examples"]["missing"][0]["row"]["body"] == "Login 500s again: see ENG-1"
-    changed = v["examples"]["changed"][0]
-    assert (changed["expected"]["body"], changed["actual"]["body"]) == ("login is broken (prod)", "login is broken")
-
-    with pytest.raises(RuntimeError, match="differ from 'expected'"):
-        await DiffEnvRowsTaskStep(id="gate", version=1, env_id="test-env", expected="expected", actual="actual",
-                                  fail_on_mismatch=True).execute(ctx)
-
-
-@pytest.mark.asyncio
-async def test_rebuild_from_base_plus_sql_matches_row_for_row(base):
-    """Two applies of the same SQL to the same base give identical rows: the clean-match case."""
-    ctx = TaskStepContext()
-    await ApplySqlTaskStep(id="inject", version=1, env_id="test-env", sql=_INJECTION).execute(ctx)
-    await _capture("expected", ctx=ctx)
-
-    # Rebuild: the base again, the same SQL again.
-    _sql(base, "DROP SCHEMA slack CASCADE;")
-    _sql(base, "CREATE SCHEMA slack;")
-    _sql(base, _BASE)
-    _sql(base, "DELETE FROM public._changelog;")
-    await ApplySqlTaskStep(id="inject-again", version=1, env_id="test-env", sql=_INJECTION).execute(ctx)
-    await _capture("actual", ctx=ctx)
-    await DiffEnvRowsTaskStep(id="diff", version=1, env_id="test-env", expected="expected", actual="actual",
-                              fail_on_mismatch=True).execute(ctx)
-    assert ctx.metadata["verifications"]["diff"]["match"] is True
-    assert ctx.metadata["verifications"]["diff"]["counts"] == {"extra": 0, "missing": 0, "changed": 0}
-
-
-@pytest.mark.asyncio
-async def test_ignore_columns_hide_volatile_differences(base):
-    ctx = TaskStepContext()
-    await _capture("expected", ctx=ctx, ignore_columns=["posted_at"])
-    _sql(base, "UPDATE slack.messages SET posted_at = '2030-01-01T00:00:00Z';")
-    await _capture("actual", ctx=ctx, ignore_columns=["posted_at"])
-    await _capture("actual-strict", ctx=ctx)
-    await DiffEnvRowsTaskStep(id="loose", version=1, env_id="test-env", expected="expected",
-                              actual="actual").execute(ctx)
-    assert ctx.metadata["verifications"]["loose"]["match"] is True
-    await DiffEnvRowsTaskStep(id="strict", version=1, env_id="test-env", expected="expected",
-                              actual="actual-strict").execute(ctx)
-    # Without the ignore list the capture's rows carry posted_at, so they no longer hash like the expected ones.
-    assert ctx.metadata["verifications"]["strict"]["counts"]["changed"] == 2
