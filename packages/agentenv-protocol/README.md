@@ -789,8 +789,13 @@ class MailApp(ComputerAppEnvironment):
   models whose fields add to the class's `Settings` and `BuildSettings` on that OS. What's on the
   class applies to every OS. `@install(os_type, spec, launch=..., ...)` is the generic form, for an
   OS type a plugin adds, with that OS type's own install model as `spec`; `@linux(...)` is
-  `@install("linux", Linux(...), ...)`. On the computer the class reads what's declared for the OS
-  it runs on (`platform.detect()`).
+  `@install("linux", Linux(...), ...)`. `@linux(distribution="omarchy", ...)`, or
+  `@install("linux/omarchy", ...)`, declares for one distribution, by its /etc/os-release ID, what
+  replaces the OS type's declaration there. On the computer the class reads what's declared for the
+  platform its computer was composed for, which the composer sets as `AGENTENV_PLATFORM` for an app
+  that declares anything for a distribution, else the one it runs on (`platform.detect()`): its
+  distribution's, else its OS type's. An install step or ready check's `os=` names OS types or
+  distributions, and one for an OS type runs on all of it.
 - **`launch=Launch(...)`** says how it starts in the desktop session: with it (`at="boot"`) or when
   the agent opens it (`"demand"`). `ready=Ready(...)` says when it's ready, within `timeout_s` of its
   launch: a window matching `launch.window` by its class, instance or title (on Hyprland, a Wayland

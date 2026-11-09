@@ -61,7 +61,10 @@ pointer has moved along its path (P7). `env.toml`'s `[[known_failures.macos]]` n
 records them in the build's probe (`known_failures`) and doesn't fail the build for them; any other failure still
 does. A driver's `known_failures`, by OS type, names a check by its id and name, with why. One that a probe didn't see
 fail is recorded in its probe (`unused_known_failures`, with what it saw) and warned of, so a waiver doesn't outlive its
-defect; P7's is intermittent, so a probe it passes doesn't show it fixed.
+defect; P7's is intermittent, so a probe it passes doesn't show it fixed. An install or known failures can also be for
+one distribution, keyed `"<os>/<distribution>"` by its /etc/os-release ID, as `[install."linux/omarchy"]` and
+`[[known_failures."linux/omarchy"]]`: on that distribution they replace the OS type's, never merge with them, and
+elsewhere the OS type's apply. A distribution no `supports` entry names is refused at put.
 
 On Windows (`amd64`, composed onto a disk such as `windows-11`), cua-driver is the cua-driver-rs release's zip,
 checked by sha256 and unpacked beside the driver (`install-windows.ps1`). Its daemon runs in the session user's
