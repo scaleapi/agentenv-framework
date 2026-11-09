@@ -117,17 +117,21 @@ async def test_the_card_is_on_the_mcp_port_and_the_recorders_and_tools_pass_thro
 
 @pytest.mark.asyncio
 async def test_a_recording_through_the_card_on_the_mcp_port_films_the_page_an_agent_opens(browser):
+    """One MCP session throughout, as an agent holds one: an isolated browser lives as long as its session."""
     _, mcp, _ = browser
-    async with httpx.AsyncClient(timeout=60) as http:
-        card = (await http.get(f"{mcp}{WELL_KNOWN_PATH}")).json()
-        start, end = (protocol_v1.find_extension_method(card, COMPUTER_RECORDING, op)["endpoint"]
-                      for op in ("start", "end"))
-        await _tools(mcp, ("browser_navigate", {"url": PAGE}))
-        started = (await http.post(f"{mcp}{start}", json={"request_id": "front:start", "fps": 5})).json()
-        for shade in ("red", "green", "blue"):
-            await _tools(mcp, ("browser_navigate", {"url": f"data:text/html,<body style='background:{shade}'>"}))
-            await asyncio.sleep(1)
-        manifest = (await http.post(f"{mcp}{end}", json={"recording_id": started["recording_id"]})).json()
+    async with httpx.AsyncClient(timeout=60) as http, streamable_http_client(f"{mcp}/mcp") as (read, write, _):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            card = (await http.get(f"{mcp}{WELL_KNOWN_PATH}")).json()
+            start, end = (protocol_v1.find_extension_method(card, COMPUTER_RECORDING, op)["endpoint"]
+                          for op in ("start", "end"))
+            await session.call_tool("browser_navigate", {"url": PAGE})
+            started = (await http.post(f"{mcp}{start}", json={"request_id": "front:start", "fps": 5})).json()
+            for shade in ("red", "green", "blue"):
+                page = f"data:text/html,<body style='background:{shade}'>"
+                await session.call_tool("browser_navigate", {"url": page})
+                await asyncio.sleep(1)
+            manifest = (await http.post(f"{mcp}{end}", json={"recording_id": started["recording_id"]})).json()
 
     assert manifest["ended_by"] == "end" and manifest["segments"], manifest
     assert sum(segment["frames"] for segment in manifest["segments"]) >= 3, manifest
