@@ -9,8 +9,9 @@ Windows, and each call goes on a connection of its own, as cua-driver's own MCP 
 cua-driver starts again after ending it for idling, where a named one stays ended. A call the daemon can't take, as
 while it restarts, fails as unavailable; input whose reply is lost fails with its outcome unknown, since it may have
 arrived. It needs ``agentenv-framework-protocol[computer]`` and ``cua-driver`` where it runs. On a Hyprland desktop
-(Wayland) it runs cua-driver's Wayland backend, sends keys and text to the focused window in the foreground, and is
-ready, and takes input, only while Hyprland has cua-driver's plugin loaded, asking Hyprland through hyprland.py."""
+(Wayland) it runs cua-driver's Wayland backend at its own pin, sends text to the desktop and keys to the focused
+window in the foreground, Super and a key a menu holds the keyboard from going to the desktop, and is ready, and takes
+input, only while Hyprland has cua-driver's plugin loaded, asking Hyprland through hyprland.py."""
 from __future__ import annotations
 
 import asyncio
@@ -77,18 +78,20 @@ else:
     SOCKET = "/run/agentenv/cua-driver.sock"
 #: What cua-driver's own MCP server (``cua-driver mcp``) says at connect and lists at the pinned version on each OS: its
 #: instructions, its tools, which the running daemon must list the same, and its skill resources.
-MANIFEST = Path(__file__).with_name("mcp-macos.json" if MACOS else "mcp-windows.json" if WINDOWS else "mcp.json")
+MANIFEST = Path(__file__).with_name("mcp-macos.json" if MACOS else "mcp-windows.json" if WINDOWS else
+                                    "mcp-hyprland.json" if HYPRLAND else "mcp.json")
 #: Where the release's zip is unpacked on Windows, beside this file.
 WINDOWS_EXECUTABLE = Path(__file__).with_name("cua-driver") / "cua-driver.exe"
 #: CuaDriver.app's executable, which macOS runs the daemon as.
 APP_EXECUTABLE = Path("/Applications/CuaDriver.app/Contents/MacOS/cua-driver")
-#: The sha256 of the cua-driver executable each arch's pinned wheel installs, on macOS CuaDriver.app's, and on Windows
-#: the release zip's.
+#: The sha256 of the cua-driver executable each arch's pinned wheel installs, on macOS CuaDriver.app's, on Windows the
+#: release zip's, and on Hyprland its own pin's wheel's, 0.44, which delivers background input there.
 EXECUTABLES = {
     "amd64": "bf57b2f3778a0a7daa9388e241f20ce948b32a7a2f4dd102e497f34e54137934",
     "arm64": "26e9eee8165e9ce7b614b5e3d68e5d963231385a82b65236406718b5ce1ff936",
     "macos/arm64": "b4d974a9c1c92a700cd7be7ede987aea4a1e6835e37039ce3d628b71bd5f0ca8",
     "windows/amd64": "ffa58d88779ee219304b0c307f4cfa970fe822f830c6ecf9254eda5c29e22bf2",
+    "hyprland/amd64": "f4259d5135d23d4d03968e074d144a10ece6305ca28ef48edfb3ef5c9e724228",
 }
 #: How the daemon delivers the pointer's actions: in the foreground on macOS, where it doesn't by default.
 FOREGROUND = {"delivery_mode": "foreground"} if MACOS else {}
@@ -140,6 +143,7 @@ class CuaDriver(ComputerDriverEnvironment):
         self._skill: tuple[str, str, dict[str, str]] | None = None
         self._texts: dict[str, str] | None = None
         self._keymap: _Keymap | None = None
+        self._reset_bind: dict | None = None
 
     def forwarded_tools(self) -> list[ForwardedTool]:
         return [ForwardedTool(EnvironmentTool(name=t["name"], description=t["description"], inputSchema=t["inputSchema"]),
@@ -209,13 +213,53 @@ class CuaDriver(ComputerDriverEnvironment):
     async def type_in(self, text) -> None:
         if not MACOS and not WINDOWS and not HYPRLAND and any(ord(ch) >= LATIN_1 for ch in text):
             await asyncio.to_thread(self._hold, text)
-        await self._send("type_text", text=text, **(await hyprland.focused() if HYPRLAND else {}))
+        await self._send("type_text", text=text, **(hyprland.DESKTOP if HYPRLAND else {}))
 
     @press
     async def press_keys(self, keys) -> None:
         *held, key = keys
-        await self._send("press_key", modifiers=_modifiers(held), key=MODIFIERS.get(key) or NAMED.get(key, key),
-                         **(await hyprland.focused() if HYPRLAND else {}))
+        modifiers, name = _modifiers(held), MODIFIERS.get(key) or NAMED.get(key, key)
+        if HYPRLAND:
+            await self._press_on_hyprland(modifiers, name)
+        else:
+            await self._send("press_key", modifiers=modifiers, key=name)
+
+    async def _press_on_hyprland(self, modifiers: list[str], key: str) -> None:
+        """A key on Hyprland: to the focused window as a person presses it on a US keyboard, where it edits text as a
+        person's does, unless it's Super or held with it, which is Hyprland's own, or nothing is focused, or a layer
+        such as a menu holds the keyboard and refuses it there; then to the desktop, punctuation by its keysym name."""
+        if key != "super" and "super" not in modifiers and (window := await hyprland.focused()):
+            try:
+                return await self._to_window({**hyprland.on_us_keyboard(modifiers, key), **window})
+            except DeliveryFailed as e:
+                if hyprland.GRABBED not in e.message:
+                    raise
+        await self._send("press_key", modifiers=modifiers, key=hyprland.PUNCTUATION.get(key, key),
+                         **hyprland.DESKTOP)
+
+    async def _to_window(self, pressed: dict) -> None:
+        """A key aimed at a window, the US layout's keymap put back first when cua-driver refuses it for the seat's
+        keymap, which an input method changes after desktop text, by a chord bound to nothing but this driver's bind,
+        which Hyprland keeps from every window."""
+        try:
+            return await self._send("press_key", **pressed)
+        except DeliveryFailed as e:
+            if hyprland.UNLAID not in e.message:
+                raise
+            if (bind := await hyprland.reset_bind(self._reset_bind)) is None:
+                raise DeliveryFailed(e.message, hint=f"Hyprland has {hyprland.RESET_BIND}, which puts the US keymap back, "
+                                                     "bound to something this driver didn't bind, or it couldn't bind "
+                                                     "it, so the driver didn't press it") from e
+            self._reset_bind = bind
+        await self._send("press_key", **hyprland.RESET, **hyprland.DESKTOP)
+        deadline = time.monotonic() + hyprland.RESET_S
+        while True:
+            try:
+                return await self._send("press_key", **pressed)
+            except DeliveryFailed as e:
+                if hyprland.UNLAID not in e.message or time.monotonic() > deadline:
+                    raise
+            await asyncio.sleep(hyprland.RESET_POLL_S)
 
     async def _forward(self, tool: str, acts: bool, /, **arguments: Any) -> CallToolResult:
         """A call to one of cua-driver's own tools in its caller's session, answered as cua-driver answers it; one that
@@ -275,7 +319,8 @@ class CuaDriver(ComputerDriverEnvironment):
             return [ReadyCheck("cua-driver", False, "its daemon isn't answering yet")]
         arch = self.platform.arch or ""
         digest = await asyncio.to_thread(_executable_sha256)
-        expected = EXECUTABLES.get(f"macos/{arch}" if MACOS else f"windows/{arch}" if WINDOWS else arch)
+        expected = EXECUTABLES.get(f"macos/{arch}" if MACOS else f"windows/{arch}" if WINDOWS else
+                                   f"hyprland/{arch}" if HYPRLAND else arch)
         running = {t["name"]: t["input_schema"] for t in listed}
         pinned = {t["name"]: t["inputSchema"] for t in _manifest()["tools"]}
         differ = sorted(name for name in running.keys() | pinned.keys() if running.get(name) != pinned.get(name))
