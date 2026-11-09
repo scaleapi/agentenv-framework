@@ -188,10 +188,16 @@ async def test_a_turn_of_the_loop_past_the_reserve_ends_the_run_on_a_step_error(
     monkeypatch.setattr(ao.AlwaysOnTaskStep, "wake_reserve_seconds", lambda step: 0.5)
     rig = Rig(monkeypatch, tmp_path)
 
-    async def hangs(run):
-        await asyncio.sleep(60)
+    real_take = ao._Run._take_messages
+    calls: list[int] = []
 
-    monkeypatch.setattr(ao._Run, "_take_messages", hangs)
+    async def hangs_once(run):
+        calls.append(1)
+        if len(calls) == 1:
+            await asyncio.sleep(60)
+        return await real_take(run)
+
+    monkeypatch.setattr(ao._Run, "_take_messages", hangs_once)
     await rig.arm()
     ctx = rig.context()
     with pytest.raises(RuntimeError, match="the opening wake ran past its worst case"):

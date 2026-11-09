@@ -54,6 +54,11 @@ it in the run's metadata under its ``name``; a ``deploy_agent`` step deploys the
   being when the reply reached the agent, so checks built on those records grade the run instead of skipping it.
 - The run's metadata keeps a summary in ``metadata["always_on"][step_id]`` (small enough for a running job to report
   back); the full timeline goes to the object store, at the summary's ``object_url``.
+- The agent: the message_user rules go in its system prompt when the step sets one and the agent's card takes it,
+  else on its first wake; its session is the step's ``context_id`` when set, as prompt_agent's is, else the run's own.
+- When the step ends it puts back the gateway settings it changed for the run (the user chat's roles and stay_quiet,
+  the triggers' concurrent_fires and executor time limit, the roles with scheduled checks, the clock's rate), so the
+  task's later steps see them as they were.
 """
 from __future__ import annotations
 
@@ -352,16 +357,25 @@ class _Run:
         self.clock: dict = {}                  # the task's clock rate, and whether the step freezes it between turns
         self.clock_rates: list[tuple[Any, float]] = []  # (env, the task's rate) for each clock the step freezes
         self.undo: list[tuple[str, Any]] = []  # (what, coroutine function): the gateway settings to put back at the end
+        self.rules_in_system_prompt = False   # whether the agent took the rules in its system prompt
 
     async def restore(self) -> None:
         """Put back what the step changed on the gateways, latest first, so later steps of the task see the settings
-        they had before it: the clock's rate, ... Each is tried on its own; one that fails is logged."""
+        they had before it: the user chat's roles, user name and stay_quiet; the triggers' concurrent_fires and
+        executor time limit; the roles with scheduled checks; the clock's rate. Each is tried on its own; one that
+        fails is logged."""
         while self.undo:
             what, put_back = self.undo.pop()
             try:
                 await put_back()
             except Exception as e:
                 logger.warning(f"always_on: could not put back {what} after the run: {type(e).__name__}: {e}")
+
+    def _undo_config(self, env, uri: str, what: str, body: dict) -> None:
+        """At the end, set ``env``'s ``uri`` config back to ``body``, what it was before the step changed it."""
+        async def put_back() -> None:
+            await _call(env, uri, "config", body, attempts=3)
+        self.undo.append((f"{what} on {env.env_id}", put_back))
 
     def close(self) -> None:
         for p in self._plugin_paths:
@@ -430,6 +444,10 @@ class _Run:
         if step.stay_quiet:
             chat_config["stay_quiet"] = True
         for env in self.chat_envs:
+            before = await _call(env, EXT_USER_CHAT_URI, "state") if env.supports(EXT_USER_CHAT_URI, "state") else {}
+            self._undo_config(env, EXT_USER_CHAT_URI, "the user chat's config",
+                              {"roles": before.get("roles") or [], "user_name": before.get("user_name") or "your user",
+                               **({"stay_quiet": True} if before.get("stay_quiet") else {})})
             await _call(env, EXT_USER_CHAT_URI, "config", chat_config)
         await self._configure_clock()
         await self._configure_checks()
@@ -449,7 +467,9 @@ class _Run:
         self.hook_records.append({"hook": HOOK_NAME, "turn": 0, "started_at": _iso(await self.now())})
         ctx.metadata.setdefault(HOOK_RECORDS_KEY, {})[step.id] = self.hook_records
         self.user_context_id = uuid.uuid4().hex   # one user sim session per run
-        self.solver_context_id = uuid.uuid4().hex
+        # The agent's session: the step's context_id, as prompt_agent uses it, so a run can go on with the session an
+        # earlier step left; else a new one. The graded conversation is the run's own either way.
+        self.solver_context_id = step.context_id or uuid.uuid4().hex
 
         now = await self.now()
         self.log("start", virtual_time=_iso(now), end_time=_iso(self.end) if self.end else None,
@@ -514,6 +534,11 @@ class _Run:
         if negotiated:
             await protocol.post_agent_config(self.target_url + negotiated.endpoint, negotiated.fields)
         ctx.record_model("solver", step.id, negotiated.fields.get("model") if negotiated else None)
+        self.rules_in_system_prompt = bool(desired.get("system_prompt") and negotiated
+                                           and "system_prompt" in negotiated.fields)
+        if desired.get("system_prompt") and not self.rules_in_system_prompt:
+            logger.warning("always_on: the agent's card did not accept system_prompt, so the message_user rules go "
+                           "on its first wake instead")
 
         setup = self.plugin.setup(self.version, self.person)
         self.user_model, self.user_model_from = self._user_model()
@@ -591,6 +616,10 @@ class _Run:
             if not env.supports(EXT_TRIGGERS_URI, "config"):
                 applied.append({"env_id": env.env_id, "applied": False, "why": "the gateway has no triggers config"})
                 continue
+            before = (await _call(env, EXT_TRIGGERS_URI, "state")).get("settings") or {}
+            self._undo_config(env, EXT_TRIGGERS_URI, "the triggers' settings",
+                              {k: v for k, v in before.items()
+                               if k in ("concurrent_fires", "executor_timeout_seconds") and v is not None})
             got = await _call(env, EXT_TRIGGERS_URI, "config", body)
             applied.append({"env_id": env.env_id, "applied": True, "concurrent_fires": got.get("concurrent_fires"),
                             "executor_timeout_seconds": got.get("executor_timeout_seconds")})
@@ -632,14 +661,17 @@ class _Run:
                 body = {"roles": [*roles, self.recipient],
                         "max_active": state.get("max_active", DEFAULT_MAX_ACTIVE) if roles else DEFAULT_MAX_ACTIVE,
                         "min_interval": state.get("min_interval") if roles else step.scheduled_check_min_interval}
+                self._undo_config(env, EXT_NOTIFICATIONS_URI, "the roles with scheduled checks",
+                                  {"roles": roles, **{k: state[k] for k in ("max_active", "min_interval")
+                                                      if state.get(k) is not None}})
                 got = await _call(env, EXT_NOTIFICATIONS_URI, "config", body)
                 applied.append({"env_id": env.env_id, "set_by": "step", "min_interval": got.get("min_interval"),
                                 "max_active": got.get("max_active")})
         self.checks = {"on": bool(applied), "envs": applied}
 
     def _system_prompt(self) -> Optional[str]:
-        """The step's system prompt with the rules after it; without one, the agent keeps its own and the first wake
-        opens with the rules."""
+        """The step's system prompt with the rules after it; without one, or when the agent's card doesn't accept it,
+        the agent keeps its own and the first wake opens with the rules."""
         return f"{self.step.system_prompt.rstrip()}\n\n{self.rules()}" if self.step.system_prompt else None
 
     def _time_line(self, at: datetime) -> str:
@@ -885,16 +917,16 @@ class _Run:
         end one that waits on a known event; with an end_time the run goes on to it, its jumps folded in the timeline
         past ``JUMPS_KEPT_PER_GAP`` per gap."""
         step = self.step
-        await self._bounded(self._open(), "the opening wake")
+        await self._capped(self._open(), "the opening wake")
         while self.end_reason is None:
             if self.wakes >= step.max_wakes:
                 self.end_reason = "max_wakes"
                 break
-            if not await self._bounded(self._next(), "a turn of the loop"):
+            if not await self._capped(self._next(), "a turn of the loop"):
                 break
-        await self._bounded(self._last_read(), "the last read", step.read_cap_seconds() + GATEWAY_ALLOWANCE_SECONDS)
+        await self._capped(self._last_read(), "the last read", step.read_cap_seconds() + GATEWAY_ALLOWANCE_SECONDS)
 
-    async def _bounded(self, work, what: str, seconds: Optional[float] = None):
+    async def _capped(self, work, what: str, seconds: Optional[float] = None):
         """``work``, cut off past ``seconds`` (one turn of the loop's worst case, ``wake_reserve_seconds``): every part
         is capped on its own, so only calls hanging past their allowance get here, and the run ends on a step error
         rather than run past the hub's job."""
@@ -1131,7 +1163,7 @@ class _Run:
         sent_at = await self.now()
         clock = await step._env_clock(self.clock_envs)
         lead = [_step_part(self._time_line(sent_at), "time")] if clock else []
-        if self.wakes == 0 and not step.system_prompt:
+        if self.wakes == 0 and not self.rules_in_system_prompt:  # no system prompt took them: the first wake does
             lead = [_step_part(self.rules(), "rules"), *lead]
         parts = [*lead, *parts]
         last = last or self.wakes + 1 >= step.max_wakes
@@ -1546,6 +1578,7 @@ class _Run:
                   "timeline_events": len(self.timeline), "pending_at_end": _bounded(self.pending)}
         record["settings"] = {"stay_quiet": step.stay_quiet, "nudge": step.nudge, "wake_reminder": step.wake_reminder,
                               "clock": self.clock,
+                              "rules_via": "system_prompt" if self.rules_in_system_prompt else "first_wake",
                               "scheduled_checks": self.checks, "contacts": self.contacts,
                               "time_budget_seconds": self.time_budget,
                               "wake_reserve_seconds": step.wake_reserve_seconds()}

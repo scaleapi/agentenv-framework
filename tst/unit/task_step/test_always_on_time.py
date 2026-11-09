@@ -15,7 +15,7 @@ PROMPT = "You are Linda's assistant."
 
 @pytest.mark.asyncio
 async def test_each_wake_opens_with_the_task_s_date_and_time(monkeypatch, tmp_path):
-    rig = Rig(monkeypatch, tmp_path)
+    rig = Rig(monkeypatch, tmp_path, takes_config=True)  # the rules go in its system prompt
     await rig.arm()
     rig.triggers(rig.notify_at("sam", "2026-11-10T14:00:00Z", "Sam: shh", channel="noor 30"))
     ctx = await rig.run(rig.step(system_prompt=PROMPT))
@@ -30,7 +30,7 @@ async def test_each_wake_opens_with_the_task_s_date_and_time(monkeypatch, tmp_pa
 
 @pytest.mark.asyncio
 async def test_a_user_in_utc_gets_the_time_once(monkeypatch, tmp_path):
-    rig = Rig(monkeypatch, tmp_path)
+    rig = Rig(monkeypatch, tmp_path, takes_config=True)
     await rig.arm()
     await rig.run(rig.step(system_prompt=PROMPT), rig.context(user={"time_zone": "UTC"}))
     assert rig.sent[0][0] == f"It's Mon Nov 9, 2026, 2:00 PM UTC. {CLOCK}"
@@ -51,4 +51,5 @@ async def test_get_time_stays_with_the_agent_when_the_task_hides_every_tool(monk
         await client.post("/tools/disable", json={"role": "default", "tools": ["*"]})
     assert "get_time" not in await rig.tools()
     await rig.run(rig.step())
-    assert {"get_time", "message_user", "stay_quiet"} <= await rig.tools()
+    assert {"get_time", "message_user", "stay_quiet"} <= rig.during[0]["tools"]
+    assert not {"message_user", "stay_quiet"} & await rig.tools()  # the user chat is off again after the run

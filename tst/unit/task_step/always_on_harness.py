@@ -11,7 +11,7 @@ from typing import Any, Callable, Optional
 import httpx
 from mcp.types import CallToolResult, TextContent, Tool
 
-from agent_env.a2a_agent import conversation_store
+from agent_env.a2a_agent import A2AAgent, conversation_store
 from agent_env.config import get_config
 from agent_env.env.env import DeployedGatewayEnv
 from agent_env.env.gateway import gateway as gw_mod
@@ -29,6 +29,10 @@ T0 = "2026-11-09T14:00:00Z"  # Mon Nov 9, 9:00 AM in New York
 ROLE = "default"
 
 Turn = Callable[[int, list[str], "Rig"], Optional[str]]
+# An agent card whose agent-config extension takes the settings the step sends.
+CONFIG_CARD = {"capabilities": {"extensions": [{"uri": A2AAgent.EXT_AGENT_CONFIG, "params": {
+    "endpoint": "/ext/agent-config", "methods": {"set": {"request": {"supported": [
+        "model", "system_prompt", "effort", "output_format", "timeout_seconds", "max_turns"]}}}}}]}}
 
 
 class Fail:
@@ -46,10 +50,12 @@ class Rig:
     user sim's answers to its
     reads, in order; once they run out it answers no_reply. Every message the agent got is in ``sent``, every read the
     user sim got in ``reads``. A ``plugin`` replaces the scripted one; what it sends the user sim agent with ``ask`` is
-    in ``user_calls``, answered in turn by ``user_texts`` (then no_reply)."""
+    in ``user_calls``, answered in turn by ``user_texts`` (then no_reply). ``during`` has, for each of the agent's
+    turns, the gateway's settings and the agent's tools as the agent saw them. With ``takes_config`` the agent's card
+    takes its config (``CONFIG_CARD``), whose posts land in ``configs``."""
 
     def __init__(self, monkeypatch, tmp_path, *, agent: Optional[Turn] = None, answers: tuple = (), rate: float = 0,
-                 t0: str = T0, plugin: Any = None, user_texts: tuple = ()):
+                 t0: str = T0, plugin: Any = None, user_texts: tuple = (), takes_config: bool = False):
         monkeypatch.setattr(gw_mod, "GATEWAY_TRAJECTORY_FILE", str(tmp_path / "trajectory.jsonl"))
         self.gw = Gateway(host="127.0.0.1", port=0, server_name="AgentEnvGateway", internal_mcp_servers=[])
         self.gw._tools_discovered = True
@@ -68,11 +74,19 @@ class Rig:
         self.user_texts = list(user_texts)
         self.user_calls: list[dict] = []
         self.contact_calls: list[dict] = []
+        self.during: list[dict] = []
+        self.solver_contexts: list[Optional[str]] = []
+        self.takes_config = takes_config
+        self.configs: list[tuple[str, dict]] = []
         self._contacts: dict[str, dict] = {}
         self._monkeypatch = monkeypatch
         monkeypatch.setattr(ao, "POLL_SECONDS", 0)
         monkeypatch.setattr(ao, "send_and_wait", self._send_and_wait)
         monkeypatch.setattr(ao._Run, "_load_plugin", self._load_plugin)
+        if takes_config:
+            async def post(url, fields):
+                self.configs.append((url, fields))
+            monkeypatch.setattr(ao.protocol, "post_agent_config", post)
 
     # ---- the world -----------------------------------------------------------------------------------------------
     async def arm(self) -> None:
@@ -188,7 +202,8 @@ class Rig:
                                  environment_card_url=f"{GATEWAY}{WELL_KNOWN_PATH}", environment_card=card,
                                  metadata={"deploy_step_id": "deploy"})
         ctx = TaskStepContext(instance_id="ti-1", deployed_envs=[env])
-        ctx.deployed_agents += [DeployedAgent(agent_name="solver", api_url=SOLVER, a2a_url=SOLVER, a2a_card={}),
+        ctx.deployed_agents += [DeployedAgent(agent_name="solver", api_url=SOLVER, a2a_url=SOLVER,
+                                              a2a_card=CONFIG_CARD if self.takes_config else {}),
                                 DeployedAgent(agent_name="user-sim", api_url=USER_SIM, a2a_url=USER_SIM, a2a_card={})]
         ctx.metadata[USER_SIMS_KEY] = {"linda": {
             "name": "linda", "model": "sim-model", "agent_name": "user-sim", "user_version": "ours",
@@ -234,8 +249,14 @@ class Rig:
             return f"user-{len(self.user_calls)}", {"status": {"state": "completed", "message": {
                 "parts": [{"kind": "text", "text": text}]}}}
         assert url == SOLVER, url
+        self.solver_contexts.append(kw.get("context_id"))
         if before_send:
             before_send()
+        chat, notes = self.gw._user_chat, self.gw._notifications
+        self.during.append({"user_chat_roles": chat.roles, "stay_quiet": chat.stay_quiet, "check_roles": notes.roles,
+                            "min_interval": notes.min_interval, "max_active": notes.max_active,
+                            "trigger_settings": dict(self.gw._trigger_engine.state()["settings"]),
+                            "clock_rate": self.gw._clock.rate, "tools": await self.tools()})
         texts = [p["text"] for p in parts if p.get("kind") == "text"]
         self.sent.append(texts)
         self.parts.append(list(parts))

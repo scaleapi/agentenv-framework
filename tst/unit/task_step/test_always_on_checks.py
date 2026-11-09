@@ -22,22 +22,35 @@ async def test_a_multi_day_run_gives_the_agent_checks_through_a_deny_all_and_say
         await client.post("/tools/disable", json={"role": "default", "tools": ["*"]})
     ctx = await rig.run(rig.step(end_time="P5D"))
 
-    assert rig.gw._notifications.roles == ("default",) and rig.gw._notifications.min_interval == "PT3H"
-    assert CHECK_TOOLS <= await rig.tools()
+    during = rig.during[0]
+    assert during["check_roles"] == ("default",) and during["min_interval"] == "PT3H"
+    assert CHECK_TOOLS <= during["tools"]
     assert ao.CHECKS_RULE in rig.sent[0][0]
+    assert rig.gw._notifications.roles == () and not CHECK_TOOLS & await rig.tools()  # off again after the run
     assert rig.record(ctx)["settings"]["scheduled_checks"] == {
         "on": True, "envs": [{"env_id": "world", "set_by": "step", "min_interval": "PT3H", "max_active": 10}]}
 
 
 @pytest.mark.asyncio
 async def test_checks_closer_than_the_minimum_gap_are_refused(monkeypatch, tmp_path):
-    rig = Rig(monkeypatch, tmp_path)
-    await rig.arm()
-    await rig.run(rig.step(end_time="P5D"))
+    refused: list[str] = []
 
-    with pytest.raises(NotificationError, match="at least PT3H"):
-        rig.gw._notifications.schedule("sync stock", every="PT1H", to="default")
-    rig.gw._notifications.schedule("sync stock", every="PT3H", to="default")
+    def agent(n, texts, rig):
+        if n == 1:
+            try:
+                rig.gw._notifications.schedule("sync stock", every="PT1H", to="default")
+            except NotificationError as e:
+                refused.append(str(e))
+            rig.gw._notifications.schedule("sync stock", every="PT3H", to="default")
+        rig.quiet()
+        return ""
+
+    rig = Rig(monkeypatch, tmp_path, agent=agent)
+    await rig.arm()
+    await rig.run(rig.step(end_time="P1D"))
+
+    [why] = refused
+    assert "at least PT3H" in why
 
 
 @pytest.mark.asyncio
@@ -68,7 +81,7 @@ async def test_otherwise_a_task_decides(monkeypatch, tmp_path, end_time, setting
                 **({"scheduled_checks": setting} if setting is not None else {})}
     ctx = await rig.run(rig.step(**settings))
 
-    assert (rig.gw._notifications.roles == ("default",)) is on
+    assert (rig.during[0]["check_roles"] == ("default",)) is on
     assert rig.record(ctx)["settings"]["scheduled_checks"]["on"] is on
     assert (ao.CHECKS_RULE in rig.sent[0][0]) is on
 
@@ -100,7 +113,8 @@ async def test_other_roles_the_task_gave_checks_keep_them(monkeypatch, tmp_path)
     rig.gw._notifications.configure({"roles": ["planner"], "min_interval": "PT2H"})
     await rig.run(rig.step(end_time="P5D"))
 
-    assert rig.gw._notifications.roles == ("planner", "default") and rig.gw._notifications.min_interval == "PT2H"
+    assert rig.during[0]["check_roles"] == ("planner", "default") and rig.during[0]["min_interval"] == "PT2H"
+    assert rig.gw._notifications.roles == ("planner",) and rig.gw._notifications.min_interval == "PT2H"
 
 
 def test_the_settings_survive_a_round_trip():
