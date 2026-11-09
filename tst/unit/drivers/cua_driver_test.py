@@ -446,8 +446,13 @@ def test_on_windows_a_call_waits_out_a_busy_or_briefly_absent_pipe_and_a_daemon_
         module._piped({"method": "list"})
 
 
-#: What ``hyprctl -j cua:status`` answers while cua-driver's plugin is loaded, enabled and built for that Hyprland.
-PLUGIN_LOADED = {"configured": True, "abi": {"match": True}}
+#: What ``hyprctl -j cua:status`` answers while cua-driver's plugin is loaded, enabled, built for that Hyprland and
+#: taking input.
+PLUGIN_LOADED = {"configured": True, "abi": {"match": True}, "transport": {"ready": True, "last_error": ""}}
+#: Its answer once it's loaded again into a running Hyprland, which gives it no input seat until the desktop restarts.
+PLUGIN_RELOADED = {**PLUGIN_LOADED, "state": "discovery_only", "transport": {
+    "ready": False,
+    "last_error": "input seat lifetime unavailable; restart the desktop before loading a replacement plugin"}}
 
 
 @pytest.fixture
@@ -521,17 +526,19 @@ async def test_on_hyprland_readiness_checks_every_time_that_hyprland_has_cua_dri
     driver = module.CuaDriver()
     monkeypatch.setattr(module, "_executable_sha256", lambda: module.EXECUTABLES[driver.platform.arch])
     statuses = iter([PLUGIN_LOADED, None, {**PLUGIN_LOADED, "configured": False},
-                     {**PLUGIN_LOADED, "abi": {"match": False}}])
+                     {**PLUGIN_LOADED, "abi": {"match": False}}, PLUGIN_RELOADED])
     monkeypatch.setattr(module, "_hyprctl", lambda request: next(statuses) if request == "cua:status" else None)
 
-    checks = [await driver.ready_checks() for _ in range(4)]
+    checks = [await driver.ready_checks() for _ in range(5)]
 
     assert [(c.name, c.ok) for c in checks[0]] == [("cua-driver", True), ("cua-driver tools", True),
                                                     ("cua-driver plugin", True)]
     assert [(c[-1].ok, c[-1].detail) for c in checks[1:]] == [
         (False, "Hyprland hasn't loaded cua-driver's plugin"),
         (False, "cua-driver's plugin is loaded but not enabled"),
-        (False, "cua-driver's plugin was built for another Hyprland")]
+        (False, "cua-driver's plugin was built for another Hyprland"),
+        (False, "cua-driver's plugin isn't taking input: input seat lifetime unavailable; restart the desktop before "
+                "loading a replacement plugin")]
     assert sum(1 for _, r in daemon.requests if r["method"] == "list") == 1
 
 
