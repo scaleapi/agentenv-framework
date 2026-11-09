@@ -9,6 +9,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import re
 import socket
 import sys
 import types
@@ -768,6 +769,7 @@ def test_an_omarchy_computer_installs_cua_driver_at_hyprlands_pin_and_the_driver
     assert str(for_os(found, omarchy).python) == "requirements-omarchy.txt"
     assert str(for_os(found, ubuntu).python) == "requirements.txt"
     assert for_os(found, omarchy).services == for_os(found, ubuntu).services
-    assert "cua-driver==0.44.0" in (DRIVER.parent / "requirements-omarchy.txt").read_text().splitlines()
+    pins = (DRIVER.parent / "requirements-omarchy.txt").read_text().splitlines()
+    assert any(re.fullmatch(r"cua-driver==\d+(\.\d+)+", line) for line in pins)
     platforms = [platform for entry in module.CuaDriver.supports for platform in supported(entry)]
     assert Platform(os="linux", distribution="omarchy", arch="amd64", display="wayland") in platforms

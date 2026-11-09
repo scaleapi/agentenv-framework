@@ -15,12 +15,15 @@ from .platform import entry_for, platform_key
 if TYPE_CHECKING:
     from .driver import ComputerDriverEnvironment
 
+#: The chords Linux apps keep for editing, whatever their desktop.
+_LINUX_APPS = """\
+- Copy, cut and paste: `['Control', 'c']`, `['Control', 'x']`, `['Control', 'v']`; in a terminal, with `'Shift'` too.
+- Undo `['Control', 'z']`, save `['Control', 's']`, select all `['Control', 'a']`, find `['Control', 'f']`.
+"""
 #: The chords each platform's desktops keep for the everyday actions, as ``computer_key`` takes them, by platform key: a
 #: distribution's replace its OS type's.
 SHORTCUTS = {
-    "linux": """\
-- Copy, cut and paste: `['Control', 'c']`, `['Control', 'x']`, `['Control', 'v']`; in a terminal, with `'Shift'` too.
-- Undo `['Control', 'z']`, save `['Control', 's']`, select all `['Control', 'a']`, find `['Control', 'f']`.
+    "linux": _LINUX_APPS + """\
 - Switch windows `['Alt', 'Tab']`; close the focused one `['Alt', 'F4']`.
 - In a file manager, `['Control', 'l']` takes a typed path, `['F2']` renames and `['Control', 'Shift', 'n']` makes a
   folder.
@@ -34,9 +37,8 @@ SHORTCUTS = {
 - `['Super', 'Enter']` opens a terminal, `['Super', 'Shift', 'f']` the file manager and `['Super', 'Shift', 'b']` the
   browser; `['Super', 'Alt', ' ']` the app launcher, where a typed name and Enter start an app; `['Super', ' ']`
   Omarchy's menu; `['Super', 'k']` the list of every shortcut.
-- In apps: copy, cut and paste `['Control', 'c']`, `['Control', 'x']`, `['Control', 'v']`, or in any window, a terminal
-  too, `['Super', 'c']`, `['Super', 'x']`, `['Super', 'v']`; undo `['Control', 'z']`, save `['Control', 's']`, select
-  all `['Control', 'a']`, find `['Control', 'f']`.
+""" + _LINUX_APPS + """\
+- `['Super', 'c']`, `['Super', 'x']` and `['Super', 'v']` copy, cut and paste in any window, a terminal too.
 """,
 }
 _SESSIONS = {"x11": "an X11 session", "wayland": "a Wayland session"}

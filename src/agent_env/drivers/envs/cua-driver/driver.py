@@ -67,6 +67,14 @@ MACOS, WINDOWS = sys.platform == "darwin", sys.platform == "win32"
 #: its Hyprland plugin; what follows reaches Hyprland's IPC, so it's Hyprland's session that turns it on, not any
 #: Wayland one.
 HYPRLAND = sys.platform == "linux" and bool(os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"))
+
+
+def _desktop() -> str | None:
+    """The desktop with a cua-driver build of its own, whose name keys its manifest (``mcp-<desktop>.json``) and its
+    executables' sha256s (``<desktop>/<arch>``); None on an X11 desktop, whose are the default's."""
+    return "macos" if MACOS else "windows" if WINDOWS else "hyprland" if HYPRLAND else None
+
+
 #: Where cua-driver's daemon listens: on Hyprland in the session user's runtime folder, which the session's units share.
 if WINDOWS:
     SOCKET = r"\\.\pipe\agentenv-cua-driver"
@@ -78,8 +86,7 @@ else:
     SOCKET = "/run/agentenv/cua-driver.sock"
 #: What cua-driver's own MCP server (``cua-driver mcp``) says at connect and lists at the pinned version on each OS: its
 #: instructions, its tools, which the running daemon must list the same, and its skill resources.
-MANIFEST = Path(__file__).with_name("mcp-macos.json" if MACOS else "mcp-windows.json" if WINDOWS else
-                                    "mcp-hyprland.json" if HYPRLAND else "mcp.json")
+MANIFEST = Path(__file__).with_name(f"mcp-{_desktop()}.json" if _desktop() else "mcp.json")
 #: Where the release's zip is unpacked on Windows, beside this file.
 WINDOWS_EXECUTABLE = Path(__file__).with_name("cua-driver") / "cua-driver.exe"
 #: CuaDriver.app's executable, which macOS runs the daemon as.
@@ -322,8 +329,7 @@ class CuaDriver(ComputerDriverEnvironment):
             return [ReadyCheck("cua-driver", False, "its daemon isn't answering yet")]
         arch = self.platform.arch or ""
         digest = await asyncio.to_thread(_executable_sha256)
-        expected = EXECUTABLES.get(f"macos/{arch}" if MACOS else f"windows/{arch}" if WINDOWS else
-                                   f"hyprland/{arch}" if HYPRLAND else arch)
+        expected = EXECUTABLES.get(f"{desktop}/{arch}" if (desktop := _desktop()) else arch)
         running = {t["name"]: t["input_schema"] for t in listed}
         pinned = {t["name"]: t["inputSchema"] for t in _manifest()["tools"]}
         differ = sorted(name for name in running.keys() | pinned.keys() if running.get(name) != pinned.get(name))
