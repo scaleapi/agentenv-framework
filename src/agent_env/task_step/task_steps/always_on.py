@@ -126,6 +126,14 @@ DEFAULT_TIME_BUDGET_SECONDS = 7 * 3600
 CONTACT_TIMEOUT_SECONDS = 300.0
 # Past a contact's time limit, how long the settle wait still gives its call to come back.
 CONTACT_GRACE_SECONDS = 30.0
+# The hard caps that bound one turn of the loop (wake_reserve_seconds adds them up): past an agent's or user sim's turn
+# limit, how long send_and_wait's own retries and polls still get before the turn is cut off; how long a trajectory
+# fetch may take; how many user sim turns one read may take; and what the step's own gateway and store calls (takes,
+# changes, the chat, clock reads) are allowed per wake and per read, beyond which the loop's turn is cut off.
+TURN_GRACE_SECONDS = 60.0
+TRAJECTORY_FETCH_SECONDS = 120.0
+READ_ASKS = 2
+GATEWAY_ALLOWANCE_SECONDS = 300.0
 # The final check-in's line when the task sets no `final`: the step's, not the user's.
 FINAL_DEFAULT_TEXT = "Time's up on this job. Send {first} a short wrap-up: what's done, and anything still open."
 NOTHING_CAN_WAKE = "nothing_can_wake_the_agent"  # until finish() tells finished_nothing_pending from stuck
@@ -217,13 +225,26 @@ class AlwaysOnTaskStep(PromptAgentTaskStep):
                       "model", "model_params", "system_prompt", "max_turns", "output_format", "max_thinking_tokens",
                       "effort", "harness", "agentenv_tools", "poll_interval_seconds", "context_id")
 
-    def wake_reserve_seconds(self) -> float:
-        """The longest one wake can take, as the settings bound it: the agent's turn (and its nudge turn, when nudges
-        are on), two settle waits (after the turn, and after a clock jump: a contact's time limit and grace, then
-        settle_timeout_seconds) and a read (two of the user sim's turns)."""
+    def settle_cap_seconds(self) -> float:
+        """The longest one settle waits, whatever is still at work (queued fires, nl actions in a row, a contact whose
+        own time limit is longer): a contact's time limit and grace, then settle_timeout_seconds."""
         contact = self.contact_timeout_seconds or CONTACT_TIMEOUT_SECONDS
-        return (self.timeout_seconds * (2 if self.nudge else 1)
-                + 2 * (contact + CONTACT_GRACE_SECONDS + self.settle_timeout_seconds) + 2 * self.user_timeout_seconds)
+        return contact + CONTACT_GRACE_SECONDS + self.settle_timeout_seconds
+
+    def read_cap_seconds(self) -> float:
+        """The longest one read's answer may take: READ_ASKS user sim turns, each with its grace and trajectory
+        fetch; an ask past it is refused, and an answer past it ends the read as a user sim error."""
+        return READ_ASKS * (self.user_timeout_seconds + TURN_GRACE_SECONDS + TRAJECTORY_FETCH_SECONDS)
+
+    def wake_reserve_seconds(self) -> float:
+        """The longest one turn of the loop, or the run's closing, can take, each part hard-capped: a clock jump's
+        settle (settle_cap_seconds), then a wake (the agent's turn and, with nudges on, its nudge turn, each at most
+        timeout_seconds + TURN_GRACE_SECONDS plus a trajectory fetch; one settle; GATEWAY_ALLOWANCE_SECONDS of the
+        step's own calls), then a read (read_cap_seconds and GATEWAY_ALLOWANCE_SECONDS). The loop cuts off a turn of
+        its own that runs past this (a step error), so it is a real bound."""
+        turn = self.timeout_seconds + TURN_GRACE_SECONDS + TRAJECTORY_FETCH_SECONDS
+        wake = turn * (2 if self.nudge else 1) + self.settle_cap_seconds() + GATEWAY_ALLOWANCE_SECONDS
+        return self.settle_cap_seconds() + wake + self.read_cap_seconds() + GATEWAY_ALLOWANCE_SECONDS
 
     def effective_time_budget(self) -> float:
         """The real time after which the run closes: ``time_budget_seconds``, else 7 h, lowered so the closing still
@@ -240,8 +261,8 @@ class AlwaysOnTaskStep(PromptAgentTaskStep):
         reserve = self.wake_reserve_seconds()
         room = JOB_LIMIT_SECONDS - JOB_HEADROOM_SECONDS - reserve
         if room <= reserve:
-            raise ValueError(f"always_on: one wake can take up to {reserve:.0f}s (wake_reserve_seconds: the agent's turn "
-                             f"and nudge, the settle waits and a read), so no run fits the hub's "
+            raise ValueError(f"always_on: one wake can take up to {reserve:.0f}s (wake_reserve_seconds: a settle, the "
+                             f"agent's turn and nudge, a settle and a read), so no run fits the hub's "
                              f"{JOB_LIMIT_SECONDS // 3600} h job; lower timeout_seconds or user_timeout_seconds")
         if self.time_budget_seconds is None:
             return min(DEFAULT_TIME_BUDGET_SECONDS, room)
@@ -547,9 +568,12 @@ class _Run:
         step = self.step
         await self._clock_runs(True)
         try:
-            return await send_and_wait(self.target_url, parts, agent=self.agent, message_id=msg_id,
-                                       context_id=self.solver_context_id, timeout_seconds=step.timeout_seconds,
-                                       poll_interval_seconds=step.poll_interval_seconds, before_send=record)
+            # Cut off past its limit and grace, whatever send_and_wait's own retries do: a TimeoutError, as its own.
+            return await asyncio.wait_for(
+                send_and_wait(self.target_url, parts, agent=self.agent, message_id=msg_id,
+                              context_id=self.solver_context_id, timeout_seconds=step.timeout_seconds,
+                              poll_interval_seconds=step.poll_interval_seconds, before_send=record),
+                step.timeout_seconds + TURN_GRACE_SECONDS)
         finally:
             await self._clock_runs(False)
 
@@ -689,11 +713,14 @@ class _Run:
     async def settle(self) -> list[dict]:
         """Wait until the world has settled: no trigger still at work, bar a fire waiting for a later time. A contact's
         reply (a call to a trigger's executor) counts as in progress until it ends or its time limit passes (plus
-        ``CONTACT_GRACE_SECONDS``); any other work gets ``settle_timeout_seconds``, from the start or from the last
-        contact call seen. A gateway that reports no executor calls gets ``settle_timeout_seconds`` in all. Returns, by
-        env, the triggers still at work when it gave up (empty when the world settled); ``last_settle`` says how long
-        it waited and how many contact calls it saw."""
+        ``CONTACT_GRACE_SECONDS``); any other work, an event due that an advance to now doesn't set going among it,
+        gets ``settle_timeout_seconds``, from the start or from the last contact call seen. A gateway that reports no
+        executor calls gets ``settle_timeout_seconds`` in all. However much is still at work (queued fires, nl
+        actions in a row, a contact whose own limit is longer), the wait never runs past ``settle_cap_seconds``.
+        Returns, by env, the triggers still at work when it gave up (empty when the world settled); ``last_settle``
+        says how long it waited and how many contact calls it saw."""
         started = time.monotonic()
+        cap = started + self.step.settle_cap_seconds()  # however much is still at work, never past this
         envs = [e for e in await self._armed() if e.supports(EXT_TRIGGERS_URI, "state")]
         waiting = {i: {"live_call_seen": started, "contact_until": started} for i in range(len(envs))}
         stuck: list[dict] = []
@@ -712,16 +739,20 @@ class _Run:
                     track["contact_until"] = max(track["contact_until"], mono + CONTACT_GRACE_SECONDS
                                                  + max(c["seconds_left"] for c in live))
                 busy = [row for row in rows if _busy(row, now)]
-                if state.get("next_event_at") is not None and _utc(state["next_event_at"]) <= now:
+                due = state.get("next_event_at") is not None and _utc(state["next_event_at"]) <= now
+                limit = min(cap, max(track["contact_until"],
+                                     track["live_call_seen"] + self.step.settle_timeout_seconds))
+                if not due and not busy:
+                    waiting.pop(i)
+                elif mono >= limit:  # a due event that won't go, like other work, gets settle_timeout_seconds
+                    stuck.append({"env_id": env.env_id, "triggers": [_at_work(row) for row in busy],
+                                  **({"due_not_going": state["next_event_at"]} if due else {})})
+                    waiting.pop(i)
+                elif due:  # an event already due: an advance to now sets it going
                     try:
                         await _call(env, EXT_CLOCK_URI, "advance", {"virtual_time": _iso(now)}, attempts=1)
                     except Exception:
                         pass
-                elif not busy:
-                    waiting.pop(i)
-                elif mono >= max(track["contact_until"], track["live_call_seen"] + self.step.settle_timeout_seconds):
-                    stuck.append({"env_id": env.env_id, "triggers": [_at_work(row) for row in busy]})
-                    waiting.pop(i)
             if waiting:
                 self.ctx.heartbeat()
                 await asyncio.sleep(POLL_SECONDS)
@@ -854,6 +885,32 @@ class _Run:
         end one that waits on a known event; with an end_time the run goes on to it, its jumps folded in the timeline
         past ``JUMPS_KEPT_PER_GAP`` per gap."""
         step = self.step
+        await self._bounded(self._open(), "the opening wake")
+        while self.end_reason is None:
+            if self.wakes >= step.max_wakes:
+                self.end_reason = "max_wakes"
+                break
+            if not await self._bounded(self._next(), "a turn of the loop"):
+                break
+        await self._bounded(self._last_read(), "the last read", step.read_cap_seconds() + GATEWAY_ALLOWANCE_SECONDS)
+
+    async def _bounded(self, work, what: str, seconds: Optional[float] = None):
+        """``work``, cut off past ``seconds`` (one turn of the loop's worst case, ``wake_reserve_seconds``): every part
+        is capped on its own, so only calls hanging past their allowance get here, and the run ends on a step error
+        rather than run past the hub's job."""
+        seconds = self.step.wake_reserve_seconds() if seconds is None else seconds
+        timer = asyncio.timeout(seconds)
+        try:
+            async with timer:
+                return await work
+        except TimeoutError:
+            if not timer.expired():
+                raise
+            self.end_reason = "step_error"
+            raise RuntimeError(f"always_on: {what} ran past its worst case ({seconds:.0f}s, wake_reserve_seconds)")
+
+    async def _open(self) -> None:
+        """The opening wake: the user's request, with what came due for the agent."""
         self.you_sent.append(dict(self.opening))
         opened_at = _utc(self.opening["at"])
         await self._chat_user(self._opening_parts(lambda text: self._chat_part(opened_at, text, kind="opening")))
@@ -863,58 +920,58 @@ class _Run:
                         woke_by=[f"notification:{d['channel']}" for d in due] + ["user_request"],
                         notifications=[{k: d.get(k) for k in ("at", "channel", "source", "source_id", "to")}
                                        for d in due])
-        while self.end_reason is None:
-            if self.wakes >= step.max_wakes:
-                self.end_reason = "max_wakes"
-                break
-            now = await self.now()
-            spent = self.spent()
-            if spent + step.wake_reserve_seconds() >= self.time_budget:
-                self.log("time_budget_reached", virtual_time=_iso(now), real_seconds=round(spent, 1),
-                         time_budget_seconds=self.time_budget, wake_reserve_seconds=step.wake_reserve_seconds())
-                await self._final(now, reason="time_budget")
-                break
-            # 1. a read that is due: the user sim reads what the agent sent
-            if self.read_at is not None and self.read_at <= now and self.unread:
-                await self.read(now)
-                continue
-            # 2. anything due for the agent: notifications, scripted user lines, held replies; and what else comes
-            # due in the same minute, so it all arrives in one wake
-            if any(h["deliver_at"] <= now for h in self.held) or await self._due_count(self.recipient, now) \
-                    or await self._due_count(USER_SAYS, now):
-                later = await self._later(now)
-                same_minute = [t for t in later.values() if t < now.replace(second=0, microsecond=0)
-                               + timedelta(minutes=1) and (self.end is None or t < self.end)]
-                if same_minute and await self._armed():
-                    await self.advance(min(same_minute), reason="same_minute")
-                    continue
-                lines = await self._take_user_says()
-                replies = [h for h in self.held if h["deliver_at"] <= now]
-                self.held = [h for h in self.held if h["deliver_at"] > now]
-                await self._wake_with(now, lines, replies)
-                continue
-            # 3. nothing due: jump to the next thing
+
+    async def _next(self) -> bool:
+        """One turn of the loop: the closing, a read, a wake or a clock jump; False once the run should end."""
+        step = self.step
+        now = await self.now()
+        spent = self.spent()
+        if spent + step.wake_reserve_seconds() >= self.time_budget:
+            self.log("time_budget_reached", virtual_time=_iso(now), real_seconds=round(spent, 1),
+                     time_budget_seconds=self.time_budget, wake_reserve_seconds=step.wake_reserve_seconds())
+            await self._final(now, reason="time_budget")
+            return False
+        # 1. a read that is due: the user sim reads what the agent sent
+        if self.read_at is not None and self.read_at <= now and self.unread:
+            await self.read(now)
+            return True
+        # 2. anything due for the agent: notifications, scripted user lines, held replies; and what else comes
+        # due in the same minute, so it all arrives in one wake
+        if any(h["deliver_at"] <= now for h in self.held) or await self._due_count(self.recipient, now) \
+                or await self._due_count(USER_SAYS, now):
             later = await self._later(now)
-            soonest = min(later.values()) if later else None
-            if self.end is not None and (soonest is None or soonest >= self.end):
-                await self._final(now)
-                break
-            if soonest is None:
-                self.end_reason = NOTHING_CAN_WAKE  # finished or stuck: finish() decides from what is pending
-                break
-            if self.end is None and set(later) == {"world_event"} and await self._only_repeating():
-                self.idle_jumps += 1
-                self.idle_since = self.idle_since or _iso(now)
-                if self.idle_jumps > IDLE_JUMPS_MAX:
-                    self.log("world_only_repeats", virtual_time=_iso(now), jumps=self.idle_jumps - 1,
-                             since=self.idle_since, triggers=await self._repeating_ids())
-                    self.end_reason = NOTHING_CAN_WAKE
-                    break
-            else:
-                self.idle_jumps, self.idle_since = 0, None
-            why = sorted(k for k, v in later.items() if v == soonest)
-            await self.advance(soonest, reason="+".join(why))
-        await self._last_read()
+            same_minute = [t for t in later.values() if t < now.replace(second=0, microsecond=0)
+                           + timedelta(minutes=1) and (self.end is None or t < self.end)]
+            if same_minute and await self._armed():
+                await self.advance(min(same_minute), reason="same_minute")
+                return True
+            lines = await self._take_user_says()
+            replies = [h for h in self.held if h["deliver_at"] <= now]
+            self.held = [h for h in self.held if h["deliver_at"] > now]
+            await self._wake_with(now, lines, replies)
+            return True
+        # 3. nothing due: jump to the next thing
+        later = await self._later(now)
+        soonest = min(later.values()) if later else None
+        if self.end is not None and (soonest is None or soonest >= self.end):
+            await self._final(now)
+            return False
+        if soonest is None:
+            self.end_reason = NOTHING_CAN_WAKE  # finished or stuck: finish() decides from what is pending
+            return False
+        if self.end is None and set(later) == {"world_event"} and await self._only_repeating():
+            self.idle_jumps += 1
+            self.idle_since = self.idle_since or _iso(now)
+            if self.idle_jumps > IDLE_JUMPS_MAX:
+                self.log("world_only_repeats", virtual_time=_iso(now), jumps=self.idle_jumps - 1,
+                         since=self.idle_since, triggers=await self._repeating_ids())
+                self.end_reason = NOTHING_CAN_WAKE
+                return False
+        else:
+            self.idle_jumps, self.idle_since = 0, None
+        why = sorted(k for k, v in later.items() if v == soonest)
+        await self.advance(soonest, reason="+".join(why))
+        return True
 
     async def _later(self, now: datetime) -> dict[str, datetime]:
         """What could wake the agent after ``now``, by kind, each at its earliest time."""
@@ -1112,8 +1169,9 @@ class _Run:
         traj_ext = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
         if traj_ext:
             try:
-                traj = await step._fetch_trajectory(self.target_url, traj_ext, task_id, step._trajectory_prefix(),
-                                                    msg_id, card=card, sandbox_type=self.agent.sandbox_type)
+                traj = await asyncio.wait_for(
+                    step._fetch_trajectory(self.target_url, traj_ext, task_id, step._trajectory_prefix(), msg_id,
+                                           card=card, sandbox_type=self.agent.sandbox_type), TRAJECTORY_FETCH_SECONDS)
             except Exception as e:
                 logger.warning(f"wake {self.wakes}: trajectory fetch failed (continuing): {e}")
         self.per_turn_trajectory_urls.append(traj)
@@ -1170,8 +1228,9 @@ class _Run:
         traj_ext = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
         if traj_ext:
             try:
-                traj = await step._fetch_trajectory(self.target_url, traj_ext, task_id, step._trajectory_prefix(),
-                                                    msg_id, card=card, sandbox_type=self.agent.sandbox_type)
+                traj = await asyncio.wait_for(
+                    step._fetch_trajectory(self.target_url, traj_ext, task_id, step._trajectory_prefix(), msg_id,
+                                           card=card, sandbox_type=self.agent.sandbox_type), TRAJECTORY_FETCH_SECONDS)
             except Exception as e:
                 logger.warning(f"nudge after wake {self.wakes}: trajectory fetch failed (continuing): {e}")
         self.per_turn_trajectory_urls.append(traj)
@@ -1286,14 +1345,20 @@ class _Run:
                 "you_sent": list(self.you_sent), "done_ends_run": not self.multi_day}
         self.unread, self.you_sent, self.read_at = [], [], None
         calls = []
+        cap = self.step.read_cap_seconds()
+        deadline = time.monotonic() + cap
 
         async def ask(text: str) -> dict:
-            got = await self._ask_user_sim(text)
+            got = await self._ask_user_sim(text, deadline)
             calls.append(got)
             return got
 
         t = time.time()
-        ans = await self.plugin.answer(self.version, self.person, self.history, read, ask)
+        try:
+            ans = await asyncio.wait_for(self.plugin.answer(self.version, self.person, self.history, read, ask), cap)
+        except TimeoutError:  # the plug-in ran past the read's cap: a user sim error, as a failed ask is
+            ans = {"outcome": "no_reply", "message": ""}
+            calls.append({"text": None, "structured": None, "error": f"the read ran past its cap ({cap:.0f}s)"})
         self.history.append({"read": read, "answer": ans})
         mode = self.read_mode
         latency = self._latency(mode)
@@ -1340,14 +1405,19 @@ class _Run:
         if calls and calls[-1].get("error") and not last:
             self.end_reason = self.end_reason or "user_sim_error"
 
-    async def _ask_user_sim(self, text: str) -> dict:
+    async def _ask_user_sim(self, text: str, deadline: float) -> dict:
+        """One user sim turn on ``text``, cut off at its time limit and grace or at the read's ``deadline``
+        (time.monotonic()), whichever comes first."""
         msg_id = uuid.uuid4().hex
+        limit = min(self.step.user_timeout_seconds + TURN_GRACE_SECONDS, deadline - time.monotonic())
+        if limit <= 0:
+            return {"text": None, "structured": None, "error": "the read's time limit passed"}
         try:
-            user_task_id, result = await send_and_wait(
+            user_task_id, result = await asyncio.wait_for(send_and_wait(
                 self.user_url, [{"kind": "text", "text": text}],
                 agent=self.user_agent if self.user_agent.sandbox_id else None, message_id=msg_id,
-                context_id=self.user_context_id, timeout_seconds=self.step.user_timeout_seconds,
-                poll_interval_seconds=self.step.poll_interval_seconds)
+                context_id=self.user_context_id, timeout_seconds=min(self.step.user_timeout_seconds, limit),
+                poll_interval_seconds=self.step.poll_interval_seconds), limit)
         except TimeoutError as e:
             return {"text": None, "structured": None, "error": f"timeout: {e}"}
         status = (result.get("status") or {})
@@ -1367,9 +1437,11 @@ class _Run:
         traj_ext = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
         if traj_ext:
             try:
-                traj = await self.step._fetch_trajectory(self.user_url, traj_ext, user_task_id,
-                                                         self.step._trajectory_prefix() + "user_sim/", msg_id,
-                                                         card=card, sandbox_type=self.user_agent.sandbox_type)
+                traj = await asyncio.wait_for(
+                    self.step._fetch_trajectory(self.user_url, traj_ext, user_task_id,
+                                                self.step._trajectory_prefix() + "user_sim/", msg_id,
+                                                card=card, sandbox_type=self.user_agent.sandbox_type),
+                    max(0.0, min(TRAJECTORY_FETCH_SECONDS, deadline - time.monotonic())))
             except Exception as e:
                 logger.warning(f"user sim trajectory fetch failed (continuing): {e}")
         return {"text": raw, "structured": structured if isinstance(structured, dict) else None,
