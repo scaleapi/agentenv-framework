@@ -4,6 +4,7 @@ Each check runs in a subprocess that refuses every module only the extra install
 installs every extra, so installed state cannot show what an install without one would do."""
 
 import ast
+import functools
 import importlib.metadata
 import importlib.util
 import json
@@ -114,7 +115,8 @@ except ConfigError as e:
 """
 
 
-def _closure(extras: frozenset[str]) -> set[str]:
+@functools.cache
+def _closure(extras: frozenset[str]) -> frozenset[str]:
     """The distributions installing this package with ``extras`` pulls in."""
     seen: set[tuple[str, frozenset[str]]] = set()
     pending = [(SELF, extras)]
@@ -132,7 +134,7 @@ def _closure(extras: frozenset[str]) -> set[str]:
             marker = requirement.marker
             if marker is None or any(marker.evaluate({"extra": e}) for e in wanted | {""}):
                 pending.append((canonicalize_name(requirement.name), frozenset(requirement.extras)))
-    return {name for name, _ in seen} - {SELF}
+    return frozenset(name for name, _ in seen) - {SELF}
 
 
 def _only_in(extra: str) -> list[str]:
