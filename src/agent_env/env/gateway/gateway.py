@@ -463,13 +463,18 @@ class Gateway:
             inner.router.routes.append(WebSocketRoute(BROWSER_ROUTE, self._browsers.relay))
 
         async def app(scope, receive, send):
+            if self._control_bearer and scope["type"] in ("http", "websocket"):
+                headers = scope.get("headers", ())
+                if scope["type"] == "http" and scope["path"] in CONTROL_ROUTES and not hmac.compare_digest(
+                        dict(headers).get(b"authorization", b""), self._control_bearer):
+                    response = self._json_response({"ok": False, "error": "this route takes the env's control token"}, 401)
+                    await response(scope, receive, send)
+                    return
+                # The token is the gateway's own: no route reads it, and no service a route proxies to receives it.
+                scope = {**scope, "headers": [(name, value) for name, value in headers if not (
+                    name == b"authorization" and hmac.compare_digest(value, self._control_bearer))]}
             if scope["type"] != "http":
                 await inner(scope, receive, send)
-                return
-            if self._control_bearer and scope["path"] in CONTROL_ROUTES and not hmac.compare_digest(
-                    dict(scope.get("headers", ())).get(b"authorization", b""), self._control_bearer):
-                response = self._json_response({"ok": False, "error": "this route takes the env's control token"}, 401)
-                await response(scope, receive, send)
                 return
             role = DEFAULT_ROLE
             for name, value in scope.get("headers", ()):

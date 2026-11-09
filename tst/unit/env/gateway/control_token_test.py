@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import httpx
 import pytest
+from starlette.responses import JSONResponse
 
 from agent_env.env.gateway.constants import CONTROL_ROUTES
 from agent_env.env.gateway.gateway import Gateway
@@ -64,6 +65,21 @@ async def test_every_other_route_stays_open(path):
     async with _client(TOKEN) as client:
         response = await client.request(OPEN[path], path, json={} if OPEN[path] == "POST" else None)
     assert response.status_code != 401
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value, seen", [(f"Bearer {TOKEN}", None), ("Bearer a-childs-own", "Bearer a-childs-own")],
+                         ids=["the-gateways", "another"])
+async def test_no_route_behind_the_gateway_reads_its_token(value, seen):
+    gw = Gateway(host="127.0.0.1", port=0, server_name="unit", internal_mcp_servers=[], control_token=TOKEN)
+
+    @gw._mcp.custom_route("/echo", methods=["GET"])
+    async def echo(request):
+        return JSONResponse({"authorization": request.headers.get("authorization")})
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gw._asgi_app()), base_url="http://gateway") as client:
+        response = await client.get("/echo", headers={"Authorization": value})
+    assert response.json() == {"authorization": seen}
 
 
 @pytest.mark.asyncio
