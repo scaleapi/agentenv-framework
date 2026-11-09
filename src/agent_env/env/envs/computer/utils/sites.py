@@ -509,7 +509,7 @@ async def deployed_sites(deployed_envs: list[DeployedEnv], only: Optional[list[s
         for child in children:
             params = protocol_v1.extension_params(child.card, WEBSITE_EXTENSION_URI)
             browse = params.get(WEBSITE_BROWSE_URL_PARAM)
-            service = _served_as(child)
+            service = served_as(child)
             if services is not None and service not in services:
                 named.add(service)
                 continue
@@ -589,7 +589,7 @@ def _env_qualified(found: list[tuple[str, dict]]) -> list[dict]:
             if len(envs[site["name"]]) > 1 else site for env_id, site in found]
 
 
-def _served_as(child) -> str:
+def served_as(child) -> str:
     """The gateway service a child env is served as: the ``<name>`` of the ``/svc/<name>/`` route its url is at, which
     ``website_frontend_urls`` keys it by, else its card's name."""
     parts = urlsplit(child.url or "").path.strip("/").split("/")

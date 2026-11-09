@@ -45,9 +45,10 @@ def _browser_card(ops=("cookies/set", "cdp")) -> dict:
                     op: {"endpoint": f"{prefix}/{op}"} for op in ops}}}]}}
 
 
-def _office(*, session: bool = True) -> DeployedGatewayEnv:
-    """A multi env's record: the shop website among its card's children, and the desktop computer, whose card lists
-    chromium, kept whole in its child_envs, as the gateway's card lists the computer without its apps."""
+def _office(*, session: bool = True, card_name: str = "shop") -> DeployedGatewayEnv:
+    """A multi env's record: the shop website among its card's children, served as shop whatever its card names it,
+    and the desktop computer, whose card lists chromium, kept whole in its child_envs, as the gateway's card lists the
+    computer without its apps."""
     website = {"uri": "urn:agentenv:website/v1", "params": {
         "endpoint": "/svc/shop/agentenv/ext/website", "domains": ["shop.test", "*.shop.test"],
         "browse_url": "/website/shop/",
@@ -60,7 +61,7 @@ def _office(*, session: bool = True) -> DeployedGatewayEnv:
         env_id="office", env_version=1, sandbox_id="gw", sandbox_type="local", gateway_url=_GATEWAY,
         control_token="gateway-token", environment_card_url=f"{_GATEWAY}/.well-known/agent-env.json",
         environment_card={"name": "office", "children_environments": [
-            {"name": "shop", "url": "/svc/shop/agentenv", "capabilities": {"extensions": [website]}},
+            {"name": card_name, "url": "/svc/shop/agentenv", "capabilities": {"extensions": [website]}},
             {"name": "desktop", "url": "/svc/desktop/agentenv", "capabilities": {"extensions": []}}]},
         child_envs={"desktop": dataclasses.asdict(desktop)})
 
@@ -86,8 +87,10 @@ def served(monkeypatch) -> list[httpx.Request]:
 
 
 @pytest.mark.asyncio
-async def test_a_browser_in_a_multi_envs_computer_is_signed_in_with_the_sites_session_for_each_of_its_names(served):
-    context = TaskStepContext(deployed_envs=[_office()], metadata={})
+@pytest.mark.parametrize("card_name", ["shop", "Shop"], ids=["card-named-as-served", "card-named-otherwise"])
+async def test_a_browser_in_a_multi_envs_computer_is_signed_in_with_the_sites_session_for_each_of_its_names(
+        served, card_name):
+    context = TaskStepContext(deployed_envs=[_office(card_name=card_name)], metadata={})
 
     await BrowserSignInTaskStep(id="in", version=None, env_id="office", site="shop-site", user="alex").execute(context)
 

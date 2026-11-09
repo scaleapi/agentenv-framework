@@ -10,7 +10,7 @@ from agentenv_protocol import METHOD_ADD, DataPart, client as protocol_v1
 from agentenv_protocol.website import WEBSITE_EXTENSION_URI
 
 from agent_env.entity.refs import EntityRef
-from agent_env.env.env import DeployedEnv, Env
+from agent_env.env.env import DeployedEnv, Env, website_child
 from agent_env.env.envs.computer.utils import sites
 from agent_env.env.envs.website import WebsiteEnv
 from agent_env.store.base import NotFoundError
@@ -98,9 +98,9 @@ class BrowserSignInTaskStep(BrowserStep):
                 (site for site in getattr(env, "website_envs", None) or [] if site.id == self.site), None)
             if not isinstance(website, WebsiteEnv):
                 continue
-            child = record.child_env(website.environment_name, mcp=False)
+            child = _served(record, website.environment_name)
             if child is None:
-                raise RuntimeError(f"env {record.env_id!r}'s card lists no website {website.environment_name!r}")
+                raise RuntimeError(f"env {record.env_id!r}'s card serves no website as {website.environment_name!r}")
             found = await sites.deployed_sites([record], services=[website.environment_name])
             names = list(dict.fromkeys(name for site in found for name in site["domains"]))
             if not names:
@@ -108,6 +108,16 @@ class BrowserSignInTaskStep(BrowserStep):
             return record, child, names
         raise RuntimeError(f"site {self.site!r} isn't deployed in this run: no env in context.deployed_envs is it or "
                            "has it among its websites")
+
+
+def _served(record: DeployedEnv, service: str) -> Optional[protocol_v1.ChildEnv]:
+    """The website ``record``'s card serves as ``service``, the name of the route it's at, which its card's name
+    needn't be (``sites.served_as``); a leaf card, a website's deployed alone, is its own."""
+    card = record.environment_card or {}
+    if not isinstance(card.get("children_environments"), list):
+        return protocol_v1.ChildEnv(name=card.get("name"), url=card.get("url"), card=card) if card else None
+    return next((child for child in protocol_v1.children(card)
+                 if website_child(child) and sites.served_as(child) == service), None)
 
 
 def scoped(cookies: list[dict], names: list[str]) -> list[dict]:
