@@ -185,6 +185,8 @@ class _RecordingLocalSandbox(LocalSandbox):
 
     async def exec_with_output(self, *args):
         self.scripts.append(" ".join(args))
+        if args[:2] == ("docker", "version"):
+            return 0, "29.0.0", ""
         if args[:3] == ("docker", "ps", "-aq") and args[-1].startswith("name="):
             return 0, self.container_name, ""
         if args[:3] == ("docker", "network", "ls"):
@@ -343,14 +345,38 @@ async def test_a_failed_lookup_is_reported_and_containers_are_not_guessed(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_teardown_without_docker_installed_reports_unverified(tmp_path: Path):
+async def test_teardown_without_docker_installed_finishes(tmp_path: Path):
     class _NoDocker(_RecordingLocalSandbox):
         async def exec_with_output(self, *args):
             raise FileNotFoundError(2, "No such file or directory", "docker")
 
     sandbox = _NoDocker(tmp_path, sandbox_id="local-abc")
-    with pytest.raises(RuntimeError, match="docker"):
+    await sandbox.terminate()
+
+    assert sandbox.scripts == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("record", [None, ".agent-container-mode", "docker-compose.yml", ".closed-network"],
+                         ids=["none", "its-container", "its-compose-stack", "its-closed-network"])
+async def test_teardown_with_docker_unreachable_fails_only_for_a_sandbox_that_made_docker_objects(tmp_path: Path,
+                                                                                                record, caplog):
+    if record is not None:
+        (tmp_path / record).write_text("closed-owned" if record == ".closed-network" else "")
+
+    class _DaemonDown(_RecordingLocalSandbox):
+        async def exec_with_output(self, *args):
+            self.scripts.append(" ".join(args))
+            return 1, "", "Cannot connect to the Docker daemon"
+
+    sandbox = _DaemonDown(tmp_path, sandbox_id="local-abc")
+    if record is None:
         await sandbox.terminate()
+        assert "docker rm -f $(docker ps -aq --filter label=agentenv.sandbox=local-abc)" in caplog.text
+    else:
+        with pytest.raises(RuntimeError, match="Docker can't be reached to remove sandbox local-abc's"):
+            await sandbox.terminate()
+    assert sandbox.scripts == ["docker version --format {{.Server.Version}}"]
 
 
 @pytest.mark.asyncio
