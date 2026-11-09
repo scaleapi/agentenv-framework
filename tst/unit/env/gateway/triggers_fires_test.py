@@ -9,7 +9,7 @@ import pytest
 from agent_env.env.gateway.constants import EXT_TRIGGERS_URI, GATEWAY_EXTENSIONS
 from agent_env.env.gateway.triggers import TriggerEngine, TriggerError
 from tst.unit.env.gateway.next_event_test import _engine, _next, _row, _until
-from tst.unit.env.gateway.triggers_time_test import _result
+from tst.unit.env.gateway.triggers_time_test import _perm, _result
 
 
 def _reply_trigger(tid: str = "reply", *, delay=None, executor: dict | None = None) -> dict:
@@ -222,3 +222,32 @@ def test_the_card_offers_config():
     triggers = next(e for e in GATEWAY_EXTENSIONS if e["uri"] == EXT_TRIGGERS_URI)
     assert triggers["params"]["methods"]["config"]["endpoint"] == "/triggers/config"
     assert "fires_in_state" in triggers["params"]["features"]
+
+
+@pytest.mark.asyncio
+async def test_a_fire_counts_as_running_from_its_detection_before_its_task_first_runs(monkeypatch):
+    bob = _Executor(monkeypatch)
+    bob.release()
+    engine, clock, _ = _engine()
+    engine.register({"watch_roles": ["default"], "triggers": [
+        {"id": "ping", "when": {"type": "time", "at": "PT1M"}, "actions": [_perm()]}]})
+    clock.advance("2026-03-02T00:01:00Z")
+
+    assert engine.clock_advanced() == ["ping"]
+    assert (_row(engine, "ping")["status"], _row(engine, "ping")["running"]) == ("firing", 1)
+    await _until(lambda: _row(engine, "ping")["status"] == "fired")
+    assert _row(engine, "ping")["running"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_fire_cancelled_before_it_began_leaves_no_count(monkeypatch):
+    _Executor(monkeypatch)
+    engine, _, _ = _engine()
+    engine.register(_reply_trigger())
+    engine.on_tool_call("default", "send_text", {}, _result())
+    trig = engine._triggers["reply"]
+    trig["task"].cancel()
+    await asyncio.gather(trig["task"], return_exceptions=True)
+    await asyncio.sleep(0)
+
+    assert trig["running"] == 0

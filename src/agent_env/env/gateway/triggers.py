@@ -1101,7 +1101,7 @@ class TriggerEngine:
         if trig["status"] in TRIGGER_IN_FLIGHT_STATUSES and self._concurrent_fires:
             # Mid-fire, side by side: this call's fire starts now, so a quick reply doesn't wait behind a slow one.
             self._emit("detected", tid, provoking=provoking, alongside=trig["running"])
-            task = self._schedule(self._fire_alongside(tid, trig, ctx, since))
+            task = self._start_fire(trig, lambda ticket: self._fire_alongside(tid, trig, ctx, since, ticket))
             task.set_name(tid)
             trig["alongside"].add(task)
             task.add_done_callback(trig["alongside"].discard)
@@ -1115,7 +1115,7 @@ class TriggerEngine:
         trig["status"] = "firing"
         trig["detected_at"] = _now()
         self._emit("detected", tid, provoking=provoking)
-        trig["task"] = self._schedule(self._fire(tid, trig, ctx, since))
+        trig["task"] = self._start_fire(trig, lambda ticket: self._fire(tid, trig, ctx, since, ticket))
         trig["task"].set_name(tid)
         return trig["task"]
 
@@ -1292,11 +1292,12 @@ class TriggerEngine:
         # first/last only: a burst can carry _MAX_CATCHUP marks, each with its own `fired` event.
         self._emit("detected", tid, provoking=provoking, due=len(marks), capped=capped,
                    first_mark=_iso(marks[0]), last_mark=_iso(marks[-1]))
-        trig["task"] = self._schedule(self._fire_time(tid, trig, marks, capped, terminated))
+        trig["task"] = self._start_fire(trig, lambda ticket: self._fire_time(tid, trig, marks, capped, terminated,
+                                                                             ticket))
 
-    async def _fire_time(self, tid: str, trig: dict, marks: list[datetime], capped: bool, terminated: bool) -> None:
+    async def _fire_time(self, tid: str, trig: dict, marks: list[datetime], capped: bool, terminated: bool,
+                         ticket: dict) -> None:
         """Run the actions once per due mark, then re-arm (recurring) or retire (one-shot / terminated)."""
-        trig["running"] += 1
         try:
             await self._gw._log_event({"event_type": "trigger_fired", "source": "trigger_engine", "trigger_id": tid})
             clock = self._gw._clock
@@ -1323,7 +1324,7 @@ class TriggerEngine:
             self._emit("failed", tid, detail=str(e)[:300])
             return
         finally:
-            trig["running"] -= 1
+            _uncount(trig, ticket)
             self._recompute_time_flag()  # a terminated trigger lets the driver park again
         self._resolve_dependents(tid)  # success-only, outside the try (see _fire)
 
@@ -1343,6 +1344,16 @@ class TriggerEngine:
                 return False
             self._readonly_tools = readonly
         return name in self._readonly_tools
+
+    def _start_fire(self, trig: dict, run) -> asyncio.Task:
+        """Schedule ``run(ticket)``, one fire of ``trig``, counted in its ``running`` from now, so state shows it at work
+        before its task first runs. The fire's ``finally`` uncounts it (``_uncount``); one cancelled before it began
+        is uncounted when its task ends."""
+        ticket = {"counted": True}
+        trig["running"] += 1
+        task = self._schedule(run(ticket))
+        task.add_done_callback(lambda _: _uncount(trig, ticket))
+        return task
 
     def _schedule(self, coro) -> asyncio.Task:
         task = asyncio.get_running_loop().create_task(coro)
@@ -1420,13 +1431,12 @@ class TriggerEngine:
         caller = Caller(role=role) if role is not None else None
         return await gw._call_child_tool(server_url, tool_name, arguments, caller=caller)
 
-    async def _fire(self, tid: str, trig: dict, ctx: dict, since: float) -> None:
+    async def _fire(self, tid: str, trig: dict, ctx: dict, since: float, ticket: dict) -> None:
         """Run the actions for one provoking call, then drain any calls queued while firing (repeat
         triggers). A failure always re-arms: a mirror states a standing invariant, so one transient
         error must not silence it for the rest of the run. Ends armed or fired (one-shot success)."""
         repeat = bool(trig["spec"]["when"].get("repeat"))
         outcome: str | None = None  # the status a normal end leaves
-        trig["running"] += 1
         try:
             while True:
                 ok = await self._fire_once(tid, trig, ctx, since)
@@ -1438,18 +1448,17 @@ class TriggerEngine:
                 outcome = "armed" if (repeat or not ok) else "fired"
                 return
         finally:
-            trig["running"] -= 1
+            _uncount(trig, ticket)
             trig["task"] = None
             self._settle_status(tid, trig, outcome)
 
-    async def _fire_alongside(self, tid: str, trig: dict, ctx: dict, since: float) -> None:
+    async def _fire_alongside(self, tid: str, trig: dict, ctx: dict, since: float, ticket: dict) -> None:
         """One fire of a repeat trigger run beside its others (``concurrent_fires``); the last of them to end re-arms
         it, as a repeat trigger always ends armed."""
-        trig["running"] += 1
         try:
             await self._fire_once(tid, trig, ctx, since)
         finally:
-            trig["running"] -= 1
+            _uncount(trig, ticket)
             self._settle_status(tid, trig, "armed")
 
     def _settle_status(self, tid: str, trig: dict, outcome: str | None) -> None:
@@ -1719,6 +1728,13 @@ class TriggerEngine:
         for dep_id, dep in self._triggers.items():
             if dep["spec"]["when"].get("after") == tid and dep["status"] == "armed":
                 self._cancel(dep_id, dep, anchor=tid)
+
+
+def _uncount(trig: dict, ticket: dict) -> None:
+    """Take one fire out of ``trig``'s ``running``, once."""
+    if ticket["counted"]:
+        ticket["counted"] = False
+        trig["running"] -= 1
 
 
 def _begin_wait(trig: dict, resumes: Any, hours: dict | None = None) -> object:
