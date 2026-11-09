@@ -1,9 +1,9 @@
 """The always_on and user_sim steps: a task that runs over simulated days, the way you'd hand a job to a personal
 assistant, with an LLM user sim.
 
-The ``user_sim`` step says who the user is (description, time zone, schedule, response times, the version of the user
-sim and its plug-in) and records it in the run's metadata under its ``name``; a ``deploy_agent`` step deploys the agent
-that plays them. The ``always_on`` step names it with ``user_sim`` and runs the loop:
+The ``user_sim`` step (``user_sim.py``, which documents the interface this step uses) says who the user is and records
+it in the run's metadata under its ``name``; a ``deploy_agent`` step deploys the agent that plays them. The
+``always_on`` step names it with ``user_sim`` and runs the loop:
 
 - The first wake is the user's request. While the task's clock is set, each wake opens with the task's date and time
   (any other date the agent sees is the computer's clock), then what came due for the agent on notifications/v1 (a
@@ -51,7 +51,6 @@ from a2a.types import TaskState
 from agent_env.a2a_agent import A2AAgent, conversation_store, protocol
 from agent_env.a2a_agent.object_transfer import send_and_wait
 from agent_env.artifact import FileArtifact
-from agent_env.entity.refs import EntityRef
 from agent_env.env.env import EnvCapabilityUnsupported
 from agent_env.env.gateway.notifications import DEFAULT_MAX_ACTIVE
 from agent_env.env.gateway.constants import (
@@ -65,12 +64,12 @@ from agent_env.store import DuplicateKeyError, get_config
 from agent_env.task_step.context import PromptResponse, TaskStepContext
 from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps import user_sim_versions
+from agent_env.task_step.task_steps.user_sim import USER_SIMS_KEY
 from agent_env.task_step.task_steps.notification_delivery import delivered_parts, label_time, take_due
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 
 logger = logging.getLogger(__name__)
 
-USER_SIMS_KEY = "user_sims"
 ALWAYS_ON_KEY = "always_on"
 USER_SAYS = "user_says"
 USER_PHONE = "user_phone"
@@ -90,71 +89,6 @@ CHECKS_RULE = ("You only run when something wakes you. To do something at a late
 CHECK_MIN_INTERVAL = "PT3H"
 EMPTY_REPLIES = frozenset({"(The assistant's reply was empty.)"})  # a harness's stand-in for an empty final reply
 TIME_LINE = "It's {when}. Any other date you see is the computer's clock, not the task's."
-
-
-# ==================================================================================================================
-class UserSimTaskStep(TaskStep):
-    """Who the user is, once per task: their settings go into the run's metadata under ``name``."""
-
-    type: ClassVar[str] = "user_sim"
-    entity_refs = (EntityRef.artifact("plugin.file_artifact_id", version_field="file_artifact_version",
-                                      artifact_type="file"),)
-
-    def __init__(self, id: str, version: Optional[int], *, name: str, model: str, agent_name: Optional[str] = None,
-                 user_version: str = "ours", display_name: Optional[str] = None, first_name: Optional[str] = None,
-                 description: Optional[str] = None, email: Optional[str] = None, time_zone: Optional[str] = None,
-                 schedule: Optional[dict] = None, response_times: Optional[dict] = None,
-                 max_replies: Optional[int] = None, permissions: Optional[dict] = None,
-                 keep_private: Optional[list] = None, output_format: Optional[dict] = None,
-                 versions: Optional[dict] = None, plugin: Optional[dict] = None, depends_on=None,
-                 fail_task_on_error: bool = True, retry_config=None):
-        super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error,
-                         retry_config=retry_config)
-        if not model:
-            raise ValueError("user_sim.model is required")
-        if time_zone is not None:
-            ZoneInfo(time_zone)
-        self.name = name
-        self.model = model
-        self.agent_name = agent_name or name
-        self.user_version = user_version
-        self.display_name = display_name
-        self.first_name = first_name
-        self.description = description
-        self.email = email
-        self.time_zone = time_zone
-        self.schedule = schedule
-        self.response_times = response_times
-        self.max_replies = max_replies
-        self.permissions = permissions
-        self.keep_private = keep_private
-        self.output_format = output_format
-        self.versions = versions or {}
-        self.plugin = plugin
-
-    _FIELDS = ("name", "model", "agent_name", "user_version", "display_name", "first_name", "description", "email",
-               "time_zone", "schedule", "response_times", "max_replies", "permissions", "keep_private", "output_format",
-               "versions", "plugin")
-
-    def to_dict(self) -> dict:
-        return {**super().to_dict(), **{k: getattr(self, k) for k in self._FIELDS}}
-
-    @classmethod
-    def from_dict(cls, data: dict) -> UserSimTaskStep:
-        return cls(**cls._base_from_dict(data), retry_config=data.get("retry_config"),
-                   **{k: data.get(k) for k in cls._FIELDS if k in data})
-
-    async def execute(self, context: TaskStepContext) -> TaskStepContext:
-        overrides = self.step_param_overrides(context)
-        version = overrides.get("user_version") or self.user_version
-        if not any(a.agent_name == self.agent_name for a in context.deployed_agents):
-            raise RuntimeError(f"user_sim '{self.name}': no deployed agent named '{self.agent_name}'; deploy it first")
-        settings = {k: getattr(self, k) for k in self._FIELDS}
-        settings.update(user_version=version, step_id=self.id,
-                        model=overrides.get("model") or self.model)
-        context.metadata.setdefault(USER_SIMS_KEY, {})[self.name] = settings
-        logger.info(f"user_sim '{self.name}': version {version}, model {settings['model']}, agent {self.agent_name}")
-        return context
 
 
 # ==================================================================================================================

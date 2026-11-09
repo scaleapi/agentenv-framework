@@ -14,6 +14,7 @@ from agent_env.env.gateway.constants import AGENT_ENV_ROLE_HEADER, GATEWAY_EXTEN
 from agent_env.env.gateway.gateway import Gateway
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
 from agent_env.task_step.task_steps import always_on as ao
+from agent_env.task_step.task_steps.user_sim import USER_SIMS_KEY
 
 GATEWAY = "http://gateway.test"
 SOLVER = "http://solver.test"
@@ -95,7 +96,7 @@ class Rig:
         ctx = TaskStepContext(instance_id="ti-1", deployed_envs=[env])
         ctx.deployed_agents += [DeployedAgent(agent_name="solver", api_url=SOLVER, a2a_url=SOLVER, a2a_card={}),
                                 DeployedAgent(agent_name="user-sim", api_url=USER_SIM, a2a_url=USER_SIM, a2a_card={})]
-        ctx.metadata[ao.USER_SIMS_KEY] = {"linda": {
+        ctx.metadata[USER_SIMS_KEY] = {"linda": {
             "name": "linda", "model": "sim-model", "agent_name": "user-sim", "user_version": "ours",
             "display_name": "Linda Murphy", "first_name": "Linda", "time_zone": "America/New_York",
             "description": "Linda, planning Noor's 30th.", **(user or {})}}
