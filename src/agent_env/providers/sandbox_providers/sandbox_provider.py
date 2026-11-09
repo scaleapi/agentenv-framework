@@ -110,12 +110,14 @@ class SandboxProvider(ABC):
         attribution: Optional[Attribution] = None,
         network_policy: Optional[NetworkPolicy] = None,
         private_network: bool = False,
+        shm_mb: Optional[int] = None,
     ) -> Sandbox:
         """Provision a sandbox with the registry image already running as a container.
 
         On return, ``tunnel_urls[port]`` is populated and the container listens on ``port``.
         Caller still owns readiness polling for the container's own endpoints. ``private_network`` puts it on a
-        network this provider's other such containers share, at its ``private_host``.
+        network this provider's other such containers share, at its ``private_host``. ``shm_mb`` sizes the container's
+        ``/dev/shm``, in MiB, where the backend can; one that can't logs that it didn't.
 
         Default implementation: a container-only backend uses create_sandbox; a VM backend creates
         a VM, pulls the image, and starts it. Backends that bake the image in at creation override.
@@ -125,6 +127,7 @@ class SandboxProvider(ABC):
                              "containers on a private network they share")
         if (type(self).create_vm is SandboxProvider.create_vm
                 and type(self).create_sandbox is not SandboxProvider.create_sandbox):
+            log_unsized_shm(self, shm_mb)
             return await self.create_sandbox(
                 image_name=image_name, port=port, env=env, cpu=cpu, memory=memory,
                 disk_size_gb=disk_size_gb, timeout=timeout, attribution=attribution,
@@ -138,7 +141,7 @@ class SandboxProvider(ABC):
         )
         try:
             await sandbox.pull_images([image_name])
-            await self._start_container(sandbox, image_name=image_name, port=port, env=env)
+            await self._start_container(sandbox, image_name=image_name, port=port, env=env, shm_mb=shm_mb)
             sandbox.mode = SANDBOX_MODE_CONTAINER
             return sandbox
         except BaseException:
@@ -148,15 +151,16 @@ class SandboxProvider(ABC):
                 pass
             raise
 
-    async def reset_container(self, sandbox: Sandbox, *, image_name: str, port: int, env: dict[str, str]) -> None:
-        """Reset the container create_container ran on ``sandbox`` to a fresh one of ``image_name`` with ``env``, reached
-        on ``port`` as before: the sandbox, its id and its URLs stay. A backend whose sandbox is the container itself
-        can't reset it in place."""
+    async def reset_container(self, sandbox: Sandbox, *, image_name: str, port: int, env: dict[str, str],
+                              shm_mb: Optional[int] = None) -> None:
+        """Reset the container create_container ran on ``sandbox`` to a fresh one of ``image_name`` with ``env`` and
+        ``shm_mb``, reached on ``port`` as before: the sandbox, its id and its URLs stay. A backend whose sandbox is the
+        container itself can't reset it in place."""
         if not isinstance(sandbox, VmSandbox):
             raise NotImplementedError(f"{type(self).__name__}'s sandbox is the container itself, so it can't be reset "
                                       "in place")
         await sandbox.exec_script(f"docker rm -f {shlex.quote(sandbox.container_name)} > /dev/null")
-        await self._start_container(sandbox, image_name=image_name, port=port, env=env)
+        await self._start_container(sandbox, image_name=image_name, port=port, env=env, shm_mb=shm_mb)
 
     async def reset_vm(self, sandbox: Sandbox, *, image: str, env: dict[str, str]) -> None:
         """Boot the disk create_vm booted on ``sandbox`` afresh, from ``image`` with ``env``, reached on its ports as
@@ -168,18 +172,22 @@ class SandboxProvider(ABC):
         any deadline on creating one, for the deploy ``attribution`` describes, as it describes the sandbox. Does
         nothing here; a provider that builds a context-only image itself builds it."""
 
-    async def _start_container(self, sandbox: VmSandbox, *, image_name: str, port: int, env: dict[str, str]) -> None:
-        """Run the pulled ``image_name`` as the sandbox's container, publishing ``port``."""
-        args = self._container_args(sandbox, image_name=image_name, port=port, env=env)
+    async def _start_container(self, sandbox: VmSandbox, *, image_name: str, port: int, env: dict[str, str],
+                               shm_mb: Optional[int] = None) -> None:
+        """Run the pulled ``image_name`` as the sandbox's container, publishing ``port``, with ``shm_mb`` MiB of
+        ``/dev/shm``."""
+        args = self._container_args(sandbox, image_name=image_name, port=port, env=env, shm_mb=shm_mb)
         await sandbox.exec_script(f"docker run -d {args} > /dev/null")
 
-    def _container_args(self, sandbox: VmSandbox, *, image_name: str, port: int, env: dict[str, str]) -> str:
+    def _container_args(self, sandbox: VmSandbox, *, image_name: str, port: int, env: dict[str, str],
+                        shm_mb: Optional[int] = None) -> str:
         """The ``docker run`` / ``docker create`` arguments for the sandbox's container."""
         env_flags = " \\\n    ".join(f"-e {shlex.quote(k)}={shlex.quote(v)}" for k, v in env.items())
         extra_args = f"{self.EXTRA_CONTAINER_RUN_ARGS} " if self.EXTRA_CONTAINER_RUN_ARGS else ""
+        shm_args = f"--shm-size {int(shm_mb)}m " if shm_mb else ""
         return (
-            f"--name {shlex.quote(sandbox.container_name)} {self._publish_args(sandbox, port)} {extra_args}\\\n    "
-            f"{env_flags} \\\n    {shlex.quote(image_name)}"
+            f"--name {shlex.quote(sandbox.container_name)} {self._publish_args(sandbox, port)} {extra_args}{shm_args}"
+            f"\\\n    {env_flags} \\\n    {shlex.quote(image_name)}"
         )
 
     def _publish_args(self, sandbox: VmSandbox, port: int) -> str:
@@ -370,6 +378,14 @@ _BUILTIN_SANDBOX_PROVIDERS: dict[str, str] = {
     "lume": "agent_env.providers.sandbox_providers.lume.provider:LumeSandboxProvider",
 }
 
+
+
+def log_unsized_shm(provider: SandboxProvider, shm_mb: Optional[int]) -> None:
+    """Log that ``provider``'s container keeps its own ``/dev/shm`` when ``shm_mb`` was asked for, which it can't size:
+    the container boots anyway."""
+    if shm_mb:
+        logger.info("%s can't size /dev/shm: the container keeps its default, not the %d MiB asked for",
+                    type(provider).__name__, shm_mb)
 
 
 def _sandbox_config(source: Config | None = None) -> dict:

@@ -877,6 +877,35 @@ async def test_a_reset_ends_the_envs_recordings_then_boots_a_fresh_container_whe
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("asks", [1024, None])
+async def test_a_computer_boots_with_the_shared_memory_its_apps_ask_for_records_it_and_a_reset_keeps_it(
+        base, driver, docker, boots, monkeypatch, tmp_path, asks):
+    monkeypatch.setenv("MAIL_TOKEN", "t0ken")
+    boots.display = (1280, 800)
+    install = {"python": "requirements.txt", "services": [{"name": "imap", "command": "venv/bin/python imap.py"}],
+               **({"shm_mb": asks} if asks else {})}
+    env = _put(base, driver, apps=[_app(base, driver, tmp_path / "mail", compose=False, install=install,
+                                        defaults={"token": "env:MAIL_TOKEN"})])
+    deployed = await Env.get(env.id).deploy()
+    (sandbox,) = boots.sandboxes
+    resets = []
+
+    async def reset_container(self, sandbox, **kwargs):
+        resets.append(kwargs)
+
+    monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "get_sandbox", AsyncMock(return_value=sandbox))
+    monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "reset_container", reset_container)
+    monkeypatch.setattr(env_computer_provider, "ready", AsyncMock(return_value=DRIVER_CARD))
+
+    await ResetEnvTaskStep(id="reset", version=None, env_id=env.id, fail_task_on_error=True).execute(
+        TaskStepContext(deployed_envs=[deployed]))
+
+    ((booted,), (reset,)) = boots.boots, resets
+    assert booted["shm_mb"] == asks and deployed.metadata["computer"].get("shm_mb") == asks
+    assert reset.get("shm_mb") == asks
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("tools, changes", [
     ("standard", [(DISABLE_TOOL_EXTENSION_URI, "disable", {"role": "default", "tools": ["*"]}),
                   (ENABLE_TOOL_EXTENSION_URI, "enable", {"role": "default", "tools": list(COMPUTER_TOOLS)})]),

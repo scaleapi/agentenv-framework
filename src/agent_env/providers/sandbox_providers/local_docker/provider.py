@@ -829,11 +829,12 @@ class LocalSandboxProvider(SandboxProvider):
         timeout: int = 3600 * 2,
         attribution: Optional[Attribution] = None,
         network_policy: Optional[NetworkPolicy] = None,
+        shm_mb: Optional[int] = None,
     ) -> LocalSandbox:
         refuse_unenforceable_policy(self, network_policy)
         if network_policy is not None and network_policy.closed:
             sandbox = await self._create_closed(image_name=image_name, port=port, env=env, timeout=timeout,
-                                                attribution=attribution)
+                                                attribution=attribution, shm_mb=shm_mb)
         else:
             sandbox = await super().create_container(
                 image_name=image_name,
@@ -845,6 +846,7 @@ class LocalSandboxProvider(SandboxProvider):
                 timeout=timeout,
                 attribution=attribution,
                 network_policy=network_policy,
+                shm_mb=shm_mb,
             )
         # The marker is how a later get_sandbox() (post-run teardown rebuilds the sandbox from disk)
         # learns this is a container and removes it. If we can't persist it, that reconstructed
@@ -877,7 +879,7 @@ class LocalSandboxProvider(SandboxProvider):
         return sandbox
 
     async def _create_closed(self, *, image_name: str, port: int, env: dict[str, str], timeout: int,
-                             attribution: Optional[Attribution]) -> LocalSandbox:
+                             attribution: Optional[Attribution], shm_mb: Optional[int] = None) -> LocalSandbox:
         """The container on an internal network of its own, with no route out, and a relay on that network and the
         default bridge publishing its ``port``: Docker publishes no port of a container on an internal network alone."""
         relay = await relay_image()
@@ -888,7 +890,7 @@ class LocalSandboxProvider(SandboxProvider):
             label = shlex.quote(f"{SANDBOX_LABEL}={sandbox.sandbox_id}")
             (sandbox.work_dir / _CLOSED_NETWORK_FILE).write_text(network)
             await sandbox.exec_script(f"docker network create --internal --label {label} {network} >/dev/null")
-            await self._run_closed(sandbox, relay, image_name=image_name, port=port, env=env)
+            await self._run_closed(sandbox, relay, image_name=image_name, port=port, env=env, shm_mb=shm_mb)
             sandbox.mode = SANDBOX_MODE_CONTAINER
         except BaseException:
             try:
@@ -900,22 +902,23 @@ class LocalSandboxProvider(SandboxProvider):
         sandbox.network_policy = NetworkPolicy(mode="allowlist")
         return sandbox
 
-    async def reset_container(self, sandbox: Sandbox, *, image_name: str, port: int, env: dict[str, str]) -> None:
+    async def reset_container(self, sandbox: Sandbox, *, image_name: str, port: int, env: dict[str, str],
+                              shm_mb: Optional[int] = None) -> None:
         """Reset the sandbox's container to a fresh one, and on a closed network its relay too, since the fresh
         container's address on that network may differ."""
         if not (isinstance(sandbox, LocalSandbox) and sandbox.closed_network):
-            await super().reset_container(sandbox, image_name=image_name, port=port, env=env)
+            await super().reset_container(sandbox, image_name=image_name, port=port, env=env, shm_mb=shm_mb)
             return
         await sandbox.exec_script(f"docker rm -f {shlex.quote(sandbox.container_name)} "
                                   f"{shlex.quote(sandbox.scoped_name('relay'))} > /dev/null")
-        await self._run_closed(sandbox, await relay_image(), image_name=image_name, port=port, env=env)
+        await self._run_closed(sandbox, await relay_image(), image_name=image_name, port=port, env=env, shm_mb=shm_mb)
 
     async def _run_closed(self, sandbox: LocalSandbox, relay: str, *, image_name: str, port: int,
-                          env: dict[str, str]) -> None:
+                          env: dict[str, str], shm_mb: Optional[int] = None) -> None:
         """The container on the sandbox's closed network, then the relay publishing its ``port`` at its address there."""
         network, relay_name = sandbox.closed_network, sandbox.scoped_name("relay")
         label = shlex.quote(f"{SANDBOX_LABEL}={sandbox.sandbox_id}")
-        await self._start_container(sandbox, image_name=image_name, port=port, env=env)
+        await self._start_container(sandbox, image_name=image_name, port=port, env=env, shm_mb=shm_mb)
         address = await sandbox.exec_script(
             f"docker inspect -f '{{{{(index .NetworkSettings.Networks \"{network}\").IPAddress}}}}' "
             f"{shlex.quote(sandbox.container_name)}")
@@ -929,14 +932,16 @@ class LocalSandboxProvider(SandboxProvider):
         network = sandbox.closed_network if isinstance(sandbox, LocalSandbox) else None
         return f"--network {shlex.quote(network)}" if network is not None else super()._publish_args(sandbox, port)
 
-    async def _start_container(self, sandbox: VmSandbox, *, image_name: str, port: int, env: dict[str, str]) -> None:
+    async def _start_container(self, sandbox: VmSandbox, *, image_name: str, port: int, env: dict[str, str],
+                               shm_mb: Optional[int] = None) -> None:
         """Where the configured store hands out local grants, create the container, copy the local transfer CA's
         trust files in, then start it, so its TLS clients trust the grant server. Variables the caller sets win."""
         trust_dir = await asyncio.to_thread(local_grant_trust)
         if trust_dir is None:
-            await super()._start_container(sandbox, image_name=image_name, port=port, env=env)
+            await super()._start_container(sandbox, image_name=image_name, port=port, env=env, shm_mb=shm_mb)
             return
-        args = self._container_args(sandbox, image_name=image_name, port=port, env={**LOCAL_TRUST_ENV, **env})
+        args = self._container_args(sandbox, image_name=image_name, port=port, env={**LOCAL_TRUST_ENV, **env},
+                                    shm_mb=shm_mb)
         await sandbox.exec_script(f"docker create {args} > /dev/null")
         await start_trusting(sandbox, sandbox.container_name, trust_dir)
 

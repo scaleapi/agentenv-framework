@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import modal
@@ -49,6 +50,26 @@ def _local_image_store():
 
     get_config().set_image_store(FakeImageStore())
     yield
+
+
+@pytest.mark.asyncio
+async def test_a_container_asking_for_shm_is_created_anyway_with_a_log_that_modal_cant_size_it(_patched_provider,
+                                                                                               caplog):
+    fake_sb = MagicMock()
+    fake_sb.object_id = "sb-FAKEFAKEFAKEFAKEFAKE"
+    fake_sb.wait_until_ready.aio = AsyncMock(side_effect=asyncio.CancelledError)
+    fake_sb.terminate.aio = AsyncMock()
+
+    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox.create") as mock_create, \
+            caplog.at_level(logging.INFO, logger="agent_env.providers.sandbox_providers.sandbox_provider"):
+        mock_create.aio = AsyncMock(return_value=fake_sb)
+        with pytest.raises(asyncio.CancelledError):
+            await _patched_provider.create_container(image_name="registry.example/mcp-server-example:v1", port=18765,
+                                                     env={}, shm_mb=1024)
+
+    mock_create.aio.assert_awaited_once()
+    assert "ModalSandboxProvider can't size /dev/shm: the container keeps its default, not the 1024 MiB asked for" in (
+        caplog.text)
 
 
 @pytest.mark.asyncio

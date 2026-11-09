@@ -34,7 +34,7 @@ from agent_env.env.envs._deployment import (
 from agent_env.env.envs.computer import COMPUTER_ENV_TYPE
 from agent_env.env.envs.computer.utils import boot, composer, gate, inside, sites
 from agent_env.env.envs.computer.utils.composed import stale
-from agent_env.env.envs.computer.utils.install import platform_of
+from agent_env.env.envs.computer.utils.install import for_os, platform_of
 from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.envs.computer.utils import params as computer_params
 from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
@@ -189,6 +189,13 @@ class ComputerEnv(Env):
     def composed_apps(self) -> list[ComputerAppEnv]:
         """The computer app envs composed into the env's computer, each installed under its prefix."""
         return self.apps
+
+    def shm_mb(self) -> int | None:
+        """The shared memory its computer's ``/dev/shm`` needs, in MiB: the most any of its apps' installs on its OS
+        declares, or None when none declares any."""
+        sizes = [size for app in self.composed_apps()
+                 if (size := getattr(for_os(app.install, self.computer.os), "shm_mb", None))]
+        return max(sizes, default=None)
 
     def app_defaults(self) -> dict[str, dict[str, Any]]:
         """Each composed app's default settings, by name: its own env's ``[settings]`` under this env's for it, field by

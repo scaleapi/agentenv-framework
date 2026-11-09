@@ -23,10 +23,12 @@ PACKAGES = ["fonts-liberation", "libasound2t64", "libatk-bridge2.0-0t64", "libat
             "unzip"]
 WINDOW_CLASS = "Chromium"
 PROFILE = ".config/chromium"
+#: The shared memory, in MiB, Chrome's renderers get in /dev/shm, so a heavy page doesn't fill Docker's 64 MiB.
+SHM_MB = 1024
 
 
 @computer_app(supports=[{"os": {"type": "linux", "display": ["x11", "none"]}, "arch": ["amd64", "arm64"]}])
-@linux(packages=Packages(apt=PACKAGES), downloads=DOWNLOADS, paths=[PROFILE],
+@linux(packages=Packages(apt=PACKAGES), downloads=DOWNLOADS, paths=[PROFILE], shm_mb=SHM_MB,
        launch=Launch(at="boot", command=["chromium/chrome/chrome", "--no-sandbox", f"--class={WINDOW_CLASS}"],
                      window={"class": WINDOW_CLASS}, ready=Ready(window=True)))
 class Chromium(WebsiteBrowserEnvironment):

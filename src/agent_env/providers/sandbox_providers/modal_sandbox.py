@@ -24,6 +24,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     Accepts,
     SandboxProvider,
     apply_default_attribution,
+    log_unsized_shm,
 )
 from agent_env.providers.sandbox_providers.modal_image_build import context_image, fmt_exc
 
@@ -326,7 +327,10 @@ class ModalSandboxProvider(SandboxProvider):
         expose_externally: bool = True,
         vnc_port: Optional[int] = None,
         private_network: bool = False,
+        shm_mb: Optional[int] = None,
     ) -> Sandbox:
+        # Modal's SDK has no option for the size of a sandbox's /dev/shm.
+        log_unsized_shm(self, shm_mb)
         # The private network is i6pn, Modal's network between sandboxes, in the configured region.
         i6pn = private_network
         region = get_config().modal_default_region if private_network else None

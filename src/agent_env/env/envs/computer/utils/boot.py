@@ -52,6 +52,8 @@ CONTROL_TOKEN_BYTES = 32
 #: for Windows, what Windows 11 asks of a PC.
 DISK_CPU, DISK_MEMORY_MB = 2.0, 4096
 WINDOWS_CPU, WINDOWS_MEMORY_MB = 4.0, 8192
+#: The variable a Linux disk's init sizes its ``/dev/shm`` by, in MiB (``computers/disk/linux/boot/init``).
+SHM_MB_ENV = "AGENTENV_SHM_MB"
 
 
 @dataclass
@@ -150,16 +152,22 @@ def control_environment(token: Optional[str]) -> dict[str, str]:
     return {CONTROL_TOKEN_ENV: token} if token else {}
 
 
+def shm_environment(form: str, os_type: str, shm_mb: Optional[int]) -> dict[str, str]:
+    """What sizes a Linux disk's ``/dev/shm`` to ``shm_mb`` in its boot environment, which its init reads; nothing for a
+    container, which its sandbox sizes, or without a size, which leaves the init's own."""
+    return {SHM_MB_ENV: str(shm_mb)} if shm_mb and form == "disk" and os_type == "linux" else {}
+
+
 async def boot(sandbox_provider: SandboxProvider, *, image: str, port: int, environment: dict[str, str], token: str,
                network_policy: Optional[NetworkPolicy], timeout: int, attribution: Optional[Attribution],
                disk_size_gb: float = 10, cpu: Optional[float] = None, memory_mb: Optional[int] = None,
                ready_s: float = READY_TIMEOUT_S, form: str = "container", held: bool = False,
-               os_type: str = "linux") -> Booted:
+               os_type: str = "linux", shm_mb: Optional[int] = None) -> Booted:
     """``image``, of ``form``, booted with ``environment`` and its control ``token`` on ``sandbox_provider``, which the
-    caller chose to run its arch natively, its driver's ``port`` reached on the sandbox, once the driver, asked with that
-    token, says the computer is ready, or with ``held``, its boot apps' launch held, once it answers (``ready``); a boot
-    that fails is torn down."""
-    environment = {**environment, **control_environment(token)}
+    caller chose to run its arch natively, its driver's ``port`` reached on the sandbox, its ``/dev/shm`` ``shm_mb`` MiB
+    where the sandbox can size it, once the driver, asked with that token, says the computer is ready, or with
+    ``held``, its boot apps' launch held, once it answers (``ready``); a boot that fails is torn down."""
+    environment = {**environment, **control_environment(token), **shm_environment(form, os_type, shm_mb)}
     if form == "vm_bundle":
         sandbox = await sandbox_provider.create_vm(
             image=image, env=environment, exposed_ports=[port], network_policy=network_policy,
@@ -173,7 +181,8 @@ async def boot(sandbox_provider: SandboxProvider, *, image: str, port: int, envi
     else:
         sandbox = await sandbox_provider.create_container(
             image_name=image, port=port, env=environment, network_policy=network_policy, disk_size_gb=disk_size_gb,
-            timeout=timeout, attribution=dict(attribution or {}), **_size_kwargs(cpu, memory_mb))
+            timeout=timeout, attribution=dict(attribution or {}), **_size_kwargs(cpu, memory_mb),
+            **({"shm_mb": shm_mb} if shm_mb else {}))
     try:
         url = sandbox.tunnel_urls[port]
         return Booted(sandbox, url, await ready(url, ready_s, token, answering=held))

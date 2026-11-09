@@ -52,6 +52,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     SandboxNotFoundError,
     SandboxProvider,
     apply_default_attribution,
+    log_unsized_shm,
 )
 
 logger = logging.getLogger(__name__)
@@ -330,6 +331,7 @@ class CoreWeaveSandboxProvider(SandboxProvider):
         attribution: Attribution | None = None,
         network_policy: NetworkPolicy | None = None,
         private_network: bool = False,
+        shm_mb: int | None = None,
     ) -> CoreWeaveContainerSandbox:
         """Create a CoreWeave Sandbox that runs ``image_name`` itself, unprivileged, with its own entrypoint and
         command and ``env``, and expose ``port`` as a public HTTPS endpoint. ``timeout`` is its hard maximum lifetime;
@@ -339,6 +341,7 @@ class CoreWeaveSandboxProvider(SandboxProvider):
             raise ValueError("CoreWeave sandboxes share no private network, so containers can't be put on one")
         # Every caller passes a size, so this is info rather than a warning on each deploy.
         logger.info("Ignoring disk_size_gb=%s: a CoreWeave container sandbox has no disk size to set", disk_size_gb)
+        log_unsized_shm(self, shm_mb)
         # Chosen before any await, so another deploy preparing this tag at another digest meanwhile can't swap it.
         image = self._pinned_images.get(image_name, image_name)
         store = get_config().get_image_store_at(image_name)
