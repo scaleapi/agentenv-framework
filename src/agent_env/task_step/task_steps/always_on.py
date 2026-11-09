@@ -5,9 +5,9 @@ The ``user_sim`` step (``user_sim.py``, which documents the interface this step 
 it in the run's metadata under its ``name``; a ``deploy_agent`` step deploys the agent that plays them. The
 ``always_on`` step names it with ``user_sim`` and runs the loop:
 
-- The first wake is the user's request. While the task's clock is set, each wake opens with the task's date and time
-  (any other date the agent sees is the computer's clock), then what came due for the agent on notifications/v1 (a
-  trigger's ``notify``, a scheduled check), labelled ``[time · channel]``, then the user's own messages.
+- The first wake is the user's request. Each wake opens with what came due for the agent on notifications/v1 (a
+  trigger's ``notify``, a scheduled check), labelled ``[time · channel]``, then the user's own messages, each labelled
+  with its time; while the task's clock is set, the agent can read it with the gateway's ``get_time``.
 - Only what the agent sends with the gateway's ``message_user`` tool (user-chat/v1) reaches the user; its plain reply
   goes to the log. Each wake should end with ``message_user`` or ``stay_quiet``: one that ends with closing text and
   neither gets one ``nudge`` turn, and every wake ends with a reminder. All three are on unless the task turns them off.
@@ -129,7 +129,6 @@ CHECKS_RULE = ("You only run when something wakes you. To do something at a late
                "schedule_check: you'll be woken then with your note.")
 CHECK_MIN_INTERVAL = "PT3H"
 EMPTY_REPLIES = frozenset({"(The assistant's reply was empty.)"})  # a harness's stand-in for an empty final reply
-TIME_LINE = "It's {when}. Any other date you see is the computer's clock, not the task's."
 # The hub runs a step as one job of at most this long, retrying one that runs over; the step keeps this much of it spare.
 JOB_LIMIT_SECONDS = 8 * 3600
 JOB_HEADROOM_SECONDS = 600
@@ -696,14 +695,6 @@ class _Run:
         the agent keeps its own and the first wake opens with the rules."""
         return f"{self.step.system_prompt.rstrip()}\n\n{self.rules()}" if self.step.system_prompt else None
 
-    def _time_line(self, at: datetime) -> str:
-        """The task's date and time, and the user's local time when they aren't in UTC."""
-        when = f"{at.strftime('%a %b')} {at.day}, {at.year}, {_clock_time(at)} UTC"
-        if self.zone != "UTC":
-            local = at.astimezone(self.tz)
-            when += f" ({local.strftime('%a')} {_clock_time(local)} for {self.person['first']}, {self.zone})"
-        return TIME_LINE.format(when=when)
-
     # ---- clock and world ------------------------------------------------------------------------------------
     async def _armed(self) -> list:
         armed = []
@@ -1193,11 +1184,8 @@ class _Run:
         ``last`` marks, or the one ``max_wakes`` makes the last, carries the last-turn notice (``final_reminder``)."""
         step = self.step
         sent_at = await self.now()
-        clock = await step._env_clock(self.clock_envs)
-        lead = [_step_part(self._time_line(sent_at), "time")] if clock else []
         if self.wakes == 0 and not self.rules_in_system_prompt:  # no system prompt took them: the first wake does
-            lead = [_step_part(self.rules(), "rules"), *lead]
-        parts = [*lead, *parts]
+            parts = [_step_part(self.rules(), "rules"), *parts]
         last = last or self.wakes + 1 >= step.max_wakes
         if last and step.final_reminder:
             parts.append(_step_part(step.final_reminder.format(first=self.person["first"]), "final_reminder"))
@@ -1802,10 +1790,6 @@ def _task_zone(us: dict, clocks: list[dict]) -> str:
 def _step_part(text: str, source: str) -> dict:
     """A line the step adds to a wake, marked so a reader can tell it from what the user or the world sent."""
     return {"kind": "text", "text": text, "metadata": {"agentenv": {"source": source}}}
-
-
-def _clock_time(at: datetime) -> str:
-    return at.strftime("%I:%M %p").lstrip("0")
 
 
 def _state_name(state: Any) -> str:
