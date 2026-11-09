@@ -23,6 +23,8 @@ from desk import (AT, CELL, CLIPBOARD, COLOURS, GRID, INBOX_EVERY_MS, ITEMS, MAR
 
 #: How often the fixture asks Hyprland where its window is until it's there, and for how long.
 PLACE_EVERY_MS, PLACE_TRIES = 100, 50
+#: How long the fixture waits for hyprctl to answer, for wl-copy to take the clipboard and for wl-paste to read it.
+HYPRCTL_TIMEOUT_S, COPY_TIMEOUT_S, PASTE_TIMEOUT_S = 2, 5, 2
 FONT = "DejaVu Sans"
 
 
@@ -274,7 +276,7 @@ def _origin() -> tuple[int, int] | None:
     Hyprland."""
     try:
         clients = json.loads(subprocess.run(["hyprctl", "-j", "clients"], capture_output=True, text=True,
-                                            timeout=2).stdout)
+                                            timeout=HYPRCTL_TIMEOUT_S).stdout)
     except (OSError, subprocess.TimeoutExpired, ValueError):
         return None
     mine = [c for c in clients if c.get("pid") == os.getpid() and c.get("title") == "Fixture Desk"]
@@ -287,14 +289,15 @@ def _rgb(colour: str) -> tuple[float, float, float]:
 
 def _set_clipboard(text: str) -> None:
     try:
-        subprocess.run(["wl-copy", "--", text], check=True, timeout=5)
+        subprocess.run(["wl-copy", "--", text], check=True, timeout=COPY_TIMEOUT_S)
     except (OSError, subprocess.SubprocessError):
         Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(text, -1)
 
 
 def _clipboard() -> str | None:
     try:
-        return subprocess.run(["wl-paste", "--no-newline"], capture_output=True, text=True, timeout=2).stdout
+        return subprocess.run(["wl-paste", "--no-newline"], capture_output=True, text=True,
+                              timeout=PASTE_TIMEOUT_S).stdout
     except (OSError, subprocess.SubprocessError):
         return Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).wait_for_text()
 
