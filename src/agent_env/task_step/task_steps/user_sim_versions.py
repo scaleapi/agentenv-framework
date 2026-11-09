@@ -200,11 +200,17 @@ def problems(person: Any) -> list[str]:
     if person.get("keep_private") is not None and not _lines(person["keep_private"]):
         out.append("keep_private must be a list of non-empty lines")
     if person.get("time_zone") is not None:
-        try:
-            ZoneInfo(person["time_zone"])
-        except (ZoneInfoNotFoundError, ValueError, TypeError):
-            out.append(f"time_zone {person['time_zone']!r} is not an IANA time zone")
+        out += zone_problems(person["time_zone"])
     return out
+
+
+def zone_problems(zone: Any) -> list[str]:
+    """What's wrong with an IANA time zone setting: one message, or none."""
+    try:
+        ZoneInfo(zone)
+    except (ZoneInfoNotFoundError, ValueError, TypeError, OSError):  # a region folder ("Pacific") is an OSError
+        return [f"time_zone {zone!r} is not an IANA time zone"]
+    return []
 
 
 # ---- one read -----------------------------------------------------------------------------------------------------

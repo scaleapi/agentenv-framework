@@ -65,7 +65,6 @@ import logging
 import re
 from datetime import datetime
 from typing import Any, ClassVar, Optional
-from zoneinfo import ZoneInfo
 
 from agent_env.entity.refs import EntityRef
 from agent_env.task_step.context import TaskStepContext
@@ -147,9 +146,9 @@ class UserSimTaskStep(TaskStep):
                          retry_config=retry_config)
         if not model:
             raise ValueError("user_sim.model is required")
-        if time_zone is not None:
-            ZoneInfo(time_zone)
         found = schedule_problems(schedule, response_times, max_replies)
+        if time_zone is not None:
+            found += user_sim_versions.zone_problems(time_zone)
         if not plugin:
             if user_version != user_sim_versions.VERSION:
                 found.append(f"user_version {user_version!r}: the built-in user sim has one version, "

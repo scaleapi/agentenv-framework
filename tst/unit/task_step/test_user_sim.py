@@ -25,8 +25,9 @@ def test_the_user_sim_step_defaults_to_ours_and_has_no_apps_setting():
     step = _step(apps=["Gmail"], time_zone="America/New_York", email="linda.murphy@example.test")
     assert step.user_version == "ours" and "apps" not in step.to_dict()
     assert UserSimTaskStep.from_dict(step.to_dict()).email == "linda.murphy@example.test"
-    with pytest.raises(Exception):
-        _step(time_zone="Mars/Olympus")
+    for zone in ("Mars/Olympus", "Pacific"):  # "Pacific" is a folder of zones: an OSError, not ZoneInfoNotFoundError
+        with pytest.raises(ValueError, match="is not an IANA time zone"):
+            _step(time_zone=zone)
 
 
 def test_the_tested_settings_load():
