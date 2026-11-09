@@ -15,6 +15,7 @@ from agent_env.config.errors import ConfigError
 from agent_env.env.env import Env
 from agent_env.env.envs.computer.utils import boot
 from agent_env.env.envs.computer.utils.composed import Record, failed, now
+from agent_env.env.envs.computer.utils.install import for_os
 from agent_env.store.ids import derive_id
 from agent_env.store.local_state import awaiting_lock
 
@@ -104,7 +105,8 @@ def _reported(env: ComputerEnv, driver: ComputerDriverEnv, form: str, arch: str,
     probe = {"level": report.level, "provider": provider, "passed": report.passed, "checks": report.counts(),
              "extensions": report.extensions, "report": {"id": stored.id, "version": stored.version},
              "probed_at": now()}
-    known = {(failure.check, failure.name): failure for failure in driver.known_failures.get(env.computer.os.type, [])}
+    known = {(failure.check, failure.name): failure
+             for failure in for_os(driver.known_failures, env.computer.os) or []}
     failed_checks = [c for c in report.checks if c.status == "failed"]
     if waived := [c for c in failed_checks if (c.check, c.name) in known]:
         probe["known_failures"] = [{"check": c.check, "name": c.name, "detail": c.detail,

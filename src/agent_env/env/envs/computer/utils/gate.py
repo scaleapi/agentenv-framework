@@ -16,6 +16,7 @@ from jsonschema import Draft202012Validator
 from agent_env.artifact.artifacts.computer import FORMS, ComputerArtifact, SettingValue
 from agent_env.config.loader import ENV_REF_PREFIX, SECRET_REF_PREFIX
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
+from agent_env.env.envs.computer.utils.install import for_os
 from agent_env.store.image_store.oci_registry_credentials import names_registry
 
 if TYPE_CHECKING:
@@ -77,7 +78,7 @@ def check_app(base: ComputerArtifact, driver: ComputerDriverEnv, app: ComputerAp
         problems.append(f"{at}: no architecture {base.id}, {driver.id} and {app.id} all run")
     if os.type not in app.install:
         problems.append(f"{at}: {app.id} declares no install for {os.type}")
-    elif taken := sorted(set(_ports(app, os.type)) & set(_driver_ports(driver, os.type))):
+    elif taken := sorted(set(_ports(app, os.type)) & set(_driver_ports(driver, os))):
         problems.append(f"{at}: {app.id} listens on {', '.join(map(str, taken))}, as {driver.id} does")
     if os.type == "windows" and (session := [step.name for step in app.declaration.install_steps
                                              if step.scope == "session" and (step.os is None or os.type in step.os)]):
@@ -148,8 +149,8 @@ def _ports(app: ComputerAppEnv, os_type: str) -> list[int]:
     return list(install.ports or []) if install is not None else []
 
 
-def _driver_ports(driver: ComputerDriverEnv, os_type: str) -> list[int]:
-    install = driver.install.get(os_type)
+def _driver_ports(driver: ComputerDriverEnv, os: Any) -> list[int]:
+    install = for_os(driver.install, os)
     return [driver.port, *(install.ports or [] if install is not None else [])]
 
 
@@ -236,8 +237,8 @@ def _platform(base: ComputerArtifact, driver: ComputerDriverEnv) -> list[str]:
     if not arches(base, driver):
         problems.append(f"driver: no architecture both run: {base.id} runs {', '.join(base.arch)}, and {driver.id} "
                         f"{', '.join(sorted({p.arch for p in _matching(base, driver.declaration.supports)}))}")
-    if (install := driver.install.get(os.type)) is None:
-        problems.append(f"driver: {driver.id} declares no install for {os.type}")
+    if (install := for_os(driver.install, os)) is None:
+        problems.append(f"driver: {driver.id} declares no install for {_os_shown(base)}")
     else:
         init = base.forms.container.init if base.forms.container is not None else "launchd"
         problems += [f"driver: its service {service.name!r} runs as root, and {base.id}'s {init} runs every program as "

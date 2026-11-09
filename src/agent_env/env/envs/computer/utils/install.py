@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal
+from typing import Any, Literal, Optional, TypeVar
 
 from agentenv_protocol.computer.app import AptSource, Download, LayerPath, Packages, RunScript
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -170,20 +170,48 @@ DRIVER_INSTALLS: dict[str, type[Install]] = {"linux": Install, "macos": MacInsta
 APP_INSTALLS: dict[str, type[Install]] = {"linux": AppInstall, "macos": MacAppInstall, "windows": WindowsAppInstall}
 
 
+#: A distribution as /etc/os-release names it (ID): lowercase letters, digits, ".", "_" and "-".
+_DISTRIBUTION = re.compile(r"[a-z0-9][a-z0-9._-]*")
+_Entry = TypeVar("_Entry")
+
+
+def platform_problem(key: str) -> Optional[str]:
+    """What's wrong with ``key`` as what an install or a known failure is for: an OS type agent-env composes, or one
+    of its distributions as ``<os>/<distribution>`` (``linux/omarchy``), whose entry replaces its OS type's there."""
+    os_type, slash, distribution = key.partition("/")
+    if os_type in OS_TYPES and (not slash or _DISTRIBUTION.fullmatch(distribution)):
+        return None
+    return (f"an OS type agent-env composes: {', '.join(OS_TYPES)}, or one of its distributions as "
+            "<os>/<distribution>, such as linux/omarchy")
+
+
+def os_type_of(key: str) -> str:
+    return key.partition("/")[0]
+
+
+def for_os(by_platform: dict[str, _Entry], os: Any) -> Optional[_Entry]:
+    """``by_platform``'s entry for ``os``, a base's OS: its distribution's (``<os>/<distribution>``) when there's one,
+    else its OS type's."""
+    distribution = getattr(os, "distribution", None)
+    if distribution and f"{os.type}/{distribution}" in by_platform:
+        return by_platform[f"{os.type}/{distribution}"]
+    return by_platform.get(os.type)
+
+
 def installs(data: Any, models: dict[str, type[Install]] = DRIVER_INSTALLS) -> tuple[dict[str, Install], list[str]]:
-    """The installs ``data``, an ``install`` table, declares by OS type, each its type's model of ``models``, and the
-    problems with it, each named by its key."""
+    """The installs ``data``, an ``install`` table, declares by OS type or distribution (``platform_problem``), each
+    its OS type's model of ``models``, and the problems with it, each named by its key."""
     if not isinstance(data, dict):
         return {}, [f"install must be a table of OS types ({', '.join(OS_TYPES)}), not {data!r}"]
     found, problems = {}, []
-    for os_type, table in data.items():
-        if os_type not in OS_TYPES:
-            problems.append(f"install.{os_type}: an install is for an OS type agent-env composes: {', '.join(OS_TYPES)}")
+    for key, table in data.items():
+        if problem := platform_problem(key):
+            problems.append(f"install.{key}: an install is for {problem}")
             continue
         try:
-            found[os_type] = models[os_type].model_validate(table)
+            found[key] = models[os_type_of(key)].model_validate(table)
         except ValidationError as e:
-            problems.extend(f"install.{'.'.join(map(str, (os_type, *error['loc'])))}: {error['msg']}"
+            problems.extend(f"install.{'.'.join(map(str, (key, *error['loc'])))}: {error['msg']}"
                             for error in e.errors())
     return found, problems
 

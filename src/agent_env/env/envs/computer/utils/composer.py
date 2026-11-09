@@ -48,7 +48,7 @@ from agent_env.env.envs.computer.utils import (
     windows_disk,
 )
 from agent_env.env.envs.computer.utils.composed import BUILT, REPOSITORY, Record, failed, now, stale
-from agent_env.env.envs.computer.utils.install import Install
+from agent_env.env.envs.computer.utils.install import Install, for_os
 from agent_env.env.published_images import DISK, DISK_TOOLS_IMAGE, published_disk, published_pinned
 from agent_env.providers.sandbox_providers.host_images import platform_tag
 from agent_env.store.ids import derive_id
@@ -782,7 +782,7 @@ def _stage_driver(context: Path, driver: ComputerDriverEnv, base: ComputerArtifa
     """Write the driver's install files under ``context/driver/`` and its supervisord programs beside them, served on
     its port, its folder under ``DRIVERS`` named for its id's last part, its programs and their file under ``driver-``
     as an app's are under ``app-``, so neither ever takes the other's."""
-    install, name = driver.install[base.os.type], gate.folder_name(driver.id, "driver")
+    install, name = for_os(driver.install, base.os), gate.folder_name(driver.id, "driver")
     layer = _Layer("driver", f"{DRIVERS}/{name}", install, f"agentenv-driver-{name}.conf", driver.id)
     _stage(context, layer, f"driver {driver.id}", driver.files, _services(f"driver-{name}", install),
            {"MCP_PORT": driver.port}, from_store)

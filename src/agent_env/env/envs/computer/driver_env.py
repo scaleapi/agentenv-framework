@@ -13,10 +13,10 @@ from agentenv_protocol.computer.driver import DriverDeclaration
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from agent_env.artifact import Artifact
-from agent_env.artifact.artifacts.computer import OS_TYPES
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.env.env import Env
-from agent_env.env.envs.computer.utils.install import DRIVER_INSTALLS, Install, folder_problems, installs
+from agent_env.env.envs.computer.utils.install import (DRIVER_INSTALLS, Install, folder_problems, installs, os_type_of,
+                                                        platform_problem)
 from agent_env.store.ids import derive_id
 
 if TYPE_CHECKING:
@@ -70,8 +70,8 @@ class ComputerDriverEnv(Env):
     @classmethod
     def from_dict(cls, data: dict) -> ComputerDriverEnv:
         files = Artifact.get(data["files"]["id"], version=data["files"]["version"])
-        install = {os_type: DRIVER_INSTALLS[os_type].model_validate(table)
-                   for os_type, table in (data.get("install") or {}).items()}
+        install = {key: DRIVER_INSTALLS[os_type_of(key)].model_validate(table)
+                   for key, table in (data.get("install") or {}).items()}
         return cls(id=data["id"], version=data.get("version"), module=data["module"], files=files,
                    declaration=DriverDeclaration.model_validate(data["declaration"]), install=install,
                    port=data.get("port", DEFAULT_PORT), metadata=data.get("metadata") or {},
@@ -91,7 +91,8 @@ class ComputerDriverEnv(Env):
     def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:
         """The keys of ``data``, an env.toml, a computer driver env takes: ``module = "<file>:<class>"``, naming a file
         of its folder; ``port``, where it serves; ``install``, by OS type, whose files and requirements are in its
-        folder; and ``known_failures``, by OS type, the probe checks it fails there. Raises BundleError listing every
+        folder; and ``known_failures``, by OS type, the probe checks it fails there. An install or known failures for
+        a distribution, ``<os>/<distribution>``, replace its OS type's there. Raises BundleError listing every
         problem."""
         fields, refused = ctx.accepted(data, module=str, port=int, install=dict, known_failures=dict)
         files = ctx.files()
@@ -140,14 +141,15 @@ def _refuse(ctx: AuthoringContext, problem: str) -> NoReturn:
 
 
 def _known_failures(data: dict) -> tuple[dict[str, list[KnownFailure]], list[str]]:
-    """The known failures ``data`` declares by OS type, and the problems with it, each named by its key."""
+    """The known failures ``data`` declares by OS type or distribution, and the problems with it, each named by its
+    key."""
     found, problems = {}, []
-    for os_type, failures in data.items():
-        if os_type not in OS_TYPES:
-            problems.append(f"known_failures.{os_type}: a known failure is for an OS type: {', '.join(OS_TYPES)}")
+    for key, failures in data.items():
+        if problem := platform_problem(key):
+            problems.append(f"known_failures.{key}: a known failure is for {problem}")
             continue
         try:
-            found[os_type] = [KnownFailure.model_validate(failure) for failure in failures]
+            found[key] = [KnownFailure.model_validate(failure) for failure in failures]
         except (ValidationError, TypeError) as e:
-            problems.append(f"known_failures.{os_type}: {e}")
+            problems.append(f"known_failures.{key}: {e}")
     return found, problems
