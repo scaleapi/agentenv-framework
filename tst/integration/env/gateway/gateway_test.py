@@ -34,7 +34,10 @@ from agent_env.env.gateway.get_time import (
     GET_TIME_TOOL_NAME as GET_TIME,
     _SCHEMA as GET_TIME_SCHEMA,
 )
+from agent_env.env.bootstrap import PUBLISHED_IMAGES
 from agent_env.env.envs.service_db import ServiceDBEnv
+from agent_env.env.published_images import published_pinned
+from agent_env.store.image_store.registry_api import read_manifest
 from agent_env.env.envs.playwright_mcp import (
     PLAYWRIGHT_MCP_IMAGE_TAG,
     PLAYWRIGHT_MCP_ENVIRONMENT_NAME,
@@ -149,19 +152,43 @@ SLACK_WEBSITE_FRONTEND_IMAGE = DockerImageConfig(
     service_name="slack",
 )
 
+_PUBLISHED_IMAGES = {(image.dockerfile, image.dockerfile.parent): image for image in PUBLISHED_IMAGES}
+
+
+def _amd64_image(pinned: str | None) -> str | None:
+    """``pinned``'s linux/amd64 image, pinned by its own digest: the containerd image store keeps a pulled index whole,
+    and ``docker save`` of one it holds only some platforms of fails."""
+    if pinned is None:
+        return None
+    manifest = read_manifest(pinned, None)
+    if "manifests" not in manifest:
+        return pinned
+    digest = next((m["digest"] for m in manifest["manifests"]
+                   if m.get("platform", {}).get("os") == "linux" and m["platform"].get("architecture") == "amd64"), None)
+    return digest and f"{pinned.partition('@')[0]}@{digest}"
+
+
+def _pull_published_else_build(img: DockerImageConfig) -> None:
+    published = _PUBLISHED_IMAGES.get((img.dockerfile, img.context))
+    pinned = published and _amd64_image(published_pinned(published))
+    if pinned:
+        logger.info(f"Pulling {img.name}'s published image {pinned}...")
+        commands = [["docker", "pull", "--platform", "linux/amd64", pinned], ["docker", "tag", pinned, img.tag]]
+    else:
+        logger.info(f"Building {img.name} Docker image...")
+        commands = [["docker", "build", "--platform", "linux/amd64", "-f", str(img.dockerfile), "-t", img.tag,
+                     str(img.context)]]
+    for argv in commands:
+        result = subprocess.run(argv, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"{shlex.join(argv)} failed: {result.stderr}")
+
 
 @pytest.fixture(scope="module")
 def gateway_env() -> GatewayEnv:
     """Build gateway image, create artifact, and create GatewayEnv."""
     img = GATEWAY_IMAGE
-    logger.info(f"Building {img.name} Docker image...")
-    result = subprocess.run(
-        ["docker", "build", "--platform", "linux/amd64", "-f", str(img.dockerfile), "-t", img.tag, str(img.context)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"{img.name} build failed: {result.stderr}")
+    _pull_published_else_build(img)
 
     artifact = DockerImageArtifact.put(
         id=f"gateway-{img.name}",
@@ -181,14 +208,7 @@ def gateway_env() -> GatewayEnv:
 def service_db_env() -> ServiceDBEnv:
     """Build service-db image, create artifact, and create ServiceDBEnv."""
     img = SERVICE_DB_IMAGE
-    logger.info(f"Building {img.name} Docker image...")
-    result = subprocess.run(
-        ["docker", "build", "--platform", "linux/amd64", "-f", str(img.dockerfile), "-t", img.tag, str(img.context)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"{img.name} build failed: {result.stderr}")
+    _pull_published_else_build(img)
 
     db_artifact = DockerImageArtifact.put(
         id=f"service-db-{img.name}",
@@ -197,14 +217,7 @@ def service_db_env() -> ServiceDBEnv:
     )
 
     db_web = DB_WEB_IMAGE
-    logger.info(f"Building {db_web.name} Docker image...")
-    result = subprocess.run(
-        ["docker", "build", "--platform", "linux/amd64", "-f", str(db_web.dockerfile), "-t", db_web.tag, str(db_web.context)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"{db_web.name} build failed: {result.stderr}")
+    _pull_published_else_build(db_web)
 
     db_web_artifact = DockerImageArtifact.put(
         id="db-web-service-db",
@@ -214,14 +227,7 @@ def service_db_env() -> ServiceDBEnv:
 
     # Build db-mcp image
     db_mcp = DB_MCP_IMAGE
-    logger.info(f"Building {db_mcp.name} Docker image...")
-    result = subprocess.run(
-        ["docker", "build", "--platform", "linux/amd64", "-f", str(db_mcp.dockerfile), "-t", db_mcp.tag, str(db_mcp.context)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"{db_mcp.name} build failed: {result.stderr}")
+    _pull_published_else_build(db_mcp)
     db_mcp_artifact = DockerImageArtifact.put(
         id="db-mcp-service-db",
         description="PostgreSQL MCP server for direct database access",
@@ -242,15 +248,7 @@ def service_db_env() -> ServiceDBEnv:
 def website_browser_env() -> MCPServerEnv:
     """Build the Playwright MCP browser's image, create artifact, and create MCPServerEnv."""
     img = PLAYWRIGHT_MCP_IMAGE
-    logger.info(f"Building {img.name} Docker image...")
-    result = subprocess.run(
-        ["docker", "build", "--platform", "linux/amd64",
-         "-f", str(img.dockerfile), "-t", img.tag, str(img.context)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"{img.name} build failed: {result.stderr}")
+    _pull_published_else_build(img)
 
     artifact = DockerImageArtifact.put(
         id=f"playwright-mcp-{img.name}",
@@ -271,15 +269,7 @@ def slack_website_env() -> WebsiteEnv:
     """Build slack website frontend/backend images and create WebsiteEnv."""
     # Build backend
     be = SLACK_WEBSITE_BACKEND_IMAGE
-    logger.info(f"Building {be.name} Docker image...")
-    result = subprocess.run(
-        ["docker", "build", "--platform", "linux/amd64",
-         "-f", str(be.dockerfile), "-t", be.tag, str(be.context)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"{be.name} build failed: {result.stderr}")
+    _pull_published_else_build(be)
     backend_artifact = DockerImageArtifact.put(
         id="integ-test-website-backend-slack",
         description="Slack website backend",
@@ -288,15 +278,7 @@ def slack_website_env() -> WebsiteEnv:
 
     # Build frontend
     fe = SLACK_WEBSITE_FRONTEND_IMAGE
-    logger.info(f"Building {fe.name} Docker image...")
-    result = subprocess.run(
-        ["docker", "build", "--platform", "linux/amd64",
-         "-f", str(fe.dockerfile), "-t", fe.tag, str(fe.context)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"{fe.name} build failed: {result.stderr}")
+    _pull_published_else_build(fe)
     frontend_artifact = DockerImageArtifact.put(
         id="integ-test-website-frontend-slack",
         description="Slack website frontend",
@@ -330,14 +312,7 @@ def mcp_server_envs() -> dict[str, MCPServerEnv]:
     """Build MCP server images, create artifacts, and create MCPServerEnvs."""
     envs = {}
     for img in ALL_MCP_SERVER_IMAGES:
-        logger.info(f"Building {img.name} Docker image...")
-        result = subprocess.run(
-            ["docker", "build", "--platform", "linux/amd64", "-f", str(img.dockerfile), "-t", img.tag, str(img.context)],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"{img.name} build failed: {result.stderr}")
+        _pull_published_else_build(img)
 
         artifact = DockerImageArtifact.put(
             id=f"mcp-{img.name}",
@@ -423,13 +398,7 @@ def agentenv_website_env() -> WebsiteEnv:
 
     # Reuse the static slack frontend — its content is irrelevant to the backend v1 path.
     fe = SLACK_WEBSITE_FRONTEND_IMAGE
-    result = subprocess.run(
-        ["docker", "build", "--platform", "linux/amd64", "-f", str(fe.dockerfile), "-t", fe.tag, str(fe.context)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"{fe.name} build failed: {result.stderr}")
+    _pull_published_else_build(fe)
     frontend_artifact = DockerImageArtifact.put(
         id="integ-test-website-frontend-webitems",
         description="Static website frontend (reused)",
