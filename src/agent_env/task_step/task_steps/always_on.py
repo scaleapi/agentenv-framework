@@ -8,7 +8,8 @@ plays them. The ``always_on`` step names it with ``user_sim`` and runs the loop:
 - The first wake is the user's request. Each wake opens with what came due for the agent on notifications/v1 (a
   trigger's ``notify``, a scheduled check), labelled ``[time · channel]``, then the user's own messages.
 - Only what the agent sends with the gateway's ``message_user`` tool (user-chat/v1) reaches the user; its plain reply
-  goes to the log, flagged when it looks meant for the user.
+  goes to the log. Each wake should end with ``message_user`` or ``stay_quiet``: one that ends with closing text and
+  neither gets one ``nudge`` turn, and every wake ends with a reminder. All three are on unless the task turns them off.
 - The user sim is asked only after the agent sent something, at the time the user would read it (``schedule``), with
   everything sent meanwhile; its answer is reply / no_reply / done, and a reply is held for the response time.
 - Scripted user lines are triggers' ``notify`` actions to the ``user_says`` recipient: sent to the agent as the
@@ -69,11 +70,13 @@ POLL_SECONDS = 0.5
 DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 FINAL_REMINDER = ("(This is the last time you'll be woken for this job. Only what you send with message_user reaches "
                   "{first}; your normal reply is not shown to them.)")
-# Opt-in settings (all off unless a task turns them on): stay_quiet, nudge, wake_reminder.
 NUDGE_TEXT = ("Your closing text was not delivered. If the user should see it, send it with message_user; otherwise "
               "call stay_quiet.")
 WAKE_REMINDER_TEXT = "Reminder: only message_user reaches the user."
-_ADDRESSED = re.compile(r"\?\s*$|^(hi|hey|hello)\b|\byou\b|\byour\b", re.I | re.M)
+MESSAGE_RULES = ("The user never sees your normal replies. The only way to reach them is message_user. Text outside it "
+                 "goes to a private log.")
+QUIET_RULE = "If nothing is worth saying, call stay_quiet."
+EMPTY_REPLIES = frozenset({"(The assistant's reply was empty.)"})  # a harness's stand-in for an empty final reply
 
 
 # ==================================================================================================================
@@ -147,8 +150,8 @@ class AlwaysOnTaskStep(PromptAgentTaskStep):
     def __init__(self, id: str, version: Optional[int], *, user_sim: str, end_time: Optional[str] = None,
                  final: Optional[str] = None, max_wakes: int = 60, settle_timeout_seconds: float = 300,
                  user_timeout_seconds: int = 300, final_reminder: Optional[str] = FINAL_REMINDER,
-                 stay_quiet: bool = False, nudge: bool = False, nudge_text: str = NUDGE_TEXT,
-                 wake_reminder: bool = False, wake_reminder_text: str = WAKE_REMINDER_TEXT,
+                 stay_quiet: bool = True, nudge: bool = True, nudge_text: str = NUDGE_TEXT,
+                 wake_reminder: bool = True, wake_reminder_text: str = WAKE_REMINDER_TEXT,
                  **prompt_fields: Any):
         for unsupported in ("max_conversation_turns", "user_agent_name", "user_a2a_url", "post_turn_hooks",
                             "user_output_format", "user_model", "snapshot_config"):
@@ -165,10 +168,10 @@ class AlwaysOnTaskStep(PromptAgentTaskStep):
         self.settle_timeout_seconds = float(settle_timeout_seconds)
         self.user_timeout_seconds = int(user_timeout_seconds)
         self.final_reminder = final_reminder
-        self.stay_quiet = bool(stay_quiet)          # the agent also gets stay_quiet() (gateway user-chat config)
-        self.nudge = bool(nudge)                    # one more short turn when closing text went undelivered
+        self.stay_quiet = bool(stay_quiet)
+        self.nudge = bool(nudge)
         self.nudge_text = nudge_text
-        self.wake_reminder = bool(wake_reminder)    # each wake's message ends with wake_reminder_text
+        self.wake_reminder = bool(wake_reminder)
         self.wake_reminder_text = wake_reminder_text
 
     _OWN = ("user_sim", "end_time", "final", "max_wakes", "settle_timeout_seconds", "user_timeout_seconds",
@@ -346,7 +349,7 @@ class _Run:
         self.model = model
         overrides = ctx.metadata.get("user_overrides", {})
         card = self.agent.a2a_card or {}
-        desired = {"model": model, "system_prompt": step.system_prompt, "effort": effort,
+        desired = {"model": model, "system_prompt": self._system_prompt(), "effort": effort,
                    "harness": ctx.agent_harness or step.harness,
                    "max_turns": overrides.get("agent_max_turns") or step.max_turns,
                    "max_thinking_tokens": overrides.get("agent_max_thinking_tokens") or step.max_thinking_tokens,
@@ -375,6 +378,15 @@ class _Run:
                            "output_format": setup.get("output_format"), "accepted_fields": accepted}
         if "system_prompt" not in accepted and setup.get("system_prompt"):
             logger.warning("always_on: the user sim agent's card did not accept system_prompt; it keeps its deploy one")
+
+    def rules(self) -> str:
+        """What the agent is told about reaching the user."""
+        return " ".join([MESSAGE_RULES, *([QUIET_RULE] if self.step.stay_quiet else [])])
+
+    def _system_prompt(self) -> Optional[str]:
+        """The step's system prompt with the rules after it; without one, the agent keeps its own and the first wake
+        opens with the rules."""
+        return f"{self.step.system_prompt.rstrip()}\n\n{self.rules()}" if self.step.system_prompt else None
 
     # ---- clock and world ------------------------------------------------------------------------------------
     async def _armed(self) -> list:
@@ -523,7 +535,8 @@ class _Run:
         first = self._effective_prompt()
         self.you_sent.append({"at": _iso(now), "text": first})
         due = await take_due(self.notification_envs, self.recipient) if self.notification_envs else []
-        await self.wake([*delivered_parts(due), self._user_part(now, first, opening=True)],
+        rules = [] if step.system_prompt else [_step_part(self.rules(), "rules")]
+        await self.wake([*rules, *delivered_parts(due), self._user_part(now, first, opening=True)],
                         woke_by=[f"notification:{d['channel']}" for d in due] + ["user_request"],
                         notifications=[{k: d.get(k) for k in ("at", "channel", "source", "source_id", "to")}
                                        for d in due])
@@ -611,16 +624,16 @@ class _Run:
             else:
                 self.log("user_reply_delivered", virtual_time=m["at"], text=m["text"])
         if final and self.step.final_reminder:
-            parts.append({"kind": "text", "text": self.step.final_reminder.format(first=self.person["first"])})
+            parts.append(_step_part(self.step.final_reminder.format(first=self.person["first"]), "final_reminder"))
         woke_by = [f"notification:{d['channel']}" for d in due] + [f"{m['kind']}" for m in user_msgs]
         await self.wake(parts, woke_by=woke_by, notifications=[{k: d.get(k) for k in
                                                                 ("at", "channel", "source", "source_id", "to")}
                                                                for d in due])
 
     async def wake(self, parts: list[dict], woke_by: list[str], notifications: Optional[list] = None) -> None:
-        step, ctx = self.step, self.ctx
+        step = self.step
         if step.wake_reminder:
-            parts = [*parts, {"kind": "text", "text": step.wake_reminder_text}]
+            parts = [*parts, _step_part(step.wake_reminder_text, "reminder")]
         self.wakes += 1
         sent_at = await self.now()
         clock = await step._env_clock(self.clock_envs)
@@ -678,13 +691,12 @@ class _Run:
         self.final_task_id = task_id
         ended = await self.now()
         plain = term.response_text or ""
-        flag = (not messages) and bool(plain.strip()) and bool(_ADDRESSED.search(plain)) and len(plain.strip()) > 40
         self.last_plain, self.last_messages = plain, messages
         extra = {"stay_quiet_calls": len(quiet)} if step.stay_quiet else {}
         self.log("agent_turn_end", n=self.wakes, state=str(state), virtual_time=_iso(ended),
                  virtual_seconds=round((ended - sent_at).total_seconds()), real_seconds=round(time.time() - t, 1),
-                 tool_calls=term.tool_call_count, plain_reply=plain,
-                 plain_reply_flagged_for_user=flag, messages_to_user=len(messages), trajectory_url=traj, **extra)
+                 tool_calls=term.tool_call_count, plain_reply=plain, messages_to_user=len(messages),
+                 trajectory_url=traj, **extra)
         for m in messages:
             self.log("message_to_user", virtual_time=m.get("at"), text=m["text"], wake=self.wakes)
             self.unread.append({"at": m.get("at"), "text": m["text"]})
@@ -693,7 +705,7 @@ class _Run:
             self.error = term.error_message or term.response_text or "agent turn failed"
             self.end_reason = "agent_turn_failed"
             return
-        if step.nudge and not messages and not quiet and plain.strip():
+        if step.nudge and not messages and not quiet and _closing_text(plain):
             await self._nudge(plain)
         stuck = await self.settle()
         if stuck:
@@ -701,11 +713,11 @@ class _Run:
         self._schedule_read()
 
     async def _nudge(self, closing: str) -> None:
-        """Opt-in (``nudge``): the wake ended with closing text and neither message_user nor stay_quiet, so give the
-        agent one more short turn with ``nudge_text``; record what the closing text was and what it did after."""
+        """The wake ended with closing text and neither message_user nor stay_quiet, so give the agent one more short
+        turn with ``nudge_text``; record what the closing text was and what it did after."""
         step = self.step
         self.nudges += 1
-        parts = [{"kind": "text", "text": step.nudge_text}]
+        parts = [_step_part(step.nudge_text, "nudge")]
         sent_at = await self.now()
         clock = await step._env_clock(self.clock_envs)
         msg_id = uuid.uuid4().hex
@@ -874,7 +886,6 @@ class _Run:
                                    and e.get("outcome") == "no_reply"),
             "scripted_user_lines": sum(1 for e in self.timeline if e["event"] == "scripted_user_line"),
             "clock_jumps": sum(1 for e in self.timeline if e["event"] == "clock_jump"),
-            "plain_replies_flagged": sum(1 for e in self.timeline if e.get("plain_reply_flagged_for_user")),
             "silent_wakes": sum(1 for e in self.timeline if e["event"] == "agent_turn_end"
                                 and not e.get("messages_to_user")),
         }
@@ -890,9 +901,7 @@ class _Run:
                   "user_sim": {"name": step.user_sim, "version": self.version, "model": self.us.get("model"),
                                "agent_name": self.us.get("agent_name"), **self.user_setup},
                   "end_time": _iso(self.end) if self.end else None, "timeline": self.timeline}
-        if step.stay_quiet or step.nudge or step.wake_reminder:
-            record["settings"] = {"stay_quiet": step.stay_quiet, "nudge": step.nudge,
-                                  "wake_reminder": step.wake_reminder}
+        record["settings"] = {"stay_quiet": step.stay_quiet, "nudge": step.nudge, "wake_reminder": step.wake_reminder}
         try:
             store = get_config().get_object_store()
             key = (f"{get_config().get_artifact_key_prefix()}always_on_timeline/"
@@ -933,6 +942,16 @@ async def _call(env, uri: str, method: str, params: Optional[dict] = None, *, at
                                f"{e}); retry {attempt + 1}/{attempts - 1}")
                 await asyncio.sleep(min(2 ** attempt, 20))
     raise last
+
+
+def _step_part(text: str, source: str) -> dict:
+    """A line the step adds to a wake, marked so a reader can tell it from what the user or the world sent."""
+    return {"kind": "text", "text": text, "metadata": {"agentenv": {"source": source}}}
+
+
+def _closing_text(plain: str) -> str:
+    text = plain.strip()
+    return "" if text in EMPTY_REPLIES else text
 
 
 def _busy(row: dict, now: datetime) -> bool:

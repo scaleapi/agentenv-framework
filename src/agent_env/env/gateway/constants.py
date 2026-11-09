@@ -273,10 +273,11 @@ GATEWAY_EXTENSIONS = [
     },
     {
         "uri": EXT_USER_CHAT_URI,
-        "description": "User chat (urn:agentenv:user-chat/v1): the message_user tool, for the roles config names, is how an always-on agent reaches its user; each message is queued with its virtual time until the harness takes it. Built in: role rules don't hide it from a configured role.",
+        "description": "User chat (urn:agentenv:user-chat/v1): the message_user tool, for the roles config names, is how an always-on agent reaches its user; each message is queued with its virtual time until the harness takes it. With stay_quiet the roles also get stay_quiet, which sends nothing and is recorded for the next take. Built in: role rules don't hide them from a configured role.",
         "params": {"endpoint": "/user_chat/state", "methods": {
             "config": {"method": "POST", "endpoint": "/user_chat/config", "request": {"type": "object", "properties": {
-                "roles": {"type": "array", "items": {"type": "string"}}, "user_name": {"type": "string"}}}},
+                "roles": {"type": "array", "items": {"type": "string"}}, "user_name": {"type": "string"},
+                "stay_quiet": {"type": "boolean"}}}},
             "state": {"method": "GET", "endpoint": "/user_chat/state", "request": {"type": "object", "properties": {}}},
             "take": {"method": "POST", "endpoint": "/user_chat/take", "request": {"type": "object", "properties": {
                 "take_id": {"type": "string"}}}},

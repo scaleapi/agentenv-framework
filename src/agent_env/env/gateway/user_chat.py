@@ -1,11 +1,13 @@
 """The user chat (urn:agentenv:user-chat/v1): how an always-on agent reaches its user.
 
-The roles a task names in `config` get one tool, `message_user`. Each call is queued with the virtual time it was
-sent at; nothing here reaches the user by itself: the always_on step `take`s what was sent after each agent turn and
-hands it to the user sim when the user would read it. Whatever else the agent writes (its plain reply) never reaches
-the user. The tool is built in: once a role is named, role rules from modify_env_tool_access don't hide it.
+The roles a task names in `config` get `message_user`, and with `stay_quiet: true` also `stay_quiet`. Each message is
+queued with the virtual time it was sent at; nothing here reaches the user by itself: the always_on step `take`s what
+was sent after each agent turn and hands it to the user sim when the user would read it. Whatever else the agent writes
+(its plain reply) never reaches the user. The tools are built in: once a role is named, role rules from
+modify_env_tool_access don't hide them.
 
-`take` hands each message out once: {"id", "from", "at", "text"}. A `take_id` makes a retry safe.
+`take` hands each message out once: {"id", "from", "at", "text"}, plus, with stay_quiet on, the `quiet` calls since the
+last take. A `take_id` makes a retry safe.
 """
 from __future__ import annotations
 
@@ -20,7 +22,7 @@ from .caller import Caller
 from .clock import Clock, _iso
 
 MESSAGE_USER_TOOL_NAME = "message_user"
-STAY_QUIET_TOOL_NAME = "stay_quiet"  # opt-in (config stay_quiet: true): "nothing to tell the user this wake"
+STAY_QUIET_TOOL_NAME = "stay_quiet"
 _MAX_TEXT_CHARS = 20000
 _MAX_TAKE_ID_CHARS = 128
 _KEPT_TAKES = 64
