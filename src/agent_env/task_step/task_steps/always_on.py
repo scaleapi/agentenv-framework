@@ -34,8 +34,8 @@ it in the run's metadata under its ``name``; a ``deploy_agent`` step deploys the
   when the task sets none. An agent's turn that ends past end_time is followed by it, with whatever came due (a read
   due before end_time goes first), never by an ordinary wake. The run's last wake, at end_time or the one
   ``max_wakes`` makes the last, carries the last-turn notice (``final_reminder``). After it the user sim reads what
-  the agent sent (its wrap-up), and the user's reaction, and any reply still held, are recorded; then the run
-  ends.
+  the agent sent (its wrap-up), no earlier than the task's time when the run ended, and the user's reaction, and any
+  reply still held, are recorded; then the run ends.
 - A real-time budget keeps the run inside the hub's 8-hour job (``effective_time_budget`` gives the rule): once one
   more wake might end past ``time_budget_seconds`` (7 h, lowered to fit the task's own timeouts), the agent gets its
   closing wake, with the step's wrap-up line and the last-turn notice, and the run ends with end reason time_budget.
@@ -1064,7 +1064,10 @@ class _Run:
         if not self.unread or self.signed_off or self.gave_up or self.end_reason in ERROR_ENDS:
             return
         await self._schedule_read()
-        at = self.read_at or await self.now()
+        now = await self.now()
+        at = self.read_at or now
+        if at < now:  # she'd have looked during the last turn, which went on sending: she reads it all, from now
+            at, self.read_mode = self._available(now)
         await self.read(at, last=True)
 
     def _prompt_parts(self) -> list[dict]:

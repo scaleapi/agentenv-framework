@@ -133,6 +133,46 @@ async def test_the_user_sim_reads_the_wrap_up_and_her_reaction_and_held_reply_ar
 
 
 @pytest.mark.asyncio
+async def test_the_last_read_comes_after_every_message_of_a_last_turn_that_ran_on(monkeypatch, tmp_path):
+    """Her last read is no earlier than the task's time when the run ended, so it never shows a message before it was
+    sent, nor holds a reply that comes before the question it answers."""
+    def wraps_up_slowly(n, texts, rig):
+        rig.message("booked the house")
+        rig.gw._clock.advance("2026-11-09T16:00:00Z")  # the turn goes on two hours, the clock running
+        rig.message("and the flights: is Friday ok?")
+        return "sent"
+
+    rig = Rig(monkeypatch, tmp_path, agent=wraps_up_slowly,
+              answers=[{"outcome": "reply", "message": "friday is fine"}])
+    await rig.arm()
+    ctx = await rig.run(rig.step(max_wakes=1))
+
+    [read] = rig.reads
+    assert [m["at"] for m in read["assistant_messages"]] == ["2026-11-09T14:00:00Z", "2026-11-09T16:00:00Z"]
+    assert read["time"] == "2026-11-09T16:00:00Z"
+    [event] = rig.events(ctx, "user_sim_read")
+    assert event["last_read"] is True and event["deliver_at"] == "2026-11-09T16:00:00Z"
+
+
+@pytest.mark.asyncio
+async def test_a_last_read_that_would_fall_in_her_night_waits_for_the_morning(monkeypatch, tmp_path):
+    def wraps_up_late(n, texts, rig):
+        rig.message("booked the house")
+        rig.gw._clock.advance("2026-11-10T05:00:00Z")  # midnight in New York: past her bedtime
+        rig.message("and the flights: is Friday ok?")
+        return "sent"
+
+    rig = Rig(monkeypatch, tmp_path, agent=wraps_up_late, answers=[{"outcome": "reply", "message": "friday is fine"}])
+    await rig.arm()
+    ctx = await rig.run(rig.step(max_wakes=1), rig.context(user=DAY))
+
+    [read] = rig.reads
+    assert read["time"] == "2026-11-10T12:30:00Z"  # 7:30 AM, when she wakes
+    [event] = rig.events(ctx, "user_sim_read")
+    assert (event["mode"], event["deliver_at"]) == ("morning", "2026-11-10T12:45:00Z")
+
+
+@pytest.mark.asyncio
 async def test_a_done_on_the_last_read_is_recorded_and_changes_nothing(monkeypatch, tmp_path):
     rig = Rig(monkeypatch, tmp_path, agent=_recaps, answers=[{"outcome": "done", "message": "thanks!!"}])
     await rig.arm()
