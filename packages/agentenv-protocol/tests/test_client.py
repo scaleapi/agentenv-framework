@@ -250,6 +250,22 @@ def test_child_named_refuses_a_name_two_children_share():
     assert protocol_v1.find_child(_SHARED_NAME, "mail")["url"] == "/svc/mcp-mail/agentenv"
 
 
+_STATED = {"name": "gw", "children_environments": [
+    {"name": "Notes", "url": "/svc/notes/agentenv", "environment_name": "notes"},
+    {"name": "slack", "url": "/svc/mcp-slack/agentenv"},
+]}
+
+
+def test_a_child_is_known_by_the_environment_name_its_composer_states_else_by_its_cards_name():
+    notes, slack = protocol_v1.children(_STATED)
+    assert (notes.name, notes.environment_name, notes.known_as) == ("Notes", "notes", "notes")
+    assert (slack.environment_name, slack.known_as) == (None, "slack")  # a composer that states none
+    assert protocol_v1.child_named(_STATED, "notes").url == "/svc/notes/agentenv"
+    assert protocol_v1.child_named(_STATED, "Notes") is None
+    assert protocol_v1.find_child(_STATED, "notes")["name"] == "Notes"
+    assert protocol_v1.find_child(_STATED, "slack")["url"] == "/svc/mcp-slack/agentenv"
+
+
 def test_serves_is_what_a_card_declares_of_a_method_and_none_when_it_declares_no_operations():
     assert protocol_v1.serves({"capabilities": {"operations": ["data/get"]}}, "data/get") is True
     assert protocol_v1.serves({"capabilities": {"operations": ["data/add"]}}, "data/get") is False

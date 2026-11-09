@@ -146,7 +146,7 @@ class DeployedEnv:
         composed = isinstance(card.get("children_environments"), list)
         if (not composed or protocol_v1.operations(card)) and card.get("name") == environment_name:
             return protocol_v1.ChildEnv(name=card.get("name"), url=card.get("url"), card=card)
-        found = [child for child in protocol_v1.children(card) if child.name == environment_name]
+        found = [child for child in protocol_v1.children(card) if child.known_as == environment_name]
         if len(found) > 1 and mcp is not None:
             found = [child for child in found if website_child(child) is not mcp]
         if len(found) > 1:
@@ -514,7 +514,7 @@ class Env(ABC):
 def website_child(child: protocol_v1.ChildEnv) -> bool:
     """Whether a child env is a website: its card carries ``website/v1``, or, for a site serving none, its url is at a
     website's gateway route, ``/svc/{name}`` (an MCP server's is ``/svc/mcp-{name}``)."""
-    route, url = f"/svc/{child.name}", (child.url or "").rstrip("/")
+    route, url = f"/svc/{child.known_as}", (child.url or "").rstrip("/")
     return child.find_extension(WEBSITE_EXTENSION_URI) is not None or url == route or url.startswith(f"{route}/")
 
 

@@ -797,10 +797,19 @@ class Gateway:
         # backends). Non-v1 backers (e.g. the injected website_browser) self-omit from the card via 404.
         return list(self.rest_proxy_urls)
 
+    def _environment_name(self, key: str) -> str:
+        """The name the env behind the backing server ``key`` is registered as: an MCP server's, whose key is its route
+        ``mcp-<name>``, without the prefix; a website's or another child env's, a computer's, its key itself, even one
+        whose name starts ``mcp-``."""
+        own_name = key in self.website_urls or any(server.name == key for server in self.internal_mcp_servers)
+        return key if own_name else key.removeprefix("mcp-")
+
     def _rewrite_child_card(self, key: str, card: dict) -> dict:
-        """One backing server's card rooted at the gateway (``rewrite_child_card``); a website's ``website/v1`` params
+        """One backing server's card rooted at the gateway (``rewrite_child_card``), stating the ``environment_name``
+        the env behind it is registered as, which its own card's name needn't be; a website's ``website/v1`` params
         also name the route the gateway serves it to a browser at, ``/website/<key>/``, as ``browse_url``."""
         card = rewrite_child_card(key, card, self._gateway_extensions())
+        card["environment_name"] = self._environment_name(key)
         if key in self.website_urls:
             for ext in (card.get("capabilities") or {}).get("extensions") or []:
                 if isinstance(ext, dict) and ext.get("uri") == EXT_WEBSITE_URI:
