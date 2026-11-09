@@ -127,10 +127,11 @@ jobs:
           python -m pip install --quiet -r .github/ci-requirements.txt
           uv sync --locked --extra dev --python "$(command -v python)"
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+      # loadscope keeps a module's or class's tests on one worker, so its fixtures run once, as make int-test-fast does.
       - name: Integration tier on the local defaults
         run: |
-          .venv/bin/python -m pytest -m 'not int_test_slow' -rA --timeout=900 --junitxml=junit-integration.xml \
-            tst/integration
+          .venv/bin/python -m pytest -m 'not int_test_slow' -n auto --dist loadscope -rA --timeout=900 \
+            --junitxml=junit-integration.xml tst/integration
       - name: Skips must be declared capability gaps
         if: always()
         run: |
