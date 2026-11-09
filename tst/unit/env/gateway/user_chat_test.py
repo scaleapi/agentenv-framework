@@ -127,3 +127,15 @@ def test_get_time_reaches_a_configured_role_through_a_deny_all_while_the_clock_i
     assert called.status_code == 200 and T0 in called.text
     _req(gateway, "POST", "/user_chat/clear", {})
     assert "get_time" not in _names(gateway, "psi_agent")
+
+
+def test_the_check_tools_reach_a_configured_role_through_a_deny_all_once_notifications_name_it(gateway):
+    checks = {"schedule_check", "list_scheduled_checks", "cancel_scheduled_check"}
+    _req(gateway, "POST", "/tools/disable", {"role": "psi_agent", "tools": ["*"]})
+    _req(gateway, "POST", "/notifications/config", {"roles": ["psi_agent"]})
+    assert not checks & _names(gateway, "psi_agent")  # the task's deny-all, as before
+
+    _req(gateway, "POST", "/user_chat/config", {"roles": ["psi_agent"]})
+    assert checks <= _names(gateway, "psi_agent")
+    _req(gateway, "POST", "/notifications/config", {"roles": []})
+    assert not checks & _names(gateway, "psi_agent")

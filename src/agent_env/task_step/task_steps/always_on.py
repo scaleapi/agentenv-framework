@@ -22,6 +22,9 @@ that plays them. The ``always_on`` step names it with ``user_sim`` and runs the 
   earliest of: the next trigger event, the next notification, a held reply, a pending read, or end_time, never past
   one; then waits up to ``settle_timeout_seconds`` for triggers to finish. What comes due in the same minute wakes
   the agent once.
+- The agent can schedule its own wake-ups (scheduled checks) when the run is multi-day, at least
+  ``scheduled_check_min_interval`` apart; ``scheduled_checks`` turns them on or off whatever the run's length. A
+  check's wake counts toward ``max_wakes``.
 - At end_time the user's ``final`` line (with a reminder to use message_user) gives the agent one last turn. The run
   ends on end_time, done (one sitting), max_wakes, or nothing left to wake the agent; the reason is recorded.
 - Everything goes into a timeline in ``metadata["always_on"][step_id]`` and the object store.
@@ -50,6 +53,7 @@ from agent_env.a2a_agent.object_transfer import send_and_wait
 from agent_env.artifact import FileArtifact
 from agent_env.entity.refs import EntityRef
 from agent_env.env.env import EnvCapabilityUnsupported
+from agent_env.env.gateway.notifications import DEFAULT_MAX_ACTIVE
 from agent_env.env.gateway.constants import (
     DEFAULT_ROLE,
     EXT_CLOCK_URI,
@@ -81,6 +85,9 @@ WAKE_REMINDER_TEXT = "Reminder: only message_user reaches the user."
 MESSAGE_RULES = ("The user never sees your normal replies. The only way to reach them is message_user. Text outside it "
                  "goes to a private log.")
 QUIET_RULE = "If nothing is worth saying, call stay_quiet."
+CHECKS_RULE = ("You only run when something wakes you. To do something at a later time, schedule a check with "
+               "schedule_check: you'll be woken then with your note.")
+CHECK_MIN_INTERVAL = "PT3H"
 EMPTY_REPLIES = frozenset({"(The assistant's reply was empty.)"})  # a harness's stand-in for an empty final reply
 TIME_LINE = "It's {when}. Any other date you see is the computer's clock, not the task's."
 
@@ -160,6 +167,7 @@ class AlwaysOnTaskStep(PromptAgentTaskStep):
                  user_timeout_seconds: int = 300, final_reminder: Optional[str] = FINAL_REMINDER,
                  stay_quiet: bool = True, nudge: bool = True, nudge_text: str = NUDGE_TEXT,
                  wake_reminder: bool = True, wake_reminder_text: str = WAKE_REMINDER_TEXT,
+                 scheduled_checks: Optional[bool] = None, scheduled_check_min_interval: str = CHECK_MIN_INTERVAL,
                  model: Optional[str] = None, model_params: Optional[dict] = None, effort: Optional[str] = None,
                  max_thinking_tokens: Optional[int] = None, harness: Optional[str] = None,
                  trajectory_output_prefix: Optional[str] = None, **prompt_fields: Any):
@@ -185,9 +193,12 @@ class AlwaysOnTaskStep(PromptAgentTaskStep):
         self.nudge_text = nudge_text
         self.wake_reminder = bool(wake_reminder)
         self.wake_reminder_text = wake_reminder_text
+        self.scheduled_checks = scheduled_checks
+        self.scheduled_check_min_interval = scheduled_check_min_interval
 
     _OWN = ("user_sim", "end_time", "final", "max_wakes", "settle_timeout_seconds", "user_timeout_seconds",
-            "final_reminder", "stay_quiet", "nudge", "nudge_text", "wake_reminder", "wake_reminder_text")
+            "final_reminder", "stay_quiet", "nudge", "nudge_text", "wake_reminder", "wake_reminder_text",
+            "scheduled_checks", "scheduled_check_min_interval")
     _PROMPT_FIELDS = ("prompt", "parts", "prompt_id", "agent_name", "timeout_seconds", "trajectory_output_prefix",
                       "model", "model_params", "system_prompt", "max_turns", "output_format", "max_thinking_tokens",
                       "effort", "harness", "agentenv_tools", "poll_interval_seconds", "context_id")
@@ -249,6 +260,7 @@ class _Run:
         self.nudges = 0
         self.zone = "UTC"
         self.multi_day = False
+        self.checks: dict = {"on": False}
 
     def close(self) -> None:
         for p in self._plugin_paths:
@@ -295,11 +307,16 @@ class _Run:
         if not self.chat_envs:
             raise RuntimeError(f"always_on: no deployed env offers {EXT_USER_CHAT_URI} (message_user); rebuild its "
                                "gateway from a branch that has user_chat.py")
+        now = await self.now()
+        t0 = await self._t0() or now
+        self.end = _end_instant(step.end_time, t0) if step.end_time else None
+        self.multi_day = self.end is not None and self.end.astimezone(self.tz).date() > t0.astimezone(self.tz).date()
         chat_config = {"roles": [self.recipient], "user_name": self.person.get("name") or "your user"}
         if step.stay_quiet:
             chat_config["stay_quiet"] = True
         for env in self.chat_envs:
             await _call(env, EXT_USER_CHAT_URI, "config", chat_config)
+        await self._configure_checks()
         await self._configure_agents()
 
         self.conversation_id = uuid.uuid4().hex
@@ -315,13 +332,10 @@ class _Run:
         self.solver_context_id = uuid.uuid4().hex
 
         now = await self.now()
-        t0 = await self._t0() or now
-        self.end = _end_instant(step.end_time, t0) if step.end_time else None
-        self.multi_day = self.end is not None and self.end.astimezone(self.tz).date() > t0.astimezone(self.tz).date()
         self.log("start", virtual_time=_iso(now), end_time=_iso(self.end) if self.end else None,
                  agent=step.agent_name, agent_role=self.recipient, user_sim=step.user_sim, version=self.version,
                  user_model=us["model"], max_wakes=step.max_wakes, time_zone=self.zone, multi_day=self.multi_day,
-                 clock_rate=await self._rate())
+                 scheduled_checks=self.checks, clock_rate=await self._rate())
         try:
             await self.loop(now)
         except Exception as e:
@@ -396,8 +410,32 @@ class _Run:
             logger.warning("always_on: the user sim agent's card did not accept system_prompt; it keeps its deploy one")
 
     def rules(self) -> str:
-        """What the agent is told about reaching the user."""
-        return " ".join([MESSAGE_RULES, *([QUIET_RULE] if self.step.stay_quiet else [])])
+        """What the agent is told about reaching the user, and about waking itself when it can."""
+        return " ".join([MESSAGE_RULES, *([QUIET_RULE] if self.step.stay_quiet else []),
+                         *([CHECKS_RULE] if self.checks["on"] else [])])
+
+    async def _configure_checks(self) -> None:
+        """Give the agent's role scheduled checks (notifications/v1) on each env whose clock is set: by default when
+        the run is multi-day, else as ``scheduled_checks`` says. A role the task already gave checks keeps its own
+        settings; other roles the task named keep theirs."""
+        step = self.step
+        wanted = self.multi_day if step.scheduled_checks is None else step.scheduled_checks
+        envs = [e for e in await self._armed() if e.supports(EXT_NOTIFICATIONS_URI, "config")]
+        applied = []
+        for env in envs:
+            state = await _call(env, EXT_NOTIFICATIONS_URI, "state")
+            roles = list(state.get("roles") or [])
+            if self.recipient in roles:
+                applied.append({"env_id": env.env_id, "set_by": "task", "min_interval": state.get("min_interval"),
+                                "max_active": state.get("max_active")})
+            elif wanted:
+                body = {"roles": [*roles, self.recipient],
+                        "max_active": state.get("max_active", DEFAULT_MAX_ACTIVE) if roles else DEFAULT_MAX_ACTIVE,
+                        "min_interval": state.get("min_interval") if roles else step.scheduled_check_min_interval}
+                got = await _call(env, EXT_NOTIFICATIONS_URI, "config", body)
+                applied.append({"env_id": env.env_id, "set_by": "step", "min_interval": got.get("min_interval"),
+                                "max_active": got.get("max_active")})
+        self.checks = {"on": bool(applied), "envs": applied}
 
     def _system_prompt(self) -> Optional[str]:
         """The step's system prompt with the rules after it; without one, the agent keeps its own and the first wake
@@ -947,7 +985,8 @@ class _Run:
                                "agent_name": self.us.get("agent_name"), **self.user_setup},
                   "end_time": _iso(self.end) if self.end else None, "time_zone": self.zone,
                   "multi_day": self.multi_day, "timeline": self.timeline}
-        record["settings"] = {"stay_quiet": step.stay_quiet, "nudge": step.nudge, "wake_reminder": step.wake_reminder}
+        record["settings"] = {"stay_quiet": step.stay_quiet, "nudge": step.nudge, "wake_reminder": step.wake_reminder,
+                              "scheduled_checks": self.checks}
         try:
             store = get_config().get_object_store()
             key = (f"{get_config().get_artifact_key_prefix()}always_on_timeline/"

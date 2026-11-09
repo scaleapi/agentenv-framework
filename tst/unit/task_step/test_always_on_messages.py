@@ -39,7 +39,7 @@ async def test_all_three_are_on_by_default(monkeypatch, tmp_path):
     ctx = await rig.run(step)
 
     assert (step.stay_quiet, step.nudge, step.wake_reminder) == (True, True, True)
-    assert rig.record(ctx)["settings"] == {"stay_quiet": True, "nudge": True, "wake_reminder": True}
+    assert rig.record(ctx)["settings"].items() >= {"stay_quiet": True, "nudge": True, "wake_reminder": True}.items()
     assert rig.gw._user_chat.stay_quiet and ROLE in rig.gw._user_chat.roles
 
 
