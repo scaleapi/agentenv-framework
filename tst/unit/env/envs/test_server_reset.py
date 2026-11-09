@@ -75,12 +75,25 @@ async def test_a_server_whose_card_declares_no_data_reset_takes_no_load_and_is_l
 @pytest.mark.parametrize("status, reset", [(200, True), (404, False)], ids=["serves-it", "serves-none"])
 async def test_an_older_server_is_emptied_through_its_api_reset_and_one_answering_404_has_none(server, status, reset):
     server.status = status
-    with patch("agent_env.env.legacy_protocol.v1_base_url", AsyncMock(return_value=None)):
+    with patch("agent_env.env.legacy_protocol.v1_base_url", AsyncMock(return_value=None)), \
+         patch("agent_env.env.legacy_protocol.offers_tool", AsyncMock(return_value=False)) as offers:
         assert await _deployment.reset_server_data(_server(None), mcp=True) is reset
 
     [request] = server.requests
     assert (request.method, str(request.url)) == ("POST", f"{GATEWAY}/svc/mcp-email/api/reset")
     assert server.triggers.await_count == reset
+    assert [call.args for call in offers.await_args_list] == ([] if reset else [(f"{GATEWAY}/mcp", "email_reset")])
+
+
+@pytest.mark.asyncio
+async def test_an_older_server_answering_404_that_resets_only_through_its_tool_to_a_seed_cant_be_emptied(server):
+    server.status = 404
+    with patch("agent_env.env.legacy_protocol.v1_base_url", AsyncMock(return_value=None)), \
+         patch("agent_env.env.legacy_protocol.offers_tool", AsyncMock(return_value=True)), \
+         pytest.raises(RuntimeError, match="^MCP server 'email' resets only to a seed loaded through its email_reset "
+                                           "tool, so a reset can't empty it; load it again instead$"):
+        await _deployment.reset_server_data(_server(None), mcp=True)
+    assert not server.triggers.await_count
 
 
 @pytest.mark.asyncio

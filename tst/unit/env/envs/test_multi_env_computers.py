@@ -493,7 +493,7 @@ async def test_each_computer_that_fails_to_load_is_named_once_every_computer_has
 def server_resets(monkeypatch):
     """Each MCP server's and website's reset, as (name, mcp) in ``log``, attached to the multi env's record: False, as
     for one serving no reset, for a name in ``unserved``, and raising for one in ``failing``; the instance whose loads
-    are forgotten in ``forgotten``."""
+    are forgotten in ``forgotten``, with how many servers had reset by then."""
     resets = SimpleNamespace(log=[], unserved=set(), failing={}, forgotten=[], attached=[])
 
     async def reset(env, *, mcp):
@@ -514,7 +514,7 @@ def server_resets(monkeypatch):
     monkeypatch.setattr("agent_env.env.envs.multi_env.reset_server_data", reset)
     monkeypatch.setattr(MultiEnv, "_attached", classmethod(attached))
     monkeypatch.setattr(EnvInstanceStore, "clear_loaded_environments",
-                        lambda store, instance_id: resets.forgotten.append(instance_id))
+                        lambda store, instance_id: resets.forgotten.append((instance_id, len(resets.log))))
     return resets
 
 
@@ -534,7 +534,7 @@ async def test_reset_resets_every_child_env_at_once_each_as_it_resets_alone_and_
 
     assert sorted(log) == [("reset", "desktop", "sb-desktop"), ("reset", "laptop", "sb-laptop")]
     assert sorted(server_resets.log) == [("shop", False, "inst-1"), ("slack", True, "inst-1")]
-    assert server_resets.attached == ["inst-1"] and server_resets.forgotten == ["inst-1"]
+    assert server_resets.attached == ["inst-1"] and server_resets.forgotten == [("inst-1", 0)]  # before any reset
 
 
 @pytest.mark.asyncio
@@ -572,7 +572,19 @@ async def test_each_child_that_fails_to_reset_is_named_once_every_child_env_has_
     assert str(raised.value) == ("multi env 'office': computer 'desktop' failed to reset: RuntimeError('no reboot'); "
                                  "MCP server 'slack' failed to reset: RuntimeError('data/reset timed out')")
     assert sorted(log) == [("reset", "desktop", "sb-desktop"), ("reset", "laptop", "sb-laptop")]
-    assert len(server_resets.log) == 2 and server_resets.forgotten == ["inst-1"]
+    assert len(server_resets.log) == 2 and server_resets.forgotten == [("inst-1", 0)]
+
+
+@pytest.mark.asyncio
+async def test_a_reset_that_cannot_forget_what_loads_put_in_empties_nothing(gateway, providers, server_resets,
+                                                                           monkeypatch):
+    stored, log = await _stored(FakeComputer("desktop")), []
+    monkeypatch.setattr(EnvInstanceStore, "clear_loaded_environments", MagicMock(side_effect=OSError("store down")))
+
+    with pytest.raises(OSError, match="store down"):
+        await _multi(FakeComputer("desktop", log=log), mcp=["slack"], websites=["shop"]).reset(stored)
+
+    assert log == server_resets.log == []  # a resumed load would skip a service a reset had emptied
 
 
 # --- routing the multi env's websites ---

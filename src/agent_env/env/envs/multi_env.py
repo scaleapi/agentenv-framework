@@ -887,18 +887,20 @@ class MultiEnv(Env):
         """Reset every child env at once, each as it resets alone: a computer reboots from its own record and gets its
         ``tools`` again, and an MCP server or website is emptied of what loads put in, so a task loads again after; one
         serving no reset takes no load, and stays as it is. A child that fails to reset fails the reset, each such one
-        named, once the others have reset. Which services the instance's loads put in is forgotten, so the next load
-        puts each in again rather than resuming."""
-        services = await type(self)._attached(deployed) if self.mcp_server_envs or self.website_envs else self
+        named, once the others have reset. Before any server is emptied, which services the instance's loads put in is
+        forgotten, so the next load puts each in again rather than resuming past one; a reset that can't forget it
+        empties nothing."""
+        services = self
+        if self.mcp_server_envs or self.website_envs:
+            services = await type(self)._attached(deployed)
+            if deployed.instance_id:
+                env_store.get_env_instance_store().clear_loaded_environments(deployed.instance_id)
         resets = [*((f"computer {name!r}", call) for name, call in self._computers.resets(deployed)),
                   *((f"MCP server {env.environment_name!r}", reset_server_data(env, mcp=True))
                     for env in services.mcp_server_envs),
                   *((f"website {env.environment_name!r}", reset_server_data(env, mcp=False))
                     for env in services.website_envs)]
-        try:
-            results = await _multi_computers.each(self.id, "reset", resets)
-        finally:
-            _forget_loaded_environments(deployed.instance_id)
+        results = await _multi_computers.each(self.id, "reset", resets)
         for (child, _), result in zip(resets, results):
             if result is False:
                 logger.info(f"multi env '{self.id}': {child} serves no reset and takes no load, so it stays as it is")
@@ -929,7 +931,7 @@ def _forget_loaded_environments(instance_id: Optional[str]) -> None:
         env_store.get_env_instance_store().clear_loaded_environments(instance_id)
     except Exception as e:  # noqa: BLE001
         logger.warning(f"Could not forget which services instance {instance_id!r} loaded; a resumed load may skip "
-                       f"one a reset emptied: {e}")
+                       f"one: {e}")
 
 
 def _hand_provider_to_child_envs(env: MultiEnv) -> None:

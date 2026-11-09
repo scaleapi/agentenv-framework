@@ -150,7 +150,8 @@ async def reset_server_data(env: MCPServerEnv | WebsiteEnv, *, mcp: bool) -> boo
     through ``data/reset``, or an older server's ``/api/reset``; then, behind a gateway of ours, its changelog started
     afresh, as after a load. ``env`` is attached to its deployment, which may be a MultiEnv's. False, with nothing sent,
     for one serving no reset, which takes no load either: a card declaring operations without ``data/reset``, a plugin's
-    card offering it no data plane, or an older server answering 404."""
+    card offering it no data plane, or an older server answering 404 that offers no ``<name>_reset`` tool. One that does
+    offers it only to load a seed, which a load does; RuntimeError, since a reset can't empty it."""
     name = env.environment_name
     if env._deployed is None and env._gateway_url is None:
         raise RuntimeError("Environment not deployed - call deploy() first")
@@ -170,6 +171,9 @@ async def reset_server_data(env: MCPServerEnv | WebsiteEnv, *, mcp: bool) -> boo
         except httpx.HTTPStatusError as e:
             if e.response.status_code != 404:
                 raise
+            if mcp and await legacy_protocol.offers_tool(f"{env._gateway_url.rstrip('/')}/mcp", f"{name}_reset"):
+                raise RuntimeError(f"MCP server '{name}' resets only to a seed loaded through its {name}_reset tool, so "
+                                   "a reset can't empty it; load it again instead") from None
             return False
     if builtin is not None:
         await builtin.install_changelog_triggers(name)
