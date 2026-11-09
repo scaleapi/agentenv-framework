@@ -44,16 +44,18 @@ def _provider(cls, **kwargs):
 
 
 _CREATES = {
-    "container": (ModalSandboxProvider, {}, "_experimental_create", lambda p: p.create_container(
+    "private container": (ModalSandboxProvider, {}, "_experimental_create", lambda p: p.create_container(
         image_name="img:latest", port=8000, env={"A": "1"}, network_policy=_ALLOWLIST, attribution=_ATTRIBUTION,
         private_network=True)),
+    "container": (ModalSandboxProvider, {}, "create", lambda p: p.create_container(
+        image_name="img:latest", port=8000, env={"A": "1"}, network_policy=_ALLOWLIST, attribution=_ATTRIBUTION)),
     "gpu container": (ModalSandboxProvider, {"gpu": "H100"}, "create", lambda p: p.create_container(
         image_name="img:latest", port=8000, env={"A": "1"}, network_policy=_ALLOWLIST, attribution=_ATTRIBUTION)),
-    "vm": (ModalVmSandboxProvider, {}, "_experimental_create", lambda p: p.create_vm(
+    "vm": (ModalVmSandboxProvider, {}, "create", lambda p: p.create_vm(
         exposed_ports=[8000], network_policy=_ALLOWLIST, attribution=_ATTRIBUTION)),
-    "vm in a region": (ModalVmSandboxProvider, {"region": "us-west", "idle_timeout": 600}, "_experimental_create",
+    "vm in a region": (ModalVmSandboxProvider, {"region": "us-west", "idle_timeout": 600}, "create",
                        lambda p: p.create_vm(exposed_ports=[8000], attribution=_ATTRIBUTION)),
-    "disk": (ModalVmSandboxProvider, {"region": "us-west"}, "_experimental_create", lambda p: p.create_vm(
+    "disk": (ModalVmSandboxProvider, {"region": "us-west"}, "create", lambda p: p.create_vm(
         image="localhost:5000/disk@sha256:" + "a" * 64, env={"ENVIRONMENT_NAME": "desk"}, exposed_ports=[18765],
         cpu=2, memory=4096, network_policy=_ALLOWLIST, attribution=_ATTRIBUTION)),
 }

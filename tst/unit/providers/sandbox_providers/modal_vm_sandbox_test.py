@@ -442,7 +442,7 @@ def modal_fake(monkeypatch):
         sb.exec.aio = AsyncMock(side_effect=AssertionError("a disk's sandbox runs nothing at create"))
         return sb
 
-    monkeypatch.setattr(mvs.modal.Sandbox, "_experimental_create", SimpleNamespace(aio=create))
+    monkeypatch.setattr(mvs.modal.Sandbox, "create", SimpleNamespace(aio=create))
     monkeypatch.setattr(mvs.modal.Secret, "from_dict", lambda variables: made.secrets.append(variables) or variables)
     monkeypatch.setattr(mvs, "exported_disk", lambda image, platform: made.exported.append((image, platform))
                         or made.export)
@@ -519,7 +519,7 @@ async def test_a_configured_region_and_idle_timeout_hold_for_every_sandbox_the_p
     (_, disk), (_, agent), (_, gateway), (_, default) = modal_fake.creates
     assert [(kwargs.get("region"), kwargs.get("idle_timeout")) for kwargs in (disk, agent, gateway, default)] == [
         ("us-west", 600), ("us-west", 600), ("us-west", 600), (None, None)]
-    assert agent["experimental_options"] == gateway["experimental_options"] == {"vm_runtime": True}
+    assert agent["runtime"] == gateway["runtime"] == "vm"
 
 
 @pytest.mark.asyncio

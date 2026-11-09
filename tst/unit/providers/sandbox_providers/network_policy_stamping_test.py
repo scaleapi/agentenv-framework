@@ -52,7 +52,7 @@ def _modal_sb():
 def _patched_create(sb):
     create = MagicMock()
     create.aio = AsyncMock(return_value=sb)
-    return patch("modal.Sandbox._experimental_create", create)
+    return patch("modal.Sandbox.create", create)
 
 
 async def _modal_vm() -> Sandbox:
