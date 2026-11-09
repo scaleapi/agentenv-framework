@@ -1,0 +1,7 @@
+# What a composed Omarchy computer installs into the driver's venv: cua-driver at Hyprland's own pin, whose executable
+# the driver checks (EXECUTABLES["hyprland/amd64"]), with Omarchy's base carrying the Hyprland plugin it drives input
+# through; python-xlib, which driver.py imports on any Linux. A release pins agentenv-framework-protocol to the version
+# it ships.
+agentenv-framework-protocol[computer]>=0.1.444
+cua-driver==0.44.0
+python-xlib>=0.33,<0.34

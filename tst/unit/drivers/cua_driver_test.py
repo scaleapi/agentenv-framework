@@ -9,12 +9,15 @@ import contextlib
 import importlib.util
 import io
 import json
+import re
 import socket
 import sys
 import types
 import stat
 import tempfile
+import tomllib
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -23,8 +26,10 @@ from mcp.shared.memory import create_connected_server_and_client_session
 from PIL import Image as PILImage
 
 import agent_env
+from agent_env.env.envs.computer.utils.install import for_os, installs
 from agentenv_protocol import SESSION_META_KEY
 from agentenv_protocol.computer import DeliveryFailed, DeviceUnavailable, Platform, Unsupported
+from agentenv_protocol.computer.platform import supported
 
 DRIVER = Path(agent_env.__file__).parent / "drivers" / "envs" / "cua-driver" / "driver.py"
 
@@ -135,9 +140,14 @@ class FakeKeymap:
 def module(monkeypatch):
     """driver.py loaded as it is on an X11 desktop on Linux, whatever runs the tests, with X stood in for; a test of
     another platform sets that platform's flags itself."""
+    monkeypatch.delenv("HYPRLAND_INSTANCE_SIGNATURE", raising=False)
+    return _loaded(monkeypatch)
+
+
+def _loaded(monkeypatch):
+    """driver.py loaded on Linux, in a Hyprland session when ``HYPRLAND_INSTANCE_SIGNATURE`` is set."""
     monkeypatch.delenv("ENVIRONMENT_NAME", raising=False)
     monkeypatch.delenv("AGENTENV_COMPUTER_SETTINGS", raising=False)
-    monkeypatch.delenv("HYPRLAND_INSTANCE_SIGNATURE", raising=False)
     xlib = types.ModuleType("Xlib")
     xlib.display = types.ModuleType("Xlib.display")
     xlib.display.Display = FakeKeymap
@@ -682,12 +692,14 @@ async def test_on_hyprland_readiness_checks_its_own_pin_and_every_time_that_hypr
     digests = iter([module.EXECUTABLES["amd64"], module.EXECUTABLES["hyprland/amd64"]])
     monkeypatch.setattr(module, "_executable_sha256", lambda: next(digests))
     x11 = await driver.ready_checks()
+    monkeypatch.setenv("HYPRLAND_INSTANCE_SIGNATURE", "ours")
     hyprland.answers.update({
         "cua:status": [PLUGIN_LOADED, None, {**PLUGIN_LOADED, "configured": False},
-                       {**PLUGIN_LOADED, "abi": {"match": False}}, PLUGIN_RELOADED, None],
-        "activeworkspace": [{"id": 1}, None]})
+                       {**PLUGIN_LOADED, "abi": {"match": False}}, PLUGIN_RELOADED, None, None],
+        "activeworkspace": [{"id": 1}, None, None],
+        "instances": [[{"instance": "ours"}], [{"instance": "after-a-crash"}]]})
 
-    checks = [await driver.ready_checks() for _ in range(6)]
+    checks = [await driver.ready_checks() for _ in range(7)]
 
     assert (x11[0].name, x11[0].ok) == ("cua-driver", False)
     assert [(c.name, c.ok) for c in checks[0]] == [("cua-driver", True), ("cua-driver tools", True),
@@ -698,8 +710,10 @@ async def test_on_hyprland_readiness_checks_its_own_pin_and_every_time_that_hypr
         (False, "cua-driver's plugin was built for another Hyprland"),
         (False, "cua-driver's plugin isn't taking input: input seat lifetime unavailable; restart the desktop before "
                 "loading a replacement plugin"),
-        (False, "Hyprland doesn't answer on its IPC; if it restarted after this driver started, restart the driver "
-                "with it")]
+        (False, "Hyprland doesn't answer on its IPC"),
+        (False, module.hyprland.REPLACED)]
+    assert [c[-1].final for c in checks] == [False] * 6 + [True]
+    assert module.hyprland.REPLACED.endswith("an infrastructure failure")
     assert sum(1 for _, r in daemon.requests if r["method"] == "list") == 2
 
 
@@ -723,3 +737,39 @@ def test_on_hyprland_the_daemon_waits_for_the_compositor_and_runs_cua_drivers_wa
     (argv, env), = started
     assert argv[:2] == ["/opt/cua-driver", "serve"] and env["CUA_DRIVER_RS_ENABLE_WAYLAND"] == "1"
     assert env["DO_NOT_TRACK"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_on_hyprland_input_once_another_hyprland_runs_in_place_of_the_drivers_fails_as_an_infrastructure_failure(
+        module, daemon, hyprland, monkeypatch):
+    monkeypatch.setenv("HYPRLAND_INSTANCE_SIGNATURE", "ours")
+    hyprland.answers.update({"cua:status": None, "activeworkspace": None,
+                             "instances": [[{"instance": "after-a-crash"}]] * 2})
+
+    with pytest.raises(DeviceUnavailable, match="an infrastructure failure"):
+        await module.CuaDriver().press_keys(["Escape"])
+
+    assert daemon.calls() == []
+
+
+def test_in_a_hyprland_session_the_driver_pins_hyprlands_manifest_and_tells_agents_how_keys_go(module, monkeypatch):
+    monkeypatch.setenv("HYPRLAND_INSTANCE_SIGNATURE", "ours")
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/1000")
+    loaded = _loaded(monkeypatch)
+
+    assert loaded.MANIFEST.name == "mcp-hyprland.json" and loaded.CuaDriver.notes == loaded.hyprland.NOTES
+    assert module.MANIFEST.name == "mcp.json" and module.CuaDriver.notes == ""
+
+
+def test_an_omarchy_computer_installs_cua_driver_at_hyprlands_pin_and_the_driver_supports_omarchy(module):
+    found, problems = installs(tomllib.loads((DRIVER.parent / "env.toml").read_text())["install"])
+    omarchy, ubuntu = (SimpleNamespace(type="linux", distribution=name) for name in ("omarchy", "ubuntu"))
+
+    assert not problems
+    assert str(for_os(found, omarchy).python) == "requirements-omarchy.txt"
+    assert str(for_os(found, ubuntu).python) == "requirements.txt"
+    assert for_os(found, omarchy).services == for_os(found, ubuntu).services
+    pins = (DRIVER.parent / "requirements-omarchy.txt").read_text().splitlines()
+    assert any(re.fullmatch(r"cua-driver==\d+(\.\d+)+", line) for line in pins)
+    platforms = [platform for entry in module.CuaDriver.supports for platform in supported(entry)]
+    assert Platform(os="linux", distribution="omarchy", arch="amd64", display="wayland") in platforms
