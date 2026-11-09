@@ -116,8 +116,12 @@ class Probe:
         self.layout: dict = {}
         self.fixture_pid: str | None = None
         self.page = self.features.get("screen") == "page"
-        self.fixture = "page_fixture.py" if self.page else "fixture.py"
-        self.windows = (self.features.get("platform") or {}).get("os") == "windows"
+        platform = self.features.get("platform") or {}
+        self.fixture = ("page_fixture.py" if self.page else "wayland_fixture.py" if platform.get("display") == "wayland"
+                        else "fixture.py")
+        self.windows = platform.get("os") == "windows"
+        #: The chord that selects a text box's text: Tk's Ctrl+/, which the Tk desk binds everywhere, or GTK's Ctrl+A.
+        self.select_all = ["Control", "a"] if self.fixture == "wayland_fixture.py" else ["Control", "/"]
         self.desk = ""
         self.tab: str | None = None
         self.opened: list[str] = []
@@ -562,12 +566,13 @@ class Probe:
     # full: the fixture
 
     async def _stage(self) -> str | None:
-        """The Fixture Desk started, or what stopped it: the Tk desk, or on a page, the HTML desk's server, with the
-        desk opened in a tab of the probe's own."""
-        source = resources.files(__package__).joinpath(self.fixture).read_bytes()
-        added = await self.driver.add_file(f"{STAGE}/{self.fixture}", source)
-        if "error" in added:
-            return f"data/add refused it: {added['error'].get('message')}"
+        """The Fixture Desk started, or what stopped it: the Tk desk, on Wayland the GTK desk, which shares the Tk desk's
+        file, or on a page, the HTML desk's server, with the desk opened in a tab of the probe's own."""
+        for file in dict.fromkeys((self.fixture, "fixture.py" if self.fixture == "wayland_fixture.py" else self.fixture)):
+            source = resources.files(__package__).joinpath(file).read_bytes()
+            added = await self.driver.add_file(f"{STAGE}/{file}", source)
+            if "error" in added:
+                return f"data/add refused it: {added['error'].get('message')}"
         if self.windows:
             await self.driver.run(*WIN_REMOVE, f"{STAGE}/state")
             started = await self.driver.run(*WIN_START, f"{STAGE}/{self.fixture}", f"{STAGE}/state", f"{STAGE}/fixture.log")
@@ -781,7 +786,7 @@ class Probe:
 
         async def clear() -> None:
             await focus("name")
-            await self.act("computer_key", {"keys": ["Control", "/"]})
+            await self.act("computer_key", {"keys": self.select_all})
             await self.act("computer_key", {"keys": ["Backspace"]})
 
         async def unicode() -> str | None:
@@ -796,7 +801,7 @@ class Probe:
 
         async def chord() -> str | None:
             await focus("name")
-            await self.act("computer_key", {"keys": ["Control", "/"]})
+            await self.act("computer_key", {"keys": self.select_all})
             await self.act("computer_key", {"keys": ["Backspace"]})
             return await self.settled(lambda s: s["name"] == "", lambda s: s["name"])
 

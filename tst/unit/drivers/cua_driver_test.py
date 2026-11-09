@@ -9,6 +9,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import socket
 import sys
 import types
 import stat
@@ -443,3 +444,83 @@ def test_on_windows_a_call_waits_out_a_busy_or_briefly_absent_pipe_and_a_daemon_
     monkeypatch.setattr(module, "open", daemon_down, raising=False)
     with pytest.raises(DeviceUnavailable, match="isn't answering"):
         module._piped({"method": "list"})
+
+
+@pytest.mark.asyncio
+async def test_on_wayland_keys_go_to_the_focused_window_in_the_foreground_and_text_skips_xs_keymap(
+        module, daemon, monkeypatch):
+    for name, value in (("MACOS", False), ("FOREGROUND", {}), ("WAYLAND", True)):
+        monkeypatch.setattr(module, name, value)
+    asked = []
+
+    def hyprctl(request):
+        asked.append(request)
+        return {"address": "0x5557e0f44ad0", "pid": 42}
+    monkeypatch.setattr(module, "_hyprctl", hyprctl)
+    driver = module.CuaDriver()
+
+    await driver.type_in("Hello, Wörld")
+    await driver.press_keys(["Control", "a"])
+    await driver.click_at(10, 20, "left", 1, [])
+
+    focused = {"pid": 42, "window_id": 0x5557E0F44AD0, "delivery_mode": "foreground"}
+    assert daemon.calls() == [
+        ("type_text", {"scope": "desktop", "text": "Hello, Wörld", **focused}),
+        ("press_key", {"scope": "desktop", "key": "a", "modifiers": ["ctrl"], **focused}),
+        ("click", {"scope": "desktop", "x": 10, "y": 20, "button": "left", "count": 1, "modifier": []}),
+    ]
+    assert driver._keymap is None and asked == ["activewindow", "activewindow"]
+
+
+@pytest.mark.asyncio
+async def test_on_wayland_with_nothing_focused_keys_go_to_the_desktop(module, daemon, monkeypatch):
+    monkeypatch.setattr(module, "MACOS", False)
+    monkeypatch.setattr(module, "WAYLAND", True)
+    monkeypatch.setattr(module, "_hyprctl", lambda request: {})
+
+    await module.CuaDriver().press_keys(["Escape"])
+
+    assert daemon.calls() == [("press_key", {"scope": "desktop", "key": "escape", "modifiers": []})]
+
+
+@pytest.mark.asyncio
+async def test_on_wayland_readiness_checks_every_time_that_hyprland_has_cua_drivers_plugin(module, daemon, monkeypatch):
+    monkeypatch.setattr(module, "MACOS", False)
+    monkeypatch.setattr(module, "WAYLAND", True)
+    driver = module.CuaDriver()
+    monkeypatch.setattr(module, "_executable_sha256", lambda: module.EXECUTABLES[driver.platform.arch])
+    loaded = {"configured": True, "abi": {"match": True}}
+    statuses = iter([loaded, None, {**loaded, "configured": False}, {**loaded, "abi": {"match": False}}])
+    monkeypatch.setattr(module, "_hyprctl", lambda request: next(statuses) if request == "cua:status" else None)
+
+    checks = [await driver.ready_checks() for _ in range(4)]
+
+    assert [(c.name, c.ok) for c in checks[0]] == [("cua-driver", True), ("cua-driver tools", True),
+                                                    ("cua-driver plugin", True)]
+    assert [(c[-1].ok, c[-1].detail) for c in checks[1:]] == [
+        (False, "Hyprland hasn't loaded cua-driver's plugin"),
+        (False, "cua-driver's plugin is loaded but not enabled"),
+        (False, "cua-driver's plugin was built for another Hyprland")]
+    assert sum(1 for _, r in daemon.requests if r["method"] == "list") == 1
+
+
+def test_on_wayland_the_daemon_waits_for_the_compositor_and_runs_cua_drivers_wayland_backend(module, monkeypatch):
+    started = []
+
+    def execve(path, argv, env):
+        started.append((argv, env))
+        raise SystemExit
+    with tempfile.TemporaryDirectory(dir="/tmp", prefix="cd-") as runtime:
+        monkeypatch.setattr(module, "WAYLAND", True)
+        monkeypatch.setenv("XDG_RUNTIME_DIR", runtime)
+        monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-1")
+        monkeypatch.setattr(module, "_executable", lambda: Path("/opt/cua-driver"))
+        monkeypatch.setattr(module.os, "execve", execve)
+        with socket.socket(socket.AF_UNIX) as compositor:
+            compositor.bind(str(Path(runtime) / "wayland-1"))
+            with pytest.raises(SystemExit):
+                module._daemon()
+
+    (argv, env), = started
+    assert argv[:2] == ["/opt/cua-driver", "serve"] and env["CUA_DRIVER_RS_ENABLE_WAYLAND"] == "1"
+    assert env["DO_NOT_TRACK"] == "1"

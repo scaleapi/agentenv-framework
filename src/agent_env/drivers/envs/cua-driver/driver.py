@@ -1,4 +1,4 @@
-"""cua-driver as a computer driver, for an X11 desktop on Linux, for macOS and for Windows: trycua's cua-driver runs on
+"""cua-driver as a computer driver, for an X11 desktop on Linux, Omarchy's Hyprland desktop, macOS and Windows: trycua's cua-driver runs on
 the computer as a daemon, which this file starts when run as a script on Linux and Windows, in the session user's
 sign-in there, and CuaDriver.app's LaunchAgent starts on macOS, so macOS gives it the app's TCC permissions. Agents get
 what its own MCP server serves at its pinned version (``mcp.json``, ``mcp-macos.json``, ``mcp-windows.json``): its
@@ -58,9 +58,14 @@ from agentenv_protocol.computer import (
 )
 
 MACOS, WINDOWS = sys.platform == "darwin", sys.platform == "win32"
-#: Where cua-driver's daemon listens.
+#: A Wayland desktop, Omarchy's Hyprland, where cua-driver runs its Wayland backend and its input goes through the seats
+#: of its Hyprland plugin.
+WAYLAND = sys.platform == "linux" and bool(os.environ.get("WAYLAND_DISPLAY"))
+#: Where cua-driver's daemon listens: on Wayland in the session user's runtime folder, which the session's units share.
 SOCKET = (r"\\.\pipe\agentenv-cua-driver" if WINDOWS else
-          str(Path("/tmp/agentenv-cua-driver.sock" if MACOS else "/run/agentenv/cua-driver.sock")))
+          str(Path("/tmp/agentenv-cua-driver.sock" if MACOS else
+                   Path(os.environ.get("XDG_RUNTIME_DIR", "/run/user/1000")) / "agentenv-cua-driver.sock" if WAYLAND
+                   else "/run/agentenv/cua-driver.sock")))
 #: What cua-driver's own MCP server (``cua-driver mcp``) says at connect and lists at the pinned version on each OS: its
 #: instructions, its tools, which the running daemon must list the same, and its skill resources.
 MANIFEST = Path(__file__).with_name("mcp-macos.json" if MACOS else "mcp-windows.json" if WINDOWS else "mcp.json")
@@ -88,6 +93,10 @@ LATIN_1 = 0xA0
 PERMISSIONS = ("accessibility", "screen_recording")
 #: What keeps cua-driver from reaching trycua: no telemetry and no update checks.
 QUIET = {"DO_NOT_TRACK": "1", "CUA_DRIVER_RS_TELEMETRY_ENABLED": "false", "CUA_DRIVER_RS_UPDATE_CHECK": "false"}
+#: What turns on cua-driver's Wayland backend, which it takes only when asked.
+WAYLAND_BACKEND = {"CUA_DRIVER_RS_ENABLE_WAYLAND": "1"}
+#: How long a request to Hyprland's IPC waits for its answer.
+HYPRCTL_TIMEOUT_S = 5
 #: W3C modifier keys and the names cua-driver holds them by.
 MODIFIERS = {"Control": "ctrl", "Shift": "shift", "Alt": "alt", "Meta": "super", "Super": "super"}
 #: W3C key values and the names cua-driver presses them by; any printable ASCII character is pressed as itself.
@@ -108,6 +117,8 @@ PIPE_WAITS = {errno.EINVAL: 10.0, errno.ENOENT: 1.0}
 
 @computer_driver(name="cua-driver",
                  supports=[{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]},
+                           {"os": {"type": "linux", "distribution": ["omarchy"], "display": ["wayland"]},
+                            "arch": ["amd64"]},
                            {"os": {"type": "macos", "display": ["aqua"]}, "arch": ["arm64"]},
                            {"os": {"type": "windows", "display": ["dwm"]}, "arch": ["amd64"]}])
 class CuaDriver(ComputerDriverEnvironment):
@@ -143,10 +154,10 @@ class CuaDriver(ComputerDriverEnvironment):
 
     async def ready_checks(self) -> list[ReadyCheck]:
         """That the daemon answers as the pinned cua-driver does: its executable's sha256 and its tools, checked
-        until they pass once."""
+        until they pass once; and on Wayland, every time, that Hyprland has its plugin, which a restart drops."""
         if self._pinned is None or not all(check.ok for check in self._pinned):
             self._pinned = await self._pinned_checks()
-        return self._pinned
+        return [*self._pinned, await _plugin()] if WAYLAND else self._pinned
 
     async def bundled_skill(self) -> tuple[str, str, dict[str, str]]:
         if self._skill is None:
@@ -190,14 +201,15 @@ class CuaDriver(ComputerDriverEnvironment):
 
     @type_text
     async def type_in(self, text) -> None:
-        if not MACOS and not WINDOWS and any(ord(ch) >= LATIN_1 for ch in text):
+        if not MACOS and not WINDOWS and not WAYLAND and any(ord(ch) >= LATIN_1 for ch in text):
             await asyncio.to_thread(self._hold, text)
-        await self._send("type_text", text=text)
+        await self._send("type_text", text=text, **await _focused())
 
     @press
     async def press_keys(self, keys) -> None:
         *held, key = keys
-        await self._send("press_key", modifiers=_modifiers(held), key=MODIFIERS.get(key) or NAMED.get(key, key))
+        await self._send("press_key", modifiers=_modifiers(held), key=MODIFIERS.get(key) or NAMED.get(key, key),
+                         **await _focused())
 
     async def _forward(self, tool: str, /, **arguments: Any) -> CallToolResult:
         """A call to one of cua-driver's own tools in its caller's session, answered as cua-driver answers it."""
@@ -380,6 +392,41 @@ def _keysym(ch: str) -> int:
     return ord(ch) if ord(ch) < 0x100 else 0x1000000 | ord(ch)
 
 
+async def _focused() -> dict:
+    """Where keys go on Wayland: the focused window, whose Hyprland address is its cua-driver window id, in the
+    foreground through the plugin's seat, since a desktop-scope key goes through libei, which Hyprland doesn't serve.
+    Elsewhere, and with nothing focused, the desktop."""
+    if not WAYLAND:
+        return {}
+    window = await asyncio.to_thread(_hyprctl, "activewindow")
+    if not window or not window.get("address"):
+        return {}
+    return {"pid": window["pid"], "window_id": int(window["address"], 16), "delivery_mode": "foreground"}
+
+
+async def _plugin() -> ReadyCheck:
+    """That Hyprland has cua-driver's plugin loaded, enabled and built for it; one restarted after a crash runs in safe
+    mode, with no plugins, where input is sent but never arrives."""
+    status = await asyncio.to_thread(_hyprctl, "cua:status")
+    if status is None:
+        return ReadyCheck("cua-driver plugin", False, "Hyprland hasn't loaded cua-driver's plugin")
+    if status.get("configured") is not True:
+        return ReadyCheck("cua-driver plugin", False, "cua-driver's plugin is loaded but not enabled")
+    if (status.get("abi") or {}).get("match") is not True:
+        return ReadyCheck("cua-driver plugin", False, "cua-driver's plugin was built for another Hyprland")
+    return ReadyCheck("cua-driver plugin", True, "loaded, enabled and built for this Hyprland")
+
+
+def _hyprctl(request: str) -> dict | None:
+    """Hyprland's JSON answer to ``request``, or None when it gives none, as for a plugin's request it doesn't know."""
+    try:
+        out = subprocess.run(["hyprctl", "-j", request], capture_output=True, text=True, timeout=HYPRCTL_TIMEOUT_S)
+        answer = json.loads(out.stdout)
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    return answer if isinstance(answer, dict) else None
+
+
 def _modifiers(keys) -> list[str]:
     if held := [key for key in keys if key not in MODIFIERS]:
         raise Unsupported(f"cua-driver holds only modifier keys, not {held}")
@@ -426,7 +473,7 @@ def _skill_pack() -> tuple[str, str, dict[str, str]]:
 
 
 def _daemon() -> None:
-    """Run cua-driver's daemon once X answers: from the session user's home, where the apps it launches start too, on
+    """Run cua-driver's daemon once the display answers, X or on Wayland the compositor, with its Wayland backend: from the session user's home, where the apps it launches start too, on
     the socket the driver reaches it at, with approvals off, since nobody is at the computer to give them, and nothing
     sent to trycua. On Windows, in the session user's sign-in, as agentenv-session starts it, and waited on, since
     Windows has no exec: one that exits is started again."""
@@ -434,13 +481,16 @@ def _daemon() -> None:
         os.chdir(Path.home())
         sys.exit(subprocess.run([str(_executable()), "serve", "--socket", SOCKET, "--dangerously-bypass-approvals",
                                  "--no-overlay"], env={**os.environ, **QUIET}).returncode)
-    display = os.environ["DISPLAY"].lstrip(":").partition(".")[0]
-    while not Path(f"/tmp/.X11-unix/X{display}").is_socket():
+    if WAYLAND:
+        display = Path(os.environ["XDG_RUNTIME_DIR"]) / os.environ["WAYLAND_DISPLAY"]
+    else:
+        display = Path(f"/tmp/.X11-unix/X{os.environ['DISPLAY'].lstrip(':').partition('.')[0]}")
+    while not display.is_socket():
         time.sleep(0.2)
     os.chdir(Path.home())
     executable = str(_executable())
     os.execve(executable, [executable, "serve", "--socket", SOCKET, "--dangerously-bypass-approvals", "--no-overlay"],
-              {**os.environ, **QUIET})
+              {**os.environ, **QUIET, **(WAYLAND_BACKEND if WAYLAND else {})})
 
 
 if __name__ == "__main__":
