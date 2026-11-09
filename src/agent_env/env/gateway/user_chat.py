@@ -47,6 +47,12 @@ _SCHEMA: dict[str, Any] = {
 }
 
 
+# Read-only for the world: they queue a message (or a note) for the harness and change no app's data, so, like get_time,
+# they don't make the trigger engine re-evaluate every armed state trigger (TriggerEngine._is_readonly). An action
+# trigger on either still fires.
+_ANNOTATIONS = ToolAnnotations(readOnlyHint=True)
+
+
 class UserChatError(ValueError):
     """A bad config, take or tool argument."""
 
@@ -183,7 +189,7 @@ def build_user_chat_tool(chat: UserChat, make_arg_model: Callable[[str, dict], A
     return FastMCPTool(fn=message_user, name=MESSAGE_USER_TOOL_NAME,
                        description=MESSAGE_USER_DESCRIPTION.format(user=chat.user_name), parameters=_SCHEMA,
                        fn_metadata=FuncMetadata(arg_model=make_arg_model(MESSAGE_USER_TOOL_NAME, _SCHEMA)),
-                       is_async=True, annotations=ToolAnnotations(readOnlyHint=False))
+                       is_async=True, annotations=_ANNOTATIONS)
 
 
 def build_stay_quiet_tool(chat: UserChat, make_arg_model: Callable[[str, dict], Any]) -> FastMCPTool:
@@ -198,4 +204,4 @@ def build_stay_quiet_tool(chat: UserChat, make_arg_model: Callable[[str, dict], 
     return FastMCPTool(fn=stay_quiet, name=STAY_QUIET_TOOL_NAME,
                        description=STAY_QUIET_DESCRIPTION.format(user=chat.user_name), parameters=_QUIET_SCHEMA,
                        fn_metadata=FuncMetadata(arg_model=make_arg_model(STAY_QUIET_TOOL_NAME, _QUIET_SCHEMA)),
-                       is_async=True, annotations=ToolAnnotations(readOnlyHint=False))
+                       is_async=True, annotations=_ANNOTATIONS)

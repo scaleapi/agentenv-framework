@@ -139,3 +139,10 @@ def test_the_check_tools_reach_a_configured_role_through_a_deny_all_once_notific
     assert checks <= _names(gateway, "psi_agent")
     _req(gateway, "POST", "/notifications/config", {"roles": []})
     assert not checks & _names(gateway, "psi_agent")
+
+
+def test_message_user_and_stay_quiet_are_read_only_for_the_world_so_they_don_t_re_evaluate_state_triggers(gateway):
+    _req(gateway, "POST", "/user_chat/config", {"roles": ["psi_agent"], "stay_quiet": True})
+    engine = gateway._trigger_engine
+    assert engine._is_readonly("message_user") and engine._is_readonly("stay_quiet")
+    assert not engine._is_readonly("svc_thing")
