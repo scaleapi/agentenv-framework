@@ -48,15 +48,17 @@ grant_executable() {
     granted "$executable" 1 "$executable" "$@"
 }
 
-# file_url PATH: the file URL of the folder PATH as macOS writes a bundle's, each byte but letters, digits and
-# "/._~-" percent-encoded, a space as %20.
+# file_url PATH: the file URL of the folder PATH as Foundation writes a bundle's: letters, digits and "!$&'()*+,-./:=@_~"
+# as they are, every other printable ASCII character percent-encoded. A path with any other byte fails, since Foundation
+# decomposes such a character before encoding it.
 file_url() {
     local LC_ALL=C path=${1%/} url= char i
     for ((i = 0; i < ${#path}; i++)); do
         char=${path:i:1}
         case "$char" in
-            [A-Za-z0-9/._~-]) url+=$char ;;
-            *) url+=$(printf '%%%02X' "'$char") ;;
+            [A-Za-z0-9/._~!\$\&\'\(\)\*+,:=@-]) url+=$char ;;
+            [[:print:]]) url+=$(printf '%%%02X' "'$char") ;;
+            *) fail "$1 isn't printable ASCII, so its file URL can't be written for its screen capture approval" ;;
         esac
     done
     echo "file://$url/"
