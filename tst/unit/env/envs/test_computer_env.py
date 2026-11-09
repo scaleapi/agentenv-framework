@@ -46,6 +46,7 @@ from agent_env.env.envs.computer.utils import (boot, builder, composed, composer
                                                probing, resolve_in_base)
 from agent_env.env.envs.computer.utils import sites as computer_sites
 from agent_env.env.envs.computer.utils.composer import Composing
+from agent_env.store.image_store.registry_api import RegistryRefusedError
 from agent_env.env.envs.computer.utils.probing import _probe
 from agent_env.env.envs.computer.env import COMPUTER_TOOLS, ComputerEnv
 from agent_env.env.envs.computer import app_env
@@ -732,6 +733,77 @@ def test_env_build_by_an_installed_alias_composes_under_the_id_of_the_env_it_nam
     images = [r["image"] for r in stored.metadata["composed"]["container"].values()]
     assert all(ref.startswith("localhost:5000/") for ref in [*images, ComputerArtifact.get(
         "@local/acme-kit/kit/desktop__computer").image().image_name])
+
+
+MIRROR = "ghcr.io/org/computers"
+
+
+def _mirrored(docker, monkeypatch, read=None):
+    """Move every composed image out of the env's image store into the computer image mirror, as a fresh runner of CI
+    finds them, and record each copy back: the mirror's refs, read with ``read`` when given."""
+    stored = {ref: digest for ref, digest in docker.registry.tags.items()
+              if f"/{composed.REPOSITORY}:" in ref and ":index-" not in ref}
+    for ref in stored:
+        del docker.registry.tags[ref]
+    mirror = {f"{MIRROR}:{composed.mirror_tag(ref.rpartition(':')[2])}": digest for ref, digest in stored.items()}
+    copied, real = [], composer.pin_if_served
+
+    def pin(ref, auth):
+        if ref.startswith(f"{MIRROR}:"):
+            return read(ref) if read else (f"{ref}@{mirror[ref]}" if ref in mirror else None)
+        return real(ref, auth)
+
+    def copy(source, target, source_auth, target_auth):
+        copied.append((source.partition("@")[0], target))
+        docker.registry.tags[target] = source.rpartition("@")[2]
+
+    monkeypatch.setattr(composer, "pin_if_served", pin)
+    monkeypatch.setattr(composer, "copy_image", copy)
+    monkeypatch.setattr(get_config(), "computer_image_mirror", MIRROR)
+    return stored, copied
+
+
+def test_an_image_the_store_lacks_is_copied_from_the_computer_image_mirror_and_reused_rather_than_built(base, driver,
+                                                                                                        docker,
+                                                                                                        monkeypatch):
+    first = _put(base, driver)
+    stored, copied = _mirrored(docker, monkeypatch)
+
+    second = _put(base, driver, id="@local/~/kit/other", environment_name="other")
+
+    reused = Env.get(second.id).metadata["composed"]["container"]
+    assert len(docker.builds) == 2 and all(r["reused"] for r in reused.values())
+    assert sorted(copied) == sorted((f"{MIRROR}:{composed.mirror_tag(ref.rpartition(':')[2])}", ref) for ref in stored)
+    assert {arch: r["image"] for arch, r in reused.items()} == {
+        arch: r["image"] for arch, r in Env.get(first.id).metadata["composed"]["container"].items()}
+
+
+def test_a_change_to_the_code_that_composes_an_image_misses_the_mirror_and_builds_it(base, driver, docker,
+                                                                                    monkeypatch):
+    _put(base, driver)
+    _, copied = _mirrored(docker, monkeypatch)
+    monkeypatch.setattr(composed, "composition", lambda: "sha256:" + "f" * 64)
+
+    second = _put(base, driver, id="@local/~/kit/other", environment_name="other")
+
+    assert len(docker.builds) == 4 and copied == []
+    assert not any(r["reused"] for r in Env.get(second.id).metadata["composed"]["container"].values())
+
+
+def test_a_computer_image_mirror_that_cant_be_read_leaves_the_image_to_be_built(base, driver, docker, monkeypatch,
+                                                                               caplog):
+    _put(base, driver)
+
+    def refused(ref):
+        raise RegistryRefusedError(f"{ref}: ghcr.io refused to serve it (HTTP 403)")
+
+    _, copied = _mirrored(docker, monkeypatch, read=refused)
+    with caplog.at_level(logging.WARNING, logger=composer.__name__):
+        second = _put(base, driver, id="@local/~/kit/other", environment_name="other")
+
+    built = Env.get(second.id).metadata["composed"]["container"]
+    assert len(docker.builds) == 4 and not any(r["reused"] for r in built.values()) and copied == []
+    assert f"the computer image mirror {MIRROR} couldn't give" in caplog.text
 
 
 def test_builds_of_one_env_at_once_keep_each_others_pairs_and_a_failure_doesnt_replace_a_built_one(base, driver,

@@ -1,5 +1,6 @@
 """Read an image from its registry over the OCI distribution API: its digest, to pin a tag to the image it names now,
-and its manifests and blobs, to inspect what it holds without pulling it; and write an index of images it holds."""
+and its manifests and blobs, to inspect what it holds without pulling it; write an index of images it holds; and copy an
+image from one registry to another."""
 
 from __future__ import annotations
 
@@ -7,6 +8,7 @@ import contextlib
 import hashlib
 import json
 import re
+import tempfile
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -217,6 +219,40 @@ def write_index(ref: str, images: dict[str, str], auth: RegistryAuth | None, *,
             {"schemaVersion": 2, "mediaType": media, "manifests": manifests}).encode(), media)
 
 
+def copy_image(source: str, target: str, source_auth: RegistryAuth | None, target_auth: RegistryAuth | None, *,
+               timeout: float = _TIMEOUT_SECONDS) -> None:
+    """Copy the image ``source`` names, pinned by its digest, to ``target``'s tag: every blob ``target``'s repository
+    lacks, then each manifest byte for byte, so the copy keeps ``source``'s digest; an index's platform manifests
+    first, each by its digest."""
+    digest = _parse(source).digest
+    if digest is None:
+        raise ValueError(f"{source}: a copy goes by the image's digest, and this names none")
+    image = _parse(target)
+    with (_Repository(_parse(source), source_auth, timeout, source) as reading,
+          _Repository(image, target_auth, timeout, target) as writing,
+          tempfile.TemporaryDirectory(prefix="agentenv-copy-") as work):
+
+        def manifest(reference: str) -> tuple[bytes, str]:
+            response = reading.get(f"manifests/{reference}", accept=_MANIFEST_TYPES)
+            body = response.json()
+            served = response.headers.get("content-type", "").split(";")[0].strip() or body.get("mediaType", "")
+            if served in _INDEXES:
+                for child in body["manifests"]:
+                    manifest(child["digest"])
+            else:
+                for blob in [body["config"], *body["layers"]]:
+                    if writing.has_blob(blob["digest"]):
+                        continue
+                    path = Path(work) / blob["digest"].removeprefix("sha256:")
+                    read_blob(source, blob["digest"], source_auth, path, timeout=timeout)
+                    writing.upload(blob["digest"], path)
+                    path.unlink()
+            writing.put(f"manifests/{reference}", response.content, served)
+            return response.content, served
+
+        writing.put(f"manifests/{image.tag or 'latest'}", *manifest(digest))
+
+
 class _Repository:
     """One image's repository on its registry, read with the Bearer token the registry's first challenge asks for."""
 
@@ -250,6 +286,25 @@ class _Repository:
         if response.status_code not in (200, 201):
             self._raise_for(response)
 
+    def has_blob(self, digest: str) -> bool:
+        response = self._send("HEAD", f"blobs/{digest}", None, stream=False)
+        if response.status_code == 404:
+            return False
+        self._raise_for(response)
+        return True
+
+    def upload(self, digest: str, path: Path) -> None:
+        """Push the file ``path`` as the blob ``digest``, in one request after the registry opens an upload."""
+        opened = self._send("POST", "blobs/uploads/", None, stream=False)
+        if opened.status_code != 202 or "location" not in opened.headers:
+            self._raise_for(opened)
+            raise ValueError(f"{self._what}: {self._host} opened no upload for {digest} (HTTP {opened.status_code})")
+        location = httpx.URL(f"{self._base}/").join(opened.headers["location"])
+        response = self._send("PUT", str(location.copy_merge_params({"digest": digest})), None, stream=False,
+                              content=path, content_type="application/octet-stream")
+        if response.status_code != 201:
+            self._raise_for(response)
+
     @contextlib.contextmanager
     def stream(self, path: str) -> Iterator[httpx.Response]:
         """``path`` as a streamed response, closed when the block ends."""
@@ -262,19 +317,27 @@ class _Repository:
         finally:
             response.close()
 
-    def _send(self, method: str, path: str, accept: str | None, *, stream: bool, content: bytes | None = None,
+    def _send(self, method: str, path: str, accept: str | None, *, stream: bool, content: bytes | Path | None = None,
               content_type: str | None = None) -> httpx.Response:
+        """``path`` is under the repository, or a whole URL the registry gave; a file's ``content`` streams from disk."""
+        url = path if path.startswith(("http://", "https://")) else f"{self._base}/{path}"
         try:
-            for _ in range(2):
+            for attempt in range(2):
                 headers = {"Accept": accept} if accept else {}
                 if content_type:
                     headers["Content-Type"] = content_type
                 if self._token:
                     headers["Authorization"] = f"Bearer {self._token}"
-                request = self._client.build_request(method, f"{self._base}/{path}", headers=headers, content=content)
-                # Basic credentials go with every request until a Bearer token replaces them.
-                response = self._client.send(request, auth=None if self._token else self._basic, stream=stream)
-                if response.status_code != 401 or self._token:
+                with contextlib.ExitStack() as opened:
+                    body = content
+                    if isinstance(content, Path):
+                        headers["Content-Length"] = str(content.stat().st_size)
+                        body = opened.enter_context(content.open("rb"))
+                    request = self._client.build_request(method, url, headers=headers, content=body)
+                    # Basic credentials go with every request until a Bearer token replaces them.
+                    response = self._client.send(request, auth=None if self._token else self._basic, stream=stream)
+                # A held token is asked for again once: GHCR scopes it to the first challenge, a pull's before a push.
+                if response.status_code != 401 or attempt:
                     return response
                 if stream:
                     response.read()
