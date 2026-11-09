@@ -107,8 +107,10 @@ def desktop(monkeypatch):
     @contextlib.contextmanager
     def paused(pid):
         events.append(("pause", pid))
-        yield
-        events.append(("continue", pid))
+        try:
+            yield
+        finally:
+            events.append(("continue", pid))
 
     monkeypatch.setattr(session, "launch", launch)
     monkeypatch.setattr(session, "stop", stop)
