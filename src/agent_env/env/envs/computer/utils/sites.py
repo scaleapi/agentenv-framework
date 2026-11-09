@@ -34,6 +34,7 @@ from urllib.parse import urlsplit
 import httpx
 from agentenv_protocol import client as protocol_client
 from agentenv_protocol.website import WEBSITE_EXTENSION_URI as WEBSITE
+from agentenv_protocol.website import WEBSITE_LIVE_PARAM
 from agentenv_protocol.website_browser import SITE_PROXY_ENV
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -486,7 +487,8 @@ async def deployed_sites(deployed_envs: list[DeployedEnv], only: Optional[list[s
     ``only`` keeps the websites of the envs it names, each of which must be deployed, and ``services`` those served
     as the names it holds, each website's environment_name, which its card's name needn't be. Sites of different
     envs that share a name are each named for their env (``_env_qualified``), so they're routed apart, while two
-    that claim one domain are still refused."""
+    that claim one domain are still refused. A live site, whose params say ``live``, is no site the computer routes:
+    the real one is at its names, which the computer reaches over its own network."""
     from agentenv_protocol import client as protocol_v1
     from agentenv_protocol.website import WEBSITE_BROWSE_URL_PARAM, WEBSITE_EXTENSION_URI
 
@@ -510,7 +512,7 @@ async def deployed_sites(deployed_envs: list[DeployedEnv], only: Optional[list[s
             params = protocol_v1.extension_params(child.card, WEBSITE_EXTENSION_URI)
             browse = params.get(WEBSITE_BROWSE_URL_PARAM)
             service = served_as(child)
-            if services is not None and service not in services:
+            if (services is not None and service not in services) or params.get(WEBSITE_LIVE_PARAM) is True:
                 named.add(service)
                 continue
             url = (_joined(address, browse) if isinstance(browse, str) and browse and address

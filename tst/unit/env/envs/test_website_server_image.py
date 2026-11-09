@@ -64,7 +64,7 @@ def test_an_env_toml_takes_a_health_path_and_refuses_a_bad_one():
         raise ValueError(problems)
 
     ctx = SimpleNamespace(config_problem=lambda problem: f"env.toml: {problem}", refuse=refuse,
-                          accept_env=lambda data, cls, named_by: data)
+                          accept_env=lambda data, cls, named_by: data, website_source=lambda image_key: None)
     data = {"backend_image": "server", "environment_name": "slack", "health": "/healthz"}
     assert WebsiteEnv.accept_toml(data, ctx) == data
     with pytest.raises(ValueError, match="env.toml: health: 'healthz' is not a path"):

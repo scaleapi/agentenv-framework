@@ -21,12 +21,14 @@ from agentenv_protocol.website import (
     SITE_READY_TIMEOUT_S,
     WEBSITE_EXTENSION_URI,
     WEBSITE_READY_OP,
+    WEBSITE_SETTINGS_ENV,
     WebsiteReadiness,
     website_readiness,
 )
 
 from agent_env.artifact.artifacts.docker_image import pull_problem
 from agent_env.attribution import Attribution
+from agent_env.config import get_config
 from agent_env.env.env import DeployedGatewayEnv, _mcp_url
 from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT, ExternalChild, GatewayMode
 from agent_env.env.gateway.constants import (
@@ -149,6 +151,10 @@ class WebsiteConfig:
     frontend_image: str | None
     environment_name: str
     health_path: str = AGENT_ENV_WEBSITE_HEALTH_PATH
+    # A live site's server serves no pages, so the gateway gives it no site route; ``settings`` are handed to its
+    # server, each ``secret:`` or ``env:`` reference resolved only as the compose file is written.
+    live: bool = False
+    settings: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -500,9 +506,10 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 f"{wc.environment_name}=http://{wc.environment_name}-{AGENT_ENV_WEBSITE_FRONTEND_SUFFIX}:80"
                 if wc.frontend_image else
                 f"{wc.environment_name}=http://{wc.environment_name}-{AGENT_ENV_WEBSITE_BACKEND_SUFFIX}:{AGENT_ENV_WEBSITE_BACKEND_PORT}"
-                for wc in website_configs
+                for wc in website_configs if not wc.live
             )
-            gateway_env.append(f"      - WEBSITE_URLS={website_urls}")
+            if website_urls:
+                gateway_env.append(f"      - WEBSITE_URLS={website_urls}")
             for wc in website_configs:
                 rest_proxy_urls.append(
                     f"{wc.environment_name}=http://{wc.environment_name}-{AGENT_ENV_WEBSITE_BACKEND_SUFFIX}:{AGENT_ENV_WEBSITE_BACKEND_PORT}"
@@ -559,6 +566,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 f"      - PORT={AGENT_ENV_WEBSITE_BACKEND_PORT}",
                 f"      - {SESSION_SECRET_ENV}={secrets.token_hex(32)}",
                 "      - PYTHONUNBUFFERED=1",
+                *_settings_lines(wc.settings),
                 "    healthcheck:",
                 f'      test: ["CMD-SHELL", "curl -sf -o /dev/null http://localhost:{AGENT_ENV_WEBSITE_BACKEND_PORT}{WELL_KNOWN_PATH}'
                 f' || curl -sf -o /dev/null http://localhost:{AGENT_ENV_WEBSITE_BACKEND_PORT}{wc.health_path}"]',
@@ -566,7 +574,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 "      timeout: 5s",
                 "      start_period: 30s",
                 "      retries: 3",
-                *_network_lines(_ENV_NETWORK, *([] if wc.frontend_image else sites_network)),
+                *_network_lines(_ENV_NETWORK, *([] if wc.frontend_image or wc.live else sites_network)),
                 "",
             ])
             if not wc.frontend_image:
@@ -956,8 +964,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         if website_configs:
             website_frontend_urls = {
                 wc.environment_name: f"{gateway_url}/website/{wc.environment_name}/"
-                for wc in website_configs
-            }
+                for wc in website_configs if not wc.live
+            } or None
             for svc_name, url in website_frontend_urls.items():
                 logger.info(f"Website frontend ({svc_name}): {url}")
 
@@ -1554,7 +1562,8 @@ def website_config(env: WebsiteEnv) -> WebsiteConfig:
     frontend = env.frontend_docker_image_artifact
     return WebsiteConfig(backend_image=env.server_docker_image_artifact.image_name,
                          frontend_image=frontend.image_name if frontend else None,
-                         environment_name=env.environment_name, health_path=env.health_path)
+                         environment_name=env.environment_name, health_path=env.health_path, live=env.live,
+                         settings=dict(env.settings))
 
 
 def _gateway_topology(env: Env) -> _GatewayTopology:
@@ -1617,6 +1626,7 @@ def _compose_name_problems(mcp_servers: list[MCPServerConfig], website_configs: 
 # rendered compose is logged. Matches the key to the left of the first '=' on an
 # `      - KEY=VALUE` env line.
 _SECRET_ENV_KEY_RE = re.compile(r"^(\s*-\s*)([A-Za-z0-9_]*(?:SECRET|PASSWORD|TOKEN|API_KEY)[A-Za-z0-9_]*)=.*$")
+_SETTINGS_LINE_RE = re.compile(rf'^(\s*-\s*")({WEBSITE_SETTINGS_ENV})=.*$')
 
 
 def _compose_ps_rows(text: str) -> list[dict]:
@@ -1651,10 +1661,20 @@ def _network_lines(*networks: str) -> list[str]:
 
 
 def _redact_compose_secrets(compose_content: str) -> str:
-    """Mask secret-valued env lines so the logged compose never carries a live secret."""
+    """Mask secret-valued env lines so the logged compose never carries a live secret, a site's settings among them."""
     return "\n".join(
-        _SECRET_ENV_KEY_RE.sub(r"\1\2=***", line) for line in compose_content.splitlines()
+        _SETTINGS_LINE_RE.sub(r'\1\2=***"', _SECRET_ENV_KEY_RE.sub(r"\1\2=***", line))
+        for line in compose_content.splitlines()
     )
+
+
+def _settings_lines(settings: dict) -> list[str]:
+    """The compose line handing a site its ``settings`` in ``WEBSITE_SETTINGS_ENV``, each ``secret:`` or ``env:``
+    reference resolved, quoted so any value is one YAML string; none for a site with none."""
+    if not settings:
+        return []
+    resolved = {name: get_config().resolve_reference(value) for name, value in settings.items()}
+    return [f"      - {json.dumps(f'{WEBSITE_SETTINGS_ENV}={json.dumps(resolved)}')}"]
 
 
 # Budget for reading the gateway's /state once its card is served: answering it runs tool discovery, one server at a

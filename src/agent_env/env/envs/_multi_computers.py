@@ -9,6 +9,7 @@ import logging
 from collections import Counter
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Optional
+from urllib.parse import urlsplit
 
 from agentenv_protocol.computer import tool_prefix_problem
 
@@ -52,6 +53,32 @@ def app_name_problems(apps: Mapping[str, Iterable[str]], others: Iterable[str]) 
         taken.update(names)
     return [f"app {name!r} of computer {computer!r} has the name of another of its child envs, and loads and snapshots "
             "find an environment by its name" for computer, names in apps.items() for name in names if taken[name] > 1]
+
+
+def start_tab_problems(computer: ComputerEnv, entry: Optional[dict], names: Iterable[str]) -> list[str]:
+    """Why a computer routing the multi env's websites can't open its browsers' start tabs: each http or https start
+    URL, its app's own setting under its child_envs entry's ``app_settings``, names a host one of ``names`` covers,
+    the routed sites' and the live sites' (their domains and ``allow_hosts``). A computer that routes no sites isn't
+    asked."""
+    params = entry.get("env_params") if isinstance(entry, dict) else None
+    if not isinstance(params, dict) or not params.get("site_routing"):
+        return []
+    given = params.get("app_settings") if isinstance(params.get("app_settings"), dict) else {}
+    defaults, names, problems = computer.app_defaults(), list(names), []
+    for app in computer.composed_apps():
+        if not app.declaration.browser:
+            continue
+        own = given.get(app.environment_name)
+        urls = {**defaults.get(app.environment_name, {}), **(own if isinstance(own, dict) else {})}.get("start_urls")
+        for url in urls if isinstance(urls, list) else []:
+            parts = urlsplit(url) if isinstance(url, str) else None
+            if parts is None or parts.scheme not in ("http", "https") or not parts.hostname:
+                continue
+            if not any(sites.matches(name, parts.hostname) for name in names):
+                problems.append(f"{app.environment_name}'s start tab {url} names {parts.hostname}, which none of the "
+                                "multi env's websites claims; add a website env at that name, or a live one (live = "
+                                "true) whose domains or allow_hosts name it")
+    return problems
 
 
 def deploy_options(entry: Optional[dict], sandbox_type: str | None) -> dict:
@@ -134,14 +161,15 @@ class Computers:
                 for env in self.envs if env.environment_name in records]
 
     def deployer(self, child_envs: Optional[dict], *, sandbox_type: str | None, ttl_seconds: int,
-                 attribution: Optional[Attribution], websites: Mapping[str, str]
+                 attribution: Optional[Attribution], websites: Mapping[str, str], live_hosts: Iterable[str] = ()
                  ) -> Callable[[Optional[str]], Awaitable[list[ExternalChild]]]:
         """The gateway's ``children``: every computer deployed as its child_envs entry says, its tools served under its
-        name and ``_``, and its network allowing ``reach``, the gateway's address when the gateway has one yet; then each
-        as the gateway fronts it. A computer routing the multi env's ``websites`` (their environment names by env id)
+        name and ``_``, and its network allowing ``reach``, the gateway's address when the gateway has one yet, and the
+        ``live_hosts`` of the multi env's live websites; then each as the gateway fronts it. A computer routing the multi env's ``websites`` (their environment names by env id)
         boots with its boot apps held, for ``finish`` to route them once the gateway is up. A gateway deploy tried again
         deploys them again, after closing the earlier try's."""
         tries = 0
+        live = tuple(live_hosts)
         self._routes = {}
         for name, entry in (child_envs or {}).items():
             if routes_later(entry):
@@ -156,6 +184,7 @@ class Computers:
             results = await asyncio.gather(*(env.deploy(
                 ttl_seconds=ttl_seconds, attribution=attribution, tool_prefix=f"{env.environment_name}_",
                 reach=reach or "", sites_later=env.environment_name in self._routes,
+                **({"live_hosts": live} if live else {}),
                 **deploy_options((child_envs or {}).get(env.environment_name), sandbox_type))
                 for env in self.envs), return_exceptions=True)
             if failed := [result for result in results if isinstance(result, BaseException)]:

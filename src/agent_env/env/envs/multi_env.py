@@ -98,7 +98,9 @@ class MultiEnv(Env):
         self.env_provider_type = env_provider_type  # the children's own types are ignored: this one deploys them all
         self.mcp_server_envs = mcp_server_envs
         self.website_envs = website_envs or []
-        if conflicts := sites.name_conflicts([sites.Claim(name, sites.SYNTHETIC, f"{env.environment_name} at website_envs[{i}]")
+        # A live site's names are the real site's, which a synthetic site claiming one of them wins.
+        if conflicts := sites.name_conflicts([sites.Claim(name, sites.ALLOWLIST if env.live else sites.SYNTHETIC,
+                                                          f"{env.environment_name} at website_envs[{i}]")
                                               for i, env in enumerate(self.website_envs)
                                               for name in dict.fromkeys(env.domains)]):
             raise sites.SiteConflict(f"multi env {id!r}: its websites claim names twice: {'; '.join(conflicts)}")
@@ -205,7 +207,8 @@ class MultiEnv(Env):
             raise ValueError(refusal)
         self._computers.begin()
         computers = dict(children=self._computers.deployer(child_envs, sandbox_type=sandbox_type, ttl_seconds=ttl_seconds,
-                                                           attribution=attribution, websites=self._websites()),
+                                                           attribution=attribution, websites=self._websites(),
+                                                           live_hosts=self.live_hosts()),
                          then=self._computers.finish) if self.computer_envs else {}
         try:
             deployed_env = await deploy_through_provider(
@@ -227,6 +230,37 @@ class MultiEnv(Env):
     def _websites(self) -> dict[str, str]:
         """Its websites' environment names by env id, the ids a computer's ``site_routing`` may name."""
         return {env.id: env.environment_name for env in self.website_envs}
+
+    def _start_tab_names(self, entry: Optional[dict]) -> list[str]:
+        """The names a computer with ``entry`` may open start tabs at: those of the websites its ``site_routing``
+        routes, all of them or those it lists, each site's own or its fallback name, and every live site's domains and
+        ``allow_hosts``, which the computer reaches the real sites at."""
+        params = entry.get("env_params") if isinstance(entry, dict) else None
+        routing = params.get("site_routing") if isinstance(params, dict) else None
+        listed = routing if isinstance(routing, list) else None
+        names = [name for env in self.website_envs if not env.live and (listed is None or env.id in listed)
+                 for name in env.domains or [sites.fallback_name(env.environment_name)]]
+        return names + [name for env in self.website_envs if env.live for name in [*env.domains, *env.allow_hosts]]
+
+    def live_hosts(self) -> list[str]:
+        """The hosts its live websites reach the real sites at, each one's domains and ``allow_hosts``, which a
+        computer whose network is an allowlist is let reach; a name one of its synthetic websites' names covers is
+        that site's, routed to it, and left out, while a wider one is kept, the synthetic name still routed within
+        it."""
+        synthetic = [name for env in self.website_envs if not env.live for name in env.domains]
+        hosts = []
+        for env in (env for env in self.website_envs if env.live):
+            for host in dict.fromkeys([*env.domains, *env.allow_hosts]):
+                if claimed := next((name for name in synthetic if sites.covers(name, host)), None):
+                    logger.warning(f"multi env '{self.id}': live site {env.environment_name!r} names {host!r}, which "
+                                   f"the synthetic site at {claimed!r} claims, so the computer reaches that site there")
+                elif host not in hosts:
+                    hosts.append(host)
+        return hosts
+
+    def live_websites(self) -> list[dict]:
+        """Its live websites, as a run records them (``WebsiteEnv.live_websites``)."""
+        return [site for env in self.website_envs for site in env.live_websites()]
 
     def save_refusal(self) -> str | None:
         """Why saving the env would be refused, or None: its env_provider_type can't deploy it. How each computer fits a
@@ -265,6 +299,8 @@ class MultiEnv(Env):
             if entry is None or (isinstance(entry, dict) and set(entry) <= set(CHILD_ENV_OPTIONS)):
                 if refusal := _multi_computers.refusal(computer, entry or {}, sandbox_type, self._websites()):
                     problems.append(f"child_envs.{name}: {refusal}" if name in child_envs else refusal)
+                problems += [f"child_envs.{name}: {problem}" for problem in _multi_computers.start_tab_problems(
+                    computer, entry, self._start_tab_names(entry))]
         return "; ".join(problems) or None
 
     @classmethod

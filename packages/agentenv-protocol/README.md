@@ -490,6 +490,50 @@ called with the caller's role in `ToolContext`. The site's `/mcp` is one of the 
 browsing route (`/website/<name>/`) never reaches. `python -m agentenv_protocol.website.conformance` checks a declared
 endpoint (`mcp`): it answers `initialize` and lists the tools the card does.
 
+## Live websites
+
+A live site is a real one, such as github.com, that a task puts in a multi env beside synthetic sites. Its server serves
+none of its pages: the real site does, and the computer reaches it over its own network. The server holds what agentenv
+knows of the site: its card, a data plane that seeds and reads the task's account through the real site's API, `ready`
+saying the account works, and `session`, the account's cookies and local storage, which `browser_sign_in` loads into the
+browser.
+
+```python
+from pydantic import BaseModel, SecretStr
+from agentenv_protocol.website import WebsiteEnvironment, ready_check, session_state, website
+
+
+@website(domains=["github.com"], live=True, allow_hosts=["*.githubassets.com", "api.github.com"])
+class GitHub(WebsiteEnvironment):
+    class Settings(BaseModel):
+        token: SecretStr                  # in env.toml as a secret:KEY or env:NAME reference
+
+    @ready_check
+    def account_works(self) -> bool:
+        ...                               # the API answers for self.settings.token
+
+    @session_state
+    def account(self, user: str | None) -> dict:
+        ...                               # {"cookies": [...], "local_storage": [...]} that sign a browser in
+```
+
+- **Its names:** `domains` are the real site's, where start tabs may open and `browser_sign_in` sets the session's
+  cookies. `allow_hosts` are the other hosts its pages reach, such as its assets and API. A computer whose network is an
+  allowlist may reach both; one that allows every host is left as it is. A name a synthetic site of the run also claims
+  is that site's.
+- **Its card:** `website/v1` says `live` (`WEBSITE_LIVE_PARAM`) and `allow_hosts` (`WEBSITE_ALLOW_HOSTS_PARAM`) beside
+  `domains`, and names no routes. The server serves no `/api/session` page route. `@website` refuses a live site
+  with no domains or a static folder, and `allow_hosts` on a site that isn't live.
+- **Its session:** the method marked `@session_state` answers `session {user}`. A live site must mark one, since only
+  the real site's cookies sign a browser in to it. Each cookie carries no domain and a `max_age`, as a synthetic
+  site's does.
+- **Settings:** any site may declare `Settings`. A deploy hands them to its server in `WEBSITE_SETTINGS_ENV`, a JSON
+  object, and the site reads them as `self.settings`, unless it has a member of that name of its own. A `SecretStr`
+  field's value in env.toml is a `secret:` or `env:` reference, which agentenv resolves only as it writes the server's
+  container, and every record shows it as withheld.
+- **The run:** a run that deploys a live site is marked live. The deploy record says `live`, and the run's metadata lists
+  its live sites with `reproducible: false`, because the real site may change between runs.
+
 ## Computer drivers
 
 A computer driver is what runs inside a computer an agent uses through screenshots and input. Write

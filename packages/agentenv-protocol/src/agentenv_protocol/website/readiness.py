@@ -20,6 +20,9 @@ from ..client import find_extension_method, invoke_extension
 WEBSITE_EXTENSION_URI = "urn:agentenv:website/v1"
 WEBSITE_READY_OP = "ready"
 WEBSITE_BROWSE_URL_PARAM = "browse_url"
+#: A live site's ``website/v1`` params: that it is one, and the other hosts its pages reach.
+WEBSITE_LIVE_PARAM = "live"
+WEBSITE_ALLOW_HOSTS_PARAM = "allow_hosts"
 READY_TIMEOUT_S = 10.0
 SITE_READY_TIMEOUT_S = 300.0
 DEFAULT_HEALTH_PATH = "/api/health"

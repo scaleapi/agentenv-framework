@@ -52,7 +52,10 @@ class FakeComputer:
         self.apps, self.reset_fails, self.route_fails, self.load_fails = apps, resets, routes, loads
 
     def composed_apps(self):
-        return [SimpleNamespace(environment_name=app) for app in self.apps]
+        return [SimpleNamespace(environment_name=app, declaration=SimpleNamespace(browser=False)) for app in self.apps]
+
+    def app_defaults(self):
+        return {app: {} for app in self.apps}
 
     def holds(self, environment_name):
         return environment_name in (self.environment_name, *self.apps)
