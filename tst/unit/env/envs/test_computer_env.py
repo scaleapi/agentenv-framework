@@ -266,6 +266,29 @@ def test_gate_3_probes_a_build_with_its_apps_defaults_as_a_deploy_with_no_env_pa
                                                                                       "theme": "dark"}}
 
 
+
+@pytest.mark.parametrize("asks", [1024, None])
+def test_the_probe_boots_a_build_with_the_shared_memory_its_apps_ask_for_as_a_deploy_does(base, driver, docker,
+                                                                                         tmp_path, monkeypatch, asks):
+    monkeypatch.setenv("MAIL_TOKEN", "t0ken")
+    install = {"python": "requirements.txt", "services": [{"name": "imap", "command": "venv/bin/python imap.py"}],
+               **({"shm_mb": asks} if asks else {})}
+    env = _put(base, driver, compose=False, apps=[_app(base, driver, tmp_path / "mail", compose=False, install=install,
+                                                       defaults={"token": "env:MAIL_TOKEN"})])
+    booted = []
+
+    async def fake_boot(link, **kwargs):
+        booted.append(kwargs)
+        return boot.Booted(sandbox=None, url="http://computer", card=CARD)
+
+    monkeypatch.setattr(boot, "boot", fake_boot)
+    monkeypatch.setattr(boot, "discard", AsyncMock())
+    monkeypatch.setattr(probing, "run_probe", AsyncMock(return_value="report"))
+
+    asyncio.run(_probe([SimpleNamespace()], env, driver, "img"))
+
+    assert booted[0]["shm_mb"] == asks
+
 @pytest.mark.parametrize("left", [{"status": "building"}, {"status": "unverified", "image": "built", "key": "k"}],
                          ids=["interrupted", "unprobed"])
 def test_the_pairs_left_to_compose_are_those_failed_interrupted_or_unprobed_on_a_native_arch(base, driver, docker,
