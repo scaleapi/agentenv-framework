@@ -51,7 +51,7 @@ async def test_a_notify_alert_wakes_the_agent_labelled_with_its_time_and_channel
     assert _woke(ctx, rig) == [("2026-11-09T14:00:00Z", ["user_request"]),
                                ("2026-11-10T14:00:00Z", ["notification:noor 30"])]
     assert "[Tue Nov 10, 2:00 PM UTC · noor 30] Sam: she suspects nothing" in rig.sent[1]
-    assert rig.record(ctx)["end_reason"] == "nothing_can_wake_the_agent"
+    assert rig.record(ctx)["end_reason"] == "finished_nothing_pending"
 
 
 @pytest.mark.asyncio

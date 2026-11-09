@@ -28,8 +28,14 @@ it in the run's metadata under its ``name``; a ``deploy_agent`` step deploys the
 - The agent can schedule its own wake-ups (scheduled checks) when the run is multi-day, at least
   ``scheduled_check_min_interval`` apart; ``scheduled_checks`` turns them on or off whatever the run's length. A
   check's wake counts toward ``max_wakes``.
-- At end_time the user's ``final`` line (with a reminder to use message_user) gives the agent one last turn. The run
-  ends on end_time, done (one sitting), max_wakes, or nothing left to wake the agent; the reason is recorded.
+- At end_time there is always a final check-in: the user's ``final`` line, or the step's own (``FINAL_DEFAULT_TEXT``)
+  when the task sets none. The run's last wake, at end_time or the one ``max_wakes`` makes the last, carries the
+  last-turn notice (``final_reminder``). After it the user sim reads what the agent sent (its wrap-up), and her
+  reaction, and any reply still held, are recorded; then the run ends.
+- End reasons: end_time, user_done (one sitting), max_wakes, time_budget, finished_nothing_pending or stuck (nothing
+  can wake the agent, with nothing pending or with something still pending), agent_turn_failed, agent_turn_timeout,
+  user_sim_error, step_error. What was still pending is recorded (``pending_at_end``): replies she held, messages she
+  never read, user lines and alerts never delivered, the agent's checks not yet due, contact replies in progress.
 - The run's metadata keeps a summary in ``metadata["always_on"][step_id]`` (small enough for a running job to report
   back); the full timeline goes to the object store, at the summary's ``object_url``.
 """
@@ -97,6 +103,23 @@ TIME_LINE = "It's {when}. Any other date you see is the computer's clock, not th
 CONTACT_TIMEOUT_SECONDS = 300.0
 # Past a contact's time limit, how long the settle wait still gives its call to come back.
 CONTACT_GRACE_SECONDS = 30.0
+# The final check-in's line when the task sets no `final`: the step's, not the user's.
+FINAL_DEFAULT_TEXT = "Time's up on this job. Send {first} a short wrap-up: what's done, and anything still open."
+NOTHING_CAN_WAKE = "nothing_can_wake_the_agent"  # until finish() tells finished_nothing_pending from stuck
+ERROR_ENDS = ("agent_turn_failed", "agent_turn_timeout", "user_sim_error", "step_error")
+# What each end reason means, for the end marker in the graded conversation; {wakes} and {first} are filled in.
+END_NOTES = {
+    "end_time": "The run reached its end time.",
+    "user_done": "{first} signed off.",
+    "max_wakes": "The run was cut off at its cap of {wakes} wakes.",
+    "time_budget": "The run was cut off by its real-time budget.",
+    "finished_nothing_pending": "Nothing could wake the assistant again, and nothing was pending.",
+    "stuck": "Nothing could wake the assistant again, though something was still pending.",
+    "agent_turn_failed": "The assistant's turn failed.",
+    "agent_turn_timeout": "The assistant's turn timed out.",
+    "user_sim_error": "The user simulator failed.",
+    "step_error": "The run stopped on an error.",
+}
 # The run's metadata keeps a summary; the full timeline goes to the object store. When storing fails, the summary keeps
 # this many of the last events instead, without these fields.
 TIMELINE_TAIL = 20
@@ -218,6 +241,8 @@ class _Run:
         self.signed_off = False  # a one-sitting run's user said done: no more reads
         self.contacts: dict = {}
         self.last_settle: dict = {}
+        self.pending: dict = {}
+        self.end_note = ""
 
     def close(self) -> None:
         for p in self._plugin_paths:
@@ -627,7 +652,7 @@ class _Run:
                 lines = await self._take_user_says()
                 replies = [h for h in self.held if h["deliver_at"] <= now]
                 self.held = [h for h in self.held if h["deliver_at"] > now]
-                await self._wake_with(now, lines, replies, final=False)
+                await self._wake_with(now, lines, replies)
                 continue
             # 3. nothing due: jump to the next thing
             later = await self._later(now)
@@ -636,10 +661,11 @@ class _Run:
                 await self._final(now)
                 break
             if soonest is None:
-                self.end_reason = "nothing_can_wake_the_agent"
+                self.end_reason = NOTHING_CAN_WAKE  # finished or stuck: finish() decides from what is pending
                 break
             why = sorted(k for k, v in later.items() if v == soonest)
             await self.advance(soonest, reason="+".join(why))
+        await self._last_read()
 
     async def _later(self, now: datetime) -> dict[str, datetime]:
         """What could wake the agent after ``now``, by kind, each at its earliest time."""
@@ -650,21 +676,36 @@ class _Run:
                       "user_read": self.read_at if self.unread else None}
         return {k: v for k, v in candidates.items() if v is not None and v > now}
 
-    async def _final(self, now: datetime) -> None:
+    async def _final(self, now: datetime, reason: str = "end_time") -> None:
+        """The final check-in: at end_time, the user's ``final`` line, else ``FINAL_DEFAULT_TEXT`` (a line from the
+        step, not the user); with whatever else is due, and the last-turn notice. A reply held past now stays held,
+        to be recorded as pending."""
         step = self.step
-        if self.end > now:
+        if reason == "end_time" and self.end > now:
             await self.advance(self.end, reason="end_time")
         now = await self.now()
-        if not step.final:
-            self.end_reason = "end_time"
-            return
         self.final_sent = True
         lines = await self._take_user_says()
         replies = [h for h in self.held if h["deliver_at"] <= now]
-        self.held = []
-        lines.append({"at": _iso(now), "text": step.final, "source": "final"})
-        await self._wake_with(now, lines, replies, final=True)
-        self.end_reason = self.end_reason or "end_time"
+        self.held = [h for h in self.held if h["deliver_at"] > now]
+        notes = []
+        if reason == "end_time" and step.final:
+            lines.append({"at": _iso(now), "text": step.final, "source": "final"})
+        else:
+            notes.append(_step_part(FINAL_DEFAULT_TEXT.format(first=self.person["first"]), "final"))
+        await self._wake_with(now, lines, replies, last=True, notes=notes)
+        self.end_reason = self.end_reason or reason
+
+    async def _last_read(self) -> None:
+        """After the agent's last turn, the user sim reads what it sent since her last read, at the time she would
+        (the world's clock stays where the run ended), so her reaction to its wrap-up is recorded; a reply she gives
+        is held and recorded as pending, never delivered. Not after done ends a one-sitting run, after she gave up, or
+        when the run ended on an error."""
+        if not self.unread or self.signed_off or self.gave_up or self.end_reason in ERROR_ENDS:
+            return
+        self._schedule_read()
+        at = self.read_at or await self.now()
+        await self.read(at, last=True)
 
     def _effective_prompt(self) -> str:
         parts = self.step._apply_seed(self.step._effective_parts(), self.ctx.metadata.get("seed", {}))
@@ -684,7 +725,10 @@ class _Run:
             out.append({"at": it.get("at"), "text": text, "source": "user_says", "trigger_id": it.get("source_id")})
         return out
 
-    async def _wake_with(self, now: datetime, lines: list[dict], replies: list[dict], final: bool) -> None:
+    async def _wake_with(self, now: datetime, lines: list[dict], replies: list[dict], last: bool = False,
+                         notes: Optional[list[dict]] = None) -> None:
+        """Wake the agent with what came due for it, then the user's lines and replies in time order, then ``notes``
+        (the step's own lines); ``last`` marks the run's last wake."""
         due = await take_due(self.notification_envs, self.recipient) if self.notification_envs else []
         parts = delivered_parts(due)
         user_msgs = sorted([{"at": l["at"] or _iso(now), "text": l["text"], "kind": l.get("source", "user_says"),
@@ -700,16 +744,19 @@ class _Run:
                          trigger_id=m.get("trigger_id"))
             else:
                 self.log("user_reply_delivered", virtual_time=m["at"], text=m["text"], done=m["done"])
-        if final and self.step.final_reminder:
-            parts.append(_step_part(self.step.final_reminder.format(first=self.person["first"]), "final_reminder"))
+        parts += notes or []
         woke_by = [f"notification:{d['channel']}" for d in due] + [f"{m['kind']}" for m in user_msgs]
+        woke_by += [f"step:{n['metadata']['agentenv']['source']}" for n in notes or []]
         await self.wake(parts, woke_by=woke_by, notifications=[{k: d.get(k) for k in
                                                                 ("at", "channel", "source", "source_id", "to")}
-                                                               for d in due])
+                                                               for d in due], last=last)
         if self.signed_off and any(m.get("done") for m in user_msgs):
             self.end_reason = self.end_reason or "user_done"
 
-    async def wake(self, parts: list[dict], woke_by: list[str], notifications: Optional[list] = None) -> None:
+    async def wake(self, parts: list[dict], woke_by: list[str], notifications: Optional[list] = None,
+                   last: bool = False) -> None:
+        """One wake: the agent's turn on ``parts``, then what it sent the user, then the settle wait. The wake that
+        ``last`` marks, or the one ``max_wakes`` makes the last, carries the last-turn notice (``final_reminder``)."""
         step = self.step
         sent_at = await self.now()
         clock = await step._env_clock(self.clock_envs)
@@ -717,6 +764,9 @@ class _Run:
         if self.wakes == 0 and not step.system_prompt:
             lead = [_step_part(self.rules(), "rules"), *lead]
         parts = [*lead, *parts]
+        last = last or self.wakes + 1 >= step.max_wakes
+        if last and step.final_reminder:
+            parts.append(_step_part(step.final_reminder.format(first=self.person["first"]), "final_reminder"))
         if step.wake_reminder:
             parts = [*parts, _step_part(step.wake_reminder_text, "reminder")]
         self.wakes += 1
@@ -728,7 +778,7 @@ class _Run:
             self.per_turn_parts.append(list(parts))
 
         self.log("wake", n=self.wakes, virtual_time=_iso(sent_at), woke_by=woke_by, notifications=notifications or [],
-                 parts_text="\n".join(p.get("text", "") for p in parts if p.get("kind") == "text"))
+                 last=last, parts_text="\n".join(p.get("text", "") for p in parts if p.get("kind") == "text"))
         t = time.time()
         try:
             task_id, result = await send_and_wait(self.target_url, parts, agent=self.agent, message_id=msg_id,
@@ -782,7 +832,7 @@ class _Run:
                  trajectory_url=traj, **extra)
         for m in messages:
             self.log("message_to_user", virtual_time=m.get("at"), text=m["text"], wake=self.wakes)
-            self.unread.append({"at": m.get("at"), "text": m["text"]})
+            self.unread.append({"at": m.get("at"), "text": m["text"], "wake": self.wakes})
             self.all_messages.append({"at": m.get("at"), "text": m["text"], "wake": self.wakes})
         if state == TaskState.failed or str(state) == "failed":
             self.error = term.error_message or term.response_text or "agent turn failed"
@@ -862,19 +912,22 @@ class _Run:
             self.last_plain, self.last_messages = plain, messages
         for m in messages:
             self.log("message_to_user", virtual_time=m.get("at"), text=m["text"], wake=self.wakes, after_nudge=True)
-            self.unread.append({"at": m.get("at"), "text": m["text"]})
+            self.unread.append({"at": m.get("at"), "text": m["text"], "wake": self.wakes})
             self.all_messages.append({"at": m.get("at"), "text": m["text"], "wake": self.wakes})
         if state == TaskState.failed or str(state) == "failed":
             self.error = term.error_message or term.response_text or "agent nudge turn failed"
             self.end_reason = "agent_turn_failed"
 
-    async def read(self, now: datetime) -> None:
+    async def read(self, now: datetime, last: bool = False) -> None:
+        """The user sim reads what the agent sent since her last read, at ``now``; ``last`` marks the read after the
+        run's last wake, whose answer can no longer change how the run ends."""
         phone = []
         if self.notification_envs:
             for it in await take_due(self.notification_envs, USER_PHONE):
                 phone.append({"at": it.get("at"), "channel": it["channel"],
                               "text": "\n\n".join(p["text"] for p in it["parts"] if p.get("kind") == "text")})
-        read = {"time": _iso(now), "assistant_messages": list(self.unread), "phone": phone,
+        read = {"time": _iso(now), "assistant_messages": [{"at": m.get("at"), "text": m["text"]} for m in self.unread],
+                "phone": phone,
                 "you_sent": list(self.you_sent), "done_ends_run": not self.multi_day}
         self.unread, self.you_sent, self.read_at = [], [], None
         calls = []
@@ -898,7 +951,7 @@ class _Run:
                          user_sim_error=(calls[-1].get("error") if calls else None),
                          user_sim_trajectory_urls=[c.get("trajectory_url") for c in calls],
                          user_sim_turns=ans.get("turns", len(calls)), shown=ans.get("shown"),
-                         past_turn_cap=ans.get("past_turn_cap"))
+                         past_turn_cap=ans.get("past_turn_cap"), last_read=last)
         outcome = ans.get("outcome")
         said = (ans.get("message") or "").strip()
         if outcome in ("reply", "done") and said:
@@ -912,13 +965,13 @@ class _Run:
             if max_replies and self.replies >= int(max_replies):
                 self.gave_up = True
                 self.log("user_gave_up", replies=self.replies)
-        elif outcome == "done":
+        elif outcome == "done" and not last:
             entry["ends_run"] = not self.multi_day
             if not self.multi_day and said:
                 self.signed_off = True
             elif not self.multi_day:
                 self.end_reason = "user_done"
-        if calls and calls[-1].get("error"):
+        if calls and calls[-1].get("error") and not last:
             self.end_reason = self.end_reason or "user_sim_error"
 
     async def _ask_user_sim(self, text: str) -> dict:
@@ -975,12 +1028,43 @@ class _Run:
                 out.append({"env_id": env.env_id, "triggers": rows})
         return out
 
+    async def _pending_at_end(self) -> dict:
+        """What was still pending when the run ended: her replies held for their response time, the agent's messages
+        she never read, user lines and alerts for the agent never delivered, its scheduled checks not yet due, and
+        contact replies still in progress."""
+        alerts, checks = [], []
+        for st in await self._notes_state(self.recipient):
+            alerts += [{k: n.get(k) for k in ("at", "channel", "text", "trigger_id")}
+                       for n in st.get("pending_notifications", [])]
+            checks += [{k: c.get(k) for k in ("next", "note", "every")} for c in st.get("checks", [])
+                       if c.get("status") == "active"]
+        lines = [{k: n.get(k) for k in ("at", "text", "trigger_id")}
+                 for st in await self._notes_state(USER_SAYS) for n in st.get("pending_notifications", [])]
+        return {"held_replies": [{"at": _iso(h["deliver_at"]), "text": h["text"], "done": h.get("done", False)}
+                                 for h in self.held],
+                "unread_by_user": [dict(m) for m in self.unread],
+                "user_lines_not_delivered": lines,
+                "alerts_never_delivered": alerts,
+                "scheduled_checks_not_due": checks,
+                "contact_replies_in_progress": await self._contacts_at_work()}
+
     async def finish(self) -> None:
         step, ctx = self.step, self.ctx
         now = await self.now()
-        self.pending = {"contact_replies_in_progress": await self._contacts_at_work()}
-        self.log("end", reason=self.end_reason, virtual_time=_iso(now), wakes=self.wakes, replies=self.replies,
-                 unread_at_end=len(self.unread), held_at_end=len(self.held), pending=self.pending)
+        try:
+            self.pending = await self._pending_at_end()
+        except Exception as e:  # the record matters more than this part of it
+            logger.warning(f"always_on: could not read what was pending at the end: {e}")
+            self.pending = {"error": [{"error": f"{type(e).__name__}: {str(e)[:200]}"}]}
+        if self.end_reason == NOTHING_CAN_WAKE:
+            # Scheduled checks would have woken the agent, so they aren't what makes a run stuck.
+            stuck = any(items for kind, items in self.pending.items() if kind != "scheduled_checks_not_due")
+            self.end_reason = "stuck" if stuck else "finished_nothing_pending"
+        self.end_note = END_NOTES.get(self.end_reason, self.end_reason or "").format(first=self.person["first"],
+                                                                                     wakes=self.wakes)
+        self.log("end", reason=self.end_reason, note=self.end_note, virtual_time=_iso(now), wakes=self.wakes,
+                 replies=self.replies, unread_at_end=len(self.unread), held_at_end=len(self.held),
+                 pending=self.pending)
         conv = conversation_store.get_conversation(self.conversation_id)
         if conv and conv.get("status") == "active":
             conversation_store.mark_closed(self.conversation_id)
@@ -1006,7 +1090,8 @@ class _Run:
         if step.stay_quiet:
             counts["stay_quiet_wakes"] = sum(1 for e in self.timeline if e["event"] == "agent_turn_end"
                                              and e.get("stay_quiet_calls"))
-        record = {"step_id": step.id, "end_reason": self.end_reason, "error": self.error, "counts": counts,
+        record = {"step_id": step.id, "end_reason": self.end_reason, "end_note": self.end_note, "error": self.error,
+                  "counts": counts,
                   "user_sim": {"name": step.user_sim, "version": self.version, "model": self.us.get("model"),
                                "agent_name": self.us.get("agent_name"), **self.user_setup},
                   "end_time": _iso(self.end) if self.end else None, "time_zone": self.zone,
