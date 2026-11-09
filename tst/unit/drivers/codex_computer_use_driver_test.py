@@ -230,8 +230,20 @@ async def test_approvals_follow_allowed_apps_by_name_or_bundle_identifier_and_no
 
 
 @pytest.mark.asyncio
-async def test_each_agent_session_keeps_a_repl_of_its_own_and_one_that_stops_starts_afresh(
+async def test_each_agent_session_keeps_a_repl_of_its_own_and_one_that_stops_starts_afresh_while_it_still_ends(
         module, monkeypatch, tmp_path):
+    """A server that stops takes a while to end; the session's next call starts a new one rather than wait on it."""
+    serve = module.CodexComputerUse._server
+
+    @contextlib.asynccontextmanager
+    async def slow_to_end(self):
+        async with serve(self) as opened:
+            try:
+                yield opened
+            finally:
+                await asyncio.sleep(0.5)
+
+    monkeypatch.setattr(module.CodexComputerUse, "_server", slow_to_end)
     async with mcp_session(_driver(module, monkeypatch)) as session:
         for caller, value in (("a", "1"), ("b", "2")):
             await session.call_tool("js", {"code": f"set {value}"}, meta={SESSION_META_KEY: caller})

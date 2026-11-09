@@ -207,61 +207,77 @@ class CodexComputerUse(MacOSDriver):
 
 
 class _Repl:
-    """One ``cua_repl`` server, held open by a task of its own, since a stdio client is entered and left in one task,
-    and reached from any through a queue, one call at a time. A server that stops is started afresh on the next call,
-    without the last one's bindings; ``close`` ends it for good."""
+    """A session's ``cua_repl``, one server at a time, each held open by a task of its own, since a stdio client is
+    entered and left in one task, and reached from any through that server's queue, one call at a time. A server that
+    stops is let go at once, while it still ends, and the next call starts one afresh, without the last one's bindings;
+    ``close`` ends them for good."""
 
     def __init__(self, open_server: Callable[[], contextlib.AbstractAsyncContextManager[
             tuple[ClientSession, InitializeResult]]]) -> None:
         self._open = open_server
-        self._calls: asyncio.Queue = asyncio.Queue()
-        self._task: asyncio.Task | None = None
+        #: The queue of the server taking calls, None when none is; and the tasks of every server not yet ended.
+        self._calls: asyncio.Queue | None = None
+        self._serving: set[asyncio.Task] = set()
         #: When a call last ended, on the monotonic clock, and how many are queued or running.
         self.used, self.busy = time.monotonic(), 0
 
     async def call(self, tool: str, arguments: dict, meta: dict) -> CallToolResult:
-        if self._task is None or self._task.done():
-            self._task = asyncio.create_task(self._serve())
+        if self._calls is None:
+            self._calls = asyncio.Queue()
+            serving = asyncio.create_task(self._serve(self._calls))
+            self._serving.add(serving)
+            serving.add_done_callback(self._serving.discard)
         answer = asyncio.get_running_loop().create_future()
         self.busy += 1
         try:
-            await self._calls.put((tool, arguments, meta, answer))
+            self._calls.put_nowait((tool, arguments, meta, answer))
             return await answer
         finally:
             self.busy -= 1
             self.used = time.monotonic()
 
     async def close(self) -> None:
-        """The server ended, its process with it, waiting at most ``CLOSE_TIMEOUT_S`` before cancelling it."""
-        if self._task is None or self._task.done():
-            return
-        await self._calls.put(None)
-        with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(self._task, CLOSE_TIMEOUT_S)
+        """Every server ended, its process with it, waiting at most ``CLOSE_TIMEOUT_S`` before cancelling one."""
+        if self._calls is not None:
+            self._calls.put_nowait(None)
+            self._calls = None
+        if serving := set(self._serving):
+            _, late = await asyncio.wait(serving, timeout=CLOSE_TIMEOUT_S)
+            for task in late:
+                task.cancel()
 
-    async def _serve(self) -> None:
+    async def _serve(self, calls: asyncio.Queue) -> None:
         stopped: BaseException = ConnectionError("cua_repl stopped")
         try:
             async with self._open() as (session, _):
-                while (call := await self._calls.get()) is not None:
-                    tool, arguments, meta, answer = call
-                    try:
-                        result = await session.call_tool(tool, arguments, meta=meta)
-                    except McpError as e:
-                        _settle(answer, error=e)
-                        if e.error.code == CONNECTION_CLOSED:
+                try:
+                    while (call := await calls.get()) is not None:
+                        tool, arguments, meta, answer = call
+                        try:
+                            result = await session.call_tool(tool, arguments, meta=meta)
+                        except McpError as e:
+                            _settle(answer, error=e)
+                            if e.error.code == CONNECTION_CLOSED:
+                                raise
+                            continue
+                        except Exception as e:
+                            _settle(answer, error=e)
                             raise
-                        continue
-                    except Exception as e:
-                        _settle(answer, error=e)
-                        raise
-                    _settle(answer, result=result)
+                        _settle(answer, result=result)
+                finally:
+                    self._let_go(calls)
         except Exception as e:
             stopped = e
         finally:
-            while not self._calls.empty():
-                if (call := self._calls.get_nowait()) is not None:
+            self._let_go(calls)
+            while not calls.empty():
+                if (call := calls.get_nowait()) is not None:
                     _settle(call[-1], error=stopped)
+
+    def _let_go(self, calls: asyncio.Queue) -> None:
+        """The next call to a new server, not to this one, which takes no more."""
+        if self._calls is calls:
+            self._calls = None
 
 
 def _settle(answer: asyncio.Future, *, result: Any = None, error: BaseException | None = None) -> None:
