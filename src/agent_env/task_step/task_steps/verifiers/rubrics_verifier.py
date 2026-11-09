@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import re
@@ -623,6 +624,29 @@ class RubricsVerifierTaskStep(TaskStep):
             judge_batch_concurrency=data.get("judge_batch_concurrency"),
         )
 
+    # An always_on step's prompt: what this verifier grades it from, set on the copy ``_for_always_on`` makes.
+    _always_on_wakes: Optional[str] = None
+
+    async def _for_always_on(self, context: TaskStepContext, record: dict) -> "RubricsVerifierTaskStep":
+        """This verifier as it grades an always_on step's prompt, which may run 40–60 wakes: from the user's chat (the
+        prompt's response and conversation) and the run's context (the trigger log, and the run wake by wake with the
+        app changes each made), never every wake's trajectory, which may not fit and costs a lot. A copy, since one
+        step instance is shared across concurrent rollouts; every other prompt is graded as before."""
+        if self._spec().cites_evidence:
+            raise RuntimeError(f"Verifier '{self.verifier_id}': output_format={self.output_format.value} cites "
+                               "per-criterion screenshots, and an always_on step's prompt is graded without its "
+                               "wakes' trajectories.")
+        if "grade_up_to_turn" in self.step_param_overrides(context) or self.grade_up_to_turn is not None:
+            raise RuntimeError(f"Verifier '{self.verifier_id}': grade_up_to_turn can't cut an always_on step's "
+                               "prompt, whose conversation turns are not its wakes.")
+        from agent_env.task_step.task_steps.always_on import render_for_judge  # its module imports this one's peers
+
+        twin = copy.copy(self)
+        twin.use_trajectory = False
+        twin.run_context_for_judge = self.run_context_for_judge or list(RUN_CONTEXT_PARTS)
+        twin._always_on_wakes = await asyncio.to_thread(render_for_judge, record)
+        return twin
+
     def _resolved_criteria(self, context: TaskStepContext) -> list[dict]:
         """Criteria for this run: a per-run ``step_params`` override replaces the stored list.
 
@@ -637,6 +661,9 @@ class RubricsVerifierTaskStep(TaskStep):
         prompt_response = next((pr for pr in context.prompt_responses if pr.prompt_id == self.prompt_id), None)
         if prompt_response is None:
             raise RuntimeError(f"PromptResponse with prompt_id='{self.prompt_id}' not found in context")
+        always_on = (context.metadata.get("always_on") or {}).get(prompt_response.step_id)
+        if always_on is not None and self._always_on_wakes is None:
+            return await (await self._for_always_on(context, always_on)).execute(context)
         overrides_for_step = self.step_param_overrides(context)
         grade_up_to_turn = (
             _validated_turn(overrides_for_step["grade_up_to_turn"])
@@ -1545,6 +1572,8 @@ class RubricsVerifierTaskStep(TaskStep):
             base += "\n\n" + render_run_context(run_context, self.run_context_for_judge,
                                                  message_max_chars=self.RUN_CONTEXT_MESSAGE_MAX_CHARS,
                                                  firings_max=self.RUN_CONTEXT_FIRINGS_MAX)
+        if self._always_on_wakes:
+            base += "\n\n" + self._always_on_wakes
         if context_facts:
             # Facts before the policy: they are inputs, the policy is how to read them.
             base += "\n\n## Context facts\n" + self._CONTEXT_FACTS_LEAD + "\n" + "\n".join(

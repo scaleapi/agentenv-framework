@@ -1278,6 +1278,81 @@ class _Run:
 
 
 # ==================================================================================================================
+# What a judge reads of the run beyond the user's chat (rubrics_verifier, for an always_on step's prompt).
+JUDGE_CHANGES_PER_WAKE = 10
+JUDGE_WAKES = 300
+_WOKE_BY = {"user_request": "the user's request", "user_reply": "the user's reply", "user_says": "a user message",
+            "final": "the user's final line", "step:final": "the end of the job"}
+
+
+def render_for_judge(record: dict) -> str:
+    """The run wake by wake for a judge: each wake's pretend time, what woke the agent, how much it sent the user and
+    its tool calls, and the app changes made around it, the agent's own marked; then how the run ended and what was
+    still pending. From the stored timeline at ``record["object_url"]`` (else the record's tail)."""
+    timeline = record.get("timeline_tail") or []
+    if record.get("object_url"):
+        try:
+            url = record["object_url"]
+            timeline = json.loads(get_config().get_object_store_at(url).get(url))["timeline"]
+        except Exception as e:
+            return f"## The run, wake by wake\n(The run's record could not be read: {type(e).__name__}: {e})"
+    turns = {e["n"]: e for e in timeline if e["event"] == "agent_turn_end"}
+    nudges = {e["wake"]: e for e in timeline if e["event"] == "nudge"}
+    changes: dict[int, list[dict]] = {}
+    for e in timeline:
+        if e["event"] == "app_changes":
+            changes.setdefault(e["wake"], []).extend(e.get("changes") or [])
+    lines = ["## The run, wake by wake",
+             "The assistant ran only when something woke it. Each wake below gives its pretend time, what woke it, how "
+             "many messages it sent the user (their text is in the conversation) and its tool calls, then the app "
+             "changes made around it: the assistant's own (\"it changed\"), others' (contacts, triggers), and ones "
+             "with no known actor (made outside the env's gateway, such as on a website reached directly), each with "
+             "when it was seen. The user saw only the messages the assistant sent."]
+    wakes = [e for e in timeline if e["event"] == "wake"]
+    for wake in wakes[:JUDGE_WAKES]:
+        n = wake["n"]
+        woke = ", ".join(_WOKE_BY.get(w, f"an alert ({w.split(':', 1)[1]})" if w.startswith("notification:") else w)
+                         for w in wake.get("woke_by") or []) or "nothing named"
+        turn = turns.get(n) or {}
+        sent = (turn.get("messages_to_user") or 0) + (nudges.get(n, {}).get("messages_to_user") or 0)
+        calls = f" · {turn['tool_calls']} tool calls" if turn.get("tool_calls") is not None else ""
+        state = f" · its turn {turn['state']}" if turn.get("state") not in (None, "completed", "TaskState.completed") \
+            else ""
+        lines.append(f"- Wake {n} · {label_time(wake.get('virtual_time'))} · woken by {woke} · sent the user "
+                     f"{sent} message{'s' if sent != 1 else ''}{calls}{state}")
+        made = changes.get(n, [])
+        for c in made[:JUDGE_CHANGES_PER_WAKE]:
+            if c.get("by") == "agent":
+                who = "it changed"
+            elif c.get("by"):
+                who = f"{_actor(c)} changed ({c.get('phase')})"
+            else:
+                who = f"no known actor changed ({c.get('phase')})"
+            summary = f" ({c['summary']})" if c.get("summary") else ""
+            lines.append(f"  - {who}: {c.get('op')} {c.get('table')} row {c.get('row_id')}{summary}")
+        if len(made) > JUDGE_CHANGES_PER_WAKE:
+            lines.append(f"  - and {len(made) - JUDGE_CHANGES_PER_WAKE} more changes")
+    if len(wakes) > JUDGE_WAKES:
+        lines.append(f"(and {len(wakes) - JUDGE_WAKES} more wakes)")
+    pending = {kind: v.get("count", 0) for kind, v in (record.get("pending_at_end") or {}).items()
+               if isinstance(v, dict) and v.get("count")}
+    lines += ["", "## How the run ended",
+              f"{record.get('end_note') or ''} (end reason: {record.get('end_reason')})".strip()]
+    if pending:
+        lines.append("Still pending at the end: " + ", ".join(f"{k.replace('_', ' ')}: {v}"
+                                                           for k, v in pending.items()))
+    return "\n".join(lines)
+
+
+def _actor(change: dict) -> str:
+    actor = (change.get("actors") or [{}])[0]
+    if actor.get("trigger_id"):
+        return f"trigger {actor['trigger_id']}"
+    if actor.get("caused_by"):
+        return f"{actor.get('role')} (for trigger {actor['caused_by'][0].get('trigger_id')})"
+    return str(actor.get("role") or actor.get("kind") or "someone")
+
+
 async def _call(env, uri: str, method: str, params: Optional[dict] = None, *, attempts: int = 6,
                 timeout: int = 60) -> Any:
     """A gateway control call, retried on a transient failure (a busy gateway can take seconds to answer).
