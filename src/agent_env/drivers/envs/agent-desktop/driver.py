@@ -1,14 +1,15 @@
-"""Vercel's agent-desktop as a computer driver on macOS and on an X11 desktop on Linux. agent-desktop reads apps'
-accessibility trees, AT-SPI's on Linux, and acts on what it finds; its own MCP server, ``agent-desktop mcp``, serves each of its commands as a tool, and agents get what that
-server serves at its pinned version (``mcp.json``): its instructions and its tools, each call forwarded to a server of
-its own and answered as the server answers it, with each screenshot the call saved to a file beside the answer, since
-the agent can't read the computer's files; agent-desktop's skill leads the computer's. The computer/v1
-operations are MacOSDriver's on macOS and X11Driver's on Linux. On macOS this process's Python is granted
-Accessibility, Post Event and Screen Recording, and agent-desktop, which it starts, has them as its own. A tool can't pass agent-desktop's global flags, so the server's
-come from the driver's ``headed`` setting: off, agent-desktop's default, it acts through the accessibility API alone and
-refuses what needs physical input (double clicks, hovers, drags, the mouse commands); on, it allows those and prefers
-physical input, moving the pointer and focus. It needs ``agentenv-framework-protocol[computer,macos]`` on macOS or
-``[computer,x11]`` on Linux, and agent-desktop's release where it runs."""
+"""Vercel's agent-desktop as a computer driver on macOS, on Windows and on an X11 desktop on Linux. agent-desktop reads
+apps' accessibility trees, UI Automation's on Windows and AT-SPI's on Linux, and acts on what it finds; its own MCP
+server, ``agent-desktop mcp``, serves each of its commands as a tool, and agents get what that server serves at its
+pinned version (``mcp.json``): its instructions and its tools, each call forwarded to a server of its own and answered
+as the server answers it, with each screenshot the call saved to a file beside the answer, since the agent can't read
+the computer's files; agent-desktop's skill leads the computer's. The computer/v1 operations are MacOSDriver's on
+macOS, WindowsDriver's on Windows and X11Driver's on Linux. On macOS this process's Python is granted Accessibility,
+Post Event and Screen Recording, and agent-desktop, which it starts, has them as its own. A tool can't pass
+agent-desktop's global flags, so the server's come from the driver's ``headed`` setting: off, agent-desktop's default,
+it acts through the accessibility API alone and refuses what needs physical input (double clicks, hovers, drags, the
+mouse commands); on, it allows those and prefers physical input, moving the pointer and focus. It needs ``agentenv-framework-protocol[computer,macos]`` on macOS,
+``[computer,windows]`` on Windows or ``[computer,x11]`` on Linux, and agent-desktop's release where it runs."""
 from __future__ import annotations
 
 import asyncio
@@ -29,9 +30,11 @@ from mcp.types import CallToolResult, ImageContent, TextContent
 from agentenv_protocol import EnvironmentTool, ForwardedTool, server_instructions
 from agentenv_protocol.computer import ComputerSettings, ReadyCheck, computer_driver
 
-MACOS = sys.platform == "darwin"
+MACOS, WINDOWS = sys.platform == "darwin", sys.platform == "win32"
 if MACOS:
     from agentenv_protocol.computer import MacOSDriver as OSDriver
+elif WINDOWS:
+    from agentenv_protocol.computer import WindowsDriver as OSDriver
 else:
     from agentenv_protocol.computer import X11Driver as OSDriver
 
@@ -46,17 +49,29 @@ EXECUTABLES = {
               "agent-desktop-linux-clipboard-owner": "3e96f92b805c0d1f9de309935d62f4189b8e11e1385ad022bb878487bb3942ec"},
     "arm64": {"agent-desktop": "915de59a8b3d22c9ad33023740bbcc5fe0b4fa830de9587bbf761237eafeb76f",
               "agent-desktop-linux-clipboard-owner": "a6bfde6778dadcf9fd04ba94de17cdf205eb0b23b643c3f34073d264d2117cc3"},
+    "windows/amd64": {"agent-desktop.exe": "d274667031322e50b9c2b1ab81c2ca46835d52cc932769a5c34bd4d481fd94c3"},
 }
-EXECUTABLE = BIN / "agent-desktop"
-#: What ``agent-desktop mcp`` says at connect and lists at the pinned version, the same on macOS and Linux: its
-#: instructions and its tools.
+EXECUTABLE = BIN / ("agent-desktop.exe" if WINDOWS else "agent-desktop")
+#: What ``agent-desktop mcp`` says at connect and lists at the pinned version, the same on macOS, Windows and Linux:
+#: its instructions and its tools.
 MANIFEST = HERE / "mcp.json"
-#: What of the driver's environment agent-desktop gets: the session user's own, and on Linux its display and the
-#: session bus AT-SPI is found on; none of a deploy's values.
+#: What of the driver's environment agent-desktop gets: the session user's own, on Windows with the system's folders,
+#: which COM and the apps it launches need, and on Linux its display and the session bus AT-SPI is found on; none of a
+#: deploy's values.
 KEPT = ("HOME", "USER", "LOGNAME", "TMPDIR", "LANG") + (
-    () if MACOS else ("DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"))
+    () if MACOS else
+    ("USERNAME", "USERDOMAIN", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP",
+     "SystemRoot", "SystemDrive", "windir", "ComSpec", "PATHEXT", "ProgramData", "ProgramFiles", "ProgramFiles(x86)",
+     "ProgramW6432", "CommonProgramFiles", "PUBLIC", "ALLUSERSPROFILE", "COMPUTERNAME") if WINDOWS else
+    ("DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"))
 #: The PATH it runs, and launches apps, with.
-PATH = "/usr/bin:/bin:/usr/sbin:/sbin" if MACOS else "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+if MACOS:
+    PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+elif WINDOWS:
+    PATH = ";".join(os.environ["SystemRoot"] + folder for folder in (
+        r"\System32", "", r"\System32\Wbem", r"\System32\WindowsPowerShell\v1.0"))
+else:
+    PATH = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 #: How long one of its commands that reads its skills may take.
 SKILL_TIMEOUT_S = 60
 #: The most bytes of saved screenshots one answer carries.
@@ -68,6 +83,7 @@ FILES = ("Files these tools write stay on this computer, which you don't share: 
 
 
 @computer_driver(name="agent-desktop", supports=[{"os": {"type": "macos", "display": ["aqua"]}, "arch": ["arm64"]},
+                                                 {"os": {"type": "windows", "display": ["dwm"]}, "arch": ["amd64"]},
                                                  {"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]}])
 class AgentDesktop(OSDriver):
     class Settings(ComputerSettings):
@@ -89,7 +105,7 @@ class AgentDesktop(OSDriver):
 
     async def ready_checks(self) -> list[ReadyCheck]:
         """agent-desktop's executables and the tools its server lists, as pinned, checked until they pass once, and the
-        OS's own checks, the TCC permissions on macOS and XTEST on Linux, every time."""
+        OS's own checks, the TCC permissions on macOS, the input desktop on Windows and XTEST on Linux, every time."""
         if self._pinned is None or not all(check.ok for check in self._pinned):
             self._pinned = await self._pinned_checks()
         return [*self._pinned, *await super().ready_checks()]
@@ -100,12 +116,10 @@ class AgentDesktop(OSDriver):
         if self._skill is None:
             listed = {skill["name"]: skill for skill in (await _agent_desktop("skills", "list"))["skills"]}
             platform = next(skill for skill in listed.values() if skill.get("current"))
-            files = {ref: (await _agent_desktop("skills", "get", "desktop", ref))["content"]
-                     for ref in listed["agent-desktop"]["references"]}
-            files["platform/SKILL.md"] = (await _agent_desktop("skills", "get", "platform"))["content"]
-            files.update({f"platform/{ref}": (await _agent_desktop("skills", "get", "platform", ref))["content"]
-                          for ref in platform["references"]})
-            _, frontmatter, body = (await _agent_desktop("skills", "get", "desktop"))["content"].split("---\n", 2)
+            files = {ref: await _skill_file("desktop", ref) for ref in listed["agent-desktop"]["references"]}
+            files["platform/SKILL.md"] = await _skill_file("platform")
+            files.update({f"platform/{ref}": await _skill_file("platform", ref) for ref in platform["references"]})
+            _, frontmatter, body = (await _skill_file("desktop")).split("---\n", 2)
             self._skill = _description(frontmatter), body.lstrip("\n"), files
         return self._skill
 
@@ -117,7 +131,7 @@ class AgentDesktop(OSDriver):
                 result = await session.call_tool(tool, arguments)
         except Exception as e:
             return CallToolResult(isError=True, content=[TextContent(type="text", text=(
-                f"agent-desktop's server failed before it answered, so {tool} may have run: {type(e).__name__}: {e}"))])
+                f"agent-desktop's server failed before it answered, so {tool} may have run: {_reason(e)}"))])
         return _with_images(result)
 
     @contextlib.asynccontextmanager
@@ -131,7 +145,8 @@ class AgentDesktop(OSDriver):
             yield session
 
     async def _pinned_checks(self) -> list[ReadyCheck]:
-        pinned = EXECUTABLES[f"macos/{self.platform.arch}" if MACOS else self.platform.arch]
+        pinned = EXECUTABLES[f"macos/{self.platform.arch}" if MACOS else
+                             f"windows/{self.platform.arch}" if WINDOWS else self.platform.arch]
         digests = await asyncio.to_thread(_digests, pinned)
         differ = sorted(name for name, digest in digests.items() if digest != pinned[name])
         checks = [ReadyCheck("agent-desktop", not differ, "the pinned executables" if not differ else
@@ -142,12 +157,19 @@ class AgentDesktop(OSDriver):
             async with self._server() as session:
                 listed = (await session.list_tools()).tools
         except Exception as e:
-            return [*checks, ReadyCheck("agent-desktop tools", False, f"its server didn't list them: {e}")]
+            return [*checks, ReadyCheck("agent-desktop tools", False, f"its server didn't list them: {_reason(e)}")]
         running = {t.name: t.inputSchema for t in listed}
         pinned = {t["name"]: t["inputSchema"] for t in _manifest()["tools"]}
         changed = sorted(name for name in running.keys() | pinned.keys() if running.get(name) != pinned.get(name))
         return [*checks, ReadyCheck("agent-desktop tools", not changed, f"{len(running)} tools, as pinned" if not changed
                                     else f"these tools differ from {MANIFEST.name}: {', '.join(changed)}")]
+
+
+def _reason(e: BaseException) -> str:
+    """What failed, under the task groups the MCP client wraps it in."""
+    while isinstance(e, BaseExceptionGroup) and len(e.exceptions) == 1:
+        e = e.exceptions[0]
+    return f"{type(e).__name__}: {e}"
 
 
 def _with_images(result: CallToolResult) -> CallToolResult:
@@ -212,8 +234,14 @@ async def _agent_desktop(*words: str) -> dict:
     out, err = await asyncio.wait_for(process.communicate(), SKILL_TIMEOUT_S)
     envelope = json.loads(out or b"{}")
     if not envelope.get("ok"):
-        raise RuntimeError(f"agent-desktop {' '.join(words)}: {envelope.get('error') or err.decode()}")
+        raise RuntimeError(f"agent-desktop {' '.join(words)}: "
+                           f"{envelope.get('error') or err.decode() or f'it exited {process.returncode}'}")
     return envelope["data"]
+
+
+async def _skill_file(*words: str) -> str:
+    """One of agent-desktop's skill files, with LF line endings, which its Windows build embeds as CRLF."""
+    return (await _agent_desktop("skills", "get", *words))["content"].replace("\r\n", "\n")
 
 
 def _description(frontmatter: str) -> str:
