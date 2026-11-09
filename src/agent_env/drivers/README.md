@@ -133,8 +133,10 @@ never run, so it never updates itself, and its helper app is copied to `/opt/age
 `[install.macos]` grants it Accessibility, Post Event and Screen Recording, as it grants the driver's own Python. The
 driver starts `cua_repl` as the app would, on the app's own Node with the environment the app builds and the computer
 surface alone, one server for each agent session, since the REPL keeps its bindings between calls; one that stops is
-started afresh on the next call. Agents get the server's instructions and its `js` and `js_reset` tools, as `mcp.json`
-pins them; `js_add_node_module_dir` and `turn_ended`, which it serves the ChatGPT app, are hidden. Codex asks its host
+started afresh on the next call, and nothing says when a session ends, so one left unused for 30 minutes, or past the
+eight kept, is closed, the least recently used first. Agents get the server's instructions and its `js` and `js_reset`
+tools, as `mcp.json` pins them, `js` marked as acting on apps where Codex marks it read-only; `js_add_node_module_dir`
+and `turn_ended`, which it serves the ChatGPT app, are hidden. Codex asks its host
 before each action on an app, and the driver answers: it approves the apps its `allowed_apps` setting names, by name or
 bundle identifier, case aside, or every app when it names none, and nothing else, recording the computer's audio
 included. Each call runs under Codex's own sandbox, read-only but for `~/.codex` and the temporary folders and with no

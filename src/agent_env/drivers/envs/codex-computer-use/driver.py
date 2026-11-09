@@ -3,14 +3,15 @@ MCP server, ``cua_repl``, runs the JavaScript an agent sends against OpenAI's ``
 accessibility trees and acts on them in the background through the plugin's helper app. The pinned app is unpacked
 beside the driver and never run, so it never updates itself; the driver starts ``cua_repl`` as the app would, on the
 app's own Node with the environment the app builds, one server for each agent session, since the REPL keeps its
-bindings between calls. Agents get the server's instructions and its ``js`` and ``js_reset`` tools as pinned
-(``mcp.json``); the two it serves only the ChatGPT app are hidden. Codex asks its host before each action on an app,
-and the driver answers: it approves the apps the ``allowed_apps`` setting names, by name or bundle identifier, or every
-app when it names none, and nothing else, recording the computer's audio included. Each call runs under Codex's own
-sandbox, read-only but for Codex's folder and the temporary ones and with no network, unless the ``js_sandbox`` setting
-is off; the apps it drives are outside it. No ChatGPT sign-in is needed. The computer/v1 operations are MacOSDriver's;
-this process's Python is granted Accessibility, Post Event and Screen Recording, as the helper app is. It needs
-``agentenv-framework-protocol[computer,macos]`` and the pinned ChatGPT app."""
+bindings between calls, closed once it's left unused or past the most kept, since nothing says when a session ends.
+Agents get the server's instructions and its ``js`` and ``js_reset`` tools as pinned (``mcp.json``), ``js`` marked as
+acting on apps where Codex marks it read-only; the two it serves only the ChatGPT app are hidden. Codex asks its host
+before each action on an app, and the driver answers: it approves the apps the ``allowed_apps`` setting names, by name
+or bundle identifier, or every app when it names none, and nothing else, recording the computer's audio included. Each
+call runs under Codex's own sandbox, read-only but for Codex's folder and the temporary ones and with no network, unless
+the ``js_sandbox`` setting is off; the apps it drives are outside it. No ChatGPT sign-in is needed. The computer/v1
+operations are MacOSDriver's; this process's Python is granted Accessibility, Post Event and Screen Recording, as the
+helper app is. It needs ``agentenv-framework-protocol[computer,macos]`` and the pinned ChatGPT app."""
 from __future__ import annotations
 
 import asyncio
@@ -21,6 +22,7 @@ import json
 import logging
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
@@ -60,6 +62,13 @@ EXECUTABLES = {
 MANIFEST = HERE / "mcp.json"
 #: The tools agents get; the others are the ChatGPT app's own.
 FORWARDED = ("js", "js_reset")
+#: The hints agents get where Codex's own undersell a tool: ``js`` acts on apps, and through them on anything.
+ANNOTATIONS = {"js": {"readOnlyHint": False, "destructiveHint": True, "openWorldHint": True}}
+#: How long a session's REPL is kept unused before it's closed, since nothing says when a session ends; how many are
+#: kept at most, the least recently used closed first; and how often the idle ones are looked for.
+IDLE_S, MAX_REPLS, SWEEP_S = 1800, 8, 60
+#: How long a closed REPL's server has to end before it's cancelled.
+CLOSE_TIMEOUT_S = 10
 #: What of the driver's environment ``cua_repl`` gets: the session user's own; none of a deploy's values.
 KEPT = ("HOME", "USER", "LOGNAME", "TMPDIR", "LANG")
 #: The PATH it runs, and launches apps, with.
@@ -83,12 +92,15 @@ class CodexComputerUse(MacOSDriver):
     def __init__(self) -> None:
         super().__init__()
         self._pinned: list[ReadyCheck] | None = None
+        #: Each session's REPL, the least recently used first.
         self._repls: dict[str | None, _Repl] = {}
+        self._sweeper: asyncio.Task | None = None
 
     def forwarded_tools(self) -> list[ForwardedTool]:
         return [ForwardedTool(EnvironmentTool(name=t["name"], description=t["description"],
                                               inputSchema=t["inputSchema"]),
-                              functools.partial(self._forward, t["name"]), t.get("annotations"))
+                              functools.partial(self._forward, t["name"]),
+                              {**(t.get("annotations") or {}), **ANNOTATIONS.get(t["name"], {})})
                 for t in _manifest()["tools"] if t["name"] in FORWARDED]
 
     @server_instructions
@@ -103,15 +115,33 @@ class CodexComputerUse(MacOSDriver):
         return [*self._pinned, *await super().ready_checks()]
 
     async def _forward(self, tool: str, /, **arguments: Any) -> CallToolResult:
-        """A call to one of Codex's tools on the caller's own REPL, answered as Codex answers it."""
-        repl = self._repls.get(caller := ToolContext.current().caller.session)
-        if repl is None:
-            repl = self._repls[caller] = _Repl(self._server)
+        """A call to one of Codex's tools on the caller's own REPL, answered as Codex answers it. Other sessions' REPLs
+        left idle, or past the most kept, are closed first."""
+        repl = self._repls.pop(caller := ToolContext.current().caller.session, None)
+        await self._evict(keep=MAX_REPLS - 1)
+        repl = self._repls[caller] = repl or _Repl(self._server)
+        if self._sweeper is None or self._sweeper.done():
+            self._sweeper = asyncio.create_task(self._sweep())
         try:
             return await repl.call(tool, arguments, self._sandbox())
         except Exception as e:
             return CallToolResult(isError=True, content=[TextContent(type="text", text=(
                 f"Codex's cua_repl failed before it answered, so {tool} may have run: {type(e).__name__}: {e}"))])
+
+    async def _evict(self, keep: int = MAX_REPLS) -> None:
+        """Close the REPLs idle for ``IDLE_S`` and, past ``keep``, the least recently used, none of them in a call."""
+        now = time.monotonic()
+        idle = [caller for caller, repl in self._repls.items() if not repl.busy and now - repl.used > IDLE_S]
+        spare = [caller for caller, repl in self._repls.items() if not repl.busy and caller not in idle]
+        closing = [self._repls.pop(caller) for caller in [*idle, *spare[:max(0, len(self._repls) - len(idle) - keep)]]]
+        for repl in closing:
+            await repl.close()
+
+    async def _sweep(self) -> None:
+        """Close idle REPLs every ``SWEEP_S`` while there are any."""
+        while self._repls:
+            await asyncio.sleep(SWEEP_S)
+            await self._evict()
 
     @contextlib.asynccontextmanager
     async def _server(self) -> AsyncIterator[ClientSession]:
@@ -168,26 +198,41 @@ class CodexComputerUse(MacOSDriver):
 class _Repl:
     """One ``cua_repl`` server, held open by a task of its own, since a stdio client is entered and left in one task,
     and reached from any through a queue, one call at a time. A server that stops is started afresh on the next call,
-    without the last one's bindings."""
+    without the last one's bindings; ``close`` ends it for good."""
 
     def __init__(self, open_server: Callable[[], contextlib.AbstractAsyncContextManager[ClientSession]]) -> None:
         self._open = open_server
         self._calls: asyncio.Queue = asyncio.Queue()
         self._task: asyncio.Task | None = None
+        #: When a call last ended, on the monotonic clock, and how many are queued or running.
+        self.used, self.busy = time.monotonic(), 0
 
     async def call(self, tool: str, arguments: dict, meta: dict) -> CallToolResult:
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._serve())
         answer = asyncio.get_running_loop().create_future()
-        await self._calls.put((tool, arguments, meta, answer))
-        return await answer
+        self.busy += 1
+        try:
+            await self._calls.put((tool, arguments, meta, answer))
+            return await answer
+        finally:
+            self.busy -= 1
+            self.used = time.monotonic()
+
+    async def close(self) -> None:
+        """The server ended, its process with it, waiting at most ``CLOSE_TIMEOUT_S`` before cancelling it."""
+        if self._task is None or self._task.done():
+            return
+        await self._calls.put(None)
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(self._task, CLOSE_TIMEOUT_S)
 
     async def _serve(self) -> None:
         stopped: BaseException = ConnectionError("cua_repl stopped")
         try:
             async with self._open() as session:
-                while True:
-                    tool, arguments, meta, answer = await self._calls.get()
+                while (call := await self._calls.get()) is not None:
+                    tool, arguments, meta, answer = call
                     try:
                         result = await session.call_tool(tool, arguments, meta=meta)
                     except McpError as e:
@@ -203,8 +248,8 @@ class _Repl:
             stopped = e
         finally:
             while not self._calls.empty():
-                *_, answer = self._calls.get_nowait()
-                _settle(answer, error=stopped)
+                if (call := self._calls.get_nowait()) is not None:
+                    _settle(call[-1], error=stopped)
 
 
 def _settle(answer: asyncio.Future, *, result: Any = None, error: BaseException | None = None) -> None:

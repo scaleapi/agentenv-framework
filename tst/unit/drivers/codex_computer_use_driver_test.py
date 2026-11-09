@@ -6,10 +6,12 @@ starting afresh; cua_repl gets the app's environment and none of the driver's; a
 executables, the tools cua_repl lists and that it answers."""
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import hashlib
 import importlib.util
 import json
+import os
 import sys
 import textwrap
 from pathlib import Path
@@ -145,6 +147,16 @@ def _text(result) -> str:
     return " ".join(c.text for c in result.content if c.type == "text")
 
 
+async def _gone(pid: int) -> bool:
+    for _ in range(200):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        await asyncio.sleep(0.01)
+    return False
+
+
 @pytest.mark.asyncio
 async def test_agents_get_codexs_js_and_js_reset_as_pinned_with_its_instructions_and_not_the_apps_own_tools(
         module, monkeypatch):
@@ -155,6 +167,8 @@ async def test_agents_get_codexs_js_and_js_reset_as_pinned_with_its_instructions
     pinned = {t["name"]: t for t in module._manifest()["tools"]}
     assert {"js", "js_reset"} <= set(listed) and not {"js_add_node_module_dir", "turn_ended"} & set(listed)
     assert listed["js"].inputSchema == pinned["js"]["inputSchema"]
+    assert listed["js"].annotations.readOnlyHint is False and listed["js"].annotations.destructiveHint is True
+    assert listed["js_reset"].annotations.readOnlyHint is True
     assert listed["js"].description == pinned["js"]["description"]
     assert driver.mcp.instructions.startswith(module._manifest()["instructions"])
 
@@ -244,3 +258,31 @@ async def test_readiness_checks_the_pinned_executables_the_tools_cua_repl_lists_
                                                ("Codex answers", True), ("macOS permissions", True)]
     assert not tools.ok and tools.detail == "these tools differ from mcp.json: turn_ended"
     assert not changed.ok and "Codex Computer Use.app/Contents/MacOS/SkyComputerUseService" in changed.detail
+
+
+@pytest.mark.asyncio
+async def test_past_the_most_repls_kept_the_least_recently_used_is_closed_and_the_others_keep_their_bindings(
+        module, monkeypatch):
+    monkeypatch.setattr(module, "MAX_REPLS", 2)
+    async with mcp_session(_driver(module, monkeypatch)) as session:
+        async def js(caller: str, code: str) -> str:
+            return _text(await session.call_tool("js", {"code": code}, meta={SESSION_META_KEY: caller}))
+
+        for caller in "abc":
+            await js(caller, f"set {caller}")
+        b, c, a = await js("b", "get"), await js("c", "get"), await js("a", "get")
+
+    assert a.startswith("None in ") and b.startswith("b in ") and c.startswith("c in ")
+
+
+@pytest.mark.asyncio
+async def test_a_repl_left_idle_is_closed_without_another_call_and_its_session_starts_afresh(module, monkeypatch):
+    monkeypatch.setattr(module, "SWEEP_S", 0.05)
+    monkeypatch.setattr(module, "IDLE_S", 0.2)
+    async with mcp_session(_driver(module, monkeypatch)) as session:
+        await session.call_tool("js", {"code": "set 1"}, meta={SESSION_META_KEY: "a"})
+        before = _text(await session.call_tool("js", {"code": "get"}, meta={SESSION_META_KEY: "a"}))
+        closed = await _gone(int(before.rpartition(" in ")[2]))
+        after = _text(await session.call_tool("js", {"code": "get"}, meta={SESSION_META_KEY: "a"}))
+
+    assert before.startswith("1 in ") and closed and after.startswith("None in ")
