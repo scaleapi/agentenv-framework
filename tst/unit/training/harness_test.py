@@ -8,6 +8,7 @@ import json
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -246,3 +247,10 @@ def test_an_engine_without_token_ids_is_refused_before_any_rollout(bundle, monke
 
     with pytest.raises(RuntimeError, match="eval-only"):
         AgentEnvSessionFactory(bundle, llm_url="http://127.0.0.1:9", model=MODEL)
+
+
+def test_a_rows_prompt_is_an_always_on_steps_as_it_is_a_prompt_agent_steps():
+    task = SimpleNamespace(steps=[SimpleNamespace(type="deploy_agent"),
+                                  SimpleNamespace(type="always_on", prompt="Watch Tess's shop this month.")])
+
+    assert harness._first_prompt(task) == "Watch Tess's shop this month."

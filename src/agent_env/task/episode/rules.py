@@ -135,6 +135,9 @@ CHECKS: dict[str, Callable[..., list[str]]] = {
     "register_agent_triggers": _needs_the_agent,
     "browser_connect_cdp": _needs_the_agent,
     "snapshot_agent_state": _needs_the_agent,
+    # An outside agent can't yet be woken by always_on's loop, nor play its user sim (the agent user_sim names).
+    "always_on": _needs_the_agent,
+    "user_sim": _needs_the_agent,
     "collect_artifacts": _collect_artifacts,
     "register_env_triggers": _register_env_triggers,
     "peer_agents": _peer_agents,

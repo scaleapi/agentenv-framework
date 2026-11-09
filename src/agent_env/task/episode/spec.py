@@ -72,7 +72,7 @@ class EpisodeSpec:
 
 
 def _trainer_agents(task: Task, steps: list[TaskStep], named: Sequence[str] | None) -> list[str]:
-    prompted = list(dict.fromkeys(step.agent_name for step in steps if step.type == "prompt_agent"))
+    prompted = list(dict.fromkeys(step.agent_name for step in steps if step.type in ("prompt_agent", "always_on")))
     if named is None:
         if len(prompted) != 1:
             raise EpisodeError(

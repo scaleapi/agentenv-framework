@@ -121,7 +121,7 @@ def played_deploys(entry: ResolvedEntry) -> frozenset[str]:
     (``EpisodeSpec``) stands in for; none when the entry isn't a task, or prompts no agent or several."""
     if entry.entry.kind is not BundleKind.TASK:
         return frozenset()
-    prompted = {_agent_name(step) for step in entry.config if step.get("type") == "prompt_agent"}
+    prompted = {_agent_name(step) for step in entry.config if step.get("type") in ("prompt_agent", "always_on")}
     if len(prompted) != 1:
         return frozenset()
     return frozenset(step.get("id") for step in entry.config

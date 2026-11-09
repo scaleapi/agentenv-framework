@@ -1206,11 +1206,15 @@ _UNREAD: Any = object()  # the configured default agent, before a task needs it
 
 
 def solver_steps(steps: Any) -> tuple[str, ...]:
-    """The ids of the steps in ``steps``, a task's config, that deploy or install an agent a ``prompt_agent`` step
-    prompts, and not as its user simulator: the solver's."""
+    """The ids of the steps in ``steps``, a task's config, that deploy or install an agent a ``prompt_agent`` or
+    ``always_on`` step prompts, and not as its user simulator: the solver's."""
     prompts = [step for step in steps if isinstance(step, dict) and step.get("type") == PromptAgentTaskStep.type]
-    prompted = {step.get("agent_name") or TaskStep.DEFAULT_AGENT_NAME for step in prompts}
+    loops = [step for step in steps if isinstance(step, dict) and step.get("type") == "always_on"]
+    prompted = {step.get("agent_name") or TaskStep.DEFAULT_AGENT_NAME for step in (*prompts, *loops)}
     prompted -= {step.get("user_agent_name") or PromptAgentTaskStep.DEFAULT_USER_AGENT_NAME for step in prompts}
+    # A user_sim step names the agent that plays the user: its agent_name, else its name.
+    prompted -= {step.get("agent_name") or step.get("name") for step in steps
+                 if isinstance(step, dict) and step.get("type") == "user_sim"}
     return tuple(step["id"] for step in steps if isinstance(step, dict) and isinstance(step.get("id"), str)
                  and step.get("type") in (DeployAgentTaskStep.type, InstallAgentTaskStep.type)
                  and (step.get("agent_name") or TaskStep.DEFAULT_AGENT_NAME) in prompted)

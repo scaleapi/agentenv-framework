@@ -172,7 +172,7 @@ def _step_output_lines(step, context) -> list[str]:
         if match:
             lines.append(_format_loaded_snapshot(match))
         return lines
-    if step.type == "prompt_agent" and context.prompt_responses:
+    if step.type in ("prompt_agent", "always_on") and context.prompt_responses:
         return [_format_prompt_response(context.prompt_responses[-1])]
     if step.type == "snapshot_agent_state":
         snapshots = context.metadata.get("agent_snapshots") or []

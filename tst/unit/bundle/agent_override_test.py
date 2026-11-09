@@ -119,6 +119,20 @@ def test_only_the_steps_deploying_or_installing_the_agent_a_step_prompts_are_the
     assert solver_steps(steps) == ("solver", "installed")
 
 
+def test_the_agent_an_always_on_step_wakes_is_the_solver_and_the_one_its_user_sim_names_is_not():
+    steps = [
+        {"id": "solver", "type": "deploy_agent"},
+        {"id": "user", "type": "deploy_agent", "agent_name": "linda"},
+        {"id": "named", "type": "deploy_agent", "agent_name": "tess"},
+        {"id": "who", "type": "user_sim", "name": "linda", "model": "m"},
+        {"id": "who-too", "type": "user_sim", "name": "tess-the-user", "agent_name": "tess", "model": "m"},
+        {"id": "loop", "type": "always_on", "prompt": "Help Linda.", "user_sim": "linda"},
+        {"id": "loop-too", "type": "always_on", "agent_name": "tess", "prompt": "Hi.", "user_sim": "tess-the-user"},
+    ]
+
+    assert solver_steps(steps) == ("solver",)
+
+
 def test_preflight_checks_the_agent_the_solver_deploys(bundle_dir, monkeypatch):
     checked = []
     original = preflight_module._Walk._agent_deploy

@@ -8,6 +8,7 @@ from agent_env.task.episode.rules import CHECKS, UNAFFECTED
 from agent_env.task.episode.steps import _EpisodeAgentStep
 from agent_env.task.task import substitute_seed_in_steps
 from agent_env.task_step.registry import _builtin_registry
+from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 
@@ -268,8 +269,43 @@ def test_every_built_in_step_type_is_checked_or_unaffected():
     registered, checked = set(_builtin_registry()), set(CHECKS)
 
     assert sorted(registered - checked - UNAFFECTED) == []
-    assert sorted((checked | UNAFFECTED) - registered) == []
+    # always_on and user_sim are classified ahead of their step classes (FD-5364).
+    assert sorted((checked | UNAFFECTED) - registered - {"always_on", "user_sim"}) == []
     assert sorted(checked & UNAFFECTED) == []
+
+
+class _AlwaysOn(PromptAgentTaskStep):
+    """An always_on step as these rules read one: the agent it wakes, by name."""
+
+    type = "always_on"
+
+
+class _UserSim(TaskStep):
+    """A user_sim step as these rules read one: the agent that plays the user, by name."""
+
+    type = "user_sim"
+
+    def __init__(self, id, agent_name):
+        super().__init__(id, None)
+        self.agent_name = agent_name
+
+    async def execute(self, context):
+        return context
+
+
+def test_the_agent_an_always_on_step_wakes_is_the_one_played_and_is_refused_for_now():
+    loop = _AlwaysOn.from_dict({**PLAY, "id": "loop"})
+    task = Task(id="dock", version=4, steps=[*_portsim(play=None).steps, loop, _UserSim("user", "linda")])
+
+    assert ("step 'loop': always_on needs 'default-agent' as a real agent, and it is played from outside"
+            in _refusal(task))
+
+
+def test_a_user_sim_played_from_outside_is_refused():
+    task = Task(id="dock", version=4, steps=[*_portsim().steps, _UserSim("user", "default-agent")])
+
+    assert ("step 'user': user_sim needs 'default-agent' as a real agent, and it is played from outside"
+            in _refusal(task))
 
 
 def test_the_seed_pass_rebuilds_each_step_as_its_own_class():

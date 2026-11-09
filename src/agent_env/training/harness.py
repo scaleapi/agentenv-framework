@@ -231,7 +231,7 @@ def _index_named(prompt: Any, ids: list[str]) -> int:
 
 
 def _first_prompt(task: Task) -> str:
-    return next((step.prompt for step in task.steps if step.type == "prompt_agent"), "")
+    return next((step.prompt for step in task.steps if step.type in ("prompt_agent", "always_on")), "")
 
 
 def _free_port() -> int:

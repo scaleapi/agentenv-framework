@@ -2,12 +2,13 @@
 
 import json
 import random
+from types import SimpleNamespace
 
 import pytest
 
 from agent_env.bundle import BundleError, BundleKind, parse_bundle
 from agent_env.bundle import resolve as resolve_module
-from agent_env.bundle.resolve import BuiltImage, Output, Reference, ReferencedImage, resolve_bundle
+from agent_env.bundle.resolve import BuiltImage, Output, Reference, ReferencedImage, played_deploys, resolve_bundle
 from agent_env.entity.refs import EntityKind, EntityRef
 from agent_env.env.env import Env
 from agent_env.task import Task
@@ -575,3 +576,14 @@ def test_a_bad_depends_on_on_a_step_deriving_its_output_is_named_once(make, depe
     assert problems(make(tasks={"t": [
         {"id": "cli", "type": "build_mcp_cli", "env_id": "tickets", "command_name": "c", "depends_on": depends_on},
     ]})) == (f"tasks/t.json: step 'cli': {problem}",)
+
+
+def test_the_agent_an_always_on_step_wakes_is_the_one_a_caller_plays():
+    task = SimpleNamespace(entry=SimpleNamespace(kind=BundleKind.TASK), config=[
+        {"id": "agent", "type": "deploy_agent"},
+        {"id": "user", "type": "deploy_agent", "agent_name": "linda"},
+        {"id": "who", "type": "user_sim", "name": "linda", "model": "m"},
+        {"id": "loop", "type": "always_on", "prompt": "Help Linda.", "user_sim": "linda"},
+    ])
+
+    assert played_deploys(task) == frozenset({"agent"})
