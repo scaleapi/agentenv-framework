@@ -341,10 +341,7 @@ async def invoke_extension(base_url: str, card: dict, uri: str, params: dict | N
         raise ValueError(f"extension {uri} does not advertise method {method!r} (advertises: {offered})")
     if not op["endpoint"]:
         raise ValueError(f"extension {uri} has no endpoint in params")
-    endpoint = op["endpoint"]
-    if not endpoint.startswith("/"):
-        endpoint = f"/{endpoint}"
-    url = f"{base_url.rstrip('/')}{endpoint}"
+    url = f"{base_url.rstrip('/')}{op['endpoint']}"
     sent = request_headers(url, headers)
     async with httpx.AsyncClient(verify=verify) as client:
         if op["method"] == "GET":
