@@ -11,6 +11,7 @@ from uuid import uuid4
 
 import click
 
+from agent_env.bundle.plan import solver_steps, user_sim_agents
 from agent_env.bundle.requires import UnmetRequirements
 from agent_env.cli._install_prompt import offer_to_install
 from agent_env.cli.banner import print_banner
@@ -28,6 +29,7 @@ from agent_env.task.store import get_task_instance_store, new_instance_id
 from agent_env.task.teardown import TeardownReport, kind, teardown_run
 from agent_env.task_step.context import TaskStepContext, read_dual_keyed
 from agent_env.task_step.context_ops import build_context_update_ops
+from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.collect_artifacts import CollectArtifactsTaskStep
 
 
@@ -355,7 +357,8 @@ def _stored(task, context: TaskStepContext) -> str:
 @click.option("--litellm-api-key", default=None, type=str, help="Override LITELLM_API_KEY for this run; a secret:KEY or env:NAME reference is resolved where it is used")
 @click.option("--judge-litellm-api-key", default=None, type=str, help="Override LITELLM_API_KEY used by rubrics_verifier judge agents (falls back to --litellm-api-key, then to config secret); a secret:KEY or env:NAME reference is resolved where it is used")
 @click.option("--apply-trajectory-filter/--no-trajectory-filter", "apply_trajectory_filter", default=None, help="Force trajectory filtering on/off for rubrics_verifier (overrides the step's trajectory_filter setting)")
-@click.option("--a2a-agent-id", default=None, type=str, help="Override A2A agent id for deploy_agent steps")
+@click.option("--a2a-agent-id", default=None, type=str,
+              help="Override A2A agent id for deploy_agent steps; only the tested agent's when the task deploys a user sim")
 @click.option("--agent-sandbox", default=None,
               help="Override agent sandbox backend(s) for deploy_agent steps; comma-separated for fallback chain (e.g. 'modal,local')")
 @click.option("--env-sandbox", default=None,
@@ -427,6 +430,7 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
     click.echo(f"Fetching task: id={task_id} version={task_version or 'latest'}...")
     task = _runnable(task_id, task_version, initial_context.metadata)
     click.echo(f"Found task: id={task.id} version={task.version} steps={len(task.steps)}")
+    _narrow_agent_pick([step.to_dict() for step in task.steps], initial_context.metadata.get("user_overrides") or {})
 
     print_banner()
 
@@ -468,6 +472,19 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
         raise SystemExit(128 + interrupted)
     if completed < k or unexported:
         raise SystemExit(1)
+
+
+def _narrow_agent_pick(config: list[dict], overrides: dict) -> None:
+    """When the task ``config`` deploys a user sim, move the run-wide ``a2a_agent_id`` in ``overrides`` onto the tested
+    agent's deploy steps as their ``step_params``, so the user sim keeps its own agent; else leave it run-wide."""
+    deployed = {step.get("agent_name") or TaskStep.DEFAULT_AGENT_NAME for step in config
+                if step.get("type") in ("deploy_agent", "install_agent")}
+    solver = solver_steps(config)
+    if not overrides.get("a2a_agent_id") or not deployed & user_sim_agents(config) or not solver:
+        return
+    agent_id = overrides.pop("a2a_agent_id")
+    for step_id in solver:  # a step's own a2a_agent_id, from --context-json, still wins
+        overrides.setdefault("step_params", {}).setdefault(step_id, {}).setdefault("a2a_agent_id", agent_id)
 
 
 def _runnable(task_id: str, task_version: int | None, metadata: dict):
