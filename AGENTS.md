@@ -89,6 +89,10 @@ or one of them only where it is used.
   they keep running; files the install wrote elsewhere (`/opt`, packages) stay. Such an agent fetches the
   local store's grants only when `grant_advertise_host` names an address this machine reaches, the
   bridge address say: `host.docker.internal`, which grant URLs name by default, resolves only in containers.
+- Local sandbox teardown reports a failure when it cannot list or remove its own Docker containers or
+  networks, or when marked Linux processes survive. The run keeps the sandbox work folder so teardown
+  can be retried. With no Docker installed there is nothing to remove; with Docker unreachable, it fails only
+  for a sandbox whose folder records its own container, compose stack or closed network.
 - `[agents] default_a2a_agent_id`: the agent a `deploy_agent` step without an id deploys; built-in
   `@local/agentenv-framework/agents/claude-code`, the `agents` bundle's Claude Code
   (`src/agent_env/agents/`), overridable by `configure(default_a2a_agent_id=...)`. Any step's

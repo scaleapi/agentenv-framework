@@ -185,6 +185,12 @@ class _RecordingLocalSandbox(LocalSandbox):
 
     async def exec_with_output(self, *args):
         self.scripts.append(" ".join(args))
+        if args[:2] == ("docker", "version"):
+            return 0, "29.0.0", ""
+        if args[:3] == ("docker", "ps", "-aq") and args[-1].startswith("name="):
+            return 0, self.container_name, ""
+        if args[:3] == ("docker", "network", "ls"):
+            return 0, "", ""
         return self._listed
 
 
@@ -275,8 +281,7 @@ async def test_terminate_removes_this_sandboxs_own_container():
     sandbox.mode = SANDBOX_MODE_CONTAINER
     await sandbox.terminate()
 
-    assert len(sandbox.scripts) == 1
-    assert f"docker rm -f {sandbox.container_name}" in sandbox.scripts[0]
+    assert any(f"docker rm -f {sandbox.container_name}" in script for script in sandbox.scripts)
     assert sandbox.container_name != "agent-api"  # it's the unique local name
 
 
@@ -314,8 +319,8 @@ async def test_terminate_vm_without_compose_removes_only_an_agent_placed_on_it(t
     sandbox = _RecordingLocalSandbox(work_dir=tmp_path)
     await sandbox.terminate()
 
-    assert sandbox.scripts[0] == f"docker ps -aq --filter label=agentenv.sandbox={sandbox.sandbox_id}"
-    assert sandbox.scripts[-1] == f"docker rm -f {sandbox.container_name} >/dev/null 2>&1 || true"
+    assert f"docker ps -aq --filter label=agentenv.sandbox={sandbox.sandbox_id}" in sandbox.scripts
+    assert f"docker rm -f {sandbox.container_name} >/dev/null" in sandbox.scripts
 
 
 @pytest.mark.asyncio
@@ -325,18 +330,18 @@ async def test_terminate_removes_what_steps_started_for_this_sandbox_only(tmp_pa
     sandbox = _RecordingLocalSandbox(tmp_path, sandbox_id="local-abc", listed=(0, "c1\nc2\n", ""))
     await sandbox.terminate()
 
-    assert sandbox.scripts[:2] == ["docker ps -aq --filter label=agentenv.sandbox=local-abc", "docker rm -f c1 c2 >/dev/null"]
-    for listing in ("docker images -q", "docker network ls -q"):
-        assert f"{listing} --filter label=agentenv.sandbox=local-abc" in sandbox.scripts[2]
+    assert "docker ps -aq --filter label=agentenv.sandbox=local-abc" in sandbox.scripts
+    assert "docker rm -f c1 c2 >/dev/null" in sandbox.scripts
+    assert any("docker images -q --filter label=agentenv.sandbox=local-abc" in script for script in sandbox.scripts)
+    assert any("docker network ls -q --filter label=agentenv.sandbox=local-abc" in script for script in sandbox.scripts)
 
 
 @pytest.mark.asyncio
-async def test_a_failed_lookup_is_reported_with_the_command_that_cleans_up(tmp_path: Path, caplog):
+async def test_a_failed_lookup_is_reported_and_containers_are_not_guessed(tmp_path: Path):
     sandbox = _RecordingLocalSandbox(tmp_path, sandbox_id="local-abc", listed=(1, "", "Cannot connect to the Docker daemon"))
-    await sandbox.terminate()
-
-    assert "docker rm -f $(docker ps -aq --filter label=agentenv.sandbox=local-abc)" in caplog.text
-    assert not any(s.startswith("docker rm -f c") for s in sandbox.scripts)
+    with pytest.raises(RuntimeError, match="Cannot connect to the Docker daemon"):
+        await sandbox.terminate()
+    assert not any(script.startswith("docker rm -f c") for script in sandbox.scripts)
 
 
 @pytest.mark.asyncio
@@ -348,7 +353,30 @@ async def test_teardown_without_docker_installed_finishes(tmp_path: Path):
     sandbox = _NoDocker(tmp_path, sandbox_id="local-abc")
     await sandbox.terminate()
 
-    assert sandbox.scripts == [f"docker rm -f {sandbox.container_name} >/dev/null 2>&1 || true"]
+    assert sandbox.scripts == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("record", [None, ".agent-container-mode", "docker-compose.yml", ".closed-network"],
+                         ids=["none", "its-container", "its-compose-stack", "its-closed-network"])
+async def test_teardown_with_docker_unreachable_fails_only_for_a_sandbox_that_made_docker_objects(tmp_path: Path,
+                                                                                                record, caplog):
+    if record is not None:
+        (tmp_path / record).write_text("closed-owned" if record == ".closed-network" else "")
+
+    class _DaemonDown(_RecordingLocalSandbox):
+        async def exec_with_output(self, *args):
+            self.scripts.append(" ".join(args))
+            return 1, "", "Cannot connect to the Docker daemon"
+
+    sandbox = _DaemonDown(tmp_path, sandbox_id="local-abc")
+    if record is None:
+        await sandbox.terminate()
+        assert "docker rm -f $(docker ps -aq --filter label=agentenv.sandbox=local-abc)" in caplog.text
+    else:
+        with pytest.raises(RuntimeError, match="Docker can't be reached to remove sandbox local-abc's"):
+            await sandbox.terminate()
+    assert sandbox.scripts == ["docker version --format {{.Server.Version}}"]
 
 
 @pytest.mark.asyncio
@@ -366,6 +394,22 @@ async def test_a_container_that_wont_go_still_lets_the_compose_stack_come_down(t
     with pytest.raises(RuntimeError, match="container is stuck"):
         await sandbox.terminate()
     assert any("docker compose down" in s for s in sandbox.scripts)
+
+
+@pytest.mark.asyncio
+async def test_a_network_lookup_failure_still_attempts_compose_teardown(tmp_path: Path):
+    (tmp_path / "docker-compose.yml").write_text("")
+
+    class _NetworkUnavailable(_RecordingLocalSandbox):
+        async def exec_with_output(self, *args):
+            if args[:3] == ("docker", "network", "ls"):
+                return 1, "", "network lookup failed"
+            return await super().exec_with_output(*args)
+
+    sandbox = _NetworkUnavailable(tmp_path, sandbox_id="local-abc")
+    with pytest.raises(RuntimeError, match="network lookup failed"):
+        await sandbox.terminate()
+    assert any("docker compose down" in script for script in sandbox.scripts)
 
 
 @pytest.mark.asyncio
@@ -406,6 +450,9 @@ async def test_a_started_container_is_removed_by_a_teardown_rebuilt_from_disk(tm
         return ""
 
     monkeypatch.setattr(LocalSandbox, "exec_script", record)
+    async def listed(self, *args):
+        return (0, self.container_name, "")
+    monkeypatch.setattr(LocalSandbox, "exec_with_output", listed)
 
     class _Provider(LocalSandboxProvider):
         async def create_vm(self, **kwargs):
@@ -416,7 +463,7 @@ async def test_a_started_container_is_removed_by_a_teardown_rebuilt_from_disk(tm
     del scripts[:]
     await rebuilt.terminate()
     assert created.owns_container and rebuilt.owns_container and rebuilt.mode == SANDBOX_MODE_VM
-    assert scripts == [f"docker rm -f {created.container_name} >/dev/null 2>&1 || true"]
+    assert scripts == [f"docker rm -f {created.container_name} >/dev/null"]
 
 
 @pytest.mark.asyncio
@@ -720,9 +767,10 @@ async def test_a_container_with_no_network_takes_its_relay_and_network_with_it(t
 
     await sandbox.terminate()
 
-    assert sandbox.scripts[:3] == [f"docker rm -f {sandbox.container_name} >/dev/null 2>&1 || true",
-                                   "docker ps -aq --filter label=agentenv.sandbox=local-abc", "docker rm -f r1 >/dev/null"]
-    assert "docker network ls -q --filter label=agentenv.sandbox=local-abc" in sandbox.scripts[3]
+    assert f"docker rm -f {sandbox.container_name} >/dev/null" in sandbox.scripts
+    assert "docker rm -f r1 >/dev/null" in sandbox.scripts
+    assert "docker network ls -q --filter label=agentenv.sandbox=local-abc" in sandbox.scripts
+
 
 
 async def _relay_image() -> str:
@@ -1098,7 +1146,8 @@ async def test_teardown_keeps_the_staging_a_surviving_process_runs_from(monkeypa
     sandbox = _RecordingLocalSandbox(work_dir=tmp_path)
     staged = Path(tempfile.mkdtemp(prefix="install-agent-solver-", suffix=f"-{sandbox.sandbox_id}", dir="/tmp"))
     try:
-        await sandbox.terminate()
+        with pytest.raises(RuntimeError, match="still has marked processes"):
+            await sandbox.terminate()
 
         assert staged.exists()
     finally:
@@ -1248,7 +1297,7 @@ async def test_a_failed_copy_removes_the_created_container(tmp_path, monkeypatch
         await provider.create_container(image_name="img:v1", port=8000, env={})
     scripts = provider.made[0].scripts
     assert not any(s.startswith("docker start") for s in scripts)
-    assert scripts[-1].startswith(f"docker rm -f {provider.made[0].container_name}")
+    assert any(script.startswith(f"docker rm -f {provider.made[0].container_name}") for script in scripts)
 
 
 def test_the_copy_runs_docker_directly_and_reports_its_error(monkeypatch, tmp_path):

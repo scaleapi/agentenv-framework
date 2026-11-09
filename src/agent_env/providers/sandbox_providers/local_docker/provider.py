@@ -90,6 +90,8 @@ _REAP_SECONDS = 5
 # how much of each stream is kept, the end of it: above the largest output core reads whole, run_code's 50 MiB result.
 _OUTPUT_GRACE_SECONDS = 1
 _OUTPUT_TAIL_BYTES = 64 * 1024 * 1024
+# How much of a failed Docker command's stderr a teardown error carries.
+_ERROR_TAIL_CHARS = 300
 
 # Every command a local sandbox runs carries this, set to the sandbox's id, and so does whatever the command starts, so
 # teardown can find a process left running on this machine, such as the agent a host-mode install started.
@@ -335,50 +337,95 @@ class LocalSandbox(VmSandbox):
         this, local runs leak their containers/compose stacks, which squat host ports and block the
         next deploy. Prod backends override terminate() to tear the whole VM down.
         Processes its commands left running on this machine are stopped first (on Linux; see ``_marked_pids``),
-        then, once none is left to run from it, what its steps staged in /tmp is removed.
+        then, once none is left to run from it, what its steps staged in /tmp is removed. With no Docker installed,
+        nothing of it can have been started; with Docker unreachable, the teardown fails only for a sandbox whose folder
+        records Docker objects of its own.
         """
+        failures: list[Exception] = []
         try:
-            if await _stop_marked(self.sandbox_id):
-                await asyncio.to_thread(_remove_staged, self.sandbox_id)
-            if self.mode == SANDBOX_MODE_VM and not self.owns_container:
-                await self._remove_labeled()
-        finally:  # a container that wouldn't go must not keep the compose stack up
-            await self.exec_script(f"docker rm -f {shlex.quote(self.container_name)} >/dev/null 2>&1 || true")
-            if self.closed_network is not None:
-                await self._remove_labeled()
-            if self.mode == SANDBOX_MODE_VM and (self._work_dir / "docker-compose.yml").exists():
-                # No `|| true`: `docker compose down` is idempotent (an already-down stack exits 0), so a
-                # non-zero exit is a real failure — surface it (exec_script raises, with the compose output)
-                # instead of silently leaving the stack running and its host ports held. Callers wrap
-                # terminate() in try/except, so a raised teardown failure is caught, not fatal.
+            if not await _stop_marked(self.sandbox_id):
+                raise RuntimeError(f"Sandbox {self.sandbox_id} still has marked processes")
+            await asyncio.to_thread(_remove_staged, self.sandbox_id)
+        except Exception as error:
+            failures.append(error)
+        try:
+            code, _, stderr = await self.exec_with_output("docker", "version", "--format", "{{.Server.Version}}")
+        except FileNotFoundError:
+            code, stderr = None, ""
+        if code == 0:
+            await self._remove_docker_objects(failures)
+        elif code is not None:
+            reason = stderr.strip()[-_ERROR_TAIL_CHARS:]
+            if self._made_docker_objects:
+                failures.append(RuntimeError(f"Docker can't be reached to remove sandbox {self.sandbox_id}'s container, "
+                                             f"compose stack or network: {reason}"))
+            else:
+                logger.warning("Could not reach Docker (%s); anything sandbox %s's steps started with it is still there. "
+                               "Remove it with: docker rm -f $(docker ps -aq --filter label=%s=%s)",
+                               reason, self.sandbox_id, SANDBOX_LABEL, self.sandbox_id)
+        if failures:
+            raise RuntimeError("Local sandbox teardown incomplete: " + "; ".join(str(error) for error in failures)) from failures[0]
+
+    @property
+    def _made_docker_objects(self) -> bool:
+        """Whether its folder records Docker objects of its own: its container, a compose stack or a closed network."""
+        return self.owns_container or self.closed_network is not None or (self._work_dir / "docker-compose.yml").exists()
+
+    async def _remove_docker_objects(self, failures: list[Exception]) -> None:
+        """Remove its container, compose stack and labeled objects, each attempted whatever the others did, adding
+        what failed to ``failures``."""
+        try:
+            await self._remove_own_container()
+        except Exception as error:
+            failures.append(error)
+        if self.mode == SANDBOX_MODE_VM and (self._work_dir / "docker-compose.yml").exists():
+            try:
                 await self.exec_script(
                     f"cd {shlex.quote(str(self._work_dir))} && docker compose down -v --remove-orphans"
                 )
+            except Exception as error:
+                failures.append(error)
+        if (self.mode == SANDBOX_MODE_VM and not self.owns_container) or self.closed_network is not None:
+            try:
+                await self._remove_labeled()
+            except Exception as error:
+                failures.append(error)
+
+    async def _remove_own_container(self) -> None:
+        """Remove this sandbox's named container, or verify that it is absent."""
+        name = f"name=^{re.escape(self.container_name)}$"
+        code, stdout, stderr = await self.exec_with_output("docker", "ps", "-aq", "--filter", name)
+        if code != 0:
+            raise RuntimeError(f"Could not list sandbox {self.sandbox_id}'s container: "
+                               f"{stderr.strip()[-_ERROR_TAIL_CHARS:]}")
+        if containers := stdout.split():
+            await self.exec_script(f"docker rm -f {shlex.join(containers)} >/dev/null")
 
     async def _remove_labeled(self) -> None:
-        """Remove what steps started on this host for this sandbox (``run_docker_container``'s containers, their
-        images and networks), which a real VM would take down with it. Images and networks go best-effort: another
-        local sandbox's container can still be using one."""
+        """Remove labeled containers and networks; images can still be shared and are best-effort."""
         label = f"label={SANDBOX_LABEL}={self.sandbox_id}"
-        try:
-            exit_code, stdout, stderr = await self.exec_with_output("docker", "ps", "-aq", "--filter", label)
-        except FileNotFoundError:  # no Docker installed: nothing could have been started
-            return
-        if exit_code != 0:
-            # No Docker to reach (a run that never needed it) or Docker is down; either way nothing can be removed now.
-            logger.warning(
-                "Could not list %s's containers (%s); anything it started is still there. Remove it with: "
-                "docker rm -f $(docker ps -aq --filter %s)", self.sandbox_id, stderr.strip()[-300:], label,
-            )
-            return
+        failures: list[Exception] = []
+        for resource, args in (
+            ("containers", ("docker", "ps", "-aq", "--filter", label)),
+            ("networks", ("docker", "network", "ls", "-q", "--filter", label)),
+        ):
+            try:
+                code, stdout, stderr = await self.exec_with_output(*args)
+                if code != 0:
+                    raise RuntimeError(f"Could not list sandbox {self.sandbox_id}'s {resource}: "
+                                       f"{stderr.strip()[-_ERROR_TAIL_CHARS:]}")
+                if identifiers := stdout.split():
+                    command = "docker rm -f" if resource == "containers" else "docker network rm"
+                    await self.exec_script(f"{command} {shlex.join(identifiers)} >/dev/null")
+            except Exception as error:
+                failures.append(error)
         q = shlex.quote(label)
-        if stdout.split():
-            await self.exec_script(f"docker rm -f {' '.join(stdout.split())} >/dev/null")
         await self.exec_script(
             f"ids=$(docker images -q --filter {q} | sort -u); [ -z \"$ids\" ] || docker rmi -f $ids >/dev/null 2>&1; "
-            f"ids=$(docker network ls -q --filter {q}); [ -z \"$ids\" ] || docker network rm $ids >/dev/null 2>&1; "
             f"exit 0"
         )
+        if failures:
+            raise RuntimeError("; ".join(str(error) for error in failures)) from failures[0]
 
     async def exec(self, *command: str) -> Any:
         """Execute a command locally via subprocess.
