@@ -627,6 +627,18 @@ def _copy_into_container(source: Path, container: str, destination: str) -> None
         raise RuntimeError(f"Could not copy {source} into container {container}: {copied.stderr.strip()}")
 
 
+def local_sandbox_ids() -> list[str]:
+    """The ids of the local sandboxes with a work folder under the sandbox root. A folder is made before anything its
+    sandbox runs, so a supervisor that gave a run its own ``AGENT_ENV_LOCAL_SANDBOX_DIR`` cleans up after killing it by
+    terminating each id here (``LocalSandboxProvider().terminate_sandbox``) and removing its folder."""
+    root = _local_sandbox_root_path()
+    if not root.is_dir():
+        return []
+    prefix = "agent-env-"
+    return sorted({entry.name.removeprefix(prefix).rsplit("-", 1)[0] for entry in root.iterdir()
+                   if entry.name.startswith(prefix) and entry.is_dir() and not entry.is_symlink()})
+
+
 def remove_local_work_dir(sandbox_id: str) -> Path | None:
     """Delete a local sandbox's work folder, and return it, when it lies directly under the sandbox root and
     isn't a symlink; anything else, a legacy folder under the temp dir included, is left alone. Raises OSError

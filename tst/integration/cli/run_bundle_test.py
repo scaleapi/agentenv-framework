@@ -1,6 +1,7 @@
 """``agent-env run`` on the hello bundle agent-env ships, with no infra: the local stores, a local VM-mode
 sandbox, and a verifier scoring the files the task loaded into it. Needs `bash` and the usual shell tools on PATH."""
 
+import asyncio
 import importlib
 import json
 import logging
@@ -26,6 +27,11 @@ from agent_env.bundle.installed import find_bundle
 from agent_env.cli import cli
 from agent_env.config import configure, reset_config
 from agent_env.config.paths import state_root
+from agent_env.providers.sandbox_providers.local_docker.provider import (
+    LocalSandboxProvider,
+    local_sandbox_ids,
+    remove_local_work_dir,
+)
 from agent_env.providers.sandbox_providers.sandbox_provider import reset_sandbox_provider
 from agent_env.store import Filter, LocalSqliteDocumentStore
 from agent_env.store.routing import namespace_routing
@@ -242,6 +248,34 @@ def test_a_signal_mid_run_marks_the_run_cancelled_tears_it_down_and_stops_its_co
     with namespace_routing():
         assert Task.get_instance(instance_id).status == "cancelled"
     assert not _alive(int((tmp_path / "nap.pid").read_text()))
+
+
+def test_a_run_killed_outright_leaves_its_sandboxes_under_its_root_for_a_supervisor_to_terminate(bundle, tmp_path):
+    napping = tmp_path / "napping"
+    (napping / "tasks").mkdir(parents=True)
+    (napping / "tasks/nap.json").write_text(json.dumps([
+        {"id": "box", "type": "deploy_sandbox", "sandbox_name": "box", "sandbox_mode": "vm", "sandbox_type": "local"},
+        {"id": "web", "type": "deploy_sandbox", "sandbox_name": "web", "sandbox_mode": "container",
+         "sandbox_type": "local", "image": "public.ecr.aws/nginx/nginx:stable-alpine", "port": 80},
+        {"id": "nap", "type": "verify_sandbox", "sandbox_name": "box", "base_dir": "/app", "verifier_id": "nap",
+         "depends_on": ["box", "web"], "criteria": [{"type": "bash_cmd_succeeds", "criterion": "naps",
+                                                    "bash_cmd": 'sleep 300 & echo $! > "$HOME/nap.pid"; wait'}]},
+    ]))
+
+    exit_code, output, held = _signalled([napping], "step 3/3 nap (verify_sandbox)", signal.SIGKILL, group=False)
+    found = local_sandbox_ids()
+    for sandbox_id in found:
+        asyncio.run(LocalSandboxProvider().terminate_sandbox(sandbox_id))
+        remove_local_work_dir(sandbox_id)
+
+    assert exit_code == -signal.SIGKILL, output
+    assert len(held) == len(found) == 2
+    assert local_sandbox_ids() == []
+    assert not _alive(int((tmp_path / "nap.pid").read_text()))
+    for sandbox_id in found:
+        listed = subprocess.run(["docker", "ps", "-aq", "--filter", f"label=agentenv.sandbox={sandbox_id}"],
+                                capture_output=True, text=True, check=True)
+        assert listed.stdout == ""
 
 
 def _alive(pid):
