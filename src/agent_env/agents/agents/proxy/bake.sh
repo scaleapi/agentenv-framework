@@ -10,13 +10,12 @@
 # where agentenv-proxy is this folder, copied into the image's build context.
 set -eu
 
-root=/opt/agentenv-proxy
 here=$(cd "$(dirname "$0")" && pwd)
-python_version=$(sed -n 's/^PYTHON_VERSION=//p' "$here/install.sh")
+. "$here/versions.sh"
 
-export UV_PYTHON_PREFERENCE=only-managed UV_PYTHON_INSTALL_DIR="$root/python" UV_CACHE_DIR="$root/cache"
-"$root/bin/uv" venv --quiet --python "$python_version" "$root/venv"
-"$root/bin/uv" pip install --quiet --python "$root/venv/bin/python" -r "$here/requirements.txt"
-rm -rf "$root/cache"
-"$root/venv/bin/python" -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' \
-  "$here/requirements.txt" > "$root/baked"
+export UV_PYTHON_PREFERENCE=only-managed UV_PYTHON_INSTALL_DIR="$BAKED/python" UV_CACHE_DIR="$BAKED/cache"
+"$BAKED/bin/uv" venv --quiet --python "$PYTHON_VERSION" "$BAKED/venv"
+"$BAKED/bin/uv" pip install --quiet --python "$BAKED/venv/bin/python" -r "$here/requirements.txt"
+rm -rf "$BAKED/cache"
+"$BAKED/venv/bin/python" -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' \
+  "$here/requirements.txt" > "$BAKED/baked"

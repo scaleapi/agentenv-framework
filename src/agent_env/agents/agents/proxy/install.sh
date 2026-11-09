@@ -9,14 +9,9 @@
 # are never touched; in one whose image bake.sh baked the proxy into, for these requirements, it only starts it.
 set -euo pipefail
 
-UV_VERSION=0.13.1
-UV_SHA256_X86_64=6c86040a8f045ab9adc9e3ec4cdafa03fd00e9a988ed2bf28971c7fc2d0debd0
-UV_SHA256_AARCH64=345a8308e4d1835cdfaadf692836fd3137a6d45864773f05ad7bf59442b1ba16
-PYTHON_VERSION=3.12
-BAKED=/opt/agentenv-proxy  # where bake.sh puts the proxy in an image
-
 mode=$1 name=$2 port=$3
 here=$(cd "$(dirname "$0")" && pwd)
+. "$here/versions.sh"
 sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
 
 case $mode in

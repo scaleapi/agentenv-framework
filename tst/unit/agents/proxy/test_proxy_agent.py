@@ -19,6 +19,7 @@ from agent_env.task.episode.steps import PROXY_AGENT_ID
 from agent_env.task_step.task_steps.install_agent import _build_param_resolvers
 
 from tst.unit.agents.proxy.agent import AGENT_DIR, a2a_server
+from tst.util.proxy_bake import BAKE_RECIPE, VERSIONS
 
 README = Path(__file__).resolve().parents[4] / "README.md"
 
@@ -53,16 +54,15 @@ def test_each_install_asks_only_for_params_install_agent_supplies_and_runs_the_f
 
 def test_the_install_script_parses_and_the_image_keeps_it_in_its_build_context():
     subprocess.run(["bash", "-n", str(AGENT_DIR / "install.sh")], check=True)
-    subprocess.run(["sh", "-n", str(AGENT_DIR / "bake.sh")], check=True)
+    for script in ("bake.sh", "versions.sh"):
+        subprocess.run(["sh", "-n", str(AGENT_DIR / script)], check=True)
     assert "COPY a2a_server.py install.sh ./" in (AGENT_DIR / "Dockerfile").read_text()
 
 
-def test_the_bake_recipe_brings_the_uv_the_install_brings_pinned_to_one_digest():
-    uv_version = re.search(r"^UV_VERSION=(\S+)$", (AGENT_DIR / "install.sh").read_text(), re.M).group(1)
-    pins = {recipe: re.findall(r"ghcr\.io/astral-sh/uv:([^@\s]+)@(sha256:[0-9a-f]{64}) ", recipe.read_text())
-            for recipe in (AGENT_DIR / "bake.sh", README)}
-    [(version, _)] = set().union(*pins.values())
-    assert version == uv_version and all(len(found) == 1 for found in pins.values()), pins
+def test_the_readme_and_bake_sh_give_the_bake_recipe_for_the_versions_the_install_brings():
+    assert re.fullmatch(r"sha256:[0-9a-f]{64}", VERSIONS["UV_IMAGE_DIGEST"])
+    assert "\n".join(BAKE_RECIPE) in README.read_text()
+    assert "\n".join(f"#   {line}" for line in BAKE_RECIPE) in (AGENT_DIR / "bake.sh").read_text()
 
 
 def test_the_image_works_in_app_as_agent():
@@ -125,9 +125,9 @@ def _install(tmp_path, baked: str | None, *, archive: Path | None = None,
     agent, bin_dir, log = tmp_path / "agent", tmp_path / "bin", tmp_path / "calls.log"
     shutil.copytree(AGENT_DIR, agent, ignore=shutil.ignore_patterns("__pycache__"))
     if archive is not None:
-        script = agent / "install.sh"
-        script.write_text(re.sub(r"^UV_SHA256_X86_64=\S+$", f"UV_SHA256_X86_64={_sha256(archive.read_bytes())}",
-                                 script.read_text(), flags=re.M))
+        versions = agent / "versions.sh"
+        versions.write_text(re.sub(r"^UV_SHA256_X86_64=\S+$", f"UV_SHA256_X86_64={_sha256(archive.read_bytes())}",
+                                   versions.read_text(), flags=re.M))
     if cached is not None:
         _cached(tmp_path).parent.mkdir(parents=True)
         _cached(tmp_path).write_bytes(cached)
@@ -164,8 +164,7 @@ def _uv_archive(tmp_path) -> Path:
 
 
 def _cached(tmp_path) -> Path:
-    uv_version = re.search(r"^UV_VERSION=(\S+)$", (AGENT_DIR / "install.sh").read_text(), re.M).group(1)
-    return tmp_path / "cache" / "agentenv-proxy" / f"{uv_version}-uv-x86_64-unknown-linux-musl.tar.gz"
+    return tmp_path / "cache" / "agentenv-proxy" / f"{VERSIONS['UV_VERSION']}-uv-x86_64-unknown-linux-musl.tar.gz"
 
 
 def _sha256(data: bytes) -> str:

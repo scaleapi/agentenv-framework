@@ -466,8 +466,6 @@ class InstallAgentTaskStep(TaskStep):
     @staticmethod
     async def _read_install_extension(sandbox, agent_image_name: str) -> dict:
         """Run the agent image briefly with --entrypoint python3 to dump its AGENT_CARD and find the install/v1 extension."""
-        from agent_env.a2a_agent import A2AAgent
-
         script = (
             "import sys, json; sys.path.insert(0, '/app'); "
             "from a2a_server import AGENT_CARD; "

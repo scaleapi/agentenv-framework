@@ -11,23 +11,18 @@ from pathlib import Path
 
 import pytest
 
-import agent_env
 from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.artifact import DockerImageArtifact
 from agent_env.artifact.store import reset_artifact_store
 from agent_env.config import configure, reset_config
 from agent_env.task import EpisodeSpec, Task
+from tst.util.proxy_bake import BAKE_RECIPE, PROXY_DIR
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
-PROXY_DIR = Path(agent_env.__file__).parent / "agents" / "agents" / "proxy"
 TASK_DOCKERFILE = """FROM mirror.gcr.io/library/debian:bookworm-slim
 RUN mkdir -p /work && echo hello > /work/greeting.txt
 WORKDIR /work
-"""
-BAKE = """COPY --from=ghcr.io/astral-sh/uv:0.13.1@sha256:4a1f3666816dafadd20ceb71eac9a7d56d7ef30279f7d64048519ab901ada336 /uv /opt/agentenv-proxy/bin/uv
-COPY agentenv-proxy /opt/agentenv-proxy/src
-RUN sh /opt/agentenv-proxy/src/bake.sh
 """
 # An agent the proxy replaces in a container needs no more than a build context.
 REPLACED_DOCKERFILE = "FROM mirror.gcr.io/library/python:3.12-slim\n"
@@ -86,7 +81,8 @@ async def test_an_agent_installed_into_a_task_container_is_played_through_the_pr
 
 def _task_image(context: Path, uid: str, baked: bool) -> DockerImageArtifact:
     context.mkdir()
-    (context / "Dockerfile").write_text(TASK_DOCKERFILE + (BAKE if baked else ""))
+    bake = "".join(f"{line}\n" for line in BAKE_RECIPE) if baked else ""
+    (context / "Dockerfile").write_text(TASK_DOCKERFILE + bake)
     if baked:
         shutil.copytree(PROXY_DIR, context / "agentenv-proxy", ignore=shutil.ignore_patterns("__pycache__"))
     return DockerImageArtifact.put_context(f"proxy-task-image-{uid}", description="a task container",
