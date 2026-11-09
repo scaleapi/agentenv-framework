@@ -34,7 +34,7 @@ class ModifyEnvToolAccessStep(TaskStep):
             raise ValueError(f"action must be {TOOL_DISABLE_ACTION!r} or {TOOL_ENABLE_ACTION!r}, got {action!r}")
         if not isinstance(role, str) or not role:
             raise ValueError("role must be a non-empty string")
-        if not isinstance(tools, list) or not all(isinstance(t, str) for t in tools):
+        if not _is_tool_list(tools):
             raise ValueError("tools must be a list of strings")
         self.env_id = env_id
         self.action = action
@@ -59,21 +59,35 @@ class ModifyEnvToolAccessStep(TaskStep):
             tools=data["tools"],
         )
 
+    def run_tools(self, context: TaskStepContext) -> list[str]:
+        """The tools a run changes: this step's ``tools`` step override, which replaces the stored list."""
+        overrides = self.step_param_overrides(context)
+        if "tools" not in overrides:
+            return self.tools
+        if not _is_tool_list(tools := overrides["tools"]):
+            raise ValueError(f"modify_env_tool_access '{self.id}': step override tools must be a list of strings, got {tools!r}")
+        return tools
+
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         deployed = next((d for d in context.deployed_envs if d.env_id == self.env_id), None)
         if deployed is None:
             raise RuntimeError(f"Env '{self.env_id}' not found in context.deployed_envs")
-        body = await deployed.invoke(_TOOL_ACCESS_URIS[self.action], self.action, {"role": self.role, "tools": self.tools})
-        logger.info(f"{self.action} role={self.role!r} tools={self.tools} on env={self.env_id}: {body}")
+        tools = self.run_tools(context)
+        body = await deployed.invoke(_TOOL_ACCESS_URIS[self.action], self.action, {"role": self.role, "tools": tools})
+        logger.info(f"{self.action} role={self.role!r} tools={tools} on env={self.env_id}: {body}")
         context.metadata.setdefault("tool_access_changes", []).append({
             "step_id": self.id,
             "env_id": self.env_id,
             "action": self.action,
             "role": self.role,
-            "tools_requested": self.tools,
+            "tools_requested": tools,
             "role_state_after": {"disabled": body.get("disabled", []), "allowed": body.get("allowed", [])},
         })
         return context
+
+
+def _is_tool_list(tools) -> bool:
+    return isinstance(tools, list) and all(isinstance(t, str) for t in tools)
 
 
 # The gateway extension each action is advertised under on the env card.
