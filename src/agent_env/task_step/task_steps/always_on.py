@@ -807,7 +807,7 @@ class _Run:
                 phone.append({"at": it.get("at"), "channel": it["channel"],
                               "text": "\n\n".join(p["text"] for p in it["parts"] if p.get("kind") == "text")})
         read = {"time": _iso(now), "assistant_messages": list(self.unread), "phone": phone,
-                "you_sent": list(self.you_sent)}
+                "you_sent": list(self.you_sent), "done_ends_run": not self.multi_day}
         self.unread, self.you_sent, self.read_at = [], [], None
         calls = []
 

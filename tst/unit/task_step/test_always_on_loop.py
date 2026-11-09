@@ -242,6 +242,17 @@ async def test_done_in_a_multi_day_run_is_recorded_and_the_run_goes_on_to_end_ti
     assert "perfect ty" not in repr(rig.sent)  # a done never reaches the agent
 
 
+@pytest.mark.parametrize("end_time,ends", [(None, True), ("P3D", False)], ids=["one sitting", "multi-day"])
+@pytest.mark.asyncio
+async def test_each_read_says_whether_done_would_end_the_run(monkeypatch, tmp_path, end_time, ends):
+    rig = Rig(monkeypatch, tmp_path, agent=_agent(t1=_message("house booked")))
+    await rig.arm()
+    await rig.run(rig.step(**({"end_time": end_time} if end_time else {})))
+
+    [read] = rig.reads
+    assert read["done_ends_run"] is ends
+
+
 @pytest.mark.parametrize("end_time,multi_day", [(None, False), ("PT6H", False), ("P1D", True)])
 @pytest.mark.asyncio
 async def test_a_run_is_multi_day_when_its_end_falls_on_a_later_day_for_the_user(monkeypatch, tmp_path, end_time,

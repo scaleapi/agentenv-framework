@@ -25,9 +25,10 @@ A plug-in is one Python module with:
 "permissions", "keep_private"}``, with ``time_zone`` the run's zone (the user's, else the world clock's, else UTC).
 
 ``answer`` runs once per read, at the time the user would read. ``read`` is ``{"time": RFC 3339 UTC,
-"assistant_messages": [{"at", "text"}], "phone": [{"at", "channel", "text"}], "you_sent": [{"at", "text"}]}``: the
-agent's message_user texts since the last read, what triggers sent ``user_phone``, and the user's own lines (the
-opening request, ``user_says`` lines, ``final``), never anything meant for the agent. ``history`` is every earlier
+"assistant_messages": [{"at", "text"}], "phone": [{"at", "channel", "text"}], "you_sent": [{"at", "text"}],
+"done_ends_run": bool}``: the agent's message_user texts since the last read, what triggers sent ``user_phone``, the
+user's own lines (the opening request, ``user_says`` lines, ``final``), never anything meant for the agent, and
+whether done ends the run (one-sitting) or is only recorded (multi-day). ``history`` is every earlier
 ``{"read", "answer"}``, oldest first. ``ask(text)`` sends one turn to the user sim agent (one session per run) and
 returns ``{"text", "structured", "trajectory_url"}``, or ``{"text": None, "structured": None, "error"}``.
 
