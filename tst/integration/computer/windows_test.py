@@ -3,8 +3,8 @@ composed on this machine, its base installed from the evaluation ISO in this mac
 passes the conformance probe at full, cua-driver's known failure on Windows waived, before and after a reset in place;
 and an agent drives Notepad on it through cua-driver's tools. And the bundle's notes app, composed onto it as a layer,
 runs on its deploy's settings, its window up and its install done as its Windows install says, its own folder and
-server the session user's alone, before and after a reset; and on it the protocol's Windows session launches, pauses
-and stops apps, and all they start, as an app's server does. Needs Docker, KVM and the ISO; the agent's task, a model
+server the session user's alone, before and after a reset; on it the protocol's Windows session launches, pauses
+and stops apps, and all they start, as an app's server does; and run_code runs a script inside it. Needs Docker, KVM and the ISO; the agent's task, a model
 endpoint too."""
 
 from pathlib import Path
