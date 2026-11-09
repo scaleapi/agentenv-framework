@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import math
-import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any
 
 from agent_env.task.episode.rules import DEPLOYS, problems, works_in_sandbox
 from agent_env.task.episode.run import Episode, EpisodeError
 from agent_env.task.episode.steps import _EpisodeAgentStep
+from agent_env.task.store import new_instance_id
 from agent_env.task.task import Task, substitute_seed_in_steps
 from agent_env.task_step.context import TaskStepContext, sandbox_overrides
 from agent_env.task_step.task_step import TaskStep
@@ -59,8 +59,10 @@ class EpisodeSpec:
     async def start(self, *, sandbox: str | None = None) -> Episode:
         """Start one run of the task, a new episode each call. It returns once the run's record exists, before
         anything is deployed; ``next_turn()`` is where the deploys and setup are waited for. ``sandbox`` is the
-        provider its envs, agents, sandboxes and judge deploy on, as ``agent-env run --sandbox`` sets it."""
-        episode_id = uuid.uuid4().hex
+        provider its envs, agents, sandboxes and judge deploy on, as ``agent-env run --sandbox`` sets it. Its id is
+        its run's, minted as ``agent-env run`` mints one, so what the run names after it stays in its task's
+        namespace."""
+        episode_id = new_instance_id(self._copy.id)
         metadata: dict[str, Any] = {"episode": {"id": episode_id, "trainer_agents": list(self.trainer_agents)}}
         if self._seed:
             metadata["seed"] = dict(self._seed)
