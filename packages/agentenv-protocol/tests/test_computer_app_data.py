@@ -2,9 +2,9 @@
 the defaults: a load writes files under them, through no link out of them, an export returns them, and a reset puts back
 the copy its server kept before it served; its card declares a file tree. Hooks override paths, and read the parts they
 get with part_bytes. Around a load and a reset the app is stopped and relaunched, a failed load is followed by a reset,
-and data calls take turns; an export of a file the paused app holds stops it and relaunches it after; an app that
-loads live is left running through a load, and a failed one is reset with it
-stopped, or left as it is when the app says so; an app with hooks may keep its paths as installed. A call past
+and data calls take turns; an export of a file the paused app holds stops it, copies it in what's left of its
+timeout, and relaunches it after; an app that loads live is left running through a load, and a failed one is reset
+with it stopped, or left as it is when the app says so; an app with hooks may keep its paths as installed. A call past
 data_timeout_s fails then and is cancelled, but a sync hook runs in a thread, which its reset and relaunch, and the next
 call, wait for. The app serves its skill file."""
 from __future__ import annotations
@@ -21,7 +21,7 @@ pytest.importorskip("mcp.server.fastmcp")
 
 import httpx  # noqa: E402
 
-from agentenv_protocol import add_data, client, reset_data  # noqa: E402
+from agentenv_protocol import add_data, client, get_data, reset_data  # noqa: E402
 from agentenv_protocol.agent_env_environment import OP_ADD_DATA  # noqa: E402
 from agentenv_protocol.computer import ComputerAppEnvironment, Launch, linux, part_bytes  # noqa: E402
 from agentenv_protocol.computer import app, app_data, app_runtime, session  # noqa: E402
@@ -441,6 +441,32 @@ async def test_calls_take_turns_and_one_past_its_timeout_fails_then_while_what_f
     assert card.status_code == 200
     assert desktop == [("launch", 4242), ("stop", 4242), ("load", 2), ("answered",), ("loaded", 2), ("reset",),
                        ("launch", 4248), ("stop", 4248), ("load", 1), ("loaded", 1), ("launch", 4252)]
+
+
+@pytest.mark.asyncio
+async def test_an_export_retried_with_the_app_stopped_gets_only_what_is_left_of_its_timeout(home, desktop):
+    @linux(launch=Launch(command=["held"]))
+    class Held(ComputerAppEnvironment):
+        data_timeout_s = 1.0
+
+        @get_data
+        async def export(self) -> list:
+            if desktop[-1][0] == "launch":
+                await asyncio.sleep(0.8)
+                raise app_data.HeldByApp("the running app holds a file")
+            await asyncio.Event().wait()
+
+    held = Held()
+    await held._computer_app.launch_app()
+    started = time.monotonic()
+    async with _http(held) as http:
+        late = await http.post(RPC_PATH, json=_call("data/get", {}))
+    answered = time.monotonic() - started
+    await asyncio.gather(*held._computer_app_data_plane().changing)
+
+    assert late.json()["error"]["message"] == "get_data ran past the app's data_timeout_s, 1 s"
+    assert answered < 1.5
+    assert desktop == [("launch", 4242), ("stop", 4242), ("launch", 4244)]
 
 
 @pytest.mark.asyncio

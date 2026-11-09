@@ -123,13 +123,15 @@ class AppDataPlane:
 
     async def _within_held(self, op: str, served: Callable, args: tuple, answer: asyncio.Future) -> Any:
         """``served``'s result within ``timeout_s``; where the app holds a file of its paths (``HeldByApp``), again with
-        the app stopped, which is relaunched after, as a load's is."""
+        the app stopped, in what's left of it, and the app relaunched after, as a load's is."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.timeout_s
         try:
             return await self._within(op, served, args, answer)
         except HeldByApp:
             stopped = await self.runtime.stop_app()
         try:
-            result = await self._within(op, served, args, answer)
+            result = await self._within(op, served, args, answer, deadline - loop.time())
         finally:
             if stopped:
                 await self.runtime.launch_app(_CAUSES[op])
@@ -167,12 +169,14 @@ class AppDataPlane:
                 OP_GET_DATA: functools.partial(get, self.paths),
                 OP_RESET_DATA: functools.partial(reset, self.paths)}[op]
 
-    async def _within(self, op: str, served: Callable, args: tuple, answer: asyncio.Future) -> Any:
-        """``served``'s result within ``timeout_s``; past it, ``answer`` fails at once and the call is cancelled, and
-        this raises the same once it has ended: at once for what awaits, after any thread it runs."""
+    async def _within(self, op: str, served: Callable, args: tuple, answer: asyncio.Future,
+                      left_s: Optional[float] = None) -> Any:
+        """``served``'s result within ``left_s``, ``timeout_s`` by default; past it, ``answer`` fails at once and the
+        call is cancelled, and this raises the same once it has ended: at once for what awaits, after any thread it
+        runs."""
         work = asyncio.ensure_future(_called(served, *args))
         try:
-            return await asyncio.wait_for(asyncio.shield(work), self.timeout_s)
+            return await asyncio.wait_for(asyncio.shield(work), max(0.0, self.timeout_s if left_s is None else left_s))
         except TimeoutError:
             late = TimeoutError(f"{op} ran past the app's data_timeout_s, {self.timeout_s:g} s")
             if not answer.done():
