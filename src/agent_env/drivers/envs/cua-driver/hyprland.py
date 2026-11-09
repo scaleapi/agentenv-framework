@@ -5,18 +5,48 @@ from __future__ import annotations
 
 import asyncio
 import json
+import string
 import subprocess
 
 from agentenv_protocol.computer import DeviceUnavailable, ReadyCheck
 
 #: How long a request to Hyprland's IPC waits for its answer.
 TIMEOUT_S = 5
+#: How keys and text go to the desktop: in the foreground, through the plugin's seat, so Hyprland's own shortcuts see
+#: them first and then whatever has the keyboard gets them, a window or a layer such as a menu. Without it a key with
+#: modifiers goes through libei, which Hyprland doesn't serve.
+DESKTOP = {"delivery_mode": "foreground"}
+#: X's keysym names for ASCII's punctuation, by which cua-driver presses those keys at the desktop: given the character
+#: there, it has no evdev key for it and falls back to libei, which can hang its input worker.
+PUNCTUATION = {
+    "!": "exclam", '"': "quotedbl", "#": "numbersign", "$": "dollar", "%": "percent", "&": "ampersand",
+    "'": "apostrophe", "(": "parenleft", ")": "parenright", "*": "asterisk", "+": "plus", ",": "comma", "-": "minus",
+    ".": "period", "/": "slash", ":": "colon", ";": "semicolon", "<": "less", "=": "equal", ">": "greater",
+    "?": "question", "@": "at", "[": "bracketleft", "\\": "backslash", "]": "bracketright", "^": "asciicircum",
+    "_": "underscore", "`": "grave", "{": "braceleft", "|": "bar", "}": "braceright", "~": "asciitilde",
+}
+#: The key each character a US keyboard types with Shift is on: a key aimed at a window is one of the seat's US layout,
+#: the only layout cua-driver's plugin takes, and a character it has no key for, or an uppercase letter's, it refuses or
+#: types unshifted.
+SHIFTED = {
+    "!": "1", "@": "2", "#": "3", "$": "4", "%": "5", "^": "6", "&": "7", "*": "8", "(": "9", ")": "0", "_": "-",
+    "+": "=", "{": "[", "}": "]", "|": "\\", ":": ";", '"': "'", "<": ",", ">": ".", "?": "/", "~": "`",
+    **{letter: letter.lower() for letter in string.ascii_uppercase},
+}
+#: What cua-driver says when a key aimed at a window is refused because a layer, such as a menu, holds the keyboard.
+GRABBED = "foreground_grab"
+
+
+def on_us_keyboard(modifiers: list[str], key: str) -> dict:
+    """A key as a person presses it on a US keyboard, a character typed with Shift as Shift and the key it's on."""
+    if base := SHIFTED.get(key):
+        return {"modifiers": modifiers if "shift" in modifiers else [*modifiers, "shift"], "key": base}
+    return {"modifiers": modifiers, "key": key}
 
 
 async def focused() -> dict:
-    """Where keys go: the focused window, whose Hyprland address is its cua-driver window id, in the foreground through
-    the plugin's seat, since a desktop-scope key with modifiers goes through libei, which Hyprland doesn't serve; with
-    nothing focused, the desktop."""
+    """The focused window as a key's target: its pid, its Hyprland address, which is its cua-driver window id, in the
+    foreground through the plugin's seat, where a key edits text as a person's does; nothing with nothing focused."""
     window = await asyncio.to_thread(hyprctl, "activewindow")
     if not window or not window.get("address"):
         return {}

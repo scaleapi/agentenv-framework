@@ -81,19 +81,28 @@ cua-driver's UI Automation tree, whose walk of it fails.
 On a Hyprland desktop (Wayland), as Omarchy's is, cua-driver runs its Wayland backend (`CUA_DRIVER_RS_ENABLE_WAYLAND=1`)
 and sends input through the seats of Hyprland's `cua-hyprland-plugin`. Hyprland's session turns this on
 (`HYPRLAND_INSTANCE_SIGNATURE`), not any Wayland one, since the driver reaches Hyprland's IPC; `supports` names no
-Wayland desktop yet, so gate 1 doesn't match it to one. The daemon starts once the compositor's socket answers, on a
-socket in the session user's runtime folder. What the driver asks Hyprland (`hyprctl -j`) is in `hyprland.py`, beside
-`driver.py`. Keys and text go to the window Hyprland has focused, in the foreground, and to the desktop with nothing
-focused; clicks, drags and scrolls stay desktop-scope. `computer-ready` also checks that the plugin is loaded, enabled,
-built for this Hyprland and taking input (`transport.ready`), and every input, a `computer_*` operation or one of
-cua-driver's own tools that isn't read-only, checks it again first and fails as `device_unavailable`, sending nothing,
-when it isn't. The runtime runs ready checks only until they first pass, and a Hyprland restarted after a crash runs in
-safe mode with no plugins, where input is accepted but never arrives. A plugin loaded again into a running Hyprland has
-no input seat until the desktop restarts, and a driver that outlives its Hyprland can't reach the next one, which has a
-new instance signature, so the driver's services have to restart with the graphical session. Keys aimed at a window
-skip Hyprland's own shortcuts, such as Super+2, and are refused while a layer such as Omarchy's menu holds the keyboard,
-and non-ASCII text aimed at one is refused; sent to the desktop in the foreground, all three work, but Backspace, the
-arrows and Home/End do nothing in a text box, so neither way alone covers both.
+Wayland desktop yet, so gate 1 doesn't match it to one. It runs cua-driver 0.44.0, its own pin, since 0.38.0 refuses
+background input there, the delivery cua-driver's own tools default to: `computer-ready` checks its wheel's executable
+(`hyprland/amd64` in `EXECUTABLES`) and the tools `mcp-hyprland.json` pins, while `requirements.txt` keeps 0.38.0 for
+the other desktops, so a Hyprland computer installs 0.44.0 itself. The daemon starts once the compositor's socket
+answers, on a socket in the session user's runtime folder. What the driver asks Hyprland (`hyprctl -j`) is in
+`hyprland.py`, beside `driver.py`. Text goes to the desktop in the foreground, where Hyprland's shortcuts, a menu
+holding the keyboard and non-ASCII text all work. A key goes to the window Hyprland has focused, in the foreground,
+where Backspace, the arrows and Home/End edit text as a person's keys do, which at the desktop they don't, pressed as on
+a US keyboard, the only layout the plugin takes there, so a shifted character goes as Shift and the key it's on. Super
+and keys held with it, Hyprland's own shortcuts, go to the desktop, as does a key with nothing focused and one the
+window path refuses because a layer such as Omarchy's menu holds the keyboard, punctuation there by its keysym name:
+given the character, cua-driver falls back to libei, which can hang its input worker. Clicks, drags and scrolls stay
+desktop-scope. Keys aimed at a window need the seat's keyboard on a plain layout, and an input method such as Omarchy's
+fcitx5 (`omarchy-fcitx5.service`) takes on the keymap desktop text uploads, after which cua-driver refuses them
+(`unsupported_layout`) until a chord at the desktop puts the layout back, so the driver needs a session with no input
+method running. `computer-ready` also checks that the plugin is loaded, enabled, built for this Hyprland and taking
+input (`transport.ready`), and every input, a `computer_*` operation or one of cua-driver's own tools that isn't
+read-only, checks it again first and fails as `device_unavailable`, sending nothing, when it isn't. The runtime runs
+ready checks only until they first pass, and a Hyprland restarted after a crash runs in safe mode with no plugins, where
+input is accepted but never arrives. A plugin loaded again into a running Hyprland has no input seat until the desktop
+restarts, and a driver that outlives its Hyprland can't reach the next one, which has a new instance signature, so the
+driver's services have to restart with the graphical session.
 
 To move it to another cua-driver version:
 
@@ -101,12 +110,13 @@ To move it to another cua-driver version:
 2. Regenerate `mcp.json` from what that version's MCP server, `cua-driver mcp`, says at connect and lists: its
    `instructions`, each tool's `name`, `description`, `inputSchema`, `annotations` and `outputSchema`, and each
    resource's `uri`, `name`, `description` and `mimeType`. That takes a running daemon, so do it on a Linux test
-   machine, `mcp-macos.json` the same way in a macOS computer, and `mcp-windows.json` in a Windows computer's signed-in
-   session, on the driver's venv, since `cua-driver mcp` refuses Session 0, where ssh lands.
-3. Set `EXECUTABLES` in `driver.py` to the sha256 of `cua_driver/bin/cua-driver` in each arch's wheel, and of
-   CuaDriver.app's executable for `macos/arm64`, and the release tarball's URL and sha256 in `env.toml`'s
-   `[install.macos]` and its folder in `install-app.sh`; for `windows/amd64`, the zip's `cua-driver.exe`, its URL and
-   sha256 in `[install.windows]` and its folder in `install-windows.ps1`.
+   machine, `mcp-hyprland.json` the same way on a Hyprland desktop at its own pin, `mcp-macos.json` in a macOS
+   computer, and `mcp-windows.json` in a Windows computer's signed-in session, on the driver's venv, since
+   `cua-driver mcp` refuses Session 0, where ssh lands.
+3. Set `EXECUTABLES` in `driver.py` to the sha256 of `cua_driver/bin/cua-driver` in each arch's wheel, and in the wheel
+   of Hyprland's own pin for `hyprland/amd64`, and of CuaDriver.app's executable for `macos/arm64`, and the release
+   tarball's URL and sha256 in `env.toml`'s `[install.macos]` and its folder in `install-app.sh`; for `windows/amd64`,
+   the zip's `cua-driver.exe`, its URL and sha256 in `[install.windows]` and its folder in `install-windows.ps1`.
 4. Run `tst/unit/drivers/cua_driver_test.py`, then `tst/integration/computer/cua_driver_test.py` on Linux, where
    `computer-ready` names any tool or executable that doesn't match its pin.
 

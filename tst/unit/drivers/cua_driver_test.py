@@ -24,7 +24,7 @@ from PIL import Image as PILImage
 
 import agent_env
 from agentenv_protocol import SESSION_META_KEY
-from agentenv_protocol.computer import DeliveryFailed, DeviceUnavailable, Unsupported
+from agentenv_protocol.computer import DeliveryFailed, DeviceUnavailable, Platform, Unsupported
 
 DRIVER = Path(agent_env.__file__).parent / "drivers" / "envs" / "cua-driver" / "driver.py"
 
@@ -38,7 +38,8 @@ def _png(width: int, height: int) -> str:
 class FakeDaemon:
     """cua-driver's daemon as the driver sees it, on ``path``: each request by the connection it came on, ``refuse``
     naming tools whose results are errors, ``fail`` tools it can't call, ``slow`` tools it answers after a second,
-    ``drop`` tools whose connection it closes without answering, and ``tools`` what ``list`` lists."""
+    ``drop`` tools whose connection it closes without answering, ``grab`` a layer such as a menu holding the keyboard,
+    from which it refuses a key aimed at a window, and ``tools`` what ``list`` lists."""
 
     def __init__(self, manifest: list[dict], path: Path) -> None:
         self.path = path
@@ -47,6 +48,7 @@ class FakeDaemon:
         self.fail: set[str] = set()
         self.slow: set[str] = set()
         self.drop: set[str] = set()
+        self.grab = False
         self.tools = [{"name": t["name"], "input_schema": t["inputSchema"]} for t in manifest]
         self.connections = 0
         self.writers: list[asyncio.StreamWriter] = []
@@ -85,6 +87,9 @@ class FakeDaemon:
             return {"ok": False, "error": f"unknown tool {name}", "exit_code": 64}
         if name in self.refuse:
             return {"ok": True, "result": {"isError": True, "content": [{"type": "text", "text": f"{name} refused"}]}}
+        if name == "press_key" and self.grab and "pid" in request["args"]:
+            return {"ok": True, "result": {"isError": True, "content": [
+                {"type": "text", "text": "foreground_unavailable (primary_target_busy): foreground_grab"}]}}
         if name == "list_windows":
             return {"ok": True, "result": {"content": [{"type": "text", "text": "Found 0 windows"}],
                                            "structuredContent": {"windows": []}}}
@@ -487,29 +492,83 @@ def hyprland(module, monkeypatch) -> FakeHyprland:
 
 
 @pytest.mark.asyncio
-async def test_on_hyprland_keys_go_to_the_focused_window_in_the_foreground_and_text_skips_xs_keymap(
+async def test_on_hyprland_text_goes_to_the_desktop_and_keys_to_the_focused_window_as_on_a_us_keyboard(
         module, daemon, hyprland):
     hyprland.answers["activewindow"] = {"address": "0x5557e0f44ad0", "pid": 42}
     driver = module.CuaDriver()
 
     await driver.type_in("Hello, Wörld")
-    await driver.press_keys(["Control", "a"])
+    for keys in (["Control", "a"], ["Backspace"], ["Control", "+"], ["Shift", "?"], ["A"], ["/"]):
+        await driver.press_keys(keys)
     await driver.click_at(10, 20, "left", 1, [])
 
     focused = {"pid": 42, "window_id": 0x5557E0F44AD0, "delivery_mode": "foreground"}
     assert daemon.calls() == [
-        ("type_text", {"scope": "desktop", "text": "Hello, Wörld", **focused}),
+        ("type_text", {"scope": "desktop", "text": "Hello, Wörld", "delivery_mode": "foreground"}),
         ("press_key", {"scope": "desktop", "key": "a", "modifiers": ["ctrl"], **focused}),
+        ("press_key", {"scope": "desktop", "key": "backspace", "modifiers": [], **focused}),
+        ("press_key", {"scope": "desktop", "key": "=", "modifiers": ["ctrl", "shift"], **focused}),
+        ("press_key", {"scope": "desktop", "key": "/", "modifiers": ["shift"], **focused}),
+        ("press_key", {"scope": "desktop", "key": "a", "modifiers": ["shift"], **focused}),
+        ("press_key", {"scope": "desktop", "key": "/", "modifiers": [], **focused}),
         ("click", {"scope": "desktop", "x": 10, "y": 20, "button": "left", "count": 1, "modifier": []}),
     ]
-    assert driver._keymap is None and hyprland.asked == ["activewindow", "cua:status"] * 2 + ["cua:status"]
+    assert driver._keymap is None
+    assert hyprland.asked == ["cua:status"] + ["activewindow", "cua:status"] * 6 + ["cua:status"]
 
 
 @pytest.mark.asyncio
-async def test_on_hyprland_with_nothing_focused_keys_go_to_the_desktop(module, daemon, hyprland):
-    await module.CuaDriver().press_keys(["Escape"])
+async def test_on_hyprland_super_and_keys_held_with_it_go_to_the_desktop_as_hyprlands_own(module, daemon, hyprland):
+    hyprland.answers["activewindow"] = {"address": "0x5557e0f44ad0", "pid": 42}
+    driver = module.CuaDriver()
 
-    assert daemon.calls() == [("press_key", {"scope": "desktop", "key": "escape", "modifiers": []})]
+    await driver.press_keys(["Meta", "2"])
+    await driver.press_keys(["Super"])
+
+    assert daemon.calls() == [
+        ("press_key", {"scope": "desktop", "key": "2", "modifiers": ["super"], "delivery_mode": "foreground"}),
+        ("press_key", {"scope": "desktop", "key": "super", "modifiers": [], "delivery_mode": "foreground"})]
+    assert "activewindow" not in hyprland.asked
+
+
+@pytest.mark.asyncio
+async def test_on_hyprland_with_nothing_focused_keys_go_to_the_desktop_punctuation_by_its_keysym_name(
+        module, daemon, hyprland):
+    for keys in (["Escape"], ["Control", "/"], ["!"]):
+        await module.CuaDriver().press_keys(keys)
+
+    assert daemon.calls() == [
+        ("press_key", {"scope": "desktop", "key": "escape", "modifiers": [], "delivery_mode": "foreground"}),
+        ("press_key", {"scope": "desktop", "key": "slash", "modifiers": ["ctrl"], "delivery_mode": "foreground"}),
+        ("press_key", {"scope": "desktop", "key": "exclam", "modifiers": [], "delivery_mode": "foreground"})]
+
+
+@pytest.mark.asyncio
+async def test_on_hyprland_a_key_refused_while_a_menu_holds_the_keyboard_goes_to_the_desktop(module, daemon, hyprland):
+    hyprland.answers["activewindow"] = {"address": "0x5557e0f44ad0", "pid": 42}
+    daemon.grab = True
+
+    for keys in (["?"], ["Escape"]):
+        await module.CuaDriver().press_keys(keys)
+
+    focused = {"pid": 42, "window_id": 0x5557E0F44AD0, "delivery_mode": "foreground"}
+    assert daemon.calls() == [
+        ("press_key", {"scope": "desktop", "key": "/", "modifiers": ["shift"], **focused}),
+        ("press_key", {"scope": "desktop", "key": "question", "modifiers": [], "delivery_mode": "foreground"}),
+        ("press_key", {"scope": "desktop", "key": "escape", "modifiers": [], **focused}),
+        ("press_key", {"scope": "desktop", "key": "escape", "modifiers": [], "delivery_mode": "foreground"})]
+
+
+@pytest.mark.asyncio
+async def test_on_hyprland_a_key_the_focused_window_refuses_otherwise_fails_without_going_to_the_desktop(
+        module, daemon, hyprland):
+    hyprland.answers["activewindow"] = {"address": "0x5557e0f44ad0", "pid": 42}
+    daemon.refuse.add("press_key")
+
+    with pytest.raises(DeliveryFailed, match="cua-driver press_key: press_key refused"):
+        await module.CuaDriver().press_keys(["Backspace"])
+
+    assert [args.get("pid") for _, args in daemon.calls()] == [42]
 
 
 @pytest.mark.asyncio
@@ -532,10 +591,13 @@ async def test_on_hyprland_input_is_refused_and_not_sent_once_hyprland_runs_with
 
 
 @pytest.mark.asyncio
-async def test_on_hyprland_readiness_checks_every_time_that_hyprland_has_cua_drivers_plugin(
+async def test_on_hyprland_readiness_checks_its_own_pin_and_every_time_that_hyprland_has_cua_drivers_plugin(
         module, daemon, hyprland, monkeypatch):
     driver = module.CuaDriver()
-    monkeypatch.setattr(module, "_executable_sha256", lambda: module.EXECUTABLES[driver.platform.arch])
+    driver.platform = Platform(os="linux", arch="amd64", display="wayland")
+    digests = iter([module.EXECUTABLES["amd64"], module.EXECUTABLES["hyprland/amd64"]])
+    monkeypatch.setattr(module, "_executable_sha256", lambda: next(digests))
+    x11 = await driver.ready_checks()
     hyprland.answers.update({
         "cua:status": [PLUGIN_LOADED, None, {**PLUGIN_LOADED, "configured": False},
                        {**PLUGIN_LOADED, "abi": {"match": False}}, PLUGIN_RELOADED, None],
@@ -543,6 +605,7 @@ async def test_on_hyprland_readiness_checks_every_time_that_hyprland_has_cua_dri
 
     checks = [await driver.ready_checks() for _ in range(6)]
 
+    assert (x11[0].name, x11[0].ok) == ("cua-driver", False)
     assert [(c.name, c.ok) for c in checks[0]] == [("cua-driver", True), ("cua-driver tools", True),
                                                     ("cua-driver plugin", True)]
     assert [(c[-1].ok, c[-1].detail) for c in checks[1:]] == [
@@ -553,7 +616,7 @@ async def test_on_hyprland_readiness_checks_every_time_that_hyprland_has_cua_dri
                 "loading a replacement plugin"),
         (False, "Hyprland doesn't answer on its IPC; if it restarted after this driver started, restart the driver "
                 "with it")]
-    assert sum(1 for _, r in daemon.requests if r["method"] == "list") == 1
+    assert sum(1 for _, r in daemon.requests if r["method"] == "list") == 2
 
 
 @pytest.mark.usefixtures("hyprland")
