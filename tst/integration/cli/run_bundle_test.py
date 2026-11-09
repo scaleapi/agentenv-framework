@@ -204,10 +204,10 @@ def test_an_installed_bundle_runs_by_name_with_ids_rooted_at_its_package(bundle,
     assert "demo_installed_bundles" not in sys.modules
 
 
-def _signalled(args, when, signum=signal.SIGINT, group=True):
+def _signalled(args, when, signum=signal.SIGINT, group=True, ready=lambda: True):
     """Run ``agent-env run ARGS`` in its own process group, as a terminal would, and send ``signum`` to the group
-    (or to the process alone) once a line containing ``when`` is printed. Returns the exit code, the output, and
-    what the sandbox root held when the signal went."""
+    (or to the process alone) once a line containing ``when`` is printed and ``ready()`` holds. Returns the exit code,
+    the output, and what the sandbox root held when the signal went."""
     process = subprocess.Popen([sys.executable, "-m", "agent_env.cli", "run", *map(str, args)], stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, text=True, start_new_session=True)
     watchdog = threading.Timer(120, process.kill)
@@ -217,6 +217,9 @@ def _signalled(args, when, signum=signal.SIGINT, group=True):
         for line in process.stdout:
             lines.append(line)
             if held is None and when in line:
+                deadline = time.monotonic() + 30
+                while not ready() and time.monotonic() < deadline:
+                    time.sleep(0.05)
                 root = os.environ["AGENT_ENV_LOCAL_SANDBOX_DIR"]
                 held = sorted(os.listdir(root)) if os.path.isdir(root) else []
                 (os.killpg if group else os.kill)(process.pid, signum)
@@ -262,7 +265,9 @@ def test_a_run_killed_outright_leaves_its_sandboxes_under_its_root_for_a_supervi
                                                     "bash_cmd": 'sleep 300 & echo $! > "$HOME/nap.pid"; wait'}]},
     ]))
 
-    exit_code, output, held = _signalled([napping], "step 3/3 nap (verify_sandbox)", signal.SIGKILL, group=False)
+    nap = tmp_path / "nap.pid"
+    exit_code, output, held = _signalled([napping], "step 3/3 nap (verify_sandbox)", signal.SIGKILL, group=False,
+                                         ready=nap.exists)
     found = local_sandbox_ids()
     for sandbox_id in found:
         asyncio.run(LocalSandboxProvider().terminate_sandbox(sandbox_id))
@@ -271,7 +276,7 @@ def test_a_run_killed_outright_leaves_its_sandboxes_under_its_root_for_a_supervi
     assert exit_code == -signal.SIGKILL, output
     assert len(held) == len(found) == 2
     assert local_sandbox_ids() == []
-    assert not _alive(int((tmp_path / "nap.pid").read_text()))
+    assert not _alive(int(nap.read_text()))
     for sandbox_id in found:
         listed = subprocess.run(["docker", "ps", "-aq", "--filter", f"label=agentenv.sandbox={sandbox_id}"],
                                 capture_output=True, text=True, check=True)
