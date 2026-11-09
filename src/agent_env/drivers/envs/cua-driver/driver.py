@@ -127,9 +127,12 @@ PIPE_WAITS = {errno.EINVAL: 10.0, errno.ENOENT: 1.0}
 
 @computer_driver(name="cua-driver",
                  supports=[{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]},
+                           {"os": {"type": "linux", "distribution": ["omarchy"], "display": ["wayland"]},
+                            "arch": ["amd64"]},
                            {"os": {"type": "macos", "display": ["aqua"]}, "arch": ["arm64"]},
                            {"os": {"type": "windows", "display": ["dwm"]}, "arch": ["amd64"]}])
 class CuaDriver(ComputerDriverEnvironment):
+    notes = hyprland.NOTES if HYPRLAND else ""
     buttons = ("left", "right", "middle")
     max_click_count = 3
     max_scroll_amount = 50

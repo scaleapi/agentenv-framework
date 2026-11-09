@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import string
 import subprocess
 
@@ -13,6 +14,10 @@ from agentenv_protocol.computer import DeviceUnavailable, ReadyCheck
 
 #: How long a request to Hyprland's IPC waits for its answer.
 TIMEOUT_S = 5
+#: Why a computer whose Hyprland restarted under its driver has failed for good: Hyprland's watchdog brings it back after
+#: a crash, in safe mode with no plugins, within the same session, so nothing restarts the driver with it.
+REPLACED = ("Hyprland restarted under this driver, as its watchdog does after a crash, in safe mode with no plugins, so "
+            "the computer can't take input again: an infrastructure failure")
 #: How keys and text go to the desktop: in the foreground, through the plugin's seat, so Hyprland's own shortcuts see
 #: them first and then whatever has the keyboard gets them, a window or a layer such as a menu. Without it a key with
 #: modifiers goes through libei, which Hyprland doesn't serve.
@@ -34,6 +39,10 @@ SHIFTED = {
     "+": "=", "{": "[", "}": "]", "|": "\\", ":": ";", '"': "'", "<": ",", ">": ".", "?": "/", "~": "`",
     **{letter: letter.lower() for letter in string.ascii_uppercase},
 }
+#: What the computer skill tells an agent of how its keys go here: the desktop's shortcuts are Super chords, which the
+#: driver sends to Hyprland, and every other key goes to the focused window, past Hyprland's own binds.
+NOTES = ("Keys held with Super go to the desktop, where its shortcuts take them; every other key or chord goes to the "
+         "focused window, so a desktop shortcut without Super, such as Alt+Tab, doesn't fire.")
 #: What cua-driver says when a key aimed at a window is refused because a layer, such as a menu, holds the keyboard.
 GRABBED = "foreground_grab"
 #: What it says when one is refused because the seat's keymap isn't the US layout's: an input method such as Omarchy's
@@ -90,13 +99,14 @@ def _chord_binds() -> list[dict]:
 async def plugin() -> ReadyCheck:
     """That Hyprland has cua-driver's plugin loaded, enabled, built for it and taking input; one restarted after a
     crash runs in safe mode, with no plugins, where input is sent but never arrives, and a plugin loaded again into a
-    running Hyprland answers but has no input seat until the desktop restarts. When Hyprland doesn't answer at all, as
-    once it restarts under a new instance signature after the driver started, it says so instead."""
+    running Hyprland answers but has no input seat until the desktop restarts. When the Hyprland the driver started with
+    doesn't answer and another runs in its place, the check fails for good (``REPLACED``)."""
     status = await asyncio.to_thread(hyprctl, "cua:status")
     transport = (status or {}).get("transport") or {}
     if status is None and await asyncio.to_thread(hyprctl, "activeworkspace") is None:
-        problem = ("Hyprland doesn't answer on its IPC; if it restarted after this driver started, restart the driver "
-                   "with it")
+        if await asyncio.to_thread(_replaced):
+            return ReadyCheck("cua-driver plugin", False, REPLACED, final=True)
+        problem = "Hyprland doesn't answer on its IPC"
     elif status is None:
         problem = "Hyprland hasn't loaded cua-driver's plugin"
     elif status.get("configured") is not True:
@@ -108,6 +118,13 @@ async def plugin() -> ReadyCheck:
     else:
         return ReadyCheck("cua-driver plugin", True, "loaded, enabled, built for this Hyprland and taking input")
     return ReadyCheck("cua-driver plugin", False, problem)
+
+
+def _replaced() -> bool:
+    """Whether another Hyprland runs in this session in place of the one whose instance signature the driver has."""
+    instances = hyprctl("instances") or []
+    ours = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
+    return bool(instances) and all(instance.get("instance") != ours for instance in instances)
 
 
 async def require_plugin() -> None:

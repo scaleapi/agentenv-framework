@@ -80,11 +80,12 @@ cua-driver's UI Automation tree, whose walk of it fails.
 
 On a Hyprland desktop (Wayland), as Omarchy's is, cua-driver runs its Wayland backend (`CUA_DRIVER_RS_ENABLE_WAYLAND=1`)
 and sends input through the seats of Hyprland's `cua-hyprland-plugin`. Hyprland's session turns this on
-(`HYPRLAND_INSTANCE_SIGNATURE`), not any Wayland one, since the driver reaches Hyprland's IPC; `supports` names no
-Wayland desktop yet, so gate 1 doesn't match it to one. It runs cua-driver 0.44.0, its own pin, since 0.38.0 refuses
-background input there, the delivery cua-driver's own tools default to: `computer-ready` checks its wheel's executable
-(`hyprland/amd64` in `EXECUTABLES`) and the tools `mcp-hyprland.json` pins, while `requirements.txt` keeps 0.38.0 for
-the other desktops, so a Hyprland computer installs 0.44.0 itself. The daemon starts once the compositor's socket
+(`HYPRLAND_INSTANCE_SIGNATURE`), not any Wayland one, since the driver reaches Hyprland's IPC; `supports` names
+Omarchy's Wayland desktop on amd64, which installs `[install."linux/omarchy"]`: `requirements-omarchy.txt` and the two
+services, with no Hyprland plugin, which Omarchy's base carries. It runs cua-driver 0.44.0, its own pin, since 0.38.0
+refuses background input there, the delivery cua-driver's own tools default to: `computer-ready` checks its wheel's
+executable (`hyprland/amd64` in `EXECUTABLES`) and the tools `mcp-hyprland.json` pins, which `requirements-omarchy.txt`
+installs, while `requirements.txt` keeps 0.38.0 for the other desktops. The daemon starts once the compositor's socket
 answers, on a socket in the session user's runtime folder. What the driver asks Hyprland (`hyprctl -j`) is in
 `hyprland.py`, beside `driver.py`. Text goes to the desktop in the foreground, where Hyprland's shortcuts, a menu
 holding the keyboard and non-ASCII text all work. A key goes to the window Hyprland has focused, in the foreground,
@@ -92,23 +93,26 @@ where Backspace, the arrows and Home/End edit text as a person's keys do, which 
 a US keyboard, the only layout the plugin takes there, so a shifted character goes as Shift and the key it's on. Super
 and keys held with it, Hyprland's own shortcuts, go to the desktop, as does a key with nothing focused and one the
 window path refuses because a layer such as Omarchy's menu holds the keyboard, punctuation there by its keysym name:
-given the character, cua-driver falls back to libei, which can hang its input worker. Clicks, drags and scrolls stay
-desktop-scope. Keys aimed at a window need the seat's keymap to be the US layout's, and an input method such as
-Omarchy's fcitx5 takes on the keymap that desktop text uploads, after which cua-driver refuses them
-(`unsupported_layout`): the driver then puts the layout back with a chord of the layout's own keys at the desktop,
-Super+Ctrl+Alt+Shift+F12, which it binds to nothing in Hyprland first (`hyprctl eval`), so Hyprland keeps it from every
-window, and sends the key again. It presses the chord only while its own bind alone has it: with the chord bound to
-anything else, the key fails as cua-driver refused it. `computer-ready` also checks that the plugin is loaded, enabled,
-built for this Hyprland and taking input (`transport.ready`), and every input, a `computer_*` operation or one of
-cua-driver's own tools that isn't read-only, checks it again first and fails as `device_unavailable`, sending nothing,
-when it isn't. The runtime runs ready checks only until they first pass, and a Hyprland restarted after a crash runs in
-safe mode with no plugins, where input is accepted but never arrives. A plugin loaded again into a running Hyprland has
-no input seat until the desktop restarts, and a driver that outlives its Hyprland can't reach the next one, which has a
-new instance signature, so the driver's services have to restart with the graphical session.
+given the character, cua-driver falls back to libei, which can hang its input worker. The computer skill tells agents so
+(`notes`): Super chords reach the desktop's shortcuts, which the protocol's skill lists for Omarchy, and other chords,
+such as Alt+Tab, go to the focused window. Clicks, drags and scrolls stay desktop-scope. Keys aimed at a window need the
+seat's keymap to be the US layout's, and an input method such as Omarchy's fcitx5 takes on the keymap that desktop text
+uploads, after which cua-driver refuses them (`unsupported_layout`): the driver then puts the layout back with a chord
+of the layout's own keys at the desktop, Super+Ctrl+Alt+Shift+F12, which it binds to nothing in Hyprland first (`hyprctl
+eval`), so Hyprland keeps it from every window, and sends the key again. It presses the chord only while its own bind
+alone has it: with the chord bound to anything else, the key fails as cua-driver refused it. `computer-ready` also
+checks that the plugin is loaded, enabled, built for this Hyprland and taking input (`transport.ready`), and every
+input, a `computer_*` operation or one of cua-driver's own tools that isn't read-only, checks it again first and fails
+as `device_unavailable`, sending nothing, when it isn't. The runtime runs ready checks only until they first pass. A
+plugin loaded again into a running Hyprland has no input seat until the desktop restarts. After a crash, Hyprland's
+watchdog brings it back within the same session, in safe mode with no plugins and under a new instance signature, so
+nothing restarts the driver with it: once another Hyprland runs in place of the one the driver started with (`hyprctl
+instances`), the plugin check fails for good (`final`) and every input fails as an infrastructure failure. The driver's
+services otherwise restart with the graphical session, as after a logout.
 
 To move it to another cua-driver version:
 
-1. Pin the version in `requirements.txt`.
+1. Pin the version in `requirements.txt`, and Hyprland's own in `requirements-omarchy.txt`.
 2. Regenerate `mcp.json` from what that version's MCP server, `cua-driver mcp`, says at connect and lists: its
    `instructions`, each tool's `name`, `description`, `inputSchema`, `annotations` and `outputSchema`, and each
    resource's `uri`, `name`, `description` and `mimeType`. That takes a running daemon, so do it on a Linux test

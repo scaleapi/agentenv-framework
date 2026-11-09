@@ -587,8 +587,9 @@ driver has them, through the `served_tools`, `served_extensions` and `served_ope
   features, among them `screen`: `desktop`, or `page` for a driver whose screen is a website
   browser's active tab, which a computer env pairs with exactly one website browser. The driver serves its skill through `skill/v1` (an `@agent_skill` handler on the base
   class): a SKILL.md written from the computer as it booted (its platform, session user and home,
-  the live screen size, what its input takes, its OS's shortcuts) and ending with the driver
-  class's `notes`, markdown for what its card can't say. A driver whose software ships a skill of
+  the live screen size, what its input takes, its platform's shortcuts, a distribution's where it
+  has its own, as Omarchy does) and ending with the driver class's `notes`, markdown for what its
+  card can't say. A driver whose software ships a skill of
   its own returns it from `bundled_skill()` (its description, body and other files), and the
   computer skill leads with it, the computer's part following.
 - **Framework extensions.** `computer-ready/v1` (`status`: real checks of the display and a
