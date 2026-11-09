@@ -704,8 +704,8 @@ fixture can't be staged, the `full` checks are unverified rather than failed.
 On a driver whose platform's display is Wayland, the desk is drawn with GTK 3 as a native Wayland client
 (`conformance/wayland_fixture.py`, staged beside `desk.py` in the Tk window's place), since Tk runs
 only under XWayland. It goes full screen, takes its origin from Hyprland's IPC, keeps the clipboard
-through wl-clipboard. There the probe selects a text box's text with GTK's Ctrl+A rather than Tk's
-Ctrl+/, since a driver on Hyprland may not press punctuation keys.
+through wl-clipboard. There the probe selects a text box's text with GTK's own Ctrl+A rather than
+Tk's Ctrl+/.
 
 On a driver whose card says `screen: "page"`, the desk is an HTML page with the same widgets at the
 same places (`conformance/page_fixture.py`). The probe starts its server on loopback, which writes
