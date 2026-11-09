@@ -25,7 +25,6 @@ import base64
 import hashlib
 import json
 import os
-import pwd
 import re
 import shutil
 import socket
@@ -40,6 +39,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlsplit, urlunsplit
+
+try:
+    import pwd
+except ImportError:  # Windows, which agent-env does not target, imports is_local and matches from here on its host.
+    pwd = None
 
 HOSTS_BEGIN = "# agentenv sites"
 HOSTS_END = "# end agentenv sites"

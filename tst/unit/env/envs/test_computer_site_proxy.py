@@ -14,6 +14,7 @@ import os
 import socket
 import ssl
 import struct
+import subprocess
 import sys
 import urllib.error
 from datetime import timedelta
@@ -982,6 +983,12 @@ def test_the_proxy_serves_as_nobody_where_the_base_has_it_else_as_the_session_us
     serve_path = tmp_path / "serve.json"
     serve_path.write_text(json.dumps({"user": "agent", "serve_user": "nobody", "sites": []}))
     assert (Config.load(str(serve_path)).user, Config.load(str(serve_path)).serve_user) == ("agent", "nobody")
+
+
+def test_the_proxy_imports_when_pwd_is_unavailable():
+    subprocess.run([sys.executable, "-c", "import sys; sys.modules['pwd'] = None; "
+                    "from agent_env.env.envs.computer.utils import site_proxy, sites; assert site_proxy.pwd is None"],
+                   check=True)
 
 
 def test_keep_starts_serve_again_each_time_it_ends(monkeypatch):
