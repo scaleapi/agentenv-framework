@@ -265,8 +265,9 @@ async def _signed_in(computer: DeployedEnv) -> Optional[str]:
 async def test_browser_sign_in_signs_a_multi_envs_browser_in_to_its_site_and_again_after_a_reset(
         website_browser_desktop, session_site):
     with namespace_routing():
-        office = MultiEnv.put(id=f"{session_site.id.rsplit('/', 1)[0]}/office", website_envs=[session_site],
-                              computer_envs=[Env.get(website_browser_desktop.id)], name="office")
+        office = MultiEnv.put(id=f"{session_site.id.rsplit('/', 1)[0]}/office", mcp_server_envs=[],
+                              website_envs=[session_site], computer_envs=[Env.get(website_browser_desktop.id)],
+                              name="office")
         sign_in = BrowserSignInTaskStep(id="in", version=None, env_id=office.id, site=session_site.id, user="alex")
         context = TaskStepContext()
         try:
