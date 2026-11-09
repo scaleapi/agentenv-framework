@@ -174,7 +174,9 @@ async def test_a_run_cut_off_by_its_wake_cap_says_so_in_the_conversation(monkeyp
     (lambda rig: Fail("the CLI crashed"), "agent_turn_failed", "agent_turn_failed"),
     (lambda rig: Fail("sandbox gone", error_type="infra_error"), "infra_error", "agent_turn_failed"),
     (lambda rig: (_ for _ in ()).throw(TimeoutError("no answer")), "agent_turn_timeout", "agent_turn_timeout"),
-], ids=["failed", "failed with the agent's error type", "timed out"])
+    (lambda rig: Fail("stopped", state="canceled"), "agent_turn_canceled", "agent_turn_failed"),
+    (lambda rig: Fail("won't do that", state="rejected"), "agent_turn_rejected", "agent_turn_failed"),
+], ids=["failed", "failed with the agent's error type", "timed out", "canceled", "rejected"])
 @pytest.mark.asyncio
 async def test_a_failed_or_timed_out_turn_sets_error_type_and_the_verifier_skips_the_run(monkeypatch, tmp_path, play,
                                                                                          error_type, end_reason):
@@ -190,3 +192,16 @@ async def test_a_failed_or_timed_out_turn_sets_error_type_and_the_verifier_skips
                                                    criteria=[{"type": "response_contains", "needles": ["on it"]}])
     await verifier.execute(ctx)
     assert ctx.metadata["verifications"]["words"]["results"][0]["id"] == "prompt_error"
+
+
+@pytest.mark.parametrize("state", ["failed", "canceled", "rejected"])
+@pytest.mark.asyncio
+async def test_a_nudge_turn_that_doesn_t_complete_sets_error_type_too(monkeypatch, tmp_path, state):
+    rig = Rig(monkeypatch, tmp_path, agent=_agent(t1=lambda rig: "PRIVATE all done", t2=lambda rig: Fail(state=state)))
+    await rig.arm()
+    ctx = await rig.run(rig.step())
+
+    [nudge] = rig.events(ctx, "nudge")
+    assert nudge["state"] == state and len(rig.sent) == 2
+    [response] = ctx.prompt_responses
+    assert (response.error_type, rig.record(ctx)["end_reason"]) == (f"agent_turn_{state}", "agent_turn_failed")

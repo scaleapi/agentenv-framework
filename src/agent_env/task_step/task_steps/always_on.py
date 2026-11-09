@@ -46,8 +46,8 @@ it in the run's metadata under its ``name``; a ``deploy_agent`` step deploys the
   time, never the agent's closing text; messages no turn took (a turn that timed out after sending) are taken at the
   end and included, and listed as never read. The conversation (``metadata["a2a_conversations"][step_id]``) holds the user's
   own messages and the agent's message_user texts, then the user's last word that never reached the agent and an end
-  marker with the end reason. A failed or timed-out agent turn sets the response's ``error_type`` (as prompt_agent
-  does), so verifiers skip the run.
+  marker with the end reason. An agent turn that doesn't complete (failed, canceled, rejected, timed out) ends the run
+  and sets the response's ``error_type`` (as prompt_agent does for a failed one), so verifiers skip the run.
 - Who did what, and in what order, even under a frozen clock: each app change (urn:agentenv:changes/v1) is recorded
   with who made it and the wake it was seen in, the agent's own with the wake that made it (``app_changes`` events);
   each reply records the agent's message it answers (``reply_to``: its wake, time and text); and each read leaves a
@@ -1229,9 +1229,10 @@ class _Run:
                  tool_calls=term.tool_call_count, plain_reply=plain, messages_to_user=len(messages),
                  trajectory_url=traj, **extra)
         self._sent(messages)
-        if state == TaskState.failed or str(state) == "failed":
-            self._failed(term.error_type or "agent_turn_failed",
-                         term.error_message or term.response_text or "agent turn failed", term.error_code)
+        if not _completed(state):  # failed, canceled or rejected: the turn didn't run to its end
+            self._failed(term.error_type or f"agent_turn_{_state_name(state)}",
+                         term.error_message or term.response_text or f"agent turn {_state_name(state)}",
+                         term.error_code)
             return
         if step.nudge and not messages and not quiet and _closing_text(plain):
             await self._nudge(plain)
@@ -1306,9 +1307,10 @@ class _Run:
                  plain_reply_after=plain, tool_calls=term.tool_call_count, real_seconds=round(time.time() - t, 1),
                  trajectory_url=traj)
         self._sent(messages, after_nudge=True)
-        if state == TaskState.failed or str(state) == "failed":
-            self._failed(term.error_type or "agent_turn_failed",
-                         term.error_message or term.response_text or "agent nudge turn failed", term.error_code)
+        if not _completed(state):
+            self._failed(term.error_type or f"agent_turn_{_state_name(state)}",
+                         term.error_message or term.response_text or f"agent nudge turn {_state_name(state)}",
+                         term.error_code)
 
     # ---- app changes -------------------------------------------------------------------------------------------------
     async def _start_changes(self) -> None:
@@ -1391,8 +1393,9 @@ class _Run:
                                                                 "wake": self.wakes}}})
 
     def _failed(self, error_type: str, error: str, error_code: Optional[str] = None) -> None:
-        """An agent turn failed or timed out: the run ends, and its prompt response carries ``error_type`` the way
-        prompt_agent's does, so verifiers skip it instead of grading it as a normal run."""
+        """An agent turn didn't complete (failed, canceled, rejected or timed out): the run ends, and its prompt
+        response carries ``error_type`` the way prompt_agent's does, so verifiers skip it instead of grading it as a
+        normal run."""
         self.error, self.error_type, self.error_code = error, error_type, error_code
         self.end_reason = "agent_turn_timeout" if error_type == "agent_turn_timeout" else "agent_turn_failed"
 
@@ -1783,6 +1786,15 @@ def _step_part(text: str, source: str) -> dict:
 
 def _clock_time(at: datetime) -> str:
     return at.strftime("%I:%M %p").lstrip("0")
+
+
+def _state_name(state: Any) -> str:
+    """An A2A task state's name ("completed", "failed", "canceled", "rejected"), from the enum or its string."""
+    return str(getattr(state, "value", state))
+
+
+def _completed(state: Any) -> bool:
+    return state == TaskState.completed or _state_name(state) == "completed"
 
 
 def _closing_text(plain: str) -> str:
