@@ -326,12 +326,12 @@ class _Run:
 
     # ---- record ----------------------------------------------------------------------------------------------
     def log(self, event: str, **fields: Any) -> dict:
+        """Add an event to the run's timeline, which keeps it whole; the process log gets only its name, ids, times,
+        counts and sizes (``_log_view``), since texts and reads carry what people wrote."""
         entry = {"event": event, "real_time": datetime.now(timezone.utc).isoformat(),
                  "real_elapsed_s": round(time.time() - self.t0_real, 1), **fields}
         self.timeline.append(entry)
-        logger.info(f"always_on {event}: " + json.dumps({k: v for k, v in fields.items()
-                                                         if k not in ("input", "parts_text", "raw")},
-                                                        default=str)[:400])
+        logger.info(f"always_on {event}: " + json.dumps(_log_view(fields), default=str))
         return entry
 
     # ---- setup -----------------------------------------------------------------------------------------------
@@ -1510,6 +1510,32 @@ def _bounded(pending: dict) -> dict:
         kept = [{k: (v[:PENDING_TEXT_CHARS] + "…" if isinstance(v, str) and len(v) > PENDING_TEXT_CHARS else v)
                  for k, v in item.items()} for item in items[:PENDING_KEPT]]
         out[kind] = {"count": len(items), "items": kept}
+    return out
+
+
+# The timeline fields the process log may show as they are: names, ids, times, states and settings, never what a person
+# or the agent wrote. Any other string is logged as its length, a list as its count, a dict as its keys' view.
+_LOGGED_AS_IS = frozenset({
+    "virtual_time", "from", "to", "reason", "state", "outcome", "mode", "read_at", "deliver_at", "end_time", "agent",
+    "agent_role", "user_sim", "version", "user_model", "time_zone", "kind", "trigger_id", "env_id", "phase",
+    "error_type", "matched_by", "at", "wake", "n", "trajectory_url", "object_url"})
+
+
+def _log_view(fields: dict, depth: int = 0) -> dict:
+    """``fields`` as the process log may show them: see ``_LOGGED_AS_IS``. Bodies and addresses are PII; the full
+    content stays in the stored timeline."""
+    out: dict = {}
+    for k, v in fields.items():
+        if v is None or isinstance(v, (bool, int, float)):
+            out[k] = v
+        elif isinstance(v, str):
+            out[k] = v if k in _LOGGED_AS_IS and len(v) <= 200 else {"chars": len(v)}
+        elif isinstance(v, (list, tuple)):
+            out[k] = {"items": len(v)}
+        elif isinstance(v, dict):
+            out[k] = _log_view(v, depth + 1) if depth < 1 else {"keys": len(v)}
+        else:
+            out[k] = type(v).__name__
     return out
 
 
