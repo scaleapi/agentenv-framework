@@ -162,4 +162,6 @@ async def test_a_malformed_answer_is_retried_once_in_the_same_user_sim_session(m
     [read] = rig.events(ctx, "user_sim_read")
     assert (read["outcome"], read["message"], read["schema_errors"]) == ("reply", "blue!", [])
     assert read["user_sim_turns"] == 2
+    assert read["retried"] is True
+    assert read["first_answer"]["raw"] == "blue, obviously" and read["first_answer"]["schema_errors"]
     assert any("] Linda: blue!" in t for texts in rig.sent for t in texts)
