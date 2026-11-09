@@ -119,13 +119,13 @@ class EpisodeEnv(MessageEnv):
             if turn is None:
                 raise EpisodeError(f"episode {self._episode.id} ended before its first turn")
             await self._open(turn)
+            self._system = turn.system_prompt
+            prefix = self._renderer.create_conversation_prefix_with_tools(tools=self._specs or [],
+                                                                          system_prompt=self._system or "")
+            self.history = [*prefix, {"role": "user", "content": turn.prompt}]
         except BaseException:
             await self.close()  # a failed episode gives its slot back now, not when its group is cleaned up
             raise
-        self._system = turn.system_prompt
-        prefix = self._renderer.create_conversation_prefix_with_tools(tools=self._specs or [],
-                                                                      system_prompt=self._system or "")
-        self.history = [*prefix, {"role": "user", "content": turn.prompt}]
         return self.history
 
     async def step(self, message: Message) -> MessageStepResult:

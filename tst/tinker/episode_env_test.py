@@ -1,8 +1,9 @@
 """The Tinker helper's episodes on the Episode API's fake steps, as tinker-cookbook's rollouts step them: a rollout's
 tool calls run on its turn and its reply ends it with the task's reward, filed in its run group; a later turn's new
 system prompt comes before its prompt; a turn with skills is refused; the turn bound ends a turn; a step's logs are
-clipped; a rollout the cookbook cuts is scored as it is cut, freeing its slot for the rest of
-its group; a bundle's splits as prepared for a trainer to play; and the tasks a dataset plays."""
+clipped; a rollout whose first prompt can't be written is abandoned and frees its slot; a rollout the cookbook cuts is
+scored as it is cut, freeing its slot for the rest of its group; a bundle's splits as prepared for a trainer to play;
+and the tasks a dataset plays."""
 
 import asyncio
 import json
@@ -133,6 +134,26 @@ async def test_a_rollout_the_cookbook_cut_has_its_open_turn_ended_and_is_scored_
 
     assert (reward, metrics["score/replies"], metrics["cut"]) == (0.0, 0.0, 1.0)
     assert await env.score_cut() == (0.0, {"cut": 0.0})
+
+
+class _ToollessRenderer(_Renderer):
+    """Stands in for a cookbook renderer that can't write tools, as ``role_colon`` can't."""
+
+    def create_conversation_prefix_with_tools(self, tools, system_prompt=""):
+        raise NotImplementedError("this renderer does not support tool calling")
+
+
+@pytest.mark.asyncio
+async def test_a_rollout_whose_first_prompt_cant_be_written_is_abandoned_and_frees_its_slot(teardowns, tools):
+    env = tinker.EpisodeEnv("dock", _spec(ITEMS, ALICE, TURN, REPLIES), renderer=_ToollessRenderer(),
+                            reward=_score_at("replies"), model_name="policy", sandbox=None, max_turns=8,
+                            tool_timeout=5, max_concurrent_episodes=1, run_group_id=GROUP)
+
+    with pytest.raises(NotImplementedError, match="does not support tool calling"):
+        await env.initial_observation()
+
+    assert not tinker._slots(1).locked()
+    assert run_store.get_run(f"episode-{env._episode.id}").status == "CANCELED"
 
 
 def _group(group_size, max_concurrent_episodes, max_trajectory_tokens=None):
