@@ -37,6 +37,10 @@ from agent_env.env.envs.playwright_mcp import (
     PLAYWRIGHT_MCP_IMAGE_TAG,
     PLAYWRIGHT_MCP_ENVIRONMENT_NAME,
 )
+from agentenv_protocol.computer.card import COMPUTER_RECORDING
+from agentenv_protocol.types import WELL_KNOWN_PATH
+from agent_env.providers.env_providers.constants import GATEWAY_APP_DIR
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
 from agent_env.env.snapshot_store import compute_env_fingerprint
 from agent_env.config import get_config
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
@@ -1427,6 +1431,31 @@ async def test_gateway_with_single_website_env(slack_website_env, slack_service_
             gateway_entry = next(s for s in state["mcp_servers"] if s["name"] == "gateway")
             gateway_tool_names = [t["name"] for t in gateway_entry["tools"]]
             assert "list_website_urls" in gateway_tool_names
+
+        # The browser is a child of the deploy's card, read where deploys read it, and serves the same card on its MCP
+        # port, where its recorder fronts Playwright MCP; a recording through the gateway films the page an agent opens.
+        browser = protocol_v1.find_child(result.environment_card, PLAYWRIGHT_MCP_ENVIRONMENT_NAME)
+        assert browser is not None, result.environment_card.get("children_environments")
+        sandbox = await LocalSandboxProvider().get_sandbox(result.sandbox_id)
+        card_url = f"http://127.0.0.1:18765{WELL_KNOWN_PATH}"
+        read_card = f"import urllib.request; print(urllib.request.urlopen('{card_url}').read().decode())"
+        served = await sandbox.exec_script(f"cd {GATEWAY_APP_DIR} && docker compose exec -T "
+                                           f"{PLAYWRIGHT_MCP_ENVIRONMENT_NAME} /opt/recorder/bin/python "
+                                           f"-c \"{read_card}\"")
+        on_mcp_port = json.loads(served.strip().splitlines()[-1])
+        assert on_mcp_port["name"] == PLAYWRIGHT_MCP_ENVIRONMENT_NAME
+        assert [e["uri"] for e in on_mcp_port["capabilities"]["extensions"]] == [COMPUTER_RECORDING]
+        start, end = (protocol_v1.find_extension_method(browser, COMPUTER_RECORDING, op)["endpoint"]
+                      for op in ("start", "end"))
+        async with httpx.AsyncClient(headers=result.control_headers, timeout=120) as client:
+            started = (await client.post(f"{result.gateway_url}{start}", json={"request_id": "e2e:start", "fps": 5}))
+            started.raise_for_status()
+            await _step_call_tool(client, result.gateway_url, "browser_navigate",
+                                  {"url": "http://slack-website-frontend:80"})
+            await asyncio.sleep(3)
+            manifest = (await client.post(f"{result.gateway_url}{end}",
+                                          json={"recording_id": started.json()["recording_id"]})).json()
+        assert manifest["segments"] and sum(segment["frames"] for segment in manifest["segments"]) > 0, manifest
 
         # Verify REST proxy: empty channels before loading data
         async with httpx.AsyncClient() as client:

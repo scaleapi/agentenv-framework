@@ -1,8 +1,11 @@
 """The Playwright MCP browser's recorder: computer-recording/v1 of the page Playwright MCP drives, from Chrome DevTools
-screencast frames, on a card and port of its own beside the MCP server. It is idle until a recording starts, which
-finds the browser through the remote debugging port Playwright opens for an ``--isolated`` Chromium and follows the
-page the agent is on. It runs standalone in the browser's image, so it imports only
-``agentenv-framework-protocol[computer]`` and, to talk to the browser, ``websockets``."""
+screencast frames. It is the front of the browser's MCP port: it serves the browser's card and the recording there, as
+any MCP server serves its card at its own address, and passes every other request, streamed, to Playwright MCP on a
+loopback port of its own behind it. It serves the card on ``RECORDER_PORT`` (18766) too, where deploys read it until
+they read it at the MCP port. It is idle until a recording starts, which finds the browser through the remote debugging
+port Playwright opens for an ``--isolated`` Chromium and follows the page the agent is on. It runs standalone in the
+browser's image, so it imports only ``agentenv-framework-protocol[computer]`` and, to talk to the browser,
+``websockets``."""
 from __future__ import annotations
 
 import asyncio
@@ -20,7 +23,12 @@ from pathlib import Path
 from typing import Any, AsyncContextManager, Optional
 
 import httpx
+import uvicorn
 from PIL import Image as PILImage
+from starlette.applications import Starlette
+from starlette.background import BackgroundTask
+from starlette.responses import PlainTextResponse, StreamingResponse
+from starlette.routing import Route
 
 from agentenv_protocol.agent_env_environment import (
     AgentEnvEnvironment,
@@ -33,9 +41,17 @@ from agentenv_protocol.computer.recording import RecordedFrame, RecordHints, Rec
 
 logger = logging.getLogger("playwright-mcp-recorder")
 
-#: The port the recorder serves its card on, unless RECORDER_PORT says another; the gateway reads the browser's card
-#: there (agent_env.env.envs.playwright_mcp.PLAYWRIGHT_MCP_RECORDER_PORT).
+#: The port the recorder serves its card on alone, unless RECORDER_PORT says another; deploys read the browser's card
+#: there (agent_env.env.envs.playwright_mcp.PLAYWRIGHT_MCP_RECORDER_PORT) until they read it at the MCP port.
 DEFAULT_PORT = 18766
+#: The browser's MCP port, which the recorder fronts unless MCP_PORT says another, and the loopback port Playwright MCP
+#: listens on behind it unless PLAYWRIGHT_MCP_PORT says another.
+DEFAULT_MCP_PORT, DEFAULT_PLAYWRIGHT_MCP_PORT = 18765, 18767
+#: How long passing a request to Playwright MCP may wait to connect; its answer may take as long as it does.
+CONNECT_S = 10.0
+#: The headers that belong to one connection, which the front doesn't pass on.
+HOP_HEADERS = frozenset({"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer",
+                         "transfer-encoding", "upgrade", "host"})
 #: How often the browser is looked for while a recording has none.
 FIND_S = 0.5
 #: A page that hasn't changed is filmed again this often, so a still page doesn't split the recording at a gap.
@@ -285,21 +301,55 @@ class _Host:
         return self.driver.frames(hints)
 
 
-def create_app(recorder: BrowserRecorder) -> Any:
-    from starlette.applications import Starlette
-
+def create_app(recorder: BrowserRecorder, behind: Optional[httpx.AsyncClient] = None) -> Any:
+    """The recorder's card and recording, and, as the front of the MCP port, every other request passed to ``behind``,
+    a client whose base URL is Playwright MCP's."""
     app = Starlette()
     AgentEnvStarletteApplication(recorder._build_card(), recorder).add_routes_to_app(app)
+    if behind is not None:
+        app.router.routes.append(Route("/{path:path}", _passing_to(behind), methods=[
+            "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]))
     return app
 
 
-def main() -> None:
-    import uvicorn
+def _passing_to(behind: httpx.AsyncClient) -> Callable:
+    async def passed(request: Any) -> Any:
+        """The request passed to Playwright MCP as it came, its body and its answer streamed, or 502 when Playwright
+        MCP doesn't answer."""
+        has_body = request.method not in ("GET", "HEAD", "OPTIONS") or "content-length" in request.headers
+        sent = behind.build_request(
+            request.method, request.url.path, params=request.url.query or None,
+            headers=[(key, value) for key, value in request.headers.items() if key.lower() not in HOP_HEADERS],
+            content=request.stream() if has_body else None)
+        try:
+            answer = await behind.send(sent, stream=True)
+        except httpx.TransportError as e:
+            return PlainTextResponse(f"Playwright MCP isn't answering: {type(e).__name__}: {e}\n", status_code=502)
+        headers = [(key, value) for key, value in answer.headers.multi_items() if key.lower() not in HOP_HEADERS]
+        return StreamingResponse(answer.aiter_raw(), status_code=answer.status_code, headers=dict(headers),
+                                 background=BackgroundTask(answer.aclose))
 
+    return passed
+
+
+async def serve() -> None:
+    """The front on the MCP port and the card alone on ``RECORDER_PORT``, one recorder behind both."""
+    host, recorder = os.environ.get("MCP_HOST", "0.0.0.0"), BrowserRecorder()
+    playwright_mcp = f"http://127.0.0.1:{os.environ.get('PLAYWRIGHT_MCP_PORT', DEFAULT_PLAYWRIGHT_MCP_PORT)}"
+    behind = httpx.AsyncClient(base_url=playwright_mcp, timeout=httpx.Timeout(None, connect=CONNECT_S))
+    apps = ((create_app(recorder, behind), int(os.environ.get("MCP_PORT", DEFAULT_MCP_PORT))),
+            (create_app(recorder), int(os.environ.get("RECORDER_PORT", DEFAULT_PORT))))
+    servers = [uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="warning")) for app, port in apps]
+    try:
+        await asyncio.gather(*(server.serve() for server in servers))
+    finally:
+        await behind.aclose()
+
+
+def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s recorder %(levelname)s %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)  # a request each time it finds a browser
-    uvicorn.run(create_app(BrowserRecorder()), host=os.environ.get("MCP_HOST", "0.0.0.0"),
-                port=int(os.environ.get("RECORDER_PORT", DEFAULT_PORT)), log_level="warning")
+    asyncio.run(serve())
 
 
 if __name__ == "__main__":
