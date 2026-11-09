@@ -31,9 +31,11 @@ it in the run's metadata under its ``name``; a ``deploy_agent`` step deploys the
   ``scheduled_check_min_interval`` apart; ``scheduled_checks`` turns them on or off whatever the run's length. A
   check's wake counts toward ``max_wakes``.
 - At end_time there is always a final check-in: the user's ``final`` line, or the step's own (``FINAL_DEFAULT_TEXT``)
-  when the task sets none. The run's last wake, at end_time or the one ``max_wakes`` makes the last, carries the
-  last-turn notice (``final_reminder``). After it the user sim reads what the agent sent (its wrap-up), and the
-  user's reaction, and any reply still held, are recorded; then the run ends.
+  when the task sets none. An agent's turn that ends past end_time is followed by it, with whatever came due (a read
+  due before end_time goes first), never by an ordinary wake. The run's last wake, at end_time or the one
+  ``max_wakes`` makes the last, carries the last-turn notice (``final_reminder``). After it the user sim reads what
+  the agent sent (its wrap-up), and the user's reaction, and any reply still held, are recorded; then the run
+  ends.
 - A real-time budget keeps the run inside the hub's 8-hour job (``effective_time_budget`` gives the rule): once one
   more wake might end past ``time_budget_seconds`` (7 h, lowered to fit the task's own timeouts), the agent gets its
   closing wake, with the step's wrap-up line and the last-turn notice, and the run ends with end reason time_budget.
@@ -976,10 +978,17 @@ class _Run:
                      time_budget_seconds=self.time_budget, wake_reserve_seconds=step.wake_reserve_seconds())
             await self._final(now, reason="time_budget")
             return False
-        # 1. a read that is due: the user sim reads what the agent sent
-        if self.read_at is not None and self.read_at <= now and self.unread:
+        # 1. a read that is due: the user sim reads what the agent sent (one due only at or past end_time is the last
+        # read, after the final check-in)
+        if self.read_at is not None and self.read_at <= now and self.unread \
+                and (self.end is None or self.read_at < self.end):
             await self.read(now)
             return True
+        # past end_time (the clock runs during the agent's turns, so one can end past it): the final check-in next, with
+        # whatever else is due, rather than ordinary wakes that would use up max_wakes without one
+        if self.end is not None and now >= self.end:
+            await self._final(now)
+            return False
         # 2. anything due for the agent: notifications, scripted user lines, held replies; and what else comes
         # due in the same minute, so it all arrives in one wake
         if any(h["deliver_at"] <= now for h in self.held) or await self._due_count(self.recipient, now) \

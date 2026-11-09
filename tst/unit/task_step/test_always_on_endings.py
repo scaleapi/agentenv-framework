@@ -58,6 +58,30 @@ async def test_without_a_final_line_the_end_time_still_brings_a_check_in_with_th
 
 
 @pytest.mark.asyncio
+async def test_a_turn_that_runs_past_end_time_is_followed_by_the_final_check_in_not_more_wakes(monkeypatch, tmp_path):
+    """The clock runs during the agent's turns, so one can end past end_time: what is due then (her reply, an alert)
+    comes with the final check-in, rather than in ordinary wakes that use up max_wakes without one."""
+    def chatty(n, texts, rig):
+        rig.message(f"update {n}: anything else?")
+        if n == 1:
+            rig.alert("Live Oak: we can come Friday", channel="Gmail · Live Oak Arbor")
+            rig.gw._clock.advance("2026-11-10T15:00:00Z")  # a long turn: the task's clock runs past end_time
+        return "sent"
+
+    rig = Rig(monkeypatch, tmp_path, agent=chatty,
+              answers=[{"outcome": "reply", "message": f"reply {i}"} for i in range(1, 6)])
+    await rig.arm()
+    ctx = await rig.run(rig.step(end_time="P1D", max_wakes=4))
+
+    assert len(rig.sent) == 2  # the opening wake, then the final check-in
+    final = " ".join(rig.sent[1])
+    assert DEFAULT_FINAL in final and NOTICE in final
+    assert "Linda: reply 1" in final and "Live Oak: we can come Friday" in final
+    assert rig.events(ctx, "wake")[-1]["virtual_time"] == "2026-11-10T15:00:00Z"
+    assert rig.record(ctx)["end_reason"] == "end_time"
+
+
+@pytest.mark.asyncio
 async def test_a_task_s_final_line_is_hers_and_comes_with_the_notice(monkeypatch, tmp_path):
     rig = Rig(monkeypatch, tmp_path, agent=_recaps)
     await rig.arm()
