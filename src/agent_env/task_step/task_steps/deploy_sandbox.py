@@ -12,7 +12,6 @@ from agent_env.task_step.context import DeployedSandbox, TaskStepContext
 from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.attribution import deploy_attribution
-from agent_env.providers.sandbox_providers import sizing
 
 if TYPE_CHECKING:
     from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
@@ -119,8 +118,7 @@ class DeploySandboxTaskStep(TaskStep):
         return None
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
-        from agent_env.providers.sandbox_providers.sandbox_provider import (
-            build_sandbox_provider, get_sandbox_provider, may_create_vm)
+        from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider, get_sandbox_provider
 
         if any(s.sandbox_name == self.sandbox_name for s in context.deployed_sandboxes):
             raise RuntimeError(f"Sandbox '{self.sandbox_name}' is already deployed")
@@ -136,11 +134,9 @@ class DeploySandboxTaskStep(TaskStep):
 
         _ttl_override = user_overrides.get("ttl_seconds")
         resolved_ttl = _ttl_override if _ttl_override is not None else self.ttl_seconds
-        size, attribution = sizing.resolve(self, deploy_attribution(self, context),
-                                           sizing.SandboxSize(self.DEFAULT_CPU, self.DEFAULT_MEMORY_MB),
-                                           # A VM backend runs even a container in a VM of its own, sized by it.
-                                           vm=self.sandbox_mode == "vm" or may_create_vm(resolved_sandbox_type))
-        cpu, memory_mb = size.cpu, size.memory_mb
+        attribution = deploy_attribution(self, context)
+        cpu = self.cpu if self.cpu is not None else self.DEFAULT_CPU
+        memory_mb = self.memory_mb if self.memory_mb is not None else self.DEFAULT_MEMORY_MB
         logger.info(
             f"Deploying sandbox '{self.sandbox_name}' (mode={self.sandbox_mode}, "
             f"image={self.image}, cpu={cpu}, memory_mb={memory_mb}, "

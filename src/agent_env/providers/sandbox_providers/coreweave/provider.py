@@ -32,7 +32,7 @@ from cwsandbox import (
 )
 
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
-from agent_env.attribution import Attribution, identifying
+from agent_env.attribution import Attribution
 from agent_env.config import get_config
 from agent_env.config.errors import ConfigError
 from agent_env.providers.sandbox_providers.coreweave.sandbox import (
@@ -108,7 +108,6 @@ def _tag(text: str) -> str:
 
 def sandbox_tags(attribution: Attribution, create_tag: str) -> list[str]:
     """``agentenv``, the create's unique tag, and one ``key.value`` tag per attribution entry."""
-    attribution = identifying(attribution)
     tags = [SANDBOX_TAG, create_tag]
     tags += [tag for key in sorted(attribution) if (tag := _tag(f"{key}.{attribution[key]}"))]
     return list(dict.fromkeys(tags))

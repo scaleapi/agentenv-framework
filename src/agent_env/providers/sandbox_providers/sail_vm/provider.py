@@ -9,7 +9,7 @@ import re
 import uuid
 from typing import Any, Awaitable, Callable, ClassVar, Self
 
-from agent_env.attribution import PIPELINE_STEP_KEY, RUN_ID_KEY, Attribution, identifying
+from agent_env.attribution import PIPELINE_STEP_KEY, RUN_ID_KEY, Attribution
 from agent_env.config import get_config
 from agent_env.config.errors import ConfigError
 from agent_env.providers.sandbox_providers.sail_vm import _sdk
@@ -65,7 +65,6 @@ def sailbox_shape(cpu: float, memory_mb: int, disk_size_gb: float, *, min_size: 
 
 def sailbox_name(attribution: Attribution) -> str:
     """``ae-<random>`` plus the attribution values in key order, slugged: for people and ``list(search=)``."""
-    attribution = identifying(attribution)
     slugs = [re.sub(r"[^A-Za-z0-9]+", "-", str(attribution[key])).strip("-") for key in sorted(attribution)]
     return "-".join(["ae", uuid.uuid4().hex[:8], *filter(None, slugs)])[:_MAX_NAME_LENGTH].rstrip("-")
 

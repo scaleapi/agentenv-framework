@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 
 from tenki import AsyncClient, SessionNotFoundError
 
-from agent_env.attribution import Attribution, identifying
+from agent_env.attribution import Attribution
 from agent_env.config.errors import ConfigError
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, NetworkPolicyUnsupportedError
 from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider, apply_default_attribution
@@ -103,7 +103,6 @@ def egress_kwargs(policy: NetworkPolicy) -> dict[str, Any]:
 
 def session_name(attribution: Attribution) -> str:
     """``agentenv-<random>`` and the attribution values, slugged into Tenki's 63-character name."""
-    attribution = identifying(attribution)
     slugs = [re.sub(r"[^a-z0-9]+", "-", str(attribution[key]).lower()).strip("-") for key in sorted(attribution)]
     return "-".join(["agentenv", uuid.uuid4().hex[:8], *filter(None, slugs)])[:63].rstrip("-")
 
