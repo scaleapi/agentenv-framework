@@ -98,7 +98,7 @@ def card_servers(card: dict, address: str) -> list[BackingServer]:
 def _listed(child: protocol_v1.ChildEnv, address: str) -> BackingServer:
     from agent_env.env.env import website_child
 
-    return BackingServer(child.name, mcp=not website_child(child), child=child, address=address)
+    return BackingServer(child.known_as, mcp=not website_child(child), child=child, address=address)
 
 
 async def backing_servers(deployed: Optional[DeployedEnv], gateway_url: Optional[str], env: Any,

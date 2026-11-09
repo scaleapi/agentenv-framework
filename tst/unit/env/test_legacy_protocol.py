@@ -211,6 +211,14 @@ def test_card_servers_are_the_cards_children_a_website_told_apart_by_its_route_o
         "https://env.example/svc/mcp-slack", "https://env.example/svc/slack", "https://env.example/svc/mcp-docs"]
 
 
+def test_card_servers_are_named_by_the_environment_name_the_gateway_states_so_snapshots_and_clocks_find_them():
+    card = {"name": "office", "children_environments": [
+        {"name": "Notes App", "url": "/svc/notes/agentenv", "environment_name": "notes"},
+        {"name": "Mail", "url": "/svc/mcp-mail/agentenv", "environment_name": "mail"}]}
+    assert [(s.environment_name, s.mcp) for s in legacy_protocol.card_servers(card, "https://env.example")] == [
+        ("notes", False), ("mail", True)]
+
+
 def test_card_servers_of_a_leaf_card_is_the_env_itself_and_a_composed_card_serving_data_get_comes_first():
     leaf = {"name": "notes", "url": RPC_PATH}
     assert [(s.environment_name, s.card) for s in legacy_protocol.card_servers(leaf, "https://n")] == [("notes", leaf)]

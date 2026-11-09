@@ -200,7 +200,10 @@ address the card was fetched from. On the client side, `client.mcp_path(card)` r
 declared path, or `/mcp` for a card without one.
 
 A composed card, such as a gateway's, nests each backing environment's card under
-`children_environments`, its `url` and endpoints rooted at the route the composer serves it at.
+`children_environments`, its `url` and endpoints rooted at the route the composer serves it at,
+and its `environment_name`: the name the child env is registered as, which its own card's `name`
+needn't be. A lookup by name finds a child by its `environment_name`, else, from a composer that
+states none, by its card's `name` (`ChildEnv.known_as`).
 `client.children(card)` returns each as a `ChildEnv` (its `name`, `url` and `card`, with its
 `extensions`, `operations` and `serves(method)`, and `base_url(address)`, its data plane resolved
 against the composed card's address). Two children may share a name, as a website and an MCP
