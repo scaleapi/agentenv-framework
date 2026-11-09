@@ -63,6 +63,7 @@ def test_the_shipped_env_aliases_name_the_mail_env_the_validator_deploys_the_dri
         "cua-driver": "@local/agentenv-framework/drivers/cua-driver", "page": "@local/agentenv-framework/drivers/page",
         "agent-desktop": "@local/agentenv-framework/drivers/agent-desktop",
         "macos-harness": "@local/agentenv-framework/drivers/macos-harness",
+        "codex-computer-use": "@local/agentenv-framework/drivers/codex-computer-use",
         "chromium": "@local/agentenv-framework/browsers/chromium"}
     assert A2AAgent.VALIDATION_ENV_ID == "mail"
 
