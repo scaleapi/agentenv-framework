@@ -45,7 +45,6 @@ from agent_env.env.envs.service_db import (
     DB_WEB_PORT,
     PGWEB_SERVICE_NAME,
 )
-from agent_env.env.envs.playwright_mcp import PLAYWRIGHT_MCP_RECORDER_PORT
 from agent_env.providers.env_providers.constants import (
     AGENT_ENV_WEBSITE_BACKEND_PORT,
     AGENT_ENV_WEBSITE_BACKEND_SUFFIX,
@@ -109,7 +108,6 @@ class MCPServerConfig:
     image: str
     environment_name: str
     extra_env_vars: dict[str, str] | None = None
-    card_port: int | None = None  # where its env card is served, when not on the MCP port (the website browser's recorder)
 
 
 @dataclass
@@ -479,12 +477,10 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             f"      - INTERNAL_MCP_PORT={gateway_port}",
             "      - GATEWAY_TRAJECTORY_FILE=/var/log/agentenv/trajectory.jsonl",
         ]
-        # Build REST_PROXY_URLS: mcp-{name} for MCP servers + {name} for website backends
-        rest_proxy_urls = []
-        for server in mcp_servers:
-            rest_proxy_urls.append(
-                f"mcp-{server.environment_name}=http://{server.environment_name}:{server.card_port or gateway_port}"
-            )
+        # Build REST_PROXY_URLS: mcp-{name} for MCP servers + {name} for website backends. An MCP server's card and
+        # extensions are read on its MCP port, the website browser's included, as the containers deploy reads them.
+        rest_proxy_urls = [f"mcp-{server.environment_name}=http://{server.environment_name}:{gateway_port}"
+                           for server in mcp_servers]
         if website_configs:
             website_urls = ",".join(
                 f"{wc.environment_name}=http://{wc.environment_name}-{AGENT_ENV_WEBSITE_FRONTEND_SUFFIX}:80"
@@ -777,7 +773,6 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             browser_server = MCPServerConfig(
                 image=website_browser_env.docker_image_artifact.image_name,
                 environment_name=website_browser_env.environment_name,
-                card_port=PLAYWRIGHT_MCP_RECORDER_PORT,
             )
             mcp_servers = list(mcp_servers) + [browser_server]
             mcp_server_images = list(mcp_server_images) + [website_browser_env.docker_image_artifact]

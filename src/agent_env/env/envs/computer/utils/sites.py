@@ -590,8 +590,11 @@ def _env_qualified(found: list[tuple[str, dict]]) -> list[dict]:
 
 
 def _served_as(child) -> str:
-    """The gateway service a child env is served as: the ``<name>`` of the ``/svc/<name>/`` route its url is at, which
-    ``website_frontend_urls`` keys it by, else its card's name."""
+    """The name a website child env is served as, which ``website_frontend_urls`` keys it by: the environment_name its
+    gateway states; from a gateway that states none, the ``<name>`` of the ``/svc/<name>/`` route its url is at, else
+    its card's name."""
+    if child.environment_name:
+        return child.environment_name
     parts = urlsplit(child.url or "").path.strip("/").split("/")
     return parts[1] if len(parts) > 1 and parts[0] == "svc" and parts[1] else child.name
 

@@ -40,7 +40,7 @@ async def _resolve_manifest_endpoint(gateway_url: str, environment_name: str) ->
         logger.debug("env card for %r unavailable (%s); constructing the manifest path", environment_name, e)
         return None
 
-    found = [child for child in protocol_v1.children(card) if child.name == environment_name and not website_child(child)]
+    found = [child for child in protocol_v1.children(card) if child.known_as == environment_name and not website_child(child)]
     if len(found) != 1:
         logger.debug("env card has %s MCP server child named %r; constructing the manifest path",
                      len(found) or "no", environment_name)
