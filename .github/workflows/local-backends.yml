@@ -232,8 +232,7 @@ jobs:
       - name: Share the computer images
         continue-on-error: true
         if: >-
-          always() && steps.tests.outcome == 'success'
-          && (github.event_name == 'push' || github.head_ref == 'andrew-park/ci-shared-computer-images')
+          always() && steps.tests.outcome == 'success' && github.event_name == 'push'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: .venv/bin/python .github/scripts/share_computer_images.py "$COMPUTER_IMAGE_MIRROR"
