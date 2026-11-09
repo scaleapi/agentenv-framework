@@ -13,7 +13,8 @@ from PIL import Image
 from agentenv_protocol.computer.conformance.client import Driver
 
 THUMB = (64, 40)
-FIXTURE = resources.files("agentenv_protocol.computer.conformance").joinpath("fixture.py").read_bytes()
+DESK = {name: resources.files("agentenv_protocol.computer.conformance").joinpath(name).read_bytes()
+        for name in ("fixture.py", "desk.py")}
 
 
 def _thumb(result):
@@ -23,7 +24,8 @@ def _thumb(result):
 
 async def verify(mcp_url, env_url):
     driver = await Driver.connect(env_url, 60)
-    await driver.add_file("desk/fixture.py", FIXTURE)
+    for name, source in DESK.items():
+        await driver.add_file(f"desk/{name}", source)
     await driver.run("sh", "-c", "python3 desk/fixture.py fixture > desk/fixture.log 2>&1 &")
     for _ in range(60):  # the Fixture Desk writes its layout once it is up
         out = await driver.run("cat", "fixture/layout.json")

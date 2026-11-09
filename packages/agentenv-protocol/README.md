@@ -692,14 +692,20 @@ driver booted with a control token is probed with it: `--token`, by default
 | Level | Checks | Needs on the computer |
 |---|---|---|
 | `basic` | P0 ready and a screenshot; P1 the card and tool schemas; P2 native frames, regions and JPEG; P5 refusals and their codes; X the declared extensions (`computer-display`, `computer-spaces`, `computer-keyboard`, `computer-exec`, `data/get`, per-role tool access, the pointer) | nothing |
-| `full` | `basic`, then P3 colours land where the mapping says; P4 clicks show their effect; P5 refusals change nothing; P6 typed and pressed keys arrive; P7 scrolls and drags arrive; P9 commands and `data/add` run as one unprivileged user; X pointer and keyboard input, `data/add`, and a recording's segments matching their files with no gap, a repeated `request_id` joining it and `max_concurrent` held; on a page, X the page tools: a prompt answered, a file uploaded, a reload, navigation, back and forward, and tabs | Linux, `python3` with Tk (on a page, `python3` and `computer-page/v1`), a 1280x800 screen or larger, `computer-exec` and `data/add` |
+| `full` | `basic`, then P3 colours land where the mapping says; P4 clicks show their effect; P5 refusals change nothing; P6 typed and pressed keys arrive; P7 scrolls and drags arrive; P9 commands and `data/add` run as one unprivileged user; X pointer and keyboard input, `data/add`, and a recording's segments matching their files with no gap, a repeated `request_id` joining it and `max_concurrent` held; on a page, X the page tools: a prompt answered, a file uploaded, a reload, navigation, back and forward, and tabs | Linux, `python3` with Tk (on Wayland, with PyGObject and GTK 3 instead; on a page, `python3` and `computer-page/v1`), a 1280x800 screen or larger, `computer-exec` and `data/add` |
 
-At `full` the probe writes the Fixture Desk, a Tk window (`conformance/fixture.py`), into
-`~/.agentenv-probe` with `data/add` and starts it with `computer-exec`. It aims at the boxes the
+At `full` the probe writes the Fixture Desk, a Tk window (`conformance/fixture.py`), and its layout
+(`conformance/desk.py`) into `~/.agentenv-probe` with `data/add` and starts it with `computer-exec`. It aims at the boxes the
 window's widgets report, reads back what reached them, and then removes the fixture. On X11 the
 window is maximized and kept above other windows, raising itself again when one covers it, so a
 window an app keeps on top doesn't take the clicks aimed at it; elsewhere it is full screen. When the
 fixture can't be staged, the `full` checks are unverified rather than failed.
+
+On a driver whose platform's display is Wayland, the desk is drawn with GTK 3 as a native Wayland client
+(`conformance/wayland_fixture.py`, staged beside `desk.py` in the Tk window's place), since Tk runs
+only under XWayland. It goes full screen, takes its origin from Hyprland's IPC, keeps the clipboard
+through wl-clipboard. There the probe selects a text box's text with GTK's own Ctrl+A rather than
+Tk's Ctrl+/.
 
 On a driver whose card says `screen: "page"`, the desk is an HTML page with the same widgets at the
 same places (`conformance/page_fixture.py`). The probe starts its server on loopback, which writes

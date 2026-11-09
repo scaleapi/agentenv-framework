@@ -3,26 +3,19 @@ Desk, whose widgets' screen boxes are written to <state-dir>/layout.json and eve
 whatever lands in <state-dir>/inbox.txt, to <state-dir>/state.json, so the probe can aim at it and read back what
 arrived. It records the same effects under X11, macOS's Aqua and Windows, whose Tk names keys, binds select-all and
 reports the wheel differently. On X11 it stays above an app's windows (``keep_on_top``); elsewhere it's full screen.
-Run as ``python3 fixture.py <state-dir>``; it needs a 1280x800 screen or larger."""
+Its layout and what it records are desk.py's, which the GTK desk shares. Run as ``python3 fixture.py <state-dir>``
+beside desk.py; it needs a 1280x800 screen or larger."""
 from __future__ import annotations
 
 import ctypes
-import json
-import os
 import sys
 import time
 import tkinter as tk
 from pathlib import Path
 
-#: The colours a grid cell cycles through, one more on each click.
-COLOURS = ("#ffffff", "#ff0000", "#00aa00", "#0000ff")
-CELL = 50
-GRID = 8
-#: Single-pixel markers on a black field, at odd and even pixels: (x, y) within the field, then the colour.
-MARKERS = ((11, 11, "#ff0000"), (12, 11, "#00ff00"), (11, 12, "#0000ff"), (12, 12, "#ffff00"), (37, 20, "#ff00ff"),
-           (20, 37, "#00ffff"))
-CLIPBOARD = "agentenv-probe clipboard"
-MIN_SIZE = (1280, 800)
+from desk import (AT, CELL, CLIPBOARD, COLOURS, GRID, INBOX_EVERY_MS, ITEMS, MARKERS, MIN_SIZE, SIZE, new_state,
+                  record_drag, record_key, write_layout, write_state)
+
 #: X11's keysyms for the keys Aqua's Tk names by their character.
 KEYSYMS = {",": "comma", " ": "space"}
 #: A wheel notch's <MouseWheel> delta where Tk scales the wheel: Windows', and Tk 9's everywhere.
@@ -46,15 +39,10 @@ def main(state_dir: Path) -> None:
     else:
         root.attributes("-fullscreen", True)
     root.configure(bg="#f0f0f0")
-    state: dict = {"name": "", "notes": "", "keys": [], "saved_count": 0, "subscribed": False, "selected": None,
-                   "scroll_top": 0.0, "cells": {}, "right_clicks": 0, "double_clicks": 0, "drags": [],
-                   "wheel": {"up": 0, "down": 0, "left": 0, "right": 0}, "clipboard": None, "loaded": None,
-                   "screen": [width, height], "windowing": root.tk.call("tk", "windowingsystem")}
+    state = new_state(width, height, root.tk.call("tk", "windowingsystem"))
 
     def save() -> None:
-        part = state_dir / ".state.json.part"
-        part.write_text(json.dumps(state))
-        os.replace(part, state_dir / "state.json")
+        write_state(state_dir, state)
 
     if width < MIN_SIZE[0] or height < MIN_SIZE[1]:
         state["error"] = f"the screen is {width}x{height}; the fixture needs {MIN_SIZE[0]}x{MIN_SIZE[1]}"
@@ -63,13 +51,13 @@ def main(state_dir: Path) -> None:
         return
 
     font = ("DejaVu Sans", 16)
-    tk.Label(root, text="Name:", font=font, bg="#f0f0f0").place(x=40, y=40)
+    _place(tk.Label(root, text="Name:", font=font, bg="#f0f0f0"), "label")
     name = tk.Entry(root, font=font, width=30)
-    name.place(x=140, y=40)
+    _place(name, "name")
 
     def key(event) -> None:
         state["name"] = name.get()
-        state["keys"] = (state["keys"] + [KEYSYMS.get(event.keysym, event.keysym)])[-100:]
+        record_key(state, KEYSYMS.get(event.keysym, event.keysym))
         state["clipboard"] = _clipboard(root)
         save()
 
@@ -88,7 +76,7 @@ def main(state_dir: Path) -> None:
         save()
 
     button = tk.Button(root, text="Save", font=font, command=on_save, width=8)
-    button.place(x=560, y=34)
+    _place(button, "save")
 
     subscribed = tk.BooleanVar(value=False)
 
@@ -98,10 +86,10 @@ def main(state_dir: Path) -> None:
 
     subscribe = tk.Checkbutton(root, text="Subscribe", font=font, variable=subscribed, command=on_subscribe,
                                bg="#f0f0f0")
-    subscribe.place(x=40, y=100)
+    _place(subscribe, "subscribe")
 
     notes = tk.Text(root, font=("DejaVu Sans", 14), width=28, height=3)
-    notes.place(x=760, y=40)
+    _place(notes, "notes")
 
     def note(event) -> None:
         state["notes"] = notes.get("1.0", "end-1c")
@@ -110,7 +98,7 @@ def main(state_dir: Path) -> None:
     notes.bind("<KeyRelease>", note)
 
     frame = tk.Frame(root)
-    frame.place(x=40, y=160, width=300, height=400)
+    _place(frame, "list", **SIZE["list"])
     listbox = tk.Listbox(frame, font=("DejaVu Sans", 14), exportselection=False)
     listbox.pack(side="left", fill="both", expand=True)
     bar = tk.Scrollbar(frame, command=listbox.yview)
@@ -122,7 +110,7 @@ def main(state_dir: Path) -> None:
         save()
 
     listbox.configure(yscrollcommand=scrolled)
-    for i in range(1, 101):
+    for i in range(1, ITEMS + 1):
         listbox.insert("end", f"Item {i}")
 
     def select(event) -> None:
@@ -133,7 +121,7 @@ def main(state_dir: Path) -> None:
     listbox.bind("<<ListboxSelect>>", select)
 
     grid = tk.Canvas(root, width=GRID * CELL, height=GRID * CELL, bg="#ffffff", highlightthickness=0)
-    grid.place(x=400, y=160)
+    _place(grid, "grid")
     for row in range(GRID):
         for col in range(GRID):
             grid.create_rectangle(col * CELL, row * CELL, (col + 1) * CELL, (row + 1) * CELL, fill=COLOURS[0],
@@ -155,8 +143,8 @@ def main(state_dir: Path) -> None:
     grid.bind("<Button-3>", lambda e: cell(e, True))
     grid.bind("<Double-Button-1>", double)
 
-    pad = tk.Canvas(root, width=400, height=300, bg="#fffbe6", highlightthickness=0)
-    pad.place(x=840, y=160)
+    pad = tk.Canvas(root, **SIZE["pad"], bg="#fffbe6", highlightthickness=0)
+    _place(pad, "pad")
     stroke: list = []
 
     def press(event) -> None:
@@ -170,8 +158,7 @@ def main(state_dir: Path) -> None:
     def release(event) -> None:
         if stroke:
             stroke.append((event.x, event.y))
-            state["drags"] = (state["drags"] + [{"start": stroke[0], "end": stroke[-1], "points": len(stroke),
-                                                 "path": stroke[::max(1, len(stroke) // 50)] + stroke[-1:]}])[-20:]
+            record_drag(state, stroke)
             save()
             stroke.clear()
 
@@ -179,8 +166,8 @@ def main(state_dir: Path) -> None:
     pad.bind("<B1-Motion>", motion)
     pad.bind("<ButtonRelease-1>", release)
 
-    wheel = tk.Canvas(root, width=200, height=120, bg="#e6f0ff", highlightthickness=0)
-    wheel.place(x=840, y=500)
+    wheel = tk.Canvas(root, **SIZE["wheel"], bg="#e6f0ff", highlightthickness=0)
+    _place(wheel, "wheel")
 
     def wheeled(horizontal: bool, steps: int) -> None:
         way = ("left" if horizontal else "up") if steps > 0 else ("right" if horizontal else "down")
@@ -202,8 +189,8 @@ def main(state_dir: Path) -> None:
     if tk.TkVersion >= 8.7:
         wheel.bind("<TouchpadScroll>", lambda e: scrolled(e.delta))
 
-    field = tk.Canvas(root, width=48, height=48, bg="#000000", highlightthickness=0, bd=0)
-    field.place(x=1080, y=500)
+    field = tk.Canvas(root, **SIZE["field"], bg="#000000", highlightthickness=0, bd=0)
+    _place(field, "field")
     for x, y, colour in MARKERS:
         field.create_rectangle(x, y, x + 1, y + 1, fill=colour, outline="", width=0)
 
@@ -212,26 +199,27 @@ def main(state_dir: Path) -> None:
         if message.exists() and (text := message.read_text()) != state["loaded"]:
             state["loaded"] = text
             save()
-        root.after(200, poll_inbox)
+        root.after(INBOX_EVERY_MS, poll_inbox)
 
-    def write_layout() -> None:
+    def layout() -> None:
         root.update_idletasks()
         boxes = {key: [w.winfo_rootx(), w.winfo_rooty(), w.winfo_width(), w.winfo_height()]
                  for key, w in (("name", name), ("save", button), ("subscribe", subscribe), ("notes", notes),
                                 ("list", listbox), ("grid", grid), ("pad", pad), ("wheel", wheel), ("field", field))}
-        boxes["list_row_height"] = listbox.bbox(0)[3] if listbox.bbox(0) else 0
-        boxes["markers"] = [[field.winfo_rootx() + x, field.winfo_rooty() + y, colour] for x, y, colour in MARKERS]
-        boxes["cell"] = CELL
-        boxes["clipboard"] = CLIPBOARD
         save()
-        (state_dir / "layout.json").write_text(json.dumps(boxes))
+        write_layout(state_dir, boxes, listbox.bbox(0)[3] if listbox.bbox(0) else 0,
+                     (field.winfo_rootx(), field.winfo_rooty()))
 
     root.clipboard_clear()
     root.clipboard_append(CLIPBOARD)
     state["clipboard"] = CLIPBOARD
-    root.after(300, write_layout)
+    root.after(300, layout)
     root.after(500, poll_inbox)
     root.mainloop()
+
+
+def _place(widget: tk.Widget, at: str, **size: int) -> None:
+    widget.place(x=AT[at][0], y=AT[at][1], **size)
 
 
 def keep_on_top(root: tk.Tk) -> None:
