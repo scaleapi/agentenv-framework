@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import pytest
 
+from agent_env.a2a_agent import conversation_store
 from agent_env.task_step.task_steps import always_on as ao
 from agent_env.task_step.task_steps.verifiers.agent_prompt_response_verifier import (
     AgentPromptResponseVerifierTaskStep,
@@ -188,6 +189,33 @@ async def test_messages_queued_before_the_run_are_not_the_run_s(monkeypatch, tmp
     [before] = rig.events(ctx, "user_chat_before_run")
     assert [m["text"] for m in before["messages"]] == ["left from an earlier step"]
     assert before["stay_quiet_calls"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_take_refused_before_the_run_still_closes_the_conversation_and_records_the_run(monkeypatch, tmp_path):
+    """The take before the run comes after the graded conversation is made: when the gateway refuses it, the run still
+    leaves its record and prompt response, and the conversation is closed, not left active."""
+    rig = Rig(monkeypatch, tmp_path)
+    real_take = ao._Run._take_messages
+    refused: list[int] = []
+
+    async def refused_once(run):
+        if not refused:  # the take before the run, not finish()'s
+            refused.append(1)
+            raise RuntimeError("the gateway refused the take")
+        return await real_take(run)
+
+    monkeypatch.setattr(ao._Run, "_take_messages", refused_once)
+    await rig.arm()
+    ctx = rig.context()
+    with pytest.raises(RuntimeError, match="the gateway refused the take"):
+        await rig.run(rig.step(), ctx)
+
+    assert rig.sent == []
+    assert rig.record(ctx)["end_reason"] == "step_error"
+    [response] = ctx.prompt_responses
+    assert response.error_type == "step_error"
+    assert conversation_store.get_conversation(ctx.metadata["a2a_conversations"]["week"])["status"] == "closed"
 
 
 # ---- failed turns are errors -----------------------------------------------------------------------------------------
