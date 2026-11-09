@@ -1,6 +1,6 @@
 """Pages a computer's start tabs open, served on this machine, which a computer reaches as ``host.docker.internal``: a
-site's route, whose home page sends itself elsewhere before it loads, or answers an error; two pages titled by name;
-and one that never answers."""
+site's route, whose home page sends itself elsewhere before it loads, or answers an error; pages titled by name; an
+event stream that sends one event and holds the response open; and one that never answers."""
 
 import contextlib
 import http.server
@@ -24,12 +24,22 @@ LEAVING = b"<title>leaving</title><script>location.replace('/landed')</script><i
 def host_pages(site_status: int = 200) -> Iterator[int]:
     """The pages served on every address of this machine while the block runs, at the port it yields: under
     ``/website/shop/``, a site's route, its home page, which sends itself to ``landed`` before it loads, or with any
-    other ``site_status`` answers it, and ``landed``; ``/alpha`` and ``/bravo``; and ``/hang``, which never answers."""
+    other ``site_status`` answers it, and ``landed``; ``/alpha`` and ``/bravo``, and any other path, titled by its last
+    part; an ``events`` path, an event stream that sends one event and holds the response open for ``SLOW_S``; and
+    ``/hang``, which never answers."""
 
     class Page(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             if self.path in ("/hang", "/website/shop/slow"):
                 time.sleep(HANG_S if self.path == "/hang" else SLOW_S)
+                return
+            if self.path.endswith("/events"):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                self.wfile.write(b"data: first\n\n")
+                self.wfile.flush()
+                time.sleep(SLOW_S)
                 return
             home = self.path == "/website/shop/"
             status = site_status if home else 200

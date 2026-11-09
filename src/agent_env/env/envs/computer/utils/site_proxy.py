@@ -4,17 +4,19 @@
 ``python3``, so it uses the standard library alone.
 
 ``install``, as root, maps each exact name to loopback in the hosts file, trusts the deployment's CA in the system
-store, Firefox's policies, Chromium's managed policies and the session user's NSS databases, starts ``serve`` and checks, as the session user, that
-each name loads. ``serve`` listens on loopback: on 443 for a name served over HTTPS, on 80 to redirect those to HTTPS
-and to serve ``.localhost`` names over HTTP, and on 53 for DNS, over UDP and TCP, when a name is a wildcard, which a
-hosts file can't list; it then drops to ``SERVE_USER`` (``nobody``), else the session user, so the agent, which runs as
-the session user, can't stop it, and ``keep``, as root, starts it again should it end. The site sees itself at ``/`` under its own name: the path goes upstream under
-the route's prefix, ``X-Forwarded-Host`` and ``X-Forwarded-Proto`` say the name and scheme the browser used,
-``AgentEnv-Site-Root`` has the gateway tell the site no prefix, so the links it makes are rooted at ``/`` too, and a
-``Location`` or cookie naming the route is rewritten back to the name. Hop-by-hop headers and the browser's own
-``X-Forwarded-*`` never go upstream; ``Transfer-Encoding`` does, since bodies are relayed as framed, and an
-``Alt-Svc`` offering HTTP/3, which the proxy doesn't serve, never reaches the browser. A WebSocket's upgrade is
-relayed, for an upstream that answers it."""
+store, Firefox's policies, Chromium's managed policies and the session user's NSS databases, starts ``serve`` and
+checks, as the session user, that each name loads. ``serve`` listens on loopback: on 443 for a name served over HTTPS,
+on 80 to redirect those to HTTPS and to serve ``.localhost`` names over HTTP, on 53 for DNS, over UDP and TCP, when a
+name is a wildcard, which a hosts file can't list, and, on a browser computer, on ``proxy_port`` (3129) as a forward
+proxy, a browser alone's only route out, which serves the same sites to ``CONNECT`` and to requests naming their URLs
+and refuses any other host at once; it then drops to ``SERVE_USER`` (``nobody``), else the session user, so the agent,
+which runs as the session user, can't stop it, and ``keep``, as root, starts it again should it end. The site sees
+itself at ``/`` under its own name: the path goes upstream under the route's prefix, ``X-Forwarded-Host`` and
+``X-Forwarded-Proto`` say the name and scheme the browser used, ``AgentEnv-Site-Root`` has the gateway tell the site no
+prefix, so the links it makes are rooted at ``/`` too, and a ``Location`` or cookie naming the route is rewritten back
+to the name. Hop-by-hop headers and the browser's own ``X-Forwarded-*`` never go upstream; ``Transfer-Encoding`` does,
+since bodies are relayed as framed, and an ``Alt-Svc`` offering HTTP/3, which the proxy doesn't serve, never reaches the
+browser. A WebSocket's upgrade is relayed, for an upstream that answers it."""
 
 from __future__ import annotations
 
@@ -143,6 +145,7 @@ class Config:
     listen: str = LOOPBACK
     https_port: int = 443
     http_port: int = 80
+    proxy_port: Optional[int] = None
     dns_port: Optional[int] = None
     nameservers: list[str] = field(default_factory=list)
 
@@ -162,7 +165,8 @@ class Config:
         return cls(user=data.get("user"), sites=sites, serve_user=data.get("serve_user"),
                    listen=data.get("listen", LOOPBACK),
                    https_port=data.get("https_port", 443), http_port=data.get("http_port", 80),
-                   dns_port=data.get("dns_port"), nameservers=list(data.get("nameservers") or []))
+                   proxy_port=data.get("proxy_port"), dns_port=data.get("dns_port"),
+                   nameservers=list(data.get("nameservers") or []))
 
     def site_for(self, host: str) -> Optional[Site]:
         """The site ``host`` names: one naming it exactly before one whose wildcard covers it."""
@@ -361,15 +365,61 @@ class SiteProxy:
     """The proxy's HTTP side: one connection's requests, each forwarded on a connection of its own to its site's
     route."""
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, tls: Optional[ssl.SSLContext] = None):
         self.config = config
+        self.tls = tls
         self.upstream_tls = ssl.create_default_context()
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, scheme: str) -> None:
+        await self._serving(reader, writer, scheme, self._requests)
+
+    async def handle_forward(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        """The forward-proxy port's connection: a ``CONNECT`` to a site's name tunnels to the site as the listeners
+        serve it, over TLS with its certificate for a name served over HTTPS; a request naming a site's URL is served
+        as the HTTP listener serves it; any other host, loopback among them, is refused at once and logged."""
+        await self._serving(reader, writer, "proxy", self._proxied)
+
+    async def _requests(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, scheme: str,
+                        peer: str) -> None:
+        while await self.exchange(reader, writer, scheme, peer):
+            pass
+
+    async def _proxied(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, _: str, peer: str) -> None:
+        while (head := await read_head(reader)) is not None:
+            start, headers = parse_head(head)
+            method, _, target = start.partition(" ")
+            target = target.rpartition(" ")[0]
+            if method == "CONNECT":
+                host = split_host(target)
+                if (site := self.config.site_for(host)) is None:
+                    self._refuse(writer, method, target)
+                    return
+                writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                await writer.drain()
+                tls = site.tls(host.lower())
+                if tls:
+                    if self.tls is None:
+                        raise BadRequest(f"{host} is served over HTTPS, and this proxy has no certificate for it")
+                    await writer.start_tls(self.tls)
+                await self._requests(reader, writer, "https" if tls else "http", peer)
+                return
+            named = urlsplit(target).netloc if "://" in target else (header(headers, "host") or "")
+            if self.config.site_for(split_host(named)) is None:
+                self._refuse(writer, method, named or target)
+                return
+            if not await self.exchange(reader, writer, "http", peer, head=head):
+                return
+
+    @staticmethod
+    def _refuse(writer: asyncio.StreamWriter, method: str, host: str) -> None:
+        print(f"site proxy: refused {method} {host}: no site of this computer", file=sys.stderr, flush=True)
+        writer.write(simple_response("403 Forbidden", f"{host} is no site of this computer, and the browser reaches "
+                                     "its sites alone\n", FAILED))
+
+    async def _serving(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, scheme: str, run) -> None:
         peer = (writer.get_extra_info("peername") or (LOOPBACK,))[0]
         try:
-            while await self.exchange(reader, writer, scheme, peer):
-                pass
+            await run(reader, writer, scheme, peer)
         except BadRequest as e:
             writer.write(simple_response("400 Bad Request", f"{e}\n"))
         except (ConnectionError, asyncio.IncompleteReadError, ssl.SSLError, OSError):
@@ -385,9 +435,9 @@ class SiteProxy:
                 pass
 
     async def exchange(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, scheme: str,
-                       peer: str) -> bool:
-        """One request and its answer; whether the connection takes another."""
-        head = await read_head(reader)
+                       peer: str, head: Optional[bytes] = None) -> bool:
+        """One request, read unless its ``head`` is given, and its answer; whether the connection takes another."""
+        head = head or await read_head(reader)
         if head is None:
             return False
         start, headers = parse_head(head)
@@ -395,14 +445,16 @@ class SiteProxy:
             method, target, version = start.split(" ")
         except ValueError:
             raise BadRequest(f"a malformed request line {start!r}") from None
-        host = header(headers, "host") or (urlsplit(target).netloc if "://" in target else "")
+        host = (urlsplit(target).netloc if "://" in target else "") or header(headers, "host") or ""
         site = self.config.site_for(split_host(host)) if host else None
         if site is None:
             writer.write(simple_response("421 Misdirected Request", f"{host or 'no host'} is no site of this "
                                          "computer\n", FAILED))
             return False
         if scheme == "http" and site.tls(split_host(host).lower()):
-            location = f"https://{split_host(host)}{target if target.startswith('/') else urlsplit(target).path}"
+            parts = urlsplit(target)
+            path = target if target.startswith("/") else urlunsplit(("", "", parts.path or "/", parts.query, ""))
+            location = f"https://{split_host(host)}{path}"
             writer.write(simple_response("308 Permanent Redirect", f"{location}\n", (("Location", location),)))
             return False
         upgrade = header(headers, "upgrade") if "upgrade" in tokens(headers, "connection") else None
@@ -602,13 +654,17 @@ def tls_context(config: Config) -> Optional[ssl.SSLContext]:
 
 async def serve(config: Config) -> None:
     """Listen, drop to the user it serves as, and serve until cancelled."""
-    proxy = SiteProxy(config)
+    context = tls_context(config)
+    proxy = SiteProxy(config, tls=context)
     servers = []
-    if (context := tls_context(config)) is not None:
+    if context is not None:
         servers.append(await asyncio.start_server(lambda r, w: proxy.handle(r, w, "https"), config.listen,
                                                   config.https_port, ssl=context, limit=HEAD_LIMIT))
     servers.append(await asyncio.start_server(lambda r, w: proxy.handle(r, w, "http"), config.listen,
                                               config.http_port, limit=HEAD_LIMIT))
+    if config.proxy_port:
+        servers.append(await asyncio.start_server(proxy.handle_forward, config.listen, config.proxy_port,
+                                                  limit=HEAD_LIMIT))
     transport = None
     if config.dns_port:
         resolver = Resolver(config)
@@ -932,8 +988,8 @@ def install(config_path: str, paths: Paths = Paths()) -> dict:
         write_in_place(paths.profile, "".join(f"export {name}={value}\n"
                                               for name, value in given["trust_environment"].items()))
         trust["environment"] = str(paths.profile)
-    serving = {"user": user, "serve_user": serve_user(user), "sites": sites, **{key: given[key] for key in ("listen", "https_port", "http_port")
-                                                 if key in given}}
+    serving = {"user": user, "serve_user": serve_user(user), "sites": sites,
+               **{key: given[key] for key in ("listen", "https_port", "http_port", "proxy_port") if key in given}}
     if wildcard:
         serving.update(dns_port=given.get("dns_port", 53), nameservers=nameservers)
     if upstream_headers:
