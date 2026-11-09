@@ -3,7 +3,8 @@ Each service a composed layer declares (C:\\agentenv\\services\\<name>.json: its
 in its prefix with the build-phase settings the disk fixes, the deploy's environment over them, read from the NoCloud
 seed the launcher attaches (the CIDATA volume; agentenv_protocol.computer.seed, version 1), and its own environment over
 that; one that exits, or couldn't start, starts again after a pause, what kept it from starting written to its log. It
-waits for the seed, and refuses one that carries only versions it doesn't read, as an init does."""
+waits for the seed, and refuses one that carries only versions it doesn't read, as an init does. A seed's trust folder,
+a local transfer CA's, is what TLS clients are pointed at, as a container's are."""
 
 import base64
 import ctypes
@@ -64,7 +65,7 @@ def main() -> None:
             raise SystemExit(f"agentenv-session: no CIDATA seed after {WAIT_S} s")
         time.sleep(1)
     fixed = json.loads(BUILD_SETTINGS.read_text()) if BUILD_SETTINGS.is_file() else {}
-    base = {**os.environ, **fixed, **environment(folder)}
+    base = {**os.environ, **fixed, **trust(folder / "trust"), **environment(folder)}
     specs = [json.loads(path.read_text()) for path in sorted(SERVICES.glob("*.json"))]
     running = {spec["name"]: start(spec, base) for spec in specs}
     while True:
@@ -72,6 +73,14 @@ def main() -> None:
         for spec in specs:
             if (process := running[spec["name"]]) is None or process.poll() is not None:
                 running[spec["name"]] = start(spec, base)
+
+
+def trust(folder: Path) -> dict[str, str]:
+    """The variables that point TLS clients at the trust files in ``folder``, none when it has none."""
+    if not (folder / "ca-bundle.pem").is_file():
+        return {}
+    return {"SSL_CERT_FILE": str(folder / "ca-bundle.pem"), "REQUESTS_CA_BUNDLE": str(folder / "ca-bundle.pem"),
+            "NODE_EXTRA_CA_CERTS": str(folder / "ca.pem")}
 
 
 def start(spec: dict, base: dict[str, str]) -> subprocess.Popen | None:

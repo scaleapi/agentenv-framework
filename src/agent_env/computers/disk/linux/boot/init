@@ -2,6 +2,8 @@
 # The disk form's first process: mounts the root filesystem the computer's image became, brings up the network, reads
 # the image's start (/etc/agentenv/vm/image.env, from its OCI config) and the deploy's environment (the NoCloud seed's
 # user-data), then becomes that start, as its user, as the container runtime would: PID 1 is the image's entrypoint.
+# As a container finds this machine at host.docker.internal, it finds the launcher at QEMU's address for it, which
+# forwards a local grant server's port, and trusts the local transfer CA the seed carries, as a container does.
 /bin/busybox --install -s /bin
 export PATH=/bin
 mount -t proc proc /proc
@@ -35,11 +37,17 @@ while read -r line; do
         workdir) decode "$value"; workdir=$decoded ;;
     esac
 done < "$config"
+if [ -f /seed/trust/ca-bundle.pem ]; then
+    cp /seed/trust/ca-bundle.pem /seed/trust/ca.pem /newroot/etc/agentenv/ || fail "can't copy the seed's trust files"
+    export SSL_CERT_FILE=/etc/agentenv/ca-bundle.pem REQUESTS_CA_BUNDLE=/etc/agentenv/ca-bundle.pem \
+        NODE_EXTRA_CA_CERTS=/etc/agentenv/ca.pem
+fi
 [ -n "$seed" ] && { seed_environment /seed || fail "$refused"; }
 hostname=$( [ -f /seed/meta-data ] && sed -n 's/^local-hostname: *//p' /seed/meta-data)
 hostname "${hostname:-computer}"
 hostname > /newroot/etc/hostname
-printf '127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n127.0.1.1\t%s\n' "$(hostname)" > /newroot/etc/hosts
+printf '127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n127.0.1.1\t%s\n10.0.2.2\thost.docker.internal\n' \
+    "$(hostname)" > /newroot/etc/hosts
 [ -s /resolv.conf ] && cp /resolv.conf /newroot/etc/resolv.conf
 entry=$(awk -F: -v u="${user%%:*}" '$1 == u || $3 == u' /newroot/etc/passwd | head -n 1)
 [ -n "$entry" ] || fail "the image's user ${user%%:*} isn't in /etc/passwd"
