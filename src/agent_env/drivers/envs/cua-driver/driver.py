@@ -417,10 +417,14 @@ async def _focused() -> dict:
 async def _plugin() -> ReadyCheck:
     """That Hyprland has cua-driver's plugin loaded, enabled, built for it and taking input; one restarted after a
     crash runs in safe mode, with no plugins, where input is sent but never arrives, and a plugin loaded again into a
-    running Hyprland answers but has no input seat until the desktop restarts."""
+    running Hyprland answers but has no input seat until the desktop restarts. When Hyprland doesn't answer at all, as
+    once it restarts under a new instance signature after this driver started, it says so instead."""
     status = await asyncio.to_thread(_hyprctl, "cua:status")
     transport = (status or {}).get("transport") or {}
-    if status is None:
+    if status is None and await asyncio.to_thread(_hyprctl, "activeworkspace") is None:
+        problem = ("Hyprland doesn't answer on its IPC; if it restarted after this driver started, restart the driver "
+                   "with it")
+    elif status is None:
         problem = "Hyprland hasn't loaded cua-driver's plugin"
     elif status.get("configured") is not True:
         problem = "cua-driver's plugin is loaded but not enabled"

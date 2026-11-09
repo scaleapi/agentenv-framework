@@ -501,7 +501,7 @@ async def test_on_hyprland_with_nothing_focused_keys_go_to_the_desktop(module, d
 @pytest.mark.usefixtures("hyprland")
 async def test_on_hyprland_input_is_refused_and_not_sent_once_hyprland_runs_without_cua_drivers_plugin(
         module, daemon, monkeypatch):
-    status = {"cua:status": PLUGIN_LOADED}
+    status = {"cua:status": PLUGIN_LOADED, "activeworkspace": {"id": 1}}
     monkeypatch.setattr(module, "_hyprctl", lambda request: status.get(request))
     driver = module.CuaDriver()
     await driver.click_at(10, 20, "left", 1, [])
@@ -526,10 +526,12 @@ async def test_on_hyprland_readiness_checks_every_time_that_hyprland_has_cua_dri
     driver = module.CuaDriver()
     monkeypatch.setattr(module, "_executable_sha256", lambda: module.EXECUTABLES[driver.platform.arch])
     statuses = iter([PLUGIN_LOADED, None, {**PLUGIN_LOADED, "configured": False},
-                     {**PLUGIN_LOADED, "abi": {"match": False}}, PLUGIN_RELOADED])
-    monkeypatch.setattr(module, "_hyprctl", lambda request: next(statuses) if request == "cua:status" else None)
+                     {**PLUGIN_LOADED, "abi": {"match": False}}, PLUGIN_RELOADED, None])
+    workspaces = iter([{"id": 1}, None])
+    monkeypatch.setattr(module, "_hyprctl",
+                        lambda request: next({"cua:status": statuses, "activeworkspace": workspaces}[request]))
 
-    checks = [await driver.ready_checks() for _ in range(5)]
+    checks = [await driver.ready_checks() for _ in range(6)]
 
     assert [(c.name, c.ok) for c in checks[0]] == [("cua-driver", True), ("cua-driver tools", True),
                                                     ("cua-driver plugin", True)]
@@ -538,7 +540,9 @@ async def test_on_hyprland_readiness_checks_every_time_that_hyprland_has_cua_dri
         (False, "cua-driver's plugin is loaded but not enabled"),
         (False, "cua-driver's plugin was built for another Hyprland"),
         (False, "cua-driver's plugin isn't taking input: input seat lifetime unavailable; restart the desktop before "
-                "loading a replacement plugin")]
+                "loading a replacement plugin"),
+        (False, "Hyprland doesn't answer on its IPC; if it restarted after this driver started, restart the driver "
+                "with it")]
     assert sum(1 for _, r in daemon.requests if r["method"] == "list") == 1
 
 
