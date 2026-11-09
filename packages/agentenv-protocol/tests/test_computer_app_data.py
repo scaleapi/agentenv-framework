@@ -2,7 +2,8 @@
 the defaults: a load writes files under them, through no link out of them, an export returns them, and a reset puts back
 the copy its server kept before it served; its card declares a file tree. Hooks override paths, and read the parts they
 get with part_bytes. Around a load and a reset the app is stopped and relaunched, a failed load is followed by a reset,
-and data calls take turns; an app that loads live is left running through a load, and a failed one is reset with it
+and data calls take turns; an export of a file the paused app holds stops it and relaunches it after; an app that
+loads live is left running through a load, and a failed one is reset with it
 stopped, or left as it is when the app says so; an app with hooks may keep its paths as installed. A call past
 data_timeout_s fails then and is cancelled, but a sync hook runs in a thread, which its reset and relaunch, and the next
 call, wait for. The app serves its skill file."""
@@ -208,6 +209,32 @@ async def test_a_load_and_a_reset_stop_the_running_app_and_relaunch_it_and_an_ex
 
     assert desktop == [("launch", 4242), ("stop", 4242), ("launch", 4244), ("pause", 4244), ("continue", 4244),
                        ("stop", 4244), ("launch", 4248)]
+
+
+@pytest.mark.asyncio
+async def test_an_export_of_a_file_the_paused_app_holds_stops_the_app_copies_it_and_relaunches_it(home, desktop,
+                                                                                                 monkeypatch):
+    """As Windows lets an app hold a file that no other process may read, which a pause doesn't release."""
+    (home / "Mail").mkdir()
+    (home / "Mail/inbox.txt").write_text("held")
+    mail = PathsMail()
+    mail._computer_app_data_plane().keep_initial()
+    await mail._computer_app.launch_app()
+    stage = app_data._stage
+
+    def held_while_running(*args):
+        if desktop[-1][0] == "pause":
+            held = PermissionError(13, "The process cannot access the file", str(home / "Mail/inbox.txt"))
+            held.winerror = 32
+            raise held
+        stage(*args)
+
+    monkeypatch.setattr(app_data, "_stage", held_while_running)
+    async with _http(mail) as http:
+        exported = _files(await _rpc(http, "data/get", {}))
+
+    assert [event[0] for event in desktop] == ["launch", "pause", "continue", "stop", "launch"]
+    assert desktop[3] == ("stop", 4242) and exported["Mail/inbox.txt"] == b"held"
 
 
 @pytest.mark.asyncio

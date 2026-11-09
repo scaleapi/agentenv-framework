@@ -1,7 +1,9 @@
 """An app's data plane as its own server serves it (``AppDataPlane``), by the app's data hooks or, with none, the
 defaults on the paths it keeps its data in, under the session user's home: a load writes the files it's given under
 them, an export returns the files there, and a reset puts back the copy its server kept when it first started on this
-boot, which is the app as installed, since every boot starts from the computer's image."""
+boot, which is the app as installed, since every boot starts from the computer's image. An export copies the files with
+the app paused, or, where the app holds one so that no other process may read it, as Windows lets an app hold a file
+and a pause doesn't release, with it stopped and relaunched after."""
 from __future__ import annotations
 
 import asyncio
@@ -17,7 +19,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 from ..agent_env_environment import OP_ADD_DATA, OP_GET_DATA, OP_RESET_DATA
 from ..transfers import WriteNamespaceGrant
-from ..types import METHOD_ADD, METHOD_RESET, FilePart, uploaded_object_path
+from ..types import METHOD_ADD, METHOD_GET, METHOD_RESET, FilePart, uploaded_object_path
 from .app_runtime import paused_app
 from .dataplane import data_files, file_parts, part_bytes
 
@@ -27,15 +29,24 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 #: The cause a launch after each data call logs.
-_CAUSES = {OP_ADD_DATA: METHOD_ADD, OP_RESET_DATA: METHOD_RESET}
+_CAUSES = {OP_ADD_DATA: METHOD_ADD, OP_GET_DATA: METHOD_GET, OP_RESET_DATA: METHOD_RESET}
 #: Where an app's server keeps its paths as installed, in the app's folder.
 INITIAL = Path(".agentenv/initial")
+#: Windows' errors for a file another process holds so that no other may read it: a sharing violation, and a lock on
+#: the part read.
+_HELD = (32, 33)
+
+
+class HeldByApp(OSError):
+    """A file under the app's paths that the running app holds so that no other process may read it, which stopping
+    the app releases and pausing it doesn't."""
 
 
 class AppDataPlane:
     """An app's data plane, served around its contract: one data call or launch at a time; a load and a reset stop the
     running app first and relaunch it after, but for those the app serves live, and a load that fails is followed by a
-    reset, when the app says so. A call fails once it runs
+    reset, when the app says so; an export the app holds a file of (``HeldByApp``) stops it and relaunches it too. A
+    call fails once it runs
     past ``timeout_s`` and is cancelled: what awaits stops at once, but a thread can't be stopped, so a sync hook's or
     a default's thread is waited for, as are the reset and relaunch after it and the next call."""
 
@@ -90,7 +101,11 @@ class AppDataPlane:
             running = op != OP_GET_DATA and op not in self.live and await self.runtime.stop_app()
             ran = op in self.live and self.runtime.running()
             try:
-                result = await self._within(op, served, args, answer)
+                try:
+                    result = await self._within(op, served, args, answer)
+                except HeldByApp:
+                    running = await self.runtime.stop_app()
+                    result = await self._within(op, served, args, answer)
             except Exception:
                 if op == OP_ADD_DATA and self.resets_failed_add():
                     if op in self.live:
@@ -185,11 +200,17 @@ async def add(parts: list, paths: list[str]) -> None:
 
 async def get(paths: list[str], write_namespace: Optional[WriteNamespaceGrant]) -> list:
     """A part for each file under ``paths``, copied with the app this server launched paused (``paused_app``), so they
-    are of one moment, and sent from the copy once it runs again; an app's own data/get hook calls it so too."""
+    are of one moment, and sent from the copy once it runs again; an app's own data/get hook calls it so too. A file
+    the paused app holds raises ``HeldByApp``, for its data plane to copy them with it stopped."""
     INITIAL.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=INITIAL.parent) as staging:
-        with paused_app():
-            await in_thread(_stage, Path.home(), paths, Path(staging))
+        try:
+            with paused_app():
+                await in_thread(_stage, Path.home(), paths, Path(staging))
+        except OSError as e:
+            if getattr(e, "winerror", None) in _HELD:
+                raise HeldByApp(f"the running app holds {e.filename or 'a file'} so that nothing else may read it") from e
+            raise
         return await file_parts(Path(staging), paths, write_namespace)
 
 
