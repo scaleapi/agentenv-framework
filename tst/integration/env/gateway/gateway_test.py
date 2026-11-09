@@ -1504,10 +1504,12 @@ async def test_the_browsers_card_and_recording_through_the_gateway_survive_its_r
         start, end = (protocol_v1.find_extension_method(browser, COMPUTER_RECORDING, op)["endpoint"]
                       for op in ("start", "end"))
         compose = f"cd {GATEWAY_APP_DIR} && docker compose"
+        # The recorder by its interpreter, which nothing else runs: the local sandbox rewrites /app in a script.
+        recorder_python = "/opt/recorder/bin/python"
 
         async def processes(pattern: str, signal: int | None = None) -> list[str]:
             argv = [pattern, *([str(signal)] if signal is not None else [])]
-            out = await sandbox.exec_script(f"{compose} exec -T {browser_name} /opt/recorder/bin/python -c "
+            out = await sandbox.exec_script(f"{compose} exec -T {browser_name} {recorder_python} -c "
                                             f"{shlex.quote(PROCESSES)} {' '.join(map(shlex.quote, argv))}")
             return out.strip().splitlines()[-1].split() if out.strip() else []
 
@@ -1546,10 +1548,10 @@ async def test_the_browsers_card_and_recording_through_the_gateway_survive_its_r
             assert (await card(client))["name"] == browser_name
             assert filmed(await record(client, "chaos:before")), "a recording before any restart filmed nothing"
 
-            serving, recorder = await processes("@playwright/mcp"), await processes("/app/recorder.py")
-            assert serving and recorder and await processes("/app/recorder.py", 9) == recorder
+            serving, recorder = await processes("@playwright/mcp"), await processes(recorder_python)
+            assert serving and recorder and await processes(recorder_python, 9) == recorder
             assert (await card(client))["name"] == browser_name
-            assert (back := await processes("/app/recorder.py")) and back != recorder
+            assert (back := await processes(recorder_python)) and back != recorder
             assert await processes("@playwright/mcp") == serving
             assert filmed(await record(client, "chaos:recorder-killed")), "no film after the recorder came back"
 
