@@ -199,14 +199,17 @@ def main(state_dir: Path) -> None:
     pad.connect("button-release-event", release)
 
     wheel = _area(200, 120)
+    wheel.add_events(Gdk.EventMask.SMOOTH_SCROLL_MASK)
     desk.put(wheel, 840, 500)
-    ways = {Gdk.ScrollDirection.UP: "up", Gdk.ScrollDirection.DOWN: "down", Gdk.ScrollDirection.LEFT: "left",
-            Gdk.ScrollDirection.RIGHT: "right"}
 
     def wheeled(_area_, event) -> bool:
-        if way := ways.get(event.direction):
-            state["wheel"][way] += 1
-            save()
+        """A step a scroll event: by its smooth deltas, since GTK 3 on Wayland names a horizontal wheel's discrete
+        direction the wrong way round, a step left RIGHT, where its deltas and GTK 4 have it left."""
+        _, dx, dy = event.get_scroll_deltas()
+        for way, delta in (("left" if dx < 0 else "right", dx), ("up" if dy < 0 else "down", dy)):
+            if delta:
+                state["wheel"][way] += 1
+        save()
         return True
 
     wheel.connect("draw", lambda _a, cr: (cr.set_source_rgb(*_rgb("#e6f0ff")), cr.paint()))

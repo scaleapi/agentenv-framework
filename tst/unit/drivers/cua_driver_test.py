@@ -447,9 +447,9 @@ def test_on_windows_a_call_waits_out_a_busy_or_briefly_absent_pipe_and_a_daemon_
 
 
 @pytest.mark.asyncio
-async def test_on_wayland_keys_go_to_the_focused_window_in_the_foreground_and_text_skips_xs_keymap(
+async def test_on_hyprland_keys_go_to_the_focused_window_in_the_foreground_and_text_skips_xs_keymap(
         module, daemon, monkeypatch):
-    for name, value in (("MACOS", False), ("FOREGROUND", {}), ("WAYLAND", True)):
+    for name, value in (("MACOS", False), ("FOREGROUND", {}), ("HYPRLAND", True)):
         monkeypatch.setattr(module, name, value)
     asked = []
 
@@ -473,9 +473,9 @@ async def test_on_wayland_keys_go_to_the_focused_window_in_the_foreground_and_te
 
 
 @pytest.mark.asyncio
-async def test_on_wayland_with_nothing_focused_keys_go_to_the_desktop(module, daemon, monkeypatch):
+async def test_on_hyprland_with_nothing_focused_keys_go_to_the_desktop(module, daemon, monkeypatch):
     monkeypatch.setattr(module, "MACOS", False)
-    monkeypatch.setattr(module, "WAYLAND", True)
+    monkeypatch.setattr(module, "HYPRLAND", True)
     monkeypatch.setattr(module, "_hyprctl", lambda request: {})
 
     await module.CuaDriver().press_keys(["Escape"])
@@ -484,9 +484,9 @@ async def test_on_wayland_with_nothing_focused_keys_go_to_the_desktop(module, da
 
 
 @pytest.mark.asyncio
-async def test_on_wayland_readiness_checks_every_time_that_hyprland_has_cua_drivers_plugin(module, daemon, monkeypatch):
+async def test_on_hyprland_readiness_checks_every_time_that_hyprland_has_cua_drivers_plugin(module, daemon, monkeypatch):
     monkeypatch.setattr(module, "MACOS", False)
-    monkeypatch.setattr(module, "WAYLAND", True)
+    monkeypatch.setattr(module, "HYPRLAND", True)
     driver = module.CuaDriver()
     monkeypatch.setattr(module, "_executable_sha256", lambda: module.EXECUTABLES[driver.platform.arch])
     loaded = {"configured": True, "abi": {"match": True}}
@@ -504,14 +504,14 @@ async def test_on_wayland_readiness_checks_every_time_that_hyprland_has_cua_driv
     assert sum(1 for _, r in daemon.requests if r["method"] == "list") == 1
 
 
-def test_on_wayland_the_daemon_waits_for_the_compositor_and_runs_cua_drivers_wayland_backend(module, monkeypatch):
+def test_on_hyprland_the_daemon_waits_for_the_compositor_and_runs_cua_drivers_wayland_backend(module, monkeypatch):
     started = []
 
     def execve(path, argv, env):
         started.append((argv, env))
         raise SystemExit
     with tempfile.TemporaryDirectory(dir="/tmp", prefix="cd-") as runtime:
-        monkeypatch.setattr(module, "WAYLAND", True)
+        monkeypatch.setattr(module, "HYPRLAND", True)
         monkeypatch.setenv("XDG_RUNTIME_DIR", runtime)
         monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-1")
         monkeypatch.setattr(module, "_executable", lambda: Path("/opt/cua-driver"))
