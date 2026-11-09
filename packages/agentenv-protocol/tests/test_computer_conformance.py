@@ -235,7 +235,7 @@ async def test_a_wayland_computer_is_probed_with_the_gtk_desk_beside_the_tk_desk
     report = await _probe(driver)
 
     assert report.passed, _failed(report)
-    assert driver.staged == ["fixture.py", "wayland_fixture.py"]
+    assert driver.staged == ["desk.py", "wayland_fixture.py"]
     assert ["kill", "4242"] in driver.commands and not (home / checks.STAGE).exists()
 
 
@@ -437,10 +437,28 @@ def test_the_fixture_gives_the_focus_back_to_the_text_box_that_had_it_when_it_ta
 
 
 def _fixture(monkeypatch):
-    """The fixture module, which runs in the computer, read with Tk stood in for, as this Python may have none."""
+    """The fixture module, which runs in the computer, read with Tk stood in for, as this Python may have none, and
+    with desk.py importable as it is beside the fixture in the computer."""
     monkeypatch.setitem(sys.modules, "tkinter", ModuleType("tkinter"))
+    monkeypatch.syspath_prepend(str(Path(checks.__file__).parent))
     monkeypatch.delitem(sys.modules, "agentenv_protocol.computer.conformance.fixture", raising=False)
     return importlib.import_module("agentenv_protocol.computer.conformance.fixture")
+
+
+def test_the_gtk_desk_starts_on_a_computer_without_tk(monkeypatch):
+    gi = ModuleType("gi")
+    gi.require_version = lambda namespace, version: None
+    gi.repository = SimpleNamespace(Gdk=None, GLib=None, Gtk=None)
+    monkeypatch.setitem(sys.modules, "gi", gi)
+    monkeypatch.setitem(sys.modules, "gi.repository", gi.repository)
+    monkeypatch.setitem(sys.modules, "tkinter", None)
+    monkeypatch.syspath_prepend(str(Path(checks.__file__).parent))
+    for name in ("desk", "wayland_fixture"):
+        monkeypatch.delitem(sys.modules, name, raising=False)
+
+    gtk_desk = importlib.import_module("wayland_fixture")
+
+    assert gtk_desk.AT["grid"] == (400, 160)
 
 
 def test_a_refusal_must_carry_the_code_and_applied_no():

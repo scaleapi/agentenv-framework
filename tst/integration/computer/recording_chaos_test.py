@@ -33,7 +33,8 @@ FPS = 10
 
 
 ARCH = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}[platform.machine().lower()]
-FIXTURE = resources.files("agentenv_protocol.computer.conformance").joinpath("fixture.py").read_bytes()
+DESK = {name: resources.files("agentenv_protocol.computer.conformance").joinpath(name).read_bytes()
+        for name in ("fixture.py", "desk.py")}
 
 
 @pytest.fixture(scope="module")
@@ -147,7 +148,8 @@ async def _ready(name: str) -> Driver:
 
 async def _layout(driver: Driver) -> dict:
     """The Fixture Desk, started through data/add and computer-exec as the probe starts it, once it wrote its layout."""
-    await driver.add_file("desk/fixture.py", FIXTURE)
+    for name, source in DESK.items():
+        await driver.add_file(f"desk/{name}", source)
     await driver.run("sh", "-c", "python3 desk/fixture.py fixture > desk/fixture.log 2>&1 &")
     for _ in range(120):
         out = await driver.run("cat", "fixture/layout.json")

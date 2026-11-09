@@ -60,14 +60,19 @@ from agentenv_protocol.computer import (
 )
 
 MACOS, WINDOWS = sys.platform == "darwin", sys.platform == "win32"
-#: A Hyprland desktop, on Wayland, where cua-driver runs its Wayland backend and its input goes through the seats of its
-#: Hyprland plugin; what follows reaches Hyprland's IPC, so it's Hyprland's session that turns it on, not any Wayland one.
+#: A Hyprland desktop, on Wayland, where cua-driver runs its Wayland backend and its input goes through the seats of
+#: its Hyprland plugin; what follows reaches Hyprland's IPC, so it's Hyprland's session that turns it on, not any
+#: Wayland one.
 HYPRLAND = sys.platform == "linux" and bool(os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"))
 #: Where cua-driver's daemon listens: on Hyprland in the session user's runtime folder, which the session's units share.
-SOCKET = (r"\\.\pipe\agentenv-cua-driver" if WINDOWS else
-          str(Path("/tmp/agentenv-cua-driver.sock" if MACOS else
-                   Path(os.environ["XDG_RUNTIME_DIR"]) / "agentenv-cua-driver.sock" if HYPRLAND
-                   else "/run/agentenv/cua-driver.sock")))
+if WINDOWS:
+    SOCKET = r"\\.\pipe\agentenv-cua-driver"
+elif MACOS:
+    SOCKET = "/tmp/agentenv-cua-driver.sock"
+elif HYPRLAND:
+    SOCKET = str(Path(os.environ["XDG_RUNTIME_DIR"]) / "agentenv-cua-driver.sock")
+else:
+    SOCKET = "/run/agentenv/cua-driver.sock"
 #: What cua-driver's own MCP server (``cua-driver mcp``) says at connect and lists at the pinned version on each OS: its
 #: instructions, its tools, which the running daemon must list the same, and its skill resources.
 MANIFEST = Path(__file__).with_name("mcp-macos.json" if MACOS else "mcp-windows.json" if WINDOWS else "mcp.json")
@@ -409,12 +414,14 @@ async def _plugin() -> ReadyCheck:
     mode, with no plugins, where input is sent but never arrives."""
     status = await asyncio.to_thread(_hyprctl, "cua:status")
     if status is None:
-        return ReadyCheck("cua-driver plugin", False, "Hyprland hasn't loaded cua-driver's plugin")
-    if status.get("configured") is not True:
-        return ReadyCheck("cua-driver plugin", False, "cua-driver's plugin is loaded but not enabled")
-    if (status.get("abi") or {}).get("match") is not True:
-        return ReadyCheck("cua-driver plugin", False, "cua-driver's plugin was built for another Hyprland")
-    return ReadyCheck("cua-driver plugin", True, "loaded, enabled and built for this Hyprland")
+        problem = "Hyprland hasn't loaded cua-driver's plugin"
+    elif status.get("configured") is not True:
+        problem = "cua-driver's plugin is loaded but not enabled"
+    elif (status.get("abi") or {}).get("match") is not True:
+        problem = "cua-driver's plugin was built for another Hyprland"
+    else:
+        return ReadyCheck("cua-driver plugin", True, "loaded, enabled and built for this Hyprland")
+    return ReadyCheck("cua-driver plugin", False, problem)
 
 
 def _hyprctl(request: str) -> dict | None:
@@ -473,10 +480,11 @@ def _skill_pack() -> tuple[str, str, dict[str, str]]:
 
 
 def _daemon() -> None:
-    """Run cua-driver's daemon once the display answers, X or on Wayland the compositor, with its Wayland backend: from the session user's home, where the apps it launches start too, on
-    the socket the driver reaches it at, with approvals off, since nobody is at the computer to give them, and nothing
-    sent to trycua. On Windows, in the session user's sign-in, as agentenv-session starts it, and waited on, since
-    Windows has no exec: one that exits is started again."""
+    """Run cua-driver's daemon once the display answers, X's or on Hyprland the compositor's, there with its Wayland
+    backend: from the session user's home, where the apps it launches start too, on the socket the driver reaches it
+    at, with approvals off, since nobody is at the computer to give them, and nothing sent to trycua. On Windows, in
+    the session user's sign-in, as agentenv-session starts it, and waited on, since Windows has no exec: one that exits
+    is started again."""
     if WINDOWS:
         os.chdir(Path.home())
         sys.exit(subprocess.run([str(_executable()), "serve", "--socket", SOCKET, "--dangerously-bypass-approvals",

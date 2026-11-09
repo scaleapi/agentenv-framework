@@ -1,8 +1,9 @@
 """The probe's fixture on a Wayland desktop: fixture.py's Fixture Desk drawn with GTK 3 as a native Wayland client,
 since Tk runs only under XWayland, whose windows a Wayland driver may not reach. Same widgets at the same places, and
-the same layout.json and state.json. Wayland tells a client nothing of where its window is, so it goes full screen
-and takes its origin from Hyprland's IPC when it answers; the clipboard goes through wl-clipboard, which needs no
-focus. Run as ``python3 wayland_fixture.py <state-dir>``; it needs a 1280x800 screen or larger and PyGObject."""
+the same layout.json and state.json, all from desk.py, which is staged beside it. Wayland tells a client
+nothing of where its window is, so it goes full screen and takes its origin from Hyprland's IPC when it answers; the
+clipboard goes through wl-clipboard, which needs no focus. Run as ``python3 wayland_fixture.py <state-dir>``; it needs
+a 1280x800 screen or larger and PyGObject."""
 from __future__ import annotations
 
 import json
@@ -17,7 +18,8 @@ gi.require_version("Gdk", "3.0")
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
-from fixture import CELL, CLIPBOARD, COLOURS, GRID, MARKERS, MIN_SIZE  # noqa: E402
+from desk import (AT, CELL, CLIPBOARD, COLOURS, GRID, INBOX_EVERY_MS, ITEMS, MARKERS, MIN_SIZE, SIZE,  # noqa: E402
+                  new_state, record_drag, record_key, write_layout, write_state)
 
 #: How often the fixture asks Hyprland where its window is until it's there, and for how long.
 PLACE_EVERY_MS, PLACE_TRIES = 100, 50
@@ -29,15 +31,10 @@ def main(state_dir: Path) -> None:
     GLib.set_prgname("FixtureDesk")
     monitor = Gdk.Display.get_default().get_monitor(0).get_geometry()
     width, height = monitor.width, monitor.height
-    state: dict = {"name": "", "notes": "", "keys": [], "saved_count": 0, "subscribed": False, "selected": None,
-                   "scroll_top": 0.0, "cells": {}, "right_clicks": 0, "double_clicks": 0, "drags": [],
-                   "wheel": {"up": 0, "down": 0, "left": 0, "right": 0}, "clipboard": None, "loaded": None,
-                   "screen": [width, height], "windowing": "wayland"}
+    state = new_state(width, height, "wayland")
 
     def save() -> None:
-        part = state_dir / ".state.json.part"
-        part.write_text(json.dumps(state))
-        os.replace(part, state_dir / "state.json")
+        write_state(state_dir, state)
 
     if width < MIN_SIZE[0] or height < MIN_SIZE[1]:
         state["error"] = f"the screen is {width}x{height}; the fixture needs {MIN_SIZE[0]}x{MIN_SIZE[1]}"
@@ -54,13 +51,13 @@ def main(state_dir: Path) -> None:
     desk = Gtk.Fixed()
     window.add(desk)
 
-    desk.put(Gtk.Label(label="Name:"), 40, 40)
+    desk.put(Gtk.Label(label="Name:"), *AT["label"])
     name = Gtk.Entry(width_chars=30)
-    desk.put(name, 140, 40)
+    desk.put(name, *AT["name"])
 
     def key(_widget, event) -> bool:
         state["name"] = name.get_text()
-        state["keys"] = (state["keys"] + [Gdk.keyval_name(event.keyval)])[-100:]
+        record_key(state, Gdk.keyval_name(event.keyval))
         state["clipboard"] = _clipboard()
         save()
         return False
@@ -81,7 +78,7 @@ def main(state_dir: Path) -> None:
     button = Gtk.Button(label="Save")
     button.set_size_request(120, -1)
     button.connect("clicked", on_save)
-    desk.put(button, 560, 34)
+    desk.put(button, *AT["save"])
 
     def on_subscribe(check) -> None:
         state["subscribed"] = check.get_active()
@@ -89,7 +86,7 @@ def main(state_dir: Path) -> None:
 
     subscribe = Gtk.CheckButton(label="Subscribe")
     subscribe.connect("toggled", on_subscribe)
-    desk.put(subscribe, 40, 100)
+    desk.put(subscribe, *AT["subscribe"])
 
     notes = Gtk.TextView()
     notes.set_size_request(340, 80)
@@ -102,17 +99,17 @@ def main(state_dir: Path) -> None:
         return False
 
     notes.connect("key-release-event", note)
-    desk.put(notes, 760, 40)
+    desk.put(notes, *AT["notes"])
 
     items = Gtk.ListStore(str)
-    for i in range(1, 101):
+    for i in range(1, ITEMS + 1):
         items.append([f"Item {i}"])
     listing = Gtk.TreeView(model=items, headers_visible=False)
     listing.append_column(Gtk.TreeViewColumn("Item", Gtk.CellRendererText(), text=0))
     scroller = Gtk.ScrolledWindow()
-    scroller.set_size_request(300, 400)
+    scroller.set_size_request(SIZE["list"]["width"], SIZE["list"]["height"])
     scroller.add(listing)
-    desk.put(scroller, 40, 160)
+    desk.put(scroller, *AT["list"])
 
     def scrolled(adjustment) -> None:
         upper = adjustment.get_upper()
@@ -129,7 +126,7 @@ def main(state_dir: Path) -> None:
     listing.get_selection().connect("changed", select)
 
     grid = _area(GRID * CELL, GRID * CELL)
-    desk.put(grid, 400, 160)
+    desk.put(grid, *AT["grid"])
 
     def draw_grid(_area_, cr) -> None:
         for row in range(GRID):
@@ -156,8 +153,8 @@ def main(state_dir: Path) -> None:
     grid.connect("draw", draw_grid)
     grid.connect("button-press-event", click)
 
-    pad = _area(400, 300)
-    desk.put(pad, 840, 160)
+    pad = _area(**SIZE["pad"])
+    desk.put(pad, *AT["pad"])
     stroke: list = []
     drawn: list = []
 
@@ -186,8 +183,7 @@ def main(state_dir: Path) -> None:
     def release(_area_, event) -> bool:
         if stroke and event.button == 1:
             stroke.append((round(event.x), round(event.y)))
-            state["drags"] = (state["drags"] + [{"start": stroke[0], "end": stroke[-1], "points": len(stroke),
-                                                 "path": stroke[::max(1, len(stroke) // 50)] + stroke[-1:]}])[-20:]
+            record_drag(state, stroke)
             drawn.append(list(stroke))
             stroke.clear()
             save()
@@ -198,9 +194,9 @@ def main(state_dir: Path) -> None:
     pad.connect("motion-notify-event", motion)
     pad.connect("button-release-event", release)
 
-    wheel = _area(200, 120)
+    wheel = _area(**SIZE["wheel"])
     wheel.add_events(Gdk.EventMask.SMOOTH_SCROLL_MASK)
-    desk.put(wheel, 840, 500)
+    desk.put(wheel, *AT["wheel"])
 
     def wheeled(_area_, event) -> bool:
         """A step a scroll event: by its smooth deltas, since GTK 3 on Wayland names a horizontal wheel's discrete
@@ -215,8 +211,8 @@ def main(state_dir: Path) -> None:
     wheel.connect("draw", lambda _a, cr: (cr.set_source_rgb(*_rgb("#e6f0ff")), cr.paint()))
     wheel.connect("scroll-event", wheeled)
 
-    field = _area(48, 48)
-    desk.put(field, 1080, 500)
+    field = _area(**SIZE["field"])
+    desk.put(field, *AT["field"])
 
     def draw_field(_area_, cr) -> None:
         cr.set_source_rgb(0, 0, 0)
@@ -237,7 +233,7 @@ def main(state_dir: Path) -> None:
 
     tries = [0]
 
-    def write_layout() -> bool:
+    def layout() -> bool:
         tries[0] += 1
         origin = _origin()
         if origin is None and tries[0] < PLACE_TRIES:
@@ -250,13 +246,9 @@ def main(state_dir: Path) -> None:
             allocation = widget.get_allocation()
             boxes[key_] = [ox + x, oy + y, allocation.width, allocation.height]
         first = listing.get_cell_area(Gtk.TreePath.new_first(), listing.get_column(0))
-        boxes["list_row_height"] = first.height
         fx, fy = field.translate_coordinates(window, 0, 0)
-        boxes["markers"] = [[ox + fx + x, oy + fy + y, colour] for x, y, colour in MARKERS]
-        boxes["cell"] = CELL
-        boxes["clipboard"] = CLIPBOARD
         save()
-        (state_dir / "layout.json").write_text(json.dumps(boxes))
+        write_layout(state_dir, boxes, first.height, (ox + fx, oy + fy))
         return False
 
     _set_clipboard(CLIPBOARD)
@@ -264,8 +256,8 @@ def main(state_dir: Path) -> None:
     window.connect("destroy", Gtk.main_quit)
     window.show_all()
     window.fullscreen()
-    GLib.timeout_add(PLACE_EVERY_MS, write_layout)
-    GLib.timeout_add(200, poll_inbox)
+    GLib.timeout_add(PLACE_EVERY_MS, layout)
+    GLib.timeout_add(INBOX_EVERY_MS, poll_inbox)
     Gtk.main()
 
 

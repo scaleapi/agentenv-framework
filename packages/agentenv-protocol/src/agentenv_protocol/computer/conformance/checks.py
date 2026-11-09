@@ -117,11 +117,13 @@ class Probe:
         self.fixture_pid: str | None = None
         self.page = self.features.get("screen") == "page"
         platform = self.features.get("platform") or {}
-        self.fixture = ("page_fixture.py" if self.page else "wayland_fixture.py" if platform.get("display") == "wayland"
-                        else "fixture.py")
+        #: Whether the desk is the GTK one: on Wayland, where Tk runs only under XWayland, which a Wayland driver may
+        #: not reach.
+        self.gtk = not self.page and platform.get("display") == "wayland"
+        self.fixture = "page_fixture.py" if self.page else "wayland_fixture.py" if self.gtk else "fixture.py"
         self.windows = platform.get("os") == "windows"
         #: The chord that selects a text box's text: Tk's Ctrl+/, which the Tk desk binds everywhere, or GTK's Ctrl+A.
-        self.select_all = ["Control", "a"] if self.fixture == "wayland_fixture.py" else ["Control", "/"]
+        self.select_all = ["Control", "a"] if self.gtk else ["Control", "/"]
         self.desk = ""
         self.tab: str | None = None
         self.opened: list[str] = []
@@ -566,9 +568,9 @@ class Probe:
     # full: the fixture
 
     async def _stage(self) -> str | None:
-        """The Fixture Desk started, or what stopped it: the Tk desk, on Wayland the GTK desk, which shares the Tk desk's
-        file, or on a page, the HTML desk's server, with the desk opened in a tab of the probe's own."""
-        for file in dict.fromkeys((self.fixture, "fixture.py" if self.fixture == "wayland_fixture.py" else self.fixture)):
+        """The Fixture Desk started, or what stopped it: the Tk desk or on Wayland the GTK desk, either beside the layout
+        they share (desk.py), or on a page, the HTML desk's server, with the desk opened in a tab of the probe's own."""
+        for file in [self.fixture] if self.page else [self.fixture, "desk.py"]:
             source = resources.files(__package__).joinpath(file).read_bytes()
             added = await self.driver.add_file(f"{STAGE}/{file}", source)
             if "error" in added:

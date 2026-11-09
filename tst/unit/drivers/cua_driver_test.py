@@ -446,11 +446,17 @@ def test_on_windows_a_call_waits_out_a_busy_or_briefly_absent_pipe_and_a_daemon_
         module._piped({"method": "list"})
 
 
+@pytest.fixture
+def hyprland(module, monkeypatch):
+    """The driver as it runs in a Hyprland session, whatever OS the tests run on."""
+    for name, value in (("MACOS", False), ("WINDOWS", False), ("FOREGROUND", {}), ("HYPRLAND", True)):
+        monkeypatch.setattr(module, name, value)
+
+
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("hyprland")
 async def test_on_hyprland_keys_go_to_the_focused_window_in_the_foreground_and_text_skips_xs_keymap(
         module, daemon, monkeypatch):
-    for name, value in (("MACOS", False), ("FOREGROUND", {}), ("HYPRLAND", True)):
-        monkeypatch.setattr(module, name, value)
     asked = []
 
     def hyprctl(request):
@@ -473,9 +479,8 @@ async def test_on_hyprland_keys_go_to_the_focused_window_in_the_foreground_and_t
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("hyprland")
 async def test_on_hyprland_with_nothing_focused_keys_go_to_the_desktop(module, daemon, monkeypatch):
-    monkeypatch.setattr(module, "MACOS", False)
-    monkeypatch.setattr(module, "HYPRLAND", True)
     monkeypatch.setattr(module, "_hyprctl", lambda request: {})
 
     await module.CuaDriver().press_keys(["Escape"])
@@ -484,9 +489,9 @@ async def test_on_hyprland_with_nothing_focused_keys_go_to_the_desktop(module, d
 
 
 @pytest.mark.asyncio
-async def test_on_hyprland_readiness_checks_every_time_that_hyprland_has_cua_drivers_plugin(module, daemon, monkeypatch):
-    monkeypatch.setattr(module, "MACOS", False)
-    monkeypatch.setattr(module, "HYPRLAND", True)
+@pytest.mark.usefixtures("hyprland")
+async def test_on_hyprland_readiness_checks_every_time_that_hyprland_has_cua_drivers_plugin(
+        module, daemon, monkeypatch):
     driver = module.CuaDriver()
     monkeypatch.setattr(module, "_executable_sha256", lambda: module.EXECUTABLES[driver.platform.arch])
     loaded = {"configured": True, "abi": {"match": True}}
@@ -504,6 +509,7 @@ async def test_on_hyprland_readiness_checks_every_time_that_hyprland_has_cua_dri
     assert sum(1 for _, r in daemon.requests if r["method"] == "list") == 1
 
 
+@pytest.mark.usefixtures("hyprland")
 def test_on_hyprland_the_daemon_waits_for_the_compositor_and_runs_cua_drivers_wayland_backend(module, monkeypatch):
     started = []
 
@@ -511,7 +517,6 @@ def test_on_hyprland_the_daemon_waits_for_the_compositor_and_runs_cua_drivers_wa
         started.append((argv, env))
         raise SystemExit
     with tempfile.TemporaryDirectory(dir="/tmp", prefix="cd-") as runtime:
-        monkeypatch.setattr(module, "HYPRLAND", True)
         monkeypatch.setenv("XDG_RUNTIME_DIR", runtime)
         monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-1")
         monkeypatch.setattr(module, "_executable", lambda: Path("/opt/cua-driver"))
