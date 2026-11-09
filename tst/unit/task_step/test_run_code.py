@@ -375,6 +375,37 @@ async def test_a_script_in_an_agent_gets_no_env():
     assert set(_written_input(sandbox)) == {"args", "results"}
 
 
+def _run_overrides(step_params):
+    return _make_context(metadata={"user_overrides": {"step_params": step_params}})
+
+
+@pytest.mark.asyncio
+async def test_a_runs_args_override_is_merged_over_the_stored_args():
+    step = _step(args={"mode": "stored", "keep": 1})
+    with _sandbox([(0, "", ""), (0, "2", ""), (0, "{}", "")]) as sandbox:
+        await step.execute(_run_overrides({"run-code-1": {"args": {"mode": "run", "before": [1, 2]}}}))
+
+    assert _written_input(sandbox)["args"] == {"mode": "run", "keep": 1, "before": [1, 2]}
+    assert step.args == {"mode": "stored", "keep": 1}
+
+
+@pytest.mark.asyncio
+async def test_an_args_override_for_another_step_leaves_the_stored_args():
+    with _sandbox([(0, "", ""), (0, "2", ""), (0, "{}", "")]) as sandbox:
+        await _step(args={"mode": "stored"}).execute(_run_overrides({"other-step": {"args": {"mode": "run"}}}))
+
+    assert _written_input(sandbox)["args"] == {"mode": "stored"}
+
+
+@pytest.mark.asyncio
+async def test_an_args_override_that_is_not_an_object_is_refused_before_the_sandbox_is_touched():
+    with _sandbox([(0, "", ""), (0, "2", ""), (0, "{}", "")]) as sandbox:
+        with pytest.raises(RunCodeValidationError, match="'args' must be an object, got list"):
+            await _step().execute(_run_overrides({"run-code-1": {"args": ["mode"]}}))
+
+    assert not sandbox.exec_with_output.await_args_list
+
+
 @pytest.mark.asyncio
 async def test_runs_of_one_step_on_this_machine_stage_into_dirs_of_their_own(tmp_path):
     """Local sandboxes share this machine's /tmp: a run of the same step on another must not clear this one's files."""

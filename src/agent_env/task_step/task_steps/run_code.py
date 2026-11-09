@@ -181,12 +181,13 @@ class RunCodeTaskStep(TaskStep):
         return []
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
+        args = self._args_for_run(context)
         script_file, files = await asyncio.to_thread(self._load_script)
         target = await self._resolve_target(context)
         run_dir = target.run_dir(self.id)
 
         try:
-            await self._stage(target, run_dir, files, self._build_input(context, target))
+            await self._stage(target, run_dir, files, self._build_input(context, target, args))
             await self._run(target, run_dir, script_file)
             result = await self._read_output(target, run_dir)
         finally:
@@ -312,10 +313,20 @@ class RunCodeTaskStep(TaskStep):
             )
         return (script_file, files)
 
-    def _build_input(self, context: TaskStepContext, target: _ExecTarget) -> dict:
+    def _args_for_run(self, context: TaskStepContext) -> dict:
+        override = self.step_param_overrides(context).get("args")
+        if override is None:
+            return self.args
+        if not isinstance(override, dict):
+            raise RunCodeValidationError(
+                f"run_code '{self.id}': step_overrides 'args' must be an object, got {type(override).__name__}"
+            )
+        return {**self.args, **override}
+
+    def _build_input(self, context: TaskStepContext, target: _ExecTarget, args: dict) -> dict:
         """Build the {args, results} input passed to the script, and its env's endpoints on an env's host."""
         script_input = {
-            "args": self.args,
+            "args": args,
             "results": context.metadata.get("script_results", {}),
         }
         if self.env_id is not None:
