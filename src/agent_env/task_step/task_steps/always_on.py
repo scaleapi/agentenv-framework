@@ -415,7 +415,7 @@ class _Run:
         now = await self.now()
         self.log("start", virtual_time=_iso(now), end_time=_iso(self.end) if self.end else None,
                  agent=step.agent_name, agent_role=self.recipient, user_sim=step.user_sim, version=self.version,
-                 user_model=us["model"], max_wakes=step.max_wakes, time_zone=self.zone, multi_day=self.multi_day,
+                 user_model=self.user_model, max_wakes=step.max_wakes, time_zone=self.zone, multi_day=self.multi_day,
                  scheduled_checks=self.checks, clock_rate=await self._rate())
         try:
             await self.loop(now)
@@ -477,7 +477,8 @@ class _Run:
         ctx.record_model("solver", step.id, negotiated.fields.get("model") if negotiated else None)
 
         setup = self.plugin.setup(self.version, self.person)
-        user_config = {"model": self.us["model"], "system_prompt": setup.get("system_prompt"),
+        self.user_model, self.user_model_from = self._user_model()
+        user_config = {"model": self.user_model, "system_prompt": setup.get("system_prompt"),
                        "output_format": setup.get("output_format")}
         user_config = {k: v for k, v in user_config.items() if v is not None}
         negotiated = A2AAgent.negotiate_agent_config(self.user_agent.a2a_card or {}, user_config)
@@ -485,7 +486,10 @@ class _Run:
             await protocol.post_agent_config(self.user_url + negotiated.endpoint, negotiated.fields)
         accepted = sorted(negotiated.fields) if negotiated else []
         ctx.record_model("user simulator", step.id, negotiated.fields.get("model") if negotiated else None)
-        self.user_setup = {"system_prompt_chars": len(setup.get("system_prompt") or ""),
+        self.user_setup = {"model": self.user_model, "model_from": self.user_model_from,
+                           "user_sim_step_model": self.us.get("model"),
+                           "model_set": "model" in accepted,  # else the agent ran its own
+                           "system_prompt_chars": len(setup.get("system_prompt") or ""),
                            "output_format": setup.get("output_format"), "accepted_fields": accepted}
         if "system_prompt" not in accepted and setup.get("system_prompt"):
             logger.warning("always_on: the user sim agent's card did not accept system_prompt; it keeps its deploy one")
@@ -514,6 +518,18 @@ class _Run:
         """What the agent is told about reaching the user, and about waking itself when it can."""
         return " ".join([MESSAGE_RULES, *([QUIET_RULE] if self.step.stay_quiet else []),
                          *([CHECKS_RULE] if self.checks["on"] else [])])
+
+    def _user_model(self) -> tuple[str, str]:
+        """The user sim agent's model for this run, and where it came from: the user_sim step's own ``step_params``
+        model, else the run's ``user_model`` (``task run`` / ``eval run --user-model``, a bundle's ``user_model``, as
+        prompt_agent's ``_resolve_user_model`` honours it), else the user_sim step's ``model``."""
+        overrides = self.ctx.metadata.get("user_overrides") or {}
+        own = ((overrides.get("step_params") or {}).get(self.us.get("step_id")) or {}).get("model")
+        if own:
+            return own, "user_sim_step_params"
+        if overrides.get("user_model"):
+            return overrides["user_model"], "run_user_model"
+        return self.us["model"], "user_sim_step"
 
     async def _configure_checks(self) -> None:
         """Give the agent's role scheduled checks (notifications/v1) on each env whose clock is set: by default when
@@ -1398,7 +1414,7 @@ class _Run:
                                              and e.get("stay_quiet_calls"))
         record = {"step_id": step.id, "end_reason": self.end_reason, "end_note": self.end_note, "error": self.error,
                   "error_type": self.error_type, "counts": counts,
-                  "user_sim": {"name": step.user_sim, "version": self.version, "model": self.us.get("model"),
+                  "user_sim": {"name": step.user_sim, "version": self.version,
                                "agent_name": self.us.get("agent_name"), **self.user_setup},
                   "end_time": _iso(self.end) if self.end else None, "time_zone": self.zone,
                   "multi_day": self.multi_day, "real_seconds": round(time.time() - self.t0_real, 1),
