@@ -16,7 +16,7 @@ from agent_env.artifact import Artifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.env.env import Env
 from agent_env.env.envs.computer.utils.install import (DRIVER_INSTALLS, Install, folder_problems, installs, os_type_of,
-                                                        platform_problem)
+                                                        platform_problem, unsupported)
 from agent_env.store.ids import derive_id
 
 if TYPE_CHECKING:
@@ -82,6 +82,9 @@ class ComputerDriverEnv(Env):
         """The driver's class is read in a process of its own (``declared``)."""
         fields = cls.accept_toml(data, ctx)
         declaration = DriverDeclaration.model_validate(declared(ctx, fields["module"], cls.type))
+        if problems := [*unsupported(fields["install"], declaration.supports, "install"),
+                        *unsupported(fields.get("known_failures") or {}, declaration.supports, "known_failures")]:
+            ctx.refuse(list(map(ctx.config_problem, problems)))
         universe = FileArtifactUniverse.put_bundled(derive_id(ctx.id, "files"), files=ctx.files())
         return cls.put(id=ctx.id, module=fields["module"], files=universe, declaration=declaration,
                        install=fields["install"], port=fields.get("port", DEFAULT_PORT),

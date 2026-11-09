@@ -29,7 +29,7 @@ from ..types import (METHOD_ADD, METHOD_GET, METHOD_RESET, SKILL_EXTENSION_URI, 
 from .app_data import AppDataPlane
 from .app_runtime import AppRuntime
 from .errors import InvalidArgument
-from .platform import detect
+from .platform import applies, detect, entry_for, platform_key
 
 #: The environment variable a computer delivers its apps' settings in: JSON of each app's values by its name.
 APP_SETTINGS_ENV = "AGENTENV_APP_SETTINGS"
@@ -327,7 +327,9 @@ def install(os_type: str, spec: BaseModel, *, launch: Optional[Launch] = None, p
     the app's own there: its ``launch``; the ``paths`` it keeps its data in, relative to the session user's home, which
     serve its data plane when it has no data hooks; its ``skill``, a file of its folder, instead of the class's; and
     ``settings`` and ``build_settings``, models whose fields add to the class's ``Settings`` and ``BuildSettings`` there.
-    ``@linux`` is this for Linux; an OS type a plugin adds is declared with it."""
+    ``os_type`` may name one of its distributions as ``<os>/<distribution>``, /etc/os-release's ID (``linux/omarchy``),
+    whose declaration replaces the OS type's there. ``@linux`` is this for Linux; an OS type a plugin adds is declared
+    with it."""
     try:
         owned = tuple(_PATHS.validate_python(list(paths or [])))
     except ValidationError:
@@ -344,16 +346,18 @@ def install(os_type: str, spec: BaseModel, *, launch: Optional[Launch] = None, p
     return deco
 
 
-def linux(*, files: str = ".", packages: Optional[Packages] = None, python: Optional[str] = None,
-          sources: Optional[list[AptSource]] = None, downloads: Optional[list[Download]] = None,
-          run: Optional[list[RunScript]] = None, services: Optional[list[Service]] = None,
-          ports: Optional[list[int]] = None, launch: Optional[Launch] = None, paths: Optional[list[str]] = None,
-          skill: Optional[str] = None, settings: Optional[type[BaseModel]] = None,
+def linux(*, distribution: Optional[str] = None, files: str = ".", packages: Optional[Packages] = None,
+          python: Optional[str] = None, sources: Optional[list[AptSource]] = None,
+          downloads: Optional[list[Download]] = None, run: Optional[list[RunScript]] = None,
+          services: Optional[list[Service]] = None, ports: Optional[list[int]] = None, launch: Optional[Launch] = None,
+          paths: Optional[list[str]] = None, skill: Optional[str] = None, settings: Optional[type[BaseModel]] = None,
           build_settings: Optional[type[BaseModel]] = None) -> Callable:
-    """``@install`` for Linux: how a Linux computer installs the app, ``Linux``'s fields, and what is its own there."""
-    return install("linux", Linux(files=files, packages=packages, python=python, sources=sources, downloads=downloads,
-                                  run=run, services=services or [], ports=ports),
-                   launch=launch, paths=paths, skill=skill, settings=settings, build_settings=build_settings)
+    """``@install`` for Linux, or with ``distribution`` for that distribution alone: how such a computer installs the
+    app, ``Linux``'s fields, and what is its own there."""
+    spec = Linux(files=files, packages=packages, python=python, sources=sources, downloads=downloads, run=run,
+                 services=services or [], ports=ports)
+    return install(platform_key("linux", distribution), spec, launch=launch, paths=paths, skill=skill,
+                   settings=settings, build_settings=build_settings)
 
 
 def windows(*, files: str = ".", python: Optional[str] = None, downloads: Optional[list[Download]] = None,
@@ -459,18 +463,18 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
         app declares its own, which its install steps read too. None is a secret, since the image keeps them."""
 
     def __init__(self) -> None:
-        cls, on = type(self), detect().os
+        cls, on = type(self), _here()
         values = json.loads(os.environ.get(APP_SETTINGS_ENV) or "{}").get(os.environ.get("ENVIRONMENT_NAME"), {})
         self.settings = cls.settings_on(on).model_validate(values)
         self.build_settings = _built_settings(cls, on)
-        declared = cls._installs.get(on)
+        declared = entry_for(cls._installs, on)
         launch = declared.launch if declared is not None else None
         self.launch = self._launch_for(launch) if launch is not None else None
         self.paths = list(declared.paths) if declared is not None else []
         ready = launch.ready if launch is not None else None
         self._computer_app = AppRuntime(
             self.launch, {fn.__name__: getattr(self, fn.__name__) for fn in _methods(cls)
-                          if hasattr(fn, _READY_CHECK_ATTR) and _runs_on(getattr(fn, _READY_CHECK_ATTR), on)},
+                          if hasattr(fn, _READY_CHECK_ATTR) and applies(getattr(fn, _READY_CHECK_ATTR), on)},
             ready.timeout_s if ready is not None else DEFAULT_TIMEOUT_S, desktop=self._on_desktop(),
             launch_fds=self._launch_fds, relaunch_on_start=self._relaunch_on_start(),
             launch_running=self._launch_running())
@@ -509,14 +513,15 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
 
     @classmethod
     def settings_on(cls, os_type: Optional[str]) -> type[BaseModel]:
-        """Its ``Settings`` on ``os_type``, with the fields its OS adds."""
-        added = declared.settings if (declared := cls._installs.get(os_type)) is not None else None
+        """Its ``Settings`` on ``os_type``, an OS type or ``<os>/<distribution>``, with the fields it adds there."""
+        added = declared.settings if (declared := entry_for(cls._installs, os_type)) is not None else None
         return _added(added, cls.Settings) if added is not None else cls.Settings
 
     @classmethod
     def build_settings_on(cls, os_type: Optional[str]) -> type[BaseModel]:
-        """Its ``BuildSettings`` on ``os_type``, with the fields its OS adds."""
-        added = declared.build_settings if (declared := cls._installs.get(os_type)) is not None else None
+        """Its ``BuildSettings`` on ``os_type``, an OS type or ``<os>/<distribution>``, with the fields it adds
+        there."""
+        added = declared.build_settings if (declared := entry_for(cls._installs, os_type)) is not None else None
         return _added(added, cls.BuildSettings) if added is not None else cls.BuildSettings
 
     @extension(COMPUTER_APP, op="launch", description=(
@@ -588,7 +593,7 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
 
     def _computer_app_skill_file(self) -> Optional[str]:
         """The file of the app's folder holding its skill on this OS, or the class's."""
-        declared = type(self)._installs.get(detect().os)
+        declared = entry_for(type(self)._installs, _here())
         return declared.skill if declared is not None and declared.skill is not None else type(self).skill
 
     @classmethod
@@ -618,8 +623,9 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
                  if hasattr(fn, _INSTALL_STEP_ATTR) for scope, os_types in [getattr(fn, _INSTALL_STEP_ATTR)]]
         checks = [AppReadyCheck(name=fn.__name__, os=getattr(fn, _READY_CHECK_ATTR)) for fn in methods
                   if hasattr(fn, _READY_CHECK_ATTR)]
+        declared_for = {*cls._installs, *(key.partition("/")[0] for key in cls._installs)}
         for method in [*steps, *checks]:
-            if unknown := [os_type for os_type in method.os or [] if os_type not in cls._installs]:
+            if unknown := [os_type for os_type in method.os or [] if os_type not in declared_for]:
                 raise ValueError(f"{cls.__name__}.{method.name} runs on {unknown[0]!r}, which {cls.__name__} declares "
                                  f"no install for; it declares {', '.join(cls._installs) or 'none'}")
         return AppDeclaration(
@@ -678,8 +684,10 @@ def _built_settings(cls: type[ComputerAppEnvironment], os_type: Optional[str]) -
     return cls.build_settings_on(os_type).model_validate(values)
 
 
-def _runs_on(os_types: Optional[list[str]], os_type: Optional[str]) -> bool:
-    return os_types is None or os_type in os_types
+def _here() -> Optional[str]:
+    """The platform this runs on, by the key an app's parts for it are under (``platform_key``)."""
+    running = detect()
+    return platform_key(running.os, running.distribution)
 
 
 @functools.cache

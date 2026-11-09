@@ -21,6 +21,7 @@ from agent_env.attribution import Attribution
 from agent_env.env.env import DeployedSandboxEnv, EnvCapabilityUnsupported
 from agent_env.env.envs.computer.utils import composer
 from agent_env.env.envs.computer.utils import params as computer_params
+from agent_env.env.envs.computer.utils.install import platform_of
 from agent_env.env.envs.computer.utils.probing import probe_first_boot
 from agent_env.env.envs.computer.utils import sites
 from agent_env.env.envs.computer.utils.boot import (
@@ -164,7 +165,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         computer, name, token = env.computer_artifact(), env.environment_name, control_token()
         values = _values(computer, values)
         app_settings = recorded_app_settings(env.composed_apps(), computer_params.app_settings(env, params.app_settings),
-                                             env.computer.os.type)
+                                             platform_of(env.computer.os))
         policy = _reaching(NetworkPolicy.from_dict(env.network) if env.network else None, sandbox_provider, reach)
         booted = await boot(
             sandbox_provider, image=build["image"], port=env.driver.port, network_policy=policy, token=token,
@@ -172,8 +173,8 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
             timeout=ttl_seconds,
             attribution=attribution,
             disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb,
-            ready_s=ready_timeout(env.composed_apps(), env.computer.os.type), form=form, held=bool(params.site_routing),
-            os_type=env.computer.os.type)
+            ready_s=ready_timeout(env.composed_apps(), platform_of(env.computer.os)), form=form,
+            held=bool(params.site_routing), os_type=env.computer.os.type)
         self._container_sandboxes.append(booted.sandbox)
         self._environment_sandboxes[name] = booted.sandbox
         try:
@@ -223,7 +224,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
                                                        env=environment)
         except NotImplementedError as e:  # a reset the env supports, which this provider can't carry out
             raise RuntimeError(f"'{env.id}' can't be reset on {type(sandbox_provider).__name__}: {e}") from None
-        card = await ready(deployed.environment_url, ready_timeout(env.composed_apps(), env.computer.os.type),
+        card = await ready(deployed.environment_url, ready_timeout(env.composed_apps(), platform_of(env.computer.os)),
                            deployed.control_token, answering=bool(params.site_routing))
         _require_name(env, card)
         valid_for_s = (record.get("sites") or {}).get("valid_for_s", 0)
@@ -267,9 +268,9 @@ async def _launch_held_apps(env: ComputerEnv, record: DeployedSandboxEnv, url: s
     waited to answer; the record keeps the card the computer answers then, as its boot's card may list an app by its
     name alone. Each is launched as the child its card lists, as a computer named for its app, a browser alone, has
     that name too."""
-    os_type = env.computer.os.type
-    timeout = ready_timeout(env.composed_apps(), os_type)
-    held = [app for app in env.composed_apps() if (launch := app.launch(os_type)) is not None and launch.at == "boot"]
+    platform = platform_of(env.computer.os)
+    timeout = ready_timeout(env.composed_apps(), platform)
+    held = [app for app in env.composed_apps() if (launch := app.launch(platform)) is not None and launch.at == "boot"]
     launchers: dict[str, protocol_v1.ChildEnv] = {}
     if held:
         record.environment_card = await listed(url, [app.environment_name for app in held], timeout)
@@ -351,7 +352,7 @@ def _environment(env: ComputerEnv, computer: ComputerArtifact, values: dict,
     return {**settings_environment(computer, values, environment_name=env.computer_name,
                                    driver_settings=params.driver_settings, tool_prefix=tool_prefix),
             **app_settings_environment(env.composed_apps(), computer_params.app_settings(env, params.app_settings),
-                                       env.computer.os.type),
+                                       platform_of(env.computer.os)),
             **({HOLD_BOOT_LAUNCH_ENV: "1", **sites.trust_environment(env.computer.os.type, params.sites,
                                                                      later=sites_later),
                 **sites.browser_environment(env.computer.os.display)} if params.site_routing else {})}

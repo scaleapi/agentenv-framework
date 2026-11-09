@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from agentenv_protocol.computer.apps import apps_folder
 from agentenv_protocol.computer.app import BUILD_SETTINGS, SOCKET
+from agentenv_protocol.computer.platform import applies, entry_for
 
 from agent_env.artifact.artifacts.computer import LOCAL_IMAGE_PREFIX, ComputerArtifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
@@ -48,7 +49,7 @@ from agent_env.env.envs.computer.utils import (
     windows_disk,
 )
 from agent_env.env.envs.computer.utils.composed import BUILT, REPOSITORY, Record, failed, now, stale
-from agent_env.env.envs.computer.utils.install import Install, for_os
+from agent_env.env.envs.computer.utils.install import Install, for_os, platform_of
 from agent_env.env.published_images import DISK, DISK_TOOLS_IMAGE, published_disk, published_pinned
 from agent_env.providers.sandbox_providers.host_images import platform_tag
 from agent_env.store.ids import derive_id
@@ -312,7 +313,7 @@ def _composed_vm_bundle(env: ComputerEnv, base: ComputerArtifact, driver: Comput
         apps = [(app, _stage_app(context, app, base, {})) for app in env.composed_apps()]
         parts = [_part(layer, _services(f"driver-{gate.folder_name(driver.id, 'driver')}", layer.install),
                        {"MCP_PORT": driver.port}, protocol, False)]
-        parts += [_part(staged, dict(zip(gate.programs(app, base.os.type), [
+        parts += [_part(staged, dict(zip(gate.programs(app, platform_of(base.os)), [
             f"venv/bin/python -m agentenv_protocol.computer.serve_app {shlex.quote(staged.served)}",
             *(service.command for service in staged.install.services)])), {"ENVIRONMENT_NAME": app.environment_name},
             protocol, True) for app, staged in apps]
@@ -383,7 +384,7 @@ def _composed_windows_disk(env: ComputerEnv, base: ComputerArtifact, driver: Com
             server = [str(prefix / "venv" / "Scripts" / "python.exe"), "-m", "agentenv_protocol.computer.serve_app",
                       staged.served]
             commands = [server, *(windows_disk.argv(service.command, prefix) for service in staged.install.services)]
-            parts.append(_windows_part(staged, prefix, dict(zip(gate.programs(app, base.os.type), commands)),
+            parts.append(_windows_part(staged, prefix, dict(zip(gate.programs(app, platform_of(base.os)), commands)),
                                        {"ENVIRONMENT_NAME": app.environment_name}, protocol))
         values = env.computer_values()
         settings = {name: values.get(name, setting.default) for name, setting in base.config.items()
@@ -795,14 +796,14 @@ def _stage_app(context: Path, app: ComputerAppEnv, base: ComputerArtifact,
     fixes, and its supervisord programs beside them, run under its name: its services and its own server, which serves
     its class from its venv and launches the app. Its folder under its OS's apps folder is named for its environment
     name."""
-    install, name = app.install[base.os.type], gate.app_folder(app)
+    install, name = entry_for(app.install, platform_of(base.os)), gate.app_folder(app)
     file, _, cls = app.module.partition(":")
     served = f"{PurePosixPath(file).relative_to(install.files)}:{cls}"
     layer = _Layer(f"apps/{name}", str(apps_folder(base.os.type) / name), install, f"agentenv-app-{name}.conf", app.id,
                    app=True, served=served,
                    steps=tuple((step.name, step.scope) for step in app.declaration.install_steps
-                               if step.os is None or base.os.type in step.os))
-    programs = dict(zip(gate.programs(app, base.os.type), [
+                               if applies(step.os, platform_of(base.os))))
+    programs = dict(zip(gate.programs(app, platform_of(base.os)), [
         f"venv/bin/python -m agentenv_protocol.computer.serve_app {shlex.quote(served)}",
         *(service.command for service in install.services)]))
     _stage(context, layer, f"app {app.id}", app.files, programs, {"ENVIRONMENT_NAME": app.environment_name},

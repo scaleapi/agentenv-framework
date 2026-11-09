@@ -14,9 +14,10 @@ from __future__ import annotations
 
 import re
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal, Optional, TypeVar
+from typing import Any, Iterable, Literal, Optional, TypeVar
 
 from agentenv_protocol.computer.app import AptSource, Download, LayerPath, Packages, RunScript
+from agentenv_protocol.computer.platform import entry_for, platform_key, supported
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from agent_env.artifact.artifacts.computer import OS_TYPES
@@ -189,13 +190,24 @@ def os_type_of(key: str) -> str:
     return key.partition("/")[0]
 
 
+def platform_of(os: Any) -> str:
+    """The key a base's OS, ``os``, takes its installs, launches and known failures by: ``<os>/<distribution>``, or its
+    OS type when it names no distribution."""
+    return platform_key(os.type, getattr(os, "distribution", None))
+
+
+def unsupported(keys: Iterable[str], supports: list[dict], at: str) -> list[str]:
+    """Each distribution of ``keys``, named from ``at``, that no ``supports`` entry names: an install or known failures
+    that would never apply, as for a misspelled distribution."""
+    named = {platform_key(platform.os, platform.distribution) for entry in supports for platform in supported(entry)
+             if platform.distribution}
+    return [f"{at}.{key}: no supports entry names {key.partition('/')[2]!r} on {os_type_of(key)}, so this never "
+            "applies" for key in keys if "/" in key and key not in named]
+
+
 def for_os(by_platform: dict[str, _Entry], os: Any) -> Optional[_Entry]:
-    """``by_platform``'s entry for ``os``, a base's OS: its distribution's (``<os>/<distribution>``) when there's one,
-    else its OS type's."""
-    distribution = getattr(os, "distribution", None)
-    if distribution and f"{os.type}/{distribution}" in by_platform:
-        return by_platform[f"{os.type}/{distribution}"]
-    return by_platform.get(os.type)
+    """``by_platform``'s entry for ``os``, a base's OS: its distribution's when there's one, else its OS type's."""
+    return entry_for(by_platform, platform_of(os))
 
 
 def installs(data: Any, models: dict[str, type[Install]] = DRIVER_INSTALLS) -> tuple[dict[str, Install], list[str]]:
