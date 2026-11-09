@@ -64,8 +64,8 @@ LISTEN_TIMEOUT_S = 15.0
 # log the failure shows.
 LISTEN_PROBE_S, LISTEN_POLL_S, LOG_TAIL_CHARS = 1.0, 0.2, 2000
 CHECK_TIMEOUT_S = 15.0
-#: The checks after each site's: Python through ``SSL_CERT_FILE``, Node and curl.
-RUNTIME_CHECKS = 3
+#: The checks after each site's: Python through ``SSL_CERT_FILE``, Node and curl, and the forward port's.
+RUNTIME_CHECKS = 4
 #: What a JDK's store is opened with unless it says otherwise, how deep a JDK's store is looked for under its folders,
 #: the folders not looked in, and how long a ``keytool`` call may take.
 JAVA_STORE_PASSWORD = "changeit"
@@ -998,7 +998,8 @@ def install(config_path: str, paths: Paths = Paths()) -> dict:
     serve_path.write_text(json.dumps(serving))
     start(str(serve_path), given.get("log"))
     checks = checks_as(user, str(serve_path))
-    return {"trust": trust, "names": names, "checks": checks["sites"], "runtimes": checks["runtimes"]}
+    return {"trust": trust, "names": names, "checks": checks["sites"], "runtimes": checks["runtimes"],
+            **({"forward_port": checks["forward_port"]} if "forward_port" in checks else {})}
 
 
 def start(serve_path: str, log: Optional[str]) -> None:
@@ -1051,28 +1052,36 @@ def checks_as(user: Optional[str], serve_path: str) -> dict:
 
 def check(config: Config) -> dict:
     """``sites``: each site's first name loaded, over HTTPS but for a ``.localhost`` name, through the system's
-    resolver and trust store: its status, or why it didn't load, which an answer the proxy made itself (it marks them
-    ``FAILED``), such as its 502 for a gateway it couldn't reach, is too. ``runtimes``: the first of them over HTTPS
-    loaded through each other runtime's own trust (``check_runtimes``)."""
+    resolver and trust store (``_loaded``). ``runtimes``: the first of them over HTTPS loaded through each other
+    runtime's own trust (``check_runtimes``). ``forward_port``, with one: the first of them over HTTPS, else the first,
+    loaded through it as a browser alone loads it."""
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     results = {}
     for site in config.sites:
         name = next((n for n in site.domains if not n.startswith("*.")), None) \
             or "agentenv-check." + site.domains[0].removeprefix("*.")
-        url = f"{'https' if site.tls(name) else 'http'}://{name}/"
-        try:
-            with opener.open(url, timeout=CHECK_TIMEOUT_S) as response:
-                results[name] = {"url": url, "status": response.status}
-        except urllib.error.HTTPError as e:
-            if e.headers is not None and e.headers.get(FAILED[0][0]) == FAILED[0][1]:
-                body = e.read().decode(errors="replace").strip()
-                results[name] = {"url": url, "error": f"{e.code} {e.reason}: {body}"}
-            else:
-                results[name] = {"url": url, "status": e.code}
-        except (urllib.error.URLError, OSError, ssl.SSLError) as e:
-            results[name] = {"url": url, "error": str(getattr(e, "reason", e))}
+        results[name] = _loaded(opener, f"{'https' if site.tls(name) else 'http'}://{name}/")
     secure = next((result["url"] for result in results.values() if result["url"].startswith("https:")), None)
-    return {"sites": results, "runtimes": check_runtimes(secure) if secure else {}}
+    report = {"sites": results, "runtimes": check_runtimes(secure) if secure else {}}
+    if config.proxy_port and results:
+        proxy = f"http://{config.listen}:{config.proxy_port}"
+        forward = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+        report["forward_port"] = {"proxy": proxy, **_loaded(forward, secure or next(iter(results.values()))["url"])}
+    return report
+
+
+def _loaded(opener, url: str) -> dict:
+    """``url`` loaded by ``opener``: its status, or why it didn't load, which an answer the proxy made itself (it marks
+    them ``FAILED``), such as its 502 for a gateway it couldn't reach, is too."""
+    try:
+        with opener.open(url, timeout=CHECK_TIMEOUT_S) as response:
+            return {"url": url, "status": response.status}
+    except urllib.error.HTTPError as e:
+        if e.headers is not None and e.headers.get(FAILED[0][0]) == FAILED[0][1]:
+            return {"url": url, "error": f"{e.code} {e.reason}: {e.read().decode(errors='replace').strip()}"}
+        return {"url": url, "status": e.code}
+    except (urllib.error.URLError, OSError, ssl.SSLError) as e:
+        return {"url": url, "error": str(getattr(e, "reason", e))}
 
 
 def check_runtimes(url: str) -> dict:

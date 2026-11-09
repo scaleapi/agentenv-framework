@@ -447,18 +447,22 @@ async def route(sandbox: Sandbox, sites: list[Site], *, user: Optional[str], net
     if failed := routing_problems(report):
         raise RuntimeError("site routing: " + "; ".join(failed))
     return {"names": table.to_dict(), "ca": issued.ca_pem, "ca_path": trust_files(os_type)["ca"],
-            "trust": report["trust"], "checks": report["checks"], "runtimes": report.get("runtimes", {})}
+            "trust": report["trust"], "checks": report["checks"], "runtimes": report.get("runtimes", {}),
+            **({"forward_port": report["forward_port"]} if "forward_port" in report else {})}
 
 
 def routing_problems(report: dict) -> list[str]:
-    """What the install's ``report`` says failed: a site that didn't load, a runtime that didn't trust the CA, and a
-    JDK's store that didn't take it."""
+    """What the install's ``report`` says failed: a site that didn't load, a runtime that didn't trust the CA, a JDK's
+    store that didn't take it, and the forward port of a browser alone that didn't load a site."""
+    forward = report.get("forward_port") or {}
     return ([f"{result.get('url', name)} didn't load in the computer: {result['error']}"
              for name, result in report["checks"].items() if "error" in result]
             + [f"{runtime} in the computer didn't trust the deploy's CA loading {result.get('url')}: {result['error']}"
                for runtime, result in report.get("runtimes", {}).items() if "error" in result]
             + [f"the JDK store {store} didn't take the deploy's CA: {result['error']}"
-               for store, result in report["trust"].get("java", {}).items() if "error" in result])
+               for store, result in report["trust"].get("java", {}).items() if "error" in result]
+            + ([f"the browser's forward port {forward.get('proxy')} didn't load {forward.get('url')}: "
+                f"{forward['error']}"] if "error" in forward else []))
 
 
 async def deployed_sites(deployed_envs: list[DeployedEnv], only: Optional[list[str]] = None) -> list[dict]:

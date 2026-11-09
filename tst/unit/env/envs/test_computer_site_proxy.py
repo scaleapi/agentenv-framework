@@ -504,6 +504,34 @@ def test_a_check_answered_by_the_proxys_own_bad_gateway_fails_and_a_sites_own_er
         "runtimes": {"node": {"url": "https://notes.test/", "status": 502}}}
 
 
+def test_a_check_loads_a_site_through_the_forward_port_and_names_one_that_doesnt_answer(monkeypatch):
+    opened = []
+
+    class Opener:
+        def __init__(self, proxies):
+            self.proxies = proxies
+
+        def open(self, url, timeout):
+            opened.append((url, self.proxies))
+            if self.proxies:
+                raise urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))
+            return contextlib.nullcontext(SimpleNamespace(status=200))
+
+    monkeypatch.setattr(site_proxy.urllib.request, "build_opener", lambda handler: Opener(handler.proxies))
+    monkeypatch.setattr(site_proxy, "check_runtimes", lambda url: {})
+    sites_ = [Site("notes", "http://gw/website/notes/", ["notes.localhost"]),
+              Site("chat", "http://gw/website/chat/", ["chat.test"])]
+
+    alone = site_proxy.check(Config(user=None, sites=sites_, proxy_port=3129))
+    desktop = site_proxy.check(Config(user=None, sites=sites_))
+
+    proxy = "http://127.0.0.1:3129"
+    assert alone["forward_port"] == {"proxy": proxy, "url": "https://chat.test/",
+                                     "error": "[Errno 111] Connection refused"}
+    assert opened[2] == ("https://chat.test/", {"http": proxy, "https": proxy})
+    assert alone["sites"] == desktop["sites"] and "forward_port" not in desktop
+
+
 @pytest.mark.asyncio
 async def test_each_name_is_served_the_certificate_of_its_own_site_and_a_wildcard_covers_one_label(tmp_path):
     async with Upstream() as upstream:

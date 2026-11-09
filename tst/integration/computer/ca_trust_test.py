@@ -49,6 +49,7 @@ async def test_every_runtime_of_a_computer_routing_a_site_trusts_its_ca_launched
     assert at_boot == {"node": "200", "java": "200", "copied java": "200", "curl": "200"}, at_boot
     assert variables.split() == ["/etc/agentenv/ca-bundle.pem", "/etc/agentenv/ca-bundle.pem", "/etc/agentenv/ca.pem"]
     assert through_cert_file["exit_code"] == 0 and through_cert_file["stdout"].strip() == "200", through_cert_file
+    assert "forward_port" not in routed
     assert routed["ca_path"] == "/etc/agentenv/ca.pem" and routed["ca"].strip() in added and mode.strip() == "644"
     assert routed["ca"].strip() in bundle and bundle.count("BEGIN CERTIFICATE") > 100
     assert {runtime: "status" in result for runtime, result in routed["runtimes"].items()} == {
