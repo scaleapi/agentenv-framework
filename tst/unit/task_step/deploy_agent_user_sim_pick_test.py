@@ -92,3 +92,15 @@ def test_install_agent_follows_the_same_rule(monkeypatch):
                  "a2a_agent_version": 2, "sandbox_name": "world"}
     (solver, linda), ctx = _user_sim_task(monkeypatch, SOLVER, installed, WHO, LOOP)
     assert linda._agent_ref(ctx) == ("sim", 2) and solver._resolve_agent_ref(ctx) == ("mine", 4)
+
+
+def test_a_seeded_user_agent_name_keeps_its_own():
+    """The running step's names are seeded (Task._run), so the stored task is read with the run's seed applied too."""
+    from agent_env.task.task import substitute_seed_in_steps
+
+    seeded_user = {**HUMAN, "agent_name": "<user>"}
+    task, ctx = _run_of(SOLVER, seeded_user, {**ASK, "user_agent_name": "<user>"})
+    ctx.metadata["seed"] = {"user": "linda"}
+    running = {s.id: s for s in substitute_seed_in_steps(task.steps, ctx.metadata["seed"])}
+    assert running["deploy-human"]._resolve_agent_ref(ctx) == ("sim", 2)
+    assert running["deploy-solver"]._resolve_agent_ref(ctx) == ("mine", 4)

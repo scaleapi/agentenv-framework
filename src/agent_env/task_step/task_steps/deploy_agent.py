@@ -66,10 +66,11 @@ def plays_a_user_sim(agent_name: Optional[str], context: TaskStepContext) -> boo
 
 
 def _run_task_config(context: TaskStepContext) -> Optional[list[dict]]:
-    """The steps, as config, of the stored task the run is an instance of; None when it has no recorded instance or
-    the task can't be read (logged)."""
+    """The steps, as config, of the stored task the run is an instance of, with the run's seed applied as ``Task._run``
+    applies it, so a seeded ``<user>`` agent name compares with the name the running step has; None when it has no
+    recorded instance or the task can't be read (logged)."""
     from agent_env.task.store import find_task_instance
-    from agent_env.task.task import Task
+    from agent_env.task.task import Task, substitute_seed_in_steps
 
     if not context.instance_id:
         return None
@@ -77,7 +78,9 @@ def _run_task_config(context: TaskStepContext) -> Optional[list[dict]]:
         instance = find_task_instance(context.instance_id)
         if instance is None:
             return None
-        return [step.to_dict() for step in Task.get(instance.task_id, instance.task_version).steps]
+        steps = Task.get(instance.task_id, instance.task_version).steps
+        seed = (context.metadata or {}).get("seed") or {}
+        return [step.to_dict() for step in (substitute_seed_in_steps(steps, seed) if seed else steps)]
     except Exception as e:  # the pick applies as before; say why it couldn't be narrowed
         logger.warning(f"deploy_agent: could not read run {context.instance_id}'s task to tell its user sim's agent "
                        f"apart, so a run-wide agent pick applies to every agent: {type(e).__name__}: {e}")
