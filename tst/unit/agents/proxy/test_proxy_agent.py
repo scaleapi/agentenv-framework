@@ -57,10 +57,12 @@ def test_the_install_script_parses_and_the_image_keeps_it_in_its_build_context()
     assert "COPY a2a_server.py install.sh ./" in (AGENT_DIR / "Dockerfile").read_text()
 
 
-def test_the_bake_recipe_brings_the_uv_the_install_brings():
+def test_the_bake_recipe_brings_the_uv_the_install_brings_pinned_to_one_digest():
     uv_version = re.search(r"^UV_VERSION=(\S+)$", (AGENT_DIR / "install.sh").read_text(), re.M).group(1)
-    for recipe in (AGENT_DIR / "bake.sh", README):
-        assert re.findall(r"ghcr\.io/astral-sh/uv:(\S+) ", recipe.read_text()) == [uv_version], recipe
+    pins = {recipe: re.findall(r"ghcr\.io/astral-sh/uv:([^@\s]+)@(sha256:[0-9a-f]{64}) ", recipe.read_text())
+            for recipe in (AGENT_DIR / "bake.sh", README)}
+    [(version, _)] = set().union(*pins.values())
+    assert version == uv_version and all(len(found) == 1 for found in pins.values()), pins
 
 
 def test_the_image_works_in_app_as_agent():

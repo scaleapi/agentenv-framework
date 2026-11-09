@@ -25,7 +25,7 @@ TASK_DOCKERFILE = """FROM mirror.gcr.io/library/debian:bookworm-slim
 RUN mkdir -p /work && echo hello > /work/greeting.txt
 WORKDIR /work
 """
-BAKE = """COPY --from=ghcr.io/astral-sh/uv:0.13.1 /uv /opt/agentenv-proxy/bin/uv
+BAKE = """COPY --from=ghcr.io/astral-sh/uv:0.13.1@sha256:4a1f3666816dafadd20ceb71eac9a7d56d7ef30279f7d64048519ab901ada336 /uv /opt/agentenv-proxy/bin/uv
 COPY agentenv-proxy /opt/agentenv-proxy/src
 RUN sh /opt/agentenv-proxy/src/bake.sh
 """

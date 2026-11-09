@@ -3,7 +3,7 @@
 # Python and a venv holding requirements.txt in /opt/agentenv-proxy, and a marker naming the requirements it holds,
 # which install.sh checks. Plain sh, for images with no bash. A task image's Dockerfile ends with
 #
-#   COPY --from=ghcr.io/astral-sh/uv:0.13.1 /uv /opt/agentenv-proxy/bin/uv
+#   COPY --from=ghcr.io/astral-sh/uv:0.13.1@sha256:4a1f3666816dafadd20ceb71eac9a7d56d7ef30279f7d64048519ab901ada336 /uv /opt/agentenv-proxy/bin/uv
 #   COPY agentenv-proxy /opt/agentenv-proxy/src
 #   RUN sh /opt/agentenv-proxy/src/bake.sh
 #

@@ -85,7 +85,7 @@ Every task in a bundle is an [OpenEnv](https://github.com/openenv/OpenEnv) env, 
 An agent a task installs into a container (`install_agent` with `container_name`) is played through AgentEnv's proxy, which an episode installs there in its place. A task image can carry the proxy, so an episode only starts it: copy the installed `agent_env` package's `agents/agents/proxy` folder into the image's build context as `agentenv-proxy`, and end the Dockerfile with
 
 ```dockerfile
-COPY --from=ghcr.io/astral-sh/uv:0.13.1 /uv /opt/agentenv-proxy/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.13.1@sha256:4a1f3666816dafadd20ceb71eac9a7d56d7ef30279f7d64048519ab901ada336 /uv /opt/agentenv-proxy/bin/uv
 COPY agentenv-proxy /opt/agentenv-proxy/src
 RUN sh /opt/agentenv-proxy/src/bake.sh
 ```
