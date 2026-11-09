@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
 import re
+import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -13,6 +17,8 @@ from agent_env.task.episode.steps import PROXY_AGENT_ID
 from agent_env.task_step.task_steps.install_agent import _build_param_resolvers
 
 from tst.unit.agents.proxy.agent import AGENT_DIR, a2a_server
+
+README = Path(__file__).resolve().parents[4] / "README.md"
 
 
 def _extensions() -> dict:
@@ -45,7 +51,57 @@ def test_each_install_asks_only_for_params_install_agent_supplies_and_runs_the_f
 
 def test_the_install_script_parses_and_the_image_keeps_it_in_its_build_context():
     subprocess.run(["bash", "-n", str(AGENT_DIR / "install.sh")], check=True)
+    subprocess.run(["sh", "-n", str(AGENT_DIR / "bake.sh")], check=True)
     assert "COPY a2a_server.py install.sh ./" in (AGENT_DIR / "Dockerfile").read_text()
+
+
+def test_the_bake_recipe_brings_the_uv_the_install_brings():
+    uv_version = re.search(r"^UV_VERSION=(\S+)$", (AGENT_DIR / "install.sh").read_text(), re.M).group(1)
+    for recipe in (AGENT_DIR / "bake.sh", README):
+        assert re.findall(r"ghcr\.io/astral-sh/uv:(\S+) ", recipe.read_text()) == [uv_version], recipe
+
+
+@pytest.mark.parametrize("baked", [None, "0" * 64], ids=["no-proxy-baked", "other-requirements-baked"])
+def test_a_container_without_this_proxy_baked_in_gets_uv_and_a_venv(tmp_path, baked):
+    calls, exit_code = _install(tmp_path, baked)
+
+    assert exit_code != 0 and calls[-1].startswith("curl -fsSL --retry 3 https://github.com/astral-sh/uv/releases/")
+    assert not [call for call in calls if call.startswith("docker exec -d")]
+
+
+def test_a_container_with_this_proxy_baked_in_only_starts_it(tmp_path):
+    requirements = hashlib.sha256((AGENT_DIR / "requirements.txt").read_bytes()).hexdigest()
+
+    calls, exit_code = _install(tmp_path, requirements)
+
+    assert exit_code == 0 and not [call for call in calls if call.startswith("curl")]
+    assert [call.split()[3] for call in calls if call.startswith("docker cp")] == [
+        "task:/opt/agentenv-proxy-8000/a2a_server.py"]
+    assert calls[-1].endswith("exec /opt/agentenv-proxy/venv/bin/python /opt/agentenv-proxy-8000/a2a_server.py "
+                              "> /opt/agentenv-proxy-8000/proxy.log 2>&1")
+
+
+def _install(tmp_path, baked: str | None) -> tuple[list[str], int]:
+    """``install.sh container task 8000`` against a fake docker whose container's image baked a proxy holding the
+    requirements digest ``baked``, or none, and a curl that fails: every docker and curl call, and the exit code."""
+    agent, bin_dir, log = tmp_path / "agent", tmp_path / "bin", tmp_path / "calls.log"
+    shutil.copytree(AGENT_DIR, agent, ignore=shutil.ignore_patterns("__pycache__"))
+    bin_dir.mkdir()
+    (bin_dir / "docker").write_text(f"""#!/bin/sh
+printf 'docker %s\\n' "$*" >> {log}
+case "$*" in
+  *"cat /opt/agentenv-proxy/baked"*) [ -n "$FAKE_BAKED" ] && echo "$FAKE_BAKED" ;;
+  *"uname -m"*) echo x86_64 ;;
+esac
+exit 0
+""")
+    (bin_dir / "curl").write_text(f"#!/bin/sh\nprintf 'curl %s\\n' \"$*\" >> {log}\nexit 22\n")
+    for stub in ("docker", "curl"):
+        (bin_dir / stub).chmod(0o755)
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "FAKE_BAKED": baked or "",
+           "HOME": str(tmp_path), "XDG_CACHE_HOME": str(tmp_path / "cache")}
+    done = subprocess.run(["bash", str(agent / "install.sh"), "container", "task", "8000"], capture_output=True, env=env)
+    return log.read_text().splitlines(), done.returncode
 
 
 def test_the_image_works_in_app_as_agent():

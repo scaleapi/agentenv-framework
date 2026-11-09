@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import uuid
 from types import SimpleNamespace
 
 import pytest
@@ -336,7 +338,8 @@ def _installing_in_place(monkeypatch, *, codex=CODEX_INSTALL, sandbox=None, cont
     step = InstallAgentTaskStep(id="i", version=None, sandbox_name="vm", a2a_agent_id="agent-x", agent_name="solver",
                                 container_name=container_name)
     cards = {"agent-x-image": codex, f"{PROXY}-image": PROXY_INSTALL}
-    monkeypatch.setattr(step, "_extract_install_extension", lambda sandbox, image: _resolved(cards[image])())
+    monkeypatch.setattr(step, "_extract_install_extension",
+                        lambda sandbox, image: _resolved(cards[image.image_name])())
     monkeypatch.setattr(step, "_wait_for_agent_card", _resolved({}))
     monkeypatch.setattr(step, "_register_instance", lambda *args: SimpleNamespace(instance_id="solver-1"))
     context = TaskStepContext(
@@ -401,3 +404,22 @@ def test_only_an_install_in_another_agents_place_gives_its_workdir_and_user():
         agent_name="solver", replaced=HostPlace(workdir="/opt/agent-solver/workspace", user="agent-solver"),
     )
     assert (placed["host_workdir"](), placed["host_user"]()) == ("/opt/agent-solver/workspace", "agent-solver")
+
+
+@pytest.mark.asyncio
+async def test_an_images_install_extension_is_read_from_it_once_and_from_another_digest_again():
+    install = {"uri": A2AAgent.EXT_INSTALL, "params": {"a2a_port": 8000}}
+    runs = []
+
+    class _Sandbox:
+        async def exec_with_output(self, *args):
+            runs.append(args)
+            return 0, json.dumps({"capabilities": {"extensions": [install]}}), ""
+
+    name = f"agent-image-{uuid.uuid4().hex}"
+    step = InstallAgentTaskStep(id="i", version=None, sandbox_name="vm", a2a_agent_id="agent-x", agent_name="solver")
+
+    read = [await step._extract_install_extension(_Sandbox(), SimpleNamespace(image_name=name, image_digest=digest))
+            for digest in ("sha256:aa", "sha256:aa", "sha256:bb")]
+
+    assert read == [install] * 3 and [run[-3] for run in runs] == [name, name]
