@@ -15,7 +15,8 @@ it in the run's metadata under its ``name``; a ``deploy_agent`` step deploys the
   everything sent meanwhile in one read: the time, the agent's messages, what triggers sent the user's phone
   (``notify`` to ``user_phone``) and the user's own lines (the opening request, ``user_says`` lines, ``final``).
   Nothing meant for the agent is in it. Its answer is reply / no_reply / done; a reply, or a done with text, is held
-  for the response time. Done ends a one-sitting run (after the agent's turn on its text); a run whose end_time falls
+  for the response time. A schedule and response times are task time, so a user sim that sets either needs an armed
+  clock (sync_env_clock): without one the step refuses to start. Done ends a one-sitting run (after the agent's turn on its text); a run whose end_time falls
   on a later day than its start goes on to end_time.
 - Scripted user lines are triggers' ``notify`` actions to the ``user_says`` recipient: sent to the agent as the
   user's message at their time.
@@ -373,6 +374,13 @@ class _Run:
         if not self.chat_envs:
             raise RuntimeError(f"always_on: no deployed env offers {EXT_USER_CHAT_URI} (message_user); rebuild its "
                                "gateway from a branch that has user_chat.py")
+        timed = [k for k in ("schedule", "response_times") if us.get(k)]
+        if timed and not await self._armed():
+            # Read times and reply delays are task time; with no clock to jump, the loop would wait them out in real
+            # time, spinning on the clock it can't move.
+            raise ValueError(f"always_on: user sim '{step.user_sim}' sets {' and '.join(timed)}, which need the "
+                             "task's clock, and no env's clock is armed; run sync_env_clock before this step, or drop "
+                             f"{' and '.join(timed)} from the user_sim step")
         now = await self.now()
         self.opening = {"at": _iso(now), "text": self._effective_prompt()}
         self.person["opening"] = self.opening
@@ -572,7 +580,11 @@ class _Run:
         before = await self.now()
         if target <= before:
             return
-        for env in await self._armed():
+        armed = await self._armed()
+        if not armed:  # nothing to move: the loop would come straight back here, spinning in real time
+            raise RuntimeError(f"always_on: can't move the task's clock to {_iso(target)} ({reason}): no env's clock "
+                               "is armed")
+        for env in armed:
             try:
                 await _call(env, EXT_CLOCK_URI, "advance", {"virtual_time": _iso(target)}, attempts=2)
             except Exception:
@@ -736,11 +748,13 @@ class _Run:
             return timedelta(0)
         return timedelta(minutes=float(rt.get(mode, rt.get("free", 0))))
 
-    def _schedule_read(self) -> None:
+    async def _schedule_read(self) -> None:
         if not self.unread or self.read_at is not None or self.gave_up or self.signed_off:
             return
+        # A message has no time when the chat env's clock is unarmed; the task's time (another env's clock, else the
+        # computer's) stands in for it.
         first_at = min(_utc(m["at"]) for m in self.unread if m.get("at")) if any(m.get("at") for m in self.unread) \
-            else datetime.now(timezone.utc)
+            else await self.now()
         at, mode = self._available(first_at)
         if self.last_reply_at and at < self.last_reply_at:
             at, mode = self._available(self.last_reply_at)
@@ -835,7 +849,7 @@ class _Run:
         step, not the user); with whatever else is due, and the last-turn notice. A reply held past now stays held,
         to be recorded as pending."""
         step = self.step
-        if reason == "end_time" and self.end > now:
+        if reason == "end_time" and self.end > now and await self._armed():  # with no clock, the check-in is now
             await self.advance(self.end, reason="end_time")
         now = await self.now()
         self.final_sent = True
@@ -857,7 +871,7 @@ class _Run:
         when the run ended on an error."""
         if not self.unread or self.signed_off or self.gave_up or self.end_reason in ERROR_ENDS:
             return
-        self._schedule_read()
+        await self._schedule_read()
         at = self.read_at or await self.now()
         await self.read(at, last=True)
 
@@ -1028,7 +1042,7 @@ class _Run:
         if stuck:
             self.log("settle_timeout", wake=self.wakes, still_at_work=stuck, settle=self.last_settle)
         await self._read_changes("after_turn")
-        self._schedule_read()
+        await self._schedule_read()
 
     async def _nudge(self, closing: str) -> None:
         """The wake ended with closing text and neither message_user nor stay_quiet, so give the agent one more short
