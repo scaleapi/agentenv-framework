@@ -209,3 +209,22 @@ async def test_her_last_read_s_reply_is_marked_undelivered(monkeypatch, tmp_path
     [_, last] = ctx.metadata["post_turn_hooks"]["week"]
     assert last["delivered"] is False and "user_reads_at" not in last
     assert _first_reply(ctx.metadata["post_turn_hooks"]) == "never"
+
+
+@pytest.mark.asyncio
+async def test_one_read_of_the_changelog_keeps_at_most_its_cap_and_counts_the_rest(monkeypatch, tmp_path):
+    def agent(n, texts, rig):
+        for i in range(ao.CHANGES_KEPT_PER_READ + 50):
+            rig.app_write("rows", f"sync {i}", trigger_id="mirror")
+        rig.quiet()
+        return ""
+
+    rig = Rig(monkeypatch, tmp_path, agent=agent)
+    await rig.arm()
+    rig.keep_changelog()
+    ctx = await rig.run(rig.step())
+
+    [event] = rig.events(ctx, "app_changes")
+    assert event["count"] == ao.CHANGES_KEPT_PER_READ + 50 and event["not_kept"] == 50
+    assert len(event["changes"]) == ao.CHANGES_KEPT_PER_READ
+    assert rig.record(ctx)["counts"]["app_changes"]["by_others"] == ao.CHANGES_KEPT_PER_READ + 50

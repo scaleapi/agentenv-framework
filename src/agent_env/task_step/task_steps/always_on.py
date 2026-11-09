@@ -168,6 +168,9 @@ END_NOTES = {
 HOOK_RECORDS_KEY = "post_turn_hooks"
 HOOK_NAME = "always_on"
 CHANGE_SUMMARY_CHARS = 200
+# The app changes one read of an env's changelog keeps in the timeline; the rest are counted (counts.app_changes counts
+# them all, by who made them).
+CHANGES_KEPT_PER_READ = 200
 TIMELINE_TAIL = 20
 # With no end_time, the run ends once this many clock jumps in a row have been to repeating triggers' marks alone (see
 # the loop's docstring): the world can go on ticking, but nothing in it has woken the agent.
@@ -1346,8 +1349,9 @@ class _Run:
             self.change_cursors[env_id] = (env, cursor)
             if rows:
                 changes = [self._change(env_id, row, phase) for row in rows]
+                more = len(changes) - CHANGES_KEPT_PER_READ
                 self.log("app_changes", wake=self.wakes, phase=phase, env_id=env_id, count=len(changes),
-                         changes=changes)
+                         changes=changes[:CHANGES_KEPT_PER_READ], **({"not_kept": more} if more > 0 else {}))
 
     def _change(self, env_id: str, row: dict, phase: str) -> dict:
         actors = [{k: v for k, v in a.items() if k in ("kind", "role", "tool", "trigger_id", "request", "caused_by",
