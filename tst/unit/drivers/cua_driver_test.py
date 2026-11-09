@@ -491,7 +491,8 @@ class FakeHyprland:
     def run_lua(self, code: str) -> None:
         self.lua.append(code)
         if self.binding and code.startswith('hl.bind("SUPER + CTRL + ALT + SHIFT + F12"'):
-            self.binds.append({"modmask": 77, "key": "F12"})
+            self.binds.append({"modmask": 77, "key": "F12", "dispatcher": "__lua", "arg": str(300 + len(self.lua)),
+                               "non_consuming": False})
 
 
 @pytest.fixture
@@ -587,12 +588,33 @@ async def test_on_hyprland_a_key_refused_for_the_seats_keymap_goes_again_once_a_
     for keys in (["Backspace"], ["Control", "a"]):
         daemon.unlaid = True
         await driver.press_keys(keys)
+    hyprland.binds.clear()
+    daemon.unlaid = True
+    await driver.press_keys(["Backspace"])
 
     window = {"scope": "desktop", "pid": 42, "window_id": 0x5557E0F44AD0, "delivery_mode": "foreground"}
     backspace = ("press_key", {"key": "backspace", "modifiers": [], **window})
     select_all = ("press_key", {"key": "a", "modifiers": ["ctrl"], **window})
-    assert daemon.calls() == [backspace, RESET, backspace, select_all, RESET, select_all]
-    assert hyprland.lua == ['hl.bind("SUPER + CTRL + ALT + SHIFT + F12", function() end)']
+    assert daemon.calls() == [backspace, RESET, backspace, select_all, RESET, select_all, backspace, RESET, backspace]
+    assert hyprland.lua == ['hl.bind("SUPER + CTRL + ALT + SHIFT + F12", function() end)'] * 2
+
+
+@pytest.mark.asyncio
+async def test_on_hyprland_a_key_refused_for_the_seats_keymap_fails_without_the_chord_while_another_bind_has_it(
+        module, daemon, hyprland):
+    hyprland.answers["activewindow"] = {"address": "0x5557e0f44ad0", "pid": 42}
+    driver = module.CuaDriver()
+    daemon.unlaid = True
+    await driver.press_keys(["Backspace"])
+    for theirs in ([{"modmask": 77, "key": "F12", "dispatcher": "__lua", "arg": "7", "non_consuming": False}],
+                   [*hyprland.binds, {"modmask": 77, "key": "F12", "dispatcher": "exec", "arg": "reboot"}]):
+        hyprland.binds[:] = theirs
+        daemon.unlaid = True
+        with pytest.raises(DeliveryFailed, match="unsupported_layout") as refused:
+            await driver.press_keys(["Backspace"])
+        assert "bound to something this driver didn't bind" in refused.value.hint
+
+    assert [args.get("pid") for _, args in daemon.calls()] == [42, None, 42, 42, 42] and len(hyprland.lua) == 1
 
 
 @pytest.mark.asyncio

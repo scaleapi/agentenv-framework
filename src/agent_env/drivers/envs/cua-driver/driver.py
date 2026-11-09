@@ -143,6 +143,7 @@ class CuaDriver(ComputerDriverEnvironment):
         self._skill: tuple[str, str, dict[str, str]] | None = None
         self._texts: dict[str, str] | None = None
         self._keymap: _Keymap | None = None
+        self._reset_bind: dict | None = None
 
     def forwarded_tools(self) -> list[ForwardedTool]:
         return [ForwardedTool(EnvironmentTool(name=t["name"], description=t["description"], inputSchema=t["inputSchema"]),
@@ -238,12 +239,18 @@ class CuaDriver(ComputerDriverEnvironment):
 
     async def _to_window(self, pressed: dict) -> None:
         """A key aimed at a window, the US layout's keymap put back first when cua-driver refuses it for the seat's
-        keymap, which an input method changes after desktop text, by a chord Hyprland keeps from every window."""
+        keymap, which an input method changes after desktop text, by a chord bound to nothing but this driver's bind,
+        which Hyprland keeps from every window."""
         try:
             return await self._send("press_key", **pressed)
         except DeliveryFailed as e:
-            if hyprland.UNLAID not in e.message or not await hyprland.bind_reset():
+            if hyprland.UNLAID not in e.message:
                 raise
+            if (bind := await hyprland.reset_bind(self._reset_bind)) is None:
+                raise DeliveryFailed(e.message, hint=f"Hyprland has {hyprland.RESET_BIND}, which puts the US keymap back, "
+                                                     "bound to something this driver didn't bind, or it couldn't bind "
+                                                     "it, so the driver didn't press it") from e
+            self._reset_bind = bind
         await self._send("press_key", **hyprland.RESET, **hyprland.DESKTOP)
         deadline = time.monotonic() + hyprland.RESET_S
         while True:
@@ -252,7 +259,7 @@ class CuaDriver(ComputerDriverEnvironment):
             except DeliveryFailed as e:
                 if hyprland.UNLAID not in e.message or time.monotonic() > deadline:
                     raise
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(hyprland.RESET_POLL_S)
 
     async def _forward(self, tool: str, acts: bool, /, **arguments: Any) -> CallToolResult:
         """A call to one of cua-driver's own tools in its caller's session, answered as cua-driver answers it; one that

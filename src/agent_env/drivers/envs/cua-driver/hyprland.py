@@ -46,8 +46,8 @@ RESET = {"modifiers": ["super", "ctrl", "alt", "shift"], "key": "f12"}
 RESET_BIND = "SUPER + CTRL + ALT + SHIFT + F12"
 #: RESET_BIND as Hyprland lists its binds: Super, Alt, Ctrl and Shift's mask, and its key.
 RESET_LISTED = (64 | 8 | 4 | 1, "F12")
-#: How long a key aimed at a window waits for the keymap RESET puts back.
-RESET_S = 1.0
+#: How long a key aimed at a window waits for the keymap RESET puts back, and how often it's sent again meanwhile.
+RESET_S, RESET_POLL_S = 1.0, 0.05
 
 
 def on_us_keyboard(modifiers: list[str], key: str) -> dict:
@@ -66,20 +66,25 @@ async def focused() -> dict:
     return {"pid": window["pid"], "window_id": int(window["address"], 16), "delivery_mode": "foreground"}
 
 
-async def bind_reset() -> bool:
-    """Whether Hyprland has RESET_BIND bound, bound to nothing first when it isn't, as a bind made over its IPC is gone
-    once its config reloads."""
-    return await asyncio.to_thread(_bound_reset)
+async def reset_bind(made: dict | None) -> dict | None:
+    """The bind of RESET_BIND this driver may press, as Hyprland lists it: ``made``, the one it bound to nothing, while
+    that bind alone has the chord; one it binds to nothing now when the chord has none, as once Hyprland's config
+    reloads; None while any other bind has the chord, since one anybody else made could do anything."""
+    return await asyncio.to_thread(_reset_bind, made)
 
 
-def _bound_reset() -> bool:
-    if not _reset_bound():
-        lua(f'hl.bind("{RESET_BIND}", function() end)')
-    return _reset_bound()
+def _reset_bind(made: dict | None) -> dict | None:
+    if binds := _chord_binds():
+        return made if made is not None and binds == [made] else None
+    lua(f'hl.bind("{RESET_BIND}", function() end)')
+    return binds[0] if len(binds := _chord_binds()) == 1 else None
 
 
-def _reset_bound() -> bool:
-    return any((bind.get("modmask"), bind.get("key")) == RESET_LISTED for bind in hyprctl("binds") or [])
+def _chord_binds() -> list[dict]:
+    """RESET_BIND's binds as Hyprland lists them, each by its mask, key, dispatcher and argument, which tell them apart:
+    a bind made in Lua has the dispatcher ``__lua`` and its function's number as its argument."""
+    return [{field: bind.get(field) for field in ("modmask", "key", "dispatcher", "arg")}
+            for bind in hyprctl("binds") or [] if (bind.get("modmask"), bind.get("key")) == RESET_LISTED]
 
 
 async def plugin() -> ReadyCheck:
