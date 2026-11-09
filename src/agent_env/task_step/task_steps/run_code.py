@@ -30,14 +30,12 @@ import asyncio
 import json
 import logging
 import os
-import re
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, ClassVar, Optional, Protocol
 
-from agentenv_protocol import client as protocol_v1
-from agentenv_protocol.computer import COMPUTER, COMPUTER_EXEC
+from agentenv_protocol.computer import COMPUTER_EXEC
 
 from agent_env.artifact import Artifact, FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
@@ -56,49 +54,14 @@ _RUN_DIR = "/tmp/agent_env_run_code"
 _COMPUTER_RUN_DIR = ".agentenv/run_code"
 # How much longer than the script's timeout a computer lets the runner run, so the runner stops the script first.
 _RUNNER_SLACK_S = 10
-# What a POSIX extended regular expression, as `pkill -f` reads one, gives a meaning to outside brackets.
-_ERE_SPECIAL = re.compile(r"[.\[\\()*+?{|^$]")
-# Inside a Windows computer, which has no POSIX tools: Python programs, as a shell started in the user's session reads
-# as an agent leaving the GUI, that end the process tree of each process whose command line holds argv[1], this one and
-# its parent aside, remove a folder, and size a file, as pkill -f, rm -rf and wc -c do elsewhere. The tree, because
-# Windows has no process group for the runner to forward the end to.
-_WIN_END = """
-import ctypes, os, subprocess, sys
-from ctypes import wintypes as w
-QUERY_AND_WAIT = 0x1000 | 0x100000  # PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE
-COMMAND_LINE = 60  # ProcessCommandLineInformation
-WAIT_MS = 10000
-kernel32, ntdll, psapi = ctypes.WinDLL("kernel32"), ctypes.WinDLL("ntdll"), ctypes.WinDLL("psapi")
-kernel32.OpenProcess.restype = w.HANDLE
-kernel32.OpenProcess.argtypes = (w.DWORD, w.BOOL, w.DWORD)
-kernel32.WaitForSingleObject.argtypes = (w.HANDLE, w.DWORD)
-kernel32.CloseHandle.argtypes = (w.HANDLE,)
-ntdll.NtQueryInformationProcess.argtypes = (w.HANDLE, ctypes.c_int, ctypes.c_void_p, w.ULONG, ctypes.POINTER(w.ULONG))
-pids, size = (w.DWORD * 65536)(), w.DWORD()
-psapi.EnumProcesses(pids, ctypes.sizeof(pids), ctypes.byref(size))
-for pid in set(pids[:size.value // 4]) - {0, os.getpid(), os.getppid()}:
-    handle = kernel32.OpenProcess(QUERY_AND_WAIT, False, pid)
-    if not handle:
-        continue
-    need = w.ULONG()
-    ntdll.NtQueryInformationProcess(handle, COMMAND_LINE, None, 0, ctypes.byref(need))
-    line = ctypes.create_string_buffer(need.value)
-    if need.value and ntdll.NtQueryInformationProcess(handle, COMMAND_LINE, line, need, ctypes.byref(need)) == 0:
-        text = ctypes.wstring_at(ctypes.c_void_p.from_buffer(line, ctypes.sizeof(ctypes.c_void_p)).value,
-                                 ctypes.c_ushort.from_buffer(line).value // 2)
-        if sys.argv[1] in text:
-            subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True)
-            kernel32.WaitForSingleObject(handle, WAIT_MS)
-    kernel32.CloseHandle(handle)
-"""
-_WIN_REMOVE = ("python3", "-c", "import os,shutil,sys;os.path.isdir(sys.argv[1]) and shutil.rmtree(sys.argv[1])")
-_WIN_SIZE = ("python3", "-c", "import os,sys;print(os.path.getsize(sys.argv[1]))")
-
 # The bootstrap we run in the sandbox: `python3 runner.py <run_dir> <entrypoint> <script_file> <timeout_seconds>`.
 _RUNNER_SOURCE = (Path(__file__).parent / "run_code_runner.py").read_text(encoding="utf-8")
+# Inside a computer, the runner's own `--clear` and `--size` stand in for the shell tools its OS may not have, isolated
+# from the home it runs in.
+_RUNNER_TOOL = ("python3", "-I", "-c", _RUNNER_SOURCE)
 
 # A universe member with one of these names would shadow run_code's own staging files.
-_RESERVED_MEMBERS = frozenset({"runner.py", "input.json", "output.json"})
+_RESERVED_MEMBERS = frozenset({"runner.py", "input.json", "output.json", "runner.lock", "runner.pid"})
 
 # Where a single-file FileArtifact is always staged, regardless of its own filename.
 _STAGED_SCRIPT = "script.py"
@@ -480,9 +443,7 @@ class RunCodeTaskStep(TaskStep):
                                          f"{limit - _RUNNER_SLACK_S} s a script in env '{self.env_id}' may run: it "
                                          f"runs a command for at most {limit} s, and the runner keeps "
                                          f"{_RUNNER_SLACK_S} s of that to stop the script")
-        windows = (protocol_v1.extension_params(deployed.environment_card or {}, COMPUTER).get("platform")
-                   or {}).get("os") == "windows"
-        return _DriverTarget(deployed, self.timeout_seconds + _RUNNER_SLACK_S, windows=windows)
+        return _DriverTarget(deployed, self.timeout_seconds + _RUNNER_SLACK_S)
 
     async def _sandbox_target(self, context: TaskStepContext) -> _ExecTarget:
         from agent_env.providers.sandbox_providers.sandbox import VmSandbox
@@ -679,13 +640,11 @@ class _AgentTarget:
 class _DriverTarget:
     """Runs the script inside a computer, as its session user, through its driver: files written with ``data/add`` and
     read with ``data/get``, commands run with computer-exec/v1 ``run`` for at most ``timeout_s``, with ``env`` added
-    to the driver's environment, and on ``windows`` its own tools in place of POSIX ones. Paths are relative to the
-    home, where commands run."""
+    to the driver's environment. Paths are relative to the home, where commands run."""
 
     deployed: DeployedSandboxEnv
     timeout_s: float
     env: dict[str, str] = field(default_factory=dict)
-    windows: bool = False
 
     def run_dir(self, step_id: str) -> str:
         return f"{_COMPUTER_RUN_DIR}/{step_id}"
@@ -694,21 +653,16 @@ class _DriverTarget:
         return inside.loopback(deployed)
 
     async def reset_dir(self, path: str) -> None:
-        """End whatever still runs from the folder, as a run whose driver died leaves going, then remove it."""
-        runner = f"{path}/runner.py"
-        if self.windows:
-            await self.run("python3", "-c", _WIN_END, runner)
-        else:
-            await self.run("pkill", "-f", _ERE_SPECIAL.sub(r"\\\g<0>", runner))
         await self.remove_dir(path)
 
     async def remove_dir(self, path: str) -> None:
-        exit_code, _, stderr = await self.run(*(_WIN_REMOVE if self.windows else ("rm", "-rf")), path)
+        """End whatever still runs from the folder, as a run whose driver died leaves going, then remove it."""
+        exit_code, _, stderr = await self.run(*_RUNNER_TOOL, "--clear", path)
         if exit_code != 0:
             raise OSError(stderr)
 
     async def size(self, path: str) -> int:
-        return await _size(self, *(_WIN_SIZE if self.windows else ("wc", "-c")), path)
+        return await _size(self, *_RUNNER_TOOL, "--size", path)
 
     async def write_file(self, path: str, content: str) -> None:
         await inside.add_files(self.deployed, {path: content.encode("utf-8")})
