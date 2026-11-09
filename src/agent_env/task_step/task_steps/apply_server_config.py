@@ -257,7 +257,7 @@ class ApplyServerConfigStep(TaskStep):
                         f"{directive.service!r} (env={self.env_id}). "
                         f"Advertised: {[e.get('uri') for e in (card.get('capabilities') or {}).get('extensions') or []]}"
                     )
-                owner = server.record if server is not None and server.record is not None else deployed
+                owner = server.owner(deployed) if server is not None else deployed
                 result = await protocol_v1.invoke_extension(
                     base_url, card, directive.uri, params=directive.args,
                     timeout=self.timeout_seconds, headers=owner.control_headers,

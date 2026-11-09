@@ -58,6 +58,11 @@ class BackingServer:
         """The server's card as the env's card lists it, or None."""
         return self.child.card if self.child is not None else None
 
+    def owner(self, deployed: DeployedEnv) -> DeployedEnv:
+        """The record whose control token a call to the server takes: its own ``record``, a multi env's computer's or
+        one of its apps', else ``deployed``, the record of the env it was listed for."""
+        return self.record or deployed
+
 
 def definition_servers(env: Any) -> list[BackingServer]:
     """The servers an env definition names: a MultiEnv's MCP servers then its websites, a WebsiteEnv's website, or
