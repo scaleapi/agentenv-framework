@@ -721,6 +721,7 @@ class LocalSandboxProvider(SandboxProvider):
     SANDBOX_ACCEPTS = Accepts.NAME_OR_CONTEXT
     CONTAINER_ACCEPTS = Accepts.NAME_OR_CONTEXT
     WEBSOCKETS = True
+    SHARED_MEMORY = True
 
     @property
     def _prepared(self) -> set[str]:

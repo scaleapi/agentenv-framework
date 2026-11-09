@@ -24,7 +24,6 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     Accepts,
     SandboxProvider,
     apply_default_attribution,
-    log_unsized_shm,
 )
 from agent_env.providers.sandbox_providers.modal_image_build import context_image, fmt_exc
 
@@ -234,6 +233,9 @@ class ModalSandboxProvider(SandboxProvider):
     CONTAINER_ACCEPTS = Accepts.NAME_OR_CONTEXT
     PRIVATE_NETWORK = True
     WEBSOCKETS = True
+    # A sandbox's /dev/shm is a tmpfs as large as its host's memory, more than an app can ask for, which create_container
+    # can't size: Modal's SDK has no option for it.
+    SHARED_MEMORY = True
 
     @classmethod
     def supports_network_policy(cls, policy: NetworkPolicy) -> bool:
@@ -329,8 +331,6 @@ class ModalSandboxProvider(SandboxProvider):
         private_network: bool = False,
         shm_mb: Optional[int] = None,
     ) -> Sandbox:
-        # Modal's SDK has no option for the size of a sandbox's /dev/shm.
-        log_unsized_shm(self, shm_mb)
         # The private network is i6pn, Modal's network between sandboxes, in the configured region.
         i6pn = private_network
         region = get_config().modal_default_region if private_network else None

@@ -56,6 +56,7 @@ from agent_env.plugins._bundles import ALIASES_FILE, InstalledBundle, installed_
 from agent_env import providers
 from agent_env.providers.env_providers import env_computer_provider
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
+from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
 from agent_env.providers.env_providers.env_provider import DeployRefused
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
@@ -288,6 +289,35 @@ def test_the_probe_boots_a_build_with_the_shared_memory_its_apps_ask_for_as_a_de
     asyncio.run(_probe([SimpleNamespace()], env, driver, "img"))
 
     assert booted[0]["shm_mb"] == asks
+
+
+@pytest.mark.asyncio
+async def test_a_boot_asks_for_shared_memory_only_where_its_provider_gives_it_and_logs_where_it_doesnt(monkeypatch,
+                                                                                                    caplog):
+    created, sandbox = [], SimpleNamespace(tunnel_urls={18765: "http://computer"})
+
+    class Gives(SandboxProvider):
+        SHARED_MEMORY = True
+
+        async def create_container(self, **kwargs):
+            created.append(kwargs)
+            return sandbox
+
+    class OldPlugin(SandboxProvider):
+        async def create_container(self, *, image_name, port, env, network_policy=None, disk_size_gb=10, timeout=7200,
+                                   attribution=None):
+            created.append({"image_name": image_name})
+            return sandbox
+
+    monkeypatch.setattr(boot, "ready", AsyncMock(return_value=CARD))
+    with caplog.at_level(logging.INFO, logger="agent_env.env.envs.computer.utils.boot"):
+        for provider in (Gives(), OldPlugin()):
+            await boot.boot(provider, image="img", port=18765, environment={}, token="t", network_policy=None,
+                            timeout=60, attribution=None, shm_mb=1024)
+
+    assert created[0]["shm_mb"] == 1024 and "shm_mb" not in created[1]
+    assert "OldPlugin can't size /dev/shm: the container keeps its default, not the 1024 MiB asked for" in caplog.text
+    assert "Gives can't size" not in caplog.text
 
 @pytest.mark.parametrize("left", [{"status": "building"}, {"status": "unverified", "image": "built", "key": "k"}],
                          ids=["interrupted", "unprobed"])

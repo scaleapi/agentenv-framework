@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import secrets
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -30,6 +31,8 @@ if TYPE_CHECKING:
     from agent_env.env.envs.computer.app_env import ComputerAppEnv
     from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, Sandbox
     from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
+
+logger = logging.getLogger(__name__)
 
 #: How long a computer may take from its container starting to its driver saying it's ready.
 READY_TIMEOUT_S = 180.0
@@ -158,6 +161,19 @@ def shm_environment(form: str, os_type: str, shm_mb: Optional[int]) -> dict[str,
     return {SHM_MB_ENV: str(shm_mb)} if shm_mb and form == "disk" and os_type == "linux" else {}
 
 
+def shm_kwargs(sandbox_provider: SandboxProvider, shm_mb: Optional[int]) -> dict[str, int]:
+    """What ``create_container`` and ``reset_container`` take for the container's ``/dev/shm`` to hold ``shm_mb`` MiB:
+    the size for a provider whose SHARED_MEMORY says it gives that, else nothing, logged, the container keeping its
+    provider's own."""
+    if not shm_mb:
+        return {}
+    if sandbox_provider.SHARED_MEMORY:
+        return {"shm_mb": shm_mb}
+    logger.info("%s can't size /dev/shm: the container keeps its default, not the %d MiB asked for",
+                type(sandbox_provider).__name__, shm_mb)
+    return {}
+
+
 async def boot(sandbox_provider: SandboxProvider, *, image: str, port: int, environment: dict[str, str], token: str,
                network_policy: Optional[NetworkPolicy], timeout: int, attribution: Optional[Attribution],
                disk_size_gb: float = 10, cpu: Optional[float] = None, memory_mb: Optional[int] = None,
@@ -182,7 +198,7 @@ async def boot(sandbox_provider: SandboxProvider, *, image: str, port: int, envi
         sandbox = await sandbox_provider.create_container(
             image_name=image, port=port, env=environment, network_policy=network_policy, disk_size_gb=disk_size_gb,
             timeout=timeout, attribution=dict(attribution or {}), **_size_kwargs(cpu, memory_mb),
-            **({"shm_mb": shm_mb} if shm_mb else {}))
+            **shm_kwargs(sandbox_provider, shm_mb))
     try:
         url = sandbox.tunnel_urls[port]
         return Booted(sandbox, url, await ready(url, ready_s, token, answering=held))

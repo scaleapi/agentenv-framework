@@ -116,8 +116,8 @@ class SandboxProvider(ABC):
 
         On return, ``tunnel_urls[port]`` is populated and the container listens on ``port``.
         Caller still owns readiness polling for the container's own endpoints. ``private_network`` puts it on a
-        network this provider's other such containers share, at its ``private_host``. ``shm_mb`` sizes the container's
-        ``/dev/shm``, in MiB, where the backend can; one that can't logs that it didn't.
+        network this provider's other such containers share, at its ``private_host``. ``shm_mb`` is the MiB the
+        container's ``/dev/shm`` holds, which a deploy passes only to a provider whose SHARED_MEMORY says it gives them.
 
         Default implementation: a container-only backend uses create_sandbox; a VM backend creates
         a VM, pulls the image, and starts it. Backends that bake the image in at creation override.
@@ -127,7 +127,6 @@ class SandboxProvider(ABC):
                              "containers on a private network they share")
         if (type(self).create_vm is SandboxProvider.create_vm
                 and type(self).create_sandbox is not SandboxProvider.create_sandbox):
-            log_unsized_shm(self, shm_mb)
             return await self.create_sandbox(
                 image_name=image_name, port=port, env=env, cpu=cpu, memory=memory,
                 disk_size_gb=disk_size_gb, timeout=timeout, attribution=attribution,
@@ -248,6 +247,11 @@ class SandboxProvider(ABC):
     # Whether its sandboxes' exposed ports carry WebSockets both ways, as a website browser's CDP address needs: on
     # where our own tests or its tunnel's documentation say so.
     WEBSOCKETS: ClassVar[bool] = False
+    # Whether the container create_container or reset_container runs has the /dev/shm their shm_mb asks for, or more:
+    # sized to it, as the default VM path's docker run does, or larger by default. A deploy passes shm_mb to no other
+    # provider. Derived for a provider class that doesn't declare it (``__init_subclass__``): on for the default VM
+    # path, off for a container-only backend and for a class that overrides either method.
+    SHARED_MEMORY: ClassVar[bool] = False
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -259,6 +263,11 @@ class SandboxProvider(ABC):
         elif not cls._DECLARES_SANDBOX_ACCEPTS:
             cls.SANDBOX_ACCEPTS = (Accepts.LOADABLE if SANDBOX_MODE_VM in cls.SUPPORTED_SANDBOX_MODES
                                    else cls.CONTAINER_ACCEPTS)
+        if "SHARED_MEMORY" not in cls.__dict__:
+            if {"create_container", "reset_container"} & cls.__dict__.keys():
+                cls.SHARED_MEMORY = False
+            elif cls.create_container is SandboxProvider.create_container:
+                cls.SHARED_MEMORY = SANDBOX_MODE_VM in cls.SUPPORTED_SANDBOX_MODES
 
     @property
     def links(self) -> tuple[SandboxProvider, ...]:
@@ -378,14 +387,6 @@ _BUILTIN_SANDBOX_PROVIDERS: dict[str, str] = {
     "lume": "agent_env.providers.sandbox_providers.lume.provider:LumeSandboxProvider",
 }
 
-
-
-def log_unsized_shm(provider: SandboxProvider, shm_mb: Optional[int]) -> None:
-    """Log that ``provider``'s container keeps its own ``/dev/shm`` when ``shm_mb`` was asked for, which it can't size:
-    the container boots anyway."""
-    if shm_mb:
-        logger.info("%s can't size /dev/shm: the container keeps its default, not the %d MiB asked for",
-                    type(provider).__name__, shm_mb)
 
 
 def _sandbox_config(source: Config | None = None) -> dict:

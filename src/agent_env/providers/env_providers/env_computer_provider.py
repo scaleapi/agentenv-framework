@@ -39,6 +39,7 @@ from agent_env.env.envs.computer.utils.boot import (
     recorded_settings,
     settings_environment,
     shm_environment,
+    shm_kwargs,
 )
 from agent_env.env.gateway.constants import WELL_KNOWN_PATH
 from agent_env.providers.env_providers.env_provider import DeployRefused, _SandboxEnvironmentProvider
@@ -226,7 +227,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
                 await sandbox_provider.reset_vm(sandbox, image=record["image"], env=environment)
             else:
                 await sandbox_provider.reset_container(sandbox, image_name=record["image"], port=env.driver.port,
-                                                       env=environment, **({"shm_mb": shm_mb} if shm_mb else {}))
+                                                       env=environment, **shm_kwargs(sandbox_provider, shm_mb))
         except NotImplementedError as e:  # a reset the env supports, which this provider can't carry out
             raise RuntimeError(f"'{env.id}' can't be reset on {type(sandbox_provider).__name__}: {e}") from None
         card = await ready(deployed.environment_url, ready_timeout(env.composed_apps(), platform_of(env.computer.os)),
