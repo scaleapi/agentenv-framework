@@ -34,10 +34,7 @@ from agent_env.env.gateway.get_time import (
     GET_TIME_TOOL_NAME as GET_TIME,
     _SCHEMA as GET_TIME_SCHEMA,
 )
-from agent_env.env.bootstrap import PUBLISHED_IMAGES
 from agent_env.env.envs.service_db import ServiceDBEnv
-from agent_env.env.published_images import published_pinned
-from agent_env.store.image_store.registry_api import read_manifest
 from agent_env.env.envs.playwright_mcp import (
     PLAYWRIGHT_MCP_IMAGE_TAG,
     PLAYWRIGHT_MCP_ENVIRONMENT_NAME,
@@ -50,6 +47,7 @@ from tst.integration.env.envs.playwright_mcp_local_test import PROCESSES
 from agent_env.env.snapshot_store import compute_env_fingerprint
 from agent_env.config import get_config
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
+from tst.util.published_image import pull_published_else_build
 from tst.util.capabilities import (
     MCP_SERVER_SOURCES,
     missing_capability_reason,
@@ -152,40 +150,8 @@ SLACK_WEBSITE_FRONTEND_IMAGE = DockerImageConfig(
     service_name="slack",
 )
 
-_PUBLISHED_IMAGES = {(image.dockerfile, image.dockerfile.parent): image for image in PUBLISHED_IMAGES}
-
-
-def _amd64_image(pinned: str | None) -> str | None:
-    """``pinned``'s linux/amd64 image, pinned by its own digest: the containerd image store keeps a pulled index whole,
-    and ``docker save`` of one it holds only some platforms of fails."""
-    if pinned is None:
-        return None
-    manifest = read_manifest(pinned, None)
-    if "manifests" not in manifest:
-        return pinned
-    digest = next((m["digest"] for m in manifest["manifests"]
-                   if m.get("platform", {}).get("os") == "linux" and m["platform"].get("architecture") == "amd64"), None)
-    return digest and f"{pinned.partition('@')[0]}@{digest}"
-
-
 def _pull_published_else_build(img: DockerImageConfig) -> None:
-    published = _PUBLISHED_IMAGES.get((img.dockerfile, img.context))
-    try:
-        if pinned := published and _amd64_image(published_pinned(published)):
-            logger.info(f"Pulling {img.name}'s published image {pinned}...")
-            _docker("pull", "--platform", "linux/amd64", pinned)
-            _docker("tag", pinned, img.tag)
-            return
-    except (RuntimeError, ValueError) as e:
-        logger.warning(f"Pulling {img.name}'s published image failed, so it's built: {e}")
-    logger.info(f"Building {img.name} Docker image...")
-    _docker("build", "--platform", "linux/amd64", "-f", str(img.dockerfile), "-t", img.tag, str(img.context))
-
-
-def _docker(*args: str) -> None:
-    result = subprocess.run(["docker", *args], capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(f"{shlex.join(['docker', *args])} failed: {result.stderr}")
+    pull_published_else_build(img.name, img.dockerfile, img.context, img.tag)
 
 
 @pytest.fixture(scope="module")
