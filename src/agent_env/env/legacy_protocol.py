@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import httpx
 from agentenv_protocol import METHOD_GET, DataPart, client as protocol_v1
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
 
 if TYPE_CHECKING:
     from agent_env.env.env import DeployedEnv
@@ -260,6 +262,20 @@ async def service_state(deployed: Optional[DeployedEnv], gateway_url: Optional[s
     return await _export_state_at(base_url, timeout=EXPORT_STATE_TIMEOUT_SECONDS, verify=True)
 
 
+async def offers_tool(mcp_url: str, name: str) -> bool:
+    """Whether the MCP endpoint at ``mcp_url`` lists the tool ``name``, on any page of its tools."""
+    async with streamable_http_client(mcp_url) as (read_stream, write_stream, _):
+        async with ClientSession(read_stream, write_stream) as session:
+            await session.initialize()
+            cursor = None
+            while True:
+                page = await session.list_tools(cursor)
+                if any(tool.name == name for tool in page.tools):
+                    return True
+                if not (cursor := page.nextCursor):
+                    return False
+
+
 async def reset_via_mcp_tool(
     mcp_url: str,
     environment_name: str,
@@ -267,8 +283,6 @@ async def reset_via_mcp_tool(
     max_retries: int = DEFAULT_MCP_MAX_RETRIES,
 ) -> None:
     """Call the ``{environment_name}_reset`` MCP tool, retrying on transient failures."""
-    from mcp import ClientSession
-    from mcp.client.streamable_http import streamable_http_client
 
     for attempt in range(max_retries):
         reset_done = False
