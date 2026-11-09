@@ -10,7 +10,7 @@ cua-driver starts again after ending it for idling, where a named one stays ende
 while it restarts, fails as unavailable; input whose reply is lost fails with its outcome unknown, since it may have
 arrived. It needs ``agentenv-framework-protocol[computer]`` and ``cua-driver`` where it runs. On a Hyprland desktop
 (Wayland) it runs cua-driver's Wayland backend, sends keys and text to the focused window in the foreground, and is
-ready, and takes input, only while Hyprland has cua-driver's plugin loaded."""
+ready, and takes input, only while Hyprland has cua-driver's plugin loaded, asking Hyprland through hyprland.py."""
 from __future__ import annotations
 
 import asyncio
@@ -59,6 +59,8 @@ from agentenv_protocol.computer import (
     type_text,
 )
 
+import hyprland
+
 MACOS, WINDOWS = sys.platform == "darwin", sys.platform == "win32"
 #: A Hyprland desktop, on Wayland, where cua-driver runs its Wayland backend and its input goes through the seats of
 #: its Hyprland plugin; what follows reaches Hyprland's IPC, so it's Hyprland's session that turns it on, not any
@@ -102,8 +104,6 @@ PERMISSIONS = ("accessibility", "screen_recording")
 QUIET = {"DO_NOT_TRACK": "1", "CUA_DRIVER_RS_TELEMETRY_ENABLED": "false", "CUA_DRIVER_RS_UPDATE_CHECK": "false"}
 #: What turns on cua-driver's Wayland backend, which it takes only when asked.
 WAYLAND_BACKEND = {"CUA_DRIVER_RS_ENABLE_WAYLAND": "1"}
-#: How long a request to Hyprland's IPC waits for its answer.
-HYPRCTL_TIMEOUT_S = 5
 #: W3C modifier keys and the names cua-driver holds them by.
 MODIFIERS = {"Control": "ctrl", "Shift": "shift", "Alt": "alt", "Meta": "super", "Super": "super"}
 #: W3C key values and the names cua-driver presses them by; any printable ASCII character is pressed as itself.
@@ -163,7 +163,7 @@ class CuaDriver(ComputerDriverEnvironment):
         until they pass once; and on Hyprland, every time, that it has cua-driver's plugin, which a restart drops."""
         if self._pinned is None or not all(check.ok for check in self._pinned):
             self._pinned = await self._pinned_checks()
-        return [*self._pinned, await _plugin()] if HYPRLAND else self._pinned
+        return [*self._pinned, await hyprland.plugin()] if HYPRLAND else self._pinned
 
     async def bundled_skill(self) -> tuple[str, str, dict[str, str]]:
         if self._skill is None:
@@ -209,21 +209,21 @@ class CuaDriver(ComputerDriverEnvironment):
     async def type_in(self, text) -> None:
         if not MACOS and not WINDOWS and not HYPRLAND and any(ord(ch) >= LATIN_1 for ch in text):
             await asyncio.to_thread(self._hold, text)
-        await self._send("type_text", text=text, **await _focused())
+        await self._send("type_text", text=text, **(await hyprland.focused() if HYPRLAND else {}))
 
     @press
     async def press_keys(self, keys) -> None:
         *held, key = keys
         await self._send("press_key", modifiers=_modifiers(held), key=MODIFIERS.get(key) or NAMED.get(key, key),
-                         **await _focused())
+                         **(await hyprland.focused() if HYPRLAND else {}))
 
     async def _forward(self, tool: str, acts: bool, /, **arguments: Any) -> CallToolResult:
         """A call to one of cua-driver's own tools in its caller's session, answered as cua-driver answers it; one that
         isn't read-only is refused on Hyprland without cua-driver's plugin."""
         session = self._callers.setdefault(ToolContext.current().caller.session, uuid.uuid4().hex)
         try:
-            if acts:
-                await _require_plugin()
+            if acts and HYPRLAND:
+                await hyprland.require_plugin()
             reply = await _request({"method": "call", "name": tool, "args": arguments, "session_id": session})
         except DeviceUnavailable as e:
             return _refused(e.message)
@@ -250,7 +250,8 @@ class CuaDriver(ComputerDriverEnvironment):
         return self._keymap
 
     async def _send(self, name: str, **args: Any) -> None:
-        await _require_plugin()
+        if HYPRLAND:
+            await hyprland.require_plugin()
         await self._call(name, DeliveryFailed, scope="desktop", **args)
 
     async def _call(self, name: str, failure: type[Exception], **args: Any) -> dict:
@@ -400,58 +401,6 @@ class _Keymap:
 def _keysym(ch: str) -> int:
     """X's keysym for ``ch``: its code point in Latin-1, else in X's Unicode range."""
     return ord(ch) if ord(ch) < 0x100 else 0x1000000 | ord(ch)
-
-
-async def _focused() -> dict:
-    """Where keys go on Hyprland: the focused window, whose Hyprland address is its cua-driver window id, in the
-    foreground through the plugin's seat, since a desktop-scope key goes through libei, which Hyprland doesn't serve.
-    Elsewhere, and with nothing focused, the desktop."""
-    if not HYPRLAND:
-        return {}
-    window = await asyncio.to_thread(_hyprctl, "activewindow")
-    if not window or not window.get("address"):
-        return {}
-    return {"pid": window["pid"], "window_id": int(window["address"], 16), "delivery_mode": "foreground"}
-
-
-async def _plugin() -> ReadyCheck:
-    """That Hyprland has cua-driver's plugin loaded, enabled, built for it and taking input; one restarted after a
-    crash runs in safe mode, with no plugins, where input is sent but never arrives, and a plugin loaded again into a
-    running Hyprland answers but has no input seat until the desktop restarts. When Hyprland doesn't answer at all, as
-    once it restarts under a new instance signature after this driver started, it says so instead."""
-    status = await asyncio.to_thread(_hyprctl, "cua:status")
-    transport = (status or {}).get("transport") or {}
-    if status is None and await asyncio.to_thread(_hyprctl, "activeworkspace") is None:
-        problem = ("Hyprland doesn't answer on its IPC; if it restarted after this driver started, restart the driver "
-                   "with it")
-    elif status is None:
-        problem = "Hyprland hasn't loaded cua-driver's plugin"
-    elif status.get("configured") is not True:
-        problem = "cua-driver's plugin is loaded but not enabled"
-    elif (status.get("abi") or {}).get("match") is not True:
-        problem = "cua-driver's plugin was built for another Hyprland"
-    elif transport.get("ready") is not True:
-        problem = f"cua-driver's plugin isn't taking input: {transport.get('last_error') or 'its transport is down'}"
-    else:
-        return ReadyCheck("cua-driver plugin", True, "loaded, enabled, built for this Hyprland and taking input")
-    return ReadyCheck("cua-driver plugin", False, problem)
-
-
-async def _require_plugin() -> None:
-    """On Hyprland, input refused unless cua-driver's plugin is loaded: the runtime runs ready checks only until they
-    first pass, and input sent while Hyprland runs without the plugin is accepted but never arrives."""
-    if HYPRLAND and not (check := await _plugin()).ok:
-        raise DeviceUnavailable(check.detail)
-
-
-def _hyprctl(request: str) -> dict | None:
-    """Hyprland's JSON answer to ``request``, or None when it gives none, as for a plugin's request it doesn't know."""
-    try:
-        out = subprocess.run(["hyprctl", "-j", request], capture_output=True, text=True, timeout=HYPRCTL_TIMEOUT_S)
-        answer = json.loads(out.stdout)
-    except (OSError, subprocess.TimeoutExpired, ValueError):
-        return None
-    return answer if isinstance(answer, dict) else None
 
 
 def _modifiers(keys) -> list[str]:
