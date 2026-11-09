@@ -119,6 +119,33 @@ class Rig:
         """Something reaching the agent the way a contact's email alert does."""
         return self.gw._notifications.notify(channel, text, to=ROLE)
 
+    def keep_changelog(self) -> None:
+        """Give the gateway an app changelog (urn:agentenv:changes/v1), held here; ``app_write`` adds to it."""
+        self.changelog: list[dict] = []
+        self.gw._db_conn = object()  # the gateway serves changes only for an env with a database
+        self.gw._query_changelog_id = lambda: self.changelog[-1]["id"] if self.changelog else None
+        self.gw._read_changelog = lambda after_id, count: [r for r in self.changelog if r["id"] > after_id][:count]
+
+    def app_write(self, table: str, summary: str = "", *, tool: str = "app_tool", role: Optional[str] = ROLE,
+                  trigger_id: Optional[str] = None) -> int:
+        """One change to an app's data: by ``role``'s tool call, by trigger ``trigger_id``'s tool action, or, with
+        neither, by nothing the gateway served (a website reached directly). Returns its changelog id."""
+        before = self.changelog[-1]["id"] if self.changelog else 0
+        self.changelog.append({"id": before + 1, "timestamp": "2026-11-09T14:00:00", "schema_name": "public",
+                               "table_name": table, "operation": "INSERT", "row_id": str(before + 1),
+                               "summary": summary, "changed_fields": None})
+        changes, n = self.gw._changes, len(self.changelog)
+        if trigger_id is not None:
+            changes.observe({"event_type": "internal_tool_call", "event_id": f"w{n}", "trigger_id": trigger_id,
+                             "action_index": 0, "tool": tool, "as": None, "changelog_id_before": before,
+                             "changelog_id_after": before + 1})
+        elif role is not None:
+            changes.observe({"event_type": "tool_call", "event_id": f"c{n}", "role": role,
+                             "tool_call": {"function_name": tool}})
+            changes.observe({"event_type": "tool_call_result", "event_id": f"r{n}", "tool_call_event_id": f"c{n}",
+                             "changelog_id_before": before, "changelog_id": before + 1})
+        return before + 1
+
     def app_tools(self, *names: str) -> None:
         """App tools the gateway knows of, so a trigger may watch them; nothing serves them."""
         self.gw._server_tools.setdefault("apps", []).extend(Tool(name=n, inputSchema={"type": "object"}) for n in names)

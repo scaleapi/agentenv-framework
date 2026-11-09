@@ -41,6 +41,11 @@ it in the run's metadata under its ``name``; a ``deploy_agent`` step deploys the
   messages and the agent's message_user texts, then her last word that never reached the agent and an end marker with
   the end reason. A failed or timed-out agent turn sets the response's ``error_type`` (as prompt_agent does), so
   verifiers skip the run.
+- Who did what, and in what order, even under a frozen clock: each app change (urn:agentenv:changes/v1) is recorded
+  with who made it and the wake it was seen in, the agent's own with the wake that made it (``app_changes`` events);
+  each reply records the agent's message it answers (``reply_to``: its wake, time and text); and each read leaves a
+  record in ``metadata["post_turn_hooks"][step_id]`` in the shape the old psi-wake hook wrote, ``user_reads_at``
+  being when her reply reached the agent, so checks built on those records grade the run instead of skipping it.
 - The run's metadata keeps a summary in ``metadata["always_on"][step_id]`` (small enough for a running job to report
   back); the full timeline goes to the object store, at the summary's ``object_url``.
 """
@@ -69,9 +74,12 @@ from agent_env.artifact import FileArtifact
 from agent_env.env.env import EnvCapabilityUnsupported
 from agent_env.env.gateway.notifications import DEFAULT_MAX_ACTIVE
 from agent_env.env.gateway.constants import (
+    CHANGES_PAGE_MAX,
     DEFAULT_ROLE,
+    EXT_CHANGES_URI,
     EXT_CLOCK_URI,
     EXT_NOTIFICATIONS_URI,
+    EXT_STATE_URI,
     EXT_TRIGGERS_URI,
     EXT_USER_CHAT_URI,
 )
@@ -127,6 +135,11 @@ END_NOTES = {
 }
 # The run's metadata keeps a summary; the full timeline goes to the object store. When storing fails, the summary keeps
 # this many of the last events instead, without these fields.
+# The records a post-turn hook keeps (metadata["post_turn_hooks"][step id]), written in the shape the old psi-wake hook
+# wrote them, so checks that read its reply times (user_reads_at) grade a run on this step.
+HOOK_RECORDS_KEY = "post_turn_hooks"
+HOOK_NAME = "always_on"
+CHANGE_SUMMARY_CHARS = 200
 TIMELINE_TAIL = 20
 PENDING_KEPT = 20
 PENDING_TEXT_CHARS = 300
@@ -239,6 +252,9 @@ class _Run:
         self.error_code: Optional[str] = None
         self.chat_pending: list[dict] = []  # the agent's message_user texts not yet in the graded conversation
         self.reaction: Optional[dict] = None  # her last read's answer when she said nothing
+        self.change_cursors: dict[str, tuple[Any, int]] = {}  # env id -> (env, the last changelog id read)
+        self.change_counts = {"by_agent": 0, "by_others": 0, "no_actor": 0}
+        self.hook_records: list[dict] = []
         self._plugin_paths: list[str] = []
         self._plugin_modules: list[str] = []
         self.nudges = 0
@@ -311,6 +327,7 @@ class _Run:
         await self._configure_checks()
         await self._configure_contacts()
         await self._configure_agents()
+        await self._start_changes()
 
         self.conversation_id = uuid.uuid4().hex
         try:
@@ -321,6 +338,8 @@ class _Run:
         except DuplicateKeyError:
             pass
         ctx.metadata.setdefault("a2a_conversations", {})[step.id] = self.conversation_id
+        self.hook_records.append({"hook": HOOK_NAME, "turn": 0, "started_at": _iso(await self.now())})
+        ctx.metadata.setdefault(HOOK_RECORDS_KEY, {})[step.id] = self.hook_records
         self.user_context_id = uuid.uuid4().hex   # one user sim session per run
         self.solver_context_id = uuid.uuid4().hex
 
@@ -786,6 +805,9 @@ class _Run:
                            + [{"at": _iso(r["deliver_at"]), "text": r["text"], "kind": "user_reply",
                                "done": r.get("done", False)} for r in replies],
                            key=lambda m: _utc(m["at"]))
+        for r in replies:
+            if r.get("hook") is not None:
+                r["hook"]["delivered_in_wake"] = self.wakes + 1
         if user_msgs:
             await self._chat_user([self._chat_part(_utc(m["at"]), m["text"], kind=m["kind"],
                                                    **({"done": True} if m.get("done") else {})) for m in user_msgs])
@@ -824,6 +846,7 @@ class _Run:
             parts = [*parts, _step_part(step.wake_reminder_text, "reminder")]
         self.wakes += 1
         msg_id = uuid.uuid4().hex
+        await self._read_changes("before_turn")
 
         def record() -> None:
             self.per_turn_parts.append(list(parts))
@@ -846,6 +869,7 @@ class _Run:
         if term.tool_call_count is not None:
             self.tool_calls = (self.tool_calls or 0) + term.tool_call_count
         messages, quiet = await self._take_messages()
+        await self._read_changes("turn")
         traj = None
         card = self.agent.a2a_card or {}
         traj_ext = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
@@ -874,6 +898,7 @@ class _Run:
         stuck = await self.settle()
         if stuck:
             self.log("settle_timeout", wake=self.wakes, still_at_work=stuck, settle=self.last_settle)
+        await self._read_changes("after_turn")
         self._schedule_read()
 
     async def _nudge(self, closing: str) -> None:
@@ -905,6 +930,7 @@ class _Run:
         if term.tool_call_count is not None:
             self.tool_calls = (self.tool_calls or 0) + term.tool_call_count
         messages, quiet = await self._take_messages()
+        await self._read_changes("nudge")
         traj = None
         card = self.agent.a2a_card or {}
         traj_ext = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
@@ -926,6 +952,62 @@ class _Run:
         if state == TaskState.failed or str(state) == "failed":
             self._failed(term.error_type or "agent_turn_failed",
                          term.error_message or term.response_text or "agent nudge turn failed", term.error_code)
+
+    # ---- app changes -------------------------------------------------------------------------------------------------
+    async def _start_changes(self) -> None:
+        """Where each env's changelog stands before the first wake (urn:agentenv:state/v1's changelog_id), so the
+        run reads only its own changes; an env that keeps no changelog is skipped."""
+        for env in self.ctx.deployed_envs:
+            if not (env.supports(EXT_CHANGES_URI, "get") and env.supports(EXT_STATE_URI, "get")):
+                continue
+            try:
+                changelog_id = (await _call(env, EXT_STATE_URI, "get", attempts=2)).get("changelog_id")
+                if changelog_id is None:  # an empty changelog, or none: only the second refuses a read
+                    await _call(env, EXT_CHANGES_URI, "get", {"after_id": 0, "limit": 1}, attempts=1)
+            except Exception as e:
+                logger.info(f"always_on: {env.env_id} keeps no changelog it serves; its changes go unrecorded: {e}")
+                continue
+            self.change_cursors[env.env_id] = (env, int(changelog_id or 0))
+
+    async def _read_changes(self, phase: str) -> None:
+        """Record the app changes made since the last read (urn:agentenv:changes/v1), each with who made it. One the
+        agent made (a tool call or website request of its role) carries the wake that made it (``wake``, with
+        ``phase`` "turn" or "nudge"); others say when they were seen: before the wake's turn (clock jumps), during it,
+        or after it (contacts and triggers while the world settled). A change with no actor is one the gateway didn't
+        serve, a website reached directly say."""
+        for env_id, (env, cursor) in list(self.change_cursors.items()):
+            rows: list[dict] = []
+            try:
+                while True:
+                    got = await _call(env, EXT_CHANGES_URI, "get", {"after_id": cursor, "limit": CHANGES_PAGE_MAX},
+                                      attempts=2)
+                    page = got.get("changes") or []
+                    rows += page
+                    if page:
+                        cursor = page[-1]["id"]
+                    if not page or not got.get("has_more"):
+                        break
+            except Exception as e:
+                logger.warning(f"always_on: reading {env_id}'s changes failed (continuing): {e}")
+            self.change_cursors[env_id] = (env, cursor)
+            if rows:
+                changes = [self._change(env_id, row, phase) for row in rows]
+                self.log("app_changes", wake=self.wakes, phase=phase, env_id=env_id, count=len(changes),
+                         changes=changes)
+
+    def _change(self, env_id: str, row: dict, phase: str) -> dict:
+        actors = [{k: v for k, v in a.items() if k in ("kind", "role", "tool", "trigger_id", "request", "caused_by",
+                                                         "failed") and v not in (None, [], {})}
+                  for a in row.get("actors") or []]
+        mine = any(a.get("role") == self.recipient and a.get("kind") in ("tool_call", "request") for a in actors)
+        by = "agent" if mine else "others" if actors else None
+        self.change_counts["by_agent" if mine else "by_others" if actors else "no_actor"] += 1
+        summary = row.get("summary")
+        if isinstance(summary, str) and len(summary) > CHANGE_SUMMARY_CHARS:
+            summary = summary[:CHANGE_SUMMARY_CHARS] + "…"
+        return {"env_id": env_id, "id": row.get("id"), "table": f"{row.get('schema_name')}.{row.get('table_name')}",
+                "op": row.get("operation"), "row_id": row.get("row_id"), "summary": summary,
+                "at": row.get("timestamp"), "by": by, "wake": self.wakes, "phase": phase, "actors": actors}
 
     async def _take_messages(self) -> tuple[list[dict], list[dict]]:
         """What the agent sent the user with message_user this turn, oldest first, and its stay_quiet calls."""
@@ -963,7 +1045,8 @@ class _Run:
             for it in await take_due(self.notification_envs, USER_PHONE):
                 phone.append({"at": it.get("at"), "channel": it["channel"],
                               "text": "\n\n".join(p["text"] for p in it["parts"] if p.get("kind") == "text")})
-        read = {"time": _iso(now), "assistant_messages": [{"at": m.get("at"), "text": m["text"]} for m in self.unread],
+        seen = list(self.unread)
+        read = {"time": _iso(now), "assistant_messages": [{"at": m.get("at"), "text": m["text"]} for m in seen],
                 "phone": phone,
                 "you_sent": list(self.you_sent), "done_ends_run": not self.multi_day}
         self.unread, self.you_sent, self.read_at = [], [], None
@@ -991,11 +1074,18 @@ class _Run:
                          past_turn_cap=ans.get("past_turn_cap"), last_read=last)
         outcome = ans.get("outcome")
         said = (ans.get("message") or "").strip()
+        hook = {"hook": HOOK_NAME, "turn": self.wakes, "read_at": _iso(now),
+                "wrote_at": min((m["at"] for m in seen if m.get("at")), default=None), "outcome": outcome}
         if outcome in ("reply", "done") and said:
             deliver = now + latency
-            self.held.append({"deliver_at": deliver, "text": ans["message"], "done": outcome == "done"})
+            reply_to = _reply_to(ans, seen)
+            entry.update(deliver_at=_iso(deliver), reply_to=reply_to, reply_to_candidates=len(seen))
+            # user_reads_at: when her answer reaches the agent, the reply time the old psi-wake hook recorded
+            hook.update(user_reads_at=_iso(deliver), reply_to=_cut(reply_to))
+            self.held.append({"deliver_at": deliver, "text": ans["message"], "done": outcome == "done",
+                              "hook": hook})
             self.last_reply_at = deliver
-            entry["deliver_at"] = _iso(deliver)
+        self.hook_records.append(hook)
         if outcome == "reply" and said:
             self.replies += 1
             max_replies = self.us.get("max_replies")
@@ -1092,6 +1182,7 @@ class _Run:
     async def finish(self) -> None:
         step, ctx = self.step, self.ctx
         now = await self.now()
+        await self._read_changes("end")
         try:
             self.pending = await self._pending_at_end()
         except Exception as e:  # the record matters more than this part of it
@@ -1129,6 +1220,8 @@ class _Run:
             "silent_wakes": sum(1 for e in self.timeline if e["event"] == "agent_turn_end"
                                 and not e.get("messages_to_user")),
         }
+        if self.change_cursors:
+            counts["app_changes"] = dict(self.change_counts)
         if step.nudge:
             nudges = [e for e in self.timeline if e["event"] == "nudge"]
             counts["nudges"] = len(nudges)
@@ -1241,6 +1334,39 @@ def _busy(row: dict, now: datetime) -> bool:
     if row.get("status") not in IN_FLIGHT and not row.get("pending"):
         return False
     return not (row.get("waiting") and row.get("resumes_at") and _utc(row["resumes_at"]) > now)
+
+
+def _reply_to(answer: dict, seen: list[dict]) -> Optional[dict]:
+    """Which of the agent's messages in a read her answer responds to: the one the plug-in names in ``replying_to``
+    (its 1-based number in the read, or words quoted from it); else the one her ``used`` quotes; else the only message
+    in the read; else the only one that asks something. None when it can't be told. ``matched_by`` says which rule
+    found it. Whether she approved what it asked is for the grader to read from her message."""
+    def found(m: dict, how: str) -> dict:
+        return {"wake": m.get("wake"), "at": m.get("at"), "text": m["text"], "matched_by": how}
+
+    def quoting(quote: Any) -> list[dict]:
+        words = " ".join(str(quote or "").split()).lower()
+        return [m for m in seen if len(words) >= 8 and words in " ".join(m["text"].split()).lower()]
+
+    named = answer.get("replying_to")
+    if isinstance(named, int) and not isinstance(named, bool) and 1 <= named <= len(seen):
+        return found(seen[named - 1], "replying_to")
+    if isinstance(named, str) and len(hits := quoting(named)) == 1:
+        return found(hits[0], "replying_to")
+    if isinstance(answer.get("used"), str) and len(hits := quoting(answer["used"])) == 1:
+        return found(hits[0], "used")
+    if len(seen) == 1:
+        return found(seen[0], "only_message")
+    if len(asks := [m for m in seen if "?" in m["text"]]) == 1:
+        return found(asks[0], "only_question")
+    return None
+
+
+def _cut(item: Optional[dict]) -> Optional[dict]:
+    """``item`` with its text cut to PENDING_TEXT_CHARS, for what the run's metadata keeps."""
+    if not item or len(item.get("text") or "") <= PENDING_TEXT_CHARS:
+        return item
+    return {**item, "text": item["text"][:PENDING_TEXT_CHARS] + "…"}
 
 
 def _bounded(pending: dict) -> dict:
