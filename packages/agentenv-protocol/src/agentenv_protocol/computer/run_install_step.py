@@ -11,8 +11,7 @@ from pathlib import Path
 from typing import NoReturn
 
 from ._load import load_class
-from .app import ComputerAppEnvironment, _built_settings
-from .platform import detect
+from .app import ComputerAppEnvironment, _built_settings, _here
 
 USAGE = "usage: python -m agentenv_protocol.computer.run_install_step <file>:<Class> <method>"
 
@@ -33,7 +32,7 @@ def main(argv: list[str]) -> None:
     if argv[1] not in {step.name for step in cls.declaration().install_steps}:
         raise SystemExit(f"{cls.__name__} has no @install_step method {argv[1]!r}")
     app = cls.__new__(cls)
-    app.settings, app.build_settings = _NoDeploy(), _built_settings(cls, detect().os)
+    app.settings, app.build_settings = _NoDeploy(), _built_settings(cls, _here())
     done = getattr(app, argv[1])()
     if inspect.isawaitable(done):
         asyncio.run(done)

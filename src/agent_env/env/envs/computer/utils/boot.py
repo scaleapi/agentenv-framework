@@ -110,23 +110,24 @@ def settings_environment(computer: ComputerArtifact, values: dict[str, Any], *, 
 
 
 def app_settings_environment(apps: list[ComputerAppEnv], app_settings: dict[str, dict],
-                             os_type: str) -> dict[str, str]:
-    """The environment that hands each of ``apps``, on a computer of ``os_type``, the values ``app_settings`` gives it,
-    by its name, in ``APP_SETTINGS_ENV``, a secret's resolved through the secret store; nothing when none has any."""
+                             platform: str) -> dict[str, str]:
+    """The environment that hands each of ``apps``, on a computer of ``platform`` (``install.platform_of``), the values
+    ``app_settings`` gives it, by its name, in ``APP_SETTINGS_ENV``, a secret's resolved through the secret store;
+    nothing when none has any."""
     given = [(app, app_settings[app.environment_name]) for app in apps if app_settings.get(app.environment_name)]
     if not given:
         return {}
     return {APP_SETTINGS_ENV: json.dumps({app.environment_name: {
-        name: get_config().resolve_reference(value) if name in app.secret_settings(os_type) and value is not None
+        name: get_config().resolve_reference(value) if name in app.secret_settings(platform) and value is not None
         else value
         for name, value in values.items()} for app, values in given})}
 
 
 def recorded_app_settings(apps: list[ComputerAppEnv], app_settings: dict[str, dict],
-                          os_type: str) -> dict[str, dict[str, Any]]:
-    """The values ``app_settings`` hands each of ``apps`` on a computer of ``os_type``, by its name, as a record keeps
-    them, a secret's withheld; its class's defaults fill in the rest."""
-    return {app.environment_name: {name: WITHHELD if name in app.secret_settings(os_type) else value
+                          platform: str) -> dict[str, dict[str, Any]]:
+    """The values ``app_settings`` hands each of ``apps`` on a computer of ``platform`` (``install.platform_of``), by
+    its name, as a record keeps them, a secret's withheld; its class's defaults fill in the rest."""
+    return {app.environment_name: {name: WITHHELD if name in app.secret_settings(platform) else value
                                    for name, value in values.items()}
             for app in apps if (values := app_settings.get(app.environment_name))}
 
@@ -193,11 +194,11 @@ async def discard(sandbox: Sandbox) -> None:
             await asyncio.to_thread(remove_local_work_dir, sandbox.sandbox_id)
 
 
-def ready_timeout(apps: list[ComputerAppEnv], os_type: str) -> float:
-    """How long a computer of ``os_type`` and ``apps`` may take to be ready: ``READY_TIMEOUT_S``, or longer when an app
-    that starts with it there gives itself longer."""
+def ready_timeout(apps: list[ComputerAppEnv], platform: str) -> float:
+    """How long a computer of ``platform`` (``install.platform_of``) and ``apps`` may take to be ready:
+    ``READY_TIMEOUT_S``, or longer when an app that starts with it there gives itself longer."""
     return max([READY_TIMEOUT_S, *(launch.ready.timeout_s + APP_READY_MARGIN_S for app in apps
-                                   if (launch := app.launch(os_type)) and launch.at == "boot" and launch.ready)])
+                                   if (launch := app.launch(platform)) and launch.at == "boot" and launch.ready)])
 
 
 async def ready(url: str, timeout: float, token: Optional[str] = None, *, answering: bool = False) -> dict:

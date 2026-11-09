@@ -14,12 +14,13 @@ from __future__ import annotations
 
 import re
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal
+from typing import Any, Iterable, Literal, Optional, TypeVar
 
 from agentenv_protocol.computer.app import AptSource, Download, LayerPath, Packages, RunScript
+from agentenv_protocol.computer.platform import entry_for, platform_key, supported
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from agent_env.artifact.artifacts.computer import OS_TYPES
+from agent_env.artifact.artifacts.computer import DISTRIBUTION, OS_TYPES
 
 #: The highest port a layer can listen on.
 MAX_PORT = 65535
@@ -170,20 +171,57 @@ DRIVER_INSTALLS: dict[str, type[Install]] = {"linux": Install, "macos": MacInsta
 APP_INSTALLS: dict[str, type[Install]] = {"linux": AppInstall, "macos": MacAppInstall, "windows": WindowsAppInstall}
 
 
+_Entry = TypeVar("_Entry")
+
+
+def platform_problem(key: str) -> Optional[str]:
+    """What's wrong with ``key`` as what an install or a known failure is for: an OS type agent-env composes, or one
+    of its distributions as ``<os>/<distribution>`` (``linux/omarchy``), whose entry replaces its OS type's there."""
+    os_type, slash, distribution = key.partition("/")
+    if os_type in OS_TYPES and (not slash or re.fullmatch(DISTRIBUTION, distribution)):
+        return None
+    return (f"an OS type agent-env composes: {', '.join(OS_TYPES)}, or one of its distributions as "
+            "<os>/<distribution>, such as linux/omarchy")
+
+
+def os_type_of(key: str) -> str:
+    return key.partition("/")[0]
+
+
+def platform_of(os: Any) -> str:
+    """The key a base's OS, ``os``, takes its installs, launches and known failures by: ``<os>/<distribution>``, or its
+    OS type when it names no distribution."""
+    return platform_key(os.type, getattr(os, "distribution", None))
+
+
+def unsupported(keys: Iterable[str], supports: list[dict], at: str) -> list[str]:
+    """Each distribution of ``keys``, named from ``at``, that no ``supports`` entry names: an install or known failures
+    that would never apply, as for a misspelled distribution."""
+    named = {platform_key(platform.os, platform.distribution) for entry in supports for platform in supported(entry)
+             if platform.distribution}
+    return [f"{at}.{key}: no supports entry names {key.partition('/')[2]!r} on {os_type_of(key)}, so this never "
+            "applies" for key in keys if "/" in key and key not in named]
+
+
+def for_os(by_platform: dict[str, _Entry], os: Any) -> Optional[_Entry]:
+    """``by_platform``'s entry for ``os``, a base's OS: its distribution's when there's one, else its OS type's."""
+    return entry_for(by_platform, platform_of(os))
+
+
 def installs(data: Any, models: dict[str, type[Install]] = DRIVER_INSTALLS) -> tuple[dict[str, Install], list[str]]:
-    """The installs ``data``, an ``install`` table, declares by OS type, each its type's model of ``models``, and the
-    problems with it, each named by its key."""
+    """The installs ``data``, an ``install`` table, declares by OS type or distribution (``platform_problem``), each
+    its OS type's model of ``models``, and the problems with it, each named by its key."""
     if not isinstance(data, dict):
         return {}, [f"install must be a table of OS types ({', '.join(OS_TYPES)}), not {data!r}"]
     found, problems = {}, []
-    for os_type, table in data.items():
-        if os_type not in OS_TYPES:
-            problems.append(f"install.{os_type}: an install is for an OS type agent-env composes: {', '.join(OS_TYPES)}")
+    for key, table in data.items():
+        if problem := platform_problem(key):
+            problems.append(f"install.{key}: an install is for {problem}")
             continue
         try:
-            found[os_type] = models[os_type].model_validate(table)
+            found[key] = models[os_type_of(key)].model_validate(table)
         except ValidationError as e:
-            problems.extend(f"install.{'.'.join(map(str, (os_type, *error['loc'])))}: {error['msg']}"
+            problems.extend(f"install.{'.'.join(map(str, (key, *error['loc'])))}: {error['msg']}"
                             for error in e.errors())
     return found, problems
 

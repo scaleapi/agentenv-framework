@@ -34,6 +34,7 @@ from agent_env.env.envs._deployment import (
 from agent_env.env.envs.computer import COMPUTER_ENV_TYPE
 from agent_env.env.envs.computer.utils import boot, composer, gate, inside, sites
 from agent_env.env.envs.computer.utils.composed import stale
+from agent_env.env.envs.computer.utils.install import platform_of
 from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.envs.computer.utils import params as computer_params
 from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
@@ -142,8 +143,8 @@ class ComputerEnv(Env):
         by_name = {app.environment_name: app for app in apps}
         for name, defaults in app_settings.items():
             problems += ([f"apps.{name}.settings: {id} has no app {name!r}"] if name not in by_name else
-                         gate.check_app_settings(by_name[name], defaults, f"apps.{name}.settings", computer.os.type,
-                                                 partial=True))
+                         gate.check_app_settings(by_name[name], defaults, f"apps.{name}.settings",
+                                                 platform_of(computer.os), partial=True))
         if problems:
             raise ValueError(f"computer env {id!r}: " + "; ".join(problems))
         env = get_env_store().put_document(cls(

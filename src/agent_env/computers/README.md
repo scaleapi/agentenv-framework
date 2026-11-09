@@ -39,7 +39,10 @@ a reset boots the disk afresh on a new overlay in the same launcher, at the same
 before reset in place started is refused a reset, to be redeployed. It boots on local Docker where Docker can pass it
 `/dev/kvm`, the disk image's files mounted read-only into the launcher where Docker mounts images (28 and later, on the
 containerd image store), so no copy of a disk, nor of a Windows disk's base, is made for each launcher, else copied into
-an image of the launcher it keeps for the next boot; and on `modal_vm`, amd64 only, whose sandbox runs the launcher as
+an image of the launcher it keeps for the next boot. There its computer uses a local object store's grants as a container
+does, at `host.docker.internal`: Linux's init and Windows' setup map that name to 10.0.2.2, QEMU's address for the
+launcher, which forwards the grant server's port to this machine (`VM_HOST_PORTS`), and the local transfer CA's trust
+files ride in the seed (`VM_TRUST`), where the init and agentenv-session point TLS clients at them; and on `modal_vm`, amd64 only, whose sandbox runs the launcher as
 its image under nested virtualization: the provider exports the disk from the image store with this machine's Docker,
 compressed, once for each composed disk, into the per-user cache, and mounts it on the sandbox at create, which Modal
 uploads once for each content and the launcher expands onto the sandbox's disk; a thin disk, a Windows one, carries its
@@ -181,7 +184,8 @@ with 4 vCPUs and 8 GB, on local Docker with KVM and on `modal_vm`; it has comput
 protocol's Windows defaults, so the probe runs its fixture there as on Linux, with Python one-liners for the commands it
 would give a shell. On `modal_vm` it runs in your own Modal workspace, under the evaluation's terms or a licence of your
 own; whether they allow it there is yours to check. Composing leaves `C:\agentenv` the admins', as `/opt/agentenv` is
-root's on Linux: every user reads and runs what's there, and the session user writes only the services' logs and each
+root's on Linux: every user, and every sandboxed process (Chrome's, as Program Files allows it), reads and runs
+what's there, and the session user writes only the services' logs and each
 app's `.agentenv` folder. An app's own server runs in the session as its services do, on a loopback port it writes
 with a token to that folder, which only the session user, SYSTEM and Administrators reach; it launches the app in a
 Job object, which ends whatever the app started. Composing signs in as `agentadmin`, so

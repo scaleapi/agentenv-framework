@@ -7,6 +7,7 @@ elevated; one it runs as the session user is refused. A Windows base is amd64, d
 agentenv-session. The scripts the Windows test bundle's verifiers run inside the computer are Python."""
 
 import ast
+import importlib.util
 import json
 import threading
 import time
@@ -189,7 +190,7 @@ def test_a_windows_env_composes_a_thin_disk_on_its_base_here_the_driver_installe
                                                                          "driver.py"], "env": {"PYTHONUTF8": "1", "MCP_PORT": "18765"}}
     assert lines[-3:] == [
         "Checked { icacls 'C:\\agentenv' /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' "
-        "'*S-1-5-32-545:(OI)(CI)RX' | Out-Null }",
+        "'*S-1-5-32-545:(OI)(CI)RX' '*S-1-15-2-1:(OI)(CI)RX' '*S-1-15-2-2:(OI)(CI)RX' | Out-Null }",
         "Checked { icacls 'C:\\agentenv\\logs' /grant 'user:(OI)(CI)M' | Out-Null }", ""]
     assert {"provision.ps1", "context/driver/driver.py", "context/driver/install.ps1"} <= set(files)
     computer = env.computer_artifact()
@@ -443,3 +444,18 @@ def test_the_scripts_the_windows_bundles_verifiers_run_inside_the_computer_are_p
                if isinstance(node, ast.Assign) and [target.id for target in node.targets] == [script]]
 
     ast.parse(text)
+
+
+def test_the_session_points_tls_clients_at_a_seeds_trust_folder_and_at_nothing_without_one(tmp_path):
+    spec = importlib.util.spec_from_file_location("agentenv_session", windows_disk.RECIPE / "agentenv-session.py")
+    session = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(session)
+    trust = tmp_path / "trust"
+
+    assert session.trust(trust) == {}
+    trust.mkdir()
+    (trust / "ca-bundle.pem").write_text("roots and the local CA")
+    (trust / "ca.pem").write_text("the local CA")
+    assert session.trust(trust) == {"SSL_CERT_FILE": str(trust / "ca-bundle.pem"),
+                                    "REQUESTS_CA_BUNDLE": str(trust / "ca-bundle.pem"),
+                                    "NODE_EXTRA_CA_CERTS": str(trust / "ca.pem")}

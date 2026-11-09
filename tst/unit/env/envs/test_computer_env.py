@@ -374,6 +374,25 @@ def test_a_build_whose_probe_fails_or_that_never_gets_ready_fails_at_the_probe_a
         "failed", "probe", f"the probe didn't finish within {probing._PROBE_TIMEOUT_S} s")
 
 
+def test_known_failures_for_a_distribution_are_waived_on_it_alone_and_replace_its_os_types_there(
+        base, docker, tmp_path):
+    docker.probe_fails["arm64"] = "the click never landed"
+    clicks = KnownFailure(check="P4", name="clicks show their effect", reason="its clicks lag")
+    elsewhere = _driver(tmp_path / "elsewhere", known_failures={"linux/omarchy": [clicks]})
+    here = _driver(tmp_path / "here", known_failures={
+        "linux": [KnownFailure(check="P0", name="the card", reason="its card was late")], "linux/ubuntu": [clicks]})
+
+    on_elsewhere = Env.get(_put(base, elsewhere, id="@local/~/kit/elsewhere", environment_name="elsewhere").id
+                           ).metadata["composed"]["container"]["arm64"]
+    on_here = Env.get(_put(base, here, id="@local/~/kit/here", environment_name="here").id).metadata[
+        "composed"]["container"]["arm64"]
+    docker.probe_fails.clear()
+
+    assert on_elsewhere["status"] == "failed"
+    assert on_here["status"] == "ready" and on_here["probe"]["known_failures"][0]["reason"] == "its clicks lag"
+    assert "unused_known_failures" not in on_here["probe"]
+
+
 def test_a_check_the_driver_declares_it_fails_is_waived_and_recorded_and_a_declared_one_that_didnt_fail_is_flagged(
         base, docker, tmp_path, caplog):
     docker.probe_fails["arm64"] = "the click never landed"
@@ -1805,6 +1824,16 @@ def test_the_locks_debs_and_wheels_are_mounted_into_the_runs_that_install_them_n
           for name, prefix in (("driver", "/opt/agentenv/drivers/desk"), ("apps-mail", "/opt/agentenv/apps/mail")))]
     assert {"packages/apt/hello_1.0_arm64.deb", "packages/wheels/driver/mss-10.1.0-py3-none-any.whl"} <= set(
         build["files"])
+
+
+def test_an_app_that_declares_for_a_distribution_is_told_the_platform_it_was_composed_for(base, driver, docker,
+                                                                                         tmp_path):
+    _app(base, driver, tmp_path / "mail", steps=[("index_mail", "session", "linux/ubuntu")])
+
+    build = {build["platform"]: build for build in docker.builds}["linux/arm64"]
+    assert ("RUN --network=none cd /opt/agentenv/apps/mail && AGENTENV_PLATFORM=linux/ubuntu venv/bin/python -m "
+            "agentenv_protocol.computer.run_install_step app.py:Mail index_mail") in build["dockerfile"]
+    assert 'AGENTENV_PLATFORM="linux/ubuntu"' in build["confs"]["agentenv-app-mail.conf"]
 
 
 def test_an_apps_packages_downloads_scripts_and_steps_are_fetched_at_put_and_installed_offline(base, driver, docker,

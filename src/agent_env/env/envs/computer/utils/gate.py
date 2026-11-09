@@ -10,12 +10,13 @@ from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from agentenv_protocol.computer.apps import apps_folder
-from agentenv_protocol.computer.platform import Platform, supported
+from agentenv_protocol.computer.platform import Platform, entry_for, supported
 from jsonschema import Draft202012Validator
 
 from agent_env.artifact.artifacts.computer import FORMS, ComputerArtifact, SettingValue
 from agent_env.config.loader import ENV_REF_PREFIX, SECRET_REF_PREFIX
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
+from agent_env.env.envs.computer.utils.install import for_os, platform_of
 from agent_env.store.image_store.oci_registry_credentials import names_registry
 
 if TYPE_CHECKING:
@@ -75,9 +76,9 @@ def check_app(base: ComputerArtifact, driver: ComputerDriverEnv, app: ComputerAp
     problems = []
     if not arches(base, driver, [app]):
         problems.append(f"{at}: no architecture {base.id}, {driver.id} and {app.id} all run")
-    if os.type not in app.install:
-        problems.append(f"{at}: {app.id} declares no install for {os.type}")
-    elif taken := sorted(set(_ports(app, os.type)) & set(_driver_ports(driver, os.type))):
+    if for_os(app.install, os) is None:
+        problems.append(f"{at}: {app.id} declares no install for {_os_shown(base)}")
+    elif taken := sorted(set(_ports(app, platform_of(os))) & set(_driver_ports(driver, os))):
         problems.append(f"{at}: {app.id} listens on {', '.join(map(str, taken))}, as {driver.id} does")
     if os.type == "windows" and (session := [step.name for step in app.declaration.install_steps
                                              if step.scope == "session" and (step.os is None or os.type in step.os)]):
@@ -114,8 +115,8 @@ def _apps(base: ComputerArtifact, driver: ComputerDriverEnv, apps: list[Computer
                  "own files" for app in distinct if app.environment_name == environment_name]
     for kind, keys in (("environment name", lambda app: [app.environment_name]),
                        ("folder", lambda app: [str(apps_folder(base.os.type) / app_folder(app))]),
-                       ("program", lambda app: programs(app, base.os.type)),
-                       ("port", lambda app: _ports(app, base.os.type))):
+                       ("program", lambda app: programs(app, platform_of(base.os))),
+                       ("port", lambda app: _ports(app, platform_of(base.os)))):
         claims: dict[object, list[str]] = {}
         for app in distinct:
             for key in keys(app):
@@ -124,32 +125,33 @@ def _apps(base: ComputerArtifact, driver: ComputerDriverEnv, apps: list[Computer
             if len(owners) > 1 and frozenset(owners) not in named:
                 named.add(frozenset(owners))
                 problems.append(f"apps: {' and '.join(owners)} would share the {kind} {key!r}")
-    owned = [(app, PurePosixPath(path)) for app in distinct for path in _paths(app, base.os.type)]
+    owned = [(app, PurePosixPath(path)) for app in distinct for path in _paths(app, platform_of(base.os))]
     problems += [f"apps: {one.id} keeps its data in {str(a)!r} and {other.id} in {str(b)!r}, so they'd share it"
                  for (one, a), (other, b) in itertools.combinations(owned, 2)
                  if one is not other and (a.is_relative_to(b) or b.is_relative_to(a))]
     return problems
 
 
-def programs(app: ComputerAppEnv, os_type: str) -> list[str]:
-    """The names of the supervisord programs ``app`` runs on ``os_type``: its own server's, then its services'."""
+def programs(app: ComputerAppEnv, platform: str) -> list[str]:
+    """The names of the supervisord programs ``app`` runs on ``platform``, an OS type or ``<os>/<distribution>``
+    (``install.platform_of``): its own server's, then its services'."""
     server = f"app-{app_folder(app)}"
-    install = app.install.get(os_type)
+    install = entry_for(app.install, platform)
     return [server, *(f"{server}-{service.name}" for service in (install.services if install is not None else []))]
 
 
-def _paths(app: ComputerAppEnv, os_type: str) -> list[str]:
-    declared = app.declaration.os.get(os_type)
+def _paths(app: ComputerAppEnv, platform: str) -> list[str]:
+    declared = entry_for(app.declaration.os, platform)
     return list(declared.paths or []) if declared is not None else []
 
 
-def _ports(app: ComputerAppEnv, os_type: str) -> list[int]:
-    install = app.install.get(os_type)
+def _ports(app: ComputerAppEnv, platform: str) -> list[int]:
+    install = entry_for(app.install, platform)
     return list(install.ports or []) if install is not None else []
 
 
-def _driver_ports(driver: ComputerDriverEnv, os_type: str) -> list[int]:
-    install = driver.install.get(os_type)
+def _driver_ports(driver: ComputerDriverEnv, os: Any) -> list[int]:
+    install = for_os(driver.install, os)
     return [driver.port, *(install.ports or [] if install is not None else [])]
 
 
@@ -236,8 +238,8 @@ def _platform(base: ComputerArtifact, driver: ComputerDriverEnv) -> list[str]:
     if not arches(base, driver):
         problems.append(f"driver: no architecture both run: {base.id} runs {', '.join(base.arch)}, and {driver.id} "
                         f"{', '.join(sorted({p.arch for p in _matching(base, driver.declaration.supports)}))}")
-    if (install := driver.install.get(os.type)) is None:
-        problems.append(f"driver: {driver.id} declares no install for {os.type}")
+    if (install := for_os(driver.install, os)) is None:
+        problems.append(f"driver: {driver.id} declares no install for {_os_shown(base)}")
     else:
         init = base.forms.container.init if base.forms.container is not None else "launchd"
         problems += [f"driver: its service {service.name!r} runs as root, and {base.id}'s {init} runs every program as "

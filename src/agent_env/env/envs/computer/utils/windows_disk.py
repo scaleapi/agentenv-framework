@@ -75,6 +75,9 @@ CPUS, MEMORY_MB = 4, 8192
 #: The groups and the account the folders under ``ROOT`` grant access to, by their well-known SIDs, as icacls takes
 #: them.
 ADMINISTRATORS, SYSTEM, USERS = "*S-1-5-32-544", "*S-1-5-18", "*S-1-5-32-545"
+#: ALL APPLICATION PACKAGES and ALL RESTRICTED APPLICATION PACKAGES: the identities a sandboxed process runs as, Chrome's
+#: and its kind's, which read and run their own program where they're installed, as Program Files lets them.
+APP_PACKAGES, RESTRICTED_APP_PACKAGES = "*S-1-15-2-1", "*S-1-15-2-2"
 #: What every service runs with: Python reading and writing files as UTF-8, as on Linux, not in Windows' code page.
 UTF8 = {"PYTHONUTF8": "1"}
 #: What a base's install prints once, as it fetches Microsoft's media.
@@ -350,10 +353,12 @@ def write(build: Path, parts: list[Part], *, user: str, build_settings: dict[str
 
 
 def _locked(user: str) -> list[str]:
-    """The lines that leave ``ROOT`` the admins', as on Linux ``/opt/agentenv`` is root's: every user reads and runs
-    what's there, none of the access ``C:\\`` gives every user to change it is left, and the session user ``user``
-    writes only the services' logs, and each app's own folder, which keeps its own access."""
-    return [_granted_alone(ROOT, {ADMINISTRATORS: "F", SYSTEM: "F", USERS: "RX"}),
+    """The lines that leave ``ROOT`` the admins', as on Linux ``/opt/agentenv`` is root's: every user, and every
+    sandboxed process, reads and runs what's there, none of the access ``C:\\`` gives every user to change it is left,
+    and the session user ``user`` writes only the services' logs, and each app's own folder, which keeps its own
+    access."""
+    return [_granted_alone(ROOT, {ADMINISTRATORS: "F", SYSTEM: "F", USERS: "RX", APP_PACKAGES: "RX",
+                                  RESTRICTED_APP_PACKAGES: "RX"}),
             f"Checked {{ icacls '{ROOT / 'logs'}' /grant {_ps(f'{user}:(OI)(CI)M')} | Out-Null }}"]
 
 

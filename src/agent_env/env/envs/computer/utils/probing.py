@@ -15,6 +15,7 @@ from agent_env.config.errors import ConfigError
 from agent_env.env.env import Env
 from agent_env.env.envs.computer.utils import boot
 from agent_env.env.envs.computer.utils.composed import Record, failed, now
+from agent_env.env.envs.computer.utils.install import for_os, platform_of
 from agent_env.store.ids import derive_id
 from agent_env.store.local_state import awaiting_lock
 
@@ -104,7 +105,8 @@ def _reported(env: ComputerEnv, driver: ComputerDriverEnv, form: str, arch: str,
     probe = {"level": report.level, "provider": provider, "passed": report.passed, "checks": report.counts(),
              "extensions": report.extensions, "report": {"id": stored.id, "version": stored.version},
              "probed_at": now()}
-    known = {(failure.check, failure.name): failure for failure in driver.known_failures.get(env.computer.os.type, [])}
+    known = {(failure.check, failure.name): failure
+             for failure in for_os(driver.known_failures, env.computer.os) or []}
     failed_checks = [c for c in report.checks if c.status == "failed"]
     if waived := [c for c in failed_checks if (c.check, c.name) in known]:
         probe["known_failures"] = [{"check": c.check, "name": c.name, "detail": c.detail,
@@ -157,7 +159,7 @@ async def _probe(links: list[SandboxProvider], env: ComputerEnv, driver: Compute
     try:
         environment = {
             **boot.settings_environment(env.computer, env.computer_values(), environment_name=env.computer_name),
-            **boot.app_settings_environment(env.composed_apps(), env.app_defaults(), env.computer.os.type)}
+            **boot.app_settings_environment(env.composed_apps(), env.app_defaults(), platform_of(env.computer.os))}
     except ConfigError as e:  # an env: or secret: reference that doesn't resolve here, or no secret store to resolve it
         raise Unprobed(f"a setting it boots with didn't resolve here: {e}") from e
     problems = []
@@ -165,8 +167,8 @@ async def _probe(links: list[SandboxProvider], env: ComputerEnv, driver: Compute
         try:
             booted = await boot.boot(link, image=image, port=driver.port, environment=environment, token=token,
                                      network_policy=None, timeout=_PROBE_TTL_S, attribution=None,
-                                     ready_s=boot.ready_timeout(env.composed_apps(), env.computer.os.type), form=form,
-                                     os_type=env.computer.os.type)
+                                     ready_s=boot.ready_timeout(env.composed_apps(), platform_of(env.computer.os)),
+                                     form=form, os_type=env.computer.os.type)
         except Exception as e:
             problems.append(f"{type(link).__name__}: {e}")
             continue
