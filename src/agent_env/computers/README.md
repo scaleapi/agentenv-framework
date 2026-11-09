@@ -201,7 +201,8 @@ passed as a systemd credential, Omarchy signing its user `omarchy` in as it does
 Hyprland; adds `agentenv.lua` to Hyprland's config (the plugin loaded at start, a US keymap, the idle cursor hidden, the
 display's mode); installs the seed unit; has SDDM log back in after a logout; sets Omarchy's toggles for an unattended
 desktop (staying awake, no animations, no screensaver or suspend, notifications silenced); turns off crash toasts,
-dictation and its keys, and housekeeping timers that would run at boot; and locks `omarchy`'s password and leaves the
+dictation and its keys, housekeeping timers that would run at boot, and the firewall, which lets in only ssh and
+LocalSend while the launcher forwards only the computer's own ports; and locks `omarchy`'s password and leaves the
 machine id empty. Trimmed, the image becomes the base's, with the key to root, and is pushed to the env's image store
 under a tag of its recipe and source. Name it as `omarchy-4.5`, or by its id,
 `@local/agentenv-framework/computers/omarchy-4.5`.
@@ -212,9 +213,10 @@ An Omarchy computer env is composed on the same machine as a thin disk too, with
 venv on the system Python, its run scripts), and its services become systemd user units of the graphical session, which
 start with the session, and again with it, through `with-seed`. At every boot, before SDDM starts the session,
 `agentenv-seed.service` reads the deploy's environment from the NoCloud seed with the Linux disk's own `seed-env` and
-writes it for `with-seed`, root's and the session user's alone, the seed's trust files first; it sets the hostname,
-names `host.docker.internal` at QEMU's address for the launcher, and writes the display's mode for Hyprland from the
-computer's `resolution`. Gate 3 probes it at full. An Omarchy computer has no apps for now: gate 1 refuses one. When
+writes it for `with-seed`, root's and the session user's alone, the seed's trust files first; it sets the hostname and
+the computer's `timezone` (UTC by default; one the disk doesn't have is written as the refusal every service then
+names), names `host.docker.internal` at QEMU's address for the launcher, and writes the display's mode for Hyprland
+from the computer's `resolution`. Gate 3 probes it at full. An Omarchy computer has no apps for now: gate 1 refuses one. When
 Hyprland crashes, its watchdog brings it back in safe mode, without cua-driver's plugin, and cua-driver reports the
 computer failed for good.
 
