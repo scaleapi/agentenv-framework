@@ -510,6 +510,28 @@ async def test_two_websites_of_one_env_whose_cards_share_a_name_are_each_named_a
 
 
 @pytest.mark.asyncio
+async def test_a_website_is_selected_by_the_environment_name_its_gateway_states(monkeypatch):
+    from agentenv_protocol import client as protocol_v1
+
+    from agent_env.env.env import DeployedGatewayEnv
+
+    async def get_card(url, timeout=10, verify=True):
+        raise AssertionError(f"read {url} live")
+
+    monkeypatch.setattr(protocol_v1, "get_card", get_card)
+    card = {"name": "env", "children_environments": [{
+        "name": "Notes", "url": "/sites/notes-v2/agentenv", "environment_name": "notes", "capabilities": {
+            "extensions": [{"uri": "urn:agentenv:website/v1", "params": {"domains": ["notes.test"]}}]}}]}
+    gateway = DeployedGatewayEnv(env_id="sites", env_version=1, sandbox_id="s", gateway_url="https://gw.example",
+                                 environment_card=card,
+                                 website_frontend_urls={"notes": "https://gw.example/website/notes/"})
+
+    found = [{"name": "Notes", "url": "https://gw.example/website/notes/", "domains": ["notes.test"]}]
+    assert await sites.deployed_sites([gateway], services=["notes"]) == found  # not the path's notes-v2
+    assert await sites.deployed_sites([gateway], services=["notes-v2"]) == []
+
+
+@pytest.mark.asyncio
 async def test_a_card_that_fails_to_load_is_retried_then_fails_rather_than_dropping_the_sites_names(monkeypatch):
     from agentenv_protocol import client as protocol_v1
 

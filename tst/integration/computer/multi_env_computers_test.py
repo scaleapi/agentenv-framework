@@ -17,6 +17,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from agentenv_protocol import client as protocol_v1
 from agentenv_protocol.tool_access import (DISABLE, DISABLE_TOOL_EXTENSION_URI, ENABLE, ENABLE_TOOL_EXTENSION_URI,
                                            WILDCARD)
 from agentenv_protocol.tool_context import DEFAULT_ROLE
@@ -34,6 +35,7 @@ from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.envs.playwright_mcp import PLAYWRIGHT_MCP_ENVIRONMENT_NAME
 from agent_env.env.envs.website import WebsiteEnv
+from agent_env.env.legacy_protocol import card_servers
 from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
 from agent_env.store.routing import namespace_routing
@@ -185,6 +187,10 @@ async def test_a_computer_in_a_multi_env_is_served_through_its_gateway_under_its
             [deployed] = (await step.execute(context)).deployed_envs
             computer = deployed.child_envs["desktop"]
             listed, shot = await _tools(deployed)
+            stated = {child.environment_name: child.name for child in protocol_v1.children(deployed.environment_card)}
+            site = deployed.child_env("shop", mcp=False)
+            servers = {(server.environment_name, server.mcp)
+                       for server in card_servers(deployed.environment_card, deployed.environment_url)}
             async with httpx.AsyncClient(timeout=30) as client:
                 card = (await client.get(f"{deployed.gateway_url}/svc/desktop{WELL_KNOWN_PATH}")).json()
             # Load, snapshot and reset reach the computer through the multi env, beside its MCP server.
@@ -230,6 +236,13 @@ async def test_a_computer_in_a_multi_env_is_served_through_its_gateway_under_its
     assert json.dumps(deployed.child_envs)  # the record stores as JSON
     assert note == "from the universe" and "snap-x" in listed_items
     assert {"items", "desktop"} <= set(snapshot) and snapshot["desktop"]["Documents/note.txt"] == b"from the universe"
+    # The gateway states each child's environment_name, which lookups, servers and snapshots go by: the shop
+    # website's card is named webitems.
+    assert {name: stated.get(name) for name in ("items", "shop", "desktop")} == {
+        "items": "items", "shop": "webitems", "desktop": "desktop"}, stated
+    assert site is not None and site.url.startswith("/svc/shop/"), site
+    assert {("items", True), ("shop", False)} <= servers and not any(name == "webitems" for name, _ in servers), servers
+    assert "shop" in snapshot and "webitems" not in snapshot, sorted(snapshot)
     assert after_reset == "gone" and all(reset_answers.values()), reset_answers
     assert computer["metadata"]["computer"]["sites"]["names"]["routes"] == {"shop": ["shop.test"]}
     assert routed == routed_after_reset == "200"

@@ -200,7 +200,10 @@ address the card was fetched from. On the client side, `client.mcp_path(card)` r
 declared path, or `/mcp` for a card without one.
 
 A composed card, such as a gateway's, nests each backing environment's card under
-`children_environments`, its `url` and endpoints rooted at the route the composer serves it at.
+`children_environments`, its `url` and endpoints rooted at the route the composer serves it at,
+and its `environment_name`: the name the child env is registered as, which its own card's `name`
+needn't be. A lookup by name finds a child by its `environment_name`, else, from a composer that
+states none, by its card's `name` (`ChildEnv.known_as`).
 `client.children(card)` returns each as a `ChildEnv` (its `name`, `url` and `card`, with its
 `extensions`, `operations` and `serves(method)`, and `base_url(address)`, its data plane resolved
 against the composed card's address). Two children may share a name, as a website and an MCP
@@ -789,8 +792,13 @@ class MailApp(ComputerAppEnvironment):
   models whose fields add to the class's `Settings` and `BuildSettings` on that OS. What's on the
   class applies to every OS. `@install(os_type, spec, launch=..., ...)` is the generic form, for an
   OS type a plugin adds, with that OS type's own install model as `spec`; `@linux(...)` is
-  `@install("linux", Linux(...), ...)`. On the computer the class reads what's declared for the OS
-  it runs on (`platform.detect()`).
+  `@install("linux", Linux(...), ...)`. `@linux(distribution="omarchy", ...)`, or
+  `@install("linux/omarchy", ...)`, declares for one distribution, by its /etc/os-release ID, what
+  replaces the OS type's declaration there. On the computer the class reads what's declared for the
+  platform its computer was composed for, which the composer sets as `AGENTENV_PLATFORM` for an app
+  that declares anything for a distribution, else the one it runs on (`platform.detect()`): its
+  distribution's, else its OS type's. An install step or ready check's `os=` names OS types or
+  distributions, and one for an OS type runs on all of it.
 - **`launch=Launch(...)`** says how it starts in the desktop session: with it (`at="boot"`) or when
   the agent opens it (`"demand"`). `ready=Ready(...)` says when it's ready, within `timeout_s` of its
   launch: a window matching `launch.window` by its class, instance or title (on Hyprland, a Wayland

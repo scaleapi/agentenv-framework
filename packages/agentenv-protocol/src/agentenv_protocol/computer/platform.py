@@ -7,10 +7,15 @@ import platform as _platform
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterable, Mapping, Optional, TypeVar
 
 PREDICATE_KEYS = ("os", "distribution", "version", "arch", "display")
 
 _ARCH = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
+_Entry = TypeVar("_Entry")
+#: The platform (``platform_key``) the computer's composer built an app for, which its server and install steps read in
+#: place of what /etc/os-release says, so they act on the install the image holds; unset outside a composed computer.
+PLATFORM_ENV = "AGENTENV_PLATFORM"
 _OS = {"linux": "linux", "darwin": "macos", "win32": "windows"}
 
 
@@ -50,6 +55,30 @@ def detect(environ: dict | None = None, os_release: Path = Path("/etc/os-release
     machine = _platform.machine().lower()
     return Platform(os=name, distribution=release.get("ID"), version=release.get("VERSION_ID"),
                     arch=_ARCH.get(machine, machine or None), display=display)
+
+
+def platform_key(os_type: Optional[str], distribution: Optional[str] = None) -> Optional[str]:
+    """What a platform's own install, launch or known failures are keyed by: ``<os>/<distribution>``, its distribution
+    being /etc/os-release's ID, or its OS type when it has none."""
+    if os_type is None:
+        return None
+    return f"{os_type}/{distribution}" if distribution else os_type
+
+
+def entry_for(by_platform: Mapping[str, _Entry], key: Optional[str]) -> Optional[_Entry]:
+    """``by_platform``'s entry for the platform ``key`` names: its distribution's, which replaces its OS type's there,
+    else its OS type's."""
+    if key is None:
+        return None
+    return by_platform[key] if key in by_platform else by_platform.get(key.partition("/")[0])
+
+
+def applies(keys: Optional[Iterable[str]], key: Optional[str]) -> bool:
+    """Whether what's declared for ``keys``, OS types or distributions, or for every OS when None, applies on the
+    platform ``key`` names: one names its OS type or its distribution."""
+    if keys is None:
+        return True
+    return key is not None and (key in keys or key.partition("/")[0] in keys)
 
 
 def supported(entry: dict) -> list[Platform]:

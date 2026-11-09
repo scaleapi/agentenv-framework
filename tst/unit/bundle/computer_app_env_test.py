@@ -124,8 +124,12 @@ def test_an_app_folders_settings_table_is_stored_as_the_defaults_each_deploy_sta
      "build_settings.colour: @local/~/apps/mail declares no build setting 'colour'"),
     (f'{TOML}[settings]\ncolour = "blue"\n', {}, "skill.md",
      "settings.colour: @local/~/apps/mail declares no setting 'colour'"),
+    (TOML, {"envs/mail/app.py": APP.format(supports=LINUX, skill="skill.md", linux_skill="skill-linux.md").replace(
+        "@linux(python=", '@linux(distribution="omarchy", services=[Service(name="imap", command="imap")])\n'
+                          "@linux(python=", 1)},
+     "skill.md", "install.linux/omarchy: no supports entry names 'omarchy' on linux, so this never applies"),
 ], ids=["no-module", "a-driver", "install-python", "skill", "linux-skill", "unknown-key", "build-setting",
-        "setting"])
+        "setting", "unsupported-distribution"])
 def test_an_app_folder_that_cant_be_read_is_refused_before_any_write(bundle_dir, toml, extra, skill, problem):
     _bundle(bundle_dir, toml=toml, skill=skill, **{path: data for path, data in extra.items() if data is not None})
     for path in (path for path, data in extra.items() if data is None):

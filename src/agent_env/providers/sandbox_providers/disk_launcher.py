@@ -18,6 +18,13 @@ UNRESETTABLE = 75
 RESET = ("sh", "-c", f"[ -d {CONTROL} ] || exit {UNRESETTABLE}; exec {LAUNCH} reset")
 
 
+def forward(port: int) -> tuple[str, ...]:
+    """The command that serves ``port`` of this machine's host to the running computer, as ``VM_HOST_PORTS`` does: the
+    launcher's ``launch forward``, which a launcher older than it would take for a second boot, so it isn't run there,
+    whose computer has no use for it."""
+    return ("sh", "-c", f"grep -q '^forward()' {LAUNCH} || exit 0; exec {LAUNCH} forward {port}")
+
+
 def launcher_variables(ports: list[int], env: dict[str, str], cpu: float, memory: int) -> dict[str, str]:
     """The environment that has the launcher size its VM, forward ``ports``, refuse to boot without KVM and hand the
     computer ``env``, each value base64'd, so one of several lines reaches the computer whole."""

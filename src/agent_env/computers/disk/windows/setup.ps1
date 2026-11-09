@@ -41,6 +41,8 @@ try {
     icacls C:\ProgramData\ssh\administrators_authorized_keys /inheritance:r /grant '*S-1-5-32-544:F' /grant 'SYSTEM:F' | Out-Null
     # QEMU's user network reaches the guest at the ports the launcher forwards alone, which the layers' services listen on.
     Set-NetFirewallProfile -Profile Domain, Private, Public -Enabled False
+    # The launcher, at 10.0.2.2, forwards a local grant server's port to the machine it runs on, as host.docker.internal.
+    Add-Content -Path "$env:SystemRoot\System32\drivers\etc\hosts" -Value "`r`n10.0.2.2 host.docker.internal" -Encoding ASCII
     Set-Service sshd -StartupType Automatic
     Start-Service sshd
 

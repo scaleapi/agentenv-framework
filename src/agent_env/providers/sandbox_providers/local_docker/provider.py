@@ -39,7 +39,7 @@ from agent_env import config
 from agent_env.attribution import Attribution
 from agent_env.config.paths import state_root
 from agent_env.providers.sandbox_providers.host_images import build_here, built_here, host_platform, present, pull_here
-from agent_env.providers.sandbox_providers.disk_launcher import RESET, UNRESETTABLE, reset_input, unresettable
+from agent_env.providers.sandbox_providers.disk_launcher import RESET, UNRESETTABLE, forward, reset_input, unresettable
 from agent_env.providers.sandbox_providers.local_docker.cli import DockerFailed, docker
 from agent_env.providers.sandbox_providers.local_docker.disk import kvm_platforms, launcher_args, machine_for
 from agent_env.providers.sandbox_providers.local_docker.relay import relay_image
@@ -599,12 +599,22 @@ def _remove_staged(sandbox_id: str) -> None:
 def local_grant_trust() -> Path | None:
     """The trust files a container on this host needs to use the configured object store's grants: the local
     transfer CA's, when the store is a local one that hands out grants; None otherwise."""
+    return local_ca().trust_dir if _granting_store() is not None else None
+
+
+def local_grants() -> Optional[tuple[int, Path]]:
+    """The port of the configured object store's grant server, started, and the local transfer CA's trust files, when
+    the store is a local one handing out grants; None otherwise."""
+    store = _granting_store()
+    return (store.grant_port(), local_ca().trust_dir) if store is not None else None
+
+
+def _granting_store() -> Optional[LocalFilesystemObjectStore]:
+    """The configured object store, or the local one a run routes to, when it's a local one that hands out grants."""
     store = config.get_config().get_object_store()
     if isinstance(store, LocalRunObjectStore):
         store = store.local
-    if isinstance(store, LocalFilesystemObjectStore) and store.supports_transfer_grants:
-        return local_ca().trust_dir
-    return None
+    return store if isinstance(store, LocalFilesystemObjectStore) and store.supports_transfer_grants else None
 
 
 async def start_trusting(sandbox: VmSandbox, container: str, trust_dir: Path) -> None:
@@ -733,10 +743,11 @@ class LocalSandboxProvider(SandboxProvider):
         ports = list(sandbox._port_map)
         publish = [arg for port in ports for spec in port_bindings(sandbox.host_ips, sandbox.host_port(port), port)
                    for arg in ("-p", spec)]
+        grants = await asyncio.to_thread(local_grants)
         running = asyncio.ensure_future(asyncio.to_thread(
             docker, "run", "-d", "--name", sandbox.container_name, "--label", f"{SANDBOX_LABEL}={sandbox.sandbox_id}",
-            *publish, *machine.args, *launcher_args(ports, env, size["cpu"], size["memory"]), machine.image,
-            timeout=_DOCKER_QUERY_SECONDS))
+            *publish, *machine.args, *launcher_args(ports, env, size["cpu"], size["memory"]),
+            *(_grant_args(*grants) if grants else ()), machine.image, timeout=_DOCKER_QUERY_SECONDS))
         try:
             await asyncio.shield(running)
         except asyncio.CancelledError:  # the container docker is still starting must exist before teardown removes it
@@ -896,13 +907,17 @@ class LocalSandboxProvider(SandboxProvider):
         )
 
     async def get_sandbox(self, sandbox_id: str) -> LocalSandbox:
-        work_dir = LocalSandbox.find_work_dir(sandbox_id)
-        if work_dir is None:
-            raise RuntimeError(f"Local sandbox work directory not found for sandbox_id={sandbox_id!r}")
-        port_map = work_dir / _PORT_MAP_FILE
-        ports = {int(c): h for c, h in json.loads(port_map.read_text()).items()} if port_map.exists() else None
-        # VM mode even for a container it owns: exec runs on this host, so steps must `docker exec` into it.
-        return LocalSandbox(sandbox_id=sandbox_id, work_dir=work_dir, port_map=ports)
+        """The sandbox ``sandbox_id``; a disk's, with this process's grant server forwarded into its launcher, as
+        lume's VMs get theirs as another process reconnects: each process that hands it grants serves them on a port
+        of its own."""
+        sandbox = _found(sandbox_id)
+        if _is_disk(sandbox.work_dir) and (grants := await asyncio.to_thread(local_grants)) is not None:
+            await asyncio.to_thread(_forward_grants, sandbox.container_name, grants[0])
+        return sandbox
+
+    async def terminate_sandbox(self, sandbox_id: str) -> None:
+        """Terminate the sandbox ``sandbox_id``, forwarding no grant port into a disk's launcher it is removing."""
+        await _found(sandbox_id).terminate()
 
     @classmethod
     def shares_network_with(cls, sandbox_type: Optional[str]) -> bool:
@@ -959,6 +974,43 @@ def _host_ips() -> tuple[str, ...]:
                                 timeout=_DOCKER_QUERY_SECONDS))
 
 
+def _grant_args(port: int, trust: Path) -> list[str]:
+    """The ``docker run`` arguments that let a disk's computer use this machine's local grants, as lume's VMs do: it
+    finds ``host.docker.internal`` at QEMU's address for the launcher, where the launcher forwards the grant server's
+    ``port`` to this machine, and trusts the local transfer CA, whose ``trust`` files the launcher puts in its seed."""
+    return [*(arg for entry in _EXTRA_HOSTS for arg in ("--add-host", entry)),
+            "--mount", f"type=bind,src={trust},dst={_LAUNCHER_TRUST},readonly",
+            "-e", f"VM_HOST_PORTS={port}", "-e", f"VM_TRUST={_LAUNCHER_TRUST}"]
+
+
+def _found(sandbox_id: str) -> LocalSandbox:
+    """The sandbox ``sandbox_id`` from its work directory, in VM mode even for a container it owns: exec runs on this
+    host, so steps must ``docker exec`` into it."""
+    work_dir = LocalSandbox.find_work_dir(sandbox_id)
+    if work_dir is None:
+        raise RuntimeError(f"Local sandbox work directory not found for sandbox_id={sandbox_id!r}")
+    port_map = work_dir / _PORT_MAP_FILE
+    ports = {int(c): h for c, h in json.loads(port_map.read_text()).items()} if port_map.exists() else None
+    return LocalSandbox(sandbox_id=sandbox_id, work_dir=work_dir, port_map=ports)
+
+
+def _is_disk(work_dir: Path) -> bool:
+    """Whether the sandbox in ``work_dir`` is a disk's computer: ``create_vm`` records the size of the VM it boots."""
+    return (work_dir / _VM_SIZE_FILE).exists()
+
+
+def _forward_grants(container: str, port: int) -> None:
+    """``port`` forwarded in a disk's launcher ``container`` (``launch forward``), unless it is already, as a second
+    listener on it exits; one that can't be is logged, the computer then reaching no grant of this process's."""
+    try:
+        docker("exec", "-d", container, *forward(port), timeout=_DOCKER_QUERY_SECONDS)
+    except DockerFailed as e:
+        logger.warning("Couldn't forward grant port %s into %s, so grants from this process won't reach its computer: "
+                       "%s", port, container, e)
+
+
 _DOCKER_QUERY_SECONDS = 30
 #: How long a reset may take: longer than the minute the launcher's reset waits for the computer to start again.
 _RESET_SECONDS = 90
+#: Where a disk's launcher finds the local transfer CA's trust files.
+_LAUNCHER_TRUST = "/agentenv-trust"

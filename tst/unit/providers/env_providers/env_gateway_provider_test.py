@@ -1082,14 +1082,14 @@ def test_compose_maps_extra_hosts_into_the_gateway(extra_hosts):
     assert mapped == ({GATEWAY_SERVICE_NAME: list(extra_hosts)} if extra_hosts else {})
 
 
-def test_compose_reads_a_servers_card_on_its_card_port_and_its_mcp_on_the_mcp_port():
-    """The website browser serves its card from its recorder's port: the gateway's REST proxy, which it reads the card
-    through, points there, while its MCP connection and health check stay on the MCP port."""
+def test_compose_reads_every_servers_card_and_mcp_on_its_mcp_port_the_website_browsers_included():
+    """The gateway's REST proxy, which it reads each server's card and extensions through, points at the server's MCP
+    port, where its MCP connection and health check are: the website browser's too, whose recorder fronts that port."""
     from agent_env.env.envs.service_db import ServiceDBConfig
 
     compose = EnvironmentGatewayProvider().create_docker_compose(
         mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack"),
-                     MCPServerConfig(image="browser", environment_name="website-browser", card_port=18766)],
+                     MCPServerConfig(image="browser", environment_name="website-browser")],
         gateway_image="agent-gateway",
         gateway_port=18765,
         state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
@@ -1098,7 +1098,7 @@ def test_compose_reads_a_servers_card_on_its_card_port_and_its_mcp_on_the_mcp_po
 
     services = yaml.safe_load(compose)["services"]
     gateway = dict(item.split("=", 1) for item in services[GATEWAY_SERVICE_NAME]["environment"])
-    assert gateway["REST_PROXY_URLS"] == "mcp-slack=http://slack:18765,mcp-website-browser=http://website-browser:18766"
+    assert gateway["REST_PROXY_URLS"] == "mcp-slack=http://slack:18765,mcp-website-browser=http://website-browser:18765"
     assert (gateway["INTERNAL_MCP_SERVERS"], gateway["INTERNAL_MCP_PORT"]) == ("slack,website-browser", "18765")
     assert "18765" in services["website-browser"]["healthcheck"]["test"][1]
 
@@ -1382,7 +1382,7 @@ async def test_deploy_via_vm_prepares_schemas_including_website_browser(override
     assert set(names) == {"slack", "shop", browser_name}
     assert compose.call_args.kwargs["mcp_server_name"] == "crm"
     browser = next(s for s in compose.call_args.kwargs["mcp_servers"] if s.environment_name == browser_name)
-    assert browser.card_port == 18766  # its card is the recorder's
+    assert browser == MCPServerConfig(image=browser.image, environment_name=browser_name)  # like any MCP server
 
 
 @pytest.mark.asyncio
@@ -1693,7 +1693,7 @@ def _render(mcp_servers, website_configs=None):
 
 @pytest.mark.parametrize("browser", ["playwright-mcp", "browseruse-mcp"])
 def test_compose_takes_a_browser_of_any_name_and_refuses_an_env_named_like_it(browser):
-    browser_server = MCPServerConfig(image="browser", environment_name=browser, card_port=18766)
+    browser_server = MCPServerConfig(image="browser", environment_name=browser)
     shop = WebsiteConfig(backend_image="shop-be", frontend_image="shop-fe", environment_name="slack")
 
     services = yaml.safe_load(_render([MCPServerConfig(image="mcp-slack", environment_name="slack"), browser_server],
