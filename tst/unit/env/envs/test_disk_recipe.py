@@ -531,7 +531,7 @@ async def test_a_disk_boots_in_the_launcher_with_kvm_its_ports_published_and_a_r
 
 
 @pytest.mark.asyncio
-async def test_a_disks_launcher_forwards_this_processs_grant_port_and_seeds_the_trust_and_a_reconnect_forwards_its_own(
+async def test_a_disk_gets_this_processs_grant_port_and_the_trust_and_a_reconnect_its_own_but_not_a_teardown(
         launched, monkeypatch):
     monkeypatch.setattr(local_sandbox, "local_grants", lambda: (41234, Path("/state/tls/trust/ca")))
 
@@ -550,6 +550,12 @@ async def test_a_disks_launcher_forwards_this_processs_grant_port_and_seeds_the_
     assert forward == ("exec", "-d", sandbox.container_name, *disk_launcher.forward(52345))
     assert disk_launcher.forward(52345)[-1] == (f"grep -q '^forward()' {LAUNCH} || exit 0; "
                                                 f"exec {LAUNCH} forward 52345")
+
+    launched.clear()
+    monkeypatch.setattr(LocalSandbox, "terminate", AsyncMock())
+    await LocalSandboxProvider().terminate_sandbox(sandbox.sandbox_id)
+
+    assert launched == [] and LocalSandbox.terminate.await_count == 1
 
 
 @pytest.mark.asyncio

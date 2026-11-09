@@ -910,16 +910,14 @@ class LocalSandboxProvider(SandboxProvider):
         """The sandbox ``sandbox_id``; a disk's, with this process's grant server forwarded into its launcher, as
         lume's VMs get theirs as another process reconnects: each process that hands it grants serves them on a port
         of its own."""
-        work_dir = LocalSandbox.find_work_dir(sandbox_id)
-        if work_dir is None:
-            raise RuntimeError(f"Local sandbox work directory not found for sandbox_id={sandbox_id!r}")
-        port_map = work_dir / _PORT_MAP_FILE
-        ports = {int(c): h for c, h in json.loads(port_map.read_text()).items()} if port_map.exists() else None
-        # VM mode even for a container it owns: exec runs on this host, so steps must `docker exec` into it.
-        sandbox = LocalSandbox(sandbox_id=sandbox_id, work_dir=work_dir, port_map=ports)
-        if _is_disk(work_dir) and (grants := await asyncio.to_thread(local_grants)) is not None:
+        sandbox = _found(sandbox_id)
+        if _is_disk(sandbox.work_dir) and (grants := await asyncio.to_thread(local_grants)) is not None:
             await asyncio.to_thread(_forward_grants, sandbox.container_name, grants[0])
         return sandbox
+
+    async def terminate_sandbox(self, sandbox_id: str) -> None:
+        """Terminate the sandbox ``sandbox_id``, forwarding no grant port into a disk's launcher it is removing."""
+        await _found(sandbox_id).terminate()
 
     @classmethod
     def shares_network_with(cls, sandbox_type: Optional[str]) -> bool:
@@ -983,6 +981,17 @@ def _grant_args(port: int, trust: Path) -> list[str]:
     return [*(arg for entry in _EXTRA_HOSTS for arg in ("--add-host", entry)),
             "--mount", f"type=bind,src={trust},dst={_LAUNCHER_TRUST},readonly",
             "-e", f"VM_HOST_PORTS={port}", "-e", f"VM_TRUST={_LAUNCHER_TRUST}"]
+
+
+def _found(sandbox_id: str) -> LocalSandbox:
+    """The sandbox ``sandbox_id`` from its work directory, in VM mode even for a container it owns: exec runs on this
+    host, so steps must ``docker exec`` into it."""
+    work_dir = LocalSandbox.find_work_dir(sandbox_id)
+    if work_dir is None:
+        raise RuntimeError(f"Local sandbox work directory not found for sandbox_id={sandbox_id!r}")
+    port_map = work_dir / _PORT_MAP_FILE
+    ports = {int(c): h for c, h in json.loads(port_map.read_text()).items()} if port_map.exists() else None
+    return LocalSandbox(sandbox_id=sandbox_id, work_dir=work_dir, port_map=ports)
 
 
 def _is_disk(work_dir: Path) -> bool:
