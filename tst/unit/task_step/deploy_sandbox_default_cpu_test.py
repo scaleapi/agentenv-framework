@@ -43,16 +43,15 @@ def test_a_stored_size_is_kept(size):
     assert (step.cpu, step.memory_mb) == (size.get("cpu"), size.get("memory_mb"))
 
 
-def test_a_step_that_sets_the_default_pair_keeps_it_through_a_save():
-    step = DeploySandboxTaskStep(id="s", version=1, sandbox_name="box", sandbox_mode="vm", cpu=1.0, memory_mb=8192)
-    reloaded = DeploySandboxTaskStep.from_dict(step.to_dict())
-    assert (reloaded.cpu, reloaded.memory_mb) == (1.0, 8192)
-
-
-def test_the_old_stored_default_reads_as_unsized():
-    """Every unsized step was stored as 1.0 / 8192 before a step could leave its size unset."""
-    step = DeploySandboxTaskStep.from_dict(_stored(cpu=1.0, memory_mb=8192))
-    assert (step.cpu, step.memory_mb) == (None, None)
+@pytest.mark.parametrize("stored", [
+    DeploySandboxTaskStep(id="s", version=1, sandbox_name="box", sandbox_mode="vm", cpu=1.0,
+                          memory_mb=8192).to_dict(),
+    _stored(cpu=1.0, memory_mb=8192),
+], ids=["saved-now", "saved-before-sizes-could-be-unset"])
+def test_a_saved_default_pair_is_kept(stored):
+    """1.0 / 8192 is the step's own size however it was saved, so no sizer replaces it."""
+    step = DeploySandboxTaskStep.from_dict(stored)
+    assert (step.cpu, step.memory_mb) == (1.0, 8192)
 
 
 @pytest.mark.asyncio

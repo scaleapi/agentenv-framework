@@ -30,7 +30,6 @@ class DeploySandboxTaskStep(TaskStep):
     # step chose is told apart from one it left to this default.
     DEFAULT_CPU: ClassVar[float] = 1.0
     DEFAULT_MEMORY_MB: ClassVar[int] = 8192
-    SIZE_SET_KEY: ClassVar[str] = "size_set"
 
     def __init__(
         self,
@@ -81,8 +80,6 @@ class DeploySandboxTaskStep(TaskStep):
             base["cpu"] = self.cpu
         if self.memory_mb is not None:
             base["memory_mb"] = self.memory_mb
-        if (self.cpu, self.memory_mb) == (self.DEFAULT_CPU, self.DEFAULT_MEMORY_MB):
-            base[self.SIZE_SET_KEY] = True  # so this pair isn't read back as a step stored before sizes could be unset
         base["disk_size_gb"] = self.disk_size_gb
         base["ttl_seconds"] = self.ttl_seconds
         base["exposed_ports"] = self.exposed_ports
@@ -95,24 +92,15 @@ class DeploySandboxTaskStep(TaskStep):
         return base
 
     @classmethod
-    def _stored_size(cls, data: dict) -> dict:
-        """``cpu`` and ``memory_mb`` as ``data`` stores them. Before a step could leave them unset, every unsized step
-        was stored with both at the default, 1.0 and 8192, so that pair is read as unset unless ``to_dict`` marked it as
-        set: a step stored back then gets the same size unless a sizer chooses one, and a step that sets the pair keeps
-        it."""
-        cpu, memory_mb = data.get("cpu"), data.get("memory_mb")
-        if (cpu, memory_mb) == (cls.DEFAULT_CPU, cls.DEFAULT_MEMORY_MB) and not data.get(cls.SIZE_SET_KEY):
-            return {"cpu": None, "memory_mb": None}
-        return {"cpu": cpu, "memory_mb": memory_mb}
-
-    @classmethod
     def from_dict(cls, data: dict) -> DeploySandboxTaskStep:
         return cls(
             **cls._base_from_dict(data),
             sandbox_name=data["sandbox_name"],
             sandbox_mode=data["sandbox_mode"],
             image=data.get("image"),
-            **cls._stored_size(data),
+            # A stored size is kept as written, whatever it is: only a field the dict leaves out is unset.
+            cpu=data.get("cpu"),
+            memory_mb=data.get("memory_mb"),
             disk_size_gb=data.get("disk_size_gb", 10),
             ttl_seconds=data.get("ttl_seconds", TaskStep.DEFAULT_TTL_SECONDS),
             exposed_ports=data.get("exposed_ports"),
