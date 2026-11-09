@@ -637,6 +637,21 @@ def _copy_into_container(source: Path, container: str, destination: str) -> None
         raise RuntimeError(f"Could not copy {source} into container {container}: {copied.stderr.strip()}")
 
 
+def local_sandbox_ids() -> list[str]:
+    """The ids of the local sandboxes with a work folder under the sandbox root. A folder is made before anything its
+    sandbox runs, so a supervisor that gave a run its own ``AGENT_ENV_LOCAL_SANDBOX_DIR`` cleans up after killing it by
+    terminating each id here (``LocalSandboxProvider().terminate_sandbox``) and removing its folder."""
+    root = _local_sandbox_root_path()
+    if not root.is_dir():
+        return []
+    prefix, found = "agent-env-", set()
+    for entry in root.iterdir():
+        sandbox_id, _, suffix = entry.name.removeprefix(prefix).rpartition("-")
+        if entry.name.startswith(prefix) and sandbox_id and suffix and entry.is_dir() and not entry.is_symlink():
+            found.add(sandbox_id)
+    return sorted(found)
+
+
 def remove_local_work_dir(sandbox_id: str) -> Path | None:
     """Delete a local sandbox's work folder, and return it, when it lies directly under the sandbox root and
     isn't a symlink; anything else, a legacy folder under the temp dir included, is left alone. Raises OSError
@@ -989,8 +1004,10 @@ def _found(sandbox_id: str) -> LocalSandbox:
     work_dir = LocalSandbox.find_work_dir(sandbox_id)
     if work_dir is None:
         raise RuntimeError(f"Local sandbox work directory not found for sandbox_id={sandbox_id!r}")
-    port_map = work_dir / _PORT_MAP_FILE
-    ports = {int(c): h for c, h in json.loads(port_map.read_text()).items()} if port_map.exists() else None
+    try:
+        ports = {int(c): h for c, h in json.loads((work_dir / _PORT_MAP_FILE).read_text()).items()}
+    except (OSError, ValueError):  # none written, or cut short by a run killed while writing it
+        ports = None
     return LocalSandbox(sandbox_id=sandbox_id, work_dir=work_dir, port_map=ports)
 
 

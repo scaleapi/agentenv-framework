@@ -244,6 +244,16 @@ def test_the_launcher_forwards_each_host_port_from_loopback_here_to_the_host_and
     assert running.wait(10) == 143
 
 
+def test_a_launcher_stopped_before_its_computer_starts_exits_as_one_stopped_after_does(launcher):
+    launch, calls = launcher
+
+    running = launch(VM_DISK="/disk/disk.img.zst", ZSTD_TAKES_S="1")
+    _logged(calls, "zstd")
+    running.terminate()
+
+    assert running.wait(10) == 143
+
+
 @pytest.mark.parametrize("host_ports", ["18765", "28765"], ids=["a-guest-ports-proxy", "its-forward"])
 def test_the_launcher_refuses_a_host_port_a_guest_ports_proxy_or_forward_takes(launcher, host_ports):
     launch, calls = launcher
