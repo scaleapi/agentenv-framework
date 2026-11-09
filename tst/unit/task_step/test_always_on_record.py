@@ -147,3 +147,21 @@ async def test_reads_whose_answer_broke_the_format_are_counted(monkeypatch, tmp_
     ctx = await rig.run(rig.step())
 
     assert rig.record(ctx)["counts"]["user_sim_malformed_answers"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_read_retried_after_a_malformed_first_answer_keeps_both_and_is_counted(monkeypatch, tmp_path):
+    def agent(n, texts, rig):
+        rig.message("question?") if n == 1 else rig.quiet()
+        return ""
+
+    first = {"outcome": "reply", "message": "{oops", "schema_errors": ["no JSON object in the answer"]}
+    rig = Rig(monkeypatch, tmp_path, agent=agent,
+              answers=[{"outcome": "no_reply", "message": "", "schema_errors": [], "retried": True,
+                        "first_answer": first, "turns": 2}])
+    await rig.arm()
+    ctx = await rig.run(rig.step())
+
+    read = next(e for e in rig.timeline(ctx) if e["event"] == "user_sim_read")
+    assert read["retried"] is True and read["first_answer"] == first and read["user_sim_turns"] == 2
+    assert rig.record(ctx)["counts"]["user_sim_malformed_answers"] == 1

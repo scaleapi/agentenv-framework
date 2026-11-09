@@ -179,7 +179,7 @@ IDLE_JUMPS_MAX = 24
 JUMPS_KEPT_PER_GAP = 20
 PENDING_KEPT = 20
 PENDING_TEXT_CHARS = 300
-BULKY_EVENT_FIELDS = ("input", "raw", "read", "parts_text", "changes")
+BULKY_EVENT_FIELDS = ("input", "raw", "first_answer", "read", "parts_text", "changes")
 # What the prompt response keeps of each wake's parts (source_agent_per_turn_prompt_parts): each text part cut to
 # TURN_TEXT_CHARS, and past TURN_TEXT_TOTAL_CHARS in all, a note for the rest; every wake's full text is in the stored
 # timeline (its wake event's parts_text).
@@ -1437,7 +1437,8 @@ class _Run:
                          user_sim_error=(calls[-1].get("error") if calls else None),
                          user_sim_trajectory_urls=[c.get("trajectory_url") for c in calls],
                          user_sim_turns=ans.get("turns", len(calls)), shown=ans.get("shown"),
-                         past_turn_cap=ans.get("past_turn_cap"), last_read=last)
+                         past_turn_cap=ans.get("past_turn_cap"), last_read=last,
+                         retried=ans.get("retried"), first_answer=ans.get("first_answer"))
         outcome = ans.get("outcome")
         said = (ans.get("message") or "").strip()
         hook = {"hook": HOOK_NAME, "turn": self.wakes, "read_at": _iso(now),
@@ -1602,9 +1603,10 @@ class _Run:
             "clock_jumps": self.clock_jumps,
             "silent_wakes": sum(1 for e in self.timeline if e["event"] == "agent_turn_end"
                                 and not e.get("messages_to_user")),
-            # reads whose answer didn't match the user sim's answer format (the plug-in's schema_errors)
+            # reads whose answer didn't match the user sim's answer format (the plug-in's schema_errors), counting a
+            # read the plug-in retried after a malformed first answer even when the retry came back well formed
             "user_sim_malformed_answers": sum(1 for e in self.timeline if e["event"] == "user_sim_read"
-                                              and e.get("schema_errors")),
+                                              and (e.get("schema_errors") or e.get("retried"))),
         }
         if self.change_cursors:
             counts["app_changes"] = dict(self.change_counts)
