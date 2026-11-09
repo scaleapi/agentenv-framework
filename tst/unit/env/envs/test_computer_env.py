@@ -44,6 +44,7 @@ from agent_env.env import env as env_module
 from agent_env.env.env import DeployedEnv, EnvCapabilityUnsupported
 from agent_env.env.envs.computer.utils import (boot, builder, composed, composer, gate, inside, packages, params,
                                                probing, resolve_in_base)
+from agent_env.env.envs.computer.utils import sites as computer_sites
 from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.envs.computer.utils.probing import _probe
 from agent_env.env.envs.computer.env import COMPUTER_TOOLS, ComputerEnv
@@ -1032,6 +1033,35 @@ async def test_a_computer_with_site_routing_reaches_the_websites_the_run_deploye
     record = context.deployed_envs[-1].metadata["computer"]
     assert record["sites"] == {"names": {"routes": {"notes": ["notes.test"]}}, "ca": "CA PEM", "valid_for_s": 3600}
     assert record["env_params"]["site_routing"] is True and record["env_params"]["sites"][0]["name"] == "notes"
+
+
+@pytest.mark.asyncio
+async def test_a_computer_deployed_to_route_its_sites_later_boots_held_and_routes_them_when_given_as_a_multi_env_does(
+        base, driver, docker, boots, routes):
+    env = Env.get(_put(base, driver, display={"width": 1600, "height": 900}).id)
+
+    deployed = await env.deploy(ttl_seconds=3600, env_params={"site_routing": True}, sites_later=True)
+    held, routed_before = boots.boots[0]["environment"][HOLD_BOOT_LAUNCH_ENV], list(routes)
+    await env.route_sites([{"name": "notes", "url": "http://localhost:8080/website/notes/", "domains": ["notes.test"]}])
+
+    assert held == "1" and routed_before == []
+    # The trust its held apps launch with, which a boot knowing its sites would give it, before they're known.
+    assert boots.boots[0]["environment"].items() >= computer_sites.TRUST_ENVIRONMENTS["linux"].items()
+    ((sandbox, sites, options),) = routes
+    assert sandbox is boots.sandboxes[0] and [site.name for site in sites] == ["notes"]
+    assert options["valid_for"] == timedelta(seconds=3600)
+    record = deployed.metadata["computer"]
+    assert record["env_params"]["sites"][0]["name"] == "notes" and record["sites"]["valid_for_s"] == 3600
+
+
+@pytest.mark.asyncio
+async def test_a_computer_given_its_sites_later_still_refuses_sites_its_params_cant_hold(base, driver, docker, boots, routes):
+    env = Env.get(_put(base, driver, display={"width": 1600, "height": 900}).id)
+    await env.deploy(env_params={"site_routing": True}, sites_later=True)
+
+    with pytest.raises(ValueError, match="sites"):
+        await env.route_sites([{"name": "notes"}])
+    assert routes == []
 
 
 @pytest.mark.asyncio

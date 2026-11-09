@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Optional
 from agentenv_protocol.computer import tool_prefix_problem
 
 from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, Env
+from agent_env.env.envs.computer.utils import sites
 from agent_env.env.gateway import ExternalChild
 from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider, get_env_sandbox_provider
 
@@ -58,21 +59,34 @@ def deploy_options(entry: Optional[dict], sandbox_type: str | None) -> dict:
     return {"sandbox_type": sandbox_type, **(entry or {})}
 
 
-def refusal(computer: ComputerEnv, entry: dict, sandbox_type: str | None) -> str | None:
-    """Why ``computer`` wouldn't deploy in a multi env with ``entry``, its child_envs entry: why it wouldn't alone, a
-    site it would route, which only a later change routes to the multi env's websites, or a sandbox provider whose URLs
-    take credentials, which the gateway doesn't send to a child env."""
+def routes_later(entry: Optional[dict]) -> bool:
+    """Whether a computer with ``entry``, its child_envs entry, routes the multi env's websites, which come up with its
+    gateway, after it: ``site_routing`` with no ``sites`` of its own."""
+    params = (entry or {}).get("env_params")  # one that isn't a table is the computer's own params check to refuse
+    return isinstance(params, dict) and bool(params.get("site_routing")) and not params.get("sites")
+
+
+def refusal(computer: ComputerEnv, entry: dict, sandbox_type: str | None, websites: Mapping[str, str]) -> str | None:
+    """Why ``computer`` wouldn't deploy in a multi env with ``entry``, its child_envs entry: why it wouldn't alone,
+    ``site_routing`` naming none of the multi env's ``websites`` (their environment names by env id), or a sandbox
+    provider whose URLs take credentials, which the gateway doesn't send to a child env."""
     options = deploy_options(entry, sandbox_type)
     params = options.get("env_params")
-    if isinstance(params, dict) and (routed := [key for key in ("site_routing", "sites") if params.get(key)]):
-        return (f"env_params.{routed[0]}: a computer in a multi env doesn't route sites yet; deploy it beside the multi "
-                "env to route them")
+    if routes_later(entry):
+        routing = params["site_routing"]
+        if not websites:
+            return "env_params.site_routing routes the multi env's websites, and it has none"
+        # A list of other than ids is the computer's own params check to refuse.
+        if isinstance(routing, list) and all(isinstance(env_id, str) for env_id in routing) and \
+                (others := [env_id for env_id in routing if env_id not in websites]):
+            return (f"env_params.site_routing names {', '.join(map(repr, others))}, which isn't one of the multi env's "
+                    f"websites ({', '.join(map(repr, websites))})")
     links = (build_sandbox_provider(options["sandbox_type"]) if options["sandbox_type"] else get_env_sandbox_provider()).links
     if headed := [type(link).__name__ for link in links if link.REQUEST_HEADERS]:
         return (f"{', '.join(headed)} takes credentials on each request to a sandbox's URL, which the multi env's gateway "
                 f"doesn't send to a child env; set child_envs.{computer.environment_name}.sandbox_type to a sandbox type "
                 "whose URLs take none")
-    return computer.deploy_refusal(**options)
+    return computer.deploy_refusal(**options, sites_later=routes_later(entry))
 
 
 class Computers:
@@ -85,6 +99,7 @@ class Computers:
     def __init__(self, envs: list[ComputerEnv], owner: str) -> None:
         self.envs = envs
         self._owner = owner  # the multi env's id, for what's logged
+        self._routes: dict[str, Optional[list[str]]] = {}  # each computer routing sites: the names it routes, or all
         self._replaced: list[ComputerEnv] = []
         self._earlier: Optional[tuple[list[ComputerEnv], list[ComputerEnv]]] = None
 
@@ -119,11 +134,19 @@ class Computers:
                 for env in self.envs if env.environment_name in records]
 
     def deployer(self, child_envs: Optional[dict], *, sandbox_type: str | None, ttl_seconds: int,
-                 attribution: Optional[Attribution]) -> Callable[[Optional[str]], Awaitable[list[ExternalChild]]]:
+                 attribution: Optional[Attribution], websites: Mapping[str, str]
+                 ) -> Callable[[Optional[str]], Awaitable[list[ExternalChild]]]:
         """The gateway's ``children``: every computer deployed as its child_envs entry says, its tools served under its
         name and ``_``, and its network allowing ``reach``, the gateway's address when the gateway has one yet; then each
-        as the gateway fronts it. A gateway deploy tried again deploys them again, after closing the earlier try's."""
+        as the gateway fronts it. A computer routing the multi env's ``websites`` (their environment names by env id)
+        boots with its boot apps held, for ``finish`` to route them once the gateway is up. A gateway deploy tried again
+        deploys them again, after closing the earlier try's."""
         tries = 0
+        self._routes = {}
+        for name, entry in (child_envs or {}).items():
+            if routes_later(entry):
+                routing = entry["env_params"]["site_routing"]
+                self._routes[name] = None if routing is True else [websites[env_id] for env_id in routing]
 
         async def deploy(reach: Optional[str]) -> list[ExternalChild]:
             nonlocal tries
@@ -132,7 +155,8 @@ class Computers:
             tries += 1
             results = await asyncio.gather(*(env.deploy(
                 ttl_seconds=ttl_seconds, attribution=attribution, tool_prefix=f"{env.environment_name}_",
-                reach=reach or "", **deploy_options((child_envs or {}).get(env.environment_name), sandbox_type))
+                reach=reach or "", sites_later=env.environment_name in self._routes,
+                **deploy_options((child_envs or {}).get(env.environment_name), sandbox_type))
                 for env in self.envs), return_exceptions=True)
             if failed := [result for result in results if isinstance(result, BaseException)]:
                 for error in failed[1:]:
@@ -142,7 +166,20 @@ class Computers:
                     for env, record in zip(self.envs, results)]
         return deploy
 
-    async def record(self, deployed: DeployedEnv) -> None:
+    async def finish(self, deployed: DeployedEnv) -> None:
+        """Once the gateway is up, before ``deployed``, the multi env's record, is registered: each computer that routes
+        the multi env's websites routes them, those its ``site_routing`` names or all, once they're ready, and launches
+        its held apps; then each computer's own record is kept in ``deployed`` (``record``)."""
+        if self._routes:
+            # Selected by the name each website is served as, its environment_name, which its card's name needn't be.
+            routed = {name: await sites.deployed_sites([deployed], services=only) for name, only in self._routes.items()}
+            await sites.require_ready([deployed])
+            await each(self._owner, "route its sites", [(f"computer {env.environment_name!r}",
+                                                      env.route_sites(routed[env.environment_name]))
+                                                     for env in self.envs if env.environment_name in routed])
+        self.record(deployed)
+
+    def record(self, deployed: DeployedEnv) -> None:
         """Keep each computer's own record in ``deployed``, the multi env's, before it is registered: whole in its
         ``child_envs``, for ``reattach``, and its sandbox in its ``sandbox_ids`` under the backend that made it, for
         teardown."""

@@ -62,6 +62,10 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
     type: ClassVar[str] = "computer"
     record_class = DeployedSandboxEnv
 
+    def __init__(self) -> None:
+        super().__init__()
+        self._later: dict[str, tuple[Sandbox, int]] = {}  # each computer booted with sites_later: its sandbox and CA lifetime
+
     async def deploy(
         self,
         env: Env,
@@ -75,11 +79,14 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         env_params: Optional[dict] = None,
         tool_prefix: str = "",
         reach: str = "",
+        sites_later: bool = False,
     ) -> DeployedSandboxEnv:
         """The env's first ready build, in its base's order of forms and arches (or of ``env_params.form``), that the sandbox
         provider runs natively, booted, once what it boots that no compose started is composed; returns the record once
         the driver is ready with the env's display. With ``tool_prefix``, its driver serves its tools under it; with ``reach``,
-        a URL this process reaches, a network that restricts the computer's egress allows its host too."""
+        a URL this process reaches, a network that restricts the computer's egress allows its host too. With
+        ``sites_later``, a computer routing sites, whose sites aren't up yet, boots with its boot apps held and returns
+        once its driver answers; ``route_sites`` routes them and finishes its boot."""
         from agent_env.env.envs.computer.env import ComputerEnv
 
         if not isinstance(env, ComputerEnv):
@@ -91,7 +98,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
             problems.append(problem)
         if problems:
             raise DeployRefused(f"{env.id}: " + "; ".join(problems))
-        if params.site_routing and not params.sites:
+        if params.site_routing and not params.sites and not sites_later:
             raise DeployRefused(f"{env.id}: env_params.site_routing reaches the run's websites, which a run's "
                                 "deploy_env names in env_params.sites; give them there to deploy it any other way")
         await env.compose_unstarted(sandbox_provider, params.form)
@@ -111,8 +118,20 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
                                 "computer runs inside a launcher container it can't reach; deploy a container form")
         attempt = functools.partial(self._boot, env, builds, params, values, ttl_seconds=ttl_seconds,
                                     disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb, attribution=attribution,
-                                    tool_prefix=tool_prefix, reach=reach)
+                                    tool_prefix=tool_prefix, reach=reach, sites_later=sites_later)
         return await self._run(sandbox_provider, env.id, attempt)
+
+    async def route_sites(self, env: ComputerEnv, record: DeployedSandboxEnv, sites: list[dict]) -> None:
+        """Route ``sites`` on the computer ``record`` names, which this provider booted with ``sites_later``, launch its
+        held apps and finish its boot as a deploy does; its record then keeps them, so a reset routes them again."""
+        sandbox, valid_for_s = self._later.pop(record.sandbox_id)
+        computer = record.metadata["computer"]
+        params, _, problems = computer_params.checked(env, {**computer["env_params"], "sites": sites})
+        if problems:
+            raise ValueError(f"{env.id}: " + "; ".join(problems))
+        computer["env_params"] = params.model_dump(exclude_defaults=True)
+        if routed := await _finish_boot(env, record, sandbox, params, valid_for_s, computer.get("display")):
+            computer["sites"] = routed
 
     async def install_changelog_triggers(self, environment_name: str) -> None:
         """No state store, so no changelog to install."""
@@ -120,7 +139,8 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
     async def _boot(self, env: ComputerEnv, builds: list[tuple[str, str, dict]], params: computer_params.ComputerParams,
                     values: dict, sandbox_provider: SandboxProvider, *, ttl_seconds: int,
                     disk_size_gb: float, cpu: float | None, memory_mb: int | None,
-                    attribution: Optional[Attribution], tool_prefix: str = "", reach: str = "") -> DeployedSandboxEnv:
+                    attribution: Optional[Attribution], tool_prefix: str = "", reach: str = "",
+                    sites_later: bool = False) -> DeployedSandboxEnv:
         """One attempt on one sandbox provider: the first build it runs natively, booted and readied; its record."""
         from agent_env.env.envs.computer.env import ComputerEnv
 
@@ -148,7 +168,8 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         policy = _reaching(NetworkPolicy.from_dict(env.network) if env.network else None, sandbox_provider, reach)
         booted = await boot(
             sandbox_provider, image=build["image"], port=env.driver.port, network_policy=policy, token=token,
-            environment=_environment(env, computer, values, params, tool_prefix), timeout=ttl_seconds,
+            environment=_environment(env, computer, values, params, tool_prefix, sites_later=sites_later),
+            timeout=ttl_seconds,
             attribution=attribution,
             disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb,
             ready_s=ready_timeout(env.composed_apps(), env.computer.os.type), form=form, held=bool(params.site_routing),
@@ -172,7 +193,9 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
                     **({"tool_prefix": tool_prefix} if tool_prefix else {}),
                     "env_params": params.model_dump(exclude_defaults=True)}},
             )
-            if routed := await _finish_boot(env, record, booted.sandbox, params, ttl_seconds, values.get("resolution")):
+            if sites_later:
+                self._later[record.sandbox_id] = (booted.sandbox, ttl_seconds)
+            elif routed := await _finish_boot(env, record, booted.sandbox, params, ttl_seconds, values.get("resolution")):
                 record.metadata["computer"]["sites"] = routed
         except BaseException:
             await discard(booted.sandbox)
@@ -323,12 +346,14 @@ def _values(computer: ComputerArtifact, values: dict) -> dict:
 
 
 def _environment(env: ComputerEnv, computer: ComputerArtifact, values: dict,
-                 params: computer_params.ComputerParams, tool_prefix: str = "") -> dict[str, str]:
+                 params: computer_params.ComputerParams, tool_prefix: str = "", *,
+                 sites_later: bool = False) -> dict[str, str]:
     return {**settings_environment(computer, values, environment_name=env.computer_name,
                                    driver_settings=params.driver_settings, tool_prefix=tool_prefix),
             **app_settings_environment(env.composed_apps(), computer_params.app_settings(env, params.app_settings),
                                        env.computer.os.type),
-            **({HOLD_BOOT_LAUNCH_ENV: "1", **sites.trust_environment(env.computer.os.type, params.sites),
+            **({HOLD_BOOT_LAUNCH_ENV: "1", **sites.trust_environment(env.computer.os.type, params.sites,
+                                                                     later=sites_later),
                 **sites.browser_environment(env.computer.os.display)} if params.site_routing else {})}
 
 

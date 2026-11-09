@@ -475,6 +475,38 @@ async def test_a_card_child_named_apart_from_its_service_is_matched_to_its_front
 
     assert await sites.deployed_sites([gateway]) == [
         {"name": "Notes", "url": "https://gw.example/website/notes/", "domains": ["notes.test"]}]
+    # Selected by the name it's served as, its environment_name, not its card's.
+    assert await sites.deployed_sites([gateway], services=["notes"]) == await sites.deployed_sites([gateway])
+    assert await sites.deployed_sites([gateway], services=["Notes"]) == []
+
+
+@pytest.mark.asyncio
+async def test_two_websites_of_one_env_whose_cards_share_a_name_are_each_named_as_theyre_served(monkeypatch):
+    from agentenv_protocol import client as protocol_v1
+
+    from agent_env.env.env import DeployedGatewayEnv
+
+    async def get_card(url, timeout=10, verify=True):
+        raise AssertionError(f"read {url} live")
+
+    monkeypatch.setattr(protocol_v1, "get_card", get_card)
+
+    def child(served: str, domain: str) -> dict:
+        return {"name": "Site", "url": f"/svc/{served}/agentenv", "capabilities": {
+            "extensions": [{"uri": "urn:agentenv:website/v1", "params": {"domains": [domain]}}]}}
+
+    card = {"name": "env", "children_environments": [child("shop", "shop.test"), child("blog", "blog.test")]}
+    gateway = DeployedGatewayEnv(env_id="sites", env_version=1, sandbox_id="s", gateway_url="https://gw.example",
+                                 environment_card=card,
+                                 website_frontend_urls={name: f"https://gw.example/website/{name}/" for name in ("shop", "blog")})
+
+    found = await sites.deployed_sites([gateway])
+
+    assert found == [{"name": "shop", "url": "https://gw.example/website/shop/", "domains": ["shop.test"]},
+                     {"name": "blog", "url": "https://gw.example/website/blog/", "domains": ["blog.test"]}]
+    assert len(sites.site_table([Site(**site) for site in found]).routes) == 2  # names of their own: both route
+    assert await sites.deployed_sites([gateway], services=["blog"]) == [
+        {"name": "Site", "url": "https://gw.example/website/blog/", "domains": ["blog.test"]}]  # alone, its card's name
 
 
 @pytest.mark.asyncio
