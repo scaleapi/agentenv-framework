@@ -20,9 +20,10 @@ it in the run's metadata under its ``name``; a ``deploy_agent`` step deploys the
   on a later day than its start goes on to end_time.
 - Scripted user lines are triggers' ``notify`` actions to the ``user_says`` recipient: sent to the agent as the
   user's message at their time.
-- The clock runs at the task's speed during turns (sync_env_clock). When nothing is due, the step advances it to the
-  earliest of: the next trigger event, the next notification, a held reply, a pending read, or end_time, never past
-  one; then waits for the world to settle. A contact's reply (an AI-played contact, a trigger's executor) counts as in
+- The clock runs at the task's speed (sync_env_clock) only during the agent's turns: the step freezes it between them
+  (clock/v1 set_rate), so settles and reads don't move it, and puts the task's rate back at the end. When nothing is
+  due, the step advances it to the earliest of: the next trigger event, the next notification, a held reply, a
+  pending read, or end_time, never past one; then waits for the world to settle. A contact's reply (an AI-played contact, a trigger's executor) counts as in
   progress until it ends or its time limit passes; other trigger work gets ``settle_timeout_seconds``. Contacts whose
   task sets no time limit get ``contact_timeout_seconds``, and one trigger's replies run side by side
   (``contact_replies_in_parallel``). What comes due in the same minute wakes the agent once.
@@ -269,7 +270,10 @@ class AlwaysOnTaskStep(PromptAgentTaskStep):
         try:
             await run.go()
         finally:
-            run.close()
+            try:
+                await run.restore()
+            finally:
+                run.close()
         return context
 
 
@@ -324,6 +328,19 @@ class _Run:
         self.clock_jumps = 0
         self.jumps_in_gap = 0         # clock jumps since the last wake, the first JUMPS_KEPT_PER_GAP of them logged
         self.folded: Optional[dict] = None
+        self.clock: dict = {}                  # the task's clock rate, and whether the step freezes it between turns
+        self.clock_rates: list[tuple[Any, float]] = []  # (env, the task's rate) for each clock the step freezes
+        self.undo: list[tuple[str, Any]] = []  # (what, coroutine function): the gateway settings to put back at the end
+
+    async def restore(self) -> None:
+        """Put back what the step changed on the gateways, latest first, so later steps of the task see the settings
+        they had before it: the clock's rate, ... Each is tried on its own; one that fails is logged."""
+        while self.undo:
+            what, put_back = self.undo.pop()
+            try:
+                await put_back()
+            except Exception as e:
+                logger.warning(f"always_on: could not put back {what} after the run: {type(e).__name__}: {e}")
 
     def close(self) -> None:
         for p in self._plugin_paths:
@@ -393,6 +410,7 @@ class _Run:
             chat_config["stay_quiet"] = True
         for env in self.chat_envs:
             await _call(env, EXT_USER_CHAT_URI, "config", chat_config)
+        await self._configure_clock()
         await self._configure_checks()
         await self._configure_contacts()
         await self._configure_agents()
@@ -493,6 +511,47 @@ class _Run:
                            "output_format": setup.get("output_format"), "accepted_fields": accepted}
         if "system_prompt" not in accepted and setup.get("system_prompt"):
             logger.warning("always_on: the user sim agent's card did not accept system_prompt; it keeps its deploy one")
+
+    async def _configure_clock(self) -> None:
+        """The clock runs at the task's rate only while the agent works (FD-5366): freeze it (rate 0) now, and between
+        turns, so a slow contact reply or user sim read doesn't move the task's time. With clock/v1 ``set_rate``,
+        which keeps the clock's marks (a re-arm with set_time, as sync_env_clock arms it, would re-anchor every
+        relative or recurring time trigger); the task's rate is put back at the end. A clock already frozen (rate 0)
+        is left alone; a gateway without set_rate keeps running between turns, as the record says."""
+        envs = []
+        for env in await self._armed():
+            state = await _call(env, EXT_CLOCK_URI, "state")
+            rate = float(state.get("virtual_seconds_per_real_second") or 0)
+            if rate <= 0:
+                continue
+            if not env.supports(EXT_CLOCK_URI, "set_rate"):
+                envs.append({"env_id": env.env_id, "rate": rate, "frozen_between_turns": False,
+                             "why": "the gateway has no clock set_rate"})
+                continue
+            self.clock_rates.append((env, rate))
+            envs.append({"env_id": env.env_id, "rate": rate, "frozen_between_turns": True})
+        if self.clock_rates:
+            self.undo.append(("the clock's rate", lambda: self._clock_runs(True)))
+            await self._clock_runs(False)
+        self.clock = {"envs": envs}
+
+    async def _clock_runs(self, running: bool) -> None:
+        """Run each clock the step freezes at the task's rate (``running``), or freeze it."""
+        for env, rate in self.clock_rates:
+            await _call(env, EXT_CLOCK_URI, "set_rate", {"virtual_seconds_per_real_second": rate if running else 0},
+                        attempts=3)
+
+    async def _agent_turn(self, parts: list[dict], msg_id: str, record) -> tuple[str, dict]:
+        """One turn of the agent on ``parts``: the task's clock runs at its rate while the agent works, and is frozen
+        again after."""
+        step = self.step
+        await self._clock_runs(True)
+        try:
+            return await send_and_wait(self.target_url, parts, agent=self.agent, message_id=msg_id,
+                                       context_id=self.solver_context_id, timeout_seconds=step.timeout_seconds,
+                                       poll_interval_seconds=step.poll_interval_seconds, before_send=record)
+        finally:
+            await self._clock_runs(False)
 
     async def _configure_contacts(self) -> None:
         """On each env with triggers, let one trigger's replies run side by side (``contact_replies_in_parallel``) and
@@ -1036,10 +1095,7 @@ class _Run:
                  last=last, parts_text="\n".join(p.get("text", "") for p in parts if p.get("kind") == "text"))
         t = time.time()
         try:
-            task_id, result = await send_and_wait(self.target_url, parts, agent=self.agent, message_id=msg_id,
-                                                  context_id=self.solver_context_id,
-                                                  timeout_seconds=step.timeout_seconds,
-                                                  poll_interval_seconds=step.poll_interval_seconds, before_send=record)
+            task_id, result = await self._agent_turn(parts, msg_id, record)
         except TimeoutError as e:
             self._failed("agent_turn_timeout", f"agent turn timed out after {step.timeout_seconds}s: {e}")
             self.log("agent_turn_end", n=self.wakes, state="timeout", real_seconds=round(time.time() - t, 1))
@@ -1096,10 +1152,7 @@ class _Run:
 
         t = time.time()
         try:
-            task_id, result = await send_and_wait(self.target_url, parts, agent=self.agent, message_id=msg_id,
-                                                  context_id=self.solver_context_id,
-                                                  timeout_seconds=step.timeout_seconds,
-                                                  poll_interval_seconds=step.poll_interval_seconds, before_send=record)
+            task_id, result = await self._agent_turn(parts, msg_id, record)
         except TimeoutError as e:
             self._failed("agent_turn_timeout", f"agent nudge turn timed out after {step.timeout_seconds}s: {e}")
             self.log("nudge", n=self.nudges, wake=self.wakes, virtual_time=_iso(sent_at), closing_text=closing,
@@ -1420,6 +1473,7 @@ class _Run:
                   "multi_day": self.multi_day, "real_seconds": round(time.time() - self.t0_real, 1),
                   "timeline_events": len(self.timeline), "pending_at_end": _bounded(self.pending)}
         record["settings"] = {"stay_quiet": step.stay_quiet, "nudge": step.nudge, "wake_reminder": step.wake_reminder,
+                              "clock": self.clock,
                               "scheduled_checks": self.checks, "contacts": self.contacts,
                               "time_budget_seconds": self.time_budget,
                               "wake_reserve_seconds": step.wake_reserve_seconds()}
