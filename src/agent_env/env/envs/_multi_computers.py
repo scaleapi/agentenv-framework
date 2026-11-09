@@ -7,8 +7,8 @@ import asyncio
 import dataclasses
 import logging
 from collections import Counter
-from collections.abc import Awaitable, Callable, Iterable
-from typing import TYPE_CHECKING, Optional
+from collections.abc import Awaitable, Callable, Iterable, Mapping
+from typing import TYPE_CHECKING, Any, Optional
 
 from agentenv_protocol.computer import tool_prefix_problem
 
@@ -17,6 +17,7 @@ from agent_env.env.gateway import ExternalChild
 from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider, get_env_sandbox_provider
 
 if TYPE_CHECKING:
+    from agent_env.artifact import EnvironmentArtifact
     from agent_env.attribution import Attribution
     from agent_env.env.envs.computer.env import ComputerEnv
 
@@ -38,6 +39,18 @@ def name_problems(computers: Iterable[str], *, mcp_servers: Iterable[str] = (), 
     problems += [f"{name!r} is the gateway's route to MCP server {routes[name]!r}, and the gateway knows a computer by its "
                  "name alone" for name in dict.fromkeys(computers) if name in routes]
     return problems
+
+
+def app_name_problems(apps: Mapping[str, Iterable[str]], others: Iterable[str]) -> list[str]:
+    """What's wrong with the names of each computer's apps, ``apps`` by the computer's name, beside ``others``, every
+    other name the multi env's child envs go by: loads and snapshots find an environment by its name, so an app's must
+    be no other's."""
+    apps = {computer: list(dict.fromkeys(names)) for computer, names in apps.items()}
+    taken = Counter(set(others))
+    for names in apps.values():
+        taken.update(names)
+    return [f"app {name!r} of computer {computer!r} has the name of another of its child envs, and loads and snapshots "
+            "find an environment by its name" for computer, names in apps.items() for name in names if taken[name] > 1]
 
 
 def deploy_options(entry: Optional[dict], sandbox_type: str | None) -> dict:
@@ -87,6 +100,23 @@ class Computers:
     def commit(self) -> None:
         (earlier, replaced), self._earlier = self._earlier, None
         self._replaced = [*replaced, *(earlier if self.envs is not earlier else [])]
+
+    def holding(self, environment_name: str) -> Optional[ComputerEnv]:
+        """The computer a load of ``environment_name`` reaches: the one of that name, or with an app of it."""
+        return next((env for env in self.envs if env.holds(environment_name)), None)
+
+    async def load(self, environments: list[EnvironmentArtifact]) -> None:
+        """Load each computer's of ``environments`` into it, in its own order, the computers at once (``each``)."""
+        await each(self._owner, "load", [(f"computer {env.environment_name!r}", env.load_environments(held))
+                                         for env in self.envs
+                                         if (held := [e for e in environments if env.holds(e.environment_name)])])
+
+    def resets(self, deployed: DeployedEnv) -> list[tuple[str, Awaitable[None]]]:
+        """Each computer ``deployed``, the multi env's record, holds, by name, with its reset from its own record, as it
+        resets alone; none is awaited yet."""
+        records = getattr(deployed, "child_envs", None) or {}
+        return [(env.environment_name, env.reset(DeployedEnv.from_dict(records[env.environment_name])))
+                for env in self.envs if env.environment_name in records]
 
     def deployer(self, child_envs: Optional[dict], *, sandbox_type: str | None, ttl_seconds: int,
                  attribution: Optional[Attribution]) -> Callable[[Optional[str]], Awaitable[list[ExternalChild]]]:
@@ -142,3 +172,15 @@ class Computers:
                 logger.warning(f"multi env '{self._owner}': failed to close computer {env.environment_name!r}: {result!r}")
             elif isinstance(result, BaseException):
                 raise result
+
+
+async def each(owner: str, what: str, calls: list[tuple[str, Awaitable[Any]]]) -> list[Any]:
+    """Await ``calls``, each a child env's under its label, at once, and once all have ended, what each returned; or,
+    when any failed to ``what``, a RuntimeError of the multi env ``owner`` naming each that did."""
+    results = await asyncio.gather(*(call for _, call in calls), return_exceptions=True)
+    if interrupted := next((r for r in results if isinstance(r, BaseException) and not isinstance(r, Exception)), None):
+        raise interrupted
+    if failed := [(child, result) for (child, _), result in zip(calls, results) if isinstance(result, Exception)]:
+        raise RuntimeError(f"multi env '{owner}': " + "; ".join(f"{child} failed to {what}: {error!r}"
+                                                                for child, error in failed)) from failed[0][1]
+    return results

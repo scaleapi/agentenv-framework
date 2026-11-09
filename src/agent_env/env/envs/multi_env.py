@@ -40,8 +40,9 @@ from agent_env.env.env import DeployedEnv, Env, gateway_url_of
 from agent_env.env.gateway import GatewayMode
 from agent_env.env.envs._deployment import (
     as_builtin, builtin_provider_for, close_deployed, close_replaced, deploy_refusal, deploy_through_provider, host_staging_refusal,
-    plugin_provider_like_a_builtin, provider_or_class,
+    plugin_provider_like_a_builtin, provider_or_class, reset_server_data,
 )
+from agent_env.env import store as env_store
 from agent_env.env.envs import _multi_computers
 from agent_env.env.envs.computer import COMPUTER_ENV_TYPE
 from agent_env.env.envs.computer.utils import sites
@@ -102,9 +103,14 @@ class MultiEnv(Env):
                                               for name in dict.fromkeys(env.domains)]):
             raise sites.SiteConflict(f"multi env {id!r}: its websites claim names twice: {'; '.join(conflicts)}")
         self._computers = _multi_computers.Computers(computer_envs or [], owner=id)
-        if problems := _multi_computers.name_problems([env.environment_name for env in self.computer_envs],
-                                                      mcp_servers=[env.environment_name for env in self.mcp_server_envs],
-                                                      websites=[env.environment_name for env in self.website_envs]):
+        servers = [env.environment_name for env in (*self.mcp_server_envs, *self.website_envs)]
+        computers = [env.environment_name for env in self.computer_envs]
+        if problems := [*_multi_computers.name_problems(computers,
+                                                        mcp_servers=[env.environment_name for env in self.mcp_server_envs],
+                                                        websites=[env.environment_name for env in self.website_envs]),
+                        *_multi_computers.app_name_problems({env.environment_name: [app.environment_name
+                                                                                    for app in env.composed_apps()]
+                                                             for env in self.computer_envs}, [*servers, *computers])]:
             raise ValueError(f"multi env {id!r}: {'; '.join(problems)}")
         self._sandbox = None
         self._gateway_url = None
@@ -259,6 +265,15 @@ class MultiEnv(Env):
 
     @classmethod
     async def from_deployed_env(cls, deployed: DeployedEnv) -> MultiEnv:
+        env = await cls._attached(deployed)
+        if env.computer_envs:
+            await env._computers.reattach(deployed)
+        return env
+
+    @classmethod
+    async def _attached(cls, deployed: DeployedEnv) -> MultiEnv:
+        """The multi env ``deployed`` records, attached to it as its loads are: its gateway reattached, and its MCP
+        servers and websites handed the provider and the record; its computers aren't reattached."""
         env = Env.get(deployed.env_id, deployed.env_version)
         if not isinstance(env, MultiEnv):
             raise TypeError(f"Expected MultiEnv, got {type(env).__name__}")
@@ -273,8 +288,6 @@ class MultiEnv(Env):
         _hand_record_to_child_envs(env, deployed)
         env._instance_id = deployed.instance_id
         env._mcp_server_name = deployed.mcp_server_name
-        if env.computer_envs:
-            await env._computers.reattach(deployed)
         return env
 
     async def load_environment_artifact(self, environment_artifact: EnvironmentArtifact) -> None:
@@ -290,6 +303,9 @@ class MultiEnv(Env):
             if env.environment_name == environment_artifact.environment_name:
                 await env.load_environment_artifact(environment_artifact)
                 return
+        if (computer := self._computers.holding(environment_artifact.environment_name)) is not None:
+            await computer.load_environment_artifact(environment_artifact)
+            return
         logger.warning(f"No env with environment_name '{environment_artifact.environment_name}' — skipping")
 
     async def load_environment_universe_artifact(
@@ -301,6 +317,7 @@ class MultiEnv(Env):
 
         A snapshot restore swaps a pre-ingested servicedb image; a miss re-ingests every
         service over HTTP under a fixed 600s per-service cap.
+        Either way each computer's environments then load into it, in its own order.
 
         Restore is NOT reliably faster. Measured on a 13-service / ~8.7GB universe:
         restore ~4min (an image pull plus recreating every service container) versus
@@ -343,6 +360,9 @@ class MultiEnv(Env):
             env_fingerprint=env_fingerprint,
         ) if can_restore else None
         restored_from_snapshot = False
+        # The universe's environments, read at most once, and only for a load that needs them: a restore reads none
+        # unless the multi env has computers to load.
+        environments: Optional[list[EnvironmentArtifact]] = None
         snapshot_baked: bool | None = None
         snapshot_bake_error: str | None = None
 
@@ -352,16 +372,14 @@ class MultiEnv(Env):
             restored_from_snapshot = True
             # A restore swaps the whole database at once, so per-service resume state from
             # any earlier partial re-ingest no longer describes anything real.
-            if self._instance_id:
-                try:
-                    from agent_env.env.store import get_env_instance_store
-                    get_env_instance_store().clear_loaded_environments(self._instance_id)
-                except Exception as e:  # noqa: BLE001
-                    logger.warning("Could not clear resume state after a snapshot restore: %s", e)
+            _forget_loaded_environments(self._instance_id)
         else:
             import asyncio
             import time
-            environment_artifacts = environment_universe_artifact.get_environment_artifacts()
+            # The services' alone: the computers' load after them, in each computer's own order.
+            environments = environment_universe_artifact.get_environment_artifacts()
+            environment_artifacts = [artifact for artifact in environments
+                                     if self._computers.holding(artifact.environment_name) is None]
             total = len(environment_artifacts)
             # WARNING, not info: this is the path that can FAIL. Every service is
             # re-ingested over HTTP under a fixed per-service timeout, and one service
@@ -450,9 +468,13 @@ class MultiEnv(Env):
                         for i, name, e in failed
                     )
                 )
+        if self.computer_envs:
+            # Every time, never skipped as a resumed service is: the changelog a resume reads doesn't see a computer's
+            # files.
+            await self._computers.load(environments if environments is not None
+                                       else environment_universe_artifact.get_environment_artifacts())
         if self._instance_id:
-            from agent_env.env.store import update_env_instance_environment_universe
-            update_env_instance_environment_universe(self._instance_id, environment_universe_artifact.id, environment_universe_artifact.version)
+            env_store.update_env_instance_environment_universe(self._instance_id, environment_universe_artifact.id, environment_universe_artifact.version)
 
         # Bake the snapshot that makes the NEXT load of this (images, universe) pair an
         # image swap. Deliberately placed here: after the universe stamp, which
@@ -516,9 +538,8 @@ class MultiEnv(Env):
             return set()
         try:
             from agent_env.env.snapshot_store import _check_changelog_empty
-            from agent_env.env.store import get_env_instance_store
 
-            recorded = set(get_env_instance_store().get_loaded_environments(
+            recorded = set(env_store.get_env_instance_store().get_loaded_environments(
                 self._instance_id, environment_universe_artifact.id, environment_universe_artifact.version,
             ))
             if not recorded:
@@ -550,9 +571,7 @@ class MultiEnv(Env):
         if not self._instance_id:
             return
         try:
-            from agent_env.env.store import get_env_instance_store
-
-            get_env_instance_store().record_loaded_environment(
+            env_store.get_env_instance_store().record_loaded_environment(
                 self._instance_id, environment_universe_artifact.id,
                 environment_universe_artifact.version, environment_name,
             )
@@ -867,6 +886,28 @@ class MultiEnv(Env):
         # (the final task step), so it persists wherever the Task runs — not only via this method.
         return context.instance_id
 
+    async def reset(self, deployed: DeployedEnv) -> None:
+        """Reset every child env at once, each as it resets alone: a computer reboots from its own record and gets its
+        ``tools`` again, and an MCP server or website is emptied of what loads put in, so a task loads again after; one
+        serving no reset takes no load, and stays as it is. A child that fails to reset fails the reset, each such one
+        named, once the others have reset. Before any server is emptied, which services the instance's loads put in is
+        forgotten, so the next load puts each in again rather than resuming past one; a reset that can't forget it
+        empties nothing."""
+        services = self
+        if self.mcp_server_envs or self.website_envs:
+            services = await type(self)._attached(deployed)
+            if deployed.instance_id:
+                env_store.get_env_instance_store().clear_loaded_environments(deployed.instance_id)
+        resets = [*((f"computer {name!r}", call) for name, call in self._computers.resets(deployed)),
+                  *((f"MCP server {env.environment_name!r}", reset_server_data(env, mcp=True))
+                    for env in services.mcp_server_envs),
+                  *((f"website {env.environment_name!r}", reset_server_data(env, mcp=False))
+                    for env in services.website_envs)]
+        results = await _multi_computers.each(self.id, "reset", resets)
+        for (child, _), result in zip(resets, results):
+            if result is False:
+                logger.info(f"multi env '{self.id}': {child} serves no reset and takes no load, so it stays as it is")
+
     async def close(self) -> None:
         await self._computers.close()
         await close_replaced(self)
@@ -882,6 +923,18 @@ class MultiEnv(Env):
             except Exception as e:  # a cancellation propagates, and keeps the sandbox for the next close()
                 logger.warning(f"Failed to terminate sandbox {self._sandbox.sandbox_id}: {e}")
             self._sandbox = None
+
+
+def _forget_loaded_environments(instance_id: Optional[str]) -> None:
+    """Forget which services the instance's loads put in, so its next load puts each in again rather than resuming;
+    best-effort, since only a resumed load reads it."""
+    if not instance_id:
+        return
+    try:
+        env_store.get_env_instance_store().clear_loaded_environments(instance_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Could not forget which services instance {instance_id!r} loaded; a resumed load may skip "
+                       f"one: {e}")
 
 
 def _hand_provider_to_child_envs(env: MultiEnv) -> None:

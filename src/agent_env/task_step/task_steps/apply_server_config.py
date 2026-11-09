@@ -143,8 +143,8 @@ class ApplyServerConfigStep(TaskStep):
         skipped, as under ``tolerate_unadvertised``, when the website has no card or doesn't advertise the URI, so a
         website the task didn't name never fails it. A named directive, and every MCP server, stays strict; a named one
         targets the server of that name, the MCP server when a website shares it, as a MultiEnv's load does, or, without
-        a broadcast to list them, is looked up by name (None)."""
-        if not any(d.service == self._BROADCAST for d in self.directives):
+        a broadcast or a computer of a multi env to list them, is looked up by name (None)."""
+        if not any(d.service == self._BROADCAST for d in self.directives) and not getattr(deployed, "child_envs", None):
             return [(d, None, False) for d in self.directives]
 
         from agent_env.env import legacy_protocol
@@ -257,9 +257,10 @@ class ApplyServerConfigStep(TaskStep):
                         f"{directive.service!r} (env={self.env_id}). "
                         f"Advertised: {[e.get('uri') for e in (card.get('capabilities') or {}).get('extensions') or []]}"
                     )
+                owner = server.owner(deployed) if server is not None else deployed
                 result = await protocol_v1.invoke_extension(
                     base_url, card, directive.uri, params=directive.args,
-                    timeout=self.timeout_seconds, headers=deployed.control_headers,
+                    timeout=self.timeout_seconds, headers=owner.control_headers,
                 )
             except ApplyServerConfigError:
                 raise

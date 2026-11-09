@@ -21,8 +21,11 @@ from agentenv_protocol.types import WELL_KNOWN_PATH
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
+from agent_env.artifact import EnvironmentArtifact, EnvironmentUniverseArtifact, FileArtifact
 from agent_env.env import Env
+from agent_env.env.env import DeployedEnv
 from agent_env.env.envs.computer.env import COMPUTER_TOOLS, ComputerEnv
+from agent_env.env.envs.computer.utils import inside
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider
@@ -31,7 +34,10 @@ from agent_env.store.routing import namespace_routing
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
-from tst.integration.env.envs.server_env_local_test import _put_items_image
+from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
+from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
+from agent_env.task_step.task_steps.snapshot_env import SnapshotEnvTaskStep
+from tst.integration.env.envs.server_env_local_test import _items_artifact, _put_items_image
 from tst.integration.store.local_parallel_deploy_test import _docker, _seed_bootstrap_envs
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
@@ -84,6 +90,30 @@ async def _answers(deployed, tools: list[str], *, until: bool = True, tries: int
     return answered
 
 
+def _universe(uid: str, files: dict[str, bytes]) -> EnvironmentUniverseArtifact:
+    """The items server's two items, and the desktop's ``files`` by their paths under its user's home."""
+    desktop = EnvironmentArtifact.put(id=f"office-desktop-{uid}", environment_name="desktop", file_artifacts={
+        path: FileArtifact.put_bytes(id=f"office-desktop-{uid}-{index}", description="multi env computers e2e",
+                                     filename=path.rsplit("/", 1)[-1], content=content, content_type="text/plain")
+        for index, (path, content) in enumerate(files.items())})
+    return EnvironmentUniverseArtifact.put(id=f"office-world-{uid}", environment_artifacts=[_items_artifact(uid), desktop])
+
+
+def _snapshotted(context: TaskStepContext, step: str) -> dict[str, dict[str, bytes]]:
+    """Each environment the snapshot ``step`` kept, with its files by their paths."""
+    kept = context.metadata["env_snapshotted_universes"][step]
+    universe = EnvironmentUniverseArtifact.get(kept["id"], version=kept["version"])
+    return {environment.environment_name: {path: file.load() for path, file in environment.get_file_artifacts().items()}
+            for environment in universe.get_environment_artifacts()}
+
+
+async def _items(deployed) -> str:
+    async with streamable_http_client(deployed.mcp_url) as (read, write, _):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            return " ".join(part.text for part in (await session.call_tool("list_items", {})).content if part.type == "text")
+
+
 def _containers(sandbox_id: str) -> list[str]:
     return _docker("ps", "-aq", "--filter", f"name=agent-{sandbox_id}").stdout.split()
 
@@ -111,12 +141,32 @@ async def test_a_computer_in_a_multi_env_is_served_through_its_gateway_under_its
             listed, shot = await _tools(deployed)
             async with httpx.AsyncClient(timeout=30) as client:
                 card = (await client.get(f"{deployed.gateway_url}/svc/desktop{WELL_KNOWN_PATH}")).json()
+            # Load, snapshot and reset reach the computer through the multi env, beside its MCP server.
+            uid, own = uuid.uuid4().hex[:8], DeployedEnv.from_dict(computer)
+            world = _universe(uid, {"Documents/note.txt": b"from the universe"})
+            await LoadArtifactTaskStep(id="seed", version=None, env_id=office.id, artifact_id=world.id).execute(context)
+            note = (await inside.run(own, ["cat", "Documents/note.txt"], timeout_s=30))["stdout"]
+            listed_items = await _items(deployed)
+            await SnapshotEnvTaskStep(id="snap", version=None, env_id=office.id,
+                                      snapshot_id=f"office-snap-{uid}").execute(context)
+            snapshot = _snapshotted(context, "snap")
+            await ResetEnvTaskStep(id="reset", version=None, env_id=office.id, fail_task_on_error=True).execute(context)
+            after_reset = (await inside.run(own, ["sh", "-c", "test -e Documents/note.txt && echo kept || echo gone"],
+                                            timeout_s=30))["stdout"].strip()
+            reset_answers = await _answers(deployed, ["desktop_computer_screenshot"])
+            emptied_items = await _items(deployed)
+            # A reset empties the server too, so the next attempt loads again, every service and the computer.
+            await LoadArtifactTaskStep(id="reseed", version=None, env_id=office.id, artifact_id=world.id).execute(context)
+            reloaded = ((await inside.run(own, ["cat", "Documents/note.txt"], timeout_s=30))["stdout"],
+                        await _items(deployed))
+
             await deployed.invoke(DISABLE_TOOL_EXTENSION_URI, DISABLE, {"role": DEFAULT_ROLE, "tools": [WILDCARD]})
             await deployed.invoke(ENABLE_TOOL_EXTENSION_URI, ENABLE, {"role": DEFAULT_ROLE,
                                                                       "tools": ["desktop_computer_screenshot"]})
             narrowed, narrowed_shot = await _tools(deployed)
             reattached = await Env.from_instance_id(deployed.instance_id)
             up = _containers(computer["sandbox_id"])
+
         finally:
             report = await teardown_run(context)
 
@@ -130,6 +180,11 @@ async def test_a_computer_in_a_multi_env_is_served_through_its_gateway_under_its
     assert [env._deployed.sandbox_id for env in reattached.computer_envs] == [computer["sandbox_id"]]
     assert _containers(computer["sandbox_id"]) == []
     assert json.dumps(deployed.child_envs)  # the record stores as JSON
+    assert note == "from the universe" and "snap-x" in listed_items
+    assert {"items", "desktop"} <= set(snapshot) and snapshot["desktop"]["Documents/note.txt"] == b"from the universe"
+    assert after_reset == "gone" and all(reset_answers.values()), reset_answers
+    assert "snap-x" not in emptied_items, emptied_items
+    assert reloaded[0] == "from the universe" and "snap-x" in reloaded[1], reloaded
 
 
 @pytest.mark.asyncio

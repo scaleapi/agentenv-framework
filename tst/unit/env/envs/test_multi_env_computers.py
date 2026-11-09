@@ -21,8 +21,10 @@ from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.gateway import ExternalChild
 from agent_env.env.gateway.constants import WELL_KNOWN_PATH
+from agent_env.env.store import EnvInstanceStore
 from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider
 from agent_env.providers.env_providers.env_provider import EnvironmentProvider
+from agent_env.providers.env_state import LocalPostgresStateProvider
 from agent_env.task.teardown import env_sandbox_ids
 from tst.util.sandbox_providers import mock_provider
 
@@ -40,10 +42,36 @@ class FakeComputer:
 
     type = COMPUTER_ENV_TYPE
 
-    def __init__(self, name: str, *, fails: Exception | None = None, refusal: str | None = None, log: list | None = None):
+    def __init__(self, name: str, *, fails: Exception | None = None, refusal: str | None = None, log: list | None = None,
+                 apps: tuple[str, ...] = (), resets: Exception | None = None, loads: Exception | None = None):
         self.id, self.version, self.environment_name = f"{name}-computer", 1, name
         self.fails, self.refusal, self.log = fails, refusal, [] if log is None else log
         self.deploys, self.refusals, self._deployed, self.closes = [], [], None, 0
+        self.apps, self.reset_fails, self.load_fails = apps, resets, loads
+
+    def composed_apps(self):
+        return [SimpleNamespace(environment_name=app) for app in self.apps]
+
+    def holds(self, environment_name):
+        return environment_name in (self.environment_name, *self.apps)
+
+    async def load_environments(self, environments):
+        inspect.signature(ComputerEnv.load_environments).bind(self, environments)
+        await asyncio.sleep(0.01)
+        self.log.append(("loaded", self.environment_name, [environment.environment_name for environment in environments]))
+        if self.load_fails:
+            raise self.load_fails
+
+    async def load_environment_artifact(self, environment_artifact):
+        inspect.signature(ComputerEnv.load_environment_artifact).bind(self, environment_artifact)
+        self.log.append(("loaded", self.environment_name, [environment_artifact.environment_name]))
+
+    async def reset(self, deployed):
+        inspect.signature(ComputerEnv.reset).bind(self, deployed)
+        await asyncio.sleep(0.01)
+        self.log.append(("reset", self.environment_name, deployed.sandbox_id))
+        if self.reset_fails:
+            raise self.reset_fails
 
     def deploy_refusal(self, **options):
         inspect.signature(ComputerEnv.deploy_refusal).bind(self, **options)  # only what the real one takes
@@ -344,3 +372,212 @@ def test_cli_put_names_a_computer_name_the_multi_env_refuses():
          patch("agent_env.cli.env.multi.detect_base_metadata", return_value={}):
         result = CliRunner().invoke(multi, ["put", "--id", "office", "--computer", "desktop-number-one-computer"])
     assert result.exit_code == 1 and "is 19 characters, and a tool prefix is at most 16" in result.output
+
+
+# --- load and reset through the multi env ---
+
+def _artifact(name: str) -> SimpleNamespace:
+    return SimpleNamespace(environment_name=name)
+
+
+@pytest.mark.parametrize("computers, others, problems", [
+    ({"desktop": ["mail", "notes"]}, ["slack", "desktop"], []),
+    ({"desktop": ["slack"]}, ["slack", "desktop"], [
+        "app 'slack' of computer 'desktop' has the name of another of its child envs, and loads and snapshots find an "
+        "environment by its name"]),
+    ({"desktop": ["mail"], "laptop": ["mail"]}, ["desktop", "laptop"], [
+        "app 'mail' of computer 'desktop' has the name of another of its child envs, and loads and snapshots find an "
+        "environment by its name",
+        "app 'mail' of computer 'laptop' has the name of another of its child envs, and loads and snapshots find an "
+        "environment by its name"]),
+    ({"desktop": ["laptop"]}, ["desktop", "laptop"], [
+        "app 'laptop' of computer 'desktop' has the name of another of its child envs, and loads and snapshots find an "
+        "environment by its name"]),
+], ids=["own", "a-server", "two-computers", "another-computer"])
+def test_a_computers_apps_names_are_no_other_child_envs(computers, others, problems):
+    assert _multi_computers.app_name_problems(computers, others) == problems
+
+
+def test_a_multi_env_refuses_a_computer_whose_app_another_child_env_names():
+    with pytest.raises(ValueError, match="app 'slack' of computer 'desktop' has the name of another of its child envs"):
+        _multi(FakeComputer("desktop", apps=("slack",)), mcp=["slack"])
+
+
+@pytest.mark.asyncio
+async def test_an_environment_artifact_named_for_a_computer_or_one_of_its_apps_loads_into_it():
+    log = []
+    env = _multi(FakeComputer("desktop", apps=("notes",), log=log), FakeComputer("laptop", log=log), mcp=["slack"])
+    env._gateway_url = GATEWAY
+    [slack] = env.mcp_server_envs
+    slack.load_environment_artifact = AsyncMock()
+
+    for name in ("notes", "desktop", "laptop", "slack"):
+        await env.load_environment_artifact(_artifact(name))
+
+    assert log == [("loaded", "desktop", ["notes"]), ("loaded", "desktop", ["desktop"]), ("loaded", "laptop", ["laptop"])]
+    slack.load_environment_artifact.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_computer_loads_its_own_environment_before_its_apps():
+    computer = SimpleNamespace(computer_name="desktop", _load=AsyncMock())
+    await ComputerEnv.load_environments(computer, [_artifact("notes"), _artifact("desktop"), _artifact("mail")])
+    assert [environment.environment_name for environment in computer._load.await_args.args[0]] == [
+        "desktop", "notes", "mail"]
+
+
+async def _load_universe(env: MultiEnv, log: list, *, restored: bool) -> MagicMock:
+    """Load a universe of five environments into ``env``, restored from a clean snapshot or re-ingested, each
+    service's load or the restore in ``log``; the universe, whose reads of its environments a test counts."""
+    env._instance_id, env._sandbox = "inst", MagicMock(mode="vm", exec_script=AsyncMock(return_value="8\n"))
+    env._env_provider = EnvironmentGatewayProvider()
+    env._env_provider._state_provider = LocalPostgresStateProvider()
+    env._load_from_snapshot = AsyncMock(side_effect=lambda snapshot: log.append(("restored",)))
+    env.load_environment_artifact = AsyncMock(side_effect=lambda artifact: log.append(("service", artifact.environment_name)))
+    universe = MagicMock(id="uni", version=1, **{"get_metadata.return_value": {}})
+    universe.get_environment_artifacts.return_value = [_artifact(name) for name in ("notes", "a", "desktop", "laptop", "b")]
+    snapshots = MagicMock(**{"get_clean.return_value": MagicMock() if restored else None})
+    with patch("agent_env.env.store.get_env_instance_store", return_value=MagicMock(**{"get_loaded_environments.return_value": []})), \
+         patch("agent_env.env.snapshot_store.get_env_snapshot_store", return_value=snapshots), \
+         patch("agent_env.env.snapshot_store.compute_env_fingerprint", return_value="fp"), \
+         patch("agent_env.env.snapshot_store._check_changelog_empty", AsyncMock(return_value=True)), \
+         patch("agent_env.env.store.update_env_instance_environment_universe", MagicMock()):
+        await env.load_environment_universe_artifact(universe, snapshot_after_load=False)
+    return universe
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restored", [False, True], ids=["re-ingested", "restored"])
+async def test_a_universe_loads_each_computers_environments_after_the_services_even_after_a_restore(restored):
+    log = []
+    env = _multi(FakeComputer("desktop", apps=("notes",), log=log), FakeComputer("laptop", log=log))
+
+    universe = await _load_universe(env, log, restored=restored)
+
+    services = [("restored",)] if restored else [("service", "a"), ("service", "b")]
+    assert log[:len(services)] == services
+    assert sorted(log[len(services):]) == [("loaded", "desktop", ["notes", "desktop"]), ("loaded", "laptop", ["laptop"])]
+    assert universe.get_environment_artifacts.call_count == 1  # the services and the computers load the same read
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restored, reads", [(False, 1), (True, 0)], ids=["re-ingested", "restored"])
+async def test_a_multi_env_without_computers_reads_the_universes_environments_only_to_re_ingest_them(restored, reads):
+    log = []
+
+    universe = await _load_universe(_multi(mcp=["a", "b"]), log, restored=restored)
+
+    assert log == ([("restored",)] if restored else [("service", name) for name in ("notes", "a", "desktop", "laptop", "b")])
+    assert universe.get_environment_artifacts.call_count == reads  # a restore needs none of them, as before computers
+
+
+@pytest.mark.asyncio
+async def test_each_computer_that_fails_to_load_is_named_once_every_computer_has_loaded():
+    log = []
+    env = _multi(FakeComputer("desktop", log=log, loads=RuntimeError("disk full")),
+                 FakeComputer("laptop", log=log, loads=ValueError("bad path")), FakeComputer("kiosk", log=log))
+
+    with pytest.raises(RuntimeError) as raised:
+        await env._computers.load([_artifact(name) for name in ("desktop", "laptop", "kiosk")])
+
+    assert str(raised.value) == ("multi env 'office': computer 'desktop' failed to load: RuntimeError('disk full'); "
+                                 "computer 'laptop' failed to load: ValueError('bad path')")
+    assert sorted(name for _, name, _ in log) == ["desktop", "kiosk", "laptop"]
+
+
+@pytest.fixture
+def server_resets(monkeypatch):
+    """Each MCP server's and website's reset, as (name, mcp) in ``log``, attached to the multi env's record: False, as
+    for one serving no reset, for a name in ``unserved``, and raising for one in ``failing``; the instance whose loads
+    are forgotten in ``forgotten``, with how many servers had reset by then."""
+    resets = SimpleNamespace(log=[], unserved=set(), failing={}, forgotten=[], attached=[])
+
+    async def reset(env, *, mcp):
+        inspect.signature(_deployment.reset_server_data).bind(env, mcp=mcp)
+        await asyncio.sleep(0.01)
+        resets.log.append((env.environment_name, mcp, env._deployed.instance_id))
+        if env.environment_name in resets.failing:
+            raise resets.failing[env.environment_name]
+        return env.environment_name not in resets.unserved
+
+    async def attached(cls, deployed):
+        resets.attached.append(deployed.instance_id)
+        env = _multi(mcp=["slack"], websites=["shop"])
+        for child in [*env.mcp_server_envs, *env.website_envs]:
+            child._deployed = deployed
+        return env
+
+    monkeypatch.setattr("agent_env.env.envs.multi_env.reset_server_data", reset)
+    monkeypatch.setattr(MultiEnv, "_attached", classmethod(attached))
+    monkeypatch.setattr(EnvInstanceStore, "clear_loaded_environments",
+                        lambda store, instance_id: resets.forgotten.append((instance_id, len(resets.log))))
+    return resets
+
+
+async def _stored(*computers) -> DeployedEnv:
+    """The record of a multi env with ``computers``, as reset_env reads it back."""
+    deployed = await _multi(*computers, mcp=["slack"], websites=["shop"]).deploy()
+    return DeployedEnv.from_dict({**dataclasses.asdict(deployed), "instance_id": "inst-1"})
+
+
+@pytest.mark.asyncio
+async def test_reset_resets_every_child_env_at_once_each_as_it_resets_alone_and_forgets_what_loads_put_in(
+        gateway, providers, server_resets):
+    stored, log = await _stored(FakeComputer("desktop"), FakeComputer("laptop")), []
+
+    await _multi(FakeComputer("desktop", log=log), FakeComputer("laptop", log=log), mcp=["slack"],
+                 websites=["shop"]).reset(stored)
+
+    assert sorted(log) == [("reset", "desktop", "sb-desktop"), ("reset", "laptop", "sb-laptop")]
+    assert sorted(server_resets.log) == [("shop", False, "inst-1"), ("slack", True, "inst-1")]
+    assert server_resets.attached == ["inst-1"] and server_resets.forgotten == [("inst-1", 0)]  # before any reset
+
+
+@pytest.mark.asyncio
+async def test_a_multi_env_of_computers_alone_resets_them_without_reattaching_its_gateway(gateway, providers,
+                                                                                          server_resets):
+    deployed, log = await _multi(FakeComputer("desktop")).deploy(), []
+
+    await _multi(FakeComputer("desktop", log=log)).reset(DeployedEnv.from_dict(dataclasses.asdict(deployed)))
+
+    assert log == [("reset", "desktop", "sb-desktop")] and server_resets.attached == server_resets.log == []
+
+
+@pytest.mark.asyncio
+async def test_a_server_serving_no_reset_stays_as_it_is_and_the_rest_reset(gateway, providers, server_resets, caplog):
+    stored, log = await _stored(FakeComputer("desktop")), []
+    server_resets.unserved.add("shop")
+
+    with caplog.at_level("INFO"):
+        await _multi(FakeComputer("desktop", log=log), mcp=["slack"], websites=["shop"]).reset(stored)
+
+    assert log == [("reset", "desktop", "sb-desktop")] and len(server_resets.log) == 2
+    assert "multi env 'office': website 'shop' serves no reset and takes no load, so it stays as it is" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_each_child_that_fails_to_reset_is_named_once_every_child_env_has_reset(gateway, providers, server_resets):
+    stored, log = await _stored(FakeComputer("desktop"), FakeComputer("laptop")), []
+    server_resets.failing["slack"] = RuntimeError("data/reset timed out")
+    env = _multi(FakeComputer("desktop", log=log, resets=RuntimeError("no reboot")), FakeComputer("laptop", log=log),
+                 mcp=["slack"], websites=["shop"])
+
+    with pytest.raises(RuntimeError) as raised:
+        await env.reset(stored)
+
+    assert str(raised.value) == ("multi env 'office': computer 'desktop' failed to reset: RuntimeError('no reboot'); "
+                                 "MCP server 'slack' failed to reset: RuntimeError('data/reset timed out')")
+    assert sorted(log) == [("reset", "desktop", "sb-desktop"), ("reset", "laptop", "sb-laptop")]
+    assert len(server_resets.log) == 2 and server_resets.forgotten == [("inst-1", 0)]
+
+
+@pytest.mark.asyncio
+async def test_a_reset_that_cannot_forget_what_loads_put_in_empties_nothing(gateway, providers, server_resets,
+                                                                           monkeypatch):
+    stored, log = await _stored(FakeComputer("desktop")), []
+    monkeypatch.setattr(EnvInstanceStore, "clear_loaded_environments", MagicMock(side_effect=OSError("store down")))
+
+    with pytest.raises(OSError, match="store down"):
+        await _multi(FakeComputer("desktop", log=log), mcp=["slack"], websites=["shop"]).reset(stored)
+
+    assert log == server_resets.log == []  # a resumed load would skip a service a reset had emptied

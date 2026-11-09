@@ -385,7 +385,16 @@ class ComputerEnv(Env):
                       if environment.environment_name not in names]:
             logger.warning(f"[{self.id}] loading only {[environment.environment_name for environment in known]} from "
                            f"'{environment_universe_artifact.id}'; leaving out {others}")
-        await self._load(sorted(known, key=lambda environment: environment.environment_name != self.computer_name))
+        await self.load_environments(known)
+
+    def holds(self, environment_name: str) -> bool:
+        """Whether a load reaches ``environment_name`` in this computer: its own, or one of its apps'."""
+        return environment_name in self._environment_names()
+
+    async def load_environments(self, environments: list[EnvironmentArtifact]) -> None:
+        """Load ``environments``, each named after the computer or one of its apps: its own first, then its apps', so
+        what an app keeps ends as its own export has it."""
+        await self._load(sorted(environments, key=lambda environment: environment.environment_name != self.computer_name))
 
     async def reset(self, deployed: DeployedEnv) -> None:
         """Return the computer to boot state: its recordings ended, its container replaced with a fresh one of the same
