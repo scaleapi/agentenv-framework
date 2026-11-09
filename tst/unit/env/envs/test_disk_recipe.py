@@ -502,19 +502,24 @@ async def test_a_disk_boots_in_the_launcher_with_kvm_its_ports_published_and_a_r
 
 
 @pytest.mark.asyncio
-async def test_with_a_local_stores_grants_a_disks_launcher_forwards_their_port_and_seeds_their_trust(launched,
-                                                                                                   monkeypatch):
+async def test_a_disks_launcher_forwards_this_processs_grant_port_and_seeds_the_trust_and_a_reconnect_forwards_its_own(
+        launched, monkeypatch):
     monkeypatch.setattr(local_sandbox, "local_grants", lambda: (41234, Path("/state/tls/trust/ca")))
 
     sandbox = await LocalSandboxProvider().create_vm(image="localhost:5000/disk@sha256:" + "a" * 64,
                                                      exposed_ports=[18765], env={}, cpu=2, memory=4096)
 
-    (run,) = launched
+    monkeypatch.setattr(local_sandbox, "local_grants", lambda: (52345, Path("/state/tls/trust/ca")))
+    await LocalSandboxProvider().get_sandbox(sandbox.sandbox_id)
+
+    run, forward = launched
     hosts = [arg for entry in local_sandbox._EXTRA_HOSTS for arg in ("--add-host", entry)]
     assert run[-7 - len(hosts):-1] == (
         *hosts, "--mount", "type=bind,src=/state/tls/trust/ca,dst=/agentenv-trust,readonly",
         "-e", "VM_HOST_PORTS=41234", "-e", "VM_TRUST=/agentenv-trust")
     assert run[-1] == "agentenv-vm:0123" and sandbox.tunnel_urls == {18765: "http://127.0.0.1:20001"}
+    assert forward == ("exec", "-d", sandbox.container_name, "socat",
+                       "TCP-LISTEN:52345,bind=127.0.0.1,fork,reuseaddr", "TCP:host.docker.internal:52345")
 
 
 @pytest.mark.asyncio
