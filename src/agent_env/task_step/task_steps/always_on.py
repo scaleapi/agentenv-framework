@@ -32,6 +32,9 @@ it in the run's metadata under its ``name``; a ``deploy_agent`` step deploys the
   when the task sets none. The run's last wake, at end_time or the one ``max_wakes`` makes the last, carries the
   last-turn notice (``final_reminder``). After it the user sim reads what the agent sent (its wrap-up), and her
   reaction, and any reply still held, are recorded; then the run ends.
+- A real-time budget keeps the run inside the hub's 8-hour job (``effective_time_budget`` gives the rule): once one
+  more wake might end past ``time_budget_seconds`` (7 h, lowered to fit the task's own timeouts), the agent gets its
+  closing wake, with the step's wrap-up line and the last-turn notice, and the run ends with end reason time_budget.
 - End reasons: end_time, user_done (one sitting), max_wakes, time_budget, finished_nothing_pending or stuck (nothing
   can wake the agent, with nothing pending or with something still pending), agent_turn_failed, agent_turn_timeout,
   user_sim_error, step_error. What was still pending is recorded (``pending_at_end``): replies she held, messages she
@@ -112,6 +115,10 @@ CHECKS_RULE = ("You only run when something wakes you. To do something at a late
 CHECK_MIN_INTERVAL = "PT3H"
 EMPTY_REPLIES = frozenset({"(The assistant's reply was empty.)"})  # a harness's stand-in for an empty final reply
 TIME_LINE = "It's {when}. Any other date you see is the computer's clock, not the task's."
+# The hub runs a step as one job of at most this long, retrying one that runs over; the step keeps this much of it spare.
+JOB_LIMIT_SECONDS = 8 * 3600
+JOB_HEADROOM_SECONDS = 600
+DEFAULT_TIME_BUDGET_SECONDS = 7 * 3600
 # The time limit of a contact (a trigger's executor) whose task sets none; the gateway's own default is 120 s.
 CONTACT_TIMEOUT_SECONDS = 300.0
 # Past a contact's time limit, how long the settle wait still gives its call to come back.
@@ -159,7 +166,8 @@ class AlwaysOnTaskStep(PromptAgentTaskStep):
                  wake_reminder: bool = True, wake_reminder_text: str = WAKE_REMINDER_TEXT,
                  scheduled_checks: Optional[bool] = None, scheduled_check_min_interval: str = CHECK_MIN_INTERVAL,
                  contact_timeout_seconds: Optional[float] = CONTACT_TIMEOUT_SECONDS,
-                 contact_replies_in_parallel: bool = True, model: Optional[str] = None, model_params: Optional[dict] = None, effort: Optional[str] = None,
+                 contact_replies_in_parallel: bool = True, time_budget_seconds: Optional[float] = None,
+                 model: Optional[str] = None, model_params: Optional[dict] = None, effort: Optional[str] = None,
                  max_thinking_tokens: Optional[int] = None, harness: Optional[str] = None,
                  trajectory_output_prefix: Optional[str] = None, **prompt_fields: Any):
         for unsupported in ("max_conversation_turns", "user_agent_name", "user_a2a_url", "post_turn_hooks",
@@ -190,13 +198,50 @@ class AlwaysOnTaskStep(PromptAgentTaskStep):
             raise ValueError(f"contact_timeout_seconds must be positive (got {contact_timeout_seconds!r})")
         self.contact_timeout_seconds = None if contact_timeout_seconds is None else float(contact_timeout_seconds)
         self.contact_replies_in_parallel = bool(contact_replies_in_parallel)
+        self.time_budget_seconds = None if time_budget_seconds is None else float(time_budget_seconds)
+        self.effective_time_budget()  # validates
 
     _OWN = ("user_sim", "end_time", "final", "max_wakes", "settle_timeout_seconds", "user_timeout_seconds",
             "final_reminder", "stay_quiet", "nudge", "nudge_text", "wake_reminder", "wake_reminder_text",
-            "scheduled_checks", "scheduled_check_min_interval", "contact_timeout_seconds", "contact_replies_in_parallel")
+            "scheduled_checks", "scheduled_check_min_interval", "contact_timeout_seconds", "contact_replies_in_parallel",
+            "time_budget_seconds")
     _PROMPT_FIELDS = ("prompt", "parts", "prompt_id", "agent_name", "timeout_seconds", "trajectory_output_prefix",
                       "model", "model_params", "system_prompt", "max_turns", "output_format", "max_thinking_tokens",
                       "effort", "harness", "agentenv_tools", "poll_interval_seconds", "context_id")
+
+    def wake_reserve_seconds(self) -> float:
+        """The longest one wake can take, as the settings bound it: the agent's turn (and its nudge turn, when nudges
+        are on), two settle waits (after the turn, and after a clock jump: a contact's time limit and grace, then
+        settle_timeout_seconds) and a read (two of the user sim's turns)."""
+        contact = self.contact_timeout_seconds or CONTACT_TIMEOUT_SECONDS
+        return (self.timeout_seconds * (2 if self.nudge else 1)
+                + 2 * (contact + CONTACT_GRACE_SECONDS + self.settle_timeout_seconds) + 2 * self.user_timeout_seconds)
+
+    def effective_time_budget(self) -> float:
+        """The real time after which the run closes: ``time_budget_seconds``, else 7 h, lowered so the closing still
+        fits the hub's job. The rule:
+
+        The hub runs a step as one job of at most 8 h (``JOB_LIMIT_SECONDS``) and retries one that runs over, which
+        would start the step again against a world whose clock has already moved. So the step never starts a wake or a
+        read that might end past the budget: once the time spent plus one wake's worst case
+        (``wake_reserve_seconds``) reaches it, it gives the agent its closing wake instead (whatever is due, the
+        step's wrap-up line and the last-turn notice), lets the user sim read the wrap-up, and ends with end reason
+        ``time_budget``. A run therefore ends by the budget plus one wake's worst case, and that must fit the job
+        with ``JOB_HEADROOM_SECONDS`` to spare: the default budget is lowered to make it fit, and a budget a task sets
+        that can't is refused, as is a wake whose worst case leaves no room for a budget at all."""
+        reserve = self.wake_reserve_seconds()
+        room = JOB_LIMIT_SECONDS - JOB_HEADROOM_SECONDS - reserve
+        if room <= reserve:
+            raise ValueError(f"always_on: one wake can take up to {reserve:.0f}s (wake_reserve_seconds: the agent's turn "
+                             f"and nudge, the settle waits and a read), so no run fits the hub's "
+                             f"{JOB_LIMIT_SECONDS // 3600} h job; lower timeout_seconds or user_timeout_seconds")
+        if self.time_budget_seconds is None:
+            return min(DEFAULT_TIME_BUDGET_SECONDS, room)
+        if not 0 < self.time_budget_seconds <= room:
+            raise ValueError(f"always_on: time_budget_seconds={self.time_budget_seconds:.0f} can't fit: with one wake's "
+                             f"worst case ({reserve:.0f}s) after it, the run must close within {room:.0f}s to end "
+                             f"inside the hub's {JOB_LIMIT_SECONDS // 3600} h job")
+        return self.time_budget_seconds
 
     def to_dict(self) -> dict:
         base = TaskStep.to_dict(self)
@@ -266,6 +311,7 @@ class _Run:
         self.last_settle: dict = {}
         self.pending: dict = {}
         self.end_note = ""
+        self.time_budget = step.effective_time_budget()
 
     def close(self) -> None:
         for p in self._plugin_paths:
@@ -273,6 +319,10 @@ class _Run:
                 os.unlink(p)
         for m in self._plugin_modules:
             sys.modules.pop(m, None)
+
+    def spent(self) -> float:
+        """Real seconds since the step started."""
+        return time.time() - self.t0_real
 
     # ---- record ----------------------------------------------------------------------------------------------
     def log(self, event: str, **fields: Any) -> dict:
@@ -662,6 +712,12 @@ class _Run:
                 self.end_reason = "max_wakes"
                 break
             now = await self.now()
+            spent = self.spent()
+            if spent + step.wake_reserve_seconds() >= self.time_budget:
+                self.log("time_budget_reached", virtual_time=_iso(now), real_seconds=round(spent, 1),
+                         time_budget_seconds=self.time_budget, wake_reserve_seconds=step.wake_reserve_seconds())
+                await self._final(now, reason="time_budget")
+                break
             # 1. a read that is due: the user sim reads what the agent sent
             if self.read_at is not None and self.read_at <= now and self.unread:
                 await self.read(now)
@@ -1238,7 +1294,9 @@ class _Run:
                   "multi_day": self.multi_day, "real_seconds": round(time.time() - self.t0_real, 1),
                   "timeline_events": len(self.timeline), "pending_at_end": _bounded(self.pending)}
         record["settings"] = {"stay_quiet": step.stay_quiet, "nudge": step.nudge, "wake_reminder": step.wake_reminder,
-                              "scheduled_checks": self.checks, "contacts": self.contacts}
+                              "scheduled_checks": self.checks, "contacts": self.contacts,
+                              "time_budget_seconds": self.time_budget,
+                              "wake_reserve_seconds": step.wake_reserve_seconds()}
         await self._store_timeline(record)
         ctx.metadata.setdefault(ALWAYS_ON_KEY, {})[step.id] = record
         # The graded response is the user's whole chat from the agent, each message with its pretend time; never its
