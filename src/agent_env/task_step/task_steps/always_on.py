@@ -37,7 +37,8 @@ it in the run's metadata under its ``name``; a ``deploy_agent`` step deploys the
   closing wake, with the step's wrap-up line and the last-turn notice, and the run ends with end reason time_budget.
 - End reasons: end_time, user_done (one sitting), max_wakes, time_budget, finished_nothing_pending or stuck (nothing
   can wake the agent, with nothing pending or with something still pending), agent_turn_failed, agent_turn_timeout,
-  user_sim_error, step_error. What was still pending is recorded (``pending_at_end``): replies held, messages the user
+  user_sim_error, step_error. With no end_time, a world that only repeats ends the run too (``IDLE_JUMPS_MAX``, in the
+  loop's docstring), so a recurring trigger that never wakes the agent can't move the clock forever. What was still pending is recorded (``pending_at_end``): replies held, messages the user
   never read, user lines and alerts never delivered, the agent's checks not yet due, contact replies in progress.
 - Graders read what the user saw. The prompt response is every message_user text in order, each with its pretend
   time, never the agent's closing text. The conversation (``metadata["a2a_conversations"][step_id]``) holds the user's
@@ -148,6 +149,11 @@ HOOK_RECORDS_KEY = "post_turn_hooks"
 HOOK_NAME = "always_on"
 CHANGE_SUMMARY_CHARS = 200
 TIMELINE_TAIL = 20
+# With no end_time, the run ends once this many clock jumps in a row have been to repeating triggers' marks alone (see
+# the loop's docstring): the world can go on ticking, but nothing in it has woken the agent.
+IDLE_JUMPS_MAX = 24
+# The clock jumps between two wakes the timeline keeps one by one; the rest are folded into one entry.
+JUMPS_KEPT_PER_GAP = 20
 PENDING_KEPT = 20
 PENDING_TEXT_CHARS = 300
 BULKY_EVENT_FIELDS = ("input", "raw", "read", "parts_text", "changes")
@@ -312,6 +318,11 @@ class _Run:
         self.pending: dict = {}
         self.end_note = ""
         self.time_budget = step.effective_time_budget()
+        self.idle_jumps = 0           # clock jumps in a row to repeating triggers' marks alone, since the last wake
+        self.idle_since: Optional[str] = None
+        self.clock_jumps = 0
+        self.jumps_in_gap = 0         # clock jumps since the last wake, the first JUMPS_KEPT_PER_GAP of them logged
+        self.folded: Optional[dict] = None
 
     def close(self) -> None:
         for p in self._plugin_paths:
@@ -569,8 +580,24 @@ class _Run:
                 if not (state.get("armed") and _utc(state["virtual_time"]) >= target):
                     raise
         stuck = await self.settle()
-        self.log("clock_jump", **{"from": _iso(before), "to": _iso(target), "reason": reason,
-                                  "settled": not stuck, "still_at_work": stuck, "settle": self.last_settle})
+        self.clock_jumps += 1
+        self.jumps_in_gap += 1
+        if self.jumps_in_gap <= JUMPS_KEPT_PER_GAP:
+            self.log("clock_jump", **{"from": _iso(before), "to": _iso(target), "reason": reason,
+                                      "settled": not stuck, "still_at_work": stuck, "settle": self.last_settle})
+            return
+        # Past the first jumps since the last wake, one entry sums the rest up, so a long gap can't grow the timeline.
+        if self.folded is None:
+            self.folded = self.log("clock_jumps_folded", count=0, **{"from": _iso(before)}, reasons={},
+                                   unsettled=0, settle_seconds=0.0)
+        f = self.folded
+        f["count"] += 1
+        f["to"] = _iso(target)
+        f["reasons"][reason] = f["reasons"].get(reason, 0) + 1
+        f["unsettled"] += 1 if stuck else 0
+        f["settle_seconds"] = round(f["settle_seconds"] + self.last_settle.get("seconds", 0), 1)
+        if stuck:
+            f["last_still_at_work"] = stuck
 
     async def settle(self) -> list[dict]:
         """Wait until the world has settled: no trigger still at work, bar a fire waiting for a later time. A contact's
@@ -622,6 +649,30 @@ class _Run:
                 if st.get("next_event_at"):
                     out.append(_utc(st["next_event_at"]))
         return min(out) if out else None
+
+    async def _trigger_rows(self) -> list[dict]:
+        rows = []
+        for env in await self._armed():
+            if env.supports(EXT_TRIGGERS_URI, "state"):
+                rows += (await _call(env, EXT_TRIGGERS_URI, "state")).get("triggers", [])
+        return rows
+
+    async def _only_repeating(self) -> bool:
+        """Whether all the world has ahead is recurring time triggers' marks: no trigger has a fire in flight (running,
+        queued, waiting out a delay or hours, calling a contact, evaluating) and none has a one-off mark to come."""
+        for row in await self._trigger_rows():
+            if (row.get("status") in IN_FLIGHT or row.get("running") or row.get("pending") or row.get("waits")
+                    or row.get("waiting") or row.get("executor_calls") or row.get("evaluating")):
+                return False
+            when = row.get("when") or {}
+            if row.get("type") == "time" and row.get("status") == "armed" and "every" not in when \
+                    and (row.get("next_mark") or "after" not in when):
+                return False
+        return True
+
+    async def _repeating_ids(self) -> list[str]:
+        return sorted({row["id"] for row in await self._trigger_rows() if row.get("type") == "time"
+                       and row.get("status") == "armed" and "every" in (row.get("when") or {})})
 
     async def _notes_state(self, to: str) -> list[dict]:
         out = []
@@ -698,6 +749,16 @@ class _Run:
 
     # ---- the loop -------------------------------------------------------------------------------------------
     async def loop(self, now: datetime) -> None:
+        """Until the run ends: a read that is due, else a wake for what is due, else a clock jump to what comes next.
+
+        A world that only repeats: with no end_time, when nothing the step tracks is ahead (no alert or check for the
+        agent, no user line, no held reply, no read) and no trigger has work in flight or a one-off mark to come, the
+        world can only go on ticking: its recurring triggers fire again and again. Each such jump after which nothing
+        woke the agent counts; ``IDLE_JUMPS_MAX`` of them in a row end the run (``nothing_can_wake``, which ``finish``
+        turns into finished_nothing_pending or stuck). A wake or a read starts the count again. The rule only ever ends
+        a run in which a recurring trigger has fired that many times running without waking the agent, and it can't
+        end one that waits on a known event; with an end_time the run goes on to it, its jumps folded in the timeline
+        past ``JUMPS_KEPT_PER_GAP`` per gap."""
         step = self.step
         self.you_sent.append(dict(self.opening))
         await self._chat_user([self._chat_part(_utc(self.opening["at"]), self.opening["text"], kind="opening")])
@@ -746,6 +807,16 @@ class _Run:
             if soonest is None:
                 self.end_reason = NOTHING_CAN_WAKE  # finished or stuck: finish() decides from what is pending
                 break
+            if self.end is None and set(later) == {"world_event"} and await self._only_repeating():
+                self.idle_jumps += 1
+                self.idle_since = self.idle_since or _iso(now)
+                if self.idle_jumps > IDLE_JUMPS_MAX:
+                    self.log("world_only_repeats", virtual_time=_iso(now), jumps=self.idle_jumps - 1,
+                             since=self.idle_since, triggers=await self._repeating_ids())
+                    self.end_reason = NOTHING_CAN_WAKE
+                    break
+            else:
+                self.idle_jumps, self.idle_since = 0, None
             why = sorted(k for k, v in later.items() if v == soonest)
             await self.advance(soonest, reason="+".join(why))
         await self._last_read()
@@ -901,6 +972,8 @@ class _Run:
         if step.wake_reminder:
             parts = [*parts, _step_part(step.wake_reminder_text, "reminder")]
         self.wakes += 1
+        self.idle_jumps, self.idle_since = 0, None
+        self.jumps_in_gap, self.folded = 0, None
         msg_id = uuid.uuid4().hex
         await self._read_changes("before_turn")
 
@@ -1101,6 +1174,7 @@ class _Run:
             for it in await take_due(self.notification_envs, USER_PHONE):
                 phone.append({"at": it.get("at"), "channel": it["channel"],
                               "text": "\n\n".join(p["text"] for p in it["parts"] if p.get("kind") == "text")})
+        self.idle_jumps, self.idle_since = 0, None
         seen = list(self.unread)
         read = {"time": _iso(now), "assistant_messages": [{"at": m.get("at"), "text": m["text"]} for m in seen],
                 "phone": phone,
@@ -1272,7 +1346,7 @@ class _Run:
                                    and e.get("outcome") == "no_reply"),
             "user_dones": sum(1 for e in self.timeline if e["event"] == "user_sim_read" and e.get("outcome") == "done"),
             "scripted_user_lines": sum(1 for e in self.timeline if e["event"] == "scripted_user_line"),
-            "clock_jumps": sum(1 for e in self.timeline if e["event"] == "clock_jump"),
+            "clock_jumps": self.clock_jumps,
             "silent_wakes": sum(1 for e in self.timeline if e["event"] == "agent_turn_end"
                                 and not e.get("messages_to_user")),
         }
