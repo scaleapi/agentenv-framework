@@ -24,9 +24,11 @@ A plug-in is one Python module with:
 
 ``setup`` runs once per run; the step sets ``model``, ``system_prompt`` and ``output_format`` on the user sim agent.
 ``person`` is ``{"key": name, "name", "first", "email", "time_zone", "description", "versions", "output_format",
-"permissions", "keep_private", "opening"}``, with ``time_zone`` the run's zone (the user's, else the world clock's,
-else UTC) and ``opening`` the user's opening request, ``{"at": RFC 3339 UTC, "text"}``, so ``setup`` can write it
-into the system prompt. The opening is also the first line of the first read's ``you_sent``.
+"permissions", "keep_private", "opening", "done_ends_run"}``, with ``time_zone`` the run's zone (the user's, else the
+world clock's, else UTC) and ``opening`` the user's opening request, ``{"at": RFC 3339 UTC, "text"}``, so ``setup``
+can write it into the system prompt. The opening is also the first line of the first read's ``you_sent``. The step
+sets ``done_ends_run`` before ``setup``, as each read has it, since the done line is in the system prompt; the
+built-in plug-in uses the multi-day wording when it's missing.
 
 ``answer`` runs once per read, at the time the user would read. ``read`` is ``{"time": RFC 3339 UTC,
 "assistant_messages": [{"at", "text"}], "phone": [{"at", "channel", "text"}], "you_sent": [{"at", "text"}],
@@ -44,6 +46,11 @@ A ``reply`` or ``done`` with text is held for the response time, then wakes the 
 recorded extras (``used``, ``score``, ...) never reach the agent. ``done`` ends a one-sitting run after the agent's
 turn on that message, or at once when it has no text, with no further reads; in a multi-day run it is only recorded.
 When the last ``ask`` of a read returned an error, the run ends (``user_sim_error``).
+
+After the run's last wake (the final check-in, or the wake ``max_wakes`` makes the last), the user reads the agent's
+wrap-up once more, if it sent one: one more ``answer``, its ``read`` shaped like any other, with the task's ``final``
+line, when it sets one, in ``you_sent``. Its answer is recorded and never delivered; a ``done`` or an error on it
+changes nothing.
 """
 from __future__ import annotations
 

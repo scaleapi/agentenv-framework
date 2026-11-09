@@ -174,6 +174,28 @@ def test_every_phone_item_shows_once_at_its_time():
     assert text.count("Table for 4 confirmed") == 1
 
 
+def test_the_read_after_the_final_check_in_renders_like_any_other_and_its_answer_parses():
+    mom = {"at": "2026-11-17T16:00:00Z", "channel": "Gmail · Carol Reyes (Mom)", "text": "Thursday ✈️"}
+    earlier = _read("2026-11-17T17:05:00Z", you_sent=[{"at": "2026-11-17T16:56:00Z", "text": "keep it chill pls"}],
+                    phone=[mom])
+    wrap_up = {"at": "2026-11-23T02:01:00Z", "text": "All set: flights, the flat and three dinners.\nNothing open."}
+    last = {"time": "2026-11-23T02:05:00Z", "assistant_messages": [wrap_up], "phone": [], "done_ends_run": False,
+            "you_sent": [{"at": "2026-11-23T02:00:00Z", "text": "send me the rundown"}], "last_read": True}
+    text = us.render(PERSON, [{"read": earlier, "answer": {"outcome": "reply", "message": "ok!"}}], last)
+    assert text == (
+        "It's Sun, Nov 22, 6:05 PM.\n"
+        "You last messaged your AI assistant at 6:00 PM.\n"
+        "\nEARLIER ON YOUR PHONE (you've already seen these):\n  [Tue 8:00 AM · Gmail · Carol Reyes (Mom)] "
+        "Thursday ✈️\n"
+        "\nYOU SENT YOUR AI ASSISTANT:\n  [6:00 PM] send me the rundown\n"
+        "\nNEW FROM YOUR AI ASSISTANT (this is what you're answering):\n  [6:01 PM]\n"
+        "    All set: flights, the flat and three dinners.\n    Nothing open.\n"
+        "\nYour AI assistant sent you this. As Hannah, decide: reply, don't reply, or say you're done.\n"
+        "Answer in JSON: " + us.ANSWER_LINE)
+    got = us.parse({"outcome": "done", "message": "you're the best 🙌", "used": "none"})
+    assert (got["outcome"], got["message"], got["schema_errors"]) == ("done", "you're the best 🙌", [])
+
+
 def test_a_time_without_its_offset_is_refused():
     with pytest.raises(ValueError, match="no UTC offset"):
         us.render(PERSON, [], _read("2026-11-17 09:05"))

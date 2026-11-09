@@ -104,3 +104,38 @@ async def test_the_always_on_loop_runs_the_built_in_user_sim(monkeypatch, tmp_pa
     [read] = rig.events(ctx, "user_sim_read")
     assert (read["outcome"], read["message"], read["used"], read["schema_errors"]) == ("reply", "blue!", "W1", [])
     assert any("] Linda: blue!" in t for texts in rig.sent for t in texts)
+
+
+@pytest.mark.usefixtures("local_stores")
+@pytest.mark.asyncio
+async def test_after_the_final_check_in_the_built_in_user_sim_reads_the_wrap_up_like_any_other_read(monkeypatch,
+                                                                                                     tmp_path):
+    def agent(n, texts, rig):
+        if any("send me the rundown" in t for t in texts):
+            rig.message("House booked; La Ola is open Friday.")
+            return "sent"
+        if n == 1:
+            rig.message("Blue house or green?")
+            return "sent"
+        rig.quiet()
+        return ""
+
+    rig = Rig(monkeypatch, tmp_path, agent=agent, plugin=user_sim_versions,
+              user_texts=['{"outcome": "reply", "message": "blue!", "used": "W1"}',
+                          '{"outcome": "done", "message": "perfect, thank you!!", "used": "none"}'])
+    await rig.arm()
+    ctx = await rig.run(rig.step(end_time="P2D", final="send me the rundown"),
+                        rig.context(user={"description": DESCRIPTION}))
+
+    first, last = rig.user_calls
+    text = last["parts"][0]["text"]
+    assert text.startswith("It's Wed, Nov 11, 9:00 AM.\nYou last messaged your AI assistant at 9:00 AM.\n")
+    assert "\nYOU SENT YOUR AI ASSISTANT:\n  [9:00 AM] send me the rundown\n" in text
+    assert "(this is what you're answering):\n  [9:00 AM]\n    House booked; La Ola is open Friday.\n" in text
+    assert text.endswith("Answer in JSON: " + user_sim_versions.ANSWER_LINE)
+    reads = rig.events(ctx, "user_sim_read")
+    assert [r["last_read"] for r in reads] == [False, True]
+    assert (reads[-1]["outcome"], reads[-1]["message"], reads[-1]["schema_errors"]) == (
+        "done", "perfect, thank you!!", [])
+    assert rig.record(ctx)["end_reason"] == "end_time"
+    assert not any("perfect, thank you" in t for texts in rig.sent for t in texts)
