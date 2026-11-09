@@ -38,7 +38,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Awaitable, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 HOSTS_BEGIN = "# agentenv sites"
@@ -371,44 +371,45 @@ class SiteProxy:
         self.upstream_tls = ssl.create_default_context()
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, scheme: str) -> None:
-        await self._serving(reader, writer, scheme, self._requests)
+        await self._serving(writer, scheme, self._requests(reader, writer, scheme, _peer(writer), forward=False))
 
     async def handle_forward(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         """The forward-proxy port's connection: a ``CONNECT`` to a site's name tunnels to the site as the listeners
-        serve it, over TLS with its certificate for a name served over HTTPS; a request naming a site's URL is served
-        as the HTTP listener serves it; any other host, loopback among them, is refused at once and logged."""
-        await self._serving(reader, writer, "proxy", self._proxied)
+        serve it, over TLS with its certificate for a name served over HTTPS, and any other request is served as the
+        HTTP listener serves it; ``exchange`` refuses one naming any other host, loopback among them, at once and logs
+        it."""
+        await self._serving(writer, "proxy", self._proxied(reader, writer, _peer(writer)))
 
-    async def _requests(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, scheme: str,
-                        peer: str) -> None:
-        while await self.exchange(reader, writer, scheme, peer):
+    async def _requests(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, scheme: str, peer: str, *,
+                        forward: bool) -> None:
+        while await self.exchange(reader, writer, scheme, peer, forward=forward):
             pass
 
-    async def _proxied(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, _: str, peer: str) -> None:
+    async def _proxied(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, peer: str) -> None:
         while (head := await read_head(reader)) is not None:
-            start, headers = parse_head(head)
-            method, _, target = start.partition(" ")
-            target = target.rpartition(" ")[0]
+            method, _, rest = parse_head(head)[0].partition(" ")
             if method == "CONNECT":
-                host = split_host(target)
-                if (site := self.config.site_for(host)) is None:
-                    self._refuse(writer, method, target)
-                    return
-                writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
-                await writer.drain()
-                tls = site.tls(host.lower())
-                if tls:
-                    if self.tls is None:
-                        raise BadRequest(f"{host} is served over HTTPS, and this proxy has no certificate for it")
-                    await writer.start_tls(self.tls)
-                await self._requests(reader, writer, "https" if tls else "http", peer)
+                await self._tunnel(reader, writer, peer, rest.rpartition(" ")[0])
                 return
-            named = urlsplit(target).netloc if "://" in target else (header(headers, "host") or "")
-            if self.config.site_for(split_host(named)) is None:
-                self._refuse(writer, method, named or target)
+            if not await self.exchange(reader, writer, "http", peer, head=head, forward=True):
                 return
-            if not await self.exchange(reader, writer, "http", peer, head=head):
-                return
+
+    async def _tunnel(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, peer: str,
+                      authority: str) -> None:
+        """A ``CONNECT`` to ``authority``: the site it names, whose certificate the tunnel's TLS needs before any
+        request in it, then each request in it, as the port serves them."""
+        host = split_host(authority)
+        if (site := self.config.site_for(host)) is None:
+            self._refuse(writer, "CONNECT", authority)
+            return
+        writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
+        await writer.drain()
+        tls = site.tls(host.lower())
+        if tls:
+            if self.tls is None:
+                raise BadRequest(f"{host} is served over HTTPS, and this proxy has no certificate for it")
+            await writer.start_tls(self.tls)
+        await self._requests(reader, writer, "https" if tls else "http", peer, forward=True)
 
     @staticmethod
     def _refuse(writer: asyncio.StreamWriter, method: str, host: str) -> None:
@@ -416,16 +417,16 @@ class SiteProxy:
         writer.write(simple_response("403 Forbidden", f"{host} is no site of this computer, and the browser reaches "
                                      "its sites alone\n", FAILED))
 
-    async def _serving(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, scheme: str, run) -> None:
-        peer = (writer.get_extra_info("peername") or (LOOPBACK,))[0]
+    @staticmethod
+    async def _serving(writer: asyncio.StreamWriter, label: str, serving: Awaitable[None]) -> None:
         try:
-            await run(reader, writer, scheme, peer)
+            await serving
         except BadRequest as e:
             writer.write(simple_response("400 Bad Request", f"{e}\n"))
         except (ConnectionError, asyncio.IncompleteReadError, ssl.SSLError, OSError):
             pass
         except Exception as e:
-            print(f"site proxy: a {scheme} connection failed: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+            print(f"site proxy: a {label} connection failed: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
         finally:
             try:
                 await writer.drain()
@@ -435,8 +436,9 @@ class SiteProxy:
                 pass
 
     async def exchange(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, scheme: str,
-                       peer: str, head: Optional[bytes] = None) -> bool:
-        """One request, read unless its ``head`` is given, and its answer; whether the connection takes another."""
+                       peer: str, head: Optional[bytes] = None, *, forward: bool = False) -> bool:
+        """One request, read unless its ``head`` is given, and its answer; whether the connection takes another. One
+        naming no site gets 421, or on the forward port (``forward``) the port's refusal, logged."""
         head = head or await read_head(reader)
         if head is None:
             return False
@@ -448,8 +450,11 @@ class SiteProxy:
         host = (urlsplit(target).netloc if "://" in target else "") or header(headers, "host") or ""
         site = self.config.site_for(split_host(host)) if host else None
         if site is None:
-            writer.write(simple_response("421 Misdirected Request", f"{host or 'no host'} is no site of this "
-                                         "computer\n", FAILED))
+            if forward:
+                self._refuse(writer, method, host or target)
+            else:
+                writer.write(simple_response("421 Misdirected Request", f"{host or 'no host'} is no site of this "
+                                             "computer\n", FAILED))
             return False
         if scheme == "http" and site.tls(split_host(host).lower()):
             parts = urlsplit(target)
@@ -627,6 +632,10 @@ def failed_answer(query: bytes, question: tuple[str, int, int]) -> bytes:
     """The answer saying the server failed (SERVFAIL), for a question it has no nameserver to pass on to."""
     (ident, flags) = struct.unpack("!HH", query[:4])
     return struct.pack("!HHHHHH", ident, 0x8082 | (flags & 0x0100), 1, 0, 0, 0) + query[12:question[2]]
+
+
+def _peer(writer: asyncio.StreamWriter) -> str:
+    return (writer.get_extra_info("peername") or (LOOPBACK,))[0]
 
 
 def tls_context(config: Config) -> Optional[ssl.SSLContext]:

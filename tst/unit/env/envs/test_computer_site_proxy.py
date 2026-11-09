@@ -335,6 +335,25 @@ async def test_the_forward_port_tunnels_a_connect_to_a_sites_name_through_its_ce
 
 
 @pytest.mark.asyncio
+async def test_a_request_in_a_sites_tunnel_naming_another_host_is_refused_and_logged_as_the_port_refuses(tmp_path,
+                                                                                                        capsys):
+    async with Upstream() as upstream:
+        config, issued = _config(tmp_path, upstream.port)
+        async with _forward_port(config) as port:
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            writer.write(b"CONNECT notes.test:443 HTTP/1.1\r\nHost: notes.test:443\r\n\r\n")
+            await reader.readuntil(b"\r\n\r\n")
+            await writer.start_tls(ssl.create_default_context(cadata=issued.ca_pem), server_hostname="notes.test")
+            start, headers, body, conn = await _exchange(port, b"GET / HTTP/1.1\r\nHost: evil.test\r\n\r\n",
+                                                         reader_writer=(reader, writer))
+            writer.close()
+
+    assert start == "HTTP/1.1 403 Forbidden" and headers["x-agentenv-site-proxy"] == "failed"
+    assert upstream.requests == []
+    assert "site proxy: refused GET evil.test: no site of this computer" in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
 async def test_the_forward_port_serves_a_localhost_name_named_by_its_url_and_sends_a_real_name_to_https(tmp_path):
     async with Upstream() as upstream:
         config, _ = _config(tmp_path, upstream.port, notes=["notes.localhost"], shop=["shop.test"])
