@@ -607,6 +607,16 @@ def local_grant_trust() -> Path | None:
     return None
 
 
+def local_grants() -> Optional[tuple[int, Path]]:
+    """The port of the configured object store's grant server, started, and the local transfer CA's trust files, when
+    the store is a local one handing out grants; None otherwise."""
+    trust = local_grant_trust()
+    if trust is None:
+        return None
+    store = config.get_config().get_object_store()
+    return (store.local if isinstance(store, LocalRunObjectStore) else store).grant_port(), trust
+
+
 async def start_trusting(sandbox: VmSandbox, container: str, trust_dir: Path) -> None:
     """Copy ``trust_dir`` into the created ``container`` where ``LOCAL_TRUST_ENV`` points, as the sandbox's host can
     reach it, then start it. A container that cannot be given the files or started is removed, so its name is free
@@ -733,10 +743,11 @@ class LocalSandboxProvider(SandboxProvider):
         ports = list(sandbox._port_map)
         publish = [arg for port in ports for spec in port_bindings(sandbox.host_ips, sandbox.host_port(port), port)
                    for arg in ("-p", spec)]
+        grants = await asyncio.to_thread(local_grants)
         running = asyncio.ensure_future(asyncio.to_thread(
             docker, "run", "-d", "--name", sandbox.container_name, "--label", f"{SANDBOX_LABEL}={sandbox.sandbox_id}",
-            *publish, *machine.args, *launcher_args(ports, env, size["cpu"], size["memory"]), machine.image,
-            timeout=_DOCKER_QUERY_SECONDS))
+            *publish, *machine.args, *launcher_args(ports, env, size["cpu"], size["memory"]),
+            *(_grant_args(*grants) if grants else ()), machine.image, timeout=_DOCKER_QUERY_SECONDS))
         try:
             await asyncio.shield(running)
         except asyncio.CancelledError:  # the container docker is still starting must exist before teardown removes it
@@ -959,6 +970,17 @@ def _host_ips() -> tuple[str, ...]:
                                 timeout=_DOCKER_QUERY_SECONDS))
 
 
+def _grant_args(port: int, trust: Path) -> list[str]:
+    """The ``docker run`` arguments that let a disk's computer use this machine's local grants, as lume's VMs do: it
+    finds ``host.docker.internal`` at QEMU's address for the launcher, where the launcher forwards the grant server's
+    ``port`` to this machine, and trusts the local transfer CA, whose ``trust`` files the launcher puts in its seed."""
+    return [*(arg for entry in _EXTRA_HOSTS for arg in ("--add-host", entry)),
+            "--mount", f"type=bind,src={trust},dst={_LAUNCHER_TRUST},readonly",
+            "-e", f"VM_HOST_PORTS={port}", "-e", f"VM_TRUST={_LAUNCHER_TRUST}"]
+
+
 _DOCKER_QUERY_SECONDS = 30
 #: How long a reset may take: longer than the minute the launcher's reset waits for the computer to start again.
 _RESET_SECONDS = 90
+#: Where a disk's launcher finds the local transfer CA's trust files.
+_LAUNCHER_TRUST = "/agentenv-trust"

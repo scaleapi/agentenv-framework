@@ -222,6 +222,35 @@ def test_the_launcher_serves_each_port_through_socat_in_front_of_qemus_forward_o
     assert running.wait(10) == 143
 
 
+def test_the_launcher_forwards_each_host_port_from_loopback_here_to_the_host_and_seeds_the_trust_files(launcher,
+                                                                                                    tmp_path):
+    """The guest finds host.docker.internal at 10.0.2.2, which QEMU's network gives this container's loopback, and
+    finds a local transfer CA's trust files in its seed's trust folder."""
+    launch, calls = launcher
+    trust = tmp_path / "trust"
+    trust.mkdir()
+
+    running = launch(VM_PORTS="18765", VM_HOST_PORTS="41234", VM_TRUST=str(trust))
+
+    assert "socat TCP-LISTEN:41234,bind=127.0.0.1,fork,reuseaddr TCP:host.docker.internal:41234" in _logged(
+        calls, "socat", 2)
+    assert f"cp -r {trust} {tmp_path}/state/boot/seed/trust" in _logged(calls, "cp -r")
+    assert _logged(calls, "mcopy")[0].startswith(f"mcopy -s -i {tmp_path}/state/boot/seed.img {tmp_path}/state/boot/seed/")
+    running.terminate()
+    assert running.wait(10) == 143
+
+
+@pytest.mark.parametrize("host_ports", ["18765", "28765"], ids=["a-guest-ports-proxy", "its-forward"])
+def test_the_launcher_refuses_a_host_port_a_guest_ports_proxy_or_forward_takes(launcher, host_ports):
+    launch, calls = launcher
+
+    refused = launch(VM_PORTS="18765", VM_HOST_PORTS=host_ports)
+
+    assert refused.wait(10) == 2
+    assert f"host port {host_ports} can't be forwarded: a guest port's proxy or its forward here takes it" in (
+        refused.stderr.read())
+
+
 @pytest.mark.parametrize("ports, why", [("55536", "above 65535"), ("6080 16080", "another of VM_PORTS")])
 def test_the_launcher_refuses_a_port_whose_forward_behind_the_proxy_has_no_port_of_its_own(launcher, ports, why):
     launch, calls = launcher
@@ -359,7 +388,7 @@ def test_a_windows_install_boots_its_iso_first_pressing_enter_and_finds_its_answ
     assert "-device ide-hd,drive=disk,bus=ide.0,bootindex=1,rotation_rate=1 " in qemu
     assert "-device usb-storage,bus=usb.0,drive=files,removable=on " in qemu
     assert _logged(calls, "socat - UNIX-CONNECT:")
-    assert _logged(calls, "mcopy -s")[0].startswith(f"mcopy -s -i {tmp_path}/state/boot/files.img {answers}/")
+    assert f"mcopy -s -i {tmp_path}/state/boot/files.img {answers}/autounattend.xml ::/" in _logged(calls, "mcopy -s", 2)
     running.terminate()
     assert running.wait(10) == 143
     pressed = calls.read_text().count("socat - UNIX-CONNECT:")
@@ -444,6 +473,7 @@ def launched(monkeypatch):
     monkeypatch.setattr(local_sandbox, "machine_for", AsyncMock(return_value=local_disk.Machine("agentenv-vm:0123")))
     monkeypatch.setattr(local_sandbox, "_free_host_port", lambda: 20001)
     monkeypatch.setattr(local_sandbox, "_host_ips", lambda: ("127.0.0.1",))
+    monkeypatch.setattr(local_sandbox, "local_grants", lambda: None)
     monkeypatch.setattr(local_sandbox, "docker", lambda *args, input=None, timeout=None: ran.append(
         args if input is None else (*args, input, timeout)) or "")
     monkeypatch.setattr(LocalSandbox, "pull_images", AsyncMock())
@@ -469,6 +499,22 @@ async def test_a_disk_boots_in_the_launcher_with_kvm_its_ports_published_and_a_r
     assert local_sandbox._RESET_SECONDS > 60
     LocalSandbox.pull_images.assert_awaited_once_with(["localhost:5000/disk@sha256:" + "a" * 64])
     assert sandbox.tunnel_urls == {18765: "http://127.0.0.1:20001"} and rebuilt.owns_container
+
+
+@pytest.mark.asyncio
+async def test_with_a_local_stores_grants_a_disks_launcher_forwards_their_port_and_seeds_their_trust(launched,
+                                                                                                   monkeypatch):
+    monkeypatch.setattr(local_sandbox, "local_grants", lambda: (41234, Path("/state/tls/trust/ca")))
+
+    sandbox = await LocalSandboxProvider().create_vm(image="localhost:5000/disk@sha256:" + "a" * 64,
+                                                     exposed_ports=[18765], env={}, cpu=2, memory=4096)
+
+    (run,) = launched
+    hosts = [arg for entry in local_sandbox._EXTRA_HOSTS for arg in ("--add-host", entry)]
+    assert run[-7 - len(hosts):-1] == (
+        *hosts, "--mount", "type=bind,src=/state/tls/trust/ca,dst=/agentenv-trust,readonly",
+        "-e", "VM_HOST_PORTS=41234", "-e", "VM_TRUST=/agentenv-trust")
+    assert run[-1] == "agentenv-vm:0123" and sandbox.tunnel_urls == {18765: "http://127.0.0.1:20001"}
 
 
 @pytest.mark.asyncio
