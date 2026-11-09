@@ -30,25 +30,25 @@ it in the run's metadata under its ``name``; a ``deploy_agent`` step deploys the
   check's wake counts toward ``max_wakes``.
 - At end_time there is always a final check-in: the user's ``final`` line, or the step's own (``FINAL_DEFAULT_TEXT``)
   when the task sets none. The run's last wake, at end_time or the one ``max_wakes`` makes the last, carries the
-  last-turn notice (``final_reminder``). After it the user sim reads what the agent sent (its wrap-up), and her
-  reaction, and any reply still held, are recorded; then the run ends.
+  last-turn notice (``final_reminder``). After it the user sim reads what the agent sent (its wrap-up), and the
+  user's reaction, and any reply still held, are recorded; then the run ends.
 - A real-time budget keeps the run inside the hub's 8-hour job (``effective_time_budget`` gives the rule): once one
   more wake might end past ``time_budget_seconds`` (7 h, lowered to fit the task's own timeouts), the agent gets its
   closing wake, with the step's wrap-up line and the last-turn notice, and the run ends with end reason time_budget.
 - End reasons: end_time, user_done (one sitting), max_wakes, time_budget, finished_nothing_pending or stuck (nothing
   can wake the agent, with nothing pending or with something still pending), agent_turn_failed, agent_turn_timeout,
-  user_sim_error, step_error. What was still pending is recorded (``pending_at_end``): replies she held, messages she
+  user_sim_error, step_error. What was still pending is recorded (``pending_at_end``): replies held, messages the user
   never read, user lines and alerts never delivered, the agent's checks not yet due, contact replies in progress.
 - Graders read what the user saw. The prompt response is every message_user text in order, each with its pretend
-  time, never the agent's closing text. The conversation (``metadata["a2a_conversations"][step_id]``) holds her own
-  messages and the agent's message_user texts, then her last word that never reached the agent and an end marker with
-  the end reason. A failed or timed-out agent turn sets the response's ``error_type`` (as prompt_agent does), so
-  verifiers skip the run.
+  time, never the agent's closing text. The conversation (``metadata["a2a_conversations"][step_id]``) holds the user's
+  own messages and the agent's message_user texts, then the user's last word that never reached the agent and an end
+  marker with the end reason. A failed or timed-out agent turn sets the response's ``error_type`` (as prompt_agent
+  does), so verifiers skip the run.
 - Who did what, and in what order, even under a frozen clock: each app change (urn:agentenv:changes/v1) is recorded
   with who made it and the wake it was seen in, the agent's own with the wake that made it (``app_changes`` events);
   each reply records the agent's message it answers (``reply_to``: its wake, time and text); and each read leaves a
   record in ``metadata["post_turn_hooks"][step_id]`` in the shape the old psi-wake hook wrote, ``user_reads_at``
-  being when her reply reached the agent, so checks built on those records grade the run instead of skipping it.
+  being when the reply reached the agent, so checks built on those records grade the run instead of skipping it.
 - The run's metadata keeps a summary in ``metadata["always_on"][step_id]`` (small enough for a running job to report
   back); the full timeline goes to the object store, at the summary's ``object_url``.
 """
