@@ -117,6 +117,12 @@ def composition() -> str:
     return "sha256:" + digest.hexdigest()
 
 
+def mirror_tag(key: str) -> str:
+    """The tag of the image of ``key`` in a computer image mirror: the key, under the start of ``composition()``, so a
+    change to the code that composes an image builds it again rather than reuse one the old code built."""
+    return f"{composition().removeprefix('sha256:')[:16]}-{key.removeprefix('sha256:')}"
+
+
 def _rank(result: dict) -> int:
     """How far a pair got: ready, then built and either unprobed or failed at its probe, then anything short of an
     image, and below that one another composer recorded. A result takes a stored one's place only when it got at least

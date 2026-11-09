@@ -392,9 +392,8 @@ orchestrators call it the same way. What callers rely on:
   `.github/scripts/slow_test_durations.py`.
 - The computer tests compose in stores of their own, but share the package locks and files a compose
   resolves (`tst/util/package_cache.py`) through `AGENTENV_TEST_PACKAGES`, a folder for the run unless
-  it's set. The slow tier caches that folder with the local registry's computer images, so a run
-  resolves from Ubuntu's archive, PyPI or a download URL only what changed since `main` last saved
-  them.
+  it's set. The slow tier caches that folder, so a run resolves from Ubuntu's archive, PyPI or a
+  download URL only what changed since `main` last saved it.
 - `tst/manual/` and `tst/benchmarks/` run only by hand, as each module's docstring says; no CI job
   collects them.
 - `tst/formal/` holds TLA+ models, run only by hand with each model's `check.sh`; the `AGENTS.md`

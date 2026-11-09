@@ -50,7 +50,7 @@ from agent_env.env.envs.computer.utils import (
     thin_disk,
     windows_disk,
 )
-from agent_env.env.envs.computer.utils.composed import BUILT, REPOSITORY, Record, failed, now, stale
+from agent_env.env.envs.computer.utils.composed import BUILT, REPOSITORY, Record, failed, mirror_tag, now, stale
 from agent_env.env.envs.computer.utils.install import Install, for_os, platform_of
 from agent_env.env.published_images import DISK, DISK_TOOLS_IMAGE, published_disk, published_pinned
 from agent_env.providers.sandbox_providers.host_images import platform_tag
@@ -58,7 +58,7 @@ from agent_env.store.ids import derive_id
 from agent_env.store.image_store.image_contents import image_config, labels
 from agent_env.store.image_store.oci_registry_credentials import names_registry
 from agent_env.store.image_store.image_store import ImageStore
-from agent_env.store.image_store.registry_api import pin_digest, pin_if_served, write_index
+from agent_env.store.image_store.registry_api import copy_image, pin_digest, pin_if_served, write_index
 from agent_env.store.local_state import holding_locks
 from agent_env.utils.docker.build import DockerBuildError
 
@@ -771,9 +771,20 @@ def _key(**inputs: Any) -> str:
 
 def _stored(env: ComputerEnv, key: str) -> tuple[ImageStore, str, str | None]:
     """The env's image store, the ref there of the image of ``key``, and that ref pinned when the store serves one
-    already, for any env that built it."""
+    already, for any env that built it, or once it's copied there from the configured computer image mirror."""
     store = _image_store(env)
-    ref = store.image_ref(REPOSITORY, key.removeprefix("sha256:"))
+    tag = key.removeprefix("sha256:")
+    ref = store.image_ref(REPOSITORY, tag)
+    if (pinned := pin_if_served(ref, store.auth(ref))) is not None or not (mirror := get_config().computer_image_mirror):
+        return store, ref, pinned
+    try:
+        if (mirrored := pin_if_served(f"{mirror}:{mirror_tag(tag)}", None)) is None:
+            return store, ref, None
+        copy_image(mirrored, ref, None, store.auth(ref))
+    except (ValueError, KeyError, OSError) as e:
+        logger.warning(f"the computer image mirror {mirror} couldn't give {tag}, so it's built: {e}")
+        return store, ref, None
+    logger.info(f"copied {tag} from the computer image mirror {mirror}")
     return store, ref, pin_if_served(ref, store.auth(ref))
 
 

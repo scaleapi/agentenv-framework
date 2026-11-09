@@ -1,0 +1,31 @@
+name: Computer image mirror
+
+# Deletes the slow tier's shared computer images (local-backends.yml) that no passing main run has used for a week.
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: List what would be deleted, and delete nothing
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          sparse-checkout: .github/scripts
+      - name: Delete the images unused for a week
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 .github/scripts/prune_computer_images.py scaleapi agentenv-ci-computers --days 7 \
+            ${{ inputs.dry_run && '--dry-run' || '' }}

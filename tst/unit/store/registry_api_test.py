@@ -327,3 +327,84 @@ def test_an_index_of_images_is_written_with_a_token_that_pushes_and_an_image_tha
     assert json.loads(request.content) == {"schemaVersion": 2, "mediaType": written, "manifests": [
         amd64_entry, *(children if arm64 == "index" else [{**amd64_entry, "digest": OTHER,
                                                            "platform": {"architecture": "arm64", "os": "linux"}}])]}
+
+
+def _sha(data: bytes) -> str:
+    return f"sha256:{hashlib.sha256(data).hexdigest()}"
+
+
+def test_an_image_is_copied_by_its_digest_with_only_the_blobs_the_target_lacks_and_its_manifests_byte_for_byte(
+        fake_registry):
+    config, kept, missing = b'{"architecture": "amd64"}', b"layer the target has", b"layer it lacks"
+    image = json.dumps({"mediaType": OCI_IMAGE, "config": {"digest": _sha(config)},
+                        "layers": [{"digest": _sha(kept)}, {"digest": _sha(missing)}]}).encode()
+    index = json.dumps({"mediaType": OCI_INDEX, "manifests": [{"digest": _sha(image)}]}).encode()
+    source = {_sha(index): (OCI_INDEX, index), _sha(image): (OCI_IMAGE, image)}
+    blobs = {_sha(blob): blob for blob in (config, kept, missing)}
+    target_blobs, target_manifests = {_sha(kept): kept}, {}
+
+    def registries(request):
+        path = request.url.path
+        if request.url.host == "ghcr.io":
+            if "/blobs/" in path:
+                return httpx.Response(200, content=blobs[path.rpartition("/")[2]])
+            media, body = source[path.rpartition("/")[2]]
+            return httpx.Response(200, content=body, headers={"Content-Type": media})
+        if request.method == "HEAD":
+            return httpx.Response(200 if path.rpartition("/")[2] in target_blobs else 404)
+        if request.method == "POST":
+            return httpx.Response(202, headers={"Location": "/v2/agentenv-computers/blobs/uploads/u1?_state=s"})
+        if "/blobs/uploads/" in path:
+            assert request.url.params["_state"] == "s"
+            target_blobs[request.url.params["digest"]] = request.read()
+            return httpx.Response(201)
+        target_manifests[path.rpartition("/")[2]] = (request.headers["content-type"], request.content)
+        return httpx.Response(201)
+
+    seen = fake_registry(registries)
+    registry_api.copy_image(f"ghcr.io/org/computers:k@{_sha(index)}", "localhost:5000/agentenv-computers:k", None, None)
+
+    assert target_blobs == blobs
+    assert [r.url.params["digest"] for r in seen if r.method == "PUT" and "/blobs/" in r.url.path] == [
+        _sha(config), _sha(missing)]
+    assert target_manifests == {_sha(image): (OCI_IMAGE, image), _sha(index): (OCI_INDEX, index), "k": (OCI_INDEX, index)}
+
+
+def test_a_copy_needs_the_digest_it_copies(fake_registry):
+    seen = fake_registry(lambda request: httpx.Response(500))
+
+    with pytest.raises(ValueError, match="names none"):
+        registry_api.copy_image("ghcr.io/org/computers:k", "localhost:5000/agentenv-computers:k", None, None)
+    assert seen == []
+
+
+def test_a_copy_to_ghcr_asks_again_for_the_push_token_its_first_challenge_didnt_give(fake_registry):
+    config = b'{"architecture": "amd64"}'
+    image = json.dumps({"mediaType": OCI_IMAGE, "config": {"digest": _sha(config)}, "layers": []}).encode()
+    pushed = []
+
+    def registries(request):
+        if request.url.host == "localhost":
+            if "/blobs/" in request.url.path:
+                return httpx.Response(200, content=config)
+            return httpx.Response(200, content=image, headers={"Content-Type": OCI_IMAGE})
+        if request.url.path == "/token":
+            assert request.headers["authorization"] == "Basic " + base64.b64encode(b"bot:t").decode()
+            return httpx.Response(200, json={"token": request.url.params["scope"]})
+        writes = request.method in ("POST", "PUT")
+        scope = "repository:org/computers:pull,push" if writes else "repository:org/computers:pull"
+        if request.headers.get("authorization") not in (f"Bearer {scope}", "Bearer repository:org/computers:pull,push"):
+            return httpx.Response(401, headers={"WWW-Authenticate": f'Bearer realm="https://ghcr.io/token",scope="{scope}"'})
+        if request.method == "HEAD":
+            return httpx.Response(404)
+        if request.method == "POST":
+            return httpx.Response(202, headers={"Location": "/v2/org/computers/blobs/uploads/u1"})
+        pushed.append(request.url.path)
+        return httpx.Response(201)
+
+    fake_registry(registries)
+    registry_api.copy_image(f"localhost:5000/agentenv-computers:k@{_sha(image)}", "ghcr.io/org/computers:k", None,
+                            RegistryAuth("ghcr.io", "bot", "t"))
+
+    assert pushed == ["/v2/org/computers/blobs/uploads/u1", f"/v2/org/computers/manifests/{_sha(image)}",
+                      "/v2/org/computers/manifests/k"]

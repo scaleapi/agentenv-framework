@@ -22,6 +22,8 @@ concurrency:
 
 env:
   AGENT_ENV_ENVIRONMENT: dev
+  # The slow tier's composed computer images, shared between its runners (computer-image-mirror.yml prunes it).
+  COMPUTER_IMAGE_MIRROR: ghcr.io/scaleapi/agentenv-ci-computers
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
 jobs:
@@ -154,8 +156,14 @@ jobs:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        # The tests run with packages: write; only the share step, on main, gets the token.
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
@@ -168,81 +176,67 @@ jobs:
       # starts afterwards.
       - name: Pull the base images from mirror.gcr.io
         run: python3 .github/scripts/mirror_base_images.py src tst
-      # A computer image or disk is tagged with a key of everything it is built from, and the composer reuses one the
-      # image store already holds for its key. That key includes the lock of the packages the image installs, which the
-      # composer resolves from Ubuntu's archive, PyPI and download URLs unless the store holds it. The registry keeps
-      # its storage on the runner, and the computer tests share their locks and files in the packages folder
-      # (tst/util/package_cache.py); both are restored from what main saved latest this week, so a run neither resolves
-      # nor builds again what hasn't changed. A shard that runs no computer tests misses.
-      - name: Week of the computer images' cache
+      # The computer tests share the package locks a compose resolves, and the files they name, in the packages folder
+      # (tst/util/package_cache.py). An image's key includes its lock, which the composer otherwise resolves from
+      # Ubuntu's archive, PyPI and download URLs, so the folder is restored from what main saved latest this week.
+      - name: Week of the packages' cache
         id: week
         run: echo "week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
-      - name: Restore the computer images and packages
-        id: computers
+      - name: Restore the packages
+        id: packages
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: |
-            ${{ runner.temp }}/registry
-            ${{ runner.temp }}/packages
-          key: computers-${{ matrix.shard }}-${{ steps.week.outputs.week }}
-          restore-keys: computers-${{ matrix.shard }}-${{ steps.week.outputs.week }}-
+          path: ${{ runner.temp }}/packages
+          key: packages-${{ matrix.shard }}-${{ steps.week.outputs.week }}
+          restore-keys: packages-${{ matrix.shard }}-${{ steps.week.outputs.week }}-
       - name: Start the local registry
         run: |
-          mkdir -p "$RUNNER_TEMP/registry"
-          docker run --detach --name registry --publish 5000:5000 --volume "$RUNNER_TEMP/registry:/var/lib/registry" \
-            mirror.gcr.io/library/registry:2
+          docker run --detach --name registry --publish 5000:5000 mirror.gcr.io/library/registry:2
           timeout 30 sh -c 'until curl -sf http://localhost:5000/v2/ >/dev/null; do sleep 1; done'
       # x64 hosted runners have /dev/kvm; the disk form's tests boot under it, and skip without it, which fails below.
       - name: Let the local provider boot disks with KVM
         run: sudo chmod 666 /dev/kvm
+      # A computer image or disk is tagged with a key of everything it is built from. A compose that finds no image of
+      # its key in the local registry copies the one the mirror holds, which main's runs share, rather than build it.
       - name: Slow integration tier on the local defaults
         id: tests
         env:
           AGENTENV_TEST_SHARD: ${{ matrix.shard }}/12
           AGENTENV_TEST_PACKAGES: ${{ runner.temp }}/packages
+          AGENT_ENV_COMPUTER_IMAGE_MIRROR: ${{ env.COMPUTER_IMAGE_MIRROR }}
         run: |
           .venv/bin/python -m pytest -m int_test_slow -n 2 --dist loadfile -rA --timeout=1200 \
             --junitxml=junit-integration-slow.xml tst/integration --ignore=tst/integration/env/gateway/gateway_test.py
-      # Only the computer images this run used are kept, with the packages, and only main saves them, once its tests
-      # pass, so pull requests reuse main's without filling the repository's cache. An image is used when the registry's
-      # log has a request for it by its tag (prune_registry.py), so what a week's earlier runs built and this one no
-      # longer asks for is dropped. The garbage collection frees what only the dropped tags and repositories referenced;
-      # with --delete-untagged it would also delete the untagged platform manifests of an image index, and their layers.
-      # The entry is named by the image keys the registry holds and the locks the packages hold, so a run that built a
-      # new image or resolved a new lock saves a new one.
-      - name: Keep only the computer images this run used
-        id: kept
+      # Only main saves the packages, once its tests pass, so pull requests reuse main's without filling the
+      # repository's cache. The entry is named by the locks the folder holds, so a run that resolved a new lock saves a
+      # new one.
+      - name: Name the packages' cache entry
+        id: lockkey
         if: always()
         run: |
-          repositories="$RUNNER_TEMP/registry/docker/registry/v2/repositories"
-          if [ ! -d "$repositories/agentenv-computers" ]; then echo "computers=false" >> "$GITHUB_OUTPUT"; exit 0; fi
-          docker logs registry > "$RUNNER_TEMP/registry.log" 2>&1
-          docker stop registry
-          sudo find "$repositories" -mindepth 1 -maxdepth 1 ! -name agentenv-computers -exec rm -rf {} +
-          sudo python3 .github/scripts/prune_registry.py prune "$RUNNER_TEMP/registry" agentenv-computers \
-            "$RUNNER_TEMP/registry.log"
-          docker run --rm --volume "$RUNNER_TEMP/registry:/var/lib/registry" mirror.gcr.io/library/registry:2 \
-            garbage-collect /etc/docker/registry/config.yml > /dev/null
-          sudo python3 .github/scripts/prune_registry.py links "$RUNNER_TEMP/registry" agentenv-computers
-          mkdir -p "$RUNNER_TEMP/packages"
-          du -sh "$RUNNER_TEMP/registry" "$RUNNER_TEMP/packages"
-          if [ -z "$(sudo ls "$repositories/agentenv-computers/_manifests/tags")" ]; then
-            echo "computers=false" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          key=$({ sudo ls "$repositories/agentenv-computers/_manifests/tags"
-                  ls "$RUNNER_TEMP/packages/agentenv-packages/locks" 2>/dev/null; } | sort | sha256sum | cut -c1-16)
-          echo "key=computers-${{ matrix.shard }}-${{ steps.week.outputs.week }}-$key" >> "$GITHUB_OUTPUT"
-          echo "computers=true" >> "$GITHUB_OUTPUT"
-      - name: Save the computer images and packages
+          locks="$RUNNER_TEMP/packages/agentenv-packages/locks"
+          if [ -z "$(ls "$locks" 2>/dev/null)" ]; then echo "packages=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          key=$(ls "$locks" | sort | sha256sum | cut -c1-16)
+          echo "key=packages-${{ matrix.shard }}-${{ steps.week.outputs.week }}-$key" >> "$GITHUB_OUTPUT"
+          echo "packages=true" >> "$GITHUB_OUTPUT"
+      - name: Save the packages
         if: >-
           always() && github.event_name == 'push' && steps.tests.outcome == 'success'
-          && steps.kept.outputs.computers == 'true' && steps.kept.outputs.key != steps.computers.outputs.cache-matched-key
+          && steps.lockkey.outputs.packages == 'true' && steps.lockkey.outputs.key != steps.packages.outputs.cache-matched-key
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: |
-            ${{ runner.temp }}/registry
-            ${{ runner.temp }}/packages
-          key: ${{ steps.kept.outputs.key }}
+          path: ${{ runner.temp }}/packages
+          key: ${{ steps.lockkey.outputs.key }}
+      # Once main's tests pass, every image this runner built or copied goes to the mirror under its key and a
+      # <key>-seen-<date> tag, which computer-image-mirror.yml's prune keeps an image by.
+      - name: Share the computer images
+        continue-on-error: true
+        if: >-
+          always() && steps.tests.outcome == 'success'
+          && (github.event_name == 'push' || github.head_ref == 'andrew-park/ci-shared-computer-images')
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: .venv/bin/python .github/scripts/share_computer_images.py "$COMPUTER_IMAGE_MIRROR"
       - name: Skips must be declared capability gaps
         if: always()
         run: |
