@@ -314,9 +314,10 @@ class RunCodeTaskStep(TaskStep):
         return (script_file, files)
 
     def _args_for_run(self, context: TaskStepContext) -> dict:
-        override = self.step_param_overrides(context).get("args")
-        if override is None:
+        overrides = self.step_param_overrides(context)
+        if "args" not in overrides:
             return self.args
+        override = overrides["args"]
         if not isinstance(override, dict):
             raise RunCodeValidationError(
                 f"run_code '{self.id}': step_overrides 'args' must be an object, got {type(override).__name__}"

@@ -398,10 +398,11 @@ async def test_an_args_override_for_another_step_leaves_the_stored_args():
 
 
 @pytest.mark.asyncio
-async def test_an_args_override_that_is_not_an_object_is_refused_before_the_sandbox_is_touched():
+@pytest.mark.parametrize("override, kind", [(["mode"], "list"), (None, "NoneType")])
+async def test_an_args_override_that_is_not_an_object_is_refused_before_the_sandbox_is_touched(override, kind):
     with _sandbox([(0, "", ""), (0, "2", ""), (0, "{}", "")]) as sandbox:
-        with pytest.raises(RunCodeValidationError, match="'args' must be an object, got list"):
-            await _step().execute(_run_overrides({"run-code-1": {"args": ["mode"]}}))
+        with pytest.raises(RunCodeValidationError, match=f"'args' must be an object, got {kind}"):
+            await _step().execute(_run_overrides({"run-code-1": {"args": override}}))
 
     assert not sandbox.exec_with_output.await_args_list
 
