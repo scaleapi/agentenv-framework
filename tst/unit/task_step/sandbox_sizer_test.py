@@ -153,18 +153,21 @@ def test_a_sizer_named_by_a_string_is_built():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode, create, extra, vm", [
-    ("vm", "create_vm", {}, True),
-    ("container", "create_container", {"image": "example.com/box:v1", "port": 80}, False),
-], ids=["vm", "container"])
-async def test_deploy_sandbox_tells_the_sizer_whether_it_deploys_a_vm(mode, create, extra, vm):
+@pytest.mark.parametrize("mode, create, extra, sandbox_type, vm", [
+    ("vm", "create_vm", {}, "modal", True),
+    ("container", "create_container", {"image": "example.com/box:v1", "port": 80}, "modal", False),
+    # A VM backend runs the container in a VM of its own, whose memory is the size chosen.
+    ("container", "create_container", {"image": "example.com/box:v1", "port": 80}, "modal_vm", True),
+], ids=["vm", "container", "container-on-a-vm-backend"])
+async def test_deploy_sandbox_tells_the_sizer_whether_it_deploys_a_vm(mode, create, extra, sandbox_type, vm):
     sandbox = AsyncMock()
     sandbox.sandbox_id, sandbox.mode, sandbox.type = "sb-1", mode, "modal"
     sandbox.tunnel_urls, sandbox.vnc_url, sandbox.network_policy = {}, None, NetworkPolicy()
     provider = AsyncMock(ON_THIS_MACHINE=False)
     provider.links = (provider,)
     getattr(provider, create).return_value = sandbox
-    step = DeploySandboxTaskStep(id="s", version=1, sandbox_name="box", sandbox_mode=mode, sandbox_type="any", **extra)
+    step = DeploySandboxTaskStep(id="s", version=1, sandbox_name="box", sandbox_mode=mode, sandbox_type=sandbox_type,
+                                 **extra)
 
     with patch("agent_env.config.runtime.get_config", return_value=_config({"impl": HalfSizer,
                                                                            "config": {"memory_mb": 2048}})), \
