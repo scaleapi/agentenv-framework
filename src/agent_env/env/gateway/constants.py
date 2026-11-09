@@ -79,6 +79,7 @@ EXT_STEP_URI = "urn:agentenv:step/v1"
 EXT_STATE_URI = "urn:agentenv:state/v1"
 EXT_CHANGES_URI = "urn:agentenv:changes/v1"
 EXT_NOTIFICATIONS_URI = "urn:agentenv:notifications/v1"
+EXT_USER_CHAT_URI = "urn:agentenv:user-chat/v1"
 EXT_WEBSITE_URI = "urn:agentenv:website/v1"
 EXT_BROWSER_URI = "urn:agentenv:browser/v1"
 EXT_COMPUTER_APP_URI = "urn:agentenv:computer-app/v1"
@@ -268,6 +269,18 @@ GATEWAY_EXTENSIONS = [
             "take": {"method": "POST", "endpoint": "/notifications/take", "request": {"type": "object", "properties": {
                 "to": {"type": "string"}, "until": {"type": "string"}}}},
             "clear": {"method": "POST", "endpoint": "/notifications/clear", "request": {"type": "object", "properties": {}}}}},
+        "required": False,
+    },
+    {
+        "uri": EXT_USER_CHAT_URI,
+        "description": "User chat (urn:agentenv:user-chat/v1): the message_user tool, for the roles config names, is how an always-on agent reaches its user; each message is queued with its virtual time until the harness takes it. Built in: role rules don't hide it from a configured role.",
+        "params": {"endpoint": "/user_chat/state", "methods": {
+            "config": {"method": "POST", "endpoint": "/user_chat/config", "request": {"type": "object", "properties": {
+                "roles": {"type": "array", "items": {"type": "string"}}, "user_name": {"type": "string"}}}},
+            "state": {"method": "GET", "endpoint": "/user_chat/state", "request": {"type": "object", "properties": {}}},
+            "take": {"method": "POST", "endpoint": "/user_chat/take", "request": {"type": "object", "properties": {
+                "take_id": {"type": "string"}}}},
+            "clear": {"method": "POST", "endpoint": "/user_chat/clear", "request": {"type": "object", "properties": {}}}}},
         "required": False,
     },
 ]
