@@ -231,16 +231,19 @@ class MultiEnv(Env):
         """Its websites' environment names by env id, the ids a computer's ``site_routing`` may name."""
         return {env.id: env.environment_name for env in self.website_envs}
 
-    def _start_tab_names(self, entry: Optional[dict]) -> list[str]:
+    def _start_tab_names(self, entry: Optional[dict]) -> Optional[list[str]]:
         """The names a computer with ``entry`` may open start tabs at: those of the websites its ``site_routing``
-        routes, all of them or those it lists, each site's own or its fallback name, and every live site's domains and
-        ``allow_hosts``, which the computer reaches the real sites at."""
+        routes, all of them or those it lists, and every live site's domains and ``allow_hosts``, which the computer
+        reaches the real sites at; None while a routed site stores no names, since its card may declare any at
+        deploy, which checks the start tabs then."""
         params = entry.get("env_params") if isinstance(entry, dict) else None
         routing = params.get("site_routing") if isinstance(params, dict) else None
         listed = routing if isinstance(routing, list) else None
-        names = [name for env in self.website_envs if not env.live and (listed is None or env.id in listed)
-                 for name in env.domains or [sites.fallback_name(env.environment_name)]]
-        return names + [name for env in self.website_envs if env.live for name in [*env.domains, *env.allow_hosts]]
+        routed = [env for env in self.website_envs if not env.live and (listed is None or env.id in listed)]
+        if any(not env.domains for env in routed):
+            return None
+        return [name for env in routed for name in env.domains] + [
+            name for env in self.website_envs if env.live for name in [*env.domains, *env.allow_hosts]]
 
     def live_hosts(self) -> list[str]:
         """The hosts its live websites reach the real sites at, each one's domains and ``allow_hosts``, which a
@@ -299,8 +302,9 @@ class MultiEnv(Env):
             if entry is None or (isinstance(entry, dict) and set(entry) <= set(CHILD_ENV_OPTIONS)):
                 if refusal := _multi_computers.refusal(computer, entry or {}, sandbox_type, self._websites()):
                     problems.append(f"child_envs.{name}: {refusal}" if name in child_envs else refusal)
-                problems += [f"child_envs.{name}: {problem}" for problem in _multi_computers.start_tab_problems(
-                    computer, entry, self._start_tab_names(entry))]
+                if (names := self._start_tab_names(entry)) is not None:
+                    problems += [f"child_envs.{name}: {problem}"
+                                 for problem in _multi_computers.start_tab_problems(computer, entry, names)]
         return "; ".join(problems) or None
 
     @classmethod

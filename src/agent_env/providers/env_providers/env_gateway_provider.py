@@ -959,15 +959,9 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         mcp_url = _mcp_url(gateway_url, card)
         logger.info(f"MCP endpoint: {mcp_url}")
 
-        # Build frontend URLs proxied through the gateway
-        website_frontend_urls: dict[str, str] | None = None
-        if website_configs:
-            website_frontend_urls = {
-                wc.environment_name: f"{gateway_url}/website/{wc.environment_name}/"
-                for wc in website_configs if not wc.live
-            } or None
-            for svc_name, url in website_frontend_urls.items():
-                logger.info(f"Website frontend ({svc_name}): {url}")
+        website_frontend_urls = _frontend_urls(gateway_url, website_configs)
+        for svc_name, url in (website_frontend_urls or {}).items():
+            logger.info(f"Website frontend ({svc_name}): {url}")
 
         logger.info(f"Gateway URL: {gateway_url}")
         return DeployedGateway(
@@ -1668,13 +1662,21 @@ def _redact_compose_secrets(compose_content: str) -> str:
     )
 
 
+def _frontend_urls(gateway_url: str, website_configs: Optional[list[WebsiteConfig]]) -> Optional[dict[str, str]]:
+    """Each synthetic site's page route through the gateway, by its environment name; None with none, as when every
+    site is live."""
+    return {wc.environment_name: f"{gateway_url}/website/{wc.environment_name}/"
+            for wc in website_configs or [] if not wc.live} or None
+
+
 def _settings_lines(settings: dict) -> list[str]:
     """The compose line handing a site its ``settings`` in ``WEBSITE_SETTINGS_ENV``, each ``secret:`` or ``env:``
-    reference resolved, quoted so any value is one YAML string; none for a site with none."""
+    reference resolved, quoted so any value is one YAML string, with each ``$`` doubled so Compose interpolates none;
+    none for a site with none."""
     if not settings:
         return []
     resolved = {name: get_config().resolve_reference(value) for name, value in settings.items()}
-    return [f"      - {json.dumps(f'{WEBSITE_SETTINGS_ENV}={json.dumps(resolved)}')}"]
+    return [f"      - {json.dumps(f'{WEBSITE_SETTINGS_ENV}={json.dumps(resolved)}'.replace('$', '$$'))}"]
 
 
 # Budget for reading the gateway's /state once its card is served: answering it runs tool discovery, one server at a

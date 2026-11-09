@@ -194,6 +194,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
                     "computer": {"id": env.metadata["computer"]["id"], "version": env.metadata["computer"]["version"]},
                     "port": env.driver.port, "display": values.get("resolution"), "network": env.network,
                     "computer_settings": recorded_settings(computer, values),
+                    **({"live_hosts": list(live_hosts)} if live_hosts else {}),
                     **({"app_settings": app_settings} if app_settings else {}),
                     **({"tool_prefix": tool_prefix} if tool_prefix else {}),
                     "env_params": params.model_dump(exclude_defaults=True)}},
@@ -245,7 +246,8 @@ async def _finish_boot(env: ComputerEnv, record: DeployedSandboxEnv, sandbox: Sa
     didn't load. What the record keeps of the routing, or None without it."""
     routed = None
     if params.site_routing:
-        routed = await _route_sites(env, sandbox, params, valid_for_s)
+        routed = await _route_sites(env, sandbox, params, valid_for_s,
+                                    tuple(record.metadata["computer"].get("live_hosts") or ()))
         await _launch_held_apps(env, record, record.environment_url, params.sites)
     await _require_display(record, resolution)
     if start_tabs := await _start_tabs(record):
@@ -255,12 +257,12 @@ async def _finish_boot(env: ComputerEnv, record: DeployedSandboxEnv, sandbox: Sa
 
 
 async def _route_sites(env: ComputerEnv, sandbox: Sandbox, params: computer_params.ComputerParams,
-                       valid_for_s: int) -> dict:
-    """The computer on ``sandbox`` routed to ``params.sites`` under a CA of its own, valid ``valid_for_s``; what its
-    record keeps of it."""
+                       valid_for_s: int, live_hosts: tuple[str, ...] = ()) -> dict:
+    """The computer on ``sandbox`` routed to ``params.sites`` under a CA of its own, valid ``valid_for_s``, a browser
+    alone's forward port taking ``live_hosts`` straight to them; what its record keeps of it."""
     routed = await sites.route(sandbox, params.sites, user=env.computer.session.user, network=env.network,
                                valid_for=timedelta(seconds=valid_for_s), label=env.environment_name,
-                               os_type=env.computer.os.type, display=env.computer.os.display)
+                               os_type=env.computer.os.type, display=env.computer.os.display, live_hosts=live_hosts)
     return {**routed, "valid_for_s": valid_for_s}
 
 

@@ -217,6 +217,24 @@ async def test_route_gives_a_browser_alone_the_forward_port_and_a_computer_with_
 
 
 @pytest.mark.asyncio
+async def test_a_browser_alones_forward_port_takes_the_live_sites_hosts_straight_to_them_with_no_site_to_route():
+    routed, alone, desktop = FakeVm(_REPORT), FakeVm(_REPORT), FakeVm(_REPORT)
+    live = ("github.com", "*.githubassets.com")
+
+    await sites.route(routed, [_site("notes", "notes.test")], user="user", network=None, valid_for=timedelta(hours=1),
+                      label="browser", os_type="linux", display="none", live_hosts=live)
+    for sandbox, display in ((alone, "none"), (desktop, "x11")):
+        await sites.route(sandbox, [], user="user", network=None, valid_for=timedelta(hours=1), label="browser",
+                          os_type="linux", display=display, live_hosts=live)
+
+    beside = json.loads(routed.written["/etc/agentenv/sites/config.json"])
+    only = json.loads(alone.written["/etc/agentenv/sites/config.json"])
+    assert (beside["proxy_port"], beside["direct"]) == (3129, list(live))
+    assert (only["sites"], only["ca_pem"], only["proxy_port"], only["direct"]) == ([], None, 3129, list(live))
+    assert desktop.written == {} and desktop.scripts == []
+
+
+@pytest.mark.asyncio
 async def test_the_config_holding_the_keys_is_written_over_stdin_into_a_private_staging_folder_never_as_text():
     sandbox = FakeVm(_REPORT)
 

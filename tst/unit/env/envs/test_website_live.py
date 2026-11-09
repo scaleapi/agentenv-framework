@@ -27,7 +27,8 @@ from agent_env.env.envs.website import WebsiteEnv, declared_live
 from agent_env.providers.env_providers.constants import GATEWAY_SERVICE_NAME
 from agent_env.providers.env_providers.env_computer_provider import _reaching
 from agent_env.providers.env_providers.env_gateway_provider import (EnvironmentGatewayProvider, WebsiteConfig,
-                                                                     _redact_compose_secrets, website_config)
+                                                                     _frontend_urls, _redact_compose_secrets,
+                                                                     website_config)
 from agent_env.providers.env_state import LocalPostgresStateProvider
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
 from agent_env.utils import card_naming
@@ -81,9 +82,13 @@ def test_a_live_website_env_keeps_what_it_is_in_its_record_and_its_env_toml(monk
     ({"live": False}, "allow_hosts are the other hosts a live site's pages reach; set live = true"),
     ({"allow_hosts": ["https://github.com"]}, "allow_hosts:"),
     ({"settings": {"token": "ghp_plain"}}, "settings.token is a secret, so it's a secret:KEY or env:NAME reference"),
+    ({"settings": {"token": "env:GH_TOKEN?ghp_plain"}}, "settings.token is a secret, so it's a secret:KEY or env:NAME "
+                                                        "reference with no ?default"),
+    ({"settings": {"token": "secret:"}}, "settings.token is a secret"),
     ({"settings": {"token": "env:T", "orgs": ["a"]}}, "settings.orgs is a string, number or boolean"),
     ({"settings": {"token": "env:T", "1org": "a"}}, "settings: '1org' isn't a setting's name"),
-], ids=["no-domains", "allow-hosts-not-live", "bad-allow-host", "plain-secret", "list-setting", "bad-name"])
+], ids=["no-domains", "allow-hosts-not-live", "bad-allow-host", "plain-secret", "fallback-secret", "nameless-secret",
+        "list-setting", "bad-name"])
 def test_a_website_env_refuses_what_a_live_site_cant_be(overrides, problem):
     with pytest.raises(ValueError, match=re.escape(problem)):
         _live(**overrides)
@@ -113,7 +118,22 @@ def test_a_synthetic_sites_names_stay_as_given_and_a_source_with_two_sites_or_no
     (tmp_path / "b.py").write_text(other)
     assert card_naming.website_source_in_files({"a.py": tmp_path / "a.py", "b.py": tmp_path / "b.py"}, "Dockerfile") is None
     (tmp_path / "c.py").write_text("@website(domains=DOMAINS, live=LIVE)\nclass Site(WebsiteEnvironment):\n    pass\n")
-    assert card_naming.website_source_in_files({"c.py": tmp_path / "c.py"}, "Dockerfile") == WebsiteSource()
+    assert card_naming.website_source_in_files({"c.py": tmp_path / "c.py"}, "Dockerfile") == WebsiteSource(
+        allow_hosts=[])
+    (tmp_path / "d.py").write_text("@website(**OPTIONS)\nclass Site(WebsiteEnvironment):\n    pass\n")
+    assert card_naming.website_source_in_files({"d.py": tmp_path / "d.py"}, "Dockerfile") == WebsiteSource()
+
+
+def test_a_source_leaving_live_and_allow_hosts_out_declares_their_defaults_so_a_flag_cant_contradict_it(tmp_path):
+    (tmp_path / "Dockerfile").write_text("FROM scratch\n")
+    (tmp_path / "site.py").write_text('@website(domains=["shop.test"])\nclass Shop(WebsiteEnvironment):\n    pass\n')
+
+    source = card_naming.website_source_from_source(str(tmp_path / "Dockerfile"), None)
+    _, problems = declared_live(source, live=True, allow_hosts=["api.shop.test"])
+
+    assert source == WebsiteSource(live=False, domains=["shop.test"], allow_hosts=[])
+    assert problems == ["live is True here, but the site's @website(...) declares live=False",
+                        "allow_hosts is ['api.shop.test'] here, but the site's @website(...) declares allow_hosts=[]"]
 
 
 def test_an_env_toml_takes_what_the_source_declares_and_refuses_what_it_contradicts():
@@ -136,7 +156,7 @@ def test_an_env_toml_takes_what_the_source_declares_and_refuses_what_it_contradi
 
 
 def test_a_live_site_gets_no_site_route_and_its_settings_resolved_only_in_its_container(monkeypatch):
-    monkeypatch.setenv("GH_TOKEN", "ghp_resolved")
+    monkeypatch.setenv("GH_TOKEN", "ghp_re$$olved${HOME}")
 
     compose = EnvironmentGatewayProvider().create_docker_compose(
         mcp_servers=[], gateway_image="agent-gateway",
@@ -150,9 +170,14 @@ def test_a_live_site_gets_no_site_route_and_its_settings_resolved_only_in_its_co
     assert gateway["WEBSITE_URLS"] == "shop=http://shop-website-backend:8000"
     assert "github=http://github-website-backend:8000" in gateway["REST_PROXY_URLS"].split(",")
     handed = dict(item.split("=", 1) for item in services["github-website-backend"]["environment"])
-    assert json.loads(handed[WEBSITE_SETTINGS_ENV]) == {"token": "ghp_resolved", "org": "octo"}
+    # Compose reads $$ as a $ and interpolates no other.
+    assert json.loads(handed[WEBSITE_SETTINGS_ENV].replace("$$", "$")) == {"token": "ghp_re$$olved${HOME}", "org": "octo"}
+    assert "$" not in handed[WEBSITE_SETTINGS_ENV].replace("$$", "")
     assert WEBSITE_SETTINGS_ENV not in dict(item.split("=", 1) for item in services["shop-website-backend"]["environment"])
-    assert "ghp_resolved" not in _redact_compose_secrets(compose)
+    assert "olved" not in _redact_compose_secrets(compose)
+    assert (_frontend_urls("https://gw", [website_config(_live())]),
+            _frontend_urls("https://gw", [website_config(_live()), website_config(_synthetic())])) == (
+        None, {"shop": "https://gw/website/shop/"})
 
 
 @pytest.mark.asyncio
@@ -215,6 +240,11 @@ def test_a_computer_routing_sites_opens_start_tabs_only_at_names_a_website_of_th
     [problem] = start_tab_problems(computer, entry(["https://example.com/"]), names)
     assert "chromium's start tab https://example.com/ names example.com, which none of the multi env's" in problem
     assert start_tab_problems(computer, entry(["https://example.com/"], routing=False), names) == []
+    # A routed site storing no names takes those its card declares at deploy, which checks the tabs then.
+    carded = MultiEnv(id="office", version=1, mcp_server_envs=[], website_envs=[_synthetic(domains=()), _live()])
+    assert carded._start_tab_names(entry()) is None
+    assert carded._start_tab_names(entry(routing=["github-site"])) == ["github.com", "*.githubassets.com",
+                                                                        "api.github.com"]
 
 
 def test_a_computers_allowlist_takes_the_live_hosts_and_one_that_allows_everything_stays_as_it_is():

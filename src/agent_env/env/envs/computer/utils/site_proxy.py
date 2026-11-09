@@ -8,8 +8,8 @@ store, Firefox's policies, Chromium's managed policies and the session user's NS
 checks, as the session user, that each name loads. ``serve`` listens on loopback: on 443 for a name served over HTTPS,
 on 80 to redirect those to HTTPS and to serve ``.localhost`` names over HTTP, on 53 for DNS, over UDP and TCP, when a
 name is a wildcard, which a hosts file can't list, and, on a browser computer, on ``proxy_port`` (3129) as a forward
-proxy, a browser alone's only route out, which serves the same sites to ``CONNECT`` and to requests naming their URLs
-and refuses any other host at once; it then drops to ``SERVE_USER`` (``nobody``), else the session user, so the agent,
+proxy, a browser alone's only route out, which serves the same sites to ``CONNECT`` and to requests naming their URLs,
+takes a live site's hosts (``direct``) straight to them, and refuses any other host at once; it then drops to ``SERVE_USER`` (``nobody``), else the session user, so the agent,
 which runs as the session user, can't stop it, and ``keep``, as root, starts it again should it end. The site sees
 itself at ``/`` under its own name: the path goes upstream under the route's prefix, ``X-Forwarded-Host`` and
 ``X-Forwarded-Proto`` say the name and scheme the browser used, ``AgentEnv-Site-Root`` has the gateway tell the site no
@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -152,6 +153,7 @@ class Config:
     proxy_port: Optional[int] = None
     dns_port: Optional[int] = None
     nameservers: list[str] = field(default_factory=list)
+    direct: list[str] = field(default_factory=list)
 
     @classmethod
     def load(cls, path: str) -> Config:
@@ -170,7 +172,7 @@ class Config:
                    listen=data.get("listen", LOOPBACK),
                    https_port=data.get("https_port", 443), http_port=data.get("http_port", 80),
                    proxy_port=data.get("proxy_port"), dns_port=data.get("dns_port"),
-                   nameservers=list(data.get("nameservers") or []))
+                   nameservers=list(data.get("nameservers") or []), direct=list(data.get("direct") or []))
 
     def site_for(self, host: str) -> Optional[Site]:
         """The site ``host`` names: one naming it exactly before one whose wildcard covers it."""
@@ -180,6 +182,17 @@ class Config:
                 if any(matches(name, host) for name in site.domains if name.startswith("*.") != exact):
                     return site
         return None
+
+    def is_direct(self, host: str) -> bool:
+        """Whether the forward port takes ``host`` straight to it: a name of a live site's (``direct``), never an
+        address or a ``.localhost`` name."""
+        host = host.lower().rstrip(".")
+        try:
+            ipaddress.ip_address(host)
+            return False
+        except ValueError:
+            pass
+        return bool(host) and not is_local(host) and any(matches(pattern, host) for pattern in self.direct)
 
 
 def header(headers: list[tuple[str, str]], name: str) -> Optional[str]:
@@ -268,6 +281,18 @@ def upstream_request(method: str, target: str, headers: list[tuple[str, str]], s
              ("X-Forwarded-For", peer), (SITE_ROOT_HEADER, f"{scheme}://{host}"), *site.upstream_headers.items()]
     kept += [("Connection", "Upgrade"), ("Upgrade", upgrade)] if upgrade else [("Connection", "close")]
     lines = [f"{method} {site.prefix}{target} HTTP/1.1", *(f"{key}: {value}" for key, value in kept)]
+    return ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1")
+
+
+def direct_head(start: str, headers: list[tuple[str, str]]) -> bytes:
+    """A request a browser alone named by its URL, as it goes straight to a live site's host: the path alone on its
+    request line, the proxy's own headers dropped, and a connection that closes after it."""
+    method, target, version = start.split(" ")
+    parts = urlsplit(target)
+    kept = [(key, value) for key, value in headers
+            if key.lower() not in {"connection", "keep-alive", "proxy-connection", "proxy-authorization"}]
+    lines = [f"{method} {urlunsplit(('', '', parts.path or '/', parts.query, ''))} {version}",
+             *(f"{key}: {value}" for key, value in kept), "Connection: close"]
     return ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1")
 
 
@@ -391,9 +416,15 @@ class SiteProxy:
 
     async def _proxied(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, peer: str) -> None:
         while (head := await read_head(reader)) is not None:
-            method, _, rest = parse_head(head)[0].partition(" ")
+            start, headers = parse_head(head)
+            method, _, rest = start.partition(" ")
             if method == "CONNECT":
                 await self._tunnel(reader, writer, peer, rest.rpartition(" ")[0])
+                return
+            target = urlsplit(rest.rpartition(" ")[0])
+            if target.hostname and self.config.site_for(target.hostname) is None and self.config.is_direct(
+                    target.hostname):
+                await self._direct(reader, writer, target.hostname, target.port or 80, direct_head(start, headers))
                 return
             if not await self.exchange(reader, writer, "http", peer, head=head, forward=True):
                 return
@@ -401,9 +432,14 @@ class SiteProxy:
     async def _tunnel(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, peer: str,
                       authority: str) -> None:
         """A ``CONNECT`` to ``authority``: the site it names, whose certificate the tunnel's TLS needs before any
-        request in it, then each request in it, as the port serves them."""
+        request in it, then each request in it, as the port serves them; or a live site's host, tunnelled straight
+        to it."""
         host = split_host(authority)
         if (site := self.config.site_for(host)) is None:
+            if self.config.is_direct(host):
+                port = authority.rpartition(":")[2] if host != authority else ""
+                await self._direct(reader, writer, host, int(port) if port.isdigit() else 443)
+                return
             self._refuse(writer, "CONNECT", authority)
             return
         writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
@@ -414,6 +450,23 @@ class SiteProxy:
                 raise BadRequest(f"{host} is served over HTTPS, and this proxy has no certificate for it")
             await writer.start_tls(self.tls)
         await self._requests(reader, writer, "https" if tls else "http", peer, forward=True)
+
+    @staticmethod
+    async def _direct(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, host: str, port: int,
+                      head: Optional[bytes] = None) -> None:
+        """``host``, a live site's, reached straight at ``port``: a tunnel, answered as established, for a ``CONNECT``,
+        else ``head`` sent on; then both ends relayed until either closes."""
+        try:
+            up_reader, up_writer = await asyncio.wait_for(asyncio.open_connection(host, port), UPSTREAM_TIMEOUT_S)
+        except (OSError, asyncio.TimeoutError) as e:
+            writer.write(simple_response("502 Bad Gateway", f"{host}:{port} didn't answer: {e}\n", FAILED))
+            return
+        if head is None:
+            writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
+        else:
+            up_writer.write(head)
+        await asyncio.gather(writer.drain(), up_writer.drain())
+        await asyncio.gather(splice(reader, up_writer), splice(up_reader, writer))
 
     @staticmethod
     def _refuse(writer: asyncio.StreamWriter, method: str, host: str) -> None:
@@ -1002,7 +1055,8 @@ def install(config_path: str, paths: Paths = Paths()) -> dict:
                                               for name, value in given["trust_environment"].items()))
         trust["environment"] = str(paths.profile)
     serving = {"user": user, "serve_user": serve_user(user), "sites": sites,
-               **{key: given[key] for key in ("listen", "https_port", "http_port", "proxy_port") if key in given}}
+               **{key: given[key] for key in ("listen", "https_port", "http_port", "proxy_port", "direct")
+                  if key in given}}
     if wildcard:
         serving.update(dns_port=given.get("dns_port", 53), nameservers=nameservers)
     if upstream_headers:

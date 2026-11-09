@@ -169,14 +169,21 @@ def _website_sources(texts: Iterable[str]) -> list[WebsiteSource]:
 
 
 def _website_source(call: ast.Call, cls: ast.ClassDef) -> WebsiteSource:
+    """What ``call``, a class's ``@website(...)``, declares: ``live`` and ``allow_hosts`` as written, their defaults
+    when left out, and unknown (None) when written as other than a literal or when the call unpacks ``**`` keywords,
+    which may hold them."""
     given = {kw.arg: kw.value for kw in call.keywords if kw.arg}
+    unpacked = any(kw.arg is None for kw in call.keywords)
     live = given.get("live")
     settings = next((n for n in cls.body if isinstance(n, ast.ClassDef) and n.name == "Settings"), None)
     secrets = [n.target.id for n in (settings.body if settings is not None else [])
                if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name) and _secret(n.annotation)]
-    return WebsiteSource(live=live.value if isinstance(live, ast.Constant) and isinstance(live.value, bool) else None,
-                         domains=_names(given.get("domains")), allow_hosts=_names(given.get("allow_hosts")),
-                         secret_settings=secrets)
+    return WebsiteSource(
+        live=(live.value if isinstance(live, ast.Constant) and isinstance(live.value, bool) else None) if live else (
+            None if unpacked else False),
+        domains=_names(given.get("domains")),
+        allow_hosts=_names(given["allow_hosts"]) if "allow_hosts" in given else None if unpacked else [],
+        secret_settings=secrets)
 
 
 def _names(node: Optional[ast.expr]) -> Optional[list[str]]:

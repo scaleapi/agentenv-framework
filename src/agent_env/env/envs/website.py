@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional
 
 from agentenv_protocol import client as protocol_v1
 from agent_env.artifact import Artifact, DockerImageArtifact, EnvironmentArtifact
-from agent_env.config import ENV_REF_PREFIX, SECRET_REF_PREFIX
+from agent_env.config import ENV_REF_PREFIX, SECRET_REF_PREFIX, is_bare_reference
 from agent_env.artifact.artifacts.docker_image import ProgressCallback, refuse_local_github_build
 from agent_env.entity.refs import EntityRef
 from agent_env.env.env import Env, gateway_url_of
@@ -530,10 +530,9 @@ def live_problems(live: Any, domains: list[str], allow_hosts: list[str], setting
             problems.append(f"settings: {name!r} isn't a setting's name")
         elif not isinstance(value, (str, int, float, bool)):
             problems.append(f"settings.{name} is a string, number or boolean, not {value!r}")
-        elif name in secret_settings and not (isinstance(value, str) and value.startswith((SECRET_REF_PREFIX,
-                                                                                            ENV_REF_PREFIX))):
+        elif name in secret_settings and not is_bare_reference(value):
             problems.append(f"settings.{name} is a secret, so it's a {SECRET_REF_PREFIX}KEY or {ENV_REF_PREFIX}NAME "
-                            "reference, never its value")
+                            "reference with no ?default, never its value")
     return problems
 
 
