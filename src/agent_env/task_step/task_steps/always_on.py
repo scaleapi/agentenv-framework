@@ -5,7 +5,8 @@ The ``user_sim`` step says who the user is (description, time zone, schedule, re
 sim and its plug-in) and records it in the run's metadata under its ``name``; a ``deploy_agent`` step deploys the agent
 that plays them. The ``always_on`` step names it with ``user_sim`` and runs the loop:
 
-- The first wake is the user's request. Each wake opens with what came due for the agent on notifications/v1 (a
+- The first wake is the user's request. While the task's clock is set, each wake opens with the task's date and time
+  (any other date the agent sees is the computer's clock), then what came due for the agent on notifications/v1 (a
   trigger's ``notify``, a scheduled check), labelled ``[time · channel]``, then the user's own messages.
 - Only what the agent sends with the gateway's ``message_user`` tool (user-chat/v1) reaches the user; its plain reply
   goes to the log. Each wake should end with ``message_user`` or ``stay_quiet``: one that ends with closing text and
@@ -81,6 +82,7 @@ MESSAGE_RULES = ("The user never sees your normal replies. The only way to reach
                  "goes to a private log.")
 QUIET_RULE = "If nothing is worth saying, call stay_quiet."
 EMPTY_REPLIES = frozenset({"(The assistant's reply was empty.)"})  # a harness's stand-in for an empty final reply
+TIME_LINE = "It's {when}. Any other date you see is the computer's clock, not the task's."
 
 
 # ==================================================================================================================
@@ -402,6 +404,14 @@ class _Run:
         opens with the rules."""
         return f"{self.step.system_prompt.rstrip()}\n\n{self.rules()}" if self.step.system_prompt else None
 
+    def _time_line(self, at: datetime) -> str:
+        """The task's date and time, and the user's local time when they aren't in UTC."""
+        when = f"{at.strftime('%a %b')} {at.day}, {at.year}, {_clock_time(at)} UTC"
+        if self.zone != "UTC":
+            local = at.astimezone(self.tz)
+            when += f" ({local.strftime('%a')} {_clock_time(local)} for {self.person['first']}, {self.zone})"
+        return TIME_LINE.format(when=when)
+
     # ---- clock and world ------------------------------------------------------------------------------------
     async def _armed(self) -> list:
         armed = []
@@ -553,8 +563,7 @@ class _Run:
         first = self._effective_prompt()
         self.you_sent.append({"at": _iso(now), "text": first})
         due = await take_due(self.notification_envs, self.recipient) if self.notification_envs else []
-        rules = [] if step.system_prompt else [_step_part(self.rules(), "rules")]
-        await self.wake([*rules, *delivered_parts(due), self._user_part(now, first, opening=True)],
+        await self.wake([*delivered_parts(due), self._user_part(now, first, opening=True)],
                         woke_by=[f"notification:{d['channel']}" for d in due] + ["user_request"],
                         notifications=[{k: d.get(k) for k in ("at", "channel", "source", "source_id", "to")}
                                        for d in due])
@@ -661,11 +670,15 @@ class _Run:
 
     async def wake(self, parts: list[dict], woke_by: list[str], notifications: Optional[list] = None) -> None:
         step = self.step
+        sent_at = await self.now()
+        clock = await step._env_clock(self.clock_envs)
+        lead = [_step_part(self._time_line(sent_at), "time")] if clock else []
+        if self.wakes == 0 and not step.system_prompt:
+            lead = [_step_part(self.rules(), "rules"), *lead]
+        parts = [*lead, *parts]
         if step.wake_reminder:
             parts = [*parts, _step_part(step.wake_reminder_text, "reminder")]
         self.wakes += 1
-        sent_at = await self.now()
-        clock = await step._env_clock(self.clock_envs)
         msg_id = uuid.uuid4().hex
 
         def record() -> None:
@@ -991,6 +1004,10 @@ def _task_zone(us: dict, clocks: list[dict]) -> str:
 def _step_part(text: str, source: str) -> dict:
     """A line the step adds to a wake, marked so a reader can tell it from what the user or the world sent."""
     return {"kind": "text", "text": text, "metadata": {"agentenv": {"source": source}}}
+
+
+def _clock_time(at: datetime) -> str:
+    return at.strftime("%I:%M %p").lstrip("0")
 
 
 def _closing_text(plain: str) -> str:

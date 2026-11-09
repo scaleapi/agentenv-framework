@@ -112,3 +112,18 @@ def test_a_bad_config_is_refused(gateway, body):
 
 def test_an_unconfigured_gateway_lists_neither_tool(gateway):
     assert not {"message_user", "stay_quiet"} & _names(gateway, "default")
+
+
+def test_get_time_reaches_a_configured_role_through_a_deny_all_while_the_clock_is_set(gateway):
+    _req(gateway, "POST", "/tools/disable", {"role": "psi_agent", "tools": ["*"]})
+    _req(gateway, "POST", "/tools/disable", {"role": "other", "tools": ["*"]})
+    assert "get_time" not in _names(gateway, "psi_agent")
+    _req(gateway, "POST", "/user_chat/config", {"roles": ["psi_agent"]})
+    assert "get_time" not in _names(gateway, "psi_agent")  # no clock set, so no get_time at all
+
+    assert _req(gateway, "PUT", "/clock/set-time", {"virtual_time": T0}).status_code == 200
+    assert "get_time" in _names(gateway, "psi_agent") and "get_time" not in _names(gateway, "other")
+    called = _call(gateway, "get_time", {}, "psi_agent")
+    assert called.status_code == 200 and T0 in called.text
+    _req(gateway, "POST", "/user_chat/clear", {})
+    assert "get_time" not in _names(gateway, "psi_agent")

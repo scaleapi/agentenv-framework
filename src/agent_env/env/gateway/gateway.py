@@ -572,11 +572,14 @@ class Gateway:
     def _is_disabled(self, role: str, name: str) -> bool:
         """Walk the rule chain (role first, then WILDCARD) returning the first concrete True/False; default False.
         A tool listed hidden by default skips "*"-tool rules: only rules naming it apply, and with none it is hidden.
-        The scheduled-check tools exist only for the roles the notifications config names, whatever the rules say."""
+        The scheduled-check tools exist only for the roles the notifications config names, whatever the rules say.
+        A role the user-chat config names always has message_user and get_time, whatever the rules say."""
         if name in CHECK_TOOL_NAMES and name not in self._tool_server_urls and role not in self._notifications.roles:
             return True
         if name == MESSAGE_USER_TOOL_NAME and name not in self._tool_server_urls:
             return role not in self._user_chat.roles  # built in: role rules don't hide it from a configured role
+        if name == GET_TIME_TOOL_NAME and name not in self._tool_server_urls and role in self._user_chat.roles:
+            return False
         if name == STAY_QUIET_TOOL_NAME and name not in self._tool_server_urls:
             return not (self._user_chat.stay_quiet and role in self._user_chat.roles)  # opt-in, like message_user
         hidden = name in self._hidden_by_default
