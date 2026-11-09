@@ -1,7 +1,8 @@
 """A run-wide agent pick (``user_overrides.a2a_agent_id``: ``task run --a2a-agent-id``, a hub run's agent pick) swaps the
-tested agent, not the one the task names as its user simulator: deploy_agent and install_agent read the run's stored
-task and leave that agent (a user_sim step's agent_name, else its name; a prompt_agent's user_agent_name) as it is
-stored. The pick keeps today's version rule wherever it applies."""
+tested agent, not the one a ``user_sim`` step names as the user: deploy_agent and install_agent read the run's stored
+task and leave that agent (the user_sim step's agent_name, else its name) as it is stored. Tasks without a user_sim
+step, prompt_agent ones included, take the pick everywhere exactly as before. The pick keeps today's version rule
+wherever it applies."""
 
 from __future__ import annotations
 
@@ -57,10 +58,11 @@ def test_the_pick_swaps_the_tested_agent_and_the_user_sim_step_s_agent_keeps_its
     assert linda._resolve_agent_ref(ctx) == ("sim", 2)
 
 
-def test_a_prompt_agent_s_user_agent_keeps_its_own():
+def test_a_prompt_agent_task_takes_the_pick_everywhere_as_before():
+    """Other teams' prompt_agent tasks are unchanged: their user_agent_name agent takes the run-wide pick too."""
     task, ctx = _run_of(SOLVER, HUMAN, ASK, overrides={"a2a_agent_version": 9})
     assert _ref(task, "deploy-solver", ctx) == ("mine", 9)
-    assert _ref(task, "deploy-human", ctx) == ("sim", 2)
+    assert _ref(task, "deploy-human", ctx) == ("mine", 9)
 
 
 def test_a_user_sim_agent_s_own_step_params_still_win(monkeypatch):
@@ -94,13 +96,16 @@ def test_install_agent_follows_the_same_rule(monkeypatch):
     assert linda._agent_ref(ctx) == ("sim", 2) and solver._resolve_agent_ref(ctx) == ("mine", 4)
 
 
-def test_a_seeded_user_agent_name_keeps_its_own():
-    """The running step's names are seeded (Task._run), so the stored task is read with the run's seed applied too."""
-    from agent_env.task.task import substitute_seed_in_steps
-
-    seeded_user = {**HUMAN, "agent_name": "<user>"}
-    task, ctx = _run_of(SOLVER, seeded_user, {**ASK, "user_agent_name": "<user>"})
+def test_the_run_s_task_is_read_with_its_seed_applied():
+    """The running step's names are seeded (Task._run), so the stored task is read with the run's seed applied too,
+    and a user_sim agent named ``<user>`` is told apart once seeded."""
+    task, ctx = _run_of(SOLVER, {**HUMAN, "agent_name": "<user>"}, {**ASK, "user_agent_name": "<user>"})
     ctx.metadata["seed"] = {"user": "linda"}
-    running = {s.id: s for s in substitute_seed_in_steps(task.steps, ctx.metadata["seed"])}
-    assert running["deploy-human"]._resolve_agent_ref(ctx) == ("sim", 2)
-    assert running["deploy-solver"]._resolve_agent_ref(ctx) == ("mine", 4)
+    config = deploy_agent._run_task_config(ctx)
+    assert {s["agent_name"] for s in config if s["type"] == "deploy_agent"} == {"solver", "linda"}
+
+
+def test_a_seeded_user_sim_agent_keeps_its_own(monkeypatch):
+    seeded = [{**SOLVER}, {**LINDA}, {**WHO, "name": "linda"}, LOOP]  # what _run_task_config returns once seeded
+    (solver, linda), ctx = _user_sim_task(monkeypatch, *seeded)
+    assert linda._resolve_agent_ref(ctx) == ("sim", 2) and solver._resolve_agent_ref(ctx) == ("mine", 4)

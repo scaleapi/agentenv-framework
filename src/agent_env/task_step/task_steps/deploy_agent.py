@@ -53,16 +53,19 @@ logger = logging.getLogger(__name__)
 
 
 def plays_a_user_sim(agent_name: Optional[str], context: TaskStepContext) -> bool:
-    """Whether the run's task names ``agent_name`` as its user simulator (a ``user_sim`` step's ``agent_name``, else
-    its ``name``; a ``prompt_agent``'s ``user_agent_name``: ``bundle.plan.user_sim_agents``) and also has a tested
-    agent to deploy (``bundle.plan.solver_steps``), read from the stored task the run is an instance of. False when the
-    run has no recorded instance or its task can't be read, so a run-wide agent pick then applies as it always has."""
-    from agent_env.bundle.plan import solver_steps, user_sim_agents
+    """Whether the run's task names ``agent_name`` in a ``user_sim`` step (its ``agent_name``, else its ``name``) and
+    also has a tested agent to deploy (``bundle.plan.solver_steps``), read from the stored task the run is an instance
+    of. Only tasks with a ``user_sim`` step are affected: a ``prompt_agent`` task's ``user_agent_name`` takes a
+    run-wide pick as it always has. False when the run has no recorded instance or its task can't be read."""
+    from agent_env.bundle.plan import solver_steps
 
     if not agent_name:
         return False
     config = _run_task_config(context)
-    return config is not None and bool(solver_steps(config)) and agent_name in user_sim_agents(config)
+    if config is None or not solver_steps(config):
+        return False
+    return agent_name in {step.get("agent_name") or step.get("name") for step in config
+                          if isinstance(step, dict) and step.get("type") == "user_sim"}
 
 
 def _run_task_config(context: TaskStepContext) -> Optional[list[dict]]:

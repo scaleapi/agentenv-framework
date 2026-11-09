@@ -1,5 +1,5 @@
 """``task run --a2a-agent-id`` is a run-wide pick: the CLI leaves it run-wide, at the deploy steps' stored versions, and
-``deploy_agent`` applies it to every agent but the one the task names as its user simulator (the one rule, shared with
+``deploy_agent`` applies it to every agent but the one a ``user_sim`` step names as the user (the one rule, shared with
 a hub run's pick; tst/unit/task_step/deploy_agent_user_sim_pick_test.py)."""
 
 import importlib
