@@ -323,6 +323,7 @@ class Gateway:
                 state = self._clock.set_time(body.get("virtual_time"), body.get("virtual_seconds_per_real_second"))
             except ClockError as e:
                 return self._json_response({"ok": False, "error": str(e)}, 400)
+            self._trigger_engine.clock_changed()
             self._register_get_time_tool()
             return self._json_response(state, 200)
 
@@ -352,12 +353,14 @@ class Gateway:
                 state = self._clock.set_rate(body.get("virtual_seconds_per_real_second"))
             except ClockError as e:
                 return self._json_response({"ok": False, "error": str(e)}, 400)
+            self._trigger_engine.clock_changed()
             return self._json_response(state, 200)
 
         @self._mcp.custom_route("/clock/clear", methods=["POST"])
         async def clock_clear(request: Request) -> Response:
             self._unregister_get_time_tool()
             state = self._clock.clear()
+            self._trigger_engine.clock_changed()
             return self._json_response(state, 200)
 
         @self._mcp.custom_route("/clock/time", methods=["GET"])

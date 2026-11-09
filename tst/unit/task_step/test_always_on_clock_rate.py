@@ -9,6 +9,8 @@ import time
 
 import pytest
 
+from agent_env.task_step.task_steps import always_on as ao
+from agent_env.task_step.task_steps.always_on import _utc
 from tst.unit.task_step.always_on_harness import Rig
 
 pytestmark = pytest.mark.usefixtures("local_stores")
@@ -70,3 +72,49 @@ async def test_the_clock_runs_at_the_task_s_rate_during_a_turn_and_the_rate_is_b
     [read] = rig.events(ctx, "user_sim_read")
     assert read["deliver_at"] == read["virtual_time"]  # nothing moved while she read
     assert rig.gw._clock.rate == RATE
+
+
+def _crew_texted(rig, n):
+    rig.alert(f"Sam: reply {n}", channel="Messages · noor 30")
+
+
+CREW_DM = {"id": "crew-dm", "when": {"type": "action", "tool": "messaging_send_message", "repeat": True},
+           "actions": [{"type": "nl", "executor": "crew", "instruction": "answer Linda's newest text",
+                        "delay": {"dist": "exp", "mean": "PT40M", "seed": 30}}]}
+
+
+@pytest.mark.asyncio
+async def test_a_contact_s_delayed_reply_goes_on_when_the_step_jumps_the_frozen_clock_to_it(monkeypatch, tmp_path):
+    """The reply's delay starts during the agent's turn, on the running clock; between turns the step freezes the
+    clock and jumps it to the reply's time. That must be enough: the reply used to wait out settle_timeout_seconds,
+    then go only at the next jump, hours of the task's time late."""
+    def texts_a_friend(n, texts, rig):
+        if n == 1:
+            rig.provoke("messaging_send_message", {"user_id": "+13475550167"})
+        rig.quiet()
+        return ""
+
+    rig = Rig(monkeypatch, tmp_path, rate=RATE, agent=texts_a_friend)
+    turn = rig._send_and_wait
+
+    async def the_turn_goes_on_after_the_text(url, parts, **kw):
+        out = await turn(url, parts, **kw)
+        await asyncio.sleep(0.05)  # the reply's delay starts while the clock still runs, as in a real turn
+        return out
+
+    monkeypatch.setattr(ao, "send_and_wait", the_turn_goes_on_after_the_text)
+    await rig.arm()
+    rig.app_tools("messaging_send_message")
+    rig.triggers(CREW_DM, executors={"crew": rig.contact("crew", seconds=0, reply=_crew_texted)})
+    try:
+        ctx = await rig.run(rig.step(settle_timeout_seconds=1))
+    finally:
+        await rig.close()
+
+    assert rig.events(ctx, "settle_timeout") == []
+    [jump] = [j for j in rig.events(ctx, "clock_jump") if j["to"].startswith("2026-11-09T14:3")]
+    assert jump["settled"]
+    [call] = rig.contact_calls
+    assert _utc(call["at"]) == _utc(jump["to"])  # the reply went at the time the step jumped to
+    [_, replied] = rig.events(ctx, "wake")
+    assert "Sam: reply 1" in replied["parts_text"] and _utc(replied["virtual_time"]) == _utc(jump["to"])

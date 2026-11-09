@@ -52,7 +52,8 @@ _CTX_PREFIXES = ("args", "result")
 _BARRIER_AT = ("provoking_call",)
 _BARRIER_KEYS = ("at", "timeout_seconds")
 _DROP = object()  # an unresolved `${x?}` used as a whole value: drop the key / element
-# Real seconds between re-reads of the clock while waiting out virtual time, so a rate change, re-arm or clear is followed.
+# Real seconds between re-reads of the clock while waiting out virtual time, so a change made other than through the
+# gateway's clock routes (which wake the waits: clock_changed) is followed.
 _VIRTUAL_RECHECK_S = 5.0
 # The clock's resolution: virtual times are microseconds.
 _VIRTUAL_RESOLUTION_S = 1e-6
@@ -445,7 +446,7 @@ class TriggerEngine:
         self._driver_task: asyncio.Task | None = None
         self._driver_interval = 1.0  # real seconds between autonomous time-trigger polls
         self._time_trigger_gate = asyncio.Event()  # parks the driver while no time-trigger is armed
-        self._clock_moved = asyncio.Event()  # set, and replaced, when an advance moves the clock under waiting actions
+        self._clock_moved = asyncio.Event()  # set, and replaced, when the clock changes under waiting actions
         # Opt-in settings (`config`), off by default so a registration behaves as it always has.
         self._concurrent_fires = False  # a contact-reply trigger's repeat fires run side by side instead of queueing
         self._executor_timeout_default: float | None = None  # the time limit of an executor that sets none
@@ -1172,9 +1173,15 @@ class TriggerEngine:
                  if now is not None and any((at := self._wait_resumes(w)) is not None and at <= now
                                             and (w["hours"] is None or _next_opening(now, w["hours"]) is None)
                                             for w in t["waits"].values())]
+        self.clock_changed()
+        return list(dict.fromkeys(due + ended))
+
+    def clock_changed(self) -> None:
+        """Wake the actions waiting out virtual time to read the clock again, after it jumps, is re-armed, changes rate
+        or is cleared: one napping on a frozen clock would otherwise see it run again only at its next recheck, up to
+        _VIRTUAL_RECHECK_S real seconds (minutes of virtual time) late."""
         self._clock_moved.set()
         self._clock_moved = asyncio.Event()
-        return list(dict.fromkeys(due + ended))
 
     def _resolve_first_mark(self, trig: dict, now: datetime) -> None:
         """Stamp the first mark for a non-anchored time-trigger; event-anchored ones wait for _resolve_dependents."""
@@ -1674,9 +1681,10 @@ class TriggerEngine:
             mean = _parse_duration(delay["mean"]).total_seconds()
             seconds = trig["delay_rngs"][index].expovariate(1.0 / mean)
         self._emit("delayed", tid, action_index=index, virtual_seconds=round(seconds, 3), **_named_executor(action))
-        token = _begin_wait(trig, since + seconds)
+        until = since + seconds
+        token = _begin_wait(trig, until)
         try:
-            await self._sleep_virtual(seconds - (self._gw._clock.elapsed() - since))
+            await self._sleep_virtual(until)
         finally:
             _end_wait(trig, token)
 
@@ -1696,19 +1704,28 @@ class TriggerEngine:
                     gen, opens = current, opening
                     trig["waits"][token]["resumes"] = opens
                     self._emit("deferred", tid, action_index=index, until=_iso(opens), **named)
-                await self._sleep_virtual((opens - now).total_seconds(), generation=gen)
+                await self._sleep_virtual(opens, generation=gen)
         finally:
             _end_wait(trig, token)
 
-    async def _sleep_virtual(self, seconds: float, generation: int | None = None) -> None:
-        """Wait out ``seconds`` of virtual time as the clock runs (real time at its rate, 1 while unarmed, none while
-        frozen) or jumps ahead. Given the clock's ``generation``, stop early once a re-arm or clear moves it on."""
+    async def _sleep_virtual(self, until: float | datetime, generation: int | None = None) -> None:
+        """Wait until the clock gets to ``until``, a Clock.elapsed() reading or a virtual time on the current arm, as it
+        runs (real time at its rate, 1 while unarmed, none while frozen) or jumps ahead. ``until`` is the very mark the
+        waiting fire's resumes_at shows: a mark worked out here from a later reading of a running clock would lie past
+        it, and a clock frozen at resumes_at would hold the fire forever. Given the clock's ``generation``, stop early
+        once a re-arm or clear moves it on."""
         clock = self._gw._clock
-        until = clock.elapsed() + seconds
-        # Times are kept to the microsecond, so an advance to a waiting fire's resumes_at can fall a hair short of it;
-        # under a microsecond left is reached, or a frozen clock would hold the fire forever.
-        while ((left := until - clock.elapsed()) >= _VIRTUAL_RESOLUTION_S
-               and (generation is None or clock.generation == generation)):
+        while generation is None or clock.generation == generation:
+            if isinstance(until, datetime):
+                if (now := clock.now()) is None:
+                    return
+                left = (until - now).total_seconds()
+            else:
+                left = until - clock.elapsed()
+            # A delay's resumes_at is its end to the microsecond, so an advance to it can fall a hair short; under a
+            # microsecond left is reached.
+            if left < _VIRTUAL_RESOLUTION_S:
+                return
             rate = clock.rate
             await self._nap(min(left / rate, _VIRTUAL_RECHECK_S) if rate else _VIRTUAL_RECHECK_S)
 
