@@ -450,11 +450,9 @@ async def test_a_computer_loads_its_own_environment_before_its_apps():
         "desktop", "notes", "mail"]
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("restored", [False, True], ids=["re-ingested", "restored"])
-async def test_a_universe_loads_each_computers_environments_after_the_services_even_after_a_restore(restored):
-    log = []
-    env = _multi(FakeComputer("desktop", apps=("notes",), log=log), FakeComputer("laptop", log=log))
+async def _load_universe(env: MultiEnv, log: list, *, restored: bool) -> MagicMock:
+    """Load a universe of five environments into ``env``, restored from a clean snapshot or re-ingested, each
+    service's load or the restore in ``log``; the universe, whose reads of its environments a test counts."""
     env._instance_id, env._sandbox = "inst", MagicMock(mode="vm", exec_script=AsyncMock(return_value="8\n"))
     env._env_provider = EnvironmentGatewayProvider()
     env._env_provider._state_provider = LocalPostgresStateProvider()
@@ -469,10 +467,32 @@ async def test_a_universe_loads_each_computers_environments_after_the_services_e
          patch("agent_env.env.snapshot_store._check_changelog_empty", AsyncMock(return_value=True)), \
          patch("agent_env.env.store.update_env_instance_environment_universe", MagicMock()):
         await env.load_environment_universe_artifact(universe, snapshot_after_load=False)
+    return universe
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restored", [False, True], ids=["re-ingested", "restored"])
+async def test_a_universe_loads_each_computers_environments_after_the_services_even_after_a_restore(restored):
+    log = []
+    env = _multi(FakeComputer("desktop", apps=("notes",), log=log), FakeComputer("laptop", log=log))
+
+    universe = await _load_universe(env, log, restored=restored)
 
     services = [("restored",)] if restored else [("service", "a"), ("service", "b")]
     assert log[:len(services)] == services
     assert sorted(log[len(services):]) == [("loaded", "desktop", ["notes", "desktop"]), ("loaded", "laptop", ["laptop"])]
+    assert universe.get_environment_artifacts.call_count == 1  # the services and the computers load the same read
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restored, reads", [(False, 1), (True, 0)], ids=["re-ingested", "restored"])
+async def test_a_multi_env_without_computers_reads_the_universes_environments_only_to_re_ingest_them(restored, reads):
+    log = []
+
+    universe = await _load_universe(_multi(mcp=["a", "b"]), log, restored=restored)
+
+    assert log == ([("restored",)] if restored else [("service", name) for name in ("notes", "a", "desktop", "laptop", "b")])
+    assert universe.get_environment_artifacts.call_count == reads  # a restore needs none of them, as before computers
 
 
 @pytest.mark.asyncio
