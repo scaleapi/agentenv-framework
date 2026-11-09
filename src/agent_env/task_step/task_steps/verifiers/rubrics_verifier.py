@@ -663,6 +663,12 @@ class RubricsVerifierTaskStep(TaskStep):
             raise RuntimeError(f"PromptResponse with prompt_id='{self.prompt_id}' not found in context")
         always_on = (context.metadata.get("always_on") or {}).get(prompt_response.step_id)
         if always_on is not None and self._always_on_wakes is None:
+            if prompt_response.error_type:  # skipped before the always_on settings are checked, as any errored prompt
+                logger.warning(f"Skipping verification '{self.verifier_id}': prompt had "
+                               f"error_type={prompt_response.error_type}")
+                self._write_skipped_entries(
+                    context, "prompt_error", f"Skipped: prompt had error_type={prompt_response.error_type}")
+                return context
             return await (await self._for_always_on(context, always_on)).execute(context)
         overrides_for_step = self.step_param_overrides(context)
         grade_up_to_turn = (

@@ -115,6 +115,24 @@ async def test_a_failed_always_on_run_is_skipped_like_a_failed_prompt(monkeypatc
     assert row["id"] == "prompt_error" and "agent_turn_timeout" in row["message"]
 
 
+@pytest.mark.asyncio
+async def test_a_failed_always_on_run_is_skipped_even_by_a_verifier_that_couldn_t_grade_it(monkeypatch, tmp_path):
+    """grade_up_to_turn can't cut an always_on prompt, but a run that broke is skipped before that is checked."""
+    def fails(n, texts, rig):
+        raise TimeoutError("no answer")
+
+    rig = Rig(monkeypatch, tmp_path, agent=fails)
+    await rig.arm()
+    ctx = await rig.run(rig.step())
+    verifier = _verifier(grade_up_to_turn=2)
+    _capture(monkeypatch, verifier)
+
+    await verifier.execute(ctx)
+
+    [row] = ctx.metadata["verifications"]["rubric"]["results"]
+    assert row["id"] == "prompt_error" and "agent_turn_timeout" in row["message"]
+
+
 def test_the_wake_by_wake_text_says_when_the_record_is_unreadable():
     text = ao.render_for_judge({"object_url": "file:///nowhere/at/all.json", "end_reason": "end_time"})
     assert text.startswith("## The run, wake by wake\n(The run's record could not be read:")
