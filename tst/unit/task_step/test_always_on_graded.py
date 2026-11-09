@@ -11,7 +11,7 @@ from agent_env.task_step.task_steps.verifiers.agent_prompt_response_verifier imp
     AgentPromptResponseVerifierTaskStep,
 )
 from agent_env.task_step.task_steps.verifiers.run_context import load_run_context
-from tst.unit.task_step.always_on_harness import Fail, Rig
+from tst.unit.task_step.always_on_harness import ROLE, Fail, Rig
 
 pytestmark = pytest.mark.usefixtures("local_stores")
 
@@ -168,13 +168,37 @@ async def test_a_run_cut_off_by_its_wake_cap_says_so_in_the_conversation(monkeyp
     assert "Linda: ok (sent after the assistant's last turn" in last["texts"][0]
 
 
+@pytest.mark.asyncio
+async def test_messages_queued_before_the_run_are_not_the_run_s(monkeypatch, tmp_path):
+    """Another role's messages stay queued for whoever takes them; what the agent's own role left before the run is
+    recorded as such; neither reaches her or the graded chat."""
+    rig = Rig(monkeypatch, tmp_path, agent=_agent(t1=_message("on it")))
+    await rig.arm()
+    chat = rig.gw._user_chat
+    chat.configure({"roles": ["other", ROLE], "stay_quiet": True})
+    chat.send("from another assistant", role="other")
+    chat.send("left from an earlier step", role=ROLE)
+    chat.quiet(role=ROLE)
+    ctx = await rig.run(rig.step())
+
+    [response] = ctx.prompt_responses
+    assert response.response == "[Mon Nov 9, 2:00 PM UTC] on it"
+    assert [m["text"] for m in rig.reads[0]["assistant_messages"]] == ["on it"]
+    assert [(m["from"], m["text"]) for m in chat.state()["pending"]] == [("other", "from another assistant")]
+    [before] = rig.events(ctx, "user_chat_before_run")
+    assert [m["text"] for m in before["messages"]] == ["left from an earlier step"]
+    assert before["stay_quiet_calls"] == 1
+
+
 # ---- failed turns are errors -----------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("play,error_type,end_reason", [
     (lambda rig: Fail("the CLI crashed"), "agent_turn_failed", "agent_turn_failed"),
     (lambda rig: Fail("sandbox gone", error_type="infra_error"), "infra_error", "agent_turn_failed"),
     (lambda rig: (_ for _ in ()).throw(TimeoutError("no answer")), "agent_turn_timeout", "agent_turn_timeout"),
-], ids=["failed", "failed with the agent's error type", "timed out"])
+    (lambda rig: Fail("stopped", state="canceled"), "agent_turn_canceled", "agent_turn_failed"),
+    (lambda rig: Fail("won't do that", state="rejected"), "agent_turn_rejected", "agent_turn_failed"),
+], ids=["failed", "failed with the agent's error type", "timed out", "canceled", "rejected"])
 @pytest.mark.asyncio
 async def test_a_failed_or_timed_out_turn_sets_error_type_and_the_verifier_skips_the_run(monkeypatch, tmp_path, play,
                                                                                          error_type, end_reason):
@@ -190,3 +214,16 @@ async def test_a_failed_or_timed_out_turn_sets_error_type_and_the_verifier_skips
                                                    criteria=[{"type": "response_contains", "needles": ["on it"]}])
     await verifier.execute(ctx)
     assert ctx.metadata["verifications"]["words"]["results"][0]["id"] == "prompt_error"
+
+
+@pytest.mark.parametrize("state", ["failed", "canceled", "rejected"])
+@pytest.mark.asyncio
+async def test_a_nudge_turn_that_doesn_t_complete_sets_error_type_too(monkeypatch, tmp_path, state):
+    rig = Rig(monkeypatch, tmp_path, agent=_agent(t1=lambda rig: "PRIVATE all done", t2=lambda rig: Fail(state=state)))
+    await rig.arm()
+    ctx = await rig.run(rig.step())
+
+    [nudge] = rig.events(ctx, "nudge")
+    assert nudge["state"] == state and len(rig.sent) == 2
+    [response] = ctx.prompt_responses
+    assert (response.error_type, rig.record(ctx)["end_reason"]) == (f"agent_turn_{state}", "agent_turn_failed")

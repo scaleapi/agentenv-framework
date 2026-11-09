@@ -5,12 +5,14 @@ The ``user_sim`` step (``user_sim.py``, which documents the interface this step 
 it in the run's metadata under its ``name``; a ``deploy_agent`` step deploys the agent that plays them. The
 ``always_on`` step names it with ``user_sim`` and runs the loop:
 
-- The first wake is the user's request. While the task's clock is set, each wake opens with the task's date and time
-  (any other date the agent sees is the computer's clock), then what came due for the agent on notifications/v1 (a
-  trigger's ``notify``, a scheduled check), labelled ``[time · channel]``, then the user's own messages.
+- The first wake is the user's request. Each wake opens with what came due for the agent on notifications/v1 (a
+  trigger's ``notify``, a scheduled check), labelled ``[time · channel]``, then the user's own messages, each labelled
+  with its time; while the task's clock is set, the agent can read it with the gateway's ``get_time``.
 - Only what the agent sends with the gateway's ``message_user`` tool (user-chat/v1) reaches the user; its plain reply
   goes to the log. Each wake should end with ``message_user`` or ``stay_quiet``: one that ends with closing text and
   neither gets one ``nudge`` turn, and every wake ends with a reminder. All three are on unless the task turns them off.
+  The step takes only its agent's role's messages: another role's stay queued, and what the role sent before the run
+  is recorded apart (``user_chat_before_run``), never read by the user.
 - The user sim is asked only after the agent sent something, at the time the user would read it (``schedule``), with
   everything sent meanwhile in one read: the time, the agent's messages, what triggers sent the user's phone
   (``notify`` to ``user_phone``) and the user's own lines (the opening request, ``user_says`` lines, ``final``).
@@ -31,9 +33,11 @@ it in the run's metadata under its ``name``; a ``deploy_agent`` step deploys the
   ``scheduled_check_min_interval`` apart; ``scheduled_checks`` turns them on or off whatever the run's length. A
   check's wake counts toward ``max_wakes``.
 - At end_time there is always a final check-in: the user's ``final`` line, or the step's own (``FINAL_DEFAULT_TEXT``)
-  when the task sets none. The run's last wake, at end_time or the one ``max_wakes`` makes the last, carries the
-  last-turn notice (``final_reminder``). After it the user sim reads what the agent sent (its wrap-up), and the
-  user's reaction, and any reply still held, are recorded; then the run ends.
+  when the task sets none. An agent's turn that ends past end_time is followed by it, with whatever came due (a read
+  due before end_time goes first), never by an ordinary wake. The run's last wake, at end_time or the one
+  ``max_wakes`` makes the last, carries the last-turn notice (``final_reminder``). After it the user sim reads what
+  the agent sent (its wrap-up), no earlier than the task's time when the run ended, and the user's reaction, and any
+  reply still held, are recorded; then the run ends.
 - A real-time budget keeps the run inside the hub's 8-hour job (``effective_time_budget`` gives the rule): once one
   more wake might end past ``time_budget_seconds`` (7 h, lowered to fit the task's own timeouts), the agent gets its
   closing wake, with the step's wrap-up line and the last-turn notice, and the run ends with end reason time_budget.
@@ -46,8 +50,8 @@ it in the run's metadata under its ``name``; a ``deploy_agent`` step deploys the
   time, never the agent's closing text; messages no turn took (a turn that timed out after sending) are taken at the
   end and included, and listed as never read. The conversation (``metadata["a2a_conversations"][step_id]``) holds the user's
   own messages and the agent's message_user texts, then the user's last word that never reached the agent and an end
-  marker with the end reason. A failed or timed-out agent turn sets the response's ``error_type`` (as prompt_agent
-  does), so verifiers skip the run.
+  marker with the end reason. An agent turn that doesn't complete (failed, canceled, rejected, timed out) ends the run
+  and sets the response's ``error_type`` (as prompt_agent does for a failed one), so verifiers skip the run.
 - Who did what, and in what order, even under a frozen clock: each app change (urn:agentenv:changes/v1) is recorded
   with who made it and the wake it was seen in, the agent's own with the wake that made it (``app_changes`` events);
   each reply records the agent's message it answers (``reply_to``: its wake, time and text); and each read leaves a
@@ -125,7 +129,6 @@ CHECKS_RULE = ("You only run when something wakes you. To do something at a late
                "schedule_check: you'll be woken then with your note.")
 CHECK_MIN_INTERVAL = "PT3H"
 EMPTY_REPLIES = frozenset({"(The assistant's reply was empty.)"})  # a harness's stand-in for an empty final reply
-TIME_LINE = "It's {when}. Any other date you see is the computer's clock, not the task's."
 # The hub runs a step as one job of at most this long, retrying one that runs over; the step keeps this much of it spare.
 JOB_LIMIT_SECONDS = 8 * 3600
 JOB_HEADROOM_SECONDS = 600
@@ -489,6 +492,11 @@ class _Run:
                  agent=step.agent_name, agent_role=self.recipient, user_sim=step.user_sim, version=self.version,
                  user_model=self.user_model, max_wakes=step.max_wakes, time_zone=self.zone, multi_day=self.multi_day,
                  scheduled_checks=self.checks, clock_rate=await self._rate())
+        # What the agent's role sent before the run (a task that gave it message_user earlier) isn't this run's: set it
+        # aside, recorded, so the first wake doesn't take it as its own.
+        before, quiet = await self._take_messages()
+        if before or quiet:
+            self.log("user_chat_before_run", messages=before, stay_quiet_calls=len(quiet))
         try:
             await self.loop(now)
         except Exception as e:
@@ -686,14 +694,6 @@ class _Run:
         """The step's system prompt with the rules after it; without one, or when the agent's card doesn't accept it,
         the agent keeps its own and the first wake opens with the rules."""
         return f"{self.step.system_prompt.rstrip()}\n\n{self.rules()}" if self.step.system_prompt else None
-
-    def _time_line(self, at: datetime) -> str:
-        """The task's date and time, and the user's local time when they aren't in UTC."""
-        when = f"{at.strftime('%a %b')} {at.day}, {at.year}, {_clock_time(at)} UTC"
-        if self.zone != "UTC":
-            local = at.astimezone(self.tz)
-            when += f" ({local.strftime('%a')} {_clock_time(local)} for {self.person['first']}, {self.zone})"
-        return TIME_LINE.format(when=when)
 
     # ---- clock and world ------------------------------------------------------------------------------------
     async def _armed(self) -> list:
@@ -976,10 +976,17 @@ class _Run:
                      time_budget_seconds=self.time_budget, wake_reserve_seconds=step.wake_reserve_seconds())
             await self._final(now, reason="time_budget")
             return False
-        # 1. a read that is due: the user sim reads what the agent sent
-        if self.read_at is not None and self.read_at <= now and self.unread:
+        # 1. a read that is due: the user sim reads what the agent sent (one due only at or past end_time is the last
+        # read, after the final check-in)
+        if self.read_at is not None and self.read_at <= now and self.unread \
+                and (self.end is None or self.read_at < self.end):
             await self.read(now)
             return True
+        # past end_time (the clock runs during the agent's turns, so one can end past it): the final check-in next, with
+        # whatever else is due, rather than ordinary wakes that would use up max_wakes without one
+        if self.end is not None and now >= self.end:
+            await self._final(now)
+            return False
         # 2. anything due for the agent: notifications, scripted user lines, held replies; and what else comes
         # due in the same minute, so it all arrives in one wake
         if any(h["deliver_at"] <= now for h in self.held) or await self._due_count(self.recipient, now) \
@@ -1055,7 +1062,10 @@ class _Run:
         if not self.unread or self.signed_off or self.gave_up or self.end_reason in ERROR_ENDS:
             return
         await self._schedule_read()
-        at = self.read_at or await self.now()
+        now = await self.now()
+        at = self.read_at or now
+        if at < now:  # she'd have looked during the last turn, which went on sending: she reads it all, from now
+            at, self.read_mode = self._available(now)
         await self.read(at, last=True)
 
     def _prompt_parts(self) -> list[dict]:
@@ -1174,11 +1184,8 @@ class _Run:
         ``last`` marks, or the one ``max_wakes`` makes the last, carries the last-turn notice (``final_reminder``)."""
         step = self.step
         sent_at = await self.now()
-        clock = await step._env_clock(self.clock_envs)
-        lead = [_step_part(self._time_line(sent_at), "time")] if clock else []
         if self.wakes == 0 and not self.rules_in_system_prompt:  # no system prompt took them: the first wake does
-            lead = [_step_part(self.rules(), "rules"), *lead]
-        parts = [*lead, *parts]
+            parts = [_step_part(self.rules(), "rules"), *parts]
         last = last or self.wakes + 1 >= step.max_wakes
         if last and step.final_reminder:
             parts.append(_step_part(step.final_reminder.format(first=self.person["first"]), "final_reminder"))
@@ -1229,9 +1236,10 @@ class _Run:
                  tool_calls=term.tool_call_count, plain_reply=plain, messages_to_user=len(messages),
                  trajectory_url=traj, **extra)
         self._sent(messages)
-        if state == TaskState.failed or str(state) == "failed":
-            self._failed(term.error_type or "agent_turn_failed",
-                         term.error_message or term.response_text or "agent turn failed", term.error_code)
+        if not _completed(state):  # failed, canceled or rejected: the turn didn't run to its end
+            self._failed(term.error_type or f"agent_turn_{_state_name(state)}",
+                         term.error_message or term.response_text or f"agent turn {_state_name(state)}",
+                         term.error_code)
             return
         if step.nudge and not messages and not quiet and _closing_text(plain):
             await self._nudge(plain)
@@ -1306,9 +1314,10 @@ class _Run:
                  plain_reply_after=plain, tool_calls=term.tool_call_count, real_seconds=round(time.time() - t, 1),
                  trajectory_url=traj)
         self._sent(messages, after_nudge=True)
-        if state == TaskState.failed or str(state) == "failed":
-            self._failed(term.error_type or "agent_turn_failed",
-                         term.error_message or term.response_text or "agent nudge turn failed", term.error_code)
+        if not _completed(state):
+            self._failed(term.error_type or f"agent_turn_{_state_name(state)}",
+                         term.error_message or term.response_text or f"agent nudge turn {_state_name(state)}",
+                         term.error_code)
 
     # ---- app changes -------------------------------------------------------------------------------------------------
     async def _start_changes(self) -> None:
@@ -1368,10 +1377,11 @@ class _Run:
                 "at": row.get("timestamp"), "by": by, "wake": self.wakes, "phase": phase, "actors": actors}
 
     async def _take_messages(self) -> tuple[list[dict], list[dict]]:
-        """What the agent sent the user with message_user this turn, oldest first, and its stay_quiet calls."""
+        """What the agent sent the user with message_user this turn, oldest first, and its stay_quiet calls: its role's
+        only, so another role's stay queued for whoever takes them."""
         messages, quiet = [], []
         for env in self.chat_envs:
-            got = await _call(env, EXT_USER_CHAT_URI, "take", {"take_id": uuid.uuid4().hex})
+            got = await _call(env, EXT_USER_CHAT_URI, "take", {"take_id": uuid.uuid4().hex, "from": self.recipient})
             messages += got.get("items") or []
             quiet += got.get("quiet") or []
         messages.sort(key=lambda m: m.get("at") or "")
@@ -1391,8 +1401,9 @@ class _Run:
                                                                 "wake": self.wakes}}})
 
     def _failed(self, error_type: str, error: str, error_code: Optional[str] = None) -> None:
-        """An agent turn failed or timed out: the run ends, and its prompt response carries ``error_type`` the way
-        prompt_agent's does, so verifiers skip it instead of grading it as a normal run."""
+        """An agent turn didn't complete (failed, canceled, rejected or timed out): the run ends, and its prompt
+        response carries ``error_type`` the way prompt_agent's does, so verifiers skip it instead of grading it as a
+        normal run."""
         self.error, self.error_type, self.error_code = error, error_type, error_code
         self.end_reason = "agent_turn_timeout" if error_type == "agent_turn_timeout" else "agent_turn_failed"
 
@@ -1781,8 +1792,13 @@ def _step_part(text: str, source: str) -> dict:
     return {"kind": "text", "text": text, "metadata": {"agentenv": {"source": source}}}
 
 
-def _clock_time(at: datetime) -> str:
-    return at.strftime("%I:%M %p").lstrip("0")
+def _state_name(state: Any) -> str:
+    """An A2A task state's name ("completed", "failed", "canceled", "rejected"), from the enum or its string."""
+    return str(getattr(state, "value", state))
+
+
+def _completed(state: Any) -> bool:
+    return state == TaskState.completed or _state_name(state) == "completed"
 
 
 def _closing_text(plain: str) -> str:

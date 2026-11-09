@@ -36,10 +36,12 @@ CONFIG_CARD = {"capabilities": {"extensions": [{"uri": A2AAgent.EXT_AGENT_CONFIG
 
 
 class Fail:
-    """What an agent's turn returns to end in the failed state, as a harness reports a turn that broke."""
+    """What an agent's turn returns to end in the failed state, as a harness reports a turn that broke; or in another
+    state that isn't completed (``state``: canceled, rejected)."""
 
-    def __init__(self, message: str = "the CLI crashed", error_type: Optional[str] = None) -> None:
-        self.message, self.error_type = message, error_type
+    def __init__(self, message: str = "the CLI crashed", error_type: Optional[str] = None,
+                 state: str = "failed") -> None:
+        self.message, self.error_type, self.state = message, error_type, state
 
 
 class Rig:
@@ -264,7 +266,7 @@ class Rig:
         if isinstance(closing, Fail):
             data = {"error_message": closing.message, **({"error_type": closing.error_type}
                                                           if closing.error_type else {})}
-            return f"task-{len(self.sent)}", {"status": {"state": "failed", "message": {"parts": [
+            return f"task-{len(self.sent)}", {"status": {"state": closing.state, "message": {"parts": [
                 {"kind": "text", "text": closing.message}, {"kind": "data", "data": data}]}}}
         reply = [{"kind": "text", "text": closing}] if closing else []
         return f"task-{len(self.sent)}", {"status": {"state": "completed", "message": {"parts": reply}}}

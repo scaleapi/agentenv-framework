@@ -189,11 +189,11 @@ async def test_a_turn_of_the_loop_past_the_reserve_ends_the_run_on_a_step_error(
     rig = Rig(monkeypatch, tmp_path)
 
     real_take = ao._Run._take_messages
-    calls: list[int] = []
+    hung: list[int] = []
 
     async def hangs_once(run):
-        calls.append(1)
-        if len(calls) == 1:
+        if run.wakes and not hung:  # the opening wake's take, not the one before the run
+            hung.append(1)
             await asyncio.sleep(60)
         return await real_take(run)
 

@@ -58,6 +58,30 @@ async def test_without_a_final_line_the_end_time_still_brings_a_check_in_with_th
 
 
 @pytest.mark.asyncio
+async def test_a_turn_that_runs_past_end_time_is_followed_by_the_final_check_in_not_more_wakes(monkeypatch, tmp_path):
+    """The clock runs during the agent's turns, so one can end past end_time: what is due then (her reply, an alert)
+    comes with the final check-in, rather than in ordinary wakes that use up max_wakes without one."""
+    def chatty(n, texts, rig):
+        rig.message(f"update {n}: anything else?")
+        if n == 1:
+            rig.alert("Live Oak: we can come Friday", channel="Gmail · Live Oak Arbor")
+            rig.gw._clock.advance("2026-11-10T15:00:00Z")  # a long turn: the task's clock runs past end_time
+        return "sent"
+
+    rig = Rig(monkeypatch, tmp_path, agent=chatty,
+              answers=[{"outcome": "reply", "message": f"reply {i}"} for i in range(1, 6)])
+    await rig.arm()
+    ctx = await rig.run(rig.step(end_time="P1D", max_wakes=4))
+
+    assert len(rig.sent) == 2  # the opening wake, then the final check-in
+    final = " ".join(rig.sent[1])
+    assert DEFAULT_FINAL in final and NOTICE in final
+    assert "Linda: reply 1" in final and "Live Oak: we can come Friday" in final
+    assert rig.events(ctx, "wake")[-1]["virtual_time"] == "2026-11-10T15:00:00Z"
+    assert rig.record(ctx)["end_reason"] == "end_time"
+
+
+@pytest.mark.asyncio
 async def test_a_task_s_final_line_is_hers_and_comes_with_the_notice(monkeypatch, tmp_path):
     rig = Rig(monkeypatch, tmp_path, agent=_recaps)
     await rig.arm()
@@ -106,6 +130,46 @@ async def test_the_user_sim_reads_the_wrap_up_and_her_reaction_and_held_reply_ar
     assert held == {"count": 1, "items": [{"at": "2026-11-11T16:30:00Z", "text": "amazing, book La Ola too",
                                            "done": False}]}
     assert rig.record(ctx)["end_reason"] == "end_time" and len(rig.sent) == 2
+
+
+@pytest.mark.asyncio
+async def test_the_last_read_comes_after_every_message_of_a_last_turn_that_ran_on(monkeypatch, tmp_path):
+    """Her last read is no earlier than the task's time when the run ended, so it never shows a message before it was
+    sent, nor holds a reply that comes before the question it answers."""
+    def wraps_up_slowly(n, texts, rig):
+        rig.message("booked the house")
+        rig.gw._clock.advance("2026-11-09T16:00:00Z")  # the turn goes on two hours, the clock running
+        rig.message("and the flights: is Friday ok?")
+        return "sent"
+
+    rig = Rig(monkeypatch, tmp_path, agent=wraps_up_slowly,
+              answers=[{"outcome": "reply", "message": "friday is fine"}])
+    await rig.arm()
+    ctx = await rig.run(rig.step(max_wakes=1))
+
+    [read] = rig.reads
+    assert [m["at"] for m in read["assistant_messages"]] == ["2026-11-09T14:00:00Z", "2026-11-09T16:00:00Z"]
+    assert read["time"] == "2026-11-09T16:00:00Z"
+    [event] = rig.events(ctx, "user_sim_read")
+    assert event["last_read"] is True and event["deliver_at"] == "2026-11-09T16:00:00Z"
+
+
+@pytest.mark.asyncio
+async def test_a_last_read_that_would_fall_in_her_night_waits_for_the_morning(monkeypatch, tmp_path):
+    def wraps_up_late(n, texts, rig):
+        rig.message("booked the house")
+        rig.gw._clock.advance("2026-11-10T05:00:00Z")  # midnight in New York: past her bedtime
+        rig.message("and the flights: is Friday ok?")
+        return "sent"
+
+    rig = Rig(monkeypatch, tmp_path, agent=wraps_up_late, answers=[{"outcome": "reply", "message": "friday is fine"}])
+    await rig.arm()
+    ctx = await rig.run(rig.step(max_wakes=1), rig.context(user=DAY))
+
+    [read] = rig.reads
+    assert read["time"] == "2026-11-10T12:30:00Z"  # 7:30 AM, when she wakes
+    [event] = rig.events(ctx, "user_sim_read")
+    assert (event["mode"], event["deliver_at"]) == ("morning", "2026-11-10T12:45:00Z")
 
 
 @pytest.mark.asyncio

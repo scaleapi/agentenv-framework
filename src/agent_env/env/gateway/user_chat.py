@@ -7,7 +7,8 @@ was sent after each agent turn and hands it to the user sim when the user would 
 modify_env_tool_access don't hide them.
 
 `take` hands each message out once: {"id", "from", "at", "text"}, plus, with stay_quiet on, the `quiet` calls since the
-last take. A `take_id` makes a retry safe.
+last take. A `take_id` makes a retry safe. With `from` (a role) it takes only that role's messages and quiet calls, and
+leaves the others queued.
 """
 from __future__ import annotations
 
@@ -156,16 +157,20 @@ class UserChat:
         take_id = body.get("take_id")
         if take_id is not None and (not isinstance(take_id, str) or not take_id or len(take_id) > _MAX_TAKE_ID_CHARS):
             raise UserChatError(f"take_id must be a non-empty string of at most {_MAX_TAKE_ID_CHARS} characters")
+        sender = body.get("from")
+        if sender is not None and (not isinstance(sender, str) or not sender.strip()):
+            raise UserChatError("from must be a role name")
         with self._lock:
             if take_id is not None and take_id in self._takes:
                 return self._takes[take_id]
-            items = [m for m in self._queue if m["status"] == "pending"]
+            items = [m for m in self._queue if m["status"] == "pending" and sender in (None, m["from"])]
             for m in items:
                 m["status"] = "taken"
             self._queue = [m for m in self._queue if m["status"] == "pending"]
             result = {"items": [_public(m) for m in items]}
             if self._stay_quiet:
-                result["quiet"], self._quiet = self._quiet, []
+                result["quiet"] = [q for q in self._quiet if sender in (None, q["from"])]
+                self._quiet = [q for q in self._quiet if sender not in (None, q["from"])]
             if take_id is not None:
                 self._takes[take_id] = result
                 while len(self._takes) > _KEPT_TAKES:

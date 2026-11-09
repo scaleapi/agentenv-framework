@@ -284,7 +284,7 @@ GATEWAY_EXTENSIONS = [
                 "stay_quiet": {"type": "boolean"}}}},
             "state": {"method": "GET", "endpoint": "/user_chat/state", "request": {"type": "object", "properties": {}}},
             "take": {"method": "POST", "endpoint": "/user_chat/take", "request": {"type": "object", "properties": {
-                "take_id": {"type": "string"}}}},
+                "take_id": {"type": "string"}, "from": {"type": "string"}}}},
             "clear": {"method": "POST", "endpoint": "/user_chat/clear", "request": {"type": "object", "properties": {}}}}},
         "required": False,
     },
