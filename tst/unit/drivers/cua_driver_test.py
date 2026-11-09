@@ -39,7 +39,9 @@ class FakeDaemon:
     """cua-driver's daemon as the driver sees it, on ``path``: each request by the connection it came on, ``refuse``
     naming tools whose results are errors, ``fail`` tools it can't call, ``slow`` tools it answers after a second,
     ``drop`` tools whose connection it closes without answering, ``grab`` a layer such as a menu holding the keyboard,
-    from which it refuses a key aimed at a window, and ``tools`` what ``list`` lists."""
+    from which it refuses a key aimed at a window, ``unlaid`` the seat's keymap changed, for which it refuses one too
+    until a chord at the desktop of the layout's keys puts it back, which ``relaid`` false keeps it from, and ``tools``
+    what ``list`` lists."""
 
     def __init__(self, manifest: list[dict], path: Path) -> None:
         self.path = path
@@ -48,7 +50,8 @@ class FakeDaemon:
         self.fail: set[str] = set()
         self.slow: set[str] = set()
         self.drop: set[str] = set()
-        self.grab = False
+        self.grab = self.unlaid = False
+        self.relaid = True
         self.tools = [{"name": t["name"], "input_schema": t["inputSchema"]} for t in manifest]
         self.connections = 0
         self.writers: list[asyncio.StreamWriter] = []
@@ -87,9 +90,12 @@ class FakeDaemon:
             return {"ok": False, "error": f"unknown tool {name}", "exit_code": 64}
         if name in self.refuse:
             return {"ok": True, "result": {"isError": True, "content": [{"type": "text", "text": f"{name} refused"}]}}
-        if name == "press_key" and self.grab and "pid" in request["args"]:
+        if name == "press_key" and "pid" in request["args"] and (self.grab or self.unlaid):
+            why = "(primary_target_busy): foreground_grab" if self.grab else "(unsupported_layout): unsupported_layout"
             return {"ok": True, "result": {"isError": True, "content": [
-                {"type": "text", "text": "foreground_unavailable (primary_target_busy): foreground_grab"}]}}
+                {"type": "text", "text": f"foreground_unavailable {why}"}]}}
+        if name == "press_key" and "super" in request["args"]["modifiers"] and self.relaid:
+            self.unlaid = False
         if name == "list_windows":
             return {"ok": True, "result": {"content": [{"type": "text", "text": "Found 0 windows"}],
                                            "structuredContent": {"windows": []}}}
@@ -469,15 +475,23 @@ PLUGIN_RELOADED = {**PLUGIN_LOADED, "state": "discovery_only", "transport": {
 
 class FakeHyprland:
     """Hyprland's IPC as ``hyprctl -j`` answers: an answer by request, a list of them answered one per ask, None for a
-    request it has no answer to, and every request asked, in order."""
+    request it has no answer to, and every request asked, in order; ``binds`` what it lists as bound, and ``lua`` the
+    Lua it was given (``hyprctl eval``), a bind in which it then lists unless ``binding`` is false."""
 
     def __init__(self, answers: dict):
-        self.answers, self.asked = answers, []
+        self.answers, self.asked, self.binds, self.lua, self.binding = answers, [], [], [], True
 
-    def __call__(self, request: str) -> dict | None:
+    def __call__(self, request: str) -> dict | list | None:
         self.asked.append(request)
+        if request == "binds":
+            return self.binds
         answer = self.answers.get(request)
         return answer.pop(0) if isinstance(answer, list) else answer
+
+    def run_lua(self, code: str) -> None:
+        self.lua.append(code)
+        if self.binding and code.startswith('hl.bind("SUPER + CTRL + ALT + SHIFT + F12"'):
+            self.binds.append({"modmask": 77, "key": "F12"})
 
 
 @pytest.fixture
@@ -488,6 +502,7 @@ def hyprland(module, monkeypatch) -> FakeHyprland:
         monkeypatch.setattr(module, name, value)
     fake = FakeHyprland({"cua:status": PLUGIN_LOADED, "activeworkspace": {"id": 1}})
     monkeypatch.setattr(module.hyprland, "hyprctl", fake)
+    monkeypatch.setattr(module.hyprland, "lua", fake.run_lua)
     return fake
 
 
@@ -557,6 +572,53 @@ async def test_on_hyprland_a_key_refused_while_a_menu_holds_the_keyboard_goes_to
         ("press_key", {"scope": "desktop", "key": "question", "modifiers": [], "delivery_mode": "foreground"}),
         ("press_key", {"scope": "desktop", "key": "escape", "modifiers": [], **focused}),
         ("press_key", {"scope": "desktop", "key": "escape", "modifiers": [], "delivery_mode": "foreground"})]
+
+
+RESET = ("press_key", {"scope": "desktop", "key": "f12", "modifiers": ["super", "ctrl", "alt", "shift"],
+                       "delivery_mode": "foreground"})
+
+
+@pytest.mark.asyncio
+async def test_on_hyprland_a_key_refused_for_the_seats_keymap_goes_again_once_a_chord_bound_to_nothing_puts_it_back(
+        module, daemon, hyprland):
+    hyprland.answers["activewindow"] = {"address": "0x5557e0f44ad0", "pid": 42}
+    driver = module.CuaDriver()
+
+    for keys in (["Backspace"], ["Control", "a"]):
+        daemon.unlaid = True
+        await driver.press_keys(keys)
+
+    window = {"scope": "desktop", "pid": 42, "window_id": 0x5557E0F44AD0, "delivery_mode": "foreground"}
+    backspace = ("press_key", {"key": "backspace", "modifiers": [], **window})
+    select_all = ("press_key", {"key": "a", "modifiers": ["ctrl"], **window})
+    assert daemon.calls() == [backspace, RESET, backspace, select_all, RESET, select_all]
+    assert hyprland.lua == ['hl.bind("SUPER + CTRL + ALT + SHIFT + F12", function() end)']
+
+
+@pytest.mark.asyncio
+async def test_on_hyprland_a_key_refused_for_the_seats_keymap_fails_without_the_chord_when_hyprland_wont_bind_it(
+        module, daemon, hyprland):
+    hyprland.answers["activewindow"] = {"address": "0x5557e0f44ad0", "pid": 42}
+    hyprland.binding, daemon.unlaid = False, True
+
+    with pytest.raises(DeliveryFailed, match="unsupported_layout"):
+        await module.CuaDriver().press_keys(["Backspace"])
+
+    assert [args.get("pid") for _, args in daemon.calls()] == [42] and len(hyprland.lua) == 1
+
+
+@pytest.mark.asyncio
+async def test_on_hyprland_a_key_still_refused_for_the_seats_keymap_after_the_chord_fails_in_time(
+        module, daemon, hyprland, monkeypatch):
+    hyprland.answers["activewindow"] = {"address": "0x5557e0f44ad0", "pid": 42}
+    daemon.unlaid, daemon.relaid = True, False
+    monkeypatch.setattr(module.hyprland, "RESET_S", 0.2)
+
+    with pytest.raises(DeliveryFailed, match="unsupported_layout"):
+        await module.CuaDriver().press_keys(["Backspace"])
+
+    calls = daemon.calls()
+    assert calls[1] == RESET and len(calls) > 3 and all(args.get("pid") == 42 for _, args in calls[:1] + calls[2:])
 
 
 @pytest.mark.asyncio

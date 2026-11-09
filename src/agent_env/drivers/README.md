@@ -93,16 +93,17 @@ a US keyboard, the only layout the plugin takes there, so a shifted character go
 and keys held with it, Hyprland's own shortcuts, go to the desktop, as does a key with nothing focused and one the
 window path refuses because a layer such as Omarchy's menu holds the keyboard, punctuation there by its keysym name:
 given the character, cua-driver falls back to libei, which can hang its input worker. Clicks, drags and scrolls stay
-desktop-scope. Keys aimed at a window need the seat's keyboard on a plain layout, and an input method such as Omarchy's
-fcitx5 (`omarchy-fcitx5.service`) takes on the keymap desktop text uploads, after which cua-driver refuses them
-(`unsupported_layout`) until a chord at the desktop puts the layout back, so the driver needs a session with no input
-method running. `computer-ready` also checks that the plugin is loaded, enabled, built for this Hyprland and taking
-input (`transport.ready`), and every input, a `computer_*` operation or one of cua-driver's own tools that isn't
-read-only, checks it again first and fails as `device_unavailable`, sending nothing, when it isn't. The runtime runs
-ready checks only until they first pass, and a Hyprland restarted after a crash runs in safe mode with no plugins, where
-input is accepted but never arrives. A plugin loaded again into a running Hyprland has no input seat until the desktop
-restarts, and a driver that outlives its Hyprland can't reach the next one, which has a new instance signature, so the
-driver's services have to restart with the graphical session.
+desktop-scope. Keys aimed at a window need the seat's keymap to be the US layout's, and an input method such as
+Omarchy's fcitx5 takes on the keymap that desktop text uploads, after which cua-driver refuses them
+(`unsupported_layout`): the driver then puts the layout back with a chord of the layout's own keys at the desktop,
+Super+Ctrl+Alt+Shift+F12, which it binds to nothing in Hyprland first (`hyprctl eval`), so Hyprland keeps it from every
+window, and sends the key again. `computer-ready` also checks that the plugin is loaded, enabled, built for this
+Hyprland and taking input (`transport.ready`), and every input, a `computer_*` operation or one of cua-driver's own
+tools that isn't read-only, checks it again first and fails as `device_unavailable`, sending nothing, when it isn't. The
+runtime runs ready checks only until they first pass, and a Hyprland restarted after a crash runs in safe mode with no
+plugins, where input is accepted but never arrives. A plugin loaded again into a running Hyprland has no input seat
+until the desktop restarts, and a driver that outlives its Hyprland can't reach the next one, which has a new instance
+signature, so the driver's services have to restart with the graphical session.
 
 To move it to another cua-driver version:
 

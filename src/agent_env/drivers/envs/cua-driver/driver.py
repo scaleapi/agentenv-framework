@@ -229,12 +229,30 @@ class CuaDriver(ComputerDriverEnvironment):
         such as a menu holds the keyboard and refuses it there; then to the desktop, punctuation by its keysym name."""
         if key != "super" and "super" not in modifiers and (window := await hyprland.focused()):
             try:
-                return await self._send("press_key", **hyprland.on_us_keyboard(modifiers, key), **window)
+                return await self._to_window({**hyprland.on_us_keyboard(modifiers, key), **window})
             except DeliveryFailed as e:
                 if hyprland.GRABBED not in e.message:
                     raise
         await self._send("press_key", modifiers=modifiers, key=hyprland.PUNCTUATION.get(key, key),
                          **hyprland.DESKTOP)
+
+    async def _to_window(self, pressed: dict) -> None:
+        """A key aimed at a window, the US layout's keymap put back first when cua-driver refuses it for the seat's
+        keymap, which an input method changes after desktop text, by a chord Hyprland keeps from every window."""
+        try:
+            return await self._send("press_key", **pressed)
+        except DeliveryFailed as e:
+            if hyprland.UNLAID not in e.message or not await hyprland.bind_reset():
+                raise
+        await self._send("press_key", **hyprland.RESET, **hyprland.DESKTOP)
+        deadline = time.monotonic() + hyprland.RESET_S
+        while True:
+            try:
+                return await self._send("press_key", **pressed)
+            except DeliveryFailed as e:
+                if hyprland.UNLAID not in e.message or time.monotonic() > deadline:
+                    raise
+            await asyncio.sleep(0.05)
 
     async def _forward(self, tool: str, acts: bool, /, **arguments: Any) -> CallToolResult:
         """A call to one of cua-driver's own tools in its caller's session, answered as cua-driver answers it; one that

@@ -4,6 +4,7 @@ the driver runs, and calls it only on Hyprland."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import string
 import subprocess
@@ -35,6 +36,18 @@ SHIFTED = {
 }
 #: What cua-driver says when a key aimed at a window is refused because a layer, such as a menu, holds the keyboard.
 GRABBED = "foreground_grab"
+#: What it says when one is refused because the seat's keymap isn't the US layout's: an input method such as Omarchy's
+#: fcitx5 takes on the keymap that desktop text, or a desktop key the layout has no key for, uploads.
+UNLAID = "unsupported_layout"
+#: A chord at the desktop that puts the US layout's keymap back: its keys are all the layout's, so cua-driver sends it
+#: with that keymap, which an input method takes on in turn, and it's bound to nothing (RESET_BIND), so Hyprland keeps
+#: it from every window.
+RESET = {"modifiers": ["super", "ctrl", "alt", "shift"], "key": "f12"}
+RESET_BIND = "SUPER + CTRL + ALT + SHIFT + F12"
+#: RESET_BIND as Hyprland lists its binds: Super, Alt, Ctrl and Shift's mask, and its key.
+RESET_LISTED = (64 | 8 | 4 | 1, "F12")
+#: How long a key aimed at a window waits for the keymap RESET puts back.
+RESET_S = 1.0
 
 
 def on_us_keyboard(modifiers: list[str], key: str) -> dict:
@@ -51,6 +64,22 @@ async def focused() -> dict:
     if not window or not window.get("address"):
         return {}
     return {"pid": window["pid"], "window_id": int(window["address"], 16), "delivery_mode": "foreground"}
+
+
+async def bind_reset() -> bool:
+    """Whether Hyprland has RESET_BIND bound, bound to nothing first when it isn't, as a bind made over its IPC is gone
+    once its config reloads."""
+    return await asyncio.to_thread(_bound_reset)
+
+
+def _bound_reset() -> bool:
+    if not _reset_bound():
+        lua(f'hl.bind("{RESET_BIND}", function() end)')
+    return _reset_bound()
+
+
+def _reset_bound() -> bool:
+    return any((bind.get("modmask"), bind.get("key")) == RESET_LISTED for bind in hyprctl("binds") or [])
 
 
 async def plugin() -> ReadyCheck:
@@ -83,12 +112,18 @@ async def require_plugin() -> None:
         raise DeviceUnavailable(check.detail)
 
 
-def hyprctl(request: str) -> dict | None:
-    """Hyprland's JSON answer to ``request``, or None when it gives none, as for a plugin's request it doesn't know or
-    when Hyprland doesn't answer."""
+def hyprctl(request: str) -> dict | list | None:
+    """Hyprland's JSON answer to ``request``, a list for one such as ``binds``, or None when it gives none, as for a
+    plugin's request it doesn't know or when Hyprland doesn't answer."""
     try:
         out = subprocess.run(["hyprctl", "-j", request], capture_output=True, text=True, timeout=TIMEOUT_S)
         answer = json.loads(out.stdout)
     except (OSError, subprocess.TimeoutExpired, ValueError):
         return None
-    return answer if isinstance(answer, dict) else None
+    return answer if isinstance(answer, (dict, list)) else None
+
+
+def lua(code: str) -> None:
+    """Runs ``code`` in Hyprland's Lua config (``hyprctl eval``); what it did is for the caller to ask Hyprland."""
+    with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+        subprocess.run(["hyprctl", "eval", code], capture_output=True, text=True, timeout=TIMEOUT_S)
