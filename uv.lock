@@ -46,7 +46,7 @@ http-server = [
 
 [[package]]
 name = "agentenv-framework"
-version = "0.9.1457"
+version = "0.9.1474"
 source = { editable = "." }
 dependencies = [
     { name = "a2a-sdk" },
@@ -58,6 +58,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "httpx" },
     { name = "huggingface-hub" },
+    { name = "idna" },
     { name = "jsonschema" },
     { name = "litellm" },
     { name = "mcp" },
@@ -230,6 +231,7 @@ requires-dist = [
     { name = "httpx2", marker = "extra == 'vercel'", specifier = ">=2.13.1,<3" },
     { name = "huggingface-hub", specifier = ">=1.0" },
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.100" },
+    { name = "idna", specifier = ">=3.0" },
     { name = "jsonschema", specifier = ">=4.20" },
     { name = "litellm", specifier = ">=1.96.0,<1.97" },
     { name = "mcp", specifier = ">=1.25,<2" },
@@ -275,7 +277,7 @@ provides-extras = ["openenv", "harness", "trl", "nemo-gym", "verl", "skyrl", "mi
 
 [[package]]
 name = "agentenv-framework-protocol"
-version = "0.1.472"
+version = "0.1.489"
 source = { editable = "packages/agentenv-protocol" }
 dependencies = [
     { name = "httpx" },

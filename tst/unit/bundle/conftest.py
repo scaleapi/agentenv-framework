@@ -27,7 +27,7 @@ def builds(monkeypatch, docker_on_path):
 
     def build(dockerfile, context, tag, *, platform, labels=None):
         calls.append({"build": (dockerfile.relative_to(context).as_posix(), listing(context), tag, platform)})
-        held[tag] = (labels or {}).get(host_images._SOURCES_LABEL)
+        held[tag] = (labels or {}).get(host_images.SOURCES_LABEL)
 
     monkeypatch.setattr(host_images, "build_image", build)
     monkeypatch.setattr(host_images, "_built_from", held.get)

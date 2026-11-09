@@ -2,6 +2,8 @@
 path is a key it takes, ``from_toml`` loads what each declared path names, and what it writes references nothing
 else."""
 
+from unittest.mock import MagicMock
+
 import pytest
 
 from agent_env.a2a_agent import A2AAgent
@@ -12,6 +14,7 @@ from agent_env.artifact.store import ArtifactStore
 from agent_env.bundle import parse_bundle
 from agent_env.bundle.authoring import AuthoringContext
 from agent_env.bundle.parse import _EVAL_KEYS, CONFIG_FILES
+from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.envs.website import WebsiteEnv
@@ -52,6 +55,9 @@ _STAND_INS = {  # what a load returns for each type a from_toml asks for
     MCPServerEnv: lambda id: MCPServerEnv(id, 1, docker_image_artifact=_image(f"{id}-image"), environment_name=id),
     WebsiteEnv: lambda id: WebsiteEnv(id, 1, backend_docker_image_artifact=_image(f"{id}-back"),
                                       frontend_docker_image_artifact=_image(f"{id}-front"), environment_name=id),
+    # A computer's name is its tool prefix, too short for a sentinel; it deploys as it would alone, which isn't checked here.
+    ComputerEnv: lambda id: MagicMock(spec=ComputerEnv, id=id, type=ComputerEnv.type, version=1, environment_name="desktop",
+                                      **{"deploy_refusal.return_value": None}),
 }
 
 

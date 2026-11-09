@@ -23,10 +23,8 @@ from agentenv_protocol.transfers import HttpGetGrant, HttpPostPolicyGrant, HttpP
 from agent_env.config.paths import state_root
 from agent_env.store.base import ObjectAlreadyExistsError, ObjectNotFoundError
 
-try:
+if os.name != "nt":
     import fcntl
-except ImportError:
-    fcntl = None
 from agent_env.store.local_state import ensure_state_dir
 from agent_env.store.object_store.local.grant_server import DEFAULT_ADVERTISE_HOST, DEFAULT_ALSO_SERVED, grant_server
 from agent_env.store.object_store.local.tls import check_local_host

@@ -29,7 +29,7 @@ from agent_env.utils.docker.build import build_image, normalize_platform
 
 logger = logging.getLogger(__name__)
 
-_SOURCES_LABEL = "dev.agentenv.sources"
+SOURCES_LABEL = "dev.agentenv.sources"
 _SAVED_PREFIX = "host-images"
 
 
@@ -106,7 +106,7 @@ def build_for(image: DockerImageArtifact, platform: str) -> str:
                 _extract_context(image, context)
                 logger.info(f"Building {tag} for {platform} from its build context on this machine...")
                 build_image(context / image.dockerfile_path, context, tag, platform=platform,
-                            labels={_SOURCES_LABEL: built_from})
+                            labels={SOURCES_LABEL: built_from})
     return tag
 
 
@@ -129,7 +129,7 @@ def _extract_context(image: DockerImageArtifact, context: Path) -> None:
 
 
 def _build(context: Path, dockerfile: str, image_name: str, image_sources: str) -> None:
-    build_image(context / dockerfile, context, image_name, platform=None, labels={_SOURCES_LABEL: image_sources})
+    build_image(context / dockerfile, context, image_name, platform=None, labels={SOURCES_LABEL: image_sources})
 
 
 async def build_here(image: DockerImageArtifact) -> None:
@@ -170,7 +170,7 @@ def _built_from(image_name: str) -> str | None:
     """The sources this machine's image ``image_name`` was built from, or None when there is none."""
     try:
         result = subprocess.run(["docker", "image", "inspect", "--format",
-                                 f'{{{{ index .Config.Labels "{_SOURCES_LABEL}" }}}}', image_name],
+                                 f'{{{{ index .Config.Labels "{SOURCES_LABEL}" }}}}', image_name],
                                 capture_output=True, text=True, errors="replace")
     except FileNotFoundError:  # no docker on PATH, so no image here; a build says so
         return None

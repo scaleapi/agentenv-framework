@@ -24,7 +24,7 @@ from agent_env.store.object_store.local.grant_server import grant_server
 from agent_env.store.routing import namespace_routing
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
-from agent_env.task_step.task_steps.browser_connect_cdp import BrowserConnectCdpTaskStep
+from agent_env.task_step.task_steps.browser.connect_cdp import BrowserConnectCdpTaskStep
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from tst.util.fake_openai import FakeOpenAI, Text, ToolCall

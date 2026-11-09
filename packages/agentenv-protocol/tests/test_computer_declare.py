@@ -18,7 +18,7 @@ pytest.importorskip("PIL")
 from agentenv_protocol.computer import AppDeclaration  # noqa: E402
 from agentenv_protocol.computer._declare import _Stub, _StubModule, declare, main  # noqa: E402
 from agentenv_protocol.computer import (APP_SETTINGS_ENV, ComputerAppEnvironment, Launch, Linux,  # noqa: E402
-                                        install, linux)
+                                        Windows, install, linux, windows)
 from agentenv_protocol.computer import app as app_module  # noqa: E402
 from agentenv_protocol.computer.app import BUILD_SETTINGS  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
@@ -350,10 +350,25 @@ def test_a_declaration_stored_before_each_os_had_its_own_part_reads_as_its_linux
     assert AppDeclaration.model_validate(declared.model_dump(mode="json")) == declared
 
 
-def test_linux_takes_every_field_of_a_linux_install_and_what_install_adds_for_an_os():
+def test_linux_and_windows_take_every_field_of_their_install_and_what_install_adds_for_an_os():
     added = set(inspect.signature(install).parameters) - {"os_type", "spec"}
 
     assert set(inspect.signature(linux).parameters) == set(Linux.model_fields) | added
+    assert set(inspect.signature(windows).parameters) == set(Windows.model_fields) | added
+
+
+def test_a_windows_app_declares_its_install_and_launch_under_windows():
+    @windows(python="requirements.txt", services=[{"name": "sync", "command": "bin/sync.exe"}],
+             launch=Launch(command=["notes"], window={"title": "Notes"}))
+    class Notes(ComputerAppEnvironment):
+        pass
+
+    declared = Notes.declaration()
+
+    assert list(declared.os) == ["windows"]
+    assert declared.os["windows"].install == {"files": ".", "python": "requirements.txt",
+                                              "services": [{"name": "sync", "command": "bin/sync.exe"}]}
+    assert declared.os["windows"].launch == Launch(command=["notes"], window={"title": "Notes"})
 
 
 def test_an_apps_code_needs_only_the_plain_package():
@@ -361,7 +376,7 @@ def test_an_apps_code_needs_only_the_plain_package():
 import importlib.abc, sys
 class Blocked(importlib.abc.MetaPathFinder):
     def find_spec(self, name, path, target=None):
-        if name.split(".")[0] in ("mcp", "av", "PIL", "uvicorn"):
+        if name.split(".")[0] in ("mcp", "av", "PIL", "uvicorn", "websockets"):
             raise ImportError(name)
 sys.meta_path.insert(0, Blocked())
 from agentenv_protocol.computer import ComputerAppEnvironment, Linux, computer_app

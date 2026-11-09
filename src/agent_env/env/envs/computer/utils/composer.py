@@ -25,11 +25,11 @@ import time
 import urllib.parse
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any, Literal
 
-from agentenv_protocol.computer import apps as installed_apps
+from agentenv_protocol.computer.apps import apps_folder
 from agentenv_protocol.computer.app import BUILD_SETTINGS, SOCKET
 
 from agent_env.artifact.artifacts.computer import LOCAL_IMAGE_PREFIX, ComputerArtifact
@@ -37,7 +37,16 @@ from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.config import get_config
 from agent_env.entity.export import Unwritable, checked_path
-from agent_env.env.envs.computer.utils import boot, builder, clashes, gate, macos_vm_bundle, packages, probing
+from agent_env.env.envs.computer.utils import (
+    boot,
+    builder,
+    clashes,
+    gate,
+    macos_vm_bundle,
+    packages,
+    probing,
+    windows_disk,
+)
 from agent_env.env.envs.computer.utils.composed import BUILT, REPOSITORY, Record, failed, now, stale
 from agent_env.env.envs.computer.utils.install import Install
 from agent_env.env.published_images import DISK, DISK_TOOLS_IMAGE, published_disk, published_pinned
@@ -45,7 +54,8 @@ from agent_env.providers.sandbox_providers.host_images import platform_tag
 from agent_env.store.ids import derive_id
 from agent_env.store.image_store.image_contents import image_config, labels
 from agent_env.store.image_store.oci_registry_credentials import names_registry
-from agent_env.store.image_store.registry_api import NoSuchImageError, pin_digest, write_index
+from agent_env.store.image_store.image_store import ImageStore
+from agent_env.store.image_store.registry_api import pin_digest, pin_if_served, write_index
 from agent_env.store.local_state import holding_locks
 from agent_env.utils.docker.build import DockerBuildError
 
@@ -63,9 +73,9 @@ logger = logging.getLogger(__name__)
 #: holds some other way, its labels or how it's built, and leave it for any other, so images aren't built again for
 #: nothing.
 FORMAT = 1
-#: Where a driver's files go in a composed computer, in a folder named for the driver; an app's, under APPS.
+#: Where a driver's files go in a composed computer, in a folder named for the driver; an app's go under its OS's apps
+#: folder (``apps_folder``).
 DRIVERS = "/opt/agentenv/drivers"
-APPS = str(installed_apps.APPS)
 KEY_LABEL = "dev.agentenv.computer-key"
 # What a build installed and whether it was emulated, kept on its image for an env that reuses it.
 INSTALLED_LABEL, EMULATED_LABEL = "dev.agentenv.installed", "dev.agentenv.emulated"
@@ -128,7 +138,9 @@ def compose(env: ComputerEnv, pairs: list[tuple[str, str]] | None = None,
                       for form, arch in pairs if form == "container"}
         futures = {future: ("container", arch) for arch, future in containers.items()}
         futures |= {pool.submit(_composed_disk, env, base, driver, arch, containers.get(arch), builds, progress):
-                    ("disk", arch) for form, arch in pairs if form == "disk"}
+                    ("disk", arch) for form, arch in pairs if form == "disk" and base.os.type != "windows"}
+        futures |= {pool.submit(_composed_windows_disk, env, base, driver, arch, provider, progress): ("disk", arch)
+                    for form, arch in pairs if form == "disk" and base.os.type == "windows"}
         futures |= {pool.submit(_composed_vm_bundle, env, base, driver, arch, provider, progress): ("vm_bundle", arch)
                     for form, arch in pairs if form == "vm_bundle"}
         for future in as_completed(futures):
@@ -163,7 +175,9 @@ def pending(env: ComputerEnv, sandbox_provider: SandboxProvider | None = None,
         if status not in BUILT or stale(record):
             return True
         if status == "unverified":
-            return bool(boot.native_links(provider, arch, form, env.stored_id))
+            return bool(boot.native_links(provider, arch, form, env.stored_id, env.computer.os.type))
+        if form == "disk" and env.computer.os.type == "windows":
+            return windows_disk.expiring(record.get("expires"))
         if form != "vm_bundle":
             return False
         links = boot.native_links(provider, arch, form, env.stored_id)
@@ -174,16 +188,34 @@ def pending(env: ComputerEnv, sandbox_provider: SandboxProvider | None = None,
 
 def unstarted(env: ComputerEnv, sandbox_provider: SandboxProvider, form: str | None = None) -> list[tuple[str, str]]:
     """The pairs a deploy on ``sandbox_provider`` boots that no compose has started, as a run for another sandbox
-    leaves them, or that an agent-env that composes differently recorded."""
-    return _pairs(env, booted_forms(env, sandbox_provider, form),
-                  lambda form, arch, record: record is None or stale(record))
+    leaves them, that an agent-env that composes differently recorded, or that are ``unprobed`` there."""
+    return _pairs(env, booted_forms(env, sandbox_provider, form), lambda form, arch, record: (
+        record is None or stale(record) or _unprobed(env, sandbox_provider, form, arch, record)))
 
 
 def unstarted_or_building(env: ComputerEnv, sandbox_provider: SandboxProvider,
                           form: str | None = None) -> list[tuple[str, str]]:
     """Those, and the ones a compose is building now, which a deploy waits for."""
-    return _pairs(env, booted_forms(env, sandbox_provider, form),
-                  lambda form, arch, record: record is None or stale(record) or record.get("status") == "building")
+    return _pairs(env, booted_forms(env, sandbox_provider, form), lambda form, arch, record: (
+        record is None or stale(record) or record.get("status") == "building"
+        or _unprobed(env, sandbox_provider, form, arch, record)))
+
+
+def unprobed(env: ComputerEnv, sandbox_provider: SandboxProvider,
+             form: str | None = None) -> list[tuple[str, str, dict]]:
+    """Each container a deploy on ``sandbox_provider`` boots that was built but not probed though the deploy runs it
+    natively, as (form, arch, record): one whose probe couldn't boot it for a setting that didn't resolve, say. A deploy
+    composes it again first, which reuses its image and probes it, since a container deploys only once ready."""
+    composed = env.metadata.get("composed", {})
+    return [(name, arch, composed[name][arch]) for name, arch in _pairs(
+        env, booted_forms(env, sandbox_provider, form),
+        lambda form, arch, record: _unprobed(env, sandbox_provider, form, arch, record))]
+
+
+def _unprobed(env: ComputerEnv, sandbox_provider: SandboxProvider, form: str, arch: str, record: dict | None) -> bool:
+    # A disk or VM bundle left unverified deploys already, its first boot probing it (probing.probe_first_boot).
+    return (form == "container" and record is not None and record.get("status") == "unverified" and not stale(record)
+            and bool(boot.native_links(sandbox_provider, arch, form, env.stored_id, env.computer.os.type)))
 
 
 def booted_forms(env: ComputerEnv, sandbox_provider: SandboxProvider, form: str | None = None) -> list[str]:
@@ -191,7 +223,8 @@ def booted_forms(env: ComputerEnv, sandbox_provider: SandboxProvider, form: str 
     link, the one ``boot.first_native`` picks, as the deploy does."""
     forms = gate.forms(env.computer)
     booted = {picked[0] for link in sandbox_provider.links if (picked := boot.first_native(
-        link, [(name, arch) for name in ([form] if form else forms) for arch in env.composed_arches()], env.stored_id))}
+        link, [(name, arch) for name in ([form] if form else forms) for arch in env.composed_arches()], env.stored_id,
+        env.computer.os.type))}
     return [name for name in forms if name in booted]
 
 
@@ -280,7 +313,7 @@ def _composed_vm_bundle(env: ComputerEnv, base: ComputerArtifact, driver: Comput
         parts = [_part(layer, _services(f"driver-{gate.folder_name(driver.id, 'driver')}", layer.install),
                        {"MCP_PORT": driver.port}, protocol, False)]
         parts += [_part(staged, dict(zip(gate.programs(app, base.os.type), [
-            f"venv/bin/python -m agentenv_protocol.computer.serve_app {staged.served}",
+            f"venv/bin/python -m agentenv_protocol.computer.serve_app {shlex.quote(staged.served)}",
             *(service.command for service in staged.install.services)])), {"ENVIRONMENT_NAME": app.environment_name},
             protocol, True) for app, staged in apps]
         if (lock := _vm_bundle_lock(env, base, link, parts, context, arch, progress)) is not None:
@@ -317,6 +350,73 @@ def _composed_vm_bundle(env: ComputerEnv, base: ComputerArtifact, driver: Comput
             if probed["status"] == "failed":
                 asyncio.run(link.delete_vm_bundle(image))
             return probed
+    return attempt.result
+
+
+def _composed_windows_disk(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, arch: str,
+                           provider: SandboxProvider, progress: _Progress) -> dict:
+    """The Windows disk of ``arch``: one of its key the env's image store holds, reused; else composed with this
+    machine's Docker and KVM (``windows_disk``), on its base, this machine's, the store's or installed from Microsoft's
+    media, the driver and each app installed over ssh as a layer on it, packed and pushed to the store under its key,
+    as Linux disks are. Then probed at full (gate 3). All of it holds a lock of its key, which keeps two composes of one
+    key on this machine from breaking each other: the other waits, then reuses it."""
+    pair = f"disk/{arch}"
+    with (_attempting(env, "disk", arch) as attempt,
+          tempfile.TemporaryDirectory(prefix="agentenv-compose-") as work):
+        if not boot.native_links(provider, arch, "disk", env.stored_id, "windows"):
+            raise builder.Unbuildable(f"no link of {' or '.join(type(link).__name__ for link in provider.links)} boots "
+                                      f"windows/{arch} disks, so it can't be composed here: compose it on a Linux machine "
+                                      "with KVM, with the local sandbox provider")
+        build = Path(work) / "build"
+        context = build / "context"
+        context.mkdir(parents=True)
+        protocol = _stage_protocol(context)
+        layer, name = _stage_driver(context, driver, base, {}), gate.folder_name(driver.id, "driver")
+        driver_prefix = windows_disk.DRIVERS / name
+        parts = [_windows_part(layer, driver_prefix, {
+            program: windows_disk.argv(command, driver_prefix)
+            for program, command in _services(f"driver-{name}", layer.install).items()}, {"MCP_PORT": driver.port},
+            protocol)]
+        for app in env.composed_apps():
+            staged = _stage_app(context, app, base, {})
+            prefix = PureWindowsPath(staged.prefix)
+            server = [str(prefix / "venv" / "Scripts" / "python.exe"), "-m", "agentenv_protocol.computer.serve_app",
+                      staged.served]
+            commands = [server, *(windows_disk.argv(service.command, prefix) for service in staged.install.services)]
+            parts.append(_windows_part(staged, prefix, dict(zip(gate.programs(app, base.os.type), commands)),
+                                       {"ENVIRONMENT_NAME": app.environment_name}, protocol))
+        values = env.computer_values()
+        settings = {name: values.get(name, setting.default) for name, setting in base.config.items()
+                    if setting.phase == "build"}
+
+        def say(line: str) -> None:
+            progress.say(f"{pair}: {line}")
+
+        attempt.stage = "base"
+        registry = windows_disk.Registry(_image_store(env), REPOSITORY)
+        disk_gb, user = base.forms.disk.min_disk_gb, base.session.user
+        made = windows_disk.base(_key(recipe=_digest(windows_disk.RECIPE), disk_gb=disk_gb, user=user,
+                                      form="windows-base", format=FORMAT),
+                                 lambda: windows_disk.media(say), disk_gb, user, say, registry)
+        script = windows_disk.write(build, parts, user=user, build_settings=settings,
+                                    image={"base": made.image, "layers": [part.folder for part in parts]})
+        expires = made.expires.isoformat(timespec="seconds")
+        key = attempt.key = _key(base=made.image, base_expires=expires, provision=script, context=_digest(context),
+                                 build_settings=settings, form="disk", arch=arch, format=FORMAT)
+        attempt.stage = "build"
+        with holding_locks([f"windows-disk:{key}"], lambda: progress.at(
+                pair, "waiting", "waiting for the compose of the same disk under way on this machine")):
+            if (pinned := registry.served(windows_disk.disk_names(key).tag)) is not None:
+                progress.at(pair, "reusing", "reusing the disk of the same key, composed earlier")
+                result = {"status": "unverified", "key": key, "image": pinned, "reused": True, "expires": expires,
+                          "built_at": now()}
+            else:
+                progress.at(pair, "composing", "composing on this machine's Docker")
+                pinned = windows_disk.compose(made, build, key,
+                                              {KEY_LABEL: key, windows_disk.EXPIRES_LABEL: expires}, say, registry)
+                result = {"status": "unverified", "key": key, "image": pinned, "reused": False,
+                          "builder": "LocalSandboxProvider", "expires": expires, "built_at": now()}
+            return _probed(env, driver, "disk", arch, result, provider, progress)
     return attempt.result
 
 
@@ -400,12 +500,24 @@ def _part(layer: _Layer, programs: dict[str, str], environment: dict[str, Any], 
                           environment, _venv(layer), spec if _venv(layer) else None, layer.served, layer.steps)
 
 
+def _windows_part(layer: _Layer, prefix: PureWindowsPath, services: dict[str, list[str]],
+                  environment: dict[str, Any], protocol: bool) -> windows_disk.Part:
+    """``layer`` as a Windows disk installs it under ``prefix``: its ``services``' argv by name, with ``environment``,
+    and a venv's protocol as on Linux: this checkout's source, else an app's pinned to this release, which a driver's
+    requirements name themselves."""
+    extra = "[app]" if layer.app else ""
+    spec = (f"{windows_disk.BUILD}\\context\\protocol{extra}" if protocol else
+            f"{_PROTOCOL}{extra}=={importlib.metadata.version(_PROTOCOL)}" if layer.app else None)
+    return windows_disk.Part(layer.folder, prefix, layer.install, services, environment, (spec,) if spec else (),
+                             layer.served, tuple(step for step, _ in layer.steps))
+
+
 def _probed(env: ComputerEnv, driver: ComputerDriverEnv, form: str, arch: str, result: dict,
             sandbox_provider: SandboxProvider, progress: _Progress) -> dict:
     """Gate 3: the build of ``result`` booted on the first link of ``sandbox_provider`` that runs ``arch``'s ``form``
     natively, and probed at ``full`` (``probing.checked``). Still unverified, saying why, when no link does."""
-    if not (links := boot.native_links(sandbox_provider, arch, form, env.stored_id)):
-        how = {"disk": f"boots linux/{arch} disks", "vm_bundle": f"boots macos/{arch} VM bundles"}.get(
+    if not (links := boot.native_links(sandbox_provider, arch, form, env.stored_id, env.computer.os.type)):
+        how = {"disk": f"boots {env.computer.os.type}/{arch} disks", "vm_bundle": f"boots macos/{arch} VM bundles"}.get(
             form, f"runs linux/{arch}")
         return {**result, "reason": f"no link of the sandbox provider {how} natively to probe it"}
     progress.at(f"{form}/{arch}", "probing", f"probing on {type(links[0]).__name__}")
@@ -575,13 +687,19 @@ def _key(**inputs: Any) -> str:
     return "sha256:" + hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
 
 
-def _stored(env: ComputerEnv, key: str) -> tuple[Any, str, str | None]:
+def _stored(env: ComputerEnv, key: str) -> tuple[ImageStore, str, str | None]:
     """The env's image store, the ref there of the image of ``key``, and that ref pinned when the store serves one
     already, for any env that built it."""
+    store = _image_store(env)
+    ref = store.image_ref(REPOSITORY, key.removeprefix("sha256:"))
+    return store, ref, pin_if_served(ref, store.auth(ref))
+
+
+def _image_store(env: ComputerEnv) -> ImageStore:
+    """The env's image store, with the repository its computers' images are kept in."""
     store = get_config().get_image_store_for(env.stored_id)
     store.ensure_repository(REPOSITORY)
-    ref = store.image_ref(REPOSITORY, key.removeprefix("sha256:"))
-    return store, ref, _served(ref, store)
+    return store
 
 
 def _base_disk(base: ComputerArtifact, arch: str) -> tuple[str | None, str]:
@@ -645,8 +763,9 @@ def _base(base: ComputerArtifact, arch: str) -> tuple[str, str]:
 @dataclass(frozen=True)
 class _Layer:
     """A driver's or an app's part of a build: its folder in the build context, its prefix in the image, what it
-    installs, the file of its supervisord programs, and the id of its env. An app's venv also has the protocol's ``app`` extra, for the
-    app's own server, which listens in a folder of the app's the session user owns."""
+    installs, the file of its supervisord programs, and the id of its env. An app's venv also has the protocol's ``app``
+    extra, for the app's own server, which listens in a folder of the app's the session user owns; ``served`` is the
+    ``<file>:<Class>`` it serves, and ``steps`` its install steps, by name and scope."""
 
     folder: str
     prefix: str
@@ -674,16 +793,17 @@ def _stage_app(context: Path, app: ComputerAppEnv, base: ComputerArtifact,
                from_store: dict[str, tuple[str, str]]) -> _Layer:
     """Write the app's install files under ``context/apps/<name>/``, with the values of its build settings the env
     fixes, and its supervisord programs beside them, run under its name: its services and its own server, which serves
-    its class from its venv and launches the app. Its folder under ``APPS`` is named for its environment name."""
+    its class from its venv and launches the app. Its folder under its OS's apps folder is named for its environment
+    name."""
     install, name = app.install[base.os.type], gate.app_folder(app)
     file, _, cls = app.module.partition(":")
-    served = shlex.quote(f"{PurePosixPath(file).relative_to(install.files)}:{cls}")
-    layer = _Layer(f"apps/{name}", f"{APPS}/{name}", install, f"agentenv-app-{name}.conf", app.id, app=True,
-                   served=served,
+    served = f"{PurePosixPath(file).relative_to(install.files)}:{cls}"
+    layer = _Layer(f"apps/{name}", str(apps_folder(base.os.type) / name), install, f"agentenv-app-{name}.conf", app.id,
+                   app=True, served=served,
                    steps=tuple((step.name, step.scope) for step in app.declaration.install_steps
                                if step.os is None or base.os.type in step.os))
     programs = dict(zip(gate.programs(app, base.os.type), [
-        f"venv/bin/python -m agentenv_protocol.computer.serve_app {served}",
+        f"venv/bin/python -m agentenv_protocol.computer.serve_app {shlex.quote(served)}",
         *(service.command for service in install.services)]))
     _stage(context, layer, f"app {app.id}", app.files, programs, {"ENVIRONMENT_NAME": app.environment_name},
            from_store)
@@ -766,7 +886,8 @@ def _build_settings(env: ComputerEnv, base: ComputerArtifact) -> dict[str, Any]:
 def _dockerfile(source: str, layers: list[_Layer], base: ComputerArtifact, build_settings: dict,
                 lock: packages.Lock | None) -> str:
     """The composed image's Dockerfile but its key's label, which the key is a digest of: the build-phase settings, the
-    lock's .debs, then each layer's files under its prefix, its venv beside them from the lock's wheels, its run scripts
+    lock's .debs, mounted into the RUN that installs them, then each layer's files under its prefix, its venv beside
+    them from the lock's wheels, mounted the same way, its run scripts
     and an app's install steps, each run as root or the session user, every install with the network closed; then its
     programs, and an app's server's folder owned by the session user."""
     user = base.session.user
@@ -774,8 +895,8 @@ def _dockerfile(source: str, layers: list[_Layer], base: ComputerArtifact, build
              *(f"ENV AGENTENV_SETTING_{name.upper()}={json.dumps(str(value))}" for name, value in build_settings.items())]
     if lock is not None and lock.apt:
         debs = f"/tmp/agentenv-{packages.STAGED_APT}"
-        lines += [f"COPY {packages.STAGED_APT}/ {debs}/",
-                  f"RUN --network=none apt-get install -y --no-install-recommends {debs}/*.deb && rm -rf {debs}"]
+        lines.append(f"RUN --network=none {_mounted(packages.STAGED_APT, debs)} apt-get install -y "
+                     f"--no-install-recommends {debs}/*.deb")
     for layer in layers:
         prefix = layer.prefix
         lines.append(f"COPY {layer.folder}/ {prefix}/")
@@ -783,10 +904,9 @@ def _dockerfile(source: str, layers: list[_Layer], base: ComputerArtifact, build
             staged = packages.staged_wheels(layer.folder)
             wheels = f"/tmp/agentenv-{staged}"
             if lock is not None and lock.wheels.get(layer.folder):
-                lines += [f"COPY {staged}/ {wheels}/",
-                          f"RUN --network=none python3 -m venv {prefix}/venv && {prefix}/venv/bin/pip install "
-                          f"--no-index --no-deps {wheels}/*.whl && {prefix}/venv/bin/pip list --format=json > "
-                          f"{prefix}/installed.json && rm -rf {wheels}"]
+                lines.append(f"RUN --network=none {_mounted(staged, wheels)} python3 -m venv {prefix}/venv && "
+                             f"{prefix}/venv/bin/pip install --no-index --no-deps {wheels}/*.whl && {prefix}/venv/bin/pip "
+                             f"list --format=json > {prefix}/installed.json")
             else:
                 lines.append(f"RUN --network=none python3 -m venv {prefix}/venv && {prefix}/venv/bin/pip list "
                              f"--format=json > {prefix}/installed.json")
@@ -803,12 +923,18 @@ def _dockerfile(source: str, layers: list[_Layer], base: ComputerArtifact, build
     return "\n".join(lines) + "\n"
 
 
+def _mounted(source: str, target: str) -> str:
+    """A RUN's mount of the build context's ``source`` at ``target``, read-only, so files an install reads once never
+    stay in a layer of the image, as a COPY's would after the next RUN removed them."""
+    return f"--mount=type=bind,source={source},target={target}"
+
+
 def _runs(layer: _Layer) -> list[tuple[str, str]]:
     """The commands of ``layer``'s run scripts and its install steps, each with the scope it runs as: the only steps of
     a build that write outside the layer's folder."""
     return [*((run.scope, f"cd {layer.prefix} && {shlex.quote('./' + run.script)}") for run in layer.install.run or []),
             *((scope, f"cd {layer.prefix} && venv/bin/python -m agentenv_protocol.computer.run_install_step "
-                      f"{layer.served} {step}") for step, scope in layer.steps)]
+                      f"{shlex.quote(layer.served)} {step}") for step, scope in layer.steps)]
 
 
 def _as(scope: str, user: str, run: str) -> list[str]:
@@ -833,14 +959,6 @@ def _wants(layers: list[_Layer], protocol: bool) -> list[packages.Want]:
     return wants
 
 
-def _served(ref: str, store) -> str | None:
-    """``ref`` pinned to the digest the image store serves for it, or None when it serves none."""
-    try:
-        return pin_digest(ref, store.auth(ref))
-    except NoSuchImageError:
-        return None
-
-
 def _computer(env: ComputerEnv, base: ComputerArtifact, built: dict[str, str], disks: dict[str, str],
               bundles: dict[str, str]) -> dict | None:
     """Write the env's computer over the images ``built``, by arch, joined into one index in the env's image store, signed
@@ -850,6 +968,11 @@ def _computer(env: ComputerEnv, base: ComputerArtifact, built: dict[str, str], d
     config = {name: setting.model_dump() for name, setting in base.config.items()}
     for name, value in env.computer_values().items():
         config[name]["default"] = value
+    if base.os.type == "windows":
+        if not disks:
+            return None
+        return _written(env, base, [arch for arch in base.arch if arch in disks], config,
+                        {"disk": base.forms.disk.model_dump(exclude={"image"})})
     if base.forms.vm_bundle is not None:
         if not bundles:
             return None

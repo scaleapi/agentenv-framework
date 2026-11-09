@@ -17,6 +17,7 @@ from agent_env.env import Env
 from agent_env.env.envs.computer.utils.composed import composition
 from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.envs.computer.env import ComputerEnv
+from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
 from tst.unit.bundle._support import layout, local_builds
 from tst.unit.bundle.computer_app_env_test import APP, TOML as APP_TOML
@@ -207,4 +208,38 @@ def test_a_computer_env_folder_that_declares_what_cant_compose_is_refused_naming
         materialize(plan, build_here=local_builds(plan))
 
     assert any(line.startswith("envs/desktop") and problem in line for line in refused.value.problems), refused.value
+    assert composed == []
+
+
+def _office(root, computers):
+    """A bundle whose multi env ``office`` holds the computer env folders ``computers``, by folder."""
+    return layout(root, {**{f"envs/{folder}/env.toml": toml for folder, toml in computers.items()},
+                         "envs/office/env.toml": f'type = "multi"\ncomputer_envs = {json.dumps(list(computers))}\n',
+                         "tasks/t.json": json.dumps([{"id": "load", "type": "load_artifact", "env_id": "office",
+                                                      "artifact_id": "notes"}]),
+                         "artifacts/notes/notes.txt": "a note\n"})
+
+
+def test_a_multi_env_holding_a_computer_is_written_naming_it_whatever_sandbox_a_deploy_will_give_it(tmp_path, composed):
+    plan = _plan(_office(tmp_path / "desk", {"desktop": DESKTOP}))
+    materialize(plan, build_here=local_builds(plan))
+
+    env = Env.get(f"{plan.bundle.bundle.id_root}/office")
+    assert isinstance(env, MultiEnv) and [computer.id for computer in env.computer_envs] == [
+        f"{plan.bundle.bundle.id_root}/desktop"]
+
+
+@pytest.mark.parametrize("computers, problem", [
+    ({"desktop-number-one": DESKTOP}, "envs/office: computer_envs: computer 'desktop-number-one' serves its tools under its "
+                                      "name and '_': tool prefix 'desktop-number-one_' is 19 characters, and a tool prefix "
+                                      "is at most 16"),
+    ({"desktop": DESKTOP, "laptop": 'environment_name = "desktop"\n' + DESKTOP},
+     "envs/office: computer_envs: 'desktop' names 2 of its child envs, and the gateway knows a computer by its name alone"),
+], ids=["too-long", "twice"])
+def test_a_multi_env_whose_gateway_cant_tell_its_computers_apart_by_name_is_refused_before_any_write(tmp_path, composed,
+                                                                                                    computers, problem):
+    with pytest.raises(BundleError) as refused:
+        _plan(_office(tmp_path / "desk", computers))
+
+    assert problem in refused.value.problems, refused.value
     assert composed == []
