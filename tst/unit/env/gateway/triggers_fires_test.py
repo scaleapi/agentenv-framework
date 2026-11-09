@@ -251,3 +251,21 @@ async def test_a_fire_cancelled_before_it_began_leaves_no_count(monkeypatch):
     await asyncio.sleep(0)
 
     assert trig["running"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_fire_advanced_to_its_resumes_at_goes_on_though_its_delay_ends_between_microseconds(monkeypatch):
+    """On a frozen clock, nothing else moves time: an advance to the rounded resumes_at must be enough."""
+    bob = _Executor(monkeypatch)
+    bob.release()
+    engine, clock, _ = _engine()
+    engine.register(_reply_trigger(delay={"dist": "exp", "mean": "PT40M", "seed": 30}))
+    engine.on_tool_call("default", "send_text", {}, _result())
+    await _until(lambda: _row(engine, "reply")["waits"])
+    resumes_at = _row(engine, "reply")["resumes_at"]
+    assert resumes_at == "2026-03-02T00:30:58.882035Z"  # the draw is 1858.882035... s
+
+    clock.advance(resumes_at)
+    engine.clock_advanced()
+    await _until(lambda: _row(engine, "reply")["status"] == "armed")
+    assert len(bob.calls) == 1

@@ -54,6 +54,8 @@ _BARRIER_KEYS = ("at", "timeout_seconds")
 _DROP = object()  # an unresolved `${x?}` used as a whole value: drop the key / element
 # Real seconds between re-reads of the clock while waiting out virtual time, so a rate change, re-arm or clear is followed.
 _VIRTUAL_RECHECK_S = 5.0
+# The clock's resolution: virtual times are microseconds.
+_VIRTUAL_RESOLUTION_S = 1e-6
 # Seconds an executor call waits to connect, and for a task poll's answer.
 _EXECUTOR_HTTP_TIMEOUT_S = 30.0
 # An allowlist, not a size bound: identifier/metadata keys only, since bodies and addresses are PII.
@@ -1675,7 +1677,10 @@ class TriggerEngine:
         frozen) or jumps ahead. Given the clock's ``generation``, stop early once a re-arm or clear moves it on."""
         clock = self._gw._clock
         until = clock.elapsed() + seconds
-        while (left := until - clock.elapsed()) > 0 and (generation is None or clock.generation == generation):
+        # Times are kept to the microsecond, so an advance to a waiting fire's resumes_at can fall a hair short of it;
+        # under a microsecond left is reached, or a frozen clock would hold the fire forever.
+        while ((left := until - clock.elapsed()) >= _VIRTUAL_RESOLUTION_S
+               and (generation is None or clock.generation == generation)):
             rate = clock.rate
             await self._nap(min(left / rate, _VIRTUAL_RECHECK_S) if rate else _VIRTUAL_RECHECK_S)
 
