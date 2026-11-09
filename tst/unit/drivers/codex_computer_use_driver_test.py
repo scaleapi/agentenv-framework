@@ -286,3 +286,19 @@ async def test_a_repl_left_idle_is_closed_without_another_call_and_its_session_s
         after = _text(await session.call_tool("js", {"code": "get"}, meta={SESSION_META_KEY: "a"}))
 
     assert before.startswith("1 in ") and closed and after.startswith("None in ")
+
+
+@pytest.mark.asyncio
+async def test_calls_a_session_makes_together_while_another_repl_closes_share_one_repl(
+        module, monkeypatch, tmp_path):
+    monkeypatch.setattr(module, "MAX_REPLS", 1)
+    async with mcp_session(_driver(module, monkeypatch)) as session:
+        async def js(caller: str, code: str) -> str:
+            return _text(await session.call_tool("js", {"code": code}, meta={SESSION_META_KEY: caller}))
+
+        await js("a", "set a")
+        await asyncio.gather(js("b", "set b"), js("b", "get"))
+        after = await js("b", "get")
+
+    pids = {call["pid"] for call in _calls(tmp_path) if call["arguments"]["code"] in ("set b", "get")}
+    assert pids == {int(after.rpartition(" in ")[2])} and after.startswith("b in ")

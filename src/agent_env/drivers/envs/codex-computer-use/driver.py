@@ -95,6 +95,8 @@ class CodexComputerUse(MacOSDriver):
         #: Each session's REPL, the least recently used first.
         self._repls: dict[str | None, _Repl] = {}
         self._sweeper: asyncio.Task | None = None
+        #: The closes under way, held so they aren't collected before they end.
+        self._closing: set[asyncio.Task] = set()
 
     def forwarded_tools(self) -> list[ForwardedTool]:
         return [ForwardedTool(EnvironmentTool(name=t["name"], description=t["description"],
@@ -116,10 +118,11 @@ class CodexComputerUse(MacOSDriver):
 
     async def _forward(self, tool: str, /, **arguments: Any) -> CallToolResult:
         """A call to one of Codex's tools on the caller's own REPL, answered as Codex answers it. Other sessions' REPLs
-        left idle, or past the most kept, are closed first."""
-        repl = self._repls.pop(caller := ToolContext.current().caller.session, None)
-        await self._evict(keep=MAX_REPLS - 1)
-        repl = self._repls[caller] = repl or _Repl(self._server)
+        left idle, or past the most kept, are closed. Nothing here awaits before the call is queued, so calls a session
+        makes together find one REPL."""
+        repl = self._repls.pop(caller := ToolContext.current().caller.session, None) or _Repl(self._server)
+        self._evict(keep=MAX_REPLS - 1)
+        self._repls[caller] = repl
         if self._sweeper is None or self._sweeper.done():
             self._sweeper = asyncio.create_task(self._sweep())
         try:
@@ -128,20 +131,24 @@ class CodexComputerUse(MacOSDriver):
             return CallToolResult(isError=True, content=[TextContent(type="text", text=(
                 f"Codex's cua_repl failed before it answered, so {tool} may have run: {type(e).__name__}: {e}"))])
 
-    async def _evict(self, keep: int = MAX_REPLS) -> None:
-        """Close the REPLs idle for ``IDLE_S`` and, past ``keep``, the least recently used, none of them in a call."""
+    def _evict(self, keep: int = MAX_REPLS) -> None:
+        """Take out the REPLs idle for ``IDLE_S`` and, past ``keep``, the least recently used, none of them in a call,
+        and close them in the background."""
         now = time.monotonic()
-        idle = [caller for caller, repl in self._repls.items() if not repl.busy and now - repl.used > IDLE_S]
-        spare = [caller for caller, repl in self._repls.items() if not repl.busy and caller not in idle]
-        closing = [self._repls.pop(caller) for caller in [*idle, *spare[:max(0, len(self._repls) - len(idle) - keep)]]]
-        for repl in closing:
-            await repl.close()
+        free = [caller for caller, repl in self._repls.items() if not repl.busy]
+        idle = [caller for caller in free if now - self._repls[caller].used > IDLE_S]
+        over = max(0, len(self._repls) - len(idle) - keep)
+        spare = [caller for caller in free if caller not in idle][:over]
+        for caller in [*idle, *spare]:
+            closing = asyncio.create_task(self._repls.pop(caller).close())
+            self._closing.add(closing)
+            closing.add_done_callback(self._closing.discard)
 
     async def _sweep(self) -> None:
         """Close idle REPLs every ``SWEEP_S`` while there are any."""
         while self._repls:
             await asyncio.sleep(SWEEP_S)
-            await self._evict()
+            self._evict()
 
     @contextlib.asynccontextmanager
     async def _server(self) -> AsyncIterator[ClientSession]:
