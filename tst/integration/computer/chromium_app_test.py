@@ -2,9 +2,10 @@
 machine's arch ready with it; deployed on two start_urls, it shows one Chromium window, on the first, with no first-run,
 sign-in or permission window beside it, and the second a tab away, which an agent reaches with Control+Tab; its managed
 policies are where Chrome for Testing reads them; and a reset of its data clears its profile and opens it again. As a
-website browser it runs Chrome itself with agentenv's flags on its debugging pipe, keeps its shared memory in files on
-Docker's 64 MiB /dev/shm, answers location prompts and leaves notification ones to ask as the deploy says, and its menu
-launcher, run while it runs, opens another window of it with no second copy, its cache kept and it still ready; and the
+website browser it runs Chrome itself with agentenv's flags on its debugging pipe, its computer's /dev/shm the 1 GiB it
+asks for, as a container or a disk, so Chrome keeps its shared memory there, a reset_env too, answers location prompts
+and leaves notification ones to ask as the deploy says, and its menu launcher, run while it runs, opens another window
+of it with no second copy, its cache kept and it still ready; and the
 desktop that gives it French defaults deploys with them, a deploy's time zone over them, each recorded; and the record
 its control connection keeps lists a tab an agent opened and closed, a download with its size and sha256, a confirm()
 accepted for it, and each launch, exit and stop with its cause, across a kill and a restart of its server; and browser/v1 reads and sets its
@@ -29,16 +30,18 @@ from agentenv_protocol import client as protocol_v1
 
 from agent_env.env import Env
 from agentenv_protocol.types import WELL_KNOWN_PATH
-from agentenv_protocol.website_browser import BROWSER
+from agentenv_protocol.website_browser import BROWSER, SHM_MIN_BYTES
 from tst.integration.computer.browser_data import SITE as DATA_SITE, check_browser_data
 from tst.integration.computer.browser_steps import check_browser_steps
 from tst.integration.computer.browser_state import check_browser_state
 from tst.integration.computer.start_tabs import host_pages, tabs_of
 from tst.integration.computer.website_browser_test import _app, _browser_process, _keys, _ready
+from tst.util.capabilities import skip_without_kvm
 from agent_env.env.envs.computer.utils import inside
 from agent_env.store.routing import namespace_routing
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
@@ -48,6 +51,8 @@ ARCH = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64
 ALPHA = "data:text/html,<title>Alpha page</title><h1>Alpha</h1>"
 BRAVO = "data:text/html,<title>Bravo page</title><h1>Bravo</h1>"
 LOOPBACK = "http://127.0.0.1:8766/"
+#: The size of the computer's /dev/shm, in bytes, as the browser base measures it.
+SHM_BYTES = "import os; s = os.statvfs('/dev/shm'); print(s.f_frsize * s.f_blocks)"
 # What chromium's menu launcher runs.
 LAUNCHER = ("/opt/agentenv/apps/chromium/venv/bin/python -m agentenv_protocol.computer.launch "
             "/opt/agentenv/apps/chromium")
@@ -186,14 +191,39 @@ async def test_it_runs_chrome_itself_on_its_pipe_answers_prompts_as_the_deploy_s
     argv = browser["argv"]
     assert argv[0].endswith("chromium/chrome/chrome") and argv[1:3] == ["--no-sandbox", "--class=Chromium"]
     assert argv[3].endswith("/.config/chromium") and argv[4].endswith("/.cache/chromium")
-    assert argv[5:10] == ["--remote-debugging-pipe", "--no-first-run", "--no-default-browser-check", "--lang=en-US",
-                          "--disable-dev-shm-usage"] and argv[10:] == ["about:blank"]
+    assert argv[5:9] == ["--remote-debugging-pipe", "--no-first-run", "--no-default-browser-check", "--lang=en-US"]
+    assert argv[9:] == ["about:blank"]
     assert browser["listening"] == 0
     assert permissions == ["denied prompt - Google Chrome for Testing"]
     assert launched["exit_code"] == 0 and len(windows) == 2 and after["pid"] == browser["pid"]
     assert kept["exit_code"] == 0 and readiness["ready"] is True, readiness
     recorded = deployed.metadata["computer"]["app_settings"]["chromium"]
     assert (recorded["geolocation"], recorded["notifications"], recorded["start_urls"]) == ("deny", "ask", [LOOPBACK])
+    assert not report.failed
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("form", ["container", pytest.param("disk", marks=skip_without_kvm())])
+async def test_its_computer_gets_the_shared_memory_it_asks_for_so_chrome_keeps_it_there_and_a_reset_env_keeps_it(
+        chromium_desktop, form):
+    with namespace_routing():
+        deployed = await Env.get(chromium_desktop.id).deploy(env_params={"form": form})
+        context = TaskStepContext(deployed_envs=[deployed])
+        sizes, in_files = [], []
+        try:
+            for reset in (False, True):
+                if reset:
+                    context = await ResetEnvTaskStep(id="reset", version=None, env_id=chromium_desktop.id,
+                                                     fail_task_on_error=True).execute(context)
+                sizes.append(int((await inside.run(deployed, ["python3", "-c", SHM_BYTES], timeout_s=30))["stdout"]))
+                in_files.append("--disable-dev-shm-usage" in (await _browser_process(deployed))["argv"])
+        finally:
+            report = await teardown_run(context)
+
+    recorded = deployed.metadata["computer"]
+    assert (recorded["form"], recorded["shm_mb"]) == (form, SHM_MIN_BYTES >> 20)
+    assert sizes == [SHM_MIN_BYTES, SHM_MIN_BYTES] and in_files == [False, False]
     assert not report.failed
 
 

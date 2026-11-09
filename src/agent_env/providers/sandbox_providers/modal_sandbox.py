@@ -233,6 +233,9 @@ class ModalSandboxProvider(SandboxProvider):
     CONTAINER_ACCEPTS = Accepts.NAME_OR_CONTEXT
     PRIVATE_NETWORK = True
     WEBSOCKETS = True
+    # A sandbox's /dev/shm is a tmpfs as large as its host's memory, more than an app can ask for, which create_container
+    # can't size: Modal's SDK has no option for it.
+    SHARED_MEMORY = True
 
     @classmethod
     def supports_network_policy(cls, policy: NetworkPolicy) -> bool:
@@ -326,6 +329,7 @@ class ModalSandboxProvider(SandboxProvider):
         expose_externally: bool = True,
         vnc_port: Optional[int] = None,
         private_network: bool = False,
+        shm_mb: Optional[int] = None,
     ) -> Sandbox:
         # The private network is i6pn, Modal's network between sandboxes, in the configured region.
         i6pn = private_network

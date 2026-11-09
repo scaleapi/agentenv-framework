@@ -54,12 +54,14 @@ class Record:
                 if result.get("status") in BUILT and not stale(result)}
 
     def computer(self, ref: dict | None) -> None:
-        """Record the env's computer, with the images it was written over, the disks' and the VM bundles' apart."""
+        """Record the env's computer, with the images it was written over, the disks' and the VM bundles' apart, and the
+        shared memory its apps need."""
         if ref is not None:
             with self.lock:
-                disks, bundles = self.built("disk"), self.built("vm_bundle")
+                disks, bundles, shm_mb = self.built("disk"), self.built("vm_bundle"), self.env.shm_mb()
                 self.env.merge_metadata({"computer": {**ref, "images": self.built(), **({"disks": disks} if disks else {}),
-                                                      **({"vm_bundles": bundles} if bundles else {})}})
+                                                      **({"vm_bundles": bundles} if bundles else {}),
+                                                      **({"shm_mb": shm_mb} if shm_mb else {})}})
 
     def _merge(self, results: dict[tuple[str, str], dict]) -> None:
         with self.lock:

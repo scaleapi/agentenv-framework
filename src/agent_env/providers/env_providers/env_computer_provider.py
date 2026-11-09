@@ -38,6 +38,8 @@ from agent_env.env.envs.computer.utils.boot import (
     recorded_app_settings,
     recorded_settings,
     settings_environment,
+    shm_environment,
+    shm_kwargs,
 )
 from agent_env.env.gateway.constants import WELL_KNOWN_PATH
 from agent_env.providers.env_providers.env_provider import DeployRefused, _SandboxEnvironmentProvider
@@ -167,6 +169,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         app_settings = recorded_app_settings(env.composed_apps(), computer_params.app_settings(env, params.app_settings),
                                              platform_of(env.computer.os))
         policy = _reaching(NetworkPolicy.from_dict(env.network) if env.network else None, sandbox_provider, reach)
+        shm_mb = env.shm_mb()
         booted = await boot(
             sandbox_provider, image=build["image"], port=env.driver.port, network_policy=policy, token=token,
             environment=_environment(env, computer, values, params, tool_prefix, sites_later=sites_later),
@@ -174,7 +177,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
             attribution=attribution,
             disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb,
             ready_s=ready_timeout(env.composed_apps(), platform_of(env.computer.os)), form=form,
-            held=bool(params.site_routing), os_type=env.computer.os.type)
+            held=bool(params.site_routing), os_type=env.computer.os.type, shm_mb=shm_mb)
         self._container_sandboxes.append(booted.sandbox)
         self._environment_sandboxes[name] = booted.sandbox
         try:
@@ -190,6 +193,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
                     "computer": {"id": env.metadata["computer"]["id"], "version": env.metadata["computer"]["version"]},
                     "port": env.driver.port, "display": values.get("resolution"), "network": env.network,
                     "computer_settings": recorded_settings(computer, values),
+                    **({"shm_mb": shm_mb} if shm_mb else {}),
                     **({"app_settings": app_settings} if app_settings else {}),
                     **({"tool_prefix": tool_prefix} if tool_prefix else {}),
                     "env_params": params.model_dump(exclude_defaults=True)}},
@@ -214,14 +218,16 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         await end_recordings(deployed, "reset")
         sandbox_provider = build_sandbox_provider(deployed.sandbox_type)
         sandbox = await sandbox_provider.get_sandbox(deployed.sandbox_id)
+        shm_mb = record.get("shm_mb")
         environment = {**_environment(env, computer, values, params, record.get("tool_prefix", "")),
-                       **control_environment(deployed.control_token)}
+                       **control_environment(deployed.control_token),
+                       **shm_environment(record.get("form", "container"), env.computer.os.type, shm_mb)}
         try:
             if record.get("form") in ("disk", "vm_bundle"):
                 await sandbox_provider.reset_vm(sandbox, image=record["image"], env=environment)
             else:
                 await sandbox_provider.reset_container(sandbox, image_name=record["image"], port=env.driver.port,
-                                                       env=environment)
+                                                       env=environment, **shm_kwargs(sandbox_provider, shm_mb))
         except NotImplementedError as e:  # a reset the env supports, which this provider can't carry out
             raise RuntimeError(f"'{env.id}' can't be reset on {type(sandbox_provider).__name__}: {e}") from None
         card = await ready(deployed.environment_url, ready_timeout(env.composed_apps(), platform_of(env.computer.os)),

@@ -780,8 +780,10 @@ class MailApp(ComputerAppEnvironment):
   installed into the venv every app gets beside them; `sources`, extra apt repositories
   (`AptSource`, with a key file in the folder); `downloads`, files fetched by URL and checked by
   sha256 (`Download`); `run`, scripts of the folder run as root or the session user (`RunScript`);
-  `services`, programs the computer's init runs from the prefix as the session user; and `ports`,
-  those it listens on. Packages, requirements and downloads are resolved and fetched once, when the
+  `services`, programs the computer's init runs from the prefix as the session user; `ports`,
+  those it listens on; and `shm_mb`, the shared memory it needs in `/dev/shm`, in MiB, which a
+  computer of it gets, the most its apps ask for, where its sandbox can size it (Chrome, say, which
+  keeps its renderers' memory there). Packages, requirements and downloads are resolved and fetched once, when the
   computer env is put, and every build installs only those stored files, with the network closed.
   Each value is checked as the class is defined: a URL, a sha256, a path that stays in the folder.
   Installs are exact: apt installs each package without its recommends, and the venv gets exactly
