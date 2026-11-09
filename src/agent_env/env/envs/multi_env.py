@@ -360,6 +360,9 @@ class MultiEnv(Env):
             env_fingerprint=env_fingerprint,
         ) if can_restore else None
         restored_from_snapshot = False
+        # The universe's environments, read at most once, and only for a load that needs them: a restore reads none
+        # unless the multi env has computers to load.
+        environments: Optional[list[EnvironmentArtifact]] = None
         snapshot_baked: bool | None = None
         snapshot_bake_error: str | None = None
 
@@ -374,7 +377,8 @@ class MultiEnv(Env):
             import asyncio
             import time
             # The services' alone: the computers' load after them, in each computer's own order.
-            environment_artifacts = [artifact for artifact in environment_universe_artifact.get_environment_artifacts()
+            environments = environment_universe_artifact.get_environment_artifacts()
+            environment_artifacts = [artifact for artifact in environments
                                      if self._computers.holding(artifact.environment_name) is None]
             total = len(environment_artifacts)
             # WARNING, not info: this is the path that can FAIL. Every service is
@@ -464,8 +468,11 @@ class MultiEnv(Env):
                         for i, name, e in failed
                     )
                 )
-        # Every time, never skipped as a resumed service is: the changelog a resume reads doesn't see a computer's files.
-        await self._computers.load(environment_universe_artifact.get_environment_artifacts())
+        if self.computer_envs:
+            # Every time, never skipped as a resumed service is: the changelog a resume reads doesn't see a computer's
+            # files.
+            await self._computers.load(environments if environments is not None
+                                       else environment_universe_artifact.get_environment_artifacts())
         if self._instance_id:
             env_store.update_env_instance_environment_universe(self._instance_id, environment_universe_artifact.id, environment_universe_artifact.version)
 
