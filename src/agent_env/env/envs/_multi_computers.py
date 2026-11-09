@@ -111,12 +111,12 @@ class Computers:
         await _all(self._owner, "load into", [env for env, _ in loads],
                    [env.load_environments(held) for env, held in loads])
 
-    async def reset(self, deployed: DeployedEnv) -> None:
-        """Reset each computer ``deployed``, the multi env's record, holds, from its own record, as it resets alone."""
+    def resets(self, deployed: DeployedEnv) -> list[tuple[str, Awaitable[None]]]:
+        """Each computer ``deployed``, the multi env's record, holds, by name, with its reset from its own record, as it
+        resets alone; none is awaited yet."""
         records = getattr(deployed, "child_envs", None) or {}
-        envs = [env for env in self.envs if env.environment_name in records]
-        await _all(self._owner, "reset", envs,
-                   [env.reset(DeployedEnv.from_dict(records[env.environment_name])) for env in envs])
+        return [(env.environment_name, env.reset(DeployedEnv.from_dict(records[env.environment_name])))
+                for env in self.envs if env.environment_name in records]
 
     def deployer(self, child_envs: Optional[dict], *, sandbox_type: str | None, ttl_seconds: int,
                  attribution: Optional[Attribution]) -> Callable[[Optional[str]], Awaitable[list[ExternalChild]]]:

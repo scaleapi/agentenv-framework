@@ -447,28 +447,87 @@ async def test_a_universe_loads_each_computers_environments_after_the_services_e
     assert sorted(log[len(services):]) == [("loaded", "desktop", ["notes", "desktop"]), ("loaded", "laptop", ["laptop"])]
 
 
-@pytest.mark.asyncio
-async def test_reset_resets_each_computer_from_its_own_record_and_a_multi_env_without_one_has_none(gateway, providers):
-    deployed = await _multi(FakeComputer("desktop"), FakeComputer("laptop")).deploy()
-    log = []
-    stored = DeployedEnv.from_dict(dataclasses.asdict(deployed))
+@pytest.fixture
+def server_resets(monkeypatch):
+    """Each MCP server's and website's reset, as (name, mcp) in ``log``, attached to the multi env's record: False, as
+    for one serving no reset, for a name in ``unserved``, and raising for one in ``failing``; the instance whose loads
+    are forgotten in ``forgotten``."""
+    resets = SimpleNamespace(log=[], unserved=set(), failing={}, forgotten=[], attached=[])
 
-    await _multi(FakeComputer("desktop", log=log), FakeComputer("laptop", log=log)).reset(stored)  # as reset_env gets it
+    async def reset(env, *, mcp):
+        inspect.signature(_deployment.reset_server_data).bind(env, mcp=mcp)
+        await asyncio.sleep(0.01)
+        resets.log.append((env.environment_name, mcp, env._deployed.instance_id))
+        if env.environment_name in resets.failing:
+            raise resets.failing[env.environment_name]
+        return env.environment_name not in resets.unserved
+
+    async def attached(cls, deployed):
+        resets.attached.append(deployed.instance_id)
+        env = _multi(mcp=["slack"], websites=["shop"])
+        for child in [*env.mcp_server_envs, *env.website_envs]:
+            child._deployed = deployed
+        return env
+
+    monkeypatch.setattr("agent_env.env.envs.multi_env.reset_server_data", reset)
+    monkeypatch.setattr(MultiEnv, "_attached", classmethod(attached))
+    store = MagicMock(clear_loaded_environments=resets.forgotten.append)
+    monkeypatch.setattr("agent_env.env.envs.multi_env.get_env_instance_store", lambda: store)
+    return resets
+
+
+async def _stored(*computers) -> DeployedEnv:
+    """The record of a multi env with ``computers``, as reset_env reads it back."""
+    deployed = await _multi(*computers, mcp=["slack"], websites=["shop"]).deploy()
+    return DeployedEnv.from_dict({**dataclasses.asdict(deployed), "instance_id": "inst-1"})
+
+
+@pytest.mark.asyncio
+async def test_reset_resets_every_child_env_at_once_each_as_it_resets_alone_and_forgets_what_loads_put_in(
+        gateway, providers, server_resets):
+    stored, log = await _stored(FakeComputer("desktop"), FakeComputer("laptop")), []
+
+    await _multi(FakeComputer("desktop", log=log), FakeComputer("laptop", log=log), mcp=["slack"],
+                 websites=["shop"]).reset(stored)
 
     assert sorted(log) == [("reset", "desktop", "sb-desktop"), ("reset", "laptop", "sb-laptop")]
-    with pytest.raises(NotImplementedError):
-        await _multi(mcp=["slack"]).reset(stored)
+    assert sorted(server_resets.log) == [("shop", False, "inst-1"), ("slack", True, "inst-1")]
+    assert server_resets.attached == ["inst-1"] and server_resets.forgotten == ["inst-1"]
 
 
 @pytest.mark.asyncio
-async def test_a_computer_that_fails_to_reset_fails_the_reset_once_every_computer_has_reset(gateway, providers, caplog):
-    stored = await _multi(FakeComputer("desktop"), FakeComputer("laptop")).deploy()
-    log = []
-    env = _multi(FakeComputer("desktop", log=log, resets=RuntimeError("no reboot")),
-                 FakeComputer("laptop", log=log, resets=RuntimeError("no reboot either")))
+async def test_a_multi_env_of_computers_alone_resets_them_without_reattaching_its_gateway(gateway, providers,
+                                                                                          server_resets):
+    deployed, log = await _multi(FakeComputer("desktop")).deploy(), []
 
-    with pytest.raises(RuntimeError, match="^no reboot$"):
+    await _multi(FakeComputer("desktop", log=log)).reset(DeployedEnv.from_dict(dataclasses.asdict(deployed)))
+
+    assert log == [("reset", "desktop", "sb-desktop")] and server_resets.attached == server_resets.log == []
+
+
+@pytest.mark.asyncio
+async def test_a_server_serving_no_reset_stays_as_it_is_and_the_rest_reset(gateway, providers, server_resets, caplog):
+    stored, log = await _stored(FakeComputer("desktop")), []
+    server_resets.unserved.add("shop")
+
+    with caplog.at_level("INFO"):
+        await _multi(FakeComputer("desktop", log=log), mcp=["slack"], websites=["shop"]).reset(stored)
+
+    assert log == [("reset", "desktop", "sb-desktop")] and len(server_resets.log) == 2
+    assert "multi env 'office': website 'shop' serves no reset and takes no load, so it stays as it is" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_each_child_that_fails_to_reset_is_named_once_every_child_env_has_reset(gateway, providers, server_resets):
+    stored, log = await _stored(FakeComputer("desktop"), FakeComputer("laptop")), []
+    server_resets.failing["slack"] = RuntimeError("data/reset timed out")
+    env = _multi(FakeComputer("desktop", log=log, resets=RuntimeError("no reboot")), FakeComputer("laptop", log=log),
+                 mcp=["slack"], websites=["shop"])
+
+    with pytest.raises(RuntimeError) as raised:
         await env.reset(stored)
 
+    assert str(raised.value) == ("multi env 'office': computer 'desktop' failed to reset: RuntimeError('no reboot'); "
+                                 "MCP server 'slack' failed to reset: RuntimeError('data/reset timed out')")
     assert sorted(log) == [("reset", "desktop", "sb-desktop"), ("reset", "laptop", "sb-laptop")]
-    assert "failed to reset computer 'laptop' too: RuntimeError('no reboot either')" in caplog.text
+    assert len(server_resets.log) == 2 and server_resets.forgotten == ["inst-1"]

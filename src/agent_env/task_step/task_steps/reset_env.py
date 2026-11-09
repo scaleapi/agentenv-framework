@@ -2,8 +2,9 @@
 
 Env-agnostic: looks up the deployed env in context and calls its ``reset()``.
 Best-effort by default — a reset failure (including an env that doesn't support
-it) is logged and the run continues. Place right before prompt_agent in a
-warm-reuse task.
+it) is logged and the run continues. A reset empties what loads put in (a
+computer reboots, an MCP server or website is emptied), so in a warm-reuse task
+place it before the load that seeds the next attempt, then prompt_agent.
 """
 from __future__ import annotations
 

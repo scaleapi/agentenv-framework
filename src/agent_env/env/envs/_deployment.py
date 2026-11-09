@@ -1,5 +1,6 @@
 """The env side of the environment-provider contract: deploying an env through its provider, the options a provider takes,
-the checks on a plugin's record, loading into a deployment a plugin's provider made, and closing a deployment."""
+the checks on a plugin's record, loading into a deployment a plugin's provider made, emptying a server's data, and closing
+a deployment."""
 
 from __future__ import annotations
 
@@ -10,9 +11,11 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Optional
 
+import httpx
 from agentenv_protocol import DATA_OBJECTS_EXTENSION_URI, METHOD_ADD, METHOD_RESET, RPC_PATH, FilePart, client as protocol_v1
 from agent_env.env import legacy_protocol
 from agent_env.env.env import DeployedSandboxEnv, gateway_url_of
+from agent_env.env.gateway.constants import DATA_PLANE_LOAD_TIMEOUT_S
 from agent_env.env.store import register_env_instance
 from agent_env.store.base import ObjectNotFoundError
 from agent_env.utils.paths import validate_file_name
@@ -140,6 +143,37 @@ async def load_by_signed_url(env: MCPServerEnv | WebsiteEnv, environment_artifac
                                "can't sign a URL for it; loading into such an env needs an object store that signs URLs (S3, Cloud Storage)")
     await protocol_v1.reset_data(base_url, timeout=timeout)
     await protocol_v1.add_data(base_url, file_parts(environment_artifact, files, urls), timeout=timeout)
+
+
+async def reset_server_data(env: MCPServerEnv | WebsiteEnv, *, mcp: bool) -> bool:
+    """Empty what loads put into ``env``, an MCP server or with ``mcp=False`` a website, as each load does before it adds:
+    through ``data/reset``, or an older server's ``/api/reset``; then, behind a gateway of ours, its changelog started
+    afresh, as after a load. ``env`` is attached to its deployment, which may be a MultiEnv's. False, with nothing sent,
+    for one serving no reset, which takes no load either: a card declaring operations without ``data/reset``, a plugin's
+    card offering it no data plane, or an older server answering 404."""
+    name = env.environment_name
+    if env._deployed is None and env._gateway_url is None:
+        raise RuntimeError("Environment not deployed - call deploy() first")
+    builtin = as_builtin(env._env_provider)
+    base_url = await legacy_protocol.v1_base_url(env._deployed, env._gateway_url, name, mcp=mcp)
+    if base_url is not None:
+        child = env._deployed.child_env(name, mcp=mcp) if env._deployed is not None and env._deployed.environment_card else None
+        if child is not None and child.serves(METHOD_RESET) is False:
+            return False
+        await protocol_v1.reset_data(base_url, timeout=DATA_PLANE_LOAD_TIMEOUT_S)
+    elif builtin is None:
+        return False
+    else:
+        try:
+            await legacy_protocol.reset_via_rest(legacy_protocol.environment_base_url(env._gateway_url, name, mcp=mcp),
+                                                 timeout=60)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code != 404:
+                raise
+            return False
+    if builtin is not None:
+        await builtin.install_changelog_triggers(name)
+    return True
 
 
 def file_parts(environment_artifact: EnvironmentArtifact, files: dict[str, FileArtifact], uris: dict[str, str]) -> list[FilePart]:

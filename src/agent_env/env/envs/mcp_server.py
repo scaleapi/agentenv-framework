@@ -21,7 +21,8 @@ from agent_env.store.ids import derive_id
 from agent_env.env import legacy_protocol
 from agent_env.env.envs._deployment import (
     as_builtin, builtin_provider_for, close_deployed, close_replaced, deploy_refusal, deploy_through_provider, host_staging_refusal,
-    file_parts, legacy_load_file, load_by_signed_url, plugin_provider_like_a_builtin, provider_or_class, staged_paths,
+    file_parts, legacy_load_file, load_by_signed_url, plugin_provider_like_a_builtin, provider_or_class, reset_server_data,
+    staged_paths,
 )
 from agent_env.env.gateway import GatewayMode
 from agent_env.providers.sandbox_providers.sandbox import VmSandbox
@@ -135,6 +136,12 @@ class MCPServerEnv(Env):
         env._instance_id = deployed.instance_id
         env._deployed = deployed
         return env
+
+    async def reset(self, deployed: DeployedEnv) -> None:
+        """Empty what loads put into the server, attached to ``deployed`` as a load is, so a task loads it again after;
+        NotImplementedError for one serving no reset, which takes no load either."""
+        if not await reset_server_data(await type(self).from_deployed_env(deployed), mcp=True):
+            raise NotImplementedError(f"MCP server '{self.environment_name}' serves no reset")
 
     async def close(self) -> None:
         await close_replaced(self)
