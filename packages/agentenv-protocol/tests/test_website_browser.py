@@ -1151,6 +1151,27 @@ async def test_its_control_records_a_completed_download_with_its_size_and_sha256
 
 
 @pytest.mark.asyncio
+async def test_its_control_records_ended_at_when_download_hashing_fails(tmp_path):
+    devtools = StubDevTools()
+    control = BrowserControl(devtools, "agent")
+    missing_file = tmp_path / "nonexistent.pdf"
+
+    devtools.send("Browser.downloadWillBegin", {"guid": "g2", "url": "https://a.test/missing.pdf",
+                                                "suggestedFilename": "missing.pdf"})
+    devtools.send("Browser.downloadProgress", {"guid": "g2", "state": "completed",
+                                               "filePath": str(missing_file)})
+    for _ in range(int(WAIT_S / POLL_S)):
+        if "ended_at" in control.downloads.get("g2", {}):
+            break
+        await asyncio.sleep(POLL_S)
+
+    done = control.downloads["g2"]
+    assert done["state"] == "completed"
+    assert "ended_at" in done
+    assert "sha256" not in done
+
+
+@pytest.mark.asyncio
 async def test_its_control_says_the_tab_whose_page_has_focus_is_active_else_the_first_visible_one(tmp_path):
     states = {"s-a": ["hidden", False], "s-b": ["visible", False], "s-c": ["visible", True]}
     devtools = StubDevTools({"Runtime.evaluate": lambda params, session: {"result": {"value": states[session]}}})

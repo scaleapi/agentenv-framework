@@ -713,8 +713,11 @@ class BrowserControl:
             download["ended_at"] = _now()
 
     async def _hashed(self, download: dict, path: Path) -> None:
-        size, sha256 = await asyncio.to_thread(_size_and_sha256, path)
-        download.update(size=size, sha256=sha256, ended_at=_now())
+        try:
+            size, sha256 = await asyncio.to_thread(_size_and_sha256, path)
+            download.update(size=size, sha256=sha256)
+        finally:
+            download["ended_at"] = _now()
 
     def _spawn(self, work: Awaitable) -> None:
         task = asyncio.ensure_future(work)
