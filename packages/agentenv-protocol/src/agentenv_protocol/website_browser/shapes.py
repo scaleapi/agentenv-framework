@@ -97,7 +97,7 @@ class ClosedTab(BaseModel):
 
 
 class Download(BaseModel):
-    """A download into ``~/Downloads``; completed, with where it landed, its size and its sha256."""
+    """A download into ``~/Downloads``; when completed, with where it landed, and its size and sha256 when available."""
     guid: str
     url: str
     filename: str

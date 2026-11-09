@@ -80,14 +80,14 @@ class AppRuntime:
         self.checking: dict[str, asyncio.Future] = {}
 
     async def start(self) -> None:
-        """Once its X display is up, when it has one, add the app's menu launcher on a desktop and launch a boot app,
-        unless the computer has launched it since it booted, at boot or on demand, or its boot launch is held
-        (``boot_launch_held``): a server that restarts leaves the app be, or with ``relaunch_on_start``, for an app
-        only the server that launched it can talk to, stops it and launches it again, whether it was launched at boot
-        or on demand."""
+        """Once its session is up, its X display or Hyprland, when it has one, add the app's menu launcher on a desktop
+        and launch a boot app, unless the computer has launched it since it booted, at boot or on demand, or its boot
+        launch is held (``boot_launch_held``): a server that restarts leaves the app be, or with ``relaunch_on_start``,
+        for an app only the server that launched it can talk to, stops it and launches it again, whether it was
+        launched at boot or on demand."""
         if self.launch is None:
             return
-        if os.environ.get("DISPLAY"):
+        if os.environ.get("DISPLAY") or os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
             await session.wait_until_up()
         if self.desktop:
             session.add_launcher(os.environ["ENVIRONMENT_NAME"], Path.cwd())

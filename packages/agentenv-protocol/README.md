@@ -692,14 +692,20 @@ driver booted with a control token is probed with it: `--token`, by default
 | Level | Checks | Needs on the computer |
 |---|---|---|
 | `basic` | P0 ready and a screenshot; P1 the card and tool schemas; P2 native frames, regions and JPEG; P5 refusals and their codes; X the declared extensions (`computer-display`, `computer-spaces`, `computer-keyboard`, `computer-exec`, `data/get`, per-role tool access, the pointer) | nothing |
-| `full` | `basic`, then P3 colours land where the mapping says; P4 clicks show their effect; P5 refusals change nothing; P6 typed and pressed keys arrive; P7 scrolls and drags arrive; P9 commands and `data/add` run as one unprivileged user; X pointer and keyboard input, `data/add`, and a recording's segments matching their files with no gap, a repeated `request_id` joining it and `max_concurrent` held; on a page, X the page tools: a prompt answered, a file uploaded, a reload, navigation, back and forward, and tabs | Linux, `python3` with Tk (on a page, `python3` and `computer-page/v1`), a 1280x800 screen or larger, `computer-exec` and `data/add` |
+| `full` | `basic`, then P3 colours land where the mapping says; P4 clicks show their effect; P5 refusals change nothing; P6 typed and pressed keys arrive; P7 scrolls and drags arrive; P9 commands and `data/add` run as one unprivileged user; X pointer and keyboard input, `data/add`, and a recording's segments matching their files with no gap, a repeated `request_id` joining it and `max_concurrent` held; on a page, X the page tools: a prompt answered, a file uploaded, a reload, navigation, back and forward, and tabs | Linux, `python3` with Tk (on Wayland, with PyGObject and GTK 3 instead; on a page, `python3` and `computer-page/v1`), a 1280x800 screen or larger, `computer-exec` and `data/add` |
 
-At `full` the probe writes the Fixture Desk, a Tk window (`conformance/fixture.py`), into
-`~/.agentenv-probe` with `data/add` and starts it with `computer-exec`. It aims at the boxes the
+At `full` the probe writes the Fixture Desk, a Tk window (`conformance/fixture.py`), and its layout
+(`conformance/desk.py`) into `~/.agentenv-probe` with `data/add` and starts it with `computer-exec`. It aims at the boxes the
 window's widgets report, reads back what reached them, and then removes the fixture. On X11 the
 window is maximized and kept above other windows, raising itself again when one covers it, so a
 window an app keeps on top doesn't take the clicks aimed at it; elsewhere it is full screen. When the
 fixture can't be staged, the `full` checks are unverified rather than failed.
+
+On a driver whose platform's display is Wayland, the desk is drawn with GTK 3 as a native Wayland client
+(`conformance/wayland_fixture.py`, staged beside `desk.py` in the Tk window's place), since Tk runs
+only under XWayland. It goes full screen, takes its origin from Hyprland's IPC, keeps the clipboard
+through wl-clipboard. There the probe selects a text box's text with GTK's own Ctrl+A rather than
+Tk's Ctrl+/.
 
 On a driver whose card says `screen: "page"`, the desk is an HTML page with the same widgets at the
 same places (`conformance/page_fixture.py`). The probe starts its server on loopback, which writes
@@ -787,7 +793,8 @@ class MailApp(ComputerAppEnvironment):
   it runs on (`platform.detect()`).
 - **`launch=Launch(...)`** says how it starts in the desktop session: with it (`at="boot"`) or when
   the agent opens it (`"demand"`). `ready=Ready(...)` says when it's ready, within `timeout_s` of its
-  launch: a window matching `launch.window` by its class, instance or title, a port answering on
+  launch: a window matching `launch.window` by its class, instance or title (on Hyprland, a Wayland
+  app ID or an X window's class, its program's file name, and its title), a port answering on
   loopback, or a command exiting 0. `env` sets variables in the app's environment, over its server's. `@ready_check` marks a method for readiness that needs logic (a
   sync one runs in a thread), and `@install_step(scope=...)` one a computer runs as it installs the
   app, after its run scripts, offline and without the class's `__init__`. Each runs on every OS the
@@ -821,13 +828,16 @@ desktop session, and `ready` (GET: an `AppReadiness` of `ready`, `problems`, `la
 and `timeout_s`), which runs the app's readiness checks then, at once, each within 10 s. A server
 that can't start, or whose start in the session fails (adding the launcher, say), writes why to
 `.agentenv/server.failure` in the folder and exits, and the driver reports that in its place. Once
-the X display is up, when `DISPLAY` names one, the server adds the app's launcher to the session user's
+the session is up, the X display when `DISPLAY` names one or on Hyprland its Wayland display and its
+IPC, the server adds the app's launcher to the session user's
 menu, which runs `python -m agentenv_protocol.computer.launch <folder>` to ask the server, so the
 server starts every copy of the app, and launches a `boot` app, once per boot. An app that runs with
 no desktop, a website browser alone, gets no launcher. The driver finds each app by the socket in its
 folder: the computer is ready once every app's server answers and each `boot` app, and each app with
 no launch, says it's ready; a `demand` app counts once something launches it. What the server does
-in the session (`agentenv_protocol.computer.session`) is Linux's.
+in the session (`agentenv_protocol.computer.session`) is Linux's. On Hyprland it lists windows through
+Hyprland's IPC (`hyprctl -j clients`), which sees native Wayland windows and XWayland's alike, where
+X's `xprop` sees only XWayland's.
 
 The server serves the app's data plane and its skill. With `paths` alone, `data/add` writes the files
 it's given under them and refuses any other path, or one a link leads out of them; `data/get`

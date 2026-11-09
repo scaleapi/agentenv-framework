@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import importlib.util
+import json
 import os
 import shlex
 import signal
@@ -443,6 +444,7 @@ def test_the_launcher_runs_the_app_through_its_own_server(tmp_path, monkeypatch)
 
 @pytest.mark.asyncio
 async def test_the_sessions_windows_are_listed_by_class_instance_and_title_from_either_name(monkeypatch):
+    monkeypatch.delenv("HYPRLAND_INSTANCE_SIGNATURE", raising=False)
     replies = {("-root", "_NET_CLIENT_LIST"): "_NET_CLIENT_LIST(WINDOW): window id # 0x1e00004, 0x2000003, 0x2200001\n",
                ("-id", "0x1e00004", "WM_CLASS", "_NET_WM_NAME", "WM_NAME"):
                    '_NET_WM_NAME(UTF8_STRING) = "Inbox \\"work\\""\nWM_CLASS(STRING) = "mail", "Mail"\n'
@@ -460,7 +462,9 @@ async def test_the_sessions_windows_are_listed_by_class_instance_and_title_from_
 
 
 @pytest.mark.asyncio
-async def test_a_window_listing_cut_short_kills_its_xprop(monkeypatch):
+@pytest.mark.parametrize("hyprland", ["", "sig"])
+async def test_a_window_listing_cut_short_kills_its_xprop_or_hyprctl(hyprland, monkeypatch):
+    monkeypatch.setenv("HYPRLAND_INSTANCE_SIGNATURE", hyprland)
     started, spawn = [], asyncio.create_subprocess_exec
 
     async def hanging(*args, **kwargs):
@@ -472,6 +476,87 @@ async def test_a_window_listing_cut_short_kills_its_xprop(monkeypatch):
         await asyncio.wait_for(session.windows(), 0.2)
 
     assert await asyncio.wait_for(started[0].wait(), 5) == -signal.SIGKILL
+
+
+@pytest.mark.asyncio
+async def test_on_hyprland_the_sessions_windows_are_its_mapped_clients_by_program_class_and_title(monkeypatch):
+    clients = [{"address": "0x55d1", "mapped": True, "class": "org.gnome.Nautilus", "title": "Home", "pid": 41,
+                "xwayland": False},
+               {"address": "0x55d2", "mapped": True, "class": "BenchLab", "title": "Bench Lab", "pid": 42,
+                "xwayland": True},
+               {"address": "0x55d3", "mapped": False, "class": "closing", "title": "", "pid": 43},
+               {"address": "0x55d4", "mapped": True, "class": "gone", "title": "Gone", "pid": 44}]
+    programs = {"/proc/41/exe": "/usr/bin/nautilus", "/proc/42/exe": "/usr/bin/python3.14"}
+    asked = []
+
+    async def output(*argv):
+        asked.append(argv)
+        return json.dumps(clients)
+
+    def readlink(path):
+        if path not in programs:
+            raise FileNotFoundError(path)
+        return programs[path]
+
+    monkeypatch.setenv("HYPRLAND_INSTANCE_SIGNATURE", "sig")
+    monkeypatch.setattr(_session_posix, "_output", output)
+    monkeypatch.setattr(_session_posix.os, "readlink", readlink)
+
+    assert await session.windows() == [{"instance": "nautilus", "class": "org.gnome.Nautilus", "title": "Home"},
+                                       {"instance": "python3.14", "class": "BenchLab", "title": "Bench Lab"},
+                                       {"instance": "", "class": "gone", "title": "Gone"}]
+    assert asked == [("hyprctl", "-j", "clients")]
+
+
+@pytest.mark.asyncio
+async def test_on_hyprland_a_session_whose_ipc_doesnt_answer_has_no_windows(monkeypatch):
+    async def output(*argv):
+        return ""
+
+    monkeypatch.setenv("HYPRLAND_INSTANCE_SIGNATURE", "sig")
+    monkeypatch.setattr(_session_posix, "_output", output)
+    assert await session.windows() == []
+
+
+@pytest.mark.asyncio
+async def test_on_hyprland_the_session_is_up_once_its_wayland_and_ipc_sockets_are_there(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYPRLAND_INSTANCE_SIGNATURE", "sig")
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-1")
+    monkeypatch.setattr(_session_posix, "POLL_S", 0.01)
+    waiting = asyncio.ensure_future(session.wait_until_up())
+
+    (tmp_path / "wayland-1").touch()
+    await asyncio.sleep(0.05)
+    halfway = waiting.done()
+    (tmp_path / "hypr" / "sig").mkdir(parents=True)
+    (tmp_path / "hypr" / "sig" / ".socket.sock").touch()
+    await asyncio.wait_for(waiting, 5)
+
+    assert not halfway
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("variables", "waits"), [({}, 0), ({"DISPLAY": ":0"}, 1),
+                                                  ({"HYPRLAND_INSTANCE_SIGNATURE": "sig"}, 1)])
+async def test_a_boot_app_waits_for_its_x11_or_hyprland_session_and_for_none_without_one(
+        variables, waits, desktop, tmp_path, monkeypatch):
+    for name in ("DISPLAY", "HYPRLAND_INSTANCE_SIGNATURE"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in variables.items():
+        monkeypatch.setenv(name, value)
+    waited = []
+
+    async def up():
+        waited.append(True)
+
+    monkeypatch.setattr(session, "wait_until_up", up)
+    monkeypatch.setattr(session, "add_launcher", lambda name, folder: None)
+    monkeypatch.chdir(tmp_path)
+
+    await Mail()._computer_app.start()
+
+    assert len(waited) == waits
 
 
 @contextlib.asynccontextmanager

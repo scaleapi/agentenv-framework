@@ -75,6 +75,23 @@ the foreground between the window and its frame, so a few of the first burst's c
 at once all land); `[[known_failures.windows]]` names it. The text of Windows 11's Notepad can't be read through
 cua-driver's UI Automation tree, whose walk of it fails.
 
+On a Hyprland desktop (Wayland), as Omarchy's is, cua-driver runs its Wayland backend (`CUA_DRIVER_RS_ENABLE_WAYLAND=1`)
+and sends input through the seats of Hyprland's `cua-hyprland-plugin`. Hyprland's session turns this on
+(`HYPRLAND_INSTANCE_SIGNATURE`), not any Wayland one, since the driver reaches Hyprland's IPC; `supports` names no
+Wayland desktop yet, so gate 1 doesn't match it to one. The daemon starts once the compositor's socket answers, on a
+socket in the session user's runtime folder. What the driver asks Hyprland (`hyprctl -j`) is in `hyprland.py`, beside
+`driver.py`. Keys and text go to the window Hyprland has focused, in the foreground, and to the desktop with nothing
+focused; clicks, drags and scrolls stay desktop-scope. `computer-ready` also checks that the plugin is loaded, enabled,
+built for this Hyprland and taking input (`transport.ready`), and every input, a `computer_*` operation or one of
+cua-driver's own tools that isn't read-only, checks it again first and fails as `device_unavailable`, sending nothing,
+when it isn't. The runtime runs ready checks only until they first pass, and a Hyprland restarted after a crash runs in
+safe mode with no plugins, where input is accepted but never arrives. A plugin loaded again into a running Hyprland has
+no input seat until the desktop restarts, and a driver that outlives its Hyprland can't reach the next one, which has a
+new instance signature, so the driver's services have to restart with the graphical session. Keys aimed at a window
+skip Hyprland's own shortcuts, such as Super+2, and are refused while a layer such as Omarchy's menu holds the keyboard,
+and non-ASCII text aimed at one is refused; sent to the desktop in the foreground, all three work, but Backspace, the
+arrows and Home/End do nothing in a text box, so neither way alone covers both.
+
 To move it to another cua-driver version:
 
 1. Pin the version in `requirements.txt`.

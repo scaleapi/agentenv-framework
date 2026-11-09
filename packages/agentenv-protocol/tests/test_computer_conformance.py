@@ -8,6 +8,7 @@ import importlib
 import json
 import subprocess
 import sys
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -18,7 +19,7 @@ pytest.importorskip("PIL")
 from computer_fake import FakeScreen, MinimalDriver  # noqa: E402
 from mcp.types import CallToolResult, TextContent  # noqa: E402
 from PIL import ImageChops  # noqa: E402
-from probe_fake import FixtureDriver, served  # noqa: E402
+from probe_fake import FakeDesk, FixtureDriver, served  # noqa: E402
 
 from agentenv_protocol.computer import (  # noqa: E402
     ComputerSettings,
@@ -195,6 +196,48 @@ async def test_a_windows_computer_is_probed_with_the_commands_windows_has(monkey
     assert len(exec_checks) >= 4 and all(c.status == "passed" for c in exec_checks)
     assert list(checks.WIN_ECHO) in sent and list(checks.WIN_SLEEP) in sent and list(checks.WIN_NOW) in sent
     assert not [argv for argv in sent if argv[0] == "sh"]
+
+
+class WaylandDesk(FakeDesk):
+    """The GTK desk as the probe uses it: GTK's own Ctrl+A selects a text box's text, and Tk's Ctrl+/ does nothing,
+    so a probe that sent it there would fail."""
+
+    def press(self, keys: list[str]) -> None:
+        if keys != ["Control", "/"]:
+            super().press(["Control", "/"] if keys == ["Control", "a"] else keys)
+
+
+class WaylandDriver(FixtureDriver):
+    """A driver on a Wayland desktop, whose desk is the GTK one, started only from wayland_fixture.py."""
+
+    def __init__(self) -> None:
+        super().__init__(platform=Platform(os="linux", distribution="omarchy", version="4.5.0", arch="amd64",
+                                           display="wayland"))
+        self.desk = WaylandDesk(self)
+        self.staged: list[str] = []
+
+    def _fixture(self, argv):
+        text = " ".join(argv)
+        if f"python3 {checks.STAGE}/wayland_fixture.py" in text:
+            self.staged = sorted(path.name for path in (Path.home() / checks.STAGE).glob("*.py"))
+            self.desk.start()
+            return ExecResult(0, b"4242\n")
+        if f"python3 {checks.STAGE}/fixture.py" in text:
+            return ExecResult(1, b"", b"Tk runs under XWayland here")
+        if argv == [*checks.OWNER, f"{checks.STAGE}/wayland_fixture.py"]:
+            return ExecResult(0, b"1000\n")
+        return super()._fixture(argv)
+
+
+@pytest.mark.asyncio
+async def test_a_wayland_computer_is_probed_with_the_gtk_desk_beside_the_tk_desks_file_selecting_all_with_ctrl_a(home):
+    driver = WaylandDriver()
+
+    report = await _probe(driver)
+
+    assert report.passed, _failed(report)
+    assert driver.staged == ["desk.py", "wayland_fixture.py"]
+    assert ["kill", "4242"] in driver.commands and not (home / checks.STAGE).exists()
 
 
 class NeverReady(FixtureDriver):
@@ -395,10 +438,28 @@ def test_the_fixture_gives_the_focus_back_to_the_text_box_that_had_it_when_it_ta
 
 
 def _fixture(monkeypatch):
-    """The fixture module, which runs in the computer, read with Tk stood in for, as this Python may have none."""
+    """The fixture module, which runs in the computer, read with Tk stood in for, as this Python may have none, and
+    with desk.py importable as it is beside the fixture in the computer."""
     monkeypatch.setitem(sys.modules, "tkinter", ModuleType("tkinter"))
+    monkeypatch.syspath_prepend(str(Path(checks.__file__).parent))
     monkeypatch.delitem(sys.modules, "agentenv_protocol.computer.conformance.fixture", raising=False)
     return importlib.import_module("agentenv_protocol.computer.conformance.fixture")
+
+
+def test_the_gtk_desk_starts_on_a_computer_without_tk(monkeypatch):
+    gi = ModuleType("gi")
+    gi.require_version = lambda namespace, version: None
+    gi.repository = SimpleNamespace(Gdk=None, GLib=None, Gtk=None)
+    monkeypatch.setitem(sys.modules, "gi", gi)
+    monkeypatch.setitem(sys.modules, "gi.repository", gi.repository)
+    monkeypatch.setitem(sys.modules, "tkinter", None)
+    monkeypatch.syspath_prepend(str(Path(checks.__file__).parent))
+    for name in ("desk", "wayland_fixture"):
+        monkeypatch.delitem(sys.modules, name, raising=False)
+
+    gtk_desk = importlib.import_module("wayland_fixture")
+
+    assert gtk_desk.AT["grid"] == (400, 160)
 
 
 def test_a_refusal_must_carry_the_code_and_applied_no():

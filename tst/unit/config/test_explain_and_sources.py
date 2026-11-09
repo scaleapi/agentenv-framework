@@ -163,7 +163,9 @@ def test_sources_says_how_the_file_was_found(config_file, tmp_path, monkeypatch)
 # Read for identity (USER), or set from [sandbox.providers.sail_vm.config] for the Sail SDK to read
 # (SAIL_*), never configuration agent-env takes, so none is a layer.
 # AGENT_ENV_INSTALLED_REQUIRES marks a command run again after installing what a bundle requires, so it never asks twice.
-_NOT_CONFIGURATION = {"USER", "DISPLAY", "SAIL_API_KEY", "SAIL_RUNTIME_THREADS", "AGENT_ENV_INSTALLED_REQUIRES"}
+# DISPLAY, WAYLAND_DISPLAY and XDG_RUNTIME_DIR are a computer's desktop session, which a driver in it reads.
+_NOT_CONFIGURATION = {"USER", "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "SAIL_API_KEY", "SAIL_RUNTIME_THREADS",
+                      "AGENT_ENV_INSTALLED_REQUIRES"}
 
 
 def _env_vars_read_by(root):
