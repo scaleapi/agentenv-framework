@@ -1,0 +1,8 @@
+[
+  {"id": "env", "type": "deploy_env", "env_id": "desktop"},
+  {"id": "before", "type": "env_outcome_verifier", "env_id": "desktop", "file_artifact_id": "check_probe",
+   "verifier_id": "before"},
+  {"id": "reset", "type": "reset_env", "env_id": "desktop", "depends_on": ["before"]},
+  {"id": "after", "type": "env_outcome_verifier", "env_id": "desktop", "file_artifact_id": "check_probe",
+   "verifier_id": "after", "depends_on": ["reset"]}
+]

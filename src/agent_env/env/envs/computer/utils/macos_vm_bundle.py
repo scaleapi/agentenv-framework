@@ -115,7 +115,8 @@ def _installed(part: Part) -> list[str]:
     if part.served is not None:
         lines.append(f"mkdir -p {shlex.quote(f'{prefix}/{SOCKET.parent}')}")
     commands = [*((run.scope, shlex.quote(f"./{run.script}")) for run in install.run or []),
-                *((scope, f"venv/bin/python -m agentenv_protocol.computer.run_install_step {part.served} {step}")
+                *((scope, f"venv/bin/python -m agentenv_protocol.computer.run_install_step {shlex.quote(part.served)} "
+                          f"{step}")
                   for step, scope in part.steps)]
     for scope, command in commands:
         run = f"cd {quoted} && {command}"

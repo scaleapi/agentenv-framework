@@ -16,6 +16,7 @@ from agent_env.attribution import PIPELINE_STEP_KEY
 from agent_env.config import get_config, reset_config
 from agent_env.providers.sandbox_providers import modal_image_build, modal_vm_sandbox
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
+from agent_env.providers.sandbox_providers.local_docker.disk import Exported
 from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPolicy
 from tst.unit.store.fakes import FakeImageStore
@@ -62,7 +63,7 @@ _CREATES = {
 def _exported_disk(tmp_path, monkeypatch):
     """A disk's export on this machine, and the launcher's image, without Docker or a registry."""
     (tmp_path / "disk.img.zst").write_bytes(b"disk")
-    monkeypatch.setattr(modal_vm_sandbox, "exported_disk", lambda image, platform: tmp_path / "disk.img.zst")
+    monkeypatch.setattr(modal_vm_sandbox, "exported_disk", lambda image, platform: Exported(tmp_path / "disk.img.zst"))
     monkeypatch.setattr(modal_vm_sandbox, "published_digest", lambda image: "sha256:" + "b" * 64)
 
 

@@ -68,6 +68,14 @@ def pin_digest(ref: str, auth: RegistryAuth | None, *, timeout: float = _TIMEOUT
     return ref
 
 
+def pin_if_served(ref: str, auth: RegistryAuth | None) -> str | None:
+    """``ref`` pinned as ``pin_digest`` pins it, or None when its registry serves no such image."""
+    try:
+        return pin_digest(ref, auth)
+    except NoSuchImageError:
+        return None
+
+
 def pinned_from(pinned: str, ref: str) -> bool:
     """Whether ``pinned``, a ref as ``pin_digest`` returns it, pins ``ref``: ``ref`` itself when it gives a digest, else
     the same name and tag (``latest`` when none is given) with a digest."""

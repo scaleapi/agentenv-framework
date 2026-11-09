@@ -27,7 +27,17 @@ def get_task_step_registry() -> dict[str, type["TaskStep"]]:
 
 
 def _builtin_registry() -> dict[str, type["TaskStep"]]:
-    from agent_env.task_step.task_steps.browser_connect_cdp import BrowserConnectCdpTaskStep
+    from agent_env.task_step.task_steps.browser.connect_cdp import BrowserConnectCdpTaskStep
+    from agent_env.task_step.task_steps.browser.cookies import BrowserDeleteCookiesTaskStep, BrowserSetCookiesTaskStep
+    from agent_env.task_step.task_steps.browser.local_storage import (
+        BrowserClearLocalStorageTaskStep,
+        BrowserSetLocalStorageTaskStep,
+    )
+    from agent_env.task_step.task_steps.browser.tabs import (
+        BrowserActivateTabTaskStep,
+        BrowserCloseTabTaskStep,
+        BrowserOpenTabTaskStep,
+    )
     from agent_env.task_step.task_steps.collect_artifacts import CollectArtifactsTaskStep
     from agent_env.task_step.task_steps.computer_recording import (
         EndComputerRecordingTaskStep,
@@ -89,6 +99,13 @@ def _builtin_registry() -> dict[str, type["TaskStep"]]:
         _get_type(ReviewTaskStep): ReviewTaskStep,
         _get_type(BuildMcpCliTaskStep): BuildMcpCliTaskStep,
         _get_type(BrowserConnectCdpTaskStep): BrowserConnectCdpTaskStep,
+        _get_type(BrowserSetCookiesTaskStep): BrowserSetCookiesTaskStep,
+        _get_type(BrowserDeleteCookiesTaskStep): BrowserDeleteCookiesTaskStep,
+        _get_type(BrowserSetLocalStorageTaskStep): BrowserSetLocalStorageTaskStep,
+        _get_type(BrowserClearLocalStorageTaskStep): BrowserClearLocalStorageTaskStep,
+        _get_type(BrowserOpenTabTaskStep): BrowserOpenTabTaskStep,
+        _get_type(BrowserCloseTabTaskStep): BrowserCloseTabTaskStep,
+        _get_type(BrowserActivateTabTaskStep): BrowserActivateTabTaskStep,
         _get_type(CollectArtifactsTaskStep): CollectArtifactsTaskStep,
         _get_type(StartComputerRecordingTaskStep): StartComputerRecordingTaskStep,
         _get_type(EndComputerRecordingTaskStep): EndComputerRecordingTaskStep,

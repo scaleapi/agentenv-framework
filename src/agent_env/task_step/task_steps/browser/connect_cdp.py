@@ -8,10 +8,8 @@ import logging
 from typing import ClassVar, Optional
 
 import httpx
-from agentenv_protocol.client import find_extension_method, invoke_extension
 from agentenv_protocol.tool_access import DISABLE, DISABLE_TOOL_EXTENSION_URI, WILDCARD
 from agentenv_protocol.tool_context import DEFAULT_ROLE
-from agentenv_protocol.website_browser import BROWSER
 
 from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.entity.refs import EntityRef
@@ -20,6 +18,7 @@ from agent_env.providers.sandbox_providers.local_docker.provider import host_url
 from agent_env.providers.sandbox_providers.sandbox_provider import reachable_url
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_steps.browser.base import BrowserStep
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +32,7 @@ CDP_TIMEOUT_S = 180
 ADD_TIMEOUT_S = 60
 
 
-class BrowserConnectCdpTaskStep(TaskStep):
+class BrowserConnectCdpTaskStep(BrowserStep):
     """Hand the agent ``agent_name`` a CDP address to the website browser ``browser`` in the env ``env_id``, the
     env's only one when unnamed: added to its cdp-config/v1 as ``name``, with every tool the env serves hidden from
     its role unless ``keep_tools``. The address is the browser's own for that agent, as its sandbox reaches it."""
@@ -53,17 +52,13 @@ class BrowserConnectCdpTaskStep(TaskStep):
         depends_on: Optional[list[TaskStepDependency]] = None,
         fail_task_on_error: bool = True,
     ):
-        super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
-        self.env_id = env_id
+        super().__init__(id, version, env_id, browser, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
         self.agent_name = agent_name or TaskStep.DEFAULT_AGENT_NAME
-        self.browser = browser
         self.name = name
         self.keep_tools = keep_tools
 
     def config_problems(self) -> list[str]:
-        problems = []
-        if not isinstance(self.env_id, str) or not self.env_id:
-            problems.append(f"step {self.id!r}: env_id must be a non-empty string")
+        problems = super().config_problems()
         if not isinstance(self.name, str) or not self.name:
             problems.append(f"step {self.id!r}: name must be a non-empty string")
         if not isinstance(self.keep_tools, bool):
@@ -71,32 +66,21 @@ class BrowserConnectCdpTaskStep(TaskStep):
         return problems
 
     def to_dict(self) -> dict:
-        base = super().to_dict()
-        base.update(env_id=self.env_id, agent_name=self.agent_name, browser=self.browser, name=self.name,
-                    keep_tools=self.keep_tools)
-        return base
+        return {**super().to_dict(), "agent_name": self.agent_name, "name": self.name, "keep_tools": self.keep_tools}
 
     @classmethod
     def from_dict(cls, data: dict) -> BrowserConnectCdpTaskStep:
-        return cls(
-            **cls._base_from_dict(data),
-            env_id=data["env_id"],
-            agent_name=data.get("agent_name"),
-            browser=data.get("browser"),
-            name=data.get("name") or DEFAULT_NAME,
-            keep_tools=data.get("keep_tools", False),
-        )
+        return cls(**cls._browser_from_dict(data), agent_name=data.get("agent_name"),
+                   name=data.get("name") or DEFAULT_NAME, keep_tools=data.get("keep_tools", False))
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
-        deployed = _deployed_env(context, self.env_id)
+        deployed, browser, _ = self._find(context)
         agent = _deployed_agent(context, self.agent_name)
         cdp_config = A2AAgent.find_extension(agent.a2a_card or {}, A2AAgent.EXT_CDP_CONFIG)
         if cdp_config is None or not agent.a2a_url:
             raise RuntimeError(f"agent {agent.agent_name!r} can't take a CDP address: its card has no "
                                f"{A2AAgent.EXT_CDP_CONFIG}")
-        browser, card = _browser(deployed, self.browser)
-        address = await invoke_extension(deployed.environment_url, card, BROWSER, {"user": agent.agent_name},
-                                         CDP_TIMEOUT_S, method="cdp", headers=deployed.control_headers)
+        address = await self._call(context, "cdp", {"user": agent.agent_name}, CDP_TIMEOUT_S)
         http_url, ws_url = _as_agent_reaches(address, deployed, agent)
         async with httpx.AsyncClient(timeout=ADD_TIMEOUT_S) as client:
             added = await client.post(agent.a2a_url + cdp_config["params"]["endpoint"], json={
@@ -118,36 +102,11 @@ class BrowserConnectCdpTaskStep(TaskStep):
         return context
 
 
-def _deployed_env(context: TaskStepContext, env_id: str) -> DeployedEnv:
-    deployed = next((d for d in context.deployed_envs if d.env_id == env_id), None)
-    if deployed is None:
-        raise RuntimeError(f"env {env_id!r} isn't in context.deployed_envs")
-    return deployed
-
-
 def _deployed_agent(context: TaskStepContext, agent_name: str) -> DeployedAgent:
     agent = next((a for a in context.deployed_agents if a.agent_name == agent_name), None)
     if agent is None:
         raise RuntimeError(f"agent {agent_name!r} isn't in context.deployed_agents")
     return agent
-
-
-def _browser(deployed: DeployedEnv, named: Optional[str]) -> tuple[Optional[str], dict]:
-    """The website browser to connect to, the one named else the env's only one: its name among the env's children,
-    or None for the env itself, and its card."""
-    card = deployed.environment_card or {}
-    browsers = [(None, card)] if find_extension_method(card, BROWSER, "cdp") else []
-    browsers += [(child.get("name"), child) for child in card.get("children_environments") or []
-                 if find_extension_method(child, BROWSER, "cdp")]
-    if named is not None:
-        found = next((browser for browser in browsers if browser[0] == named), None)
-        if found is None:
-            raise RuntimeError(f"env {deployed.env_id!r} has no website browser named {named!r}")
-        return found
-    if len(browsers) != 1:
-        raise RuntimeError(f"env {deployed.env_id!r} has {len(browsers) or 'no'} website browsers"
-                           + (": name one as browser" if browsers else ""))
-    return browsers[0]
 
 
 def _as_agent_reaches(address: dict, deployed: DeployedEnv, agent: DeployedAgent) -> tuple[str, str]:

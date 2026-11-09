@@ -130,7 +130,7 @@ async def test_chromium_runs_with_agentenvs_flags_on_its_pipe_and_a_reset_relaun
     assert argv[4].startswith("--disk-cache-dir=") and argv[4].endswith("/.cache/chromium")
     assert argv[5:10] == ["--remote-debugging-pipe", "--no-first-run", "--no-default-browser-check", "--lang=fr-FR",
                           "--disable-dev-shm-usage"]
-    assert argv[10:] == [TIME_ZONE_PAGE, LOOPBACK]
+    assert argv[10:] == ["about:blank"]
     assert browser["listening"] == 0 and port_file["exit_code"] != 0
     assert zone.startswith("Europe/Paris") and loopback.startswith("Loopback page")
     assert {"BrowserSignin": 0, "DownloadDirectory": "${user_home}/Downloads"}.items() <= json.loads(
@@ -140,8 +140,8 @@ async def test_chromium_runs_with_agentenvs_flags_on_its_pipe_and_a_reset_relaun
         "156.0.8078.4", "real", ["cdp", "cookies/delete", "cookies/get", "cookies/set", "dialog/answer", "downloads/get",
                                  "downloads/list", "files/choose", "history", "local_storage/clear",
                                  "local_storage/get", "local_storage/set", "navigate", "page/capture", "page/input",
-                                 "page/state", "page/viewport", "record", "tabs/activate", "tabs/close", "tabs/list",
-                                 "tabs/open"])
+                                 "page/state", "page/viewport", "record", "sites/set", "tabs/activate", "tabs/close",
+                                 "tabs/list", "tabs/open"])
     assert readiness["ready"] is True, readiness
     assert relaunched["pid"] != browser["pid"] and relaunched["listening"] == 0
     assert relaunched_readiness["ready"] is True, relaunched_readiness

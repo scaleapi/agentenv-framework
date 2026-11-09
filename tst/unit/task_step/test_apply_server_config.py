@@ -837,3 +837,40 @@ def _carded_context(card: dict) -> TaskStepContext:
     ctx.deployed_envs[0].environment_card_url = f"{_CARD}{WELL_KNOWN_PATH}"
     ctx.deployed_envs[0].environment_card = card
     return ctx
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("service", ["desktop", "*"], ids=["named", "broadcast"])
+async def test_a_multi_envs_computer_is_configured_at_its_own_address_with_its_own_token(service):
+    """Not through the gateway's /svc/desktop/, which carries the gateway's token, not the computer's."""
+    import dataclasses
+
+    from agent_env.env.env import DeployedSandboxEnv
+
+    computer = DeployedSandboxEnv(env_id="desk", env_version=1, sandbox_id="sb-desk", control_token="desk-token",
+                                  environment_card_url="https://desk.example/.well-known/agent-env.json",
+                                  environment_card={**_card(_ext(_SET_ERRORS_URI, "/agentenv/ext/set_errors")), "name": "desktop"})
+    record = DeployedGatewayEnv(env_id="env-x", env_version=1, gateway_url=_GATEWAY, mcp_url="", sandbox_id="sb-env",
+                                control_token="gateway-token", environment_card_url=f"{_GATEWAY}/.well-known/agent-env.json",
+                                environment_card={"name": "office", "url": "/agentenv", "children_environments": [
+                                    {"name": "desktop", "url": "/svc/desktop/agentenv", "capabilities": {"extensions": []}}]},
+                                child_envs={"desktop": dataclasses.asdict(computer)})
+    sent = []
+
+    class Client:
+        async def request(self, method, url, *, json=None, timeout=None, headers=None):
+            sent.append((url, headers))
+            return _resp(200, url, {"ok": True})
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    step = _step(directives=[{"service": service, "uri": _SET_ERRORS_URI, "args": {"tool_name": "t", "error_rate": 0.5}}])
+    with patch("httpx.AsyncClient", return_value=Client()), \
+         patch("agent_env.env.env.Env.get", return_value=SimpleNamespace(mcp_server_envs=[], website_envs=[])):
+        await step.execute(TaskStepContext(deployed_envs=[record]))
+
+    assert sent == [("https://desk.example/agentenv/ext/set_errors", computer.control_headers)]

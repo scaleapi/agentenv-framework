@@ -69,6 +69,10 @@ GNU_STAT = "gnu_stat"
 #: Docker Desktop on a Mac has none, nor has a host without nested virtualization.
 KVM = "kvm"
 
+#: Composing a Windows computer installs Windows from Microsoft's evaluation ISO, which a run fetches into this machine's
+#: cache once, about 7 GB; a test that composes one needs it there already, and KVM, which boots windows/amd64 disks.
+WINDOWS_MEDIA = "windows_media"
+
 
 def missing_capability_reason(capability: str) -> str:
     return f"{MISSING_CAPABILITY_PREFIX}{capability}"
@@ -209,6 +213,19 @@ def kvm_is_available() -> bool:
     from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
 
     return bool(LocalSandboxProvider.disk_image_platforms())
+
+
+def windows_media_is_available() -> bool:
+    """Whether this machine boots Windows disks and holds Microsoft's evaluation ISO in its cache."""
+    from agent_env.env.envs.computer.utils.windows_disk import media_path
+    from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
+
+    return "windows/amd64" in LocalSandboxProvider.disk_image_platforms() and media_path().exists()
+
+
+def skip_without_windows_media() -> pytest.MarkDecorator:
+    """Collection-time ``skipif`` for tests that compose a Windows computer on local Docker."""
+    return pytest.mark.skipif(not windows_media_is_available(), reason=missing_capability_reason(WINDOWS_MEDIA))
 
 
 def skip_without_kvm() -> pytest.MarkDecorator:

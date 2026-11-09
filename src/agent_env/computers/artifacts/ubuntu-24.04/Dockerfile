@@ -1,6 +1,7 @@
 # The ubuntu-24.04 base computer: Ubuntu 24.04 with XFCE on Xvfb, D-Bus and AT-SPI, every program run by supervisord
 # as the session user, whose home has a desktop's standard folders (Documents, Downloads, ...). Composing a driver or an
-# app onto it adds its services as programs in /etc/supervisor/conf.d.
+# app onto it adds its services as programs in /etc/supervisor/conf.d. The trust files agentenv adds are in
+# /etc/agentenv from boot: ca.pem, empty until a deploy adds a CA, and ca-bundle.pem, the public roots and those CAs.
 FROM public.ecr.aws/docker/library/ubuntu:24.04@sha256:24737cef17f4e22b1977df7d9a05e77c4e28b7da5b8911f8d8ccda136bf3573c
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -16,6 +17,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && useradd --create-home --uid 1000 --shell /bin/bash user \
     && runuser -u user -- xdg-user-dirs-update \
     && mkdir -p /etc/supervisor/conf.d /var/log/agentenv /run/agentenv \
+    && mkdir -p /etc/agentenv && touch /etc/agentenv/ca.pem \
+    && cp /etc/ssl/certs/ca-certificates.crt /etc/agentenv/ca-bundle.pem \
     && chown user:user /var/log/agentenv /run/agentenv
 COPY supervisord.conf /etc/supervisor/supervisord.conf
 COPY xfwm4.xml /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml
