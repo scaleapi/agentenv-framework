@@ -10,7 +10,7 @@ import pytest
 from agentenv_protocol import EnvironmentCard, client as protocol_client
 from agent_env.env.gateway import constants as gateway_constants
 from agent_env.env.gateway import InternalMCPServer
-from agent_env.env.gateway.gateway import Gateway
+from agent_env.env.gateway.gateway import Gateway, route_environment_name
 
 
 def _gateway(rest_proxy_urls: dict[str, str]) -> Gateway:
@@ -292,6 +292,25 @@ async def test_each_child_entry_states_the_environment_name_its_env_is_registere
     assert {child.environment_name for child in EnvironmentCard.model_validate(card).children_environments} == {
         "email", "shop", "desktop", "mcp-tools"}
     assert [child.known_as for child in protocol_client.children(card)] == ["email", "shop", "desktop", "mcp-tools"]
+
+
+@pytest.mark.parametrize("servers, routes", [
+    ({"foo": "http://foo:8000/mcp", "mcp-foo": "http://mcp-foo:8000/mcp"},
+     {"mcp-foo": "http://foo:8001", "mcp-mcp-foo": "http://mcp-foo:8001"}),  # compose: each on its own host
+    ({"foo": "https://sb.example:9001/mcp", "mcp-foo": "https://sb.example:9002/mcp"},
+     {"mcp-foo": "https://sb.example:9001", "mcp-mcp-foo": "https://sb.example:9002"}),  # one host, a port each
+], ids=["compose", "one-host"])
+def test_mcp_servers_named_foo_and_mcp_foo_are_each_named_by_the_backend_their_route_reaches(servers, routes):
+    internal = [InternalMCPServer(name, url) for name, url in servers.items()]
+    named = {key: route_environment_name(key, url, internal, website=False) for key, url in routes.items()}
+    assert named == {"mcp-foo": "foo", "mcp-mcp-foo": "mcp-foo"}
+
+
+def test_a_computer_whose_name_starts_mcp_keeps_it_and_a_route_with_no_server_behind_it_drops_the_prefix():
+    internal = [InternalMCPServer("mcp-tools", "http://tools-sb:7000/mcp")]
+    assert route_environment_name("mcp-tools", "http://tools-sb:7000", internal, website=False) == "mcp-tools"
+    assert route_environment_name("mcp-email", "http://email:8000", [], website=False) == "email"
+    assert route_environment_name("mcp-shop", "http://shop-backend:8000", [], website=True) == "mcp-shop"
 
 
 def test_a_website_childs_card_names_the_route_the_gateway_serves_it_to_a_browser_at():
