@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 import re
 import shutil
 import subprocess
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -61,6 +63,22 @@ def test_the_bake_recipe_brings_the_uv_the_install_brings():
         assert re.findall(r"ghcr\.io/astral-sh/uv:(\S+) ", recipe.read_text()) == [uv_version], recipe
 
 
+def test_the_image_works_in_app_as_agent():
+    lines = (AGENT_DIR / "Dockerfile").read_text().splitlines()
+    last = {key: next(line.split(maxsplit=1)[1] for line in reversed(lines) if line.startswith(f"{key} "))
+            for key in ("USER", "WORKDIR")}
+    assert last == {"USER": "agent", "WORKDIR": "/app"}
+
+
+def test_the_episode_writes_it_from_the_bundle_taking_no_credentials(local_stores, cli_routing):
+    version = write_installed(PROXY_AGENT_ID)
+    agent = A2AAgent.get(PROXY_AGENT_ID)
+
+    assert (agent.version, agent.metadata) == (version, {"takes_credentials": False})
+    assert agent.docker_image_artifact.context_only
+    assert write_installed(PROXY_AGENT_ID) == version
+
+
 @pytest.mark.parametrize("baked", [None, "0" * 64], ids=["no-proxy-baked", "other-requirements-baked"])
 def test_a_container_without_this_proxy_baked_in_gets_uv_and_a_venv(tmp_path, baked):
     calls, exit_code = _install(tmp_path, baked)
@@ -81,11 +99,36 @@ def test_a_container_with_this_proxy_baked_in_only_starts_it(tmp_path):
                               "> /opt/agentenv-proxy-8000/proxy.log 2>&1")
 
 
-def _install(tmp_path, baked: str | None) -> tuple[list[str], int]:
+@pytest.mark.parametrize(("cached", "downloads"), [("good", 0), (b"not uv", 1), (None, 1)],
+                         ids=["a-good-copy", "a-corrupt-copy", "no-copy"])
+def test_a_full_install_takes_uv_from_the_hosts_copy_unless_it_isnt_good(tmp_path, cached, downloads):
+    archive = _uv_archive(tmp_path)
+
+    calls, exit_code = _install(tmp_path, None, archive=archive, cached=archive.read_bytes() if cached == "good" else cached)
+
+    assert exit_code == 0 and len([call for call in calls if call.startswith("curl")]) == downloads
+    assert _cached(tmp_path).read_bytes() == archive.read_bytes()
+    assert [call.split()[3] for call in calls if call.startswith("docker cp")] == [
+        "task:/opt/agentenv-proxy-8000/bin/uv", "task:/opt/agentenv-proxy-8000/requirements.txt",
+        "task:/opt/agentenv-proxy-8000/a2a_server.py"]
+    assert calls[-1].endswith("exec /opt/agentenv-proxy-8000/venv/bin/python /opt/agentenv-proxy-8000/a2a_server.py "
+                              "> /opt/agentenv-proxy-8000/proxy.log 2>&1")
+
+
+def _install(tmp_path, baked: str | None, *, archive: Path | None = None,
+             cached: bytes | None = None) -> tuple[list[str], int]:
     """``install.sh container task 8000`` against a fake docker whose container's image baked a proxy holding the
-    requirements digest ``baked``, or none, and a curl that fails: every docker and curl call, and the exit code."""
+    requirements digest ``baked``, or none, with the host holding ``cached`` as its copy of uv, and a curl that serves
+    ``archive`` as uv, pinned to its checksum, or fails without one: every docker and curl call, and the exit code."""
     agent, bin_dir, log = tmp_path / "agent", tmp_path / "bin", tmp_path / "calls.log"
     shutil.copytree(AGENT_DIR, agent, ignore=shutil.ignore_patterns("__pycache__"))
+    if archive is not None:
+        script = agent / "install.sh"
+        script.write_text(re.sub(r"^UV_SHA256_X86_64=\S+$", f"UV_SHA256_X86_64={_sha256(archive.read_bytes())}",
+                                 script.read_text(), flags=re.M))
+    if cached is not None:
+        _cached(tmp_path).parent.mkdir(parents=True)
+        _cached(tmp_path).write_bytes(cached)
     bin_dir.mkdir()
     (bin_dir / "docker").write_text(f"""#!/bin/sh
 printf 'docker %s\\n' "$*" >> {log}
@@ -95,26 +138,33 @@ case "$*" in
 esac
 exit 0
 """)
-    (bin_dir / "curl").write_text(f"#!/bin/sh\nprintf 'curl %s\\n' \"$*\" >> {log}\nexit 22\n")
+    (bin_dir / "curl").write_text(f"""#!/bin/sh
+printf 'curl %s\\n' "$*" >> {log}
+[ -n "$FAKE_UV" ] || exit 22
+while [ $# -gt 1 ]; do [ "$1" = -o ] && cp "$FAKE_UV" "$2"; shift; done
+""")
     for stub in ("docker", "curl"):
         (bin_dir / stub).chmod(0o755)
     env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "FAKE_BAKED": baked or "",
-           "HOME": str(tmp_path), "XDG_CACHE_HOME": str(tmp_path / "cache")}
+           "FAKE_UV": str(archive or ""), "HOME": str(tmp_path), "XDG_CACHE_HOME": str(tmp_path / "cache")}
     done = subprocess.run(["bash", str(agent / "install.sh"), "container", "task", "8000"], capture_output=True, env=env)
     return log.read_text().splitlines(), done.returncode
 
 
-def test_the_image_works_in_app_as_agent():
-    lines = (AGENT_DIR / "Dockerfile").read_text().splitlines()
-    last = {key: next(line.split(maxsplit=1)[1] for line in reversed(lines) if line.startswith(f"{key} "))
-            for key in ("USER", "WORKDIR")}
-    assert last == {"USER": "agent", "WORKDIR": "/app"}
+def _uv_archive(tmp_path) -> Path:
+    """A uv release archive whose uv is a stub."""
+    archive = tmp_path / "uv.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        uv = tarfile.TarInfo("uv-x86_64-unknown-linux-musl/uv")
+        uv.size, uv.mode = 10, 0o755
+        tar.addfile(uv, io.BytesIO(b"#!/bin/sh\n"))
+    return archive
 
 
-def test_the_episode_writes_it_from_the_bundle_taking_no_credentials(local_stores, cli_routing):
-    version = write_installed(PROXY_AGENT_ID)
-    agent = A2AAgent.get(PROXY_AGENT_ID)
+def _cached(tmp_path) -> Path:
+    uv_version = re.search(r"^UV_VERSION=(\S+)$", (AGENT_DIR / "install.sh").read_text(), re.M).group(1)
+    return tmp_path / "cache" / "agentenv-proxy" / f"{uv_version}-uv-x86_64-unknown-linux-musl.tar.gz"
 
-    assert (agent.version, agent.metadata) == (version, {"takes_credentials": False})
-    assert agent.docker_image_artifact.context_only
-    assert write_installed(PROXY_AGENT_ID) == version
+
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()

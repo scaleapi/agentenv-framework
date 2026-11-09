@@ -48,8 +48,9 @@ WORKDIR_HOST_KEY = "workdir_host"
 USER_HOST_KEY = "user_host"
 # The per-step param that installs this agent in place of the step's own, as an episode plays it through a proxy.
 PROXY_PARAM = "proxy"
-# The install/v1 extension of each agent image's card, by its name and digest, which name the image's content.
-_INSTALL_EXTENSIONS: dict[tuple[str, Optional[str]], dict] = {}
+# Each agent image's read of its card's install/v1 extension, by the image artifact's id and version, under which the
+# image never changes.
+_INSTALL_EXTENSIONS: dict[tuple[str, Optional[int]], asyncio.Future] = {}
 
 
 class HostPlace(NamedTuple):
@@ -452,14 +453,21 @@ class InstallAgentTaskStep(TaskStep):
         return TaskStep.DEFAULT_TTL_SECONDS
 
     async def _extract_install_extension(self, sandbox, image: DockerImageArtifact) -> dict:
-        """The install/v1 extension of the card ``image`` serves: read once in this process, by running the image
-        briefly with --entrypoint python3 to dump its AGENT_CARD."""
+        """The install/v1 extension of the card ``image`` serves, read once in this process for each image artifact
+        version: installs at once share one read, and one that failed, or ran on another event loop, is made again."""
+        key = (image.id, image.version)
+        read = _INSTALL_EXTENSIONS.get(key)
+        if (read is None or read.get_loop() is not asyncio.get_running_loop()
+                or (read.done() and (read.cancelled() or read.exception() is not None))):
+            read = asyncio.ensure_future(self._read_install_extension(sandbox, image.image_name))
+            _INSTALL_EXTENSIONS[key] = read
+        return await asyncio.shield(read)
+
+    @staticmethod
+    async def _read_install_extension(sandbox, agent_image_name: str) -> dict:
+        """Run the agent image briefly with --entrypoint python3 to dump its AGENT_CARD and find the install/v1 extension."""
         from agent_env.a2a_agent import A2AAgent
 
-        key = (image.image_name, image.image_digest)
-        if (cached := _INSTALL_EXTENSIONS.get(key)) is not None:
-            return cached
-        agent_image_name = image.image_name
         script = (
             "import sys, json; sys.path.insert(0, '/app'); "
             "from a2a_server import AGENT_CARD; "
@@ -481,7 +489,6 @@ class InstallAgentTaskStep(TaskStep):
                 f"Agent image {agent_image_name} does not declare {A2AAgent.EXT_INSTALL} on its card; "
                 f"cannot use InstallAgentTaskStep with this agent"
             )
-        _INSTALL_EXTENSIONS[key] = install_ext
         return install_ext
 
     def _check_tunnel_collision(self, context: TaskStepContext, sandbox_id: Optional[str], a2a_url: str, a2a_port: int) -> None:

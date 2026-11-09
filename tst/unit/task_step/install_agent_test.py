@@ -406,20 +406,57 @@ def test_only_an_install_in_another_agents_place_gives_its_workdir_and_user():
     assert (placed["host_workdir"](), placed["host_user"]()) == ("/opt/agent-solver/workspace", "agent-solver")
 
 
+class _CardSandbox:
+    """Runs an agent image's card dump, answering after ``delay`` with a card offering ``INSTALL``, or failing first
+    ``failures`` times; each run recorded."""
+
+    def __init__(self, delay: float = 0, failures: int = 0):
+        self.runs, self.delay, self.failures = [], delay, failures
+
+    async def exec_with_output(self, *args):
+        self.runs.append(args[-3])
+        await asyncio.sleep(self.delay)
+        if len(self.runs) <= self.failures:
+            return 1, "", "the image's Python exited"
+        return 0, json.dumps({"capabilities": {"extensions": [INSTALL]}}), ""
+
+
+INSTALL = {"uri": A2AAgent.EXT_INSTALL, "params": {"a2a_port": 8000}}
+
+
+def _card_image(version: int, name: str | None = None):
+    return SimpleNamespace(id=f"agent-image-{uuid.uuid4().hex}" if name is None else name, version=version,
+                           image_name="agent:latest")
+
+
+def _card_step():
+    return InstallAgentTaskStep(id="i", version=None, sandbox_name="vm", a2a_agent_id="agent-x", agent_name="solver")
+
+
 @pytest.mark.asyncio
-async def test_an_images_install_extension_is_read_from_it_once_and_from_another_digest_again():
-    install = {"uri": A2AAgent.EXT_INSTALL, "params": {"a2a_port": 8000}}
-    runs = []
+async def test_an_images_install_extension_is_read_once_for_each_version_of_its_artifact():
+    """A tarball's images carry no digest, so two versions under one name differ only as versions."""
+    sandbox, name = _CardSandbox(), f"agent-image-{uuid.uuid4().hex}"
 
-    class _Sandbox:
-        async def exec_with_output(self, *args):
-            runs.append(args)
-            return 0, json.dumps({"capabilities": {"extensions": [install]}}), ""
+    read = [await _card_step()._extract_install_extension(sandbox, _card_image(version, name)) for version in (1, 1, 2)]
 
-    name = f"agent-image-{uuid.uuid4().hex}"
-    step = InstallAgentTaskStep(id="i", version=None, sandbox_name="vm", a2a_agent_id="agent-x", agent_name="solver")
+    assert read == [INSTALL] * 3 and sandbox.runs == ["agent:latest", "agent:latest"]
 
-    read = [await step._extract_install_extension(_Sandbox(), SimpleNamespace(image_name=name, image_digest=digest))
-            for digest in ("sha256:aa", "sha256:aa", "sha256:bb")]
 
-    assert read == [install] * 3 and [run[-3] for run in runs] == [name, name]
+@pytest.mark.asyncio
+async def test_installs_at_once_share_one_read_of_an_images_install_extension():
+    sandbox, image = _CardSandbox(delay=0.05), _card_image(1)
+
+    read = await asyncio.gather(*(_card_step()._extract_install_extension(sandbox, image) for _ in range(8)))
+
+    assert read == [INSTALL] * 8 and len(sandbox.runs) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failed_read_of_an_images_install_extension_is_made_again():
+    sandbox, image = _CardSandbox(failures=1), _card_image(1)
+
+    with pytest.raises(RuntimeError, match="the image's Python exited"):
+        await _card_step()._extract_install_extension(sandbox, image)
+
+    assert await _card_step()._extract_install_extension(sandbox, image) == INSTALL and len(sandbox.runs) == 2
