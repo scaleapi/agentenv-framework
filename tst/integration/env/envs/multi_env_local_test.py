@@ -1,14 +1,16 @@
 """A MultiEnv on the local backend: two MCP servers behind one gateway and the local Postgres store, on docker compose.
 
-The env deploys, a fresh object restores its record as a later process would, loads a universe into one of its servers,
-and close() takes the whole compose stack down. Requires a docker daemon; spins up a throwaway ``registry:2`` and skips
-if it can't start.
+The env deploys, a fresh object restores its record as a later process would, loads a universe into both its servers,
+the reset_env step empties both (the items server through data/reset, the older slack server, which serves no card,
+through its /api/reset), and close() takes the whole compose stack down. Requires a docker daemon; spins up a throwaway
+``registry:2`` and skips if it can't start.
 """
 
 import json
 import uuid
 from pathlib import Path
 
+import httpx
 import pytest
 from agentenv_protocol import client as protocol_v1
 
@@ -17,6 +19,8 @@ from agent_env.env import legacy_protocol
 from agent_env.env.env import DeployedGatewayEnv, Env
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
+from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
 from tst.integration.env.envs.server_env_local_test import _put_items_image
 from tst.integration.store.local_parallel_deploy_test import _docker, _seed_bootstrap_envs, local_stack as local_stack
 
@@ -50,6 +54,14 @@ async def test_a_multi_env_deploys_restores_loads_and_tears_down_on_local_compos
         await restored.load_environment_universe_artifact(_items_universe(uid))
         base_url = await legacy_protocol.v1_base_url(deployed, deployed.gateway_url, "items")
         assert (await protocol_v1.get_data(base_url)).model_dump()["parts"][0]["data"] == {"items": ["snap-x", "snap-y"]}
+        slack_state = f"{legacy_protocol.environment_base_url(deployed.gateway_url, 'slack')}/export-state"
+        assert len(httpx.get(slack_state, timeout=30).json()["channels"]) == 10
+
+        # A multi env without computers resets its servers, each as it resets alone, and fails if one doesn't.
+        await ResetEnvTaskStep(id="reset", version=None, env_id=env.id, fail_task_on_error=True).execute(
+            TaskStepContext(deployed_envs=[deployed]))
+        assert (await protocol_v1.get_data(base_url)).model_dump()["parts"][0]["data"] == {"items": []}
+        assert httpx.get(slack_state, timeout=30).json()["channels"] == []
 
         await restored.close()
         assert _stack(work_dir) == ""
@@ -63,10 +75,18 @@ def _stack(work_dir: Path) -> str:
 
 
 def _items_universe(uid: str) -> EnvironmentUniverseArtifact:
+    """The items server's two items, and the slack server's workspace of ten channels."""
     items = EnvironmentArtifact.put(
         id=f"multi-items-data-{uid}",
         environment_name="items",
         file_artifact=FileArtifact.put_bytes(id=f"multi-items-file-{uid}", description="multi env e2e", filename="items.json",
                                              content=json.dumps({"items": ["snap-x", "snap-y"]}).encode(), content_type="application/json"),
     )
-    return EnvironmentUniverseArtifact.put(id=f"multi-universe-{uid}", environment_artifacts=[items])
+    slack = EnvironmentArtifact.put(
+        id=f"multi-slack-data-{uid}",
+        environment_name="slack",
+        file_artifact=FileArtifact.put_bytes(id=f"multi-slack-file-{uid}", description="multi env e2e", filename="slack.json",
+                                             content=(_TST_DATA / "slack_mcp/generated_data.json").read_bytes(),
+                                             content_type="application/json"),
+    )
+    return EnvironmentUniverseArtifact.put(id=f"multi-universe-{uid}", environment_artifacts=[items, slack])

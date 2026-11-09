@@ -147,11 +147,11 @@ async def load_by_signed_url(env: MCPServerEnv | WebsiteEnv, environment_artifac
 
 async def reset_server_data(env: MCPServerEnv | WebsiteEnv, *, mcp: bool) -> bool:
     """Empty what loads put into ``env``, an MCP server or with ``mcp=False`` a website, as each load does before it adds:
-    through ``data/reset``, or an older server's ``/api/reset``; then, behind a gateway of ours, its changelog started
-    afresh, as after a load. ``env`` is attached to its deployment, which may be a MultiEnv's. False, with nothing sent,
-    for one serving no reset, which takes no load either: a card declaring operations without ``data/reset``, a plugin's
-    card offering it no data plane, or an older server answering 404 that offers no ``<name>_reset`` tool. One that does
-    offers it only to load a seed, which a load does; RuntimeError, since a reset can't empty it."""
+    through ``data/reset``, or an older server's ``/api/reset``, or else its ``<name>_reset`` tool, which with no seed
+    puts back the data the server boots with; then, behind a gateway of ours, its changelog started afresh, as after a
+    load. ``env`` is attached to its deployment, which may be a MultiEnv's. False, with nothing sent, for one serving no
+    reset, which takes no load either: a card declaring operations without ``data/reset``, a plugin's card offering it
+    no data plane, or an older server answering 404 that offers no ``<name>_reset`` tool."""
     name = env.environment_name
     if env._deployed is None and env._gateway_url is None:
         raise RuntimeError("Environment not deployed - call deploy() first")
@@ -171,10 +171,12 @@ async def reset_server_data(env: MCPServerEnv | WebsiteEnv, *, mcp: bool) -> boo
         except httpx.HTTPStatusError as e:
             if e.response.status_code != 404:
                 raise
-            if mcp and await legacy_protocol.offers_tool(f"{env._gateway_url.rstrip('/')}/mcp", f"{name}_reset"):
-                raise RuntimeError(f"MCP server '{name}' resets only to a seed loaded through its {name}_reset tool, so "
-                                   "a reset can't empty it; load it again instead") from None
-            return False
+            mcp_url = f"{env._gateway_url.rstrip('/')}/mcp"
+            if not (mcp and await legacy_protocol.offers_tool(mcp_url, f"{name}_reset")):
+                return False
+            if (answer := await legacy_protocol.reset_via_mcp_tool(mcp_url, name)).isError:
+                said = "".join(part.text for part in answer.content if hasattr(part, "text"))
+                raise RuntimeError(f"MCP server '{name}': its {name}_reset tool failed: {said}") from None
     if builtin is not None:
         await builtin.install_changelog_triggers(name)
     return True
