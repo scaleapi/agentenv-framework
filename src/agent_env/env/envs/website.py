@@ -27,7 +27,8 @@ from agent_env.store.ids import derive_id
 from agent_env.env import legacy_protocol
 from agent_env.env.envs._deployment import (
     as_builtin, builtin_provider_for, close_deployed, close_replaced, deploy_refusal, deploy_through_provider, host_staging_refusal,
-    file_parts, legacy_load_file, load_by_signed_url, plugin_provider_like_a_builtin, provider_or_class, staged_paths,
+    file_parts, legacy_load_file, load_by_signed_url, plugin_provider_like_a_builtin, provider_or_class, reset_server_data,
+    staged_paths,
 )
 from agent_env.env.gateway import GatewayMode
 from agent_env.attribution import Attribution
@@ -288,6 +289,12 @@ class WebsiteEnv(Env):
                 f"environment '{self.environment_name}' backend is in empty state: {e}"
             )
             raise
+
+    async def reset(self, deployed: DeployedEnv) -> None:
+        """Empty what loads put into the website, attached to ``deployed`` as a load is, so a task loads it again after;
+        NotImplementedError for one serving no reset, which takes no load either."""
+        if not await reset_server_data(await type(self).from_deployed_env(deployed), mcp=False):
+            raise NotImplementedError(f"website '{self.environment_name}' serves no reset")
 
     async def close(self) -> None:
         await close_replaced(self)

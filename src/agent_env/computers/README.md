@@ -13,10 +13,12 @@ building it. Name it from another bundle as `ubuntu-24.04`, the alias `aliases.t
 `artifacts/ubuntu-24.04-headless/` is Ubuntu 24.04 (`amd64` and `arm64`) with no display server or desktop
 (`display = "none"`), for one website browser, which runs headless there, and the `page` driver, whose screen is the
 browser's page: a browser computer, which agentenv's `chromium` deploys alone as. supervisord runs every program as the
-session user, among them a stand-in site proxy on `127.0.0.1:3128`, the browser's only route out, which forwards every
-request to wherever it names, refusing nothing: the sandbox's network policy is all that limits it until the shared
-site proxy replaces it. It has a container form only. Name it from another bundle as `ubuntu-24.04-headless`, or by
-its id, `@local/agentenv-framework/computers/ubuntu-24.04-headless`.
+session user, among them a stand-in site proxy on `127.0.0.1:3128`, the browser's only route out when the computer
+routes no sites, which forwards every request to wherever it names, refusing nothing: the sandbox's network policy is
+all that limits it. A computer that routes sites names the shared site proxy's forward port, `127.0.0.1:3129`, to the
+browser instead: it serves the run's sites, refuses every other host and runs out of the agent's reach. It has a
+container form only. Name it from another bundle as `ubuntu-24.04-headless`, or by its id,
+`@local/agentenv-framework/computers/ubuntu-24.04-headless`.
 
 It also has a disk form, a disk a VM boots from UEFI, which is the container form's root filesystem on the Linux boot
 recipe in `disk/linux/`: a GPT disk of an EFI system partition holding one UKI, Ubuntu's kernel with a busybox initramfs,
@@ -34,14 +36,21 @@ partition kept, so nothing is emulated or privileged. A disk boots where `/dev/k
 KVM probes it. A deploy boots it with `env_params = { form = "disk" }`. The launcher serves each of the computer's ports
 through socat, whose listen backlog takes a burst of connections, in front of QEMU's own forward, whose backlog is 1, and
 a reset boots the disk afresh on a new overlay in the same launcher, at the same URLs; a container an agent-env from
-before reset in place started is refused a reset, to be redeployed. It boots on local Docker where
-Docker can pass it `/dev/kvm`, and on `modal_vm`, amd64 only, whose sandbox runs the launcher as its image under nested
-virtualization: the provider exports the disk from the image store with this machine's Docker, compressed, once for each
-composed disk, into the per-user cache, and mounts it on the sandbox at create, which Modal uploads once for each
-content and the launcher expands onto the sandbox's disk. Such a sandbox is ended once it has been idle, with no
-connection open, for the provider's `idle_timeout`, 30 minutes unless its config sets another, as a running QEMU isn't
-activity. A gate 3 probe that ends with the connection to the driver dropped, refused or timed out runs again on a fresh
-boot, up to three in all, and the record keeps each attempt; one with a failed check is recorded as it is.
+before reset in place started is refused a reset, to be redeployed. It boots on local Docker where Docker can pass it
+`/dev/kvm`, the disk image's files mounted read-only into the launcher where Docker mounts images (28 and later, on the
+containerd image store), so no copy of a disk, nor of a Windows disk's base, is made for each launcher, else copied into
+an image of the launcher it keeps for the next boot. There its computer uses a local object store's grants as a container
+does, at `host.docker.internal`: Linux's init and Windows' setup map that name to 10.0.2.2, QEMU's address for the
+launcher, which forwards the grant server's port to this machine (`VM_HOST_PORTS`), and the local transfer CA's trust
+files ride in the seed (`VM_TRUST`), where the init and agentenv-session point TLS clients at them; and on `modal_vm`, amd64 only, whose sandbox runs the launcher as
+its image under nested virtualization: the provider exports the disk from the image store with this machine's Docker,
+compressed, once for each composed disk, into the per-user cache, and mounts it on the sandbox at create, which Modal
+uploads once for each content and the launcher expands onto the sandbox's disk; a thin disk, a Windows one, carries its
+base too, exported once for each base and expanded beside it there, so another computer on that base adds its layer
+alone. Such a sandbox is ended once it has been idle, with no connection open, for the provider's `idle_timeout`, 30
+minutes unless its config sets another, as a running QEMU isn't activity. A gate 3 probe that ends with the connection
+to the driver dropped, refused or timed out runs again on a fresh boot, up to three in all, and the record keeps each
+attempt; one with a failed check is recorded as it is.
 
 A put, `env build` and the release compose every form; a run composes only the forms its sandbox's deploys boot: on each
 link of a chain, the first form it boots natively, as a deploy picks, so local Docker composes containers, and a sandbox
@@ -50,7 +59,10 @@ names another, never on the sandbox it deploys on. A compose of a disk also comp
 unless that's built. A deploy that boots a form no compose has started, a disk named by `env_params` included, composes
 it first on that same provider, saying which, reusing what's built, as every build is reused by its key; deploys of one
 env at once compose it once, the others
-waiting for it, a deploy that finds it building included. In `agent-env run` it says why and each stage as it goes, and
+waiting for it, a deploy that finds it building included. A container built but left unverified though the deploy's
+sandbox runs it natively, as one is when a setting its probe boots with doesn't resolve, is composed again the same way:
+its image reused and probed, and booted only once ready; a deploy that still has no ready build names why each such
+container wasn't probed. In `agent-env run` it says why and each stage as it goes, and
 a deploy waiting for another's compose says what it waits for and since when. A local run doesn't compose a registered
 env's form at deploy where a configured store isn't the per-user one, since the run's fence refuses its record: the
 deploy refuses for want of a ready build and names `agent-env env build`.
@@ -140,6 +152,44 @@ Virtualization.framework runs a VM only in a logged-in session, so on a Mac with
 agent-env runs as logs in at boot and agent-env runs in that session (`launchctl asuser`). A Mac runs two macOS VMs at
 once, as Apple's licence allows and Virtualization.framework enforces; `lume` refuses a third. Its `resolution` setting
 sizes the virtual display.
+
+`artifacts/windows-11/` is Windows 11 Enterprise (`amd64`), Microsoft's evaluation, as a disk. Windows isn't
+agent-env's to publish, so no image of it is: the first compose on a Linux machine with KVM fetches the evaluation ISO
+from Microsoft's link into the per-user cache, once, printing one line that says so, and installs it unattended in the
+QEMU launcher (`disk/windows/`): `autounattend.xml` answers setup, with the licence accepted, a UEFI disk and two local
+accounts, `agentadmin`, whom agent-env composes as over ssh with a key of the base's own, and `user`, the session user
+the desktop signs in as at every boot; `setup.ps1` runs once at `agentadmin`'s first sign-in, OpenSSH first, so a
+setup that fails is read back over ssh at once (`setup-failed`), then turns off what would get in an agent's way
+(updates, the lock screen, notifications, Widgets, Copilot, first-run pages, the page file and the firewall, behind
+QEMU's network, which reaches the guest at the ports the launcher forwards alone), installs the pinned Python with Tk
+and `agentenv-session`, and switches the sign-in to `user`. Setup takes about 13 minutes. The installed disk, trimmed,
+becomes the base's image, `disk/base.img` in a layer of its own under an empty overlay of it, with the date its 90-day
+evaluation expires and the key to `agentadmin`; it's pushed to the env's image store, as Linux disks
+are, under a tag of its recipe, so another machine composing on it pulls it rather than installing Windows, and fetches
+no ISO. A compose installs a base afresh once fewer than 7 days of its evaluation are left, from the ISO Microsoft's
+link serves then. Name it as `windows-11`, or by its id, `@local/agentenv-framework/computers/windows-11`.
+
+A Windows computer env is composed on the same machine (`env/envs/computer/utils/windows_disk.py`): the base booted on
+an overlay kept in a folder of its own, each layer installed over ssh as `agentadmin` by a PowerShell script composing
+writes, as its `[install.windows]` says (its files under `C:\agentenv\drivers\<name>`, or an app's under
+`C:\agentenv\apps\<name>`, its downloads checked by sha256, its venv on the pinned Python, its PowerShell run scripts,
+elevated, an app's install steps, elevated too, and its services), then shut down and
+packed onto the base's image, so every computer composed on a base shares one copy of it, and pushed to the env's image
+store under its key, pinned, as a Linux disk is; a compose of the same inputs on any machine reuses it, and a deploy
+pulls it. Gate 3 probes it at full. At the session user's sign-in,
+`agentenv-session`, run windowless by `pythonw`, reads the deploy's environment from the NoCloud seed, which the
+launcher attaches as a removable USB drive, since Windows mounts a FAT filesystem with no partition table on removable
+media alone, and starts each layer's services in that session, again whenever one exits. A Windows computer boots
+with 4 vCPUs and 8 GB, on local Docker with KVM and on `modal_vm`; it has computer-exec and data/add, through the
+protocol's Windows defaults, so the probe runs its fixture there as on Linux, with Python one-liners for the commands it
+would give a shell. On `modal_vm` it runs in your own Modal workspace, under the evaluation's terms or a licence of your
+own; whether they allow it there is yours to check. Composing leaves `C:\agentenv` the admins', as `/opt/agentenv` is
+root's on Linux: every user, and every sandboxed process (Chrome's, as Program Files allows it), reads and runs
+what's there, and the session user writes only the services' logs and each
+app's `.agentenv` folder. An app's own server runs in the session as its services do, on a loopback port it writes
+with a token to that folder, which only the session user, SYSTEM and Administrators reach; it launches the app in a
+Job object, which ends whatever the app started. Composing signs in as `agentadmin`, so
+an app's install step for the session user can't run on Windows, and gate 1 refuses an app that declares one there.
 
 This bundle has no tasks of its own: other bundles pull its computers by alias, and `agent-env run computers` has
 nothing to run.

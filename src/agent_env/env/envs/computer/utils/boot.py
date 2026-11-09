@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 from agentenv_protocol import CONTROL_TOKEN_ENV
 from agentenv_protocol import client as protocol_v1
-from agentenv_protocol.computer import APP_SETTINGS_ENV, COMPUTER_READY, SETTINGS_ENV
+from agentenv_protocol.computer import APP_SETTINGS_ENV, COMPUTER_READY, SETTINGS_ENV, TOOL_PREFIX_ENV
 from agentenv_protocol.computer.app import COMPUTER_APP
 from agentenv_protocol.computer.apps import ANSWER_TIMEOUT_S
 
@@ -48,8 +48,10 @@ class ComputerFailed(RuntimeError):
     """The computer's ``computer-ready`` status says it failed for good, a check that can't pass again."""
 #: How many random bytes a computer's control token carries: 256 bits, past guessing.
 CONTROL_TOKEN_BYTES = 32
-#: The size of a disk's VM when a deploy sets none: what the desktop was measured booting and passing the probe in.
+#: The size of a disk's VM when a deploy sets none: what the desktop was measured booting and passing the probe in, and
+#: for Windows, what Windows 11 asks of a PC.
 DISK_CPU, DISK_MEMORY_MB = 2.0, 4096
+WINDOWS_CPU, WINDOWS_MEMORY_MB = 4.0, 8192
 
 
 @dataclass
@@ -59,22 +61,24 @@ class Booted:
     card: dict
 
 
-def native_links(sandbox_provider: SandboxProvider, arch: str, form: str, store_id: str) -> list[SandboxProvider]:
-    """The providers a boot of ``form`` for ``arch`` of the env stored as ``store_id`` may run on, in the order a chain
-    tries them: those that boot its disk natively, which they carry themselves, or run its container natively and pull
-    it from the env's image store."""
+def native_links(sandbox_provider: SandboxProvider, arch: str, form: str, store_id: str,
+                 os_type: str = "linux") -> list[SandboxProvider]:
+    """The providers a boot of ``form`` for ``arch`` of the env stored as ``store_id``, an ``os_type`` computer, may run
+    on, in the order a chain tries them: those that boot its disk natively, which they carry themselves, or run its
+    container natively and pull it from the env's image store."""
     if form == "disk":
-        return [link for link in sandbox_provider.links if f"linux/{arch}" in link.disk_image_platforms()]
+        return [link for link in sandbox_provider.links if f"{os_type}/{arch}" in link.disk_image_platforms()]
     if form == "vm_bundle":
         return [link for link in sandbox_provider.links if f"macos/{arch}" in link.vm_bundle_platforms()]
     return [link for link in sandbox_provider.links if f"linux/{arch}" in link.native_platforms()
             and pulls_containers(link, store_id)]
 
 
-def first_native(link: SandboxProvider, pairs: Iterable[tuple[str, str]], store_id: str) -> tuple[str, str] | None:
+def first_native(link: SandboxProvider, pairs: Iterable[tuple[str, str]], store_id: str,
+                 os_type: str = "linux") -> tuple[str, str] | None:
     """The first of ``pairs``, forms and arches in the base's order, that ``link`` boots natively: the one a deploy on it
     boots, and so the one a run composes for it."""
-    return next(((form, arch) for form, arch in pairs if native_links(link, arch, form, store_id)), None)
+    return next(((form, arch) for form, arch in pairs if native_links(link, arch, form, store_id, os_type)), None)
 
 
 def pulls_containers(link: SandboxProvider, store_id: str) -> bool:
@@ -85,11 +89,11 @@ def pulls_containers(link: SandboxProvider, store_id: str) -> bool:
 
 
 def settings_environment(computer: ComputerArtifact, values: dict[str, Any], *, environment_name: str,
-                         driver_settings: Optional[dict] = None) -> dict[str, str]:
+                         driver_settings: Optional[dict] = None, tool_prefix: str = "") -> dict[str, str]:
     """The environment a boot of ``computer`` gives it: each deploy-phase setting as ``AGENTENV_SETTING_<NAME>``, from
     ``values`` over its default, minted afresh when it's generated and resolved through the secret store when it's a
-    secret; ``driver_settings``, when there are any, in ``AGENTENV_COMPUTER_SETTINGS``; and the name its card is served
-    under."""
+    secret; ``driver_settings``, when there are any, in ``AGENTENV_COMPUTER_SETTINGS``; the name its card is served
+    under; and ``tool_prefix``, when there is one, in ``AGENTENV_TOOL_PREFIX``."""
     environment = {"ENVIRONMENT_NAME": environment_name}
     for name, setting in computer.config.items():
         if setting.phase != "deploy":
@@ -100,27 +104,30 @@ def settings_environment(computer: ComputerArtifact, values: dict[str, Any], *, 
         environment[f"AGENTENV_SETTING_{name.upper()}"] = str(value)
     if driver_settings:
         environment[SETTINGS_ENV] = json.dumps(driver_settings)
+    if tool_prefix:
+        environment[TOOL_PREFIX_ENV] = tool_prefix
     return environment
 
 
 def app_settings_environment(apps: list[ComputerAppEnv], app_settings: dict[str, dict],
-                             os_type: str) -> dict[str, str]:
-    """The environment that hands each of ``apps``, on a computer of ``os_type``, the values ``app_settings`` gives it,
-    by its name, in ``APP_SETTINGS_ENV``, a secret's resolved through the secret store; nothing when none has any."""
+                             platform: str) -> dict[str, str]:
+    """The environment that hands each of ``apps``, on a computer of ``platform`` (``install.platform_of``), the values
+    ``app_settings`` gives it, by its name, in ``APP_SETTINGS_ENV``, a secret's resolved through the secret store;
+    nothing when none has any."""
     given = [(app, app_settings[app.environment_name]) for app in apps if app_settings.get(app.environment_name)]
     if not given:
         return {}
     return {APP_SETTINGS_ENV: json.dumps({app.environment_name: {
-        name: get_config().resolve_reference(value) if name in app.secret_settings(os_type) and value is not None
+        name: get_config().resolve_reference(value) if name in app.secret_settings(platform) and value is not None
         else value
         for name, value in values.items()} for app, values in given})}
 
 
 def recorded_app_settings(apps: list[ComputerAppEnv], app_settings: dict[str, dict],
-                          os_type: str) -> dict[str, dict[str, Any]]:
-    """The values ``app_settings`` hands each of ``apps`` on a computer of ``os_type``, by its name, as a record keeps
-    them, a secret's withheld; its class's defaults fill in the rest."""
-    return {app.environment_name: {name: WITHHELD if name in app.secret_settings(os_type) else value
+                          platform: str) -> dict[str, dict[str, Any]]:
+    """The values ``app_settings`` hands each of ``apps`` on a computer of ``platform`` (``install.platform_of``), by
+    its name, as a record keeps them, a secret's withheld; its class's defaults fill in the rest."""
+    return {app.environment_name: {name: WITHHELD if name in app.secret_settings(platform) else value
                                    for name, value in values.items()}
             for app in apps if (values := app_settings.get(app.environment_name))}
 
@@ -146,7 +153,8 @@ def control_environment(token: Optional[str]) -> dict[str, str]:
 async def boot(sandbox_provider: SandboxProvider, *, image: str, port: int, environment: dict[str, str], token: str,
                network_policy: Optional[NetworkPolicy], timeout: int, attribution: Optional[Attribution],
                disk_size_gb: float = 10, cpu: Optional[float] = None, memory_mb: Optional[int] = None,
-               ready_s: float = READY_TIMEOUT_S, form: str = "container", held: bool = False) -> Booted:
+               ready_s: float = READY_TIMEOUT_S, form: str = "container", held: bool = False,
+               os_type: str = "linux") -> Booted:
     """``image``, of ``form``, booted with ``environment`` and its control ``token`` on ``sandbox_provider``, which the
     caller chose to run its arch natively, its driver's ``port`` reached on the sandbox, once the driver, asked with that
     token, says the computer is ready, or with ``held``, its boot apps' launch held, once it answers (``ready``); a boot
@@ -160,7 +168,8 @@ async def boot(sandbox_provider: SandboxProvider, *, image: str, port: int, envi
         sandbox = await sandbox_provider.create_vm(
             image=image, env=environment, exposed_ports=[port], network_policy=network_policy,
             disk_size_gb=disk_size_gb, timeout=timeout, attribution=dict(attribution or {}),
-            cpu=cpu or DISK_CPU, memory=memory_mb or DISK_MEMORY_MB)
+            cpu=cpu or (WINDOWS_CPU if os_type == "windows" else DISK_CPU),
+            memory=memory_mb or (WINDOWS_MEMORY_MB if os_type == "windows" else DISK_MEMORY_MB))
     else:
         sandbox = await sandbox_provider.create_container(
             image_name=image, port=port, env=environment, network_policy=network_policy, disk_size_gb=disk_size_gb,
@@ -185,11 +194,11 @@ async def discard(sandbox: Sandbox) -> None:
             await asyncio.to_thread(remove_local_work_dir, sandbox.sandbox_id)
 
 
-def ready_timeout(apps: list[ComputerAppEnv], os_type: str) -> float:
-    """How long a computer of ``os_type`` and ``apps`` may take to be ready: ``READY_TIMEOUT_S``, or longer when an app
-    that starts with it there gives itself longer."""
+def ready_timeout(apps: list[ComputerAppEnv], platform: str) -> float:
+    """How long a computer of ``platform`` (``install.platform_of``) and ``apps`` may take to be ready:
+    ``READY_TIMEOUT_S``, or longer when an app that starts with it there gives itself longer."""
     return max([READY_TIMEOUT_S, *(launch.ready.timeout_s + APP_READY_MARGIN_S for app in apps
-                                   if (launch := app.launch(os_type)) and launch.at == "boot" and launch.ready)])
+                                   if (launch := app.launch(platform)) and launch.at == "boot" and launch.ready)])
 
 
 async def ready(url: str, timeout: float, token: Optional[str] = None, *, answering: bool = False) -> dict:

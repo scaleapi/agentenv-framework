@@ -228,7 +228,7 @@ jobs:
         if: always()
         run: |
           .venv/bin/python .github/scripts/check_skip_policy.py junit-integration-slow.xml \
-            --allow model_endpoint_configured remote_sandbox default_a2a_agent mcp_server_sources
+            --allow model_endpoint_configured remote_sandbox default_a2a_agent mcp_server_sources windows_media
       # The tests' times, for .github/scripts/slow_test_durations.py to rebalance the shards with.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()

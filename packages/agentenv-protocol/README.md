@@ -200,7 +200,10 @@ address the card was fetched from. On the client side, `client.mcp_path(card)` r
 declared path, or `/mcp` for a card without one.
 
 A composed card, such as a gateway's, nests each backing environment's card under
-`children_environments`, its `url` and endpoints rooted at the route the composer serves it at.
+`children_environments`, its `url` and endpoints rooted at the route the composer serves it at,
+and its `environment_name`: the name the child env is registered as, which its own card's `name`
+needn't be. A lookup by name finds a child by its `environment_name`, else, from a composer that
+states none, by its card's `name` (`ChildEnv.known_as`).
 `client.children(card)` returns each as a `ChildEnv` (its `name`, `url` and `card`, with its
 `extensions`, `operations` and `serves(method)`, and `base_url(address)`, its data plane resolved
 against the composed card's address). Two children may share a name, as a website and an MCP
@@ -584,8 +587,9 @@ driver has them, through the `served_tools`, `served_extensions` and `served_ope
   features, among them `screen`: `desktop`, or `page` for a driver whose screen is a website
   browser's active tab, which a computer env pairs with exactly one website browser. The driver serves its skill through `skill/v1` (an `@agent_skill` handler on the base
   class): a SKILL.md written from the computer as it booted (its platform, session user and home,
-  the live screen size, what its input takes, its OS's shortcuts) and ending with the driver
-  class's `notes`, markdown for what its card can't say. A driver whose software ships a skill of
+  the live screen size, what its input takes, its platform's shortcuts, a distribution's where it
+  has its own, as Omarchy does) and ending with the driver class's `notes`, markdown for what its
+  card can't say. A driver whose software ships a skill of
   its own returns it from `bundled_skill()` (its description, body and other files), and the
   computer skill leads with it, the computer's part following.
 - **Framework extensions.** `computer-ready/v1` (`status`: real checks of the display and a
@@ -692,12 +696,20 @@ driver booted with a control token is probed with it: `--token`, by default
 | Level | Checks | Needs on the computer |
 |---|---|---|
 | `basic` | P0 ready and a screenshot; P1 the card and tool schemas; P2 native frames, regions and JPEG; P5 refusals and their codes; X the declared extensions (`computer-display`, `computer-spaces`, `computer-keyboard`, `computer-exec`, `data/get`, per-role tool access, the pointer) | nothing |
-| `full` | `basic`, then P3 colours land where the mapping says; P4 clicks show their effect; P5 refusals change nothing; P6 typed and pressed keys arrive; P7 scrolls and drags arrive; P9 commands and `data/add` run as one unprivileged user; X pointer and keyboard input, `data/add`, and a recording's segments matching their files with no gap, a repeated `request_id` joining it and `max_concurrent` held; on a page, X the page tools: a prompt answered, a file uploaded, a reload, navigation, back and forward, and tabs | Linux, `python3` with Tk (on a page, `python3` and `computer-page/v1`), a 1280x800 screen or larger, `computer-exec` and `data/add` |
+| `full` | `basic`, then P3 colours land where the mapping says; P4 clicks show their effect; P5 refusals change nothing; P6 typed and pressed keys arrive; P7 scrolls and drags arrive; P9 commands and `data/add` run as one unprivileged user; X pointer and keyboard input, `data/add`, and a recording's segments matching their files with no gap, a repeated `request_id` joining it and `max_concurrent` held; on a page, X the page tools: a prompt answered, a file uploaded, a reload, navigation, back and forward, and tabs | Linux, `python3` with Tk (on Wayland, with PyGObject and GTK 3 instead; on a page, `python3` and `computer-page/v1`), a 1280x800 screen or larger, `computer-exec` and `data/add` |
 
-At `full` the probe writes the Fixture Desk, a Tk window (`conformance/fixture.py`), into
-`~/.agentenv-probe` with `data/add` and starts it with `computer-exec`. It aims at the boxes the
-window's widgets report, reads back what reached them, and then removes the fixture. When the
+At `full` the probe writes the Fixture Desk, a Tk window (`conformance/fixture.py`), and its layout
+(`conformance/desk.py`) into `~/.agentenv-probe` with `data/add` and starts it with `computer-exec`. It aims at the boxes the
+window's widgets report, reads back what reached them, and then removes the fixture. On X11 the
+window is maximized and kept above other windows, raising itself again when one covers it, so a
+window an app keeps on top doesn't take the clicks aimed at it; elsewhere it is full screen. When the
 fixture can't be staged, the `full` checks are unverified rather than failed.
+
+On a driver whose platform's display is Wayland, the desk is drawn with GTK 3 as a native Wayland client
+(`conformance/wayland_fixture.py`, staged beside `desk.py` in the Tk window's place), since Tk runs
+only under XWayland. It goes full screen, takes its origin from Hyprland's IPC, keeps the clipboard
+through wl-clipboard. There the probe selects a text box's text with GTK's own Ctrl+A rather than
+Tk's Ctrl+/.
 
 On a driver whose card says `screen: "page"`, the desk is an HTML page with the same widgets at the
 same places (`conformance/page_fixture.py`). The probe starts its server on loopback, which writes
@@ -781,11 +793,17 @@ class MailApp(ComputerAppEnvironment):
   models whose fields add to the class's `Settings` and `BuildSettings` on that OS. What's on the
   class applies to every OS. `@install(os_type, spec, launch=..., ...)` is the generic form, for an
   OS type a plugin adds, with that OS type's own install model as `spec`; `@linux(...)` is
-  `@install("linux", Linux(...), ...)`. On the computer the class reads what's declared for the OS
-  it runs on (`platform.detect()`).
+  `@install("linux", Linux(...), ...)`. `@linux(distribution="omarchy", ...)`, or
+  `@install("linux/omarchy", ...)`, declares for one distribution, by its /etc/os-release ID, what
+  replaces the OS type's declaration there. On the computer the class reads what's declared for the
+  platform its computer was composed for, which the composer sets as `AGENTENV_PLATFORM` for an app
+  that declares anything for a distribution, else the one it runs on (`platform.detect()`): its
+  distribution's, else its OS type's. An install step or ready check's `os=` names OS types or
+  distributions, and one for an OS type runs on all of it.
 - **`launch=Launch(...)`** says how it starts in the desktop session: with it (`at="boot"`) or when
   the agent opens it (`"demand"`). `ready=Ready(...)` says when it's ready, within `timeout_s` of its
-  launch: a window matching `launch.window` by its class, instance or title, a port answering on
+  launch: a window matching `launch.window` by its class, instance or title (on Hyprland, a Wayland
+  app ID or an X window's class, its program's file name, and its title), a port answering on
   loopback, or a command exiting 0. `env` sets variables in the app's environment, over its server's. `@ready_check` marks a method for readiness that needs logic (a
   sync one runs in a thread), and `@install_step(scope=...)` one a computer runs as it installs the
   app, after its run scripts, offline and without the class's `__init__`. Each runs on every OS the
@@ -819,13 +837,16 @@ desktop session, and `ready` (GET: an `AppReadiness` of `ready`, `problems`, `la
 and `timeout_s`), which runs the app's readiness checks then, at once, each within 10 s. A server
 that can't start, or whose start in the session fails (adding the launcher, say), writes why to
 `.agentenv/server.failure` in the folder and exits, and the driver reports that in its place. Once
-the X display is up, when `DISPLAY` names one, the server adds the app's launcher to the session user's
+the session is up, the X display when `DISPLAY` names one or on Hyprland its Wayland display and its
+IPC, the server adds the app's launcher to the session user's
 menu, which runs `python -m agentenv_protocol.computer.launch <folder>` to ask the server, so the
 server starts every copy of the app, and launches a `boot` app, once per boot. An app that runs with
 no desktop, a website browser alone, gets no launcher. The driver finds each app by the socket in its
 folder: the computer is ready once every app's server answers and each `boot` app, and each app with
 no launch, says it's ready; a `demand` app counts once something launches it. What the server does
-in the session (`agentenv_protocol.computer.session`) is Linux's.
+in the session (`agentenv_protocol.computer.session`) is Linux's. On Hyprland it lists windows through
+Hyprland's IPC (`hyprctl -j clients`), which sees native Wayland windows and XWayland's alike, where
+X's `xprop` sees only XWayland's.
 
 The server serves the app's data plane and its skill. With `paths` alone, `data/add` writes the files
 it's given under them and refuses any other path, or one a link leads out of them; `data/get`
@@ -878,14 +899,14 @@ under the session user's home (`.config/chromium` by default), whose contents fr
 are the profile's template. The base class adds:
 
 - **Its settings**, `BrowserSettings`, which a subclass's `Settings` extends: `start_urls`, opened in
-  tabs at launch, the first active (`["about:blank"]` by default; none may start with `-`), headless
-  the first from its command line and the rest over its pipe, since headless Chromium takes one; `window`,
+  tabs at launch, the first active (`["about:blank"]` by default; none may start with `-`); `window`,
   1280 × 800, alone only; `locale`; `time_zone`, set as `TZ` in its launch's `env`; `geolocation` and
   `notifications`, `deny` (the default), which answers a page's prompt for it, or `ask`; and `dialogs`, who
   answers a page's JavaScript dialogs: `agent` (the default), or agentenv, accepting (`accept`, a `prompt()`
   with its default text) or dismissing (`dismiss`) each. Either way agentenv leaves a page that asks before
   it's left (`beforeunload`), so none of its answers blocks a navigation.
-- **The flags agentenv owns**, after the subclass's command and before the start tabs: its profile, its
+- **The flags agentenv owns**, after the subclass's command and before `about:blank`, the one tab its command line
+  opens: its profile, its
   HTTP cache under `~/.cache` (`--disk-cache-dir`), `--remote-debugging-pipe`, `--no-first-run`,
   `--no-default-browser-check`, `--lang` and, when `/dev/shm` holds under 1 GiB (Docker gives 64 MiB),
   `--disable-dev-shm-usage`, so it keeps its shared memory in files. With
@@ -944,6 +965,8 @@ are the profile's template. The base class adds:
   - `files/choose {paths}`, files in `~/Uploads` for the file chooser open on it, which headless, and so
     alone, it intercepts;
   - `page/state`, the active tab's id, URL and title and the dialog or file chooser open on it.
+  - `sites/set {sites}`, the env's own sites, each `{name, domains}`, a `*.` domain matching one label more, which
+    the deploy hands it before it launches the browser and its server keeps for every launch after.
   - `cookies/get {urls?}`, `cookies/set {cookies}` and `cookies/delete {name?, domain?, path?}`, on its default
     context, each cookie as Playwright's `storageState` has it, CDP's `Network.Cookie` fields (`name`, `value`,
     `domain`, `path`, `expires`, `httpOnly`, `secure`, `sameSite`), so a storage state exported from Playwright loads
@@ -966,9 +989,26 @@ are the profile's template. The base class adds:
     under the `write_namespace` grant when there is one, else inline, as `data/get` returns files. Inline, the whole
     file is read into memory and sent base64 in one answer, so a large one belongs under a grant.
 
+  **Start tabs.** At each launch its start tabs open over its pipe, in a computer and alone alike: the first in the
+  blank tab its command line opened, the rest in tabs it opens blank after it, each held to the window's size
+  (headless) before it goes to its URL, so its page sees that size from its first script; then the first is brought
+  to the front. They load at once, and each settles once it has loaded (its load event fired, its document's final
+  status read), once it failed (a network error, or on one of the env's sites, as `sites/set` named them, a 4xx or
+  5xx status, which settles it at once), or once it has been waited on: every one settles within the browser's
+  ready timeout of its launch, the launch's setup counted against it, a tab on one of the env's sites waited on what's
+  left of it and any other on 30 s at most, so `data/reset`, a load and a deploy, which wait that timeout and a margin,
+  always get its outcome. Its `start_tabs_loaded` ready check passes once all have settled, so `cdp` and a deploy wait
+  for them. `record`'s `start_tabs` keeps each launch's (`StartTabsLaunch`: `at` and its
+  `tabs`, each a `StartTab`: `tab`, `url`, `final_url`, `status`, `error`, `load_ms`, `site` — the env's site's
+  name, null for a live one — and `outcome`, `loaded`, `failed` or `timed_out`), and `data/get`'s state keeps its
+  latest launch's. A deploy of a computer reads them once it's ready, keeps them in its record and fails, naming
+  each, if one on the env's sites didn't load; `data/reset` and a load that opens the start tabs again fail
+  the same way, while a server's restart only records it.
+
   The browser's data plane is a file tree, every file by its path under the session user's home:
   - `data/get` returns its state as `browser-state.json` (`BrowserState`: `cookies` and `local_storage`
-    as above, `tabs`, `closed_tabs`, `downloads` and `clock`, `real` with its `now`); its profile's files,
+    as above, `tabs`, `closed_tabs`, `downloads`, `clock`, `real` with its `now`, and `start_tabs`); its
+    profile's files,
     each database with its journal or log, copied in one pass with the browser paused once its state is
     read, so the files are of one moment, without caches (`Cache`, `Code Cache`,
     `GPUCache`, the shader and Dawn caches, `CacheStorage`, `ScriptCache`, `Crashpad`) or locks

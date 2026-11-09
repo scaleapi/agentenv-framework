@@ -14,6 +14,7 @@ from agent_env.store.image_store.registry_api import (
     NoSuchImageError,
     RegistryRefusedError,
     pin_digest,
+    pin_if_served,
     pinned_from,
     read_blob,
     read_manifest,
@@ -185,6 +186,17 @@ def test_a_missing_image_and_a_refusal_each_have_their_own_error(fake_registry, 
         pin_digest("ghcr.io/org/tool:v9", None)
 
     assert type(raised.value) is (kind or ValueError)
+
+
+@pytest.mark.parametrize("status, kind", [(404, None), (401, RegistryRefusedError), (500, ValueError)])
+def test_pin_if_served_is_none_for_a_missing_image_and_raises_anything_else(fake_registry, status, kind):
+    fake_registry(lambda request: httpx.Response(status))
+
+    if kind is None:
+        assert pin_if_served("ghcr.io/org/tool:v9", None) is None
+    else:
+        with pytest.raises(kind):
+            pin_if_served("ghcr.io/org/tool:v9", None)
 
 
 def test_an_unreachable_registry_is_named(fake_registry):

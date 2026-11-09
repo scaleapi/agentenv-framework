@@ -29,6 +29,7 @@ def get_task_step_registry() -> dict[str, type["TaskStep"]]:
 def _builtin_registry() -> dict[str, type["TaskStep"]]:
     from agent_env.task_step.task_steps.browser.connect_cdp import BrowserConnectCdpTaskStep
     from agent_env.task_step.task_steps.browser.cookies import BrowserDeleteCookiesTaskStep, BrowserSetCookiesTaskStep
+    from agent_env.task_step.task_steps.browser.sign_in import BrowserSignInTaskStep
     from agent_env.task_step.task_steps.browser.local_storage import (
         BrowserClearLocalStorageTaskStep,
         BrowserSetLocalStorageTaskStep,
@@ -101,6 +102,7 @@ def _builtin_registry() -> dict[str, type["TaskStep"]]:
         _get_type(BuildMcpCliTaskStep): BuildMcpCliTaskStep,
         _get_type(BrowserConnectCdpTaskStep): BrowserConnectCdpTaskStep,
         _get_type(BrowserSetCookiesTaskStep): BrowserSetCookiesTaskStep,
+        _get_type(BrowserSignInTaskStep): BrowserSignInTaskStep,
         _get_type(BrowserDeleteCookiesTaskStep): BrowserDeleteCookiesTaskStep,
         _get_type(BrowserSetLocalStorageTaskStep): BrowserSetLocalStorageTaskStep,
         _get_type(BrowserClearLocalStorageTaskStep): BrowserClearLocalStorageTaskStep,

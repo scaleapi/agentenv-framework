@@ -8,6 +8,7 @@ import hashlib
 import logging
 import time
 from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
@@ -15,7 +16,7 @@ from urllib.parse import urlsplit
 
 from ..computer.errors import DeviceUnavailable, InvalidArgument
 from .devtools import DevToolsError, DevToolsPipe
-from .shapes import (ClosedTab, Cookie, CookieToSet, Dialog, Download, OpenTab, OriginStorage, StorageItem,
+from .shapes import (ClosedTab, Cookie, CookieToSet, Dialog, Download, OpenTab, OriginStorage, StartTab, StorageItem,
                      origin_of)
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,10 @@ ACTIVE_CHECK_TIMEOUT_S = 2.0
 #: of agentenv's own may take to reach an origin, and how often it's asked meanwhile.
 PIN_TIMEOUT_S = 10.0
 ARRIVAL_POLL_S = 0.05
+#: How long a start tab on a site the env doesn't serve may take to load before it's left loading.
+LIVE_START_TAB_TIMEOUT_S = 30.0
+#: How a start tab settled.
+LOADED, FAILED, TIMED_OUT = "loaded", "failed", "timed_out"
 #: How much of a download each read hashes.
 HASH_CHUNK_BYTES = 1 << 20
 #: Who answered a dialog when agentenv didn't.
@@ -80,6 +85,8 @@ class BrowserControl:
         self._dialog_opened: dict[str, asyncio.Event] = {}
         self._pinned: dict[str, asyncio.Event] = {}
         self._tasks: set[asyncio.Future] = set()
+        #: Each start tab loading, by its session.
+        self._loading: dict[str, _StartLoad] = {}
         #: Every http and https origin a page or frame it follows loaded since this server started, and the sessions
         #: of agentenv's own pages whose requests it answers itself.
         self.origins: set[str] = set()
@@ -108,6 +115,9 @@ class BrowserControl:
         self._shots.clear()
         self._dialog_opened.clear()
         self._pinned.clear()
+        for load in self._loading.values():
+            load.error = load.error or "the browser ended"
+            load.settled.set()
 
     async def close_tab(self, target: str) -> None:
         """Close the tab ``target``, which the record says agentenv closed."""
@@ -138,18 +148,84 @@ class BrowserControl:
             await self._bring_to_front(active)
         return target
 
-    async def reopen_start_tabs(self, urls: list[str]) -> None:
-        """The start tabs at their ``urls`` again, in place, the first active: each tab open, in opened order, goes to
-        its URL, and any the browser lacks opens. A page already loaded doesn't read cookies set after it, so a tab
-        a load signed in shows it only once it loads again."""
-        tabs = list(self.tabs)
-        for index, url in enumerate(urls):
-            if index < len(tabs):
-                await self._navigate_tab(tabs[index], url)
-            else:
-                tabs.append(await self.open_tab(url))
-        if tabs:
-            await self._bring_to_front(tabs[0])
+    async def load_start_tabs(self, urls: list[str], site_of: Callable[[str], Optional[str]], own_timeout_s: float,
+                              live_timeout_s: float = LIVE_START_TAB_TIMEOUT_S) -> list[dict]:
+        """Each of ``urls`` in a start tab, in order, the first then active: in the tabs open now, in opened order, and
+        in tabs it opens blank after them; each held to the window's size, headless, before it goes to its URL, and
+        all loading at once. A tab settles once it has loaded, once it has failed, which on one of the env's own sites,
+        as ``site_of`` names them, an error status is too, or once it has been waited on ``own_timeout_s`` on such a
+        site, else ``live_timeout_s``. Each tab's outcome, in order, kept though the browser has gone and the first
+        can't come to the front. A page already loaded doesn't read cookies set after it, so a tab a load signed in
+        shows it only once it loads again."""
+        if not urls:
+            return []
+        targets = list(self.tabs)[:len(urls)] or [await self._first_tab()]
+        while len(targets) < len(urls):
+            targets.append((await self.devtools.call("Target.createTarget",
+                                                     {"url": "about:blank", "background": True}))["targetId"])
+        for target in targets:
+            await asyncio.wait_for(self._pinned.setdefault(target, asyncio.Event()).wait(), PIN_TIMEOUT_S)
+        loading = []
+        for target, url in zip(targets, urls):
+            site = site_of(url)
+            loading.append(await self._start_load(target, url, site))
+        outcomes = await asyncio.gather(*(self._settled(target, load, own_timeout_s if load.site is not None
+                                                        else live_timeout_s) for target, load in zip(targets, loading)))
+        with contextlib.suppress(ConnectionError, DevToolsError):
+            await self._bring_to_front(targets[0])
+        return outcomes
+
+    async def _first_tab(self) -> str:
+        """The tab a browser just launched opened, once it has one."""
+        deadline = asyncio.get_running_loop().time() + PIN_TIMEOUT_S
+        while not self.tabs:
+            if asyncio.get_running_loop().time() > deadline:
+                raise DeviceUnavailable(f"the browser opened no tab within {PIN_TIMEOUT_S:g} s")
+            await asyncio.sleep(ARRIVAL_POLL_S)
+        return next(iter(self.tabs))
+
+    async def _start_load(self, target: str, url: str, site: Optional[str]) -> _StartLoad:
+        """The tab ``target`` sent to ``url``, its navigation followed by what the browser says of it. The browser
+        answers a navigation once it commits, which a page that never answers never does, so its answer is awaited
+        apart, for as long as the tab is."""
+        session = next((s for s, t in self._sessions.items() if t == target), None)
+        if session is None:
+            raise DeviceUnavailable(f"the browser's tab {target} has no session to load a start tab in")
+        load = self._loading[session] = _StartLoad(session, url, site, asyncio.get_running_loop().time())
+        try:
+            await self.devtools.call("Network.enable", session_id=session)
+        except (ConnectionError, DevToolsError, asyncio.TimeoutError) as e:
+            load.error = f"{type(e).__name__}: {e}"
+            load.check()
+            return load
+        load.navigating = asyncio.ensure_future(self.devtools.request("Page.navigate", {"url": url},
+                                                                      session_id=session))
+        load.navigating.add_done_callback(load.answered)
+        return load
+
+    async def _settled(self, target: str, load: _StartLoad, timeout_s: float) -> dict:
+        """``load``'s outcome once it settles, or once it has been waited on ``timeout_s``."""
+        try:
+            await asyncio.wait_for(load.settled.wait(), timeout_s)
+        except asyncio.TimeoutError:
+            pass
+        finally:
+            if load.navigating is not None:
+                load.navigating.cancel()
+            self._loading.pop(load.session, None)
+            with contextlib.suppress(ConnectionError, DevToolsError, asyncio.TimeoutError):
+                await self.devtools.call("Network.disable", session_id=load.session)
+        document = load.current() or load.loader or ""
+        status, final_url = load.responses.get(document, (None, None))
+        error = load.error or load.failures.get(load.loader or "") or load.failures.get(document)
+        outcome = FAILED if error or (load.settled.is_set() and status is not None and status >= 400) else \
+            LOADED if load.settled.is_set() else TIMED_OUT
+        if final_url is None and outcome == LOADED:
+            await self._refresh(target)
+            final_url = self.tabs.get(target, {}).get("url")
+        return StartTab(tab=target, url=load.url, final_url=final_url, status=status, error=error,
+                        load_ms=round((asyncio.get_running_loop().time() - load.started) * 1000), site=load.site,
+                        outcome=outcome).model_dump()
 
     async def replace_tabs(self, tabs: list) -> None:
         """``tabs``, each with its ``url`` and whether it's ``active``, opened in order in place of the tabs open now,
@@ -160,14 +236,6 @@ class BrowserControl:
             await self.close_tab(target)
         if opened:
             await self._bring_to_front(next((target for target, tab in zip(opened, tabs) if tab.active), opened[0]))
-
-    async def _navigate_tab(self, target: str, url: str) -> None:
-        session = next((s for s, t in self._sessions.items() if t == target), None)
-        if session is None:
-            raise DeviceUnavailable(f"the browser's tab {target} has no session to navigate it")
-        answer = await self.devtools.call("Page.navigate", {"url": url}, session_id=session)
-        if error := answer.get("errorText"):
-            raise InvalidArgument(f"the browser couldn't open {url}: {error}")
 
     def forget(self) -> None:
         """A record that starts now, as a reset leaves the browser: no tabs closed, downloads or dialogs before it, and
@@ -521,6 +589,26 @@ class BrowserControl:
     def _on_Page_frameNavigated(self, params: dict, session: Optional[str]) -> None:
         if session in self._sessions:
             self._saw(params.get("frame", {}).get("url", ""))
+        frame = params.get("frame", {})
+        if (load := self._loading.get(session)) is not None and not frame.get("parentId") and frame.get("loaderId"):
+            load.commits.append(frame["loaderId"])
+            load.check()
+
+    def _on_Network_requestWillBeSent(self, params: dict, session: Optional[str]) -> None:
+        if (load := self._loading.get(session)) is not None and params.get("type") == "Document":
+            load.requests[params["requestId"]] = params.get("loaderId", "")
+
+    def _on_Network_responseReceived(self, params: dict, session: Optional[str]) -> None:
+        if (load := self._loading.get(session)) is not None and params.get("type") == "Document" and \
+                params.get("requestId") in load.requests:
+            response = params.get("response", {})
+            load.responses[load.requests[params["requestId"]]] = (response.get("status"), response.get("url"))
+            load.check()
+
+    def _on_Network_loadingFailed(self, params: dict, session: Optional[str]) -> None:
+        if (load := self._loading.get(session)) is not None and (loader := load.requests.get(params.get("requestId"))):
+            load.failures[loader] = params.get("errorText") or "the load failed"
+            load.check()
 
     def _on_Fetch_requestPaused(self, params: dict, session: Optional[str]) -> None:
         if session in self._serving:
@@ -575,6 +663,9 @@ class BrowserControl:
         self._choosers.pop(session, None)
         if (target := self._sessions.get(session)) is not None:
             self._spawn(self._refresh(target))
+        if (load := self._loading.get(session)) is not None and load.commits:
+            load.loaded.add(load.commits[-1])
+            load.check()
 
     def _on_Page_fileChooserOpened(self, params: dict, session: Optional[str]) -> None:
         if session in self._sessions:
@@ -622,8 +713,11 @@ class BrowserControl:
             download["ended_at"] = _now()
 
     async def _hashed(self, download: dict, path: Path) -> None:
-        size, sha256 = await asyncio.to_thread(_size_and_sha256, path)
-        download.update(size=size, sha256=sha256, ended_at=_now())
+        try:
+            size, sha256 = await asyncio.to_thread(_size_and_sha256, path)
+            download.update(size=size, sha256=sha256)
+        finally:
+            download["ended_at"] = _now()
 
     def _spawn(self, work: Awaitable) -> None:
         task = asyncio.ensure_future(work)
@@ -634,6 +728,58 @@ class BrowserControl:
         self._tasks.discard(task)
         if not task.cancelled() and (error := task.exception()) is not None:
             logger.warning(f"the browser's control connection: {type(error).__name__}: {error}")
+
+
+@dataclass
+class _StartLoad:
+    """What the browser has said of a start tab's navigation, by loader, since it was sent to ``url``: its main frame's
+    commits in order, the loads that fired after a commit, and its documents' requests, final responses and failures.
+    Its document is the last its main frame committed from its own navigation on, which a page that sends itself
+    elsewhere before it loads replaces. It's ``settled`` once its navigation or its document has failed, its document
+    has loaded or, on one of the env's ``site``, answered an error."""
+    session: str
+    url: str
+    site: Optional[str]
+    started: float
+    loader: Optional[str] = None
+    error: Optional[str] = None
+    commits: list[str] = field(default_factory=list)
+    loaded: set[str] = field(default_factory=set)
+    requests: dict[str, str] = field(default_factory=dict)
+    responses: dict[str, tuple[Optional[int], Optional[str]]] = field(default_factory=dict)
+    failures: dict[str, str] = field(default_factory=dict)
+    settled: asyncio.Event = field(default_factory=asyncio.Event)
+    navigating: Optional[asyncio.Future] = None
+
+    def answered(self, navigating: asyncio.Future) -> None:
+        """The browser's answer to its navigation: its loader, or why it couldn't navigate."""
+        if navigating.cancelled():
+            return
+        if (error := navigating.exception()) is not None:
+            self.error = f"{type(error).__name__}: {error}"
+        else:
+            answer = navigating.result()
+            if "error" in answer:
+                self.error = str(answer["error"].get("message", answer["error"]))
+            else:
+                self.error = answer.get("result", {}).get("errorText") or None
+                self.loader = answer.get("result", {}).get("loaderId")
+        self.check()
+
+    def current(self) -> Optional[str]:
+        """The loader of its document: the last its main frame committed, once its own navigation has; else None."""
+        return self.commits[-1] if self.loader is not None and self.loader in self.commits else None
+
+    def check(self) -> None:
+        if self.error or (self.loader is not None and self.loader in self.failures):
+            self.settled.set()
+            return
+        if (document := self.current()) is None:
+            return
+        status = self.responses.get(document, (None, None))[0]
+        if document in self.failures or document in self.loaded or (
+                self.site is not None and status is not None and status >= 400):
+            self.settled.set()
 
 
 def _size_and_sha256(path: Path) -> tuple[int, str]:

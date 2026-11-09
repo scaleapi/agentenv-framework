@@ -61,18 +61,72 @@ pointer has moved along its path (P7). `env.toml`'s `[[known_failures.macos]]` n
 records them in the build's probe (`known_failures`) and doesn't fail the build for them; any other failure still
 does. A driver's `known_failures`, by OS type, names a check by its id and name, with why. One that a probe didn't see
 fail is recorded in its probe (`unused_known_failures`, with what it saw) and warned of, so a waiver doesn't outlive its
-defect; P7's is intermittent, so a probe it passes doesn't show it fixed.
+defect; P7's is intermittent, so a probe it passes doesn't show it fixed. An install or known failures can also be for
+one distribution, keyed `"<os>/<distribution>"` by its /etc/os-release ID, as `[install."linux/omarchy"]` and
+`[[known_failures."linux/omarchy"]]`: on that distribution they replace the OS type's, never merge with them, and
+elsewhere the OS type's apply. A distribution no `supports` entry names is refused at put.
+
+On Windows (`amd64`, composed onto a disk such as `windows-11`), cua-driver is the cua-driver-rs release's zip,
+checked by sha256 and unpacked beside the driver (`install-windows.ps1`). Its daemon runs in the session user's
+sign-in, where `agentenv-session` starts this file as a script, since cua-driver refuses Session 0, on the named pipe
+`\\.\pipe\agentenv-cua-driver`, which takes the same line-delimited JSON as the Linux socket; a call that finds every
+pipe instance taken, or none yet made, waits for one, as a Unix socket would queue it. Agents get the tools
+`mcp-windows.json` pins, as Windows's `cua-driver mcp` lists them in a signed-in session; `computer-ready` checks the
+zip's executable's sha256 and those tools. cua-driver 0.38.0 refuses a click (`foreground_unavailable`) when the
+clicked window isn't in the foreground after it, and in a burst of clicks on a window that just opened, Windows passes
+the foreground between the window and its frame, so a few of the first burst's clicks are refused (P4, 16 clicks sent
+at once all land); `[[known_failures.windows]]` names it. The text of Windows 11's Notepad can't be read through
+cua-driver's UI Automation tree, whose walk of it fails.
+
+On a Hyprland desktop (Wayland), as Omarchy's is, cua-driver runs its Wayland backend (`CUA_DRIVER_RS_ENABLE_WAYLAND=1`)
+and sends input through the seats of Hyprland's `cua-hyprland-plugin`. Hyprland's session turns this on
+(`HYPRLAND_INSTANCE_SIGNATURE`), not any Wayland one, since the driver reaches Hyprland's IPC; `supports` names
+Omarchy's Wayland desktop on amd64, which installs `[install."linux/omarchy"]`: `requirements-omarchy.txt` and the two
+services, with no Hyprland plugin, which Omarchy's base carries. It runs cua-driver 0.44.0, its own pin, since 0.38.0
+refuses background input there, the delivery cua-driver's own tools default to: `computer-ready` checks its wheel's
+executable (`hyprland/amd64` in `EXECUTABLES`) and the tools `mcp-hyprland.json` pins, which `requirements-omarchy.txt`
+installs, while `requirements.txt` keeps 0.38.0 for the other desktops.
+
+The daemon starts once the compositor's socket answers, on a socket in the session user's runtime folder. What the
+driver asks Hyprland (`hyprctl -j`) is in `hyprland.py`, beside `driver.py`. Text goes to the desktop in the foreground,
+where Hyprland's shortcuts, a menu holding the keyboard and non-ASCII text all work. A key goes to the window Hyprland
+has focused, in the foreground, where Backspace, the arrows and Home/End edit text as a person's keys do, which at the
+desktop they don't, pressed as on a US keyboard, the only layout the plugin takes there, so a shifted character goes as
+Shift and the key it's on. Super and keys held with it, Hyprland's own shortcuts, go to the desktop, as does a key with
+nothing focused and one the window path refuses because a layer such as Omarchy's menu holds the keyboard, punctuation
+there by its keysym name: given the character, cua-driver falls back to libei, which can hang its input worker. The
+computer skill tells agents so (`notes`): Super chords reach the desktop's shortcuts, which the protocol's skill lists
+for Omarchy, and other chords, such as Alt+Tab, go to the focused window. Clicks, drags and scrolls stay desktop-scope.
+
+Keys aimed at a window need the seat's keymap to be the US layout's, and an input method such as Omarchy's fcitx5 takes
+on the keymap that desktop text uploads, after which cua-driver refuses them (`unsupported_layout`): the driver then
+puts the layout back with a chord of the layout's own keys at the desktop, Super+Ctrl+Alt+Shift+F12, which it binds to
+nothing in Hyprland first (`hyprctl eval`), so Hyprland keeps it from every window, and sends the key again. It presses
+the chord only while its own bind alone has it: with the chord bound to anything else, the key fails as cua-driver
+refused it.
+
+`computer-ready` also checks that the plugin is loaded, enabled, built for this Hyprland and taking input
+(`transport.ready`), and every input, a `computer_*` operation or one of cua-driver's own tools that isn't read-only,
+checks it again first and fails as `device_unavailable`, sending nothing, when it isn't. The runtime runs ready checks
+only until they first pass. A plugin loaded again into a running Hyprland has no input seat until the desktop restarts.
+After a crash, Hyprland's watchdog brings it back within the same session, in safe mode with no plugins and under a new
+instance signature, so nothing restarts the driver with it: once another Hyprland runs in place of the one the driver
+started with (`hyprctl instances`), the plugin check fails for good (`final`) and every input fails as an infrastructure
+failure. The driver's services otherwise restart with the graphical session, as after a logout.
 
 To move it to another cua-driver version:
 
-1. Pin the version in `requirements.txt`.
+1. Pin the version in `requirements.txt`, and Hyprland's own in `requirements-omarchy.txt`.
 2. Regenerate `mcp.json` from what that version's MCP server, `cua-driver mcp`, says at connect and lists: its
    `instructions`, each tool's `name`, `description`, `inputSchema`, `annotations` and `outputSchema`, and each
    resource's `uri`, `name`, `description` and `mimeType`. That takes a running daemon, so do it on a Linux test
-   machine, and `mcp-macos.json` the same way in a macOS computer.
-3. Set `EXECUTABLES` in `driver.py` to the sha256 of `cua_driver/bin/cua-driver` in each arch's wheel, and of
-   CuaDriver.app's executable for `macos/arm64`, and the release tarball's URL and sha256 in `env.toml`'s
-   `[install.macos]` and its folder in `install-app.sh`.
+   machine, `mcp-hyprland.json` the same way on a Hyprland desktop at its own pin, `mcp-macos.json` in a macOS
+   computer, and `mcp-windows.json` in a Windows computer's signed-in session, on the driver's venv, since
+   `cua-driver mcp` refuses Session 0, where ssh lands.
+3. Set `EXECUTABLES` in `driver.py` to the sha256 of `cua_driver/bin/cua-driver` in each arch's wheel, and in the wheel
+   of Hyprland's own pin for `hyprland/amd64`, and of CuaDriver.app's executable for `macos/arm64`, and the release
+   tarball's URL and sha256 in `env.toml`'s `[install.macos]` and its folder in `install-app.sh`; for `windows/amd64`,
+   the zip's `cua-driver.exe`, its URL and sha256 in `[install.windows]` and its folder in `install-windows.ps1`.
 4. Run `tst/unit/drivers/cua_driver_test.py`, then `tst/integration/computer/cua_driver_test.py` on Linux, where
    `computer-ready` names any tool or executable that doesn't match its pin.
 
@@ -110,6 +164,31 @@ cuts a server's instructions at 4,096 characters, so the skill itself isn't in t
 `MacOSDriver` and a grant to its own Python. The harness gets none of the driver's environment, and its telemetry is off
 (`DO_NOT_TRACK`). `computer-ready` checks its version, that it prints the pinned skill, and the TCC permissions. Name it
 as `macos-harness`.
+
+`envs/codex-computer-use/` is OpenAI's Codex Computer Use as a driver, for the same macOS computers. It is the ChatGPT
+app's `unified-computer-use` plugin, whose MCP server, `cua_repl`, runs the JavaScript an agent sends against OpenAI's
+`cua` API, which reads apps' accessibility trees and acts on them in the background through the plugin's helper app. The
+ChatGPT version `driver.py` pins as `VERSION`, OpenAI's versioned download checked by sha256, is unpacked beside the
+driver by `install.sh` and never run, so it never updates itself, and its helper app is copied to
+`/opt/agentenv/codex-computer-use/`, where `[install.macos]` grants it Accessibility, Post Event and Screen Recording,
+as it grants the driver's own Python. The driver starts `cua_repl` as the app would, on the app's own Node with the
+environment the app builds and the computer surface alone, one server for each agent session, since the REPL keeps its
+bindings between calls; one that stops is started afresh on the next call, and nothing says when a session ends, so one
+left unused for 30 minutes, or past the eight kept, is closed, the least recently used first. Agents get the server's
+instructions and its `js` and `js_reset` tools, as `mcp.json` pins them, `js` marked as acting on apps where Codex marks
+it read-only; `js_add_node_module_dir` and `turn_ended`, which it serves the ChatGPT app, are hidden. Codex asks its
+host before each action on an app, and the driver answers: it approves the apps its `allowed_apps` setting names, by
+name or bundle identifier, case aside, as the request's metadata or its message gives them, or every app when it names
+none, and nothing else, recording the computer's audio included, a request that names no app logged as a warning. Each
+call runs under Codex's own sandbox, read-only but for `~/.codex` and the temporary folders and with no network, unless
+its `js_sandbox` setting is off; the apps it drives are outside it, and it still lets the JavaScript read files and run
+commands, so a bench that wants the GUI alone guards for that. No ChatGPT sign-in is needed. Its `computer_*` tools are
+agent-desktop's, from `MacOSDriver`. `computer-ready` checks the executables' sha256, that `cua_repl` gives the
+instructions and lists the tools `mcp.json` pins and answers `cua.getState()`, and the TCC permissions. To move it to
+another ChatGPT version, set `VERSION`, pin the zip's URL and sha256 in `env.toml` and the executables' in `driver.py`'s
+`EXECUTABLES` (a unit test checks that `env.toml`, `install.sh` and `driver.py` agree on the version and the helper's
+path), and take `mcp.json` again from what that version's `cua_repl` says at connect and lists. Name it as
+`codex-computer-use`.
 
 This bundle has no tasks of its own: other bundles pull its drivers by alias, and `agent-env run drivers` has nothing
 to run.

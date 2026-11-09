@@ -146,7 +146,7 @@ class DeployedEnv:
         composed = isinstance(card.get("children_environments"), list)
         if (not composed or protocol_v1.operations(card)) and card.get("name") == environment_name:
             return protocol_v1.ChildEnv(name=card.get("name"), url=card.get("url"), card=card)
-        found = [child for child in protocol_v1.children(card) if child.name == environment_name]
+        found = [child for child in protocol_v1.children(card) if child.known_as == environment_name]
         if len(found) > 1 and mcp is not None:
             found = [child for child in found if website_child(child) is not mcp]
         if len(found) > 1:
@@ -235,6 +235,9 @@ class DeployedGatewayEnv(DeployedSandboxEnv):
     # Ids of the EnvStateInstance record(s) this deploy's state was provisioned into
     # (one today — one backend per deploy). The forward pointer deploy -> state store.
     env_state_instance_ids: list[str] = field(default_factory=list)
+    # Each child env on a sandbox of its own, which the gateway fronts (a multi env's computers): its own deploy record,
+    # by its environment name.
+    child_envs: dict[str, dict] = field(default_factory=dict)
 
     @classmethod
     def _fields_from(cls, data: dict) -> dict:
@@ -248,6 +251,7 @@ class DeployedGatewayEnv(DeployedSandboxEnv):
             "website_frontend_urls": data.get("website_frontend_urls"),
             "vnc_url": data.get("vnc_url"),
             "env_state_instance_ids": data.get("env_state_instance_ids") or [],
+            "child_envs": data.get("child_envs") or {},
         }
 
 
@@ -409,10 +413,12 @@ class Env(ABC):
         raise NotImplementedError(f"{type(self).__name__} must implement deploy()")
 
     def deploy_refusal(self, *, sandbox_type: Optional[str] = None, env_params: Optional[dict] = None,
-                       **options) -> Optional[str]:
+                       child_envs: Optional[dict] = None, **options) -> Optional[str]:
         """Why deploy() would refuse these options before building anything, or None. A type that checks its options
-        overrides this; one that doesn't takes no ``env_params``."""
-        return f"{self.type} envs take no env_params" if env_params else None
+        overrides this; one that doesn't takes no ``env_params``, and has no child envs to give ``child_envs``."""
+        if env_params:
+            return f"{self.type} envs take no env_params"
+        return f"{self.type} envs have no child envs" if child_envs else None
 
     async def run_env_params(self, env_params: Optional[dict], deployed_envs: list[DeployedEnv]) -> Optional[dict]:
         """``env_params`` as a run's deploy_env passes them to deploy(), once the run has deployed ``deployed_envs``:
@@ -508,7 +514,7 @@ class Env(ABC):
 def website_child(child: protocol_v1.ChildEnv) -> bool:
     """Whether a child env is a website: its card carries ``website/v1``, or, for a site serving none, its url is at a
     website's gateway route, ``/svc/{name}`` (an MCP server's is ``/svc/mcp-{name}``)."""
-    route, url = f"/svc/{child.name}", (child.url or "").rstrip("/")
+    route, url = f"/svc/{child.known_as}", (child.url or "").rstrip("/")
     return child.find_extension(WEBSITE_EXTENSION_URI) is not None or url == route or url.startswith(f"{route}/")
 
 
@@ -560,4 +566,5 @@ def _record_class(data: dict) -> type[DeployedEnv]:
 
 
 # A record carrying any of these is a gateway's. Not gateway_mode: an older kernel writes its default into any record it round-trips.
-_GATEWAY_ONLY_FIELDS = ("gateway_url", "db_web_url", "db_mcp_url", "website_frontend_urls", "vnc_url", "env_state_instance_ids")
+_GATEWAY_ONLY_FIELDS = ("gateway_url", "db_web_url", "db_mcp_url", "website_frontend_urls", "vnc_url", "env_state_instance_ids",
+                        "child_envs")

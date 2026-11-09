@@ -1,18 +1,22 @@
-"""cua-driver as a computer driver, for an X11 desktop on Linux and for macOS: trycua's cua-driver runs on the computer
-as a daemon, which this file starts when run as a script on Linux and CuaDriver.app's LaunchAgent starts on macOS, so
-macOS gives it the app's TCC permissions. Agents get what its own MCP server serves at its pinned version (``mcp.json``,
-``mcp-macos.json``): its instructions, its tools beside the ``computer_*`` tools, and its skill resources, read from it.
-The computer/v1 operations are its desktop-scope calls, the pointer's in the foreground on macOS, where cua-driver
-otherwise keeps from moving a person's pointer over a background app. The daemon takes
-line-delimited JSON on a Unix socket, and each call goes on a connection of its own, as cua-driver's own MCP server sends
-them. The framework and each caller, told apart by MCP session, have an unnamed cua-driver session of their own, which
+"""cua-driver as a computer driver, for an X11 desktop on Linux, for macOS and for Windows: trycua's cua-driver runs on
+the computer as a daemon, which this file starts when run as a script on Linux and Windows, in the session user's
+sign-in there, and CuaDriver.app's LaunchAgent starts on macOS, so macOS gives it the app's TCC permissions. Agents get
+what its own MCP server serves at its pinned version (``mcp.json``, ``mcp-macos.json``, ``mcp-windows.json``): its
+instructions, its tools beside the ``computer_*`` tools, and its skill resources, read from it. The computer/v1
+operations are its desktop-scope calls, the pointer's in the foreground on macOS, where cua-driver otherwise keeps from
+moving a person's pointer over a background app. The daemon takes line-delimited JSON on a Unix socket, a named pipe on
+Windows, and each call goes on a connection of its own, as cua-driver's own MCP server sends them. The framework and each caller, told apart by MCP session, have an unnamed cua-driver session of their own, which
 cua-driver starts again after ending it for idling, where a named one stays ended. A call the daemon can't take, as
 while it restarts, fails as unavailable; input whose reply is lost fails with its outcome unknown, since it may have
-arrived. It needs ``agentenv-framework-protocol[computer]`` and ``cua-driver`` where it runs."""
+arrived. It needs ``agentenv-framework-protocol[computer]`` and ``cua-driver`` where it runs. On a Hyprland desktop
+(Wayland) it runs cua-driver's Wayland backend at its own pin, sends text to the desktop and keys to the focused
+window in the foreground, Super and a key a menu holds the keyboard from going to the desktop, and is ready, and takes
+input, only while Hyprland has cua-driver's plugin loaded, asking Hyprland through hyprland.py."""
 from __future__ import annotations
 
 import asyncio
 import base64
+import errno
 import functools
 import hashlib
 import importlib.util
@@ -32,7 +36,7 @@ from mcp.client.stdio import stdio_client
 from mcp.types import CallToolResult, TextContent
 from pydantic import AnyUrl
 
-if sys.platform != "darwin":
+if sys.platform == "linux":
     from Xlib import display as x_display
     from Xlib.error import ConnectionClosedError, DisplayConnectionError
 
@@ -56,19 +60,45 @@ from agentenv_protocol.computer import (
     type_text,
 )
 
-MACOS = sys.platform == "darwin"
-#: Where cua-driver's daemon listens.
-SOCKET = Path("/tmp/agentenv-cua-driver.sock" if MACOS else "/run/agentenv/cua-driver.sock")
+import hyprland
+
+MACOS, WINDOWS = sys.platform == "darwin", sys.platform == "win32"
+#: A Hyprland desktop, on Wayland, where cua-driver runs its Wayland backend and its input goes through the seats of
+#: its Hyprland plugin; what follows reaches Hyprland's IPC, so it's Hyprland's session that turns it on, not any
+#: Wayland one.
+HYPRLAND = sys.platform == "linux" and bool(os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"))
+
+
+def _desktop() -> str | None:
+    """The desktop with a cua-driver build of its own, whose name keys its manifest (``mcp-<desktop>.json``) and its
+    executables' sha256s (``<desktop>/<arch>``); None on an X11 desktop, whose are the default's."""
+    return "macos" if MACOS else "windows" if WINDOWS else "hyprland" if HYPRLAND else None
+
+
+#: Where cua-driver's daemon listens: on Hyprland in the session user's runtime folder, which the session's units share.
+if WINDOWS:
+    SOCKET = r"\\.\pipe\agentenv-cua-driver"
+elif MACOS:
+    SOCKET = "/tmp/agentenv-cua-driver.sock"
+elif HYPRLAND:
+    SOCKET = str(Path(os.environ["XDG_RUNTIME_DIR"]) / "agentenv-cua-driver.sock")
+else:
+    SOCKET = "/run/agentenv/cua-driver.sock"
 #: What cua-driver's own MCP server (``cua-driver mcp``) says at connect and lists at the pinned version on each OS: its
 #: instructions, its tools, which the running daemon must list the same, and its skill resources.
-MANIFEST = Path(__file__).with_name("mcp-macos.json" if MACOS else "mcp.json")
+MANIFEST = Path(__file__).with_name(f"mcp-{_desktop()}.json" if _desktop() else "mcp.json")
+#: Where the release's zip is unpacked on Windows, beside this file.
+WINDOWS_EXECUTABLE = Path(__file__).with_name("cua-driver") / "cua-driver.exe"
 #: CuaDriver.app's executable, which macOS runs the daemon as.
 APP_EXECUTABLE = Path("/Applications/CuaDriver.app/Contents/MacOS/cua-driver")
-#: The sha256 of the cua-driver executable each arch's pinned wheel installs, and on macOS, CuaDriver.app's.
+#: The sha256 of the cua-driver executable each arch's pinned wheel installs, on macOS CuaDriver.app's, on Windows the
+#: release zip's, and on Hyprland its own pin's wheel's, 0.44, which delivers background input there.
 EXECUTABLES = {
     "amd64": "bf57b2f3778a0a7daa9388e241f20ce948b32a7a2f4dd102e497f34e54137934",
     "arm64": "26e9eee8165e9ce7b614b5e3d68e5d963231385a82b65236406718b5ce1ff936",
     "macos/arm64": "b4d974a9c1c92a700cd7be7ede987aea4a1e6835e37039ce3d628b71bd5f0ca8",
+    "windows/amd64": "ffa58d88779ee219304b0c307f4cfa970fe822f830c6ecf9254eda5c29e22bf2",
+    "hyprland/amd64": "f4259d5135d23d4d03968e074d144a10ece6305ca28ef48edfb3ef5c9e724228",
 }
 #: How the daemon delivers the pointer's actions: in the foreground on macOS, where it doesn't by default.
 FOREGROUND = {"delivery_mode": "foreground"} if MACOS else {}
@@ -82,6 +112,8 @@ LATIN_1 = 0xA0
 PERMISSIONS = ("accessibility", "screen_recording")
 #: What keeps cua-driver from reaching trycua: no telemetry and no update checks.
 QUIET = {"DO_NOT_TRACK": "1", "CUA_DRIVER_RS_TELEMETRY_ENABLED": "false", "CUA_DRIVER_RS_UPDATE_CHECK": "false"}
+#: What turns on cua-driver's Wayland backend, which it takes only when asked.
+WAYLAND_BACKEND = {"CUA_DRIVER_RS_ENABLE_WAYLAND": "1"}
 #: W3C modifier keys and the names cua-driver holds them by.
 MODIFIERS = {"Control": "ctrl", "Shift": "shift", "Alt": "alt", "Meta": "super", "Super": "super"}
 #: W3C key values and the names cua-driver presses them by; any printable ASCII character is pressed as itself.
@@ -94,12 +126,20 @@ NAMED = {
 SKILL_TIMEOUT_S = 60
 #: The largest reply the daemon sends: a screenshot of a large display, base64.
 REPLY_LIMIT = 64 << 20
+#: How long a call waits on Windows for one of the daemon's pipe instances to free, every one taken, which the C
+#: runtime's open reports as EINVAL (ERROR_PIPE_BUSY), and for the next to be made, none there (ENOENT), which a daemon
+#: that isn't running answers too.
+PIPE_WAITS = {errno.EINVAL: 10.0, errno.ENOENT: 1.0}
 
 
 @computer_driver(name="cua-driver",
                  supports=[{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]},
-                           {"os": {"type": "macos", "display": ["aqua"]}, "arch": ["arm64"]}])
+                           {"os": {"type": "linux", "distribution": ["omarchy"], "display": ["wayland"]},
+                            "arch": ["amd64"]},
+                           {"os": {"type": "macos", "display": ["aqua"]}, "arch": ["arm64"]},
+                           {"os": {"type": "windows", "display": ["dwm"]}, "arch": ["amd64"]}])
 class CuaDriver(ComputerDriverEnvironment):
+    notes = hyprland.NOTES if HYPRLAND else ""
     buttons = ("left", "right", "middle")
     max_click_count = 3
     max_scroll_amount = 50
@@ -113,10 +153,12 @@ class CuaDriver(ComputerDriverEnvironment):
         self._skill: tuple[str, str, dict[str, str]] | None = None
         self._texts: dict[str, str] | None = None
         self._keymap: _Keymap | None = None
+        self._reset_bind: dict | None = None
 
     def forwarded_tools(self) -> list[ForwardedTool]:
         return [ForwardedTool(EnvironmentTool(name=t["name"], description=t["description"], inputSchema=t["inputSchema"]),
-                              functools.partial(self._forward, t["name"]), t["annotations"] or None, t.get("outputSchema"))
+                              functools.partial(self._forward, t["name"], not (t["annotations"] or {}).get("readOnlyHint")),
+                              t["annotations"] or None, t.get("outputSchema"))
                 for t in _manifest()["tools"]]
 
     @resource("skill://cua-driver/{file}", listed=lambda env: _manifest()["resources"])
@@ -132,10 +174,10 @@ class CuaDriver(ComputerDriverEnvironment):
 
     async def ready_checks(self) -> list[ReadyCheck]:
         """That the daemon answers as the pinned cua-driver does: its executable's sha256 and its tools, checked
-        until they pass once."""
+        until they pass once; and on Hyprland, every time, that it has cua-driver's plugin, which a restart drops."""
         if self._pinned is None or not all(check.ok for check in self._pinned):
             self._pinned = await self._pinned_checks()
-        return self._pinned
+        return [*self._pinned, await hyprland.plugin()] if HYPRLAND else self._pinned
 
     async def bundled_skill(self) -> tuple[str, str, dict[str, str]]:
         if self._skill is None:
@@ -179,19 +221,63 @@ class CuaDriver(ComputerDriverEnvironment):
 
     @type_text
     async def type_in(self, text) -> None:
-        if not MACOS and any(ord(ch) >= LATIN_1 for ch in text):
+        if not MACOS and not WINDOWS and not HYPRLAND and any(ord(ch) >= LATIN_1 for ch in text):
             await asyncio.to_thread(self._hold, text)
-        await self._send("type_text", text=text)
+        await self._send("type_text", text=text, **(hyprland.DESKTOP if HYPRLAND else {}))
 
     @press
     async def press_keys(self, keys) -> None:
         *held, key = keys
-        await self._send("press_key", modifiers=_modifiers(held), key=MODIFIERS.get(key) or NAMED.get(key, key))
+        modifiers, name = _modifiers(held), MODIFIERS.get(key) or NAMED.get(key, key)
+        if HYPRLAND:
+            await self._press_on_hyprland(modifiers, name)
+        else:
+            await self._send("press_key", modifiers=modifiers, key=name)
 
-    async def _forward(self, tool: str, /, **arguments: Any) -> CallToolResult:
-        """A call to one of cua-driver's own tools in its caller's session, answered as cua-driver answers it."""
+    async def _press_on_hyprland(self, modifiers: list[str], key: str) -> None:
+        """A key on Hyprland: to the focused window as a person presses it on a US keyboard, where it edits text as a
+        person's does, unless it's Super or held with it, which is Hyprland's own, or nothing is focused, or a layer
+        such as a menu holds the keyboard and refuses it there; then to the desktop, punctuation by its keysym name."""
+        if key != "super" and "super" not in modifiers and (window := await hyprland.focused()):
+            try:
+                return await self._to_window({**hyprland.on_us_keyboard(modifiers, key), **window})
+            except DeliveryFailed as e:
+                if hyprland.GRABBED not in e.message:
+                    raise
+        await self._send("press_key", modifiers=modifiers, key=hyprland.PUNCTUATION.get(key, key),
+                         **hyprland.DESKTOP)
+
+    async def _to_window(self, pressed: dict) -> None:
+        """A key aimed at a window, the US layout's keymap put back first when cua-driver refuses it for the seat's
+        keymap, which an input method changes after desktop text, by a chord bound to nothing but this driver's bind,
+        which Hyprland keeps from every window."""
+        try:
+            return await self._send("press_key", **pressed)
+        except DeliveryFailed as e:
+            if hyprland.UNLAID not in e.message:
+                raise
+            if (bind := await hyprland.reset_bind(self._reset_bind)) is None:
+                raise DeliveryFailed(e.message, hint=f"Hyprland has {hyprland.RESET_BIND}, which puts the US keymap back, "
+                                                     "bound to something this driver didn't bind, or it couldn't bind "
+                                                     "it, so the driver didn't press it") from e
+            self._reset_bind = bind
+        await self._send("press_key", **hyprland.RESET, **hyprland.DESKTOP)
+        deadline = time.monotonic() + hyprland.RESET_S
+        while True:
+            try:
+                return await self._send("press_key", **pressed)
+            except DeliveryFailed as e:
+                if hyprland.UNLAID not in e.message or time.monotonic() > deadline:
+                    raise
+            await asyncio.sleep(hyprland.RESET_POLL_S)
+
+    async def _forward(self, tool: str, acts: bool, /, **arguments: Any) -> CallToolResult:
+        """A call to one of cua-driver's own tools in its caller's session, answered as cua-driver answers it; one that
+        isn't read-only is refused on Hyprland without cua-driver's plugin."""
         session = self._callers.setdefault(ToolContext.current().caller.session, uuid.uuid4().hex)
         try:
+            if acts and HYPRLAND:
+                await hyprland.require_plugin()
             reply = await _request({"method": "call", "name": tool, "args": arguments, "session_id": session})
         except DeviceUnavailable as e:
             return _refused(e.message)
@@ -218,6 +304,8 @@ class CuaDriver(ComputerDriverEnvironment):
         return self._keymap
 
     async def _send(self, name: str, **args: Any) -> None:
+        if HYPRLAND:
+            await hyprland.require_plugin()
         await self._call(name, DeliveryFailed, scope="desktop", **args)
 
     async def _call(self, name: str, failure: type[Exception], **args: Any) -> dict:
@@ -240,7 +328,8 @@ class CuaDriver(ComputerDriverEnvironment):
         except DeviceUnavailable:
             return [ReadyCheck("cua-driver", False, "its daemon isn't answering yet")]
         arch = self.platform.arch or ""
-        digest, expected = await asyncio.to_thread(_executable_sha256), EXECUTABLES.get(f"macos/{arch}" if MACOS else arch)
+        digest = await asyncio.to_thread(_executable_sha256)
+        expected = EXECUTABLES.get(f"{desktop}/{arch}" if (desktop := _desktop()) else arch)
         running = {t["name"]: t["input_schema"] for t in listed}
         pinned = {t["name"]: t["inputSchema"] for t in _manifest()["tools"]}
         differ = sorted(name for name in running.keys() | pinned.keys() if running.get(name) != pinned.get(name))
@@ -268,8 +357,10 @@ class _ReplyLost(DeviceUnavailable):
 async def _request(payload: dict) -> dict:
     """The daemon's reply to ``payload``, sent on a connection of its own; a cancelled request closes it, so nothing is
     left to read its reply."""
+    if WINDOWS:
+        return await asyncio.to_thread(_piped, payload)
     try:
-        reader, writer = await asyncio.open_unix_connection(str(SOCKET), limit=REPLY_LIMIT)
+        reader, writer = await asyncio.open_unix_connection(SOCKET, limit=REPLY_LIMIT)
     except OSError as e:
         raise DeviceUnavailable(f"cua-driver's daemon isn't answering: {e}") from None
     try:
@@ -286,9 +377,38 @@ async def _request(payload: dict) -> dict:
         writer.close()
 
 
+def _piped(payload: dict) -> dict:
+    """``_request`` on Windows, over the daemon's named pipe, which a thread waits on. A pipe whose every instance is
+    taken refuses the open, where a Unix socket queues the connection, so a burst of calls waits for one to free, and
+    for the moment between one instance taken and the next made, when the pipe has none."""
+    started = time.monotonic()
+    while True:
+        try:
+            pipe = open(SOCKET, "r+b", buffering=0)
+            break
+        except OSError as e:
+            if time.monotonic() - started > PIPE_WAITS.get(e.errno, 0):
+                raise DeviceUnavailable(f"cua-driver's daemon isn't answering: {e}") from None
+            time.sleep(0.01)
+    with pipe:
+        try:
+            pipe.write((json.dumps(payload) + "\n").encode())
+            reply = bytearray()
+            while not reply.endswith(b"\n"):
+                if not (chunk := pipe.read(1 << 20)):
+                    raise ConnectionError("the daemon closed the connection")
+                reply += chunk
+                if len(reply) > REPLY_LIMIT:
+                    raise ValueError(f"its reply is over {REPLY_LIMIT} bytes")
+            return json.loads(reply)
+        except (OSError, ValueError) as e:
+            raise _ReplyLost(f"cua-driver's daemon stopped answering after the request was sent, which it may have "
+                             f"acted on: {e}") from None
+
+
 async def _read_resources(uris: list[str]) -> dict[str, str]:
     """cua-driver's skill resources as its own MCP server serves them, on the running daemon."""
-    server = StdioServerParameters(command=str(_executable()), args=["mcp", "--socket", str(SOCKET)],
+    server = StdioServerParameters(command=str(_executable()), args=["mcp", "--socket", SOCKET],
                                    env={**os.environ, **QUIET})
     async with stdio_client(server) as (read, write), ClientSession(read, write) as session:
         await session.initialize()
@@ -297,7 +417,7 @@ async def _read_resources(uris: list[str]) -> dict[str, str]:
 
 @functools.cache
 def _manifest() -> dict:
-    return json.loads(MANIFEST.read_text())
+    return json.loads(MANIFEST.read_text(encoding="utf-8"))
 
 
 class _Keymap:
@@ -358,6 +478,8 @@ def _executable() -> Path:
     package, which loads its SDK."""
     if MACOS:
         return APP_EXECUTABLE
+    if WINDOWS:
+        return WINDOWS_EXECUTABLE
     return Path(importlib.util.find_spec("cua_driver").submodule_search_locations[0]) / "bin" / "cua-driver"
 
 
@@ -371,9 +493,9 @@ def _skill_pack() -> tuple[str, str, dict[str, str]]:
     with tempfile.TemporaryDirectory(prefix="cua-driver-skill-") as home:
         (Path(home) / ".claude").mkdir()
         subprocess.run([str(_executable()), "mcp-config", "--client", "claude"], capture_output=True, check=True,
-                       timeout=SKILL_TIMEOUT_S, env={**os.environ, "HOME": home, **QUIET})
+                       timeout=SKILL_TIMEOUT_S, env={**os.environ, "HOME": home, "USERPROFILE": home, **QUIET})
         folder = Path(home) / ".cua-driver" / "skills" / "cua-driver"
-        files = {path.name: path.read_text() for path in sorted(folder.iterdir()) if path.is_file()}
+        files = {path.name: path.read_text(encoding="utf-8") for path in sorted(folder.iterdir()) if path.is_file()}
     _, frontmatter, body = files.pop("SKILL.md").split("---\n", 2)
     description = next(line.partition(":")[2].strip() for line in frontmatter.splitlines()
                        if line.startswith("description:"))
@@ -381,16 +503,25 @@ def _skill_pack() -> tuple[str, str, dict[str, str]]:
 
 
 def _daemon() -> None:
-    """Run cua-driver's daemon once X answers: from the session user's home, where the apps it launches start too, on
-    the socket the driver reaches it at, with approvals off, since nobody is at the computer to give them, and nothing
-    sent to trycua."""
-    display = os.environ["DISPLAY"].lstrip(":").partition(".")[0]
-    while not Path(f"/tmp/.X11-unix/X{display}").is_socket():
+    """Run cua-driver's daemon once the display answers, X's or on Hyprland the compositor's, there with its Wayland
+    backend: from the session user's home, where the apps it launches start too, on the socket the driver reaches it
+    at, with approvals off, since nobody is at the computer to give them, and nothing sent to trycua. On Windows, in
+    the session user's sign-in, as agentenv-session starts it, and waited on, since Windows has no exec: one that exits
+    is started again."""
+    if WINDOWS:
+        os.chdir(Path.home())
+        sys.exit(subprocess.run([str(_executable()), "serve", "--socket", SOCKET, "--dangerously-bypass-approvals",
+                                 "--no-overlay"], env={**os.environ, **QUIET}).returncode)
+    if HYPRLAND:
+        display = Path(os.environ["XDG_RUNTIME_DIR"]) / os.environ["WAYLAND_DISPLAY"]
+    else:
+        display = Path(f"/tmp/.X11-unix/X{os.environ['DISPLAY'].lstrip(':').partition('.')[0]}")
+    while not display.is_socket():
         time.sleep(0.2)
     os.chdir(Path.home())
     executable = str(_executable())
-    os.execve(executable, [executable, "serve", "--socket", str(SOCKET), "--dangerously-bypass-approvals", "--no-overlay"],
-              {**os.environ, **QUIET})
+    os.execve(executable, [executable, "serve", "--socket", SOCKET, "--dangerously-bypass-approvals", "--no-overlay"],
+              {**os.environ, **QUIET, **(WAYLAND_BACKEND if HYPRLAND else {})})
 
 
 if __name__ == "__main__":

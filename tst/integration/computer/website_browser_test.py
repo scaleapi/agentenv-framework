@@ -5,12 +5,16 @@ with agentenv's policies where its build reads them and with no debugging port a
 first start tab sees the deploy's time zone, and a page on loopback loads; its card declares browser/v1; a data/reset
 relaunches it on its profile template, on a new pipe its ready check answers over; and reset_env, a reboot, brings the
 template back too. Its computer's /dev/shm is Docker's
-64 MiB, so it keeps its shared memory in files. Needs Docker and the local registry on localhost:5000."""
+64 MiB, so it keeps its shared memory in files. In a multi env beside a site that offers website/v1's session,
+browser_sign_in signs it in, and again after reset_env starts it afresh. Needs Docker and the local registry on
+localhost:5000."""
 
 import asyncio
 import json
 import platform
 import re
+import uuid
+from typing import Optional
 
 import httpx
 import pytest
@@ -22,12 +26,23 @@ from agentenv_protocol.computer import apps
 from agentenv_protocol.types import WELL_KNOWN_PATH
 from agentenv_protocol.website_browser import BROWSER
 
+from agent_env.config import get_config, website_browser_env_id
 from agent_env.env import Env
+from agent_env.env.env import DeployedEnv
 from agent_env.env.envs.computer.utils import inside
+from agent_env.env.envs.mcp_server import MCPServerEnv
+from agent_env.env.envs.multi_env import MultiEnv
+from agent_env.env.envs.playwright_mcp import PLAYWRIGHT_MCP_ENVIRONMENT_NAME
+from agent_env.env.envs.website import WebsiteEnv
 from agent_env.store.routing import namespace_routing
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.task_steps.browser.base import find_browser
+from agent_env.task_step.task_steps.browser.sign_in import BrowserSignInTaskStep
+from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
+from tst.integration.computer.multi_env_computers_test import CONTAINER, _image
+from tst.integration.store.local_parallel_deploy_test import _seed_bootstrap_envs
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
@@ -130,7 +145,7 @@ async def test_chromium_runs_with_agentenvs_flags_on_its_pipe_and_a_reset_relaun
     assert argv[4].startswith("--disk-cache-dir=") and argv[4].endswith("/.cache/chromium")
     assert argv[5:10] == ["--remote-debugging-pipe", "--no-first-run", "--no-default-browser-check", "--lang=fr-FR",
                           "--disable-dev-shm-usage"]
-    assert argv[10:] == [TIME_ZONE_PAGE, LOOPBACK]
+    assert argv[10:] == ["about:blank"]
     assert browser["listening"] == 0 and port_file["exit_code"] != 0
     assert zone.startswith("Europe/Paris") and loopback.startswith("Loopback page")
     assert {"BrowserSignin": 0, "DownloadDirectory": "${user_home}/Downloads"}.items() <= json.loads(
@@ -140,8 +155,8 @@ async def test_chromium_runs_with_agentenvs_flags_on_its_pipe_and_a_reset_relaun
         "156.0.8078.4", "real", ["cdp", "cookies/delete", "cookies/get", "cookies/set", "dialog/answer", "downloads/get",
                                  "downloads/list", "files/choose", "history", "local_storage/clear",
                                  "local_storage/get", "local_storage/set", "navigate", "page/capture", "page/input",
-                                 "page/state", "page/viewport", "record", "tabs/activate", "tabs/close", "tabs/list",
-                                 "tabs/open"])
+                                 "page/state", "page/viewport", "record", "sites/set", "tabs/activate", "tabs/close",
+                                 "tabs/list", "tabs/open"])
     assert readiness["ready"] is True, readiness
     assert relaunched["pid"] != browser["pid"] and relaunched["listening"] == 0
     assert relaunched_readiness["ready"] is True, relaunched_readiness
@@ -211,3 +226,66 @@ async def _ready(deployed, card: dict, app: str = "browser") -> dict:
             return readiness
         await asyncio.sleep(1)
     return readiness
+
+
+# Who a request carrying the cookie signs in, as the site says, asked inside the computer through its site proxy.
+WHO_IS_SIGNED_IN = """import json, sys, urllib.request
+request = urllib.request.Request("https://shop.test/api/session", headers={"Cookie": sys.argv[1]})
+print(json.load(urllib.request.urlopen(request, timeout=20))["user"])
+"""
+
+
+@pytest.fixture(scope="module")
+def session_site(website_browser_desktop):
+    """The gateway's and service-db's envs, a small stand-in for the website browser's MCP server a gateway in front of
+    websites runs, and a WebsiteEnvironment site named shop.test that offers session, under a local id as the
+    desktop's."""
+    uid = uuid.uuid4().hex[:8]
+    with namespace_routing():
+        _seed_bootstrap_envs()
+        MCPServerEnv.put(id=website_browser_env_id(get_config()), environment_name=PLAYWRIGHT_MCP_ENVIRONMENT_NAME,
+                         docker_image_artifact=_image("cardless_mcp", f"signin-browser-{uid}"))
+        return WebsiteEnv.put(id=f"@local/~/signin-{uid}/shop", environment_name="shop", domains=["shop.test"],
+                              server_docker_image_artifact=_image("session_website", f"signin-shop-{uid}"))
+
+
+async def _signed_in(computer: DeployedEnv) -> Optional[str]:
+    """Who the browser's cookies for shop.test sign in, as the site says inside the computer; None with none."""
+    owner, _, card = find_browser(computer, None)
+    cookies = (await protocol_v1.invoke_extension(owner.environment_url, card, BROWSER, {"urls": ["https://shop.test/"]},
+                                                  30, method="cookies/get", headers=owner.control_headers))["cookies"]
+    if not cookies:
+        return None
+    header = "; ".join(f"{cookie['name']}={cookie['value']}" for cookie in cookies)
+    answer = await inside.run(computer, ["python3", "-c", WHO_IS_SIGNED_IN, header], timeout_s=40)
+    return answer["stdout"].strip() or answer.get("stderr", "")[-300:]
+
+
+@pytest.mark.asyncio
+async def test_browser_sign_in_signs_a_multi_envs_browser_in_to_its_site_and_again_after_a_reset(
+        website_browser_desktop, session_site):
+    with namespace_routing():
+        office = MultiEnv.put(id=f"{session_site.id.rsplit('/', 1)[0]}/office", mcp_server_envs=[],
+                              website_envs=[session_site], computer_envs=[Env.get(website_browser_desktop.id)],
+                              name="office")
+        sign_in = BrowserSignInTaskStep(id="in", version=None, env_id=office.id, site=session_site.id, user="alex")
+        context = TaskStepContext()
+        try:
+            [deployed] = (await DeployEnvTaskStep(
+                id="office", version=None, env_id=office.id, sandbox_type="local", ttl_seconds=900,
+                child_envs={"desktop": {**CONTAINER, "env_params": {"form": "container", "site_routing": True}}},
+            ).execute(context)).deployed_envs
+            computer = DeployedEnv.from_dict(deployed.child_envs["desktop"])
+            before = await _signed_in(computer)
+            await sign_in.execute(context)
+            signed = await _signed_in(computer)
+            await ResetEnvTaskStep(id="reset", version=None, env_id=office.id, fail_task_on_error=True).execute(context)
+            after_reset = await _signed_in(computer)
+            await sign_in.execute(context)
+            again = await _signed_in(computer)
+        finally:
+            report = await teardown_run(context)
+
+    assert not report.failed
+    assert (before, signed, after_reset, again) == (None, "alex", None, "alex")
+    assert context.metadata["browser_steps"]["in"]["names"] == ["shop.test"]

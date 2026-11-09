@@ -16,6 +16,7 @@ from agent_env.attribution import PIPELINE_STEP_KEY
 from agent_env.config import get_config, reset_config
 from agent_env.providers.sandbox_providers import modal_image_build, modal_vm_sandbox
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
+from agent_env.providers.sandbox_providers.local_docker.disk import Exported
 from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPolicy
 from tst.unit.store.fakes import FakeImageStore
@@ -43,16 +44,18 @@ def _provider(cls, **kwargs):
 
 
 _CREATES = {
-    "container": (ModalSandboxProvider, {}, "_experimental_create", lambda p: p.create_container(
+    "private container": (ModalSandboxProvider, {}, "_experimental_create", lambda p: p.create_container(
         image_name="img:latest", port=8000, env={"A": "1"}, network_policy=_ALLOWLIST, attribution=_ATTRIBUTION,
         private_network=True)),
+    "container": (ModalSandboxProvider, {}, "create", lambda p: p.create_container(
+        image_name="img:latest", port=8000, env={"A": "1"}, network_policy=_ALLOWLIST, attribution=_ATTRIBUTION)),
     "gpu container": (ModalSandboxProvider, {"gpu": "H100"}, "create", lambda p: p.create_container(
         image_name="img:latest", port=8000, env={"A": "1"}, network_policy=_ALLOWLIST, attribution=_ATTRIBUTION)),
-    "vm": (ModalVmSandboxProvider, {}, "_experimental_create", lambda p: p.create_vm(
+    "vm": (ModalVmSandboxProvider, {}, "create", lambda p: p.create_vm(
         exposed_ports=[8000], network_policy=_ALLOWLIST, attribution=_ATTRIBUTION)),
-    "vm in a region": (ModalVmSandboxProvider, {"region": "us-west", "idle_timeout": 600}, "_experimental_create",
+    "vm in a region": (ModalVmSandboxProvider, {"region": "us-west", "idle_timeout": 600}, "create",
                        lambda p: p.create_vm(exposed_ports=[8000], attribution=_ATTRIBUTION)),
-    "disk": (ModalVmSandboxProvider, {"region": "us-west"}, "_experimental_create", lambda p: p.create_vm(
+    "disk": (ModalVmSandboxProvider, {"region": "us-west"}, "create", lambda p: p.create_vm(
         image="localhost:5000/disk@sha256:" + "a" * 64, env={"ENVIRONMENT_NAME": "desk"}, exposed_ports=[18765],
         cpu=2, memory=4096, network_policy=_ALLOWLIST, attribution=_ATTRIBUTION)),
 }
@@ -62,7 +65,7 @@ _CREATES = {
 def _exported_disk(tmp_path, monkeypatch):
     """A disk's export on this machine, and the launcher's image, without Docker or a registry."""
     (tmp_path / "disk.img.zst").write_bytes(b"disk")
-    monkeypatch.setattr(modal_vm_sandbox, "exported_disk", lambda image, platform: tmp_path / "disk.img.zst")
+    monkeypatch.setattr(modal_vm_sandbox, "exported_disk", lambda image, platform: Exported(tmp_path / "disk.img.zst"))
     monkeypatch.setattr(modal_vm_sandbox, "published_digest", lambda image: "sha256:" + "b" * 64)
 
 

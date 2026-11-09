@@ -1082,14 +1082,14 @@ def test_compose_maps_extra_hosts_into_the_gateway(extra_hosts):
     assert mapped == ({GATEWAY_SERVICE_NAME: list(extra_hosts)} if extra_hosts else {})
 
 
-def test_compose_reads_a_servers_card_on_its_card_port_and_its_mcp_on_the_mcp_port():
-    """The website browser serves its card from its recorder's port: the gateway's REST proxy, which it reads the card
-    through, points there, while its MCP connection and health check stay on the MCP port."""
+def test_compose_reads_every_servers_card_and_mcp_on_its_mcp_port_the_website_browsers_included():
+    """The gateway's REST proxy, which it reads each server's card and extensions through, points at the server's MCP
+    port, where its MCP connection and health check are: the website browser's too, whose recorder fronts that port."""
     from agent_env.env.envs.service_db import ServiceDBConfig
 
     compose = EnvironmentGatewayProvider().create_docker_compose(
         mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack"),
-                     MCPServerConfig(image="browser", environment_name="website-browser", card_port=18766)],
+                     MCPServerConfig(image="browser", environment_name="website-browser")],
         gateway_image="agent-gateway",
         gateway_port=18765,
         state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
@@ -1098,9 +1098,45 @@ def test_compose_reads_a_servers_card_on_its_card_port_and_its_mcp_on_the_mcp_po
 
     services = yaml.safe_load(compose)["services"]
     gateway = dict(item.split("=", 1) for item in services[GATEWAY_SERVICE_NAME]["environment"])
-    assert gateway["REST_PROXY_URLS"] == "mcp-slack=http://slack:18765,mcp-website-browser=http://website-browser:18766"
+    assert gateway["REST_PROXY_URLS"] == "mcp-slack=http://slack:18765,mcp-website-browser=http://website-browser:18765"
     assert (gateway["INTERNAL_MCP_SERVERS"], gateway["INTERNAL_MCP_PORT"]) == ("slack,website-browser", "18765")
     assert "18765" in services["website-browser"]["healthcheck"]["test"][1]
+
+
+@pytest.mark.parametrize("browsing", [True, False], ids=["with-browser", "without"])
+def test_the_website_browser_reaches_only_the_gateway_and_the_sites_and_no_database(browsing):
+    from agent_env.env.envs.service_db import ServiceDBConfig
+
+    sites = ["website-network"] if browsing else []
+    mcp_servers = [MCPServerConfig(image="mcp-slack", environment_name="slack"),
+                   MCPServerConfig(image="browser", environment_name="website-browser",
+                                   **({"networks": ("website-network",)} if browsing else {}))]
+    website_configs = [WebsiteConfig(backend_image="shop-be", frontend_image="shop-fe", environment_name="shop"),
+                       WebsiteConfig(backend_image="notes-be", frontend_image=None, environment_name="notes")]
+    provider = EnvironmentGatewayProvider()
+    compose = yaml.safe_load(provider.create_docker_compose(
+        mcp_servers=mcp_servers,
+        gateway_image="agent-gateway",
+        gateway_port=18765,
+        website_configs=website_configs,
+        state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig(db_web_image="pgweb", db_mcp_image="db-mcp")),
+        state_instance=LocalPostgresStateProvider.default_instance(),
+    ))
+
+    networks = {name: service["networks"] for name, service in compose["services"].items()}
+    assert networks == {
+        "servicedb": ["env-network"], "pgweb": ["env-network"], "db-mcp": ["env-network"],
+        "slack": ["env-network"], "website-browser": sites or ["env-network"],
+        GATEWAY_SERVICE_NAME: ["env-network", *sites],
+        "shop-website-backend": ["env-network"], "shop-website-frontend": ["env-network", *sites],
+        "notes-website-backend": ["env-network", *sites],
+    }
+    assert list(compose["networks"]) == ["env-network", *sites]
+    browser = compose["services"]["website-browser"]
+    database = ("depends_on" in browser, any(e.startswith("DATABASE_URL=") for e in browser["environment"]))
+    assert database == (not browsing, not browsing)
+    assert provider._all_environments(mcp_servers, website_configs) == [
+        "slack", *([] if browsing else ["website-browser"]), "shop", "notes"]
 
 
 # --- sidecar rendering --------------------------------------------------------
@@ -1331,10 +1367,10 @@ def test_needs_local_postgres_reflects_provider_type():
     ({}, "website-browser"),
     ({"website_browser_env_id": "wb-run"}, "wb-run"),
 ], ids=["configured-default", "run-override"])
-async def test_deploy_via_vm_prepares_schemas_including_website_browser(overrides, browser_name):
-    """The gateway auto-adds the browser MCP when websites are present, the run's own when it names one, then drives
-    stage 2 (prepare) with the full post-append service list — so a remote store provisions the browser's
-    schema. This replaces the earlier band-aid that made Env.deploy compute that list."""
+async def test_deploy_via_vm_adds_the_website_browser_and_prepares_schemas_without_it(overrides, browser_name):
+    """The gateway auto-adds the browser MCP when websites are present, the run's own when it names one, on the sites'
+    network alone, then drives stage 2 (prepare) with the post-append service list, which leaves the browser out:
+    it reaches no database, so a remote store provisions it no schema."""
     from agent_env.config import run_env_ids
     from agent_env.env.gateway import GatewayMode
     from agent_env.providers.env_state import DatabaseStateProvider
@@ -1379,10 +1415,10 @@ async def test_deploy_via_vm_prepares_schemas_including_website_browser(override
 
     state_provider.prepare.assert_awaited_once()
     names = state_provider.prepare.call_args.args[0]
-    assert set(names) == {"slack", "shop", browser_name}
+    assert set(names) == {"slack", "shop"}
     assert compose.call_args.kwargs["mcp_server_name"] == "crm"
     browser = next(s for s in compose.call_args.kwargs["mcp_servers"] if s.environment_name == browser_name)
-    assert browser.card_port == 18766  # its card is the recorder's
+    assert browser == MCPServerConfig(image=browser.image, environment_name=browser_name, networks=("website-network",))
 
 
 @pytest.mark.asyncio
@@ -1693,7 +1729,7 @@ def _render(mcp_servers, website_configs=None):
 
 @pytest.mark.parametrize("browser", ["playwright-mcp", "browseruse-mcp"])
 def test_compose_takes_a_browser_of_any_name_and_refuses_an_env_named_like_it(browser):
-    browser_server = MCPServerConfig(image="browser", environment_name=browser, card_port=18766)
+    browser_server = MCPServerConfig(image="browser", environment_name=browser)
     shop = WebsiteConfig(backend_image="shop-be", frontend_image="shop-fe", environment_name="slack")
 
     services = yaml.safe_load(_render([MCPServerConfig(image="mcp-slack", environment_name="slack"), browser_server],
@@ -1987,7 +2023,7 @@ async def test_create_gateway_hands_the_deploy_path_every_argument(attribution, 
 
     [call] = vm.await_args_list
     assert call.args == (provider, args.pop("mcp_servers"), args.pop("mcp_server_images"))
-    assert call.kwargs == {**args, "attribution": forwarded}
+    assert call.kwargs == {**args, "attribution": forwarded, "children": None}
     assert call.kwargs["attribution"] is not attribution
 
 
@@ -2605,7 +2641,7 @@ async def test_a_site_that_never_says_it_is_ready_fails_the_deploy_naming_why():
             return httpx.Response(200, json=_READY_CARD)
         return httpx.Response(200, json={"ready": False, "problems": ["seeded"]})
 
-    with _sites(site), pytest.raises(RuntimeError, match=r"websites not ready after 0s: mail \(seeded\)"):
+    with _sites(site), pytest.raises(RuntimeError, match=r"websites not ready after \d+s: mail \(seeded\)"):
         await env_gateway_provider._wait_for_websites(
             "http://gw", [WebsiteConfig(backend_image="m", frontend_image=None, environment_name="mail")],
             timeout_s=0, poll_s=0)
@@ -2618,7 +2654,7 @@ async def test_a_site_whose_ready_answers_no_website_readiness_is_never_ready_an
             return httpx.Response(200, json=_READY_CARD)
         return httpx.Response(200, json={"ready": "yes"})
 
-    with _sites(site), pytest.raises(RuntimeError, match=r"websites not ready after 0s: mail \(ValidationError: "):
+    with _sites(site), pytest.raises(RuntimeError, match=r"websites not ready after \d+s: mail \(ValidationError: "):
         await env_gateway_provider._wait_for_websites(
             "http://gw", [WebsiteConfig(backend_image="m", frontend_image=None, environment_name="mail")],
             timeout_s=0, poll_s=0)
@@ -2651,7 +2687,7 @@ async def test_a_site_past_the_time_it_declared_fails_the_deploy_saying_so(monke
         return httpx.Response(200, json={"ready": False, "problems": ["@ready_check seeded returned False"],
                                          "waited_s": 61, "timeout_s": 0})
 
-    with _sites(site), pytest.raises(RuntimeError, match=r"websites not ready after 0s: mail \(not ready after 0 s: "
+    with _sites(site), pytest.raises(RuntimeError, match=r"websites not ready after \d+s: mail \(not ready after 0 s: "
                                                          r"@ready_check seeded returned False\)"):
         await env_gateway_provider._wait_for_websites(
             "http://gw", [WebsiteConfig(backend_image="m", frontend_image=None, environment_name="mail")],
@@ -2729,3 +2765,162 @@ async def test_a_site_whose_cards_path_answers_no_card_falls_back_to_its_health_
     with _sites(site):
         await env_gateway_provider._wait_for_websites(
             "http://gw", [WebsiteConfig(backend_image="s", frontend_image=None, environment_name="shop")], poll_s=0)
+
+
+# --- children on sandboxes of their own: the gateway fronts each as it does an MCP server, by its name ---
+
+def test_compose_fronts_each_external_child_as_an_mcp_server_and_a_rest_route_by_its_name():
+    from agent_env.env.envs.service_db import ServiceDBConfig
+    from agent_env.env.gateway import ExternalChild
+
+    compose = yaml.safe_load(EnvironmentGatewayProvider().create_docker_compose(
+        mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")], gateway_image="agent-gateway",
+        state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
+        state_instance=LocalPostgresStateProvider.default_instance(),
+        external_children=(ExternalChild("desktop", "https://desk.example/mcp", "https://desk.example"),)))
+
+    env = dict(line.split("=", 1) for line in compose["services"][GATEWAY_SERVICE_NAME]["environment"])
+    assert env["INTERNAL_MCP_SERVERS"].split(",") == ["slack", "desktop=https://desk.example/mcp"]
+    assert "desktop=https://desk.example" in env["REST_PROXY_URLS"].split(",")
+
+
+def test_no_service_depends_on_the_gateway_so_a_vm_deploy_can_start_them_all_before_it():
+    """A VM deploy with children runs ``compose up --scale gateway=0`` first, which starts a service that depends on the
+    gateway with it, before its children answer."""
+    from agent_env.env.envs.service_db import ServiceDBConfig
+
+    compose = yaml.safe_load(EnvironmentGatewayProvider().create_docker_compose(
+        mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")], gateway_image="agent-gateway",
+        website_configs=[WebsiteConfig(backend_image="shop-back", frontend_image="shop-front", environment_name="shop")],
+        state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig(db_web_image="pgweb", db_mcp_image="db-mcp")),
+        state_instance=LocalPostgresStateProvider.default_instance()))
+
+    assert {name: service.get("depends_on") for name, service in compose["services"].items()
+            if GATEWAY_SERVICE_NAME in (service.get("depends_on") or ())} == {}
+
+
+@pytest.mark.asyncio
+async def test_a_vm_deploy_starts_its_children_beside_its_services_and_the_gateway_after_them_fronting_each():
+    """The children get the gateway's address before the gateway starts, which then waits for each to answer; every
+    child is reached as the VM reaches it."""
+    from agent_env.env.gateway import ExternalChild, GatewayMode
+    from agent_env.providers.env_state import DatabaseStateProvider
+
+    gp = EnvironmentGatewayProvider()
+    gp._state_provider = MagicMock(spec=DatabaseStateProvider, prepare=AsyncMock())
+    gp._state_instance = MagicMock()
+    sandbox = AsyncMock(tunnel_urls={18765: "https://gw.example"})
+    sandbox.url_from_sandbox = MagicMock(side_effect=lambda url: url.replace("localhost", "host.docker.internal"))
+    order, composes = [], []
+
+    async def children(reach):
+        order.append(("children", reach))
+        return [ExternalChild("desktop", "http://localhost:20001/mcp", "http://localhost:20001")]
+
+    def compose(**kwargs):
+        composes.append(kwargs.get("external_children", ()))
+        return f"compose {len(composes)}"
+
+    class _Stop(Exception):
+        """Abort once the gateway's compose up has run."""
+
+    async def up(sandbox, args=""):
+        order.append(("up", args))
+        if not args:
+            raise _Stop
+
+    with patch("agent_env.env.env.Env.get", return_value=MagicMock(docker_image_artifact=_loadable("gw"))), \
+         patch("agent_env.config.get_config", return_value=MagicMock(default_gateway_env_id="gw-id")), \
+         patch.object(gp, "create_docker_compose", side_effect=compose), \
+         patch.object(gp, "_compose_up", side_effect=up), \
+         pytest.raises(_Stop):
+        await gp._deploy_via_vm(
+            sandbox_provider=MagicMock(create_vm=AsyncMock(return_value=sandbox)),
+            mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")], mcp_server_images=[_loadable("mcp-slack")],
+            gateway_port=18765, website_configs=None, website_images=None, gateway_mode=GatewayMode.PERFORMANCE, ttl_seconds=60,
+            disk_size_gb=10, children=children)
+
+    assert sorted(order[:2]) == [("children", "https://gw.example"), ("up", f"--scale {GATEWAY_SERVICE_NAME}=0")]
+    assert order[2:] == [("up", "")]
+    assert composes == [(), (ExternalChild("desktop", "http://host.docker.internal:20001/mcp", "http://host.docker.internal:20001"),)]
+    written = [shlex.split(call.args[0]) for call in sandbox.exec_script.await_args_list]
+    assert ["printf", "%s\\n", "compose 2", ">", f"{GATEWAY_APP_DIR}/docker-compose.yml"] in written
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing", ["children", "up"])
+async def test_a_vm_deploy_whose_children_or_services_fail_raises_once_both_have_ended_and_starts_no_gateway(failing):
+    from agent_env.env.gateway import GatewayMode
+    from agent_env.providers.env_state import DatabaseStateProvider
+
+    gp = EnvironmentGatewayProvider()
+    gp._state_provider = MagicMock(spec=DatabaseStateProvider, prepare=AsyncMock())
+    gp._state_instance = MagicMock()
+    ended = []
+
+    async def children(reach):
+        await asyncio.sleep(0.05)
+        ended.append("children")
+        if failing == "children":
+            raise RuntimeError("children")
+        return []
+
+    async def up(sandbox, args=""):
+        assert args, "the gateway started"
+        ended.append("up")
+        if failing == "up":
+            raise RuntimeError("up")
+
+    with patch("agent_env.env.env.Env.get", return_value=MagicMock(docker_image_artifact=_loadable("gw"))), \
+         patch("agent_env.config.get_config", return_value=MagicMock(default_gateway_env_id="gw-id")), \
+         patch.object(gp, "create_docker_compose", return_value="compose"), \
+         patch.object(gp, "_compose_up", side_effect=up), \
+         pytest.raises(RuntimeError, match=f"^{failing}$"):
+        await gp._deploy_via_vm(
+            sandbox_provider=MagicMock(create_vm=AsyncMock(return_value=AsyncMock(tunnel_urls={}))),
+            mcp_servers=[], mcp_server_images=[], gateway_port=18765, website_configs=None, website_images=None,
+            gateway_mode=GatewayMode.PERFORMANCE, ttl_seconds=60, disk_size_gb=10, children=children)
+
+    assert sorted(ended) == ["children", "up"]
+
+
+@pytest.mark.asyncio
+async def test_container_mode_starts_children_beside_its_servers_and_hands_the_gateway_each_as_its_provider_reaches_it(monkeypatch):
+    """Container mode creates the gateway last, so its children get no address of it."""
+    from agent_env.env.gateway import ExternalChild, GatewayMode
+
+    monkeypatch.setattr(env_gateway_provider, "sandbox_request_header_names", lambda: ())
+    provider = ModalSandboxProvider()
+    gp = EnvironmentGatewayProvider()
+    gp._state_provider = LocalPostgresStateProvider()
+    create_calls, reaches = [], []
+
+    async def fake_create_container(**kwargs):
+        create_calls.append(kwargs)
+        port = kwargs["port"]
+        if kwargs.get("is_tcp"):
+            return _FakeSandbox(f"db-{port}", port, f"tcp://db.modal.host:{port}")
+        return _FakeSandbox(f"sb-{kwargs['image_name']}-{port}", port, f"https://{kwargs['image_name']}.modal.host")
+
+    async def children(reach):
+        reaches.append(reach)
+        return [ExternalChild("desktop", "https://desk.example/mcp", "https://desk.example")]
+
+    gateway_env = MagicMock(docker_image_artifact=_image("agent-gateway"))
+    db_env = MagicMock()
+    db_env.to_config.return_value = MagicMock(db_image="postgres:16-alpine", db_web_image=None, db_mcp_image=None)
+    gp._init_service_db_via_exec = AsyncMock()
+    gp._wait_for_tunnel = AsyncMock(return_value=_CARD)
+    gp._refuse_tool_name_clashes = AsyncMock()
+    with patch.object(provider, "create_container", side_effect=fake_create_container), \
+         patch("agent_env.env.env.Env.get", side_effect=lambda env_id, *a, **k: gateway_env if env_id == "gw-id" else db_env), \
+         patch("agent_env.config.get_config", return_value=MagicMock(default_gateway_env_id="gw-id", default_service_db_env_id="db-id")):
+        await gp._deploy_via_containers(
+            sandbox_provider=provider, mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")],
+            mcp_server_images=[_image("mcp-slack")], gateway_port=18765, website_configs=None,
+            gateway_mode=GatewayMode.PERFORMANCE, ttl_seconds=60, disk_size_gb=10, children=children)
+
+    env = create_calls[-1]["env"]
+    assert reaches == [None]
+    assert env["INTERNAL_MCP_SERVERS"].split(",")[-1] == "desktop=https://desk.example/mcp"
+    assert env["REST_PROXY_URLS"].split(",")[-1] == "desktop=https://desk.example"

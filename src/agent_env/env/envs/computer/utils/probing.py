@@ -11,9 +11,11 @@ import httpx
 from agentenv_protocol.computer.conformance import run_probe
 
 from agent_env.artifact.artifacts.file import FileArtifact
+from agent_env.config.errors import ConfigError
 from agent_env.env.env import Env
 from agent_env.env.envs.computer.utils import boot
 from agent_env.env.envs.computer.utils.composed import Record, failed, now
+from agent_env.env.envs.computer.utils.install import for_os, platform_of
 from agent_env.store.ids import derive_id
 from agent_env.store.local_state import awaiting_lock
 
@@ -53,16 +55,25 @@ async def probe_first_boot(env: ComputerEnv, form: str, arch: str, sandbox_provi
         return result
 
 
+class Unprobed(Exception):
+    """The probe couldn't boot the build, for a setting it boots with that doesn't resolve here: which says nothing of
+    the build."""
+
+
 async def checked(links: list[SandboxProvider], env: ComputerEnv, driver: ComputerDriverEnv, form: str, arch: str,
                   result: dict) -> dict:
     """The build of ``result`` booted on the first of ``links`` that boots it and probed at ``full``: ready, with the
     driver's card, or failed at the probe; each with a summary of the probe and its report stored. A probe that ended
     on a transport error talking to the driver runs again on a fresh boot first, up to ``_PROBE_ATTEMPTS`` in all, the
-    record then keeping each attempt; one with a failed check is recorded at once."""
+    record then keeping each attempt; one with a failed check is recorded at once. A build the probe couldn't boot for
+    a setting that doesn't resolve here stays as it was, unverified, saying why, so a compose once it resolves probes
+    it."""
     attempts: list[dict] = []
     while True:
         try:
             report, card, provider = await _probe(links, env, driver, result["image"], form)
+        except Unprobed as e:
+            return {**result, "reason": f"not probed: {e}"}
         except TimeoutError:
             outcome = failed(env, form, arch, "probe", result["key"],
                              f"the probe didn't finish within {_PROBE_TIMEOUT_S} s")
@@ -94,7 +105,8 @@ def _reported(env: ComputerEnv, driver: ComputerDriverEnv, form: str, arch: str,
     probe = {"level": report.level, "provider": provider, "passed": report.passed, "checks": report.counts(),
              "extensions": report.extensions, "report": {"id": stored.id, "version": stored.version},
              "probed_at": now()}
-    known = {(failure.check, failure.name): failure for failure in driver.known_failures.get(env.computer.os.type, [])}
+    known = {(failure.check, failure.name): failure
+             for failure in for_os(driver.known_failures, env.computer.os) or []}
     failed_checks = [c for c in report.checks if c.status == "failed"]
     if waived := [c for c in failed_checks if (c.check, c.name) in known]:
         probe["known_failures"] = [{"check": c.check, "name": c.name, "detail": c.detail,
@@ -141,16 +153,22 @@ async def _probe(links: list[SandboxProvider], env: ComputerEnv, driver: Compute
                  form: str = "container") -> tuple[ProbeReport, dict, str]:
     """``image``, of ``form``, booted at the env's settings and its apps' defaults with a control token of its own, as
     a deploy with no ``env_params`` boots it, on the first of ``links`` that boots it, probed at ``full`` with that
-    token within ``_PROBE_TIMEOUT_S`` and torn down; the report, the driver's card and the provider's name."""
+    token within ``_PROBE_TIMEOUT_S`` and torn down; the report, the driver's card and the provider's name. Raises
+    Unprobed, booting nothing, when a setting it boots with doesn't resolve here."""
     token = boot.control_token()
-    environment = {**boot.settings_environment(env.computer, env.computer_values(), environment_name=env.computer_name),
-                   **boot.app_settings_environment(env.composed_apps(), env.app_defaults(), env.computer.os.type)}
+    try:
+        environment = {
+            **boot.settings_environment(env.computer, env.computer_values(), environment_name=env.computer_name),
+            **boot.app_settings_environment(env.composed_apps(), env.app_defaults(), platform_of(env.computer.os))}
+    except ConfigError as e:  # an env: or secret: reference that doesn't resolve here, or no secret store to resolve it
+        raise Unprobed(f"a setting it boots with didn't resolve here: {e}") from e
     problems = []
     for link in links:
         try:
             booted = await boot.boot(link, image=image, port=driver.port, environment=environment, token=token,
                                      network_policy=None, timeout=_PROBE_TTL_S, attribution=None,
-                                     ready_s=boot.ready_timeout(env.composed_apps(), env.computer.os.type), form=form)
+                                     ready_s=boot.ready_timeout(env.composed_apps(), platform_of(env.computer.os)),
+                                     form=form, os_type=env.computer.os.type)
         except Exception as e:
             problems.append(f"{type(link).__name__}: {e}")
             continue
