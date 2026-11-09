@@ -1,5 +1,5 @@
-"""The user sim plug-in the always_on step calls by default: each version decides the user sim's system prompt and
-answer format (``setup``), renders its own input for one read and parses the answer (``answer``).
+"""The user sim plug-in the always_on step calls when a user_sim step names none: each version decides the user sim's
+system prompt and answer format (``setup``), renders its own input for one read and parses the answer (``answer``).
 
 The interface, which any plug-in a ``user_sim`` step names (a file artifact) must offer:
 
@@ -7,14 +7,18 @@ The interface, which any plug-in a ``user_sim`` step names (a file artifact) mus
     async answer(version, person, history, read, ask) -> {"outcome": "reply" | "no_reply" | "done", "message": str,
                                                           "used": str | None, "input": str, "raw": ..., ...}
 
-``person`` is the user_sim step's settings (name, first, time_zone, description, versions, ...). ``history`` is every
+``person`` is the user_sim step's settings (name, first, time_zone, description, versions, ...). A plug-in may also
+offer ``configure(params)``, called once with the step's ``plugin.params``. ``history`` is every
 earlier read, oldest first, each ``{"read": <read>, "answer": <answer>}``. ``read`` is this read:
 ``{"time": RFC 3339, "assistant_messages": [{"at", "text"}], "phone": [{"at", "channel", "text"}],
 "you_sent": [{"at", "text"}]}``. ``ask(text)`` sends the rendered text to the deployed user sim (one session per run)
 and returns ``{"text": raw text, "structured": parsed object or None}``.
 
-Versions here (from user-sim-h2h/v2/PLAN.md): today, ours, ours_no_feed, ours_no_labels, ours_no_time, ours_no_used,
-ours_always_replies. "today + fixes" and "ours + fixes" need per-person lines the versions module will supply.
+Versions here: ``ours`` (the default) and its ablations ours_no_feed, ours_no_labels, ours_no_time, ours_no_used and
+ours_always_replies, and ``today`` (the description as the whole prompt, the agent's raw text as the input, answers
+{message, done}). ``ours`` shows each read labelled (the time, what's new on the phone, what the user sent, what the
+assistant sent) and answers {outcome, message, used}; its prompt is ``versions.ours.system_prompt`` when the person
+has one, else the rules below followed by the description, which then says only who the person is.
 """
 from __future__ import annotations
 
@@ -68,12 +72,42 @@ def setup(version: str, person: dict) -> dict:
     ours = (person.get("versions") or {}).get("ours") or {}
     prompt = ours.get("system_prompt")
     if not prompt:
-        raise ValueError(f"user sim {person.get('name')!r} has no versions.ours.system_prompt for version {version!r}")
+        if not person.get("description"):
+            raise ValueError(f"user sim {person.get('name')!r} needs a description or versions.ours.system_prompt")
+        return {"system_prompt": ours_prompt(version, person), "output_format": _ours_schema(version)}
     if version == "ours_no_used":
         prompt = _drop_used(prompt)
     if version == "ours_always_replies":
         prompt = _drop_no_reply(prompt)
     return {"system_prompt": prompt, "output_format": _ours_schema(version)}
+
+
+def ours_prompt(version: str, person: dict) -> str:
+    """How a person reads and answers in ``ours``, then who they are (the description)."""
+    full = person.get("name") or "the user"
+    first = person.get("first") or full.split()[0]
+    feed, clock = version != "ours_no_feed", version != "ours_no_time"
+    shows = [*(["the time"] if clock else []), *(["what's new on your phone"] if feed else []), "what you sent",
+             "what your AI assistant sent"]
+    lines = [f"You are {full}, a real person messaging your personal AI assistant. You are not the AI assistant and "
+             f"not a tester. Each message you get shows {', '.join(shows[:-1])}, and {shows[-1]}. Reply only as "
+             f"{first}. Don't do your assistant's work: never look things up for it or hand over facts it should find "
+             "itself. You can't open your apps" + ("; what's new on your phone is listed in each message." if feed
+                                                    else ".")]
+    if feed:
+        lines.append("What's new on your phone is for you: your assistant reads your inbox itself. Don't pass it on or "
+                     "make calls about it unless the assistant asks, or your description says to.")
+    if clock:
+        lines.append("Go by the time each message gives. Any other date you see is the computer's clock, not today's.")
+    lines.append("If the assistant asks something your description doesn't cover: for a choice, choose the way you "
+                 "would; for a fact about you or anyone else that isn't written there, say you don't know. Never "
+                 "guess facts.")
+    lines.append('Only answer "done" with a short sign-off. If your message answers a question or tells the assistant '
+                 'to do something, answer "reply": a "done" message never reaches the assistant.')
+    used = ('In "used", give the tag or quote the words of your description you relied on, or "none". '
+            if version != "ours_no_used" else "")
+    lines.append(used + "Answer in JSON:\n" + _json_line(version))
+    return "\n".join(lines) + "\n\nWHO YOU ARE\n" + person["description"].strip() + "\n"
 
 
 def _drop_used(prompt: str) -> str:

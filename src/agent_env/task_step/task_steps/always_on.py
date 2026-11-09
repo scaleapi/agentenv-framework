@@ -1,9 +1,9 @@
 """The always_on and user_sim steps: a task that runs over simulated days, the way you'd hand a job to a personal
-assistant, with an LLM user sim. A test-rig build of the "Always-on Task Step Design" doc.
+assistant, with an LLM user sim.
 
-The ``user_sim`` step says who the user is (description, schedule, response times, the version of the user sim and
-its plug-in) and records it in the run's metadata under its ``name``; a ``deploy_agent`` step deploys the agent that
-plays them. The ``always_on`` step names it with ``user_sim`` and runs the loop:
+The ``user_sim`` step says who the user is (description, time zone, schedule, response times, the version of the user
+sim and its plug-in) and records it in the run's metadata under its ``name``; a ``deploy_agent`` step deploys the agent
+that plays them. The ``always_on`` step names it with ``user_sim`` and runs the loop:
 
 - The first wake is the user's request. Each wake opens with what came due for the agent on notifications/v1 (a
   trigger's ``notify``, a scheduled check), labelled ``[time · channel]``, then the user's own messages.
@@ -11,14 +11,18 @@ plays them. The ``always_on`` step names it with ``user_sim`` and runs the loop:
   goes to the log. Each wake should end with ``message_user`` or ``stay_quiet``: one that ends with closing text and
   neither gets one ``nudge`` turn, and every wake ends with a reminder. All three are on unless the task turns them off.
 - The user sim is asked only after the agent sent something, at the time the user would read it (``schedule``), with
-  everything sent meanwhile; its answer is reply / no_reply / done, and a reply is held for the response time.
+  everything sent meanwhile in one read: the time, the agent's messages, what triggers sent the user's phone
+  (``notify`` to ``user_phone``) and the user's own lines (the opening request, ``user_says`` lines, ``final``).
+  Nothing meant for the agent is in it. Its answer is reply / no_reply / done, and a reply is held for the response
+  time. Done ends a one-sitting run; a run whose end_time falls on a later day than its start goes on to end_time.
 - Scripted user lines are triggers' ``notify`` actions to the ``user_says`` recipient: sent to the agent as the
-  user's message and added to the user sim's history. What the user's phone shows is ``notify`` to ``user_phone``.
+  user's message at their time.
 - The clock runs at the task's speed during turns (sync_env_clock). When nothing is due, the step advances it to the
-  earliest of: the next trigger event, the next notification, a held reply, a pending read, or end_time; then waits up
-  to ``settle_timeout_seconds`` for triggers to finish.
+  earliest of: the next trigger event, the next notification, a held reply, a pending read, or end_time, never past
+  one; then waits up to ``settle_timeout_seconds`` for triggers to finish. What comes due in the same minute wakes
+  the agent once.
 - At end_time the user's ``final`` line (with a reminder to use message_user) gives the agent one last turn. The run
-  ends on done, end_time, max_wakes, or nothing left to wake the agent; the reason is recorded.
+  ends on end_time, done (one sitting), max_wakes, or nothing left to wake the agent; the reason is recorded.
 - Everything goes into a timeline in ``metadata["always_on"][step_id]`` and the object store.
 """
 from __future__ import annotations
@@ -88,8 +92,8 @@ class UserSimTaskStep(TaskStep):
                                       artifact_type="file"),)
 
     def __init__(self, id: str, version: Optional[int], *, name: str, model: str, agent_name: Optional[str] = None,
-                 user_version: str = "today", display_name: Optional[str] = None, first_name: Optional[str] = None,
-                 description: Optional[str] = None, time_zone: Optional[str] = None, apps: Optional[list] = None,
+                 user_version: str = "ours", display_name: Optional[str] = None, first_name: Optional[str] = None,
+                 description: Optional[str] = None, time_zone: Optional[str] = None,
                  schedule: Optional[dict] = None, response_times: Optional[dict] = None,
                  max_replies: Optional[int] = None, permissions: Optional[dict] = None,
                  keep_private: Optional[list] = None, output_format: Optional[dict] = None,
@@ -99,6 +103,8 @@ class UserSimTaskStep(TaskStep):
                          retry_config=retry_config)
         if not model:
             raise ValueError("user_sim.model is required")
+        if time_zone is not None:
+            ZoneInfo(time_zone)
         self.name = name
         self.model = model
         self.agent_name = agent_name or name
@@ -107,7 +113,6 @@ class UserSimTaskStep(TaskStep):
         self.first_name = first_name
         self.description = description
         self.time_zone = time_zone
-        self.apps = apps or []
         self.schedule = schedule
         self.response_times = response_times
         self.max_replies = max_replies
@@ -118,7 +123,7 @@ class UserSimTaskStep(TaskStep):
         self.plugin = plugin
 
     _FIELDS = ("name", "model", "agent_name", "user_version", "display_name", "first_name", "description", "time_zone",
-               "apps", "schedule", "response_times", "max_replies", "permissions", "keep_private", "output_format",
+               "schedule", "response_times", "max_replies", "permissions", "keep_private", "output_format",
                "versions", "plugin")
 
     def to_dict(self) -> dict:
@@ -146,17 +151,22 @@ class UserSimTaskStep(TaskStep):
 class AlwaysOnTaskStep(PromptAgentTaskStep):
     type: ClassVar[str] = "always_on"
     entity_refs = ()
+    field_scopes = {k: v for k, v in PromptAgentTaskStep.field_scopes.items() if k != "user_model"}
 
     def __init__(self, id: str, version: Optional[int], *, user_sim: str, end_time: Optional[str] = None,
                  final: Optional[str] = None, max_wakes: int = 60, settle_timeout_seconds: float = 300,
                  user_timeout_seconds: int = 300, final_reminder: Optional[str] = FINAL_REMINDER,
                  stay_quiet: bool = True, nudge: bool = True, nudge_text: str = NUDGE_TEXT,
                  wake_reminder: bool = True, wake_reminder_text: str = WAKE_REMINDER_TEXT,
-                 **prompt_fields: Any):
+                 model: Optional[str] = None, model_params: Optional[dict] = None, effort: Optional[str] = None,
+                 max_thinking_tokens: Optional[int] = None, harness: Optional[str] = None,
+                 trajectory_output_prefix: Optional[str] = None, **prompt_fields: Any):
         for unsupported in ("max_conversation_turns", "user_agent_name", "user_a2a_url", "post_turn_hooks",
                             "user_output_format", "user_model", "snapshot_config"):
             prompt_fields.pop(unsupported, None)
-        super().__init__(id, version, max_conversation_turns=max(1, int(max_wakes)), **prompt_fields)
+        super().__init__(id, version, max_conversation_turns=max(1, int(max_wakes)), model=model,
+                         model_params=model_params, effort=effort, max_thinking_tokens=max_thinking_tokens,
+                         harness=harness, trajectory_output_prefix=trajectory_output_prefix, **prompt_fields)
         if not user_sim:
             raise ValueError("always_on needs user_sim, the name of a user_sim step's user")
         if end_time is not None:
@@ -235,6 +245,8 @@ class _Run:
         self._plugin_paths: list[str] = []
         self._plugin_modules: list[str] = []
         self.nudges = 0
+        self.zone = "UTC"
+        self.multi_day = False
 
     def close(self) -> None:
         for p in self._plugin_paths:
@@ -265,14 +277,15 @@ class _Run:
         if us is None:
             raise RuntimeError(f"always_on: no user_sim step named '{step.user_sim}' ran before this step")
         self.us = us
-        self.person = self._person(us)
+        self.zone = _task_zone(us, ctx.metadata.get("clock_configurations") or [])
+        self.person = {**self._person(us), "time_zone": self.zone}
         self.version = us["user_version"]
         self.user_agent = next((a for a in ctx.deployed_agents if a.agent_name == us["agent_name"]), None)
         if self.user_agent is None:
             raise RuntimeError(f"always_on: the user sim agent '{us['agent_name']}' is not deployed")
         self.user_url = self.user_agent.a2a_url or self.user_agent.api_url
         self.plugin = await self._load_plugin(us.get("plugin"))
-        self.tz = ZoneInfo(us.get("time_zone") or "UTC")
+        self.tz = ZoneInfo(self.zone)
 
         self.clock_envs = [d for d in ctx.deployed_envs if d.supports(EXT_CLOCK_URI, "state")]
         self.notification_envs = [d for d in ctx.deployed_envs if d.supports(EXT_NOTIFICATIONS_URI, "take")]
@@ -302,9 +315,10 @@ class _Run:
         now = await self.now()
         t0 = await self._t0() or now
         self.end = _end_instant(step.end_time, t0) if step.end_time else None
+        self.multi_day = self.end is not None and self.end.astimezone(self.tz).date() > t0.astimezone(self.tz).date()
         self.log("start", virtual_time=_iso(now), end_time=_iso(self.end) if self.end else None,
                  agent=step.agent_name, agent_role=self.recipient, user_sim=step.user_sim, version=self.version,
-                 user_model=us["model"], max_wakes=step.max_wakes,
+                 user_model=us["model"], max_wakes=step.max_wakes, time_zone=self.zone, multi_day=self.multi_day,
                  clock_rate=await self._rate())
         try:
             await self.loop(now)
@@ -321,7 +335,7 @@ class _Run:
         return {"key": us["name"], "name": name, "first": us.get("first_name") or name.split()[0],
                 "time_zone": us.get("time_zone"),
                 "description": us.get("description"), "versions": us.get("versions") or {},
-                "output_format": us.get("output_format"), "apps": us.get("apps") or [],
+                "output_format": us.get("output_format"),
                 "permissions": us.get("permissions"), "keep_private": us.get("keep_private")}
 
     async def _load_plugin(self, spec: Optional[dict]) -> ModuleType:
@@ -474,9 +488,13 @@ class _Run:
             n += sum(1 for p in st.get("pending_notifications", []) if not p.get("at") or _utc(p["at"]) <= now)
         return n
 
-    async def _next_due(self, to: str) -> Optional[datetime]:
-        times = [_utc(st["next_due_at"]) for st in await self._notes_state(to) if st.get("next_due_at")]
-        return min(times) if times else None
+    async def _next_due(self, to: str, now: datetime) -> Optional[datetime]:
+        """When the next check or notification for ``to`` comes due after ``now``."""
+        times = []
+        for st in await self._notes_state(to):
+            times += [_utc(c["next"]) for c in st.get("checks", []) if c.get("status") == "active"]
+            times += [_utc(p["at"]) for p in st.get("pending_notifications", []) if p.get("at")]
+        return min((t for t in times if t > now), default=None)
 
     # ---- the user's schedule ---------------------------------------------------------------------------------
     def _schedule(self) -> Optional[dict]:
@@ -549,21 +567,23 @@ class _Run:
             if self.read_at is not None and self.read_at <= now and self.unread:
                 await self.read(now)
                 continue
-            # 2. anything due for the agent: notifications, scripted user lines, held replies
-            lines = await self._take_user_says()
-            replies = [h for h in self.held if h["deliver_at"] <= now]
-            due = await self._due_count(self.recipient, now)
-            if lines or replies or due:
+            # 2. anything due for the agent: notifications, scripted user lines, held replies; and what else comes
+            # due in the same minute, so it all arrives in one wake
+            if any(h["deliver_at"] <= now for h in self.held) or await self._due_count(self.recipient, now) \
+                    or await self._due_count(USER_SAYS, now):
+                later = await self._later(now)
+                same_minute = [t for t in later.values() if t < now.replace(second=0, microsecond=0)
+                               + timedelta(minutes=1) and (self.end is None or t < self.end)]
+                if same_minute and await self._armed():
+                    await self.advance(min(same_minute), reason="same_minute")
+                    continue
+                lines = await self._take_user_says()
+                replies = [h for h in self.held if h["deliver_at"] <= now]
                 self.held = [h for h in self.held if h["deliver_at"] > now]
                 await self._wake_with(now, lines, replies, final=False)
                 continue
             # 3. nothing due: jump to the next thing
-            candidates = {"world_event": await self._next_world_event(),
-                          "agent_notification": await self._next_due(self.recipient),
-                          "user_says": await self._next_due(USER_SAYS),
-                          "held_reply": min((h["deliver_at"] for h in self.held), default=None),
-                          "user_read": self.read_at if self.unread else None}
-            later = {k: v for k, v in candidates.items() if v is not None and v > now}
+            later = await self._later(now)
             soonest = min(later.values()) if later else None
             if self.end is not None and (soonest is None or soonest >= self.end):
                 await self._final(now)
@@ -573,6 +593,15 @@ class _Run:
                 break
             why = sorted(k for k, v in later.items() if v == soonest)
             await self.advance(soonest, reason="+".join(why))
+
+    async def _later(self, now: datetime) -> dict[str, datetime]:
+        """What could wake the agent after ``now``, by kind, each at its earliest time."""
+        candidates = {"world_event": await self._next_world_event(),
+                      "agent_notification": await self._next_due(self.recipient, now),
+                      "user_says": await self._next_due(USER_SAYS, now),
+                      "held_reply": min((h["deliver_at"] for h in self.held), default=None),
+                      "user_read": self.read_at if self.unread else None}
+        return {k: v for k, v in candidates.items() if v is not None and v > now}
 
     async def _final(self, now: datetime) -> None:
         step = self.step
@@ -828,7 +857,9 @@ class _Run:
                 self.gave_up = True
                 self.log("user_gave_up", replies=self.replies)
         elif outcome == "done":
-            self.end_reason = "user_done"
+            entry["ends_run"] = not self.multi_day
+            if not self.multi_day:
+                self.end_reason = "user_done"
         if calls and calls[-1].get("error"):
             self.end_reason = self.end_reason or "user_sim_error"
 
@@ -884,6 +915,7 @@ class _Run:
             "user_replies": self.replies,
             "user_no_replies": sum(1 for e in self.timeline if e["event"] == "user_sim_read"
                                    and e.get("outcome") == "no_reply"),
+            "user_dones": sum(1 for e in self.timeline if e["event"] == "user_sim_read" and e.get("outcome") == "done"),
             "scripted_user_lines": sum(1 for e in self.timeline if e["event"] == "scripted_user_line"),
             "clock_jumps": sum(1 for e in self.timeline if e["event"] == "clock_jump"),
             "silent_wakes": sum(1 for e in self.timeline if e["event"] == "agent_turn_end"
@@ -900,7 +932,8 @@ class _Run:
         record = {"step_id": step.id, "end_reason": self.end_reason, "error": self.error, "counts": counts,
                   "user_sim": {"name": step.user_sim, "version": self.version, "model": self.us.get("model"),
                                "agent_name": self.us.get("agent_name"), **self.user_setup},
-                  "end_time": _iso(self.end) if self.end else None, "timeline": self.timeline}
+                  "end_time": _iso(self.end) if self.end else None, "time_zone": self.zone,
+                  "multi_day": self.multi_day, "timeline": self.timeline}
         record["settings"] = {"stay_quiet": step.stay_quiet, "nudge": step.nudge, "wake_reminder": step.wake_reminder}
         try:
             store = get_config().get_object_store()
@@ -942,6 +975,17 @@ async def _call(env, uri: str, method: str, params: Optional[dict] = None, *, at
                                f"{e}); retry {attempt + 1}/{attempts - 1}")
                 await asyncio.sleep(min(2 ** attempt, 20))
     raise last
+
+
+def _task_zone(us: dict, clocks: list[dict]) -> str:
+    """The user's time zone, else the one sync_env_clock gave the world; refused when the two disagree."""
+    zones = sorted({c["timezone"] for c in clocks if c.get("timezone")})
+    zone = us.get("time_zone")
+    if zone and zones and zones != [zone]:
+        raise ValueError(f"always_on: user sim '{us['name']}' is in {zone} but sync_env_clock set {zones}")
+    if not zone and len(zones) > 1:
+        raise ValueError(f"always_on: sync_env_clock set several time zones {zones}; give the user_sim step one")
+    return zone or (zones[0] if zones else "UTC")
 
 
 def _step_part(text: str, source: str) -> dict:

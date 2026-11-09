@@ -28,7 +28,8 @@ class Rig:
     """The world, the agent and the user sim for one always_on run.
 
     ``agent(n, texts, rig)`` plays the agent's nth turn (nudges included) given the texts it was sent, acting through
-    ``message``, ``quiet`` and ``schedule``, and returns its closing text. ``answers`` are the user sim's answers to its
+    ``message``, ``quiet`` and ``schedule``, and returns its closing text; by default it stays quiet. ``answers`` are the
+    user sim's answers to its
     reads, in order; once they run out it answers no_reply. Every message the agent got is in ``sent``, every read the
     user sim got in ``reads``."""
 
@@ -42,7 +43,7 @@ class Rig:
         monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **kw: real_client(*a, **{**kw, "transport": transport}))
         self.http = lambda: real_client(transport=transport, base_url=GATEWAY)
         self.t0, self.rate = t0, rate
-        self.agent = agent or (lambda n, texts, rig: "ok")
+        self.agent = agent or (lambda n, texts, rig: (rig.quiet(), "")[1])
         self.answers = list(answers)
         self.sent: list[list[str]] = []
         self.parts: list[list[dict]] = []
