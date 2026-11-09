@@ -285,8 +285,10 @@ def test_both_steps_are_registered():
 
 def test_the_user_sim_step_defaults_to_ours_and_has_no_apps_setting():
     step = ao.UserSimTaskStep.from_dict({"id": "u", "type": "user_sim", "name": "linda", "model": "m",
-                                         "apps": ["Gmail"], "time_zone": "America/New_York"})
+                                         "apps": ["Gmail"], "time_zone": "America/New_York",
+                                         "email": "linda.murphy@example.test"})
     assert step.user_version == "ours" and "apps" not in step.to_dict()
+    assert ao.UserSimTaskStep.from_dict(step.to_dict()).email == "linda.murphy@example.test"
     with pytest.raises(Exception):
         ao.UserSimTaskStep("u", None, name="linda", model="m", time_zone="Mars/Olympus")
 

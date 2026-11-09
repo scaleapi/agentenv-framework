@@ -102,7 +102,7 @@ class UserSimTaskStep(TaskStep):
 
     def __init__(self, id: str, version: Optional[int], *, name: str, model: str, agent_name: Optional[str] = None,
                  user_version: str = "ours", display_name: Optional[str] = None, first_name: Optional[str] = None,
-                 description: Optional[str] = None, time_zone: Optional[str] = None,
+                 description: Optional[str] = None, email: Optional[str] = None, time_zone: Optional[str] = None,
                  schedule: Optional[dict] = None, response_times: Optional[dict] = None,
                  max_replies: Optional[int] = None, permissions: Optional[dict] = None,
                  keep_private: Optional[list] = None, output_format: Optional[dict] = None,
@@ -121,6 +121,7 @@ class UserSimTaskStep(TaskStep):
         self.display_name = display_name
         self.first_name = first_name
         self.description = description
+        self.email = email
         self.time_zone = time_zone
         self.schedule = schedule
         self.response_times = response_times
@@ -131,8 +132,8 @@ class UserSimTaskStep(TaskStep):
         self.versions = versions or {}
         self.plugin = plugin
 
-    _FIELDS = ("name", "model", "agent_name", "user_version", "display_name", "first_name", "description", "time_zone",
-               "schedule", "response_times", "max_replies", "permissions", "keep_private", "output_format",
+    _FIELDS = ("name", "model", "agent_name", "user_version", "display_name", "first_name", "description", "email",
+               "time_zone", "schedule", "response_times", "max_replies", "permissions", "keep_private", "output_format",
                "versions", "plugin")
 
     def to_dict(self) -> dict:
@@ -349,7 +350,7 @@ class _Run:
     def _person(self, us: dict) -> dict:
         name = us.get("display_name") or us["name"]
         return {"key": us["name"], "name": name, "first": us.get("first_name") or name.split()[0],
-                "time_zone": us.get("time_zone"),
+                "email": us.get("email"), "time_zone": us.get("time_zone"),
                 "description": us.get("description"), "versions": us.get("versions") or {},
                 "output_format": us.get("output_format"),
                 "permissions": us.get("permissions"), "keep_private": us.get("keep_private")}
