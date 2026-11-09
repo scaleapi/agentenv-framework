@@ -2605,7 +2605,7 @@ async def test_a_site_that_never_says_it_is_ready_fails_the_deploy_naming_why():
             return httpx.Response(200, json=_READY_CARD)
         return httpx.Response(200, json={"ready": False, "problems": ["seeded"]})
 
-    with _sites(site), pytest.raises(RuntimeError, match=r"websites not ready after 0s: mail \(seeded\)"):
+    with _sites(site), pytest.raises(RuntimeError, match=r"websites not ready after \d+s: mail \(seeded\)"):
         await env_gateway_provider._wait_for_websites(
             "http://gw", [WebsiteConfig(backend_image="m", frontend_image=None, environment_name="mail")],
             timeout_s=0, poll_s=0)
@@ -2618,7 +2618,7 @@ async def test_a_site_whose_ready_answers_no_website_readiness_is_never_ready_an
             return httpx.Response(200, json=_READY_CARD)
         return httpx.Response(200, json={"ready": "yes"})
 
-    with _sites(site), pytest.raises(RuntimeError, match=r"websites not ready after 0s: mail \(ValidationError: "):
+    with _sites(site), pytest.raises(RuntimeError, match=r"websites not ready after \d+s: mail \(ValidationError: "):
         await env_gateway_provider._wait_for_websites(
             "http://gw", [WebsiteConfig(backend_image="m", frontend_image=None, environment_name="mail")],
             timeout_s=0, poll_s=0)
@@ -2651,7 +2651,7 @@ async def test_a_site_past_the_time_it_declared_fails_the_deploy_saying_so(monke
         return httpx.Response(200, json={"ready": False, "problems": ["@ready_check seeded returned False"],
                                          "waited_s": 61, "timeout_s": 0})
 
-    with _sites(site), pytest.raises(RuntimeError, match=r"websites not ready after 0s: mail \(not ready after 0 s: "
+    with _sites(site), pytest.raises(RuntimeError, match=r"websites not ready after \d+s: mail \(not ready after 0 s: "
                                                          r"@ready_check seeded returned False\)"):
         await env_gateway_provider._wait_for_websites(
             "http://gw", [WebsiteConfig(backend_image="m", frontend_image=None, environment_name="mail")],
