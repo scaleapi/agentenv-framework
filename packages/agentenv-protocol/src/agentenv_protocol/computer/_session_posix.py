@@ -1,10 +1,12 @@
 """What a computer app's own server does in the desktop session on Linux and macOS (``session``): wait for the X
-session, launch the app into a session of its own and stop or pause it by its process group, add its freedesktop menu
-launcher and list the X session's windows."""
+session, or on Hyprland for its Wayland and IPC sockets, launch the app into a session of its own and stop or pause it
+by its process group, add its freedesktop menu launcher and list the session's windows, X's with ``xprop`` or
+Hyprland's with ``hyprctl``."""
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import re
 import signal
@@ -21,9 +23,13 @@ WITH_FDS = Path(__file__).with_name("_with_fds.py")
 
 
 async def wait_until_up() -> None:
-    """Until the X display's socket is there."""
-    display = os.environ["DISPLAY"].lstrip(":").split(".")[0]
-    while not Path(f"/tmp/.X11-unix/X{display}").exists():
+    """Until the session's sockets are there: on Hyprland its Wayland display's and its IPC's, else the X display's."""
+    if signature := _hyprland():
+        runtime = Path(os.environ["XDG_RUNTIME_DIR"])
+        sockets = [runtime / os.environ["WAYLAND_DISPLAY"], runtime / "hypr" / signature / ".socket.sock"]
+    else:
+        sockets = [Path(f"/tmp/.X11-unix/X{os.environ['DISPLAY'].lstrip(':').split('.')[0]}")]
+    while not all(socket.exists() for socket in sockets):
         await asyncio.sleep(POLL_S)
 
 
@@ -101,7 +107,11 @@ def add_launcher(name: str, folder: Path) -> Path:
 async def windows() -> list[dict[str, str]]:
     """The window manager's top-level windows, each as its WM_CLASS ``instance`` and ``class`` and its ``title``, read
     with ``xprop``: ``_NET_WM_NAME``, or ``WM_NAME`` for a window that sets only that; a window that closes while it's
-    read is left out."""
+    read is left out. On Hyprland, its mapped clients as its IPC lists them, native Wayland and XWayland alike: its
+    ``class``, a Wayland app ID or an X window's WM_CLASS class, and its ``title``, and as its ``instance``, which a
+    Wayland window hasn't, its program's file name, as on Windows."""
+    if _hyprland():
+        return await _clients()
     listed = await _xprop("-root", "_NET_CLIENT_LIST")
     found = []
     for window in re.findall(r"0x[0-9a-f]+", listed.partition("#")[2]):
@@ -119,8 +129,37 @@ def _strings(value: str) -> list[str]:
     return [re.sub(r"\\(.)", r"\1", text) for text in re.findall(r'"((?:[^"\\]|\\.)*)"', value)]
 
 
+def _hyprland() -> str | None:
+    """The Hyprland instance whose session this is, by its signature; None outside one."""
+    return os.environ.get("HYPRLAND_INSTANCE_SIGNATURE") or None
+
+
+async def _clients() -> list[dict[str, str]]:
+    """Hyprland's mapped clients, by their program, class and title; none when its IPC doesn't answer."""
+    try:
+        clients = json.loads(await _output("hyprctl", "-j", "clients") or "[]")
+    except ValueError:
+        return []
+    return [{"instance": _program(client.get("pid")), "class": client.get("class") or "",
+             "title": client.get("title") or ""}
+            for client in clients if isinstance(client, dict) and client.get("mapped")]
+
+
+def _program(pid: object) -> str:
+    """The file name of the program process ``pid`` runs, or "" when it can't be read."""
+    try:
+        return Path(os.readlink(f"/proc/{int(pid)}/exe")).name
+    except (OSError, TypeError, ValueError):
+        return ""
+
+
 async def _xprop(*args: str) -> str:
-    process = await asyncio.create_subprocess_exec("xprop", *args, stdout=asyncio.subprocess.PIPE,
+    return await _output("xprop", *args)
+
+
+async def _output(*argv: str) -> str:
+    """What ``argv`` prints, or nothing when it fails; killed when the listing it's part of is cut short."""
+    process = await asyncio.create_subprocess_exec(*argv, stdout=asyncio.subprocess.PIPE,
                                                    stderr=asyncio.subprocess.DEVNULL)
     try:
         out, _ = await process.communicate()
