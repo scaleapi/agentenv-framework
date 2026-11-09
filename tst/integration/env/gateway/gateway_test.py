@@ -170,18 +170,22 @@ def _amd64_image(pinned: str | None) -> str | None:
 
 def _pull_published_else_build(img: DockerImageConfig) -> None:
     published = _PUBLISHED_IMAGES.get((img.dockerfile, img.context))
-    pinned = published and _amd64_image(published_pinned(published))
-    if pinned:
-        logger.info(f"Pulling {img.name}'s published image {pinned}...")
-        commands = [["docker", "pull", "--platform", "linux/amd64", pinned], ["docker", "tag", pinned, img.tag]]
-    else:
-        logger.info(f"Building {img.name} Docker image...")
-        commands = [["docker", "build", "--platform", "linux/amd64", "-f", str(img.dockerfile), "-t", img.tag,
-                     str(img.context)]]
-    for argv in commands:
-        result = subprocess.run(argv, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(f"{shlex.join(argv)} failed: {result.stderr}")
+    try:
+        if pinned := published and _amd64_image(published_pinned(published)):
+            logger.info(f"Pulling {img.name}'s published image {pinned}...")
+            _docker("pull", "--platform", "linux/amd64", pinned)
+            _docker("tag", pinned, img.tag)
+            return
+    except (RuntimeError, ValueError) as e:
+        logger.warning(f"Pulling {img.name}'s published image failed, so it's built: {e}")
+    logger.info(f"Building {img.name} Docker image...")
+    _docker("build", "--platform", "linux/amd64", "-f", str(img.dockerfile), "-t", img.tag, str(img.context))
+
+
+def _docker(*args: str) -> None:
+    result = subprocess.run(["docker", *args], capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"{shlex.join(['docker', *args])} failed: {result.stderr}")
 
 
 @pytest.fixture(scope="module")
