@@ -2,8 +2,9 @@
 # agentenv-seed: run each boot by agentenv-seed.service, before SDDM starts the session. It reads the launcher's NoCloud
 # seed (CIDATA, as agentenv_protocol.computer.seed defines it) as the Linux disk's init does, with the same seed-env:
 # the deploy's environment written for with-seed, which each of the computer's services starts through, the seed's trust
-# files before it; the hostname; host.docker.internal at QEMU's address for the launcher; and the display's mode, for
-# the session's Hyprland. A seed this disk can't read is written as its refusal, so every service then stops naming it.
+# files before it; the hostname; host.docker.internal at QEMU's address for the launcher; the time zone; and the
+# display's mode, for the session's Hyprland. A seed this disk can't read, or a time zone it doesn't have, is written as
+# its refusal, so every service then stops naming it.
 set -euo pipefail
 . /opt/agentenv/seed-env
 user=$(cat /opt/agentenv/session-user)
@@ -28,13 +29,21 @@ if [ -n "$seed" ]; then
     umount "$mounted"
     rmdir "$mounted"
 fi
+# setting NAME DEFAULT: the deploy's value of the computer's setting NAME, DEFAULT when it gives none.
+setting() { env -i bash -c 'eval "$1" 2>/dev/null; v=AGENTENV_SETTING_$2; echo "${!v:-$3}"' _ "$exports" "$1" "$2"; }
+timezone=$(setting TIMEZONE UTC)
+if [[ "$timezone" != *..* && -f "/usr/share/zoneinfo/$timezone" ]]; then
+    ln -sf "/usr/share/zoneinfo/$timezone" /etc/localtime
+else
+    exports="$exports"$'\n'"refused='its time zone, ${timezone//\'/}, is not in /usr/share/zoneinfo'; false"
+fi
 install -d -m 750 -g "$user" /run/agentenv
 install -m 640 -g "$user" /dev/null /run/agentenv/environment
 printf '%s\n' "$exports" > /run/agentenv/environment
 hostname "${hostname:-computer}"
 hostname > /etc/hostname
 grep -q 'host\.docker\.internal' /etc/hosts || printf '10.0.2.2\thost.docker.internal\n' >> /etc/hosts
-resolution=$(env -i bash -c 'eval "$1" 2>/dev/null; echo "${AGENTENV_SETTING_RESOLUTION:-1920x1080}"' _ "$exports")
+resolution=$(setting RESOLUTION 1920x1080)
 [[ "$resolution" =~ ^[1-9][0-9]*x[1-9][0-9]*$ ]] || resolution=1920x1080
 install -m 644 -o "$user" -g "$user" /dev/null "$home/.config/hypr/agentenv-display.lua"
 printf 'hl.monitor({ output = "", mode = "%s@60", position = "0x0", scale = 1 })\n' "$resolution" \

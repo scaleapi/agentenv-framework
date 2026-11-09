@@ -14,3 +14,7 @@ min_disk_gb = 40
 [config.resolution]
 default = "1920x1080"
 phase = "deploy"
+
+[config.timezone]
+default = "UTC"
+phase = "deploy"

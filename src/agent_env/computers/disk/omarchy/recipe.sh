@@ -4,8 +4,9 @@
 # its artifact declares, then makes it a computer's base: cua-driver's Hyprland plugin, pinned to the package built for
 # this Omarchy's Hyprland; agent-env's Hyprland drop-in; the seed unit that hands each boot its deploy's environment;
 # SDDM logging back in after a logout; Omarchy's toggles for an unattended desktop; and off, what a trial doesn't want:
-# crash toasts, dictation and its keys, and housekeeping timers that would run at boot. The session user's password is
-# locked, and the machine id left empty, as Omarchy's own sealed images leave it.
+# crash toasts, dictation and its keys, housekeeping timers that would run at boot, and the firewall, which would stop
+# the computer's own ports. The session user's password is locked, and the machine id left empty, as Omarchy's own
+# sealed images leave it.
 set -euo pipefail
 user=$1 distribution=$2 version=$3
 here=$(cd "$(dirname "$0")" && pwd)
@@ -45,6 +46,10 @@ systemctl mask --quiet snapper-cleanup.timer plocate-updatedb.timer man-db.timer
     archlinux-keyring-wkd-sync.timer
 # With no dictation backend chosen, Omarchy binds no dictation keys (its bindings/dictation.lua), Alt+Space among them.
 rm -f "$home/.config/omarchy/defaults/dictation"
+# Omarchy's firewall lets in only ssh and LocalSend. A computer's network is the launcher's user-mode one, which only the
+# ports agent-env forwards reach, its driver's and apps', so the firewall would stop just those.
+ufw --force disable > /dev/null
+systemctl disable --quiet ufw.service
 
 runtime=/run/user/$(id -u "$user")
 for _ in $(seq 180); do
