@@ -142,5 +142,30 @@ cuts a server's instructions at 4,096 characters, so the skill itself isn't in t
 (`DO_NOT_TRACK`). `computer-ready` checks its version, that it prints the pinned skill, and the TCC permissions. Name it
 as `macos-harness`.
 
+`envs/codex-computer-use/` is OpenAI's Codex Computer Use as a driver, for the same macOS computers. It is the ChatGPT
+app's `unified-computer-use` plugin, whose MCP server, `cua_repl`, runs the JavaScript an agent sends against OpenAI's
+`cua` API, which reads apps' accessibility trees and acts on them in the background through the plugin's helper app. The
+ChatGPT version `driver.py` pins as `VERSION`, OpenAI's versioned download checked by sha256, is unpacked beside the
+driver by `install.sh` and never run, so it never updates itself, and its helper app is copied to
+`/opt/agentenv/codex-computer-use/`, where `[install.macos]` grants it Accessibility, Post Event and Screen Recording,
+as it grants the driver's own Python. The driver starts `cua_repl` as the app would, on the app's own Node with the
+environment the app builds and the computer surface alone, one server for each agent session, since the REPL keeps its
+bindings between calls; one that stops is started afresh on the next call, and nothing says when a session ends, so one
+left unused for 30 minutes, or past the eight kept, is closed, the least recently used first. Agents get the server's
+instructions and its `js` and `js_reset` tools, as `mcp.json` pins them, `js` marked as acting on apps where Codex marks
+it read-only; `js_add_node_module_dir` and `turn_ended`, which it serves the ChatGPT app, are hidden. Codex asks its
+host before each action on an app, and the driver answers: it approves the apps its `allowed_apps` setting names, by
+name or bundle identifier, case aside, as the request's metadata or its message gives them, or every app when it names
+none, and nothing else, recording the computer's audio included, a request that names no app logged as a warning. Each
+call runs under Codex's own sandbox, read-only but for `~/.codex` and the temporary folders and with no network, unless
+its `js_sandbox` setting is off; the apps it drives are outside it, and it still lets the JavaScript read files and run
+commands, so a bench that wants the GUI alone guards for that. No ChatGPT sign-in is needed. Its `computer_*` tools are
+agent-desktop's, from `MacOSDriver`. `computer-ready` checks the executables' sha256, that `cua_repl` gives the
+instructions and lists the tools `mcp.json` pins and answers `cua.getState()`, and the TCC permissions. To move it to
+another ChatGPT version, set `VERSION`, pin the zip's URL and sha256 in `env.toml` and the executables' in `driver.py`'s
+`EXECUTABLES` (a unit test checks that `env.toml`, `install.sh` and `driver.py` agree on the version and the helper's
+path), and take `mcp.json` again from what that version's `cua_repl` says at connect and lists. Name it as
+`codex-computer-use`.
+
 This bundle has no tasks of its own: other bundles pull its drivers by alias, and `agent-env run drivers` has nothing
 to run.
