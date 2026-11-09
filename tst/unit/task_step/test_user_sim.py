@@ -71,6 +71,7 @@ def test_a_step_that_names_its_own_plug_in_writes_its_description_its_own_way():
     ({"response_times": {"work": -5}}, "response_times.work must be a number of minutes"),
     ({"response_times": {"evening": 30}}, "response_times has unknown keys ['evening']"),
     ({"max_replies": 0}, "max_replies must be a whole number"),
+    ({"response_times": {"work": 30}}, "response_times needs a schedule"),
 ])
 def test_when_she_reads_and_how_long_she_takes_are_checked_for_any_plug_in(settings, problem):
     for plugin in (None, {"file_artifact_id": "fa-1"}):
