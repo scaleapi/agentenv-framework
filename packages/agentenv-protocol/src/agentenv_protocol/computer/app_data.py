@@ -101,11 +101,7 @@ class AppDataPlane:
             running = op != OP_GET_DATA and op not in self.live and await self.runtime.stop_app()
             ran = op in self.live and self.runtime.running()
             try:
-                try:
-                    result = await self._within(op, served, args, answer)
-                except HeldByApp:
-                    running = await self.runtime.stop_app()
-                    result = await self._within(op, served, args, answer)
+                result = await self._within_held(op, served, args, answer)
             except Exception:
                 if op == OP_ADD_DATA and self.resets_failed_add():
                     if op in self.live:
@@ -124,6 +120,22 @@ class AppDataPlane:
                 answer.set_exception(e)
         else:
             answer.set_result(result)
+
+    async def _within_held(self, op: str, served: Callable, args: tuple, answer: asyncio.Future) -> Any:
+        """``served``'s result within ``timeout_s``; where the app holds a file of its paths (``HeldByApp``), again with
+        the app stopped, which is relaunched after, as a load's is."""
+        try:
+            return await self._within(op, served, args, answer)
+        except HeldByApp:
+            stopped = await self.runtime.stop_app()
+        try:
+            result = await self._within(op, served, args, answer)
+        finally:
+            if stopped:
+                await self.runtime.launch_app(_CAUSES[op])
+        if stopped and self.relaunched is not None:
+            await self.relaunched(op)
+        return result
 
     async def _undo(self, answer: asyncio.Future) -> None:
         """Reset the app's data after a load that failed."""

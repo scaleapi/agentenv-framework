@@ -7,6 +7,7 @@ settings and size, and exporting one, compressed, once."""
 import asyncio
 import base64
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -26,7 +27,10 @@ from agent_env.providers.sandbox_providers.disk_launcher import CONTROL, LAUNCH,
 from agent_env.providers.sandbox_providers.local_docker import disk as local_disk
 from agent_env.providers.sandbox_providers.local_docker import provider as local_sandbox
 from agent_env.providers.sandbox_providers.local_docker.cli import DockerFailed
-from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox, LocalSandboxProvider
+from agent_env.env.envs.computer.utils import windows_disk
+from agent_env.providers.sandbox_providers import disk_launcher
+from agent_env.providers.sandbox_providers.local_docker.provider import (LOCAL_TRUST_DIR, LocalSandbox,
+                                                                         LocalSandboxProvider, trust_env)
 from agent_env.providers.sandbox_providers.sandbox import SANDBOX_LABEL
 
 TRICKY = "a value with spaces, = signs, 'quotes', $dollars and\na second line"
@@ -249,6 +253,31 @@ def test_the_launcher_refuses_a_host_port_a_guest_ports_proxy_or_forward_takes(l
     assert refused.wait(10) == 2
     assert f"host port {host_ports} can't be forwarded: a guest port's proxy or its forward here takes it" in (
         refused.stderr.read())
+
+
+def test_launch_forward_serves_a_host_port_to_the_running_computer_as_the_boot_does(launcher):
+    launch, calls = launcher
+
+    forwarding = launch("forward", "52345")
+
+    assert _logged(calls, "socat") == [
+        "socat TCP-LISTEN:52345,bind=127.0.0.1,fork,reuseaddr TCP:host.docker.internal:52345"]
+    forwarding.terminate()
+
+
+def test_a_disks_guests_point_tls_clients_at_the_trust_files_a_containers_variables_name(tmp_path):
+    """Neither guest can import the framework, so each keeps its own copy of trust_env's variables and files."""
+    spec = importlib.util.spec_from_file_location("agentenv_session", windows_disk.RECIPE / "agentenv-session.py")
+    session = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(session)
+    init = (DISK / "boot" / "init").read_text()
+    expected = trust_env(LOCAL_TRUST_DIR)
+
+    assert all(f"{name}={value}" in init for name, value in expected.items())
+    assert all(f"/seed/trust/{PurePosixPath(value).name}" in init for value in expected.values())
+    (tmp_path / "ca-bundle.pem").write_text("")
+    assert {name: Path(value).name for name, value in session.trust(tmp_path).items()} == {
+        name: PurePosixPath(value).name for name, value in expected.items()}
 
 
 @pytest.mark.parametrize("ports, why", [("55536", "above 65535"), ("6080 16080", "another of VM_PORTS")])
@@ -514,12 +543,13 @@ async def test_a_disks_launcher_forwards_this_processs_grant_port_and_seeds_the_
 
     run, forward = launched
     hosts = [arg for entry in local_sandbox._EXTRA_HOSTS for arg in ("--add-host", entry)]
-    assert run[-7 - len(hosts):-1] == (
-        *hosts, "--mount", "type=bind,src=/state/tls/trust/ca,dst=/agentenv-trust,readonly",
-        "-e", "VM_HOST_PORTS=41234", "-e", "VM_TRUST=/agentenv-trust")
-    assert run[-1] == "agentenv-vm:0123" and sandbox.tunnel_urls == {18765: "http://127.0.0.1:20001"}
-    assert forward == ("exec", "-d", sandbox.container_name, "socat",
-                       "TCP-LISTEN:52345,bind=127.0.0.1,fork,reuseaddr", "TCP:host.docker.internal:52345")
+    assert run == ("run", "-d", "--name", sandbox.container_name, "--label", f"{SANDBOX_LABEL}={sandbox.sandbox_id}",
+                   "-p", "127.0.0.1:20001:18765", *local_disk.launcher_args([18765], {}, 2, 4096), *hosts,
+                   "--mount", "type=bind,src=/state/tls/trust/ca,dst=/agentenv-trust,readonly",
+                   "-e", "VM_HOST_PORTS=41234", "-e", "VM_TRUST=/agentenv-trust", "agentenv-vm:0123")
+    assert forward == ("exec", "-d", sandbox.container_name, *disk_launcher.forward(52345))
+    assert disk_launcher.forward(52345)[-1] == (f"grep -q '^forward()' {LAUNCH} || exit 0; "
+                                                f"exec {LAUNCH} forward 52345")
 
 
 @pytest.mark.asyncio

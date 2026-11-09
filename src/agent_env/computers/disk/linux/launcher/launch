@@ -29,7 +29,16 @@
 #   VM_FILES       for a windows guest, a folder whose files it finds on a removable FAT drive
 # launch reset: boot the running computer afresh on a new overlay, its environment the VM_ENV_<NAME>=<base64> lines on
 # stdin, returning once its new QEMU has started; its ports stay up throughout.
+# launch forward PORT: serve PORT of this machine's host to the running computer as VM_HOST_PORTS does, for another
+# process's grant server, until stopped.
 set -euo pipefail
+
+# forward PORT: PORT of this machine's host served on 127.0.0.1 here, where the guest reaches it at 10.0.2.2.
+forward() { exec socat "TCP-LISTEN:$1,bind=127.0.0.1,fork,reuseaddr" "TCP:host.docker.internal:$1"; }
+
+if [ "${1:-}" = forward ]; then
+    forward "$2"
+fi
 state=${VM_STATE:-/var/lib/agentenv-vm}
 # A reset and the boot loop meet here: the reset writes next.env, creates reset and stops the QEMU qemu.pid names; the
 # loop, finding reset, takes next.env's environment, removes reset and boots afresh; the reset returns once qemu.pid
@@ -99,9 +108,10 @@ case "$guest/$arch" in
         echo "launch: no architecture $arch" >&2
         exit 2 ;;
 esac
-forwards="" fronts=()
+forwards="" fronts=() taken=""
 for port in ${VM_PORTS:-}; do
     behind=$((port + 10000))
+    taken="$taken $port $behind"
     if [ "$behind" -gt 65535 ] || [[ " $VM_PORTS " == *" $behind "* ]]; then
         echo "launch: port $port can't be forwarded: QEMU's forward behind its proxy would take port $behind, which" \
              "is $([ "$behind" -gt 65535 ] && echo "above 65535" || echo "another of VM_PORTS")" >&2
@@ -112,11 +122,11 @@ for port in ${VM_PORTS:-}; do
     fronts+=("$!")
 done
 for port in ${VM_HOST_PORTS:-}; do
-    if [[ " ${VM_PORTS:-} " == *" $port "* || " ${VM_PORTS:-} " == *" $((port - 10000)) "* ]]; then
+    if [[ "$taken " == *" $port "* ]]; then
         echo "launch: host port $port can't be forwarded: a guest port's proxy or its forward here takes it" >&2
         exit 2
     fi
-    socat "TCP-LISTEN:$port,bind=127.0.0.1,fork,reuseaddr" "TCP:host.docker.internal:$port" &
+    forward "$port" &
     fronts+=("$!")
 done
 trap 'kill ${fronts[@]+"${fronts[@]}"} ${presser:-} 2>/dev/null || true' EXIT
