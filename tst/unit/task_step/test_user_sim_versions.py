@@ -196,6 +196,36 @@ def test_the_read_after_the_final_check_in_renders_like_any_other_and_its_answer
     assert (got["outcome"], got["message"], got["schema_errors"]) == ("done", "you're the best 🙌", [])
 
 
+def test_earlier_on_your_phone_keeps_only_the_last_week():
+    old = {"at": "2026-11-09T16:00:00Z", "channel": "Gmail · Priya Shah", "text": "Re: the flat"}
+    week = {"at": "2026-11-11T16:00:00Z", "channel": "Gmail · Carol Reyes (Mom)", "text": "Thursday ✈️"}
+    history = [{"read": _read("2026-11-11T17:05:00Z", phone=[old, week]), "answer": NOTHING}]
+    text = us.render(PERSON, history, _read())
+    assert "EARLIER ON YOUR PHONE (you've already seen these):\n" \
+           "  [Wed Nov 11, 8:00 AM · Gmail · Carol Reyes (Mom)] Thursday ✈️\n" + us.EARLIER_CUT + "\n" in text
+    assert "Re: the flat" not in text
+
+
+def test_in_a_long_run_each_read_stays_bounded():
+    history, longest, sizes = [], 0, []
+    for k in range(80):  # two reads a day for 40 days, two phone items each
+        at = f"2026-11-{1 + k // 2:02d}T{14 + 6 * (k % 2)}:00:00Z" if k < 60 else \
+            f"2026-12-{1 + (k - 60) // 2:02d}T{14 + 6 * (k % 2)}:00:00Z"
+        phone = [{"at": at, "channel": "Gmail · Carol Reyes (Mom)", "text": f"Day {k}: the plan\nmore below"},
+                 {"at": at, "channel": "Tablefern", "text": f"Table {k} confirmed"}]
+        read = _read(at, phone=phone, assistant_messages=[{"at": at, "text": f"Update {k}."}])
+        text = us.render(PERSON, history, read)
+        section = text.split("EARLIER ON YOUR PHONE (you've already seen these):\n")[1].split("\n\n")[0] if k else ""
+        lines = [line for line in section.splitlines() if line != us.EARLIER_CUT]
+        longest = max(longest, len(lines))
+        assert len(lines) <= us.EARLIER_MAX
+        assert (us.EARLIER_CUT in section) == (2 * k > us.EARLIER_MAX)
+        sizes.append(len(text))
+        history.append({"read": read, "answer": NOTHING})
+    assert longest == us.EARLIER_MAX
+    assert max(sizes[20:]) - min(sizes[20:]) < 100
+
+
 def test_a_time_without_its_offset_is_refused():
     with pytest.raises(ValueError, match="no UTC offset"):
         us.render(PERSON, [], _read("2026-11-17 09:05"))
@@ -257,6 +287,46 @@ async def test_each_read_is_asked_as_the_replay_asked_it():
     assert {"outcome", "message", "used", "input", "raw", "schema_errors"} <= set(history[0]["answer"])
 
 
+def _asker(*answers):
+    sent = []
+
+    async def ask(text):
+        sent.append(text)
+        got = answers[len(sent) - 1]
+        return {"text": got if isinstance(got, str) else json.dumps(got),
+                "structured": got if isinstance(got, dict) else None, "trajectory_url": None}
+
+    return ask, sent
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_answer_gets_one_retry_and_the_valid_answer_is_used():
+    ask, sent = _asker("sure, the blue one", {"outcome": "reply", "message": "the blue one", "used": "D1"})
+    got = await us.answer("ours", PERSON, [], _read(), ask)
+    assert sent[1] == us.RETRY and sent[1].endswith("only as JSON: " + us.ANSWER_LINE)
+    assert (got["outcome"], got["message"], got["used"], got["schema_errors"]) == ("reply", "the blue one", "D1", [])
+    assert got["retried"] is True and got["turns"] == 2 and got["input"] == sent[0]
+    assert got["first_answer"] == {"raw": "sure, the blue one", "schema_errors": ["the answer is not a JSON object"]}
+
+
+@pytest.mark.asyncio
+async def test_malformed_twice_is_no_reply_with_both_errors():
+    ask, sent = _asker("sure", {"outcome": "maybe", "message": "ok"})
+    got = await us.answer("ours", PERSON, [], _read(), ask)
+    assert len(sent) == 2 and (got["outcome"], got["message"], got["retried"]) == ("no_reply", "", True)
+    assert got["schema_errors"][0] == "first answer: the answer is not a JSON object"
+    assert got["schema_errors"][1].startswith("answer after the retry: outcome 'maybe' is not one of")
+
+
+@pytest.mark.asyncio
+async def test_an_empty_reply_and_a_valid_answer_get_no_retry():
+    for answer in ({"outcome": "reply", "message": ""}, {"outcome": "reply", "message": "ok"}):
+        ask, sent = _asker(answer)
+        got = await us.answer("ours", PERSON, [], _read(), ask)
+        assert len(sent) == 1 and got["retried"] is False and got["schema_errors"] == []
+    assert got["outcome"] == "reply"
+
+
 @pytest.mark.asyncio
 async def test_she_isn_t_asked_when_nothing_is_new_from_the_assistant():
     async def ask(text):
@@ -272,4 +342,4 @@ async def test_when_the_user_sim_can_t_be_reached_nothing_is_sent():
         return {"text": None, "structured": None, "error": "timeout"}
 
     got = await us.answer("ours", PERSON, [], _read(), ask)
-    assert got["outcome"] == "no_reply" and got["schema_errors"]
+    assert got["outcome"] == "no_reply" and got["schema_errors"] and got["retried"] is False

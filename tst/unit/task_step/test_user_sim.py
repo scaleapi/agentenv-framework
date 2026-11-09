@@ -139,3 +139,27 @@ async def test_after_the_final_check_in_the_built_in_user_sim_reads_the_wrap_up_
         "done", "perfect, thank you!!", [])
     assert rig.record(ctx)["end_reason"] == "end_time"
     assert not any("perfect, thank you" in t for texts in rig.sent for t in texts)
+
+
+@pytest.mark.usefixtures("local_stores")
+@pytest.mark.asyncio
+async def test_a_malformed_answer_is_retried_once_in_the_same_user_sim_session(monkeypatch, tmp_path):
+    def agent(n, texts, rig):
+        if n == 1:
+            rig.message("Blue house or green?")
+            return "sent"
+        rig.quiet()
+        return ""
+
+    rig = Rig(monkeypatch, tmp_path, agent=agent, plugin=user_sim_versions,
+              user_texts=["blue, obviously", '{"outcome": "reply", "message": "blue!", "used": "W1"}'])
+    await rig.arm()
+    ctx = await rig.run(rig.step(end_time="P3D"), rig.context(user={"description": DESCRIPTION}))
+
+    first, retry = rig.user_calls
+    assert retry["parts"] == [{"kind": "text", "text": user_sim_versions.RETRY}]
+    assert first["context_id"] == retry["context_id"]
+    [read] = rig.events(ctx, "user_sim_read")
+    assert (read["outcome"], read["message"], read["schema_errors"]) == ("reply", "blue!", [])
+    assert read["user_sim_turns"] == 2
+    assert any("] Linda: blue!" in t for texts in rig.sent for t in texts)

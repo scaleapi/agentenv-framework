@@ -4,8 +4,9 @@ user_sim.py; how to write a user sim for it is in user_sim.md. It has one versio
 ``setup`` writes the system prompt once per run: fixed lines on how a real person reads and answers, the description
 as tagged sections (with the opening request), the user's rules from ``permissions`` and ``keep_private``, and the
 answer format. Its done line follows ``person["done_ends_run"]``, the multi-day wording when that's absent.
-``answer`` renders one read as one labelled message, asks the user sim, and parses its answer. What earlier reads
-showed, and when the user last wrote, come from ``history``; keys of ``read`` it doesn't know are ignored.
+``answer`` renders one read as one labelled message, asks the user sim, and parses its answer; a malformed answer
+gets one retry in the same session. What earlier reads showed, and when the user last wrote, come from ``history``;
+keys of ``read`` it doesn't know are ignored.
 ``problems`` is the load check for the settings."""
 
 from __future__ import annotations
@@ -67,6 +68,11 @@ DONE_MULTI_DAY = ("Answer \"done\" only as WHEN YOU'RE DONE says; your message r
 DONE_MULTI_DAY_NO_SECTION = ('Only answer "done" with a short sign-off; your message reaches the assistant either way, '
                              "and the week goes on.")
 CLOSING = "Your AI assistant sent you this. As {first}, decide: reply, don't reply, or say you're done."
+RETRY = "Your last answer wasn't in the required format. Answer again, only as JSON: " + ANSWER_LINE
+# EARLIER ON YOUR PHONE keeps a long run's reads short: the last week's items, at most this many.
+EARLIER_DAYS = 7
+EARLIER_MAX = 20
+EARLIER_CUT = "  (older messages not shown)"
 
 # The kinds of line the user sent; a you_sent item of any other kind (an alert, a nudge) is never shown as theirs.
 OWN_LINE_KINDS = frozenset({"opening", "user_says", "final"})
@@ -269,9 +275,12 @@ def render(person: dict, history: list[dict], read: dict) -> Optional[str]:
         out.append("\nNEW ON YOUR PHONE (since you last checked):")
         out += [phone_line(item, True) for item in read["phone"]]
     seen = [item for r in earlier for item in r.get("phone") or []]
+    recent = [item for item in seen if (now - at(item)).days < EARLIER_DAYS][-EARLIER_MAX:]
     if seen:
         out.append("\nEARLIER ON YOUR PHONE (you've already seen these):")
-        out += [phone_line(item, False) for item in seen]
+        out += [phone_line(item, False) for item in recent]
+        if len(recent) < len(seen):
+            out.append(EARLIER_CUT)
     if own:
         out.append("\nYOU SENT YOUR AI ASSISTANT:")
         out += [f"  [{_stamp(at(s), now)}] {s['text']}" for s in own]
@@ -356,6 +365,18 @@ async def answer(version: str, person: dict, history: list[dict], read: dict,
     if text is None:
         return {"outcome": "no_reply", "message": "", "used": None, "input": None, "raw": None, "turns": 0}
     got = await ask(text)
+    first = _parsed(got)
+    if not first["schema_errors"] or got.get("error"):
+        return {**first, "input": text, "raw": got.get("text"), "retried": False}
+    again = await ask(RETRY)
+    second = _parsed(again)
+    if second["schema_errors"]:
+        second["schema_errors"] = ([f"first answer: {e}" for e in first["schema_errors"]]
+                                   + [f"answer after the retry: {e}" for e in second["schema_errors"]])
+    return {**second, "input": text, "raw": again.get("text"), "retried": True, "turns": 2,
+            "first_answer": {"raw": got.get("text"), "schema_errors": first["schema_errors"]}}
+
+
+def _parsed(got: dict) -> dict:
     structured = got.get("structured")
-    return {**parse(structured if isinstance(structured, dict) else got.get("text")), "input": text,
-            "raw": got.get("text")}
+    return parse(structured if isinstance(structured, dict) else got.get("text"))
