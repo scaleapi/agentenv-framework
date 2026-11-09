@@ -3,6 +3,7 @@ that isn't such a class exits saying why, and an app's server that can't start s
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 
@@ -14,7 +15,7 @@ pytest.importorskip("uvicorn")
 
 from agentenv_protocol import CONTROL_TOKEN_ENV  # noqa: E402
 from agentenv_protocol.computer import ComputerDriverEnvironment, run_install_step, serve_app  # noqa: E402
-from agentenv_protocol.computer.app import BUILD_SETTINGS, FAILURE, SOCKET  # noqa: E402
+from agentenv_protocol.computer.app import ADDRESS, BUILD_SETTINGS, FAILURE, SOCKET  # noqa: E402
 from agentenv_protocol.computer.app_runtime import AppRuntime  # noqa: E402
 from agentenv_protocol.computer.serve import USAGE, main  # noqa: E402
 
@@ -146,7 +147,8 @@ def test_what_isnt_a_driver_class_exits_saying_why(tmp_path, served, monkeypatch
 @pytest.fixture
 def app_folder(tmp_path, monkeypatch, isolated):
     """An app's folder, holding ``APP`` and what its last server left, whose server only runs its app's lifespan, as
-    uvicorn runs it around serving; each server is recorded."""
+    uvicorn runs it around serving, through the ASGI lifespan protocol; each server is recorded, with the sockets it
+    was handed."""
     (tmp_path / "app.py").write_text(APP)
     (tmp_path / SOCKET).parent.mkdir()
     (tmp_path / SOCKET).write_text("left by the last server")
@@ -154,13 +156,24 @@ def app_folder(tmp_path, monkeypatch, isolated):
     monkeypatch.chdir(tmp_path)
     ran = []
 
-    def run(server):
+    def run(server, sockets=None):
         async def lifespan():
-            async with server.config.app.router.lifespan_context(server.config.app):
-                await asyncio.sleep(0.05)
+            inbox, sent = asyncio.Queue(), []
+
+            async def send(message):
+                sent.append(message["type"])
+
+            await inbox.put({"type": "lifespan.startup"})
+            running = asyncio.ensure_future(server.config.app({"type": "lifespan", "asgi": {"version": "3.0"},
+                                                               "state": {}}, inbox.get, send))
+            while not {"lifespan.startup.complete", "lifespan.startup.failed"} & set(sent):
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.05)
+            await inbox.put({"type": "lifespan.shutdown"})
+            await running
 
         asyncio.run(lifespan())
-        ran.append(server)
+        ran.append((server, sockets))
 
     monkeypatch.setattr(serve_app.uvicorn.Server, "run", run)
     return tmp_path, ran
@@ -179,8 +192,8 @@ def test_an_apps_server_serves_on_the_socket_in_its_folder_with_no_control_token
 
     serve_app.main(["app.py:Notes"])
 
-    (server,) = ran
-    assert CONTROL_TOKEN_ENV not in os.environ
+    ((server, sockets),) = ran
+    assert CONTROL_TOKEN_ENV not in os.environ and sockets is None
     assert server.config.uds == str(SOCKET) and not server.should_exit
     assert not (folder / SOCKET).exists() and not (folder / FAILURE).exists()
     assert len(started) == 1 and isinstance(started[0], AppRuntime)
@@ -197,8 +210,31 @@ def test_an_apps_server_whose_start_fails_stops_saying_why_in_the_apps_folder(ap
     with pytest.raises(PermissionError):
         serve_app.main(["app.py:Notes"])
 
-    assert ran[0].should_exit is True
+    assert ran[0][0].should_exit is True
     assert (folder / FAILURE).read_text() == "PermissionError: ~/.local/share/applications isn't writable"
+
+
+def test_an_apps_server_on_windows_serves_on_a_loopback_port_it_writes_in_its_folder_with_a_token(app_folder,
+                                                                                                    monkeypatch):
+    folder, ran = app_folder
+    monkeypatch.setattr(serve_app, "LOOPBACK", True)
+
+    async def start(runtime):
+        pass
+
+    monkeypatch.setattr(AppRuntime, "start", start)
+
+    serve_app.main(["app.py:Notes"])
+
+    ((server, sockets),) = ran
+    written = json.loads((folder / ADDRESS).read_text())
+    try:
+        assert server.config.uds is None and [listening.getsockname() for listening in sockets] == [
+            ("127.0.0.1", written["port"])]
+        assert len(written["token"]) >= 32 and not (folder / FAILURE).exists()
+    finally:
+        for listening in sockets:
+            listening.close()
 
 
 @pytest.mark.parametrize("argv, failure", [

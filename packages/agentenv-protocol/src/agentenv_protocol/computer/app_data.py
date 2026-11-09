@@ -11,13 +11,14 @@ import inspect
 import logging
 import shutil
 import tempfile
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Optional
 
 from ..agent_env_environment import OP_ADD_DATA, OP_GET_DATA, OP_RESET_DATA
 from ..transfers import WriteNamespaceGrant
 from ..types import METHOD_ADD, METHOD_RESET, FilePart, uploaded_object_path
+from .app_runtime import paused_app
 from .dataplane import data_files, file_parts, part_bytes
 
 if TYPE_CHECKING:
@@ -40,7 +41,8 @@ class AppDataPlane:
 
     def __init__(self, runtime: AppRuntime, hooks: dict[str, Callable], paths: list[str], timeout_s: float, *,
                  live: frozenset[str] = frozenset(), keeps_paths: bool = False,
-                 resets_failed_add: Callable[[], bool] = lambda: True) -> None:
+                 resets_failed_add: Callable[[], bool] = lambda: True,
+                 relaunched: Optional[Callable[[str], Awaitable[None]]] = None) -> None:
         self.runtime = runtime
         self.hooks = hooks
         self.paths = paths
@@ -48,6 +50,8 @@ class AppDataPlane:
         #: The operations served on the running app; whether a hook's reset needs the paths as installed; and whether
         #: a load that fails is followed by a reset now.
         self.live, self.keeps_paths, self.resets_failed_add = live, keeps_paths, resets_failed_add
+        #: What a call that stopped the app awaits once it has launched it again, whose error fails the call.
+        self.relaunched = relaunched
         self.turn = asyncio.Lock()
         self.changing: set[asyncio.Task] = set()
 
@@ -98,6 +102,8 @@ class AppDataPlane:
             finally:
                 if running:
                     await self.runtime.launch_app(_CAUSES[op])
+            if running and self.relaunched is not None:
+                await self.relaunched(op)
         except Exception as e:
             if not answer.done():
                 answer.set_exception(e)
@@ -131,7 +137,7 @@ class AppDataPlane:
         if not self.paths:
             return None
         return {OP_ADD_DATA: functools.partial(add, paths=self.paths),
-                OP_GET_DATA: functools.partial(get, self.paths, self.runtime.paused),
+                OP_GET_DATA: functools.partial(get, self.paths),
                 OP_RESET_DATA: functools.partial(reset, self.paths)}[op]
 
     async def _within(self, op: str, served: Callable, args: tuple, answer: asyncio.Future) -> Any:
@@ -177,13 +183,12 @@ async def add(parts: list, paths: list[str]) -> None:
     await in_thread(write_within, Path.home(), files, paths)
 
 
-async def get(paths: list[str], paused: Callable[[], contextlib.AbstractContextManager],
-              write_namespace: Optional[WriteNamespaceGrant]) -> list:
-    """A part for each file under ``paths``, copied with the app ``paused``, so they are of one moment, and sent from
-    the copy once it runs again."""
+async def get(paths: list[str], write_namespace: Optional[WriteNamespaceGrant]) -> list:
+    """A part for each file under ``paths``, copied with the app this server launched paused (``paused_app``), so they
+    are of one moment, and sent from the copy once it runs again; an app's own data/get hook calls it so too."""
     INITIAL.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=INITIAL.parent) as staging:
-        with paused():
+        with paused_app():
             await in_thread(_stage, Path.home(), paths, Path(staging))
         return await file_parts(Path(staging), paths, write_namespace)
 

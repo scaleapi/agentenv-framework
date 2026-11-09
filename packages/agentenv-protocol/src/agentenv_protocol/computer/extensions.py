@@ -79,8 +79,8 @@ class Extensions:
                                    self.settings.default_norm_scale)
         self.settings = self.settings.model_copy(update={"default_space": space, "default_norm_scale": scale})
         for tool in self.mounted_card().capabilities.tools or []:
-            if tool.name in card.POINT_TOOLS:
-                await self.update_tool(tool.name, description=card.point_description(self, tool.name))
+            if (own := self._computer_prefix.own(tool.name)) in card.POINT_TOOLS:
+                await self.update_tool(tool.name, description=self._computer_prefix.text(card.point_description(self, own)))
         return await self._computer_spaces_get()
 
     @extension(COMPUTER_KEYBOARD, op="get", method="GET",

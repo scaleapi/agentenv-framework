@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
-import hashlib
 import io
 import json
 import re
@@ -26,15 +25,21 @@ import urllib.request
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from pathlib import Path, PureWindowsPath
-from typing import Any
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import Any, NamedTuple
+
+from agentenv_protocol.computer.app import ADDRESS
 
 from agent_env.artifact.artifacts.computer import DISK_BASE_FILE, DISK_FILE, DISK_OWNER
+from agent_env.artifact.artifacts.docker_image import docker_login, push_local_image
 from agent_env.config.paths import cache_root
 from agent_env.env.envs.computer.utils.install import WindowsInstall
-from agent_env.providers.sandbox_providers.host_images import SOURCES_LABEL, present
+from agent_env.providers.sandbox_providers.host_images import present
 from agent_env.providers.sandbox_providers.local_docker.cli import docker
-from agent_env.providers.sandbox_providers.local_docker.disk import KVM, launcher, machine_image
+from agent_env.providers.sandbox_providers.local_docker.disk import KVM, launcher, machine_for
+from agent_env.store.image_store.image_contents import labels as image_labels
+from agent_env.store.image_store.image_store import ImageStore
+from agent_env.store.image_store.registry_api import pin_digest, pin_if_served
 from agent_env.store.local_state import holding_locks
 from agent_env.utils.docker.build import build_image
 
@@ -45,12 +50,15 @@ RECIPE = Path(__file__).resolve().parents[4] / "computers" / "disk" / "windows"
 ADMIN = "agentadmin"
 #: Where agent-env's own files are on a Windows computer, and each layer's folder under them.
 ROOT = PureWindowsPath("C:/agentenv")
-DRIVERS, APPS = ROOT / "drivers", ROOT / "apps"
+DRIVERS = ROOT / "drivers"
 PYTHON = ROOT / "python" / "python.exe"
 BUILD = ROOT / "build"
 #: The fewest days of its evaluation a base may have left, as a deploy needs some.
 RENEW_DAYS = 7
 EXPIRES_LABEL, BUILD_LABEL, KEY_LABEL = "dev.agentenv.windows.expires", "dev.agentenv.windows.build", "dev.agentenv.key"
+#: Where a base's image keeps the key to its admin, which composing a layer on it takes over ssh. The image is in the
+#: user's own image store, and the guest's ssh is reached only on this machine's loopback while a layer is composed.
+ADMIN_KEY = PurePosixPath("/disk/admin.key")
 #: How long an install, and a compose, may take, and how long the session user's first sign-in is left to settle.
 INSTALL_TIMEOUT_S, COMPOSE_TIMEOUT_S, SETTLE_S = 3600, 3600, 60
 #: How long a guest may take to power off once told.
@@ -59,7 +67,14 @@ SHUTDOWN_TIMEOUT_S = 300
 COMPACT_TIMEOUT_S = 1800
 #: How often an install looks for setup's end, a compose for the base's ssh, and a shutdown for the guest's.
 INSTALL_POLL_S, BOOT_POLL_S, SHUTDOWN_POLL_S = 15, 5, 2
+#: How many times a compose tries a layer's download, and how long it waits between, as the base's setup does: a
+#: server's errors can last minutes, as GitHub's release downloads' 504s have. A client error, 4xx, but a timeout or
+#: a rate limit, fails at once, as no retry mends a wrong URL.
+FETCH_TRIES, FETCH_PAUSE_S = 30, 10
 CPUS, MEMORY_MB = 4, 8192
+#: The groups and the account the folders under ``ROOT`` grant access to, by their well-known SIDs, as icacls takes
+#: them.
+ADMINISTRATORS, SYSTEM, USERS = "*S-1-5-32-544", "*S-1-5-18", "*S-1-5-32-545"
 #: What every service runs with: Python reading and writing files as UTF-8, as on Linux, not in Windows' code page.
 UTF8 = {"PYTHONUTF8": "1"}
 #: What a base's install prints once, as it fetches Microsoft's media.
@@ -68,18 +83,68 @@ NOTICE = ("windows: fetching the Windows 11 Enterprise evaluation from Microsoft
 
 
 @dataclass(frozen=True)
+class Registry:
+    """The env's image store as Windows disks are kept in it: by tag in ``repository``, pinned by digest, as Linux
+    disks are."""
+
+    store: ImageStore
+    repository: str
+
+    def served(self, tag: str) -> str | None:
+        """``tag``'s ref, pinned to the digest the store serves for it now; None when it serves none."""
+        ref = self.store.image_ref(self.repository, tag)
+        return pin_if_served(ref, self.store.auth(ref))
+
+    def labels(self, pinned: str) -> dict[str, str]:
+        return image_labels(pinned, "amd64", self.store.auth(pinned))
+
+    def push(self, local: str, tag: str) -> str:
+        """``local`` pushed as ``tag``; its ref there, pinned."""
+        ref = self.store.image_ref(self.repository, tag)
+        push_local_image(local, ref, self.store)
+        return pin_digest(ref, self.store.auth(ref))
+
+    def pull(self, pinned: str) -> None:
+        docker_login(self.store.auth(pinned))
+        docker("pull", "-q", pinned)
+
+
+class Names(NamedTuple):
+    """What a base or a disk is called: ``local`` in this machine's Docker, ``tag`` in the image store."""
+
+    local: str
+    tag: str
+
+
+def base_names(key: str) -> Names:
+    return Names(f"agentenv-windows-base:{_short(key)}", f"windows-base-{_short(key)}")
+
+
+def disk_names(key: str) -> Names:
+    """A disk's names, its tag in the image store being its key, as a Linux disk's is."""
+    return Names(f"agentenv-windows:{_short(key)}", key.removeprefix("sha256:"))
+
+
+def _short(key: str) -> str:
+    return key.removeprefix("sha256:")[:16]
+
+
+@dataclass(frozen=True)
 class Base:
-    """A base on this machine: its image's tag, the folder of its admin's key, and when its evaluation expires."""
+    """A base: its image's tag on this machine, the folder of its admin's key, when its evaluation expires, and, for one
+    the image store holds that this machine doesn't yet, its ref there, pulled when a layer is composed on it."""
 
     image: str
     keys: Path
     expires: datetime
+    pinned: str | None = None
 
 
 @dataclass(frozen=True)
 class Part:
     """A layer as a Windows disk installs it: its folder under ``context/``, its prefix, its install, its services'
-    argv by name, the environment they're given, and what its venv installs beside its requirements."""
+    argv by name, the environment they're given, what its venv installs beside its requirements, and for an app, the
+    ``<file>:<Class>`` its own server serves and its install steps by name, each run elevated."""
 
     folder: str
     prefix: PureWindowsPath
@@ -87,6 +152,8 @@ class Part:
     services: dict[str, list[str]]
     environment: dict[str, Any]
     wants: tuple[str, ...] = ()
+    served: str | None = None
+    steps: tuple[str, ...] = ()
 
 
 def media_path() -> Path:
@@ -108,41 +175,70 @@ def media(say: Callable[[str], None]) -> Path:
     return iso
 
 
-def sha256(path: Path) -> str:
-    """``path``'s sha256, kept beside it for its size and mtime, since an ISO takes a while to read."""
-    stat, kept = path.stat(), path.with_name(path.name + ".sha256")
-    stamp = f"{stat.st_size} {stat.st_mtime_ns}"
-    if kept.exists() and (lines := kept.read_text().split("\n"))[0] == stamp:
-        return lines[1]
-    hashed = hashlib.sha256()
-    with path.open("rb") as source:
-        while chunk := source.read(1 << 20):
-            hashed.update(chunk)
-    kept.write_text(f"{stamp}\n{hashed.hexdigest()}\n")
-    return hashed.hexdigest()
-
-
-def base(key: str, iso: Path, disk_gb: int, user: str, say: Callable[[str], None]) -> Base:
-    """The base of ``key`` on this machine, installed from ``iso`` first when there's none, its key is gone, or its
-    evaluation has fewer than ``RENEW_DAYS`` left; one install of a key runs at once, and another waits for it."""
-    image, keys = f"agentenv-windows-base:{key[7:23]}", cache_root() / "windows" / "bases" / key[7:23]
-    with holding_locks([f"windows-base:{key}"], lambda: say("waiting for the install of the same base under way")):
+def base(key: str, iso: Callable[[], Path], disk_gb: int, user: str, say: Callable[[str], None],
+         registry: Registry) -> Base:
+    """The base of ``key``: this machine's, pushed to the image store unless it holds one of ``key``; else the one the
+    store holds, pulled, with the key to its admin it carries, when a layer is composed on it; else Windows installed
+    from the ISO ``iso`` gives, and pushed there. One with fewer than ``RENEW_DAYS`` of its evaluation left is installed
+    afresh. One install of a key runs at once on a machine, and another waits for it."""
+    (image, tag), keys = base_names(key), cache_root() / "windows" / "bases" / _short(key)
+    with holding_locks([_base_lock(image)], lambda: say("waiting for the install of the same base under way")):
         if present(image) and (keys / "id").exists():
             expires = datetime.fromisoformat(_label(image, EXPIRES_LABEL))
-            if expires - datetime.now(timezone.utc) >= timedelta(days=RENEW_DAYS):
+            if not expiring(expires.isoformat()):
+                if registry.served(tag) is None:
+                    say("pushing the base to the image store, which doesn't hold it")
+                    registry.push(image, tag)
                 return Base(image, keys, expires)
             say(f"its base's evaluation expires {expires:%Y-%m-%d}; installing it afresh")
+        elif (pinned := registry.served(tag)) is not None and not expiring(
+                stored := registry.labels(pinned).get(EXPIRES_LABEL)):
+            return Base(image, keys, datetime.fromisoformat(stored), pinned)
         shutil.rmtree(keys, ignore_errors=True)
         keys.mkdir(parents=True)
         subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", f"agentenv {image}", "-f",
                         str(keys / "id")], check=True)
-        with _working(f"base-{key[7:23]}") as work:
-            facts = _installed(work, iso, keys, disk_gb, user, say)
+        media = iso()
+        with _working(f"base-{_short(key)}") as work:
+            facts = _installed(work, media, keys, disk_gb, user, say)
             say("packing the base")
             expires = datetime.now(timezone.utc) + timedelta(minutes=facts["grace_minutes"])
+            shutil.copy(keys / "id", work / ADMIN_KEY.name)
             _pack(work, image, {KEY_LABEL: key, EXPIRES_LABEL: expires.isoformat(timespec="seconds"),
                                 BUILD_LABEL: facts["build"]}, base_image=None)
+        say("pushing the base to the image store")
+        registry.push(image, tag)
         return Base(image, keys, expires)
+
+
+def _here(base_: Base, registry: Registry, say: Callable[[str], None]) -> None:
+    """``base_`` on this machine, with the key to its admin: pulled from the image store when it's the store's, under
+    the base's lock, so a compose of another disk on it waits, then finds it."""
+    if base_.pinned is None:
+        return
+    with holding_locks([_base_lock(base_.image)], lambda: say("waiting for the pull of the same base under way")):
+        if present(base_.image) and (base_.keys / "id").exists():
+            return
+        say(f"pulling its base from the image store, {base_.pinned}")
+        registry.pull(base_.pinned)
+        docker("tag", base_.pinned, base_.image)
+        _take_admin_key(base_.image, base_.keys)
+
+
+def _base_lock(image: str) -> str:
+    return f"windows-base:{image}"
+
+
+def _take_admin_key(image: str, keys: Path) -> None:
+    """The key to the admin of the base ``image`` holds, written to ``keys``, as composing a layer on it needs."""
+    shutil.rmtree(keys, ignore_errors=True)
+    keys.mkdir(parents=True)
+    container = docker("create", image, "none")
+    try:
+        docker("cp", f"{container}:{ADMIN_KEY}", str(keys / "id"))
+    finally:
+        subprocess.run(["docker", "rm", container], capture_output=True)
+    (keys / "id").chmod(0o600)
 
 
 def _installed(work: Path, iso: Path, keys: Path, disk_gb: int, user: str, say: Callable[[str], None]) -> dict:
@@ -187,16 +283,21 @@ def _installed(work: Path, iso: Path, keys: Path, disk_gb: int, user: str, say: 
     return facts
 
 
-def compose(base_: Base, build: Path, image: str, labels: dict[str, str], say: Callable[[str], None]) -> None:
-    """``image``, a disk composed on ``base_``: the base booted on an overlay kept in a folder of this machine, ``build``
-    copied in and its ``provision.ps1`` run as the admin over ssh, then shut down and packed onto the base's image."""
-    with _working(f"disk-{image.rpartition(':')[2]}") as work:
+def compose(base_: Base, build: Path, key: str, labels: dict[str, str], say: Callable[[str], None],
+            registry: Registry) -> str:
+    """The disk of ``key`` composed on ``base_``: the base booted on an overlay kept in a folder of this machine,
+    ``build`` copied in and its ``provision.ps1`` run as the admin over ssh, then shut down, packed onto the base's
+    image with ``labels`` and pushed to the image store; its ref there, pinned. A base the store holds is pulled
+    first."""
+    image, tag = disk_names(key)
+    _here(base_, registry, say)
+    with _working(f"disk-{_short(key)}") as work:
         out = work / "out"
         out.mkdir()
-        name = f"agentenv-windows-compose-{image.rpartition(':')[2]}"
+        name = f"agentenv-windows-compose-{_short(key)}"
         say(f"booting its base in {name}")
-        machine = asyncio.run(machine_image(base_.image))
-        container = _launched(name, {"VM_KEEP": "/out/disk.img"}, ["-v", f"{out}:/out"], machine)
+        machine = asyncio.run(machine_for(base_.image))
+        container = _launched(name, {"VM_KEEP": "/out/disk.img"}, ["-v", f"{out}:/out", *machine.args], machine.image)
         try:
             port, deadline = _ssh_port(container), time.monotonic() + COMPOSE_TIMEOUT_S
             while ssh(port, base_.keys, "echo ready", check=False, timeout=60).returncode != 0:
@@ -214,18 +315,15 @@ def compose(base_: Base, build: Path, image: str, labels: dict[str, str], say: C
             _shut_down(container, port, base_.keys)
         finally:
             subprocess.run(["docker", "rm", "-f", container], capture_output=True)
-        _converted(out, machine, backing=f"/{DISK_BASE_FILE}")
+        _converted(out, machine.image, backing=f"/{DISK_BASE_FILE}", args=machine.args)
         subprocess.run(["docker", "run", "--rm", "-v", f"{out}:/out", "--entrypoint", "qemu-img", launcher(), "rebase",
                         "-u", "-b", PureWindowsPath(DISK_BASE_FILE).name, "-F", "qcow2", "/out/disk.img"],
                        check=True, capture_output=True)
         (out / "guest").write_text("windows")
         say("packing the disk")
         _pack(out, image, labels, base_image=base_.image)
-
-
-def held(image: str) -> bool:
-    """Whether this machine's Docker holds ``image``."""
-    return present(image)
+    say("pushing the disk to the image store")
+    return registry.push(image, tag)
 
 
 def expiring(expires: str | None) -> bool:
@@ -234,34 +332,36 @@ def expiring(expires: str | None) -> bool:
     return expires is None or datetime.fromisoformat(expires) - datetime.now(timezone.utc) < timedelta(days=RENEW_DAYS)
 
 
-def image_id(image: str) -> str:
-    """The id of ``image`` in this machine's Docker, which a base installed afresh under its tag changes."""
-    return docker("image", "inspect", "-f", "{{.Id}}", image)
-
-
-def remove(image: str) -> None:
-    """``image`` removed from this machine's Docker, so no deploy here boots it."""
-    subprocess.run(["docker", "image", "rm", "-f", image], capture_output=True)
-
-
-def write(build: Path, parts: list[Part], build_settings: dict[str, Any], image: dict) -> str:
-    """Write ``build``'s ``provision.ps1``, which installs ``parts`` from ``build/context``, their services for
-    agentenv-session, ``build_settings`` as every service's ``AGENTENV_SETTING_<NAME>`` and ``image`` as what the disk
-    says it holds; its text, which a composed disk's key covers."""
+def write(build: Path, parts: list[Part], *, user: str, build_settings: dict[str, Any], image: dict) -> str:
+    """Write ``build``'s ``provision.ps1``, which installs ``parts`` from ``build/context``, each app's own folder the
+    session user ``user``'s, their services for agentenv-session, ``build_settings`` as every service's
+    ``AGENTENV_SETTING_<NAME>`` and ``image`` as what the disk says it holds, then leaves ``ROOT`` the admins'
+    (``_locked``); its text, which a composed disk's key covers."""
     lines = ["$ErrorActionPreference = 'Stop'", "$ProgressPreference = 'SilentlyContinue'",
              f"$build = '{BUILD}'", _CHECKED, _FETCH]
     for part in parts:
-        lines += [f"# {part.folder}", *_installed_part(part)]
+        lines += [f"# {part.folder}", *_installed_part(part, user)]
     settings = {f"AGENTENV_SETTING_{name.upper()}": str(value) for name, value in build_settings.items()}
     lines += [_written(ROOT / "build-settings.json", json.dumps(settings)),
-              _written(ROOT / "image.json", json.dumps(image, sort_keys=True))]
+              _written(ROOT / "image.json", json.dumps(image, sort_keys=True)), *_locked(user)]
     script = "\r\n".join(lines) + "\r\n"
     (build / "provision.ps1").write_text(script)
     return script
 
 
-def _installed_part(part: Part) -> list[str]:
-    """The lines that install ``part``: its files, downloads, venv, run scripts and services."""
+def _locked(user: str) -> list[str]:
+    """The lines that leave ``ROOT`` the admins', as on Linux ``/opt/agentenv`` is root's: every user reads and runs
+    what's there, none of the access ``C:\\`` gives every user to change it is left, and the session user ``user``
+    writes only the services' logs, and each app's own folder, which keeps its own access."""
+    return [_granted_alone(ROOT, {ADMINISTRATORS: "F", SYSTEM: "F", USERS: "RX"}),
+            f"Checked {{ icacls '{ROOT / 'logs'}' /grant {_ps(f'{user}:(OI)(CI)M')} | Out-Null }}"]
+
+
+def _installed_part(part: Part, user: str) -> list[str]:
+    """The lines that install ``part``: its files, downloads, venv, an app's own folder, its run scripts and install
+    steps, and its services. An app's own folder, where its server writes its address and token, holds none of the
+    access its parents give: only ``user``, the session user its server runs as, SYSTEM and Administrators have it, as
+    on Linux the session user alone reaches the server's socket."""
     prefix, install = part.prefix, part.install
     lines = [f"New-Item -ItemType Directory -Force '{prefix}' | Out-Null",
              f"Copy-Item -Recurse -Force \"$build\\context\\{PureWindowsPath(part.folder)}\\*\" '{prefix}'"]
@@ -278,14 +378,28 @@ def _installed_part(part: Part) -> list[str]:
                      + " ".join(_ps(want) for want in wants) + " }")
         lines.append(f"Checked {{ & '{venv / 'Scripts' / 'python.exe'}' -m pip list --format=json | "
                      f"Set-Content -Encoding utf8 '{prefix / 'installed.json'}' }}")
+    if part.served is not None:
+        own = prefix / ADDRESS.parent.as_posix()
+        lines += [f"New-Item -ItemType Directory -Force '{own}' | Out-Null",
+                  _granted_alone(own, {user: "F", SYSTEM: "F", ADMINISTRATORS: "F"})]
     for run in install.run or []:
         lines.append(f"$env:PREFIX = '{prefix}'; Push-Location '{prefix}'; Checked {{ & powershell -NoProfile "
                      f"-ExecutionPolicy Bypass -File '{prefix / PureWindowsPath(run.script)}' }}; Pop-Location")
+    for step in part.steps:
+        lines.append(f"Push-Location '{prefix}'; Checked {{ & '{prefix / 'venv' / 'Scripts' / 'python.exe'}' -m "
+                     f"agentenv_protocol.computer.run_install_step {_ps(part.served)} {_ps(step)} }}; Pop-Location")
     for name, argv in part.services.items():
         spec = {"name": name, "prefix": str(prefix), "command": argv,
                 "env": {**UTF8, **{key: str(value) for key, value in part.environment.items()}}}
         lines.append(_written(ROOT / "services" / f"{name}.json", json.dumps(spec)))
     return lines
+
+
+def _granted_alone(folder: PureWindowsPath, access: dict[str, str]) -> str:
+    """The line that leaves ``folder`` with only ``access``, rights by account, which what's under it inherits, and
+    none of the access its parents give."""
+    granted = " ".join(_ps(f"{account}:(OI)(CI){rights}") for account, rights in access.items())
+    return f"Checked {{ icacls '{folder}' /inheritance:r /grant:r {granted} | Out-Null }}"
 
 
 def argv(command: str, prefix: PureWindowsPath) -> list[str]:
@@ -343,12 +457,12 @@ def _compacted(port: int, keys: Path, say: Callable[[str], None]) -> None:
         say(f"trimming exited {done.returncode}, so its image keeps what it held: {(done.stderr + done.stdout)[-300:]}")
 
 
-def _converted(folder: Path, image: str, backing: str | None = None) -> None:
-    """``folder``'s ``disk.img`` rewritten by ``qemu-img convert`` in ``image``, which holds its backing file, keeping
-    only the clusters it uses: a base's whole, a layer's over ``backing``, the backing file ``image`` holds."""
+def _converted(folder: Path, image: str, backing: str | None = None, args: tuple[str, ...] = ()) -> None:
+    """``folder``'s ``disk.img`` rewritten by ``qemu-img convert`` in ``image`` run with ``args``, which give it its
+    backing file, keeping only the clusters it uses: a base's whole, a layer's over ``backing``."""
     over = ["-B", backing, "-F", "qcow2"] if backing else []
-    subprocess.run(["docker", "run", "--rm", "-v", f"{folder}:/out", "--entrypoint", "qemu-img", image, "convert", "-O",
-                    "qcow2", *over, "/out/disk.img", "/out/compact.img"], check=True, capture_output=True)
+    subprocess.run(["docker", "run", "--rm", "-v", f"{folder}:/out", *args, "--entrypoint", "qemu-img", image, "convert",
+                    "-O", "qcow2", *over, "/out/disk.img", "/out/compact.img"], check=True, capture_output=True)
     (folder / "compact.img").replace(folder / "disk.img")
 
 
@@ -398,14 +512,14 @@ def _pack(folder: Path, image: str, labels: dict[str, str], base_image: str | No
                        check=True, capture_output=True)
         (folder / "guest").write_text("windows")
         dockerfile = (f"FROM scratch\nCOPY {owner} base.img /{DISK_BASE_FILE}\n"
+                      f"COPY --chmod=600 {ADMIN_KEY.name} {ADMIN_KEY}\n"
                       f"COPY {owner} disk.img guest /{Path(DISK_FILE).parent}/\n")
     else:
         dockerfile = f"FROM {base_image}\nCOPY {owner} disk.img guest /{Path(DISK_FILE).parent}/\n"
     for name in ("answers", "out"):
         shutil.rmtree(folder / name, ignore_errors=True)
     (folder / "Dockerfile").write_text(dockerfile)
-    # Labelled as built here, so a deploy boots this machine's image and pulls none of its name.
-    build_image(folder / "Dockerfile", folder, image, platform="linux/amd64", labels={**labels, SOURCES_LABEL: image})
+    build_image(folder / "Dockerfile", folder, image, platform="linux/amd64", labels=labels)
 
 
 @contextlib.contextmanager
@@ -451,6 +565,9 @@ $g = (Get-CimInstance SoftwareLicensingProduct -Filter 'PartialProductKey IS NOT
 @{build = "$($v.CurrentBuild).$($v.UBR)"; grace_minutes = [int]$g} | ConvertTo-Json -Compress"""
 _CHECKED = ("function Checked([scriptblock]$Run) { & $Run; if ($LASTEXITCODE) { throw \"provision: $Run exited "
             "$LASTEXITCODE\" } }")
-_FETCH = ("function Fetch([string]$Url, [string]$Sha256, [string]$To) { Invoke-WebRequest -UseBasicParsing -Uri $Url "
-          "-OutFile $To; $got = (Get-FileHash -Algorithm SHA256 $To).Hash.ToLower(); if ($got -ne $Sha256) { throw "
-          "\"provision: $Url came with sha256 $got, not $Sha256\" } }")
+_FETCH = ("function Fetch([string]$Url, [string]$Sha256, [string]$To) { for ($try = 1; ; $try++) { try { "
+          "Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $To; break } catch { "
+          "$status = [int]$_.Exception.Response.StatusCode; "
+          f"if ($try -ge {FETCH_TRIES} -or ($status -ge 400 -and $status -lt 500 -and $status -notin 408, 429)) "
+          f"{{ throw }}; Start-Sleep {FETCH_PAUSE_S} }} }}; $got = (Get-FileHash -Algorithm SHA256 $To).Hash.ToLower(); "
+          "if ($got -ne $Sha256) { throw \"provision: $Url came with sha256 $got, not $Sha256\" } }")

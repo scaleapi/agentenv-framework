@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 from agentenv_protocol import CONTROL_TOKEN_ENV
 from agentenv_protocol import client as protocol_v1
-from agentenv_protocol.computer import APP_SETTINGS_ENV, COMPUTER_READY, SETTINGS_ENV
+from agentenv_protocol.computer import APP_SETTINGS_ENV, COMPUTER_READY, SETTINGS_ENV, TOOL_PREFIX_ENV
 from agentenv_protocol.computer.app import COMPUTER_APP
 from agentenv_protocol.computer.apps import ANSWER_TIMEOUT_S
 
@@ -89,11 +89,11 @@ def pulls_containers(link: SandboxProvider, store_id: str) -> bool:
 
 
 def settings_environment(computer: ComputerArtifact, values: dict[str, Any], *, environment_name: str,
-                         driver_settings: Optional[dict] = None) -> dict[str, str]:
+                         driver_settings: Optional[dict] = None, tool_prefix: str = "") -> dict[str, str]:
     """The environment a boot of ``computer`` gives it: each deploy-phase setting as ``AGENTENV_SETTING_<NAME>``, from
     ``values`` over its default, minted afresh when it's generated and resolved through the secret store when it's a
-    secret; ``driver_settings``, when there are any, in ``AGENTENV_COMPUTER_SETTINGS``; and the name its card is served
-    under."""
+    secret; ``driver_settings``, when there are any, in ``AGENTENV_COMPUTER_SETTINGS``; the name its card is served
+    under; and ``tool_prefix``, when there is one, in ``AGENTENV_TOOL_PREFIX``."""
     environment = {"ENVIRONMENT_NAME": environment_name}
     for name, setting in computer.config.items():
         if setting.phase != "deploy":
@@ -104,6 +104,8 @@ def settings_environment(computer: ComputerArtifact, values: dict[str, Any], *, 
         environment[f"AGENTENV_SETTING_{name.upper()}"] = str(value)
     if driver_settings:
         environment[SETTINGS_ENV] = json.dumps(driver_settings)
+    if tool_prefix:
+        environment[TOOL_PREFIX_ENV] = tool_prefix
     return environment
 
 

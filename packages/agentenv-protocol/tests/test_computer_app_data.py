@@ -139,6 +139,19 @@ async def test_an_app_with_only_paths_loads_exports_and_resets_them_as_installed
 
 
 @pytest.mark.asyncio
+async def test_get_takes_paths_and_a_write_namespace_and_pauses_the_running_app_as_exported_apps_call_it(home,
+                                                                                                        desktop):
+    (home / "Mail").mkdir()
+    (home / "Mail/inbox.txt").write_text("kept")
+    await PathsMail()._computer_app.launch_app()
+
+    parts = await app_data.get(["Mail"], None)
+
+    assert [await part_bytes(part) for part in parts] == [b"kept"]
+    assert desktop == [("launch", 4242), ("pause", 4242), ("continue", 4242)]
+
+
+@pytest.mark.asyncio
 async def test_a_file_under_none_of_its_paths_or_through_a_link_out_of_them_is_refused_and_nothing_is_written(home):
     (home / "Documents").mkdir()
     (home / "Mail").mkdir()
@@ -237,6 +250,37 @@ async def test_an_export_sends_a_linked_files_contents_from_inside_the_home_and_
         exported = _files(await _rpc(http, "data/get", {}))
 
     assert exported == {"Mail/latest.txt": b"archived"}
+
+
+@linux(paths=MAIL, launch=Launch(command=["mail"]))
+class CheckedMail(ComputerAppEnvironment):
+    """Mail that, once a data call relaunches it, checks it came back, failing while ``broken``."""
+    relaunched: list = []
+    broken = False
+
+    async def _relaunched(self, op: str) -> None:
+        type(self).relaunched.append(op)
+        if type(self).broken:
+            raise RuntimeError("it came back broken")
+
+
+@pytest.mark.asyncio
+async def test_a_call_that_relaunched_the_app_awaits_its_relaunch_check_whose_failure_fails_the_call(home, desktop):
+    mail = CheckedMail()
+    mail._computer_app_data_plane().keep_initial()
+    await mail._computer_app.launch_app()
+
+    async with _http(mail) as http:
+        await _rpc(http, "data/reset", {})
+        await _rpc(http, "data/get", {})
+        CheckedMail.broken = True
+        broken = await http.post(RPC_PATH, json=_call("data/reset", {}))
+    await mail._computer_app.stop_app()
+
+    assert CheckedMail.relaunched == ["reset_data", "reset_data"]
+    assert "it came back broken" in broken.json()["error"]["message"]
+    assert [event for event, _ in desktop] == ["launch", "stop", "launch", "pause", "continue", "stop", "launch",
+                                               "stop"]
 
 
 @pytest.mark.asyncio

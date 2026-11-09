@@ -38,6 +38,7 @@ from agent_env.store.object_store.local.grant_server import grant_server
 from agent_env.task import EpisodeSpec, Task
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task.teardown import TORN_DOWN_KEY
+from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
 from agent_env.task_step.task_steps.teardown_sandboxes import TeardownSandboxesTaskStep
 from tst.integration.utils.registry import REGISTRY_IMAGE
 from tst.util.a2a_test_agent import put_test_agent
@@ -125,6 +126,9 @@ async def test_a_server_env_deploys_restores_loads_and_tears_down_on_local_conta
     await restored.load_environment_artifact(_items_artifact(uid))
     base_url = await legacy_protocol.v1_base_url(deployed, None, "items")
     assert (await protocol_v1.get_data(base_url)).model_dump()["parts"][0]["data"] == {"items": ["snap-x", "snap-y"]}
+    await ResetEnvTaskStep(id="reset", version=None, env_id=env.id, fail_task_on_error=True).execute(
+        TaskStepContext(deployed_envs=[deployed]))
+    assert (await protocol_v1.get_data(base_url)).model_dump()["parts"][0]["data"] == {"items": []}  # emptied alone too
 
     step = TeardownSandboxesTaskStep(id="teardown", version=None, env_ids=[env.id])
     context = await step.execute(TaskStepContext(deployed_envs=[deployed]))

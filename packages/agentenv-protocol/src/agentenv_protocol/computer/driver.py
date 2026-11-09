@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from pathlib import Path
 from typing import Any, Callable, ClassVar, Literal, Optional
 
@@ -13,9 +14,9 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.websockets import WebSocket
 
-from ..agent_env_environment import (_CARD_CONFIG_ATTR, AgentEnvEnvironment, AgentEnvFastMCPApplication,
-                                     AgentEnvError, _error_response, add_websocket_route, control_check,
-                                     environment_card)
+from ..agent_env_environment import (_CARD_CONFIG_ATTR, _TOOL_ATTR, AgentEnvEnvironment, AgentEnvFastMCPApplication,
+                                     AgentEnvError, _error_response, _marked_members, add_websocket_route,
+                                     control_check, environment_card)
 from ..tool_context import ToolContext
 from ..types import EnvironmentCard, EnvironmentExtension, EnvironmentTool
 from . import _linux, apps, card, svc
@@ -27,8 +28,9 @@ from .operations import ReadyCheck, check_class, default_for
 from .platform import Platform, detect
 from .recording import Recording
 from .runtime import ComputerRuntime
-from .settings import ComputerSettings, load_settings
-from .tools import Tools
+from .prefix import ToolPrefix
+from .settings import TOOL_PREFIX_ENV, ComputerSettings, load_settings, tool_prefix_problem
+from .tools import COMPUTER_TOOLS, Tools
 
 #: The caller every call comes from until agents carry an identity of their own.
 DEFAULT_IDENTITY = "default"
@@ -99,9 +101,15 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
         check_class(cls)
         check_features(cls)
 
-    def __init__(self, settings: ComputerSettings | None = None, platform: Platform | None = None) -> None:
+    def __init__(self, settings: ComputerSettings | None = None, platform: Platform | None = None,
+                 tool_prefix: str | None = None) -> None:
         self.settings = settings if settings is not None else load_settings(model=type(self).Settings)
         self.platform = platform if platform is not None else detect()
+        prefix = os.environ.get(TOOL_PREFIX_ENV, "") if tool_prefix is None else tool_prefix
+        if problem := tool_prefix_problem(prefix):
+            raise ValueError(problem)
+        #: The start of every name it serves a tool under: the deploy's ``AGENTENV_TOOL_PREFIX``, none by default.
+        self._computer_prefix = ToolPrefix(prefix)
         self._computer = ComputerRuntime(self)
         #: The routes each app's card opens to agents, by app, read once it answers.
         self._computer_agent_routes: dict[str, list[str]] = {}
@@ -113,7 +121,7 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
         running its ``__init__``: what a ``computer_driver`` env records for each platform it supports. The card
         hooks may read the class and the base class's state, not what a subclass's ``__init__`` sets."""
         driver = cls.__new__(cls)
-        ComputerDriverEnvironment.__init__(driver, settings=cls.Settings(), platform=platform)
+        ComputerDriverEnvironment.__init__(driver, settings=cls.Settings(), platform=platform, tool_prefix="")
         config = dict(getattr(cls, _CARD_CONFIG_ATTR, None) or {})
         card = EnvironmentCard(**{**config, "name": config.get("name") or cls.__name__})
         return AgentEnvFastMCPApplication(card, driver).environment_card
@@ -203,6 +211,17 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
     def served_tools(self, tools: list[EnvironmentTool]) -> list[EnvironmentTool]:
         return card.served_tools(self, tools)
 
+    def serve_tools_as(self, tools: list[EnvironmentTool]) -> list[EnvironmentTool]:
+        return self._computer_prefix.tools(tools)
+
+    def served_instructions(self, text: str) -> str:
+        return self._computer_prefix.instructions(text, self._computer_other_tools())
+
+    def _computer_other_tools(self) -> list[str]:
+        """Its driver's own and forwarded tools, whose text stays as written, by their own names."""
+        return [marker.name for _member, marker in _marked_members(self, _TOOL_ATTR) if marker.name not in COMPUTER_TOOLS] + [
+            forwarded.tool.name for forwarded in self.forwarded_tools()]
+
     def served_extensions(self, extensions: list[EnvironmentExtension]) -> list[EnvironmentExtension]:
         return card.served_extensions(self, extensions)
 
@@ -213,7 +232,8 @@ class ComputerDriverEnvironment(Tools, Extensions, DataPlane, AgentEnvEnvironmen
         return card.extension_params(self, uri)
 
     def declared_extensions(self) -> list[EnvironmentExtension]:
-        return card.declared_extensions(self)
+        return [extension.model_copy(update={"description": self._computer_prefix.text(extension.description)})
+                for extension in card.declared_extensions(self)]
 
     def _computer_require_init(self) -> None:
         if self._computer is None:

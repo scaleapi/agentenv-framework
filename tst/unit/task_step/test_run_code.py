@@ -14,6 +14,7 @@ import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -838,6 +839,16 @@ def test_runner_parses_as_python_3_9():
     ast.parse(_RUNNER.read_text(), feature_version=(3, 9))
 
 
+def test_on_windows_the_runner_ends_the_scripts_process_tree_as_it_has_no_process_groups():
+    ran = []
+    runner = {"os": SimpleNamespace(name="nt"), "subprocess": SimpleNamespace(run=lambda argv, **_: ran.append(argv))}
+    exec(_RUNNER.read_text().partition("\nif sys.argv[1:2] in")[0], runner)
+
+    runner["_signal_group"](4242, signal.SIGTERM)
+
+    assert ran == [["taskkill", "/T", "/F", "/PID", "4242"]]
+
+
 def _runner_args(run_dir, body, timeout):
     """Stage the runner, script and input as run_code does, the runner inside the run dir."""
     (run_dir / "runner.py").write_text(_RUNNER.read_text())
@@ -951,6 +962,20 @@ def test_a_forwarded_signal_the_script_ignores_is_followed_by_sigkill(tmp_path):
     assert proc.wait(timeout=30) == 128 + signal.SIGKILL
     assert 5 <= time.monotonic() - started < 30
     assert _gone_within(child)
+
+
+def test_clearing_a_folder_ends_the_runner_still_running_from_it_with_all_it_started_then_removes_it(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    proc = subprocess.Popen(_runner_args(run_dir, _STARTS_A_CHILD, 60))
+    child = _wait_for_pid(run_dir)
+
+    cleared = subprocess.run([sys.executable, "-I", "-c", _RUNNER.read_text(), "--clear", str(run_dir)],
+                             capture_output=True, text=True, timeout=60)
+
+    assert cleared.returncode == 0, cleared.stderr
+    assert proc.wait(timeout=30) == 128 + signal.SIGTERM
+    assert _gone_within(child) and not run_dir.exists()
 
 
 def test_artifact_files_named_after_the_supervisors_imports_never_run_in_it(tmp_path):
@@ -1322,9 +1347,12 @@ async def test_a_script_for_a_computer_runs_inside_it_and_reaches_its_driver_on_
     run_dir = ".agentenv/run_code/run-code-1"
     assert [call[1] for call in computer.calls if call[0] == "data/add"] == [
         [{"path": f"{run_dir}/script.py"}], [{"path": f"{run_dir}/input.json"}], [{"path": f"{run_dir}/runner.py"}]]
-    (script,) = [params for kind, params, *_ in computer.calls if kind == "run" and params["argv"][0] == "python3"]
-    assert script["argv"] == ["python3", f"{run_dir}/runner.py", run_dir, "run", "script.py", "600"]
-    assert script["timeout_s"] == 610
+    tool = ["python3", "-I", "-c", _RUNNER.read_text(encoding="utf-8")]
+    runs = [params for kind, params, *_ in computer.calls if kind == "run"]
+    assert [params["argv"] for params in runs] == [
+        [*tool, "--clear", run_dir], ["python3", f"{run_dir}/runner.py", run_dir, "run", "script.py", "600"],
+        [*tool, "--size", f"{run_dir}/output.json"], [*tool, "--clear", run_dir]]
+    assert runs[1]["timeout_s"] == 610
     assert ("data/get", [f"{run_dir}/output.json"]) in computer.calls
     assert not (computer.home / run_dir).exists()
 
@@ -1341,7 +1369,7 @@ async def test_a_failed_script_in_a_computer_is_reported_and_leaves_no_run_folde
 async def test_a_run_the_computer_stopped_at_its_timeout_is_reported_as_one(computer, monkeypatch):
     monkeypatch.setattr(computer, "_run", lambda params: {"exit_code": None, "stdout": "", "stderr": "",
                                                           "truncated": False, "timed_out": True}
-                        if params["argv"][0] == "python3" else Computer._run(computer, params))
+                        if _runs_the_script(params) else Computer._run(computer, params))
 
     with pytest.raises(RunCodeExecutionError, match="timed out after 30s"):
         await _run_in(computer, _DEFAULT_BODY, timeout_seconds=30)
@@ -1352,7 +1380,7 @@ async def test_a_run_whose_call_drops_fails_naming_why_and_the_next_one_runs_afr
     invoke, dropped = computer.invoke_extension, []
 
     async def drop_once(base_url, card, uri, params=None, timeout=30, verify=True, *, method=None, headers=None):
-        if params["argv"][0] == "python3" and not dropped:
+        if _runs_the_script(params) and not dropped:
             dropped.append(params["request_id"])
             raise httpx.RemoteProtocolError("the driver went away")
         return await invoke(base_url, card, uri, params, timeout, verify, method=method)
@@ -1365,11 +1393,14 @@ async def test_a_run_whose_call_drops_fails_naming_why_and_the_next_one_runs_afr
     await _run_in(computer, _DEFAULT_BODY, id="read.v1")
 
     runs = [params for kind, params, *_ in computer.calls if kind == "run"]
-    staged = [params["argv"] for params in runs if params["argv"][0] == "pkill"]
-    assert staged == [["pkill", "-f", r"\.agentenv/run_code/read\.v1/runner\.py"]] * 2
-    assert not re.search(staged[0][2], "python3 /home/u/.agentenv/run_code/read-v1/runner.py")
-    scripts = [params["request_id"] for params in runs if params["argv"][0] == "python3"]
+    cleared = [params["argv"][-1] for params in runs if params["argv"][-2:-1] == ["--clear"]]
+    assert cleared == [".agentenv/run_code/read.v1"] * 4
+    scripts = [params["request_id"] for params in runs if _runs_the_script(params)]
     assert len(scripts) == 1 and scripts[0] != dropped[0]
+
+
+def _runs_the_script(params):
+    return params["argv"][1].endswith("/runner.py")
 
 
 @pytest.mark.asyncio

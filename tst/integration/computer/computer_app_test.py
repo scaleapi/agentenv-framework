@@ -10,7 +10,8 @@ name, notes's paths and clock's hooks, the computer's snapshot keeps each app's 
 apps' paths out of its own, and each app's data/reset, sent through the driver's route to it, puts the app back as
 installed. And through the driver's route from outside the computer, a WebSocket reaches the clock's own server both
 ways until it closes, only with the control token, a 20 MB answer streams through whole, and the clock sees the
-address the driver was reached at. Needs Docker and the local registry on localhost:5000."""
+address the driver was reached at. And the lock's .debs and wheels, mounted into the RUNs that install them, are in
+no layer of the composed image. Needs Docker and the local registry on localhost:5000."""
 
 import hashlib
 import json
@@ -30,7 +31,7 @@ from agent_env.env import Env
 from agent_env.store.routing import namespace_routing
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
-from tst.integration.computer.conftest import _composed, run_context
+from tst.integration.computer.conftest import _composed, docker, run_context
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
@@ -143,6 +144,24 @@ async def test_through_the_drivers_route_a_websocket_reaches_an_apps_server_and_
     assert seen["host"] == host and seen["headers"]["x-forwarded-host"] == host
     assert seen["headers"]["x-forwarded-prefix"] == "/svc/clock" and "authorization" not in seen["headers"]
     assert not report.failed
+
+
+def test_the_locks_debs_and_wheels_install_from_mounts_and_stay_in_no_layer_of_the_image(desk):
+    image = desk.metadata["composed"]["container"][ARCH]["image"]
+    docker("pull", "-q", image)
+
+    made = docker("history", "--no-trunc", "--format", "{{.CreatedBy}}", image).stdout.decode().splitlines()
+    installed = docker("run", "--rm", "--entrypoint", "sh", image, "-c",
+                       "dpkg-query -W -f '${Package} ${Status}\\n' hello fastfetch && "
+                       "/opt/agentenv/apps/clock/venv/bin/python -c 'import websockets; print(\"websockets\")' && "
+                       "if [ -e /tmp/agentenv-packages ]; then echo left; else echo clean; fi"
+                       ).stdout.decode().splitlines()
+
+    assert [line for line in made if "packages/" in line and line.startswith("COPY")] == []
+    assert any(line.startswith("RUN /bin/sh -c apt-get install -y --no-install-recommends /tmp/agentenv-packages/apt/")
+               for line in made)
+    assert sorted(installed[:2]) == ["fastfetch install ok installed", "hello install ok installed"]
+    assert installed[2:] == ["websockets", "clean"]
 
 
 def _kept(snapshot: dict) -> dict:

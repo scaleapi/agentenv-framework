@@ -694,8 +694,8 @@ class SnapshotEnvTaskStep(TaskStep):
                     try:
                         result = await cls._export_environment_to_file(
                             gateway, environment_name, tmp_path, export_timeout_seconds,
-                            deployed=card_record, data_get_params=(data_get_params or {}).get(environment_name),
-                            server=server, **website,
+                            deployed=server.owner(card_record),
+                            data_get_params=(data_get_params or {}).get(environment_name), server=server, **website,
                         )
                     except httpx.HTTPStatusError as e:
                         body_snippet = ""
