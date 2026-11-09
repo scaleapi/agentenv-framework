@@ -36,6 +36,11 @@ it in the run's metadata under its ``name``; a ``deploy_agent`` step deploys the
   can wake the agent, with nothing pending or with something still pending), agent_turn_failed, agent_turn_timeout,
   user_sim_error, step_error. What was still pending is recorded (``pending_at_end``): replies she held, messages she
   never read, user lines and alerts never delivered, the agent's checks not yet due, contact replies in progress.
+- Graders read what the user saw. The prompt response is every message_user text in order, each with its pretend
+  time, never the agent's closing text. The conversation (``metadata["a2a_conversations"][step_id]``) holds her own
+  messages and the agent's message_user texts, then her last word that never reached the agent and an end marker with
+  the end reason. A failed or timed-out agent turn sets the response's ``error_type`` (as prompt_agent does), so
+  verifiers skip the run.
 - The run's metadata keeps a summary in ``metadata["always_on"][step_id]`` (small enough for a running job to report
   back); the full timeline goes to the object store, at the summary's ``object_url``.
 """
@@ -227,11 +232,13 @@ class _Run:
         self.per_turn_trajectory_urls: list[Optional[str]] = []
         self.per_turn_parts: list[Optional[list[dict]]] = []
         self.tool_calls: Optional[int] = None
-        self.last_plain = ""
-        self.last_messages: list[dict] = []
         self.all_messages: list[dict] = []
         self.final_task_id = ""
         self.error: Optional[str] = None
+        self.error_type: Optional[str] = None  # set as prompt_agent sets it, so verifiers skip a run that broke
+        self.error_code: Optional[str] = None
+        self.chat_pending: list[dict] = []  # the agent's message_user texts not yet in the graded conversation
+        self.reaction: Optional[dict] = None  # her last read's answer when she said nothing
         self._plugin_paths: list[str] = []
         self._plugin_modules: list[str] = []
         self.nudges = 0
@@ -624,6 +631,7 @@ class _Run:
     async def loop(self, now: datetime) -> None:
         step = self.step
         self.you_sent.append(dict(self.opening))
+        await self._chat_user([self._chat_part(_utc(self.opening["at"]), self.opening["text"], kind="opening")])
         due = await take_due(self.notification_envs, self.recipient) if self.notification_envs else []
         await self.wake([*delivered_parts(due), self._user_part(_utc(self.opening["at"]), self.opening["text"],
                                                                  opening=True)],
@@ -717,6 +725,48 @@ class _Run:
         return {"kind": "text", "text": f"[{label_time(_iso(at))}] {first}: {body}",
                 "metadata": {"agentenv": {"source": "user", "at": _iso(at), "opening": opening}}}
 
+    # ---- the graded conversation: the user's chat ----------------------------------------------------------------
+    # What graders read as the run's conversation (metadata["a2a_conversations"][step id]) is what the user saw: her
+    # own messages as user turns (the opening request, user_says and final lines, her replies), and the agent's
+    # message_user texts, each with its pretend time, as one agent message per run of them. Never the agent's closing
+    # text, the alerts that woke it, or the step's own lines; those are in the per-wake prompt parts and the timeline.
+    # It ends with her last word that never reached the agent, and a marker saying how the run ended.
+
+    def _chat_part(self, at: datetime, text: str, **meta: Any) -> dict:
+        part = self._user_part(at, text)
+        part["metadata"]["agentenv"].update(meta)
+        return part
+
+    async def _chat_flush(self) -> None:
+        """Write the agent's message_user texts not yet in the conversation, as one agent message."""
+        if self.chat_pending:
+            parts, self.chat_pending = self.chat_pending, []
+            conversation_store.complete_a2a_task(conversation_id=self.conversation_id, parts=parts, role="agent",
+                                                 **(await self.step._env_clock(self.clock_envs)))
+
+    async def _chat_user(self, parts: list[dict]) -> None:
+        """Write a user turn: what she said, after what the agent sent before it."""
+        await self._chat_flush()
+        conversation_store.add_a2a_task(conversation_id=self.conversation_id, parts=parts,
+                                        a2a_task_id=uuid.uuid4().hex, role="user",
+                                        **(await self.step._env_clock(self.clock_envs)))
+
+    async def _chat_end(self, now: datetime) -> None:
+        """Close the conversation: the agent's last messages, then one last user turn with her replies that never
+        reached the agent, her reaction to its last messages when she said nothing, and the end marker."""
+        first = self.person["first"]
+        parts = [self._chat_part(h["deliver_at"], f"{h['text']} (sent after the assistant's last turn; it never saw "
+                                 "this)", kind="user_reply", delivered=False, **({"done": True} if h.get("done") else {}))
+                 for h in self.held]
+        if self.reaction:
+            parts.append(_step_part(f"({first} {self.reaction['said']})", "user_reaction"))
+            parts[-1]["metadata"]["agentenv"].update(outcome=self.reaction["outcome"], at=self.reaction["at"])
+        parts.append({"kind": "text", "text": f"[End of run · {label_time(_iso(now))}] {self.end_note} (A note from "
+                                              f"the run, not a message from {first}.)",
+                      "metadata": {"agentenv": {"source": "end_marker", "end_reason": self.end_reason,
+                                                "at": _iso(now)}}})
+        await self._chat_user(parts)
+
     async def _take_user_says(self) -> list[dict]:
         items = await take_due(self.notification_envs, USER_SAYS) if self.notification_envs else []
         out = []
@@ -736,6 +786,9 @@ class _Run:
                            + [{"at": _iso(r["deliver_at"]), "text": r["text"], "kind": "user_reply",
                                "done": r.get("done", False)} for r in replies],
                            key=lambda m: _utc(m["at"]))
+        if user_msgs:
+            await self._chat_user([self._chat_part(_utc(m["at"]), m["text"], kind=m["kind"],
+                                                   **({"done": True} if m.get("done") else {})) for m in user_msgs])
         for m in user_msgs:
             parts.append(self._user_part(_utc(m["at"]), m["text"]))
             if m["kind"] != "user_reply":
@@ -773,8 +826,6 @@ class _Run:
         msg_id = uuid.uuid4().hex
 
         def record() -> None:
-            conversation_store.add_a2a_task(conversation_id=self.conversation_id, parts=parts, a2a_task_id=msg_id,
-                                            role="user", **clock)
             self.per_turn_parts.append(list(parts))
 
         self.log("wake", n=self.wakes, virtual_time=_iso(sent_at), woke_by=woke_by, notifications=notifications or [],
@@ -786,8 +837,7 @@ class _Run:
                                                   timeout_seconds=step.timeout_seconds,
                                                   poll_interval_seconds=step.poll_interval_seconds, before_send=record)
         except TimeoutError as e:
-            self.error = f"agent turn timed out after {step.timeout_seconds}s: {e}"
-            self.end_reason = "agent_turn_timeout"
+            self._failed("agent_turn_timeout", f"agent turn timed out after {step.timeout_seconds}s: {e}")
             self.log("agent_turn_end", n=self.wakes, state="timeout", real_seconds=round(time.time() - t, 1))
             return
         state = result["status"]["state"]
@@ -795,22 +845,7 @@ class _Run:
         term = protocol.TerminalResponse.from_message(status_msg)
         if term.tool_call_count is not None:
             self.tool_calls = (self.tool_calls or 0) + term.tool_call_count
-        agent_parts = status_msg.get("parts") or [{"kind": "text", "text": term.response_text}]
-        messages, quiet = [], []
-        for env in self.chat_envs:
-            take_id = uuid.uuid4().hex
-            got = await _call(env, EXT_USER_CHAT_URI, "take", {"take_id": take_id})
-            messages += got.get("items") or []
-            quiet += got.get("quiet") or []
-        messages.sort(key=lambda m: m.get("at") or "")
-        # The conversation shows graders what the user saw (message_user) and, marked, what only went to the log.
-        recorded = [{"kind": "text", "text": f"[message_user · {label_time(m.get('at'))}] {m['text']}",
-                     "metadata": {"agentenv": {"source": "message_user", "at": m.get("at")}}} for m in messages]
-        recorded += [{**p, "text": f"[plain reply, not shown to the user] {p['text']}",
-                      "metadata": {"agentenv": {"source": "plain_reply"}}} if p.get("kind") == "text" else p
-                     for p in agent_parts]
-        conversation_store.complete_a2a_task(conversation_id=self.conversation_id, parts=recorded, role="agent",
-                                             **(await step._env_clock(self.clock_envs)))
+        messages, quiet = await self._take_messages()
         traj = None
         card = self.agent.a2a_card or {}
         traj_ext = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
@@ -824,19 +859,15 @@ class _Run:
         self.final_task_id = task_id
         ended = await self.now()
         plain = term.response_text or ""
-        self.last_plain, self.last_messages = plain, messages
         extra = {"stay_quiet_calls": len(quiet)} if step.stay_quiet else {}
         self.log("agent_turn_end", n=self.wakes, state=str(state), virtual_time=_iso(ended),
                  virtual_seconds=round((ended - sent_at).total_seconds()), real_seconds=round(time.time() - t, 1),
                  tool_calls=term.tool_call_count, plain_reply=plain, messages_to_user=len(messages),
                  trajectory_url=traj, **extra)
-        for m in messages:
-            self.log("message_to_user", virtual_time=m.get("at"), text=m["text"], wake=self.wakes)
-            self.unread.append({"at": m.get("at"), "text": m["text"], "wake": self.wakes})
-            self.all_messages.append({"at": m.get("at"), "text": m["text"], "wake": self.wakes})
+        self._sent(messages)
         if state == TaskState.failed or str(state) == "failed":
-            self.error = term.error_message or term.response_text or "agent turn failed"
-            self.end_reason = "agent_turn_failed"
+            self._failed(term.error_type or "agent_turn_failed",
+                         term.error_message or term.response_text or "agent turn failed", term.error_code)
             return
         if step.nudge and not messages and not quiet and _closing_text(plain):
             await self._nudge(plain)
@@ -852,12 +883,9 @@ class _Run:
         self.nudges += 1
         parts = [_step_part(step.nudge_text, "nudge")]
         sent_at = await self.now()
-        clock = await step._env_clock(self.clock_envs)
         msg_id = uuid.uuid4().hex
 
         def record() -> None:
-            conversation_store.add_a2a_task(conversation_id=self.conversation_id, parts=parts, a2a_task_id=msg_id,
-                                            role="user", **clock)
             self.per_turn_parts.append(list(parts))
 
         t = time.time()
@@ -867,8 +895,7 @@ class _Run:
                                                   timeout_seconds=step.timeout_seconds,
                                                   poll_interval_seconds=step.poll_interval_seconds, before_send=record)
         except TimeoutError as e:
-            self.error = f"agent nudge turn timed out after {step.timeout_seconds}s: {e}"
-            self.end_reason = "agent_turn_timeout"
+            self._failed("agent_turn_timeout", f"agent nudge turn timed out after {step.timeout_seconds}s: {e}")
             self.log("nudge", n=self.nudges, wake=self.wakes, virtual_time=_iso(sent_at), closing_text=closing,
                      state="timeout", outcome="timeout", real_seconds=round(time.time() - t, 1))
             return
@@ -877,20 +904,7 @@ class _Run:
         term = protocol.TerminalResponse.from_message(status_msg)
         if term.tool_call_count is not None:
             self.tool_calls = (self.tool_calls or 0) + term.tool_call_count
-        agent_parts = status_msg.get("parts") or [{"kind": "text", "text": term.response_text}]
-        messages, quiet = [], []
-        for env in self.chat_envs:
-            got = await _call(env, EXT_USER_CHAT_URI, "take", {"take_id": uuid.uuid4().hex})
-            messages += got.get("items") or []
-            quiet += got.get("quiet") or []
-        messages.sort(key=lambda m: m.get("at") or "")
-        recorded = [{"kind": "text", "text": f"[message_user · {label_time(m.get('at'))}] {m['text']}",
-                     "metadata": {"agentenv": {"source": "message_user", "at": m.get("at")}}} for m in messages]
-        recorded += [{**p, "text": f"[plain reply, not shown to the user] {p['text']}",
-                      "metadata": {"agentenv": {"source": "plain_reply"}}} if p.get("kind") == "text" else p
-                     for p in agent_parts]
-        conversation_store.complete_a2a_task(conversation_id=self.conversation_id, parts=recorded, role="agent",
-                                             **(await step._env_clock(self.clock_envs)))
+        messages, quiet = await self._take_messages()
         traj = None
         card = self.agent.a2a_card or {}
         traj_ext = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
@@ -908,15 +922,38 @@ class _Run:
                  state=str(state), outcome=outcome, messages_to_user=len(messages), stay_quiet_calls=len(quiet),
                  plain_reply_after=plain, tool_calls=term.tool_call_count, real_seconds=round(time.time() - t, 1),
                  trajectory_url=traj)
-        if messages:
-            self.last_plain, self.last_messages = plain, messages
-        for m in messages:
-            self.log("message_to_user", virtual_time=m.get("at"), text=m["text"], wake=self.wakes, after_nudge=True)
-            self.unread.append({"at": m.get("at"), "text": m["text"], "wake": self.wakes})
-            self.all_messages.append({"at": m.get("at"), "text": m["text"], "wake": self.wakes})
+        self._sent(messages, after_nudge=True)
         if state == TaskState.failed or str(state) == "failed":
-            self.error = term.error_message or term.response_text or "agent nudge turn failed"
-            self.end_reason = "agent_turn_failed"
+            self._failed(term.error_type or "agent_turn_failed",
+                         term.error_message or term.response_text or "agent nudge turn failed", term.error_code)
+
+    async def _take_messages(self) -> tuple[list[dict], list[dict]]:
+        """What the agent sent the user with message_user this turn, oldest first, and its stay_quiet calls."""
+        messages, quiet = [], []
+        for env in self.chat_envs:
+            got = await _call(env, EXT_USER_CHAT_URI, "take", {"take_id": uuid.uuid4().hex})
+            messages += got.get("items") or []
+            quiet += got.get("quiet") or []
+        messages.sort(key=lambda m: m.get("at") or "")
+        return messages, quiet
+
+    def _sent(self, messages: list[dict], after_nudge: bool = False) -> None:
+        """Record what the agent sent the user: for her next read, the graded chat and the timeline."""
+        for m in messages:
+            self.log("message_to_user", virtual_time=m.get("at"), text=m["text"], wake=self.wakes,
+                     **({"after_nudge": True} if after_nudge else {}))
+            sent = {"at": m.get("at"), "text": m["text"], "wake": self.wakes}
+            self.unread.append(sent)
+            self.all_messages.append(sent)
+            self.chat_pending.append({"kind": "text", "text": f"[{label_time(m.get('at'))}] {m['text']}",
+                                      "metadata": {"agentenv": {"source": "message_user", "at": m.get("at"),
+                                                                "wake": self.wakes}}})
+
+    def _failed(self, error_type: str, error: str, error_code: Optional[str] = None) -> None:
+        """An agent turn failed or timed out: the run ends, and its prompt response carries ``error_type`` the way
+        prompt_agent's does, so verifiers skip it instead of grading it as a normal run."""
+        self.error, self.error_type, self.error_code = error, error_type, error_code
+        self.end_reason = "agent_turn_timeout" if error_type == "agent_turn_timeout" else "agent_turn_failed"
 
     async def read(self, now: datetime, last: bool = False) -> None:
         """The user sim reads what the agent sent since her last read, at ``now``; ``last`` marks the read after the
@@ -965,7 +1002,11 @@ class _Run:
             if max_replies and self.replies >= int(max_replies):
                 self.gave_up = True
                 self.log("user_gave_up", replies=self.replies)
-        elif outcome == "done" and not last:
+        if not said and outcome in ("no_reply", "done") and (last or (outcome == "done" and not self.multi_day)):
+            self.reaction = {"outcome": outcome, "at": _iso(now),
+                             "said": "read it and signed off without a message." if outcome == "done"
+                             else "read it and didn't reply."}
+        if outcome == "done" and not last:
             entry["ends_run"] = not self.multi_day
             if not self.multi_day and said:
                 self.signed_off = True
@@ -1062,9 +1103,15 @@ class _Run:
             self.end_reason = "stuck" if stuck else "finished_nothing_pending"
         self.end_note = END_NOTES.get(self.end_reason, self.end_reason or "").format(first=self.person["first"],
                                                                                      wakes=self.wakes)
+        if self.end_reason in ERROR_ENDS and not self.error_type:
+            self.error_type = self.end_reason
         self.log("end", reason=self.end_reason, note=self.end_note, virtual_time=_iso(now), wakes=self.wakes,
                  replies=self.replies, unread_at_end=len(self.unread), held_at_end=len(self.held),
                  pending=self.pending)
+        try:
+            await self._chat_end(now)
+        except Exception as e:
+            logger.warning(f"always_on: could not close the graded conversation: {e}")
         conv = conversation_store.get_conversation(self.conversation_id)
         if conv and conv.get("status") == "active":
             conversation_store.mark_closed(self.conversation_id)
@@ -1091,7 +1138,7 @@ class _Run:
             counts["stay_quiet_wakes"] = sum(1 for e in self.timeline if e["event"] == "agent_turn_end"
                                              and e.get("stay_quiet_calls"))
         record = {"step_id": step.id, "end_reason": self.end_reason, "end_note": self.end_note, "error": self.error,
-                  "counts": counts,
+                  "error_type": self.error_type, "counts": counts,
                   "user_sim": {"name": step.user_sim, "version": self.version, "model": self.us.get("model"),
                                "agent_name": self.us.get("agent_name"), **self.user_setup},
                   "end_time": _iso(self.end) if self.end else None, "time_zone": self.zone,
@@ -1101,8 +1148,9 @@ class _Run:
                               "scheduled_checks": self.checks, "contacts": self.contacts}
         await self._store_timeline(record)
         ctx.metadata.setdefault(ALWAYS_ON_KEY, {})[step.id] = record
-        final_text = "\n\n".join([m["text"] for m in self.last_messages] + ([self.last_plain] if self.last_plain else []))
-        self._append_prompt_response(final_text)
+        # The graded response is the user's whole chat from the agent, each message with its pretend time; never its
+        # closing text, which she never saw.
+        self._append_prompt_response("\n\n".join(f"[{label_time(m.get('at'))}] {m['text']}" for m in self.all_messages))
 
     async def _store_timeline(self, record: dict) -> None:
         """Store the run's full record, its timeline included, and give ``record`` (what stays in the run's metadata,
@@ -1131,7 +1179,8 @@ class _Run:
             agent_trajectory_object_url=traj, agent_trajectory_object_prefix=step._trajectory_prefix(),
             target_agent_per_turn_trajectory_object_urls=self.per_turn_trajectory_urls or None,
             source_agent_per_turn_prompt_parts=self.per_turn_parts or None, tool_call_count=self.tool_calls,
-            model=self.model, error_message=self.error, agent_session_id=self.final_task_id,
+            model=self.model, error_type=self.error_type, error_code=self.error_code, error_message=self.error,
+            agent_session_id=self.final_task_id,
             a2a_context_id=self.solver_context_id, agent_name=step.agent_name, step_id=step.id))
 
 

@@ -11,6 +11,7 @@ from typing import Any, Callable, Optional
 import httpx
 from mcp.types import CallToolResult, TextContent, Tool
 
+from agent_env.a2a_agent import conversation_store
 from agent_env.config import get_config
 from agent_env.env.env import DeployedGatewayEnv
 from agent_env.env.gateway import gateway as gw_mod
@@ -28,6 +29,13 @@ T0 = "2026-11-09T14:00:00Z"  # Mon Nov 9, 9:00 AM in New York
 ROLE = "default"
 
 Turn = Callable[[int, list[str], "Rig"], Optional[str]]
+
+
+class Fail:
+    """What an agent's turn returns to end in the failed state, as a harness reports a turn that broke."""
+
+    def __init__(self, message: str = "the CLI crashed", error_type: Optional[str] = None) -> None:
+        self.message, self.error_type = message, error_type
 
 
 class Rig:
@@ -182,6 +190,12 @@ class Rig:
     def timeline(self, ctx: TaskStepContext) -> list[dict]:
         return self.stored(ctx)["timeline"]
 
+    def chat(self, ctx: TaskStepContext) -> list[dict]:
+        """The graded conversation as stored: each message's role and text parts."""
+        doc = conversation_store.get_conversation(ctx.metadata["a2a_conversations"]["week"])
+        return [{"role": m["role"], "texts": [p["text"] for p in m["parts"] if p.get("kind") == "text"],
+                 "parts": m["parts"]} for m in doc["messages"]]
+
     def events(self, ctx: TaskStepContext, name: str) -> list[dict]:
         return [e for e in self.timeline(ctx) if e["event"] == name]
 
@@ -198,7 +212,12 @@ class Rig:
         texts = [p["text"] for p in parts if p.get("kind") == "text"]
         self.sent.append(texts)
         self.parts.append(list(parts))
-        closing = self.agent(len(self.sent), texts, self)
+        closing = self.agent(len(self.sent), texts, self)  # a TimeoutError it raises is the turn timing out
+        if isinstance(closing, Fail):
+            data = {"error_message": closing.message, **({"error_type": closing.error_type}
+                                                          if closing.error_type else {})}
+            return f"task-{len(self.sent)}", {"status": {"state": "failed", "message": {"parts": [
+                {"kind": "text", "text": closing.message}, {"kind": "data", "data": data}]}}}
         reply = [{"kind": "text", "text": closing}] if closing else []
         return f"task-{len(self.sent)}", {"status": {"state": "completed", "message": {"parts": reply}}}
 
