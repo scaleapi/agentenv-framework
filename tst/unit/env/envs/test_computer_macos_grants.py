@@ -62,15 +62,16 @@ def test_an_executables_screen_capture_is_approved_ahead_by_its_path_alone_and_n
     assert writes == [["write", approvals, str(tool), *APPROVED]]
 
 
-def _file_url(path):
+def _file_url(path, **locale):
     return subprocess.run(["bash", "-c", f'. "{LIB}"; file_url "$1"', "_", path], capture_output=True, text=True,
-                          env={"PATH": "/usr/bin:/bin"})
+                          env={"PATH": "/usr/bin:/bin", **locale})
 
 
 def test_a_bundles_file_url_is_foundations_for_every_printable_ascii_character_and_a_path_past_ascii_fails():
     chars = KEPT + "".join(ENCODED)
-    written, beyond = _file_url(f"/opt/{chars}.app/"), _file_url("/opt/Café.app")
+    written = _file_url(f"/opt/{chars}.app/")
+    beyond = [_file_url("/opt/Café.app"), _file_url("/opt/Café.app", LANG="C.UTF-8", LC_ALL="C.UTF-8")]
 
     assert sorted(chars) == sorted(chr(c) for c in range(32, 127) if chr(c) != "/")
     assert written.returncode == 0 and written.stdout == f"file:///opt/{KEPT}{''.join(ENCODED.values())}.app/\n"
-    assert beyond.returncode != 0 and "isn't printable ASCII" in beyond.stderr
+    assert all(run.returncode != 0 and "isn't printable ASCII" in run.stderr for run in beyond)
