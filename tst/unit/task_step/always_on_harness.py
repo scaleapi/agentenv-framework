@@ -32,10 +32,11 @@ class Rig:
     ``message``, ``quiet`` and ``schedule``, and returns its closing text; by default it stays quiet. ``answers`` are the
     user sim's answers to its
     reads, in order; once they run out it answers no_reply. Every message the agent got is in ``sent``, every read the
-    user sim got in ``reads``."""
+    user sim got in ``reads``. A ``plugin`` replaces the scripted one; what it sends the user sim agent with ``ask`` is
+    in ``user_calls``, answered in turn by ``user_texts`` (then no_reply)."""
 
     def __init__(self, monkeypatch, tmp_path, *, agent: Optional[Turn] = None, answers: tuple = (), rate: float = 0,
-                 t0: str = T0):
+                 t0: str = T0, plugin: Any = None, user_texts: tuple = ()):
         monkeypatch.setattr(gw_mod, "GATEWAY_TRAJECTORY_FILE", str(tmp_path / "trajectory.jsonl"))
         self.gw = Gateway(host="127.0.0.1", port=0, server_name="AgentEnvGateway", internal_mcp_servers=[])
         self.gw._tools_discovered = True
@@ -50,6 +51,9 @@ class Rig:
         self.parts: list[list[dict]] = []
         self.reads: list[dict] = []
         self.setups: list[dict] = []
+        self.plugin = plugin
+        self.user_texts = list(user_texts)
+        self.user_calls: list[dict] = []
         monkeypatch.setattr(ao, "POLL_SECONDS", 0)
         monkeypatch.setattr(ao, "send_and_wait", self._send_and_wait)
         monkeypatch.setattr(ao._Run, "_load_plugin", self._load_plugin)
@@ -119,6 +123,11 @@ class Rig:
 
     # ---- fakes -----------------------------------------------------------------------------------------------------
     async def _send_and_wait(self, url, parts, *, before_send=None, **kw):
+        if url == USER_SIM:
+            self.user_calls.append({"parts": list(parts), "context_id": kw.get("context_id")})
+            text = self.user_texts.pop(0) if self.user_texts else '{"outcome": "no_reply", "message": ""}'
+            return f"user-{len(self.user_calls)}", {"status": {"state": "completed", "message": {
+                "parts": [{"kind": "text", "text": text}]}}}
         assert url == SOLVER, url
         if before_send:
             before_send()
@@ -130,6 +139,8 @@ class Rig:
         return f"task-{len(self.sent)}", {"status": {"state": "completed", "message": {"parts": reply}}}
 
     async def _load_plugin(self, spec):
+        if self.plugin is not None:
+            return self.plugin
         rig = self
 
         class Plugin:
