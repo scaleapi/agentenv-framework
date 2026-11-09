@@ -780,10 +780,11 @@ class _Run:
         past ``JUMPS_KEPT_PER_GAP`` per gap."""
         step = self.step
         self.you_sent.append(dict(self.opening))
-        await self._chat_user([self._chat_part(_utc(self.opening["at"]), self.opening["text"], kind="opening")])
+        opened_at = _utc(self.opening["at"])
+        await self._chat_user(self._opening_parts(lambda text: self._chat_part(opened_at, text, kind="opening")))
         due = await take_due(self.notification_envs, self.recipient) if self.notification_envs else []
-        await self.wake([*delivered_parts(due), self._user_part(_utc(self.opening["at"]), self.opening["text"],
-                                                                 opening=True)],
+        await self.wake([*delivered_parts(due),
+                         *self._opening_parts(lambda text: self._user_part(opened_at, text, opening=True))],
                         woke_by=[f"notification:{d['channel']}" for d in due] + ["user_request"],
                         notifications=[{k: d.get(k) for k in ("at", "channel", "source", "source_id", "to")}
                                        for d in due])
@@ -880,9 +881,25 @@ class _Run:
         at = self.read_at or await self.now()
         await self.read(at, last=True)
 
+    def _prompt_parts(self) -> list[dict]:
+        """The task's prompt as A2A parts, its seed applied."""
+        return self.step._apply_seed(self.step._effective_parts(), self.ctx.metadata.get("seed", {}))
+
     def _effective_prompt(self) -> str:
-        parts = self.step._apply_seed(self.step._effective_parts(), self.ctx.metadata.get("seed", {}))
-        return "\n".join(p.get("text", "") for p in parts if p.get("kind") == "text")
+        return "\n".join(p.get("text", "") for p in self._prompt_parts() if p.get("kind") == "text")
+
+    def _opening_parts(self, labelled) -> list[dict]:
+        """The prompt as the opening wake and the user's chat carry it: its text as one labelled line from the user
+        (``labelled(text)``), where its first text part was, and every other part (a file, data) as it is, in the
+        prompt's order, as prompt_agent sends them."""
+        out, text = [], self._effective_prompt()
+        for part in self._prompt_parts():
+            if part.get("kind") != "text":
+                out.append(part)
+            elif text is not None:
+                out.append(labelled(text))
+                text = None
+        return out
 
     def _user_part(self, at: datetime, text: str, opening: bool = False) -> dict:
         first = self.person["first"]
