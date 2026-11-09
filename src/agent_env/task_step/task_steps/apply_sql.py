@@ -82,11 +82,59 @@ $agentenv_sync$;
 """
 
 
-# Comments, string literals, quoted identifiers and dollar-quoted bodies, which hold no statement of the script's own.
-_LITERAL = re.compile(
-    r"--[^\n]*|/\*.*?\*/|'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"|\$([A-Za-z_][A-Za-z0-9_]*|)\$.*?\$\1\$",
-    re.DOTALL,
-)
+_DOLLAR_TAG = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)?\$")
+
+
+def _blank(text: str) -> str:
+    return re.sub(r"[^\n]", " ", text)
+
+
+def _code_only(sql: str) -> str:
+    """``sql`` with its comments, string literals, quoted identifiers and dollar-quoted bodies blanked out (newlines
+    kept, so positions still give line numbers): what is left is the script's own statements.
+
+    Follows PostgreSQL's lexer where it matters here: ``/* */`` comments nest, ``E'...'`` strings take backslash
+    escapes (``E'it\\'s'``), other strings only ``''``, and ``$tag$ ... $tag$`` bodies end at the same tag. An
+    unterminated literal runs to the end, as psql would read it.
+    """
+    out, i, n = [], 0, len(sql)
+    while i < n:
+        c, start = sql[i], i
+        if sql.startswith("--", i):
+            j = sql.find("\n", i)
+            i = n if j < 0 else j
+        elif sql.startswith("/*", i):
+            depth, i = 1, i + 2
+            while i < n and depth:
+                if sql.startswith("/*", i):
+                    depth, i = depth + 1, i + 2
+                elif sql.startswith("*/", i):
+                    depth, i = depth - 1, i + 2
+                else:
+                    i += 1
+        elif c in "'\"":
+            escapes = c == "'" and i > 0 and sql[i - 1] in "eE" and (i < 2 or not (sql[i - 2].isalnum() or sql[i - 2] in "_$"))
+            i += 1
+            while i < n:
+                if escapes and sql[i] == "\\":
+                    i += 2
+                elif sql[i] == c:
+                    if sql.startswith(c * 2, i):
+                        i += 2
+                    else:
+                        i += 1
+                        break
+                else:
+                    i += 1
+        elif c == "$" and (m := _DOLLAR_TAG.match(sql, i)) and (i == 0 or not (sql[i - 1].isalnum() or sql[i - 1] == "_")):
+            j = sql.find(m.group(0), m.end())
+            i = n if j < 0 else j + len(m.group(0))
+        else:
+            out.append(c)
+            i += 1
+            continue
+        out.append(_blank(sql[start:i]))
+    return "".join(out)
 _TRANSACTION_CONTROL = re.compile(
     r"(?:\A|;)\s*(begin|commit|rollback|end|abort|savepoint|release|start\s+transaction|prepare\s+transaction)\b",
     re.IGNORECASE,
@@ -104,7 +152,7 @@ class RefusedSqlError(ServiceDbSqlError):
 
 def refusals(sql: str) -> list[str]:
     """Why ``sql`` can't run as one ``apply_sql`` transaction, each naming its line; empty when it can."""
-    code = _LITERAL.sub(lambda m: re.sub(r"[^\n]", " ", m.group(0)), sql)
+    code = _code_only(sql)
     found = []
     for m in _TRANSACTION_CONTROL.finditer(code):
         line = code.count("\n", 0, m.start(1)) + 1

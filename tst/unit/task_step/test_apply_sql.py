@@ -86,6 +86,9 @@ def test_psql_error_keeps_error_lines_and_names_a_missing_service():
     "DO $$ BEGIN PERFORM 1; END $$;",
     "CREATE FUNCTION f() RETURNS int AS $body$ BEGIN RETURN 1; END $body$ LANGUAGE plpgsql;",
     "-- COMMIT later\n/* ROLLBACK */ INSERT INTO s.t VALUES (E'it''s back\\tafter');",
+    "INSERT INTO s.t VALUES (E'it\\'s\\tback; COMMIT');",
+    "/* outer /* inner */ COMMIT; still a comment */ INSERT INTO s.t VALUES (1);",
+    "INSERT INTO s.t VALUES ($tag$ COMMIT; \\! $notag$ $tag$);",
 ])
 def test_refusals_ignore_literals_comments_and_bodies(sql):
     assert refusals(sql) == []
@@ -95,6 +98,9 @@ def test_refusals_ignore_literals_comments_and_bodies(sql):
     ("BEGIN;\nINSERT INTO s.t VALUES (1);\nCOMMIT;\nSELECT 1/0;", ["line 1 of the SQL: BEGIN", "line 3 of the SQL: COMMIT"]),
     ("INSERT INTO s.t VALUES (1); savepoint x;", ["line 1 of the SQL: SAVEPOINT"]),
     ("INSERT INTO s.t VALUES (1);\n\\! rm -rf /", ["line 2 of the SQL: psql meta-commands"]),
+    # Without the E prefix a backslash is an ordinary character, so the quote after it ends the string.
+    ("INSERT INTO s.t VALUES ('a\\');\nCOMMIT;", ["line 2 of the SQL: COMMIT"]),
+    ("INSERT INTO s.t VALUES (E'a\\'');\nCOMMIT;", ["line 2 of the SQL: COMMIT"]),
 ])
 def test_refusals_name_transaction_control_and_meta_commands(sql, found):
     problems = refusals(sql)
