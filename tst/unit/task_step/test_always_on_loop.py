@@ -214,15 +214,27 @@ async def test_each_read_holds_the_time_the_agent_s_messages_her_phone_and_only_
 
 
 @pytest.mark.asyncio
-async def test_done_ends_a_one_sitting_run(monkeypatch, tmp_path):
-    rig = Rig(monkeypatch, tmp_path, agent=_agent(t1=_message("all set: shelves restocked")),
+async def test_done_ends_a_one_sitting_run_after_the_agent_s_turn_on_her_sign_off(monkeypatch, tmp_path):
+    rig = Rig(monkeypatch, tmp_path, agent=_agent(t1=_message("all set: shelves restocked"),
+                                                  t2=_message("glad to help!")),
               answers=[{"outcome": "done", "message": "thanks!"}])
     await rig.arm()
     rig.triggers(rig.notify_at("later", "2026-11-10T14:00:00Z", "a new order", channel="Craftweb"))
     ctx = await rig.run(rig.step())
 
+    assert rig.record(ctx)["end_reason"] == "user_done" and len(rig.sent) == 2
+    assert "[Mon Nov 9, 2:00 PM UTC] Linda: thanks!" in rig.sent[1]
+    assert len(rig.reads) == 1 and rig.events(ctx, "user_sim_read")[0]["ends_run"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_blank_done_ends_a_one_sitting_run_at_once(monkeypatch, tmp_path):
+    rig = Rig(monkeypatch, tmp_path, agent=_agent(t1=_message("all set")),
+              answers=[{"outcome": "done", "message": "  "}])
+    await rig.arm()
+    ctx = await rig.run(rig.step())
+
     assert rig.record(ctx)["end_reason"] == "user_done" and len(rig.sent) == 1
-    assert rig.events(ctx, "user_sim_read")[0]["ends_run"] is True
 
 
 @pytest.mark.asyncio
@@ -239,7 +251,7 @@ async def test_done_in_a_multi_day_run_is_recorded_and_the_run_goes_on_to_end_ti
     assert rig.events(ctx, "user_sim_read")[0]["ends_run"] is False
     assert [m["text"] for m in rig.reads[1]["assistant_messages"]] == ["airline moved Dev"]
     assert record["counts"]["user_dones"] == 1
-    assert "perfect ty" not in repr(rig.sent)  # a done never reaches the agent
+    assert any("Linda: perfect ty" in t for texts in rig.sent for t in texts)
 
 
 @pytest.mark.parametrize("end_time,ends", [(None, True), ("P3D", False)], ids=["one sitting", "multi-day"])

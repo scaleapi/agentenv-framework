@@ -22,20 +22,26 @@ A plug-in is one Python module with:
 
 ``setup`` runs once per run; the step sets ``model``, ``system_prompt`` and ``output_format`` on the user sim agent.
 ``person`` is ``{"key": name, "name", "first", "email", "time_zone", "description", "versions", "output_format",
-"permissions", "keep_private"}``, with ``time_zone`` the run's zone (the user's, else the world clock's, else UTC).
+"permissions", "keep_private", "opening"}``, with ``time_zone`` the run's zone (the user's, else the world clock's,
+else UTC) and ``opening`` the user's opening request, ``{"at": RFC 3339 UTC, "text"}``, so ``setup`` can write it
+into the system prompt. The opening is also the first line of the first read's ``you_sent``.
 
 ``answer`` runs once per read, at the time the user would read. ``read`` is ``{"time": RFC 3339 UTC,
 "assistant_messages": [{"at", "text"}], "phone": [{"at", "channel", "text"}], "you_sent": [{"at", "text"}],
-"done_ends_run": bool}``: the agent's message_user texts since the last read, what triggers sent ``user_phone``, the
-user's own lines (the opening request, ``user_says`` lines, ``final``), never anything meant for the agent, and
-whether done ends the run (one-sitting) or is only recorded (multi-day). ``history`` is every earlier
+"done_ends_run": bool}``: the agent's message_user texts since the last read, oldest first; what triggers sent
+``user_phone`` since the last read, its sender in ``channel`` (``"Gmail · Carol Reyes (Mom)"``) as in the agent's
+alerts; the user's own lines (the opening request, ``user_says`` lines, ``final``) each at the time it was sent; never
+anything meant for the agent; and whether done ends the run (one-sitting) or is only recorded (multi-day). The user
+sim reads only after the agent has used message_user. ``history`` is every earlier
 ``{"read", "answer"}``, oldest first. ``ask(text)`` sends one turn to the user sim agent (one session per run) and
 returns ``{"text", "structured", "trajectory_url"}``, or ``{"text": None, "structured": None, "error"}``.
 
 ``answer`` returns ``{"outcome": "reply" | "no_reply" | "done", "message": str, "used": str | None}``, and may add
 ``input``, ``raw``, ``score``, ``schema_errors``, ``turns``, ``shown`` and ``past_turn_cap``, which the step records.
-A reply with text is held for the response time, then wakes the agent; ``done`` is never sent to the agent and ends
-only a one-sitting run. When the last ``ask`` of a read returned an error, the run ends (``user_sim_error``).
+A ``reply`` or ``done`` with text is held for the response time, then wakes the agent as the user's message; the
+recorded extras (``used``, ``score``, ...) never reach the agent. ``done`` ends a one-sitting run after the agent's
+turn on that message, or at once when it has no text, with no further reads; in a multi-day run it is only recorded.
+When the last ``ask`` of a read returned an error, the run ends (``user_sim_error``).
 """
 from __future__ import annotations
 

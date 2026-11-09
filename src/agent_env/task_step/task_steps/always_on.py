@@ -14,8 +14,9 @@ it in the run's metadata under its ``name``; a ``deploy_agent`` step deploys the
 - The user sim is asked only after the agent sent something, at the time the user would read it (``schedule``), with
   everything sent meanwhile in one read: the time, the agent's messages, what triggers sent the user's phone
   (``notify`` to ``user_phone``) and the user's own lines (the opening request, ``user_says`` lines, ``final``).
-  Nothing meant for the agent is in it. Its answer is reply / no_reply / done, and a reply is held for the response
-  time. Done ends a one-sitting run; a run whose end_time falls on a later day than its start goes on to end_time.
+  Nothing meant for the agent is in it. Its answer is reply / no_reply / done; a reply, or a done with text, is held
+  for the response time. Done ends a one-sitting run (after the agent's turn on its text); a run whose end_time falls
+  on a later day than its start goes on to end_time.
 - Scripted user lines are triggers' ``notify`` actions to the ``user_says`` recipient: sent to the agent as the
   user's message at their time.
 - The clock runs at the task's speed during turns (sync_env_clock). When nothing is due, the step advances it to the
@@ -196,6 +197,7 @@ class _Run:
         self.zone = "UTC"
         self.multi_day = False
         self.checks: dict = {"on": False}
+        self.signed_off = False  # a one-sitting run's user said done: no more reads
 
     def close(self) -> None:
         for p in self._plugin_paths:
@@ -243,6 +245,8 @@ class _Run:
             raise RuntimeError(f"always_on: no deployed env offers {EXT_USER_CHAT_URI} (message_user); rebuild its "
                                "gateway from a branch that has user_chat.py")
         now = await self.now()
+        self.opening = {"at": _iso(now), "text": self._effective_prompt()}
+        self.person["opening"] = self.opening
         t0 = await self._t0() or now
         self.end = _end_instant(step.end_time, t0) if step.end_time else None
         self.multi_day = self.end is not None and self.end.astimezone(self.tz).date() > t0.astimezone(self.tz).date()
@@ -520,7 +524,7 @@ class _Run:
         return timedelta(minutes=float(rt.get(mode, rt.get("free", 0))))
 
     def _schedule_read(self) -> None:
-        if not self.unread or self.read_at is not None or self.gave_up:
+        if not self.unread or self.read_at is not None or self.gave_up or self.signed_off:
             return
         first_at = min(_utc(m["at"]) for m in self.unread if m.get("at")) if any(m.get("at") for m in self.unread) \
             else datetime.now(timezone.utc)
@@ -533,10 +537,10 @@ class _Run:
     # ---- the loop -------------------------------------------------------------------------------------------
     async def loop(self, now: datetime) -> None:
         step = self.step
-        first = self._effective_prompt()
-        self.you_sent.append({"at": _iso(now), "text": first})
+        self.you_sent.append(dict(self.opening))
         due = await take_due(self.notification_envs, self.recipient) if self.notification_envs else []
-        await self.wake([*delivered_parts(due), self._user_part(now, first, opening=True)],
+        await self.wake([*delivered_parts(due), self._user_part(_utc(self.opening["at"]), self.opening["text"],
+                                                                 opening=True)],
                         woke_by=[f"notification:{d['channel']}" for d in due] + ["user_request"],
                         notifications=[{k: d.get(k) for k in ("at", "channel", "source", "source_id", "to")}
                                        for d in due])
@@ -624,7 +628,8 @@ class _Run:
         parts = delivered_parts(due)
         user_msgs = sorted([{"at": l["at"] or _iso(now), "text": l["text"], "kind": l.get("source", "user_says"),
                              "trigger_id": l.get("trigger_id")} for l in lines]
-                           + [{"at": _iso(r["deliver_at"]), "text": r["text"], "kind": "user_reply"} for r in replies],
+                           + [{"at": _iso(r["deliver_at"]), "text": r["text"], "kind": "user_reply",
+                               "done": r.get("done", False)} for r in replies],
                            key=lambda m: _utc(m["at"]))
         for m in user_msgs:
             parts.append(self._user_part(_utc(m["at"]), m["text"]))
@@ -633,13 +638,15 @@ class _Run:
                 self.log("scripted_user_line", virtual_time=m["at"], text=m["text"], kind=m["kind"],
                          trigger_id=m.get("trigger_id"))
             else:
-                self.log("user_reply_delivered", virtual_time=m["at"], text=m["text"])
+                self.log("user_reply_delivered", virtual_time=m["at"], text=m["text"], done=m["done"])
         if final and self.step.final_reminder:
             parts.append(_step_part(self.step.final_reminder.format(first=self.person["first"]), "final_reminder"))
         woke_by = [f"notification:{d['channel']}" for d in due] + [f"{m['kind']}" for m in user_msgs]
         await self.wake(parts, woke_by=woke_by, notifications=[{k: d.get(k) for k in
                                                                 ("at", "channel", "source", "source_id", "to")}
                                                                for d in due])
+        if self.signed_off and any(m.get("done") for m in user_msgs):
+            self.end_reason = self.end_reason or "user_done"
 
     async def wake(self, parts: list[dict], woke_by: list[str], notifications: Optional[list] = None) -> None:
         step = self.step
@@ -832,19 +839,23 @@ class _Run:
                          user_sim_turns=ans.get("turns", len(calls)), shown=ans.get("shown"),
                          past_turn_cap=ans.get("past_turn_cap"))
         outcome = ans.get("outcome")
-        if outcome == "reply" and (ans.get("message") or "").strip():
+        said = (ans.get("message") or "").strip()
+        if outcome in ("reply", "done") and said:
             deliver = now + latency
-            self.held.append({"deliver_at": deliver, "text": ans["message"]})
+            self.held.append({"deliver_at": deliver, "text": ans["message"], "done": outcome == "done"})
             self.last_reply_at = deliver
-            self.replies += 1
             entry["deliver_at"] = _iso(deliver)
+        if outcome == "reply" and said:
+            self.replies += 1
             max_replies = self.us.get("max_replies")
             if max_replies and self.replies >= int(max_replies):
                 self.gave_up = True
                 self.log("user_gave_up", replies=self.replies)
         elif outcome == "done":
             entry["ends_run"] = not self.multi_day
-            if not self.multi_day:
+            if not self.multi_day and said:
+                self.signed_off = True
+            elif not self.multi_day:
                 self.end_reason = "user_done"
         if calls and calls[-1].get("error"):
             self.end_reason = self.end_reason or "user_sim_error"
