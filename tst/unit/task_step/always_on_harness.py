@@ -4,10 +4,12 @@ answers are scripted. Shared by the always_on step's tests."""
 
 from __future__ import annotations
 
+import json
 from typing import Any, Callable, Optional
 
 import httpx
 
+from agent_env.config import get_config
 from agent_env.env.env import DeployedGatewayEnv
 from agent_env.env.gateway import gateway as gw_mod
 from agent_env.env.gateway.constants import AGENT_ENV_ROLE_HEADER, GATEWAY_EXTENSIONS, WELL_KNOWN_PATH
@@ -116,10 +118,19 @@ class Rig:
         return ctx
 
     def record(self, ctx: TaskStepContext) -> dict:
+        """The step's summary in the run's metadata."""
         return ctx.metadata[ao.ALWAYS_ON_KEY]["week"]
 
+    def stored(self, ctx: TaskStepContext) -> dict:
+        """The step's full record, its timeline included, as the object store holds it."""
+        url = self.record(ctx)["object_url"]
+        return json.loads(get_config().get_object_store_at(url).get(url))
+
+    def timeline(self, ctx: TaskStepContext) -> list[dict]:
+        return self.stored(ctx)["timeline"]
+
     def events(self, ctx: TaskStepContext, name: str) -> list[dict]:
-        return [e for e in self.record(ctx)["timeline"] if e["event"] == name]
+        return [e for e in self.timeline(ctx) if e["event"] == name]
 
     # ---- fakes -----------------------------------------------------------------------------------------------------
     async def _send_and_wait(self, url, parts, *, before_send=None, **kw):

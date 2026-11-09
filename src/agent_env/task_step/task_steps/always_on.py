@@ -28,7 +28,8 @@ it in the run's metadata under its ``name``; a ``deploy_agent`` step deploys the
   check's wake counts toward ``max_wakes``.
 - At end_time the user's ``final`` line (with a reminder to use message_user) gives the agent one last turn. The run
   ends on end_time, done (one sitting), max_wakes, or nothing left to wake the agent; the reason is recorded.
-- Everything goes into a timeline in ``metadata["always_on"][step_id]`` and the object store.
+- The run's metadata keeps a summary in ``metadata["always_on"][step_id]`` (small enough for a running job to report
+  back); the full timeline goes to the object store, at the summary's ``object_url``.
 """
 from __future__ import annotations
 
@@ -90,6 +91,10 @@ CHECKS_RULE = ("You only run when something wakes you. To do something at a late
 CHECK_MIN_INTERVAL = "PT3H"
 EMPTY_REPLIES = frozenset({"(The assistant's reply was empty.)"})  # a harness's stand-in for an empty final reply
 TIME_LINE = "It's {when}. Any other date you see is the computer's clock, not the task's."
+# The run's metadata keeps a summary; the full timeline goes to the object store. When storing fails, the summary keeps
+# this many of the last events instead, without these fields.
+TIMELINE_TAIL = 20
+BULKY_EVENT_FIELDS = ("input", "raw", "read", "parts_text", "changes")
 
 
 # ==================================================================================================================
@@ -930,20 +935,36 @@ class _Run:
                   "user_sim": {"name": step.user_sim, "version": self.version, "model": self.us.get("model"),
                                "agent_name": self.us.get("agent_name"), **self.user_setup},
                   "end_time": _iso(self.end) if self.end else None, "time_zone": self.zone,
-                  "multi_day": self.multi_day, "timeline": self.timeline}
+                  "multi_day": self.multi_day, "real_seconds": round(time.time() - self.t0_real, 1),
+                  "timeline_events": len(self.timeline)}
         record["settings"] = {"stay_quiet": step.stay_quiet, "nudge": step.nudge, "wake_reminder": step.wake_reminder,
                               "scheduled_checks": self.checks}
+        await self._store_timeline(record)
+        ctx.metadata.setdefault(ALWAYS_ON_KEY, {})[step.id] = record
+        final_text = "\n\n".join([m["text"] for m in self.last_messages] + ([self.last_plain] if self.last_plain else []))
+        self._append_prompt_response(final_text)
+
+    async def _store_timeline(self, record: dict) -> None:
+        """Store the run's full record, its timeline included, and give ``record`` (what stays in the run's metadata,
+        kept small for the job's report) its ``object_url``. When it can't be stored, ``record`` keeps the last
+        ``TIMELINE_TAIL`` events instead, their bulky fields dropped."""
+        step, ctx = self.step, self.ctx
         try:
             store = get_config().get_object_store()
             key = (f"{get_config().get_artifact_key_prefix()}always_on_timeline/"
                    f"instance_id={ctx.instance_id or 'adhoc'}/{step.id}-{uuid.uuid4().hex[:8]}.json")
+            full = {**record, "timeline": self.timeline}
             record["object_url"] = await asyncio.to_thread(store.put, key,
-                                                           json.dumps(record, indent=1, default=str).encode(),
+                                                           json.dumps(full, indent=1, default=str).encode(),
                                                            content_type="application/json")
         except Exception as e:
             logger.warning(f"always_on: could not store the timeline: {e}")
-        ctx.metadata.setdefault(ALWAYS_ON_KEY, {})[step.id] = record
-        final_text = "\n\n".join([m["text"] for m in self.last_messages] + ([self.last_plain] if self.last_plain else []))
+            record["timeline_store_error"] = f"{type(e).__name__}: {str(e)[:300]}"
+            record["timeline_tail"] = [{k: v for k, v in event.items() if k not in BULKY_EVENT_FIELDS}
+                                       for event in self.timeline[-TIMELINE_TAIL:]]
+
+    def _append_prompt_response(self, final_text: str) -> None:
+        step, ctx = self.step, self.ctx
         traj = next((u for u in reversed(self.per_turn_trajectory_urls) if u), None)
         ctx.prompt_responses.append(PromptResponse(
             prompt_id=step.prompt_id, response=final_text, prompt_text=step.prompt,
