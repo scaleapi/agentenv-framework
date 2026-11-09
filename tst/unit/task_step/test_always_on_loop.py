@@ -304,3 +304,37 @@ async def test_a_user_and_a_world_in_different_time_zones_are_refused(monkeypatc
 def test_both_steps_are_registered():
     registry = get_task_step_registry()
     assert registry["always_on"] is ao.AlwaysOnTaskStep and registry["user_sim"] is UserSimTaskStep
+
+
+# ---- the user's schedule --------------------------------------------------------------------------------------------
+
+def _available(monkeypatch, tmp_path, schedule: dict, at: str):
+    rig = Rig(monkeypatch, tmp_path)
+    run = ao._Run(rig.step(), rig.context(user={"schedule": schedule}))
+    run.us = {"schedule": schedule}
+    run.tz = ao.ZoneInfo("America/New_York")
+    got, mode = run._available(ao._utc(at))
+    return ao._iso(got), mode
+
+
+@pytest.mark.parametrize("at,read_at,mode", [
+    ("2026-11-10T14:00:00Z", "2026-11-10T14:00:00Z", "work"),     # Tue 9:00 AM: awake
+    ("2026-11-11T04:00:00Z", "2026-11-11T04:00:00Z", "free"),     # Tue 11:00 PM: still up
+    ("2026-11-11T05:15:00Z", "2026-11-11T05:15:00Z", "free"),     # Wed 12:15 AM: still up
+    ("2026-11-11T05:45:00Z", "2026-11-11T13:00:00Z", "morning"),  # Wed 12:45 AM: asleep until 8:00
+    ("2026-11-11T10:00:00Z", "2026-11-11T13:00:00Z", "morning"),  # Wed 5:00 AM: asleep until 8:00
+])
+def test_a_night_that_starts_after_midnight_keeps_the_evening_awake(monkeypatch, tmp_path, at, read_at, mode):
+    night_owl = {"wake": "08:00", "sleep": "00:30", "work": ["09:00", "18:00"]}
+    assert _available(monkeypatch, tmp_path, night_owl, at) == (read_at, mode)
+
+
+def test_back_to_back_busy_blocks_and_nights_never_leave_a_read_inside_one(monkeypatch, tmp_path):
+    blocks = [("2026-11-10T08:00", "2026-11-10T09:00"), ("2026-11-10T09:00", "2026-11-10T10:00"),
+              ("2026-11-10T10:00", "2026-11-10T23:45"),  # into the night: she reads next morning
+              ("2026-11-11T07:30", "2026-11-11T08:30"), ("2026-11-11T08:30", "2026-11-11T09:30"),
+              ("2026-11-11T09:30", "2026-11-11T10:00")]
+    schedule = {"wake": "07:30", "sleep": "23:30", "work": ["09:00", "18:00"],
+                "busy": [{"start": a, "end": b} for a, b in reversed(blocks)]}  # latest first: one block a pass
+    # Tue 8:00 AM in New York: six blocks and a night in a row, more than the old four passes
+    assert _available(monkeypatch, tmp_path, schedule, "2026-11-10T13:00:00Z") == ("2026-11-11T15:00:00Z", "morning")

@@ -714,7 +714,8 @@ class _Run:
 
     def _available(self, t: datetime) -> tuple[datetime, str]:
         """When the user would first look at a message that arrived at ``t``, and in what mode (morning, work, free):
-        while awake and not busy. No schedule: at once, mode "now"."""
+        while awake and not busy. Sleep may run past midnight (wake 08:00, sleep 00:30). No schedule: at once, mode
+        "now"."""
         sched = self._schedule()
         if not sched:
             return t, "now"
@@ -726,17 +727,21 @@ class _Run:
                 for b in sched.get("busy") or []]
         lt = t.astimezone(tz)
         mode = None
-        for _ in range(4):
+        # Each pass moves past a busy block or a night, or ends: a block once passed is behind, and a night always ends
+        # at a waking time; so the passes are bounded by two per block and one more.
+        for _ in range(2 * len(busy) + 2):
             moved = False
             for start, stop in busy:
                 if start <= lt < stop:
                     lt, moved = stop, True
             hm = (lt.hour, lt.minute)
-            if hm >= sleep or hm < wake:
+            if _asleep(hm, wake, sleep):
                 day = lt.date() if hm < wake else lt.date() + timedelta(days=1)
                 lt, mode, moved = datetime(day.year, day.month, day.day, *wake, tzinfo=tz), "morning", True
             if not moved:
                 break
+        else:
+            raise RuntimeError(f"always_on: the user's schedule never frees a time to read after {_iso(t)}")
         if mode is None:
             hm = (lt.hour, lt.minute)
             mode = "work" if DAYS[lt.weekday()] in work_days and work[0] <= hm < work[1] else "free"
@@ -1631,6 +1636,14 @@ def _at_work(row: dict) -> dict:
     """A trigger still at work, as the run's record keeps it."""
     return {k: row.get(k) for k in ("id", "status", "running", "pending", "executor_calls", "waits", "resumes_at")
             if row.get(k) not in (None, [], 0)}
+
+
+def _asleep(hm: tuple[int, int], wake: tuple[int, int], sleep: tuple[int, int]) -> bool:
+    """Whether local time ``hm`` falls in the night from ``sleep`` to ``wake``; a sleep time after midnight (00:30 with
+    a wake at 08:00) makes the night the span between them. Equal times: never asleep."""
+    if sleep > wake:
+        return hm >= sleep or hm < wake
+    return sleep <= hm < wake
 
 
 def _hm(text: str) -> tuple[int, int]:
