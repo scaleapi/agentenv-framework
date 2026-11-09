@@ -5,7 +5,9 @@
 # windows guest, which has no virtio drivers, boots from secure-boot UEFI with Microsoft's keys and a fresh TPM 2.0,
 # its disk on AHCI, an SSD to Windows, whose TRIM frees the overlay's clusters, its seed on a removable USB drive, since
 # Windows mounts a FAT filesystem with no partition table on removable media alone, an e1000e NIC, a 1920x1080 display
-# and, under KVM, Hyper-V enlightenments.
+# and, under KVM, Hyper-V enlightenments. A linux-desktop guest, a Wayland desktop, on amd64 alone, boots as a linux one
+# does and gets a virtio GPU at the computer's resolution (its AGENTENV_SETTING_RESOLUTION, 1920x1080 when it has none),
+# 4 CPUs and 8192 MiB unless sized, TRIM to its disk, and the systemd credentials VM_CREDENTIALS names over SMBIOS.
 #   VM_DISK        the disk, /disk/disk.img by default, which may be backed by another beside it; one ending .zst is
 #                  expanded onto this machine's disk first
 #   VM_BASE        the base of a thin VM_DISK ending .zst, compressed too, which a provider carries beside it: expanded
@@ -18,7 +20,7 @@
 #                  for here: socat serves each on 127.0.0.1 here, through to the host, as a local grant server's
 #   VM_TRUST       a folder of trust files, a local transfer CA's, that go into the seed as its trust/ folder
 #   VM_ARCH        the disk's arch, amd64 or arm64; this machine's by default
-#   VM_CPUS, VM_MEMORY_MB   its size: 2 and 4096 by default
+#   VM_CPUS, VM_MEMORY_MB   its size: 2 and 4096 by default, 4 and 8192 for a linux-desktop guest
 #   VM_REQUIRE_KVM when set, fail rather than emulate where KVM can't run the disk
 #   VM_STATE       where its overlay, its seed and an expanded disk go: /var/lib/agentenv-vm by default
 #   VM_KEEP        a builder's overlay: boot on this file, kept across the guest's restarts and after it powers off,
@@ -27,6 +29,8 @@
 #   VM_MEDIA       for a windows guest, an installer ISO on a CD-ROM it boots first; Enter is pressed for its first
 #                  minute, past the ISO's "press any key"
 #   VM_FILES       for a windows guest, a folder whose files it finds on a removable FAT drive
+#   VM_CREDENTIALS for a linux-desktop guest, systemd credentials, space-separated NAME=<base64> pairs, as a builder's
+#                  boot passes the key its ssh takes before the disk holds it
 # launch reset: boot the running computer afresh on a new overlay, its environment the VM_ENV_<NAME>=<base64> lines on
 # stdin, returning once its new QEMU has started; its ports stay up throughout.
 # launch forward PORT: serve PORT of this machine's host to the running computer as VM_HOST_PORTS does, for another
@@ -75,6 +79,28 @@ if [ "$guest" != windows ] && [ -n "${VM_MEDIA:-}${VM_FILES:-}" ]; then
     echo "launch: VM_MEDIA and VM_FILES are for a windows guest, not $guest" >&2
     exit 2
 fi
+if [ "$guest" != linux-desktop ] && [ -n "${VM_CREDENTIALS:-}" ]; then
+    echo "launch: VM_CREDENTIALS are for a linux-desktop guest, not $guest" >&2
+    exit 2
+fi
+# resolution: the display's WIDTHxHEIGHT, the computer's resolution setting's, 1920x1080 when it has none.
+resolution() {
+    local value=1920x1080
+    if [ -n "${VM_ENV_AGENTENV_SETTING_RESOLUTION:-}" ]; then
+        value=$(printf '%s' "$VM_ENV_AGENTENV_SETTING_RESOLUTION" | base64 -d)
+    fi
+    if [[ ! "$value" =~ ^[1-9][0-9]*x[1-9][0-9]*$ ]]; then
+        echo "launch: the computer's resolution, $value, isn't WIDTHxHEIGHT" >&2
+        return 2
+    fi
+    echo "$value"
+}
+
+cpus=${VM_CPUS:-2} memory=${VM_MEMORY_MB:-4096}
+if [ "$guest" = linux-desktop ]; then
+    cpus=${VM_CPUS:-4} memory=${VM_MEMORY_MB:-8192}
+    resolution > /dev/null || exit 2
+fi
 work=$state/boot
 mkdir -p "$control"
 rm -f "$control/qemu.pid" "$control/reset" "$control/next.env"
@@ -87,7 +113,10 @@ elif [ -n "${VM_REQUIRE_KVM:-}" ]; then
     exit 3
 fi
 case "$guest/$arch" in
-    linux/*) ;;
+    linux/* | linux-desktop/amd64) ;;
+    linux-desktop/*)
+        echo "launch: a linux-desktop guest boots on amd64 alone, not $arch" >&2
+        exit 2 ;;
     windows/amd64) [ "$accel" = kvm ] && cpu=host,hv_relaxed,hv_vapic,hv_spinlocks=0x1fff,hv_time ;;
     windows/*)
         echo "launch: a windows guest boots on amd64 alone, not $arch" >&2
@@ -192,11 +221,21 @@ boot() {
             cp /usr/share/AAVMF/AAVMF_CODE.fd "$work/code.fd"
             truncate -s 64M "$work/code.fd" "$work/vars.fd"
         fi
-        devices=(-drive file="$booted",format=qcow2,if=virtio
+        local trim=""
+        [ "$guest" = linux-desktop ] && trim=,discard=unmap,detect-zeroes=unmap
+        devices=(-drive file="$booted",format=qcow2,if=virtio$trim
                  -drive file="$work/seed.img",format=raw,if=virtio,readonly=on
                  -device virtio-net-pci,netdev=net -device virtio-rng-pci)
+        if [ "$guest" = linux-desktop ]; then
+            local size
+            size=$(resolution)
+            devices+=(-vga none -device "virtio-vga,xres=${size%x*},yres=${size#*x}")
+            for credential in ${VM_CREDENTIALS:-}; do
+                devices+=(-smbios "type=11,value=io.systemd.credential.binary:$credential")
+            done
+        fi
     fi
-    "${machine[@]}" -cpu "$cpu" -smp "${VM_CPUS:-2}" -m "${VM_MEMORY_MB:-4096}" \
+    "${machine[@]}" -cpu "$cpu" -smp "$cpus" -m "$memory" \
         -drive if=pflash,format=raw,file="$work/vars.fd" -netdev "user,id=net$forwards" "${devices[@]}" \
         -display none -serial stdio ${restart[@]+"${restart[@]}"} &
     echo "$!" > "$control/qemu.pid"

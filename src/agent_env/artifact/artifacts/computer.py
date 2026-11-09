@@ -22,6 +22,8 @@ from pydantic import (
     model_validator,
 )
 
+from agentenv_protocol.computer.platform import entry_for, platform_key
+
 from agent_env.artifact.artifact import Artifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.ref import ArtifactRef
@@ -89,11 +91,13 @@ class WindowsOS(BaseModel):
 
 #: The OS types a computer is, by ``os.type``.
 OS_TYPES: dict[str, type[BaseModel]] = {"linux": LinuxOS, "macos": MacOS, "windows": WindowsOS}
-#: The forms each OS type's computers have: a Linux computer is a container and may be a disk too, a macOS one a VM
-#: bundle alone, a Windows one a disk alone.
-OS_FORMS = {"linux": ("container", "disk"), "macos": ("vm_bundle",), "windows": ("disk",)}
-#: The init that starts a disk's programs on each OS type with a disk form.
-DISK_INITS = {"linux": "supervisord", "windows": "agentenv-session"}
+#: The forms each platform's computers have, by platform key, a distribution's replacing its OS type's: a Linux computer
+#: is a container and may be a disk too, an Omarchy one a disk alone, as Hyprland needs a GPU a container doesn't get, a
+#: macOS one a VM bundle alone, a Windows one a disk alone. The first is the one every computer of it has.
+OS_FORMS = {"linux": ("container", "disk"), "linux/omarchy": ("disk",), "macos": ("vm_bundle",), "windows": ("disk",)}
+#: The init that starts a disk's programs on each platform with a disk form, by platform key: on Linux the boot recipe's
+#: supervisord, on Omarchy systemd's user units in its graphical session, on Windows agentenv-session.
+DISK_INITS = {"linux": "supervisord", "linux/omarchy": "systemd", "windows": "agentenv-session"}
 
 
 class Session(BaseModel):
@@ -136,17 +140,28 @@ class ContainerForm(BaseModel):
     input_channel: Literal["env"]
 
 
+class DiskSource(BaseModel):
+    """The VM image a disk's base is built from: a distribution's own, fetched by ``url`` and checked by ``sha256``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    url: str = Field(pattern=r"^https://\S+$")
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class DiskForm(BaseModel):
     """The computer as a disk a VM boots from UEFI, whose init reads deploy settings from a NoCloud seed
     (``input_channel``): on Linux, an EFI system partition holding one UKI and its root filesystem, the image's own
-    ``init`` started; on Windows, agentenv-session at the session user's sign-in. With no ``image``, it's made when
-    composed: the container form's root filesystem on agent-env's Linux boot recipe, or Windows installed from
-    Microsoft's media on this machine (``computers/disk/windows``)."""
+    ``init`` started; on Omarchy, systemd's user units in its graphical session; on Windows, agentenv-session at the
+    session user's sign-in. With no ``image``, it's made when composed: from its ``source``, a distribution's own VM
+    image, on its recipe; else from the container form's root filesystem on agent-env's Linux boot recipe, or Windows
+    installed from Microsoft's media on this machine (``computers/disk/windows``)."""
 
     model_config = ConfigDict(extra="forbid")
 
     image: ArtifactRef | None = None
-    init: Literal["supervisord", "agentenv-session"]
+    source: DiskSource | None = None
+    init: Literal["supervisord", "systemd", "agentenv-session"]
     input_channel: Literal["nocloud"]
     firmware: list[Literal["efi"]] = Field(default=["efi"], min_length=1)
     min_disk_gb: int = Field(ge=1, description="Its virtual size, which a deploy's disk is at least")
@@ -238,21 +253,29 @@ class ComputerArtifact(Artifact):
 
     @model_validator(mode="after")
     def _forms_fit_os(self) -> Self:
-        allowed = OS_FORMS[self.os.type]
+        platform = platform_key(self.os.type, getattr(self.os, "distribution", None))
+        allowed, kind = entry_for(OS_FORMS, platform), platform if platform in OS_FORMS else self.os.type
         if others := [form for form in FORMS if getattr(self.forms, form) is not None and form not in allowed]:
-            raise ValueError(f"forms.{others[0]}: a {self.os.type} computer's forms are {' and '.join(allowed)}")
+            raise ValueError(f"forms.{others[0]}: a {kind} computer's forms are {' and '.join(allowed)}")
         if getattr(self.forms, allowed[0]) is None:
-            raise ValueError(f"forms.{allowed[0]} is required: every {self.os.type} computer has one")
+            raise ValueError(f"forms.{allowed[0]} is required: every {kind} computer has one")
         if self.os.type == "macos" and self.arch != ["arm64"]:
             raise ValueError(f"arch: a macOS VM bundle runs on Apple silicon, arm64 alone, not {self.arch}")
         if self.os.type == "windows" and self.arch != ["amd64"]:
             raise ValueError(f"arch: a Windows computer is amd64 alone, not {self.arch}")
-        if self.forms.disk is not None and self.forms.disk.init != DISK_INITS[self.os.type]:
-            raise ValueError(f"forms.disk.init: a {self.os.type} disk's init is {DISK_INITS[self.os.type]}, not "
-                             f"{self.forms.disk.init}")
-        if self.os.type == "windows" and self.forms.disk.image is not None:
-            raise ValueError("forms.disk.image: a Windows disk is installed from Microsoft's media on the machine that "
-                             "composes it, so it names no image")
+        disk = self.forms.disk
+        if disk is not None and disk.init != (init := entry_for(DISK_INITS, platform)):
+            raise ValueError(f"forms.disk.init: a {platform if platform in DISK_INITS else self.os.type} disk's init is "
+                             f"{init}, not {disk.init}")
+        if disk is not None and disk.image is not None and disk.source is not None:
+            raise ValueError("forms.disk: a disk names an image or the source its base is built from, not both")
+        if self.os.type == "windows" and (disk.image is not None or disk.source is not None):
+            raise ValueError("forms.disk: a Windows disk is installed from Microsoft's media on the machine that "
+                             "composes it, so it names no image or source")
+        if (self.os.type == "linux" and disk is not None and self.forms.container is None and disk.image is None
+                and disk.source is None):
+            raise ValueError("forms.disk: with no container form to be made from, a Linux disk names its image or the "
+                             "source its base is built from")
         return self
 
     @field_validator("forms", mode="before")
@@ -295,7 +318,9 @@ class ComputerArtifact(Artifact):
             checks["vm_bundle"] = _unread(computer.arch, "a VM bundle is read by the host that boots it")
         if disk is not None and disk.image is None:
             checks["disk"] = _unread(computer.arch, "it's installed from Microsoft's media when composed"
-                                     if computer.os.type == "windows" else "it's made from the container form when composed")
+                                     if computer.os.type == "windows" else
+                                     "it's built from its source when composed, which checks its os-release"
+                                     if disk.source is not None else "it's made from the container form when composed")
         elif disk is not None:
             checks["disk"] = (_inspect(computer.disk_image(), computer.arch,
                                        functools.partial(_read_disk, disk.min_disk_gb))
