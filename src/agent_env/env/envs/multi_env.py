@@ -1,6 +1,7 @@
 """Multi environment combining multiple MCP servers, websites and computers."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -40,8 +41,9 @@ from agent_env.env.env import DeployedEnv, Env, gateway_url_of
 from agent_env.env.gateway import GatewayMode
 from agent_env.env.envs._deployment import (
     as_builtin, builtin_provider_for, close_deployed, close_replaced, deploy_refusal, deploy_through_provider, host_staging_refusal,
-    plugin_provider_like_a_builtin, provider_or_class,
+    plugin_provider_like_a_builtin, provider_or_class, reset_server_data,
 )
+from agent_env.env.store import get_env_instance_store
 from agent_env.env.envs import _multi_computers
 from agent_env.env.envs.computer import COMPUTER_ENV_TYPE
 from agent_env.env.envs.computer.utils import sites
@@ -268,6 +270,15 @@ class MultiEnv(Env):
 
     @classmethod
     async def from_deployed_env(cls, deployed: DeployedEnv) -> MultiEnv:
+        env = await cls._attached(deployed)
+        if env.computer_envs:
+            await env._computers.reattach(deployed)
+        return env
+
+    @classmethod
+    async def _attached(cls, deployed: DeployedEnv) -> MultiEnv:
+        """The multi env ``deployed`` records, attached to it as its loads are: its gateway reattached, and its MCP
+        servers and websites handed the provider and the record; its computers aren't reattached."""
         env = Env.get(deployed.env_id, deployed.env_version)
         if not isinstance(env, MultiEnv):
             raise TypeError(f"Expected MultiEnv, got {type(env).__name__}")
@@ -282,8 +293,6 @@ class MultiEnv(Env):
         _hand_record_to_child_envs(env, deployed)
         env._instance_id = deployed.instance_id
         env._mcp_server_name = deployed.mcp_server_name
-        if env.computer_envs:
-            await env._computers.reattach(deployed)
         return env
 
     async def load_environment_artifact(self, environment_artifact: EnvironmentArtifact) -> None:
@@ -885,11 +894,27 @@ class MultiEnv(Env):
         return context.instance_id
 
     async def reset(self, deployed: DeployedEnv) -> None:
-        """Reset each computer as it resets alone: rebooted, and its ``tools`` given again. Its MCP servers and websites
-        have no reset alone, so they stay as they are, and a multi env with no computers has none."""
-        if not self.computer_envs:
-            raise NotImplementedError(f"multi env '{self.id}' has no computers to reset")
-        await self._computers.reset(deployed)
+        """Reset every child env at once, each as it resets alone: a computer reboots from its own record and gets its
+        ``tools`` again, and an MCP server or website is emptied of what loads put in, so a task loads again after; one
+        serving no reset takes no load, and stays as it is. A child that fails to reset fails the reset, each such one
+        named, once the others have reset. Which services the instance's loads put in is forgotten, so the next load
+        puts each in again rather than resuming."""
+        services = await type(self)._attached(deployed) if self.mcp_server_envs or self.website_envs else self
+        resets = [*((f"computer {name!r}", call) for name, call in self._computers.resets(deployed)),
+                  *((f"MCP server {env.environment_name!r}", reset_server_data(env, mcp=True))
+                    for env in services.mcp_server_envs),
+                  *((f"website {env.environment_name!r}", reset_server_data(env, mcp=False))
+                    for env in services.website_envs)]
+        results = await asyncio.gather(*(call for _, call in resets), return_exceptions=True)
+        _forget_loaded_environments(deployed.instance_id)
+        if interrupted := next((r for r in results if isinstance(r, BaseException) and not isinstance(r, Exception)), None):
+            raise interrupted
+        for (child, _), result in zip(resets, results):
+            if result is False:
+                logger.info(f"multi env '{self.id}': {child} serves no reset and takes no load, so it stays as it is")
+        if failed := [(child, result) for (child, _), result in zip(resets, results) if isinstance(result, Exception)]:
+            raise RuntimeError(f"multi env '{self.id}': " + "; ".join(f"{child} failed to reset: {error!r}"
+                                                                     for child, error in failed)) from failed[0][1]
 
     async def close(self) -> None:
         await self._computers.close()
@@ -906,6 +931,18 @@ class MultiEnv(Env):
             except Exception as e:  # a cancellation propagates, and keeps the sandbox for the next close()
                 logger.warning(f"Failed to terminate sandbox {self._sandbox.sandbox_id}: {e}")
             self._sandbox = None
+
+
+def _forget_loaded_environments(instance_id: Optional[str]) -> None:
+    """Forget which services the instance's loads put in, so its next load puts each in again rather than resuming;
+    best-effort, since only a resumed load reads it."""
+    if not instance_id:
+        return
+    try:
+        get_env_instance_store().clear_loaded_environments(instance_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Could not forget which services instance {instance_id!r} loaded; a resumed load may skip "
+                       f"one a reset emptied: {e}")
 
 
 def _hand_provider_to_child_envs(env: MultiEnv) -> None:

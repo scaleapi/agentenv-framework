@@ -190,9 +190,8 @@ async def test_a_computer_in_a_multi_env_is_served_through_its_gateway_under_its
             # Load, snapshot and reset reach the computer through the multi env, beside its MCP server.
             uid, own = uuid.uuid4().hex[:8], DeployedEnv.from_dict(computer)
             routed = await _reaches(own, "https://shop.test/api/health")
-            await LoadArtifactTaskStep(id="seed", version=None, env_id=office.id,
-                                       artifact_id=_universe(uid, {"Documents/note.txt": b"from the universe"}).id
-                                       ).execute(context)
+            world = _universe(uid, {"Documents/note.txt": b"from the universe"})
+            await LoadArtifactTaskStep(id="seed", version=None, env_id=office.id, artifact_id=world.id).execute(context)
             note = (await inside.run(own, ["cat", "Documents/note.txt"], timeout_s=30))["stdout"]
             listed_items = await _items(deployed)
             await SnapshotEnvTaskStep(id="snap", version=None, env_id=office.id,
@@ -203,6 +202,11 @@ async def test_a_computer_in_a_multi_env_is_served_through_its_gateway_under_its
                                             timeout_s=30))["stdout"].strip()
             reset_answers = await _answers(deployed, ["desktop_computer_screenshot"])
             routed_after_reset = await _reaches(own, "https://shop.test/api/health")
+            emptied_items = await _items(deployed)
+            # A reset empties the server too, so the next attempt loads again, every service and the computer.
+            await LoadArtifactTaskStep(id="reseed", version=None, env_id=office.id, artifact_id=world.id).execute(context)
+            reloaded = ((await inside.run(own, ["cat", "Documents/note.txt"], timeout_s=30))["stdout"],
+                        await _items(deployed))
 
             await deployed.invoke(DISABLE_TOOL_EXTENSION_URI, DISABLE, {"role": DEFAULT_ROLE, "tools": [WILDCARD]})
             await deployed.invoke(ENABLE_TOOL_EXTENSION_URI, ENABLE, {"role": DEFAULT_ROLE,
@@ -229,6 +233,8 @@ async def test_a_computer_in_a_multi_env_is_served_through_its_gateway_under_its
     assert after_reset == "gone" and all(reset_answers.values()), reset_answers
     assert computer["metadata"]["computer"]["sites"]["names"]["routes"] == {"shop": ["shop.test"]}
     assert routed == routed_after_reset == "200"
+    assert "snap-x" not in emptied_items, emptied_items
+    assert reloaded[0] == "from the universe" and "snap-x" in reloaded[1], reloaded
 
 
 @pytest.mark.asyncio
