@@ -127,6 +127,8 @@ class Computers:
         self.envs = envs
         self._owner = owner  # the multi env's id, for what's logged
         self._routes: dict[str, Optional[list[str]]] = {}  # each computer routing sites: the names it routes, or all
+        self._entries: dict = {}  # the deploy's child_envs entries, by computer
+        self._live: tuple[str, ...] = ()  # the live hosts of the multi env's live websites
         self._replaced: list[ComputerEnv] = []
         self._earlier: Optional[tuple[list[ComputerEnv], list[ComputerEnv]]] = None
 
@@ -170,7 +172,7 @@ class Computers:
         deploys them again, after closing the earlier try's."""
         tries = 0
         live = tuple(live_hosts)
-        self._routes = {}
+        self._routes, self._entries, self._live = {}, dict(child_envs or {}), live
         for name, entry in (child_envs or {}).items():
             if routes_later(entry):
                 routing = entry["env_params"]["site_routing"]
@@ -197,11 +199,19 @@ class Computers:
 
     async def finish(self, deployed: DeployedEnv) -> None:
         """Once the gateway is up, before ``deployed``, the multi env's record, is registered: each computer that routes
-        the multi env's websites routes them, those its ``site_routing`` names or all, once they're ready, and launches
-        its held apps; then each computer's own record is kept in ``deployed`` (``record``)."""
+        the multi env's websites, those its ``site_routing`` names or all, has its start tabs checked against their
+        names as the cards declare them and the live hosts (``start_tab_problems``), then routes them once they're
+        ready and launches its held apps; then each computer's own record is kept in ``deployed`` (``record``)."""
         if self._routes:
             # Selected by the name each website is served as, its environment_name, which its card's name needn't be.
             routed = {name: await sites.deployed_sites([deployed], services=only) for name, only in self._routes.items()}
+            if problems := [f"computer {env.environment_name!r}: {problem}" for env in self.envs
+                            if env.environment_name in routed for problem in start_tab_problems(
+                                env, self._entries.get(env.environment_name), [
+                                    *(name for site in routed[env.environment_name]
+                                      for name in site.get("domains") or [sites.fallback_name(site["name"])]),
+                                    *self._live])]:
+                raise ValueError(f"multi env '{self._owner}': " + "; ".join(problems))
             await sites.require_ready([deployed])
             await each(self._owner, "route its sites", [(f"computer {env.environment_name!r}",
                                                       env.route_sites(routed[env.environment_name]))
