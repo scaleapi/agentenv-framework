@@ -122,7 +122,8 @@ class Probe:
         self.gtk = not self.page and platform.get("display") == "wayland"
         self.fixture = "page_fixture.py" if self.page else "wayland_fixture.py" if self.gtk else "fixture.py"
         self.windows = platform.get("os") == "windows"
-        #: The chord that selects a text box's text: Tk's Ctrl+/, which the Tk desk binds everywhere, or GTK's Ctrl+A.
+        #: The chord that selects a text box's text: Tk's Ctrl+/, which the Tk desk binds everywhere, or on the GTK
+        #: desk GTK's Ctrl+A, since a driver on Hyprland may not press punctuation keys.
         self.select_all = ["Control", "a"] if self.gtk else ["Control", "/"]
         self.desk = ""
         self.tab: str | None = None

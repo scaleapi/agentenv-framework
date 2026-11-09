@@ -64,14 +64,7 @@ def main(state_dir: Path) -> None:
         save()
         return False
 
-    def select_all(_widget, event) -> bool:
-        if event.state & Gdk.ModifierType.CONTROL_MASK and event.keyval == Gdk.KEY_slash:
-            name.select_region(0, -1)
-            return True
-        return False
-
     name.connect("key-release-event", key)
-    name.connect("key-press-event", select_all)
 
     def on_save(_button) -> None:
         state["saved_count"] += 1

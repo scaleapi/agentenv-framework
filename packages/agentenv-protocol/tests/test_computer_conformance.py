@@ -199,7 +199,8 @@ async def test_a_windows_computer_is_probed_with_the_commands_windows_has(monkey
 
 
 class WaylandDesk(FakeDesk):
-    """The GTK desk: Ctrl+A selects a text box's text, and Tk's Ctrl+/ does nothing."""
+    """The GTK desk as the probe must use it: Ctrl+A selects a text box's text, and Tk's Ctrl+/, which cua-driver
+    can't press on Hyprland, does nothing."""
 
     def press(self, keys: list[str]) -> None:
         if keys != ["Control", "/"]:
