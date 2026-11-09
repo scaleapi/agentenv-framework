@@ -1,5 +1,6 @@
-"""``task run --a2a-agent-id`` swaps only the tested agent's deploy when the task deploys a user sim, so the user sim
-keeps its own agent; a task without one keeps the run-wide pick."""
+"""``task run --a2a-agent-id`` is a run-wide pick: the CLI leaves it run-wide, at the deploy steps' stored versions, and
+``deploy_agent`` applies it to every agent but the one the task names as its user simulator (the one rule, shared with
+a hub run's pick; tst/unit/task_step/deploy_agent_user_sim_pick_test.py)."""
 
 import importlib
 import logging
@@ -15,12 +16,9 @@ from agent_env.task.teardown import TeardownReport
 task_run = importlib.import_module("agent_env.cli.task.run")  # the package's ``run`` is the click command
 pytestmark = pytest.mark.usefixtures("sigint_handled", "local_stores")
 
-AGENT = {"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "theirs"}
+AGENT = {"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "theirs", "a2a_agent_version": 4}
 USER = {"id": "user", "type": "deploy_agent", "env_ids": [], "agent_name": "human_agent", "a2a_agent_id": "sim"}
 ASK = {"id": "ask", "type": "prompt_agent", "prompt_id": "ask", "prompt": "hi", "max_conversation_turns": 3}
-LINDA = {"id": "user", "type": "deploy_agent", "agent_name": "linda", "a2a_agent_id": "sim"}
-WHO = {"id": "who", "type": "user_sim", "name": "linda", "model": "m"}
-LOOP = {"id": "loop", "type": "always_on", "prompt": "Help Linda.", "user_sim": "linda"}
 
 
 class _Recorded:
@@ -56,45 +54,11 @@ def stored(monkeypatch):
     logging.disable(logging.NOTSET)
 
 
-def _overrides(recorded):
+def test_the_pick_stays_run_wide_with_a_user_sim_deployed_and_deploy_agent_narrows_it(stored):
+    recorded = stored(AGENT, USER, ASK)
     result = CliRunner().invoke(cli, ["task", "run", "--id", "t", "--a2a-agent-id", "mine"])
     assert result.exit_code == 0, result.output
+
     [context] = recorded.contexts
-    return context.metadata["user_overrides"]
-
-
-def test_with_a_user_sim_deployed_only_the_tested_agents_deploy_is_swapped(stored):
-    overrides = _overrides(stored(AGENT, USER, ASK))
-
-    assert "a2a_agent_id" not in overrides
-    assert overrides["step_params"] == {"agent": {"a2a_agent_id": "mine"}}
-
-
-def test_without_a_user_sim_the_pick_stays_run_wide(stored):
-    overrides = _overrides(stored(AGENT, {**ASK, "max_conversation_turns": 1}))
-
+    overrides = context.metadata["user_overrides"]
     assert overrides["a2a_agent_id"] == "mine" and "step_params" not in overrides
-
-
-def test_the_agent_a_user_sim_step_names_keeps_its_own():
-    overrides = {"a2a_agent_id": "mine"}
-
-    task_run._narrow_agent_pick([AGENT, LINDA, WHO, LOOP], overrides)
-
-    assert overrides == {"step_params": {"agent": {"a2a_agent_id": "mine"}}}
-
-
-def test_a_steps_own_pick_wins_over_the_moved_one():
-    overrides = {"a2a_agent_id": "mine", "step_params": {"agent": {"a2a_agent_id": "pinned"}}}
-
-    task_run._narrow_agent_pick([AGENT, LINDA, WHO, LOOP], overrides)
-
-    assert overrides == {"step_params": {"agent": {"a2a_agent_id": "pinned"}}}
-
-
-def test_a_user_sim_named_but_not_deployed_leaves_the_pick_run_wide():
-    overrides = {"a2a_agent_id": "mine"}
-
-    task_run._narrow_agent_pick([AGENT, WHO, LOOP], overrides)
-
-    assert overrides == {"a2a_agent_id": "mine"}
