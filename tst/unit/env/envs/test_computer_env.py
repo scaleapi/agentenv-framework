@@ -1028,7 +1028,7 @@ async def test_a_computer_with_site_routing_reaches_the_websites_the_run_deploye
     assert [site.model_dump() for site in sites] == [{"name": "notes", "url": "http://localhost:8080/website/notes/",
                                                       "domains": ["notes.test"]}]
     assert options == {"user": "user", "network": None, "valid_for": timedelta(seconds=3600), "label": "desktop",
-                       "os_type": "linux"}
+                       "os_type": "linux", "display": "x11"}
     assert boots.boots[0]["environment"][HOLD_BOOT_LAUNCH_ENV] == "1"
     record = context.deployed_envs[-1].metadata["computer"]
     assert record["sites"] == {"names": {"routes": {"notes": ["notes.test"]}}, "ca": "CA PEM", "valid_for_s": 3600}
@@ -1114,6 +1114,7 @@ async def test_a_computer_routing_sites_boots_with_its_trust_until_its_driver_an
 
     assert boots.boots[0]["held"] is True and order == ["route", ("ready", {}), "display"]
     assert env_computer_provider.sites.TRUST_ENVIRONMENTS["linux"].items() <= boots.boots[0]["environment"].items()
+    assert "AGENTENV_SITE_PROXY" not in boots.boots[0]["environment"]
 
 
 @pytest.mark.asyncio

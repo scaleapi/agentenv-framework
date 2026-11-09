@@ -1,8 +1,12 @@
 """A Windows computer env, composed on this machine's Docker with KVM: its base installed from Microsoft's media once and
-kept here, then the driver installed over ssh by a provision script as its ``[install.windows]`` says and packed as a
-thin layer on the base, under a tag of its key, which a compose of the same inputs reuses while this machine holds it;
-the env's computer is a disk of the base's form. A Windows base is amd64, disk-only and started by agentenv-session."""
+kept here, then the driver and each app installed over ssh by a provision script as their ``[install.windows]`` says
+and packed as a thin layer on the base, under a tag of its key, which a compose of the same inputs reuses while this
+machine holds it, its agentenv folder left the admins' and the session user's to read; the env's computer is a disk
+of the base's form. An app's own server runs from its venv, its own folder the session user's alone, its install steps
+elevated; one it runs as the session user is refused. A Windows base is amd64, disk-only and started by
+agentenv-session. The scripts the Windows test bundle's verifiers run inside the computer are Python."""
 
+import ast
 import json
 import threading
 import time
@@ -13,12 +17,13 @@ from pathlib import Path, PureWindowsPath
 import pytest
 from pydantic import ValidationError
 
-from agentenv_protocol.computer import DriverDeclaration
+from agentenv_protocol.computer import AppDeclaration, DriverDeclaration
 from agentenv_protocol.computer.app import Download, Packages, RunScript
 
 from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.env.env import Env
+from agent_env.env.envs.computer.app_env import ComputerAppEnv
 from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
 from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.env.envs.computer.utils import composer, gate, windows_disk
@@ -27,6 +32,7 @@ from agent_env.env.envs.computer.utils.install import WindowsInstall, WindowsSer
 from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
 
 URL = "https://example.com/desk.zip"
+BUNDLE = Path(__file__).parents[3] / "integration" / "computer" / "windows"
 SERVE = "venv/Scripts/python.exe -m agentenv_protocol.computer.serve driver.py:Desk"
 WINDOWS = {"type": "windows", "version": "11", "edition": "Enterprise Evaluation"}
 DISK = {"init": "agentenv-session", "input_channel": "nocloud", "min_disk_gb": 64}
@@ -123,9 +129,37 @@ def _driver(folder: Path) -> ComputerDriverEnv:
     return Env.get(put.id, put.version)
 
 
-def _put(driver: ComputerDriverEnv, link: SandboxProvider, **settings) -> ComputerEnv:
-    return ComputerEnv.put(id="@local/~/kit/desktop", computer=_base(), driver=driver, environment_name="desktop",
-                           composing=Composing(sandbox_provider=link), computer_settings=settings or None)
+def _notes(base: ComputerArtifact | None, driver: ComputerDriverEnv | None, folder: Path,
+           steps: tuple = (("stamp", "system", None),)) -> ComputerAppEnv:
+    """A notes app on Windows: a sync service in the venv its own server gets, an elevated run script, ``steps``, its
+    install steps by name, scope and the OS types they run on, and the edition its env fixes."""
+    folder.mkdir(parents=True, exist_ok=True)
+    for name, text in (("app.py", "class Notes: ...\n"), ("setup.ps1", "'ran' | Set-Content run.txt\n")):
+        (folder / name).write_text(text)
+    files = FileArtifactUniverse.put_bundled("@local/~/kit/notes__files", files={
+        name: folder / name for name in ("app.py", "setup.ps1")})
+    declaration = AppDeclaration.model_validate({
+        "supports": [{"os": {"type": "windows", "display": ["dwm"]}, "arch": ["amd64"]}], "permissions": [],
+        "settings": {"type": "object", "properties": {}}, "skill": None, "data": [], "ready_checks": [],
+        "build_settings": {"type": "object", "properties": {"edition": {"type": "string", "default": "home"}}},
+        "install_steps": [{"name": name, "scope": scope, "os": os} for name, scope, os in steps],
+        "os": {"windows": {"install": {"run": [{"script": "setup.ps1"}], "services": [
+            {"name": "sync", "command": "venv/Scripts/python.exe sync.py"}]}}}})
+    return ComputerAppEnv.put(id="@local/~/kit/notes", environment_name="notes", module="app.py:Notes", files=files,
+                              declaration=declaration, computer=base, driver=driver, compose=False,
+                              build_settings={"edition": "pro"})
+
+
+def _put(driver: ComputerDriverEnv, link: SandboxProvider, apps: list[ComputerAppEnv] | None = None,
+         base: ComputerArtifact | None = None, **settings) -> ComputerEnv:
+    return ComputerEnv.put(id="@local/~/kit/desktop", computer=base or _base(), driver=driver,
+                           environment_name="desktop", composing=Composing(sandbox_provider=link),
+                           computer_settings=settings or None, apps=apps or [])
+
+
+def _written_json(line: str) -> object:
+    """The JSON a provision script's line writes to its file (``windows_disk._written``)."""
+    return json.loads(line.split(", '", 1)[1].rsplit("')", 1)[0].replace("''", "'"))
 
 
 def test_a_windows_env_composes_a_thin_disk_on_its_base_here_the_driver_installed_by_its_provision_script(
@@ -150,13 +184,69 @@ def test_a_windows_env_composes_a_thin_disk_on_its_base_here_the_driver_installe
     assert any(line.startswith(f"Checked {{ & '{prefix}\\venv\\Scripts\\python.exe' -m pip install") and
                f"'-r' '{prefix}\\requirements-windows.txt'" in line for line in lines)
     daemon = next(line for line in lines if "services\\driver-desk-daemon.json" in line)
-    assert json.loads(daemon.split(", '", 1)[1].rsplit("')", 1)[0].replace("''", "'")) == {
+    assert _written_json(daemon) == {
         "name": "driver-desk-daemon", "prefix": str(prefix), "command": [str(prefix / "venv/Scripts/python.exe"),
                                                                          "driver.py"], "env": {"PYTHONUTF8": "1", "MCP_PORT": "18765"}}
+    assert lines[-3:] == [
+        "Checked { icacls 'C:\\agentenv' /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' "
+        "'*S-1-5-32-545:(OI)(CI)RX' | Out-Null }",
+        "Checked { icacls 'C:\\agentenv\\logs' /grant 'user:(OI)(CI)M' | Out-Null }", ""]
     assert {"provision.ps1", "context/driver/driver.py", "context/driver/install.ps1"} <= set(files)
     computer = env.computer_artifact()
     assert computer.os.type == "windows" and computer.forms.disk.init == "agentenv-session"
     assert computer.forms.disk.image is None and env.metadata["computer"]["disks"] == {"amd64": built["image"]}
+
+
+def test_an_app_is_a_layer_of_its_own_its_server_on_its_venv_its_folder_the_session_users_its_steps_elevated(
+        docker, tmp_path):
+    base = _base()
+    driver = _driver(tmp_path / "desk")
+    env = _put(driver, FakeLinux(), apps=[_notes(base, driver, tmp_path / "notes")], base=base)
+
+    assert env.metadata["composed"]["disk"]["amd64"]["status"] == "ready"
+    ((_, script, files, _),) = docker.composed
+    prefix, lines = PureWindowsPath("C:/agentenv/apps/notes"), script.split("\r\n")
+    python = prefix / "venv" / "Scripts" / "python.exe"
+    installed = lines[lines.index("# apps/notes") + 1:]
+    assert installed[:5] == [
+        f"New-Item -ItemType Directory -Force '{prefix}' | Out-Null",
+        f"Copy-Item -Recurse -Force \"$build\\context\\apps\\notes\\*\" '{prefix}'",
+        f"Checked {{ & 'C:\\agentenv\\python\\python.exe' -m venv '{prefix}\\venv' }}",
+        f"Checked {{ & '{python}' -m pip install -q --disable-pip-version-check "
+        "'C:\\agentenv\\build\\context\\protocol[app]' }",
+        f"Checked {{ & '{python}' -m pip list --format=json | Set-Content -Encoding utf8 '{prefix}\\installed.json' }}"]
+    assert installed[5:9] == [
+        f"New-Item -ItemType Directory -Force '{prefix}\\.agentenv' | Out-Null",
+        f"Checked {{ icacls '{prefix}\\.agentenv' /inheritance:r /grant:r 'user:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' "
+        "'*S-1-5-32-544:(OI)(CI)F' | Out-Null }",
+        f"$env:PREFIX = '{prefix}'; Push-Location '{prefix}'; Checked {{ & powershell -NoProfile -ExecutionPolicy "
+        f"Bypass -File '{prefix}\\setup.ps1' }}; Pop-Location",
+        f"Push-Location '{prefix}'; Checked {{ & '{python}' -m agentenv_protocol.computer.run_install_step "
+        "'app.py:Notes' 'stamp' }; Pop-Location"]
+    services = {spec["name"]: spec for spec in (_written_json(line) for line in installed if "\\services\\" in line)}
+    environment = {"PYTHONUTF8": "1", "ENVIRONMENT_NAME": "notes"}
+    assert services == {
+        "app-notes": {"name": "app-notes", "prefix": str(prefix), "env": environment,
+                      "command": [str(python), "-m", "agentenv_protocol.computer.serve_app", "app.py:Notes"]},
+        "app-notes-sync": {"name": "app-notes-sync", "prefix": str(prefix), "env": environment,
+                           "command": [str(python), "sync.py"]}}
+    driver_lines = lines[lines.index("# driver"):lines.index("# apps/notes")]
+    assert not any(".agentenv" in line or "run_install_step" in line for line in driver_lines)
+    assert any(line.endswith("\"layers\": [\"driver\", \"apps/notes\"]}')") for line in lines)
+    assert {"context/apps/notes/app.py", "context/apps/notes/.agentenv/build_settings.json"} <= set(files)
+
+
+def test_an_apps_install_step_for_the_session_user_is_refused_on_windows_alone_or_composed(docker, tmp_path):
+    base = _base()
+    driver = _driver(tmp_path / "desk")
+    steps = (("stamp", "system", None), ("remember", "session", ["linux"]), ("greet", "session", None))
+    refused = "@local/~/kit/notes's install steps greet run as the session user, which a Windows computer can't"
+
+    with pytest.raises(ValueError, match=f"computer app env '@local/~/kit/notes': app: {refused}"):
+        _notes(base, driver, tmp_path / "notes", steps)
+    with pytest.raises(ValueError, match=rf"apps\[0\]: {refused}"):
+        _put(driver, FakeLinux(), apps=[_notes(None, None, tmp_path / "notes", steps)], base=base)
+    assert docker.composed == []
 
 
 def test_a_compose_of_the_same_inputs_reuses_the_disk_the_image_store_holds(docker, tmp_path):
@@ -344,3 +434,12 @@ def test_a_disk_is_rewritten_keeping_only_the_clusters_it_uses(monkeypatch, tmp_
     assert ran == [["docker", "run", "--rm", "-v", f"{tmp_path}:/out", *args, "--entrypoint", "qemu-img", "machine:1",
                     "convert", "-O", "qcow2", *over, "/out/disk.img", "/out/compact.img"]]
     assert (tmp_path / "disk.img").read_text() == "compacted" and not (tmp_path / "compact.img").exists()
+
+
+@pytest.mark.parametrize("artifact, script", [("check_notes", "FACTS"), ("check_session", "SESSION")])
+def test_the_scripts_the_windows_bundles_verifiers_run_inside_the_computer_are_python(artifact, script):
+    verifier = ast.parse((BUNDLE / "artifacts" / artifact / "verify.py").read_text())
+    (text,) = [node.value.value for node in verifier.body
+               if isinstance(node, ast.Assign) and [target.id for target in node.targets] == [script]]
+
+    ast.parse(text)

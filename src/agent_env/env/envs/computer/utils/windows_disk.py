@@ -28,7 +28,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, NamedTuple
 
-from agentenv_protocol.computer.apps import apps_folder
+from agentenv_protocol.computer.app import ADDRESS
 
 from agent_env.artifact.artifacts.computer import DISK_BASE_FILE, DISK_FILE, DISK_OWNER
 from agent_env.artifact.artifacts.docker_image import docker_login, push_local_image
@@ -50,7 +50,7 @@ RECIPE = Path(__file__).resolve().parents[4] / "computers" / "disk" / "windows"
 ADMIN = "agentadmin"
 #: Where agent-env's own files are on a Windows computer, and each layer's folder under them.
 ROOT = PureWindowsPath("C:/agentenv")
-DRIVERS, APPS = ROOT / "drivers", apps_folder("windows")
+DRIVERS = ROOT / "drivers"
 PYTHON = ROOT / "python" / "python.exe"
 BUILD = ROOT / "build"
 #: The fewest days of its evaluation a base may have left, as a deploy needs some.
@@ -67,7 +67,14 @@ SHUTDOWN_TIMEOUT_S = 300
 COMPACT_TIMEOUT_S = 1800
 #: How often an install looks for setup's end, a compose for the base's ssh, and a shutdown for the guest's.
 INSTALL_POLL_S, BOOT_POLL_S, SHUTDOWN_POLL_S = 15, 5, 2
+#: How many times a compose tries a layer's download, and how long it waits between, as the base's setup does: a
+#: server's errors can last minutes, as GitHub's release downloads' 504s have. A client error, 4xx, but a timeout or
+#: a rate limit, fails at once, as no retry mends a wrong URL.
+FETCH_TRIES, FETCH_PAUSE_S = 30, 10
 CPUS, MEMORY_MB = 4, 8192
+#: The groups and the account the folders under ``ROOT`` grant access to, by their well-known SIDs, as icacls takes
+#: them.
+ADMINISTRATORS, SYSTEM, USERS = "*S-1-5-32-544", "*S-1-5-18", "*S-1-5-32-545"
 #: What every service runs with: Python reading and writing files as UTF-8, as on Linux, not in Windows' code page.
 UTF8 = {"PYTHONUTF8": "1"}
 #: What a base's install prints once, as it fetches Microsoft's media.
@@ -136,7 +143,8 @@ class Base:
 @dataclass(frozen=True)
 class Part:
     """A layer as a Windows disk installs it: its folder under ``context/``, its prefix, its install, its services'
-    argv by name, the environment they're given, and what its venv installs beside its requirements."""
+    argv by name, the environment they're given, what its venv installs beside its requirements, and for an app, the
+    ``<file>:<Class>`` its own server serves and its install steps by name, each run elevated."""
 
     folder: str
     prefix: PureWindowsPath
@@ -144,6 +152,8 @@ class Part:
     services: dict[str, list[str]]
     environment: dict[str, Any]
     wants: tuple[str, ...] = ()
+    served: str | None = None
+    steps: tuple[str, ...] = ()
 
 
 def media_path() -> Path:
@@ -322,24 +332,36 @@ def expiring(expires: str | None) -> bool:
     return expires is None or datetime.fromisoformat(expires) - datetime.now(timezone.utc) < timedelta(days=RENEW_DAYS)
 
 
-def write(build: Path, parts: list[Part], build_settings: dict[str, Any], image: dict) -> str:
-    """Write ``build``'s ``provision.ps1``, which installs ``parts`` from ``build/context``, their services for
-    agentenv-session, ``build_settings`` as every service's ``AGENTENV_SETTING_<NAME>`` and ``image`` as what the disk
-    says it holds; its text, which a composed disk's key covers."""
+def write(build: Path, parts: list[Part], *, user: str, build_settings: dict[str, Any], image: dict) -> str:
+    """Write ``build``'s ``provision.ps1``, which installs ``parts`` from ``build/context``, each app's own folder the
+    session user ``user``'s, their services for agentenv-session, ``build_settings`` as every service's
+    ``AGENTENV_SETTING_<NAME>`` and ``image`` as what the disk says it holds, then leaves ``ROOT`` the admins'
+    (``_locked``); its text, which a composed disk's key covers."""
     lines = ["$ErrorActionPreference = 'Stop'", "$ProgressPreference = 'SilentlyContinue'",
              f"$build = '{BUILD}'", _CHECKED, _FETCH]
     for part in parts:
-        lines += [f"# {part.folder}", *_installed_part(part)]
+        lines += [f"# {part.folder}", *_installed_part(part, user)]
     settings = {f"AGENTENV_SETTING_{name.upper()}": str(value) for name, value in build_settings.items()}
     lines += [_written(ROOT / "build-settings.json", json.dumps(settings)),
-              _written(ROOT / "image.json", json.dumps(image, sort_keys=True))]
+              _written(ROOT / "image.json", json.dumps(image, sort_keys=True)), *_locked(user)]
     script = "\r\n".join(lines) + "\r\n"
     (build / "provision.ps1").write_text(script)
     return script
 
 
-def _installed_part(part: Part) -> list[str]:
-    """The lines that install ``part``: its files, downloads, venv, run scripts and services."""
+def _locked(user: str) -> list[str]:
+    """The lines that leave ``ROOT`` the admins', as on Linux ``/opt/agentenv`` is root's: every user reads and runs
+    what's there, none of the access ``C:\\`` gives every user to change it is left, and the session user ``user``
+    writes only the services' logs, and each app's own folder, which keeps its own access."""
+    return [_granted_alone(ROOT, {ADMINISTRATORS: "F", SYSTEM: "F", USERS: "RX"}),
+            f"Checked {{ icacls '{ROOT / 'logs'}' /grant {_ps(f'{user}:(OI)(CI)M')} | Out-Null }}"]
+
+
+def _installed_part(part: Part, user: str) -> list[str]:
+    """The lines that install ``part``: its files, downloads, venv, an app's own folder, its run scripts and install
+    steps, and its services. An app's own folder, where its server writes its address and token, holds none of the
+    access its parents give: only ``user``, the session user its server runs as, SYSTEM and Administrators have it, as
+    on Linux the session user alone reaches the server's socket."""
     prefix, install = part.prefix, part.install
     lines = [f"New-Item -ItemType Directory -Force '{prefix}' | Out-Null",
              f"Copy-Item -Recurse -Force \"$build\\context\\{PureWindowsPath(part.folder)}\\*\" '{prefix}'"]
@@ -356,14 +378,28 @@ def _installed_part(part: Part) -> list[str]:
                      + " ".join(_ps(want) for want in wants) + " }")
         lines.append(f"Checked {{ & '{venv / 'Scripts' / 'python.exe'}' -m pip list --format=json | "
                      f"Set-Content -Encoding utf8 '{prefix / 'installed.json'}' }}")
+    if part.served is not None:
+        own = prefix / ADDRESS.parent.as_posix()
+        lines += [f"New-Item -ItemType Directory -Force '{own}' | Out-Null",
+                  _granted_alone(own, {user: "F", SYSTEM: "F", ADMINISTRATORS: "F"})]
     for run in install.run or []:
         lines.append(f"$env:PREFIX = '{prefix}'; Push-Location '{prefix}'; Checked {{ & powershell -NoProfile "
                      f"-ExecutionPolicy Bypass -File '{prefix / PureWindowsPath(run.script)}' }}; Pop-Location")
+    for step in part.steps:
+        lines.append(f"Push-Location '{prefix}'; Checked {{ & '{prefix / 'venv' / 'Scripts' / 'python.exe'}' -m "
+                     f"agentenv_protocol.computer.run_install_step {_ps(part.served)} {_ps(step)} }}; Pop-Location")
     for name, argv in part.services.items():
         spec = {"name": name, "prefix": str(prefix), "command": argv,
                 "env": {**UTF8, **{key: str(value) for key, value in part.environment.items()}}}
         lines.append(_written(ROOT / "services" / f"{name}.json", json.dumps(spec)))
     return lines
+
+
+def _granted_alone(folder: PureWindowsPath, access: dict[str, str]) -> str:
+    """The line that leaves ``folder`` with only ``access``, rights by account, which what's under it inherits, and
+    none of the access its parents give."""
+    granted = " ".join(_ps(f"{account}:(OI)(CI){rights}") for account, rights in access.items())
+    return f"Checked {{ icacls '{folder}' /inheritance:r /grant:r {granted} | Out-Null }}"
 
 
 def argv(command: str, prefix: PureWindowsPath) -> list[str]:
@@ -529,6 +565,9 @@ $g = (Get-CimInstance SoftwareLicensingProduct -Filter 'PartialProductKey IS NOT
 @{build = "$($v.CurrentBuild).$($v.UBR)"; grace_minutes = [int]$g} | ConvertTo-Json -Compress"""
 _CHECKED = ("function Checked([scriptblock]$Run) { & $Run; if ($LASTEXITCODE) { throw \"provision: $Run exited "
             "$LASTEXITCODE\" } }")
-_FETCH = ("function Fetch([string]$Url, [string]$Sha256, [string]$To) { Invoke-WebRequest -UseBasicParsing -Uri $Url "
-          "-OutFile $To; $got = (Get-FileHash -Algorithm SHA256 $To).Hash.ToLower(); if ($got -ne $Sha256) { throw "
-          "\"provision: $Url came with sha256 $got, not $Sha256\" } }")
+_FETCH = ("function Fetch([string]$Url, [string]$Sha256, [string]$To) { for ($try = 1; ; $try++) { try { "
+          "Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $To; break } catch { "
+          "$status = [int]$_.Exception.Response.StatusCode; "
+          f"if ($try -ge {FETCH_TRIES} -or ($status -ge 400 -and $status -lt 500 -and $status -notin 408, 429)) "
+          f"{{ throw }}; Start-Sleep {FETCH_PAUSE_S} }} }}; $got = (Get-FileHash -Algorithm SHA256 $To).Hash.ToLower(); "
+          "if ($got -ne $Sha256) { throw \"provision: $Url came with sha256 $got, not $Sha256\" } }")
