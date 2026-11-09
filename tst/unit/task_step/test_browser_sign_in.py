@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 
-from agent_env.env.env import DeployedGatewayEnv, DeployedSandboxEnv, Env
+from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, DeployedSandboxEnv, Env
 from agent_env.env.envs.computer.app_env import ComputerAppEnv
 from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.env.envs.multi_env import MultiEnv
@@ -28,6 +28,7 @@ from agent_env.task_step.task_steps.browser.sign_in import BrowserSignInTaskStep
 
 _GATEWAY = "http://localhost:42000"
 _DESKTOP = "http://localhost:42100"
+_SITE = "http://localhost:42200"
 _SESSION = {"name": "agentenv_session_shop", "value": "signed.alex", "path": "/", "max_age": 3600, "httpOnly": True,
             "sameSite": "Lax"}
 
@@ -106,6 +107,40 @@ async def test_a_browser_in_a_multi_envs_computer_is_signed_in_with_the_sites_se
     assert context.metadata["browser_steps"]["in"] == {
         "env_id": "office", "browser": None, "site": "shop-site", "user": "alex", "cookies": ["agentenv_session_shop"],
         "names": ["shop.test", "*.shop.test"]}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("stored", "names"), [(["shop.test"], ["shop.test"]), ([], ["shop.example"])],
+                         ids=["the-names-it-stores", "the-names-its-card-declares"])
+async def test_a_website_a_plugin_deployed_alone_is_signed_in_by_the_names_it_stores_else_those_its_card_declares(
+        served, monkeypatch, stored, names):
+    """A website deployed alone, its card its own and no frontend, which deployed_sites doesn't route, beside the
+    desktop deployed alone."""
+    website = {"uri": "urn:agentenv:website/v1", "params": {
+        "endpoint": "/agentenv/ext/website", "domains": ["shop.example"],
+        "methods": {"session": {"endpoint": "/agentenv/ext/website/session"}}}}
+    site = DeployedEnv(env_id="shop-site", env_version=1, env_provider_type="plugin", instance_id="inst-shop",
+                       environment_card_url=f"{_SITE}/.well-known/agent-env.json",
+                       environment_card={"name": "shop", "url": "/agentenv", "capabilities": {"extensions": [website]}})
+    desktop = DeployedSandboxEnv(
+        env_id="desktop-computer", env_version=1, sandbox_id="sb-desktop", sandbox_type="local",
+        control_token="desktop-token", environment_card_url=f"{_DESKTOP}/.well-known/agent-env.json",
+        environment_card={"name": "desktop", "children_environments": [_browser_card()]})
+    envs = {"shop-site": WebsiteEnv(id="shop-site", version=1, server_docker_image_artifact=MagicMock(),
+                                    environment_name="shop", domains=stored),
+            "desktop-computer": SimpleNamespace(website_envs=[])}
+    monkeypatch.setattr(Env, "get", classmethod(lambda cls, id, version=None: envs[id]))
+    context = TaskStepContext(deployed_envs=[desktop, site], metadata={})
+
+    await BrowserSignInTaskStep(id="in", version=None, env_id="desktop-computer", site="shop-site",
+                                user="alex").execute(context)
+
+    session, add = served
+    assert str(session.url) == f"{_SITE}/agentenv/ext/website/session"
+    assert (str(add.url), add.headers["authorization"]) == (f"{_DESKTOP}/svc/chromium/agentenv", "Bearer desktop-token")
+    [cookie] = json.loads(add.content)["params"]["parts"][0]["data"]["cookies"]
+    assert cookie["url"] == f"https://{names[0]}/"
+    assert context.metadata["browser_steps"]["in"]["names"] == names
 
 
 @pytest.mark.asyncio

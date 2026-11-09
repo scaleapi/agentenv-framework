@@ -102,7 +102,7 @@ class BrowserSignInTaskStep(BrowserStep):
             if child is None:
                 raise RuntimeError(f"env {record.env_id!r}'s card serves no website as {website.environment_name!r}")
             found = await sites.deployed_sites([record], services=[website.environment_name])
-            names = list(dict.fromkeys(name for site in found for name in site["domains"]))
+            names = list(dict.fromkeys(name for site in found for name in site["domains"])) or _own_names(website, child)
             if not names:
                 raise RuntimeError(f"site {self.site!r} has no names a browser reaches it by")
             return record, child, names
@@ -118,6 +118,14 @@ def _served(record: DeployedEnv, service: str) -> Optional[protocol_v1.ChildEnv]
         return protocol_v1.ChildEnv(name=card.get("name"), url=card.get("url"), card=card) if card else None
     return next((child for child in protocol_v1.children(card)
                  if website_child(child) and sites.served_as(child) == service), None)
+
+
+def _own_names(website: WebsiteEnv, child: protocol_v1.ChildEnv) -> list[str]:
+    """The names ``website`` stores, else those its card's ``website/v1`` declares, for a site ``deployed_sites``
+    doesn't route: one a plugin deploys alone, with a card of its own and no frontend."""
+    declared = protocol_v1.extension_params(child.card, WEBSITE_EXTENSION_URI).get("domains")
+    names = website.domains or (declared if isinstance(declared, list) else [])
+    return list(dict.fromkeys(name for name in names if isinstance(name, str) and name))
 
 
 def scoped(cookies: list[dict], names: list[str]) -> list[dict]:
