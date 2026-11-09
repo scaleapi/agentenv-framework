@@ -557,6 +557,7 @@ def _composed_omarchy_disk(env: ComputerEnv, base: ComputerArtifact, driver: Com
                 result = {"status": "unverified", "key": key, "image": pinned, "reused": False,
                           "builder": "LocalSandboxProvider", "built_at": now()}
             return _probed(env, driver, "disk", arch, result, provider, progress)
+    return attempt.result
 
 
 def _windows_part(layer: _Layer, prefix: PureWindowsPath, services: dict[str, list[str]],
@@ -1034,12 +1035,12 @@ def _computer(env: ComputerEnv, base: ComputerArtifact, built: dict[str, str], d
               bundles: dict[str, str]) -> dict | None:
     """Write the env's computer over the images ``built``, by arch, joined into one index in the env's image store, signed
     in to it: its arches those, its OS and session the base's, its settings the base's with the env's values as their
-    defaults; with a disk form over ``disks`` when there's one for each of those arches; for a macOS base, over its VM
-    bundles alone. None when nothing built."""
+    defaults; with a disk form over ``disks`` when there's one for each of those arches; for a base that's a disk alone,
+    Windows or Omarchy, over its disks alone; for a macOS base, over its VM bundles alone. None when nothing built."""
     config = {name: setting.model_dump() for name, setting in base.config.items()}
     for name, value in env.computer_values().items():
         config[name]["default"] = value
-    if base.os.type == "windows":
+    if base.forms.container is None and base.forms.disk is not None:
         if not disks:
             return None
         return _written(env, base, [arch for arch in base.arch if arch in disks], config,
