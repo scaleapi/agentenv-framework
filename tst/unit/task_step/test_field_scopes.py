@@ -29,7 +29,7 @@ MINIMAL = {
 UNSOURCED = {
     "add_skills": "add_skills 's': skill 'notes' names no source",
     "load_artifact": "load_artifact 's': names nothing to load",
-    "run_docker_container": "run_docker_container 's': names no build context",
+    "run_docker_container": "run_docker_container 's': names no image or build context",
 }
 
 
