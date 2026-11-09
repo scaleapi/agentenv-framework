@@ -5,12 +5,17 @@ What always_on reads from the settings (``metadata["user_sims"][name]``):
 
 - ``name``; ``display_name`` (else ``name``) and ``first_name`` (else the display name's first word): how the agent's
   wakes and the plug-in name the user.
-- ``agent_name``: the deployed agent that plays the user (``ask`` below sends to it); ``model``: set on that agent.
+- ``agent_name``: the deployed agent that plays the user (``ask`` below sends to it); ``model``: set on that agent,
+  unless the run overrides it. The model used is this step's ``step_params`` ``model`` (found by the ``step_id`` the
+  step records), else the run's ``user_model`` (``task run`` / ``eval run --user-model``, a bundle's ``user_model``),
+  else this step's ``model``.
 - ``user_version``: the version handed to the plug-in; ``plugin``: ``{"file_artifact_id", "file_artifact_version",
   "params"}`` naming a plug-in file, else the built-in ``user_sim_versions``.
 - ``time_zone`` (IANA): the user's zone; ``schedule`` (``wake``, ``sleep``, ``work``, ``work_days``, ``busy``): when
-  the user reads; ``response_times`` (minutes by ``morning`` / ``work`` / ``free``): how long a reply is held;
-  ``max_replies``: after that many replies the user stops reading.
+  the user reads, where ``sleep`` may be past midnight (wake 08:00, sleep 00:30); ``response_times`` (minutes by
+  ``morning`` / ``work`` / ``free``): how long a reply is held; ``max_replies``: after that many replies the user
+  stops reading. ``schedule`` and ``response_times`` need the task's clock (``sync_env_clock``): always_on refuses to
+  start a run that sets either with no clock armed.
 - ``email``, ``description``, ``versions``, ``output_format``, ``permissions``, ``keep_private``: passed to the
   plug-in in ``person`` only. For the built-in plug-in, ``description`` is an object of sections; user_sim.md says
   how to write one. Its settings are checked when the task loads, as are ``schedule``, ``response_times`` and
@@ -41,10 +46,12 @@ sim reads only after the agent has used message_user. ``history`` is every earli
 returns ``{"text", "structured", "trajectory_url"}``, or ``{"text": None, "structured": None, "error"}``.
 
 ``answer`` returns ``{"outcome": "reply" | "no_reply" | "done", "message": str, "used": str | None}``, and may add
-``input``, ``raw``, ``score``, ``schema_errors``, ``turns``, ``shown`` and ``past_turn_cap``, which the step records.
-A ``reply`` or ``done`` with text is held for the response time, then wakes the agent as the user's message; the
-recorded extras (``used``, ``score``, ...) never reach the agent. ``done`` ends a one-sitting run after the agent's
-turn on that message, or at once when it has no text, with no further reads; in a multi-day run it is only recorded.
+``input``, ``raw``, ``score``, ``schema_errors``, ``turns``, ``retried``, ``first_answer``, ``shown`` and
+``past_turn_cap``, which the step records. A ``reply`` or ``done`` with text is held for the response time, then
+wakes the agent as the user's message; the recorded extras (``used``, ``score``, ...) never reach the agent. A reply
+that never reaches the agent (one still held when the run ends, or the answer to the last read below) is recorded with
+``delivered: false``. ``done`` ends a one-sitting run after the agent's turn on that message, or at once when it has
+no text, with no further reads; in a multi-day run it is only recorded.
 When the last ``ask`` of a read returned an error, the run ends (``user_sim_error``).
 
 After the run's last wake (the final check-in, or the wake ``max_wakes`` makes the last), the user reads the agent's
