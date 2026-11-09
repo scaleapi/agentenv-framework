@@ -480,7 +480,9 @@ async def deployed_sites(deployed_envs: list[DeployedEnv], only: Optional[list[s
     its ``website_frontend_urls``. A site those name that the stored card doesn't hold, every site of a record without
     a card or one whose card the gateway couldn't read when it composed its own, is read live at ``/svc/<name>``
     unless its env stores its names, and has no names when it serves no card (404 or no JSON). Reading one fails
-    otherwise, after ``CARD_ATTEMPTS`` tries, rather than route the site by names it didn't declare.
+    otherwise, after ``CARD_ATTEMPTS`` tries, rather than route the site by names it didn't declare. An env's sites are
+    named by their cards unless two of its cards share a name, and then each by the name it's served as
+    (``_served_names``).
     ``only`` keeps the websites of the envs it names, each of which must be deployed, and ``services`` those served
     as the names it holds, each website's environment_name, which its card's name needn't be. Sites of different
     envs that share a name are each named for their env (``_env_qualified``), so they're routed apart, while two
@@ -503,6 +505,7 @@ async def deployed_sites(deployed_envs: list[DeployedEnv], only: Optional[list[s
                     if child.find_extension(WEBSITE_EXTENSION_URI) is not None and child.name]
         stored = _stored_domains(record) if children or frontends else {}
         named = set()
+        own: list[tuple[str, dict]] = []  # the env's sites, each with the name it's served as
         for child in children:
             params = protocol_v1.extension_params(child.card, WEBSITE_EXTENSION_URI)
             browse = params.get(WEBSITE_BROWSE_URL_PARAM)
@@ -517,13 +520,14 @@ async def deployed_sites(deployed_envs: list[DeployedEnv], only: Optional[list[s
                                "isn't routed", child.name, record.env_id)
                 continue
             named.add(service)
-            found.append((record.env_id, _found(child.name, url, params, stored.get(service))))
+            own.append((service, _found(child.name, url, params, stored.get(service))))
         for name, url in frontends.items():
             if name not in named and (services is None or name in services):
                 card = {} if name in stored else await _site_card(protocol_v1, f"{gateway_url_of(record)}/svc/{name}",
                                                                    name)
                 params = protocol_v1.extension_params(card, WEBSITE_EXTENSION_URI)
-                found.append((record.env_id, _found(name, url, params, stored.get(name))))
+                own.append((name, _found(name, url, params, stored.get(name))))
+        found += [(record.env_id, site) for site in _served_names(own)]
     return _env_qualified(found)
 
 
@@ -563,6 +567,16 @@ def serves_websites(record: DeployedEnv) -> bool:
     card = getattr(record, "environment_card", None) or {}
     return bool(getattr(record, "website_frontend_urls", None)) or any(
         child.find_extension(WEBSITE) is not None and child.name for child in protocol_client.children(card))
+
+
+def _served_names(sites: list[tuple[str, dict]]) -> list[dict]:
+    """One env's ``sites``, each with the name it's served as: named by their cards, unless two cards share a name, as
+    two websites of one image whose cards name it can; then each is named as it's served, its environment_name, which
+    the env's gateway gives each a route of its own by."""
+    names = [site["name"] for _, site in sites]
+    if len(set(names)) == len(names):
+        return [site for _, site in sites]
+    return [{**site, "name": service} for service, site in sites]
 
 
 def _env_qualified(found: list[tuple[str, dict]]) -> list[dict]:
