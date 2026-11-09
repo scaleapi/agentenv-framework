@@ -29,7 +29,7 @@ from ..types import (METHOD_ADD, METHOD_GET, METHOD_RESET, SKILL_EXTENSION_URI, 
 from .app_data import AppDataPlane
 from .app_runtime import AppRuntime
 from .errors import InvalidArgument
-from .platform import applies, detect, entry_for, platform_key
+from .platform import PLATFORM_ENV, applies, detect, entry_for, platform_key
 
 #: The environment variable a computer delivers its apps' settings in: JSON of each app's values by its name.
 APP_SETTINGS_ENV = "AGENTENV_APP_SETTINGS"
@@ -623,9 +623,10 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
                  if hasattr(fn, _INSTALL_STEP_ATTR) for scope, os_types in [getattr(fn, _INSTALL_STEP_ATTR)]]
         checks = [AppReadyCheck(name=fn.__name__, os=getattr(fn, _READY_CHECK_ATTR)) for fn in methods
                   if hasattr(fn, _READY_CHECK_ATTR)]
-        declared_for = {*cls._installs, *(key.partition("/")[0] for key in cls._installs)}
+        installed_os = {key.partition("/")[0] for key in cls._installs}
         for method in [*steps, *checks]:
-            if unknown := [os_type for os_type in method.os or [] if os_type not in declared_for]:
+            if unknown := [os_type for os_type in method.os or []
+                           if entry_for(cls._installs, os_type) is None and os_type not in installed_os]:
                 raise ValueError(f"{cls.__name__}.{method.name} runs on {unknown[0]!r}, which {cls.__name__} declares "
                                  f"no install for; it declares {', '.join(cls._installs) or 'none'}")
         return AppDeclaration(
@@ -685,7 +686,10 @@ def _built_settings(cls: type[ComputerAppEnvironment], os_type: Optional[str]) -
 
 
 def _here() -> Optional[str]:
-    """The platform this runs on, by the key an app's parts for it are under (``platform_key``)."""
+    """The platform this runs on, by the key an app's parts for it are under (``platform_key``): the one its computer
+    was composed for (``PLATFORM_ENV``), else what it detects."""
+    if composed := os.environ.get(PLATFORM_ENV):
+        return composed
     running = detect()
     return platform_key(running.os, running.distribution)
 

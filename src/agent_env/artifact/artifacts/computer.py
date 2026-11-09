@@ -46,6 +46,10 @@ DISK_BASE_FILE, DISK_GUEST_FILE = "disk/base.img", "disk/guest"
 SettingValue = str | int | float | bool
 
 
+#: A distribution, as os-release's ID names it here: lowercase letters, digits and "-", from a letter.
+DISTRIBUTION = r"^[a-z][a-z0-9-]*$"
+
+
 class LinuxOS(BaseModel):
     """A Linux base: its distribution and version (``rolling`` for one with no versions, such as Arch), and the display
     server its desktop runs, ``none`` for one with no desktop, whose driver's screen is something else, a page say."""
@@ -53,7 +57,7 @@ class LinuxOS(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     type: Literal["linux"] = "linux"
-    distribution: str = Field(pattern=r"^[a-z][a-z0-9-]*$", description="os-release's ID: ubuntu, debian, fedora, arch")
+    distribution: str = Field(pattern=DISTRIBUTION, description="os-release's ID: ubuntu, debian, fedora, arch")
     version: str = Field(min_length=1, description="os-release's VERSION_ID, or rolling")
     display: Literal["x11", "wayland", "none"]
     build: str | None = None

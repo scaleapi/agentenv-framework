@@ -20,7 +20,7 @@ from agentenv_protocol.computer.app import AptSource, Download, LayerPath, Packa
 from agentenv_protocol.computer.platform import entry_for, platform_key, supported
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from agent_env.artifact.artifacts.computer import OS_TYPES
+from agent_env.artifact.artifacts.computer import DISTRIBUTION, OS_TYPES
 
 #: The highest port a layer can listen on.
 MAX_PORT = 65535
@@ -171,8 +171,6 @@ DRIVER_INSTALLS: dict[str, type[Install]] = {"linux": Install, "macos": MacInsta
 APP_INSTALLS: dict[str, type[Install]] = {"linux": AppInstall, "macos": MacAppInstall, "windows": WindowsAppInstall}
 
 
-#: A distribution as /etc/os-release names it (ID): lowercase letters, digits, ".", "_" and "-".
-_DISTRIBUTION = re.compile(r"[a-z0-9][a-z0-9._-]*")
 _Entry = TypeVar("_Entry")
 
 
@@ -180,7 +178,7 @@ def platform_problem(key: str) -> Optional[str]:
     """What's wrong with ``key`` as what an install or a known failure is for: an OS type agent-env composes, or one
     of its distributions as ``<os>/<distribution>`` (``linux/omarchy``), whose entry replaces its OS type's there."""
     os_type, slash, distribution = key.partition("/")
-    if os_type in OS_TYPES and (not slash or _DISTRIBUTION.fullmatch(distribution)):
+    if os_type in OS_TYPES and (not slash or re.fullmatch(DISTRIBUTION, distribution)):
         return None
     return (f"an OS type agent-env composes: {', '.join(OS_TYPES)}, or one of its distributions as "
             "<os>/<distribution>, such as linux/omarchy")

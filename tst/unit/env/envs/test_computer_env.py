@@ -1826,6 +1826,16 @@ def test_the_locks_debs_and_wheels_are_mounted_into_the_runs_that_install_them_n
         build["files"])
 
 
+def test_an_app_that_declares_for_a_distribution_is_told_the_platform_it_was_composed_for(base, driver, docker,
+                                                                                         tmp_path):
+    _app(base, driver, tmp_path / "mail", steps=[("index_mail", "session", "linux/ubuntu")])
+
+    build = {build["platform"]: build for build in docker.builds}["linux/arm64"]
+    assert ("RUN --network=none cd /opt/agentenv/apps/mail && AGENTENV_PLATFORM=linux/ubuntu venv/bin/python -m "
+            "agentenv_protocol.computer.run_install_step app.py:Mail index_mail") in build["dockerfile"]
+    assert 'AGENTENV_PLATFORM="linux/ubuntu"' in build["confs"]["agentenv-app-mail.conf"]
+
+
 def test_an_apps_packages_downloads_scripts_and_steps_are_fetched_at_put_and_installed_offline(base, driver, docker,
                                                                                                tmp_path, monkeypatch):
     tool = b"#!/bin/sh\necho tool\n"

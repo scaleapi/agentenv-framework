@@ -792,8 +792,10 @@ class MailApp(ComputerAppEnvironment):
   `@install("linux", Linux(...), ...)`. `@linux(distribution="omarchy", ...)`, or
   `@install("linux/omarchy", ...)`, declares for one distribution, by its /etc/os-release ID, what
   replaces the OS type's declaration there. On the computer the class reads what's declared for the
-  platform it runs on (`platform.detect()`): its distribution's, else its OS type's. An install step
-  or ready check's `os=` names OS types or distributions, and one for an OS type runs on all of it.
+  platform its computer was composed for, which the composer sets as `AGENTENV_PLATFORM` for an app
+  that declares anything for a distribution, else the one it runs on (`platform.detect()`): its
+  distribution's, else its OS type's. An install step or ready check's `os=` names OS types or
+  distributions, and one for an OS type runs on all of it.
 - **`launch=Launch(...)`** says how it starts in the desktop session: with it (`at="boot"`) or when
   the agent opens it (`"demand"`). `ready=Ready(...)` says when it's ready, within `timeout_s` of its
   launch: a window matching `launch.window` by its class, instance or title (on Hyprland, a Wayland

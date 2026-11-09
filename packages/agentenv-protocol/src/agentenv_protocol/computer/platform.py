@@ -13,6 +13,9 @@ PREDICATE_KEYS = ("os", "distribution", "version", "arch", "display")
 
 _ARCH = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
 _Entry = TypeVar("_Entry")
+#: The platform (``platform_key``) the computer's composer built an app for, which its server and install steps read in
+#: place of what /etc/os-release says, so they act on the install the image holds; unset outside a composed computer.
+PLATFORM_ENV = "AGENTENV_PLATFORM"
 _OS = {"linux": "linux", "darwin": "macos", "win32": "windows"}
 
 
