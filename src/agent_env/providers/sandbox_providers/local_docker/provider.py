@@ -685,9 +685,9 @@ def _copy_into_container(source: Path, container: str, destination: str) -> None
 
 
 def local_sandbox_ids() -> list[str]:
-    """The ids of the local sandboxes with a work folder under the sandbox root. A folder is made before anything its
-    sandbox runs, so a supervisor that gave a run its own ``AGENT_ENV_LOCAL_SANDBOX_DIR`` cleans up after killing it by
-    terminating each id here (``LocalSandboxProvider().terminate_sandbox``) and removing its folder."""
+    """The ids of the local sandboxes with a work folder under the sandbox root, made before anything its sandbox runs:
+    a supervisor that gave a run its own ``AGENT_ENV_LOCAL_SANDBOX_DIR`` terminates each after killing it, removing its
+    folder, and keeps one whose ``LocalSandboxProvider().terminate_sandbox`` raises, not fully gone, to retry."""
     root = _local_sandbox_root_path()
     if not root.is_dir():
         return []
