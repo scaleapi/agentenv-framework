@@ -44,6 +44,7 @@ from agent_env.env import env as env_module
 from agent_env.env.env import DeployedEnv, EnvCapabilityUnsupported
 from agent_env.env.envs.computer.utils import (boot, builder, composed, composer, gate, inside, packages, params,
                                                probing, resolve_in_base)
+from agent_env.env.envs.computer.utils import sites as computer_sites
 from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.envs.computer.utils.probing import _probe
 from agent_env.env.envs.computer.env import COMPUTER_TOOLS, ComputerEnv
@@ -1044,6 +1045,8 @@ async def test_a_computer_deployed_to_route_its_sites_later_boots_held_and_route
     await env.route_sites([{"name": "notes", "url": "http://localhost:8080/website/notes/", "domains": ["notes.test"]}])
 
     assert held == "1" and routed_before == []
+    # The trust its held apps launch with, which a boot knowing its sites would give it, before they're known.
+    assert boots.boots[0]["environment"].items() >= computer_sites.TRUST_ENVIRONMENTS["linux"].items()
     ((sandbox, sites, options),) = routes
     assert sandbox is boots.sandboxes[0] and [site.name for site in sites] == ["notes"]
     assert options["valid_for"] == timedelta(seconds=3600)

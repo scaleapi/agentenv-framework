@@ -24,6 +24,7 @@ import logging
 import re
 import shlex
 import time
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -278,10 +279,15 @@ def trust_files(os_type: str) -> dict[str, str]:
     return {"ca": environment["NODE_EXTRA_CA_CERTS"], "bundle": environment["SSL_CERT_FILE"]}
 
 
-def trust_environment(os_type: str, sites: list[Site]) -> dict[str, str]:
+def trust_environment(os_type: str, sites: list[Site], *, later: bool = False) -> dict[str, str]:
     """The variables naming the trust agentenv adds, for an ``os_type`` computer routing ``sites``: none when every name
-    is served over plain HTTP, as a ``.localhost`` one is, since no CA is made then to write the files they'd name."""
-    return dict(TRUST_ENVIRONMENTS[os_type]) if any(route.tls_names for route in site_table(sites).routes) else {}
+    is served over plain HTTP, as a ``.localhost`` one is, since no CA is made then to write the files they'd name.
+    With ``later``, a computer booting before the sites it routes are known, every one: the apps it holds launch after
+    routing, with the variables it booted with, and its base holds the files from boot, the public roots and no CA
+    until routing adds one."""
+    if later or any(route.tls_names for route in site_table(sites).routes):
+        return dict(TRUST_ENVIRONMENTS[os_type])
+    return {}
 
 
 def proxy_config(table: SiteTable, issued: Issued, *, user: Optional[str], os_type: str,
@@ -445,7 +451,8 @@ def routing_problems(report: dict) -> list[str]:
                for store, result in report["trust"].get("java", {}).items() if "error" in result])
 
 
-async def deployed_sites(deployed_envs: list[DeployedEnv], only: Optional[list[str]] = None) -> list[dict]:
+async def deployed_sites(deployed_envs: list[DeployedEnv], only: Optional[list[str]] = None, *,
+                         services: Optional[Collection[str]] = None) -> list[dict]:
     """The websites a run has deployed, as ``env_params.sites`` names them: each ``website/v1`` child env of a deployed
     env's stored card, with the route its composer serves it to a browser at (its params' ``browse_url``, joined onto
     the env's address), and its names: those its env stores (a website env's ``domains``), else those its params
@@ -454,9 +461,10 @@ async def deployed_sites(deployed_envs: list[DeployedEnv], only: Optional[list[s
     a card or one whose card the gateway couldn't read when it composed its own, is read live at ``/svc/<name>``
     unless its env stores its names, and has no names when it serves no card (404 or no JSON). Reading one fails
     otherwise, after ``CARD_ATTEMPTS`` tries, rather than route the site by names it didn't declare.
-    ``only`` keeps the websites of the envs it names, each of which must be deployed. Sites of different envs that
-    share a name are each named for their env (``_env_qualified``), so they're routed apart, while two that claim one
-    domain are still refused."""
+    ``only`` keeps the websites of the envs it names, each of which must be deployed, and ``services`` those served
+    as the names it holds, each website's environment_name, which its card's name needn't be. Sites of different
+    envs that share a name are each named for their env (``_env_qualified``), so they're routed apart, while two
+    that claim one domain are still refused."""
     from agentenv_protocol import client as protocol_v1
     from agentenv_protocol.website import WEBSITE_BROWSE_URL_PARAM, WEBSITE_EXTENSION_URI
 
@@ -479,6 +487,9 @@ async def deployed_sites(deployed_envs: list[DeployedEnv], only: Optional[list[s
             params = protocol_v1.extension_params(child.card, WEBSITE_EXTENSION_URI)
             browse = params.get(WEBSITE_BROWSE_URL_PARAM)
             service = _served_as(child)
+            if services is not None and service not in services:
+                named.add(service)
+                continue
             url = (_joined(address, browse) if isinstance(browse, str) and browse and address
                    else frontends.get(service))
             if url is None:
@@ -488,7 +499,7 @@ async def deployed_sites(deployed_envs: list[DeployedEnv], only: Optional[list[s
             named.add(service)
             found.append((record.env_id, _found(child.name, url, params, stored.get(service))))
         for name, url in frontends.items():
-            if name not in named:
+            if name not in named and (services is None or name in services):
                 card = {} if name in stored else await _site_card(protocol_v1, f"{gateway_url_of(record)}/svc/{name}",
                                                                    name)
                 params = protocol_v1.extension_params(card, WEBSITE_EXTENSION_URI)

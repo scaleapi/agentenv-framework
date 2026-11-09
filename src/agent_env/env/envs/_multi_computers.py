@@ -76,7 +76,9 @@ def refusal(computer: ComputerEnv, entry: dict, sandbox_type: str | None, websit
         routing = params["site_routing"]
         if not websites:
             return "env_params.site_routing routes the multi env's websites, and it has none"
-        if isinstance(routing, list) and (others := [env_id for env_id in routing if env_id not in websites]):
+        # A list of other than ids is the computer's own params check to refuse.
+        if isinstance(routing, list) and all(isinstance(env_id, str) for env_id in routing) and \
+                (others := [env_id for env_id in routing if env_id not in websites]):
             return (f"env_params.site_routing names {', '.join(map(repr, others))}, which isn't one of the multi env's "
                     f"websites ({', '.join(map(repr, websites))})")
     links = (build_sandbox_provider(options["sandbox_type"]) if options["sandbox_type"] else get_env_sandbox_provider()).links
@@ -169,17 +171,12 @@ class Computers:
         the multi env's websites routes them, those its ``site_routing`` names or all, once they're ready, and launches
         its held apps; then each computer's own record is kept in ``deployed`` (``record``)."""
         if self._routes:
-            found = await sites.deployed_sites([deployed])
+            # Selected by the name each website is served as, its environment_name, which its card's name needn't be.
+            routed = {name: await sites.deployed_sites([deployed], services=only) for name, only in self._routes.items()}
             await sites.require_ready([deployed])
-            envs = [env for env in self.envs if env.environment_name in self._routes]
-
-            def routed(name: str) -> list[dict]:
-                only = self._routes[name]
-                return [site for site in found if only is None or site["name"] in only]
-
             await each(self._owner, "route its sites", [(f"computer {env.environment_name!r}",
-                                                      env.route_sites(routed(env.environment_name)))
-                                                     for env in envs])
+                                                      env.route_sites(routed[env.environment_name]))
+                                                     for env in self.envs if env.environment_name in routed])
         self.record(deployed)
 
     def record(self, deployed: DeployedEnv) -> None:

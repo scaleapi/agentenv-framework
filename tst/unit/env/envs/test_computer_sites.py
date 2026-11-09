@@ -463,6 +463,9 @@ async def test_a_card_child_named_apart_from_its_service_is_matched_to_its_front
 
     assert await sites.deployed_sites([gateway]) == [
         {"name": "Notes", "url": "https://gw.example/website/notes/", "domains": ["notes.test"]}]
+    # Selected by the name it's served as, its environment_name, not its card's.
+    assert await sites.deployed_sites([gateway], services=["notes"]) == await sites.deployed_sites([gateway])
+    assert await sites.deployed_sites([gateway], services=["Notes"]) == []
 
 
 @pytest.mark.asyncio

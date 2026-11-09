@@ -168,7 +168,8 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         policy = _reaching(NetworkPolicy.from_dict(env.network) if env.network else None, sandbox_provider, reach)
         booted = await boot(
             sandbox_provider, image=build["image"], port=env.driver.port, network_policy=policy, token=token,
-            environment=_environment(env, computer, values, params, tool_prefix), timeout=ttl_seconds,
+            environment=_environment(env, computer, values, params, tool_prefix, sites_later=sites_later),
+            timeout=ttl_seconds,
             attribution=attribution,
             disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb,
             ready_s=ready_timeout(env.composed_apps(), env.computer.os.type), form=form, held=bool(params.site_routing),
@@ -345,12 +346,14 @@ def _values(computer: ComputerArtifact, values: dict) -> dict:
 
 
 def _environment(env: ComputerEnv, computer: ComputerArtifact, values: dict,
-                 params: computer_params.ComputerParams, tool_prefix: str = "") -> dict[str, str]:
+                 params: computer_params.ComputerParams, tool_prefix: str = "", *,
+                 sites_later: bool = False) -> dict[str, str]:
     return {**settings_environment(computer, values, environment_name=env.computer_name,
                                    driver_settings=params.driver_settings, tool_prefix=tool_prefix),
             **app_settings_environment(env.composed_apps(), computer_params.app_settings(env, params.app_settings),
                                        env.computer.os.type),
-            **({HOLD_BOOT_LAUNCH_ENV: "1", **sites.trust_environment(env.computer.os.type, params.sites)}
+            **({HOLD_BOOT_LAUNCH_ENV: "1", **sites.trust_environment(env.computer.os.type, params.sites,
+                                                                     later=sites_later)}
                if params.site_routing else {})}
 
 

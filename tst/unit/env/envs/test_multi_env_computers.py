@@ -215,6 +215,14 @@ def test_env_params_that_arent_a_table_are_left_to_the_computers_own_check_to_re
     assert desktop.refusals == [{"sandbox_type": None, "env_params": "invalid", "sites_later": False}]
 
 
+def test_a_site_routing_list_of_other_than_ids_is_left_to_the_computers_own_check_to_refuse(providers):
+    desktop = FakeComputer("desktop", refusal="computer env 'desktop-computer': site_routing is a list of names")
+    env_params = {"site_routing": [["shop-site"]]}
+    refusal = _multi(desktop, websites=["shop"]).child_envs_refusal({"desktop": {"env_params": env_params}})
+    assert refusal == "child_envs.desktop: computer env 'desktop-computer': site_routing is a list of names"
+    assert desktop.refusals == [{"sandbox_type": None, "env_params": env_params, "sites_later": True}]
+
+
 @pytest.mark.parametrize("env_params, later", [({"site_routing": True}, True), ({"site_routing": ["shop-site"]}, True),
                                                 ({"site_routing": True, "sites": [{"name": "shop"}]}, False)],
                          ids=["all", "named", "its-own-sites"])
@@ -614,7 +622,8 @@ async def test_a_computer_routing_sites_boots_held_and_routes_the_multi_envs_web
         gateway, providers, monkeypatch):
     log = gateway.log
     found = [{"name": "shop", "url": f"{GATEWAY}/website/shop/"}, {"name": "blog", "url": f"{GATEWAY}/website/blog/"}]
-    read = AsyncMock(side_effect=lambda records: log.append(("sites read", records[0].env_id)) or found)
+    read = AsyncMock(side_effect=lambda records, services=None: log.append(("sites read", records[0].env_id, services))
+                     or [site for site in found if services is None or site["name"] in services])
     ready = AsyncMock()
     monkeypatch.setattr(_multi_computers.sites, "deployed_sites", read)
     monkeypatch.setattr(_multi_computers.sites, "require_ready", ready)
@@ -624,8 +633,9 @@ async def test_a_computer_routing_sites_boots_held_and_routes_the_multi_envs_web
         "desktop": {"env_params": {"site_routing": True}}, "laptop": {"env_params": {"site_routing": ["blog-site"]}}})
 
     assert [deploy["sites_later"] for deploy in (desktop.deploys + laptop.deploys + kiosk.deploys)] == [True, True, False]
-    assert log[3] == ("sites read", "office") and [r.env_id for r in ready.await_args.args[0]] == ["office"]
-    assert sorted(log[4:]) == [("routed", "desktop", ["shop", "blog"]), ("routed", "laptop", ["blog"])]
+    assert log[3:5] == [("sites read", "office", None), ("sites read", "office", ["blog"])]  # by environment_name
+    assert [r.env_id for r in ready.await_args.args[0]] == ["office"]
+    assert sorted(log[5:]) == [("routed", "desktop", ["shop", "blog"]), ("routed", "laptop", ["blog"])]
     assert set(deployed.child_envs) == {"desktop", "laptop", "kiosk"}
 
 
