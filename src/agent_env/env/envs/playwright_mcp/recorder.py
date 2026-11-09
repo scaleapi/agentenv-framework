@@ -26,7 +26,6 @@ import httpx
 import uvicorn
 from PIL import Image as PILImage
 from starlette.applications import Starlette
-from starlette.background import BackgroundTask
 from starlette.responses import PlainTextResponse, StreamingResponse
 from starlette.routing import Route
 
@@ -47,11 +46,12 @@ DEFAULT_PORT = 18766
 #: The browser's MCP port, which the recorder fronts unless MCP_PORT says another, and the loopback port Playwright MCP
 #: listens on behind it unless PLAYWRIGHT_MCP_PORT says another.
 DEFAULT_MCP_PORT, DEFAULT_PLAYWRIGHT_MCP_PORT = 18765, 18767
-#: How long passing a request to Playwright MCP may wait to connect; its answer may take as long as it does.
-CONNECT_S = 10.0
-#: The headers that belong to one connection, which the front doesn't pass on.
+#: How long passing a request to Playwright MCP may wait to connect; its answer may take as long as it does. How often
+#: the front looks for Playwright MCP listening before it opens the MCP port.
+CONNECT_S, LISTENING_POLL_S = 10.0, 0.2
+#: The headers that belong to one connection, which the front doesn't pass on; Host goes on as the caller sent it.
 HOP_HEADERS = frozenset({"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer",
-                         "transfer-encoding", "upgrade", "host"})
+                         "transfer-encoding", "upgrade"})
 #: How often the browser is looked for while a recording has none.
 FIND_S = 0.5
 #: A page that hasn't changed is filmed again this often, so a still page doesn't split the recording at a gap.
@@ -325,25 +325,65 @@ def _passing_to(behind: httpx.AsyncClient) -> Callable:
             answer = await behind.send(sent, stream=True)
         except httpx.TransportError as e:
             return PlainTextResponse(f"Playwright MCP isn't answering: {type(e).__name__}: {e}\n", status_code=502)
-        headers = [(key, value) for key, value in answer.headers.multi_items() if key.lower() not in HOP_HEADERS]
-        return StreamingResponse(answer.aiter_raw(), status_code=answer.status_code, headers=dict(headers),
-                                 background=BackgroundTask(answer.aclose))
+        return PassedAnswer(answer)
 
     return passed
 
 
+class PassedAnswer(StreamingResponse):
+    """Playwright MCP's answer streamed through as it came, its repeated headers kept apart, and closed when the
+    response ends, streamed or not: a caller that leaves before the first chunk cancels the body before it starts."""
+
+    #: Hop-by-hop headers, and those uvicorn adds itself, which passing on would repeat.
+    DROPPED = frozenset(name.encode() for name in HOP_HEADERS) | {b"date", b"server"}
+
+    def __init__(self, answer: httpx.Response) -> None:
+        super().__init__(answer.aiter_raw(), status_code=answer.status_code)
+        self.raw_headers = [(key.lower(), value) for key, value in answer.headers.raw
+                            if key.lower() not in self.DROPPED]
+        self.answer = answer
+
+    async def __call__(self, scope: Any, receive: Callable, send: Callable) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await self.answer.aclose()
+
+
 async def serve() -> None:
-    """The front on the MCP port and the card alone on ``RECORDER_PORT``, one recorder behind both."""
+    """The card alone on ``RECORDER_PORT`` at once, and the front on the MCP port once Playwright MCP listens behind it,
+    so the MCP port answering, which is what the gateway's health check asks, means Playwright MCP does; one recorder
+    behind both."""
     host, recorder = os.environ.get("MCP_HOST", "0.0.0.0"), BrowserRecorder()
-    playwright_mcp = f"http://127.0.0.1:{os.environ.get('PLAYWRIGHT_MCP_PORT', DEFAULT_PLAYWRIGHT_MCP_PORT)}"
-    behind = httpx.AsyncClient(base_url=playwright_mcp, timeout=httpx.Timeout(None, connect=CONNECT_S))
-    apps = ((create_app(recorder, behind), int(os.environ.get("MCP_PORT", DEFAULT_MCP_PORT))),
-            (create_app(recorder), int(os.environ.get("RECORDER_PORT", DEFAULT_PORT))))
-    servers = [uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="warning")) for app, port in apps]
+    behind_port = int(os.environ.get("PLAYWRIGHT_MCP_PORT", DEFAULT_PLAYWRIGHT_MCP_PORT))
+    behind = httpx.AsyncClient(base_url=f"http://127.0.0.1:{behind_port}",
+                               timeout=httpx.Timeout(None, connect=CONNECT_S))
+    card = uvicorn.Server(uvicorn.Config(create_app(recorder), host=host,
+                                         port=int(os.environ.get("RECORDER_PORT", DEFAULT_PORT)), log_level="warning"))
+    front = uvicorn.Server(uvicorn.Config(create_app(recorder, behind), host=host,
+                                          port=int(os.environ.get("MCP_PORT", DEFAULT_MCP_PORT)), log_level="warning"))
+
+    async def front_once_behind_listens() -> None:
+        await _listening(behind_port)
+        await front.serve()
+
     try:
-        await asyncio.gather(*(server.serve() for server in servers))
+        await asyncio.gather(card.serve(), front_once_behind_listens())
     finally:
         await behind.aclose()
+
+
+async def _listening(port: int) -> None:
+    """Return once something accepts connections on loopback ``port``."""
+    while True:
+        try:
+            _, writer = await asyncio.open_connection("127.0.0.1", port)
+        except OSError:
+            await asyncio.sleep(LISTENING_POLL_S)
+            continue
+        writer.close()
+        await writer.wait_closed()
+        return
 
 
 def main() -> None:

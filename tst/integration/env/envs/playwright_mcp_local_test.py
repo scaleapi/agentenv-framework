@@ -1,10 +1,12 @@
 """The Playwright MCP browser's image, built for this machine and run alone: its recorder fronts the MCP port, so the
 browser's card is served there, as every MCP server serves its card, and on the recorder's own port too, where deploys
-read it until they read it at the MCP port; an MCP client lists and calls the browser's tools through the front; a
+read it until they read it at the MCP port, the card first and the MCP port only once Playwright MCP answers behind it,
+which is what the gateway's health check asks; an MCP client lists and calls the browser's tools through the front; a
 recording through the card on the MCP port films the page the client opens; and a killed recorder comes back, the front
 with it, while the MCP server behind it stays up. Needs Docker."""
 
 import asyncio
+import json
 import subprocess
 import time
 import uuid
@@ -41,6 +43,37 @@ for pid in (p for p in os.listdir("/proc") if p.isdigit() and int(p) != os.getpi
 for pid in found if len(sys.argv) > 2 else ():
     os.kill(int(pid), int(sys.argv[2]))
 print(" ".join(sorted(found, key=int)))
+"""
+
+
+#: Run in the image as it starts: watches its card port and MCP port from inside, where nothing answers for a port that
+#: isn't listening, and the moment the MCP port first accepts, opens an MCP session through it; prints whether the card
+#: answered first and the session's status.
+OPENING = """import json, socket, time, urllib.error, urllib.request
+def accepts(port):
+    try:
+        socket.create_connection(("127.0.0.1", port), 0.5).close()
+        return True
+    except OSError:
+        return False
+deadline, card_at, mcp_at = time.monotonic() + 180, None, None
+while time.monotonic() < deadline and mcp_at is None:
+    now = time.monotonic()
+    if card_at is None and accepts(18766):
+        card_at = now
+    if accepts(18765):
+        mcp_at = now
+    else:
+        time.sleep(0.05)
+body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+    "protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "opening", "version": "1"}}}).encode()
+request = urllib.request.Request("http://127.0.0.1:18765/mcp", body, {
+    "Content-Type": "application/json", "Accept": "application/json, text/event-stream"})
+try:
+    status = urllib.request.urlopen(request, timeout=30).status
+except urllib.error.HTTPError as e:
+    status = e.code
+print(json.dumps({"card_first": card_at is not None and mcp_at is not None and card_at <= mcp_at, "status": status}))
 """
 
 
@@ -113,6 +146,17 @@ async def test_the_card_is_on_the_mcp_port_and_the_recorders_and_tools_pass_thro
     assert [extension["uri"] for extension in on_mcp_port["capabilities"]["extensions"]] == [COMPUTER_RECORDING]
     assert {"browser_navigate", "browser_snapshot", "browser_take_screenshot"} <= set(names)
     assert "front" in navigated
+
+
+def test_the_mcp_port_opens_only_once_playwright_mcp_answers_behind_it_and_the_card_comes_first(image):
+    name = f"playwright-mcp-opening-{uuid.uuid4().hex[:8]}"
+    _docker("run", "-d", "--name", name, "-e", "MCP_HOST=0.0.0.0", "-e", "MCP_PORT=18765", image)
+    try:
+        opened = _docker("exec", name, "/opt/recorder/bin/python", "-c", OPENING).strip().splitlines()[-1]
+    finally:
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+
+    assert json.loads(opened) == {"card_first": True, "status": 200}, opened
 
 
 @pytest.mark.asyncio

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import io
 import itertools
 import re
@@ -251,7 +252,7 @@ async def test_the_front_serves_the_card_and_recording_and_passes_everything_els
 
     async def mcp(request):
         passed.append((request.method, request.url.path, request.url.query, await request.body(),
-                       request.headers.get("mcp-session-id")))
+                       request.headers.get("mcp-session-id"), request.headers.get("host")))
         return JSONResponse({"jsonrpc": "2.0", "id": 1, "result": {}}, headers={"Mcp-Session-Id": "s-2"})
 
     playwright = Starlette(routes=[Route("/mcp", mcp, methods=["POST", "DELETE"])])
@@ -267,7 +268,8 @@ async def test_the_front_serves_the_card_and_recording_and_passes_everything_els
     assert [e["uri"] for e in card["capabilities"]["extensions"]] == [COMPUTER_RECORDING]
     assert (answer.status_code, answer.json()["result"], answer.headers["mcp-session-id"]) == (200, {}, "s-2")
     assert passed[0][:3] == ("POST", "/mcp", "x=1") and b'"tools/list"' in passed[0][3] and passed[0][4] == "s-1"
-    assert closed.status_code == 200 and passed[1][0::4] == ("DELETE", "s-2")
+    assert passed[0][5] == "front"  # the Host the caller sent, not Playwright MCP's own address
+    assert closed.status_code == 200 and (passed[1][0], passed[1][4]) == ("DELETE", "s-2")
 
 
 @pytest.mark.asyncio
@@ -294,6 +296,88 @@ async def _serve(app) -> tuple[uvicorn.Server, int]:
     server.lifespan = config.lifespan_class(config)
     await server.startup(sockets=[sock])
     return server, sock.getsockname()[1]
+
+
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+async def _accepts(port: int) -> bool:
+    try:
+        _, writer = await asyncio.open_connection("127.0.0.1", port)
+    except OSError:
+        return False
+    writer.close()
+    return True
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("socket_enabled")
+async def test_the_card_is_served_at_once_and_the_mcp_port_opens_only_once_playwright_mcp_listens(monkeypatch):
+    mcp, card, behind = _free_port(), _free_port(), _free_port()
+    for name, port in (("MCP_PORT", mcp), ("RECORDER_PORT", card), ("PLAYWRIGHT_MCP_PORT", behind)):
+        monkeypatch.setenv(name, str(port))
+    monkeypatch.setenv("MCP_HOST", "127.0.0.1")
+    serving = asyncio.create_task(recorder.serve())
+    playwright = None
+    try:
+        for _ in range(100):
+            if await _accepts(card):
+                break
+            await asyncio.sleep(0.05)
+        await asyncio.sleep(3 * recorder.LISTENING_POLL_S)
+        card_first, mcp_first = await _accepts(card), await _accepts(mcp)
+        playwright = await asyncio.start_server(lambda reader, writer: writer.close(), "127.0.0.1", behind)
+        for _ in range(100):
+            if await _accepts(mcp):
+                break
+            await asyncio.sleep(0.05)
+        async with httpx.AsyncClient() as http:
+            served = (await http.get(f"http://127.0.0.1:{mcp}/.well-known/agent-env.json")).json()
+    finally:
+        serving.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await serving
+        if playwright is not None:
+            playwright.close()
+
+    assert (card_first, mcp_first) == (True, False)
+    assert served["name"] == "playwright-mcp"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("spec_version", ["2.0", "2.4"], ids=["disconnect-message", "send-raises"])
+async def test_an_answer_is_closed_when_its_caller_leaves_before_the_first_chunk(spec_version):
+    """Under ASGI 2.4 a caller that left shows as ``send`` raising; before it, as a disconnect message."""
+    closed = asyncio.Event()
+
+    class Held(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            await asyncio.Event().wait()
+            yield b""
+
+        async def aclose(self) -> None:
+            closed.set()
+
+    answer = httpx.Response(200, headers=[("Set-Cookie", "a=1"), ("Set-Cookie", "b=2"), ("Connection", "close")],
+                            stream=Held())
+    passed = recorder.PassedAnswer(answer)
+
+    async def receive():
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        if spec_version == "2.4":
+            raise OSError("the caller left")
+
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(passed({"type": "http", "asgi": {"spec_version": spec_version}}, receive, send), 5)
+
+    assert closed.is_set()
+    assert [value for key, value in passed.raw_headers if key == b"set-cookie"] == [b"a=1", b"b=2"]
+    assert b"connection" not in dict(passed.raw_headers)
 
 
 @pytest.mark.asyncio
