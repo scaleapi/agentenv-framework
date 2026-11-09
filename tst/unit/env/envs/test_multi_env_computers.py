@@ -21,6 +21,7 @@ from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.gateway import ExternalChild
 from agent_env.env.gateway.constants import WELL_KNOWN_PATH
+from agent_env.env.store import EnvInstanceStore
 from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider
 from agent_env.providers.env_providers.env_provider import EnvironmentProvider
 from agent_env.providers.env_state import LocalPostgresStateProvider
@@ -42,11 +43,11 @@ class FakeComputer:
     type = COMPUTER_ENV_TYPE
 
     def __init__(self, name: str, *, fails: Exception | None = None, refusal: str | None = None, log: list | None = None,
-                 apps: tuple[str, ...] = (), resets: Exception | None = None):
+                 apps: tuple[str, ...] = (), resets: Exception | None = None, loads: Exception | None = None):
         self.id, self.version, self.environment_name = f"{name}-computer", 1, name
         self.fails, self.refusal, self.log = fails, refusal, [] if log is None else log
         self.deploys, self.refusals, self._deployed, self.closes = [], [], None, 0
-        self.apps, self.reset_fails = apps, resets
+        self.apps, self.reset_fails, self.load_fails = apps, resets, loads
 
     def composed_apps(self):
         return [SimpleNamespace(environment_name=app) for app in self.apps]
@@ -56,7 +57,10 @@ class FakeComputer:
 
     async def load_environments(self, environments):
         inspect.signature(ComputerEnv.load_environments).bind(self, environments)
+        await asyncio.sleep(0.01)
         self.log.append(("loaded", self.environment_name, [environment.environment_name for environment in environments]))
+        if self.load_fails:
+            raise self.load_fails
 
     async def load_environment_artifact(self, environment_artifact):
         inspect.signature(ComputerEnv.load_environment_artifact).bind(self, environment_artifact)
@@ -447,6 +451,20 @@ async def test_a_universe_loads_each_computers_environments_after_the_services_e
     assert sorted(log[len(services):]) == [("loaded", "desktop", ["notes", "desktop"]), ("loaded", "laptop", ["laptop"])]
 
 
+@pytest.mark.asyncio
+async def test_each_computer_that_fails_to_load_is_named_once_every_computer_has_loaded():
+    log = []
+    env = _multi(FakeComputer("desktop", log=log, loads=RuntimeError("disk full")),
+                 FakeComputer("laptop", log=log, loads=ValueError("bad path")), FakeComputer("kiosk", log=log))
+
+    with pytest.raises(RuntimeError) as raised:
+        await env._computers.load([_artifact(name) for name in ("desktop", "laptop", "kiosk")])
+
+    assert str(raised.value) == ("multi env 'office': computer 'desktop' failed to load: RuntimeError('disk full'); "
+                                 "computer 'laptop' failed to load: ValueError('bad path')")
+    assert sorted(name for _, name, _ in log) == ["desktop", "kiosk", "laptop"]
+
+
 @pytest.fixture
 def server_resets(monkeypatch):
     """Each MCP server's and website's reset, as (name, mcp) in ``log``, attached to the multi env's record: False, as
@@ -471,8 +489,8 @@ def server_resets(monkeypatch):
 
     monkeypatch.setattr("agent_env.env.envs.multi_env.reset_server_data", reset)
     monkeypatch.setattr(MultiEnv, "_attached", classmethod(attached))
-    store = MagicMock(clear_loaded_environments=resets.forgotten.append)
-    monkeypatch.setattr("agent_env.env.envs.multi_env.get_env_instance_store", lambda: store)
+    monkeypatch.setattr(EnvInstanceStore, "clear_loaded_environments",
+                        lambda store, instance_id: resets.forgotten.append(instance_id))
     return resets
 
 

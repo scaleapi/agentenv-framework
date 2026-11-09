@@ -8,7 +8,7 @@ import dataclasses
 import logging
 from collections import Counter
 from collections.abc import Awaitable, Callable, Iterable, Mapping
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from agentenv_protocol.computer import tool_prefix_problem
 
@@ -106,10 +106,10 @@ class Computers:
         return next((env for env in self.envs if env.holds(environment_name)), None)
 
     async def load(self, environments: list[EnvironmentArtifact]) -> None:
-        """Load each computer's of ``environments`` into it, in its own order, the computers at once."""
-        loads = [(env, held) for env in self.envs if (held := [e for e in environments if env.holds(e.environment_name)])]
-        await _all(self._owner, "load into", [env for env, _ in loads],
-                   [env.load_environments(held) for env, held in loads])
+        """Load each computer's of ``environments`` into it, in its own order, the computers at once (``each``)."""
+        await each(self._owner, "load", [(f"computer {env.environment_name!r}", env.load_environments(held))
+                                         for env in self.envs
+                                         if (held := [e for e in environments if env.holds(e.environment_name)])])
 
     def resets(self, deployed: DeployedEnv) -> list[tuple[str, Awaitable[None]]]:
         """Each computer ``deployed``, the multi env's record, holds, by name, with its reset from its own record, as it
@@ -174,11 +174,13 @@ class Computers:
                 raise result
 
 
-async def _all(owner: str, what: str, envs: list[ComputerEnv], calls: list[Awaitable]) -> None:
-    """Await ``calls``, one per computer of ``envs``, at once, then raise the first failure, each other one logged."""
-    results = await asyncio.gather(*calls, return_exceptions=True)
-    failed = [(env, result) for env, result in zip(envs, results) if isinstance(result, BaseException)]
-    for env, error in failed[1:]:
-        logger.warning(f"multi env '{owner}': failed to {what} computer {env.environment_name!r} too: {error!r}")
-    if failed:
-        raise failed[0][1]
+async def each(owner: str, what: str, calls: list[tuple[str, Awaitable[Any]]]) -> list[Any]:
+    """Await ``calls``, each a child env's under its label, at once, and once all have ended, what each returned; or,
+    when any failed to ``what``, a RuntimeError of the multi env ``owner`` naming each that did."""
+    results = await asyncio.gather(*(call for _, call in calls), return_exceptions=True)
+    if interrupted := next((r for r in results if isinstance(r, BaseException) and not isinstance(r, Exception)), None):
+        raise interrupted
+    if failed := [(child, result) for (child, _), result in zip(calls, results) if isinstance(result, Exception)]:
+        raise RuntimeError(f"multi env '{owner}': " + "; ".join(f"{child} failed to {what}: {error!r}"
+                                                                for child, error in failed)) from failed[0][1]
+    return results

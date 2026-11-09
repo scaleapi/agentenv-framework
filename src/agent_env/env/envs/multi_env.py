@@ -1,7 +1,6 @@
 """Multi environment combining multiple MCP servers, websites and computers."""
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import re
@@ -43,7 +42,7 @@ from agent_env.env.envs._deployment import (
     as_builtin, builtin_provider_for, close_deployed, close_replaced, deploy_refusal, deploy_through_provider, host_staging_refusal,
     plugin_provider_like_a_builtin, provider_or_class, reset_server_data,
 )
-from agent_env.env.store import get_env_instance_store
+from agent_env.env import store as env_store
 from agent_env.env.envs import _multi_computers
 from agent_env.env.envs.computer import COMPUTER_ENV_TYPE
 from agent_env.env.envs.computer.utils import sites
@@ -370,12 +369,7 @@ class MultiEnv(Env):
             restored_from_snapshot = True
             # A restore swaps the whole database at once, so per-service resume state from
             # any earlier partial re-ingest no longer describes anything real.
-            if self._instance_id:
-                try:
-                    from agent_env.env.store import get_env_instance_store
-                    get_env_instance_store().clear_loaded_environments(self._instance_id)
-                except Exception as e:  # noqa: BLE001
-                    logger.warning("Could not clear resume state after a snapshot restore: %s", e)
+            _forget_loaded_environments(self._instance_id)
         else:
             import asyncio
             import time
@@ -473,8 +467,7 @@ class MultiEnv(Env):
         # Every time, never skipped as a resumed service is: the changelog a resume reads doesn't see a computer's files.
         await self._computers.load(environment_universe_artifact.get_environment_artifacts())
         if self._instance_id:
-            from agent_env.env.store import update_env_instance_environment_universe
-            update_env_instance_environment_universe(self._instance_id, environment_universe_artifact.id, environment_universe_artifact.version)
+            env_store.update_env_instance_environment_universe(self._instance_id, environment_universe_artifact.id, environment_universe_artifact.version)
 
         # Bake the snapshot that makes the NEXT load of this (images, universe) pair an
         # image swap. Deliberately placed here: after the universe stamp, which
@@ -538,9 +531,8 @@ class MultiEnv(Env):
             return set()
         try:
             from agent_env.env.snapshot_store import _check_changelog_empty
-            from agent_env.env.store import get_env_instance_store
 
-            recorded = set(get_env_instance_store().get_loaded_environments(
+            recorded = set(env_store.get_env_instance_store().get_loaded_environments(
                 self._instance_id, environment_universe_artifact.id, environment_universe_artifact.version,
             ))
             if not recorded:
@@ -572,9 +564,7 @@ class MultiEnv(Env):
         if not self._instance_id:
             return
         try:
-            from agent_env.env.store import get_env_instance_store
-
-            get_env_instance_store().record_loaded_environment(
+            env_store.get_env_instance_store().record_loaded_environment(
                 self._instance_id, environment_universe_artifact.id,
                 environment_universe_artifact.version, environment_name,
             )
@@ -901,16 +891,13 @@ class MultiEnv(Env):
                     for env in services.mcp_server_envs),
                   *((f"website {env.environment_name!r}", reset_server_data(env, mcp=False))
                     for env in services.website_envs)]
-        results = await asyncio.gather(*(call for _, call in resets), return_exceptions=True)
-        _forget_loaded_environments(deployed.instance_id)
-        if interrupted := next((r for r in results if isinstance(r, BaseException) and not isinstance(r, Exception)), None):
-            raise interrupted
+        try:
+            results = await _multi_computers.each(self.id, "reset", resets)
+        finally:
+            _forget_loaded_environments(deployed.instance_id)
         for (child, _), result in zip(resets, results):
             if result is False:
                 logger.info(f"multi env '{self.id}': {child} serves no reset and takes no load, so it stays as it is")
-        if failed := [(child, result) for (child, _), result in zip(resets, results) if isinstance(result, Exception)]:
-            raise RuntimeError(f"multi env '{self.id}': " + "; ".join(f"{child} failed to reset: {error!r}"
-                                                                     for child, error in failed)) from failed[0][1]
 
     async def close(self) -> None:
         await self._computers.close()
@@ -935,7 +922,7 @@ def _forget_loaded_environments(instance_id: Optional[str]) -> None:
     if not instance_id:
         return
     try:
-        get_env_instance_store().clear_loaded_environments(instance_id)
+        env_store.get_env_instance_store().clear_loaded_environments(instance_id)
     except Exception as e:  # noqa: BLE001
         logger.warning(f"Could not forget which services instance {instance_id!r} loaded; a resumed load may skip "
                        f"one a reset emptied: {e}")
