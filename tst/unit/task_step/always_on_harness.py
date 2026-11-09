@@ -4,16 +4,19 @@ answers are scripted. Shared by the always_on step's tests."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, Callable, Optional
 
 import httpx
+from mcp.types import CallToolResult, TextContent, Tool
 
 from agent_env.config import get_config
 from agent_env.env.env import DeployedGatewayEnv
 from agent_env.env.gateway import gateway as gw_mod
 from agent_env.env.gateway.constants import AGENT_ENV_ROLE_HEADER, GATEWAY_EXTENSIONS, WELL_KNOWN_PATH
 from agent_env.env.gateway.gateway import Gateway
+from agent_env.env.gateway.triggers import TriggerEngine
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
 from agent_env.task_step.task_steps import always_on as ao
 from agent_env.task_step.task_steps.user_sim import USER_SIMS_KEY
@@ -56,6 +59,9 @@ class Rig:
         self.plugin = plugin
         self.user_texts = list(user_texts)
         self.user_calls: list[dict] = []
+        self.contact_calls: list[dict] = []
+        self._contacts: dict[str, dict] = {}
+        self._monkeypatch = monkeypatch
         monkeypatch.setattr(ao, "POLL_SECONDS", 0)
         monkeypatch.setattr(ao, "send_and_wait", self._send_and_wait)
         monkeypatch.setattr(ao._Run, "_load_plugin", self._load_plugin)
@@ -68,8 +74,55 @@ class Rig:
                                                           "virtual_seconds_per_real_second": self.rate})
             r.raise_for_status()
 
-    def triggers(self, *triggers: dict) -> None:
-        self.gw._trigger_engine.register({"watch_roles": [ROLE], "triggers": list(triggers)})
+    def triggers(self, *triggers: dict, executors: Optional[dict] = None) -> None:
+        self.gw._trigger_engine.register({"watch_roles": [ROLE], "triggers": list(triggers),
+                                          **({"executors": executors} if executors else {})})
+
+    def contact(self, name: str, *, seconds: float, reply: Callable[["Rig", int], None],
+                timeout_seconds: Optional[float] = None, keeps_to_its_limit: bool = True) -> dict:
+        """An AI-played contact (a trigger's executor) whose every reply takes ``seconds`` of real time, then acts with
+        ``reply(rig, n)`` for its nth reply. Past its time limit the call fails, though the reply still lands, as a
+        real contact's does; one that doesn't ``keep_to_its_limit`` holds its call open until it is done. Returns its
+        executor spec, for ``triggers(executors={name: spec})``."""
+        url = f"http://{name}.test"
+        self._contacts[url] = {"name": name, "seconds": seconds, "reply": reply, "keeps": keeps_to_its_limit,
+                               "replies": 0}
+        rig = self
+
+        async def call(engine, executor, instruction, context_id):
+            contact = rig._contacts[executor["a2a_url"]]
+            rig.contact_calls.append({"contact": contact["name"], "timeout_seconds": executor["timeout_seconds"],
+                                      "context_id": context_id, "at": rig.now()})
+            contact["replies"] += 1
+            n, limit = contact["replies"], executor["timeout_seconds"]
+            if contact["keeps"] and contact["seconds"] > limit:
+                await asyncio.sleep(limit)
+                asyncio.get_running_loop().call_later(contact["seconds"] - limit, contact["reply"], rig, n)
+                return None
+            await asyncio.sleep(contact["seconds"])
+            contact["reply"](rig, n)
+            return "replied"
+
+        self._monkeypatch.setattr(TriggerEngine, "_call_executor", call)
+        return {"a2a_url": url, "role": f"contact-{name}",
+                **({"timeout_seconds": timeout_seconds} if timeout_seconds is not None else {})}
+
+    def alert(self, text: str, *, channel: str = "Gmail") -> dict:
+        """Something reaching the agent the way a contact's email alert does."""
+        return self.gw._notifications.notify(channel, text, to=ROLE)
+
+    def app_tools(self, *names: str) -> None:
+        """App tools the gateway knows of, so a trigger may watch them; nothing serves them."""
+        self.gw._server_tools.setdefault("apps", []).extend(Tool(name=n, inputSchema={"type": "object"}) for n in names)
+
+    def provoke(self, tool: str, args: Optional[dict] = None) -> None:
+        """The agent's tool call as the gateway's triggers see it."""
+        self.gw._trigger_engine.on_tool_call(ROLE, tool, args or {},
+                                             CallToolResult(content=[TextContent(type="text", text="{}")]))
+
+    async def close(self) -> None:
+        """Cancel what the gateway's triggers still have running."""
+        await self.gw._trigger_engine.cancel_scheduled()
 
     def notify_at(self, trigger_id: str, at: str, text: str, *, channel: str = "Messages", to: str = ROLE) -> dict:
         return {"id": trigger_id, "when": {"type": "time", "at": at},

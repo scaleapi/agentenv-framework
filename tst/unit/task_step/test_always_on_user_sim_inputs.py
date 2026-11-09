@@ -250,3 +250,14 @@ async def test_done_ends_run_says_whether_done_would_end_the_run(monkeypatch, tm
     await rig.run(rig.step(**({"end_time": end_time} if end_time else {})))
 
     assert [r["done_ends_run"] for r in rig.reads] == [ends]
+
+
+@pytest.mark.parametrize("end_time,ends", [(None, True), ("P3D", False)], ids=["one sitting", "multi-day"])
+@pytest.mark.asyncio
+async def test_setup_s_person_says_whether_done_ends_the_run(monkeypatch, tmp_path, end_time, ends):
+    rig = Rig(monkeypatch, tmp_path)
+    await rig.arm()
+    await rig.run(rig.step(**({"end_time": end_time} if end_time else {})))
+
+    [person] = rig.setups
+    assert person["done_ends_run"] is ends

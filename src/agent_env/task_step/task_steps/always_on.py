@@ -21,8 +21,10 @@ it in the run's metadata under its ``name``; a ``deploy_agent`` step deploys the
   user's message at their time.
 - The clock runs at the task's speed during turns (sync_env_clock). When nothing is due, the step advances it to the
   earliest of: the next trigger event, the next notification, a held reply, a pending read, or end_time, never past
-  one; then waits up to ``settle_timeout_seconds`` for triggers to finish. What comes due in the same minute wakes
-  the agent once.
+  one; then waits for the world to settle. A contact's reply (an AI-played contact, a trigger's executor) counts as in
+  progress until it ends or its time limit passes; other trigger work gets ``settle_timeout_seconds``. Contacts whose
+  task sets no time limit get ``contact_timeout_seconds``, and one trigger's replies run side by side
+  (``contact_replies_in_parallel``). What comes due in the same minute wakes the agent once.
 - The agent can schedule its own wake-ups (scheduled checks) when the run is multi-day, at least
   ``scheduled_check_min_interval`` apart; ``scheduled_checks`` turns them on or off whatever the run's length. A
   check's wake counts toward ``max_wakes``.
@@ -91,9 +93,15 @@ CHECKS_RULE = ("You only run when something wakes you. To do something at a late
 CHECK_MIN_INTERVAL = "PT3H"
 EMPTY_REPLIES = frozenset({"(The assistant's reply was empty.)"})  # a harness's stand-in for an empty final reply
 TIME_LINE = "It's {when}. Any other date you see is the computer's clock, not the task's."
+# The time limit of a contact (a trigger's executor) whose task sets none; the gateway's own default is 120 s.
+CONTACT_TIMEOUT_SECONDS = 300.0
+# Past a contact's time limit, how long the settle wait still gives its call to come back.
+CONTACT_GRACE_SECONDS = 30.0
 # The run's metadata keeps a summary; the full timeline goes to the object store. When storing fails, the summary keeps
 # this many of the last events instead, without these fields.
 TIMELINE_TAIL = 20
+PENDING_KEPT = 20
+PENDING_TEXT_CHARS = 300
 BULKY_EVENT_FIELDS = ("input", "raw", "read", "parts_text", "changes")
 
 
@@ -109,7 +117,8 @@ class AlwaysOnTaskStep(PromptAgentTaskStep):
                  stay_quiet: bool = True, nudge: bool = True, nudge_text: str = NUDGE_TEXT,
                  wake_reminder: bool = True, wake_reminder_text: str = WAKE_REMINDER_TEXT,
                  scheduled_checks: Optional[bool] = None, scheduled_check_min_interval: str = CHECK_MIN_INTERVAL,
-                 model: Optional[str] = None, model_params: Optional[dict] = None, effort: Optional[str] = None,
+                 contact_timeout_seconds: Optional[float] = CONTACT_TIMEOUT_SECONDS,
+                 contact_replies_in_parallel: bool = True, model: Optional[str] = None, model_params: Optional[dict] = None, effort: Optional[str] = None,
                  max_thinking_tokens: Optional[int] = None, harness: Optional[str] = None,
                  trajectory_output_prefix: Optional[str] = None, **prompt_fields: Any):
         for unsupported in ("max_conversation_turns", "user_agent_name", "user_a2a_url", "post_turn_hooks",
@@ -136,10 +145,14 @@ class AlwaysOnTaskStep(PromptAgentTaskStep):
         self.wake_reminder_text = wake_reminder_text
         self.scheduled_checks = scheduled_checks
         self.scheduled_check_min_interval = scheduled_check_min_interval
+        if contact_timeout_seconds is not None and not float(contact_timeout_seconds) > 0:
+            raise ValueError(f"contact_timeout_seconds must be positive (got {contact_timeout_seconds!r})")
+        self.contact_timeout_seconds = None if contact_timeout_seconds is None else float(contact_timeout_seconds)
+        self.contact_replies_in_parallel = bool(contact_replies_in_parallel)
 
     _OWN = ("user_sim", "end_time", "final", "max_wakes", "settle_timeout_seconds", "user_timeout_seconds",
             "final_reminder", "stay_quiet", "nudge", "nudge_text", "wake_reminder", "wake_reminder_text",
-            "scheduled_checks", "scheduled_check_min_interval")
+            "scheduled_checks", "scheduled_check_min_interval", "contact_timeout_seconds", "contact_replies_in_parallel")
     _PROMPT_FIELDS = ("prompt", "parts", "prompt_id", "agent_name", "timeout_seconds", "trajectory_output_prefix",
                       "model", "model_params", "system_prompt", "max_turns", "output_format", "max_thinking_tokens",
                       "effort", "harness", "agentenv_tools", "poll_interval_seconds", "context_id")
@@ -203,6 +216,8 @@ class _Run:
         self.multi_day = False
         self.checks: dict = {"on": False}
         self.signed_off = False  # a one-sitting run's user said done: no more reads
+        self.contacts: dict = {}
+        self.last_settle: dict = {}
 
     def close(self) -> None:
         for p in self._plugin_paths:
@@ -255,12 +270,14 @@ class _Run:
         t0 = await self._t0() or now
         self.end = _end_instant(step.end_time, t0) if step.end_time else None
         self.multi_day = self.end is not None and self.end.astimezone(self.tz).date() > t0.astimezone(self.tz).date()
+        self.person["done_ends_run"] = not self.multi_day  # for setup, which writes her prompt before any read
         chat_config = {"roles": [self.recipient], "user_name": self.person.get("name") or "your user"}
         if step.stay_quiet:
             chat_config["stay_quiet"] = True
         for env in self.chat_envs:
             await _call(env, EXT_USER_CHAT_URI, "config", chat_config)
         await self._configure_checks()
+        await self._configure_contacts()
         await self._configure_agents()
 
         self.conversation_id = uuid.uuid4().hex
@@ -353,6 +370,26 @@ class _Run:
         if "system_prompt" not in accepted and setup.get("system_prompt"):
             logger.warning("always_on: the user sim agent's card did not accept system_prompt; it keeps its deploy one")
 
+    async def _configure_contacts(self) -> None:
+        """On each env with triggers, let one trigger's replies run side by side (``contact_replies_in_parallel``) and
+        give contacts that set no time limit ``contact_timeout_seconds``; a gateway too old for it keeps its ways."""
+        step = self.step
+        body = {"concurrent_fires": step.contact_replies_in_parallel}
+        if step.contact_timeout_seconds is not None:
+            body["executor_timeout_seconds"] = step.contact_timeout_seconds
+        applied = []
+        for env in self.ctx.deployed_envs:
+            if not env.supports(EXT_TRIGGERS_URI, "state"):
+                continue
+            if not env.supports(EXT_TRIGGERS_URI, "config"):
+                applied.append({"env_id": env.env_id, "applied": False, "why": "the gateway has no triggers config"})
+                continue
+            got = await _call(env, EXT_TRIGGERS_URI, "config", body)
+            applied.append({"env_id": env.env_id, "applied": True, "concurrent_fires": got.get("concurrent_fires"),
+                            "executor_timeout_seconds": got.get("executor_timeout_seconds")})
+        self.contacts = {"replies_in_parallel": step.contact_replies_in_parallel,
+                         "timeout_seconds": step.contact_timeout_seconds, "envs": applied}
+
     def rules(self) -> str:
         """What the agent is told about reaching the user, and about waking itself when it can."""
         return " ".join([MESSAGE_RULES, *([QUIET_RULE] if self.step.stay_quiet else []),
@@ -432,30 +469,49 @@ class _Run:
                     raise
         stuck = await self.settle()
         self.log("clock_jump", **{"from": _iso(before), "to": _iso(target), "reason": reason,
-                                  "settled": not stuck, "still_firing": stuck})
+                                  "settled": not stuck, "still_at_work": stuck, "settle": self.last_settle})
 
-    async def settle(self) -> list[str]:
-        """Wait until no trigger still fires (bar one waiting for a later time); the ids of envs still firing."""
-        deadline = time.monotonic() + self.step.settle_timeout_seconds
+    async def settle(self) -> list[dict]:
+        """Wait until the world has settled: no trigger still at work, bar a fire waiting for a later time. A contact's
+        reply (a call to a trigger's executor) counts as in progress until it ends or its time limit passes (plus
+        ``CONTACT_GRACE_SECONDS``); any other work gets ``settle_timeout_seconds``, from the start or from the last
+        contact call seen. A gateway that reports no executor calls gets ``settle_timeout_seconds`` in all. Returns, by
+        env, the triggers still at work when it gave up (empty when the world settled); ``last_settle`` says how long
+        it waited and how many contact calls it saw."""
+        started = time.monotonic()
         envs = [e for e in await self._armed() if e.supports(EXT_TRIGGERS_URI, "state")]
-        waiting = set(range(len(envs)))
-        while waiting and time.monotonic() < deadline:
+        waiting = {i: {"live_call_seen": started, "contact_until": started} for i in range(len(envs))}
+        stuck: list[dict] = []
+        calls_seen = 0
+        while waiting:
             for i in sorted(waiting):
-                env = envs[i]
+                env, track = envs[i], waiting[i]
                 clock = await _call(env, EXT_CLOCK_URI, "state")
                 state = await _call(env, EXT_TRIGGERS_URI, "state")
-                now = _utc(clock["virtual_time"])
+                now, mono = _utc(clock["virtual_time"]), time.monotonic()
+                rows = state.get("triggers", [])
+                live = [c for row in rows for c in row.get("executor_calls") or [] if c.get("seconds_left", 0) > 0]
+                if live:
+                    calls_seen = max(calls_seen, len(live))
+                    track["live_call_seen"] = mono
+                    track["contact_until"] = max(track["contact_until"], mono + CONTACT_GRACE_SECONDS
+                                                 + max(c["seconds_left"] for c in live))
+                busy = [row for row in rows if _busy(row, now)]
                 if state.get("next_event_at") is not None and _utc(state["next_event_at"]) <= now:
                     try:
                         await _call(env, EXT_CLOCK_URI, "advance", {"virtual_time": _iso(now)}, attempts=1)
                     except Exception:
                         pass
-                elif not any(_busy(row, now) for row in state.get("triggers", [])):
-                    waiting.discard(i)
+                elif not busy:
+                    waiting.pop(i)
+                elif mono >= max(track["contact_until"], track["live_call_seen"] + self.step.settle_timeout_seconds):
+                    stuck.append({"env_id": env.env_id, "triggers": [_at_work(row) for row in busy]})
+                    waiting.pop(i)
             if waiting:
                 self.ctx.heartbeat()
                 await asyncio.sleep(POLL_SECONDS)
-        return sorted(envs[i].env_id for i in waiting)
+        self.last_settle = {"seconds": round(time.monotonic() - started, 1), "contact_calls_seen": calls_seen}
+        return stuck
 
     async def _next_world_event(self) -> Optional[datetime]:
         out = []
@@ -736,7 +792,7 @@ class _Run:
             await self._nudge(plain)
         stuck = await self.settle()
         if stuck:
-            self.log("settle_timeout", envs=stuck)
+            self.log("settle_timeout", wake=self.wakes, still_at_work=stuck, settle=self.last_settle)
         self._schedule_read()
 
     async def _nudge(self, closing: str) -> None:
@@ -901,11 +957,30 @@ class _Run:
                 "trajectory_url": traj}
 
     # ---- the end --------------------------------------------------------------------------------------------
+    async def _contacts_at_work(self) -> list[dict]:
+        """By env, the triggers still at work now: contact replies in progress or waiting for a later time."""
+        out = []
+        for env in self.ctx.deployed_envs:
+            if not env.supports(EXT_TRIGGERS_URI, "state"):
+                continue
+            try:
+                state = await _call(env, EXT_TRIGGERS_URI, "state", attempts=2)
+            except Exception as e:
+                out.append({"env_id": env.env_id, "error": f"{type(e).__name__}: {str(e)[:200]}"})
+                continue
+            rows = [_at_work(row) for row in state.get("triggers", [])
+                    if row.get("status") in IN_FLIGHT or row.get("running") or row.get("executor_calls")
+                    or row.get("pending")]
+            if rows:
+                out.append({"env_id": env.env_id, "triggers": rows})
+        return out
+
     async def finish(self) -> None:
         step, ctx = self.step, self.ctx
         now = await self.now()
+        self.pending = {"contact_replies_in_progress": await self._contacts_at_work()}
         self.log("end", reason=self.end_reason, virtual_time=_iso(now), wakes=self.wakes, replies=self.replies,
-                 unread_at_end=len(self.unread), held_at_end=len(self.held))
+                 unread_at_end=len(self.unread), held_at_end=len(self.held), pending=self.pending)
         conv = conversation_store.get_conversation(self.conversation_id)
         if conv and conv.get("status") == "active":
             conversation_store.mark_closed(self.conversation_id)
@@ -936,9 +1011,9 @@ class _Run:
                                "agent_name": self.us.get("agent_name"), **self.user_setup},
                   "end_time": _iso(self.end) if self.end else None, "time_zone": self.zone,
                   "multi_day": self.multi_day, "real_seconds": round(time.time() - self.t0_real, 1),
-                  "timeline_events": len(self.timeline)}
+                  "timeline_events": len(self.timeline), "pending_at_end": _bounded(self.pending)}
         record["settings"] = {"stay_quiet": step.stay_quiet, "nudge": step.nudge, "wake_reminder": step.wake_reminder,
-                              "scheduled_checks": self.checks}
+                              "scheduled_checks": self.checks, "contacts": self.contacts}
         await self._store_timeline(record)
         ctx.metadata.setdefault(ALWAYS_ON_KEY, {})[step.id] = record
         final_text = "\n\n".join([m["text"] for m in self.last_messages] + ([self.last_plain] if self.last_plain else []))
@@ -1022,11 +1097,33 @@ def _closing_text(plain: str) -> str:
 
 
 def _busy(row: dict, now: datetime) -> bool:
-    if row.get("evaluating"):
+    """Whether a trigger is still at work at ``now``: evaluating, calling an executor, or with a fire in flight that
+    isn't waiting for a later time."""
+    if row.get("evaluating") or row.get("executor_calls"):
         return True
+    if "running" in row:  # a gateway that reports each fire in flight and when each waiting one goes on
+        later = sum(1 for w in row.get("waits") or [] if w.get("resumes_at") and _utc(w["resumes_at"]) > now)
+        return row["running"] > later
     if row.get("status") not in IN_FLIGHT and not row.get("pending"):
         return False
     return not (row.get("waiting") and row.get("resumes_at") and _utc(row["resumes_at"]) > now)
+
+
+def _bounded(pending: dict) -> dict:
+    """``pending`` as the run's metadata keeps it: each list's count, and its first ``PENDING_KEPT`` items with their
+    texts cut to ``PENDING_TEXT_CHARS``; the stored timeline's end event has them all."""
+    out = {}
+    for kind, items in pending.items():
+        kept = [{k: (v[:PENDING_TEXT_CHARS] + "…" if isinstance(v, str) and len(v) > PENDING_TEXT_CHARS else v)
+                 for k, v in item.items()} for item in items[:PENDING_KEPT]]
+        out[kind] = {"count": len(items), "items": kept}
+    return out
+
+
+def _at_work(row: dict) -> dict:
+    """A trigger still at work, as the run's record keeps it."""
+    return {k: row.get(k) for k in ("id", "status", "running", "pending", "executor_calls", "waits", "resumes_at")
+            if row.get(k) not in (None, [], 0)}
 
 
 def _hm(text: str) -> tuple[int, int]:
