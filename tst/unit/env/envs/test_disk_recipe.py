@@ -255,7 +255,8 @@ def test_a_launcher_stopped_before_its_computer_starts_exits_as_one_stopped_afte
 
 
 @pytest.mark.parametrize("host_ports", ["18765", "28765"], ids=["a-guest-ports-proxy", "its-forward"])
-def test_the_launcher_refuses_a_host_port_a_guest_ports_proxy_or_forward_takes(launcher, host_ports):
+def test_the_launcher_refuses_a_host_port_a_guest_ports_proxy_or_forward_takes_before_it_starts_a_proxy(
+        launcher, host_ports):
     launch, calls = launcher
 
     refused = launch(VM_PORTS="18765", VM_HOST_PORTS=host_ports)
@@ -263,6 +264,7 @@ def test_the_launcher_refuses_a_host_port_a_guest_ports_proxy_or_forward_takes(l
     assert refused.wait(10) == 2
     assert f"host port {host_ports} can't be forwarded: a guest port's proxy or its forward here takes it" in (
         refused.stderr.read())
+    assert not calls.exists() or "socat" not in calls.read_text()
 
 
 def test_launch_forward_serves_a_host_port_to_the_running_computer_as_the_boot_does(launcher):
