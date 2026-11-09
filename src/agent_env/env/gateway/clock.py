@@ -186,6 +186,21 @@ class Clock:
             self._lived += jump
         return self.state()
 
+    def set_rate(self, rate) -> dict:
+        """Change the rate on the current arm from now on, keeping the virtual time, t0 and generation, so time
+        triggers keep their marks (a re-arm with set_time would re-anchor them); 0 freezes the clock."""
+        r = _parse_rate(rate)
+        with self._lock:
+            if not self._armed or self._t0 is None:
+                raise ClockError("clock is not armed")
+            current = _advance(self._t0, (self._now() - self._anchor) * self._rate + self._ahead)
+            if current > _MAX_T0 - timedelta(seconds=_OVERFLOW_HORIZON_S * r):
+                raise ClockError(f"rate {r:g} would overflow datetime near the max from {_iso(current)}")
+            self._bank()
+            self._ahead = (current - self._t0).total_seconds()
+            self._rate = r
+        return self.state()
+
     def clear(self) -> dict:
         """Disarm (idempotent). Afterwards reads 404."""
         with self._lock:

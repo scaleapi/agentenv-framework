@@ -340,6 +340,20 @@ class Gateway:
                 return self._json_response({"ok": False, "error": str(e)}, 400)
             return self._json_response({**state, "due": self._trigger_engine.clock_advanced()}, 200)
 
+        @self._mcp.custom_route("/clock/rate", methods=["PUT"])
+        async def clock_rate(request: Request) -> Response:
+            try:
+                body = await request.json()
+            except Exception:
+                return self._json_response({"ok": False, "error": "Invalid JSON body"}, 400)
+            if not isinstance(body, dict):
+                return self._json_response({"ok": False, "error": "body must be a JSON object"}, 400)
+            try:
+                state = self._clock.set_rate(body.get("virtual_seconds_per_real_second"))
+            except ClockError as e:
+                return self._json_response({"ok": False, "error": str(e)}, 400)
+            return self._json_response(state, 200)
+
         @self._mcp.custom_route("/clock/clear", methods=["POST"])
         async def clock_clear(request: Request) -> Response:
             self._unregister_get_time_tool()
