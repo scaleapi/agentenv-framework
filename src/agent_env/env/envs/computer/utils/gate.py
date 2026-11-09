@@ -67,8 +67,9 @@ def arches(base: ComputerArtifact, driver: ComputerDriverEnv, apps: Sequence[Com
 
 def check_app(base: ComputerArtifact, driver: ComputerDriverEnv, app: ComputerAppEnv, at: str = "app") -> list[str]:
     """Every way ``app`` doesn't fit a composition of ``base`` and ``driver``, each named from ``at``: a platform it
-    doesn't support, no architecture in common, no install for the base's OS, a port the driver listens on too, or on
-    Windows an install step for the session user, as a Windows computer is composed over ssh as its admin."""
+    doesn't support, no architecture in common, no install for the base's OS, a port the driver listens on too, any app
+    on Omarchy, whose disks compose a driver alone for now, or on Windows an install step for the session user, as a
+    Windows computer is composed over ssh as its admin."""
     os = base.os
     if not _matching(base, app.declaration.supports):
         named = ", ".join(_shown(platform) for entry in app.declaration.supports for platform in supported(entry))
@@ -80,6 +81,9 @@ def check_app(base: ComputerArtifact, driver: ComputerDriverEnv, app: ComputerAp
         problems.append(f"{at}: {app.id} declares no install for {_os_shown(base)}")
     elif taken := sorted(set(_ports(app, platform_of(os))) & set(_driver_ports(driver, os))):
         problems.append(f"{at}: {app.id} listens on {', '.join(map(str, taken))}, as {driver.id} does")
+    if platform_of(os) == "linux/omarchy":
+        problems.append(f"{at}: an Omarchy computer composes its driver alone for now; {app.id} would need its install "
+                        "composed onto Omarchy's disk, which agent-env doesn't do yet")
     if os.type == "windows" and (session := [step.name for step in app.declaration.install_steps
                                              if step.scope == "session" and (step.os is None or os.type in step.os)]):
         problems.append(f"{at}: {app.id}'s install steps {', '.join(session)} run as the session user, which a Windows "

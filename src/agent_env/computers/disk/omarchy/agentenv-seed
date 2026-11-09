@@ -1,0 +1,41 @@
+#!/bin/bash
+# agentenv-seed: run each boot by agentenv-seed.service, before SDDM starts the session. It reads the launcher's NoCloud
+# seed (CIDATA, as agentenv_protocol.computer.seed defines it) as the Linux disk's init does, with the same seed-env:
+# the deploy's environment written for with-seed, which each of the computer's services starts through, the seed's trust
+# files before it; the hostname; host.docker.internal at QEMU's address for the launcher; and the display's mode, for
+# the session's Hyprland. A seed this disk can't read is written as its refusal, so every service then stops naming it.
+set -euo pipefail
+. /opt/agentenv/seed-env
+user=$(cat /opt/agentenv/session-user)
+home=$(getent passwd "$user" | cut -d: -f6)
+seed=""
+for _ in $(seq 50); do
+    seed=$(blkid -L CIDATA 2>/dev/null) && break
+    sleep 0.2
+done
+exports="" hostname=computer
+if [ -n "$seed" ]; then
+    mounted=$(mktemp -d)
+    mount -o ro "$seed" "$mounted"
+    if [ -f "$mounted/trust/ca-bundle.pem" ]; then
+        install -d /etc/agentenv
+        cp "$mounted/trust/ca-bundle.pem" "$mounted/trust/ca.pem" /etc/agentenv/
+        exports="export SSL_CERT_FILE=/etc/agentenv/ca-bundle.pem REQUESTS_CA_BUNDLE=/etc/agentenv/ca-bundle.pem"
+        exports="$exports NODE_EXTRA_CA_CERTS=/etc/agentenv/ca.pem"$'\n'
+    fi
+    exports="$exports$(_seed_exports "$mounted")"
+    hostname=$(sed -n 's/^local-hostname: *//p' "$mounted/meta-data" 2>/dev/null | head -n 1)
+    umount "$mounted"
+    rmdir "$mounted"
+fi
+install -d -m 750 -g "$user" /run/agentenv
+install -m 640 -g "$user" /dev/null /run/agentenv/environment
+printf '%s\n' "$exports" > /run/agentenv/environment
+hostname "${hostname:-computer}"
+hostname > /etc/hostname
+grep -q 'host\.docker\.internal' /etc/hosts || printf '10.0.2.2\thost.docker.internal\n' >> /etc/hosts
+resolution=$(env -i bash -c 'eval "$1" 2>/dev/null; echo "${AGENTENV_SETTING_RESOLUTION:-1920x1080}"' _ "$exports")
+[[ "$resolution" =~ ^[1-9][0-9]*x[1-9][0-9]*$ ]] || resolution=1920x1080
+install -m 644 -o "$user" -g "$user" /dev/null "$home/.config/hypr/agentenv-display.lua"
+printf 'hl.monitor({ output = "", mode = "%s@60", position = "0x0", scale = 1 })\n' "$resolution" \
+    > "$home/.config/hypr/agentenv-display.lua"
