@@ -89,7 +89,7 @@ async def test_a_task_s_final_line_is_hers_and_comes_with_the_notice(monkeypatch
 
     texts = rig.sent[-1]
     assert "[Wed Nov 11, 2:00 PM UTC] Linda: send me the rundown" in texts and DEFAULT_FINAL not in texts
-    assert texts[-2:] == [NOTICE, ao.WAKE_REMINDER_TEXT]
+    assert texts[-1] == NOTICE and ao.WAKE_REMINDER_TEXT not in texts
     assert [s["text"] for s in rig.reads[-1]["you_sent"]] == ["sort the cdmx weekend", "send me the rundown"]
 
 

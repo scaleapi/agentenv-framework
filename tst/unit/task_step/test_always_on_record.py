@@ -124,7 +124,7 @@ async def test_the_prompt_response_keeps_each_wake_s_parts_cut_to_size(monkeypat
     await rig.arm()
     for day in (10, 11, 12):
         rig.triggers(rig.notify_at(f"news-{day}", f"2026-11-{day}T14:00:00Z", "y" * 10_000, channel="Gmail"))
-    ctx = await rig.run(rig.step())
+    ctx = await rig.run(rig.step(wake_reminder=True))  # its parts add up past the total with the reminder
 
     kept = ctx.prompt_responses[0].source_agent_per_turn_prompt_parts
     assert len(kept) == 4

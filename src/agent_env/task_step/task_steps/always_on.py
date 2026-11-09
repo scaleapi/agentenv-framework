@@ -10,7 +10,9 @@ it in the run's metadata under its ``name``; a ``deploy_agent`` step deploys the
   with its time; while the task's clock is set, the agent can read it with the gateway's ``get_time``.
 - Only what the agent sends with the gateway's ``message_user`` tool (user-chat/v1) reaches the user; its plain reply
   goes to the log. Each wake should end with ``message_user`` or ``stay_quiet``: one that ends with closing text and
-  neither gets one ``nudge`` turn, and every wake ends with a reminder. All three are on unless the task turns them off.
+  neither gets one ``nudge`` turn. ``stay_quiet`` and the nudge are on unless the task turns them off; the rule itself is
+  in the agent's system prompt. A reminder at the end of every wake (``wake_reminder``) is off by default: with
+  ``stay_quiet`` on, no wake in Opus 5.5 and GPT 6.1 runs of Surprise 30th ended in a message left in closing text.
   The step takes only its agent's role's messages: another role's stay queued, and what the role sent before the run
   is recorded apart (``user_chat_before_run``), never read by the user.
 - The user sim is asked only after the agent sent something, at the time the user would read it (``schedule``), with
@@ -200,7 +202,7 @@ class AlwaysOnTaskStep(PromptAgentTaskStep):
                  final: Optional[str] = None, max_wakes: int = 60, settle_timeout_seconds: float = 300,
                  user_timeout_seconds: int = 300, final_reminder: Optional[str] = FINAL_REMINDER,
                  stay_quiet: bool = True, nudge: bool = True, nudge_text: str = NUDGE_TEXT,
-                 wake_reminder: bool = True, wake_reminder_text: str = WAKE_REMINDER_TEXT,
+                 wake_reminder: bool = False, wake_reminder_text: str = WAKE_REMINDER_TEXT,
                  scheduled_checks: Optional[bool] = None, scheduled_check_min_interval: str = CHECK_MIN_INTERVAL,
                  contact_timeout_seconds: Optional[float] = CONTACT_TIMEOUT_SECONDS,
                  contact_replies_in_parallel: bool = True, time_budget_seconds: Optional[float] = None,
