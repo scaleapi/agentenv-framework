@@ -1340,11 +1340,13 @@ class Gateway:
             self._server_tools.pop("gateway", None)
 
     def _unregister_user_chat_tool(self) -> None:
+        """Remove message_user and stay_quiet when the chat is turned off or cleared; a backing server's are left."""
         tools = self._mcp._tool_manager._tools
         if MESSAGE_USER_TOOL_NAME in self._tool_server_urls:
             return
         tools.pop(MESSAGE_USER_TOOL_NAME, None)
-        tools.pop(STAY_QUIET_TOOL_NAME, None)
+        if STAY_QUIET_TOOL_NAME not in self._tool_server_urls:
+            tools.pop(STAY_QUIET_TOOL_NAME, None)
         remaining = [t for t in self._server_tools.get("gateway", [])
                      if t.name not in (MESSAGE_USER_TOOL_NAME, STAY_QUIET_TOOL_NAME)]
         if remaining:

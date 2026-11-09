@@ -104,6 +104,20 @@ def test_a_new_config_or_clear_removes_stay_quiet(gateway):
     assert not {"stay_quiet", "message_user"} & _names(gateway, "psi_agent")
 
 
+def test_turning_the_chat_off_or_clearing_it_leaves_a_backing_server_s_stay_quiet(gateway):
+    gateway._tool_server_urls["stay_quiet"] = "http://backing"
+    gateway._create_and_register_proxy_tool("http://backing", MCPTool(
+        name="stay_quiet", description="backing", inputSchema={"type": "object", "properties": {}}))
+    tools = gateway._mcp._tool_manager._tools
+
+    _req(gateway, "POST", "/user_chat/config", {"roles": ["psi_agent"], "stay_quiet": True})
+    _req(gateway, "POST", "/user_chat/config", {"roles": []})
+    assert tools["stay_quiet"].description == "backing" and "message_user" not in tools
+    _req(gateway, "POST", "/user_chat/config", {"roles": ["psi_agent"]})
+    _req(gateway, "POST", "/user_chat/clear", {})
+    assert tools["stay_quiet"].description == "backing" and "message_user" not in tools
+
+
 @pytest.mark.parametrize("body", [{"roles": ["psi_agent"], "stay_quiet": "yes"}, {"roles": "psi_agent"},
                                   {"roles": ["psi_agent"], "colour": "red"}])
 def test_a_bad_config_is_refused(gateway, body):
