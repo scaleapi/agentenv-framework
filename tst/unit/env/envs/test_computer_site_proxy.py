@@ -336,6 +336,25 @@ async def test_the_forward_port_tunnels_a_connect_to_a_sites_name_through_its_ce
 
 
 @pytest.mark.asyncio
+async def test_a_request_in_a_sites_tunnel_naming_another_host_is_refused_and_logged_as_the_port_refuses(tmp_path,
+                                                                                                        capsys):
+    async with Upstream() as upstream:
+        config, issued = _config(tmp_path, upstream.port)
+        async with _forward_port(config) as port:
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            writer.write(b"CONNECT notes.test:443 HTTP/1.1\r\nHost: notes.test:443\r\n\r\n")
+            await reader.readuntil(b"\r\n\r\n")
+            await writer.start_tls(ssl.create_default_context(cadata=issued.ca_pem), server_hostname="notes.test")
+            start, headers, body, conn = await _exchange(port, b"GET / HTTP/1.1\r\nHost: evil.test\r\n\r\n",
+                                                         reader_writer=(reader, writer))
+            writer.close()
+
+    assert start == "HTTP/1.1 403 Forbidden" and headers["x-agentenv-site-proxy"] == "failed"
+    assert upstream.requests == []
+    assert "site proxy: refused GET evil.test: no site of this computer" in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
 async def test_the_forward_port_serves_a_localhost_name_named_by_its_url_and_sends_a_real_name_to_https(tmp_path):
     async with Upstream() as upstream:
         config, _ = _config(tmp_path, upstream.port, notes=["notes.localhost"], shop=["shop.test"])
@@ -503,6 +522,34 @@ def test_a_check_answered_by_the_proxys_own_bad_gateway_fails_and_a_sites_own_er
         "notes.test": {"url": "https://notes.test/", "error": "502 Bad Gateway: the site can't be reached"},
         "chat.test": {"url": "https://chat.test/", "status": 502}},
         "runtimes": {"node": {"url": "https://notes.test/", "status": 502}}}
+
+
+def test_a_check_loads_a_site_through_the_forward_port_and_names_one_that_doesnt_answer(monkeypatch):
+    opened = []
+
+    class Opener:
+        def __init__(self, proxies):
+            self.proxies = proxies
+
+        def open(self, url, timeout):
+            opened.append((url, self.proxies))
+            if self.proxies:
+                raise urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))
+            return contextlib.nullcontext(SimpleNamespace(status=200))
+
+    monkeypatch.setattr(site_proxy.urllib.request, "build_opener", lambda handler: Opener(handler.proxies))
+    monkeypatch.setattr(site_proxy, "check_runtimes", lambda url: {})
+    sites_ = [Site("notes", "http://gw/website/notes/", ["notes.localhost"]),
+              Site("chat", "http://gw/website/chat/", ["chat.test"])]
+
+    alone = site_proxy.check(Config(user=None, sites=sites_, proxy_port=3129))
+    desktop = site_proxy.check(Config(user=None, sites=sites_))
+
+    proxy = "http://127.0.0.1:3129"
+    assert alone["forward_port"] == {"proxy": proxy, "url": "https://chat.test/",
+                                     "error": "[Errno 111] Connection refused"}
+    assert opened[2] == ("https://chat.test/", {"http": proxy, "https": proxy})
+    assert alone["sites"] == desktop["sites"] and "forward_port" not in desktop
 
 
 @pytest.mark.asyncio

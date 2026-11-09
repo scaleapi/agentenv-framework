@@ -573,6 +573,12 @@ def test_routing_names_each_site_that_didnt_load_runtime_that_didnt_trust_the_ca
         "problem",
         "the JDK store /opt/b/lib/security/cacerts didn't take the deploy's CA: keystore password was incorrect"]
     assert sites.routing_problems({"checks": {}, "trust": {}}) == []
+    forward = {"proxy": "http://127.0.0.1:3129", "url": "https://chat.test/", "error": "[Errno 111] Connection refused"}
+    assert sites.routing_problems({"checks": {}, "trust": {}, "forward_port": forward}) == [
+        "the browser's forward port http://127.0.0.1:3129 didn't load https://chat.test/: "
+        "[Errno 111] Connection refused"]
+    loaded = {"proxy": "http://127.0.0.1:3129", "url": "https://chat.test/", "status": 200}
+    assert sites.routing_problems({"checks": {}, "trust": {}, "forward_port": loaded}) == []
 
 
 def test_the_trust_a_routing_linux_computer_boots_with_is_the_local_providers_so_the_two_always_agree():

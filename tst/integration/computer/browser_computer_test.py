@@ -600,6 +600,8 @@ async def test_routing_sites_it_goes_out_only_through_the_forward_port_which_the
     assert [(tab["url"], tab["title"]) for tab in tabs] == [("https://shop.test/landed", "landed"),
                                                             ("http://notes.localhost/", "notes")], tabs
     assert named.strip() == "http://127.0.0.1:3129"
+    assert deployed.metadata["computer"]["sites"]["forward_port"] == {
+        "proxy": "http://127.0.0.1:3129", "url": "https://shop.test/", "status": 200}
     assert pages["https://shop.test/alpha"].startswith("200 ") and pages["https://shop.test/alpha"].endswith(
         "<title>alpha</title>"), pages
     assert pages["http://notes.localhost/bravo"].endswith("<title>bravo</title>"), pages
