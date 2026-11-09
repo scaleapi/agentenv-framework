@@ -12,8 +12,8 @@ APPROVED = ["-dict", "kScreenCaptureApprovalLastAlerted", "-date", "3024-01-01 0
             "kScreenCaptureApprovalLastUsed", "-date", "3024-01-01 00:00:00 +0000",
             "kScreenCapturePrivacyHintDate", "-date", "3024-01-01 00:00:00 +0000",
             "kScreenCapturePrivacyHintPolicy", "-int", "3153600000"]
-#: What Foundation's NSURL fileURLWithPath writes on macOS 26 for each printable ASCII character but "/" in a path: these
-#: as they are, and the rest as their percent-encodings.
+#: What Foundation's NSURL fileURLWithPath writes on macOS 26 for each printable ASCII character but "/" in a path:
+#: these as they are, and the rest as their percent-encodings.
 KEPT = "!$&'()*+,-.0123456789:=@ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz~"
 ENCODED = {" ": "%20", '"': "%22", "#": "%23", "%": "%25", ";": "%3B", "<": "%3C", ">": "%3E", "?": "%3F",
            "[": "%5B", "\\": "%5C", "]": "%5D", "^": "%5E", "`": "%60", "{": "%7B", "|": "%7C", "}": "%7D"}
