@@ -1183,6 +1183,20 @@ async def test_an_executor_slower_than_the_http_timeout_is_waited_out_and_the_la
 
 
 @pytest.mark.asyncio
+async def test_a_reply_that_completes_just_past_the_executor_s_limit_is_kept(engine, monkeypatch):
+    """A deployed executor answers message/send when its task ends; one that ends a moment past the limit used to be
+    cut off by the read timeout, its completed reply dropped."""
+    monkeypatch.setattr(triggers_module, "_EXECUTOR_HTTP_TIMEOUT_S", 0.5)
+    async with _executor_answering_after(1.2) as url:
+        engine.register(_reply_then_post(url, timeout_seconds=1.0))
+        engine.on_tool_call("default", "t", {}, _result())
+        await _settled(engine, "x", within=3)
+
+    assert engine._triggers["x"]["status"] == "fired", engine.state()["events"][-3:]
+    assert engine._test_gw.calls == [("slack_send_message", {"channel": "#c", "text": "the client replied"})]
+
+
+@pytest.mark.asyncio
 async def test_an_executor_slower_than_its_own_timeout_still_fails_the_fire(engine, monkeypatch):
     monkeypatch.setattr(triggers_module, "_EXECUTOR_HTTP_TIMEOUT_S", 0.2)
     async with _executor_answering_after(3.0) as url:

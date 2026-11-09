@@ -447,7 +447,7 @@ class TriggerEngine:
         self._time_trigger_gate = asyncio.Event()  # parks the driver while no time-trigger is armed
         self._clock_moved = asyncio.Event()  # set, and replaced, when an advance moves the clock under waiting actions
         # Opt-in settings (`config`), off by default so a registration behaves as it always has.
-        self._concurrent_fires = False  # a repeat trigger's fires run side by side instead of queueing
+        self._concurrent_fires = False  # a contact-reply trigger's repeat fires run side by side instead of queueing
         self._executor_timeout_default: float | None = None  # the time limit of an executor that sets none
         self._unset_timeouts: set[str | None] = set()  # executors registered without a timeout_seconds of their own
         # One turn at a time per executor conversation (its URL and context id): fires of one trigger running side by
@@ -583,8 +583,11 @@ class TriggerEngine:
     def config(self, body: Any) -> dict:
         """Set the engine's opt-in settings, each off unless the body sets it (an omitted one resets): with
         ``concurrent_fires``, each further call that provokes a repeat trigger already firing starts its own fire at
-        once, side by side, instead of queueing behind the one running; ``executor_timeout_seconds`` is the time limit
-        of each executor whose registration set no ``timeout_seconds`` (else 120). ``clear`` resets both."""
+        once, side by side, instead of queueing behind the one running, when every action of the trigger is a contact's
+        reply (``nl``); any other trigger still queues, since its tool actions may read and then write the same rows.
+        Fires of one trigger side by side still take turns on its executor conversation (``_executor_turn``).
+        ``executor_timeout_seconds`` is the time limit of each executor whose registration set no
+        ``timeout_seconds`` (else 120). ``clear`` resets both."""
         if not isinstance(body, dict):
             raise TriggerError("body must be a JSON object")
         unknown = sorted(set(body) - {"concurrent_fires", "executor_timeout_seconds"})
@@ -1100,7 +1103,7 @@ class TriggerEngine:
     def _mark_detected(self, tid: str, trig: dict, provoking: dict, ctx: dict | None = None) -> asyncio.Task | None:
         ctx = ctx if ctx is not None else {}
         since = self._gw._clock.elapsed()  # a delay runs from the provoking call, not from when its turn comes
-        if trig["status"] in TRIGGER_IN_FLIGHT_STATUSES and self._concurrent_fires:
+        if trig["status"] in TRIGGER_IN_FLIGHT_STATUSES and self._concurrent_fires and _replies_only(trig["spec"]):
             # Mid-fire, side by side: this call's fire starts now, so a quick reply doesn't wait behind a slow one.
             self._emit("detected", tid, provoking=provoking, alongside=trig["running"])
             task = self._start_fire(trig, lambda ticket: self._fire_alongside(tid, trig, ctx, since, ticket))
@@ -1109,7 +1112,8 @@ class TriggerEngine:
             task.add_done_callback(trig["alongside"].discard)
             return task
         if trig["status"] in TRIGGER_IN_FLIGHT_STATUSES:
-            # Mid-fire: queue it; the running fire drains the queue before it settles.
+            # Mid-fire: queue it; the running fire drains the queue before it settles, or, when only fires run side by
+            # side are left (concurrent_fires turned off meanwhile), the last of them to end starts one that does.
             trig["pending"].append((ctx, since))
             trig["status"] = "queued"
             self._emit("detected", tid, provoking=provoking, queued=len(trig["pending"]))
@@ -1309,8 +1313,9 @@ class TriggerEngine:
             sinces = [elapsed - (max(0.0, (now - mark).total_seconds()) if now is not None else 0.0) for mark in marks]
             for mark, since in zip(marks, sinces):
                 trig["attempts"] += 1
+                fire = trig["attempts"]
                 for index, action in enumerate(trig["spec"]["actions"]):
-                    if not await self._run_action(tid, trig, index, action, {}, since):
+                    if not await self._run_action(tid, trig, index, action, {}, since, fire=fire):
                         trig["status"] = "failed"
                         trig["next_mark"] = None
                         self._emit("failed", tid, action_index=index)
@@ -1351,14 +1356,19 @@ class TriggerEngine:
         """Schedule ``run(ticket)``, one fire of ``trig``, counted in its ``running`` from now, so state shows it at work
         before its task first runs. The fire's ``finally`` uncounts it (``_uncount``); one cancelled before it began
         is uncounted when its task ends."""
-        ticket = {"counted": True}
+        ticket = {"counted": False}
+        task = self._schedule(run(ticket))  # counted only once it exists, so a schedule that raises leaves no count
         trig["running"] += 1
-        task = self._schedule(run(ticket))
+        ticket["counted"] = True
         task.add_done_callback(lambda _: _uncount(trig, ticket))
         return task
 
     def _schedule(self, coro) -> asyncio.Task:
-        task = asyncio.get_running_loop().create_task(coro)
+        try:
+            task = asyncio.get_running_loop().create_task(coro)
+        except BaseException:
+            coro.close()  # never awaited: closed, so it doesn't warn
+            raise
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return task
@@ -1469,6 +1479,15 @@ class TriggerEngine:
         removed or cleared meanwhile is gone, and has nothing left to report."""
         if trig["running"] or trig["status"] not in TRIGGER_IN_FLIGHT_STATUSES:
             return
+        if outcome is not None and trig["pending"] and trig["task"] is None and self._triggers.get(tid) is trig:
+            # Calls queued while only fires side by side ran (concurrent_fires turned off meanwhile): none of those
+            # drains a queue, so a fire that does starts now rather than leave them stranded.
+            ctx, since = trig["pending"].popleft()
+            trig["status"] = "firing"
+            trig["detected_at"] = _now()
+            trig["task"] = self._start_fire(trig, lambda ticket: self._fire(tid, trig, ctx, since, ticket))
+            trig["task"].set_name(tid)
+            return
         if outcome is not None:
             trig["status"] = outcome
         elif self._triggers.get(tid) is trig:
@@ -1481,12 +1500,13 @@ class TriggerEngine:
         spec = trig["spec"]
         ok = True
         trig["attempts"] += 1
+        fire = trig["attempts"]  # this fire's number, read now: fires side by side move `attempts` on meanwhile
         try:
             await self._gw._log_event({"event_type": "trigger_fired", "source": "trigger_engine", "trigger_id": tid,
                                        "provoking_tool": (ctx.get("args") is not None and spec["when"].get("tool")) or None,
                                        **({"provoking_request": ctx["request"]} if "request" in ctx else {})})
             for index, action in enumerate(spec["actions"]):
-                if not await self._run_action(tid, trig, index, action, ctx, since):
+                if not await self._run_action(tid, trig, index, action, ctx, since, fire=fire):
                     ok = False
                     self._emit("failed", tid, action_index=index)
                     break
@@ -1502,7 +1522,10 @@ class TriggerEngine:
             self._resolve_dependents(tid)  # success-only, outside the try so it can't flip a fired trigger to failed
         return ok
 
-    async def _run_action(self, tid: str, trig: dict, index: int, action: dict, ctx: dict, since: float) -> bool:
+    async def _run_action(self, tid: str, trig: dict, index: int, action: dict, ctx: dict, since: float,
+                          fire: int | None = None) -> bool:
+        """Run one action of ``tid``'s fire number ``fire`` (its ``attempts`` when not given); whether it went
+        through."""
         if "delay" in action:
             await self._delay(tid, trig, index, action, since)
         changelog_before = self._gw._query_changelog_id()
@@ -1553,12 +1576,12 @@ class TriggerEngine:
                     detail = {"notify": action["channel"], "to": note["to"], "notification_id": note["id"],
                               "text_len": len(text)}
             else:
-                fire = await self._run_nl(tid, trig, index, action, ctx)
-                if fire is None:
+                done = await self._run_nl(tid, trig, index, action, ctx, fire=fire)
+                if done is None:
                     return False
-                detail = {"nl": action["instruction"][:120], **_named_executor(action), "calls": fire["calls"],
-                          **({"failed_calls": fire["failed_calls"]} if fire["failed_calls"] else {}),
-                          **({"calls_shared_with": sorted(fire["shared_with"])} if fire["shared_with"] else {})}
+                detail = {"nl": action["instruction"][:120], **_named_executor(action), "calls": done["calls"],
+                          **({"failed_calls": done["failed_calls"]} if done["failed_calls"] else {}),
+                          **({"calls_shared_with": sorted(done["shared_with"])} if done["shared_with"] else {})}
             if "verify" in action and action["type"] != "nl":
                 # only an action's own verify inherits its `as`; when.check state probes read as the pin
                 if not await self._run_verify(tid, index, action["verify"], ctx, role=action.get("as")):
@@ -1580,43 +1603,42 @@ class TriggerEngine:
         self._emit("verify_failed", tid, action_index=index)
         return False
 
-    async def _run_nl(self, tid: str, trig: dict, index: int, action: dict, ctx: dict | None = None) -> dict | None:
-        """The fire with the calls its executor made for it, by tool, or None when the action failed."""
+    async def _run_nl(self, tid: str, trig: dict, index: int, action: dict, ctx: dict | None = None,
+                      fire: int | None = None) -> dict | None:
+        """Fire number ``fire`` (``attempts`` when not given) with the calls its executor made for it, by tool, or None
+        when the action failed."""
         instruction = action["instruction"]
         named = _named_executor(action)
         executor = self._executors.get(action.get("executor"))
         if executor is not None and "hours" in executor:
             await self._await_hours(tid, trig, index, executor["hours"], named)
-        fire = _in_flight_fire({"trigger_id": tid, "action_index": index, "fire": trig["attempts"]})
-        fires = self._in_flight.setdefault(executor["role"], []) if executor is not None else []
-        for other in fires:  # an executor's calls carry only its role, so fires it realizes at once share their counts
-            other["shared_with"].add(tid)
-            fire["shared_with"].add(other["cause"]["trigger_id"])
-        fires.append(fire)
-        try:
-            for attempt in (1, 2):
-                reply = await self._executor_turn(tid, trig, index, action.get("executor"), executor, instruction)
-                if reply is None:
-                    self._emit("action_failed", tid, action_index=index,
-                               detail=f"executor attempt {attempt} did not complete", **named)
-                    return None
-                if "verify" not in action:
-                    return fire
-                if await self._run_verify(tid, index, action["verify"], ctx):
-                    return fire
-                if attempt == 1:
-                    instruction = (f"{action['instruction']}\n\nYour previous attempt did not pass verification — "
-                                   f"the expected change is not observable in the environment. Do it again exactly as described.")
-        finally:
-            fires.remove(fire)
+        done = _in_flight_fire({"trigger_id": tid, "action_index": index,
+                                "fire": trig["attempts"] if fire is None else fire})
+        for attempt in (1, 2):
+            reply = await self._executor_turn(tid, trig, index, action.get("executor"), executor, instruction, done)
+            if reply is None:
+                self._emit("action_failed", tid, action_index=index,
+                           detail=f"executor attempt {attempt} did not complete", **named)
+                return None
+            if "verify" not in action:
+                return done
+            if await self._run_verify(tid, index, action["verify"], ctx):
+                return done
+            if attempt == 1:
+                instruction = (f"{action['instruction']}\n\nYour previous attempt did not pass verification — "
+                               f"the expected change is not observable in the environment. Do it again exactly as described.")
         self._emit("action_failed", tid, action_index=index, detail="verification failed after retry", **named)
         return None
 
     async def _executor_turn(self, tid: str, trig: dict, index: int, name: str | None, executor: dict | None,
-                             instruction: str) -> str | None:
+                             instruction: str, fire: dict) -> str | None:
         """One call to the executor, listed in the trigger's ``calls`` with the end of its time limit while it runs.
-        Calls in one conversation (the executor's URL and the trigger's context id) take turns, so fires of one trigger
-        running side by side never resume the executor's session at once."""
+
+        Calls in one conversation (the executor's URL and the trigger's context id) take turns: fires of one trigger
+        running side by side (``concurrent_fires``) wait for each other here, by design, so two turns never resume the
+        executor's session (a Claude Code conversation, say) at once; only their delays and hours run side by side.
+        ``fire`` (``_in_flight_fire``) is counted as being realized only while its call runs, so the calls the executor
+        makes for another fire while this one waits for its turn are never credited to this one."""
         context_id = f"trigger-{tid}"
         if executor is None:
             return await self._call_executor(executor, instruction, context_id=context_id)
@@ -1625,12 +1647,18 @@ class TriggerEngine:
             executor = {**executor, "timeout_seconds": timeout}
         lock = self._executor_locks.setdefault((executor["a2a_url"], context_id), asyncio.Lock())
         async with lock:
+            fires = self._in_flight.setdefault(executor["role"], [])
+            for other in fires:  # an executor's calls carry only its role, so fires it realizes at once share counts
+                other["shared_with"].add(tid)
+                fire["shared_with"].add(other["cause"]["trigger_id"])
+            fires.append(fire)
             call = {"executor": name, "action_index": index, "deadline": _monotonic() + timeout}
             trig["calls"].append(call)
             try:
                 return await self._call_executor(executor, instruction, context_id=context_id)
             finally:
                 trig["calls"].remove(call)
+                fires.remove(fire)
 
     def caused_by(self, role: str) -> list[dict]:
         """The fires in flight for the executor with ``role``, all of them when several overlap; its tool calls are
@@ -1700,8 +1728,9 @@ class TriggerEngine:
         url = f"{executor['a2a_url']}/a2a"
         deadline = asyncio.get_running_loop().time() + executor["timeout_seconds"]
         async with httpx.AsyncClient(timeout=_EXECUTOR_HTTP_TIMEOUT_S) as client:
-            # an executor holds message/send open until its task ends, so the read waits as long as the executor may take
-            read_s = max(_EXECUTOR_HTTP_TIMEOUT_S, executor["timeout_seconds"])
+            # An executor holds message/send open until its task ends, so the read waits as long as the executor may
+            # take, and a little longer, so a reply that completes just past the time limit is still read.
+            read_s = max(_EXECUTOR_HTTP_TIMEOUT_S, executor["timeout_seconds"]) + _EXECUTOR_HTTP_TIMEOUT_S
             send = await client.post(url, timeout=httpx.Timeout(_EXECUTOR_HTTP_TIMEOUT_S, read=read_s), json={
                 "jsonrpc": "2.0", "id": str(uuid.uuid4()), "method": "message/send",
                 "params": {"message": {"role": "user", "messageId": uuid.uuid4().hex,
@@ -1709,21 +1738,27 @@ class TriggerEngine:
                                        "parts": [{"kind": "text", "text": instruction}]}},
             })
             send.raise_for_status()
-            task_id = (send.json().get("result") or {}).get("id")
+            result = send.json().get("result") or {}
+            task_id = result.get("id")
             if not task_id:
                 return None
-            while asyncio.get_running_loop().time() < deadline:
-                await asyncio.sleep(2)
+            status = result.get("status") or {}
+            # Polled until the time limit, then once more: a reply that completed in the last poll's gap is kept.
+            last = False
+            while status.get("state") not in _TERMINAL_A2A_STATES:
+                if last:
+                    return None
+                last = asyncio.get_running_loop().time() >= deadline
+                if not last:
+                    await asyncio.sleep(2)
                 poll = await client.post(url, json={"jsonrpc": "2.0", "id": str(uuid.uuid4()),
                                                     "method": "tasks/get", "params": {"id": task_id}})
                 poll.raise_for_status()
                 status = ((poll.json().get("result") or {}).get("status") or {})
-                if status.get("state") in _TERMINAL_A2A_STATES:
-                    if status.get("state") != "completed":
-                        return None
-                    parts = (status.get("message") or {}).get("parts") or []
-                    return "\n".join(p.get("text", "") for p in parts if p.get("kind") == "text")
-        return None
+            if status.get("state") != "completed":
+                return None
+            parts = (status.get("message") or {}).get("parts") or []
+            return "\n".join(p.get("text", "") for p in parts if p.get("kind") == "text")
 
     def _cancel(self, tid: str, trig: dict, **cause) -> None:
         """Retire a deadline its `unless` call answered, and the time triggers anchored on it, which can no longer fire."""
@@ -1771,6 +1806,12 @@ def _result_text(result: CallToolResult) -> str:
 def _named_executor(action: dict) -> dict:
     """``{"executor": name}`` for an nl action that names its executor, for its firing-log events; else empty."""
     return {"executor": action["executor"]} if action.get("executor") is not None else {}
+
+
+def _replies_only(spec: dict) -> bool:
+    """Whether every action of a trigger is a contact's reply (``nl``), the only kind ``concurrent_fires`` runs side
+    by side."""
+    return all(action.get("type") == "nl" for action in spec["actions"])
 
 
 def _in_flight_fire(cause: dict) -> dict:

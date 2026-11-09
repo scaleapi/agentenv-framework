@@ -210,7 +210,7 @@ GATEWAY_EXTENSIONS = [
     },
     {
         "uri": EXT_TRIGGERS_URI,
-        "description": "Register (additive add-by-id), remove, clear, or read (state) typed Action/State triggers + the firing log (harness control path). config sets the engine's opt-in settings: concurrent_fires (a repeat trigger's fires run side by side instead of queueing) and executor_timeout_seconds (the time limit of an executor that sets none).",
+        "description": "Register (additive add-by-id), remove, clear, or read (state) typed Action/State triggers + the firing log (harness control path). config sets the engine's opt-in settings: concurrent_fires (a repeat trigger whose actions are all contact replies (nl) runs its fires side by side instead of queueing) and executor_timeout_seconds (the time limit of an executor that sets none).",
         "params": {"endpoint": "/triggers/register", "features": list(TRIGGER_FEATURES), "methods": {
             "register": {"method": "POST", "endpoint": "/triggers/register", "request": {"type": "object", "properties": {"watch_roles": {"type": "array", "items": {"type": "string"}}, "executor": {"type": "object"}, "executors": {"type": "object"}, "triggers": {"type": "array"}}, "required": ["triggers"]}},
             "config": {"method": "POST", "endpoint": "/triggers/config", "request": {"type": "object", "properties": {"concurrent_fires": {"type": "boolean"}, "executor_timeout_seconds": {"type": "number", "exclusiveMinimum": 0}}}},

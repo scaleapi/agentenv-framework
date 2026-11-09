@@ -166,6 +166,97 @@ async def test_removing_a_trigger_cancels_its_fires_side_by_side(monkeypatch):
     assert all(t.cancelled() for t in tasks) and bob.calls == []
 
 
+@pytest.mark.asyncio
+async def test_side_by_side_is_only_for_contact_replies_a_tool_action_trigger_still_queues(monkeypatch):
+    """A tool action may read a row and write it back; two of its fires at once could lose a write, so it queues."""
+    bob = _Executor(monkeypatch)
+    engine, _, _ = _engine()
+    engine.config({"concurrent_fires": True})
+    engine.register({"watch_roles": ["default"],
+                     "executors": {"bob": {"a2a_url": "http://bob", "role": "bob"}},
+                     "triggers": [{"id": "mirror", "when": {"type": "action", "tool": "send_text", "repeat": True},
+                                   "actions": [{"type": "nl", "executor": "bob", "instruction": "answer"}, _perm()]}]})
+    engine.on_tool_call("default", "send_text", {}, _result())
+    engine.on_tool_call("default", "send_text", {}, _result())
+    await _until(lambda: bob.calls)
+
+    row = _row(engine, "mirror")
+    assert (row["status"], row["pending"], row["running"]) == ("queued", 1, 1)
+    bob.release()
+    await _until(lambda: _row(engine, "mirror")["status"] == "armed")
+    assert len(bob.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_each_fire_side_by_side_keeps_its_own_number_and_only_its_own_executor_calls(monkeypatch):
+    """Fire 1 waits out its delay while fire 2 starts: fire 1's call still says it is fire 1. Fire 2, waiting for its
+    turn on the executor conversation, is not credited with the calls the executor makes for fire 1."""
+    seen: list[list[int]] = []
+    engine, clock, _ = _engine()
+    engine.config({"concurrent_fires": True})
+    engine.register(_reply_trigger(delay="PT1H"))
+
+    async def call(eng, ex, instruction, context_id):
+        seen.append([c["fire"] for c in eng.caused_by("bob")])
+        eng.on_tool_call("bob", "messaging_send", {}, _result())  # the executor's own tool call, made for this fire
+        await asyncio.sleep(0.05)
+        return "replied"
+
+    monkeypatch.setattr(TriggerEngine, "_call_executor", call)
+    engine.on_tool_call("default", "send_text", {}, _result())
+    clock.advance("2026-03-02T00:30:00Z")
+    engine.on_tool_call("default", "send_text", {}, _result())
+    await _until(lambda: len(_row(engine, "reply")["waits"]) == 2)
+    clock.advance("2026-03-02T01:30:00Z")  # both delays end: the two calls take turns
+    engine.clock_advanced()
+    await _until(lambda: _row(engine, "reply")["status"] == "armed")
+
+    assert seen == [[1], [2]]
+    oks = [e["detail"] for e in engine._events if e["kind"] == "action_ok"]
+    assert [d["calls"] for d in oks] == [{"messaging_send": 1}, {"messaging_send": 1}]
+    assert not any("calls_shared_with" in d for d in oks)
+
+
+@pytest.mark.asyncio
+async def test_a_call_queued_once_side_by_side_is_turned_off_still_fires(monkeypatch):
+    """Fires side by side don't drain a queue; turned off meanwhile, a queued call used to be left behind for good."""
+    bob = _Executor(monkeypatch)
+    bob.release()
+    engine, clock, _ = _engine()
+    engine.config({"concurrent_fires": True})
+    engine.register(_reply_trigger(delay="PT1H"))
+    engine.on_tool_call("default", "send_text", {}, _result())              # the first fire, resumes 01:00
+    clock.advance("2026-03-02T00:30:00Z")
+    engine.on_tool_call("default", "send_text", {}, _result())              # side by side, resumes 01:30
+    clock.advance("2026-03-02T01:00:00Z")
+    engine.clock_advanced()
+    await _until(lambda: len(bob.calls) == 1 and _row(engine, "reply")["running"] == 1)
+
+    engine.config({})                                                        # side by side off
+    engine.on_tool_call("default", "send_text", {}, _result())              # queued behind the fire left
+    assert (_row(engine, "reply")["status"], _row(engine, "reply")["pending"]) == ("queued", 1)
+    clock.advance("2026-03-02T01:30:00Z")
+    engine.clock_advanced()
+    await _until(lambda: len(bob.calls) == 2 and _row(engine, "reply")["pending"] == 0)
+    clock.advance("2026-03-02T02:00:00Z")                                   # its delay runs from its own call
+    engine.clock_advanced()
+    await _until(lambda: _row(engine, "reply")["status"] == "armed")
+    assert len(bob.calls) == 3 and _row(engine, "reply")["fire_count"] == 3
+
+
+def test_a_fire_that_can_t_be_scheduled_leaves_no_count():
+    engine, _, _ = _engine()
+    engine.register(_reply_trigger())
+    trig = engine._triggers["reply"]
+
+    async def fire(ticket):
+        return None
+
+    with pytest.raises(RuntimeError):  # no running event loop
+        engine._start_fire(trig, fire)
+    assert trig["running"] == 0
+
+
 # ---- executor_timeout_seconds ---------------------------------------------------------------------------------------
 
 @pytest.mark.asyncio
