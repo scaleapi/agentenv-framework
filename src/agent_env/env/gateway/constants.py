@@ -131,9 +131,11 @@ TRIGGER_EXECUTOR_HOURS_TIME_ZONE = "executor_hours_time_zone"
 TRIGGER_NEXT_EVENT_AT = "next_event_at"
 TRIGGER_NOTIFY = "notify"
 TRIGGER_WEBSITE_OP = "website_op"
+# state reports each fire in flight (running, waits) and each executor call in progress (executor_calls).
+TRIGGER_FIRES_IN_STATE = "fires_in_state"
 TRIGGER_FEATURES = (TRIGGER_NAMED_EXECUTORS, TRIGGER_PROVOKING_ROLES, TRIGGER_ACTION_DELAY, TRIGGER_EXECUTOR_HOURS,
                     TRIGGER_UNLESS, TRIGGER_WEBSITE, TRIGGER_EXECUTOR_HOURS_TIME_ZONE, TRIGGER_NEXT_EVENT_AT,
-                    TRIGGER_NOTIFY, TRIGGER_WEBSITE_OP)
+                    TRIGGER_NOTIFY, TRIGGER_WEBSITE_OP, TRIGGER_FIRES_IN_STATE)
 
 # The one `source` a /step call may name instead of step_api, with the id of the hook artifact that made it.
 STEP_SOURCE_POST_TURN_HOOK = "post_turn_hook"
@@ -208,9 +210,10 @@ GATEWAY_EXTENSIONS = [
     },
     {
         "uri": EXT_TRIGGERS_URI,
-        "description": "Register (additive add-by-id), remove, clear, or read (state) typed Action/State triggers + the firing log (harness control path).",
+        "description": "Register (additive add-by-id), remove, clear, or read (state) typed Action/State triggers + the firing log (harness control path). config sets the engine's opt-in settings: concurrent_fires (a repeat trigger's fires run side by side instead of queueing) and executor_timeout_seconds (the time limit of an executor that sets none).",
         "params": {"endpoint": "/triggers/register", "features": list(TRIGGER_FEATURES), "methods": {
             "register": {"method": "POST", "endpoint": "/triggers/register", "request": {"type": "object", "properties": {"watch_roles": {"type": "array", "items": {"type": "string"}}, "executor": {"type": "object"}, "executors": {"type": "object"}, "triggers": {"type": "array"}}, "required": ["triggers"]}},
+            "config": {"method": "POST", "endpoint": "/triggers/config", "request": {"type": "object", "properties": {"concurrent_fires": {"type": "boolean"}, "executor_timeout_seconds": {"type": "number", "exclusiveMinimum": 0}}}},
             "remove": {"method": "POST", "endpoint": "/triggers/remove", "request": {"type": "object", "properties": {"ids": {"type": "array", "items": {"type": "string"}}}, "required": ["ids"]}},
             "clear": {"method": "POST", "endpoint": "/triggers/clear", "request": {"type": "object", "properties": {}}},
             "state": {"method": "GET", "endpoint": "/triggers/state", "request": {"type": "object", "properties": {}}}}},

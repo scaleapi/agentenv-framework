@@ -342,11 +342,11 @@ async def test_env_data_plane_unknown_method():
 
 
 def test_triggers_advertised_as_one_extension():
-    """Triggers ride a single urn:agentenv:triggers/v1 (register/remove/clear/state) — no separate get URI."""
+    """Triggers ride a single urn:agentenv:triggers/v1 (register/config/remove/clear/state) — no separate get URI."""
     exts = _gateway({})._gateway_extensions()
     trigger = [e for e in exts if e["uri"] == "urn:agentenv:triggers/v1"]
     assert len(trigger) == 1
-    assert set(trigger[0]["params"]["methods"]) == {"register", "remove", "clear", "state"}
+    assert set(trigger[0]["params"]["methods"]) == {"register", "config", "remove", "clear", "state"}
     assert not any(e["uri"] == "urn:agentenv:get-triggers/v1" for e in exts)
 
 

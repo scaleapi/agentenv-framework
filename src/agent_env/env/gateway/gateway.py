@@ -298,6 +298,10 @@ class Gateway:
         async def triggers_remove(request: Request) -> Response:
             return await _trigger_write(request, self._trigger_engine.remove)
 
+        @self._mcp.custom_route("/triggers/config", methods=["POST"])
+        async def triggers_config(request: Request) -> Response:
+            return await _trigger_write(request, self._trigger_engine.config)
+
         @self._mcp.custom_route("/triggers/clear", methods=["POST"])
         async def triggers_clear(request: Request) -> Response:
             return self._json_response(self._trigger_engine.clear(), 200)

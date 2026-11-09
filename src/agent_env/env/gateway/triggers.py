@@ -16,6 +16,7 @@ import re
 import uuid
 from collections import deque
 from datetime import datetime, time, timedelta, timezone, tzinfo
+from time import monotonic as _monotonic
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -443,6 +444,13 @@ class TriggerEngine:
         self._driver_interval = 1.0  # real seconds between autonomous time-trigger polls
         self._time_trigger_gate = asyncio.Event()  # parks the driver while no time-trigger is armed
         self._clock_moved = asyncio.Event()  # set, and replaced, when an advance moves the clock under waiting actions
+        # Opt-in settings (`config`), off by default so a registration behaves as it always has.
+        self._concurrent_fires = False  # a repeat trigger's fires run side by side instead of queueing
+        self._executor_timeout_default: float | None = None  # the time limit of an executor that sets none
+        self._unset_timeouts: set[str | None] = set()  # executors registered without a timeout_seconds of their own
+        # One turn at a time per executor conversation (its URL and context id): fires of one trigger running side by
+        # side would otherwise resume the same session at once.
+        self._executor_locks: dict[tuple[str, str], asyncio.Lock] = {}
 
     def register(self, body: Any) -> dict:
         """Additively add each trigger by id (idempotent upsert; conflicting id or bad shape -> 400); watch_roles and
@@ -450,7 +458,7 @@ class TriggerEngine:
         if not isinstance(body, dict):
             raise TriggerError("body must be a JSON object")
         watch_roles = self._resolve_watch_roles(body)
-        executors = self._resolve_executors(body, watch_roles)
+        executors, unset_timeouts = self._resolve_executors(body, watch_roles)
         triggers = body.get("triggers")
         if not isinstance(triggers, list):
             raise TriggerError("triggers must be a list")
@@ -482,15 +490,19 @@ class TriggerEngine:
         self._readonly_tools = None
         self._watch_roles = watch_roles
         self._executors = executors
+        self._unset_timeouts |= unset_timeouts
         self._config_set = True
         for tid, spec in to_add:
+            # `running` counts its fires in flight, `alongside` holds those run beside the first (concurrent_fires),
+            # `waits` each fire waiting out a delay or its executor's hours, `calls` each executor call in progress.
             self._triggers[tid] = {"spec": spec, "status": "armed", "detected_at": None,
                                    "fired_at": None, "evaluating": False,
                                    "next_mark": None, "resolved": False, "fire_count": 0,
                                    "failure_count": 0, "last_failure_at": None,
                                    "rng": _make_rng(spec), "mark_gen": None,
                                    "pending": deque(), "task": None, "delay_rngs": _delay_rngs(spec),
-                                   "attempts": 0, "waiting": False, "resumes": None, "hours": None}
+                                   "attempts": 0, "waiting": False, "running": 0, "alongside": set(),
+                                   "waits": {}, "calls": []}
             self._emit("added", tid)
         self._recompute_time_flag()
         return {"ok": True, "added": batch_order, "all": list(self._triggers)}
@@ -537,8 +549,9 @@ class TriggerEngine:
         for tid in ids:
             trig = self._triggers.pop(tid, None)
             if trig is not None:
-                if trig["task"] is not None:
-                    trig["task"].cancel()  # a fire waiting out a delay or hours would otherwise still act
+                for task in [trig["task"], *trig["alongside"]]:
+                    if task is not None:
+                        task.cancel()  # a fire waiting out a delay or hours would otherwise still act
                 removed.append(tid)
                 self._emit("removed", tid)
         self._recompute_time_flag()
@@ -558,8 +571,43 @@ class TriggerEngine:
         self._in_flight = {}
         self._config_set = False
         self._readonly_tools = None
+        self._concurrent_fires = False
+        self._executor_timeout_default = None
+        self._unset_timeouts = set()
+        self._executor_locks = {}
         self._recompute_time_flag()
         return {"ok": True}
+
+    def config(self, body: Any) -> dict:
+        """Set the engine's opt-in settings, each off unless the body sets it (an omitted one resets): with
+        ``concurrent_fires``, each further call that provokes a repeat trigger already firing starts its own fire at
+        once, side by side, instead of queueing behind the one running; ``executor_timeout_seconds`` is the time limit
+        of each executor whose registration set no ``timeout_seconds`` (else 120). ``clear`` resets both."""
+        if not isinstance(body, dict):
+            raise TriggerError("body must be a JSON object")
+        unknown = sorted(set(body) - {"concurrent_fires", "executor_timeout_seconds"})
+        if unknown:
+            raise TriggerError(f"unknown setting(s) {unknown}; expected concurrent_fires, executor_timeout_seconds")
+        concurrent = body.get("concurrent_fires", False)
+        if not isinstance(concurrent, bool):
+            raise TriggerError(f"concurrent_fires must be true or false (got {concurrent!r})")
+        timeout = body.get("executor_timeout_seconds")
+        if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+                                    or not math.isfinite(timeout) or timeout <= 0):
+            raise TriggerError(f"executor_timeout_seconds must be a positive, finite number (got {timeout!r})")
+        self._concurrent_fires = concurrent
+        self._executor_timeout_default = None if timeout is None else float(timeout)
+        return {"ok": True, **self._settings()}
+
+    def _settings(self) -> dict:
+        return {"concurrent_fires": self._concurrent_fires,
+                "executor_timeout_seconds": self._executor_timeout_default}
+
+    def _executor_timeout(self, name: str | None, executor: dict) -> float:
+        """The executor's time limit: its own, else the configured default, else 120."""
+        if self._executor_timeout_default is not None and name in self._unset_timeouts:
+            return self._executor_timeout_default
+        return executor["timeout_seconds"]
 
     def _recompute_time_flag(self) -> None:
         # "firing" counts: a recurrence mid-fire returns to "armed" and still needs the driver.
@@ -618,14 +666,15 @@ class TriggerEngine:
             raise TriggerError(f"watch_roles {sorted(new)} conflicts with the already-registered {sorted(self._watch_roles)} — clear to change it")
         return new
 
-    def _resolve_executors(self, body: dict, watch_roles: set[str]) -> dict[str | None, dict]:
+    def _resolve_executors(self, body: dict, watch_roles: set[str]) -> tuple[dict[str | None, dict], set[str | None]]:
         """The executors once this register lands: those before, plus the body's `executor` (under None) and
-        `executors`, each set once."""
+        `executors`, each set once; and those of them new here that set no `timeout_seconds` of their own."""
         named = body.get("executors")
         if named is not None and (not isinstance(named, dict) or not all(isinstance(n, str) and n for n in named)):
             raise TriggerError("executors must be an object keyed by non-empty executor names")
         incoming = ({None: body["executor"]} if body.get("executor") is not None else {}) | (named or {})
         merged = dict(self._executors)
+        unset: set[str | None] = set()
         for name, raw in incoming.items():
             normalized = self._normalize_executor(raw, "executor" if name is None else f"executors[{name!r}]",
                                                   watch_roles)
@@ -634,8 +683,10 @@ class TriggerEngine:
                                    if name is None else
                                    f"executor {name!r} conflicts with the already-registered executor of that name — "
                                    "clear to change it")
+            if name not in merged and raw.get("timeout_seconds") is None:
+                unset.add(name)
             merged[name] = normalized
-        return merged
+        return merged, unset
 
     @staticmethod
     def _normalize_executor(raw: Any, where: str, watch_roles: set[str]) -> dict:
@@ -898,10 +949,15 @@ class TriggerEngine:
         resumes = {tid: self._resumes_at(t) for tid, t in self._triggers.items()}
         upcoming = [self._upcoming_mark(t) for t in self._triggers.values()] + list(resumes.values())
         next_event = min((at for at in upcoming if at is not None), default=None)
+        now = _monotonic()
         return {
             "config": {"watch_roles": sorted(self._watch_roles),
                        "executor_configured": None in self._executors,
                        "executors": sorted(n for n in self._executors if n is not None)},
+            "settings": self._settings(),  # what `config` set
+            # `running` counts a trigger's fires in flight, `waits` says when each of them waiting out a delay or its
+            # executor's hours goes on, and `executor_calls` lists each call to an executor in progress, with the
+            # seconds left of its time limit; `waiting` and `resumes_at` sum `waits` up.
             "triggers": [
                 {"id": tid, "type": t["spec"]["when"]["type"],
                  "when": {k: t["spec"]["when"][k] for k in _WHEN_SUMMARY_KEYS if k in t["spec"]["when"]},
@@ -909,9 +965,14 @@ class TriggerEngine:
                  "fired_at": t["fired_at"], "fire_count": t["fire_count"],
                  "failure_count": t["failure_count"], "last_failure_at": t["last_failure_at"],
                  "barrier": t["spec"].get("barrier"),
-                 "pending": len(t["pending"]), "waiting": t["waiting"], "evaluating": t["evaluating"],
+                 "pending": len(t["pending"]), "waiting": bool(t["waits"]), "evaluating": t["evaluating"],
                  "resumes_at": _iso(resumes[tid]) if resumes[tid] else None,
-                 "next_mark": _iso(t["next_mark"]) if t["next_mark"] else None}
+                 "next_mark": _iso(t["next_mark"]) if t["next_mark"] else None,
+                 "running": t["running"],
+                 "waits": sorted(({"resumes_at": _iso(at) if (at := self._wait_resumes(w)) else None}
+                                  for w in t["waits"].values()), key=lambda w: w["resumes_at"] or ""),
+                 "executor_calls": [{"executor": c["executor"], "action_index": c["action_index"],
+                                     "seconds_left": round(max(0.0, c["deadline"] - now), 1)} for c in t["calls"]]}
                 for tid, t in self._triggers.items()
             ],
             "next_event_at": _iso(next_event) if next_event else None,
@@ -1037,6 +1098,14 @@ class TriggerEngine:
     def _mark_detected(self, tid: str, trig: dict, provoking: dict, ctx: dict | None = None) -> asyncio.Task | None:
         ctx = ctx if ctx is not None else {}
         since = self._gw._clock.elapsed()  # a delay runs from the provoking call, not from when its turn comes
+        if trig["status"] in TRIGGER_IN_FLIGHT_STATUSES and self._concurrent_fires:
+            # Mid-fire, side by side: this call's fire starts now, so a quick reply doesn't wait behind a slow one.
+            self._emit("detected", tid, provoking=provoking, alongside=trig["running"])
+            task = self._schedule(self._fire_alongside(tid, trig, ctx, since))
+            task.set_name(tid)
+            trig["alongside"].add(task)
+            task.add_done_callback(trig["alongside"].discard)
+            return task
         if trig["status"] in TRIGGER_IN_FLIGHT_STATUSES:
             # Mid-fire: queue it; the running fire drains the queue before it settles.
             trig["pending"].append((ctx, since))
@@ -1094,8 +1163,9 @@ class TriggerEngine:
         due = self._eval_time_triggers()
         now = self._gw._clock.now()
         ended = [tid for tid, t in self._triggers.items()
-                 if now is not None and (at := self._resumes_at(t)) is not None and at <= now
-                 and (t["hours"] is None or _next_opening(now, t["hours"]) is None)]
+                 if now is not None and any((at := self._wait_resumes(w)) is not None and at <= now
+                                            and (w["hours"] is None or _next_opening(now, w["hours"]) is None)
+                                            for w in t["waits"].values())]
         self._clock_moved.set()
         self._clock_moved = asyncio.Event()
         return list(dict.fromkeys(due + ended))
@@ -1137,8 +1207,14 @@ class TriggerEngine:
         return None if mark is None or (until is not None and mark > until) else mark
 
     def _resumes_at(self, trig: dict) -> datetime | None:
-        """When a fire waiting out a delay or its executor's hours goes on, in virtual time; None when none waits."""
-        resumes = trig["resumes"]
+        """When the first of its fires waiting out a delay or its executor's hours goes on, in virtual time; None when
+        none waits."""
+        return min((at for w in trig["waits"].values() if (at := self._wait_resumes(w)) is not None), default=None)
+
+    def _wait_resumes(self, wait: dict) -> datetime | None:
+        """When one waiting fire goes on, in virtual time: its delay's end (a Clock.elapsed() reading) or its
+        executor's next opening."""
+        resumes = wait["resumes"]
         if resumes is None or isinstance(resumes, datetime):
             return resumes
         return self._gw._clock.at_elapsed(resumes)
@@ -1220,6 +1296,7 @@ class TriggerEngine:
 
     async def _fire_time(self, tid: str, trig: dict, marks: list[datetime], capped: bool, terminated: bool) -> None:
         """Run the actions once per due mark, then re-arm (recurring) or retire (one-shot / terminated)."""
+        trig["running"] += 1
         try:
             await self._gw._log_event({"event_type": "trigger_fired", "source": "trigger_engine", "trigger_id": tid})
             clock = self._gw._clock
@@ -1246,6 +1323,7 @@ class TriggerEngine:
             self._emit("failed", tid, detail=str(e)[:300])
             return
         finally:
+            trig["running"] -= 1
             self._recompute_time_flag()  # a terminated trigger lets the driver park again
         self._resolve_dependents(tid)  # success-only, outside the try (see _fire)
 
@@ -1346,46 +1424,72 @@ class TriggerEngine:
         """Run the actions for one provoking call, then drain any calls queued while firing (repeat
         triggers). A failure always re-arms: a mirror states a standing invariant, so one transient
         error must not silence it for the rest of the run. Ends armed or fired (one-shot success)."""
-        spec = trig["spec"]
-        repeat = bool(spec["when"].get("repeat"))
+        repeat = bool(trig["spec"]["when"].get("repeat"))
+        outcome: str | None = None  # the status a normal end leaves
+        trig["running"] += 1
         try:
             while True:
-                ok = True
-                trig["attempts"] += 1
-                try:
-                    await self._gw._log_event({"event_type": "trigger_fired", "source": "trigger_engine", "trigger_id": tid,
-                                               "provoking_tool": (ctx.get("args") is not None and spec["when"].get("tool")) or None,
-                                               **({"provoking_request": ctx["request"]} if "request" in ctx else {})})
-                    for index, action in enumerate(spec["actions"]):
-                        if not await self._run_action(tid, trig, index, action, ctx, since):
-                            ok = False
-                            self._emit("failed", tid, action_index=index)
-                            break
-                    if ok:
-                        trig["fire_count"] += 1
-                        trig["fired_at"] = _now()
-                        self._emit("fired", tid, fire_count=trig["fire_count"])
-                except Exception as e:
-                    logger.exception(f"trigger '{tid}' firing failed")
-                    ok = False
-                    self._emit("failed", tid, detail=str(e)[:300])
-                if ok:
-                    self._resolve_dependents(tid)  # success-only, outside the try so it can't flip a fired trigger to failed
+                ok = await self._fire_once(tid, trig, ctx, since)
                 if trig["pending"]:
                     ctx, since = trig["pending"].popleft()
                     trig["status"] = "firing"
                     trig["detected_at"] = _now()
                     continue
-                trig["status"] = "armed" if (repeat or not ok) else "fired"
+                outcome = "armed" if (repeat or not ok) else "fired"
                 return
         finally:
-            # An abnormal exit must not wedge the trigger in firing/queued, nor drop its queue silently; a trigger removed
-            # or cleared meanwhile is gone, and has nothing left to report.
-            if trig["status"] in TRIGGER_IN_FLIGHT_STATUSES and self._triggers.get(tid) is trig:
-                self._emit("failed", tid, detail="firing did not settle", dropped=len(trig["pending"]))
-                trig["status"] = "armed"
-                trig["pending"].clear()
+            trig["running"] -= 1
             trig["task"] = None
+            self._settle_status(tid, trig, outcome)
+
+    async def _fire_alongside(self, tid: str, trig: dict, ctx: dict, since: float) -> None:
+        """One fire of a repeat trigger run beside its others (``concurrent_fires``); the last of them to end re-arms
+        it, as a repeat trigger always ends armed."""
+        trig["running"] += 1
+        try:
+            await self._fire_once(tid, trig, ctx, since)
+        finally:
+            trig["running"] -= 1
+            self._settle_status(tid, trig, "armed")
+
+    def _settle_status(self, tid: str, trig: dict, outcome: str | None) -> None:
+        """A fire of ``tid`` ended, normally (leaving ``outcome``) or not (None); the last of its fires to end sets its
+        status. An abnormal exit must not wedge the trigger in firing/queued, nor drop its queue silently; a trigger
+        removed or cleared meanwhile is gone, and has nothing left to report."""
+        if trig["running"] or trig["status"] not in TRIGGER_IN_FLIGHT_STATUSES:
+            return
+        if outcome is not None:
+            trig["status"] = outcome
+        elif self._triggers.get(tid) is trig:
+            self._emit("failed", tid, detail="firing did not settle", dropped=len(trig["pending"]))
+            trig["status"] = "armed"
+            trig["pending"].clear()
+
+    async def _fire_once(self, tid: str, trig: dict, ctx: dict, since: float) -> bool:
+        """Run the actions once for one provoking call; whether they all went through."""
+        spec = trig["spec"]
+        ok = True
+        trig["attempts"] += 1
+        try:
+            await self._gw._log_event({"event_type": "trigger_fired", "source": "trigger_engine", "trigger_id": tid,
+                                       "provoking_tool": (ctx.get("args") is not None and spec["when"].get("tool")) or None,
+                                       **({"provoking_request": ctx["request"]} if "request" in ctx else {})})
+            for index, action in enumerate(spec["actions"]):
+                if not await self._run_action(tid, trig, index, action, ctx, since):
+                    ok = False
+                    self._emit("failed", tid, action_index=index)
+                    break
+            if ok:
+                trig["fire_count"] += 1
+                trig["fired_at"] = _now()
+                self._emit("fired", tid, fire_count=trig["fire_count"])
+        except Exception as e:
+            logger.exception(f"trigger '{tid}' firing failed")
+            ok = False
+            self._emit("failed", tid, detail=str(e)[:300])
+        if ok:
+            self._resolve_dependents(tid)  # success-only, outside the try so it can't flip a fired trigger to failed
+        return ok
 
     async def _run_action(self, tid: str, trig: dict, index: int, action: dict, ctx: dict, since: float) -> bool:
         if "delay" in action:
@@ -1480,7 +1584,7 @@ class TriggerEngine:
         fires.append(fire)
         try:
             for attempt in (1, 2):
-                reply = await self._call_executor(executor, instruction, context_id=f"trigger-{tid}")
+                reply = await self._executor_turn(tid, trig, index, action.get("executor"), executor, instruction)
                 if reply is None:
                     self._emit("action_failed", tid, action_index=index,
                                detail=f"executor attempt {attempt} did not complete", **named)
@@ -1497,6 +1601,26 @@ class TriggerEngine:
         self._emit("action_failed", tid, action_index=index, detail="verification failed after retry", **named)
         return None
 
+    async def _executor_turn(self, tid: str, trig: dict, index: int, name: str | None, executor: dict | None,
+                             instruction: str) -> str | None:
+        """One call to the executor, listed in the trigger's ``calls`` with the end of its time limit while it runs.
+        Calls in one conversation (the executor's URL and the trigger's context id) take turns, so fires of one trigger
+        running side by side never resume the executor's session at once."""
+        context_id = f"trigger-{tid}"
+        if executor is None:
+            return await self._call_executor(executor, instruction, context_id=context_id)
+        timeout = self._executor_timeout(name, executor)
+        if timeout != executor["timeout_seconds"]:
+            executor = {**executor, "timeout_seconds": timeout}
+        lock = self._executor_locks.setdefault((executor["a2a_url"], context_id), asyncio.Lock())
+        async with lock:
+            call = {"executor": name, "action_index": index, "deadline": _monotonic() + timeout}
+            trig["calls"].append(call)
+            try:
+                return await self._call_executor(executor, instruction, context_id=context_id)
+            finally:
+                trig["calls"].remove(call)
+
     def caused_by(self, role: str) -> list[dict]:
         """The fires in flight for the executor with ``role``, all of them when several overlap; its tool calls are
         attributed to them. A fire is the trigger's n-th, failed ones counted."""
@@ -1511,20 +1635,17 @@ class TriggerEngine:
             mean = _parse_duration(delay["mean"]).total_seconds()
             seconds = trig["delay_rngs"][index].expovariate(1.0 / mean)
         self._emit("delayed", tid, action_index=index, virtual_seconds=round(seconds, 3), **_named_executor(action))
-        trig["waiting"] = True
-        trig["resumes"] = since + seconds
+        token = _begin_wait(trig, since + seconds)
         try:
             await self._sleep_virtual(seconds - (self._gw._clock.elapsed() - since))
         finally:
-            trig["waiting"] = False
-            trig["resumes"] = None
+            _end_wait(trig, token)
 
     async def _await_hours(self, tid: str, trig: dict, index: int, hours: dict, named: dict) -> None:
         """Wait until the executor's working hours are open now, reckoned each pass; not while the clock is unarmed."""
         clock = self._gw._clock
         gen = opens = None
-        trig["waiting"] = True
-        trig["hours"] = hours
+        token = _begin_wait(trig, None, hours)
         try:
             while True:
                 current = clock.generation  # read before now(), so a re-arm in between is caught on the next pass
@@ -1534,13 +1655,11 @@ class TriggerEngine:
                     return
                 if current != gen or opening != opens:
                     gen, opens = current, opening
-                    trig["resumes"] = opens
+                    trig["waits"][token]["resumes"] = opens
                     self._emit("deferred", tid, action_index=index, until=_iso(opens), **named)
                 await self._sleep_virtual((opens - now).total_seconds(), generation=gen)
         finally:
-            trig["waiting"] = False
-            trig["resumes"] = None
-            trig["hours"] = None
+            _end_wait(trig, token)
 
     async def _sleep_virtual(self, seconds: float, generation: int | None = None) -> None:
         """Wait out ``seconds`` of virtual time as the clock runs (real time at its rate, 1 while unarmed, none while
@@ -1600,6 +1719,20 @@ class TriggerEngine:
         for dep_id, dep in self._triggers.items():
             if dep["spec"]["when"].get("after") == tid and dep["status"] == "armed":
                 self._cancel(dep_id, dep, anchor=tid)
+
+
+def _begin_wait(trig: dict, resumes: Any, hours: dict | None = None) -> object:
+    """Mark one fire of ``trig`` as waiting until ``resumes`` (a Clock.elapsed() reading, a datetime, or None until
+    known), for ``hours`` when it waits on its executor's working hours; returns the token ``_end_wait`` takes."""
+    token = object()
+    trig.setdefault("waits", {})[token] = {"resumes": resumes, "hours": hours}
+    trig["waiting"] = True
+    return token
+
+
+def _end_wait(trig: dict, token: object) -> None:
+    trig["waits"].pop(token, None)
+    trig["waiting"] = bool(trig["waits"])
 
 
 def _interval_seconds(when: dict, rng: random.Random | None) -> float:
