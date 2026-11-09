@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Optional
 import httpx
 from agentenv_protocol import METHOD_GET, DataPart, client as protocol_v1
 from mcp import ClientSession
+from mcp.types import CallToolResult
 from mcp.client.streamable_http import streamable_http_client
 
 if TYPE_CHECKING:
@@ -279,11 +280,12 @@ async def offers_tool(mcp_url: str, name: str) -> bool:
 async def reset_via_mcp_tool(
     mcp_url: str,
     environment_name: str,
-    mock_data_path: str,
+    mock_data_path: Optional[str] = None,
     max_retries: int = DEFAULT_MCP_MAX_RETRIES,
-) -> None:
-    """Call the ``{environment_name}_reset`` MCP tool, retrying on transient failures."""
-
+) -> CallToolResult:
+    """Call the ``{environment_name}_reset`` MCP tool, retrying on transient failures; what it answered. With
+    ``mock_data_path``, the seed it loads; with none, an older server's tool puts back the data it boots with."""
+    arguments = {} if mock_data_path is None else {"mock_data_path": mock_data_path}
     for attempt in range(max_retries):
         reset_done = False
         try:
@@ -291,7 +293,7 @@ async def reset_via_mcp_tool(
                 async with ClientSession(read_stream, write_stream) as session:
                     await session.initialize()
                     reset_tool_name = f"{environment_name}_reset"
-                    result = await session.call_tool(reset_tool_name, {"mock_data_path": mock_data_path})
+                    result = await session.call_tool(reset_tool_name, arguments)
                     result_text = "".join(c.text for c in result.content if hasattr(c, "text"))
                     logger.info(f"load_environment_artifact: {reset_tool_name} returned: {result_text}")
                     reset_done = True
@@ -312,6 +314,7 @@ async def reset_via_mcp_tool(
                 raise
         else:
             break
+    return result
 
 
 async def reset(

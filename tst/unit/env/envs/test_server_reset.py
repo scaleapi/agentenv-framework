@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from mcp.types import CallToolResult, TextContent
 
 from agent_env.env.env import DeployedEnv
 from agent_env.env.envs import _deployment, mcp_server, website
@@ -86,12 +87,26 @@ async def test_an_older_server_is_emptied_through_its_api_reset_and_one_answerin
 
 
 @pytest.mark.asyncio
-async def test_an_older_server_answering_404_that_resets_only_through_its_tool_to_a_seed_cant_be_emptied(server):
+async def test_an_older_server_answering_404_resets_through_its_tool_with_no_seed_to_the_data_it_boots_with(server):
     server.status = 404
+    tool = AsyncMock(return_value=CallToolResult(content=[TextContent(type="text", text="Data reset for email.")]))
     with patch("agent_env.env.legacy_protocol.v1_base_url", AsyncMock(return_value=None)), \
          patch("agent_env.env.legacy_protocol.offers_tool", AsyncMock(return_value=True)), \
-         pytest.raises(RuntimeError, match="^MCP server 'email' resets only to a seed loaded through its email_reset "
-                                           "tool, so a reset can't empty it; load it again instead$"):
+         patch("agent_env.env.legacy_protocol.reset_via_mcp_tool", tool):
+        assert await _deployment.reset_server_data(_server(None), mcp=True) is True
+
+    tool.assert_awaited_once_with(f"{GATEWAY}/mcp", "email")  # no seed
+    server.triggers.assert_awaited_once_with("email")
+
+
+@pytest.mark.asyncio
+async def test_an_older_server_whose_reset_tool_fails_fails_its_reset_named(server):
+    server.status = 404
+    failed = CallToolResult(content=[TextContent(type="text", text="database is locked")], isError=True)
+    with patch("agent_env.env.legacy_protocol.v1_base_url", AsyncMock(return_value=None)), \
+         patch("agent_env.env.legacy_protocol.offers_tool", AsyncMock(return_value=True)), \
+         patch("agent_env.env.legacy_protocol.reset_via_mcp_tool", AsyncMock(return_value=failed)), \
+         pytest.raises(RuntimeError, match="^MCP server 'email': its email_reset tool failed: database is locked$"):
         await _deployment.reset_server_data(_server(None), mcp=True)
     assert not server.triggers.await_count
 
