@@ -32,23 +32,24 @@ def _says(closing):
 
 
 @pytest.mark.asyncio
-async def test_all_three_are_on_by_default(monkeypatch, tmp_path):
+async def test_stay_quiet_and_the_nudge_are_on_and_the_wake_reminder_off_by_default(monkeypatch, tmp_path):
     rig = Rig(monkeypatch, tmp_path, agent=_turns(_quiet()))
     await rig.arm()
     step = rig.step()
     ctx = await rig.run(step)
 
-    assert (step.stay_quiet, step.nudge, step.wake_reminder) == (True, True, True)
-    assert rig.record(ctx)["settings"].items() >= {"stay_quiet": True, "nudge": True, "wake_reminder": True}.items()
+    assert (step.stay_quiet, step.nudge, step.wake_reminder) == (True, True, False)
+    assert rig.record(ctx)["settings"].items() >= {"stay_quiet": True, "nudge": True, "wake_reminder": False}.items()
+    assert not any(ao.WAKE_REMINDER_TEXT in texts for texts in rig.sent)
     assert rig.during[0]["stay_quiet"] and ROLE in rig.during[0]["user_chat_roles"]
 
 
 @pytest.mark.asyncio
-async def test_each_wake_ends_with_the_reminder(monkeypatch, tmp_path):
+async def test_a_task_that_turns_the_wake_reminder_on_ends_each_wake_with_it(monkeypatch, tmp_path):
     rig = Rig(monkeypatch, tmp_path, agent=_turns(_send("two houses, which one?"), _quiet()),
               answers=[{"outcome": "reply", "message": "the blue one"}])
     await rig.arm()
-    await rig.run(rig.step())
+    await rig.run(rig.step(wake_reminder=True))
 
     assert len(rig.sent) == 2
     assert all(texts[-1] == ao.WAKE_REMINDER_TEXT for texts in rig.sent)
