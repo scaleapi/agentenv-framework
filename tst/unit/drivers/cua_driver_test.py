@@ -122,8 +122,11 @@ class FakeKeymap:
 
 @pytest.fixture
 def module(monkeypatch):
+    """driver.py loaded as it is on an X11 desktop on Linux, whatever runs the tests, with X stood in for; a test of
+    another platform sets that platform's flags itself."""
     monkeypatch.delenv("ENVIRONMENT_NAME", raising=False)
     monkeypatch.delenv("AGENTENV_COMPUTER_SETTINGS", raising=False)
+    monkeypatch.delenv("HYPRLAND_INSTANCE_SIGNATURE", raising=False)
     xlib = types.ModuleType("Xlib")
     xlib.display = types.ModuleType("Xlib.display")
     xlib.display.Display = FakeKeymap
@@ -137,7 +140,9 @@ def module(monkeypatch):
     monkeypatch.delitem(sys.modules, "hyprland", raising=False)
     spec = importlib.util.spec_from_file_location("cua_driver_driver", DRIVER)
     loaded = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(loaded)
+    with monkeypatch.context() as linux:
+        linux.setattr(sys, "platform", "linux")
+        spec.loader.exec_module(loaded)
     return loaded
 
 
