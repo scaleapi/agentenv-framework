@@ -258,6 +258,16 @@ Code that names none runs under `client.authorized({env_url: client.control_head
 within it, a call to an address under `env_url` sends those headers. agent-env runs every task
 step, a verifier's `verify` included, under such a grant for each environment it deployed.
 
+The env gateway agent-env deploys in front of an environment's servers takes the same token in the
+same header, but for now checks it only on tool access (`POST /tools/disable`, `POST /tools/enable`)
+and on the writes of triggers and notifications (`/triggers/register`, `/triggers/remove`,
+`/triggers/clear`, `/notifications/config`, `/notifications/take`, `/notifications/clear`). A call to
+one of those without it gets 401 and `{"ok": false, "error": "this route takes the env's control
+token"}`. Its other routes, the clock's writes, the state reads, `/svc` and `/agentenv` among them,
+stay open while callers outside agent-env use them without the token. No card, the gateway's or an
+environment's, marks which routes take it: a client sends the token to every route but the MCP
+endpoint and the card, and an open route ignores it.
+
 ### Tool access without a gateway
 
 An environment agents reach directly, with no gateway in front, can enforce per-role tool access
