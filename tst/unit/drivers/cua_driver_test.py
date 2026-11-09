@@ -446,6 +446,10 @@ def test_on_windows_a_call_waits_out_a_busy_or_briefly_absent_pipe_and_a_daemon_
         module._piped({"method": "list"})
 
 
+#: What ``hyprctl -j cua:status`` answers while cua-driver's plugin is loaded, enabled and built for that Hyprland.
+PLUGIN_LOADED = {"configured": True, "abi": {"match": True}}
+
+
 @pytest.fixture
 def hyprland(module, monkeypatch):
     """The driver as it runs in a Hyprland session, whatever OS the tests run on."""
@@ -461,7 +465,7 @@ async def test_on_hyprland_keys_go_to_the_focused_window_in_the_foreground_and_t
 
     def hyprctl(request):
         asked.append(request)
-        return {"address": "0x5557e0f44ad0", "pid": 42}
+        return {"activewindow": {"address": "0x5557e0f44ad0", "pid": 42}, "cua:status": PLUGIN_LOADED}[request]
     monkeypatch.setattr(module, "_hyprctl", hyprctl)
     driver = module.CuaDriver()
 
@@ -475,13 +479,13 @@ async def test_on_hyprland_keys_go_to_the_focused_window_in_the_foreground_and_t
         ("press_key", {"scope": "desktop", "key": "a", "modifiers": ["ctrl"], **focused}),
         ("click", {"scope": "desktop", "x": 10, "y": 20, "button": "left", "count": 1, "modifier": []}),
     ]
-    assert driver._keymap is None and asked == ["activewindow", "activewindow"]
+    assert driver._keymap is None and asked == ["activewindow", "cua:status"] * 2 + ["cua:status"]
 
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("hyprland")
 async def test_on_hyprland_with_nothing_focused_keys_go_to_the_desktop(module, daemon, monkeypatch):
-    monkeypatch.setattr(module, "_hyprctl", lambda request: {})
+    monkeypatch.setattr(module, "_hyprctl", lambda request: {"cua:status": PLUGIN_LOADED}.get(request))
 
     await module.CuaDriver().press_keys(["Escape"])
 
@@ -490,12 +494,34 @@ async def test_on_hyprland_with_nothing_focused_keys_go_to_the_desktop(module, d
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("hyprland")
+async def test_on_hyprland_input_is_refused_and_not_sent_once_hyprland_runs_without_cua_drivers_plugin(
+        module, daemon, monkeypatch):
+    status = {"cua:status": PLUGIN_LOADED}
+    monkeypatch.setattr(module, "_hyprctl", lambda request: status.get(request))
+    driver = module.CuaDriver()
+    await driver.click_at(10, 20, "left", 1, [])
+
+    del status["cua:status"]
+    for act in (driver.click_at(10, 20, "left", 1, []), driver.press_keys(["Escape"]), driver.type_in("hi")):
+        with pytest.raises(module.DeviceUnavailable, match="Hyprland hasn't loaded cua-driver's plugin"):
+            await act
+    async with mcp_session(driver) as session:
+        clicked = await session.call_tool("click", {"pid": 42, "window_id": 7, "x": 1, "y": 2})
+        listed = await session.call_tool("list_windows", {})
+
+    assert clicked.isError and clicked.content[0].text == "Hyprland hasn't loaded cua-driver's plugin"
+    assert not listed.isError
+    assert [name for name, _ in daemon.calls()] == ["click", "list_windows"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("hyprland")
 async def test_on_hyprland_readiness_checks_every_time_that_hyprland_has_cua_drivers_plugin(
         module, daemon, monkeypatch):
     driver = module.CuaDriver()
     monkeypatch.setattr(module, "_executable_sha256", lambda: module.EXECUTABLES[driver.platform.arch])
-    loaded = {"configured": True, "abi": {"match": True}}
-    statuses = iter([loaded, None, {**loaded, "configured": False}, {**loaded, "abi": {"match": False}}])
+    statuses = iter([PLUGIN_LOADED, None, {**PLUGIN_LOADED, "configured": False},
+                     {**PLUGIN_LOADED, "abi": {"match": False}}])
     monkeypatch.setattr(module, "_hyprctl", lambda request: next(statuses) if request == "cua:status" else None)
 
     checks = [await driver.ready_checks() for _ in range(4)]

@@ -10,7 +10,7 @@ cua-driver starts again after ending it for idling, where a named one stays ende
 while it restarts, fails as unavailable; input whose reply is lost fails with its outcome unknown, since it may have
 arrived. It needs ``agentenv-framework-protocol[computer]`` and ``cua-driver`` where it runs. On a Hyprland desktop
 (Wayland) it runs cua-driver's Wayland backend, sends keys and text to the focused window in the foreground, and is
-ready only while Hyprland has cua-driver's plugin loaded."""
+ready, and takes input, only while Hyprland has cua-driver's plugin loaded."""
 from __future__ import annotations
 
 import asyncio
@@ -143,7 +143,8 @@ class CuaDriver(ComputerDriverEnvironment):
 
     def forwarded_tools(self) -> list[ForwardedTool]:
         return [ForwardedTool(EnvironmentTool(name=t["name"], description=t["description"], inputSchema=t["inputSchema"]),
-                              functools.partial(self._forward, t["name"]), t["annotations"] or None, t.get("outputSchema"))
+                              functools.partial(self._forward, t["name"], not (t["annotations"] or {}).get("readOnlyHint")),
+                              t["annotations"] or None, t.get("outputSchema"))
                 for t in _manifest()["tools"]]
 
     @resource("skill://cua-driver/{file}", listed=lambda env: _manifest()["resources"])
@@ -216,10 +217,13 @@ class CuaDriver(ComputerDriverEnvironment):
         await self._send("press_key", modifiers=_modifiers(held), key=MODIFIERS.get(key) or NAMED.get(key, key),
                          **await _focused())
 
-    async def _forward(self, tool: str, /, **arguments: Any) -> CallToolResult:
-        """A call to one of cua-driver's own tools in its caller's session, answered as cua-driver answers it."""
+    async def _forward(self, tool: str, acts: bool, /, **arguments: Any) -> CallToolResult:
+        """A call to one of cua-driver's own tools in its caller's session, answered as cua-driver answers it; one that
+        isn't read-only is refused on Hyprland without cua-driver's plugin."""
         session = self._callers.setdefault(ToolContext.current().caller.session, uuid.uuid4().hex)
         try:
+            if acts:
+                await _require_plugin()
             reply = await _request({"method": "call", "name": tool, "args": arguments, "session_id": session})
         except DeviceUnavailable as e:
             return _refused(e.message)
@@ -246,6 +250,7 @@ class CuaDriver(ComputerDriverEnvironment):
         return self._keymap
 
     async def _send(self, name: str, **args: Any) -> None:
+        await _require_plugin()
         await self._call(name, DeliveryFailed, scope="desktop", **args)
 
     async def _call(self, name: str, failure: type[Exception], **args: Any) -> dict:
@@ -422,6 +427,13 @@ async def _plugin() -> ReadyCheck:
     else:
         return ReadyCheck("cua-driver plugin", True, "loaded, enabled and built for this Hyprland")
     return ReadyCheck("cua-driver plugin", False, problem)
+
+
+async def _require_plugin() -> None:
+    """On Hyprland, input refused unless cua-driver's plugin is loaded: the runtime runs ready checks only until they
+    first pass, and input sent while Hyprland runs without the plugin is accepted but never arrives."""
+    if HYPRLAND and not (check := await _plugin()).ok:
+        raise DeviceUnavailable(check.detail)
 
 
 def _hyprctl(request: str) -> dict | None:
