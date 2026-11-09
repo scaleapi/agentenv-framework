@@ -206,6 +206,18 @@ def test_earlier_on_your_phone_keeps_only_the_last_week():
     assert "Re: the flat" not in text
 
 
+def test_an_earlier_item_without_a_time_keeps_the_time_of_the_read_it_came_in():
+    undated = {"channel": "Gmail · Priya Shah", "text": "Re: the flat"}
+    history = [{"read": _read("2026-11-09T16:00:00Z", phone=[undated]), "answer": NOTHING},
+               {"read": _read("2026-11-16T17:05:00Z", phone=[{**undated, "text": "Keys on Friday"}],
+                              you_sent=[{"kind": "user_says", "text": "can you check the flat?"}]),
+                "answer": NOTHING}]
+    text = us.render(PERSON, history, _read())
+    assert "  [Mon 9:05 AM · Gmail · Priya Shah] Keys on Friday\n" + us.EARLIER_CUT + "\n" in text
+    assert "Re: the flat" not in text
+    assert "You last messaged your AI assistant on Mon at 9:05 AM." in text
+
+
 def test_in_a_long_run_each_read_stays_bounded():
     history, longest, sizes = [], 0, []
     for k in range(80):  # two reads a day for 40 days, two phone items each

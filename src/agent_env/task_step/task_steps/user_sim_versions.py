@@ -244,7 +244,7 @@ def _stamp(t: datetime, now: datetime) -> str:
 
 def render(person: dict, history: list[dict], read: dict) -> Optional[str]:
     """The message the user sim gets for ``read``, or None when the assistant sent nothing. An item without ``at``
-    shows at the read's time."""
+    shows at the time of the read it came in."""
     messages = [m for m in read.get("assistant_messages") or [] if (m.get("text") or "").strip()]
     if not messages:
         return None
@@ -262,7 +262,11 @@ def render(person: dict, history: list[dict], read: dict) -> Optional[str]:
 
     earlier = [h["read"] for h in history]
     own = _own(read)
-    wrote = [at(s) for r in [*earlier, read] for s in _own(r)]
+
+    def dated(r: dict, items: list) -> list[dict]:  # an earlier read's items, each without ``at`` at that read's time
+        return [item if item.get("at") else {**item, "at": r["time"]} for item in items]
+
+    wrote = [at(s) for r in [*earlier, read] for s in dated(r, _own(r))]
     wrote += [_local(h["read"]["time"], zone) for h in history if _messaged(h.get("answer"))]
     out = [f"It's {now.strftime('%a, %b')} {now.day}, {_hm(now)}."]
     if wrote:
@@ -274,7 +278,7 @@ def render(person: dict, history: list[dict], read: dict) -> Optional[str]:
     if read.get("phone"):
         out.append("\nNEW ON YOUR PHONE (since you last checked):")
         out += [phone_line(item, True) for item in read["phone"]]
-    seen = [item for r in earlier for item in r.get("phone") or []]
+    seen = [item for r in earlier for item in dated(r, r.get("phone") or [])]
     recent = [item for item in seen if (now - at(item)).days < EARLIER_DAYS][-EARLIER_MAX:]
     if seen:
         out.append("\nEARLIER ON YOUR PHONE (you've already seen these):")
