@@ -26,6 +26,13 @@ values, the origin's other keys left as they are; `browser_clear_local_storage {
 `browser_open_tab {url, background?}`, in front, or with `background` behind the active tab, which stays active; and
 `browser_close_tab {url}` and `browser_activate_tab {url}`, on the one open tab at that URL as the browser shows it
 (scheme and host lowercase, no default port, `/` for an empty path), none or several failing the step with the tabs
-open listed. Preflight refuses a step on an env with no browser, none of the name given, or several and none named.
+open listed. `browser_sign_in {site, user}` signs the browser in to `site`, a website env deployed in the run on its
+own or in a multi env, by its env id: the site's `website/v1` `session {user}` gives the cookies and local storage,
+each cookie is set for every name the site is reached by (an exact name by its URL, a `*.` name as a domain cookie),
+and the browser's `data/add` loads them, which opens the start tabs again while no agent has acted. A task runs it
+after the load that seeds the site and again after `reset_env`, which starts the browser afresh. Preflight refuses a
+step on an env with no browser, none of the name given, or several and none named. On a multi env, the steps reach
+the browser apps of its computers, each through the computer's own record and control token; `browser_connect_cdp`
+doesn't reach those yet.
 `browser_connect_cdp` hands an agent a CDP address to the same browser. A whole state, Playwright's `storageState`
 included, loads through `load_artifact` or `data/add` instead.

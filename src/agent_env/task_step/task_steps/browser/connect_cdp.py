@@ -75,6 +75,10 @@ class BrowserConnectCdpTaskStep(BrowserStep):
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         deployed, browser, _ = self._find(context)
+        if deployed.env_id != self.env_id:
+            raise RuntimeError(f"the website browser {browser!r} is in a computer of the multi env {self.env_id!r}, whose "
+                               "agents reach it through the multi env's gateway; browser_connect_cdp doesn't hand out "
+                               "that address yet")
         agent = _deployed_agent(context, self.agent_name)
         cdp_config = A2AAgent.find_extension(agent.a2a_card or {}, A2AAgent.EXT_CDP_CONFIG)
         if cdp_config is None or not agent.a2a_url:
