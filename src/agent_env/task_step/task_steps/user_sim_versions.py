@@ -144,7 +144,7 @@ def _stamp(t: datetime, now: datetime) -> str:
 
 
 def render_today(read: dict) -> str:
-    """ML's setup: the assistant's raw message text, nothing else (several messages joined by a blank line)."""
+    """The assistant's raw message text, nothing else (several messages joined by a blank line)."""
     return "\n\n".join(m["text"].strip() for m in read["assistant_messages"])
 
 
@@ -193,7 +193,7 @@ def render_ours(version: str, person: dict, history: list[dict], read: dict) -> 
 
 def _last_messaged(history: list[dict], read: dict) -> Optional[str]:
     """When the person last sent their assistant anything before this read: their scripted lines (this read's
-    included, as the h2h runner did) and their earlier replies."""
+    included) and their earlier replies."""
     times = [s["at"] for h in history for s in h["read"].get("you_sent") or [] if s.get("at")]
     times += [s["at"] for s in read.get("you_sent") or [] if s.get("at")]
     times += [h["read"]["time"] for h in history if (h.get("answer") or {}).get("outcome") in ("reply", "done")]

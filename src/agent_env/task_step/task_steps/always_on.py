@@ -1012,7 +1012,7 @@ class _Run:
 # ==================================================================================================================
 async def _call(env, uri: str, method: str, params: Optional[dict] = None, *, attempts: int = 6,
                 timeout: int = 60) -> Any:
-    """A gateway control call, retried on a transient failure (a busy laptop's gateway can take seconds to answer).
+    """A gateway control call, retried on a transient failure (a busy gateway can take seconds to answer).
     Every call the step retries is safe to repeat: reads, config, advance (checked against the clock after) and takes
     with a take_id."""
     last: Optional[Exception] = None
