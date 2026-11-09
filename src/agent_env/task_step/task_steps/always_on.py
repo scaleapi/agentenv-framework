@@ -11,6 +11,8 @@ it in the run's metadata under its ``name``; a ``deploy_agent`` step deploys the
 - Only what the agent sends with the gateway's ``message_user`` tool (user-chat/v1) reaches the user; its plain reply
   goes to the log. Each wake should end with ``message_user`` or ``stay_quiet``: one that ends with closing text and
   neither gets one ``nudge`` turn, and every wake ends with a reminder. All three are on unless the task turns them off.
+  The step takes only its agent's role's messages: another role's stay queued, and what the role sent before the run
+  is recorded apart (``user_chat_before_run``), never read by the user.
 - The user sim is asked only after the agent sent something, at the time the user would read it (``schedule``), with
   everything sent meanwhile in one read: the time, the agent's messages, what triggers sent the user's phone
   (``notify`` to ``user_phone``) and the user's own lines (the opening request, ``user_says`` lines, ``final``).
@@ -491,6 +493,11 @@ class _Run:
                  agent=step.agent_name, agent_role=self.recipient, user_sim=step.user_sim, version=self.version,
                  user_model=self.user_model, max_wakes=step.max_wakes, time_zone=self.zone, multi_day=self.multi_day,
                  scheduled_checks=self.checks, clock_rate=await self._rate())
+        # What the agent's role sent before the run (a task that gave it message_user earlier) isn't this run's: set it
+        # aside, recorded, so the first wake doesn't take it as its own.
+        before, quiet = await self._take_messages()
+        if before or quiet:
+            self.log("user_chat_before_run", messages=before, stay_quiet_calls=len(quiet))
         try:
             await self.loop(now)
         except Exception as e:
@@ -1382,10 +1389,11 @@ class _Run:
                 "at": row.get("timestamp"), "by": by, "wake": self.wakes, "phase": phase, "actors": actors}
 
     async def _take_messages(self) -> tuple[list[dict], list[dict]]:
-        """What the agent sent the user with message_user this turn, oldest first, and its stay_quiet calls."""
+        """What the agent sent the user with message_user this turn, oldest first, and its stay_quiet calls: its role's
+        only, so another role's stay queued for whoever takes them."""
         messages, quiet = [], []
         for env in self.chat_envs:
-            got = await _call(env, EXT_USER_CHAT_URI, "take", {"take_id": uuid.uuid4().hex})
+            got = await _call(env, EXT_USER_CHAT_URI, "take", {"take_id": uuid.uuid4().hex, "from": self.recipient})
             messages += got.get("items") or []
             quiet += got.get("quiet") or []
         messages.sort(key=lambda m: m.get("at") or "")

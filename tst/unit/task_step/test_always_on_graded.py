@@ -11,7 +11,7 @@ from agent_env.task_step.task_steps.verifiers.agent_prompt_response_verifier imp
     AgentPromptResponseVerifierTaskStep,
 )
 from agent_env.task_step.task_steps.verifiers.run_context import load_run_context
-from tst.unit.task_step.always_on_harness import Fail, Rig
+from tst.unit.task_step.always_on_harness import ROLE, Fail, Rig
 
 pytestmark = pytest.mark.usefixtures("local_stores")
 
@@ -166,6 +166,28 @@ async def test_a_run_cut_off_by_its_wake_cap_says_so_in_the_conversation(monkeyp
     assert last["texts"][-1].startswith("[End of run · Mon Nov 9, 2:00 PM UTC] The run was cut off at its cap of 2 "
                                         "wakes.")
     assert "Linda: ok (sent after the assistant's last turn" in last["texts"][0]
+
+
+@pytest.mark.asyncio
+async def test_messages_queued_before_the_run_are_not_the_run_s(monkeypatch, tmp_path):
+    """Another role's messages stay queued for whoever takes them; what the agent's own role left before the run is
+    recorded as such; neither reaches her or the graded chat."""
+    rig = Rig(monkeypatch, tmp_path, agent=_agent(t1=_message("on it")))
+    await rig.arm()
+    chat = rig.gw._user_chat
+    chat.configure({"roles": ["other", ROLE], "stay_quiet": True})
+    chat.send("from another assistant", role="other")
+    chat.send("left from an earlier step", role=ROLE)
+    chat.quiet(role=ROLE)
+    ctx = await rig.run(rig.step())
+
+    [response] = ctx.prompt_responses
+    assert response.response == "[Mon Nov 9, 2:00 PM UTC] on it"
+    assert [m["text"] for m in rig.reads[0]["assistant_messages"]] == ["on it"]
+    assert [(m["from"], m["text"]) for m in chat.state()["pending"]] == [("other", "from another assistant")]
+    [before] = rig.events(ctx, "user_chat_before_run")
+    assert [m["text"] for m in before["messages"]] == ["left from an earlier step"]
+    assert before["stay_quiet_calls"] == 1
 
 
 # ---- failed turns are errors -----------------------------------------------------------------------------------------

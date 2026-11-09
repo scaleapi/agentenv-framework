@@ -95,6 +95,25 @@ def test_stay_quiet_sends_nothing_and_is_recorded_for_the_next_take(gateway):
     assert "Tess" in desc
 
 
+def test_a_take_for_one_role_leaves_the_others_messages_and_quiet_calls_queued(gateway):
+    _req(gateway, "POST", "/user_chat/config", {"roles": ["psi_agent", "other"], "stay_quiet": True})
+    _call(gateway, "message_user", {"text": "from psi"}, "psi_agent")
+    _call(gateway, "message_user", {"text": "from other"}, "other")
+    _call(gateway, "stay_quiet", {}, "other")
+
+    taken = _req(gateway, "POST", "/user_chat/take", {"from": "psi_agent"}).json()
+    assert [(m["from"], m["text"]) for m in taken["items"]] == [("psi_agent", "from psi")] and taken["quiet"] == []
+    assert [m["text"] for m in _req(gateway, "GET", "/user_chat/state").json()["pending"]] == ["from other"]
+    rest = _req(gateway, "POST", "/user_chat/take", {}).json()
+    assert [(m["from"], m["text"]) for m in rest["items"]] == [("other", "from other")]
+    assert [q["from"] for q in rest["quiet"]] == ["other"]
+
+
+@pytest.mark.parametrize("who", ["", 3])
+def test_a_take_from_no_role_is_refused(gateway, who):
+    assert _req(gateway, "POST", "/user_chat/take", {"from": who}).status_code == 400
+
+
 def test_a_new_config_or_clear_removes_stay_quiet(gateway):
     _req(gateway, "POST", "/user_chat/config", {"roles": ["psi_agent"], "stay_quiet": True})
     _req(gateway, "POST", "/user_chat/config", {"roles": ["psi_agent"]})
