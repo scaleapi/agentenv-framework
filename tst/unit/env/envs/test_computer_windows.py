@@ -190,7 +190,7 @@ def test_a_windows_env_composes_a_thin_disk_on_its_base_here_the_driver_installe
                                                                          "driver.py"], "env": {"PYTHONUTF8": "1", "MCP_PORT": "18765"}}
     assert lines[-3:] == [
         "Checked { icacls 'C:\\agentenv' /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' "
-        "'*S-1-5-32-545:(OI)(CI)RX' | Out-Null }",
+        "'*S-1-5-32-545:(OI)(CI)RX' '*S-1-15-2-1:(OI)(CI)RX' '*S-1-15-2-2:(OI)(CI)RX' | Out-Null }",
         "Checked { icacls 'C:\\agentenv\\logs' /grant 'user:(OI)(CI)M' | Out-Null }", ""]
     assert {"provision.ps1", "context/driver/driver.py", "context/driver/install.ps1"} <= set(files)
     computer = env.computer_artifact()

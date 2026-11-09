@@ -184,7 +184,8 @@ with 4 vCPUs and 8 GB, on local Docker with KVM and on `modal_vm`; it has comput
 protocol's Windows defaults, so the probe runs its fixture there as on Linux, with Python one-liners for the commands it
 would give a shell. On `modal_vm` it runs in your own Modal workspace, under the evaluation's terms or a licence of your
 own; whether they allow it there is yours to check. Composing leaves `C:\agentenv` the admins', as `/opt/agentenv` is
-root's on Linux: every user reads and runs what's there, and the session user writes only the services' logs and each
+root's on Linux: every user, and every sandboxed process (Chrome's, as Program Files allows it), reads and runs
+what's there, and the session user writes only the services' logs and each
 app's `.agentenv` folder. An app's own server runs in the session as its services do, on a loopback port it writes
 with a token to that folder, which only the session user, SYSTEM and Administrators reach; it launches the app in a
 Job object, which ends whatever the app started. Composing signs in as `agentadmin`, so
