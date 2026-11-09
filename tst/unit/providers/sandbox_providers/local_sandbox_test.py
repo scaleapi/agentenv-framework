@@ -117,7 +117,20 @@ def test_find_work_dir_only_returns_matching_sandbox_id(tmp_path: Path, monkeypa
     assert LocalSandbox.find_work_dir("local-requested") == requested
     assert LocalSandbox.find_work_dir("local-missing") is None
     (tmp_path / "agent-env-notes.txt").write_text("")
+    (tmp_path / "agent-env-notes").mkdir()
     assert local_sandbox_ids() == ["local-other", "local-requested"]
+
+
+@pytest.mark.asyncio
+async def test_a_sandbox_killed_while_writing_its_port_map_is_still_rebuilt_for_teardown(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("AGENT_ENV_LOCAL_SANDBOX_DIR", str(tmp_path))
+    work_dir = tmp_path / "agent-env-local-cut-abc123"
+    work_dir.mkdir()
+    (work_dir / ".port-map.json").write_text("")
+
+    sandbox = await LocalSandboxProvider().get_sandbox("local-cut")
+
+    assert (sandbox.sandbox_id, sandbox.work_dir) == ("local-cut", work_dir)
 
 
 def test_find_work_dir_falls_back_to_legacy_tempdir(tmp_path: Path, monkeypatch):

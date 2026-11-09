@@ -278,9 +278,10 @@ def test_a_run_killed_outright_leaves_its_sandboxes_under_its_root_for_a_supervi
     assert local_sandbox_ids() == []
     assert not _alive(int(nap.read_text()))
     for sandbox_id in found:
-        listed = subprocess.run(["docker", "ps", "-aq", "--filter", f"label=agentenv.sandbox={sandbox_id}"],
-                                capture_output=True, text=True, check=True)
-        assert listed.stdout == ""
+        for selector in (f"label=agentenv.sandbox={sandbox_id}", f"name=^agent-{sandbox_id}$"):
+            listed = subprocess.run(["docker", "ps", "-aq", "--filter", selector], capture_output=True, text=True,
+                                    check=True)
+            assert listed.stdout == "", selector
 
 
 def _alive(pid):

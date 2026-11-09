@@ -634,9 +634,12 @@ def local_sandbox_ids() -> list[str]:
     root = _local_sandbox_root_path()
     if not root.is_dir():
         return []
-    prefix = "agent-env-"
-    return sorted({entry.name.removeprefix(prefix).rsplit("-", 1)[0] for entry in root.iterdir()
-                   if entry.name.startswith(prefix) and entry.is_dir() and not entry.is_symlink()})
+    prefix, found = "agent-env-", set()
+    for entry in root.iterdir():
+        sandbox_id, _, suffix = entry.name.removeprefix(prefix).rpartition("-")
+        if entry.name.startswith(prefix) and sandbox_id and suffix and entry.is_dir() and not entry.is_symlink():
+            found.add(sandbox_id)
+    return sorted(found)
 
 
 def remove_local_work_dir(sandbox_id: str) -> Path | None:
@@ -911,8 +914,10 @@ class LocalSandboxProvider(SandboxProvider):
         work_dir = LocalSandbox.find_work_dir(sandbox_id)
         if work_dir is None:
             raise RuntimeError(f"Local sandbox work directory not found for sandbox_id={sandbox_id!r}")
-        port_map = work_dir / _PORT_MAP_FILE
-        ports = {int(c): h for c, h in json.loads(port_map.read_text()).items()} if port_map.exists() else None
+        try:
+            ports = {int(c): h for c, h in json.loads((work_dir / _PORT_MAP_FILE).read_text()).items()}
+        except (OSError, ValueError):  # none written, or cut short by a run killed while writing it
+            ports = None
         # VM mode even for a container it owns: exec runs on this host, so steps must `docker exec` into it.
         return LocalSandbox(sandbox_id=sandbox_id, work_dir=work_dir, port_map=ports)
 
