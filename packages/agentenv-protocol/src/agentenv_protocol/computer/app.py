@@ -187,7 +187,8 @@ class Launch(BaseModel):
     at: Literal["boot", "demand"] = "boot"
     command: list[str]
     #: Matches the app's window by ``class``, ``instance`` and ``title``, as given: on X11 its WM_CLASS class and
-    #: instance; on Windows its window class and its program's file name, lowercased, such as ``notepad.exe``.
+    #: instance; on Hyprland its class, a Wayland app ID or an X window's WM_CLASS class, and its program's file name;
+    #: on Windows its window class and its program's file name, lowercased, such as ``notepad.exe``.
     window: Optional[dict[str, str]] = None
     ready: Optional[Ready] = None
     #: Variables set in the app's environment, over its server's.
