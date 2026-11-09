@@ -41,7 +41,7 @@ from agent_env.config.paths import state_root
 from agent_env.providers.sandbox_providers.host_images import build_here, built_here, host_platform, present, pull_here
 from agent_env.providers.sandbox_providers.disk_launcher import RESET, UNRESETTABLE, reset_input, unresettable
 from agent_env.providers.sandbox_providers.local_docker.cli import DockerFailed, docker
-from agent_env.providers.sandbox_providers.local_docker.disk import kvm_platforms, launcher_args, machine_image
+from agent_env.providers.sandbox_providers.local_docker.disk import kvm_platforms, launcher_args, machine_for
 from agent_env.providers.sandbox_providers.local_docker.relay import relay_image
 from agent_env.providers.sandbox_providers.sandbox import (
     SANDBOX_LABEL,
@@ -729,13 +729,14 @@ class LocalSandboxProvider(SandboxProvider):
         """The launcher booting ``image`` as the sandbox's container, its ports published as a container's are."""
         size = json.loads((sandbox.work_dir / _VM_SIZE_FILE).read_text())
         await sandbox.pull_images([image])
-        machine = await machine_image(image)
+        machine = await machine_for(image)
         ports = list(sandbox._port_map)
         publish = [arg for port in ports for spec in port_bindings(sandbox.host_ips, sandbox.host_port(port), port)
                    for arg in ("-p", spec)]
         running = asyncio.ensure_future(asyncio.to_thread(
             docker, "run", "-d", "--name", sandbox.container_name, "--label", f"{SANDBOX_LABEL}={sandbox.sandbox_id}",
-            *publish, *launcher_args(ports, env, size["cpu"], size["memory"]), machine, timeout=_DOCKER_QUERY_SECONDS))
+            *publish, *machine.args, *launcher_args(ports, env, size["cpu"], size["memory"]), machine.image,
+            timeout=_DOCKER_QUERY_SECONDS))
         try:
             await asyncio.shield(running)
         except asyncio.CancelledError:  # the container docker is still starting must exist before teardown removes it

@@ -7,10 +7,13 @@ name is claimed once (``site_table``): a site's names are routed and the network
 a site's name winning over the allowlist; two sites claiming a name are refused. Once the computer is booted, a CA made for the deploy signs a certificate for each
 site's names (``issue``), and the site proxy (``site_proxy.py``) is installed through the sandbox's root channel and
 started (``route``), which a reset does again on its fresh computer. In the computer they live in
-``/etc/agentenv/sites``, readable by root alone but the CA, ``ca.pem``, at a fixed path for an app with a certificate
-list of its own: the folder is root's alone (0700) before the config and its keys are written into it, until the
-install has made the keys and the config private; the CA and certificates are valid for the deploy's ttl and a day more, from a few minutes back for a
-clock that's behind."""
+``/etc/agentenv/sites``, root's alone (0700) before the config and its keys are written into it, until the install has
+made the keys and the config private; the CA and certificates are valid for the deploy's ttl and a day more, from a few
+minutes back for a clock that's behind. The CA also joins the trust agentenv adds, two files at fixed paths for each OS
+site routing reaches (``TRUST_ENVIRONMENTS``), which on Linux are the local provider's (``LOCAL_TRUST_ENV``):
+``/etc/agentenv/ca.pem``, every CA agentenv adds, for an app with a certificate list of its own, and
+``/etc/agentenv/ca-bundle.pem``, the public roots and them. The computer's boot environment names them, so every program
+in it trusts the sites however it was started. Site routing reaches Linux computers alone."""
 
 from __future__ import annotations
 
@@ -20,6 +23,7 @@ import json
 import logging
 import re
 import shlex
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -27,13 +31,17 @@ from typing import TYPE_CHECKING, Iterable, Optional
 from urllib.parse import urlsplit
 
 import httpx
+from agentenv_protocol import client as protocol_client
+from agentenv_protocol.website import WEBSITE_EXTENSION_URI as WEBSITE
+from agentenv_protocol.website_browser import SITE_PROXY_ENV
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
-from agent_env.env.env import Env, gateway_url_of
+from agent_env.env.env import Env, EnvCapabilityUnsupported, gateway_url_of
 from agent_env.env.envs.computer.utils.site_proxy import is_local, matches
+from agent_env.providers.sandbox_providers.local_docker.provider import LOCAL_TRUST_ENV
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, VmSandbox
 from agent_env.store.base import NotFoundError
 
@@ -45,7 +53,14 @@ if TYPE_CHECKING:
 FOLDER = PurePosixPath("/etc/agentenv/sites")
 PROXY = FOLDER / "site_proxy.py"
 CONFIG = FOLDER / "config.json"
-CA_PATH = FOLDER / "ca.pem"
+#: By the OS type of each computer site routing reaches, the variables naming the trust files agentenv adds, which a
+#: computer routing sites boots with.
+TRUST_ENVIRONMENTS = {"linux": dict(LOCAL_TRUST_ENV)}
+#: The site proxy's forward port, a browser alone's only route out when its computer routes sites (the base's own
+#: stand-in, for a computer that routes none, keeps 3128), and the display of the computer a browser runs alone on.
+FORWARD_PROXY_PORT = 3129
+FORWARD_PROXY = f"http://127.0.0.1:{FORWARD_PROXY_PORT}"
+ALONE_DISPLAY = "none"
 LOG = FOLDER / "site-proxy.log"
 SYNTHETIC, ALLOWLIST = "synthetic", "allowlist"
 RANKS = (SYNTHETIC, ALLOWLIST)
@@ -53,6 +68,9 @@ VALID_MARGIN = timedelta(days=1)
 CLOCK_SKEW = timedelta(minutes=5)
 CARD_ATTEMPTS = 3
 CARD_RETRY_S = 1.0
+#: How long a computer's deploy waits for the run's websites it routes to say they're ready, as each said at its own
+#: deploy, and how often it asks meanwhile.
+SITES_READY_TIMEOUT_S, SITES_READY_POLL_S = 60.0, 2.0
 _LABEL = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
 _PROXY_SOURCE = Path(__file__).with_name("site_proxy.py")
 logger = logging.getLogger(__name__)
@@ -259,11 +277,32 @@ def _key_usage(**granted: bool) -> x509.KeyUsage:
     return x509.KeyUsage(**{usage: granted.get(usage, False) for usage in usages})
 
 
-def proxy_config(table: SiteTable, issued: Issued, *, user: Optional[str],
+def trust_files(os_type: str) -> dict[str, str]:
+    """The trust files agentenv adds on an ``os_type`` computer, as its variables name them: every CA it adds
+    (``ca``), and the public roots and them (``bundle``)."""
+    environment = TRUST_ENVIRONMENTS[os_type]
+    return {"ca": environment["NODE_EXTRA_CA_CERTS"], "bundle": environment["SSL_CERT_FILE"]}
+
+
+def trust_environment(os_type: str, sites: list[Site]) -> dict[str, str]:
+    """The variables naming the trust agentenv adds, for an ``os_type`` computer routing ``sites``: none when every name
+    is served over plain HTTP, as a ``.localhost`` one is, since no CA is made then to write the files they'd name."""
+    return dict(TRUST_ENVIRONMENTS[os_type]) if any(route.tls_names for route in site_table(sites).routes) else {}
+
+
+def browser_environment(display: str) -> dict[str, str]:
+    """For a computer routing sites, the variable naming the forward port to a browser alone, which runs on a computer
+    with no display; none on one with a display, whose apps reach the sites by name on the transparent listeners."""
+    return {SITE_PROXY_ENV: FORWARD_PROXY} if display == ALONE_DISPLAY else {}
+
+
+def proxy_config(table: SiteTable, issued: Issued, *, user: Optional[str], os_type: str, forward_port: bool,
                  upstream_headers: Optional[dict[str, dict[str, str]]] = None) -> dict:
-    """What ``site_proxy.py install`` reads: the session user, the CA, and each route with its certificate and key, and
-    the headers its gateway's sandbox provider asks requests to it to carry (``upstream_headers``, by site), which the
-    proxy sends upstream alone."""
+    """What ``site_proxy.py install`` reads: the session user, the CA, the trust files on an ``os_type`` computer and
+    the variables naming them, which its profile script sets as the computer's boot environment does, each route with
+    its certificate and key, and the headers its gateway's sandbox provider asks requests to it to carry
+    (``upstream_headers``, by site), which the proxy sends upstream alone, and with ``forward_port``, for a browser
+    alone, the forward port."""
     sites = []
     for route in table.routes:
         site = {"name": route.site, "upstream": route.url, "domains": list(route.domains)}
@@ -272,7 +311,9 @@ def proxy_config(table: SiteTable, issued: Issued, *, user: Optional[str],
         if (upstream_headers or {}).get(route.site):
             site["upstream_headers"] = dict(upstream_headers[route.site])
         sites.append(site)
-    return {"user": user, "ca_pem": issued.ca_pem, "sites": sites, "log": str(LOG)}
+    return {"user": user, "ca_pem": issued.ca_pem, "sites": sites, "log": str(LOG),
+            "trust_files": trust_files(os_type), "trust_environment": dict(TRUST_ENVIRONMENTS[os_type]),
+            **({"proxy_port": FORWARD_PROXY_PORT} if forward_port else {})}
 
 
 def reachable_problem(policy: Optional[NetworkPolicy], routes: list[Route]) -> Optional[str]:
@@ -377,10 +418,11 @@ class RootChannel:
 
 
 async def route(sandbox: Sandbox, sites: list[Site], *, user: Optional[str], network: Optional[dict],
-                valid_for: timedelta, label: str) -> dict:
-    """Have the computer on ``sandbox`` reach each of ``sites`` by its names: the table made, the CA and certificates
-    issued, the proxy installed and started as root, and each name checked as ``user``; what the deploy record keeps of
-    it. Raises naming a name that didn't load."""
+                valid_for: timedelta, label: str, os_type: str, display: str) -> dict:
+    """Have the ``os_type`` computer on ``sandbox`` reach each of ``sites`` by its names: the table made, the CA and
+    certificates issued, the proxy installed and started as root, with its forward port on a computer with no
+    ``display``, a browser alone's, and each name checked as ``user``; what the deploy record keeps of it. Raises
+    naming a name that didn't load."""
     requested = NetworkPolicy.from_dict(network) if network else None
     table = site_table(sites, requested.allow_hosts if requested else ())
     table.routes = [Route(r.site, sandbox.url_from_sandbox(r.url), r.domains) for r in table.routes]
@@ -396,17 +438,27 @@ async def route(sandbox: Sandbox, sites: list[Site], *, user: Optional[str], net
     channel = RootChannel(sandbox)
     await channel.private_folder(FOLDER)
     await channel.write(PROXY, _PROXY_SOURCE.read_text())
-    await channel.write_secret(CONFIG, json.dumps(proxy_config(table, issued, user=user,
+    await channel.write_secret(CONFIG, json.dumps(proxy_config(table, issued, user=user, os_type=os_type,
+                                                               forward_port=display == ALONE_DISPLAY,
                                                                upstream_headers=upstream_headers)))
     await channel.run(["chmod", "0600", str(CONFIG)])
     output = await channel.run(["python3", str(PROXY), "install", str(CONFIG)])
     report = json.loads(output.strip().splitlines()[-1])
-    failed = {name: result for name, result in report["checks"].items() if "error" in result}
-    if failed:
-        raise RuntimeError("site routing: " + "; ".join(f"{result.get('url', name)} didn't load in the computer: "
-                                                        f"{result['error']}" for name, result in failed.items()))
-    return {"names": table.to_dict(), "ca": issued.ca_pem, "ca_path": str(CA_PATH), "trust": report["trust"],
-            "checks": report["checks"]}
+    if failed := routing_problems(report):
+        raise RuntimeError("site routing: " + "; ".join(failed))
+    return {"names": table.to_dict(), "ca": issued.ca_pem, "ca_path": trust_files(os_type)["ca"],
+            "trust": report["trust"], "checks": report["checks"], "runtimes": report.get("runtimes", {})}
+
+
+def routing_problems(report: dict) -> list[str]:
+    """What the install's ``report`` says failed: a site that didn't load, a runtime that didn't trust the CA, and a
+    JDK's store that didn't take it."""
+    return ([f"{result.get('url', name)} didn't load in the computer: {result['error']}"
+             for name, result in report["checks"].items() if "error" in result]
+            + [f"{runtime} in the computer didn't trust the deploy's CA loading {result.get('url')}: {result['error']}"
+               for runtime, result in report.get("runtimes", {}).items() if "error" in result]
+            + [f"the JDK store {store} didn't take the deploy's CA: {result['error']}"
+               for store, result in report["trust"].get("java", {}).items() if "error" in result])
 
 
 async def deployed_sites(deployed_envs: list[DeployedEnv], only: Optional[list[str]] = None) -> list[dict]:
@@ -458,6 +510,44 @@ async def deployed_sites(deployed_envs: list[DeployedEnv], only: Optional[list[s
                 params = protocol_v1.extension_params(card, WEBSITE_EXTENSION_URI)
                 found.append((record.env_id, _found(name, url, params, stored.get(name))))
     return _env_qualified(found)
+
+
+async def require_ready(deployed_envs: list[DeployedEnv], only: Optional[list[str]] = None, *,
+                        timeout_s: float = SITES_READY_TIMEOUT_S, poll_s: float = SITES_READY_POLL_S) -> None:
+    """Back once each deployed env whose websites a computer routes, those of the env ids ``only`` names or all, says
+    through ``website/v1``'s ``ready`` that every site of it is ready; RuntimeError naming each one still not, and why,
+    once ``timeout_s`` has passed. An env that serves no website isn't asked, nor one with no address to ask, and one
+    with no site serving ``ready`` is ready."""
+    waiting = [record for record in deployed_envs
+               if (only is None or record.env_id in only) and serves_websites(record)]
+    deadline = time.monotonic() + timeout_s
+    while True:
+        why: dict[str, str] = {}
+        for record in waiting:
+            try:
+                readiness = await record.readiness()
+            except EnvCapabilityUnsupported:
+                continue
+            except (httpx.HTTPError, ValueError) as e:
+                why[record.env_id] = f"{type(e).__name__}: {e}"
+                continue
+            if not readiness.ready:
+                why[record.env_id] = "; ".join(readiness.problems) or "it says it isn't ready"
+        if not why:
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"site routing: the run's websites weren't ready after {timeout_s:g} s: "
+                               + "; ".join(f"{env_id} ({reason})" for env_id, reason in why.items()))
+        waiting = [record for record in waiting if record.env_id in why]
+        await asyncio.sleep(poll_s)
+
+
+def serves_websites(record: DeployedEnv) -> bool:
+    """Whether ``record`` serves websites a computer routes, as ``deployed_sites`` finds them: a named ``website/v1``
+    child on its stored card, or a website frontend it lists."""
+    card = getattr(record, "environment_card", None) or {}
+    return bool(getattr(record, "website_frontend_urls", None)) or any(
+        child.find_extension(WEBSITE) is not None and child.name for child in protocol_client.children(card))
 
 
 def _env_qualified(found: list[tuple[str, dict]]) -> list[dict]:

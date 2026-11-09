@@ -116,7 +116,7 @@ class ComputerRuntime:
         async with self.queue.turn(self.driver.settings.queue_wait_s):
             if operation in DIALOG_BLOCKS and self.has("page") and (dialog := (await self.page_now()).dialog):
                 raise DialogOpen(f'a {dialog.type} dialog is open on the page: "{dialog.message}"; answer it with '
-                                 "computer_dialog first")
+                                 f"{self.driver._computer_prefix.served('computer_dialog')} first")
             if mapped and frame is not None:
                 self.frames.check_current(frame, await self.display_now())
             if at_pointer:

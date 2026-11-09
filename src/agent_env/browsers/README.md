@@ -9,9 +9,23 @@ build Playwright 1.64.1 pins, fetched by sha256 when a computer env that lists i
 (`agentenv_protocol.website_browser.WebsiteBrowserEnvironment`): agentenv launches it on a debugging pipe with its own
 flags, and writes managed policies to `/etc/opt/chrome_for_testing/policies/managed/` for unattended use. It runs
 without Chromium's sandbox, which a container can't give it. Its env.toml spells out its settings and their defaults
-under `[settings]`: `start_urls`, opened at boot, the first tab active; `window`, alone only; `locale`; `time_zone`; and
+under `[settings]`: `start_urls`, opened at boot in order, the first tab active, each waited on to load; `window`,
+alone only; `locale`; `time_zone`; and
 `geolocation` and `notifications`, `deny` or `ask`; and `dialogs`, `agent`, `accept` or `dismiss`. A computer env sets its own beside it
 (`apps = [{ env = "chromium", settings = { start_urls = ["https://example.test/"] } }]`), and a deploy overrides any of
 them (`env_params.app_settings = {chromium = {start_urls = [...]}}`). Its data is its profile, `~/.config/chromium`, which
 the image has none of, so each deploy and each reset starts with a clean one. Name it from another bundle as `chromium`,
 the alias `aliases.toml` gives it, or by its id, `@local/agentenv-framework/browsers/chromium`.
+
+A task changes a browser's state with the steps in `agent_env.task_step.task_steps.browser`, each a call to one
+`browser/v1` operation on the browser in the env `env_id`, the one `browser` names when the env has several:
+`browser_set_cookies {cookies}`, in the shape `cookies/set` takes; `browser_delete_cookies {name?, domain?, path?}`,
+every cookie matching all of those given, a domain as the cookie stores it (`.shop.test` for a domain cookie), every
+cookie with none, the count deleted recorded; `browser_set_local_storage {origin, items}`, `items` a map of keys to
+values, the origin's other keys left as they are; `browser_clear_local_storage {origin?}`, every origin seen with none;
+`browser_open_tab {url, background?}`, in front, or with `background` behind the active tab, which stays active; and
+`browser_close_tab {url}` and `browser_activate_tab {url}`, on the one open tab at that URL as the browser shows it
+(scheme and host lowercase, no default port, `/` for an empty path), none or several failing the step with the tabs
+open listed. Preflight refuses a step on an env with no browser, none of the name given, or several and none named.
+`browser_connect_cdp` hands an agent a CDP address to the same browser. A whole state, Playwright's `storageState`
+included, loads through `load_artifact` or `data/add` instead.

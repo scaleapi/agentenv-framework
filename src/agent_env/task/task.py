@@ -23,6 +23,7 @@ from agent_env.plugins import _registration
 from agent_env.plugins._requirements import unmet_problems
 from agent_env.store.document_store import UnknownDocumentTypeError
 from agent_env.store.routing import run_scope
+from agent_env.task_step.preflight import pinned
 from agent_env.task.teardown import env_record_ids
 from agent_env.task_step.context import TaskStepContext, regraft_redacted_keys
 from agent_env.task_step.context_ops import ContextUpdateOps, build_context_update_ops
@@ -405,9 +406,13 @@ class Task:
         Covers what needs the stores to answer; `_validate_dag` already covers ids and edges.
         """
         problems: list[str] = []
+        versions: dict[str, Optional[int]] = {}
         for step in self.steps:
             problems.extend(step.config_problems())
-            problems.extend(step.preflight())
+            with pinned(versions):
+                problems.extend(step.preflight())
+            if (deployed := step.deploys_env()) is not None:
+                versions.setdefault(*deployed)
         return problems
 
     def to_dict(self) -> dict:

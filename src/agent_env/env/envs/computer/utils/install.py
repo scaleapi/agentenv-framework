@@ -7,7 +7,8 @@ prefix; and ``ports``, those it listens on. Everything but the files is resolved
 build installs only what was stored then (``packages`` module). The models of packages, sources, downloads and run
 scripts are the protocol's, which an app's ``@linux(...)`` uses too. ``[install.macos]`` takes the same, but apt's
 packages and sources; its services are LaunchAgents of the login session, and its ``grants`` the TCC permissions an app
-bundle or an executable it installs needs."""
+bundle or an executable it installs needs. ``[install.windows]`` takes the same as macOS but grants: its run scripts are
+PowerShell, run elevated, and its services run windowless in the session user's sign-in."""
 
 from __future__ import annotations
 
@@ -139,9 +140,34 @@ class MacAppInstall(MacInstall):
     services: list[MacService] = Field(default_factory=list)
 
 
+class WindowsService(Service):
+    """A program agentenv-session starts, windowless, in the session user's sign-in, with the deploy's settings."""
+
+    scope: Literal["session"] = "session"
+
+
+class WindowsInstall(Install):
+    """How a Windows computer installs a layer: as on Linux, but with no apt; its run scripts are PowerShell, run
+    elevated over ssh as it's composed, and its services run in the session user's sign-in."""
+
+    services: list[WindowsService] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _windows_steps(self) -> WindowsInstall:
+        if self.packages is not None or self.sources:
+            raise ValueError("Windows has no apt: fetch what the layer needs with downloads, checked by sha256")
+        if bad := [run.script for run in self.run or [] if not run.script.endswith(".ps1") or run.scope != "system"]:
+            raise ValueError(f"a Windows layer's run scripts are PowerShell (.ps1), run elevated (scope system): {bad}")
+        return self
+
+
+class WindowsAppInstall(WindowsInstall):
+    services: list[WindowsService] = Field(default_factory=list)
+
+
 #: The install model of each OS type, for a driver and for an app.
-DRIVER_INSTALLS: dict[str, type[Install]] = {"linux": Install, "macos": MacInstall}
-APP_INSTALLS: dict[str, type[Install]] = {"linux": AppInstall, "macos": MacAppInstall}
+DRIVER_INSTALLS: dict[str, type[Install]] = {"linux": Install, "macos": MacInstall, "windows": WindowsInstall}
+APP_INSTALLS: dict[str, type[Install]] = {"linux": AppInstall, "macos": MacAppInstall, "windows": WindowsAppInstall}
 
 
 def installs(data: Any, models: dict[str, type[Install]] = DRIVER_INSTALLS) -> tuple[dict[str, Install], list[str]]:

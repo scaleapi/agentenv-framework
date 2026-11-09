@@ -185,7 +185,7 @@ async def test_route_installs_the_proxy_as_root_with_each_sites_route_as_the_com
     sandbox = FakeVm(_REPORT)
 
     routed = await sites.route(sandbox, [_site("notes", "notes.test")], user="user", network=None,
-                               valid_for=timedelta(hours=1), label="desktop")
+                               valid_for=timedelta(hours=1), label="desktop", os_type="linux", display="x11")
 
     assert set(sandbox.written) == {"/etc/agentenv/sites/site_proxy.py", "/etc/agentenv/sites/config.json"}
     config = json.loads(sandbox.written["/etc/agentenv/sites/config.json"])
@@ -199,9 +199,21 @@ async def test_route_installs_the_proxy_as_root_with_each_sites_route_as_the_com
                                "docker exec -u 0 computer-1 chmod 0600 /etc/agentenv/sites/config.json",
                                "docker exec -u 0 computer-1 python3 /etc/agentenv/sites/site_proxy.py install "
                                "/etc/agentenv/sites/config.json"]
-    assert "upstream_headers" not in site
+    assert "upstream_headers" not in site and "proxy_port" not in config
     assert routed["checks"] == _REPORT["checks"] and routed["names"]["routes"] == {"notes": ["notes.test"]}
     assert "PRIVATE KEY" not in json.dumps(routed)
+
+
+@pytest.mark.asyncio
+async def test_route_gives_a_browser_alone_the_forward_port_and_a_computer_with_a_display_none():
+    alone, desktop = FakeVm(_REPORT), FakeVm(_REPORT)
+
+    for sandbox, display in ((alone, "none"), (desktop, "x11")):
+        await sites.route(sandbox, [_site("notes", "notes.test")], user="user", network=None,
+                          valid_for=timedelta(hours=1), label="desktop", os_type="linux", display=display)
+
+    configs = [json.loads(sandbox.written["/etc/agentenv/sites/config.json"]) for sandbox in (alone, desktop)]
+    assert [config.get("proxy_port") for config in configs] == [3129, None]
 
 
 @pytest.mark.asyncio
@@ -209,7 +221,7 @@ async def test_the_config_holding_the_keys_is_written_over_stdin_into_a_private_
     sandbox = FakeVm(_REPORT)
 
     await sites.route(sandbox, [_site("notes", "notes.test")], user="user", network=None,
-                      valid_for=timedelta(hours=1), label="desktop")
+                      valid_for=timedelta(hours=1), label="desktop", os_type="linux", display="x11")
 
     assert ("write", "/etc/agentenv/sites/config.json") not in sandbox.events
     secret = sandbox.events.index(("secret", "/tmp/secret-1/config.json"))
@@ -227,7 +239,7 @@ async def test_the_headers_the_gateways_provider_asks_for_go_in_the_private_conf
         "CF-Access-Client-Secret": "s3cret"} if url.startswith("http://host.docker.internal:8080/") else {})
 
     routed = await sites.route(sandbox, [_site("notes", "notes.test")], user="user", network=None,
-                               valid_for=timedelta(hours=1), label="desktop")
+                               valid_for=timedelta(hours=1), label="desktop", os_type="linux", display="x11")
 
     (site,) = json.loads(sandbox.written["/etc/agentenv/sites/config.json"])["sites"]
     assert site["upstream_headers"] == {"CF-Access-Client-Secret": "s3cret"}
@@ -242,7 +254,7 @@ async def test_the_sites_keys_land_in_a_folder_root_alone_can_enter():
     sandbox = FakeVm(_REPORT)
 
     await sites.route(sandbox, [_site("notes", "notes.test")], user="user", network=None,
-                      valid_for=timedelta(hours=1), label="desktop")
+                      valid_for=timedelta(hours=1), label="desktop", os_type="linux", display="x11")
 
     private = sandbox.events.index("docker exec -u 0 computer-1 chmod 0700 /etc/agentenv/sites")
     assert private < sandbox.events.index(("cp", "/tmp/secret-1/config.json", "computer-1:/etc/agentenv/sites/config.json"))
@@ -255,7 +267,7 @@ async def test_a_name_that_doesnt_load_in_the_computer_fails_the_route():
 
     with pytest.raises(RuntimeError, match="https://notes.test/ didn't load in the computer: certificate verify"):
         await sites.route(FakeVm(report), [_site("notes", "notes.test")], user="user", network=None,
-                          valid_for=timedelta(hours=1), label="desktop")
+                          valid_for=timedelta(hours=1), label="desktop", os_type="linux", display="x11")
 
 
 @pytest.mark.asyncio
@@ -266,7 +278,7 @@ async def test_a_network_that_keeps_the_computer_from_the_gateway_is_refused_bef
                                            "host.docker.internal"):
         await sites.route(sandbox, [_site("notes", "notes.test")], user="user",
                           network={"mode": "allowlist", "allow_hosts": ["api.example"]}, valid_for=timedelta(hours=1),
-                          label="desktop")
+                          label="desktop", os_type="linux", display="x11")
 
     assert sandbox.scripts == [] and sandbox.written == {}
 
@@ -280,7 +292,7 @@ async def test_a_gateway_the_sandboxs_applied_network_allows_by_its_address_rang
 
     routed = await sites.route(sandbox, [_site("notes", "notes.test")], user="user",
                                network={"mode": "allowlist", "allow_hosts": ["api.example"]},
-                               valid_for=timedelta(hours=1), label="desktop")
+                               valid_for=timedelta(hours=1), label="desktop", os_type="linux", display="x11")
 
     assert routed["checks"] == _REPORT["checks"]
     routes = [sites.Route("notes", "http://10.0.0.7:8080/website/notes/", ("notes.test",))]
@@ -305,7 +317,7 @@ async def test_a_sandbox_that_is_the_container_is_reached_as_root_through_its_ow
                               write_file_from_text=write_file_from_text)
 
     await sites.route(sandbox, [_site("notes", "notes.test")], user="user", network=None,
-                      valid_for=timedelta(hours=1), label="desktop")
+                      valid_for=timedelta(hours=1), label="desktop", os_type="linux", display="x11")
 
     assert calls == [("id", "-u"), ("mkdir", "-p", "/etc/agentenv/sites"), ("chmod", "0700", "/etc/agentenv/sites"),
                      ("mkdir", "-p", "/etc/agentenv/sites"), ("write", "/etc/agentenv/sites/site_proxy.py"),
@@ -330,7 +342,7 @@ async def test_a_container_sandbox_that_runs_the_computer_as_its_user_is_refused
 
     with pytest.raises(RuntimeError, match="the coreweave sandbox runs the computer's commands as uid 1000"):
         await sites.route(sandbox, [_site("notes", "notes.test")], user="user", network=None,
-                          valid_for=timedelta(hours=1), label="desktop")
+                          valid_for=timedelta(hours=1), label="desktop", os_type="linux", display="x11")
 
     assert calls == [("id", "-u")]
 
@@ -343,7 +355,7 @@ async def test_a_site_naming_the_gateway_its_routes_are_on_is_refused_before_any
 
     with pytest.raises(RuntimeError, match=r"the gateway at gw.sites.test \(named by notes's .*sites.test\) would"):
         await sites.route(sandbox, [_site("notes", *domains)], user="user", network=None,
-                          valid_for=timedelta(hours=1), label="desktop")
+                          valid_for=timedelta(hours=1), label="desktop", os_type="linux", display="x11")
 
     assert sandbox.scripts == [] and sandbox.written == {}
 
@@ -497,3 +509,90 @@ async def test_a_card_that_fails_to_load_is_retried_then_fails_rather_than_dropp
 def _status_error(url, code):
     request = httpx.Request("GET", f"{url}/.well-known/agent-env.json")
     return httpx.HTTPStatusError(f"{code}", request=request, response=httpx.Response(code, request=request))
+
+
+class _Website:
+    """A deployed env serving a website, whose ``readiness`` answers each of ``answers`` in turn, then the last again: a
+    readiness, an error to raise, or None for a record with no address."""
+
+    def __init__(self, env_id, *answers, card=None):
+        self.env_id, self.answers, self.asked = env_id, list(answers), 0
+        self.environment_card = card
+        self.website_frontend_urls = None if card is not None else {"site": f"http://gw/website/{env_id}/"}
+
+    async def readiness(self):
+        from agent_env.env.env import EnvCapabilityUnsupported
+        from agentenv_protocol.website import WebsiteReadiness
+
+        answer = self.answers[min(self.asked, len(self.answers) - 1)]
+        self.asked += 1
+        if answer is None:
+            raise EnvCapabilityUnsupported("urn:agentenv:website/v1", "ready", self.env_id, None)
+        if isinstance(answer, Exception):
+            raise answer
+        return WebsiteReadiness(ready=not answer, problems=answer)
+
+
+@pytest.mark.asyncio
+async def test_the_websites_a_computer_routes_are_waited_on_till_ready_one_never_ready_named_and_others_not_asked():
+    late = _Website("late", ["notes: warming up"], [])
+    shop = _Website("shop", [])
+    other = _Website("other", ["never asked"])
+    unaddressed = _Website("unaddressed", None)
+
+    on_its_card = _Website("on-its-card", [], card={"name": "kit", "children_environments": [{
+        "name": "notes", "capabilities": {"extensions": [{"uri": "urn:agentenv:website/v1", "params": {}}]}}]})
+    mcp_only = _Website("mcp-only", httpx.ConnectError("never asked"), card={"name": "mcp", "children_environments": [
+        {"name": "tools", "capabilities": {"extensions": []}}]})
+
+    await sites.require_ready([late, shop, other, unaddressed], ["late", "shop", "unaddressed"], timeout_s=5,
+                              poll_s=0.01)
+    await sites.require_ready([on_its_card, mcp_only], timeout_s=0.05, poll_s=0.01)
+    broken = _Website("broken", ["shop: its database is down"])
+    unreachable = _Website("unreachable", httpx.ConnectError("refused"))
+    with pytest.raises(RuntimeError) as never:
+        await sites.require_ready([broken, unreachable, shop], timeout_s=0.05, poll_s=0.01)
+
+    assert (late.asked, shop.asked, other.asked, unaddressed.asked) == (2, 2, 0, 1)
+    assert (on_its_card.asked, mcp_only.asked) == (1, 0)
+    assert str(never.value).startswith("site routing: the run's websites weren't ready after 0.05 s: ")
+    assert str(never.value).endswith("broken (shop: its database is down); unreachable (ConnectError: refused)")
+
+
+def test_routing_names_each_site_that_didnt_load_runtime_that_didnt_trust_the_ca_and_jdk_store_that_didnt_take_it():
+    report = {"checks": {"notes.test": {"url": "https://notes.test/", "status": 200},
+                         "chat.test": {"url": "https://chat.test/", "error": "502 Bad Gateway: no route"}},
+              "runtimes": {"node": {"url": "https://notes.test/", "status": 200},
+                           "curl": {"url": "https://notes.test/", "error": "curl: (60) SSL certificate problem"}},
+              "trust": {"java": {"/usr/lib/jvm/a/lib/security/cacerts": {"trusted": True},
+                                 "/opt/b/lib/security/cacerts": {"error": "keystore password was incorrect"}}}}
+
+    assert sites.routing_problems(report) == [
+        "https://chat.test/ didn't load in the computer: 502 Bad Gateway: no route",
+        "curl in the computer didn't trust the deploy's CA loading https://notes.test/: curl: (60) SSL certificate "
+        "problem",
+        "the JDK store /opt/b/lib/security/cacerts didn't take the deploy's CA: keystore password was incorrect"]
+    assert sites.routing_problems({"checks": {}, "trust": {}}) == []
+
+
+def test_the_trust_a_routing_linux_computer_boots_with_is_the_local_providers_so_the_two_always_agree():
+    from agent_env.providers.sandbox_providers.local_docker.provider import LOCAL_TRUST_ENV
+
+    assert sites.TRUST_ENVIRONMENTS == {"linux": LOCAL_TRUST_ENV} and LOCAL_TRUST_ENV == {
+        "SSL_CERT_FILE": "/etc/agentenv/ca-bundle.pem", "REQUESTS_CA_BUNDLE": "/etc/agentenv/ca-bundle.pem",
+        "NODE_EXTRA_CA_CERTS": "/etc/agentenv/ca.pem"}
+    assert sites.trust_files("linux") == {"ca": "/etc/agentenv/ca.pem", "bundle": "/etc/agentenv/ca-bundle.pem"}
+
+
+def test_a_browser_alone_routing_sites_is_named_the_forward_port_and_a_computer_with_a_display_is_named_none():
+    assert sites.browser_environment("none") == {"AGENTENV_SITE_PROXY": "http://127.0.0.1:3129"}
+    assert sites.browser_environment("x11") == {}
+
+
+def test_a_computer_boots_with_the_trust_variables_only_when_a_site_it_routes_is_served_over_https():
+    local = [Site(name="notes", url="http://gw/website/notes/", domains=["notes.localhost"]),
+             Site(name="bare", url="http://gw/website/bare/")]
+    secure = [*local, Site(name="shop", url="http://gw/website/shop/", domains=["shop.test"])]
+
+    assert sites.trust_environment("linux", local) == {}
+    assert sites.trust_environment("linux", secure) == sites.TRUST_ENVIRONMENTS["linux"]

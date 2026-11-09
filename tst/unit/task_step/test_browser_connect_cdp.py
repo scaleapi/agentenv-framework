@@ -12,7 +12,7 @@ import pytest
 
 from agent_env.env.env import DeployedSandboxEnv
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
-from agent_env.task_step.task_steps.browser_connect_cdp import BrowserConnectCdpTaskStep
+from agent_env.task_step.task_steps.browser.connect_cdp import BrowserConnectCdpTaskStep
 
 _ENV = "http://localhost:41000"
 _AGENT = "http://localhost:42000"

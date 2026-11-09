@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
 
-from agentenv_protocol.computer.apps import APPS
+from agentenv_protocol.computer.apps import apps_folder
 from agentenv_protocol.computer.platform import Platform, supported
 from jsonschema import Draft202012Validator
 
@@ -66,7 +66,8 @@ def arches(base: ComputerArtifact, driver: ComputerDriverEnv, apps: Sequence[Com
 
 def check_app(base: ComputerArtifact, driver: ComputerDriverEnv, app: ComputerAppEnv, at: str = "app") -> list[str]:
     """Every way ``app`` doesn't fit a composition of ``base`` and ``driver``, each named from ``at``: a platform it
-    doesn't support, no architecture in common, no install for the base's OS, or a port the driver listens on too."""
+    doesn't support, no architecture in common, no install for the base's OS, a port the driver listens on too, or on
+    Windows an install step for the session user, as a Windows computer is composed over ssh as its admin."""
     os = base.os
     if not _matching(base, app.declaration.supports):
         named = ", ".join(_shown(platform) for entry in app.declaration.supports for platform in supported(entry))
@@ -78,6 +79,11 @@ def check_app(base: ComputerArtifact, driver: ComputerDriverEnv, app: ComputerAp
         problems.append(f"{at}: {app.id} declares no install for {os.type}")
     elif taken := sorted(set(_ports(app, os.type)) & set(_driver_ports(driver, os.type))):
         problems.append(f"{at}: {app.id} listens on {', '.join(map(str, taken))}, as {driver.id} does")
+    if os.type == "windows" and (session := [step.name for step in app.declaration.install_steps
+                                             if step.scope == "session" and (step.os is None or os.type in step.os)]):
+        problems.append(f"{at}: {app.id}'s install steps {', '.join(session)} run as the session user, which a Windows "
+                        "computer can't as it's composed, over ssh as its admin; give them scope \"system\" for "
+                        "Windows")
     return problems
 
 
@@ -87,8 +93,8 @@ def folder_name(name: str, fallback: str) -> str:
 
 
 def app_folder(app: ComputerAppEnv) -> str:
-    """The name of the folder ``app`` is installed in, under ``APPS``, and of its programs: its environment name's, the
-    one name a computer knows it by."""
+    """The name of the folder ``app`` is installed in, under its computer's apps folder (``apps_folder``), and of its
+    programs: its environment name's, the one name a computer knows it by."""
     return folder_name(app.environment_name, "app")
 
 
@@ -107,7 +113,7 @@ def _apps(base: ComputerArtifact, driver: ComputerDriverEnv, apps: list[Computer
     problems += [f"apps: {app.id} is named {environment_name!r}, as the computer env is, which names the computer's "
                  "own files" for app in distinct if app.environment_name == environment_name]
     for kind, keys in (("environment name", lambda app: [app.environment_name]),
-                       ("folder", lambda app: [f"{APPS}/{app_folder(app)}"]),
+                       ("folder", lambda app: [str(apps_folder(base.os.type) / app_folder(app))]),
                        ("program", lambda app: programs(app, base.os.type)),
                        ("port", lambda app: _ports(app, base.os.type))):
         claims: dict[object, list[str]] = {}
@@ -184,6 +190,10 @@ def _optional(setting: dict) -> bool:
     return any(option.get("type") == "null" for option in setting.get("anyOf", []))
 
 
+#: A Windows computer's display: Windows keeps the mode it was installed at, whatever size the launcher's VGA offers.
+WINDOWS_DISPLAY = "1920x1080"
+
+
 def check_computer_settings(base: ComputerArtifact, values: Any) -> tuple[dict[str, SettingValue], list[str]]:
     """``values``, of the base's settings by name, and the problems with them: a setting the base doesn't declare, a
     value of another type than its default's, or a secret's given as anything but a bare reference, since the env, the
@@ -203,6 +213,9 @@ def check_computer_settings(base: ComputerArtifact, values: Any) -> tuple[dict[s
         elif type(value) is not type(setting.default):
             problems.append(f"computer_settings.{name} must be a {type(setting.default).__name__}, like its default "
                             f"{setting.default!r}, not {value!r}")
+        elif base.os.type == "windows" and name == "resolution" and value != WINDOWS_DISPLAY:
+            problems.append(f"computer_settings.resolution: a Windows computer's display is {WINDOWS_DISPLAY} for now, "
+                            f"not {value}")
         else:
             checked[name] = value
     return checked, problems
@@ -269,6 +282,8 @@ def _display(base: ComputerArtifact, display: Any, computer_settings: Any) -> li
         return [f"display is {{ width = <n>, height = <n> }}, each 1 to {MAX_SIDE} pixels, not {display!r}"]
     if "resolution" not in base.config:
         return [f"display: {base.id} declares no resolution setting for it to set"]
+    if base.os.type == "windows" and f"{display['width']}x{display['height']}" != WINDOWS_DISPLAY:
+        return [f"display: a Windows computer's display is {WINDOWS_DISPLAY} for now"]
     if isinstance(computer_settings, dict) and "resolution" in computer_settings:
         return ["display and the base's resolution setting both set the screen's size; set display alone"]
     return []

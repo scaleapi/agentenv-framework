@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self
 
 from agentenv_protocol import METHOD_ADD, RPC_PATH
 from agentenv_protocol import client as protocol_v1
-from agentenv_protocol.computer.tools import Tools
+from agentenv_protocol.computer.tools import COMPUTER_TOOLS
 from agentenv_protocol.tool_access import (DISABLE, DISABLE_TOOL_EXTENSION_URI, ENABLE, ENABLE_TOOL_EXTENSION_URI,
                                            WILDCARD)
 from agentenv_protocol.tool_context import DEFAULT_ROLE
@@ -31,6 +31,7 @@ from agent_env.env.envs._deployment import (
     deploy_through_provider,
     provider_or_class,
 )
+from agent_env.env.envs.computer import COMPUTER_ENV_TYPE
 from agent_env.env.envs.computer.utils import boot, composer, gate, inside, sites
 from agent_env.env.envs.computer.utils.composed import stale
 from agent_env.env.envs.computer.utils.composer import Composing
@@ -61,7 +62,6 @@ APP_TYPE = "computer_app"
 #: so may a VM bundle, which a Mac probes.
 _DEPLOYABLE = {"container": ("ready",), "disk": ("ready", "unverified"), "vm_bundle": ("ready", "unverified")}
 #: Every ``computer_*`` tool a driver can serve.
-COMPUTER_TOOLS = tuple(sorted(name for name in vars(Tools) if name.startswith("computer_")))
 #: What a computer env's ``tools`` gives its agents, as the tool-access changes a deploy makes for them: ``standard``,
 #: AgentEnv's ``computer_*`` tools alone; ``driver``, the driver's own alone; ``both``, every tool it serves.
 TOOLS = {"standard": ((DISABLE, [WILDCARD]), (ENABLE, list(COMPUTER_TOOLS))), "driver": ((DISABLE, list(COMPUTER_TOOLS)),),
@@ -70,7 +70,7 @@ _TOOL_ACCESS_URIS = {DISABLE: DISABLE_TOOL_EXTENSION_URI, ENABLE: ENABLE_TOOL_EX
 
 
 class ComputerEnv(Env):
-    type: ClassVar[str] = "computer"
+    type: ClassVar[str] = COMPUTER_ENV_TYPE
     description = "A computer: a base computer and a driver, composed at put into an image for each form and arch"
     env_provider_type: ClassVar[str] = "computer"
     toml_refs: ClassVar[tuple[EntityRef, ...]] = (EntityRef.artifact("computer", artifact_type="computer"),
@@ -209,7 +209,8 @@ class ComputerEnv(Env):
         return ComputerArtifact.get(self.metadata["computer"]["id"], self.metadata["computer"]["version"])
 
     async def compose_unstarted(self, sandbox_provider: SandboxProvider, form: Optional[str] = None) -> None:
-        """Compose first what a deploy on ``sandbox_provider`` boots that no compose started, once for deploys at once,
+        """Compose first what a deploy on ``sandbox_provider`` boots that no compose started, or a container it runs
+        natively that was built but not probed (``composer.unprobed``), once for deploys at once,
         on the env's default sandbox provider, this machine unless the config names another, never on the deploy's,
         unless the run's fence would refuse the record (rules in ``computers/README.md``). A cancelled deploy holds the
         lock until its compose's thread, which no cancel stops, ends, so the next deploy waits for what it builds."""
@@ -235,8 +236,9 @@ class ComputerEnv(Env):
                 composed = self.metadata.get("composed", {})
                 booting, building = (" or ".join(type(link).__name__ for link in provider.links)
                                      for provider in (sandbox_provider, on.provider()))
-                why = (f"an agent-env that composes differently built {them}" if any(
-                    stale(composed.get(name, {}).get(arch)) for name, arch in pairs)
+                records = [composed.get(name, {}).get(arch) for name, arch in pairs]
+                why = (f"an agent-env that composes differently built {them}" if any(map(stale, records))
+                       else f"no compose probed {them} on {booting} yet" if all(records)
                        else f"no compose built {them} for {booting} yet")
                 say(f"composing {_pairs(pairs)} before this deploy on {building} ({why}); later deploys reuse {them}")
                 composing = asyncio.ensure_future(asyncio.to_thread(composer.compose, self, pairs, on))
@@ -276,16 +278,18 @@ class ComputerEnv(Env):
                      gateway_mode: GatewayMode = GatewayMode.PERFORMANCE, cpu: float | None = None,
                      memory_mb: int | None = None, sandbox_type: str | None = None, env_state_type: str | None = None,
                      env_state_instance_id: str | None = None, *, attribution: Optional[Attribution] = None,
-                     env_params: Optional[dict] = None) -> DeployedEnv:
+                     env_params: Optional[dict] = None, tool_prefix: str = "", reach: str = "") -> DeployedEnv:
+        """With ``tool_prefix``, its driver serves its tools under it, and with ``reach``, a network that restricts its
+        egress allows that URL's host too: what a multi env gives each of its computers."""
         return await deploy_through_provider(
             self, environment_name=self.environment_name, ttl_seconds=ttl_seconds, sandbox_type=sandbox_type,
             then=self._give_tools, disk_size_gb=disk_size_gb, gateway_mode=gateway_mode, cpu=cpu, memory_mb=memory_mb,
             env_state_type=env_state_type, env_state_instance_id=env_state_instance_id, attribution=attribution,
-            env_params=env_params)
+            env_params=env_params, tool_prefix=tool_prefix, reach=reach)
 
     async def run_env_params(self, env_params: Optional[dict], deployed_envs: list[DeployedEnv]) -> Optional[dict]:
         """With ``site_routing`` and no ``sites``, ``env_params`` naming as its sites the websites the run deployed
-        before the computer: all of them, or those of the env ids ``site_routing`` lists."""
+        before the computer, all of them or those of the env ids ``site_routing`` lists, once each says it's ready."""
         routing = (env_params or {}).get("site_routing")
         if routing is not None and routing is not False and routing is not True and not (
                 isinstance(routing, list) and all(isinstance(env_id, str) for env_id in routing)):
@@ -293,10 +297,12 @@ class ComputerEnv(Env):
                              f"{routing!r}")
         if not routing or env_params.get("sites"):
             return env_params
-        found = await sites.deployed_sites(deployed_envs, None if routing is True else list(routing))
+        only = None if routing is True else list(routing)
+        found = await sites.deployed_sites(deployed_envs, only)
         if not found:
             raise ValueError(f"computer env {self.id!r}: env_params.site_routing reaches the run's websites, and the "
                              "run deployed none before the computer")
+        await sites.require_ready(deployed_envs, only)
         return {**env_params, "sites": found}
 
     def deploy_refusal(self, *, sandbox_type: str | None = None, env_params: Optional[dict] = None,
@@ -314,8 +320,8 @@ class ComputerEnv(Env):
         sandbox_provider = build_sandbox_provider(sandbox_type) if sandbox_type else get_env_sandbox_provider()
         links, arches = sandbox_provider.links, self.composed_arches()
         forms = [params.form] if params.form else gate.forms(self.computer)
-        native = [link for link in links if any(boot.native_links(link, arch, form, self.stored_id) for form in forms
-                                                for arch in arches)]
+        native = [link for link in links if any(boot.native_links(link, arch, form, self.stored_id, self.computer.os.type)
+                                                for form in forms for arch in arches)]
         usable = [link for link in native if link.WEBSOCKETS] if self.serves_website_browser() else native
         if native and not usable:
             problems.append(f"{', '.join(type(link).__name__ for link in native)} carries no WebSockets, which its "
@@ -390,9 +396,12 @@ class ComputerEnv(Env):
         await self._give_tools(deployed)
 
     async def _give_tools(self, deployed: DeployedEnv) -> None:
-        """Make the tool-access changes ``tools`` makes for the agents' role, which a task's own then follow."""
+        """Make the tool-access changes ``tools`` makes for the agents' role, which a task's own then follow, naming
+        each tool as the deploy's tool prefix has the driver serve it."""
+        prefix = (deployed.metadata or {}).get("computer", {}).get("tool_prefix", "")
         for action, tools in TOOLS[self.tools or "both"]:
-            await deployed.invoke(_TOOL_ACCESS_URIS[action], action, {"role": DEFAULT_ROLE, "tools": tools})
+            served = [tool if tool == WILDCARD else f"{prefix}{tool}" for tool in tools]
+            await deployed.invoke(_TOOL_ACCESS_URIS[action], action, {"role": DEFAULT_ROLE, "tools": served})
 
     async def close(self) -> None:
         """End the computer's recordings, so what they recorded reaches the store, then tear it down."""
