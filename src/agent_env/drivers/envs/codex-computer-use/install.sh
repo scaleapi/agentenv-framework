@@ -5,8 +5,9 @@
 set -eu
 ditto -x -k ChatGPT.zip .
 rm -f ChatGPT.zip
-helper="ChatGPT.app/Contents/Resources/cua_node/lib/node_modules/@oai/sky/Codex Computer Use.app"
-mkdir -p /opt/agentenv/codex-computer-use
-rm -rf "/opt/agentenv/codex-computer-use/Codex Computer Use.app"
-ditto "$helper" "/opt/agentenv/codex-computer-use/Codex Computer Use.app"
-xattr -dr com.apple.quarantine ChatGPT.app /opt/agentenv/codex-computer-use || true
+helper="Codex Computer Use.app"
+dest=/opt/agentenv/codex-computer-use
+mkdir -p "$dest"
+rm -rf "$dest/$helper"
+ditto "ChatGPT.app/Contents/Resources/cua_node/lib/node_modules/@oai/sky/$helper" "$dest/$helper"
+xattr -dr com.apple.quarantine ChatGPT.app "$dest" || true

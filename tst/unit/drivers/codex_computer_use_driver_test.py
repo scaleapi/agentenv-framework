@@ -1,9 +1,10 @@
 """The codex-computer-use driver against a fake cua_repl: agents get its js and js_reset as pinned, with its
 instructions, and not the tools it serves only the ChatGPT app; each call carries Codex's read-only sandbox unless the
-setting turns it off; Codex's approval requests are answered from allowed_apps by name or bundle identifier, every app
-approved when it names none, and nothing else; each agent session keeps a REPL of its own across calls, one that stops
-starting afresh; cua_repl gets the app's environment and none of the driver's; and readiness checks the pinned
-executables, the tools cua_repl lists and that it answers."""
+setting turns it off; Codex's approval requests are answered from allowed_apps by name or bundle identifier, from the
+request's metadata or its message, every app approved when it names none, and nothing else; each agent session keeps a
+REPL of its own across calls, one that stops starting afresh; cua_repl gets the app's environment and none of the
+driver's; readiness checks the pinned executables, what cua_repl says and lists and that it answers; and the driver's
+files agree on the pinned version."""
 from __future__ import annotations
 
 import asyncio
@@ -14,6 +15,7 @@ import json
 import os
 import sys
 import textwrap
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -40,12 +42,14 @@ FAKE = textwrap.dedent('''\
 
     @server.list_tools()
     async def tools():
-        return [types.Tool(name=t["name"], description=t["description"], inputSchema=t["inputSchema"])
-                for t in manifest["tools"]]
+        return [types.Tool(**t) for t in manifest["tools"]]
 
-    async def ask(message, app):
+    async def ask(message, tool=None, app=None, shown=None):
         context = server.request_context
-        meta = types.RequestParams.Meta(**({"tool_params": {"app": app}} if app else {}))
+        meta = types.RequestParams.Meta(**({} if tool is None else {
+            "codex_approval_kind": "mcp_tool_call", "connector_id": "computer-use", "tool_name": tool,
+            "tool_params": {"app": app} if app else {},
+            "tool_params_display": [{"display_name": "App", "name": "app", "value": shown}] if shown else []}))
         result = await context.session.send_request(
             types.ServerRequest(types.ElicitRequest(params=types.ElicitRequestFormParams(
                 message=message, requestedSchema={"type": "object", "properties": {}}, _meta=meta))),
@@ -63,10 +67,15 @@ FAKE = textwrap.dedent('''\
             bindings.clear()
             text = "reset"
         elif code.startswith("app "):
-            _, display, bundle = code.split(" ")
-            text = await ask(f'Allow Computer Use to use "{display}"?', bundle)
+            _, shown, bundle = code.split(" ")
+            text = await ask(f'Allow Computer Use to use "{shown}"?', "get_app_state", bundle, shown)
+        elif code.startswith("reworded "):
+            _, shown, bundle = code.split(" ")
+            text = await ask(f"Codex would like to control {shown}.", "get_app_state", bundle, shown)
+        elif code.startswith("bare "):
+            text = await ask(f'Allow Computer Use to use "{code[5:]}"?')
         elif code == "audio":
-            text = await ask("Allow Computer Use to record computer audio?", None)
+            text = await ask("Allow Computer Use to record computer audio?", "start_audio_recording")
         elif code.startswith("set "):
             bindings["x"] = code[4:]
             text = "set"
@@ -95,7 +104,8 @@ class Granted:
 
 
 @pytest.fixture
-def module(monkeypatch, tmp_path):
+def pinned(monkeypatch, tmp_path):
+    """The driver's module, as it ships."""
     monkeypatch.delenv("AGENTENV_COMPUTER_SETTINGS", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("AGENTENV_CONTROL_TOKEN", "a-deploys-secret")
@@ -105,26 +115,31 @@ def module(monkeypatch, tmp_path):
     spec = importlib.util.spec_from_file_location("codex_computer_use_driver", DRIVER)
     loaded = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(loaded)
+    return loaded
+
+
+@pytest.fixture
+def module(pinned, monkeypatch, tmp_path):
+    """The driver's module on a fake ChatGPT app whose Node is the fake cua_repl."""
     (tmp_path / "fake").mkdir()
-    (tmp_path / "fake" / "tools.json").write_text(loaded.MANIFEST.read_text())
+    (tmp_path / "fake" / "tools.json").write_text(pinned.MANIFEST.read_text())
     app, helper = tmp_path / "ChatGPT.app", tmp_path / "Codex Computer Use.app"
-    node = app / "Contents" / "Resources" / "cua_node" / "bin" / "node"
+    node = app / pinned.NODE
     node.parent.mkdir(parents=True)
     node.write_text(f"#!{sys.executable}\n{FAKE}")
     node.chmod(0o755)
-    pinned = {}
-    for path in loaded.EXECUTABLES:
+    digests = {}
+    for path in pinned.EXECUTABLES:
         root, _, rest = path.partition("/")
         file = (app if root == "ChatGPT.app" else helper) / rest
         if not file.exists():
             file.parent.mkdir(parents=True, exist_ok=True)
             file.write_text(f"the pinned {file.name}")
-        pinned[path] = hashlib.sha256(file.read_bytes()).hexdigest()
-    monkeypatch.setattr(loaded, "APP", app)
-    monkeypatch.setattr(loaded, "HELPER", helper)
-    monkeypatch.setattr(loaded, "NODE", node)
-    monkeypatch.setattr(loaded, "EXECUTABLES", pinned)
-    return loaded
+        digests[path] = hashlib.sha256(file.read_bytes()).hexdigest()
+    monkeypatch.setattr(pinned, "APP", app)
+    monkeypatch.setattr(pinned, "HELPER", helper)
+    monkeypatch.setattr(pinned, "EXECUTABLES", digests)
+    return pinned
 
 
 def _driver(module, monkeypatch, **settings):
@@ -195,18 +210,23 @@ async def test_each_call_runs_in_codexs_read_only_sandbox_unless_the_setting_tur
 
 @pytest.mark.asyncio
 async def test_approvals_follow_allowed_apps_by_name_or_bundle_identifier_and_nothing_else_is_approved(
-        module, monkeypatch):
+        module, monkeypatch, caplog):
     async with mcp_session(_driver(module, monkeypatch, allowed_apps=["calculator", "com.apple.TextEdit"])) as session:
-        named = await session.call_tool("js", {"code": "app Calculator com.apple.calculator"})
-        by_id = await session.call_tool("js", {"code": "app TextEdit com.apple.TextEdit"})
-        other = await session.call_tool("js", {"code": "app Finder com.apple.finder"})
-        audio = await session.call_tool("js", {"code": "audio"})
-    async with mcp_session(_driver(module, monkeypatch)) as session:
-        any_app = await session.call_tool("js", {"code": "app Finder com.apple.finder"})
-        no_audio = await session.call_tool("js", {"code": "audio"})
+        async def js(code: str) -> str:
+            return _text(await session.call_tool("js", {"code": code}))
 
-    assert [_text(r) for r in (named, by_id, other, audio)] == ["accept", "accept", "decline", "decline"]
-    assert [_text(r) for r in (any_app, no_audio)] == ["accept", "decline"]
+        named, by_id = await js("app Calculator com.apple.calculator"), await js("app TextEdit com.apple.TextEdit")
+        other, audio = await js("app Finder com.apple.finder"), await js("audio")
+        reworded, bare = await js("reworded Calculator com.apple.calc"), await js("bare Calculator")
+    async with mcp_session(_driver(module, monkeypatch)) as session:
+        any_app = _text(await session.call_tool("js", {"code": "app Finder com.apple.finder"}))
+        no_audio = _text(await session.call_tool("js", {"code": "audio"}))
+
+    assert [named, by_id, other, audio] == ["accept", "accept", "decline", "decline"]
+    assert [reworded, bare] == ["accept", "accept"]
+    assert [any_app, no_audio] == ["accept", "decline"]
+    warned = [r.getMessage() for r in caplog.records if r.name == module.logger.name and r.levelname == "WARNING"]
+    assert len(warned) == 2 and all("record computer audio" in message for message in warned)
 
 
 @pytest.mark.asyncio
@@ -233,31 +253,55 @@ async def test_cua_repl_gets_the_apps_environment_and_none_of_the_drivers(module
 
     (env_file,) = (tmp_path / "fake").glob("env-*.json")
     env = json.loads(env_file.read_text())
-    modules = str(module.NODE_MODULES)
+    modules = str(module.APP / module.NODE_MODULES)
     assert "AGENTENV_CONTROL_TOKEN" not in env and env["PATH"] == "/usr/bin:/bin:/usr/sbin:/sbin"
     assert env["CUA_REPL_ENABLED_SURFACES"] == "computer" and env["SKY_CUA_SERVICE_PATH"] == str(module.HELPER)
     assert env["NODE_REPL_TRUSTED_SERVICES"] == '{"sky": "@oai/sky/service"}'
     assert env["NODE_REPL_TRUSTED_CODE_PATHS"] == f"{tmp_path / '.codex'}:{modules}"
-    assert env["CODEX_HOME"] == str(tmp_path / ".codex") and env["NODE_REPL_NODE_PATH"] == str(module.NODE)
+    assert env["CODEX_HOME"] == str(tmp_path / ".codex") and env["NODE_REPL_NODE_PATH"] == str(module.APP / module.NODE)
 
 
 @pytest.mark.asyncio
-async def test_readiness_checks_the_pinned_executables_the_tools_cua_repl_lists_and_that_it_answers(
+async def test_readiness_checks_the_pinned_executables_what_cua_repl_says_and_lists_and_that_it_answers(
         module, monkeypatch, tmp_path):
     driver = _driver(module, monkeypatch)
+    manifest = module._manifest()
+
+    async def tools_check(served: dict):
+        (tmp_path / "fake" / "tools.json").write_text(json.dumps(served))
+        driver._pinned = None
+        return (await driver.ready_checks())[1]
+
     ready = await driver.ready_checks()
-    three = {**module._manifest(), "tools": module._manifest()["tools"][:3]}
-    (tmp_path / "fake" / "tools.json").write_text(json.dumps(three))
-    driver._pinned = None
-    tools = (await driver.ready_checks())[1]
+    fewer = await tools_check({**manifest, "tools": manifest["tools"][:3]})
+    described = await tools_check({"instructions": "other", "tools": [
+        {**t, "description": "other"} if t["name"] == "js" else t for t in manifest["tools"]]})
+    hinted = await tools_check({**manifest, "tools": [
+        {**t, "annotations": {}} if t["name"] == "js_reset" else t for t in manifest["tools"]]})
     (module.HELPER / "Contents" / "MacOS" / "SkyComputerUseService").write_text("another build")
     driver._pinned = None
     (changed, *_) = await driver.ready_checks()
 
     assert [(c.name, c.ok) for c in ready] == [("Codex Computer Use", True), ("Codex tools", True),
                                                ("Codex answers", True), ("macOS permissions", True)]
-    assert not tools.ok and tools.detail == "these tools differ from mcp.json: turn_ended"
+    assert (fewer.ok, fewer.detail) == (False, "these differ from mcp.json: turn_ended")
+    assert (described.ok, described.detail) == (False, "these differ from mcp.json: instructions, js")
+    assert (hinted.ok, hinted.detail) == (False, "these differ from mcp.json: js_reset")
     assert not changed.ok and "Codex Computer Use.app/Contents/MacOS/SkyComputerUseService" in changed.detail
+
+
+def test_env_toml_install_sh_and_the_driver_agree_on_the_pinned_version_and_the_helpers_path(pinned):
+    """A move to another ChatGPT version, or the helper to another folder, has to change them together."""
+    folder = DRIVER.parent
+    macos = tomllib.loads((folder / "env.toml").read_text())["install"]["macos"]
+    install = (folder / "install.sh").read_text()
+
+    (download,) = macos["downloads"]
+    assert download["url"].endswith(f"/ChatGPT-darwin-arm64-{pinned.VERSION}.zip")
+    assert [grant["app"] for grant in macos["grants"] if "app" in grant] == [str(pinned.HELPER)]
+    assert f'helper="{pinned.HELPER.name}"\n' in install and f"dest={pinned.HELPER.parent}\n" in install
+    assert pinned.APP == folder / "ChatGPT.app" and all(
+        path.startswith(("ChatGPT.app/", f"{pinned.HELPER.name}/")) for path in pinned.EXECUTABLES)
 
 
 @pytest.mark.asyncio

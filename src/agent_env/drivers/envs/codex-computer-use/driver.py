@@ -29,7 +29,8 @@ from typing import Any, AsyncIterator, Callable
 from mcp import ClientSession, McpError, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.shared.context import RequestContext
-from mcp.types import CONNECTION_CLOSED, CallToolResult, ElicitRequestParams, ElicitResult, TextContent
+from mcp.types import (CONNECTION_CLOSED, CallToolResult, ElicitRequestParams, ElicitResult, InitializeResult,
+                       TextContent)
 
 from agentenv_protocol import EnvironmentTool, ForwardedTool, ToolContext, server_instructions
 from agentenv_protocol.computer import ComputerSettings, MacOSDriver, ReadyCheck, computer_driver
@@ -37,15 +38,15 @@ from agentenv_protocol.computer import ComputerSettings, MacOSDriver, ReadyCheck
 logger = logging.getLogger(__name__)
 
 HERE = Path(__file__).resolve().parent
-#: The pinned ChatGPT app, as install.sh unpacks it, and what of it starts Codex's REPL.
+#: The pinned ChatGPT app, as install.sh unpacks it, and where in it what starts Codex's REPL is.
 VERSION = "26.930.51102"
 APP = HERE / "ChatGPT.app"
-RESOURCES = APP / "Contents" / "Resources"
-NODE = RESOURCES / "cua_node" / "bin" / "node"
-NODE_REPL = RESOURCES / "cua_node" / "bin" / "node_repl"
-NODE_MODULES = RESOURCES / "cua_node" / "lib" / "node_modules"
+CUA_NODE = Path("Contents", "Resources", "cua_node")
+NODE = CUA_NODE / "bin" / "node"
+NODE_REPL = CUA_NODE / "bin" / "node_repl"
+NODE_MODULES = CUA_NODE / "lib" / "node_modules"
 LAUNCHER = NODE_MODULES / "@oai" / "cua-repl" / "bin" / "cua-repl.mjs"
-CODEX_CLI = RESOURCES / "codex-cli" / "CodexCLI.app" / "Contents" / "MacOS" / "codex"
+CODEX_CLI = Path("Contents", "Resources", "codex-cli", "CodexCLI.app", "Contents", "MacOS", "codex")
 #: Codex Computer Use's helper app, where install.sh copies it and the layer's grant names it.
 HELPER = Path("/opt/agentenv/codex-computer-use/Codex Computer Use.app")
 #: The sha256 of each executable at the pinned version, by its path under the app or the helper.
@@ -75,8 +76,9 @@ KEPT = ("HOME", "USER", "LOGNAME", "TMPDIR", "LANG")
 PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 #: The JavaScript the readiness check runs: an inventory, which needs no app's approval.
 PROBE = "await cua.getState({ emit: false }); nodeRepl.write('ready');"
-#: The approval Codex asks of its host before it acts on an app, which names it.
-APPROVAL = re.compile(r'Allow (?:Computer Use|Codex) to use "?(?P<app>[^"?]+)"?\?')
+#: The message of the approval Codex asks of its host before it acts on an app, which names it as the request's
+#: metadata does.
+APPROVAL =re.compile(r'Allow (?:Computer Use|Codex) to use "?(?P<app>[^"?]+)"?\?')
 #: The key of the metadata Codex reads its sandbox from on each call.
 SANDBOX_KEY = "codex/sandbox-state-meta"
 
@@ -151,26 +153,26 @@ class CodexComputerUse(MacOSDriver):
             self._evict()
 
     @contextlib.asynccontextmanager
-    async def _server(self) -> AsyncIterator[ClientSession]:
-        """``cua_repl`` connected and initialized, its approval requests answered; it ends with the block."""
-        server = StdioServerParameters(command=str(NODE), args=[str(LAUNCHER)], env=_environment(),
+    async def _server(self) -> AsyncIterator[tuple[ClientSession, InitializeResult]]:
+        """``cua_repl`` connected and initialized, with what it said at connect, its approval requests answered; it
+        ends with the block."""
+        server = StdioServerParameters(command=str(APP / NODE), args=[str(APP / LAUNCHER)], env=_environment(),
                                        cwd=str(_workspace()))
         async with (stdio_client(server) as (read, write),
                     ClientSession(read, write, elicitation_callback=self._approve) as session):
-            await session.initialize()
-            yield session
+            yield session, await session.initialize()
 
     async def _approve(self, context: RequestContext, params: ElicitRequestParams) -> ElicitResult:
         """Codex's request to act on an app, approved when ``allowed_apps`` names the app or names none; anything else
-        it asks is declined."""
+        it asks, to record the computer's audio say, is declined."""
         message = getattr(params, "message", "")
-        approved = False
-        if named := APPROVAL.fullmatch(message.strip()):
-            meta = params.meta.model_dump() if params.meta else {}
-            names = {named["app"].strip().lower(), str((meta.get("tool_params") or {}).get("app") or "").lower()}
-            allowed = self.settings.allowed_apps
-            approved = allowed is None or bool(names & {app.lower() for app in allowed})
-        logger.info("%s %r", "approved" if approved else "declined", message)
+        names = _app_names(message, params.meta.model_dump() if params.meta else {})
+        allowed = self.settings.allowed_apps
+        approved = bool(names) and (allowed is None or bool(names & {app.lower() for app in allowed}))
+        if names:
+            logger.info("%s %r", "approved" if approved else "declined", message)
+        else:
+            logger.warning("declined %r, which names no app", message)
         return ElicitResult(action="accept", content={}) if approved else ElicitResult(action="decline")
 
     def _sandbox(self) -> dict:
@@ -186,18 +188,20 @@ class CodexComputerUse(MacOSDriver):
         if differ:
             return checks
         try:
-            async with self._server() as session:
+            async with self._server() as (session, initialized):
                 listed = (await session.list_tools()).tools
                 probed = await session.call_tool("js", {"code": PROBE}, meta=self._sandbox())
         except Exception as e:
             return [*checks, ReadyCheck("Codex tools", False, f"cua_repl didn't answer: {type(e).__name__}: {e}")]
-        running = {t.name: t.inputSchema for t in listed}
-        pinned = {t["name"]: t["inputSchema"] for t in _manifest()["tools"]}
-        changed = sorted(name for name in running.keys() | pinned.keys() if running.get(name) != pinned.get(name))
+        running = {t.name: t.model_dump(mode="json", exclude_none=True) for t in listed}
+        pinned = {t["name"]: t for t in _manifest()["tools"]}
+        changed = ["instructions"] if initialized.instructions != _manifest()["instructions"] else []
+        changed += sorted(name for name in running.keys() | pinned.keys() if name not in running or name not in pinned
+                          or any(running[name].get(key) != value for key, value in pinned[name].items()))
         answer = " ".join(c.text for c in probed.content if isinstance(c, TextContent))
         return [*checks,
-                ReadyCheck("Codex tools", not changed, f"{len(running)} tools, as pinned" if not changed else
-                           f"these tools differ from {MANIFEST.name}: {', '.join(changed)}"),
+                ReadyCheck("Codex tools", not changed, f"its instructions and {len(running)} tools, as pinned"
+                           if not changed else f"these differ from {MANIFEST.name}: {', '.join(changed)}"),
                 ReadyCheck("Codex answers", not probed.isError and "ready" in answer,
                            "it read the computer's apps" if not probed.isError else f"cua.getState() failed: {answer}")]
 
@@ -207,7 +211,8 @@ class _Repl:
     and reached from any through a queue, one call at a time. A server that stops is started afresh on the next call,
     without the last one's bindings; ``close`` ends it for good."""
 
-    def __init__(self, open_server: Callable[[], contextlib.AbstractAsyncContextManager[ClientSession]]) -> None:
+    def __init__(self, open_server: Callable[[], contextlib.AbstractAsyncContextManager[
+            tuple[ClientSession, InitializeResult]]]) -> None:
         self._open = open_server
         self._calls: asyncio.Queue = asyncio.Queue()
         self._task: asyncio.Task | None = None
@@ -237,7 +242,7 @@ class _Repl:
     async def _serve(self) -> None:
         stopped: BaseException = ConnectionError("cua_repl stopped")
         try:
-            async with self._open() as session:
+            async with self._open() as (session, _):
                 while (call := await self._calls.get()) is not None:
                     tool, arguments, meta, answer = call
                     try:
@@ -273,6 +278,15 @@ def _manifest() -> dict:
     return json.loads(MANIFEST.read_text())
 
 
+def _app_names(message: str, meta: dict) -> set[str]:
+    """The app an approval request is for, case aside: its bundle identifier and name as the request's metadata gives
+    them, and the name its message quotes; none for a request that isn't for an app."""
+    shown = [field.get("value") for field in meta.get("tool_params_display") or [] if field.get("name") == "app"]
+    named = APPROVAL.fullmatch(message.strip())
+    names = [(meta.get("tool_params") or {}).get("app"), *shown, named and named["app"]]
+    return {str(name).strip().lower() for name in names if name}
+
+
 def _codex_home() -> Path:
     return Path.home() / ".codex"
 
@@ -296,16 +310,16 @@ def _workspace() -> Path:
 
 def _environment() -> dict[str, str]:
     """``cua_repl``'s environment, as the ChatGPT app builds it for the plugin, with the computer surface alone."""
-    codex, modules = str(_codex_home()), str(NODE_MODULES)
+    codex, modules = str(_codex_home()), str(APP / NODE_MODULES)
     return {**{name: os.environ[name] for name in KEPT if name in os.environ}, "PATH": PATH,
             "CODEX_HOME": codex,
-            "CODEX_CLI_PATH": str(CODEX_CLI),
+            "CODEX_CLI_PATH": str(APP / CODEX_CLI),
             "CUA_REPL_ENABLED_SURFACES": "computer",
-            "CUA_REPL_NODE_REPL_PATH": str(NODE_REPL),
+            "CUA_REPL_NODE_REPL_PATH": str(APP / NODE_REPL),
             "NODE_REPL_INSTRUCTIONS_USE_CASE_COMPUTER_USE": "Control desktop apps on macOS through Computer Use.",
             "NODE_REPL_NATIVE_PIPE_CONNECT_TIMEOUT_MS": "1000",
             "NODE_REPL_NODE_MODULE_DIRS": modules,
-            "NODE_REPL_NODE_PATH": str(NODE),
+            "NODE_REPL_NODE_PATH": str(APP / NODE),
             "NODE_REPL_TRUSTED_CODE_PATHS": f"{codex}:{modules}",
             "NODE_REPL_TRUSTED_SERVICES": json.dumps({"sky": "@oai/sky/service"}),
             "SKY_CUA_SERVICE_PATH": str(HELPER)}
