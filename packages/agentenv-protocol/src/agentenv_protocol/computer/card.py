@@ -18,6 +18,7 @@ COMPUTER_DISPLAY = "urn:agentenv:computer-display/v1"
 COMPUTER_SPACES = "urn:agentenv:computer-spaces/v1"
 COMPUTER_POINTER = "urn:agentenv:computer-pointer/v1"
 COMPUTER_KEYBOARD = "urn:agentenv:computer-keyboard/v1"
+COMPUTER_PAGE = "urn:agentenv:computer-page/v1"
 COMPUTER_EXEC = "urn:agentenv:computer-exec/v1"
 COMPUTER_RECORDING = "urn:agentenv:computer-recording/v1"
 
@@ -29,6 +30,7 @@ GROUP_TOOLS = {
     "pointer": ("computer_pointer_move", "computer_pointer_down", "computer_pointer_up", "computer_pointer_position",
                 "computer_pointer_list"),
     "keyboard": ("computer_keyboard_down", "computer_keyboard_up"),
+    "page": ("computer_navigate", "computer_history", "computer_tabs", "computer_dialog", "computer_upload"),
 }
 #: The tools whose description names the default coordinate space.
 POINT_TOOLS = ("computer_screenshot", "computer_click", "computer_drag", "computer_scroll", "computer_pointer_move",
@@ -89,7 +91,7 @@ def computer_features(driver: ComputerDriverEnvironment) -> dict:
         "max_wait_ms": driver.max_wait_ms, "max_drag_points": driver.max_drag_points,
         "max_duration_ms": driver.max_duration_ms, "max_key_repeat": driver.max_key_repeat,
         "max_scroll_amount": driver.max_scroll_amount, "delivery": "foreground", "platform": driver.platform.as_dict(),
-        "supports": list(driver.supports), "default_data_paths": list(DEFAULT_DATA_PATHS),
+        "supports": list(driver.supports), "default_data_paths": list(DEFAULT_DATA_PATHS), "screen": driver.screen_kind,
     }
 
 
@@ -101,6 +103,12 @@ def declared_extensions(driver: ComputerDriverEnvironment) -> list[EnvironmentEx
         declared.append(EnvironmentExtension(
             uri=COMPUTER_POINTER, description="The computer_pointer_* tools, and click and scroll at the pointer.",
             params={"buttons": list(driver.buttons), "kinds": ["foreground"]}))
+    if driver.has("page"):
+        declared.append(EnvironmentExtension(
+            uri=COMPUTER_PAGE, description="The page tools, for a screen that is a website browser's active tab: "
+                                           "computer_navigate, computer_history, computer_tabs, computer_dialog and "
+                                           "computer_upload; each frame names the page it shows.",
+            params={"uploads": "~/Uploads"}))
     intake = IntakeDeclaration(get=[IntakeFormat(part="file", format="file-tree")])
     if driver.has("write_files"):
         intake.add = [IntakeFormat(part="file", format="file-tree", load="additive")]

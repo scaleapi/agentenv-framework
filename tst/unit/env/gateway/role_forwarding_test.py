@@ -16,8 +16,10 @@ from mcp.types import CONNECTION_CLOSED, CallToolResult, ErrorData, TextContent,
 from agent_env.env.gateway import AGENT_ENV_ROLE_META_KEY, AGENT_ENV_SESSION_META_KEY, InternalMCPServer
 from agent_env.env.gateway.caller import Caller
 from agent_env.env.gateway.constants import DEFAULT_ROLE
-from agent_env.env.gateway.gateway import GATEWAY_TRAJECTORY_FILE, Gateway, _call_never_reached_child, _is_dead_session
+from agent_env.env.gateway.child_sessions import call_never_reached_child, is_dead_session
+from agent_env.env.gateway.gateway import GATEWAY_TRAJECTORY_FILE, Gateway
 from agent_env.env.gateway.get_time import GET_TIME_TOOL_NAME
+from agent_env.env.gateway.triggers import _in_flight_fire
 
 URL = "http://backing/mcp"
 TOOL = MCPTool(name="svc_thing", description="", inputSchema={"type": "object", "properties": {}})
@@ -43,10 +45,10 @@ class _RecordingSession:
 def _gateway(session: _RecordingSession) -> Gateway:
     gw = Gateway(host="127.0.0.1", port=0, server_name="t", internal_mcp_servers=[InternalMCPServer("svc", URL)])
 
-    async def _open(stack):
-        return {URL: session}
+    async def _open(server, stack, report):
+        return session
 
-    gw._open_persistent_sessions = _open  # type: ignore[method-assign]
+    gw._sessions.open_session = _open  # type: ignore[method-assign]
     return gw
 
 
@@ -88,7 +90,7 @@ def test_mcp_tool_calls_record_who_made_them_and_the_fires_in_flight_for_that_ex
     gw._clock.set_time("2019-06-15T12:00:00Z", 1)
     gw._register_get_time_tool()
     cause = {"trigger_id": "x", "action_index": 0, "fire": 1}
-    gw._trigger_engine._in_flight["bob@example.com"] = [cause]
+    gw._trigger_engine._in_flight["bob@example.com"] = [_in_flight_fire(cause)]
     before = len(_trajectory(gw))
 
     for role in ("bob@example.com", "alice@example.com"):
@@ -146,5 +148,5 @@ async def test_trigger_internal_calls_are_stamped_only_when_an_as_role_is_given(
     (ValueError("x"), False, False),
 ], ids=["closed", "broken", "session_terminated", "connection_closed", "invalid_params", "timeout", "other"])
 def test_the_dead_session_predicates(exc, dead, retry):
-    assert _is_dead_session(exc) is dead
-    assert _call_never_reached_child(exc) is retry
+    assert is_dead_session(exc) is dead
+    assert call_never_reached_child(exc) is retry

@@ -13,6 +13,7 @@ import httpx
 import pytest
 
 from agent_env.store import LocalRegistryImageStore
+from tst.integration.utils.registry import REGISTRY_IMAGE
 from tst.store import image_conformance
 
 pytestmark = pytest.mark.integration
@@ -31,7 +32,7 @@ def registry_host():
     port = _free_port()
     name = f"imagestore-conf-registry-{uuid.uuid4().hex[:8]}"
     start = subprocess.run(
-        ["docker", "run", "-d", "--rm", "--name", name, "-p", f"127.0.0.1:{port}:5000", "registry:2"],
+        ["docker", "run", "-d", "--rm", "--name", name, "-p", f"127.0.0.1:{port}:5000", REGISTRY_IMAGE],
         capture_output=True, text=True,
     )
     if start.returncode != 0:

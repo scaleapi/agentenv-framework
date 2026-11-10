@@ -32,10 +32,10 @@ def _gateway(servers: dict[str, _Session], **kw) -> Gateway:
                  internal_mcp_servers=[InternalMCPServer(name, f"http://{name}/mcp") for name in servers])
     sessions = {f"http://{name}/mcp": session for name, session in servers.items()}
 
-    async def open_sessions(stack):
-        return sessions
+    async def open_sessions(server, stack, report):
+        return sessions[server.mcp_url]
 
-    gw._open_persistent_sessions = open_sessions  # type: ignore[method-assign]
+    gw._sessions.open_session = open_sessions  # type: ignore[method-assign]
     return gw
 
 

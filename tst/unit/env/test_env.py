@@ -6,7 +6,9 @@
 env overrides `deploy`; this pins the base behavior a custom env inherits.
 
 The card helpers read only the stored env card: capabilities and child envs come from it,
-and invoke calls the endpoint and verb it advertises, joined onto the card's address.
+and invoke calls the endpoint and verb it advertises, joined onto the card's address. readiness
+asks each site the card, or the card the env serves now for a record without one, advertises
+website/v1's ready on, through the protocol's env_readiness.
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ from agentenv_protocol import client as protocol_v1
 
 from agent_env.env.env import (
     _GATEWAY_ONLY_FIELDS, DeployedEnv, DeployedGatewayEnv, DeployedSandboxEnv, Env, EnvCapabilityUnsupported, EnvNeedsGateway,
-    EnvNeedsSandbox, gateway_url_of, require_gateway_url, require_sandbox,
+    EnvNeedsSandbox, gateway_url_of, require_gateway_url, require_sandbox, website_child,
 )
 from agent_env.env.gateway.constants import (
     EXT_CHANGES_URI, EXT_CLOCK_URI, EXT_DISABLE_TOOL_URI, EXT_ENABLE_TOOL_URI, EXT_STATE_URI, EXT_STEP_URI, EXT_TRAJECTORY_URI, EXT_TRIGGERS_URI,
@@ -145,6 +147,49 @@ def test_a_leaf_card_is_its_own_only_child_env_and_a_composed_one_with_a_data_pl
     assert _record(desk).get_child_env_card("desk") is desk and _record(desk).get_child_env_card("mail") is mail
     alone = {**desk, "children_environments": [{**mail, "name": "desk"}]}
     assert _record(alone).get_child_env_card("desk") is alone
+
+
+def test_a_child_whose_card_is_named_otherwise_is_found_by_the_environment_name_its_gateway_states():
+    """A card the SDK didn't build can carry another name than the env's; the gateway states the env's beside it, and
+    a website served at /svc/<environment_name> is still told from an MCP server by its route."""
+    notes = {"name": "Notes App", "url": "/svc/notes/agentenv", "environment_name": "notes"}
+    mail = {"name": "Mail", "url": "/svc/mcp-mail/agentenv", "environment_name": "mail"}
+    deployed = _record({"name": "office", "children_environments": [notes, mail]})
+    assert deployed.get_child_env_card("notes") is notes and deployed.get_child_env_card("Notes App") is None
+    assert deployed.child_env("notes", mcp=False).card is notes and deployed.child_env("mail", mcp=True).card is mail
+    assert website_child(deployed.child_env("notes")) and not website_child(deployed.child_env("mail"))
+    # A card from a gateway that states none is found by its own name, as before.
+    assert _record({"name": "office", "children_environments": [{"name": "notes", "url": "/svc/notes/agentenv"}]}
+                   ).get_child_env_card("notes")["url"] == "/svc/notes/agentenv"
+
+
+_SITE_MAIL = {"name": "mail", "url": "/svc/mail/agentenv",
+              "capabilities": {"extensions": [{"uri": "urn:agentenv:website/v1", "params": {}}]}}
+_MCP_MAIL = {"name": "mail", "url": "/svc/mcp-mail/agentenv"}
+
+
+def test_children_sharing_a_name_are_told_apart_by_kind_and_refused_without_it():
+    deployed = _record({"name": "office", "children_environments": [_SITE_MAIL, _MCP_MAIL]})
+    assert deployed.get_child_env_card("mail", mcp=False) is _SITE_MAIL
+    assert deployed.get_child_env_card("mail", mcp=True) is _MCP_MAIL
+    assert deployed.child_env("mail", mcp=True).base_url(deployed.environment_url) == "https://gw.example/svc/mcp-mail"
+    with pytest.raises(protocol_v1.AmbiguousChildError, match="2 child envs of env 'multi' are named 'mail'"):
+        deployed.get_child_env_card("mail")
+    twice = _record({"name": "office", "children_environments": [_SITE_MAIL, {**_SITE_MAIL, "url": "/svc/mail2/agentenv"}]})
+    with pytest.raises(protocol_v1.AmbiguousChildError):
+        twice.get_child_env_card("mail", mcp=False)
+    alone = _record({"name": "office", "children_environments": [{**_MCP_MAIL, "url": "/svc/mail/agentenv"}]})
+    assert alone.get_child_env_card("mail", mcp=True)["url"] == "/svc/mail/agentenv"
+
+
+@pytest.mark.asyncio
+async def test_invoke_calls_the_child_given_as_its_own_card_advertises_it(sent):
+    site = {**_SITE_MAIL, "capabilities": {"extensions": [_ext(EXT_STEP_URI, "/svc/mail/agentenv/ext/step", "step")]}}
+    deployed = _record({"name": "office", "children_environments": [_MCP_MAIL, site]})
+
+    await deployed.invoke(EXT_STEP_URI, "step", {}, child=protocol_v1.child_at(deployed.environment_card, "/svc/mail"))
+
+    assert [request.url.path for request in sent] == ["/svc/mail/agentenv/ext/step"]
 
 
 @pytest.mark.asyncio
@@ -286,3 +331,81 @@ def test_only_a_record_in_our_sandboxes_has_a_sandbox():
     with pytest.raises(EnvNeedsSandbox, match="^run_code needs a sandbox; env 'e' runs outside agent-env's sandboxes$") as raised:
         require_sandbox(hosted, "run_code")
     assert (raised.value.what, raised.value.env_id) == ("run_code", "e")
+
+
+def _site(name: str) -> dict:
+    """A site's own card, as the website SDK serves it, readiness at website/v1's ready."""
+    return {"name": name, "url": "/agentenv", "capabilities": {"extensions": [
+        {"uri": "urn:agentenv:website/v1", "params": {"domains": [f"{name}.test"], "health": "/api/health", "methods": {
+            "ready": {"method": "GET", "endpoint": "/agentenv/ext/website/ready"}}}}]}}
+
+
+@pytest.fixture(scope="module")
+def sites() -> dict:
+    """The real gateway's composed card over two sites, mail and shop, and mcp-slack, which serves no ready."""
+    gw = Gateway(host="127.0.0.1", port=0, server_name="env1234", internal_mcp_servers=[],
+                 rest_proxy_urls={"mail": "http://mail:8000", "shop": "http://shop:8000", "mcp-slack": "http://slack:18765"})
+
+    async def fetch(client, key, base_url):
+        return gw._rewrite_child_card(key, _SLACK if key == "mcp-slack" else _site(key))
+
+    gw._fetch_child_card = fetch
+    return json.loads(asyncio.run(gw._serve_env_card()).body)
+
+
+def _gateway(monkeypatch, card: dict, answers: dict[str, object]) -> list[httpx.Request]:
+    """The requests the protocol client sends to a stubbed gateway serving ``card`` and, by path, ``answers``."""
+    requests, real = [], httpx.AsyncClient
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith(WELL_KNOWN_PATH):
+            return httpx.Response(200, json=card)
+        answer = answers.get(request.url.path)
+        return answer if isinstance(answer, httpx.Response) else httpx.Response(200, json=answer)
+
+    monkeypatch.setattr(protocol_v1.httpx, "AsyncClient", lambda *a, **k: real(transport=httpx.MockTransport(handle)))
+    return requests
+
+
+@pytest.mark.asyncio
+async def test_readiness_asks_each_site_on_the_stored_card_with_the_control_headers_naming_each_ones_problems(
+        monkeypatch, sites):
+    sent = _gateway(monkeypatch, sites, {"/svc/mail/agentenv/ext/website/ready": {"ready": True, "problems": []},
+                                         "/svc/shop/agentenv/ext/website/ready": {"ready": False, "problems": ["seeded"]}})
+    deployed = _record(sites)
+    deployed.control_token = "t0ken"
+
+    readiness = await deployed.readiness()
+
+    assert (readiness.ready, readiness.problems) == (False, ["shop: seeded"])
+    assert sorted(r.url.path for r in sent) == ["/svc/mail/agentenv/ext/website/ready",
+                                                "/svc/shop/agentenv/ext/website/ready"]
+    assert {r.headers.get("authorization") for r in sent} == {"Bearer t0ken"}
+
+
+@pytest.mark.asyncio
+async def test_readiness_of_a_record_without_its_card_reads_the_card_the_env_serves_now(monkeypatch, sites):
+    sent = _gateway(monkeypatch, sites, {"/svc/mail/agentenv/ext/website/ready": {"ready": True},
+                                         "/svc/shop/agentenv/ext/website/ready": httpx.Response(503, text="down")})
+
+    readiness = await _record(None).readiness()
+
+    assert not readiness.ready and readiness.problems[0].startswith("shop: ready could not be read: ExtensionCallError")
+    assert sent[0].url.path == WELL_KNOWN_PATH
+
+
+@pytest.mark.asyncio
+async def test_readiness_of_an_env_with_no_site_is_ready_with_no_problems_and_asks_nothing(monkeypatch, composed):
+    sent = _gateway(monkeypatch, composed, {})
+
+    readiness = await _record(composed).readiness()
+
+    assert (readiness.ready, readiness.problems, sent) == (True, [], [])
+
+
+@pytest.mark.asyncio
+async def test_readiness_of_a_record_with_no_card_url_cannot_be_asked(sent, sites):
+    with pytest.raises(EnvCapabilityUnsupported, match="does not offer 'ready' on urn:agentenv:website/v1"):
+        await dataclasses.replace(_record(sites), environment_card_url=None).readiness()
+    assert sent == []

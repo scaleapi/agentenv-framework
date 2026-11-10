@@ -12,6 +12,16 @@ Each operation is called with screen pixels, positionally, in the order below, a
     key_down(keys), key_up(keys)
     run_in_session(argv, cwd, env, timeout_s) -> ExecResult            write_files({path: bytes})
     record(hints) -> an async iterator of RecordedFrame or RecordedSegment, until it is closed
+
+The page group, for a driver whose screen is a website browser's active tab:
+
+    navigate(url)                                         history(direction), back, forward or reload
+    tabs(action, tab, url) -> [Tab, ...]                  list, open, switch or close; the tabs open after it
+    dialog(accept, text)                                  upload(paths), relative to the session user's ~/Uploads
+    page_state() -> PageState
+
+A page driver's ``capture`` may return its ``Image`` with the ``page`` it shows, read with it, which every frame then
+carries rather than one ``page_state`` reads after.
 """
 from __future__ import annotations
 
@@ -25,10 +35,13 @@ REQUIRED = ("display", "capture", "click", "drag", "scroll", "type_text", "press
 GROUPS = {
     "pointer": ("pointer_move", "pointer_down", "pointer_up", "pointer_position"),
     "keyboard": ("key_down", "key_up"),
+    "page": ("navigate", "history", "tabs", "dialog", "upload", "page_state"),
 }
 OPTIONAL = ("set_display", "run_in_session", "write_files", "record")
 INPUT = frozenset({"click", "drag", "scroll", "type_text", "press", "pointer_move", "pointer_down", "pointer_up",
-                   "key_down", "key_up"})
+                   "key_down", "key_up", "navigate", "history", "tabs", "dialog", "upload"})
+#: The input a page's open dialog blocks, which is refused while one is open there.
+DIALOG_BLOCKS = INPUT - {"tabs", "dialog", "upload"}
 
 _OP_ATTR = "_aec_operation"
 
@@ -44,11 +57,12 @@ class Display:
 @dataclass(frozen=True)
 class Image:
     """A capture: encoded ``png`` or ``jpeg`` bytes, or raw pixels in a Pillow raw mode (``RGB``, ``RGBA``, ``BGRA``,
-    ``BGRX``)."""
+    ``BGRX``); and, from a page driver, the page it shows."""
     width: int
     height: int
     data: bytes
     mode: str = "png"
+    page: PageState | None = None
 
 
 @dataclass(frozen=True)
@@ -58,6 +72,40 @@ class Effect:
     pointer_moved: bool | None = None
     clipboard_used: bool | None = None
     detail: str | None = None
+
+
+@dataclass(frozen=True)
+class Tab:
+    """A tab of a website browser: its id, the browser's own, and its page's URL and title."""
+    id: str
+    url: str
+    title: str
+    active: bool = False
+
+
+@dataclass(frozen=True)
+class PageDialog:
+    """A JavaScript dialog open on a page: ``alert``, ``confirm``, ``prompt`` or ``beforeunload``."""
+    type: str
+    message: str
+    default_text: str = ""
+
+
+@dataclass(frozen=True)
+class FileChooser:
+    """A file chooser a page opened, waiting for files: several, or one."""
+    multiple: bool = False
+
+
+@dataclass(frozen=True)
+class PageState:
+    """The page a page driver's screen shows: the active tab's id, URL and title, the dialog open on it, and the file
+    chooser it opened that waits."""
+    tab: str
+    url: str
+    title: str
+    dialog: PageDialog | None = None
+    file_chooser: FileChooser | None = None
 
 
 @dataclass(frozen=True)
@@ -74,6 +122,8 @@ class ReadyCheck:
     name: str
     ok: bool
     detail: str = ""
+    #: Failed for good: the check can't pass again, so the computer has failed.
+    final: bool = False
 
 
 @dataclass(frozen=True)
@@ -113,6 +163,12 @@ pointer_up = _marker("pointer_up")
 pointer_position = _marker("pointer_position")
 key_down = _marker("key_down")
 key_up = _marker("key_up")
+navigate = _marker("navigate")
+history = _marker("history")
+tabs = _marker("tabs")
+dialog = _marker("dialog")
+upload = _marker("upload")
+page_state = _marker("page_state")
 run_in_session = _marker("run_in_session")
 write_files = _marker("write_files")
 record = _marker("record")

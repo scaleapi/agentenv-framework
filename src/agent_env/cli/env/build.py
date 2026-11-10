@@ -1,5 +1,5 @@
-"""Build the forms and arches of a computer env not built yet: those that failed, and those a put that stopped left
-building."""
+"""Build the forms and arches of a computer env not built yet: those that failed, those a put that stopped left
+building, and a VM bundle the Mac doesn't hold."""
 
 import click
 
@@ -18,7 +18,7 @@ from agent_env.store.base import NotFoundError
 @click.option("--no-emulate", is_flag=True, help="Skip, rather than emulate, an arch no link runs natively")
 def build(env_id: str, version: int | None, sandbox: str | None, no_emulate: bool):
     """Build a computer env's forms and arches not built yet, reusing any image of the same key, and print each one's
-    status; exits 1 when one failed."""
+    status, this build's for those it built; exits 1 when one failed."""
     try:
         provider = build_sandbox_provider(sandbox) if sandbox else None
         env = Env.get(env_id, version)
@@ -28,11 +28,13 @@ def build(env_id: str, version: int | None, sandbox: str | None, no_emulate: boo
         raise click.ClickException(f"{env_id} is a {env.type} env; only a computer env is built")
     if env.computer is None:
         raise click.ClickException(f"{env_id} names no computer and driver, so it has nothing to build alone")
+    built = {}
     if (pairs := composer.pending(env, provider)) or not composer.current(env):
-        composer.compose(env, pairs, composer.Composing(provider, not no_emulate, click.echo))
+        built = composer.compose(env, pairs, composer.Composing(provider, not no_emulate, click.echo))
     failed = False
     for form, by_arch in env.metadata.get("composed", {}).items():
-        for arch, result in by_arch.items():
+        for arch, recorded in by_arch.items():
+            result = built.get((form, arch), recorded)
             failed |= result["status"] == "failed"
             detail = result.get("reason") or result.get("image", "")
             click.echo(f"{form}/{arch}: {result['status']}" + (f" ({'reused, ' if result.get('reused') else ''}"

@@ -66,7 +66,7 @@ async def file_parts(home: Path, paths: list[str], write_namespace: Optional[Wri
     """A part for each file under ``paths`` of ``home`` but under none of ``leaving_out``, naming its path relative to
     ``home``: uploaded under ``write_namespace`` when there is one, else inline. A file a running app removes before it's
     read is left out."""
-    files = [(relative, source) for relative, source in _data_files(home, paths)
+    files = [(relative, source) for relative, source in data_files(home, paths)
              if not any(PurePosixPath(relative).is_relative_to(owned) for owned in leaving_out)]
     parts = []
     if write_namespace is not None:
@@ -125,7 +125,7 @@ async def _get_url(file: FileWithUri) -> bytes:
     return bytes(data)
 
 
-def _data_files(home: Path, paths: list[str]) -> list[tuple[str, Path]]:
+def data_files(home: Path, paths: list[str]) -> list[tuple[str, Path]]:
     """Every file under ``paths``, by its path relative to the home; a path not there yet is skipped."""
     root = home.resolve()
     found: dict[str, Path] = {}

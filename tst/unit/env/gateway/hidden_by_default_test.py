@@ -36,10 +36,10 @@ def _gateway(*tools: MCPTool) -> Gateway:
     gw = Gateway(host="127.0.0.1", port=0, server_name="unit",
                  internal_mcp_servers=[InternalMCPServer("mail", "http://mail/mcp")])
 
-    async def open_sessions(stack):
-        return {"http://mail/mcp": _Session(*tools)}
+    async def open_sessions(server, stack, report):
+        return _Session(*tools)
 
-    gw._open_persistent_sessions = open_sessions  # type: ignore[method-assign]
+    gw._sessions.open_session = open_sessions  # type: ignore[method-assign]
     return gw
 
 

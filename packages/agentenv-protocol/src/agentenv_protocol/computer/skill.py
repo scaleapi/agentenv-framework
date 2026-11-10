@@ -10,18 +10,35 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .keys import PRINTABLE_KEYS
+from .platform import entry_for, platform_key
 
 if TYPE_CHECKING:
     from .driver import ComputerDriverEnvironment
 
-#: The chords each OS's desktops keep for the everyday actions, as ``computer_key`` takes them.
-SHORTCUTS = {
-    "linux": """\
+#: The chords Linux apps keep for editing, whatever their desktop.
+_LINUX_APPS = """\
 - Copy, cut and paste: `['Control', 'c']`, `['Control', 'x']`, `['Control', 'v']`; in a terminal, with `'Shift'` too.
 - Undo `['Control', 'z']`, save `['Control', 's']`, select all `['Control', 'a']`, find `['Control', 'f']`.
+"""
+#: The chords each platform's desktops keep for the everyday actions, as ``computer_key`` takes them, by platform key: a
+#: distribution's replace its OS type's.
+SHORTCUTS = {
+    "linux": _LINUX_APPS + """\
 - Switch windows `['Alt', 'Tab']`; close the focused one `['Alt', 'F4']`.
 - In a file manager, `['Control', 'l']` takes a typed path, `['F2']` renames and `['Control', 'Shift', 'n']` makes a
   folder.
+""",
+    "linux/omarchy": """\
+- Workspaces: `['Super', '1']` to `['Super', '9']` switch to one; `['Super', 'Shift', '1']` to `['Super', 'Shift', '9']`
+  move the focused window there.
+- Windows tile side by side. `['Super', 'ArrowLeft']` and the other arrows focus the window that way, and with
+  `'Shift'` too move it there; `['Super', 'w']` closes the focused window, `['Super', 'f']` makes it full screen and
+  `['Super', 't']` floats or tiles it.
+- `['Super', 'Enter']` opens a terminal, `['Super', 'Shift', 'f']` the file manager and `['Super', 'Shift', 'b']` the
+  browser; `['Super', 'Alt', ' ']` the app launcher, where a typed name and Enter start an app; `['Super', ' ']`
+  Omarchy's menu; `['Super', 'k']` the list of every shortcut.
+""" + _LINUX_APPS + """\
+- `['Super', 'c']`, `['Super', 'x']` and `['Super', 'v']` copy, cut and paste in any window, a terminal too.
 """,
 }
 _SESSIONS = {"x11": "an X11 session", "wayland": "a Wayland session"}
@@ -56,16 +73,19 @@ async def skill(driver: ComputerDriverEnvironment) -> tuple[str, str, dict[str, 
         "## Input",
         _input(driver),
     ]
-    if shortcuts := SHORTCUTS.get(platform.os or ""):
+    if shortcuts := entry_for(SHORTCUTS, platform_key(platform.os, platform.distribution)):
         sections += ["## Shortcuts", shortcuts.rstrip()]
     if notes := driver.notes.strip():
         sections += ["## Notes", notes]
     body = "\n\n".join(sections) + "\n"
+    prefix = driver._computer_prefix
+    lead = f"{rule}\n\n" if (rule := prefix.rule(driver._computer_other_tools())) else ""
     if bundled is None:
-        return description, body, {}
+        return prefix.text(description), prefix.text(lead + body), {}
     own_description, own_body, files = bundled
-    return (f"{own_description} This computer: {system}, {display.width}x{display.height}, and its computer_* tools.",
-            own_body.rstrip() + "\n\n" + body, files)
+    return (prefix.text(f"{own_description} This computer: {system}, {display.width}x{display.height}, and its "
+                        "computer_* tools."),
+            prefix.text(lead + own_body.rstrip() + "\n\n" + body), files)
 
 
 def _input(driver: ComputerDriverEnvironment) -> str:

@@ -1,9 +1,11 @@
 """The shipped desktop example's disk form, composed on this machine and booted under KVM in the QEMU launcher through
 ``agent-env run``. A run on local Docker, whose deploys boot the container, composes no disk; a later run whose deploy
 names the disk form composes it first, reusing the container, and gate 3 probes this machine's arch's disk at full as
-it composes it; the deploy boots it with its settings and control token in its seed, it passes the probe at full, and a
-reset boots it afresh, where it passes again. Needs Docker, the local registry and /dev/kvm."""
+it composes it, or reuses one of the same key an earlier compose made; the deploy boots it with its settings and control
+token in its seed, it passes the probe at full, and a reset boots it afresh, where it passes again. Needs Docker, the
+local registry and /dev/kvm."""
 
+import re
 from pathlib import Path
 
 import pytest
@@ -33,9 +35,10 @@ def test_the_desktops_disk_is_composed_by_the_first_deploy_that_boots_it_then_pr
     ran = CliRunner().invoke(cli, ["run", str(BUNDLE), "--task", "probe"])
 
     assert ran.exit_code == 0, ran.output
-    assert f"[tasks/probe.json] {DESKTOP}: composing disk/amd64, disk/arm64 before this deploy (no compose built them" in (
-        ran.output)
-    assert f"{DESKTOP}: disk/{arch}: making the disk" in ran.output and f"{DESKTOP}: disk/{arch}: ready (" in ran.output
+    assert (f"[tasks/probe.json] {DESKTOP}: composing disk/amd64, disk/arm64 before this deploy on LocalSandboxProvider "
+            "(no compose built them") in ran.output
+    assert re.search(rf"{DESKTOP}: disk/{arch}: (making the disk|reusing the disk of the same key)", ran.output)
+    assert re.search(rf"{DESKTOP}: disk/{arch}: (reused, )?ready \(", ran.output)
     context = run_context(ran.output)
     verifications = context["metadata"]["verifications"]
     assert all(result["result"] for step in ("probe", "again") for result in verifications[step]["results"])

@@ -1,8 +1,8 @@
 """Computer app env: software on a computer, a ``ComputerAppEnvironment`` subclass, with its files, what it declares,
 read from the class at put, the values of its build settings the env fixes in the image, and the defaults for its
 settings each deploy starts from. Deployed alone it is a
-one-app computer env: the computer and driver its env.toml names, composed with the app installed under its prefix, its
-card named after it."""
+one-app computer env: the computer and driver its env.toml names, composed with the app installed under its prefix, the
+computer's card named after it with ``DRIVER_SUFFIX``, so the app's own name reaches the app."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self
 
 from agentenv_protocol.computer import AppDeclaration, Launch
 from agentenv_protocol.computer.app import SOCKET
+from agentenv_protocol.computer.platform import entry_for
 
 from agent_env.artifact import Artifact
 from agent_env.artifact.artifacts.computer import ComputerArtifact
@@ -19,7 +20,8 @@ from agent_env.env.env import Env
 from agent_env.env.envs.computer.utils import composer, gate
 from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.envs.computer.env import APP_TYPE, ComputerEnv
-from agent_env.env.envs.computer.utils.install import AppInstall, folder_problems, installs
+from agent_env.env.envs.computer.utils.install import (APP_INSTALLS, AppInstall, folder_problems, installs, platform_of,
+                                                        unsupported)
 from agent_env.env.envs.computer.driver_env import ComputerDriverEnv, declared
 from agent_env.env.store import get_env_store
 from agent_env.store.ids import derive_id
@@ -28,6 +30,10 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from agent_env.bundle.authoring import AuthoringContext
+
+
+#: What an app deployed alone adds to its name to name its computer.
+DRIVER_SUFFIX = "-driver"
 
 
 class ComputerAppEnv(ComputerEnv):
@@ -50,19 +56,23 @@ class ComputerAppEnv(ComputerEnv):
     def install(self) -> dict[str, AppInstall]:
         return _installs(self.declaration)[0]
 
+    @property
+    def computer_name(self) -> str:
+        return f"{self.environment_name}{DRIVER_SUFFIX}"
+
     def composed_apps(self) -> list[ComputerAppEnv]:
         return [self]
 
     def settings_schema(self, os_type: str | None) -> dict[str, Any]:
         """The JSON schema of its settings on ``os_type``: its class's, with the fields that OS adds; with no OS type,
         its class's."""
-        on = self.declaration.os.get(os_type)
+        on = entry_for(self.declaration.os, os_type)
         own = on.settings if on is not None else None
         return own if own is not None else self.declaration.settings
 
     def build_settings_schema(self, os_type: str | None) -> dict[str, Any] | None:
         """The JSON schema of its build settings on ``os_type``, as ``settings_schema``; None when it declares none."""
-        on = self.declaration.os.get(os_type)
+        on = entry_for(self.declaration.os, os_type)
         own = on.build_settings if on is not None else None
         return own if own is not None else self.declaration.build_settings
 
@@ -74,7 +84,7 @@ class ComputerAppEnv(ComputerEnv):
 
     def launch(self, os_type: str) -> Launch | None:
         """How it launches on ``os_type``."""
-        on = self.declaration.os.get(os_type)
+        on = entry_for(self.declaration.os, os_type)
         return on.launch if on is not None else None
 
     def to_dict(self) -> dict:
@@ -113,8 +123,9 @@ class ComputerAppEnv(ComputerEnv):
         app = cls(id=id, version=None, environment_name=environment_name, module=module, files=files,
                   declaration=declaration, computer=computer, driver=driver, build_settings=build_settings,
                   settings=settings)
-        os_type = computer.os.type if computer is not None else None
+        os_type = platform_of(computer.os) if computer is not None else None
         _, problems = _installs(declaration)
+        problems += unsupported(declaration.os, declaration.supports, "install")
         problems += _class_beyond_reach(module, declaration)
         problems += _in_server_folder(declaration, files.get_file_artifacts())
         problems += gate.check_app_build_settings(app, app.build_settings, "build_settings", os_type)
@@ -124,7 +135,7 @@ class ComputerAppEnv(ComputerEnv):
         elif computer is not None and not problems:
             _, refused = gate.check(computer, driver, environment_name=environment_name, apps=[], display=None,
                                     network=None, computer_settings={})
-            problems += refused + gate.check_app(computer, driver, app)
+            problems += refused + gate.check_app(computer, driver, app) + gate.check_screen(driver, [app], "app")
         if problems:
             raise ValueError(f"computer app env {id!r}: " + "; ".join(problems))
         app = get_env_store().put_document(app)
@@ -188,7 +199,7 @@ class ComputerAppEnv(ComputerEnv):
 
 def _installs(declaration: AppDeclaration) -> tuple[dict[str, AppInstall], list[str]]:
     """Its installs by OS type, each checked as the composer installs it, and the problems with them."""
-    return installs({os_type: on.install for os_type, on in declaration.os.items()}, AppInstall)
+    return installs({os_type: on.install for os_type, on in declaration.os.items()}, APP_INSTALLS)
 
 
 def _in_server_folder(declaration: AppDeclaration, names: Iterable[str]) -> list[str]:

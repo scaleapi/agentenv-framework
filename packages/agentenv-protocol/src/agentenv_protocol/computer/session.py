@@ -1,140 +1,16 @@
-"""What a computer app's own server does in the desktop session, the Linux way: wait for the session, launch the app
-into it and stop it, add its menu launcher and list the session's windows. Another OS type brings its own."""
+"""What a computer app's own server does in the desktop session, its OS's way: wait for the session, launch the app
+into it in a group that holds whatever it starts, stop, pause and look for that group, add the app's menu launcher and
+list the session's windows. Linux and macOS share the POSIX way (``_session_posix``); Windows has its own
+(``_session_windows``). How a launched process exited is kept alike for both (``_reaping``)."""
 from __future__ import annotations
 
-import asyncio
-import contextlib
-import os
-import re
-import signal
 import sys
-from pathlib import Path
-from typing import Optional
 
-#: How often a starting session is looked for.
-POLL_S = 0.2
-#: Moves the fds an app is launched with into place, run on its own so it loads nothing but the standard library.
-WITH_FDS = Path(__file__).with_name("_with_fds.py")
-#: The processes launched into the session, kept until they exit so each is reaped.
-_running: set[asyncio.Task] = set()
-#: Each launched process's reaping, by pid, until its exit is asked for: its return code, negative for a signal.
-_exits: dict[int, asyncio.Future] = {}
-#: How many exits no one has asked for are kept, the latest.
-KEPT_EXITS = 16
+from ._reaping import returncode
 
+if sys.platform == "win32":
+    from ._session_windows import add_launcher, alive, launch, paused, stop, wait_until_up, windows
+else:
+    from ._session_posix import add_launcher, alive, launch, paused, stop, wait_until_up, windows
 
-async def wait_until_up() -> None:
-    """Until the X display's socket is there."""
-    display = os.environ["DISPLAY"].lstrip(":").split(".")[0]
-    while not Path(f"/tmp/.X11-unix/X{display}").exists():
-        await asyncio.sleep(POLL_S)
-
-
-async def launch(argv: list[str], cwd: Path, env: dict[str, str], fds: Optional[dict[int, int]] = None) -> int:
-    """Start ``argv`` in ``cwd``, in a session of its own so it outlives the server, with the server's environment and
-    ``env``, and ``fds``, the server's fds it inherits by the number each gets in it; its pid."""
-    if fds:
-        argv = [sys.executable, "-I", "-S", str(WITH_FDS), *(f"{source}={target}" for target, source in fds.items()),
-                "--", *argv]
-    process = await asyncio.create_subprocess_exec(
-        *argv, cwd=cwd, env={**os.environ, **env}, start_new_session=True, stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL, pass_fds=tuple((fds or {}).values()))
-    reaped = asyncio.ensure_future(process.wait())
-    _running.add(reaped)
-    reaped.add_done_callback(_running.discard)
-    _exits[process.pid] = reaped
-    reaped.add_done_callback(lambda _: _forget_old_exits())
-    return process.pid
-
-
-def _forget_old_exits() -> None:
-    """Drop all but the latest ``KEPT_EXITS`` exits no one has asked for."""
-    for pid in [pid for pid, reaped in _exits.items() if reaped.done()][:-KEPT_EXITS]:
-        del _exits[pid]
-
-
-async def returncode(pid: int, timeout_s: float) -> Optional[int]:
-    """The return code the process ``launch`` started as ``pid`` exited with, negative for the signal that ended it,
-    once it's reaped within ``timeout_s``; None for one ``launch`` didn't start or that hasn't exited."""
-    reaped = _exits.get(pid)
-    if reaped is None:
-        return None
-    try:
-        code = await asyncio.wait_for(asyncio.shield(reaped), timeout_s)
-    except TimeoutError:
-        return None
-    _exits.pop(pid, None)
-    return code
-
-
-async def stop(pid: int, timeout_s: float) -> None:
-    """End the session ``launch`` started as ``pid``, every process in it: asked to exit, then killed after
-    ``timeout_s``. No one asks how it exited once it's stopped."""
-    _exits.pop(pid, None)
-    try:
-        os.killpg(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    try:
-        await asyncio.wait_for(_exited(pid), timeout_s)
-    except TimeoutError:
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(pid, signal.SIGKILL)
-
-
-def alive(pid: int) -> bool:
-    """Whether a process of the session ``launch`` started as ``pid`` is running, its first or one it started."""
-    try:
-        os.killpg(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
-
-
-async def _exited(pid: int) -> None:
-    while alive(pid):
-        await asyncio.sleep(POLL_S)
-
-
-def add_launcher(name: str, folder: Path) -> Path:
-    """The desktop entry that launches the app ``name`` in ``folder`` through its own server, written where the
-    session user's menu finds it."""
-    entry = Path.home() / ".local/share/applications" / f"agentenv-app-{folder.name}.desktop"
-    entry.parent.mkdir(parents=True, exist_ok=True)
-    entry.write_text(f"[Desktop Entry]\nType=Application\nName={name}\n"
-                     f"Exec={folder}/venv/bin/python -m agentenv_protocol.computer.launch {folder}\nTerminal=false\n")
-    return entry
-
-
-async def windows() -> list[dict[str, str]]:
-    """The window manager's top-level windows, each as its WM_CLASS ``instance`` and ``class`` and its ``title``, read
-    with ``xprop``: ``_NET_WM_NAME``, or ``WM_NAME`` for a window that sets only that; a window that closes while it's
-    read is left out."""
-    listed = await _xprop("-root", "_NET_CLIENT_LIST")
-    found = []
-    for window in re.findall(r"0x[0-9a-f]+", listed.partition("#")[2]):
-        props = await _xprop("-id", window, "WM_CLASS", "_NET_WM_NAME", "WM_NAME")
-        names = dict(re.findall(r'^(WM_CLASS|_NET_WM_NAME|WM_NAME)[^=]*= (.*)$', props, re.MULTILINE))
-        parts = _strings(names.get("WM_CLASS", ""))
-        if len(parts) == 2:
-            title = _strings(names.get("_NET_WM_NAME") or names.get("WM_NAME", ""))
-            found.append({"instance": parts[0], "class": parts[1], "title": title[0] if title else ""})
-    return found
-
-
-def _strings(value: str) -> list[str]:
-    """The quoted strings of an ``xprop`` value, as the window holds them, without the escapes ``xprop`` prints."""
-    return [re.sub(r"\\(.)", r"\1", text) for text in re.findall(r'"((?:[^"\\]|\\.)*)"', value)]
-
-
-async def _xprop(*args: str) -> str:
-    process = await asyncio.create_subprocess_exec("xprop", *args, stdout=asyncio.subprocess.PIPE,
-                                                   stderr=asyncio.subprocess.DEVNULL)
-    try:
-        out, _ = await process.communicate()
-    except asyncio.CancelledError:
-        process.kill()
-        raise
-    return out.decode(errors="replace") if process.returncode == 0 else ""
+__all__ = ["add_launcher", "alive", "launch", "paused", "returncode", "stop", "wait_until_up", "windows"]

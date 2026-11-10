@@ -1,46 +1,276 @@
-#!/bin/sh
-# launch: boot /disk/disk.img, a Linux computer's disk form, under QEMU until it powers off, on a copy-on-write overlay
-# so the disk stays as it is: with KVM when /dev/kvm is here and the disk is this machine's arch, else with TCG, from
-# UEFI firmware. The guest's console is this container's output.
+#!/bin/bash
+# launch: boot a computer's disk form under QEMU until it powers off, on a copy-on-write overlay so the disk stays as it
+# is: with KVM when /dev/kvm is here and the disk is this machine's arch, else with TCG, from UEFI firmware. The guest's
+# console is this process's output. The guest is what the guest file beside the disk names, linux when there's none; a
+# windows guest, which has no virtio drivers, boots from secure-boot UEFI with Microsoft's keys and a fresh TPM 2.0,
+# its disk on AHCI, an SSD to Windows, whose TRIM frees the overlay's clusters, its seed on a removable USB drive, since
+# Windows mounts a FAT filesystem with no partition table on removable media alone, an e1000e NIC, a 1920x1080 display
+# and, under KVM, Hyper-V enlightenments. A linux-desktop guest, a Wayland desktop, on amd64 alone, boots as a linux one
+# does and gets a virtio GPU at the computer's resolution (its AGENTENV_SETTING_RESOLUTION, 1920x1080 when it has none),
+# 4 CPUs and 8192 MiB unless sized, TRIM to its disk, and the systemd credentials VM_CREDENTIALS names over SMBIOS.
+#   VM_DISK        the disk, /disk/disk.img by default, which may be backed by another beside it; one ending .zst is
+#                  expanded onto this machine's disk first
+#   VM_BASE        the base of a thin VM_DISK ending .zst, compressed too, which a provider carries beside it: expanded
+#                  beside the expanded disk, as the base.img it's backed by
 #   VM_ENV_<NAME>  the computer's variable NAME, its value base64'd, for its NoCloud seed (CIDATA; see seed)
-#   VM_PORTS       guest TCP ports, each forwarded from the same port here
+#   VM_PORTS       guest TCP ports, each served on the same port here by socat, whose listen backlog takes a burst of
+#                  connections, in front of QEMU's forward on 127.0.0.1 at the port plus 10000, whose backlog is 1;
+#                  socat retries a connection that forward drops every half second, not on the kernel's SYN backoff
+#   VM_HOST_PORTS  ports of this machine's host the guest reaches, as host.docker.internal, at 10.0.2.2, QEMU's address
+#                  for here: socat serves each on 127.0.0.1 here, through to the host, as a local grant server's
+#   VM_TRUST       a folder of trust files, a local transfer CA's, that go into the seed as its trust/ folder
 #   VM_ARCH        the disk's arch, amd64 or arm64; this machine's by default
-#   VM_CPUS, VM_MEMORY_MB   its size: 2 and 4096 by default
-set -eu
+#   VM_CPUS, VM_MEMORY_MB   its size: 2 and 4096 by default, 4 and 8192 for a linux-desktop guest
+#   VM_REQUIRE_KVM when set, fail rather than emulate where KVM can't run the disk
+#   VM_STATE       where its overlay, its seed and an expanded disk go: /var/lib/agentenv-vm by default
+#   VM_KEEP        a builder's overlay: boot on this file, kept across the guest's restarts and after it powers off,
+#                  rather than a fresh overlay each boot; made backed by the disk, or empty at VM_DISK_GB GiB (64 by
+#                  default) where there's no disk, whose guest file is then beside it
+#   VM_MEDIA       for a windows guest, an installer ISO on a CD-ROM it boots first; Enter is pressed for its first
+#                  minute, past the ISO's "press any key"
+#   VM_FILES       for a windows guest, a folder whose files it finds on a removable FAT drive
+#   VM_CREDENTIALS for a linux-desktop guest, systemd credentials, space-separated NAME=<base64> pairs, as a builder's
+#                  boot passes the key its ssh takes before the disk holds it
+# launch reset: boot the running computer afresh on a new overlay, its environment the VM_ENV_<NAME>=<base64> lines on
+# stdin, returning once its new QEMU has started; its ports stay up throughout.
+# launch forward PORT: serve PORT of this machine's host to the running computer as VM_HOST_PORTS does, for another
+# process's grant server, until stopped.
+set -euo pipefail
+
+# forward PORT: PORT of this machine's host served on 127.0.0.1 here, where the guest reaches it at 10.0.2.2.
+forward() { exec socat "TCP-LISTEN:$1,bind=127.0.0.1,fork,reuseaddr" "TCP:host.docker.internal:$1"; }
+
+if [ "${1:-}" = forward ]; then
+    forward "$2"
+fi
+state=${VM_STATE:-/var/lib/agentenv-vm}
+# A reset and the boot loop meet here: the reset writes next.env, creates reset and stops the QEMU qemu.pid names; the
+# loop, finding reset, takes next.env's environment, removes reset and boots afresh; the reset returns once qemu.pid
+# names the new QEMU.
+control=$state/control
+
+if [ "${1:-}" = reset ]; then
+    [ -s "$control/qemu.pid" ] || { echo "launch reset: no computer is running here" >&2; exit 1; }
+    old=$(cat "$control/qemu.pid")
+    grep -E '^VM_ENV_[A-Za-z_][A-Za-z0-9_]*=[A-Za-z0-9+/=]*$' > "$control/next.env" || true
+    touch "$control/reset"
+    kill "$old"
+    for _ in $(seq 600); do
+        if [ ! -e "$control/reset" ] && [ "$(cat "$control/qemu.pid")" != "$old" ]; then
+            exit 0
+        fi
+        sleep 0.1
+    done
+    echo "launch reset: the computer didn't start again within 60 s" >&2
+    exit 1
+fi
+
 here=$(dpkg --print-architecture)
 arch=${VM_ARCH:-$here}
-work=/run/vm
-rm -rf "$work"
-mkdir -p "$work"
-qemu-img create -q -f qcow2 -b /disk/disk.img -F qcow2 "$work/disk.qcow2"
-seed "$work"
-mkfs.vfat -C -n CIDATA "$work/seed.img" 2048 >/dev/null
-mcopy -i "$work/seed.img" "$work/user-data" "$work/meta-data" ::/
-forwards=""
-for port in ${VM_PORTS:-}; do
-    forwards="$forwards,hostfwd=tcp::$port-:$port"
+disk=${VM_DISK:-/disk/disk.img}
+guest=linux
+for folder in "$(dirname "$disk")" ${VM_KEEP:+"$(dirname "$VM_KEEP")"}; do
+    if [ -s "$folder/guest" ]; then
+        guest=$(cat "$folder/guest")
+        break
+    fi
 done
+if [ "$guest" != windows ] && [ -n "${VM_MEDIA:-}${VM_FILES:-}" ]; then
+    echo "launch: VM_MEDIA and VM_FILES are for a windows guest, not $guest" >&2
+    exit 2
+fi
+if [ "$guest" != linux-desktop ] && [ -n "${VM_CREDENTIALS:-}" ]; then
+    echo "launch: VM_CREDENTIALS are for a linux-desktop guest, not $guest" >&2
+    exit 2
+fi
+# resolution: the display's WIDTHxHEIGHT, the computer's resolution setting's, 1920x1080 when it has none.
+resolution() {
+    local value=1920x1080
+    if [ -n "${VM_ENV_AGENTENV_SETTING_RESOLUTION:-}" ]; then
+        value=$(printf '%s' "$VM_ENV_AGENTENV_SETTING_RESOLUTION" | base64 -d)
+    fi
+    if [[ ! "$value" =~ ^[1-9][0-9]*x[1-9][0-9]*$ ]]; then
+        echo "launch: the computer's resolution, $value, isn't WIDTHxHEIGHT" >&2
+        return 2
+    fi
+    echo "$value"
+}
+
+cpus=${VM_CPUS:-2} memory=${VM_MEMORY_MB:-4096}
+if [ "$guest" = linux-desktop ]; then
+    cpus=${VM_CPUS:-4} memory=${VM_MEMORY_MB:-8192}
+    resolution > /dev/null || exit 2
+fi
+work=$state/boot
+mkdir -p "$control"
+rm -f "$control/qemu.pid" "$control/reset" "$control/next.env"
 accel=tcg cpu=max
 if [ -w /dev/kvm ] && [ "$arch" = "$here" ]; then
     accel=kvm cpu=host
+elif [ -n "${VM_REQUIRE_KVM:-}" ]; then
+    echo "launch: KVM can't run this $arch disk on this $here machine, and VM_REQUIRE_KVM refuses to emulate it" \
+         "($([ -e /dev/kvm ] && echo "/dev/kvm isn't writable" || echo "there's no /dev/kvm"))" >&2
+    exit 3
 fi
-case "$arch" in
-    amd64)
-        cp /usr/share/OVMF/OVMF_VARS_4M.fd "$work/vars.fd"
-        set -- qemu-system-x86_64 -machine "q35,accel=$accel" \
-            -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd ;;
-    arm64)
-        cp /usr/share/AAVMF/AAVMF_CODE.fd "$work/code.fd"
-        truncate -s 64M "$work/code.fd" "$work/vars.fd"
-        set -- qemu-system-aarch64 -machine "virt,accel=$accel" \
-            -drive if=pflash,format=raw,readonly=on,file="$work/code.fd" ;;
+case "$guest/$arch" in
+    linux/* | linux-desktop/amd64) ;;
+    linux-desktop/*)
+        echo "launch: a linux-desktop guest boots on amd64 alone, not $arch" >&2
+        exit 2 ;;
+    windows/amd64) [ "$accel" = kvm ] && cpu=host,hv_relaxed,hv_vapic,hv_spinlocks=0x1fff,hv_time ;;
+    windows/*)
+        echo "launch: a windows guest boots on amd64 alone, not $arch" >&2
+        exit 2 ;;
+    *)
+        echo "launch: no guest $guest" >&2
+        exit 2 ;;
+esac
+case "$guest/$arch" in
+    windows/amd64) machine=(qemu-system-x86_64 -machine "q35,smm=on,accel=$accel"
+                            -global driver=cfi.pflash01,property=secure,value=on
+                            -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.secboot.fd) ;;
+    */amd64) machine=(qemu-system-x86_64 -machine "q35,accel=$accel"
+                      -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd) ;;
+    */arm64) machine=(qemu-system-aarch64 -machine "virt,accel=$accel"
+                      -drive if=pflash,format=raw,readonly=on,file="$work/code.fd") ;;
     *)
         echo "launch: no architecture $arch" >&2
         exit 2 ;;
 esac
-exec "$@" -cpu "$cpu" -smp "${VM_CPUS:-2}" -m "${VM_MEMORY_MB:-4096}" \
-    -drive if=pflash,format=raw,file="$work/vars.fd" \
-    -drive file="$work/disk.qcow2",format=qcow2,if=virtio \
-    -drive file="$work/seed.img",format=raw,if=virtio,readonly=on \
-    -netdev "user,id=net$forwards" -device virtio-net-pci,netdev=net -device virtio-rng-pci \
-    -display none -serial stdio -no-reboot
+forwards="" fronts=() taken=""
+for port in ${VM_PORTS:-}; do
+    behind=$((port + 10000))
+    taken="$taken $port $behind"
+    if [ "$behind" -gt 65535 ] || [[ " $VM_PORTS " == *" $behind "* ]]; then
+        echo "launch: port $port can't be forwarded: QEMU's forward behind its proxy would take port $behind, which" \
+             "is $([ "$behind" -gt 65535 ] && echo "above 65535" || echo "another of VM_PORTS")" >&2
+        exit 2
+    fi
+    forwards="$forwards,hostfwd=tcp:127.0.0.1:$behind-:$port"
+done
+for port in ${VM_HOST_PORTS:-}; do
+    if [[ "$taken " == *" $port "* ]]; then
+        echo "launch: host port $port can't be forwarded: a guest port's proxy or its forward here takes it" >&2
+        exit 2
+    fi
+done
+for port in ${VM_PORTS:-}; do
+    socat "TCP-LISTEN:$port,fork,reuseaddr,backlog=1024" \
+        "TCP:127.0.0.1:$((port + 10000)),connect-timeout=0.5,retry=600,interval=0.05" &
+    fronts+=("$!")
+done
+for port in ${VM_HOST_PORTS:-}; do
+    forward "$port" &
+    fronts+=("$!")
+done
+trap 'kill ${fronts[@]+"${fronts[@]}"} ${presser:-} 2>/dev/null || true' EXIT
+trap 'kill "$(cat "$control/qemu.pid" 2>/dev/null)" 2>/dev/null || true; exit 143' TERM INT
+if [[ "$disk" == *.zst ]]; then
+    zstd -q -d -f "$disk" -o "$state/disk.img"
+    disk=$state/disk.img
+    if [ -n "${VM_BASE:-}" ]; then
+        zstd -q -d -f "$VM_BASE" -o "$state/base.img"
+    fi
+fi
+
+boot() {
+    rm -rf "$work"
+    mkdir -p "$work"
+    local booted=$work/disk.qcow2 restart=(-no-reboot)
+    if [ -n "${VM_KEEP:-}" ]; then
+        booted=$VM_KEEP restart=()
+        if [ -e "$VM_KEEP" ]; then
+            :
+        elif [ -e "$disk" ]; then
+            qemu-img create -q -f qcow2 -b "$disk" -F qcow2 "$VM_KEEP"
+        else
+            qemu-img create -q -f qcow2 "$VM_KEEP" "${VM_DISK_GB:-64}G"
+        fi
+    else
+        qemu-img create -q -f qcow2 -b "$disk" -F qcow2 "$booted"
+    fi
+    seed "$work/seed"
+    [ -z "${VM_TRUST:-}" ] || cp -r "$VM_TRUST" "$work/seed/trust"
+    mkfs.vfat -C -n CIDATA "$work/seed.img" 2048 >/dev/null
+    mcopy -s -i "$work/seed.img" "$work/seed/"* ::/
+    if [ "$guest" = windows ]; then
+        cp /usr/share/OVMF/OVMF_VARS_4M.ms.fd "$work/vars.fd"
+        mkdir "$work/tpm"
+        swtpm socket --tpm2 --tpmstate dir="$work/tpm" --ctrl type=unixio,path="$work/tpm.sock" --daemon --terminate
+        devices=(-chardev socket,id=tpm,path="$work/tpm.sock" -tpmdev emulator,id=tpm,chardev=tpm
+                 -device tpm-tis,tpmdev=tpm
+                 -drive file="$booted",format=qcow2,if=none,id=disk,discard=unmap,detect-zeroes=unmap
+                 -device ide-hd,drive=disk,bus=ide.0,bootindex=1,rotation_rate=1
+                 -device qemu-xhci,id=usb
+                 -drive file="$work/seed.img",format=raw,if=none,id=seed -device usb-storage,bus=usb.0,drive=seed,removable=on
+                 -device e1000e,netdev=net -vga none -device VGA,xres=1920,yres=1080)
+        if [ -n "${VM_MEDIA:-}" ]; then
+            devices+=(-drive file="$VM_MEDIA",format=raw,if=none,id=media,media=cdrom,readonly=on
+                      -device ide-cd,drive=media,bus=ide.2,bootindex=0 -monitor unix:"$work/monitor.sock",server=on,wait=off)
+        fi
+        if [ -n "${VM_FILES:-}" ]; then
+            mkfs.vfat -C -n FILES "$work/files.img" $(( $(du -sk "$VM_FILES" | cut -f1) + 1024 )) >/dev/null
+            mcopy -s -i "$work/files.img" "$VM_FILES"/* ::/
+            devices+=(-drive file="$work/files.img",format=raw,if=none,id=files
+                      -device usb-storage,bus=usb.0,drive=files,removable=on)
+        fi
+    else
+        if [ "$arch" = amd64 ]; then
+            cp /usr/share/OVMF/OVMF_VARS_4M.fd "$work/vars.fd"
+        else
+            cp /usr/share/AAVMF/AAVMF_CODE.fd "$work/code.fd"
+            truncate -s 64M "$work/code.fd" "$work/vars.fd"
+        fi
+        local trim=""
+        [ "$guest" = linux-desktop ] && trim=,discard=unmap,detect-zeroes=unmap
+        devices=(-drive file="$booted",format=qcow2,if=virtio$trim
+                 -drive file="$work/seed.img",format=raw,if=virtio,readonly=on
+                 -device virtio-net-pci,netdev=net -device virtio-rng-pci)
+        if [ "$guest" = linux-desktop ]; then
+            local size
+            size=$(resolution)
+            devices+=(-vga none -device "virtio-vga,xres=${size%x*},yres=${size#*x}")
+            for credential in ${VM_CREDENTIALS:-}; do
+                devices+=(-smbios "type=11,value=io.systemd.credential.binary:$credential")
+            done
+        fi
+    fi
+    "${machine[@]}" -cpu "$cpu" -smp "$cpus" -m "$memory" \
+        -drive if=pflash,format=raw,file="$work/vars.fd" -netdev "user,id=net$forwards" "${devices[@]}" \
+        -display none -serial stdio ${restart[@]+"${restart[@]}"} &
+    echo "$!" > "$control/qemu.pid"
+    if [ -n "${VM_MEDIA:-}" ]; then
+        for _ in $(seq 120); do
+            echo "sendkey ret" | socat - UNIX-CONNECT:"$work/monitor.sock" >/dev/null 2>&1 || true
+            sleep 0.5
+        done &
+        presser=$!
+    fi
+}
+
+while true; do
+    boot
+    qemu=$(cat "$control/qemu.pid")
+    while kill -0 "$qemu" 2>/dev/null; do
+        for front in "${fronts[@]}"; do
+            if ! kill -0 "$front" 2>/dev/null; then
+                status=0
+                wait "$front" || status=$?
+                echo "launch: the proxy in front of a forwarded port exited ($status), so the computer is stopped" >&2
+                kill "$qemu" 2>/dev/null || true
+                exit 1
+            fi
+        done
+        sleep 0.2
+    done
+    status=0
+    wait "$qemu" || status=$?
+    [ -e "$control/reset" ] || exit "$status"
+    for name in $(compgen -e); do
+        case "$name" in VM_ENV_*) unset "$name" ;; esac
+    done
+    while IFS= read -r line; do
+        export "$line"
+    done < "$control/next.env"
+    rm -f "$control/reset"
+done

@@ -38,7 +38,9 @@ from agent_env.store.object_store.local.grant_server import grant_server
 from agent_env.task import EpisodeSpec, Task
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task.teardown import TORN_DOWN_KEY
+from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
 from agent_env.task_step.task_steps.teardown_sandboxes import TeardownSandboxesTaskStep
+from tst.integration.utils.registry import REGISTRY_IMAGE
 from tst.util.a2a_test_agent import put_test_agent
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
@@ -75,7 +77,7 @@ def local_stack(monkeypatch, tmp_path):
         pytest.skip("docker daemon not available")
     reg_port = _free_port()
     reg_name = f"server-e2e-registry-{uuid.uuid4().hex[:8]}"
-    if _docker("run", "-d", "--rm", "--name", reg_name, "-p", f"127.0.0.1:{reg_port}:5000", "registry:2").returncode != 0:
+    if _docker("run", "-d", "--rm", "--name", reg_name, "-p", f"127.0.0.1:{reg_port}:5000", REGISTRY_IMAGE).returncode != 0:
         pytest.skip("could not start registry:2")
     host = f"localhost:{reg_port}"
     if not _wait_ready(f"http://{host}/v2/", (200, 401)):
@@ -124,6 +126,9 @@ async def test_a_server_env_deploys_restores_loads_and_tears_down_on_local_conta
     await restored.load_environment_artifact(_items_artifact(uid))
     base_url = await legacy_protocol.v1_base_url(deployed, None, "items")
     assert (await protocol_v1.get_data(base_url)).model_dump()["parts"][0]["data"] == {"items": ["snap-x", "snap-y"]}
+    await ResetEnvTaskStep(id="reset", version=None, env_id=env.id, fail_task_on_error=True).execute(
+        TaskStepContext(deployed_envs=[deployed]))
+    assert (await protocol_v1.get_data(base_url)).model_dump()["parts"][0]["data"] == {"items": []}  # emptied alone too
 
     step = TeardownSandboxesTaskStep(id="teardown", version=None, env_ids=[env.id])
     context = await step.execute(TaskStepContext(deployed_envs=[deployed]))

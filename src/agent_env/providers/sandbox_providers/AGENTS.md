@@ -54,11 +54,13 @@ with `exposed_ports=[port]` and returns the VM, and the deploy then loads and st
 | `create_sandbox(*, image_name, port, env, cpu, memory, disk_size_gb, timeout, attribution, network_policy) -> Sandbox` | yes (a VM backend wraps `create_vm`) | an agent's sandbox (`provider.create_sandbox`); `create_container` of a container-only backend |
 | `get_sandbox(sandbox_id) -> Sandbox` | yes | every step after the one that created the sandbox, and teardown |
 | `terminate_sandbox(sandbox_id)` | no | teardown. The default calls `get_sandbox` then `terminate()`, and treats `SandboxNotFoundError` as done; override when you can terminate without a live handle |
-| `create_container(...)` | inherited | containers that run an env or agent image. Override only when the platform boots images natively |
-| `reset_container(sandbox, *, image_name, port, env)` | inherited | a computer env's reset, which replaces the container `create_container` ran with a fresh one on the same sandbox and port. The default works on a VM backend; one whose sandbox is the container itself raises `NotImplementedError` |
+| `create_container(...)` | inherited | containers that run an env or agent image. Override only when the platform boots images natively. Its `shm_mb` is the MiB the container's `/dev/shm` holds (`--shm-size` on the default VM path), passed only where `SHARED_MEMORY` is on |
+| `reset_container(sandbox, *, image_name, port, env, shm_mb)` | inherited | a computer env's reset, which replaces the container `create_container` ran with a fresh one on the same sandbox and port, its `/dev/shm` as before. The default works on a VM backend; one whose sandbox is the container itself raises `NotImplementedError` |
 | `native_platforms()` | no | a computer env's deploy and gate 3, which boot a build only on a provider that runs its arch without emulation. The default is `linux/amd64`; local Docker returns this machine's |
-| `disk_image_platforms()` | no | the same for a computer's disk form: the platforms whose disks `create_vm` boots without emulation. The default is none; local Docker returns this machine's where it can pass `/dev/kvm` to a container |
-| `reset_vm(sandbox, *, image, env)` | no | a computer env's reset of a disk `create_vm` booted: boot it afresh on the same sandbox and ports. The default raises `NotImplementedError` |
+| `disk_image_platforms()` | no | the same for a computer's disk form: the platforms whose disks `create_vm` boots without emulation. The default is none; local Docker returns this machine's where it can pass `/dev/kvm` to a container, and `modal_vm` `linux/amd64` and `windows/amd64`, booting the launcher as its sandbox's image under nested virtualization, a Windows disk's base carried beside it |
+| `vm_bundle_platforms()` | no | the same for a computer's vm_bundle form, a whole saved VM (`format = "lume"`): the platforms, as `<os>/<arch>`, whose VM bundles `create_vm` boots. The default is none; `lume` returns `macos/arm64` on an Apple Silicon Mac. A provider that names one implements the VM-bundle methods below too |
+| `reset_vm(sandbox, *, image, env)` | no | a computer env's reset of a disk `create_vm` booted: boot it afresh on the same sandbox and ports. The default raises `NotImplementedError`; local Docker and `modal_vm` run the launcher's `launch reset` in the sandbox hosting it, with `env` on its stdin |
+| `has_vm_bundle(image)`, `delete_vm_bundle(image)`, `open_builder(image, name, build)`, `keep_builder(builder)`, `ssh_password` | when `vm_bundle_platforms()` names a platform | a macOS computer's compose, and a deploy on a Mac that doesn't hold the env's VM bundle: `open_builder` boots a clone of the base `image`, named `name`, with the folder `build` (named `agentenv-build`) shared read-write, and its sandbox's `exec_with_output` runs over ssh as the session user, whose sudo reads `ssh_password` from that folder; `keep_builder` shuts it down from inside and keeps it, returning `local:<name>`; `has_vm_bundle` says whether this machine holds a `local:` VM bundle, and `delete_vm_bundle` deletes one, as a compose does one that failed its probe. Here `create_vm` boots `image`, `local:<name>` or a registry reference pinned by digest, with `env` as the protocol's seed in a folder the VM shares, and `reset_vm` clones it afresh. See `lume/provider.py` |
 | `prepare_image(image, *, attribution)` | no | before a sandbox is asked for an image, outside any creation deadline; build a context-only image here, and pull one with an `image_digest` by it, building it from its context when it can't be pulled |
 | `from_config(**config)` | no | receives `[sandbox.providers.<name>.config]` with `secret:` references resolved. Override to fail early with a `ConfigError` that names the missing key (`boxd` also rejects unknown keys) |
 | `close()` | no | release SDK clients |
@@ -76,7 +78,7 @@ with `exposed_ports=[port]` and returns the VM, and the deploy then loads and st
 ### Declarations
 
 Class variables the rest of agent-env reads instead of asking which provider it has. A provider that declares nothing has its
-sandboxes off this machine, runs containers' images by name, and has no private network.
+sandboxes off this machine, runs containers' images by name, has no private network, and isn't trusted to carry WebSockets.
 
 | Variable | Set it when |
 |---|---|
@@ -84,6 +86,8 @@ sandboxes off this machine, runs containers' images by name, and has no private 
 | `CONTAINER_ACCEPTS` | `create_container` runs images other than by name: `Accepts.LOADABLE` (tar.gz, registry name or build context), `Accepts.NAME_OR_CONTEXT` |
 | `SANDBOX_ACCEPTS` | an agent's sandbox runs different images than the default (a provider that implements `create_vm` defaults to `LOADABLE`) |
 | `PRIVATE_NETWORK` | `create_container(private_network=True)` puts containers on a network they share |
+| `WEBSOCKETS` | its sandboxes' exposed ports carry WebSockets both ways, as `tst/integration/providers/sandbox_providers/websockets_live_test.py` or its tunnel's documentation show; a computer with a website browser among its apps, whose CDP address agents reach by WebSocket, refuses a provider without it at preflight, and a chain skips it at deploy |
+| `SHARED_MEMORY` | the container `create_container` or `reset_container` runs has the `/dev/shm` their `shm_mb` asks for, or more: sized to it, or larger by default, as Modal's host-sized tmpfs is. A deploy passes `shm_mb` to no other provider and logs that the container keeps its default. Derived when undeclared: on for the default VM path, off for a container-only backend and for a class that overrides either method |
 
 ## Sandbox handle contract
 

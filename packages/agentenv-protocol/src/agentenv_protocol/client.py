@@ -7,6 +7,7 @@ import contextlib
 import logging
 from collections.abc import Iterator
 from contextvars import ContextVar
+from dataclasses import dataclass, field
 
 import httpx
 
@@ -79,7 +80,7 @@ def granted_headers(url: str, grants: dict[str | None, dict[str, str]]) -> dict[
 async def _rpc(base_url: str, method: str, params: dict, timeout: int, verify: bool,
                headers: dict[str, str] | None) -> dict:
     request = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
-    url = f"{base_url}{RPC_PATH}"
+    url = f"{base_url.rstrip('/')}{RPC_PATH}"
     async with httpx.AsyncClient(verify=verify) as client:
         response = await client.post(url, json=request, timeout=timeout, headers=request_headers(url, headers))
         response.raise_for_status()
@@ -116,7 +117,7 @@ async def get_data(
 
 async def get_card(base_url: str, timeout: int = 10, verify: bool = True) -> dict:
     async with httpx.AsyncClient(verify=verify) as client:
-        response = await client.get(f"{base_url}{WELL_KNOWN_PATH}", timeout=timeout)
+        response = await client.get(f"{base_url.rstrip('/')}{WELL_KNOWN_PATH}", timeout=timeout)
         response.raise_for_status()
         return response.json()
 
@@ -210,6 +211,93 @@ def find_tool(card: dict, name: str) -> dict | None:
     return None
 
 
+def serves(card: dict, method: str) -> bool | None:
+    """Whether a card serves the data-plane ``method`` (``data/get`` say): True or False by its declared
+    ``capabilities.operations``, or None when it declares none, as an older card doesn't, so the caller decides as it
+    did before cards declared them (a probe, say)."""
+    declared = operations(card)
+    return None if declared is None else method in declared
+
+
+@dataclass(frozen=True)
+class ChildEnv:
+    """One child env a composed card nests under ``children_environments``: its ``name`` and ``url`` as its card gives
+    them, and that ``card``, which says what it offers. A composer roots each child's ``url`` (and its endpoints) at
+    the route it serves the child at, so two children sharing a name have distinct urls; ``url`` is None for a child
+    whose card names none. ``environment_name`` is the name the composer states the child is registered as, None
+    from a composer that states none."""
+
+    name: str | None
+    url: str | None
+    card: dict = field(hash=False, repr=False)
+    environment_name: str | None = None
+
+    @property
+    def known_as(self) -> str | None:
+        """The name a lookup finds the child by: the ``environment_name`` its composer states, else its card's
+        ``name``, which an env built on this SDK serves its environment name as."""
+        return self.environment_name or self.name
+
+    @property
+    def extensions(self) -> list[dict]:
+        """The extensions the child's card advertises (``capabilities.extensions``)."""
+        return list((self.card.get("capabilities") or {}).get("extensions") or [])
+
+    @property
+    def operations(self) -> list[str] | None:
+        """The data-plane methods the child's card declares (``operations``), or None when it declares none."""
+        return operations(self.card)
+
+    def find_extension(self, uri: str) -> dict | None:
+        """The extension the child's card advertises under ``uri``, or None (``find_extension``)."""
+        return find_extension(self.card, uri)
+
+    def serves(self, method: str) -> bool | None:
+        """Whether the child's card serves the data-plane ``method``, None when it declares no operations (``serves``)."""
+        return serves(self.card, method)
+
+    def base_url(self, address: str) -> str:
+        """Where the child's data plane is, its ``url`` without the RPC path, resolved against ``address``, the composed
+        card's: a path joins onto it, a full URL stands alone, and a child naming no url is at ``address`` itself."""
+        url = (self.url or RPC_PATH).removesuffix(RPC_PATH)
+        return url if "://" in url else f"{address.rstrip('/')}{url}"
+
+
+def children(card: dict) -> list[ChildEnv]:
+    """Each child env a composed card nests under ``children_environments``, in its order; none for a leaf card, or
+    one whose ``children_environments`` is missing or null. An entry that isn't an object is skipped."""
+    return [ChildEnv(name=child.get("name"), url=child.get("url"), card=child,
+                     environment_name=child.get("environment_name"))
+            for child in card.get("children_environments") or [] if isinstance(child, dict)]
+
+
+def child_at(card: dict, url: str) -> ChildEnv | None:
+    """The child env of a composed card at ``url``: the one whose ``url`` is ``url``, or whose data plane is there
+    (``url`` without the RPC path, ``/svc/mcp-slack`` for ``/svc/mcp-slack/agentenv`` say), a trailing slash aside;
+    None when no child is. A composer serves each child at its own route, so this is the lookup two children sharing a
+    name can't confuse."""
+    wanted = url.rstrip("/")
+    for child in children(card):
+        if child.url is not None and wanted in (child.url.rstrip("/"), child.url.removesuffix(RPC_PATH).rstrip("/")):
+            return child
+    return None
+
+
+class AmbiguousChildError(LookupError):
+    """More than one child env of a composed card has the name asked for, so the name can't say which is meant."""
+
+
+def child_named(card: dict, name: str) -> ChildEnv | None:
+    """The one child env of a composed card known as ``name`` (``ChildEnv.known_as``), or None when none is; raises
+    ``AmbiguousChildError`` when several are, as a website and an MCP server sharing a name are, which ``child_at``
+    tells apart by their urls."""
+    found = [child for child in children(card) if child.known_as == name]
+    if len(found) > 1:
+        raise AmbiguousChildError(f"{len(found)} child envs are named {name!r} ({', '.join(str(c.url) for c in found)}); "
+                                  "look one up by its url")
+    return found[0] if found else None
+
+
 def find_child(card: dict, name: str) -> dict | None:
     """Return the nested child EnvironmentCard named `name`, or None.
 
@@ -218,9 +306,12 @@ def find_child(card: dict, name: str) -> dict | None:
     rewritten to be reachable from the composed card's base_url. Callers resolve a service by
     name here, then use the child card with `find_extension`/`invoke_extension`. Tolerates a
     missing/null `children_environments` so single/leaf cards return None rather than raising.
+    Two children sharing `name` return the first; `child_named` refuses that, and `child_at`
+    finds a child by its url, which tells them apart. A child is known by the `environment_name`
+    its composer states, else by its card's `name`.
     """
     for child in card.get("children_environments") or []:
-        if child.get("name") == name:
+        if isinstance(child, dict) and (child.get("environment_name") or child.get("name")) == name:
             return child
     return None
 
@@ -261,7 +352,7 @@ async def invoke_extension(base_url: str, card: dict, uri: str, params: dict | N
         raise ValueError(f"extension {uri} does not advertise method {method!r} (advertises: {offered})")
     if not op["endpoint"]:
         raise ValueError(f"extension {uri} has no endpoint in params")
-    url = f"{base_url}{op['endpoint']}"
+    url = f"{base_url.rstrip('/')}{op['endpoint']}"
     sent = request_headers(url, headers)
     async with httpx.AsyncClient(verify=verify) as client:
         if op["method"] == "GET":

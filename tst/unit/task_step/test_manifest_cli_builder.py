@@ -320,6 +320,17 @@ def test_manifest_endpoint_comes_from_the_card(fake_gateway):
     assert asyncio.run(fetch_interface_manifest(fake_gateway, "crm")) == CRM_MANIFEST
 
 
+def test_manifest_endpoint_is_the_mcp_servers_though_a_website_shares_its_name(fake_gateway):
+    _GatewayHandler.manifest_path = "/svc/mcp-elsewhere/agentenv/interface-manifest/cli"
+    site = {"name": "crm", "url": "/svc/crm/agentenv", "capabilities": {"extensions": [
+        {"uri": "urn:agentenv:website/v1", "params": {}},
+        {"uri": GET_INTERFACES_EXTENSION_URI, "params": {"endpoint": "/svc/crm/agentenv/interface-manifest"}}]}}
+    server = {"name": "crm", "url": "/svc/mcp-crm/agentenv", "capabilities": {"extensions": [
+        {"uri": GET_INTERFACES_EXTENSION_URI, "params": {"endpoint": "/svc/mcp-elsewhere/agentenv/interface-manifest"}}]}}
+    _GatewayHandler.card = {**CRM_CARD, "children_environments": [site, server]}
+    assert asyncio.run(fetch_interface_manifest(fake_gateway, "crm")) == CRM_MANIFEST
+
+
 @pytest.mark.parametrize(
     "card",
     [

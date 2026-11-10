@@ -121,7 +121,7 @@ def _patch_clients(provider):
 )
 async def test_container_create_passes_sandbox_tags(attribution, expected):
     provider = _patch_clients(ModalSandboxProvider(app_name="agent-env-test"))
-    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox._experimental_create") as create:
+    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox.create") as create:
         create.aio = AsyncMock(side_effect=_StopAfterCreate())
         with pytest.raises(RuntimeError):
             await provider.create_container(
@@ -146,7 +146,7 @@ async def test_gpu_container_create_passes_sandbox_tags():
 @pytest.mark.asyncio
 async def test_vm_create_passes_sandbox_tags():
     provider = _patch_clients(ModalVmSandboxProvider(app_name="agent-env-test"))
-    with patch("agent_env.providers.sandbox_providers.modal_vm_sandbox.modal.Sandbox._experimental_create") as create:
+    with patch("agent_env.providers.sandbox_providers.modal_vm_sandbox.modal.Sandbox.create") as create:
         create.aio = AsyncMock(side_effect=_StopAfterCreate())
         with pytest.raises(RuntimeError):
             await provider.create_vm(attribution={PIPELINE_STEP_KEY: "t_s"})

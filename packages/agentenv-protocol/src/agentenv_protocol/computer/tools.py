@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Callable, Literal, Optional
 from mcp.types import CallToolResult
 from pydantic import Field
 
-from ..agent_env_environment import tool
+from ..agent_env_environment import _TOOL_ATTR, tool
 from ..tool_context import ToolContext
 from .errors import InvalidArgument, Unsupported
 from .frames import Frame
@@ -21,6 +21,8 @@ from .results import (
     PointerListResult,
     PointerPositionResult,
     ScreenshotResult,
+    TabData,
+    TabsResult,
     WaitResult,
     send,
 )
@@ -87,7 +89,8 @@ class Tools:
             if frame_id is not None:
                 raise InvalidArgument("frame_id names the frame a region crops; give a region too")
             frame = await computer.capture(identity)
-            summary = f"Captured {frame.id}: {frame.width}×{frame.height} of the {_display(frame)} display"
+            summary = (f"Captured {frame.id}: {frame.width}×{frame.height} of the {_display(frame)} display"
+                       f"{frame.note()}")
         else:
             parent = computer.frames.get(frame_id, identity)
             computer.frames.check_current(parent, await computer.display_now())
@@ -198,7 +201,8 @@ class Tools:
             raise InvalidArgument(f"text is at most {self.max_text_length} characters on this computer, got {len(text)}")
         control = sorted({f"U+{ord(c):04X}" for c in text if c not in "\n\t" and unicodedata.category(c) == "Cc"})
         if control:
-            raise InvalidArgument(f"text has control characters {control}; press keys with computer_key")
+            raise InvalidArgument(f"text has control characters {control}; press keys with "
+                                  f"{self._computer_prefix.served('computer_key')}")
         return await computer.act(ctx, "type_text", (text,), frame=computer.frames.latest(self.caller_identity(ctx)),
                                   screenshot=screenshot, summary=f"Typed {len(text)} characters")
 
@@ -236,7 +240,8 @@ class Tools:
         if not screenshot:
             return send(WaitResult(summary=summary, waited_ms=ms))
         frame = await self._computer.capture(self.caller_identity(ctx))
-        return send(WaitResult(summary=f"{summary}, then captured {frame.id}", waited_ms=ms, frame=frame.result()),
+        return send(WaitResult(summary=f"{summary}, then captured {frame.id}{frame.note()}", waited_ms=ms,
+                               frame=frame.result()),
                     frame.encode())
 
     @tool(annotations=_INPUT)
@@ -359,6 +364,90 @@ class Tools:
                                   screenshot=screenshot, summary=f"Released {'+'.join(names)}",
                                   then=lambda: computer.release(identity, names))
 
+    @tool(annotations=_INPUT)
+    async def computer_navigate(
+        self,
+        ctx: ToolContext,
+        url: Annotated[str, Field(description="The URL to open, as you'd type it into the address bar")],
+        screenshot: Screenshot = False,
+    ) -> Annotated[CallToolResult, InputResult]:
+        """Open a URL in the active tab. The screen is the page alone, with no address bar to type it into."""
+        return await _page_action(self, ctx, "navigate", (url,), screenshot, f"Opened {url}")
+
+    @tool(annotations=_INPUT)
+    async def computer_history(
+        self,
+        ctx: ToolContext,
+        direction: Annotated[Literal["back", "forward", "reload"], Field(
+            description="back or forward in the active tab's history, or reload its page")],
+        screenshot: Screenshot = False,
+    ) -> Annotated[CallToolResult, InputResult]:
+        """Go back, go forward or reload in the active tab, as the browser's buttons do."""
+        verb = {"back": "Went back", "forward": "Went forward", "reload": "Reloaded the page"}[direction]
+        return await _page_action(self, ctx, "history", (direction,), screenshot, verb)
+
+    @tool(annotations=_INPUT)
+    async def computer_tabs(
+        self,
+        ctx: ToolContext,
+        action: Annotated[Literal["list", "open", "switch", "close"], Field(
+            description="list the tabs; open one, at url or blank, which becomes active; switch to tab; close tab")],
+        tab: Annotated[Optional[str], Field(description="The tab to switch to or close, by its id from list")] = None,
+        url: Annotated[Optional[str], Field(description="For open: the URL the new tab opens")] = None,
+        screenshot: Screenshot = False,
+    ) -> Annotated[CallToolResult, TabsResult]:
+        """List, open, switch and close the browser's tabs: the screen is the active one."""
+        if (tab is None) == (action in ("switch", "close")):
+            raise InvalidArgument("switch and close take tab, from list; list and open take none")
+        if url is not None and action != "open":
+            raise InvalidArgument("only open takes url")
+        verb = {"list": "Listed the tabs", "open": f"Opened a tab{f' at {url}' if url else ''}",
+                "switch": f"Switched to tab {tab}", "close": f"Closed tab {tab}"}[action]
+
+        def listed(result: InputResult, tabs: Any) -> TabsResult:
+            rows = [TabData(tab=t.id, url=t.url, title=t.title, active=t.active) for t in tabs or []]
+            active = next((row for row in rows if row.active), None)
+            shown = f', the active one "{active.title}" ({active.url})' if active is not None else ""
+            return TabsResult(**{**result.model_dump(), "summary": f"{verb}; {len(rows)} open{shown}"
+                                 if rows else f"{verb}; none open"}, tabs=rows)
+
+        return await _page_action(self, ctx, "tabs", (action, tab, url), screenshot, verb, wrap=listed)
+
+    @tool(annotations=_INPUT)
+    async def computer_dialog(
+        self,
+        ctx: ToolContext,
+        accept: Annotated[bool, Field(description="true for OK, false for Cancel")],
+        text: Annotated[Optional[str], Field(description="For a prompt dialog: the text to answer with")] = None,
+        screenshot: Screenshot = False,
+    ) -> Annotated[CallToolResult, InputResult]:
+        """Answer the JavaScript dialog open on the page, which a screenshot names; nothing else reaches the page
+        until it's answered."""
+        return await _page_action(self, ctx, "dialog", (accept, text), screenshot,
+                                  "Accepted the dialog" if accept else "Dismissed the dialog")
+
+    @tool(annotations=_INPUT)
+    async def computer_upload(
+        self,
+        ctx: ToolContext,
+        paths: Annotated[list[str], Field(description="Files in ~/Uploads, by their paths there")],
+        screenshot: Screenshot = False,
+    ) -> Annotated[CallToolResult, InputResult]:
+        """Choose files in the file chooser the page opened, which a screenshot names, as picking them in its dialog
+        does."""
+        if not paths:
+            raise InvalidArgument("give at least one path")
+        return await _page_action(self, ctx, "upload", (list(paths),), screenshot,
+                                  f"Chose {', '.join(paths)} in the file chooser")
+
+
+async def _page_action(driver: Tools, ctx: ToolContext, op: str, args: tuple, screenshot: bool, summary: str,
+                       wrap: Callable | None = None) -> CallToolResult:
+    computer = driver._computer
+    await computer.ensure_ready()
+    return await computer.act(ctx, op, args, frame=computer.frames.latest(driver.caller_identity(ctx)),
+                              screenshot=screenshot, summary=summary, wrap=wrap)
+
 
 async def _button_action(driver: Tools, ctx: ToolContext, op: str, verb: str, button: str | None, x: float | None,
                          y: float | None, frame_id: str | None, screenshot: bool, space: str | None,
@@ -421,3 +510,7 @@ def _check_range(name: str, value: int, low: int, high: int) -> None:
 def _display(frame: Frame) -> str:
     d = frame.display
     return f"{d.width}×{d.height}" + (f" at scale {d.scale:g}" if d.scale != 1 else "")
+
+
+#: The tools the SDK serves on every computer, by their own names.
+COMPUTER_TOOLS: tuple[str, ...] = tuple(sorted(name for name, member in vars(Tools).items() if hasattr(member, _TOOL_ATTR)))

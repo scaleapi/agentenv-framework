@@ -17,13 +17,15 @@ the journal, and a refused, unpersisted or cancelled rollback leaves a true reco
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+from datetime import datetime, timezone
 
 import pytest
 
 import agent_env.task.task as task_module
 import agent_env.task.store as store_mod
-from agent_env.env.env import DeployedGatewayEnv
+from agent_env.env.env import DeployedGatewayEnv, DeployedSandboxEnv
 from agent_env.store import LocalSqliteDocumentStore
 from agent_env.store.document_store import Filter
 from agent_env.task.step_journal import _SCHEDULER_STEP_ID, _SEED_STEP_ID, commit_ordered, replay_context
@@ -35,7 +37,7 @@ from agent_env.task.store import (
     set_task_instance_store,
 )
 from agent_env.task.task import Task, _rolled_back_sandboxes
-from agent_env.task_step.context import PromptResponse, TaskStepContext
+from agent_env.task_step.context import DeployedAgent, DeployedSandbox, PromptResponse, TaskStepContext
 from agent_env.task_step.context_ops import ContextUpdateOps, build_context_update_ops
 from agent_env.task_step.task_step import RetryConfig
 from agent_env.config import set_document_store
@@ -769,10 +771,30 @@ def test_rolled_back_sandboxes_is_the_difference_between_stored_and_replayed():
         "deployed_agents": [],
         "deployed_sandboxes": [],
     }
-    assert _rolled_back_sandboxes(before, after) == {
+    assert _rolled_back_sandboxes(before, after, {}) == {
         "deployed_envs": [{"sandbox_id": "sb-e", "sandbox_type": "beta", "sandbox_ids": {"vm": "sb-vm"}}],
         "deployed_agents": [{"sandbox_id": "sb-a", "sandbox_type": "local"}],
         "deployed_sandboxes": [{"sandbox_id": "sb-x", "sandbox_type": None}],
+    }
+
+
+def test_rolled_back_sandboxes_matches_live_and_stored_records_by_sandbox_id_however_else_they_differ():
+    env = DeployedSandboxEnv(env_id="e", env_version=1, sandbox_id="sb-env", sandbox_type="fake",
+                             sandbox_ids={"vm": "sb-vm"}, metadata={"at": datetime(2026, 1, 1, tzinfo=timezone.utc)})
+    older_agent = {"agent_name": "a", "api_url": "http://a", "sandbox_id": "sb-env", "sandbox_type": "fake"}
+    box = DeployedSandbox(sandbox_name="s", sandbox_id="sb-box", sandbox_mode="vm", network_policy={1: "a", "x": "b"})
+    live = TaskStepContext(deployed_envs=[env], deployed_agents=[DeployedAgent.from_dict(older_agent)],
+                           deployed_sandboxes=[box, DeployedSandbox(sandbox_name="g", sandbox_id="sb-gone", sandbox_mode="vm")])
+    stored = json.loads(json.dumps(
+        {**TaskStepContext(deployed_envs=[env], deployed_sandboxes=[box]).to_dict(), "deployed_agents": [older_agent]},
+        default=lambda value: value.isoformat(),
+    ))
+    box.expires_at_utc = "later"
+
+    assert _rolled_back_sandboxes(stored, stored, live.to_dict()) == {
+        "deployed_envs": [],
+        "deployed_agents": [],
+        "deployed_sandboxes": [{"sandbox_id": "sb-gone", "sandbox_type": None}],
     }
 
 

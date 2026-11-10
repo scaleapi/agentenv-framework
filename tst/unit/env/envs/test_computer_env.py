@@ -14,6 +14,7 @@ import logging
 import re
 import shutil
 import urllib.parse
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -21,8 +22,12 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from agentenv_protocol import CONTROL_TOKEN_ENV
-from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_RECORDING
-from agentenv_protocol.tool_access import DISABLE_TOOL_EXTENSION_URI
+from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_READY, COMPUTER_RECORDING, TOOL_PREFIX_ENV
+from agentenv_protocol.computer.app import COMPUTER_APP
+from agentenv_protocol.computer.app_runtime import HOLD_BOOT_LAUNCH_ENV
+from agentenv_protocol.computer.conformance import CheckResult, ProbeReport
+from agentenv_protocol.tool_access import DISABLE_TOOL_EXTENSION_URI, ENABLE_TOOL_EXTENSION_URI
+from agentenv_protocol.website_browser import BROWSER
 from click.testing import CliRunner
 
 from agent_env.artifact.artifacts.computer import ComputerArtifact
@@ -36,18 +41,22 @@ from agent_env.cli import cli
 from agent_env.config import get_config
 from agent_env.env import Env
 from agent_env.env import env as env_module
-from agent_env.env.env import DeployedEnv
-from agent_env.env.envs.computer.utils import (boot, builder, composed, composer, gate, inside, packages, probing,
-                                               resolve_in_base)
+from agent_env.env.env import DeployedEnv, EnvCapabilityUnsupported
+from agent_env.env.envs.computer.utils import (boot, builder, composed, composer, gate, inside, packages, params,
+                                               probing, resolve_in_base)
+from agent_env.env.envs.computer.utils import sites as computer_sites
 from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.envs.computer.utils.probing import _probe
-from agent_env.env.envs.computer.env import ComputerEnv
+from agent_env.env.envs.computer.env import COMPUTER_TOOLS, ComputerEnv
 from agent_env.env.envs.computer import app_env
 from agent_env.env.envs.computer.app_env import ComputerAppEnv
 from agent_env.env.envs.computer.utils.install import Install, Service
-from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
+from agent_env.env.envs.computer.driver_env import ComputerDriverEnv, KnownFailure
 from agent_env.plugins._bundles import ALIASES_FILE, InstalledBundle, installed_aliases
+from agent_env import providers
 from agent_env.providers.env_providers import env_computer_provider
+from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
+from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
 from agent_env.providers.env_providers.env_provider import DeployRefused
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
@@ -94,10 +103,10 @@ def test_a_computer_env_is_composed_for_each_arch_and_written_with_the_computer_
     assert arm64["dockerfile"].splitlines() == [
         f"FROM {base.image().image_name}", "USER root", 'ENV AGENTENV_SETTING_THEME="dark"',
         "COPY driver/ /opt/agentenv/drivers/desk/",
-        "COPY packages/wheels/driver/ /tmp/agentenv-packages/wheels/driver/",
-        "RUN --network=none python3 -m venv /opt/agentenv/drivers/desk/venv && /opt/agentenv/drivers/desk/venv/bin/pip "
-        "install --no-index --no-deps /tmp/agentenv-packages/wheels/driver/*.whl && /opt/agentenv/drivers/desk/venv/bin/pip list "
-        "--format=json > /opt/agentenv/drivers/desk/installed.json && rm -rf /tmp/agentenv-packages/wheels/driver",
+        "RUN --network=none --mount=type=bind,source=packages/wheels/driver,target=/tmp/agentenv-packages/wheels/driver "
+        "python3 -m venv /opt/agentenv/drivers/desk/venv && /opt/agentenv/drivers/desk/venv/bin/pip install --no-index "
+        "--no-deps /tmp/agentenv-packages/wheels/driver/*.whl && /opt/agentenv/drivers/desk/venv/bin/pip list "
+        "--format=json > /opt/agentenv/drivers/desk/installed.json",
         "COPY agentenv-driver-desk.conf /etc/supervisor/conf.d/agentenv-driver-desk.conf",
         "RUN test -d /opt/agentenv/drivers/desk && test -f /etc/supervisor/conf.d/agentenv-driver-desk.conf && test -x "
         "/opt/agentenv/drivers/desk/venv/bin/python",
@@ -258,6 +267,58 @@ def test_gate_3_probes_a_build_with_its_apps_defaults_as_a_deploy_with_no_env_pa
                                                                                       "theme": "dark"}}
 
 
+
+@pytest.mark.parametrize("asks", [1024, None])
+def test_the_probe_boots_a_build_with_the_shared_memory_its_apps_ask_for_as_a_deploy_does(base, driver, docker,
+                                                                                         tmp_path, monkeypatch, asks):
+    monkeypatch.setenv("MAIL_TOKEN", "t0ken")
+    install = {"python": "requirements.txt", "services": [{"name": "imap", "command": "venv/bin/python imap.py"}],
+               **({"shm_mb": asks} if asks else {})}
+    env = _put(base, driver, compose=False, apps=[_app(base, driver, tmp_path / "mail", compose=False, install=install,
+                                                       defaults={"token": "env:MAIL_TOKEN"})])
+    booted = []
+
+    async def fake_boot(link, **kwargs):
+        booted.append(kwargs)
+        return boot.Booted(sandbox=None, url="http://computer", card=CARD)
+
+    monkeypatch.setattr(boot, "boot", fake_boot)
+    monkeypatch.setattr(boot, "discard", AsyncMock())
+    monkeypatch.setattr(probing, "run_probe", AsyncMock(return_value="report"))
+
+    asyncio.run(_probe([SimpleNamespace()], env, driver, "img"))
+
+    assert booted[0]["shm_mb"] == asks
+
+
+@pytest.mark.asyncio
+async def test_a_boot_asks_for_shared_memory_only_where_its_provider_gives_it_and_logs_where_it_doesnt(monkeypatch,
+                                                                                                    caplog):
+    created, sandbox = [], SimpleNamespace(tunnel_urls={18765: "http://computer"})
+
+    class Gives(SandboxProvider):
+        SHARED_MEMORY = True
+
+        async def create_container(self, **kwargs):
+            created.append(kwargs)
+            return sandbox
+
+    class OldPlugin(SandboxProvider):
+        async def create_container(self, *, image_name, port, env, network_policy=None, disk_size_gb=10, timeout=7200,
+                                   attribution=None):
+            created.append({"image_name": image_name})
+            return sandbox
+
+    monkeypatch.setattr(boot, "ready", AsyncMock(return_value=CARD))
+    with caplog.at_level(logging.INFO, logger="agent_env.env.envs.computer.utils.boot"):
+        for provider in (Gives(), OldPlugin()):
+            await boot.boot(provider, image="img", port=18765, environment={}, token="t", network_policy=None,
+                            timeout=60, attribution=None, shm_mb=1024)
+
+    assert created[0]["shm_mb"] == 1024 and "shm_mb" not in created[1]
+    assert "OldPlugin can't size /dev/shm: the container keeps its default, not the 1024 MiB asked for" in caplog.text
+    assert "Gives can't size" not in caplog.text
+
 @pytest.mark.parametrize("left", [{"status": "building"}, {"status": "unverified", "image": "built", "key": "k"}],
                          ids=["interrupted", "unprobed"])
 def test_the_pairs_left_to_compose_are_those_failed_interrupted_or_unprobed_on_a_native_arch(base, driver, docker,
@@ -300,6 +361,43 @@ def test_the_probe_boots_a_build_at_the_envs_settings_with_a_token_of_its_own_as
     probed.assert_awaited_once_with("http://computer", "full", token=booted[0]["token"])
 
 
+def test_a_build_the_probe_cant_boot_for_a_setting_that_doesnt_resolve_stays_unverified_until_a_compose_where_it_does(
+        base, driver, docker, tmp_path, monkeypatch):
+    monkeypatch.delenv("MAIL_TOKEN", raising=False)
+    booted = _probing_for_real(monkeypatch)
+    env = _put(base, driver, apps=[_app(base, driver, tmp_path / "mail", compose=False,
+                                        defaults={"token": "env:MAIL_TOKEN"})])
+    unprobed = Env.get(env.id).metadata["composed"]["container"]["arm64"]
+    left = composer.pending(Env.get(env.id))
+    monkeypatch.setenv("MAIL_TOKEN", "t0ken")
+    composer.compose(Env.get(env.id), left)
+    probed = Env.get(env.id).metadata["composed"]["container"]["arm64"]
+
+    assert (unprobed["status"], unprobed["reason"]) == ("unverified", "not probed: a setting it boots with didn't "
+                                                        "resolve here: Unresolved env:MAIL_TOKEN reference (no value "
+                                                        "and no default)")
+    assert left == [("container", "arm64")]
+    assert probed["status"] == "ready" and probed["image"] == unprobed["image"]
+    assert len(booted) == 1 and json.loads(booted[0]["AGENTENV_APP_SETTINGS"])["mail"]["token"] == "t0ken"
+
+
+def _probing_for_real(monkeypatch) -> list[dict]:
+    """Gate 3's own probe, which resolves the settings it boots with, over a boot and a probe that pass: the
+    environment of each boot it makes."""
+    booted = []
+
+    async def fake_boot(link, **kwargs):
+        booted.append(kwargs["environment"])
+        return boot.Booted(sandbox=None, url="http://computer", card=CARD)
+
+    monkeypatch.setattr(probing, "_probe", _probe)
+    monkeypatch.setattr(boot, "boot", fake_boot)
+    monkeypatch.setattr(boot, "discard", AsyncMock())
+    monkeypatch.setattr(probing, "run_probe", AsyncMock(return_value=ProbeReport.of("full", "desk", [CheckResult(
+        check="P0", name="the card", status="passed", extensions=[CARD_EXTENSION])], [CARD_EXTENSION])))
+    return booted
+
+
 def test_a_build_whose_probe_fails_or_that_never_gets_ready_fails_at_the_probe_and_isnt_deployed(base, driver, docker,
                                                                                                 monkeypatch):
     docker.probe_fails["arm64"] = "the click never landed"
@@ -329,6 +427,81 @@ def test_a_build_whose_probe_fails_or_that_never_gets_ready_fails_at_the_probe_a
         "failed", "probe", f"the probe didn't finish within {probing._PROBE_TIMEOUT_S} s")
 
 
+def test_known_failures_for_a_distribution_are_waived_on_it_alone_and_replace_its_os_types_there(
+        base, docker, tmp_path):
+    docker.probe_fails["arm64"] = "the click never landed"
+    clicks = KnownFailure(check="P4", name="clicks show their effect", reason="its clicks lag")
+    elsewhere = _driver(tmp_path / "elsewhere", known_failures={"linux/omarchy": [clicks]})
+    here = _driver(tmp_path / "here", known_failures={
+        "linux": [KnownFailure(check="P0", name="the card", reason="its card was late")], "linux/ubuntu": [clicks]})
+
+    on_elsewhere = Env.get(_put(base, elsewhere, id="@local/~/kit/elsewhere", environment_name="elsewhere").id
+                           ).metadata["composed"]["container"]["arm64"]
+    on_here = Env.get(_put(base, here, id="@local/~/kit/here", environment_name="here").id).metadata[
+        "composed"]["container"]["arm64"]
+    docker.probe_fails.clear()
+
+    assert on_elsewhere["status"] == "failed"
+    assert on_here["status"] == "ready" and on_here["probe"]["known_failures"][0]["reason"] == "its clicks lag"
+    assert "unused_known_failures" not in on_here["probe"]
+
+
+def test_a_check_the_driver_declares_it_fails_is_waived_and_recorded_and_a_declared_one_that_didnt_fail_is_flagged(
+        base, docker, tmp_path, caplog):
+    docker.probe_fails["arm64"] = "the click never landed"
+    elsewhere = _driver(tmp_path / "elsewhere", known_failures={"macos": [KnownFailure(
+        check="P4", name="clicks show their effect", reason="its clicks lag on macOS")]})
+    still_failed = Env.get(_put(base, elsewhere).id).metadata["composed"]["container"]["arm64"]
+    known = _driver(tmp_path / "known", known_failures={"linux": [
+        KnownFailure(check="P4", name="clicks show their effect", reason="its clicks lag"),
+        KnownFailure(check="P4", name="clicks land", reason="a name the probe doesn't have")]})
+
+    ready = Env.get(_put(base, known, id="@local/~/kit/known", environment_name="known").id).metadata[
+        "composed"]["container"]["arm64"]
+
+    assert still_failed["status"] == "failed"
+    assert ready["status"] == "ready" and not ready["probe"]["passed"]
+    assert ready["probe"]["known_failures"] == [{"check": "P4", "name": "clicks show their effect",
+                                                 "detail": "the click never landed", "reason": "its clicks lag"}]
+    assert ready["probe"]["unused_known_failures"] == [{"check": "P4", "name": "clicks land", "status": "absent"}]
+    assert Env.get(known.id, known.version).known_failures["linux"][0].reason == "its clicks lag"
+    docker.probe_fails.clear()
+    fixed = _driver(tmp_path / "fixed", known_failures={"linux": [KnownFailure(
+        check="P0", name="the card", reason="its card was late")]})
+    passed = Env.get(_put(base, fixed, id="@local/~/kit/fixed", environment_name="fixed").id).metadata[
+        "composed"]["container"]["arm64"]
+    assert passed["status"] == "ready" and "known_failures" not in passed["probe"]
+    assert passed["probe"]["unused_known_failures"] == [{"check": "P0", "name": "the card", "status": "passed"}]
+    assert ("declares P0 'the card' a known failure on linux, and its container/arm64 probe found it passed: once what "
+            "it declares is fixed, take it out" in caplog.text)
+
+
+def test_a_probe_ended_by_a_dropped_connection_runs_again_on_a_fresh_boot_and_one_with_a_failed_check_doesnt(
+        base, driver, docker):
+    """The record keeps every attempt; a build whose every probe drops its connection fails at the probe."""
+    docker.probe_drops["arm64"] = 1
+    retried = Env.get(_put(base, driver).id).metadata["composed"]["container"]["arm64"]
+    probes = len(docker.probed)
+    docker.probe_fails["arm64"] = "the click never landed"
+    strict = Env.get(_put(base, driver, id="@local/~/kit/strict", environment_name="strict").id).metadata[
+        "composed"]["container"]["arm64"]
+    strict_probes = len(docker.probed) - probes
+    docker.probe_fails.clear()
+    docker.probe_drops["arm64"] = probing._PROBE_ATTEMPTS
+    dropped = Env.get(_put(base, driver, id="@local/~/kit/dropped", environment_name="dropped").id).metadata[
+        "composed"]["container"]["arm64"]
+
+    assert retried["status"] == "ready" and [a["status"] for a in retried["attempts"]] == ["dropped", "ready"]
+    assert retried["attempts"][0]["reason"] == "RemoteProtocolError: Server disconnected without sending a response."
+    assert retried["attempts"][1]["probe"] == retried["probe"] and probes == 2
+    assert (strict["status"], strict_probes, "attempts" in strict) == ("failed", 1, False)
+    assert (dropped["status"], dropped["stage"]) == ("failed", "probe")
+    assert [a["status"] for a in dropped["attempts"]] == ["dropped"] * probing._PROBE_ATTEMPTS
+    assert dropped["reason"] == (f"each of its {probing._PROBE_ATTEMPTS} probes, each on a fresh boot, ended on a "
+                                 "transport error talking to its driver, the last RemoteProtocolError: Server "
+                                 "disconnected without sending a response.")
+
+
 @pytest.mark.parametrize("result, stored, replaces", [
     ({"status": "unverified"}, {"status": "ready"}, False),
     ({"status": "failed", "stage": "build"}, {"status": "unverified"}, False),
@@ -337,10 +510,29 @@ def test_a_build_whose_probe_fails_or_that_never_gets_ready_fails_at_the_probe_a
     ({"status": "failed", "stage": "probe"}, {"status": "ready"}, False),
     ({"status": "ready"}, {"status": "failed", "stage": "probe"}, True),
     ({"status": "building"}, {"status": "failed", "stage": "build"}, True),
+    ({"status": "building"}, {"status": "ready", "composer": "sha256:another"}, True),
+    ({"status": "failed", "stage": "build"}, {"status": "ready", "composer": None}, True),
 ], ids=["unprobed-over-ready", "build-failure-over-built", "building-over-built", "probe-failure-over-unprobed",
-        "probe-failure-over-ready", "ready-over-probe-failure", "building-over-build-failure"])
+        "probe-failure-over-ready", "ready-over-probe-failure", "building-over-build-failure",
+        "building-over-another-composers-ready", "build-failure-over-a-ready-no-composer-named"])
 def test_a_result_takes_a_pairs_place_only_when_it_got_at_least_as_far(result, stored, replaces):
-    assert (composed._rank(result) >= composed._rank(stored)) is replaces
+    mine = {"composer": composed.composition()}
+    assert (composed._rank({**mine, **result}) >= composed._rank({**mine, **stored})) is replaces
+
+
+def test_the_composers_digest_changes_with_a_files_bytes_and_with_its_executable_bit_alone(tmp_path, monkeypatch):
+    (tmp_path / "prepare.sh").write_text("echo hi\n")
+    (tmp_path / "README.md").write_text("docs")
+    monkeypatch.setattr(composed, "COMPOSING", (tmp_path,))
+    digests = [composed.composition.__wrapped__()]
+    (tmp_path / "prepare.sh").chmod(0o755)
+    digests.append(composed.composition.__wrapped__())
+    (tmp_path / "prepare.sh").write_text("echo bye\n")
+    digests.append(composed.composition.__wrapped__())
+    (tmp_path / "README.md").write_text("other docs")
+    digests.append(composed.composition.__wrapped__())
+
+    assert len(set(digests[:3])) == 3 and digests[3] == digests[2]
 
 
 def test_env_build_builds_what_a_put_left_and_prints_each_pair(base, driver, docker, caplog):
@@ -394,8 +586,9 @@ async def test_a_computer_env_with_no_ready_build_is_refused_at_deploy_naming_it
      "computer_settings.wallpaper: @local/~/kit/ubuntu-24.04 declares no setting 'wallpaper'"),
     ({"computer_settings": {"timezone": 3}}, "computer_settings.timezone must be a str, like its default 'UTC', not 3"),
     ({"computer_settings": ["timezone"]}, "computer_settings must be a table of the computer's setting values"),
+    ({"tools": "all"}, "tools is 'standard', 'driver' or 'both', not 'all'"),
 ], ids=["display-zero", "display-side", "display-and-resolution", "network", "network-key",
-        "settings-name", "settings-type", "settings-table"])
+        "settings-name", "settings-type", "settings-table", "tools"])
 def test_what_the_env_declares_wrong_is_refused_before_anything_is_stored(base, driver, docker, changes, problem):
     with pytest.raises(ValueError, match="computer env '@local/~/kit/desktop'") as refused:
         _put(base, driver, **changes)
@@ -421,6 +614,40 @@ def test_a_driver_that_cant_compose_with_the_base_is_refused(base, docker, tmp_p
         _put(base, make(tmp_path / "driver"))
 
     assert problem in str(refused.value)
+
+
+@pytest.mark.parametrize("names, problem", [
+    ((), "apps: @local/~/kit/desk's screen is a website browser's page, so its computer takes exactly one website "
+         "browser; it has 0"),
+    (("first", "second"), "it has 2: @local/~/kit/first, @local/~/kit/second"),
+])
+def test_a_driver_whose_screen_is_a_page_takes_exactly_one_website_browser_and_any_other_apps(base, docker, tmp_path,
+                                                                                               names, problem):
+    page = _driver(tmp_path / "driver", features={"screen": "page"})
+    mail = _app(None, None, tmp_path / "mail", compose=False)
+    browsers = [_app(None, None, tmp_path / name, compose=False, name=name, browser=True) for name in names]
+
+    with pytest.raises(ValueError) as refused:
+        _put(base, page, compose=False, apps=[*browsers, mail])
+    alone = _put(base, page, compose=False, apps=[_app(None, None, tmp_path / "one", compose=False, name="one",
+                                                       browser=True), mail])
+    desktop = _put(base, _driver(tmp_path / "desktop-driver"), compose=False, id="@local/~/kit/two",
+                   apps=[_app(None, None, tmp_path / "a", compose=False, name="a", browser=True),
+                         _app(None, None, tmp_path / "b", compose=False, name="b", browser=True)])
+
+    assert problem in str(refused.value)
+    assert [app.environment_name for app in alone.apps] == ["one", "mail"] and len(desktop.apps) == 2
+
+
+def test_an_app_deployed_alone_on_a_driver_whose_screen_is_a_page_is_one_website_browser(base, docker, tmp_path):
+    page = _driver(tmp_path / "driver", features={"screen": "page"})
+
+    with pytest.raises(ValueError, match="app: @local/~/kit/desk's screen is a website browser's page, so its "
+                                         "computer takes exactly one website browser; it has 0"):
+        _app(base, page, tmp_path / "mail", compose=False)
+    browser = _app(base, page, tmp_path / "browser", compose=False, name="browser", browser=True)
+
+    assert browser.declaration.browser is True
 
 
 def test_a_base_and_driver_with_no_arch_in_common_and_an_image_that_cant_be_got_are_refused(docker, tmp_path):
@@ -515,7 +742,7 @@ def test_builds_of_one_env_at_once_keep_each_others_pairs_and_a_failure_doesnt_r
 
     composer.compose(first, [("container", "amd64")])
     composer.compose(second, [("container", "arm64")])
-    monkeypatch.setattr(composer, "_served", lambda ref, store: None)
+    monkeypatch.setattr(composer, "pin_if_served", lambda ref, auth: None)
     docker.fail["linux/arm64"] = "boom"
     composer.compose(third, [("container", "arm64")])
 
@@ -528,6 +755,7 @@ def test_builds_of_one_env_at_once_keep_each_others_pairs_and_a_failure_doesnt_r
 DRIVER_CARD = {"name": "desktop", "capabilities": {"extensions": [
     {"uri": COMPUTER_DISPLAY, "params": {"endpoint": "/computer/display", "methods": {"get": {"method": "GET"}}}},
     {"uri": DISABLE_TOOL_EXTENSION_URI, "params": {"endpoint": "/tools/disable", "methods": {"disable": {}}}},
+    {"uri": ENABLE_TOOL_EXTENSION_URI, "params": {"endpoint": "/tools/enable", "methods": {"enable": {}}}},
     {"uri": COMPUTER_RECORDING, "params": {"endpoint": "/computer/recording", "methods": {"end_all": {}}}}]}}
 
 
@@ -594,6 +822,84 @@ async def test_a_computer_env_deploys_its_first_native_ready_build_with_its_sett
 
 
 @pytest.mark.asyncio
+async def test_a_deploy_composes_again_what_an_agent_env_that_composes_differently_built_and_boots_that(
+        base, driver, docker, boots, monkeypatch):
+    env = _put(base, driver, display={"width": 1600, "height": 900})
+    monkeypatch.setattr(composed, "composition", lambda: "sha256:a-later-agent-env")
+
+    stale = Env.get(env.id)
+    statuses, deployable = stale.build_statuses(), stale.deployable_builds()
+    await stale.deploy()
+
+    (booted,) = boots.boots
+    record = Env.get(env.id).metadata["composed"]["container"]
+    assert statuses == {"container/amd64": "unverified, by another composer",
+                        "container/arm64": "ready, by another composer"} and deployable == []
+    assert {arch: (r["status"], r["composer"]) for arch, r in record.items()} == {
+        "amd64": ("unverified", "sha256:a-later-agent-env"), "arm64": ("ready", "sha256:a-later-agent-env")}
+    assert booted["image"] == record["arm64"]["image"]
+
+
+@pytest.mark.asyncio
+async def test_a_deploy_probes_a_container_left_unprobed_once_its_setting_resolves_and_boots_it_only_once_ready(
+        base, driver, docker, boots, tmp_path, monkeypatch):
+    monkeypatch.delenv("MAIL_TOKEN", raising=False)
+    probed = _probing_for_real(monkeypatch)
+    env = _put(base, driver, display={"width": 1600, "height": 900}, apps=[_app(
+        base, driver, tmp_path / "mail", compose=False, defaults={"token": "env:MAIL_TOKEN"})])
+    unprobed = Env.get(env.id).metadata["composed"]["container"]["arm64"]
+    monkeypatch.setenv("MAIL_TOKEN", "t0ken")
+
+    deployed = await Env.get(env.id).deploy()
+
+    build = Env.get(env.id).metadata["composed"]["container"]["arm64"]
+    (booted,) = boots.boots
+    assert unprobed["status"] == "unverified" and build["status"] == "ready"
+    assert build["image"] == unprobed["image"] == booted["image"] == deployed.metadata["computer"]["image"]
+    assert len(probed) == 1 and json.loads(probed[0]["AGENTENV_APP_SETTINGS"])["mail"]["token"] == "t0ken"
+
+
+@pytest.mark.asyncio
+async def test_a_deploy_refuses_a_container_still_unprobed_for_a_setting_that_doesnt_resolve_saying_why(
+        base, driver, docker, boots, tmp_path, monkeypatch):
+    monkeypatch.delenv("MAIL_TOKEN", raising=False)
+    probed = _probing_for_real(monkeypatch)
+    env = _put(base, driver, apps=[_app(base, driver, tmp_path / "mail", compose=False,
+                                        defaults={"token": "env:MAIL_TOKEN"})])
+
+    with pytest.raises(DeployRefused) as refused:
+        await Env.get(env.id).deploy()
+
+    assert str(refused.value) == (
+        f"{env.id} has no ready build to deploy; its builds are {{'container/amd64': 'unverified', 'container/arm64': "
+        "'unverified'}; container/arm64: not probed: a setting it boots with didn't resolve here: Unresolved "
+        f"env:MAIL_TOKEN reference (no value and no default); compose it with: agent-env env build --id {env.id}")
+    assert probed == [] and boots.boots == []
+
+
+@pytest.mark.asyncio
+async def test_a_deploy_says_why_its_native_container_is_unprobed_though_another_arch_it_cant_run_is_ready(
+        base, driver, docker, boots, tmp_path, monkeypatch):
+    monkeypatch.delenv("MAIL_TOKEN", raising=False)
+    probed = _probing_for_real(monkeypatch)
+    env = _put(base, driver, apps=[_app(base, driver, tmp_path / "mail", compose=False,
+                                        defaults={"token": "env:MAIL_TOKEN"})])
+    stored = Env.get(env.id)
+    composed = stored.metadata["composed"]
+    composed["container"]["amd64"] = {**composed["container"]["amd64"], "status": "ready"}
+    stored.update_metadata({**stored.metadata, "composed": composed})
+
+    with pytest.raises(DeployRefused) as refused:
+        await Env.get(env.id).deploy()
+
+    assert str(refused.value) == (
+        f"{env.id} has no ready build to deploy; its builds are {{'container/amd64': 'ready', 'container/arm64': "
+        "'unverified'}; container/arm64: not probed: a setting it boots with didn't resolve here: Unresolved "
+        f"env:MAIL_TOKEN reference (no value and no default); compose it with: agent-env env build --id {env.id}")
+    assert probed == [] and boots.boots == []
+
+
+@pytest.mark.asyncio
 async def test_a_reset_ends_the_envs_recordings_then_boots_a_fresh_container_where_the_last_one_ran(
         base, driver, docker, boots, monkeypatch):
     env = _put(base, driver, display={"width": 1600, "height": 900})
@@ -619,8 +925,143 @@ async def test_a_reset_ends_the_envs_recordings_then_boots_a_fresh_container_whe
     assert (kwargs["env"]["AGENTENV_SETTING_TIMEZONE"], kwargs["env"]["ENVIRONMENT_NAME"]) == ("Asia/Tokyo", "desktop")
     assert kwargs["env"][CONTROL_TOKEN_ENV] == deployed.control_token
     env_computer_provider.ready.assert_awaited_once_with(deployed.environment_url, boot.READY_TIMEOUT_S,
-                                                         deployed.control_token)
+                                                         deployed.control_token, answering=False)
     assert boots.calls == [(COMPUTER_RECORDING, "end_all", {"reason": "reset"}), "reset_container", (COMPUTER_DISPLAY, "get", None)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asks", [1024, None])
+async def test_a_computer_boots_with_the_shared_memory_its_apps_ask_for_records_it_and_a_reset_keeps_it(
+        base, driver, docker, boots, monkeypatch, tmp_path, asks):
+    monkeypatch.setenv("MAIL_TOKEN", "t0ken")
+    boots.display = (1280, 800)
+    install = {"python": "requirements.txt", "services": [{"name": "imap", "command": "venv/bin/python imap.py"}],
+               **({"shm_mb": asks} if asks else {})}
+    env = _put(base, driver, apps=[_app(base, driver, tmp_path / "mail", compose=False, install=install,
+                                        defaults={"token": "env:MAIL_TOKEN"})])
+    deployed = await Env.get(env.id).deploy()
+    (sandbox,) = boots.sandboxes
+    resets = []
+
+    async def reset_container(self, sandbox, **kwargs):
+        resets.append(kwargs)
+
+    monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "get_sandbox", AsyncMock(return_value=sandbox))
+    monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "reset_container", reset_container)
+    monkeypatch.setattr(env_computer_provider, "ready", AsyncMock(return_value=DRIVER_CARD))
+
+    await ResetEnvTaskStep(id="reset", version=None, env_id=env.id, fail_task_on_error=True).execute(
+        TaskStepContext(deployed_envs=[deployed]))
+
+    ((booted,), (reset,)) = boots.boots, resets
+    assert booted["shm_mb"] == asks and deployed.metadata["computer"].get("shm_mb") == asks
+    assert reset.get("shm_mb") == asks
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tools, changes", [
+    ("standard", [(DISABLE_TOOL_EXTENSION_URI, "disable", {"role": "default", "tools": ["*"]}),
+                  (ENABLE_TOOL_EXTENSION_URI, "enable", {"role": "default", "tools": list(COMPUTER_TOOLS)})]),
+    ("driver", [(DISABLE_TOOL_EXTENSION_URI, "disable", {"role": "default", "tools": list(COMPUTER_TOOLS)})]),
+    ("both", []),
+])
+async def test_a_computer_envs_tools_are_given_its_agents_at_deploy_and_again_after_a_reset(
+        base, driver, docker, boots, monkeypatch, tools, changes):
+    env = _put(base, driver, display={"width": 1600, "height": 900}, tools=tools)
+    deployed = await Env.get(env.id).deploy()
+    (sandbox,) = boots.sandboxes
+    given = [call for call in boots.calls if call[0] in (DISABLE_TOOL_EXTENSION_URI, ENABLE_TOOL_EXTENSION_URI)]
+    monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "get_sandbox", AsyncMock(return_value=sandbox))
+    monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "reset_container", AsyncMock())
+    monkeypatch.setattr(env_computer_provider, "ready", AsyncMock(return_value=DRIVER_CARD))
+    boots.calls.clear()
+
+    await ResetEnvTaskStep(id="reset", version=None, env_id=env.id, fail_task_on_error=True).execute(
+        TaskStepContext(deployed_envs=[deployed]))
+
+    assert Env.get(env.id).tools == tools and given == changes
+    assert [call for call in boots.calls if call[0] in (DISABLE_TOOL_EXTENSION_URI, ENABLE_TOOL_EXTENSION_URI)] == changes
+
+
+@pytest.mark.asyncio
+async def test_a_deploy_with_a_tool_prefix_has_its_driver_serve_its_tools_under_it_and_gives_them_by_those_names(
+        base, driver, docker, boots, monkeypatch):
+    env = _put(base, driver, display={"width": 1600, "height": 900}, tools="standard")
+    deployed = await Env.get(env.id).deploy(tool_prefix="desktop_")
+    (booted,), (sandbox,) = boots.boots, boots.sandboxes
+    given = [call for call in boots.calls if call[0] in (DISABLE_TOOL_EXTENSION_URI, ENABLE_TOOL_EXTENSION_URI)]
+    reset = AsyncMock()
+    monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "get_sandbox", AsyncMock(return_value=sandbox))
+    monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "reset_container", reset)
+    monkeypatch.setattr(env_computer_provider, "ready", AsyncMock(return_value=DRIVER_CARD))
+    boots.calls.clear()
+
+    await ResetEnvTaskStep(id="reset", version=None, env_id=env.id, fail_task_on_error=True).execute(
+        TaskStepContext(deployed_envs=[deployed]))
+
+    changes = [(DISABLE_TOOL_EXTENSION_URI, "disable", {"role": "default", "tools": ["*"]}),
+               (ENABLE_TOOL_EXTENSION_URI, "enable", {"role": "default",
+                                                      "tools": [f"desktop_{tool}" for tool in COMPUTER_TOOLS]})]
+    assert booted["environment"][TOOL_PREFIX_ENV] == "desktop_" == deployed.metadata["computer"]["tool_prefix"]
+    assert reset.call_args.kwargs["env"][TOOL_PREFIX_ENV] == "desktop_"
+    assert given == changes
+    assert [call for call in boots.calls if call[0] in (DISABLE_TOOL_EXTENSION_URI, ENABLE_TOOL_EXTENSION_URI)] == changes
+
+
+@pytest.mark.asyncio
+async def test_a_deploy_without_a_tool_prefix_gives_its_driver_none(base, driver, docker, boots):
+    deployed = await Env.get(_put(base, driver, display={"width": 1600, "height": 900}).id).deploy()
+    assert TOOL_PREFIX_ENV not in boots.boots[0]["environment"] and "tool_prefix" not in deployed.metadata["computer"]
+
+
+@pytest.mark.asyncio
+async def test_a_tool_prefix_a_tool_name_cant_hold_is_refused_before_anything_boots(base, driver, docker, boots):
+    with pytest.raises(Exception, match="tool prefix 'desk top_' holds characters a tool's name can't"):
+        await Env.get(_put(base, driver, display={"width": 1600, "height": 900}).id).deploy(tool_prefix="desk top_")
+    assert boots.boots == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("allow, reach, allowed", [
+    (["pypi.org"], "https://gw.example/mcp", ("pypi.org", "gw.example")),
+    (["pypi.org"], "http://localhost:18765", ("pypi.org", "host.docker.internal")),
+    (["gw.example"], "https://gw.example", ("gw.example",)),
+    (["pypi.org"], "", ("pypi.org",)),
+], ids=["added", "as-its-sandbox-reaches-it", "already-allowed", "nothing-to-reach"])
+async def test_a_deploy_given_a_url_to_reach_allows_its_host_on_a_network_that_lists_the_hosts_allowed(
+        base, driver, docker, boots, monkeypatch, allow, reach, allowed):
+    class Enforces(local_sandbox.LocalSandboxProvider):
+        @classmethod
+        def supports_network_policy(cls, policy):
+            return True
+
+    monkeypatch.setattr(providers, "build_sandbox_provider", lambda spec: Enforces())
+    env = _put(base, driver, display={"width": 1600, "height": 900}, network={"mode": "allowlist", "allow_hosts": allow})
+
+    await Env.get(env.id).deploy(sandbox_type="enforcing", reach=reach)
+
+    assert boots.boots[0]["network_policy"].allow_hosts == allowed
+
+
+@pytest.mark.asyncio
+async def test_a_deploy_given_a_url_to_reach_leaves_a_network_it_doesnt_restrict_as_it_is(base, driver, docker, boots):
+    await Env.get(_put(base, driver, display={"width": 1600, "height": 900}).id).deploy(reach="https://gw.example")
+    assert boots.boots[0]["network_policy"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_deploy_whose_tools_the_driver_cant_take_fails_and_tears_down_its_computer_alone(
+        base, driver, docker, boots, monkeypatch):
+    live = Env.get(_put(base, driver, display={"width": 1600, "height": 900}, tools="standard").id)
+    first = await live.deploy()
+    monkeypatch.setitem(DRIVER_CARD["capabilities"], "extensions", [
+        extension for extension in DRIVER_CARD["capabilities"]["extensions"] if extension["uri"] != ENABLE_TOOL_EXTENSION_URI])
+
+    with pytest.raises(EnvCapabilityUnsupported):
+        await live.deploy()
+
+    kept, failed = boots.sandboxes
+    assert failed.terminated and not kept.terminated and live._deployed is first
 
 
 @pytest.mark.asyncio
@@ -635,6 +1076,402 @@ async def test_a_reset_a_provider_cant_carry_out_fails_the_step_rather_than_skip
     with pytest.raises(RuntimeError, match="can't be reset on LocalSandboxProvider: its sandbox is the container"):
         await ResetEnvTaskStep(id="reset", version=None, env_id=env.id, fail_task_on_error=True).execute(
             TaskStepContext(deployed_envs=[deployed]))
+
+
+NOTES_CARD = {"name": "notes", "capabilities": {"extensions": [
+    {"uri": "urn:agentenv:website/v1", "params": {"domains": ["notes.test"]}}]}}
+
+
+def _sites_gateway():
+    from agent_env.env.env import DeployedGatewayEnv
+
+    return DeployedGatewayEnv(env_id="@local/~/kit/sites", env_version=1, sandbox_id="gw", sandbox_type="local",
+                              gateway_url="http://localhost:8080",
+                              website_frontend_urls={"notes": "http://localhost:8080/website/notes/"})
+
+
+@pytest.fixture
+def routes(monkeypatch):
+    """Each site routing a deploy asks for, as (sandbox, sites, options), answering what the proxy's install would; the
+    gateway serving the notes site's card, its websites ready."""
+    from agentenv_protocol import client as protocol_v1
+
+    made = []
+
+    async def route(sandbox, sites, **options):
+        made.append((sandbox, sites, options))
+        return {"names": {"routes": {site.name: site.domains for site in sites}}, "ca": "CA PEM"}
+
+    async def get_card(url, timeout=10, verify=True):
+        assert url == "http://localhost:8080/svc/notes"
+        return NOTES_CARD
+
+    monkeypatch.setattr(env_computer_provider.sites, "route", route)
+    monkeypatch.setattr(env_computer_provider.sites, "require_ready", AsyncMock())
+    monkeypatch.setattr(protocol_v1, "get_card", get_card)
+    monkeypatch.setattr(env_computer_provider, "ready", AsyncMock(return_value=DRIVER_CARD))
+    return made
+
+
+@pytest.mark.asyncio
+async def test_a_computer_with_site_routing_reaches_the_websites_the_run_deployed_before_it_by_their_names(
+        base, driver, docker, boots, routes):
+    env = _put(base, driver, display={"width": 1600, "height": 900})
+    context = TaskStepContext(deployed_envs=[_sites_gateway()])
+
+    step = DeployEnvTaskStep(id="d", version=None, env_id=env.id, ttl_seconds=3600, env_params={"site_routing": True})
+
+    assert step.preflight() == []
+    await step.execute(context)
+
+    ((sandbox, sites, options),) = routes
+    assert sandbox is boots.sandboxes[0]
+    assert [site.model_dump() for site in sites] == [{"name": "notes", "url": "http://localhost:8080/website/notes/",
+                                                      "domains": ["notes.test"]}]
+    assert options == {"user": "user", "network": None, "valid_for": timedelta(seconds=3600), "label": "desktop",
+                       "os_type": "linux", "display": "x11", "live_hosts": ()}
+    assert boots.boots[0]["environment"][HOLD_BOOT_LAUNCH_ENV] == "1"
+    record = context.deployed_envs[-1].metadata["computer"]
+    assert record["sites"] == {"names": {"routes": {"notes": ["notes.test"]}}, "ca": "CA PEM", "valid_for_s": 3600}
+    assert record["env_params"]["site_routing"] is True and record["env_params"]["sites"][0]["name"] == "notes"
+
+
+@pytest.mark.asyncio
+async def test_a_computer_deployed_to_route_its_sites_later_boots_held_and_routes_them_when_given_as_a_multi_env_does(
+        base, driver, docker, boots, routes):
+    env = Env.get(_put(base, driver, display={"width": 1600, "height": 900}).id)
+
+    deployed = await env.deploy(ttl_seconds=3600, env_params={"site_routing": True}, sites_later=True)
+    held, routed_before = boots.boots[0]["environment"][HOLD_BOOT_LAUNCH_ENV], list(routes)
+    await env.route_sites([{"name": "notes", "url": "http://localhost:8080/website/notes/", "domains": ["notes.test"]}])
+
+    assert held == "1" and routed_before == []
+    # The trust its held apps launch with, which a boot knowing its sites would give it, before they're known.
+    assert boots.boots[0]["environment"].items() >= computer_sites.TRUST_ENVIRONMENTS["linux"].items()
+    ((sandbox, sites, options),) = routes
+    assert sandbox is boots.sandboxes[0] and [site.name for site in sites] == ["notes"]
+    assert options["valid_for"] == timedelta(seconds=3600)
+    record = deployed.metadata["computer"]
+    assert record["env_params"]["sites"][0]["name"] == "notes" and record["sites"]["valid_for_s"] == 3600
+
+
+@pytest.mark.asyncio
+async def test_a_computer_given_its_sites_later_still_refuses_sites_its_params_cant_hold(base, driver, docker, boots, routes):
+    env = Env.get(_put(base, driver, display={"width": 1600, "height": 900}).id)
+    await env.deploy(env_params={"site_routing": True}, sites_later=True)
+
+    with pytest.raises(ValueError, match="sites"):
+        await env.route_sites([{"name": "notes"}])
+    assert routes == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("routing", ["web-env", 1, ["web-env", 2], {"web-env": True}])
+async def test_a_site_routing_that_is_neither_true_nor_a_list_of_env_ids_is_refused_before_it_is_read(
+        base, driver, routing):
+    env = _put(base, driver, display={"width": 1600, "height": 900})
+    with pytest.raises(ValueError, match="site_routing is true or a list of env ids"):
+        await env.run_env_params({"site_routing": routing}, [_sites_gateway()])
+
+
+@pytest.mark.asyncio
+async def test_a_computer_without_site_routing_routes_nothing_whatever_websites_the_run_deployed(
+        base, driver, docker, boots, routes):
+    env = _put(base, driver, display={"width": 1600, "height": 900})
+    context = TaskStepContext(deployed_envs=[_sites_gateway()])
+
+    await DeployEnvTaskStep(id="d", version=None, env_id=env.id).execute(context)
+
+    assert routes == [] and "sites" not in context.deployed_envs[-1].metadata["computer"]
+    assert HOLD_BOOT_LAUNCH_ENV not in boots.boots[0]["environment"] and boots.boots[0]["held"] is False
+    assert not set(env_computer_provider.sites.TRUST_ENVIRONMENTS["linux"]) & set(boots.boots[0]["environment"])
+
+
+@pytest.mark.asyncio
+async def test_a_computer_routing_sites_boots_with_its_trust_until_its_driver_answers_and_checks_its_display(
+        base, driver, docker, boots, routes, monkeypatch):
+    """A page driver's screen is its browser's page, whose launch a deploy routing sites holds: the boot waits only for
+    the driver to answer, and the display is checked once the sites are routed and the computer is ready."""
+    env = _put(base, driver, display={"width": 1600, "height": 900})
+    order = []
+    routed = env_computer_provider.sites.route
+
+    async def route(sandbox, sites, **options):
+        order.append("route")
+        return await routed(sandbox, sites, **options)
+
+    async def ready(url, timeout, token, **kwargs):
+        order.append(("ready", kwargs))
+        return DRIVER_CARD
+
+    async def require_display(record, resolution):
+        order.append("display")
+
+    monkeypatch.setattr(env_computer_provider.sites, "route", route)
+    monkeypatch.setattr(env_computer_provider, "ready", ready)
+    monkeypatch.setattr(env_computer_provider, "_require_display", require_display)
+    await DeployEnvTaskStep(id="d", version=None, env_id=env.id, ttl_seconds=3600,
+                            env_params={"site_routing": True}).execute(TaskStepContext(deployed_envs=[_sites_gateway()]))
+
+    assert boots.boots[0]["held"] is True and order == ["route", ("ready", {}), "display"]
+    assert env_computer_provider.sites.TRUST_ENVIRONMENTS["linux"].items() <= boots.boots[0]["environment"].items()
+    assert "AGENTENV_SITE_PROXY" not in boots.boots[0]["environment"]
+
+
+@pytest.mark.asyncio
+async def test_a_held_boot_waits_for_the_driver_to_answer_and_still_fails_as_soon_as_it_says_it_failed(monkeypatch):
+    statuses = []
+
+    async def get_card(url, timeout=5):
+        return DRIVER_CARD
+
+    async def invoke(url, card, uri, params, timeout, *, method=None, headers=None):
+        return statuses[0]
+
+    monkeypatch.setattr(boot.protocol_v1, "get_card", get_card)
+    monkeypatch.setattr(boot.protocol_v1, "invoke_extension", invoke)
+    monkeypatch.setattr(boot, "_POLL_S", 0.01)
+    statuses[:] = [{"ready": False, "checks": [{"name": "browser", "ok": False, "detail": "no page yet"}]}]
+
+    assert await boot.ready("http://computer", 5, "t0ken", answering=True) == DRIVER_CARD
+    with pytest.raises(TimeoutError, match="browser: no page yet"):
+        await boot.ready("http://computer", 0.2, "t0ken")
+    statuses[:] = [{"ready": False, "failed": "its driver exited"}]
+    with pytest.raises(boot.ComputerFailed, match="its driver exited"):
+        await boot.ready("http://computer", 5, "t0ken", answering=True)
+
+
+@pytest.mark.asyncio
+async def test_a_computer_routing_sites_launches_its_held_boot_apps_once_listed_then_keeps_its_ready_card(monkeypatch):
+    order = []
+    apps = [SimpleNamespace(environment_name=name, launch=lambda os_type, at=at: SimpleNamespace(at=at))
+            for name, at in [("mail", "boot"), ("music", "demand"), ("notes", "boot")]]
+    env = SimpleNamespace(computer=SimpleNamespace(os=SimpleNamespace(type="linux")), composed_apps=lambda: apps)
+
+    def app_card(name):
+        return {"name": name, "url": f"/svc/{name}/agentenv", "capabilities": {"extensions": [
+            {"uri": COMPUTER_APP, "params": {"endpoint": f"/svc/{name}/agentenv/ext/app", "methods": {"launch": {}}}}]}}
+
+    listed_card = {"name": "mail", "capabilities": {"extensions": [{"uri": COMPUTER_READY, "params": {}}]},
+                   "children_environments": [app_card("mail"), app_card("music"), app_card("notes")]}
+
+    async def invoke(uri, method, params=None, *, environment_name=None, child=None):
+        order.append((uri, method, child.name, child.card == app_card(child.name), record.environment_card["name"]))
+
+    async def listed(url, names, timeout):
+        order.append(("listed", url, names))
+        return listed_card
+
+    async def ready(url, timeout, token):
+        order.append(("ready", url, token))
+        return {"name": "ready"}
+
+    monkeypatch.setattr(env_computer_provider, "listed", listed)
+    monkeypatch.setattr(env_computer_provider, "ready", ready)
+    monkeypatch.setattr(env_computer_provider, "ready_timeout", lambda apps, os_type: 30.0)
+    record = SimpleNamespace(invoke=invoke, control_token="t0ken", environment_card={"name": "booted"})
+    await env_computer_provider._launch_held_apps(env, record, "http://computer", [])
+
+    assert order == [("listed", "http://computer", ["mail", "notes"]), (COMPUTER_APP, "launch", "mail", True, "mail"),
+                     (COMPUTER_APP, "launch", "notes", True, "mail"), ("ready", "http://computer", "t0ken")]
+    assert record.environment_card == {"name": "ready"} and record.environment_card_read_at_utc
+    order.clear()
+    apps[:] = [apps[1]]
+    await env_computer_provider._launch_held_apps(env, record, "http://computer", [])
+    assert order == [("ready", "http://computer", "t0ken")]
+
+
+def _app_card(name, browser_methods=None):
+    """A held app's card, launched through computer-app/v1, a website browser when it serves ``browser_methods``."""
+    extensions = [{"uri": COMPUTER_APP, "params": {"endpoint": f"/svc/{name}/agentenv/ext/app",
+                                                   "methods": {"launch": {}}}}]
+    if browser_methods is not None:
+        extensions.append({"uri": BROWSER, "params": {"endpoint": f"/svc/{name}/agentenv/ext/browser",
+                                                      "methods": {method: {} for method in browser_methods}}})
+    return {"name": name, "url": f"/svc/{name}/agentenv", "capabilities": {"extensions": extensions}}
+
+
+@pytest.mark.asyncio
+async def test_each_held_browser_is_handed_the_routed_sites_before_its_launch_and_one_built_before_is_only_launched(
+        monkeypatch, caplog):
+    from agent_env.env.env import EnvCapabilityUnsupported
+    from agent_env.env.envs.computer.utils.params import Site
+
+    calls = []
+    apps = [SimpleNamespace(environment_name=name, launch=lambda os_type: SimpleNamespace(at="boot"))
+            for name in ("chromium", "older", "mail")]
+    env = SimpleNamespace(computer=SimpleNamespace(os=SimpleNamespace(type="linux")), composed_apps=lambda: apps)
+    listed_card = {"name": "desk", "children_environments": [
+        _app_card("chromium", ["record", "sites/set"]), _app_card("older", ["record"]), _app_card("mail")]}
+
+    async def invoke(uri, method, params=None, *, environment_name=None, child=None):
+        if method == "sites/set" and child.name == "older":
+            raise EnvCapabilityUnsupported(uri, method, "desk", None, child.name)
+        calls.append((uri, method, child.name, params))
+
+    monkeypatch.setattr(env_computer_provider, "listed", AsyncMock(return_value=listed_card))
+    monkeypatch.setattr(env_computer_provider, "ready", AsyncMock(return_value=listed_card))
+    monkeypatch.setattr(env_computer_provider, "ready_timeout", lambda apps, os_type: 30.0)
+    record = SimpleNamespace(invoke=invoke, control_token="t0ken", environment_card={}, env_id="desk")
+    routed = [Site(name="shop", url="http://gw/website/shop/", domains=["shop.test", "*.shop.test"]),
+              Site(name="bare", url="http://gw/website/bare/")]
+
+    with caplog.at_level(logging.WARNING):
+        await env_computer_provider._launch_held_apps(env, record, "http://computer", routed)
+
+    assert calls == [(BROWSER, "sites/set", "chromium", {"sites": [{"name": "shop", "domains": ["shop.test",
+                                                                                                  "*.shop.test"]}]}),
+                     (COMPUTER_APP, "launch", "chromium", None), (COMPUTER_APP, "launch", "older", None),
+                     (COMPUTER_APP, "launch", "mail", None)]
+    assert "older in desk serves no browser/v1 sites/set" in caplog.text
+
+
+def _start_tabs_record(card, launches_by_browser):
+    """A deployed computer whose card is ``card`` and whose browsers' ``record`` keeps ``launches_by_browser``, by the
+    browser's name, None for the computer's own card; a browser absent from it built before start tabs."""
+    from agent_env.env.env import EnvCapabilityUnsupported
+
+    async def invoke(uri, method, params=None, *, environment_name=None, child=None):
+        name = child.name if child is not None else None
+        if (uri, method) != (BROWSER, "record") or name not in launches_by_browser:
+            raise EnvCapabilityUnsupported(uri, method, "desk", None, name)
+        return {"start_tabs": [{"at": "t", "tabs": tabs} for tabs in launches_by_browser[name]]}
+
+    return SimpleNamespace(invoke=invoke, environment_card=card, env_id="@local/desk")
+
+
+def _tab(url, site=None, outcome="loaded", **fields):
+    return {"tab": "t1", "url": url, "final_url": url, "status": 200, "error": None, "load_ms": 120, "site": site,
+            "outcome": outcome, **fields}
+
+
+@pytest.mark.asyncio
+async def test_each_browsers_start_tabs_of_its_latest_launch_are_kept_and_one_built_before_them_is_left_out():
+    card = {"name": "desk", "children_environments": [_app_card("chromium", ["record"]), _app_card("older", []),
+                                                      _app_card("mail")]}
+    record = _start_tabs_record(card, {"chromium": [[_tab("about:blank")], [
+        _tab("https://shop.test/", "shop"), _tab("https://slack.com/", outcome="timed_out", status=None)]]})
+    alone = _start_tabs_record({"name": "chromium-driver", "capabilities": {"extensions": [
+        {"uri": BROWSER, "params": {"endpoint": "/ext/browser", "methods": {"record": {}}}}]}},
+        {None: [[_tab("https://linear.app/")]]})
+
+    assert await env_computer_provider._start_tabs(record) == {"chromium": [
+        _tab("https://shop.test/", "shop"), _tab("https://slack.com/", outcome="timed_out", status=None)]}
+    assert await env_computer_provider._start_tabs(alone) == {"chromium-driver": [_tab("https://linear.app/")]}
+
+
+@pytest.mark.asyncio
+async def test_a_start_tab_on_one_of_the_env_sites_that_didnt_load_fails_the_boot_naming_each_once_kept(
+        monkeypatch):
+    card = {"name": "desk", "children_environments": [_app_card("chromium", ["record"])]}
+    tabs = [_tab("https://shop.test/", "shop", "failed", status=503),
+            _tab("https://mail.test/", "mail", "failed", status=None, error="net::ERR_CONNECTION_REFUSED"),
+            _tab("https://notes.test/", "notes", "timed_out", status=None, load_ms=60000),
+            _tab("https://slack.com/", None, "failed", status=500)]
+    record = _start_tabs_record(card, {"chromium": [tabs]})
+    record.metadata = {"computer": {"start_tabs": {"chromium": [_tab("https://shop.test/", "shop")]}}}
+    monkeypatch.setattr(env_computer_provider, "_require_display", AsyncMock())
+
+    with pytest.raises(RuntimeError) as failed:
+        await env_computer_provider._finish_boot(SimpleNamespace(), record, None,
+                                                 SimpleNamespace(site_routing=False), 0, None)
+
+    assert record.metadata["computer"]["start_tabs"] == {"chromium": tabs}
+    assert str(failed.value) == (
+        "computer env '@local/desk': chromium's start tab https://shop.test/ on the env's site shop answered 503; "
+        "chromium's start tab https://mail.test/ on the env's site mail didn't load: net::ERR_CONNECTION_REFUSED; "
+        "chromium's start tab https://notes.test/ on the env's site notes was still loading after 60 s")
+
+
+@pytest.mark.asyncio
+async def test_a_held_app_is_awaited_until_the_driver_lists_it_with_its_server(monkeypatch):
+    """A page driver answers before its browser's server does, and lists the browser by its name alone until then."""
+    named_only = {"name": "browser", "children_environments": [{"name": "chromium", "url": "/svc/chromium/agentenv"}]}
+    served = {"name": "browser", "children_environments": [{"name": "chromium", "url": "/svc/chromium/agentenv",
+        "capabilities": {"extensions": [{"uri": COMPUTER_APP, "params": {"endpoint": "/svc/chromium/agentenv/ext/app",
+                                                                         "methods": {"launch": {}}}}]}}]}
+    cards = [named_only, named_only, served]
+
+    async def get_card(url, timeout=5):
+        return cards.pop(0) if len(cards) > 1 else cards[0]
+
+    monkeypatch.setattr(boot.protocol_v1, "get_card", get_card)
+    monkeypatch.setattr(boot, "_POLL_S", 0.01)
+
+    assert await boot.listed("http://computer", ["chromium"], 5) == served
+    cards[:] = [named_only]
+    with pytest.raises(TimeoutError, match="didn't list chromium with its server"):
+        await boot.listed("http://computer", ["chromium"], 0.2)
+
+
+@pytest.mark.asyncio
+async def test_a_reset_routes_the_fresh_computer_to_the_same_sites_under_a_ca_of_its_own(
+        base, driver, docker, boots, routes, monkeypatch):
+    env = _put(base, driver, display={"width": 1600, "height": 900})
+    context = TaskStepContext(deployed_envs=[_sites_gateway()])
+    await DeployEnvTaskStep(id="d", version=None, env_id=env.id, ttl_seconds=3600,
+                            env_params={"site_routing": True}).execute(context)
+    (sandbox,) = boots.sandboxes
+    monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "get_sandbox", AsyncMock(return_value=sandbox))
+    monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "reset_container", AsyncMock())
+    monkeypatch.setattr(env_computer_provider, "ready", AsyncMock(return_value=DRIVER_CARD))
+
+    await ResetEnvTaskStep(id="reset", version=None, env_id=env.id, fail_task_on_error=True).execute(context)
+
+    first, again = routes
+    assert again[0] is sandbox and again[1] == first[1] and again[2]["valid_for"] == timedelta(seconds=3600)
+    assert context.deployed_envs[-1].metadata["computer"]["sites"]["valid_for_s"] == 3600
+
+
+@pytest.mark.asyncio
+async def test_site_routing_with_no_website_deployed_or_outside_a_run_is_refused_before_anything_boots(
+        base, driver, docker, boots, routes):
+    env = _put(base, driver, display={"width": 1600, "height": 900})
+
+    with pytest.raises(ValueError, match="the run deployed none before the computer"):
+        await DeployEnvTaskStep(id="d", version=None, env_id=env.id, env_params={"site_routing": True}).execute(
+            TaskStepContext())
+    with pytest.raises(DeployRefused, match="which a run's deploy_env names in env_params.sites"):
+        await Env.get(env.id).deploy(env_params={"site_routing": True})
+
+    assert boots.boots == [] and routes == []
+
+
+@pytest.mark.asyncio
+async def test_site_routing_on_a_disk_computer_is_refused_before_it_boots_and_a_container_form_is_kept(
+        base, driver, docker, boots, routes, monkeypatch):
+    from agent_env.env.envs.computer.env import ComputerEnv
+
+    env = _put(base, driver, display={"width": 1600, "height": 900})
+    container = ComputerEnv.deployable_builds(Env.get(env.id))
+    disk = [("disk", arch, build) for _, arch, build in container]
+    monkeypatch.setattr(ComputerEnv, "deployable_builds", lambda self, form=None: disk)
+    params = {"site_routing": True, "sites": [{"name": "a", "url": "http://gw/website/a/", "domains": ["a.test"]}]}
+
+    with pytest.raises(DeployRefused, match="a disk computer runs inside a launcher container"):
+        await Env.get(env.id).deploy(env_params=params)
+
+    assert boots.boots == [] and routes == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("env_params, problem", [
+    ({"site_routing": True, "sites": [{"name": "a", "url": "http://gw/website/a/", "domains": ["x.test"]},
+                                      {"name": "b", "url": "http://gw/website/b/", "domains": ["x.test"]}]},
+     "env_params.sites: names claimed twice: 'x.test' (b) overlaps 'x.test' (a)"),
+    ({"sites": [{"name": "a", "url": "http://gw/website/a/"}]},
+     "env_params.sites: a computer reaches sites only with site_routing"),
+    ({"site_routing": "yes"}, "env_params.site_routing"),
+], ids=["conflict", "sites-alone", "not-a-flag"])
+async def test_sites_a_computer_cant_reach_by_their_names_are_refused_at_save_and_at_deploy(
+        base, driver, docker, boots, routes, env_params, problem):
+    env = _put(base, driver, display={"width": 1600, "height": 900})
+
+    saved = DeployEnvTaskStep(id="d", version=None, env_id=env.id, env_params=env_params).preflight()
+    with pytest.raises(DeployRefused, match=re.escape(problem)):
+        await Env.get(env.id).deploy(env_params=env_params)
+
+    assert len(saved) == 1 and problem in saved[0] and boots.boots == [] and routes == []
 
 
 @pytest.mark.asyncio
@@ -681,6 +1518,19 @@ async def test_env_params_a_computer_env_cant_take_are_refused_at_save_and_at_de
         await Env.get(env.id).deploy(env_params=env_params)
 
     assert len(saved) == 1 and problem in saved[0] and boots.boots == []
+
+
+def test_a_drivers_own_settings_are_checked_against_the_schema_it_declares(base, driver):
+    env = _put(base, driver)
+    env.driver.declaration = env.driver.declaration.model_copy(update={"settings": {
+        "type": "object", "additionalProperties": False,
+        "properties": {"headed": {"type": "boolean"}, "default_space": {"enum": ["frame", "norm"]}}}})
+
+    assert params.driver_problems(env, {"headed": True, "default_space": "norm"}) == []
+    assert params.driver_problems(env, {"headed": "yes"}) == ["env_params.driver_settings.headed: 'yes' is not of type "
+                                                              "'boolean'"]
+    assert "Additional properties are not allowed ('colour' was unexpected)" in params.driver_problems(
+        env, {"colour": "blue"})[0]
 
 
 @pytest.mark.asyncio
@@ -740,6 +1590,27 @@ async def test_a_boot_is_ready_with_the_card_read_once_its_status_asked_with_its
     assert sent == [{"Authorization": "Bearer t0ken"}] * 2
 
 
+@pytest.mark.asyncio
+async def test_a_boot_whose_status_says_the_computer_failed_raises_at_once_with_why(monkeypatch):
+    asked = []
+
+    async def card(url, timeout):
+        return {"name": "desk"}
+
+    async def status(url, card, uri, params, timeout, method, headers):
+        asked.append(method)
+        return {"ready": False, "failed": "browser: it ended on its own", "checks": [
+            {"name": "browser", "ok": False, "detail": "it ended on its own", "final": True}]}
+
+    monkeypatch.setattr(boot.protocol_v1, "get_card", card)
+    monkeypatch.setattr(boot.protocol_v1, "invoke_extension", status)
+    monkeypatch.setattr(boot, "_POLL_S", 0)
+
+    with pytest.raises(boot.ComputerFailed, match="the computer at http://desk failed: browser: it ended on its own"):
+        await boot.ready("http://desk", 5, "t0ken")
+    assert asked == ["status"]
+
+
 def test_a_boot_mints_a_generated_setting_resolves_a_secret_its_record_withholds_both_and_a_secret_is_a_reference(
         base, monkeypatch):
     monkeypatch.setenv("DESK_KEY", "s3cret")
@@ -767,16 +1638,59 @@ def test_a_boot_mints_a_generated_setting_resolves_a_secret_its_record_withholds
 @pytest.mark.parametrize("change, problem", [
     ("riscv64", "LocalSandboxProvider runs none of its arches (amd64, arm64) natively"),
     ("network", "LocalSandboxProvider can't enforce its network"),
+    ("websockets", "LocalSandboxProvider carries no WebSockets, which its website browser's CDP address needs"),
 ])
-def test_a_deploy_its_sandbox_provider_cant_carry_out_is_refused_at_save(base, driver, docker, monkeypatch, change,
-                                                                       problem):
-    env = _put(base, driver, network={"mode": "allowlist", "allow_hosts": ["example.com"]} if change == "network" else None)
+def test_a_deploy_its_sandbox_provider_cant_carry_out_is_refused_at_save(base, driver, docker, monkeypatch, tmp_path,
+                                                                       change, problem):
+    browser = [_app(None, None, tmp_path / "chromium", compose=False, name="chromium", browser=True)]
+    env = _put(base, driver, network={"mode": "allowlist", "allow_hosts": ["example.com"]} if change == "network" else None,
+               apps=browser if change == "websockets" else [])
     if change == "riscv64":
         monkeypatch.setattr(local_sandbox, "host_platform", lambda: "linux/riscv64")
+    if change == "websockets":
+        assert DeployEnvTaskStep(id="d", version=None, env_id=env.id).preflight() == []
+        monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "WEBSOCKETS", False)
 
     (refusal,) = DeployEnvTaskStep(id="d", version=None, env_id=env.id).preflight()
 
     assert problem in refusal
+
+
+def test_a_chain_with_no_one_link_that_both_carries_websockets_and_enforces_the_network_is_refused_at_save(
+        base, driver, docker, monkeypatch, tmp_path):
+    class Enforces(local_sandbox.LocalSandboxProvider):
+        WEBSOCKETS = False
+
+        @classmethod
+        def supports_network_policy(cls, policy):
+            return True
+
+    class Carries(local_sandbox.LocalSandboxProvider):
+        pass
+
+    monkeypatch.setattr(providers, "build_sandbox_provider",
+                        lambda spec: ChainedSandboxProvider([Enforces(), Carries()]))
+    env = _put(base, driver, network={"mode": "allowlist", "allow_hosts": ["example.com"]},
+               apps=[_app(None, None, tmp_path / "chromium", compose=False, name="chromium", browser=True)])
+
+    assert Env.get(env.id).deploy_refusal(sandbox_type="chain") == f"computer env {env.id!r}: Carries can't enforce its network"
+
+
+@pytest.mark.asyncio
+async def test_a_deploy_with_a_website_browser_skips_a_link_that_carries_no_websockets_and_boots_on_the_next(
+        base, driver, docker, boots, monkeypatch, tmp_path):
+    env = _put(base, driver, display={"width": 1600, "height": 900},
+               apps=[_app(None, None, tmp_path / "chromium", compose=False, name="chromium", browser=True)])
+
+    class NoWebSockets(local_sandbox.LocalSandboxProvider):
+        WEBSOCKETS = False
+
+    chain = ChainedSandboxProvider([NoWebSockets(), local_sandbox.LocalSandboxProvider()])
+    monkeypatch.setattr(providers, "build_sandbox_provider", lambda spec: chain)
+
+    await Env.get(env.id).deploy(sandbox_type="chain")
+
+    assert [made["provider"] for made in boots.boots] == ["LocalSandboxProvider"]
 
 
 @pytest.fixture
@@ -889,6 +1803,22 @@ async def test_a_snapshot_loads_back_its_files_then_each_apps_through_the_apps_r
 
 
 @pytest.mark.asyncio
+async def test_an_app_deployed_alone_loads_its_own_name_through_its_route_and_its_computers_through_the_driver(
+        base, driver, docker, computer, tmp_path, monkeypatch):
+    monkeypatch.setattr(inside, "issues_grants_to", lambda store, sandbox_type: False)
+    mail = _app(base, driver, tmp_path / "mail", compose=False)
+    mail._deployed = computer.deployed(env_id=mail.id, card={**HOME_CARD, "name": "mail-driver", "children_environments": [
+        _child("mail", "data/add", "data/get")]})
+
+    await mail.load_environment_universe_artifact(EnvironmentUniverseArtifact.put("alone", environment_artifacts=[
+        _snapshot("mail", {"Mail/inbox.txt": b"m"}), _snapshot("mail-driver", {"Desktop/a.txt": b"a"})]))
+
+    assert computer.added_at == ["http://127.0.0.1:20001", "http://127.0.0.1:20001/svc/mail"]
+    assert (computer.home / "Desktop/a.txt").read_bytes() == b"a"
+    assert [markers for _, markers, _ in computer.calls][1] == [{"path": "Mail/inbox.txt"}]
+
+
+@pytest.mark.asyncio
 async def test_an_environment_named_after_neither_the_computer_nor_an_app_that_loads_is_refused_before_anything_is_sent(
         base, driver, docker, computer, tmp_path):
     mail = _app(base, driver, tmp_path / "mail", compose=False)
@@ -921,7 +1851,8 @@ def test_an_app_deployed_alone_is_composed_with_its_files_venv_and_programs_unde
         "name": "apps-mail", "folder": "/ctx/apps/mail", "requirements": "requirements.txt",
         "add": [f"agentenv-framework-protocol[app]=={PROTOCOL_VERSION}"]}
     for line in ("COPY apps/mail/ /opt/agentenv/apps/mail/",
-                 "RUN --network=none python3 -m venv /opt/agentenv/apps/mail/venv && /opt/agentenv/apps/mail/venv/bin/pip"
+                 "RUN --network=none --mount=type=bind,source=packages/wheels/apps-mail,target=/tmp/agentenv-packages/"
+                 "wheels/apps-mail python3 -m venv /opt/agentenv/apps/mail/venv && /opt/agentenv/apps/mail/venv/bin/pip"
                  " install --no-index --no-deps /tmp/agentenv-packages/wheels/apps-mail/*.whl",
                  "RUN mkdir -p /opt/agentenv/apps/mail/.agentenv && chown user /opt/agentenv/apps/mail/.agentenv",
                  "COPY agentenv-app-mail.conf /etc/supervisor/conf.d/agentenv-app-mail.conf"):
@@ -955,6 +1886,38 @@ def test_an_app_that_requires_nothing_still_gets_a_venv_for_its_own_server(base,
     assert boot.ready_timeout([app], "windows") == boot.READY_TIMEOUT_S
 
 
+def test_the_locks_debs_and_wheels_are_mounted_into_the_runs_that_install_them_never_copied_into_a_layer(
+        base, driver, docker, tmp_path):
+    """A COPY's files stay in its layer of the image though the RUN after it removes them."""
+    _app(base, driver, tmp_path / "mail", install={"python": "requirements.txt", "packages": {"apt": ["hello"]},
+                                                   "services": []})
+
+    build = next(build for build in docker.builds if build["platform"] == "linux/arm64")
+    lines = build["dockerfile"].splitlines()
+    installs = [line for line in lines if "/tmp/agentenv-packages" in line]
+
+    assert [line for line in lines if line.startswith("COPY packages/")] == []
+    assert installs == [
+        "RUN --network=none --mount=type=bind,source=packages/apt,target=/tmp/agentenv-packages/apt apt-get install -y "
+        "--no-install-recommends /tmp/agentenv-packages/apt/*.deb",
+        *(f"RUN --network=none --mount=type=bind,source=packages/wheels/{name},target=/tmp/agentenv-packages/wheels/"
+          f"{name} python3 -m venv {prefix}/venv && {prefix}/venv/bin/pip install --no-index --no-deps "
+          f"/tmp/agentenv-packages/wheels/{name}/*.whl && {prefix}/venv/bin/pip list --format=json > {prefix}/installed.json"
+          for name, prefix in (("driver", "/opt/agentenv/drivers/desk"), ("apps-mail", "/opt/agentenv/apps/mail")))]
+    assert {"packages/apt/hello_1.0_arm64.deb", "packages/wheels/driver/mss-10.1.0-py3-none-any.whl"} <= set(
+        build["files"])
+
+
+def test_an_app_that_declares_for_a_distribution_is_told_the_platform_it_was_composed_for(base, driver, docker,
+                                                                                         tmp_path):
+    _app(base, driver, tmp_path / "mail", steps=[("index_mail", "session", "linux/ubuntu")])
+
+    build = {build["platform"]: build for build in docker.builds}["linux/arm64"]
+    assert ("RUN --network=none cd /opt/agentenv/apps/mail && AGENTENV_PLATFORM=linux/ubuntu venv/bin/python -m "
+            "agentenv_protocol.computer.run_install_step app.py:Mail index_mail") in build["dockerfile"]
+    assert 'AGENTENV_PLATFORM="linux/ubuntu"' in build["confs"]["agentenv-app-mail.conf"]
+
+
 def test_an_apps_packages_downloads_scripts_and_steps_are_fetched_at_put_and_installed_offline(base, driver, docker,
                                                                                                tmp_path, monkeypatch):
     tool = b"#!/bin/sh\necho tool\n"
@@ -975,11 +1938,10 @@ def test_an_apps_packages_downloads_scripts_and_steps_are_fetched_at_put_and_ins
         {"apt": "https://ppa.example/ubuntu", "suite": "noble", "components": ["main"], "key": "/ctx/apps/mail/ppa.asc"}]
     builds = {build["platform"]: build for build in docker.builds}
     lines = builds["linux/arm64"]["dockerfile"].splitlines()
-    first = lines.index("COPY packages/apt/ /tmp/agentenv-packages/apt/")
-    assert lines[first:first + 3] == [
-        "COPY packages/apt/ /tmp/agentenv-packages/apt/",
-        "RUN --network=none apt-get install -y --no-install-recommends /tmp/agentenv-packages/apt/*.deb && rm -rf "
-        "/tmp/agentenv-packages/apt", "COPY driver/ /opt/agentenv/drivers/desk/"]
+    first = lines.index("USER root") + 1
+    assert lines[first:first + 2] == [
+        "RUN --network=none --mount=type=bind,source=packages/apt,target=/tmp/agentenv-packages/apt apt-get install -y "
+        "--no-install-recommends /tmp/agentenv-packages/apt/*.deb", "COPY driver/ /opt/agentenv/drivers/desk/"]
     steps = lines.index("RUN mkdir -p /opt/agentenv/apps/mail/.agentenv && chown user /opt/agentenv/apps/mail/.agentenv")
     assert lines[steps + 1:steps + 8] == [
         "RUN --network=none cd /opt/agentenv/apps/mail && './set up.sh'",
@@ -1182,7 +2144,7 @@ def test_an_app_that_doesnt_fit_its_computer_and_driver_is_refused_before_anythi
 
 
 @pytest.mark.asyncio
-async def test_an_app_deployed_alone_is_named_after_it_and_handed_its_settings_a_secret_resolved(
+async def test_an_app_deployed_alone_is_a_computer_named_after_it_as_its_driver_and_handed_its_settings_a_secret_resolved(
         base, driver, docker, boots, tmp_path, monkeypatch):
     monkeypatch.setenv("MAIL_PASSWORD", "s3cret")
     monkeypatch.setenv("MAIL_TOKEN", "t0ken")
@@ -1193,7 +2155,7 @@ async def test_an_app_deployed_alone_is_named_after_it_and_handed_its_settings_a
     deployed = await Env.get(app.id).deploy(env_params={"app_settings": settings})
 
     environment = boots.boots[0]["environment"]
-    assert environment["ENVIRONMENT_NAME"] == "mail" and deployed.environment_card["name"] == "mail"
+    assert environment["ENVIRONMENT_NAME"] == "mail-driver" and deployed.environment_card["name"] == "mail-driver"
     assert json.loads(environment["AGENTENV_APP_SETTINGS"]) == {"mail": {"signature": "-- Ada", "password": "s3cret",
                                                                          "token": "t0ken"}}
     assert deployed.env_id == app.id and deployed.metadata["computer"]["env_params"] == {"app_settings": settings}

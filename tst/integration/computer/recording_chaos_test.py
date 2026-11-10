@@ -33,7 +33,8 @@ FPS = 10
 
 
 ARCH = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}[platform.machine().lower()]
-FIXTURE = resources.files("agentenv_protocol.computer.conformance").joinpath("fixture.py").read_bytes()
+DESK = {name: resources.files("agentenv_protocol.computer.conformance").joinpath(name).read_bytes()
+        for name in ("fixture.py", "desk.py")}
 
 
 @pytest.fixture(scope="module")
@@ -128,22 +129,27 @@ async def _ready(name: str) -> Driver:
     """A client for the container's driver once its computer is ready, within the time a deploy gives one; a restart may
     move its port."""
     deadline = time.monotonic() + READY_TIMEOUT_S
+    status = None
     while time.monotonic() < deadline:
         port = subprocess.run(["docker", "port", name, str(PORT)], capture_output=True, text=True).stdout
         if port:
             try:
                 driver = await Driver.connect(f"http://{port.splitlines()[0]}", 30)
-                if (await driver.invoke(COMPUTER_READY, "status"))["ready"]:
+                status = await driver.invoke(COMPUTER_READY, "status")
+                if status["ready"]:
                     return driver
             except Exception:  # not serving yet
                 pass
         await asyncio.sleep(0.25)
-    raise TimeoutError(f"{name}'s computer wasn't ready within {READY_TIMEOUT_S:.0f} s")
+    failing = [check for check in (status or {}).get("checks", []) if not check["ok"]]
+    raise TimeoutError(f"{name}'s computer wasn't ready within {READY_TIMEOUT_S:.0f} s: "
+                       f"{failing or 'its driver never answered'}")
 
 
 async def _layout(driver: Driver) -> dict:
     """The Fixture Desk, started through data/add and computer-exec as the probe starts it, once it wrote its layout."""
-    await driver.add_file("desk/fixture.py", FIXTURE)
+    for name, source in DESK.items():
+        await driver.add_file(f"desk/{name}", source)
     await driver.run("sh", "-c", "python3 desk/fixture.py fixture > desk/fixture.log 2>&1 &")
     for _ in range(120):
         out = await driver.run("cat", "fixture/layout.json")

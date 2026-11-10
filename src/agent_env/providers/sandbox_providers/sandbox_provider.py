@@ -110,12 +110,14 @@ class SandboxProvider(ABC):
         attribution: Optional[Attribution] = None,
         network_policy: Optional[NetworkPolicy] = None,
         private_network: bool = False,
+        shm_mb: Optional[int] = None,
     ) -> Sandbox:
         """Provision a sandbox with the registry image already running as a container.
 
         On return, ``tunnel_urls[port]`` is populated and the container listens on ``port``.
         Caller still owns readiness polling for the container's own endpoints. ``private_network`` puts it on a
-        network this provider's other such containers share, at its ``private_host``.
+        network this provider's other such containers share, at its ``private_host``. ``shm_mb`` is the MiB the
+        container's ``/dev/shm`` holds, which a deploy passes only to a provider whose SHARED_MEMORY says it gives them.
 
         Default implementation: a container-only backend uses create_sandbox; a VM backend creates
         a VM, pulls the image, and starts it. Backends that bake the image in at creation override.
@@ -138,7 +140,7 @@ class SandboxProvider(ABC):
         )
         try:
             await sandbox.pull_images([image_name])
-            await self._start_container(sandbox, image_name=image_name, port=port, env=env)
+            await self._start_container(sandbox, image_name=image_name, port=port, env=env, shm_mb=shm_mb)
             sandbox.mode = SANDBOX_MODE_CONTAINER
             return sandbox
         except BaseException:
@@ -148,15 +150,16 @@ class SandboxProvider(ABC):
                 pass
             raise
 
-    async def reset_container(self, sandbox: Sandbox, *, image_name: str, port: int, env: dict[str, str]) -> None:
-        """Reset the container create_container ran on ``sandbox`` to a fresh one of ``image_name`` with ``env``, reached
-        on ``port`` as before: the sandbox, its id and its URLs stay. A backend whose sandbox is the container itself
-        can't reset it in place."""
+    async def reset_container(self, sandbox: Sandbox, *, image_name: str, port: int, env: dict[str, str],
+                              shm_mb: Optional[int] = None) -> None:
+        """Reset the container create_container ran on ``sandbox`` to a fresh one of ``image_name`` with ``env`` and
+        ``shm_mb``, reached on ``port`` as before: the sandbox, its id and its URLs stay. A backend whose sandbox is the
+        container itself can't reset it in place."""
         if not isinstance(sandbox, VmSandbox):
             raise NotImplementedError(f"{type(self).__name__}'s sandbox is the container itself, so it can't be reset "
                                       "in place")
         await sandbox.exec_script(f"docker rm -f {shlex.quote(sandbox.container_name)} > /dev/null")
-        await self._start_container(sandbox, image_name=image_name, port=port, env=env)
+        await self._start_container(sandbox, image_name=image_name, port=port, env=env, shm_mb=shm_mb)
 
     async def reset_vm(self, sandbox: Sandbox, *, image: str, env: dict[str, str]) -> None:
         """Boot the disk create_vm booted on ``sandbox`` afresh, from ``image`` with ``env``, reached on its ports as
@@ -168,18 +171,22 @@ class SandboxProvider(ABC):
         any deadline on creating one, for the deploy ``attribution`` describes, as it describes the sandbox. Does
         nothing here; a provider that builds a context-only image itself builds it."""
 
-    async def _start_container(self, sandbox: VmSandbox, *, image_name: str, port: int, env: dict[str, str]) -> None:
-        """Run the pulled ``image_name`` as the sandbox's container, publishing ``port``."""
-        args = self._container_args(sandbox, image_name=image_name, port=port, env=env)
+    async def _start_container(self, sandbox: VmSandbox, *, image_name: str, port: int, env: dict[str, str],
+                               shm_mb: Optional[int] = None) -> None:
+        """Run the pulled ``image_name`` as the sandbox's container, publishing ``port``, with ``shm_mb`` MiB of
+        ``/dev/shm``."""
+        args = self._container_args(sandbox, image_name=image_name, port=port, env=env, shm_mb=shm_mb)
         await sandbox.exec_script(f"docker run -d {args} > /dev/null")
 
-    def _container_args(self, sandbox: VmSandbox, *, image_name: str, port: int, env: dict[str, str]) -> str:
+    def _container_args(self, sandbox: VmSandbox, *, image_name: str, port: int, env: dict[str, str],
+                        shm_mb: Optional[int] = None) -> str:
         """The ``docker run`` / ``docker create`` arguments for the sandbox's container."""
         env_flags = " \\\n    ".join(f"-e {shlex.quote(k)}={shlex.quote(v)}" for k, v in env.items())
         extra_args = f"{self.EXTRA_CONTAINER_RUN_ARGS} " if self.EXTRA_CONTAINER_RUN_ARGS else ""
+        shm_args = f"--shm-size {int(shm_mb)}m " if shm_mb else ""
         return (
-            f"--name {shlex.quote(sandbox.container_name)} {self._publish_args(sandbox, port)} {extra_args}\\\n    "
-            f"{env_flags} \\\n    {shlex.quote(image_name)}"
+            f"--name {shlex.quote(sandbox.container_name)} {self._publish_args(sandbox, port)} {extra_args}{shm_args}"
+            f"\\\n    {env_flags} \\\n    {shlex.quote(image_name)}"
         )
 
     def _publish_args(self, sandbox: VmSandbox, port: int) -> str:
@@ -237,6 +244,14 @@ class SandboxProvider(ABC):
     _DECLARES_SANDBOX_ACCEPTS: ClassVar[bool] = False
     # Whether create_container(private_network=True) puts containers on a network they share.
     PRIVATE_NETWORK: ClassVar[bool] = False
+    # Whether its sandboxes' exposed ports carry WebSockets both ways, as a website browser's CDP address needs: on
+    # where our own tests or its tunnel's documentation say so.
+    WEBSOCKETS: ClassVar[bool] = False
+    # Whether the container create_container or reset_container runs has the /dev/shm their shm_mb asks for, or more:
+    # sized to it, as the default VM path's docker run does, or larger by default. A deploy passes shm_mb to no other
+    # provider. Derived for a provider class that doesn't declare it (``__init_subclass__``): on for the default VM
+    # path, off for a container-only backend and for a class that overrides either method.
+    SHARED_MEMORY: ClassVar[bool] = False
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -248,6 +263,11 @@ class SandboxProvider(ABC):
         elif not cls._DECLARES_SANDBOX_ACCEPTS:
             cls.SANDBOX_ACCEPTS = (Accepts.LOADABLE if SANDBOX_MODE_VM in cls.SUPPORTED_SANDBOX_MODES
                                    else cls.CONTAINER_ACCEPTS)
+        if "SHARED_MEMORY" not in cls.__dict__:
+            if {"create_container", "reset_container"} & cls.__dict__.keys():
+                cls.SHARED_MEMORY = False
+            elif cls.create_container is SandboxProvider.create_container:
+                cls.SHARED_MEMORY = SANDBOX_MODE_VM in cls.SUPPORTED_SANDBOX_MODES
 
     @property
     def links(self) -> tuple[SandboxProvider, ...]:
@@ -331,6 +351,12 @@ class SandboxProvider(ABC):
         return frozenset()
 
     @classmethod
+    def vm_bundle_platforms(cls) -> frozenset[str]:
+        """The platforms whose VM bundles (a computer's vm_bundle form) its create_vm boots, as ``<os>/<arch>``: none
+        here."""
+        return frozenset()
+
+    @classmethod
     def effective_network_policy(cls, policy: Optional[NetworkPolicy]) -> NetworkPolicy:
         """``policy`` with the platform's own hosts unioned in; identity unless it allowlists."""
         if policy is None:
@@ -356,7 +382,9 @@ _BUILTIN_SANDBOX_PROVIDERS: dict[str, str] = {
     "daytona": "agent_env.providers.sandbox_providers.daytona.provider:DaytonaSandboxProvider",
     "boat": "agent_env.providers.sandbox_providers.boat.provider:BoatSandboxProvider",
     "coreweave": "agent_env.providers.sandbox_providers.coreweave.provider:CoreWeaveSandboxProvider",
+    "agent37": "agent_env.providers.sandbox_providers.agent37.provider:Agent37SandboxProvider",
     "local": "agent_env.providers.sandbox_providers.local_docker.provider:LocalSandboxProvider",
+    "lume": "agent_env.providers.sandbox_providers.lume.provider:LumeSandboxProvider",
 }
 
 
@@ -619,6 +647,15 @@ def sandbox_request_headers_for_url(url: str) -> dict[str, str]:
         except Exception:
             logger.warning("Provider %s failed to contribute request headers; skipping", cls.__name__, exc_info=True)
     return headers
+
+
+def sandbox_request_header_names() -> tuple[str, ...]:
+    """The names of every header any registered provider attaches to requests for its URLs
+    (``sandbox_request_headers_for_url``), lower-cased and sorted: what a gateway takes off the requests it forwards,
+    so no service behind it reads a provider's credentials. Names only, so no credential is resolved."""
+    names = {header.lower() for cls in registered_sandbox_provider_classes()
+             for entries in (cls.REQUEST_HEADERS or {}).values() for header in entries}
+    return tuple(sorted(names))
 
 
 def _resolve_container_env(provider_cls: type[SandboxProvider]) -> dict[str, str]:

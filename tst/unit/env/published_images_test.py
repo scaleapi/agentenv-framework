@@ -13,7 +13,6 @@ import pytest
 from agent_env.env import bootstrap, published_images
 from agent_env.env.published_images import (
     AGENT_IMAGES,
-    COMPUTER_IMAGES,
     DISK,
     DISK_IMAGES,
     DISK_TOOLS_IMAGE,
@@ -41,7 +40,7 @@ def test_every_shipped_dockerfile_is_published_once_under_a_name_of_its_own():
     shipped.append(published_images._EXAMPLES / "mail-mcp" / "envs" / "mail" / "Dockerfile")
     shipped += published_images._COMPUTERS.glob("*/Dockerfile")
     shipped += DISK.glob("*/Dockerfile")
-    shipped += [DISK / "boot" / "Dockerfile"] * (len(COMPUTER_IMAGES) - 1)
+    shipped += [DISK / "boot" / "Dockerfile"] * (len(DISK_IMAGES) - 1)
 
     assert sorted(image.dockerfile for image in bootstrap.PUBLISHED_IMAGES) == sorted(shipped)
     assert len({image.name for image in bootstrap.PUBLISHED_IMAGES}) == len(bootstrap.PUBLISHED_IMAGES)
@@ -138,7 +137,7 @@ def test_an_image_its_release_didnt_record_is_looked_up_and_only_what_was_served
 
 
 def test_a_shipped_agents_sources_find_its_published_image_and_other_sources_none(monkeypatch):
-    claude_code = AGENT_IMAGES[0]
+    claude_code = next(image for image in AGENT_IMAGES if image.name == "agentenv-claude-code")
     sources = BuildContext.of(claude_code.dockerfile.parent, claude_code.dockerfile).source_digest(None)
     monkeypatch.setattr(published_images, "_registry_digest", lambda ref: _DIGEST if ref == claude_code.ref() else None)
 
@@ -169,7 +168,7 @@ def test_a_recorded_image_the_registry_doesnt_serve_anonymously_isnt_published_y
 
 
 def test_a_shipped_agents_sources_whose_image_isnt_published_find_none(monkeypatch):
-    claude_code = AGENT_IMAGES[0]
+    claude_code = next(image for image in AGENT_IMAGES if image.name == "agentenv-claude-code")
     sources = BuildContext.of(claude_code.dockerfile.parent, claude_code.dockerfile).source_digest(None)
 
     assert published_bundle_image(sources) is None
@@ -178,7 +177,8 @@ def test_a_shipped_agents_sources_whose_image_isnt_published_find_none(monkeypat
 
 def test_a_disk_forms_tag_is_of_its_boot_recipe_its_bases_sources_and_the_disk_tools_and_it_is_found_by_its_bases(
         tmp_path, monkeypatch):
-    (disk,), (base,) = DISK_IMAGES, COMPUTER_IMAGES
+    (disk,) = DISK_IMAGES
+    base = dict(disk.args)["ROOTFS"]
     recipe = BuildContext.of(disk.dockerfile.parent, disk.dockerfile).source_digest(None).removeprefix("sha256:")
     served = {}
     monkeypatch.setattr(published_images, "_registry_digest", served.get)

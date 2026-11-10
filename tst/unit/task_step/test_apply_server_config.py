@@ -589,6 +589,117 @@ async def test_live_read_strips_a_trailing_slash_from_the_gateway_url():
     assert [url for url, _ in gw.post_calls] == [f"{_GATEWAY}/svc/mcp-slack/agentenv/ext/set_errors"]
 
 
+# --- websites ---
+
+
+def _fake_multi_env(mcp_names, website_names):
+    return SimpleNamespace(mcp_server_envs=[SimpleNamespace(environment_name=s) for s in mcp_names],
+                           website_envs=[SimpleNamespace(environment_name=s) for s in website_names])
+
+
+class _KeyedGateway(_MockGateway):
+    """A gateway serving each card at /svc/<key>/.well-known/agent-env.json, where a website's key is its bare name."""
+
+    async def get(self, url, *, timeout=None, params=None):
+        self.get_calls.append(url)
+        for key, card in self.cards.items():
+            if url.endswith(f"/svc/{key}/.well-known/agent-env.json"):
+                return _resp(200, url, card)
+        return _resp(404, url, {"error": "no card"})
+
+
+@pytest.mark.asyncio
+async def test_stored_card_broadcast_reaches_websites_and_a_website_sharing_an_mcp_servers_name():
+    """The card lists a website and an MCP server sharing a name as two children at distinct urls, so a broadcast
+    reaches both, each at its own route; a directive naming the name means the MCP server."""
+    gw = _MockGateway({})
+    ext = _ext(_SET_ACTING_USER_URI, "/agentenv/ext/set_acting_user")
+    ctx = _carded_context(await _composed_card({"mcp-slack": [ext], "shop": [ext], "slack": [ext]}))
+    step = _step(directives=[{"service": "*", "uri": _SET_ACTING_USER_URI, "args": {"user_email": "a@x.com"}},
+                             {"service": "slack", "uri": _SET_ACTING_USER_URI, "args": {"user_email": "b@x.com"}}])
+    with _patch_httpx(gw), patch("agent_env.env.env.Env.get", return_value=_fake_multi_env(["slack"], ["shop", "slack"])):
+        out = await step.execute(ctx)
+
+    assert gw.get_calls == []
+    assert gw.post_calls == [(f"{_CARD}/svc/mcp-slack/agentenv/ext/set_acting_user", {"user_email": "a@x.com"}),
+                             (f"{_CARD}/svc/shop/agentenv/ext/set_acting_user", {"user_email": "a@x.com"}),
+                             (f"{_CARD}/svc/slack/agentenv/ext/set_acting_user", {"user_email": "a@x.com"}),
+                             (f"{_CARD}/svc/mcp-slack/agentenv/ext/set_acting_user", {"user_email": "b@x.com"})]
+    assert [c["service"] for c in out.metadata["server_config_changes"]] == ["slack", "shop", "slack", "slack"]
+
+
+@pytest.mark.asyncio
+async def test_stored_card_broadcast_to_an_mcp_only_env_is_unchanged():
+    gw = _MockGateway({})
+    ext = _ext(_SET_ACTING_USER_URI, "/agentenv/ext/set_acting_user")
+    ctx = _carded_context(await _composed_card({"mcp-slack": [ext], "mcp-email": [ext]}))
+    step = _step(directives=[{"service": "*", "uri": _SET_ACTING_USER_URI, "args": {"user_email": "a@x.com"}}])
+    with _patch_httpx(gw), patch("agent_env.env.env.Env.get", return_value=_fake_env("slack", "email")):
+        out = await step.execute(ctx)
+
+    assert gw.get_calls == []
+    assert [url for url, _ in gw.post_calls] == [f"{_CARD}/svc/mcp-slack/agentenv/ext/set_acting_user",
+                                                 f"{_CARD}/svc/mcp-email/agentenv/ext/set_acting_user"]
+    assert out.metadata["server_config_skipped"] == []
+
+
+@pytest.mark.asyncio
+async def test_live_read_broadcast_reads_a_websites_card_at_its_own_gateway_path():
+    ext = _ext(_SET_ACTING_USER_URI, "/agentenv/ext/set_acting_user")
+    gw = _KeyedGateway({"mcp-slack": _card(ext), "shop": _card(ext)})
+    step = _step(directives=[{"service": "*", "uri": _SET_ACTING_USER_URI, "args": {"user_email": "a@x.com"}}])
+    with _patch_httpx(gw), patch("agent_env.env.env.Env.get", return_value=_fake_multi_env(["slack"], ["shop"])):
+        await step.execute(_make_context())
+
+    assert gw.get_calls == [f"{_GATEWAY}/svc/mcp-slack/.well-known/agent-env.json", f"{_GATEWAY}/svc/shop/.well-known/agent-env.json"]
+    assert [url for url, _ in gw.post_calls] == [f"{_GATEWAY}/svc/mcp-slack/agentenv/ext/set_acting_user",
+                                                 f"{_GATEWAY}/svc/shop/agentenv/ext/set_acting_user"]
+
+
+@pytest.mark.asyncio
+async def test_broadcast_reaches_a_single_website_env():
+    from agent_env.env.envs.website import WebsiteEnv
+
+    gw = _MockGateway({})
+    ctx = _carded_context(await _composed_card({"shop": [_ext(_SET_ACTING_USER_URI, "/agentenv/ext/set_acting_user")]}))
+    step = _step(directives=[{"service": "*", "uri": _SET_ACTING_USER_URI, "args": {"user_email": "a@x.com"}}])
+    with _patch_httpx(gw), patch("agent_env.env.env.Env.get", return_value=WebsiteEnv(id="env-x", version=1, environment_name="shop")):
+        await step.execute(ctx)
+
+    assert [url for url, _ in gw.post_calls] == [f"{_CARD}/svc/shop/agentenv/ext/set_acting_user"]
+
+
+@pytest.mark.asyncio
+async def test_strict_broadcast_skips_websites_without_a_card_or_the_extension():
+    gw = _MockGateway({})
+    ext = _ext(_SET_ERRORS_URI, "/agentenv/ext/set_errors")
+    ctx = _carded_context(await _composed_card({"mcp-slack": [ext], "shop": []}))
+    step = _step(directives=[{"service": "*", "uri": _SET_ERRORS_URI, "args": {"error_rate": 1.0}}])
+    with _patch_httpx(gw), patch("agent_env.env.env.Env.get", return_value=_fake_multi_env(["slack"], ["shop", "legacy"])):
+        out = await step.execute(ctx)
+
+    assert [url for url, _ in gw.post_calls] == [f"{_CARD}/svc/mcp-slack/agentenv/ext/set_errors"]
+    assert [c["service"] for c in out.metadata["server_config_changes"]] == ["slack"]
+    assert [(s["service"], s["reason"]) for s in out.metadata["server_config_skipped"]] == [
+        ("shop", "extension_not_advertised"), ("legacy", "no_env_card")]
+
+
+@pytest.mark.asyncio
+async def test_strict_broadcast_still_fails_for_an_mcp_server_or_a_named_website_lacking_the_extension():
+    ext = _ext(_SET_ERRORS_URI, "/agentenv/ext/set_errors")
+    broadcast = {"service": "*", "uri": _SET_ERRORS_URI, "args": {"error_rate": 1.0}}
+    unadvertising_mcp = _carded_context(await _composed_card({"mcp-slack": [], "shop": [ext]}))
+    with _patch_httpx(_MockGateway({})), patch("agent_env.env.env.Env.get", return_value=_fake_multi_env(["slack"], ["shop"])):
+        with pytest.raises(ApplyServerConfigError, match="not advertised on card for service 'slack'"):
+            await _step(directives=[broadcast]).execute(unadvertising_mcp)
+
+    unadvertising_shop = _carded_context(await _composed_card({"mcp-slack": [ext], "shop": []}))
+    named = {"service": "shop", "uri": _SET_ERRORS_URI, "args": {"error_rate": 1.0}}
+    with _patch_httpx(_MockGateway({})), patch("agent_env.env.env.Env.get", return_value=_fake_multi_env(["slack"], ["shop"])):
+        with pytest.raises(ApplyServerConfigError, match="not advertised on card for service 'shop'"):
+            await _step(directives=[broadcast, named]).execute(unadvertising_shop)
+
+
 # --- schema / validation (pure, no I/O) ---
 
 
@@ -726,3 +837,40 @@ def _carded_context(card: dict) -> TaskStepContext:
     ctx.deployed_envs[0].environment_card_url = f"{_CARD}{WELL_KNOWN_PATH}"
     ctx.deployed_envs[0].environment_card = card
     return ctx
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("service", ["desktop", "*"], ids=["named", "broadcast"])
+async def test_a_multi_envs_computer_is_configured_at_its_own_address_with_its_own_token(service):
+    """Not through the gateway's /svc/desktop/, which carries the gateway's token, not the computer's."""
+    import dataclasses
+
+    from agent_env.env.env import DeployedSandboxEnv
+
+    computer = DeployedSandboxEnv(env_id="desk", env_version=1, sandbox_id="sb-desk", control_token="desk-token",
+                                  environment_card_url="https://desk.example/.well-known/agent-env.json",
+                                  environment_card={**_card(_ext(_SET_ERRORS_URI, "/agentenv/ext/set_errors")), "name": "desktop"})
+    record = DeployedGatewayEnv(env_id="env-x", env_version=1, gateway_url=_GATEWAY, mcp_url="", sandbox_id="sb-env",
+                                control_token="gateway-token", environment_card_url=f"{_GATEWAY}/.well-known/agent-env.json",
+                                environment_card={"name": "office", "url": "/agentenv", "children_environments": [
+                                    {"name": "desktop", "url": "/svc/desktop/agentenv", "capabilities": {"extensions": []}}]},
+                                child_envs={"desktop": dataclasses.asdict(computer)})
+    sent = []
+
+    class Client:
+        async def request(self, method, url, *, json=None, timeout=None, headers=None):
+            sent.append((url, headers))
+            return _resp(200, url, {"ok": True})
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    step = _step(directives=[{"service": service, "uri": _SET_ERRORS_URI, "args": {"tool_name": "t", "error_rate": 0.5}}])
+    with patch("httpx.AsyncClient", return_value=Client()), \
+         patch("agent_env.env.env.Env.get", return_value=SimpleNamespace(mcp_server_envs=[], website_envs=[])):
+        await step.execute(TaskStepContext(deployed_envs=[record]))
+
+    assert sent == [("https://desk.example/agentenv/ext/set_errors", computer.control_headers)]

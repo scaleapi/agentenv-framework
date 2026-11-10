@@ -28,6 +28,7 @@ from ..card import (
     COMPUTER_DISPLAY,
     COMPUTER_EXEC,
     COMPUTER_KEYBOARD,
+    COMPUTER_PAGE,
     COMPUTER_POINTER,
     COMPUTER_READY,
     COMPUTER_RECORDING,
@@ -39,6 +40,7 @@ from ..manifest import RecordingManifest
 from ..recording import RECORDINGS_DIR
 from .client import Driver, image
 from .mp4 import read_mp4
+from .page_fixture import QUESTION, TITLE, TWO, TWO_TITLE
 from .report import CheckResult
 
 MINIMUM_TOOLS = ("computer_screenshot", "computer_click", "computer_drag", "computer_scroll", "computer_type",
@@ -46,6 +48,12 @@ MINIMUM_TOOLS = ("computer_screenshot", "computer_click", "computer_drag", "comp
 DATA_PLANE = (INTAKE_EXTENSION_URI, DATA_OBJECTS_EXTENSION_URI)
 #: Where the fixture is staged and keeps its state, relative to the session user's home.
 STAGE = ".agentenv-probe"
+#: How the probe reads a staged file's owner: through the python3 the fixture runs on, the same on every OS.
+OWNER = ("python3", "-c", "import os, sys; print(os.stat(sys.argv[1]).st_uid)")
+#: Where a page driver's computer_upload takes files from, relative to the session user's home.
+UPLOADS = "Uploads"
+#: What the probe answers the page fixture's prompt with.
+WORD = "tangerine"
 #: What the tool-access check's role, new each run, and the probe's request ids start with.
 PROBE_ROLE = "agentenv-probe"
 #: How long the probe waits for an effect to reach the fixture, and how often it looks.
@@ -64,12 +72,35 @@ READ_DIGEST = ("import hashlib,json,sys;d=open(sys.argv[1],'rb').read();"
 READ_CHUNK = ("import base64,sys;f=open(sys.argv[1],'rb');f.seek(int(sys.argv[2]));"
               "print(base64.b64encode(f.read(int(sys.argv[3]))).decode())")
 CHUNK_BYTES = 512 << 10
+#: The probe's commands on a Windows computer, which has no POSIX shell or tools: Python one-liners on the python3 the
+#: fixture runs on, writing bytes, so output carries no CRLF, and taskkill and the account checks Windows has.
+WIN_ECHO = ("python3", "-c", "import sys;sys.stdout.buffer.write(b'probe\\n');sys.stderr.buffer.write(b'oops\\n');"
+            "sys.exit(3)")
+WIN_SLEEP = ("python3", "-c", "import time;time.sleep(30)")
+WIN_NOW = ("python3", "-c", "import time;print(time.time_ns())")
+WIN_CAT = ("python3", "-c", "import sys;sys.stdout.buffer.write(open(sys.argv[1],'rb').read())")
+WIN_TAIL = ("python3", "-c", "import sys;sys.stdout.buffer.write(b''.join(open(sys.argv[1],'rb').readlines()[-5:]))")
+WIN_REMOVE = ("python3", "-c", "import os,shutil,sys;[shutil.rmtree(p,ignore_errors=True) if os.path.isdir(p) else "
+              "os.path.exists(p) and os.remove(p) for p in sys.argv[1:]]")
+WIN_RMDIR = ("python3", "-c", "import os,sys;p=sys.argv[1];os.path.isdir(p) and not os.listdir(p) and os.rmdir(p)")
+#: Starts the fixture detached, its output to its log, in a process group of its own with no console window; its pid.
+WIN_START = ("python3", "-c", "import subprocess,sys;log=open(sys.argv[3],'wb');print(subprocess.Popen("
+             "[sys.executable,sys.argv[1],sys.argv[2]],stdout=log,stderr=subprocess.STDOUT,stdin=subprocess.DEVNULL,"
+             "creationflags=0x08000200).pid)")
+#: A file's owner, its path in the command, since PowerShell takes what follows -Command as more of the command.
+WIN_OWNER = "(Get-Acl -LiteralPath '{}').Owner"
+#: The well-known SID of the local Administrators group, which an unprivileged user's token holds no enabled entry of.
+ADMINISTRATORS = "S-1-5-32-544"
 #: The checks only ``full`` runs, recorded unverified when the fixture can't be staged.
 FULL_CHECKS = (("P3", "fixture colours land where the mapping says"), ("P4", "clicks show their effect"),
                ("P5", "refusals leave the fixture as it was"), ("P6", "typed and pressed keys arrive"),
                ("P7", "scrolls and drags arrive"), ("P9", "commands and data/add run as one unprivileged user"))
 
 Test = Callable[[], Awaitable[str | None]]
+
+
+class NotApplicable(Exception):
+    """Raised by a test whose check doesn't apply to this driver, with why."""
 
 
 class Probe:
@@ -84,6 +115,20 @@ class Probe:
         self.features = driver.params(COMPUTER)
         self.layout: dict = {}
         self.fixture_pid: str | None = None
+        self.page = self.features.get("screen") == "page"
+        platform = self.features.get("platform") or {}
+        #: Whether the desk is the GTK one: on Wayland, where Tk runs only under XWayland, which a Wayland driver may
+        #: not reach.
+        self.gtk = not self.page and platform.get("display") == "wayland"
+        self.fixture = "page_fixture.py" if self.page else "wayland_fixture.py" if self.gtk else "fixture.py"
+        self.windows = platform.get("os") == "windows"
+        #: The chord that selects a text box's text: Tk's Ctrl+/, which the Tk desk binds everywhere, or on the GTK
+        #: desk GTK's own Ctrl+A.
+        self.select_all = ["Control", "a"] if self.gtk else ["Control", "/"]
+        self.desk = ""
+        self.tab: str | None = None
+        self.opened: list[str] = []
+        self.upload: str | None = None
 
     async def basic(self) -> None:
         for check, section in (("P0", self._ready), ("P1", self._card), ("P2", self._frame), ("P5", self._refusals),
@@ -95,11 +140,14 @@ class Probe:
         self._grants()
 
     async def full(self) -> None:
-        missing = [uri for uri in (COMPUTER_EXEC,) if not self.driver.declares(uri)]
+        needs = (COMPUTER_EXEC, COMPUTER_PAGE) if self.page else (COMPUTER_EXEC,)
+        missing = [uri for uri in needs if not self.driver.declares(uri)]
         if not (protocol.intake_declaration(self.driver.card) or {}).get("add"):
             missing.append("data/add")
         if missing:
-            return self._skip_full(f"the fixture is staged with data/add and computer-exec; the driver lacks {missing}")
+            how = "data/add and computer-exec, and opened with computer-page/v1" if self.page else \
+                "data/add and computer-exec"
+            return self._skip_full(f"the fixture is staged with {how}; the driver lacks {missing}")
         try:
             try:
                 problem = await self._stage()
@@ -109,7 +157,8 @@ class Probe:
                 return self._skip_full(f"the fixture didn't start: {problem}")
             for check, section in (("P9", self._security), ("P3", self._geometry), ("P4", self._effects),
                                    ("P5", self._unchanged), ("P6", self._typing), ("P7", self._scroll_and_drag),
-                                   ("X", self._pointer_input), ("X", self._data_add), ("X", self._recording)):
+                                   ("X", self._pointer_input), ("X", self._data_add), ("X", self._recording),
+                                   ("X", self._page_tools)):
                 await self._guarded(check, section)
         finally:
             await self._unstage()
@@ -119,6 +168,9 @@ class Probe:
     async def check(self, check: str, name: str, test: Test, *extensions: str) -> bool:
         try:
             problem = await test()
+        except NotApplicable as e:
+            self._record(check, name, "not_applicable", str(e), extensions)
+            return True
         except Exception as e:
             problem = f"{type(e).__name__}: {e}"
         self._record(check, name, "failed" if problem else "passed", problem or "", extensions)
@@ -163,7 +215,7 @@ class Probe:
             raise AssertionError(f"{name} {args} failed: {result.content[0].text}")
 
     async def state(self) -> dict:
-        out = await self.driver.run("cat", f"{STAGE}/state/state.json")
+        out = await self._cat(f"{STAGE}/state/state.json")
         return json.loads(out["stdout"])
 
     async def until(self, holds: Callable[[Any], bool],
@@ -180,6 +232,14 @@ class Probe:
     async def settled(self, holds: Callable[[dict], bool], show: Callable[[dict], object]) -> str | None:
         ok, state = await self.until(holds)
         return None if ok else f"the fixture shows {show(state)!r}"
+
+    async def page_now(self) -> dict:
+        """The page a new frame names, or {} for a frame that names none."""
+        return (await self.shot())[0].structuredContent.get("page") or {}
+
+    async def showing(self, holds: Callable[[dict], bool]) -> str | None:
+        ok, page = await self.until(holds, self.page_now)
+        return None if ok else f"the frame's page is {page!r}"
 
     @staticmethod
     def refused(result: CallToolResult, code: str) -> str | None:
@@ -361,24 +421,26 @@ class Probe:
         cap = self.driver.params(COMPUTER_EXEC).get("max_output_bytes")
 
         async def output() -> str | None:
-            out = await self.driver.run("sh", "-c", "echo probe; echo oops >&2; exit 3")
+            out = await self.driver.run(*(WIN_ECHO if self.windows else ("sh", "-c", "echo probe; echo oops >&2; exit 3")))
             want = {"exit_code": 3, "stdout": "probe\n", "stderr": "oops\n", "timed_out": False}
             return None if {k: out.get(k) for k in want} == want else f"it answered {out}"
 
         async def timeout() -> str | None:
             started = time.monotonic()
-            out = await self.driver.run("sh", "-c", "sleep 30", timeout_s=1)
+            out = await self.driver.run(*(WIN_SLEEP if self.windows else ("sh", "-c", "sleep 30")), timeout_s=1)
             took = time.monotonic() - started
             return None if out.get("timed_out") and took < 15 else f"after {took:.1f} s it answered {out}"
 
         async def once() -> str | None:
-            request = {"argv": ["sh", "-c", "date +%s%N"], "request_id": f"{PROBE_ROLE}-once-{time.time_ns()}"}
+            request = {"argv": list(WIN_NOW if self.windows else ("sh", "-c", "date +%s%N")),
+                       "request_id": f"{PROBE_ROLE}-once-{time.time_ns()}"}
             first = await self.driver.invoke(COMPUTER_EXEC, "run", request)
             again = await self.driver.invoke(COMPUTER_EXEC, "run", request)
             return None if first == again else f"it ran twice: {first} then {again}"
 
         async def capped() -> str | None:
-            out = await self.driver.run("sh", "-c", f"head -c {cap + 1000} /dev/zero | tr '\\0' a")
+            out = await self.driver.run(*(("python3", "-c", f"import sys;sys.stdout.buffer.write(b'a'*{cap + 1000})")
+                                          if self.windows else ("sh", "-c", f"head -c {cap + 1000} /dev/zero | tr '\\0' a")))
             return None if out.get("truncated") and len(out["stdout"]) == cap else (
                 f"{len(out['stdout'])} bytes came back, truncated {out.get('truncated')}")
 
@@ -507,31 +569,67 @@ class Probe:
     # full: the fixture
 
     async def _stage(self) -> str | None:
-        source = resources.files(__package__).joinpath("fixture.py").read_bytes()
-        added = await self.driver.add_file(f"{STAGE}/fixture.py", source)
-        if "error" in added:
-            return f"data/add refused it: {added['error'].get('message')}"
-        await self.driver.run("sh", "-c", f"rm -rf {STAGE}/state")
-        started = await self.driver.run(
-            "sh", "-c", f"python3 {STAGE}/fixture.py {STAGE}/state > {STAGE}/fixture.log 2>&1 & echo $!")
+        """The Fixture Desk started, or what stopped it: the Tk desk or on Wayland the GTK desk, either beside the layout
+        they share (desk.py), or on a page, the HTML desk's server, with the desk opened in a tab of the probe's own."""
+        for file in [self.fixture] if self.page else [self.fixture, "desk.py"]:
+            source = resources.files(__package__).joinpath(file).read_bytes()
+            added = await self.driver.add_file(f"{STAGE}/{file}", source)
+            if "error" in added:
+                return f"data/add refused it: {added['error'].get('message')}"
+        if self.windows:
+            await self.driver.run(*WIN_REMOVE, f"{STAGE}/state")
+            started = await self.driver.run(*WIN_START, f"{STAGE}/{self.fixture}", f"{STAGE}/state", f"{STAGE}/fixture.log")
+        else:
+            await self.driver.run("sh", "-c", f"rm -rf {STAGE}/state")
+            started = await self.driver.run(
+                "sh", "-c", f"python3 {STAGE}/{self.fixture} {STAGE}/state > {STAGE}/fixture.log 2>&1 & echo $!")
         self.fixture_pid = started["stdout"].strip() or None
         deadline = time.monotonic() + FIXTURE_START_S
         while time.monotonic() < deadline:
-            layout = await self.driver.run("cat", f"{STAGE}/state/layout.json")
+            if self.page and self.tab is None and (problem := await self._open_desk()):
+                return problem
+            layout = await self._cat(f"{STAGE}/state/layout.json")
             if layout.get("exit_code") == 0 and layout["stdout"].strip():
                 self.layout = json.loads(layout["stdout"])
                 return None
-            state = await self.driver.run("cat", f"{STAGE}/state/state.json")
+            state = await self._cat(f"{STAGE}/state/state.json")
             if state.get("exit_code") == 0 and "error" in (failed := json.loads(state["stdout"] or "{}")):
                 return failed["error"]
             await asyncio.sleep(0.5)
-        log = await self.driver.run("tail", "-n", "5", f"{STAGE}/fixture.log")
+        log = await self.driver.run(*(WIN_TAIL if self.windows else ("tail", "-n", "5")), f"{STAGE}/fixture.log")
         return f"no layout after {FIXTURE_START_S:g} s: {log['stdout'].strip() or log['stderr'].strip()}"
 
+    async def _open_desk(self) -> str | None:
+        """Once the page fixture's server has its port, the desk opened in a new tab, which is the probe's."""
+        port = await self._cat(f"{STAGE}/state/port")
+        if port.get("exit_code") != 0 or not port["stdout"].strip():
+            return None
+        self.desk = f"http://127.0.0.1:{port['stdout'].strip()}/"
+        opened = await self.tool("computer_tabs", {"action": "open", "url": self.desk})
+        if opened.isError:
+            return f"computer_tabs couldn't open it: {opened.content[0].text}"
+        self.tab = next((t["tab"] for t in opened.structuredContent["tabs"] if t["active"]), None)
+        self.opened += [self.tab] if self.tab else []
+        return None if self.tab else f"the tab computer_tabs opened isn't active: {opened.structuredContent['tabs']}"
+
     async def _unstage(self) -> None:
+        if self.opened:
+            with contextlib.suppress(Exception):
+                listed = await self.tool("computer_tabs", {"action": "list"})
+                left = [t["tab"] for t in listed.structuredContent["tabs"]]
+                for tab in [t for t in left if t in self.opened]:
+                    if len(left) > 1:
+                        await self.tool("computer_tabs", {"action": "close", "tab": tab})
+                        left.remove(tab)
         if self.fixture_pid:
-            await self.driver.run("kill", self.fixture_pid)
-        await self.driver.run("rm", "-rf", STAGE)
+            await self.driver.run(*(("taskkill", "/F", "/T", "/PID") if self.windows else ("kill",)), self.fixture_pid)
+        await self.driver.run(*(WIN_REMOVE if self.windows else ("rm", "-rf")), STAGE)
+        if self.upload:
+            await self.driver.run(*(WIN_REMOVE if self.windows else ("rm", "-f")), f"{UPLOADS}/{self.upload}")
+
+    async def _cat(self, path: str) -> dict:
+        """``path``'s bytes as the computer's command answers them."""
+        return await self.driver.run(*(WIN_CAT if self.windows else ("cat",)), path)
 
     async def _base(self) -> tuple[str, float, object]:
         """A fresh frame of the fixture: its id, the display's scale, and its image."""
@@ -545,9 +643,24 @@ class Probe:
                 math.floor((y + (h / 2 if dy is None else dy)) * scale))
 
     async def _security(self) -> None:
+        async def one_account() -> str | None:
+            account = (await self.driver.run("whoami"))["stdout"].strip()
+            owner = (await self.driver.run("powershell", "-NoProfile", "-Command",
+                                           WIN_OWNER.format(f"{STAGE}/{self.fixture}")))["stdout"].strip()
+            groups = (await self.driver.run("whoami", "/groups"))["stdout"]
+            if any(ADMINISTRATORS in line and "Enabled group" in line for line in groups.splitlines()):
+                return f"commands run as {account}, an administrator"
+            return None if owner.lower() == account.lower() else (
+                f"data/add wrote as {owner}, commands run as {account}")
+
+        if self.windows:
+            await self.check("P9", "commands and data/add run as one unprivileged user", one_account, COMPUTER_EXEC,
+                             *DATA_PLANE)
+            return
+
         async def one_user() -> str | None:
             uid = (await self.driver.run("id", "-u"))["stdout"].strip()
-            owner = (await self.driver.run("stat", "-c", "%u", f"{STAGE}/fixture.py"))["stdout"].strip()
+            owner = (await self.driver.run(*OWNER, f"{STAGE}/{self.fixture}"))["stdout"].strip()
             if uid == "0":
                 return "commands run as root"
             return None if owner == uid else f"data/add wrote as uid {owner}, commands run as uid {uid}"
@@ -676,7 +789,7 @@ class Probe:
 
         async def clear() -> None:
             await focus("name")
-            await self.act("computer_key", {"keys": ["Control", "/"]})
+            await self.act("computer_key", {"keys": self.select_all})
             await self.act("computer_key", {"keys": ["Backspace"]})
 
         async def unicode() -> str | None:
@@ -691,7 +804,7 @@ class Probe:
 
         async def chord() -> str | None:
             await focus("name")
-            await self.act("computer_key", {"keys": ["Control", "/"]})
+            await self.act("computer_key", {"keys": self.select_all})
             await self.act("computer_key", {"keys": ["Backspace"]})
             return await self.settled(lambda s: s["name"] == "", lambda s: s["name"])
 
@@ -708,7 +821,11 @@ class Probe:
 
         async def clipboard() -> str | None:
             state = await self.state()
-            return None if state["clipboard"] == self.layout["clipboard"] else f"the clipboard is {state['clipboard']!r}"
+            if pasted := state.get("pasted"):
+                return f"typing arrived as a paste of {pasted!r}"
+            if state["clipboard"] != self.layout["clipboard"]:
+                return f"the clipboard is {state['clipboard']!r}"
+            return None
 
         async def held() -> str | None:
             await clear()
@@ -789,6 +906,100 @@ class Probe:
 
         await self.check("X", "a file data/add writes is there for an app to read", picked_up, *DATA_PLANE)
 
+    async def _page_tools(self) -> None:
+        """The page tools against the HTML desk, each confirmed on the desk or in the page a new frame names; those
+        that leave the desk run last."""
+        if not self.page:
+            return
+        frame, scale, _ = await self._base()
+        two = self.desk + TWO.lstrip("/")
+
+        async def dialog() -> str | None:
+            before = (await self.state())["saved_count"]
+            await self.act("computer_click", {"x": self._at("ask", scale)[0], "y": self._at("ask", scale)[1],
+                                              "frame_id": frame})
+
+            async def seen() -> tuple[dict, dict]:
+                return await self.page_now(), await self.state()
+
+            ok, (page, state) = await self.until(lambda s: bool(s[0].get("dialog")) or s[1]["prompts"] > 0, seen)
+            if not page.get("dialog"):
+                if state["prompts"]:
+                    raise NotApplicable(f"the browser answers dialogs itself: the prompt returned {state['prompted']!r}")
+                return f"no dialog shows in the frame's page: {page!r}"
+            if page["dialog"] != {"type": "prompt", "message": QUESTION, "default_text": ""}:
+                return f"the frame's page shows the dialog as {page['dialog']!r}"
+            x, y = self._at("save", scale)
+            latest = (await self.shot())[0].structuredContent["frame_id"]
+            if problem := self.refused(await self.tool("computer_click", {"x": x, "y": y, "frame_id": latest}),
+                                       "dialog_open"):
+                return f"a click while it's open: {problem}"
+            await self.act("computer_dialog", {"accept": True, "text": WORD})
+            return await self.settled(lambda s: s["prompted"] == WORD and s["saved_count"] == before,
+                                      lambda s: {"prompted": s["prompted"], "saved_count": s["saved_count"]})
+
+        async def upload() -> str | None:
+            self.upload = f"{PROBE_ROLE}-{uuid.uuid4().hex[:8]}.txt"
+            text = f"uploaded by the probe {time.time_ns()}"
+            added = await self.driver.add_file(f"{UPLOADS}/{self.upload}", text.encode())
+            if "error" in added:
+                return f"data/add refused it: {added['error'].get('message')}"
+            x, y = self._at("file", scale, dx=40)
+            await self.act("computer_click", {"x": x, "y": y, "frame_id": frame})
+            if problem := await self.showing(lambda p: p.get("file_chooser") is not None):
+                return f"no file chooser shows: {problem}"
+            outside = await self.tool("computer_upload", {"paths": [f"../{STAGE}/page_fixture.py"]})
+            if problem := self.refused(outside, "invalid_argument"):
+                return f"a file outside ~/{UPLOADS}: {problem}"
+            await self.act("computer_upload", {"paths": [self.upload]})
+            return await self.settled(lambda s: s["uploaded"] == {"name": self.upload, "content": text},
+                                      lambda s: s["uploaded"])
+
+        async def reload() -> str | None:
+            loads = (await self.state())["loads"]
+            await self.act("computer_history", {"direction": "reload"})
+            return await self.settled(lambda s: s["loads"] == loads + 1, lambda s: f"{s['loads'] - loads} loads")
+
+        async def navigate() -> str | None:
+            await self.act("computer_navigate", {"url": two})
+            return await self.showing(lambda p: p.get("url") == two and p.get("title") == TWO_TITLE)
+
+        async def back_and_forth() -> str | None:
+            for direction, url, title in (("back", self.desk, TITLE), ("forward", two, TWO_TITLE)):
+                await self.act("computer_history", {"direction": direction})
+                if problem := await self.showing(lambda p: p.get("url") == url and p.get("title") == title):
+                    return f"after {direction}: {problem}"
+            return None
+
+        async def tabs() -> str | None:
+            opened = await self.tool("computer_tabs", {"action": "open", "url": self.desk})
+            if opened.isError:
+                return f"open: {opened.content[0].text}"
+            active = [t["tab"] for t in opened.structuredContent["tabs"] if t["active"]]
+            if len(active) != 1 or active[0] == self.tab:
+                return f"the opened tab isn't the one active: {opened.structuredContent['tabs']}"
+            other = active[0]
+            self.opened.append(other)
+            if problem := await self.showing(lambda p: p.get("tab") == other and p.get("url") == self.desk):
+                return f"after open: {problem}"
+            await self.act("computer_tabs", {"action": "switch", "tab": self.tab})
+            if problem := await self.showing(lambda p: p.get("tab") == self.tab):
+                return f"after switching back: {problem}"
+            closed = await self.tool("computer_tabs", {"action": "close", "tab": other})
+            if closed.isError or any(t["tab"] == other for t in closed.structuredContent["tabs"]):
+                return f"close: {closed.content[0].text if closed.isError else closed.structuredContent['tabs']}"
+            return await self.showing(lambda p: p.get("tab") == self.tab)
+
+        for name, test in (
+                ("computer_dialog answers a prompt the frame's page shows, and input waits for it", dialog),
+                (f"computer_upload gives the page's file chooser a file from ~/{UPLOADS}, and refuses one outside it",
+                 upload),
+                ("computer_history reload loads the page again", reload),
+                ("computer_navigate opens a page, and the frame's page names it", navigate),
+                ("computer_history goes back and forward through the tab's pages", back_and_forth),
+                ("computer_tabs opens, switches to and closes a tab, and the frame shows the active one", tabs)):
+            await self.check("X", name, test, COMPUTER_PAGE)
+
     async def _recording(self) -> None:
         if not self.driver.declares(COMPUTER_RECORDING):
             return
@@ -835,8 +1046,9 @@ class Probe:
             for recording_id in made:
                 with contextlib.suppress(Exception):
                     await self.driver.invoke(COMPUTER_RECORDING, "end", {"recording_id": recording_id})
-                await self.driver.run("rm", "-rf", f"{RECORDINGS_DIR}/{recording_id}")
-            await self.driver.run("sh", "-c", f"rmdir {RECORDINGS_DIR} 2>/dev/null || true")
+                await self.driver.run(*(WIN_REMOVE if self.windows else ("rm", "-rf")), f"{RECORDINGS_DIR}/{recording_id}")
+            await self.driver.run(*((*WIN_RMDIR, RECORDINGS_DIR) if self.windows else
+                                    ("sh", "-c", f"rmdir {RECORDINGS_DIR} 2>/dev/null || true")))
 
     async def _segments_match(self, wire: dict, fps: int) -> str | None:
         """What is wrong with a recording without a grant, read back from the computer, or None."""

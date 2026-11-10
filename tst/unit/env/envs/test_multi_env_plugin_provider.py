@@ -237,6 +237,17 @@ async def test_a_plugin_multi_env_card_without_one_of_its_children_fails_the_dep
     assert SEEN["closed"] == 1 and env._deployed is None
 
 
+def test_a_plugin_multi_env_card_whose_website_and_mcp_server_share_a_name_is_accepted():
+    from agent_env.env.envs._deployment import check_plugin_record
+
+    env = _multi(servers=("shop",), websites=("shop",))
+    card = {"name": "crm", "children_environments": [{"name": "shop", "url": "/svc/mcp-shop/agentenv"},
+                                                     {"name": "shop", "url": "/svc/shop/agentenv"}]}
+    deployed = DeployedEnv(env_id=env.id, env_version=env.version, env_provider_type="plugin_pods",
+                           environment_card_url=f"{_URL}/.well-known/agent-env.json", environment_card=card)
+    check_plugin_record(env, deployed)
+
+
 def _preflight(env, **options) -> list[str]:
     with patch("agent_env.env.env.Env.get", return_value=env):
         return DeployEnvTaskStep(id="d", version=None, env_id=env.id, **options).preflight()

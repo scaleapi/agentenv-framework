@@ -29,7 +29,7 @@ from ..types import (METHOD_ADD, METHOD_GET, METHOD_RESET, SKILL_EXTENSION_URI, 
 from .app_data import AppDataPlane
 from .app_runtime import AppRuntime
 from .errors import InvalidArgument
-from .platform import detect
+from .platform import PLATFORM_ENV, applies, detect, entry_for, platform_key
 
 #: The environment variable a computer delivers its apps' settings in: JSON of each app's values by its name.
 APP_SETTINGS_ENV = "AGENTENV_APP_SETTINGS"
@@ -41,8 +41,14 @@ _PATHS = TypeAdapter(list[RelativePath])
 WINDOW_KEYS = frozenset({"class", "instance", "title"})
 #: The framework extension an app's own server serves: its launch as params, and its ``launch`` and ``ready`` methods.
 COMPUTER_APP = "urn:agentenv:computer-app/v1"
-#: Where an app's own server listens, in the app's folder, and where it says why it last failed to start.
+#: Where an app's own server listens on Linux and macOS, in the app's folder.
 SOCKET = Path(".agentenv/server.sock")
+#: Where an app's server on Windows writes the port it serves on and its token, in the app's folder.
+ADDRESS = Path(".agentenv/server.json")
+#: Written in an app's folder by its computer's driver once an agent acts there, by a tool call or on a route the app
+#: opens to agents: a fresh computer starts without it, and an app that resets removes its own.
+AGENT_ACTED = Path(".agentenv/agent-acted")
+#: Where an app's server says why it last failed to start, in the app's folder.
 FAILURE = Path(".agentenv/server.failure")
 #: The values of an app's build settings its env fixes in its computer's image, in the app's folder.
 BUILD_SETTINGS = Path(".agentenv/build_settings.json")
@@ -128,7 +134,9 @@ class Linux(BaseModel):
     """How a Linux computer installs the app: ``files``, a folder of the app's copied under its prefix; ``packages``,
     the OS's; ``python``, a requirements file in that folder installed into a venv beside them; ``sources``, extra apt
     repositories; ``downloads``, files fetched by URL; ``run``, scripts run once those are in; ``services``, programs
-    its init runs; ``ports``, those it listens on. Everything is fetched once at put, and builds install only that."""
+    its init runs; ``ports``, those it listens on; ``shm_mb``, the shared memory it needs in ``/dev/shm``, in MiB, which
+    a computer of it gets where its sandbox can size it. Everything is fetched once at put, and builds install only
+    that."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -136,6 +144,21 @@ class Linux(BaseModel):
     packages: Optional[Packages] = None
     python: Optional[LayerPath] = None
     sources: Optional[list[AptSource]] = None
+    downloads: Optional[list[Download]] = None
+    run: Optional[list[RunScript]] = None
+    services: list[Service] = Field(default_factory=list)
+    ports: Optional[list[int]] = None
+    shm_mb: Optional[int] = None
+
+
+class Windows(BaseModel):
+    """How a Windows computer installs the app: as on Linux, with no apt; ``run`` scripts are PowerShell (``.ps1``), run
+    elevated as the computer is composed, and ``services`` run in the session user's sign-in."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    files: LayerPath = "."
+    python: Optional[LayerPath] = None
     downloads: Optional[list[Download]] = None
     run: Optional[list[RunScript]] = None
     services: list[Service] = Field(default_factory=list)
@@ -166,7 +189,9 @@ class Launch(BaseModel):
 
     at: Literal["boot", "demand"] = "boot"
     command: list[str]
-    #: Matches the app's window by its WM_CLASS ``class`` or ``instance`` and its ``title``, as given.
+    #: Matches the app's window by ``class``, ``instance`` and ``title``, as given: on X11 its WM_CLASS class and
+    #: instance; on Hyprland its class, a Wayland app ID or an X window's WM_CLASS class, and its program's file name;
+    #: on Windows its window class and its program's file name, lowercased, such as ``notepad.exe``.
     window: Optional[dict[str, str]] = None
     ready: Optional[Ready] = None
     #: Variables set in the app's environment, over its server's.
@@ -236,7 +261,7 @@ class AppDeclaration(BaseModel):
     """What a ComputerAppEnvironment class declares, as a ``computer_app`` env stores it: the platforms it ``supports``,
     as a driver names them; ``os``, what it declares for each OS type; ``settings`` and ``build_settings``, the JSON
     schemas of its ``Settings`` and of its ``BuildSettings`` when it declares any; its ``skill``; and the ``data``
-    methods, ``install_steps`` and ``ready_checks`` it serves, by name."""
+    methods, ``install_steps`` and ``ready_checks`` it serves, by name; and ``browser``, true for a website browser."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -249,6 +274,16 @@ class AppDeclaration(BaseModel):
     data: list[str]
     install_steps: list[InstallStep]
     ready_checks: list[AppReadyCheck]
+    browser: Optional[bool] = None
+
+    @model_validator(mode="after")
+    def _no_window_wait_on_macos(self) -> AppDeclaration:
+        """A window's readiness is read from X11's windows, which macOS hasn't."""
+        launch = self.os["macos"].launch if "macos" in self.os else None
+        if launch is not None and launch.ready is not None and launch.ready.window:
+            raise ValueError("on macos an app's launch can't wait on its window, which is read from X11; wait on a "
+                             "port, a command or a @ready_check")
+        return self
 
     @model_validator(mode="before")
     @classmethod
@@ -295,7 +330,9 @@ def install(os_type: str, spec: BaseModel, *, launch: Optional[Launch] = None, p
     the app's own there: its ``launch``; the ``paths`` it keeps its data in, relative to the session user's home, which
     serve its data plane when it has no data hooks; its ``skill``, a file of its folder, instead of the class's; and
     ``settings`` and ``build_settings``, models whose fields add to the class's ``Settings`` and ``BuildSettings`` there.
-    ``@linux`` is this for Linux; an OS type a plugin adds is declared with it."""
+    ``os_type`` may name one of its distributions as ``<os>/<distribution>``, /etc/os-release's ID (``linux/omarchy``),
+    whose declaration replaces the OS type's there. ``@linux`` is this for Linux; an OS type a plugin adds is declared
+    with it."""
     try:
         owned = tuple(_PATHS.validate_python(list(paths or [])))
     except ValidationError:
@@ -312,15 +349,29 @@ def install(os_type: str, spec: BaseModel, *, launch: Optional[Launch] = None, p
     return deco
 
 
-def linux(*, files: str = ".", packages: Optional[Packages] = None, python: Optional[str] = None,
-          sources: Optional[list[AptSource]] = None, downloads: Optional[list[Download]] = None,
-          run: Optional[list[RunScript]] = None, services: Optional[list[Service]] = None,
-          ports: Optional[list[int]] = None, launch: Optional[Launch] = None, paths: Optional[list[str]] = None,
-          skill: Optional[str] = None, settings: Optional[type[BaseModel]] = None,
-          build_settings: Optional[type[BaseModel]] = None) -> Callable:
-    """``@install`` for Linux: how a Linux computer installs the app, ``Linux``'s fields, and what is its own there."""
-    return install("linux", Linux(files=files, packages=packages, python=python, sources=sources, downloads=downloads,
-                                  run=run, services=services or [], ports=ports),
+def linux(*, distribution: Optional[str] = None, files: str = ".", packages: Optional[Packages] = None,
+          python: Optional[str] = None, sources: Optional[list[AptSource]] = None,
+          downloads: Optional[list[Download]] = None, run: Optional[list[RunScript]] = None,
+          services: Optional[list[Service]] = None, ports: Optional[list[int]] = None, shm_mb: Optional[int] = None,
+          launch: Optional[Launch] = None, paths: Optional[list[str]] = None, skill: Optional[str] = None,
+          settings: Optional[type[BaseModel]] = None, build_settings: Optional[type[BaseModel]] = None) -> Callable:
+    """``@install`` for Linux, or with ``distribution`` for that distribution alone: how such a computer installs the
+    app, ``Linux``'s fields, and what is its own there."""
+    spec = Linux(files=files, packages=packages, python=python, sources=sources, downloads=downloads, run=run,
+                 services=services or [], ports=ports, shm_mb=shm_mb)
+    return install(platform_key("linux", distribution), spec, launch=launch, paths=paths, skill=skill,
+                   settings=settings, build_settings=build_settings)
+
+
+def windows(*, files: str = ".", python: Optional[str] = None, downloads: Optional[list[Download]] = None,
+            run: Optional[list[RunScript]] = None, services: Optional[list[Service]] = None,
+            ports: Optional[list[int]] = None, launch: Optional[Launch] = None, paths: Optional[list[str]] = None,
+            skill: Optional[str] = None, settings: Optional[type[BaseModel]] = None,
+            build_settings: Optional[type[BaseModel]] = None) -> Callable:
+    """``@install`` for Windows: how a Windows computer installs the app, ``Windows``'s fields, and what is its own
+    there."""
+    return install("windows", Windows(files=files, python=python, downloads=downloads, run=run,
+                                      services=services or [], ports=ports),
                    launch=launch, paths=paths, skill=skill, settings=settings, build_settings=build_settings)
 
 
@@ -349,6 +400,17 @@ def _named(os_types: Union[str, list[str], None]) -> Optional[list[str]]:
     return None if os_types is None else [os_types] if isinstance(os_types, str) else list(os_types)
 
 
+def agent_acted() -> bool:
+    """Whether an agent has acted in this app's computer since the computer started or the app last reset, as its
+    driver notes; read from the app's own folder."""
+    return AGENT_ACTED.exists()
+
+
+def forget_agent_acted() -> None:
+    """Start over, as an app that has reset: no agent has acted since."""
+    AGENT_ACTED.unlink(missing_ok=True)
+
+
 class ComputerAppEnvironment(AgentEnvEnvironment):
     """Subclass it, declare it with ``@computer_app`` and an OS decorator for each OS (``@linux``), and set ``skill`` as
     a class attribute; a deploy's settings arrive as ``self.settings``, those its env fixes at build as
@@ -373,6 +435,14 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
     skill: ClassVar[Optional[str]] = None
     #: How long one of its data calls may take, a hook or its paths' default, before it fails.
     data_timeout_s: ClassVar[float] = 300.0
+    #: The data operations its hooks serve on the running app, which its data plane neither stops it for nor
+    #: relaunches it after; and whether its server keeps its paths as installed for a reset hook of its own to put
+    #: back (``app_data.reset``), as it does for the default reset.
+    data_live: ClassVar[frozenset[str]] = frozenset()
+    data_keeps_paths: ClassVar[bool] = False
+    #: Path prefixes of its own server's routes, each ending in ``/``, that agents reach through the driver without the
+    #: computer's control token; the app checks a call to one itself.
+    agent_routes: ClassVar[tuple[str, ...]] = ()
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         """Take the class's data hooks over, for the base class's handlers to serve around its contract; and serve its
@@ -396,24 +466,25 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
         app declares its own, which its install steps read too. None is a secret, since the image keeps them."""
 
     def __init__(self) -> None:
-        cls, on = type(self), detect().os
+        cls, on = type(self), _here()
         values = json.loads(os.environ.get(APP_SETTINGS_ENV) or "{}").get(os.environ.get("ENVIRONMENT_NAME"), {})
         self.settings = cls.settings_on(on).model_validate(values)
         self.build_settings = _built_settings(cls, on)
-        declared = cls._installs.get(on)
+        declared = entry_for(cls._installs, on)
         launch = declared.launch if declared is not None else None
         self.launch = self._launch_for(launch) if launch is not None else None
         self.paths = list(declared.paths) if declared is not None else []
         ready = launch.ready if launch is not None else None
         self._computer_app = AppRuntime(
             self.launch, {fn.__name__: getattr(self, fn.__name__) for fn in _methods(cls)
-                          if hasattr(fn, _READY_CHECK_ATTR) and _runs_on(getattr(fn, _READY_CHECK_ATTR), on)},
+                          if hasattr(fn, _READY_CHECK_ATTR) and applies(getattr(fn, _READY_CHECK_ATTR), on)},
             ready.timeout_s if ready is not None else DEFAULT_TIMEOUT_S, desktop=self._on_desktop(),
             launch_fds=self._launch_fds, relaunch_on_start=self._relaunch_on_start(),
             launch_running=self._launch_running())
         self._computer_app_data = AppDataPlane(
             self._computer_app, {op: getattr(self, name) for op, name in cls._data_hooks.items()}, self.paths,
-            cls.data_timeout_s)
+            cls.data_timeout_s, live=cls.data_live, keeps_paths=cls.data_keeps_paths,
+            resets_failed_add=self._resets_failed_add, relaunched=self._relaunched)
 
     def _launch_for(self, launch: Launch) -> Launch:
         """The launch its server uses, from the one declared for its OS, whose ``ready`` timeout it keeps: as
@@ -436,16 +507,24 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
         """What a launch does while it runs instead of starting a second copy: nothing, so another copy starts."""
         return None
 
+    def _resets_failed_add(self) -> bool:
+        """Whether a load that fails is followed by a reset, so the app isn't left half loaded: always."""
+        return True
+
+    async def _relaunched(self, op: str) -> None:
+        """What a data call that stopped the app, ``op``, awaits once it has launched it again: nothing."""
+
     @classmethod
     def settings_on(cls, os_type: Optional[str]) -> type[BaseModel]:
-        """Its ``Settings`` on ``os_type``, with the fields its OS adds."""
-        added = declared.settings if (declared := cls._installs.get(os_type)) is not None else None
+        """Its ``Settings`` on ``os_type``, an OS type or ``<os>/<distribution>``, with the fields it adds there."""
+        added = declared.settings if (declared := entry_for(cls._installs, os_type)) is not None else None
         return _added(added, cls.Settings) if added is not None else cls.Settings
 
     @classmethod
     def build_settings_on(cls, os_type: Optional[str]) -> type[BaseModel]:
-        """Its ``BuildSettings`` on ``os_type``, with the fields its OS adds."""
-        added = declared.build_settings if (declared := cls._installs.get(os_type)) is not None else None
+        """Its ``BuildSettings`` on ``os_type``, an OS type or ``<os>/<distribution>``, with the fields it adds
+        there."""
+        added = declared.build_settings if (declared := entry_for(cls._installs, os_type)) is not None else None
         return _added(added, cls.BuildSettings) if added is not None else cls.BuildSettings
 
     @extension(COMPUTER_APP, op="launch", description=(
@@ -472,7 +551,7 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
     def extension_params(self, uri: str) -> dict:
         if uri == COMPUTER_APP:
             return {"launch": self.launch.model_dump(mode="json", exclude_none=True) if self.launch else None,
-                    "paths": self.paths}
+                    "paths": self.paths, **({"agent_routes": list(self.agent_routes)} if self.agent_routes else {})}
         return super().extension_params(uri)
 
     def served_operations(self, operations: list[str]) -> list[str]:
@@ -517,7 +596,7 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
 
     def _computer_app_skill_file(self) -> Optional[str]:
         """The file of the app's folder holding its skill on this OS, or the class's."""
-        declared = type(self)._installs.get(detect().os)
+        declared = entry_for(type(self)._installs, _here())
         return declared.skill if declared is not None and declared.skill is not None else type(self).skill
 
     @classmethod
@@ -547,8 +626,10 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
                  if hasattr(fn, _INSTALL_STEP_ATTR) for scope, os_types in [getattr(fn, _INSTALL_STEP_ATTR)]]
         checks = [AppReadyCheck(name=fn.__name__, os=getattr(fn, _READY_CHECK_ATTR)) for fn in methods
                   if hasattr(fn, _READY_CHECK_ATTR)]
+        installed_os = {key.partition("/")[0] for key in cls._installs}
         for method in [*steps, *checks]:
-            if unknown := [os_type for os_type in method.os or [] if os_type not in cls._installs]:
+            if unknown := [os_type for os_type in method.os or []
+                           if entry_for(cls._installs, os_type) is None and os_type not in installed_os]:
                 raise ValueError(f"{cls.__name__}.{method.name} runs on {unknown[0]!r}, which {cls.__name__} declares "
                                  f"no install for; it declares {', '.join(cls._installs) or 'none'}")
         return AppDeclaration(
@@ -607,8 +688,13 @@ def _built_settings(cls: type[ComputerAppEnvironment], os_type: Optional[str]) -
     return cls.build_settings_on(os_type).model_validate(values)
 
 
-def _runs_on(os_types: Optional[list[str]], os_type: Optional[str]) -> bool:
-    return os_types is None or os_type in os_types
+def _here() -> Optional[str]:
+    """The platform this runs on, by the key an app's parts for it are under (``platform_key``): the one its computer
+    was composed for (``PLATFORM_ENV``), else what it detects."""
+    if composed := os.environ.get(PLATFORM_ENV):
+        return composed
+    running = detect()
+    return platform_key(running.os, running.distribution)
 
 
 @functools.cache

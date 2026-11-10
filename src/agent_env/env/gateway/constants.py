@@ -80,7 +80,10 @@ EXT_STATE_URI = "urn:agentenv:state/v1"
 EXT_CHANGES_URI = "urn:agentenv:changes/v1"
 EXT_NOTIFICATIONS_URI = "urn:agentenv:notifications/v1"
 EXT_WEBSITE_URI = "urn:agentenv:website/v1"
+EXT_BROWSER_URI = "urn:agentenv:browser/v1"
+EXT_COMPUTER_APP_URI = "urn:agentenv:computer-app/v1"
 WEBSITE_READY_OP = "ready"
+WEBSITE_BROWSE_URL_PARAM = "browse_url"
 
 # Rows per GET /changes page: the default, and the most a client may ask for.
 CHANGES_PAGE_DEFAULT = 1000
@@ -126,9 +129,10 @@ TRIGGER_WEBSITE = "website"
 TRIGGER_EXECUTOR_HOURS_TIME_ZONE = "executor_hours_time_zone"
 TRIGGER_NEXT_EVENT_AT = "next_event_at"
 TRIGGER_NOTIFY = "notify"
+TRIGGER_WEBSITE_OP = "website_op"
 TRIGGER_FEATURES = (TRIGGER_NAMED_EXECUTORS, TRIGGER_PROVOKING_ROLES, TRIGGER_ACTION_DELAY, TRIGGER_EXECUTOR_HOURS,
                     TRIGGER_UNLESS, TRIGGER_WEBSITE, TRIGGER_EXECUTOR_HOURS_TIME_ZONE, TRIGGER_NEXT_EVENT_AT,
-                    TRIGGER_NOTIFY)
+                    TRIGGER_NOTIFY, TRIGGER_WEBSITE_OP)
 
 # The one `source` a /step call may name instead of step_api, with the id of the hook artifact that made it.
 STEP_SOURCE_POST_TURN_HOOK = "post_turn_hook"
@@ -142,6 +146,9 @@ GATEWAY_TRAJECTORY_FILE = os.environ.get(
 )
 
 AGENT_ENV_ROLE_HEADER = "AgentEnv-Role"
+# Sent by a computer's site proxy, which serves a website's route at the root of the site's own name.
+AGENT_ENV_SITE_ROOT_HEADER = "AgentEnv-Site-Root"
+GATEWAY_PROVIDER_HEADERS_ENV = "AGENTENV_PROVIDER_REQUEST_HEADERS"
 # MCP request `_meta` keys the gateway stamps on every child tools/call: the caller's role, and on the MCP path a
 # key naming the inbound session, so a child can keep per-caller state behind the gateway's one shared session.
 AGENT_ENV_ROLE_META_KEY = "agentenv.io/role"

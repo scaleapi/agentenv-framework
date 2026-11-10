@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tomllib
+from pathlib import Path
 
 import pytest
 
@@ -21,8 +23,8 @@ MISSING_CAPABILITY_PREFIX = "agentenv-capability-missing: "
 MODEL_ENDPOINT = "model_endpoint_configured"
 
 #: The remote sandbox providers (``modal``, ``modal_vm``, ``e2b``, ``sail_vm``, ``tensorlake``, ``tenki``,
-#: ``vercel``, ``boxd``, ``coreweave``, ``daytona``, ``boat``) need credentials the resolved config may not carry; the
-#: local default never does.
+#: ``vercel``, ``boxd``, ``coreweave``, ``daytona``, ``boat``, ``agent37``) need credentials the resolved config may not
+#: carry; the local default never does.
 REMOTE_SANDBOX = "remote_sandbox"
 
 #: The A2A agent a ``deploy_agent`` step without an id resolves to (``default_a2a_agent_id``); the
@@ -69,6 +71,16 @@ GNU_STAT = "gnu_stat"
 #: Docker Desktop on a Mac has none, nor has a host without nested virtualization.
 KVM = "kvm"
 
+#: Composing a Windows computer installs Windows from Microsoft's evaluation ISO, which a run fetches into this machine's
+#: cache once, about 7 GB; a test that composes one needs it there already, and KVM, which boots windows/amd64 disks.
+WINDOWS_MEDIA = "windows_media"
+
+#: Composing an Omarchy computer builds its base from Omarchy's own VM image, which a run fetches into this machine's
+#: cache once, about 4 GB; a test that composes one needs it there already, and KVM, which boots linux/amd64 disks.
+OMARCHY_IMAGE = "omarchy_image"
+#: The shipped Omarchy base, whose source the capability looks for.
+OMARCHY_ARTIFACT = Path(__file__).parents[2] / "src" / "agent_env" / "computers" / "artifacts" / "omarchy-4.5" / "artifact.toml"
+
 
 def missing_capability_reason(capability: str) -> str:
     return f"{MISSING_CAPABILITY_PREFIX}{capability}"
@@ -110,17 +122,17 @@ def skip_without_model_endpoint() -> pytest.MarkDecorator:
 
 def remote_sandbox_is_available(provider: str) -> bool:
     """Whether the resolved config can build the ``modal`` / ``modal_vm`` / ``e2b`` / ``sail_vm`` /
-    ``tensorlake`` / ``tenki`` / ``vercel`` / ``boxd`` / ``coreweave`` / ``daytona`` / ``boat`` sandbox provider, credentials included.
+    ``tensorlake`` / ``tenki`` / ``vercel`` / ``boxd`` / ``coreweave`` / ``daytona`` / ``boat`` / ``agent37`` sandbox provider, credentials included.
 
     Modal: any failure to resolve the credentials answers False. E2B, Sail, Tensorlake, Tenki, Vercel, boxd,
-    CoreWeave, Daytona and boat: building the provider resolves ``[sandbox.providers.<name>.config]`` and its ``secret:`` references;
+    CoreWeave, Daytona, boat and Agent37: building the provider resolves ``[sandbox.providers.<name>.config]`` and its ``secret:`` references;
     only a ``ConfigError`` (absent or incomplete config, or the provider's extra not installed) answers
     False, any other failure answers True and lets the test fail on the real problem, as
     ``model_endpoint_is_configured`` does. Vercel, which builds without credentials, also needs them in
     its config or the environment."""
-    if provider not in ("modal", "modal_vm", "e2b", "sail_vm", "tensorlake", "tenki", "vercel", "boxd", "coreweave", "daytona", "boat"):
+    if provider not in ("modal", "modal_vm", "e2b", "sail_vm", "tensorlake", "tenki", "vercel", "boxd", "coreweave", "daytona", "boat", "agent37"):
         raise ValueError(f"unknown remote sandbox provider {provider!r}")
-    if provider in ("e2b", "sail_vm", "tensorlake", "tenki", "vercel", "boxd", "coreweave", "daytona", "boat"):
+    if provider in ("e2b", "sail_vm", "tensorlake", "tenki", "vercel", "boxd", "coreweave", "daytona", "boat", "agent37"):
         from agent_env.config.errors import ConfigError
         from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider
 
@@ -209,6 +221,34 @@ def kvm_is_available() -> bool:
     from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
 
     return bool(LocalSandboxProvider.disk_image_platforms())
+
+
+def windows_media_is_available() -> bool:
+    """Whether this machine boots Windows disks and holds Microsoft's evaluation ISO in its cache."""
+    from agent_env.env.envs.computer.utils.windows_disk import media_path
+    from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
+
+    return "windows/amd64" in LocalSandboxProvider.disk_image_platforms() and media_path().exists()
+
+
+def omarchy_image_is_available() -> bool:
+    """Whether this machine boots Omarchy's disks and holds the image the shipped Omarchy base is built from."""
+    from agent_env.env.envs.computer.utils.omarchy_disk import source_path
+    from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
+
+    artifact = OMARCHY_ARTIFACT.read_text()
+    sha256 = tomllib.loads(artifact)["forms"]["disk"]["source"]["sha256"]
+    return "linux/amd64" in LocalSandboxProvider.disk_image_platforms() and source_path(sha256).exists()
+
+
+def skip_without_omarchy_image() -> pytest.MarkDecorator:
+    """Collection-time ``skipif`` for tests that compose an Omarchy computer on local Docker."""
+    return pytest.mark.skipif(not omarchy_image_is_available(), reason=missing_capability_reason(OMARCHY_IMAGE))
+
+
+def skip_without_windows_media() -> pytest.MarkDecorator:
+    """Collection-time ``skipif`` for tests that compose a Windows computer on local Docker."""
+    return pytest.mark.skipif(not windows_media_is_available(), reason=missing_capability_reason(WINDOWS_MEDIA))
 
 
 def skip_without_kvm() -> pytest.MarkDecorator:

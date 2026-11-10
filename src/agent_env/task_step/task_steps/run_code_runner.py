@@ -5,7 +5,13 @@ JSON result. Reads `run_dir`, `entrypoint` and `script_file` from argv.
 
 Given a fourth argument, `timeout_seconds`, it first supervises: it reruns itself without
 it in a new session and stops that whole process group at the limit, so no target needs
-GNU `timeout`.
+GNU `timeout`. Windows has no process groups to signal, so there it ends the rerun's process
+tree with `taskkill`. While it supervises, it holds a lock on `runner.lock` in `run_dir`, its pid
+in `runner.pid`.
+
+`--clear <run_dir>` ends the supervisor holding that lock, with all it started, then removes the
+folder; `--size <path>` prints a file's size. run_code runs these inside a computer, as its OS
+may have no POSIX tools to do it with.
 
 Both the entry script's own directory and `run_dir` go on sys.path, so a multi-file
 artifact can import its siblings whether it is laid out flat or under a subdirectory.
@@ -18,9 +24,17 @@ import sys
 _TIMEOUT_EXIT_CODE = 124  # GNU timeout's, which run_code reports as a timeout
 _GRACE_SECONDS = 5  # between SIGTERM and SIGKILL
 _POLL_SECONDS = 0.1
+_LOCK, _PID = "runner.lock", "runner.pid"
+
+
+def _end_tree(pid):
+    subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True)
 
 
 def _signal_group(pgid, signum):
+    if os.name == "nt":
+        _end_tree(pgid)
+        return
     try:
         os.killpg(pgid, signum)
     except (ProcessLookupError, PermissionError):  # gone, or (macOS) only zombies are left
@@ -49,8 +63,9 @@ def _supervise(command, timeout_seconds):
 
     # Caught before the child starts, as GNU timeout does, so it gets their defaults: one ignored here (a background
     # job's SIGINT) would stay ignored in it.
-    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-        signal.signal(signum, forward)
+    for name in ("SIGTERM", "SIGINT", "SIGHUP"):  # Windows has no SIGHUP
+        if hasattr(signal, name):
+            signal.signal(getattr(signal, name), forward)
     child = subprocess.Popen(command, start_new_session=True)
     for signum in early:
         _signal_group(child.pid, signum)
@@ -67,12 +82,77 @@ def _supervise(command, timeout_seconds):
         except subprocess.TimeoutExpired:
             pass
     if kill_at is not None:
-        _signal_group(child.pid, signal.SIGKILL)
+        _signal_group(child.pid, getattr(signal, "SIGKILL", signal.SIGTERM))
     status = child.wait()
     if timed_out:
         return _TIMEOUT_EXIT_CODE
     return status if status >= 0 else 128 - status
 
+
+def _hold(run_dir):
+    """Lock ``run_dir`` for this supervisor's life, its pid beside the lock."""
+    with open(os.path.join(run_dir, _PID), "w") as pid:
+        pid.write(str(os.getpid()))
+    lock = open(os.path.join(run_dir, _LOCK), "wb")
+    if os.name == "nt":
+        msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+    else:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+    return lock
+
+
+def _held(path):
+    """Whether another process holds the lock at ``path``."""
+    with open(path, "r+b") as lock:
+        try:
+            if os.name == "nt":
+                msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return True
+    return False
+
+
+def _clear(run_dir):
+    """End the supervisor still running from ``run_dir``, as a run whose caller died leaves one, with all it started,
+    then remove the folder. A supervisor passes a SIGTERM on to its group; Windows ends the tree at once."""
+    lock = os.path.join(run_dir, _LOCK)
+    if os.path.exists(lock) and _held(lock):
+        with open(os.path.join(run_dir, _PID)) as pid_file:
+            pid = int(pid_file.read())
+        if os.name == "nt":
+            _end_tree(pid)
+        else:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+        deadline = time.monotonic() + _GRACE_SECONDS * 2
+        while _held(lock) and time.monotonic() < deadline:
+            time.sleep(_POLL_SECONDS)
+    if os.path.isdir(run_dir):
+        shutil.rmtree(run_dir)
+
+
+if sys.argv[1:2] in (["--clear"], ["--size"]):
+    import os
+    import shutil
+    import signal
+    import subprocess
+    import time
+
+    if os.name == "nt":
+        import msvcrt
+    else:
+        import fcntl
+
+    if sys.argv[1] == "--size":
+        print(os.path.getsize(sys.argv[2]))
+    else:
+        _clear(sys.argv[2])
+    sys.exit(0)
 
 if len(sys.argv) == 5:
     # Only the supervisor imports these, and not from the run dir (sys.path[0]): an artifact member named after one
@@ -86,6 +166,12 @@ if len(sys.argv) == 5:
     import subprocess
     import time
 
+    if os.name == "nt":
+        import msvcrt
+    else:
+        import fcntl
+
+    lock = _hold(sys.argv[1])
     sys.exit(_supervise([sys.executable] + sys.argv[:4], float(sys.argv[4])))
 
 # Below the supervisor, which must not import these.

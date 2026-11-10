@@ -18,17 +18,17 @@ pytest.importorskip("PIL")
 from agentenv_protocol.computer import AppDeclaration  # noqa: E402
 from agentenv_protocol.computer._declare import _Stub, _StubModule, declare, main  # noqa: E402
 from agentenv_protocol.computer import (APP_SETTINGS_ENV, ComputerAppEnvironment, Launch, Linux,  # noqa: E402
-                                        install, linux)
+                                        Windows, install, install_step, linux, ready_check, windows)
 from agentenv_protocol.computer import app as app_module  # noqa: E402
 from agentenv_protocol.computer.app import BUILD_SETTINGS  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
-from agentenv_protocol.computer.platform import Platform  # noqa: E402
+from agentenv_protocol.computer.platform import PLATFORM_ENV, Platform  # noqa: E402
 
 DRIVER = '''import not_installed_here
 from not_installed_here.input import Base, Keyboard
 
-from agentenv_protocol.computer import (ComputerDriverEnvironment, Display, capture, click, computer_driver, display,
-                                        drag, press, scroll, type_text)
+from agentenv_protocol.computer import (ComputerDriverEnvironment, ComputerSettings, Display, capture, click,
+                                        computer_driver, display, drag, press, scroll, type_text)
 
 SHIFT = Keyboard.keysym("Shift_L")[0]
 print("loading the desk driver")
@@ -62,6 +62,11 @@ class Desk(ComputerDriverEnvironment):
 
     @press
     def press_keys(self, keys): pass
+
+
+class Headed(Desk):
+    class Settings(ComputerSettings):
+        headed: bool = False
 '''
 APP = '''import not_installed_here
 from pydantic import BaseModel, SecretStr
@@ -160,6 +165,9 @@ def test_a_class_whose_imports_arent_installed_declares_what_it_serves_on_each_p
     linux = declared.platforms[0]
     assert {"urn:agentenv:computer/v1", "urn:agentenv:computer-exec/v1"} <= set(linux.provides)
     assert len(linux.tools) == 7 and linux.features["buttons"] == ["left", "right"]
+    assert declared.settings is None
+    assert declare(folder, "driver.py", "Headed").settings["properties"]["headed"] == {"default": False, "title": "Headed",
+                                                                                      "type": "boolean"}
 
 
 def test_a_stub_is_itself_again_except_for_dunders(folder):
@@ -264,6 +272,9 @@ def test_an_app_declaring_its_skill_twice_is_refused(folder):
      "Changed.fonts runs on 'windows', which Changed declares no install for; it declares freebsd, linux"),
     ('@ready_check(os="macos")\n    def window_shown(self): return True',
      "Changed.window_shown runs on 'macos', which Changed declares no install for"),
+    ('@install("macos", FreeBSD(), launch=Launch(command=["mail"], window={"class": "Mail"}, '
+     'ready=Ready(window=True)))',
+     "on macos an app's launch can't wait on its window, which is read from X11"),
     ('class BuildSettings(BaseModel): key: SecretStr = SecretStr("")',
      "Changed.BuildSettings holds a secret at properties.key, which its computer's image would keep; declare it in "
      "Settings"),
@@ -273,9 +284,9 @@ def test_an_app_declaring_its_skill_twice_is_refused(folder):
      "Changed.BuildSettings holds a secret at $defs.Settings.properties.password, which"),
 ], ids=["no-wait", "no-window", "window-key", "download-sha", "script-escape", "os-skill-twice", "os-build-secret",
         "step-os",
-        "check-os", "build-secret", "build-secrets-listed", "build-secret-nested"])
+        "check-os", "macos-window-wait", "build-secret", "build-secrets-listed", "build-secret-nested"])
 def test_an_app_whose_declaration_cant_be_checked_is_refused_saying_why(folder, capsys, change, problem):
-    decorator, body = (change, "pass") if change.startswith("@linux") else ("", change)
+    decorator, body = (change, "pass") if change.startswith(("@linux", "@install(")) else ("", change)
     (folder / "app.py").write_text(APP.format(supports=LINUX, sha='a' * 64) + f"""
 
 @computer_app(supports={LINUX})
@@ -326,6 +337,106 @@ def test_an_app_reads_its_settings_build_settings_and_launch_as_declared_for_the
         assert (type(notes.settings), notes.build_settings.edition, notes.launch) == (Notes.Settings, "home", None)
 
 
+@pytest.mark.parametrize(("distribution", "launched", "checked"), [
+    ("omarchy", ["notes", "--wayland"], ["anywhere", "here"]), ("ubuntu", ["notes"], ["anywhere"]),
+    (None, ["notes"], ["anywhere"])])
+def test_an_app_on_a_distribution_it_declares_for_takes_that_part_and_elsewhere_its_os_types(
+        monkeypatch, tmp_path, distribution, launched, checked):
+    class WaylandSettings(BaseModel):
+        portal: bool = True
+
+    @linux(distribution="omarchy", launch=Launch(command=["notes", "--wayland"]), settings=WaylandSettings)
+    @linux(launch=Launch(command=["notes"]))
+    class Notes(ComputerAppEnvironment):
+        @ready_check(os="linux")
+        def anywhere(self):
+            return True
+
+        @ready_check(os="linux/omarchy")
+        def here(self):
+            return True
+
+    monkeypatch.setattr(app_module, "detect", lambda: Platform(os="linux", distribution=distribution))
+    monkeypatch.setenv("ENVIRONMENT_NAME", "notes")
+    monkeypatch.delenv(APP_SETTINGS_ENV, raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    notes = Notes()
+
+    assert set(Notes.declaration().os) == {"linux", "linux/omarchy"}
+    assert notes.launch.command == launched and hasattr(notes.settings, "portal") == (distribution == "omarchy")
+    assert sorted(notes._computer_app.ready_checks) == checked
+
+
+def test_an_install_step_or_ready_check_on_no_os_type_the_app_installs_on_is_refused():
+    @linux(distribution="omarchy")
+    class Notes(ComputerAppEnvironment):
+        @ready_check(os="linux")
+        def anywhere(self):
+            return True
+
+        @ready_check(os="macos")
+        def mac(self):
+            return True
+
+    with pytest.raises(ValueError, match="Notes.mac runs on 'macos', which Notes declares no install for"):
+        Notes.declaration()
+
+
+@pytest.mark.parametrize(("distribution", "checked"), [("ubuntu", ["anywhere", "on_ubuntu"]),
+                                                     ("omarchy", ["anywhere"])])
+def test_an_install_step_or_ready_check_for_a_distribution_runs_there_on_its_os_types_install(
+        monkeypatch, tmp_path, distribution, checked):
+    @linux(launch=Launch(command=["notes"]))
+    class Notes(ComputerAppEnvironment):
+        @install_step(os="linux/ubuntu")
+        def fonts(self):
+            pass
+
+        @ready_check(os="linux")
+        def anywhere(self):
+            return True
+
+        @ready_check(os="linux/ubuntu")
+        def on_ubuntu(self):
+            return True
+
+    monkeypatch.setattr(app_module, "detect", lambda: Platform(os="linux", distribution=distribution))
+    monkeypatch.setenv("ENVIRONMENT_NAME", "notes")
+    monkeypatch.delenv(APP_SETTINGS_ENV, raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    assert [step.os for step in Notes.declaration().install_steps] == [["linux/ubuntu"]]
+    assert sorted(Notes()._computer_app.ready_checks) == checked
+
+
+def test_an_app_reads_the_platform_its_computer_was_composed_for_over_what_it_detects(monkeypatch, tmp_path):
+    @linux(distribution="omarchy", launch=Launch(command=["notes", "--wayland"]))
+    @linux(launch=Launch(command=["notes"]))
+    class Notes(ComputerAppEnvironment):
+        pass
+
+    monkeypatch.setattr(app_module, "detect", lambda: Platform(os="linux", distribution="arch"))
+    monkeypatch.setenv("ENVIRONMENT_NAME", "notes")
+    monkeypatch.delenv(APP_SETTINGS_ENV, raising=False)
+    monkeypatch.chdir(tmp_path)
+    detected = Notes().launch.command
+    monkeypatch.setenv(PLATFORM_ENV, "linux/omarchy")
+
+    assert (detected, Notes().launch.command) == (["notes"], ["notes", "--wayland"])
+
+
+def test_an_install_step_or_ready_check_for_a_distribution_with_no_install_of_its_own_or_its_os_types_is_refused():
+    @linux(distribution="omarchy")
+    class Notes(ComputerAppEnvironment):
+        @install_step(os="linux/ubuntu")
+        def fonts(self):
+            pass
+
+    with pytest.raises(ValueError, match="Notes.fonts runs on 'linux/ubuntu', which Notes declares no install for"):
+        Notes.declaration()
+
+
 def test_a_declaration_stored_before_each_os_had_its_own_part_reads_as_its_linux_part():
     stored = {"supports": LINUX, "permissions": [], "settings": {"type": "object"}, "data": [], "install_steps": [],
               "install": {"linux": {"files": ".", "services": [{"name": "imap", "command": "bin/imap"}]}},
@@ -339,10 +450,25 @@ def test_a_declaration_stored_before_each_os_had_its_own_part_reads_as_its_linux
     assert AppDeclaration.model_validate(declared.model_dump(mode="json")) == declared
 
 
-def test_linux_takes_every_field_of_a_linux_install_and_what_install_adds_for_an_os():
+def test_linux_and_windows_take_every_field_of_their_install_and_what_install_adds_for_an_os():
     added = set(inspect.signature(install).parameters) - {"os_type", "spec"}
 
-    assert set(inspect.signature(linux).parameters) == set(Linux.model_fields) | added
+    assert set(inspect.signature(linux).parameters) == set(Linux.model_fields) | added | {"distribution"}
+    assert set(inspect.signature(windows).parameters) == set(Windows.model_fields) | added
+
+
+def test_a_windows_app_declares_its_install_and_launch_under_windows():
+    @windows(python="requirements.txt", services=[{"name": "sync", "command": "bin/sync.exe"}],
+             launch=Launch(command=["notes"], window={"title": "Notes"}))
+    class Notes(ComputerAppEnvironment):
+        pass
+
+    declared = Notes.declaration()
+
+    assert list(declared.os) == ["windows"]
+    assert declared.os["windows"].install == {"files": ".", "python": "requirements.txt",
+                                              "services": [{"name": "sync", "command": "bin/sync.exe"}]}
+    assert declared.os["windows"].launch == Launch(command=["notes"], window={"title": "Notes"})
 
 
 def test_an_apps_code_needs_only_the_plain_package():
@@ -350,7 +476,7 @@ def test_an_apps_code_needs_only_the_plain_package():
 import importlib.abc, sys
 class Blocked(importlib.abc.MetaPathFinder):
     def find_spec(self, name, path, target=None):
-        if name.split(".")[0] in ("mcp", "av", "PIL", "uvicorn"):
+        if name.split(".")[0] in ("mcp", "av", "PIL", "uvicorn", "websockets"):
             raise ImportError(name)
 sys.meta_path.insert(0, Blocked())
 from agentenv_protocol.computer import ComputerAppEnvironment, Linux, computer_app

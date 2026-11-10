@@ -191,6 +191,7 @@ class TenkiSandboxProvider(SandboxProvider):
 
     # Exposed ports get public URLs under these domains. Tenki wildcards cover one label, hence the regional entry.
     EGRESS_HOSTS: ClassVar[tuple[str, ...]] = ("*.sb.tenki.sh", "*.us.sb.tenki.sh")
+    WEBSOCKETS = True
 
     def __init__(
         self,

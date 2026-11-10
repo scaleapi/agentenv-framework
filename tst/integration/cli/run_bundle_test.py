@@ -1,6 +1,7 @@
 """``agent-env run`` on the hello bundle agent-env ships, with no infra: the local stores, a local VM-mode
 sandbox, and a verifier scoring the files the task loaded into it. Needs `bash` and the usual shell tools on PATH."""
 
+import asyncio
 import importlib
 import json
 import logging
@@ -26,6 +27,11 @@ from agent_env.bundle.installed import find_bundle
 from agent_env.cli import cli
 from agent_env.config import configure, reset_config
 from agent_env.config.paths import state_root
+from agent_env.providers.sandbox_providers.local_docker.provider import (
+    LocalSandboxProvider,
+    local_sandbox_ids,
+    remove_local_work_dir,
+)
 from agent_env.providers.sandbox_providers.sandbox_provider import reset_sandbox_provider
 from agent_env.store import Filter, LocalSqliteDocumentStore
 from agent_env.store.routing import namespace_routing
@@ -198,10 +204,10 @@ def test_an_installed_bundle_runs_by_name_with_ids_rooted_at_its_package(bundle,
     assert "demo_installed_bundles" not in sys.modules
 
 
-def _signalled(args, when, signum=signal.SIGINT, group=True):
+def _signalled(args, when, signum=signal.SIGINT, group=True, ready=lambda: True):
     """Run ``agent-env run ARGS`` in its own process group, as a terminal would, and send ``signum`` to the group
-    (or to the process alone) once a line containing ``when`` is printed. Returns the exit code, the output, and
-    what the sandbox root held when the signal went."""
+    (or to the process alone) once a line containing ``when`` is printed and ``ready()`` holds. Returns the exit code,
+    the output, and what the sandbox root held when the signal went."""
     process = subprocess.Popen([sys.executable, "-m", "agent_env.cli", "run", *map(str, args)], stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, text=True, start_new_session=True)
     watchdog = threading.Timer(120, process.kill)
@@ -211,6 +217,9 @@ def _signalled(args, when, signum=signal.SIGINT, group=True):
         for line in process.stdout:
             lines.append(line)
             if held is None and when in line:
+                deadline = time.monotonic() + 30
+                while not ready() and time.monotonic() < deadline:
+                    time.sleep(0.05)
                 root = os.environ["AGENT_ENV_LOCAL_SANDBOX_DIR"]
                 held = sorted(os.listdir(root)) if os.path.isdir(root) else []
                 (os.killpg if group else os.kill)(process.pid, signum)
@@ -232,7 +241,8 @@ def test_a_signal_mid_run_marks_the_run_cancelled_tears_it_down_and_stops_its_co
                        "bash_cmd": 'sleep 30 & echo $! > "$HOME/nap.pid"; wait'}]},
     ]))
 
-    exit_code, output, held = _signalled([napping], "step 2/2 nap (verify_sandbox)", signum, group)
+    nap = tmp_path / "nap.pid"
+    exit_code, output, held = _signalled([napping], "step 2/2 nap (verify_sandbox)", signum, group, ready=nap.exists)
 
     assert exit_code == code, output
     assert len(held) == 1
@@ -241,7 +251,38 @@ def test_a_signal_mid_run_marks_the_run_cancelled_tears_it_down_and_stops_its_co
     (instance_id,) = re.findall(r"instance (\S+)", output)
     with namespace_routing():
         assert Task.get_instance(instance_id).status == "cancelled"
-    assert not _alive(int((tmp_path / "nap.pid").read_text()))
+    assert not _alive(int(nap.read_text()))
+
+
+def test_a_run_killed_outright_leaves_its_sandboxes_under_its_root_for_a_supervisor_to_terminate(bundle, tmp_path):
+    napping = tmp_path / "napping"
+    (napping / "tasks").mkdir(parents=True)
+    (napping / "tasks/nap.json").write_text(json.dumps([
+        {"id": "box", "type": "deploy_sandbox", "sandbox_name": "box", "sandbox_mode": "vm", "sandbox_type": "local"},
+        {"id": "web", "type": "deploy_sandbox", "sandbox_name": "web", "sandbox_mode": "container",
+         "sandbox_type": "local", "image": "public.ecr.aws/nginx/nginx:stable-alpine", "port": 80},
+        {"id": "nap", "type": "verify_sandbox", "sandbox_name": "box", "base_dir": "/app", "verifier_id": "nap",
+         "depends_on": ["box", "web"], "criteria": [{"type": "bash_cmd_succeeds", "criterion": "naps",
+                                                    "bash_cmd": 'sleep 300 & echo $! > "$HOME/nap.pid"; wait'}]},
+    ]))
+
+    nap = tmp_path / "nap.pid"
+    exit_code, output, held = _signalled([napping], "step 3/3 nap (verify_sandbox)", signal.SIGKILL, group=False,
+                                         ready=nap.exists)
+    found = local_sandbox_ids()
+    for sandbox_id in found:
+        asyncio.run(LocalSandboxProvider().terminate_sandbox(sandbox_id))
+        remove_local_work_dir(sandbox_id)
+
+    assert exit_code == -signal.SIGKILL, output
+    assert len(held) == len(found) == 2
+    assert local_sandbox_ids() == []
+    assert not _alive(int(nap.read_text()))
+    for sandbox_id in found:
+        for selector in (f"label=agentenv.sandbox={sandbox_id}", f"name=^agent-{sandbox_id}$"):
+            listed = subprocess.run(["docker", "ps", "-aq", "--filter", selector], capture_output=True, text=True,
+                                    check=True)
+            assert listed.stdout == "", selector
 
 
 def _alive(pid):

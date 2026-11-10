@@ -29,7 +29,7 @@ MINIMAL = {
 UNSOURCED = {
     "add_skills": "add_skills 's': skill 'notes' names no source",
     "load_artifact": "load_artifact 's': names nothing to load",
-    "run_docker_container": "run_docker_container 's': names no build context",
+    "run_docker_container": "run_docker_container 's': names no image or build context",
 }
 
 
@@ -37,7 +37,7 @@ UNSOURCED = {
 def test_each_scoped_field_is_an_optional_parameter_of_its_step_type_or_one_the_base_scopes_for_every_step(cls):
     parameters = inspect.signature(cls.__init__).parameters
     for path in cls.field_scopes:
-        top = path.split(".")[0].removesuffix("[]")
+        top = path.split(".")[0].removesuffix("[]").removesuffix("{}")
         if top in parameters:
             assert parameters[top].default is not inspect.Parameter.empty, f"{cls.type} scopes {top}, which it requires"
         else:

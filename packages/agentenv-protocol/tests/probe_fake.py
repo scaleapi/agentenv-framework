@@ -19,16 +19,28 @@ from computer_fake import FakeDriver
 from agentenv_protocol.computer import (
     ComputerDriverEnvironment,
     ExecResult,
+    FileChooser,
+    InvalidArgument,
+    PageDialog,
+    PageState,
+    Tab,
     click,
+    dialog,
     drag,
+    history,
+    navigate,
+    page_state,
     pointer_up,
     press,
     run_in_session,
     scroll,
+    tabs,
     type_text,
+    upload,
 )
 from agentenv_protocol.computer import _linux as linux
-from agentenv_protocol.computer.conformance.checks import STAGE
+from agentenv_protocol.computer.conformance.checks import OWNER, STAGE
+from agentenv_protocol.computer.conformance.page_fixture import QUESTION, TITLE, TWO, TWO_TITLE
 
 CLIPBOARD = "agentenv-probe clipboard"
 FIELD = (1080, 500)
@@ -39,10 +51,16 @@ LAYOUT = {"name": [140, 40, 420, 34], "save": [560, 34, 120, 44], "subscribe": [
           "pad": [840, 160, 400, 300], "wheel": [840, 500, 200, 120], "field": [*FIELD, 48, 48], "list_row_height": 24,
           "markers": [[FIELD[0] + x, FIELD[1] + y, c] for x, y, c in MARKERS], "cell": 50, "clipboard": CLIPBOARD}
 KEYSYMS = {" ": "space", ",": "comma", "!": "exclam", "\t": "Tab", "\n": "Return"}
+PAGE_LAYOUT = {**LAYOUT, "ask": [40, 600, 120, 44], "file": [40, 670, 300, 34]}
+DESK_URL = "http://127.0.0.1:4343/"
+TITLES = {DESK_URL: TITLE, DESK_URL + TWO.lstrip("/"): TWO_TITLE}
+
 
 
 class FakeDesk:
     """What the Fixture Desk would record of the input the fake screen gets."""
+
+    layout = LAYOUT
 
     def __init__(self, driver: FakeDriver) -> None:
         self.driver = driver
@@ -69,7 +87,7 @@ class FakeDesk:
         return self.state
 
     def _in(self, box: str, x: float, y: float) -> tuple[float, float] | None:
-        x0, y0, w, h = LAYOUT[box]
+        x0, y0, w, h = self.layout[box]
         return (x - x0, y - y0) if x0 <= x < x0 + w and y0 <= y < y0 + h else None
 
     def click(self, x: float, y: float, button: str, count: int) -> None:
@@ -185,11 +203,129 @@ class FixtureDriver(FakeDriver):
         if f"python3 {STAGE}/fixture.py" in text:
             self.desk.start()
             return ExecResult(0, b"4242\n")
-        if argv in (["id", "-u"], ["stat", "-c", "%u", f"{STAGE}/fixture.py"]):
+        if argv in (["id", "-u"], [*OWNER, f"{STAGE}/fixture.py"]):
             return ExecResult(0, b"1000\n")
         if argv[:1] in (["kill"], ["tail"]) or f"rm -rf {STAGE}/state" in text:
             return ExecResult(0)
         return None
+
+
+class FakePageDesk(FakeDesk):
+    """What the HTML desk would record: the Tk desk's record, with a prompt behind its Ask button, a file chooser behind
+    its file input, and the fields only a page has."""
+
+    layout = PAGE_LAYOUT
+
+    def __init__(self, driver: PageFixtureDriver) -> None:
+        super().__init__(driver)
+        self.state.update(pasted=[], prompts=0, prompted=None, uploaded=None, loads=0)
+
+    def click(self, x: float, y: float, button: str, count: int) -> None:
+        super().click(x, y, button, count)
+        if not self.started:
+            return
+        if self._in("ask", x, y) is not None:
+            if self.driver.answers_dialogs:
+                self.state.update(prompts=self.state["prompts"] + 1, prompted="")
+            else:
+                self.driver.open_dialog = PageDialog("prompt", QUESTION)
+        elif self._in("file", x, y) is not None:
+            self.driver.chooser = FileChooser()
+
+
+class PageFixtureDriver(FixtureDriver):
+    """The fixture driver as a page driver: its screen a browser's active tab, its page tools over fake tabs and their
+    history, and the HTML desk's server among its commands."""
+
+    screen_kind = "page"
+
+    def __init__(self, answers_dialogs: bool = False, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.desk = FakePageDesk(self)
+        self.answers_dialogs = answers_dialogs
+        self.open_dialog: PageDialog | None = None
+        self.chooser: FileChooser | None = None
+        self.opened = 0
+        self.tabs = [{"id": "start", "urls": ["about:blank"], "at": 0, "active": True}]
+
+    def _active(self) -> dict:
+        return next(tab for tab in self.tabs if tab["active"])
+
+    def _visit(self, url: str) -> None:
+        if url == DESK_URL:
+            self.desk.state["loads"] += 1
+
+    def _listed(self) -> list[Tab]:
+        return [Tab(t["id"], t["urls"][t["at"]], TITLES.get(t["urls"][t["at"]], ""), t["active"]) for t in self.tabs]
+
+    @navigate
+    async def go_to(self, url):
+        tab = self._active()
+        tab["urls"], tab["at"] = tab["urls"][:tab["at"] + 1] + [url], tab["at"] + 1
+        self._visit(url)
+
+    @history
+    async def move_in_history(self, direction):
+        tab = self._active()
+        tab["at"] = max(0, min(len(tab["urls"]) - 1, tab["at"] + {"back": -1, "forward": 1}.get(direction, 0)))
+        self._visit(tab["urls"][tab["at"]])
+
+    @tabs
+    async def tab_action(self, action, tab, url):
+        known = next((t for t in self.tabs if t["id"] == tab), None)
+        if action in ("switch", "close") and known is None:
+            raise InvalidArgument(f"no tab {tab}")
+        if action == "open":
+            self.opened += 1
+            for t in self.tabs:
+                t["active"] = False
+            self.tabs.append({"id": f"t{self.opened}", "urls": [url or "about:blank"], "at": 0, "active": True})
+            self._visit(url)
+        elif action == "switch":
+            for t in self.tabs:
+                t["active"] = t is known
+        elif action == "close":
+            self.tabs.remove(known)
+            if known["active"]:
+                self.tabs[-1]["active"] = True
+        return self._listed()
+
+    @dialog
+    async def answer_dialog(self, accept, text):
+        if self.open_dialog is None:
+            raise InvalidArgument("no dialog is open")
+        self.open_dialog = None
+        self.desk.state.update(prompts=self.desk.state["prompts"] + 1, prompted=(text or "") if accept else None)
+
+    @upload
+    async def choose_files(self, paths):
+        uploads = (Path.home() / "Uploads").resolve()
+        files = [(uploads / path).resolve() for path in paths]
+        if any(uploads not in file.parents for file in files):
+            raise InvalidArgument("a file outside ~/Uploads")
+        self.chooser = None
+        self.desk.state["uploaded"] = {"name": files[0].name, "content": files[0].read_text()}
+
+    @page_state
+    async def page_now(self):
+        tab = self._active()
+        url = tab["urls"][tab["at"]]
+        return PageState(tab["id"], url, TITLES.get(url, ""), self.open_dialog, self.chooser)
+
+    def _fixture(self, argv: list[str]) -> ExecResult | None:
+        text = " ".join(argv)
+        if f"python3 {STAGE}/page_fixture.py" in text:
+            self.desk.start()
+            return ExecResult(0, b"4343\n")
+        if argv == ["cat", f"{STAGE}/state/port"]:
+            return ExecResult(0, b"4343") if self.desk.started else ExecResult(1)
+        if argv[:1] == ["cat"] and argv[1].endswith("layout.json") and self.desk.started:
+            return ExecResult(0, json.dumps(PAGE_LAYOUT).encode())
+        if argv == [*OWNER, f"{STAGE}/page_fixture.py"]:
+            return ExecResult(0, b"1000\n")
+        if argv == [*OWNER, f"{STAGE}/fixture.py"]:
+            return ExecResult(1, b"", b"FileNotFoundError: [Errno 2] No such file or directory")
+        return super()._fixture(argv)
 
 
 @contextlib.contextmanager

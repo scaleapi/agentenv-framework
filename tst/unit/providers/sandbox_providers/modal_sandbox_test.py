@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import modal
@@ -52,6 +53,25 @@ def _local_image_store():
 
 
 @pytest.mark.asyncio
+async def test_a_container_asking_for_shm_is_created_as_any_other_its_host_sized_shm_holding_it(_patched_provider,
+                                                                                                caplog):
+    fake_sb = MagicMock()
+    fake_sb.object_id = "sb-FAKEFAKEFAKEFAKEFAKE"
+    fake_sb.wait_until_ready.aio = AsyncMock(side_effect=asyncio.CancelledError)
+    fake_sb.terminate.aio = AsyncMock()
+
+    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox.create") as mock_create, \
+            caplog.at_level(logging.INFO, logger="agent_env"):
+        mock_create.aio = AsyncMock(return_value=fake_sb)
+        with pytest.raises(asyncio.CancelledError):
+            await _patched_provider.create_container(image_name="registry.example/mcp-server-example:v1", port=18765,
+                                                     env={}, shm_mb=1024)
+
+    mock_create.aio.assert_awaited_once()
+    assert ModalSandboxProvider.SHARED_MEMORY and "/dev/shm" not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_create_container_wraps_modal_create_failure_with_context(_patched_provider):
     with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox._experimental_create") as mock_create:
         mock_create.aio = AsyncMock(side_effect=_BareSandboxTimeoutError())
@@ -85,7 +105,7 @@ async def test_create_container_wraps_post_create_failure_and_terminates(_patche
     fake_sb.terminate = MagicMock()
     fake_sb.terminate.aio = AsyncMock()
 
-    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox._experimental_create") as mock_create:
+    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox.create") as mock_create:
         mock_create.aio = AsyncMock(return_value=fake_sb)
 
         with pytest.raises(RuntimeError) as ei:
@@ -110,7 +130,7 @@ async def test_create_container_terminates_a_sandbox_whose_create_is_cancelled(_
     fake_sb.wait_until_ready.aio = AsyncMock(side_effect=asyncio.CancelledError)
     fake_sb.terminate.aio = AsyncMock()
 
-    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox._experimental_create") as mock_create:
+    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox.create") as mock_create:
         mock_create.aio = AsyncMock(return_value=fake_sb)
 
         with pytest.raises(asyncio.CancelledError):
@@ -132,7 +152,7 @@ async def test_create_container_terminates_a_sandbox_modal_creates_after_its_cre
         await release.wait()
         return fake_sb
 
-    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox._experimental_create") as mock_create:
+    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox.create") as mock_create:
         mock_create.aio = AsyncMock(side_effect=experimental_create)
         create = asyncio.create_task(
             _patched_provider.create_container(image_name="registry.example/mcp-server-example:v1", port=18765, env={}))
@@ -159,7 +179,7 @@ async def test_a_sandbox_a_cancelled_create_cant_terminate_is_named_in_a_warning
         await release.wait()
         return fake_sb
 
-    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox._experimental_create") as mock_create:
+    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox.create") as mock_create:
         mock_create.aio = AsyncMock(side_effect=experimental_create)
         create = asyncio.create_task(
             _patched_provider.create_container(image_name="registry.example/mcp-server-example:v1", port=18765, env={}))
@@ -186,7 +206,7 @@ async def _cancel_a_create_that_hangs(provider, *, cancels: int) -> tuple[MagicM
         await release.wait()
         return fake_sb
 
-    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox._experimental_create") as mock_create:
+    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox.create") as mock_create:
         mock_create.aio = AsyncMock(side_effect=experimental_create)
         create = asyncio.create_task(
             provider.create_container(image_name="registry.example/mcp-server-example:v1", port=18765, env={}))
@@ -234,7 +254,7 @@ async def test_a_sandbox_created_just_as_a_cancelled_creates_wait_gives_up_is_te
         await awaitable
         raise TimeoutError
 
-    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox._experimental_create") as mock_create:
+    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox.create") as mock_create:
         mock_create.aio = AsyncMock(side_effect=experimental_create)
         create = asyncio.create_task(
             _patched_provider.create_container(image_name="registry.example/mcp-server-example:v1", port=18765, env={}))
@@ -269,7 +289,7 @@ async def test_create_container_includes_cause_message_in_wrapped_text(_patched_
         pass
 
     inner_msg = "Image build for im-Xhe66qHlOEXQpwDyiiBuGX failed. See build logs."
-    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox._experimental_create") as mock_create:
+    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox.create") as mock_create:
         mock_create.aio = AsyncMock(side_effect=_RemoteErrorWithMessage(inner_msg))
 
         with pytest.raises(RuntimeError) as ei:
@@ -286,7 +306,7 @@ async def test_create_container_includes_cause_message_in_wrapped_text(_patched_
 
 @pytest.mark.asyncio
 async def test_create_container_handles_empty_args_exception(_patched_provider):
-    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox._experimental_create") as mock_create:
+    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox.create") as mock_create:
         mock_create.aio = AsyncMock(side_effect=_BareSandboxTimeoutError())
 
         with pytest.raises(RuntimeError) as ei:
@@ -303,7 +323,7 @@ async def test_create_container_handles_empty_args_exception(_patched_provider):
 
 @pytest.mark.asyncio
 async def test_image_auth_paths(_patched_provider):
-    """ECR -> from_aws_ecr + named secret; store-supplied creds -> docker login; else anonymous."""
+    """Registry pulls use a named ECR secret, store-supplied login credentials, or anonymous access."""
     from agent_env.config import get_config
     from agent_env.store import (
         EcrCredentials,
@@ -322,8 +342,8 @@ async def test_image_auth_paths(_patched_provider):
     _patched_provider._environment_name = "rl-prod"
     p = lambda n: patch(f"agent_env.providers.sandbox_providers.modal_sandbox.modal.{n}")  # noqa: E731
 
-    with p("Image.from_aws_ecr") as aws_ecr, p("Image.from_registry") as registry, \
-         p("Secret.from_name") as from_name, p("Sandbox._experimental_create") as create:
+    with p("Image.from_registry") as registry, \
+         p("Secret.from_name") as from_name, p("Sandbox.create") as create:
         create.aio = AsyncMock(side_effect=_BareSandboxTimeoutError())
         cases = (
             (
@@ -348,15 +368,16 @@ async def test_image_auth_paths(_patched_provider):
             with pytest.raises(RuntimeError):
                 await _patched_provider.create_container(image_name=ref, port=1, env={})
 
-    assert aws_ecr.call_args.args[0] == ecr
+    assert registry.call_args_list[0].args == (ecr,)
+    assert registry.call_args_list[0].kwargs["secret"] is from_name.return_value
     from_name.assert_called_once_with(
         "agent-env-ecr-reader",
         required_keys=["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION"],
         environment_name="rl-prod",
     )
-    assert registry.call_args_list[0].kwargs["secret"] is not None
-    assert registry.call_args_list[1].args == ("pub.example/x:v1",)
-    assert registry.call_args_list[2].args == (f"{ecr_host}.attacker.example/x:v1",)
+    assert registry.call_args_list[1].kwargs["secret"] is not None
+    assert registry.call_args_list[2].args == ("pub.example/x:v1",)
+    assert registry.call_args_list[3].args == (f"{ecr_host}.attacker.example/x:v1",)
 
 
 @pytest.mark.asyncio
@@ -380,9 +401,8 @@ async def test_unset_pull_secret_falls_back_to_minted_credentials(_patched_provi
         )
     )
 
-    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Image.from_aws_ecr") as aws_ecr, \
-         patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Image.from_registry") as registry, \
-         patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox._experimental_create") as create:
+    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Image.from_registry") as registry, \
+         patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox.create") as create:
         create.aio = AsyncMock(side_effect=_BareSandboxTimeoutError())
         with pytest.raises(RuntimeError):
             await _patched_provider.create_container(
@@ -391,7 +411,6 @@ async def test_unset_pull_secret_falls_back_to_minted_credentials(_patched_provi
                 env={},
             )
 
-    aws_ecr.assert_not_called()
     assert registry.call_args.kwargs["secret"] is not None
 
 
@@ -415,7 +434,7 @@ async def test_vnc_port_controls_the_tunnel_set_and_the_vnc_url(
         p: MagicMock(host=f"ta-x-{p}-y.w.modal.host", port=443) for p in (5000, 6080)
     })
 
-    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox._experimental_create") as mock_create:
+    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox.create") as mock_create:
         mock_create.aio = AsyncMock(return_value=fake_sb)
         sandbox = await _patched_provider.create_container(
             image_name="registry.example/vnc-image:v1", port=5000, env={}, vnc_port=vnc_port,

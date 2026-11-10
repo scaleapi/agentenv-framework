@@ -196,6 +196,7 @@ class CoreWeaveSandboxProvider(SandboxProvider):
     # The platform pulls a container's image by its name; only a VM loads a tarball or builds a context.
     CONTAINER_ACCEPTS = Accepts.NAME
     SANDBOX_ACCEPTS = Accepts.NAME
+    WEBSOCKETS = True
     # An exposed port's URL is <port>-<sandbox id>.<runner label>.<domain>, and a CoreWeave wildcard covers exactly one
     # label, so no one entry covers every runner. Each parent seen on an exposed port is added here, and every
     # provider's allowlists include it, so a restricted agent on any provider reaches environments served there.

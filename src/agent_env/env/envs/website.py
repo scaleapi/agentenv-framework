@@ -3,7 +3,14 @@ built before the server image held its pages may still name a separate frontend 
 
 A deploy reads whether the site is ready from its env card, the protocol layer: ``website/v1``'s ``ready``, as
 ``computer-app/v1``'s says of an app. ``health_path`` (env.toml's ``health``) is read only for a site whose card has no
-``ready``, or that serves no card, and is deprecated."""
+``ready``, or that serves no card, and is deprecated.
+
+A live website env (``live``) is a real site, at its ``domains``, its pages reaching the ``allow_hosts`` too: its server
+serves none of its pages, only its card, data plane, readiness and session, so a computer reaches the real site over
+its own network, and a gateway gives it no site route. The env keeps them, as it keeps ``domains``, since a computer's
+network is fixed before any card is read. ``settings`` are what its server is handed as ``WEBSITE_SETTINGS_ENV``,
+each of its ``secret_settings`` (its ``Settings``' ``SecretStr`` fields) a ``secret:`` or ``env:`` reference, resolved only
+when its container is written."""
 
 from __future__ import annotations
 
@@ -19,14 +26,18 @@ from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional
 
 from agentenv_protocol import client as protocol_v1
 from agent_env.artifact import Artifact, DockerImageArtifact, EnvironmentArtifact
+from agent_env.config import ENV_REF_PREFIX, SECRET_REF_PREFIX, is_bare_reference
 from agent_env.artifact.artifacts.docker_image import ProgressCallback, refuse_local_github_build
 from agent_env.entity.refs import EntityRef
 from agent_env.env.env import Env, gateway_url_of
+from agent_env.env.envs.computer.utils.sites import name_problem
 from agent_env.store.ids import derive_id
+from agent_env.utils.card_naming import WebsiteSource
 from agent_env.env import legacy_protocol
 from agent_env.env.envs._deployment import (
     as_builtin, builtin_provider_for, close_deployed, close_replaced, deploy_refusal, deploy_through_provider, host_staging_refusal,
-    file_parts, legacy_load_file, load_by_signed_url, plugin_provider_like_a_builtin, provider_or_class, staged_paths,
+    file_parts, legacy_load_file, load_by_signed_url, plugin_provider_like_a_builtin, provider_or_class, reset_server_data,
+    staged_paths,
 )
 from agent_env.env.gateway import GatewayMode
 from agent_env.attribution import Attribution
@@ -51,7 +62,8 @@ class WebsiteEnv(Env):
                                                   EntityRef.artifact("frontend_image", artifact_type="docker_image",
                                                                      optional=True))
     toml_keys: ClassVar[dict[str, type]] = {"backend_image": object, "frontend_image": object, "environment_name": str,
-                                            "health": str, "env_provider_type": str}
+                                            "health": str, "domains": list, "env_provider_type": str, "live": bool,
+                                            "allow_hosts": list, "settings": dict}
 
     def __init__(
         self,
@@ -63,8 +75,13 @@ class WebsiteEnv(Env):
         *,
         backend_docker_image_artifact: Optional[DockerImageArtifact] = None,
         health_path: str = DEFAULT_HEALTH_PATH,
+        domains: Optional[list[str]] = None,
         metadata: Optional[dict[str, str]] = None,
         env_provider_type: str = "gateway",
+        live: bool = False,
+        allow_hosts: Optional[list[str]] = None,
+        settings: Optional[dict[str, Any]] = None,
+        secret_settings: Optional[list[str]] = None,
     ):
         super().__init__(id, version, metadata=metadata)
         if not environment_name:
@@ -79,6 +96,15 @@ class WebsiteEnv(Env):
         if problem := health_path_problem(health_path):
             raise ValueError(f"website env {id!r}: {problem}")
         self.health_path = health_path
+        if problem := domains_problem(domains or []):
+            raise ValueError(f"website env {id!r}: {problem}")
+        self.domains = list(domains or [])
+        if problems := live_problems(live, self.domains, allow_hosts or [], settings or {}, secret_settings or []):
+            raise ValueError(f"website env {id!r}: {'; '.join(problems)}")
+        self.live = live
+        self.allow_hosts = list(allow_hosts or [])
+        self.settings = dict(settings or {})
+        self.secret_settings = list(secret_settings or [])
         self.environment_name = environment_name
         self.env_provider_type = env_provider_type
         self._sandbox = None
@@ -87,6 +113,14 @@ class WebsiteEnv(Env):
         self._gateway_url = None
         self._deployed: Optional[DeployedEnv] = None
         self._replaced: list[tuple] = []  # the provider and sandbox of each deployment a later deploy replaced, for close()
+
+    def live_websites(self) -> list[dict]:
+        """The live site it is, as a run records one: its env id, environment name, domains and ``allow_hosts``;
+        none for a synthetic site."""
+        if not self.live:
+            return []
+        return [{"env_id": self.id, "environment_name": self.environment_name, "domains": list(self.domains),
+                 "allow_hosts": list(self.allow_hosts)}]
 
     @property
     def backend_docker_image_artifact(self) -> DockerImageArtifact:
@@ -106,6 +140,16 @@ class WebsiteEnv(Env):
                 "type": self.frontend_docker_image_artifact.type,
             }
         base["health_path"] = self.health_path
+        if self.domains:
+            base["domains"] = list(self.domains)
+        if self.live:
+            base["live"] = True
+        if self.allow_hosts:
+            base["allow_hosts"] = list(self.allow_hosts)
+        if self.settings:
+            base["settings"] = dict(self.settings)
+        if self.secret_settings:
+            base["secret_settings"] = list(self.secret_settings)
         base["service_name"] = self.environment_name
         base["environment_name"] = self.environment_name  # dual-write with service_name during the rename
         base["env_provider_type"] = self.env_provider_type
@@ -123,8 +167,13 @@ class WebsiteEnv(Env):
                                             if frontend_ref else None),
             environment_name=data["environment_name"] if "environment_name" in data else data["service_name"],
             health_path=data.get("health_path", DEFAULT_HEALTH_PATH),
+            domains=data.get("domains") or [],
             metadata=data.get("metadata", {}),
             env_provider_type=data.get("env_provider_type", "gateway"),
+            live=bool(data.get("live", False)),
+            allow_hosts=data.get("allow_hosts") or [],
+            settings=data.get("settings") or {},
+            secret_settings=data.get("secret_settings") or [],
         )
 
     @classmethod
@@ -147,7 +196,12 @@ class WebsiteEnv(Env):
                        frontend_docker_image_artifact=ctx.artifact(frontend, DockerImageArtifact) if frontend else None,
                        environment_name=fields["environment_name"],
                        health_path=fields.get("health", DEFAULT_HEALTH_PATH),
-                       env_provider_type=fields["env_provider_type"])
+                       domains=fields.get("domains") or [],
+                       env_provider_type=fields["env_provider_type"],
+                       live=fields.get("live", False),
+                       allow_hosts=fields.get("allow_hosts") or [],
+                       settings=fields.get("settings") or {},
+                       secret_settings=fields.get("secret_settings") or [])
 
     def to_toml(self, out: ExportContext) -> dict:
         """The env.toml of a folder this env's images are built from, which ``from_toml`` reads back as it."""
@@ -157,6 +211,14 @@ class WebsiteEnv(Env):
             toml["frontend_image"] = out.image(self.frontend_docker_image_artifact, "frontend_image")
         if self.health_path != DEFAULT_HEALTH_PATH:
             toml["health"] = self.health_path
+        if self.domains:
+            toml["domains"] = list(self.domains)
+        if self.live:
+            toml["live"] = True
+        if self.allow_hosts:
+            toml["allow_hosts"] = list(self.allow_hosts)
+        if self.settings:
+            toml["settings"] = dict(self.settings)
         return {**toml, **self.provider_toml(out, self.env_provider_type)}
 
     @classmethod
@@ -167,7 +229,18 @@ class WebsiteEnv(Env):
         health = data.get("health", DEFAULT_HEALTH_PATH)
         if isinstance(health, str) and (problem := health_path_problem(health)):
             ctx.refuse([ctx.config_problem(problem)])
-        return ctx.accept_env(data, cls, named_by="backend_image")
+        domains = data.get("domains", [])
+        if isinstance(domains, list) and (problem := domains_problem(domains)):
+            ctx.refuse([ctx.config_problem(problem)])
+        fields = ctx.accept_env(data, cls, named_by="backend_image")
+        declared, problems = declared_live(ctx.website_source("backend_image"), live=fields.get("live"),
+                                           domains=fields.get("domains"), allow_hosts=fields.get("allow_hosts"))
+        problems += live_problems(declared["live"], declared.get("domains", fields.get("domains") or []),
+                                  declared["allow_hosts"], fields.get("settings") or {}, declared["secret_settings"])
+        fields.update({key: value for key, value in declared.items() if value})
+        if problems:
+            ctx.refuse([ctx.config_problem(problem) for problem in problems])
+        return fields
 
     async def deploy(self, ttl_seconds: int = 10800, disk_size_gb: float = 10, gateway_mode: GatewayMode = GatewayMode.PERFORMANCE, cpu: float | None = None, memory_mb: int | None = None, sandbox_type: str | None = None, env_state_type: str | None = None, env_state_instance_id: str | None = None, artifact_id: str | None = None, artifact_version: int | None = None, *, attribution: Optional[Attribution] = None) -> DeployedEnv:
         return await deploy_through_provider(
@@ -275,6 +348,12 @@ class WebsiteEnv(Env):
             )
             raise
 
+    async def reset(self, deployed: DeployedEnv) -> None:
+        """Empty what loads put into the website, attached to ``deployed`` as a load is, so a task loads it again after;
+        NotImplementedError for one serving no reset, which takes no load either."""
+        if not await reset_server_data(await type(self).from_deployed_env(deployed), mcp=False):
+            raise NotImplementedError(f"website '{self.environment_name}' serves no reset")
+
     async def close(self) -> None:
         await close_replaced(self)
         if self._env_provider is not None:
@@ -335,6 +414,11 @@ class WebsiteEnv(Env):
         github_token: str | None = None,
         env_provider_type: str = "gateway",
         health_path: str = DEFAULT_HEALTH_PATH,
+        domains: list[str] | None = None,
+        live: bool = False,
+        allow_hosts: list[str] | None = None,
+        settings: dict[str, Any] | None = None,
+        secret_settings: list[str] | None = None,
     ) -> WebsiteEnv:
         """Build the server image, from ``backend_dockerfile_github_url``, and any deprecated frontend image from
         GitHub in parallel, and create a WebsiteEnv."""
@@ -384,6 +468,11 @@ class WebsiteEnv(Env):
             metadata=combined_metadata,
             env_provider_type=env_provider_type,
             health_path=health_path,
+            domains=domains,
+            live=live,
+            allow_hosts=allow_hosts,
+            settings=settings,
+            secret_settings=secret_settings,
         )
         return env
 
@@ -394,3 +483,61 @@ def health_path_problem(health_path: str) -> str | None:
     if _HEALTH_PATH.fullmatch(health_path):
         return None
     return f"health: {health_path!r} is not a path of letters, digits, '.', '_', '~', '-' and '/' starting with '/'"
+
+
+def declared_live(source: Optional[WebsiteSource], *, live: Optional[bool] = None, domains: Optional[list[str]] = None,
+                  allow_hosts: Optional[list[str]] = None) -> tuple[dict, list[str]]:
+    """A website env's ``live``, ``allow_hosts``, ``secret_settings`` and, for a live one, ``domains``: each one
+    given, else what ``source``, its server's ``@website(...)``, declares; and the problems, one for each value given
+    that the source declares otherwise, since the env and the site's card would then disagree. A synthetic site's
+    domains stay as given: without them its card's are read at deploy."""
+    source = source or WebsiteSource()
+    problems = [f"{key} is {given!r} here, but the site's @website(...) declares {key}={declared!r}"
+                for key, given, declared in (("live", live, source.live), ("allow_hosts", allow_hosts, source.allow_hosts))
+                if given is not None and declared is not None and given != declared]
+    resolved = live if live is not None else bool(source.live)
+    fields = {"live": resolved, "allow_hosts": list(allow_hosts if allow_hosts is not None else source.allow_hosts or []),
+              "secret_settings": list(source.secret_settings)}
+    if resolved:
+        if domains and source.domains is not None and list(domains) != source.domains:
+            problems.append(f"domains are {list(domains)!r} here, but the site's @website(...) declares "
+                            f"domains={source.domains!r}")
+        fields["domains"] = list(domains or source.domains or [])
+    return fields, problems
+
+
+def live_problems(live: Any, domains: list[str], allow_hosts: list[str], settings: dict, secret_settings: list[str]
+                  ) -> list[str]:
+    """Why these can't be a website env's: a live site names the domains the real site is at, its ``allow_hosts`` are
+    host names as ``domains`` are and only a live site's, each setting's value is a string, number or boolean, and each
+    of the secret settings given is a ``secret:`` or ``env:`` reference, never its value."""
+    problems = []
+    if not isinstance(live, bool):
+        problems.append(f"live is true or false, not {live!r}")
+    elif live and not domains:
+        problems.append("a live website env names the domains the real site is at")
+    if not isinstance(allow_hosts, list):
+        problems.append(f"allow_hosts is a list of host names, not {allow_hosts!r}")
+    elif allow_hosts:
+        if live is not True:
+            problems.append("allow_hosts are the other hosts a live site's pages reach; set live = true")
+        if problem := domains_problem(allow_hosts):
+            problems.append(problem.replace("domains:", "allow_hosts:", 1))
+    if not isinstance(settings, dict):
+        return [*problems, f"settings is a table of a setting's value by its name, not {settings!r}"]
+    for name, value in settings.items():
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            problems.append(f"settings: {name!r} isn't a setting's name")
+        elif not isinstance(value, (str, int, float, bool)):
+            problems.append(f"settings.{name} is a string, number or boolean, not {value!r}")
+        elif name in secret_settings and not is_bare_reference(value):
+            problems.append(f"settings.{name} is a secret, so it's a {SECRET_REF_PREFIX}KEY or {ENV_REF_PREFIX}NAME "
+                            "reference with no ?default, never its value")
+    return problems
+
+
+def domains_problem(domains: list[str]) -> str | None:
+    """Why ``domains`` can't be the names a site is reached by, or None: each a DNS name, as a computer's site table
+    takes it, a wildcard only as its whole first label."""
+    problems = [name_problem(name) if isinstance(name, str) else f"{name!r} is not a host name" for name in domains]
+    return next((f"domains: {problem}" for problem in problems if problem), None)

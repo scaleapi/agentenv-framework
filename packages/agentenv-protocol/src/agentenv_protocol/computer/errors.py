@@ -55,6 +55,10 @@ class DeviceUnavailable(ComputerError):
     CODE, STATUS, APPLIED, RETRYABLE = "device_unavailable", 503, "no", True
 
 
+class DialogOpen(ComputerError):
+    CODE, STATUS, APPLIED = "dialog_open", 409, "no"
+
+
 class LimitExceeded(ComputerError):
     CODE, STATUS, APPLIED, RETRYABLE = "limit_exceeded", 429, "no", True
 

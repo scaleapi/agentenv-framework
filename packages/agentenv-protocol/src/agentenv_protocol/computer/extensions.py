@@ -45,8 +45,12 @@ class Extensions:
                description="Whether the computer is usable now, by real checks; never sends input.")
     async def _computer_ready_status(self) -> dict:
         checks = await self._computer.ready_checks()
-        return {"ready": all(c.ok for c in checks),
-                "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail} for c in checks]}
+        status = {"ready": all(c.ok for c in checks),
+                  "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail, **({"final": True} if c.final else {})}
+                             for c in checks]}
+        if failed := [c for c in checks if c.final and not c.ok]:
+            status["failed"] = "; ".join(f"{c.name}: {c.detail}" for c in failed)
+        return status
 
     @extension(COMPUTER_DISPLAY, op="get", method="GET", description="Get or set the display's resolution and scale.")
     async def _computer_display_get(self) -> dict:
@@ -75,8 +79,8 @@ class Extensions:
                                    self.settings.default_norm_scale)
         self.settings = self.settings.model_copy(update={"default_space": space, "default_norm_scale": scale})
         for tool in self.mounted_card().capabilities.tools or []:
-            if tool.name in card.POINT_TOOLS:
-                await self.update_tool(tool.name, description=card.point_description(self, tool.name))
+            if (own := self._computer_prefix.own(tool.name)) in card.POINT_TOOLS:
+                await self.update_tool(tool.name, description=self._computer_prefix.text(card.point_description(self, own)))
         return await self._computer_spaces_get()
 
     @extension(COMPUTER_KEYBOARD, op="get", method="GET",

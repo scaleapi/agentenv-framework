@@ -27,6 +27,7 @@ from agent_env.task import Task
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.deploy_human_agent import DeployHumanAgentTaskStep
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
+from tst.integration.utils.registry import REGISTRY_IMAGE
 from tst.util.a2a_test_agent import AGENT_DIR, put_test_agent
 
 pytestmark = pytest.mark.integration
@@ -56,7 +57,7 @@ def local_registry(monkeypatch, tmp_path):
     monkeypatch.setenv("AGENT_ENV_LOCAL_SANDBOX_DIR", str(sandboxes))
     port = _free_port()
     name = f"file-parts-registry-{uuid.uuid4().hex[:8]}"
-    started = _docker("run", "-d", "--rm", "--name", name, "-p", f"127.0.0.1:{port}:5000", "registry:2")
+    started = _docker("run", "-d", "--rm", "--name", name, "-p", f"127.0.0.1:{port}:5000", REGISTRY_IMAGE)
     assert started.returncode == 0, started.stderr
     host = f"localhost:{port}"
     deadline = time.time() + REGISTRY_READY_SECONDS

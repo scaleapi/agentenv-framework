@@ -210,10 +210,12 @@ def _website(name, toml=""):
      "pgweb, servicedb); choose another"),
     (_website("x", 'env_provider_type = "server"\n'),
      "envs/x: env.toml: env_provider_type 'server' deploys one MCP server, not a website env"),
+    (_website("x", 'domains = ["Slack.com"]\n'),
+     "envs/x: env.toml: domains: 'Slack.com' must be lowercase, with no trailing dot"),
     ({**_mcp("x"), "envs/x/env.toml": 'image = { dockerfile = "Dockerfile", build_args = { A = "1" } }\n'},
      "envs/x: image: an image built from this folder takes only dockerfile, not build_args"),
     ({"envs/x/env.toml": 'type = "multi"\nname = "suite"\n'},
-     "envs/x: env.toml: a multi env needs at least one env in mcp_server_envs or website_envs"),
+     "envs/x: env.toml: a multi env needs at least one env in mcp_server_envs, website_envs or computer_envs"),
     ({**_mcp("crm"), "envs/x/env.toml": 'type = "multi"\nmcp_server_envs = ["crm"]\nname = "my suite"\n'},
      "envs/x: env.toml: name must be non-empty with no whitespace, not 'my suite'"),
     ({**_website("shop"), "envs/x/env.toml": 'type = "multi"\nmcp_server_envs = ["shop"]\n'},
@@ -225,6 +227,10 @@ def _website(name, toml=""):
       "envs/x/env.toml": 'type = "multi"\nmcp_server_envs = ["a"]\nwebsite_envs = ["shop"]\n'},
      "envs/x: website_envs[0]: environment_name 'shop' names the container 'shop-website-backend', as "
      "mcp_server_envs[0]'s does; each env of a multi needs its own"),
+    ({**_website("a", 'domains = ["shop.test"]\n'), **_website("b", 'domains = ["shop.test", "b.test"]\n'),
+      "envs/x/env.toml": 'type = "multi"\nwebsite_envs = ["a", "b"]\n'},
+     "envs/x: website_envs: names claimed twice: 'shop.test' (website_envs[1]) overlaps 'shop.test' (website_envs[0]); "
+     "each site of a multi needs names of its own"),
     ({"envs/x/env.toml": 'type = "gateway_server"\n'},
      "envs/x: a gateway_server env isn't written from a bundle: config names the one every deploy uses "
      "(default_gateway_env_id), and a run builds it when it's missing"),
@@ -233,8 +239,8 @@ def _website(name, toml=""):
      "(default_service_db_env_id), and a run builds it when it's missing"),
 ], ids=["no-card", "several-cards", "store-image-unnamed", "metadata", "empty-name", "name-escapes-its-line",
         "name-with-a-space", "reserved-name",
-        "website-on-server", "build-args", "multi-without-envs", "multi-name", "multi-wrong-child", "multi-same-names",
-        "multi-same-container",
+        "website-on-server", "website-bad-domain", "build-args", "multi-without-envs", "multi-name", "multi-wrong-child", "multi-same-names",
+        "multi-same-container", "multi-same-domain",
         "gateway", "service-db"])
 def test_an_env_toml_that_cant_be_written_is_refused_before_any_write(bundle_dir, files, problem):
     _store_image("base")

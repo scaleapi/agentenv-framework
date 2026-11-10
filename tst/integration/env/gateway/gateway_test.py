@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -13,6 +14,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
+import yaml
 from typing import NamedTuple
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
@@ -37,9 +39,15 @@ from agent_env.env.envs.playwright_mcp import (
     PLAYWRIGHT_MCP_IMAGE_TAG,
     PLAYWRIGHT_MCP_ENVIRONMENT_NAME,
 )
+from agentenv_protocol.computer.card import COMPUTER_RECORDING
+from agentenv_protocol.types import WELL_KNOWN_PATH
+from agent_env.providers.env_providers.constants import DOCKER_COMPOSE_PATH, GATEWAY_APP_DIR, GATEWAY_SERVICE_NAME
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
+from tst.integration.env.envs.playwright_mcp_local_test import PROCESSES
 from agent_env.env.snapshot_store import compute_env_fingerprint
 from agent_env.config import get_config
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
+from tst.util.published_image import pull_published_else_build
 from tst.util.capabilities import (
     MCP_SERVER_SOURCES,
     missing_capability_reason,
@@ -142,19 +150,15 @@ SLACK_WEBSITE_FRONTEND_IMAGE = DockerImageConfig(
     service_name="slack",
 )
 
+def _pull_published_else_build(img: DockerImageConfig) -> None:
+    pull_published_else_build(img.name, img.dockerfile, img.context, img.tag)
+
 
 @pytest.fixture(scope="module")
 def gateway_env() -> GatewayEnv:
     """Build gateway image, create artifact, and create GatewayEnv."""
     img = GATEWAY_IMAGE
-    logger.info(f"Building {img.name} Docker image...")
-    result = subprocess.run(
-        ["docker", "build", "--platform", "linux/amd64", "-f", str(img.dockerfile), "-t", img.tag, str(img.context)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"{img.name} build failed: {result.stderr}")
+    _pull_published_else_build(img)
 
     artifact = DockerImageArtifact.put(
         id=f"gateway-{img.name}",
@@ -174,14 +178,7 @@ def gateway_env() -> GatewayEnv:
 def service_db_env() -> ServiceDBEnv:
     """Build service-db image, create artifact, and create ServiceDBEnv."""
     img = SERVICE_DB_IMAGE
-    logger.info(f"Building {img.name} Docker image...")
-    result = subprocess.run(
-        ["docker", "build", "--platform", "linux/amd64", "-f", str(img.dockerfile), "-t", img.tag, str(img.context)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"{img.name} build failed: {result.stderr}")
+    _pull_published_else_build(img)
 
     db_artifact = DockerImageArtifact.put(
         id=f"service-db-{img.name}",
@@ -190,14 +187,7 @@ def service_db_env() -> ServiceDBEnv:
     )
 
     db_web = DB_WEB_IMAGE
-    logger.info(f"Building {db_web.name} Docker image...")
-    result = subprocess.run(
-        ["docker", "build", "--platform", "linux/amd64", "-f", str(db_web.dockerfile), "-t", db_web.tag, str(db_web.context)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"{db_web.name} build failed: {result.stderr}")
+    _pull_published_else_build(db_web)
 
     db_web_artifact = DockerImageArtifact.put(
         id="db-web-service-db",
@@ -207,14 +197,7 @@ def service_db_env() -> ServiceDBEnv:
 
     # Build db-mcp image
     db_mcp = DB_MCP_IMAGE
-    logger.info(f"Building {db_mcp.name} Docker image...")
-    result = subprocess.run(
-        ["docker", "build", "--platform", "linux/amd64", "-f", str(db_mcp.dockerfile), "-t", db_mcp.tag, str(db_mcp.context)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"{db_mcp.name} build failed: {result.stderr}")
+    _pull_published_else_build(db_mcp)
     db_mcp_artifact = DockerImageArtifact.put(
         id="db-mcp-service-db",
         description="PostgreSQL MCP server for direct database access",
@@ -235,15 +218,7 @@ def service_db_env() -> ServiceDBEnv:
 def website_browser_env() -> MCPServerEnv:
     """Build the Playwright MCP browser's image, create artifact, and create MCPServerEnv."""
     img = PLAYWRIGHT_MCP_IMAGE
-    logger.info(f"Building {img.name} Docker image...")
-    result = subprocess.run(
-        ["docker", "build", "--platform", "linux/amd64",
-         "-f", str(img.dockerfile), "-t", img.tag, str(img.context)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"{img.name} build failed: {result.stderr}")
+    _pull_published_else_build(img)
 
     artifact = DockerImageArtifact.put(
         id=f"playwright-mcp-{img.name}",
@@ -264,15 +239,7 @@ def slack_website_env() -> WebsiteEnv:
     """Build slack website frontend/backend images and create WebsiteEnv."""
     # Build backend
     be = SLACK_WEBSITE_BACKEND_IMAGE
-    logger.info(f"Building {be.name} Docker image...")
-    result = subprocess.run(
-        ["docker", "build", "--platform", "linux/amd64",
-         "-f", str(be.dockerfile), "-t", be.tag, str(be.context)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"{be.name} build failed: {result.stderr}")
+    _pull_published_else_build(be)
     backend_artifact = DockerImageArtifact.put(
         id="integ-test-website-backend-slack",
         description="Slack website backend",
@@ -281,15 +248,7 @@ def slack_website_env() -> WebsiteEnv:
 
     # Build frontend
     fe = SLACK_WEBSITE_FRONTEND_IMAGE
-    logger.info(f"Building {fe.name} Docker image...")
-    result = subprocess.run(
-        ["docker", "build", "--platform", "linux/amd64",
-         "-f", str(fe.dockerfile), "-t", fe.tag, str(fe.context)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"{fe.name} build failed: {result.stderr}")
+    _pull_published_else_build(fe)
     frontend_artifact = DockerImageArtifact.put(
         id="integ-test-website-frontend-slack",
         description="Slack website frontend",
@@ -323,14 +282,7 @@ def mcp_server_envs() -> dict[str, MCPServerEnv]:
     """Build MCP server images, create artifacts, and create MCPServerEnvs."""
     envs = {}
     for img in ALL_MCP_SERVER_IMAGES:
-        logger.info(f"Building {img.name} Docker image...")
-        result = subprocess.run(
-            ["docker", "build", "--platform", "linux/amd64", "-f", str(img.dockerfile), "-t", img.tag, str(img.context)],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"{img.name} build failed: {result.stderr}")
+        _pull_published_else_build(img)
 
         artifact = DockerImageArtifact.put(
             id=f"mcp-{img.name}",
@@ -416,13 +368,7 @@ def agentenv_website_env() -> WebsiteEnv:
 
     # Reuse the static slack frontend — its content is irrelevant to the backend v1 path.
     fe = SLACK_WEBSITE_FRONTEND_IMAGE
-    result = subprocess.run(
-        ["docker", "build", "--platform", "linux/amd64", "-f", str(fe.dockerfile), "-t", fe.tag, str(fe.context)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"{fe.name} build failed: {result.stderr}")
+    _pull_published_else_build(fe)
     frontend_artifact = DockerImageArtifact.put(
         id="integ-test-website-frontend-webitems",
         description="Static website frontend (reused)",
@@ -488,6 +434,11 @@ def agentenv_website_env() -> WebsiteEnv:
         id="coreweave",
         marks=skip_without_remote_sandbox("coreweave"),
     ),
+    pytest.param(
+        "agent37",
+        id="agent37",
+        marks=skip_without_remote_sandbox("agent37"),
+    ),
 ])
 def sandbox_provider(request):
     from agent_env.providers import (
@@ -527,6 +478,9 @@ def sandbox_provider(request):
     elif request.param == "coreweave":
         set_sandbox_provider(build_sandbox_provider("coreweave"))
         set_env_sandbox_provider(build_sandbox_provider("coreweave"))
+    elif request.param == "agent37":
+        set_sandbox_provider(build_sandbox_provider("agent37"))
+        set_env_sandbox_provider(build_sandbox_provider("agent37"))
     try:
         yield request.param
     finally:
@@ -1420,6 +1374,35 @@ async def test_gateway_with_single_website_env(slack_website_env, slack_service_
             gateway_tool_names = [t["name"] for t in gateway_entry["tools"]]
             assert "list_website_urls" in gateway_tool_names
 
+        # The browser is a child of the deploy's card, which the gateway reads on its MCP port as it reads every MCP
+        # server's, its recorder fronting Playwright MCP there; a recording through the gateway films the page opened.
+        browser = protocol_v1.find_child(result.environment_card, PLAYWRIGHT_MCP_ENVIRONMENT_NAME)
+        assert browser is not None, result.environment_card.get("children_environments")
+        sandbox = await LocalSandboxProvider().get_sandbox(result.sandbox_id)
+        compose = yaml.safe_load(await sandbox.exec_script(f"cat {DOCKER_COMPOSE_PATH}"))
+        proxied = dict(item.split("=", 1) for item in compose["services"][GATEWAY_SERVICE_NAME]["environment"])
+        assert (f"mcp-{PLAYWRIGHT_MCP_ENVIRONMENT_NAME}=http://{PLAYWRIGHT_MCP_ENVIRONMENT_NAME}:18765"
+                in proxied["REST_PROXY_URLS"].split(",")), proxied["REST_PROXY_URLS"]
+        card_url = f"http://127.0.0.1:18765{WELL_KNOWN_PATH}"
+        read_card = f"import urllib.request; print(urllib.request.urlopen('{card_url}').read().decode())"
+        served = await sandbox.exec_script(f"cd {GATEWAY_APP_DIR} && docker compose exec -T "
+                                           f"{PLAYWRIGHT_MCP_ENVIRONMENT_NAME} /opt/recorder/bin/python "
+                                           f"-c \"{read_card}\"")
+        on_mcp_port = json.loads(served.strip().splitlines()[-1])
+        assert on_mcp_port["name"] == PLAYWRIGHT_MCP_ENVIRONMENT_NAME
+        assert [e["uri"] for e in on_mcp_port["capabilities"]["extensions"]] == [COMPUTER_RECORDING]
+        start, end = (protocol_v1.find_extension_method(browser, COMPUTER_RECORDING, op)["endpoint"]
+                      for op in ("start", "end"))
+        async with httpx.AsyncClient(headers=result.control_headers, timeout=120) as client:
+            started = (await client.post(f"{result.gateway_url}{start}", json={"request_id": "e2e:start", "fps": 5}))
+            started.raise_for_status()
+            await _step_call_tool(client, result.gateway_url, "browser_navigate",
+                                  {"url": "http://slack-website-frontend:80"})
+            await asyncio.sleep(3)
+            manifest = (await client.post(f"{result.gateway_url}{end}",
+                                          json={"recording_id": started.json()["recording_id"]})).json()
+        assert manifest["segments"] and sum(segment["frames"] for segment in manifest["segments"]) > 0, manifest
+
         # Verify REST proxy: empty channels before loading data
         async with httpx.AsyncClient() as client:
             response = await client.get(f"{result.gateway_url}/svc/slack/api/channels?member_only=false", timeout=30)
@@ -1446,6 +1429,82 @@ async def test_gateway_with_single_website_env(slack_website_env, slack_service_
 
 @pytest.mark.asyncio
 @pytest.mark.integration
+async def test_the_browsers_card_and_recording_through_the_gateway_survive_its_recorder_and_container_restarting(
+        slack_website_env):
+    """The gateway reaches the browser's card and recording on its MCP port, where the recorder fronts Playwright MCP.
+    The recorder killed comes back with the MCP server behind it untouched, the browser's container restarted comes
+    back whole, and after each the card answers through the gateway and a recording through it films the page."""
+    browser_name = PLAYWRIGHT_MCP_ENVIRONMENT_NAME
+    result = await slack_website_env.deploy()
+    try:
+        sandbox = await LocalSandboxProvider().get_sandbox(result.sandbox_id)
+        browser = protocol_v1.find_child(result.environment_card, browser_name)
+        assert browser is not None, result.environment_card.get("children_environments")
+        start, end = (protocol_v1.find_extension_method(browser, COMPUTER_RECORDING, op)["endpoint"]
+                      for op in ("start", "end"))
+        compose = f"cd {GATEWAY_APP_DIR} && docker compose"
+        # The recorder by its interpreter, which nothing else runs: the local sandbox rewrites /app in a script.
+        recorder_python = "/opt/recorder/bin/python"
+
+        async def processes(pattern: str, signal: int | None = None) -> list[str]:
+            argv = [pattern, *([str(signal)] if signal is not None else [])]
+            out = await sandbox.exec_script(f"{compose} exec -T {browser_name} {recorder_python} -c "
+                                            f"{shlex.quote(PROCESSES)} {' '.join(map(shlex.quote, argv))}")
+            return out.strip().splitlines()[-1].split() if out.strip() else []
+
+        async def card(client: httpx.AsyncClient) -> dict:
+            deadline, last = time.monotonic() + 90, None
+            while time.monotonic() < deadline:
+                try:
+                    response = await client.get(f"{result.gateway_url}/svc/mcp-{browser_name}{WELL_KNOWN_PATH}")
+                    if response.status_code == 200:
+                        return response.json()
+                    last = f"HTTP {response.status_code}"
+                except httpx.HTTPError as e:
+                    last = repr(e)
+                await asyncio.sleep(1)
+            raise AssertionError(f"the browser's card didn't answer through the gateway: {last}")
+
+        async def record(client: httpx.AsyncClient, request_id: str) -> dict:
+            started = await client.post(f"{result.gateway_url}{start}", json={"request_id": request_id, "fps": 5})
+            started.raise_for_status()
+            await _step_call_tool(client, result.gateway_url, "browser_navigate",
+                                  {"url": "http://slack-website-frontend:80"})
+            await asyncio.sleep(3)
+            ended = await client.post(f"{result.gateway_url}{end}",
+                                      json={"recording_id": started.json()["recording_id"]})
+            ended.raise_for_status()
+            return ended.json()
+
+        async def started_at() -> str:
+            return (await sandbox.exec_script(f"{compose} ps -q {browser_name} | xargs docker inspect -f "
+                                              "'{{.State.StartedAt}}'")).strip()
+
+        def filmed(manifest: dict) -> bool:
+            return bool(manifest["segments"]) and sum(segment["frames"] for segment in manifest["segments"]) > 0
+
+        async with httpx.AsyncClient(headers=result.control_headers, timeout=120) as client:
+            assert (await card(client))["name"] == browser_name
+            assert filmed(await record(client, "chaos:before")), "a recording before any restart filmed nothing"
+
+            serving, recorder = await processes("@playwright/mcp"), await processes(recorder_python)
+            assert serving and recorder and await processes(recorder_python, 9) == recorder
+            assert (await card(client))["name"] == browser_name
+            assert (back := await processes(recorder_python)) and back != recorder
+            assert await processes("@playwright/mcp") == serving
+            assert filmed(await record(client, "chaos:recorder-killed")), "no film after the recorder came back"
+
+            first_start = await started_at()
+            await sandbox.exec_script(f"{compose} restart {browser_name}")
+            assert (await card(client))["name"] == browser_name
+            assert await started_at() != first_start
+            assert filmed(await record(client, "chaos:container-restarted")), "no film after the container restarted"
+    finally:
+        await slack_website_env.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
 async def test_gateway_with_multi_env_including_website(multi_env_with_website, environment_universe_artifact):
     """Test MultiEnv with MCP servers + website: deploy, browse website, load universe artifact."""
 
@@ -1462,6 +1521,12 @@ async def test_gateway_with_multi_env_including_website(multi_env_with_website, 
         content_text = "".join(c.text for c in result.content if hasattr(c, "text"))
         logger.info(f"browser_navigate result: {content_text[:500]}")
         assert "Slack Workspace" in content_text, f"Expected 'Slack Workspace' in navigate result, got {content_text}"
+
+        for url in ("http://slack/", "http://email/", "http://slack-website-backend:8000/api/health",
+                    "http://servicedb:5432/", "http://pgweb:8081/", "http://db-mcp:8000/mcp"):
+            result = await session.call_tool("browser_navigate", {"url": url})
+            content_text = "".join(c.text for c in result.content if hasattr(c, "text"))
+            assert "ERR_NAME_NOT_RESOLVED" in content_text, f"The browser reached {url}: {content_text[:300]}"
 
         await session.call_tool("browser_close", {})
 

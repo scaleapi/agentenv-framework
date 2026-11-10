@@ -13,6 +13,8 @@ from urllib.parse import unquote, urlsplit
 
 import httpx
 import pytest
+from starlette.testclient import TestClient
+from agentenv_protocol.website import ApiContext, WebsiteEnvironment, api, website
 
 from agent_env.env.gateway import AGENT_ENV_ROLE_META_KEY, AGENT_ENV_SESSION_META_KEY
 from agent_env.env.gateway import gateway as gateway_module
@@ -38,6 +40,11 @@ class _Upstream:
         self.requests: list[httpx.Request] = []
         self.produced = 0
         self.closed = False
+
+    @property
+    def forwarded(self) -> list[httpx.Request]:
+        """What it saw but the card reads the gateway makes of a website it fronts, for the paths its card reserves."""
+        return [request for request in self.requests if request.url.path != "/.well-known/agent-env.json"]
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -247,9 +254,9 @@ async def test_website_routes_use_the_same_handler(monkeypatch):
     gw = _gateway(website_urls={"web": "http://web"})
     status, headers, chunks = await _call(gw, "/website/web/assets/app.js")
     assert status == 200 and b"".join(chunks) == b"<html>hi</html>" and headers["content-type"].startswith("text/html")
-    assert str(up.requests[0].url) == "http://web/assets/app.js"
+    assert str(up.forwarded[0].url) == "http://web/assets/app.js"
     status, _, _ = await _call(gw, "/website/web")
-    assert status == 200 and str(up.requests[1].url) == "http://web"
+    assert status == 200 and str(up.forwarded[1].url) == "http://web"
 
 
 @pytest.mark.asyncio
@@ -338,7 +345,7 @@ async def test_website_paths_keep_their_encoding_and_the_bare_root_still_maps_to
     await _call(gw, "/website/web/a%2Fb/c%20d")
     await _call(gw, "/website/web")
     await _call(gw, "/website/web/")
-    assert [r.url.raw_path for r in up.requests] == [b"/a%2Fb/c%20d", b"/", b"/"]
+    assert [r.url.raw_path for r in up.forwarded] == [b"/a%2Fb/c%20d", b"/", b"/"]
 
 
 @pytest.mark.asyncio
@@ -361,7 +368,7 @@ async def test_an_escaped_slash_in_the_route_prefix_is_refused_not_misrouted(mon
     for path in ("/svc/mcp-svc%2Fx/y", "/website/web%2Findex.html"):
         status, _, chunks = await _call(gw, path)
         assert status == 400 and path.encode() in b"".join(chunks)  # names the request-target
-    assert up.requests == []  # nothing was forwarded
+    assert up.forwarded == []  # nothing was forwarded
 
 
 def test_gateway_module_doctests_pass():
@@ -427,7 +434,7 @@ async def test_the_website_proxy_stamps_the_role_too(monkeypatch):
     gw = _gateway(website_urls={"web": "http://web"})
     await _call(gw, "/website/web/assets/app.js", headers={"AgentEnv-Role": "viewer"})
     await _call(gw, "/website/web")
-    assert [r.headers.get_list("agentenv-role") for r in up.requests] == [["viewer"], ["default"]]
+    assert [r.headers.get_list("agentenv-role") for r in up.forwarded] == [["viewer"], ["default"]]
 
 
 def _rpc(**params) -> dict:
@@ -474,3 +481,171 @@ async def test_bodies_that_are_not_a_child_mcp_request_are_forwarded_untouched(m
         status, _, _ = await _call(gw, path, method=method, body=body, headers={"AgentEnv-Role": "alice@example.com"})
         assert status == 200, path
     assert [r.content for r in up.requests] == [body for _, _, body in cases]
+
+
+def _forwarded(request: httpx.Request) -> tuple[list[str], list[str], list[str]]:
+    return tuple(request.headers.get_list(name) for name in ("x-forwarded-host", "x-forwarded-proto", "x-forwarded-prefix"))
+
+
+@pytest.mark.asyncio
+async def test_the_upstream_learns_the_host_scheme_and_route_prefix_the_client_reached_it_at(monkeypatch):
+    up = _Upstream([b"ok"])
+    up.install(monkeypatch)
+    gw = _gateway(website_urls={"web": "http://web"})
+    await _call(gw, "/website/web/api/x/", headers={"host": "gw.example", "x-forwarded-prefix": "/elsewhere"})
+    await _call(gw, "/website/web", headers={"host": "gw.example"})
+    await _call(gw, "/website/web/", headers={"host": "gw.example"})
+    await _call(gw, "/svc/mcp-svc/x%2Fy", headers={"host": "gw.example"})
+    await _call(gw, "/gw%20x/svc/mcp-svc/x", headers={"host": "gw.example"}, root_path="/gw x")
+    assert [_forwarded(r) for r in up.forwarded] == [
+        (["gw.example"], ["http"], ["/website/web"]),
+        (["gw.example"], ["http"], ["/website/web"]),
+        (["gw.example"], ["http"], ["/website/web"]),
+        (["gw.example"], ["http"], ["/svc/mcp-svc"]),
+        (["gw.example"], ["http"], ["/gw%20x/svc/mcp-svc"]),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_client_serving_the_route_at_its_own_root_is_told_no_prefix_and_its_header_stays_with_the_gateway(
+        monkeypatch):
+    up = _Upstream([b"ok"])
+    up.install(monkeypatch)
+    gw = _gateway(website_urls={"web": "http://web"})
+    await _call(gw, "/website/web/api/x", headers={"host": "gw.example", "x-forwarded-host": "notes.test",
+                                                   "x-forwarded-proto": "https", "agentenv-site-root": "1"})
+    await _call(gw, "/website/web/api/x", headers={"host": "gw.example", "agentenv-site-root": ""})
+    assert [_forwarded(r) for r in up.forwarded] == [(["notes.test"], ["https"], []),
+                                                    (["gw.example"], ["http"], ["/website/web"])]
+    assert all("agentenv-site-root" not in r.headers for r in up.forwarded)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("root, expected", [
+    ("https://notes.test", (["notes.test"], ["https"], [])),
+    ("http://notes.test:8080/", (["notes.test:8080"], ["http"], [])),
+    ("javascript://notes.test", (["front.example"], ["https"], [])),
+    ("https://notes.test/elsewhere", (["front.example"], ["https"], [])),
+    ("https://user@notes.test", (["front.example"], ["https"], [])),
+], ids=["origin", "port", "not-http", "a-path", "userinfo"])
+async def test_a_site_root_naming_an_origin_is_the_address_though_a_front_rewrote_the_forwarded_host(
+        monkeypatch, root, expected):
+    """A front between a computer's site proxy and the gateway, as a provider's ingress is, may set its own
+    X-Forwarded-Host; the origin the proxy names in AgentEnv-Site-Root is the site's address all the same."""
+    up = _Upstream([b"ok"])
+    up.install(monkeypatch)
+    gw = _gateway(website_urls={"web": "http://web"})
+    await _call(gw, "/website/web/api/x", headers={"host": "gw.example", "x-forwarded-host": "front.example",
+                                                   "x-forwarded-proto": "https", "agentenv-site-root": root})
+    assert [_forwarded(r) for r in up.forwarded] == [expected]
+
+
+@pytest.mark.asyncio
+async def test_a_front_s_own_forwarded_host_and_scheme_win_and_reach_the_upstream_once(monkeypatch):
+    up = _Upstream([b"ok"])
+    up.install(monkeypatch)
+    gw = _gateway(website_urls={"web": "http://web"})
+    await _call(gw, "/website/web/x", raw_headers=[
+        (b"host", b"gateway.internal"), (b"x-forwarded-host", b"env.example, proxy"), (b"x-forwarded-proto", b"https"),
+        (b"x-forwarded-proto", b"http"), (b"x-forwarded-for", b"10.0.0.1")])
+    await _call(gw, "/website/web/x", headers={"host": "gw.example", "x-forwarded-proto": "gopher"})
+    assert [_forwarded(r) for r in up.forwarded] == [
+        (["env.example"], ["https"], ["/website/web"]),
+        (["gw.example"], ["http"], ["/website/web"]),
+    ]
+    assert up.forwarded[0].headers.get_list("x-forwarded-for") == ["10.0.0.1"]
+
+
+@pytest.mark.asyncio
+async def test_an_sdk_site_behind_the_gateway_names_the_gateway_s_address(monkeypatch):
+    @website(domains=["notes.example"])
+    class Notes(WebsiteEnvironment):
+        @api.get("/api/whoami")
+        def whoami(self, ctx: ApiContext) -> dict:
+            return {"base_url": ctx.base_url}
+
+    transport = httpx.ASGITransport(app=Notes().create_app())
+    monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient", lambda **kw: _RealAsyncClient(transport=transport, **kw))
+    gw = _gateway(website_urls={"notes": "http://notes"})
+
+    async def whoami(path: str) -> tuple[int, dict, bytes]:
+        status, answered, chunks = await _call(gw, path, headers={"host": "gw.example"})
+        return status, answered, b"".join(chunks)
+
+    _, _, answer = await whoami("/website/notes/api/whoami")
+    status, redirect, _ = await whoami("/website/notes/api/whoami/")
+    assert json.loads(answer) == {"base_url": "http://gw.example/website/notes"}
+    assert (status, redirect["location"]) == (307, "http://gw.example/website/notes/api/whoami")
+
+
+def test_the_route_an_sdk_card_names_reaches_its_nested_and_typed_paths():
+    @website(domains=["files.example"])
+    class Files(WebsiteEnvironment):
+        @api.get("/files/{rest:path}")
+        def files(self, rest: str) -> dict:
+            return {"rest": rest}
+
+        @api.get("/api/notes/{note_id:int}")
+        def get_note(self, note_id: int) -> dict:
+            return {"id": note_id}
+
+    card = TestClient(Files().create_app()).get("/.well-known/agent-env.json").json()
+    routes = rest_proxy_module.website_routes(card)
+    assert rest_proxy_module.route_name(routes, "GET", "/files/a/b.txt") == "files"
+    assert rest_proxy_module.route_name(routes, "GET", "/api/notes/7") == "get_note"
+    assert rest_proxy_module.route_name(routes, "GET", "/api/notes/seven") is None
+
+
+def test_a_request_a_built_in_route_answers_is_named_by_no_card_route():
+    @website(domains=["any.example"])
+    class AnyApi(WebsiteEnvironment):
+        @api.get("/api/{rest:path}")
+        def any_api(self, rest: str) -> dict:
+            return {"rest": rest}
+
+        @api.delete("/{rest:path}")
+        def any_delete(self, rest: str) -> dict:
+            return {"rest": rest}
+
+    card = TestClient(AnyApi().create_app()).get("/.well-known/agent-env.json").json()
+    routes = rest_proxy_module.website_routes(card)
+    assert rest_proxy_module.route_name(routes, "GET", "/api/session") is None
+    assert rest_proxy_module.route_name(routes, "DELETE", "/api/session") is None
+    assert rest_proxy_module.route_name(routes, "GET", "/api/health") == "any_api"
+    assert rest_proxy_module.route_name(routes, "GET", "/api/notes") == "any_api"
+    assert rest_proxy_module.route_name(routes, "DELETE", "/api/health") == "any_delete"
+
+
+def test_a_site_route_at_the_session_path_replaces_the_built_in_one():
+    @website(domains=["own.example"])
+    class OwnSession(WebsiteEnvironment):
+        @api.post("/api/session")
+        def sign_in(self) -> dict:
+            return {}
+
+        @api.get("/api/{rest:path}")
+        def any_api(self, rest: str) -> dict:
+            return {"rest": rest}
+
+    card = TestClient(OwnSession().create_app()).get("/.well-known/agent-env.json").json()
+    routes = rest_proxy_module.website_routes(card)
+    assert rest_proxy_module.route_name(routes, "POST", "/api/session") == "sign_in"
+    assert rest_proxy_module.route_name(routes, "GET", "/api/session") == "any_api"
+
+
+@pytest.mark.parametrize("path, method, target, expected", [
+    ("/api/notes/{note_id:int}", "GET", "/api/notes/7", "route"),
+    ("/api/notes/{note_id:int}", "GET", "/api/notes/seven", None),
+    ("/api/notes/{note_id}", "GET", "/api/notes/seven", "route"),
+    ("/api/notes/{note_id}", "GET", "/api/notes/7/extra", None),
+    ("/files/{rest:path}", "GET", "/files/a/b.txt", "route"),
+    ("/api/price/{p:float}", "GET", "/api/price/3.50", "route"),
+    ("/api/x/{id:uuid}", "GET", "/api/x/123e4567-e89b-12d3-a456-426614174000", "route"),
+    ("/api/a.b", "GET", "/api/aXb", None),
+    ("/api/notes", "HEAD", "/api/notes", "route"),
+    ("/api/notes", "POST", "/api/notes", None),
+])
+def test_a_request_is_named_by_the_card_route_its_method_and_path_reach(path, method, target, expected):
+    card = {"capabilities": {"extensions": [{"uri": "urn:agentenv:website/v1", "params": {
+        "routes": [{"method": "GET", "path": path, "name": "route"}]}}]}}
+    assert rest_proxy_module.route_name(rest_proxy_module.website_routes(card), method, target) == expected

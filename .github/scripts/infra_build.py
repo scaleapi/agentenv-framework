@@ -44,6 +44,7 @@ IMAGES = {
     "agentenv-db-web": "src/agent_env/env/envs/service_db/Dockerfile.db-web",
     "agentenv-db-mcp": "src/agent_env/env/envs/service_db/Dockerfile.db-mcp",
     "agentenv-playwright-mcp": "src/agent_env/env/envs/playwright_mcp/Dockerfile",
+    "agentenv-browser-use": "src/agent_env/agents/agents/browser-use/Dockerfile",
     "agentenv-claude-code": "src/agent_env/agents/agents/claude-code/Dockerfile",
     "agentenv-codex": "src/agent_env/agents/agents/codex/Dockerfile",
     "agentenv-gemini": "src/agent_env/agents/agents/gemini/Dockerfile",
@@ -56,6 +57,7 @@ IMAGES = {
     "agentenv-pydantic-ai": "src/agent_env/agents/agents/pydantic-ai/Dockerfile",
     "agentenv-mail-mcp": "src/agent_env/examples/mail-mcp/envs/mail/Dockerfile",
     "agentenv-ubuntu-24.04": "src/agent_env/computers/artifacts/ubuntu-24.04/Dockerfile",
+    "agentenv-ubuntu-24.04-headless": "src/agent_env/computers/artifacts/ubuntu-24.04-headless/Dockerfile",
     "agentenv-disk-tools": "src/agent_env/computers/disk/linux/tools/Dockerfile",
     "agentenv-qemu-launcher": "src/agent_env/computers/disk/linux/launcher/Dockerfile",
     "agentenv-ubuntu-24.04-disk": "src/agent_env/computers/disk/linux/boot/Dockerfile",
@@ -80,14 +82,17 @@ _RATE_LIMITED = re.compile(r"429 Too Many Requests|toomanyrequests", re.IGNORECA
 # What pip in an agent image's build answers for the agentenv-framework-protocol its release published moments earlier,
 # until PyPI's index, which a CDN caches, lists it: pinned (an agent's), or a floor it names (the browser's recorder).
 _NOT_YET_SERVED = re.compile(r"No matching distribution found for agentenv-framework-protocol(\[[^\]]*\])?(==|>=)")
+# What GHCR answers a push to a new package while another platform's push creates it, until it links the package to
+# this repository.
+_NOT_YET_LINKED = re.compile(r"denied: permission_denied: write_package")
 # How long to wait before each try again, so a burst of builds starting together spreads out.
 _RETRY_WAITS_SECONDS = (30, 60, 120)
 
 # Each image's check, beyond its build: the gateway imports its server, Postgres turns healthy, the sidecars and the
-# browser answer their own commands, Claude Code's, Codex's, Gemini's, Hermes', OpenCode's and pi's agents run their CLIs and
-# import their servers, OpenHands' imports its server, which loads the OpenHands SDK, Pydantic AI's imports its
-# server, which loads Pydantic AI, the proxy imports its server, the mail example's env imports its server, and the
-# base computer's desktop comes up, every program running.
+# browser answer their own commands, Claude Code's, Codex's, Gemini's, Hermes', OpenCode's and pi's agents run their
+# CLIs and import their servers, OpenHands' imports its server, which loads the OpenHands SDK, Pydantic AI's imports its
+# server, which loads Pydantic AI, Browser Use's loads Browser Use Pi and imports its server, the proxy imports its
+# server, the mail example's env imports its server, and the base computer's desktop comes up, every program running.
 _SMOKES = {
     "agentenv-gateway": ["docker", "run", "--rm", "--entrypoint", "python", "{image}", "-c", "import gateway.entrypoint"],
     "agentenv-db-web": ["docker", "run", "--rm", "--entrypoint", "/usr/bin/pgweb", "{image}", "--version"],
@@ -97,6 +102,8 @@ _SMOKES = {
                                 " && ls -d /root/.cache/ms-playwright/chromium-*"],
     "agentenv-claude-code": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
                              'claude --version && python -c "import a2a_server"'],
+    "agentenv-browser-use": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
+                             'node -e "import(\'@browser_use/pi\')" && python -c "import a2a_server"'],
     "agentenv-codex": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
                        'codex --version && mcp-remote --help >/dev/null && python -c "import a2a_server"'],
     "agentenv-gemini": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
@@ -118,11 +125,19 @@ _SMOKES = {
                               " s=$(supervisorctl -c /etc/supervisor/supervisord.conf status);"
                               " echo \"$s\" | grep -q ' RUNNING ' && ! echo \"$s\" | grep -qv ' RUNNING ' && exit 0;"
                               " done; supervisorctl -c /etc/supervisor/supervisord.conf status; exit 1"],
+    "agentenv-ubuntu-24.04-headless": [
+        "docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
+        "start-computer & for _ in $(seq 60); do sleep 1;"
+        " s=$(supervisorctl -c /etc/supervisor/supervisord.conf status);"
+        " echo \"$s\" | grep -q ' RUNNING ' && ! echo \"$s\" | grep -qv ' RUNNING ' && exit 0;"
+        " done; supervisorctl -c /etc/supervisor/supervisord.conf status; exit 1"],
     "agentenv-disk-tools": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
                             "command -v disk image-env mkfs.ext4 mkfs.vfat mcopy sfdisk qemu-img"],
     "agentenv-qemu-launcher": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
                                "qemu-system-x86_64 --version && qemu-system-aarch64 --version"
-                               " && test -f /usr/share/OVMF/OVMF_CODE_4M.fd && test -f /usr/share/AAVMF/AAVMF_CODE.fd"],
+                               " && test -f /usr/share/OVMF/OVMF_CODE_4M.fd && test -f /usr/share/AAVMF/AAVMF_CODE.fd"
+                               " && test -f /usr/share/OVMF/OVMF_CODE_4M.secboot.fd"
+                               " && test -f /usr/share/OVMF/OVMF_VARS_4M.ms.fd && command -v socat zstd swtpm"],
 }
 
 
@@ -297,13 +312,16 @@ def _tried_again(attempt: Callable[[], subprocess.CompletedProcess]) -> subproce
 
 def _why_again(result: subprocess.CompletedProcess) -> str | None:
     """Why a failed run can work later, or None: a registry rate-limited it, as public.ecr.aws does past one anonymous
-    pull a second, which builds starting together pass; or a build's pip can't find the agentenv-framework-protocol its
-    release has just published, which PyPI's index lists a little after the upload."""
+    pull a second, which builds starting together pass; a build's pip can't find the agentenv-framework-protocol its
+    release has just published, which PyPI's index lists a little after the upload; or GHCR refuses a push to a package
+    another platform's push is creating, as an image's first release pushes both at once."""
     printed, command = f"{result.stdout}{result.stderr}", f"`{' '.join(result.args)[:_PRINTED_CHARS]}`"
     if _RATE_LIMITED.search(printed):
         return f"a registry rate-limited {command}"
     if _NOT_YET_SERVED.search(printed):
         return f"PyPI doesn't list yet the agentenv-framework-protocol {command} installs"
+    if list(result.args[:2]) == ["docker", "push"] and _NOT_YET_LINKED.search(printed):
+        return f"GHCR doesn't let this repository write yet the package {command} pushes to"
     return None
 
 

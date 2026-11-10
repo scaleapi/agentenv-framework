@@ -1,0 +1,45 @@
+# seed-env, sourced by init: the deploy's environment from the launcher's NoCloud seed, as
+# agentenv_protocol.computer.seed defines it. init sources it before it exports the image's environment, and a seed may
+# name any variable, so the reader works in a subshell and hands back only exports, each name checked and each value
+# quoted, which seed_environment evaluates: no variable but those the seed names is touched.
+
+# decode VALUE: VALUE's base64 decoded into $decoded, its trailing newlines kept, which $(...) alone would drop.
+decode() { decoded=$(echo "$1" | base64 -d; echo .); decoded=${decoded%.}; }
+
+# seed_environment DIR: export each variable of the newest seed version this init reads (1) that the seed mounted at DIR
+# carries, from the one its agentenv-seed-oldest names, 1 without it; with none, return 1, the reason in $refused.
+seed_environment() { eval "$(_seed_exports "$1")"; }
+
+# _seed_exports DIR: what seed_environment evaluates: an export a variable, or the refusal.
+_seed_exports() (
+    reads=1
+    oldest=$(cat "$1/agentenv-seed-oldest" 2>/dev/null || echo 1)
+    newest=${reads##* }
+    case "$oldest" in ''|*[!0-9]*) oldest=1 ;; esac
+    if [ "$oldest" -gt "$newest" ]; then
+        echo "refused='this disk reads seed v$newest; this agent-env writes v$oldest or later;" \
+             "recompose it with agent-env env build'; false"
+        exit 0
+    fi
+    file=
+    for version in $reads; do
+        [ "$version" -ge "$oldest" ] || continue
+        name=user-data
+        [ "$version" -gt 1 ] && name=user-data.v$version
+        [ -f "$1/$name" ] && file=$1/$name
+    done
+    [ -n "$file" ] || exit 0
+    while read -r line; do
+        name=${line%%=*} value=${line#*=}
+        case "$name" in ''|\#*|[0-9]*|*[!A-Za-z0-9_]*) continue ;; esac
+        decode "$value"
+        quoted= rest=$decoded
+        while :; do
+            case "$rest" in
+                *\'*) quoted="$quoted${rest%%\'*}'\\''" rest=${rest#*\'} ;;
+                *) quoted="$quoted$rest"; break ;;
+            esac
+        done
+        printf "export %s='%s'\n" "$name" "$quoted"
+    done < "$file"
+)

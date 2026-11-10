@@ -133,6 +133,7 @@ CHECKS: dict[str, Callable[..., list[str]]] = {
     "deploy_agent": _deploy_agent,
     "deploy_human_agent": _deploys_an_agent,
     "register_agent_triggers": _needs_the_agent,
+    "browser_connect_cdp": _needs_the_agent,
     "snapshot_agent_state": _needs_the_agent,
     "collect_artifacts": _collect_artifacts,
     "register_env_triggers": _register_env_triggers,
@@ -148,12 +149,14 @@ CHECKS: dict[str, Callable[..., list[str]]] = {
 
 UNAFFECTED = frozenset({
     # They name no agent.
-    "aggregate_verifiers", "apply_server_config", "build_mcp_cli", "combine_universe_verdicts", "configure_scheduled_checks",
+    "aggregate_verifiers", "apply_server_config", "browser_activate_tab", "browser_clear_local_storage",
+    "browser_close_tab", "browser_delete_cookies", "browser_open_tab", "browser_set_cookies", "browser_sign_in",
+    "browser_set_local_storage", "build_mcp_cli", "combine_universe_verdicts", "configure_scheduled_checks",
     "deploy_env", "deploy_sandbox", "end_computer_recording", "start_computer_recording", "env_outcome_verifier",
     "modify_env_tool_access", "reset_env", "review",
     "run_container_unit_tests_verifier", "run_docker_container", "snapshot_env", "snapshot_computer_env", "sync_env_clock",
     "validation_gate_aggregator", "verify_env_card", "verify_env_core_protocol", "verify_mcp_tool_schema",
-    "verify_spec_conformance", "verify_universe_load_export_roundtrip", "website_state_verifier",
+    "verify_spec_conformance", "verify_universe_load_export_roundtrip",
     # They read only what an outside turn leaves: its reply.
     "agent_prompt_response_verifier", "verify_mcp_env_assessment",
     # It skips an agent that isn't deployed.

@@ -3,18 +3,18 @@ from __future__ import annotations
 
 import asyncio
 import atexit
-import contextlib
 import json
 import logging
 import os
 import posixpath
 import socket
 import subprocess
+from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
-from urllib.parse import parse_qsl
+from typing import TYPE_CHECKING, Any, NamedTuple
+from urllib.parse import parse_qsl, urljoin, urlsplit
 from uuid import uuid4
 
 import anyio
@@ -22,17 +22,16 @@ import httpx
 import psycopg2
 import uvicorn
 from mcp import ClientSession
-from mcp.client.streamable_http import streamable_http_client
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.fastmcp.tools import Tool as FastMCPTool
 from mcp.server.fastmcp.utilities.func_metadata import FuncMetadata, ArgModelBase
-from mcp.shared.exceptions import McpError
-from mcp.types import CONNECTION_CLOSED, CallToolResult, ErrorData, TextContent, Tool as MCPTool
+from mcp.types import CallToolResult, TextContent, Tool as MCPTool
 from pydantic import create_model
-from starlette.requests import Request
+from starlette.requests import HTTPConnection, Request
 from starlette.responses import Response, StreamingResponse
-from anyio import ClosedResourceError
+from starlette.routing import WebSocketRoute
+from starlette.websockets import WebSocket
 
 if TYPE_CHECKING:
     from . import InternalMCPServer
@@ -49,6 +48,7 @@ from .constants import (
     CHILD_DISCOVERY_TIMEOUT_S,
     DATA_PLANE_LOAD_TIMEOUT_MAX_S,
     DEFAULT_ROLE,
+    EXT_WEBSITE_URI,
     GATEWAY_COMPOSE_HOST,
     GATEWAY_EXTENSIONS,
     GATEWAY_TRAJECTORY_FILE,
@@ -62,17 +62,32 @@ from .constants import (
     STEP_SOURCE_POST_TURN_HOOK,
     TOOL_DISABLE_ACTION,
     TOOL_ENABLE_ACTION,
+    WEBSITE_BROWSE_URL_PARAM,
     WELL_KNOWN_PATH,
     WILDCARD,
     GatewayMode,
     tool_name_clashes_text,
 )
+from .browser_proxy import PING_INTERVAL_S, BrowserRoutes, TokenRedaction
 from .caller import Caller
 from .changes import ChangeAttribution
-from .child_transport import child_http_client
+from .child_sessions import ChildSessions, is_dead_session
 from .clock import Clock, ClockError, _iso
 from .get_time import GET_TIME_TOOL_NAME, build_get_time_tool
-from .rest_proxy import ROLE_HEADER_BYTES, UpstreamResponse, fetch_child_card, forward, rewrite_child_card, upstream_url
+from .rest_proxy import (
+    ROLE_HEADER_BYTES,
+    UpstreamResponse,
+    WebsiteRoute,
+    fetch_child_card,
+    forward,
+    operations,
+    refuse_websocket,
+    relay_websocket,
+    rewrite_child_card,
+    route_name,
+    upstream_url,
+    website_routes,
+)
 from .triggers import TriggerEngine, TriggerError
 from .notifications import CHECK_TOOL_NAMES, NotificationError, Notifications, build_check_tools
 
@@ -80,6 +95,11 @@ logger = logging.getLogger(__name__)
 
 # RFC 9110's safe methods: a request using one asks for no change, so the proxy measures no write window for it.
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
+# A CDP address at the gateway: the website browser behind the /svc child <key>, discovery and its WebSocket.
+BROWSER_ROUTE = "/browser/{key}/cdp/{token}/{path:path}"
+# The loggers that write a request's path or a forwarded URL: uvicorn's, for HTTP requests and WebSocket handshakes,
+# and httpx's, for each request the gateway forwards.
+_TOKEN_LOGGERS = ("uvicorn.access", "uvicorn.error", "httpx")
 _STEP_API = {"source": "step_api"}
 
 
@@ -97,7 +117,6 @@ class Gateway:
 
     TOOL_CALL_TIMEOUT_S = 600.0
     STARTUP_DISCOVERY_TIMEOUT_S = 60.0  # startup discovery past it fails open, like a failed one; uvicorn must come up
-    CHILD_CLOSE_TIMEOUT_S = 3.0  # wait for the owner task to exit a retired child-session generation; past it, cancel it
     BARRIER_READ_AHEAD_MAX_BYTES = 8 * 1024 * 1024  # a larger sized body held by a barrier streams, its window to the last byte
     TRIGGER_BARRIER_TIMEOUT_S = 30.0  # a barrier may ask for less; past it the call is answered anyway
     # Must be >= the largest timeout any client can ask for, or the proxy severs a load the
@@ -119,28 +138,34 @@ class Gateway:
         rest_proxy_urls: dict[str, str] | None = None,
         gateway_mode: GatewayMode = GatewayMode.PERFORMANCE,
         service_db_url: str | None = None,
+        provider_headers: Iterable[str] = (),
     ):
+        """`provider_headers` names the headers the sandbox provider in front of the gateway is sent, its credentials,
+        which the gateway takes off every request it forwards to a service behind it."""
         self.host = host
         self.port = port
         self.server_name = server_name
         self.internal_mcp_servers = internal_mcp_servers
         self.website_urls = website_urls or {}
         self.rest_proxy_urls = rest_proxy_urls or {}
+        self._site_mcp_endpoints = site_mcp_endpoints(internal_mcp_servers, self.website_urls, self.rest_proxy_urls)
+        self._site_reserved: dict[str, frozenset[str]] = {}
+        self._withheld = frozenset(name.strip().lower().encode() for name in provider_headers if name.strip())
+        self._browsers = BrowserRoutes(self.rest_proxy_urls, self.REST_PROXY_TIMEOUT, self._log_event,
+                                       self._attribution, self._request_role, withheld=self._withheld)
+        for name in _TOKEN_LOGGERS:  # each names a CDP address's path, its token in it, at INFO
+            log = logging.getLogger(name)
+            if not any(isinstance(f, TokenRedaction) for f in log.filters):
+                log.addFilter(TokenRedaction())
         self.gateway_mode = gateway_mode
         self._service_db_url = service_db_url
+        self._website_routes: dict[str, list[WebsiteRoute] | None] = {}
         self._db_conn: psycopg2.extensions.connection | None = None
         if service_db_url:
             self._db_conn = psycopg2.connect(service_db_url)
             self._db_conn.autocommit = True
-        # The process's one generation of child sessions, shared by the MCP proxy, /step and triggers. The client
-        # contexts are anyio task groups, so only the task that entered them may exit them: the owner task.
-        self._child_sessions: dict[str, ClientSession] = {}
-        self._child_owner: asyncio.Task | None = None
-        self._child_close: asyncio.Event | None = None
-        self._child_lock = asyncio.Lock()  # open / retire / close of a generation (taken after _discover_lock)
-        self._closing = False  # set at process shutdown; no generation is opened past it
-        self._retirements: set[asyncio.Task] = set()  # generations being retired on a reported transport failure
-        self._retiring: set[int] = set()  # ids of generations a report has already retired, so the rest are no-ops
+        # Each child's session, shared by the MCP proxy, /step and triggers (its locks are taken after _discover_lock)
+        self._sessions = ChildSessions(self.internal_mcp_servers)
         self._discover_lock = asyncio.Lock()
         self._server_tools: dict[str, list[MCPTool]] = {}
         self._tools_discovered = False
@@ -187,20 +212,29 @@ class Gateway:
             async def proxy_to_service(request: Request) -> Response:
                 return await self._proxy_rest_request(request)
 
+            @self._mcp.custom_route(BROWSER_ROUTE, methods=["GET", "HEAD"])
+            async def browser_discovery(request: Request) -> Response:
+                return await self._browsers.discovery(request)
+
         if self.website_urls:
             @self._mcp.custom_route(
                 "/website/{service_name}/{path:path}",
-                methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
+                methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
             )
             async def proxy_to_frontend(request: Request) -> Response:
                 return await self._proxy_website_request(request)
 
             @self._mcp.custom_route(
                 "/website/{service_name}",
-                methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
+                methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
             )
             async def proxy_to_frontend_root(request: Request) -> Response:
                 return await self._proxy_website_request(request)
+
+            self._mcp._custom_starlette_routes += [
+                WebSocketRoute("/website/{service_name}/{path:path}", self._proxy_website_socket),
+                WebSocketRoute("/website/{service_name}", self._proxy_website_socket),
+            ]
 
         @self._mcp.custom_route(f"/tools/{TOOL_DISABLE_ACTION}", methods=["POST"])
         async def tools_disable(request: Request) -> Response:
@@ -239,13 +273,15 @@ class Gateway:
         async def step_endpoint(request: Request) -> Response:
             return await self._handle_step(request)
 
-        async def _trigger_write(request: Request, method) -> Response:
-            """Shared body for the trigger write routes: parse JSON, invoke the engine method,
-            map a TriggerError (bad config) to a 400."""
+        async def _trigger_write(request: Request, method, prepare=None) -> Response:
+            """Shared body for the trigger write routes: parse JSON, await `prepare` with it, invoke the engine
+            method, map a TriggerError (bad config) to a 400."""
             try:
                 body = await request.json()
             except Exception:
                 return self._json_response({"ok": False, "error": "Invalid JSON body"}, 400)
+            if prepare is not None:
+                await prepare(body)
             try:
                 return self._json_response(method(body), 200)
             except TriggerError as e:
@@ -253,7 +289,7 @@ class Gateway:
 
         @self._mcp.custom_route("/triggers/register", methods=["POST"])
         async def triggers_register(request: Request) -> Response:
-            return await _trigger_write(request, self._trigger_engine.register)
+            return await _trigger_write(request, self._trigger_engine.register, prepare=self._read_trigger_website_routes)
 
         @self._mcp.custom_route("/triggers/remove", methods=["POST"])
         async def triggers_remove(request: Request) -> Response:
@@ -395,6 +431,8 @@ class Gateway:
             host=self._mcp.settings.host,
             port=self._mcp.settings.port,
             log_level=self._mcp.settings.log_level.lower(),
+            ws_ping_interval=PING_INTERVAL_S,
+            ws_ping_timeout=PING_INTERVAL_S,
         )
         server = uvicorn.Server(config)
         if self._resolve_i6pn_host():
@@ -417,6 +455,8 @@ class Gateway:
         lifespan wrapped around the MCP session manager's."""
         inner = self._mcp.streamable_http_app()
         inner.router.lifespan_context = self._process_lifespan(inner.router.lifespan_context)
+        if self.rest_proxy_urls:
+            inner.router.routes.append(WebSocketRoute(BROWSER_ROUTE, self._browsers.relay))
 
         async def app(scope, receive, send):
             if scope["type"] != "http":
@@ -465,7 +505,7 @@ class Gateway:
                 async with mcp_lifespan(app):
                     yield
             finally:
-                self._closing = True
+                self._sessions.closing = True
                 await self._trigger_engine.stop_driver()
                 await self._trigger_engine.cancel_scheduled()
                 await self._close_child_sessions()
@@ -600,9 +640,14 @@ class Gateway:
         if base_url is None:
             return self._json_response({"error": f"Unknown service: {service_name}"}, 404)
         role = self._request_role(request)
-        mcp_server = url_map is self.rest_proxy_urls and service_name.startswith("mcp-")
+        site_mcp = self._site_mcp_endpoints.get(service_name) if url_map is self.rest_proxy_urls else None
+        mcp_server = url_map is self.rest_proxy_urls and (service_name.startswith("mcp-") or site_mcp is not None)
+        mcp_endpoint = site_mcp or "mcp"
+        if url_map is self.rest_proxy_urls and (cdp := await self._browsers.cdp_answer(request, base_url, role)) is not None:
+            return cdp
         if request.method in _SAFE_METHODS:
-            return await forward(request, base_url, role=role, timeout=self.REST_PROXY_TIMEOUT, mcp_server=mcp_server)
+            return await forward(request, base_url, role=role, timeout=self.REST_PROXY_TIMEOUT, mcp_server=mcp_server,
+                                 withheld=self._withheld, mcp_endpoint=mcp_endpoint)
         changelog_before = self._query_changelog_id()
         attribution = self._attribution(role)  # at the start: a fire may be gone by the time the response ends
 
@@ -610,12 +655,16 @@ class Gateway:
             changelog_after = self._query_changelog_id()
             if changelog_after is None or changelog_after <= (changelog_before or 0):
                 return  # only a request that wrote changelog rows is a write window
+            path = "/" + request.path_params.get("path", "")
+            op = (self._website_op(service_name, request.method, site_request_path(request) or path)
+                  if url_map is self.website_urls else None)
             await self._log_event({
                 "event_type": "http_request",
                 "route": "website" if url_map is self.website_urls else "svc",
                 "service": service_name,
                 "method": request.method,
-                "path": "/" + request.path_params.get("path", ""),
+                "path": path,
+                **({"op": op} if op else {}),
                 "status": status,
                 **attribution,
                 "changelog_id_before": changelog_before,
@@ -623,21 +672,26 @@ class Gateway:
             })
 
         return await forward(request, base_url, role=role, timeout=self.REST_PROXY_TIMEOUT, mcp_server=mcp_server,
-                             on_done=log_write)
+                             on_done=log_write, withheld=self._withheld, mcp_endpoint=mcp_endpoint)
 
     async def _proxy_website_request(self, request: Request) -> Response:
         """Proxy a website request; with a website or state trigger registered, feed it to the engine and hold barriers.
-        A site's data plane and card are never reached through its route, so an agent browsing the site can't read
-        what grades it; agentenv reaches them through /svc/<name>/."""
-        if reserved_site_request(request):
+        A site's data plane and card, and every path its card advertises for agentenv (``site_reserved_paths``), are
+        never reached through its route, so an agent browsing the site can't read its data or what grades it; agentenv
+        reaches them through /svc/<name>/."""
+        reserved = await self._site_reserved_paths(request.path_params["service_name"])
+        if reserved is None:
+            return self._json_response({"error": "website card unavailable"}, 503)
+        if reserved_site_request(request, reserved):
             return self._json_response({"error": "not found"}, 404)
         response = await self._proxy_rest_request(request, url_map=self.website_urls)
         app = request.path_params["service_name"]
         engine = self._trigger_engine
         if app in self.website_urls and (engine.has_website_triggers or engine.has_state_triggers):
+            path = site_request_path(request) or "/" + request.path_params.get("path", "")
             if isinstance(response, UpstreamResponse):
-                if not engine.may_hold_website_request(self._request_role(request), app, request.method,
-                                                       "/" + request.path_params.get("path", ""), response.status_code):
+                if not engine.may_hold_website_request(self._request_role(request), app, request.method, path,
+                                                       response.status_code, self._website_op(app, request.method, path)):
                     response.after_body(lambda status: self._fire_website_triggers(request, app, status))  # answered at its last byte
                     return response
                 await response.read_ahead_if_sized(self.BARRIER_READ_AHEAD_MAX_BYTES)  # its window ends before its triggers run
@@ -645,34 +699,128 @@ class Gateway:
             await self._await_barriers(barrier_tasks, barrier_timeout_s)
         return response
 
+    async def _proxy_website_socket(self, websocket: WebSocket) -> None:
+        """Relay a WebSocket on a site's route to its server, as its HTTP requests are: its data plane and card, and
+        every path its card advertises for agentenv (``site_reserved_paths``), are refused, and it goes upstream with
+        the role, role key and forwarded address an HTTP request would carry."""
+        reserved = await self._site_reserved_paths(websocket.path_params["service_name"])
+        if reserved is None:
+            await refuse_websocket(websocket, self._json_response({"error": "website card unavailable"}, 503))
+            return
+        if reserved_site_request(websocket, reserved):
+            await refuse_websocket(websocket, self._json_response({"error": "not found"}, 404))
+            return
+        service_name = websocket.path_params["service_name"]
+        base_url = self.website_urls.get(service_name)
+        if base_url is None:
+            await refuse_websocket(websocket, self._json_response({"error": f"Unknown service: {service_name}"}, 404))
+            return
+        await relay_websocket(websocket, base_url, role=self._request_role(websocket),
+                              open_timeout=self.REST_PROXY_CONNECT_TIMEOUT_S, withheld=self._withheld)
+
     async def _fire_website_triggers(self, request: Request, app: str,
                                      status: int) -> tuple[list[asyncio.Task], float | None]:
         """Feed an answered website request to the trigger engine (fail-open)."""
         try:
             # Only a website trigger reads the request's args; a state re-check needs just the method and status.
             args = _request_args(request, await request.body()) if self._trigger_engine.has_website_triggers else {}
-            return self._trigger_engine.on_website_request(self._request_role(request), app, request.method,
-                                                           "/" + request.path_params.get("path", ""), status, args)
+            path = site_request_path(request) or "/" + request.path_params.get("path", "")
+            return self._trigger_engine.on_website_request(self._request_role(request), app, request.method, path,
+                                                           status, args, self._website_op(app, request.method, path))
         except Exception:
             logger.exception("Trigger evaluation failed (fail-open)")
             return [], None
 
     @staticmethod
-    def _request_role(request: Request) -> str:
+    def _request_role(request: HTTPConnection) -> str:
         """The role the gateway attributes a REST request to: the first AgentEnv-Role header, else the default role."""
         return request.headers.get(AGENT_ENV_ROLE_HEADER, "").strip() or DEFAULT_ROLE
+
+    async def _read_trigger_website_routes(self, body: Any) -> None:
+        """Read the routes of each website a website trigger in a register `body` names an `op` of, so registration
+        can check the op and requests can be matched by it; one whose card could not be read before is read again."""
+        triggers = body.get("triggers") if isinstance(body, dict) else None
+        apps = {trigger["when"]["app"] for trigger in triggers if isinstance(trigger, dict)
+                and isinstance(trigger.get("when"), dict) and trigger["when"].get("type") == "website"
+                and trigger["when"].get("op") is not None and isinstance(trigger["when"].get("app"), str)
+                and trigger["when"]["app"] in self.website_urls} if isinstance(triggers, list) else set()
+        await asyncio.gather(*(self._read_website_routes(app, again=True) for app in apps))
+
+    async def _read_website_routes(self, app: str, *, again: bool = False) -> None:
+        """Read website `app`'s routes from its card once (`again`: once more, when its card could not be read). The
+        env card's composition reads them too, so a deploy, which reads that card, leaves them read."""
+        if app in self._website_routes and not (again and self._website_routes[app] is None):
+            return
+        async with httpx.AsyncClient() as client:
+            card = await fetch_child_card(client, app, self.rest_proxy_urls.get(app) or self.website_urls[app])
+        self._website_routes[app] = website_routes(card) if card is not None else None
+
+    def website_route_names(self, app: str) -> set[str] | None:
+        """The names of the routes website `app`'s card names, as last read; None when it has not been read."""
+        routes = self._website_routes.get(app)
+        return None if routes is None else {route.name for route in routes if route.name is not None}
+
+    def _website_op(self, app: str, method: str, path: str) -> str | None:
+        """The name of the route of website `app` a request reached, by the routes last read from its card; never a
+        read of its own, so answering a request waits on no card."""
+        return route_name(self._website_routes.get(app) or [], method, path)
+
+    async def _site_reserved_paths(self, app: str) -> frozenset[str] | None:
+        """The paths ``app``'s card advertises for agentenv (``site_reserved_paths``), read once from its server, the one
+        its /svc/ route reaches (else the one its website route does), and kept; none for a site serving no card, one
+        whose card path answers a 4xx or what isn't a JSON object, and None, read again next time, while its card can't
+        be read, unreachable or answering a 5xx, so its route serves nothing until it knows what to refuse."""
+        if app in self._site_reserved:
+            return self._site_reserved[app]
+        base_url = self.rest_proxy_urls.get(app) or self.website_urls.get(app)
+        if base_url is None:
+            return frozenset()
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{base_url.rstrip('/')}{WELL_KNOWN_PATH}", timeout=CARD_FETCH_TIMEOUT_S)
+            if response.status_code >= 500:
+                response.raise_for_status()
+        except Exception as e:
+            logger.warning(f"website {app}: its card could not be read ({type(e).__name__}: {e}), so its route answers "
+                           "503 until it can be")
+            return None
+        try:
+            card = response.json() if response.is_success else None
+        except ValueError:
+            card = None
+        address = self.website_urls.get(app) or base_url
+        self._site_reserved[app] = site_reserved_paths(card, address) if isinstance(card, dict) else frozenset()
+        return self._site_reserved[app]
 
     def _backing_keys(self) -> list[str]:
         # rest_proxy_urls entries are the env's backing servers: mcp-<svc> (MCP) + <svc> (website
         # backends). Non-v1 backers (e.g. the injected website_browser) self-omit from the card via 404.
         return list(self.rest_proxy_urls)
 
+    def _environment_name(self, key: str) -> str:
+        """The name the env behind the backing server ``key`` is registered as (``route_environment_name``)."""
+        return route_environment_name(key, self.rest_proxy_urls.get(key, ""), self.internal_mcp_servers,
+                                      website=key in self.website_urls)
+
     def _rewrite_child_card(self, key: str, card: dict) -> dict:
-        return rewrite_child_card(key, card, self._gateway_extensions())
+        """One backing server's card rooted at the gateway (``rewrite_child_card``), stating the ``environment_name``
+        the env behind it is registered as, which its own card's name needn't be; a website's ``website/v1`` params
+        also name the route the gateway serves it to a browser at, ``/website/<key>/``, as ``browse_url``."""
+        card = rewrite_child_card(key, card, self._gateway_extensions())
+        card["environment_name"] = self._environment_name(key)
+        if key in self.website_urls:
+            for ext in (card.get("capabilities") or {}).get("extensions") or []:
+                if isinstance(ext, dict) and ext.get("uri") == EXT_WEBSITE_URI:
+                    params = ext.get("params") if isinstance(ext.get("params"), dict) else {}
+                    ext["params"] = {**params, WEBSITE_BROWSE_URL_PARAM: f"/website/{key}/"}
+        return card
 
     async def _fetch_child_card(self, client: httpx.AsyncClient, key: str, base_url: str) -> dict | None:
-        """Fetch + rewrite one backing server's card; None (omit) on 404 / error / timeout / malformed JSON."""
+        """Fetch + rewrite one backing server's card; None (omit) on 404 / error / timeout / malformed JSON. A
+        website's card read here also refreshes the routes its requests are named by."""
         child = await fetch_child_card(client, key, base_url)
+        if child is not None and key in self.website_urls:
+            self._website_routes[key] = website_routes(child)
         return None if child is None else self._rewrite_child_card(key, child)
 
     def _gateway_extensions(self) -> list[dict]:
@@ -737,194 +885,19 @@ class Gateway:
             media_type=response.headers.get("content-type", "application/json"),
         )
 
-    async def _open_persistent_sessions(self, exit_stack: contextlib.AsyncExitStack, max_retries: int = 10, retry_delay: float = 1.0) -> dict[str, ClientSession]:
-        """Open a persistent MCP client session to each internal server, over a transport that reports a failed
-        request to this generation so it is retired at once (see child_transport).
-
-        Each attempt opens its contexts on a stack of its own. mcp's client runs its requests in an anyio task group
-        whose cancel scope belongs to the task that entered it, this one: a request that fails outright (the child
-        refusing the connection) cancels whatever this task awaits, and keeps cancelling it until that group is
-        exited. So a failed attempt is exited before anything else is awaited, and reads as a failure to retry
-        rather than as this task being cancelled; only a cancellation that is still pending once the attempt's
-        group is gone came from outside."""
-        sessions: dict[str, ClientSession] = {}
-
-        def report(exc: httpx.TransportError) -> None:
-            self._child_transport_failed(sessions, exc)
-
-        for server in self.internal_mcp_servers:
-            for attempt in range(max_retries):
-                attempt_stack = contextlib.AsyncExitStack()
-                try:
-                    client = await attempt_stack.enter_async_context(child_http_client(report))
-                    read_stream, write_stream, _ = await attempt_stack.enter_async_context(
-                        streamable_http_client(server.mcp_url, http_client=client))
-                    session = await attempt_stack.enter_async_context(ClientSession(read_stream, write_stream))
-                    # a child that accepts the connection but never answers initialize is a failed attempt, not a hang
-                    await asyncio.wait_for(session.initialize(), timeout=CARD_FETCH_TIMEOUT_S)
-                except BaseException as e:
-                    failure: BaseException = e
-                    try:
-                        await attempt_stack.aclose()
-                    except BaseException as unwound:  # the client's task group names what failed
-                        if isinstance(e, asyncio.CancelledError):
-                            failure = unwound
-                    if isinstance(e, asyncio.CancelledError) and asyncio.current_task().cancelling():
-                        raise
-                    if attempt < max_retries - 1:
-                        logger.warning(f"Failed to connect to {server.name} (attempt {attempt + 1}/{max_retries}): {failure!r}")
-                        await asyncio.sleep(retry_delay)
-                    else:
-                        logger.error(f"Failed to connect to {server.name} after {max_retries} attempts: {failure!r}")
-                        if failure is e:
-                            raise
-                        raise RuntimeError(f"could not open a session to {server.name}: {failure!r}") from failure
-                else:
-                    exit_stack.push_async_callback(attempt_stack.aclose)
-                    sessions[server.mcp_url] = session
-                    logger.info(f"Opened persistent session to {server.name}")
-                    break
-        return sessions
-
     async def _ensure_child_sessions(self) -> dict[str, ClientSession]:
-        """The process's one generation of child sessions, opened on first need. Liveness is the owner task's, not
-        the dict's emptiness, so a gateway with no backing servers does not reopen on every call."""
-        if self._child_owner is not None and not self._child_owner.done():
-            return self._child_sessions
-        async with self._child_lock:
-            if self._child_owner is not None and not self._child_owner.done():
-                return self._child_sessions
-            if self._closing:
-                raise RuntimeError("gateway is shutting down")
-            await self._close_child_sessions()  # a dead or half-open generation
-            loop = asyncio.get_running_loop()
-            ready: asyncio.Future = loop.create_future()
-            close = asyncio.Event()
-            owner = loop.create_task(self._own_child_sessions(ready, close), name="gateway-child-sessions")
-            owner.add_done_callback(self._log_owner_exit)
-            try:
-                sessions = await ready
-            except BaseException:
-                # Nobody will use this generation: an open still in progress is abandoned (its stack unwinds what
-                # it entered), not finished in the background to hold connections nobody waits on.
-                close.set()
-                owner.cancel()
-                raise
-            self._child_sessions, self._child_owner, self._child_close = sessions, owner, close
-            return sessions
-
-    async def _own_child_sessions(self, ready: asyncio.Future, close: asyncio.Event) -> None:
-        """Holds one generation open: opens the client contexts, reports through `ready`, parks until `close` is set
-        (or it is cancelled) and exits them. Returns rather than raising on a failed open, which `ready` carries.
-        `close` is set on the way out whatever the reason, so a call racing on it fails now, not at its timeout."""
-        try:
-            async with contextlib.AsyncExitStack() as stack:
-                try:
-                    sessions = await self._open_persistent_sessions(stack)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as e:
-                    if not ready.done():
-                        ready.set_exception(e)
-                    return
-                if ready.cancelled():
-                    return  # nobody is waiting any more; the stack closes what was opened
-                ready.set_result(sessions)
-                await close.wait()
-        except BaseExceptionGroup as e:
-            # a request failing outright under a live generation cancels this task through mcp's client task group
-            # (see _open_persistent_sessions); the stack has unwound, and the transport failure retires the generation
-            logger.warning(f"child session generation ended: {e!r}")
-        finally:
-            close.set()
-
-    @staticmethod
-    def _log_owner_exit(owner: asyncio.Task) -> None:
-        """Retrieve a generation's exception when it dies on its own (a transport crash), so it is logged now rather
-        than as 'exception never retrieved' at garbage collection."""
-        if not owner.cancelled() and owner.exception() is not None:
-            logger.warning("child session generation ended", exc_info=owner.exception())
+        return await self._sessions.sessions()
 
     async def _close_child_sessions(self) -> None:
-        """Retire the current generation and wait (bounded) for its owner to exit it. Callers hold _child_lock,
-        except the process lifespan, which runs after the last request."""
-        owner, close = self._child_owner, self._child_close
-        self._child_sessions, self._child_owner, self._child_close = {}, None, None
-        if close is not None:
-            close.set()
-        if owner is not None and not owner.done():
-            try:
-                await asyncio.wait_for(owner, timeout=self.CHILD_CLOSE_TIMEOUT_S)
-            except Exception:
-                logger.warning("child sessions did not close cleanly", exc_info=True)
-
-    async def _reset_child_sessions(self, stale: dict[str, ClientSession]) -> None:
-        """Retire the generation a caller found dead; a concurrent caller that already did is a no-op."""
-        async with self._child_lock:
-            if self._child_sessions is stale:
-                await self._close_child_sessions()
-
-    def _child_transport_failed(self, sessions: dict[str, ClientSession], exc: httpx.TransportError) -> None:
-        """A request to a child of ``sessions`` failed at the transport. mcp's client would keep the request
-        pending, so the generation is retired now: every call it has in flight fails with CONNECTION_CLOSED instead
-        of waiting out its timeout, and the next call reopens. Called from inside the client's own task, so the
-        retirement is scheduled rather than awaited; a report for a generation already retired is nothing."""
-        if self._closing or sessions is not self._child_sessions or id(sessions) in self._retiring:
-            return  # every request in flight on a dying generation reports; the first one retires it
-        self._retiring.add(id(sessions))
-        logger.warning(f"child transport failed ({exc!r}); retiring the child session generation")
-        task = asyncio.get_running_loop().create_task(self._reset_child_sessions(sessions), name="gateway-child-retire")
-        self._retirements.add(task)
-        task.add_done_callback(self._retirements.discard)
-        task.add_done_callback(lambda _: self._retiring.discard(id(sessions)))
+        await self._sessions.close()
 
     async def _call_child_tool(self, server_url: str, tool_name: str, arguments: dict, *,
                                caller: Caller | None = None) -> CallToolResult:
-        """Every child tools/call (MCP proxy, /step, trigger engine): one shared generation, the caller's `_meta`
-        stamp (none for an unattributed trigger action), and one reconnect when the session turns out dead,
-        retrying the call only if it never reached the child (a call the transport lost in flight may already have
-        written; the next call reopens). Discovery is not redone on a reconnect; the registered proxies look their
-        session up by URL."""
+        """Every child tools/call (MCP proxy, /step, trigger engine), with the caller's `_meta` stamp (none for an
+        unattributed trigger action), on its child's session (see child_sessions). Discovery is not redone on a
+        reconnect; the registered proxies look their child up by URL."""
         meta = caller.meta() if caller is not None else None
-        sessions = await self._ensure_child_sessions()
-        closed = self._child_close  # this generation's; no await since the lookup, so they agree
-        try:
-            return await asyncio.wait_for(self._call_until_retired(sessions[server_url], closed, tool_name, arguments, meta),
-                                          timeout=self.TOOL_CALL_TIMEOUT_S)
-        except Exception as e:
-            if not _is_dead_session(e):
-                raise
-            await self._reset_child_sessions(sessions)
-            if not _call_never_reached_child(e):
-                logger.warning(f"child session to {server_url} died with {tool_name} in flight ({e!r}); not retried")
-                raise
-            logger.warning(f"child session to {server_url} is dead ({e!r}), reconnecting...")
-            sessions = await self._ensure_child_sessions()
-            closed = self._child_close
-            return await asyncio.wait_for(self._call_until_retired(sessions[server_url], closed, tool_name, arguments, meta),
-                                          timeout=self.TOOL_CALL_TIMEOUT_S)
-
-    @staticmethod
-    async def _call_until_retired(session: ClientSession, closed: asyncio.Event | None, tool_name: str,
-                                  arguments: dict, meta: dict | None) -> CallToolResult:
-        """``session.call_tool``, unless its generation is retired first: then the call fails with CONNECTION_CLOSED
-        the way a closed transport would fail it. mcp's client keeps a request whose transport failed pending, and
-        exiting the session under it cancels the receive loop before that loop can fail the request, so the gateway
-        fails it. The retirement event is this generation's; a generation already gone has none."""
-        if closed is None:
-            raise McpError(ErrorData(code=CONNECTION_CLOSED, message="Connection closed"))
-        call = asyncio.ensure_future(session.call_tool(tool_name, arguments, meta=meta))
-        retired = asyncio.ensure_future(closed.wait())
-        try:
-            done, _ = await asyncio.wait({call, retired}, return_when=asyncio.FIRST_COMPLETED)
-        finally:
-            retired.cancel()
-            if not call.done():
-                call.cancel()
-            await asyncio.gather(call, retired, return_exceptions=True)  # the loser's cleanup ends before the caller moves on
-        if call in done:
-            return call.result()
-        raise McpError(ErrorData(code=CONNECTION_CLOSED, message="Connection closed"))
+        return await self._sessions.call(server_url, tool_name, arguments, meta, timeout=self.TOOL_CALL_TIMEOUT_S)
 
     async def _ensure_tools_discovered(self) -> None:
         """Idempotent discovery over the process's child sessions (startup, MCP session start, /step, /state, triggers)."""
@@ -942,13 +915,11 @@ class Gateway:
                 self._tool_name_clashes = e.clashes
                 logger.error(f"Tool discovery refused: {e}. The env serves none of its servers' tools")
                 raise
-            except Exception as e:
+            except Exception:
                 logger.exception("Tool discovery failed")
                 for server in self.internal_mcp_servers:
                     self._server_tools.pop(server.name, None)  # the gateway's own entry stays
                 self._tools_discovered = False
-                if _is_dead_session(e):
-                    await self._reset_child_sessions(sessions)
                 raise
 
     async def _discover_and_register_tools(self, sessions: dict[str, ClientSession]) -> None:
@@ -963,6 +934,9 @@ class Gateway:
                 tools_result = await asyncio.wait_for(session.list_tools(), timeout=CHILD_DISCOVERY_TIMEOUT_S)
             except Exception as e:
                 logger.error(f"Failed to discover tools from {server.name}: {e}")
+                child = self._sessions.current.get(server.mcp_url)
+                if is_dead_session(e) and child is not None and child.session is session:
+                    await self._sessions.replace(child)
                 raise
             logger.info(f"Found {len(tools_result.tools)} tool(s) from {server.name}")
             listed.append((server, tools_result.tools))
@@ -1489,39 +1463,133 @@ def _fields(pairs: list[tuple[str, str]]) -> dict:
     return {key: values[0] if len(values) == 1 else values for key, values in grouped.items()}
 
 
-def _is_dead_session(exc: BaseException) -> bool:
-    """Whether a child call failed because its session is gone, so the generation is retired: the stream closed under
-    it, the child answered 404 for the session id (idle expiry or a restart, which the client reports as code 32600),
-    or the transport died with the call in flight (CONNECTION_CLOSED)."""
-    if isinstance(exc, (ClosedResourceError, anyio.BrokenResourceError)):
-        return True
-    return isinstance(exc, McpError) and exc.error.code in (32600, CONNECTION_CLOSED)
+def _normalized(path: str) -> str:
+    return posixpath.normpath("/" + path.lstrip("/"))
 
 
-def _call_never_reached_child(exc: BaseException) -> bool:
-    """Whether a dead-session failure may be retried: the stream was closed before the request was written, or the
-    child rejected the session id at the transport. Not CONNECTION_CLOSED: the call was in flight when the transport
-    died, and the child may already have performed its write."""
-    if isinstance(exc, (ClosedResourceError, anyio.BrokenResourceError)):
-        return True
-    return isinstance(exc, McpError) and exc.error.code == 32600
+def reserved_site_path(path: str, reserved: frozenset[str] = frozenset()) -> bool:
+    """Whether ``path``, as a site's server would route it, is its data plane or its env card, or one of the paths
+    ``reserved`` names (``site_reserved_paths``), or under one."""
+    normalized = _normalized(path)
+    return normalized == WELL_KNOWN_PATH or any(normalized == base or normalized.startswith(base.rstrip("/") + "/")
+                                                for base in (RPC_PATH, *reserved))
 
 
-def reserved_site_path(path: str) -> bool:
-    """Whether ``path``, as a site's server would route it, is its data plane or its env card."""
-    normalized = posixpath.normpath("/" + path.lstrip("/"))
-    return normalized == RPC_PATH or normalized.startswith(RPC_PATH + "/") or normalized == WELL_KNOWN_PATH
+def route_environment_name(key: str, base_url: str, servers: list[InternalMCPServer], *, website: bool) -> str:
+    """The name the env behind the backing server ``key``, at ``base_url``, is registered as. A website's key is its
+    name. Any other key is an MCP server's route, ``mcp-<name>``, or a child env's own name, a computer's, which may
+    start ``mcp-`` too; the internal MCP server whose endpoint is at the route's backend says which: one under the
+    route's base address first, else one on its host, as a server whose card is on another port than its MCP endpoint
+    is. With no such server, an ``mcp-`` key is an MCP server's route."""
+    stripped = key.removeprefix("mcp-")
+    if website or stripped == key:
+        return key
+    base = base_url.rstrip("/")
+    host = urlsplit(base).hostname
+
+    def at_backend(name: str) -> int:
+        urls = [server.mcp_url for server in servers if server.name == name]
+        if any(url.startswith(f"{base}/") for url in urls) and base:
+            return 2
+        return 1 if host and any(urlsplit(url).hostname == host for url in urls) else 0
+
+    route, own = at_backend(stripped), at_backend(key)
+    return key if own > route else stripped
 
 
-def reserved_site_request(request: Request) -> bool:
-    """Whether a request on a site's route reaches its data plane or env card: by the path as routed here, or by the
-    one its server receives, which is the raw path forwarded, its dot segments removed by httpx and then decoded. The
-    two differ when an encoded slash sits beside a dot segment (``public%2Fx/../agentenv``). A request-target the proxy
-    can't build a URL for isn't reserved here: ``forward()`` refuses it."""
-    if reserved_site_path("/" + request.path_params.get("path", "")):
-        return True
+def site_mcp_endpoints(servers: list[InternalMCPServer], website_urls: dict[str, str],
+                       rest_proxy_urls: dict[str, str]) -> dict[str, str]:
+    """The MCP endpoint, as a path under its /svc/<name>/ base, of each site that is an internal MCP server too, by
+    name: where a call through /svc/<name>/ gets the gateway's role in its JSON-RPC ``_meta``, as an MCP server's does."""
+    endpoints = {}
+    for server in servers:
+        base = rest_proxy_urls.get(server.name, "")
+        if server.name not in website_urls or not base:
+            continue
+        resolved = card_url(base, server.mcp_url)
+        if resolved is not None and resolved.own_server and resolved.route_path is not None:
+            endpoints[server.name] = resolved.route_path
+    return endpoints
+
+
+class CardURL(NamedTuple):
+    """A URL a site's card names, as the site at an address serves it: its path and query; the path a request on the
+    site's route reaches it at, its path under the address's (None when it isn't under it); and whether it is on the
+    site's own server."""
+    path: str
+    query: str
+    route_path: str | None
+    own_server: bool
+
+
+def card_url(base: str, url: str) -> CardURL | None:
+    """``url``, which a site's card names, against the site's address ``base`` (a URL, or only its path): a path,
+    absolute or relative, joined under the address's path, since a card's paths are relative to where it was read, and
+    on the site's own server; a full URL as it is, on the site's own server when its scheme, host and port are the
+    address's. The one reading of a card's URLs that discovery, /svc role stamping and a route's reserved paths share.
+    None for one with no path, or that can't be read."""
     try:
-        sent = httpx.URL(upstream_url("http://site", request)).path
+        own, given = urlsplit(base.rstrip("/")), urlsplit(url)
+        full = bool(given.scheme or given.netloc)
+        same = not full or _address(given) == _address(own)
+    except ValueError:
+        return None
+    under = own.path.rstrip("/")
+    if full:
+        path = given.path
+    elif given.path.startswith("/"):
+        path = under + given.path
+    else:
+        path = urljoin(under + "/", given.path) if given.path else ""
+    if not path.startswith("/"):
+        return None
+    normalized = _normalized(path)
+    route = (normalized[len(under):] or "/") if normalized == under or normalized.startswith(under + "/") else None
+    return CardURL(path, given.query, route, same)
+
+
+def _address(url) -> tuple:
+    """A split URL's scheme, host and port, its scheme's default port when it names none."""
+    return url.scheme, url.hostname, url.port or {"http": 80, "https": 443}.get(url.scheme)
+
+
+def site_reserved_paths(card: dict, base: str = "") -> frozenset[str]:
+    """The paths a site's card advertises for agentenv, which its route never reaches: its ``url``, every interface's,
+    such as the MCP endpoint of a site that is an MCP server too, and every extension's endpoint and each of its
+    methods'; each one a path of its own, not the site's root, read from a full URL or one with a query as well as from
+    a bare path, as ``card_url`` reads them against the site's address ``base``. A full URL's path is reserved
+    whatever its host, since a site is reached under names it never sees in advance: as its route reaches it, under the
+    address's path, or as it is when it isn't under it."""
+    urls = [card.get("url")]
+    urls += [i.get("url") for i in card.get("additionalInterfaces") or [] if isinstance(i, dict)]
+    for ext in (card.get("capabilities") or {}).get("extensions") or []:
+        params = ext.get("params") if isinstance(ext, dict) else None
+        if not isinstance(params, dict):
+            continue
+        urls += [endpoint for *_, endpoint in operations(params)]
+        urls.append(params.get("endpoint"))
+    resolved = (card_url(base, url) for url in urls if isinstance(url, str))
+    paths = (_normalized(r.path if r.route_path is None else r.route_path) for r in resolved if r is not None)
+    return frozenset(p for p in paths if p != "/")
+
+
+def site_request_path(request: HTTPConnection) -> str | None:
+    """The path a site's server receives for a request on its route: the raw path forwarded, its dot segments removed
+    by httpx and then decoded. It differs from the path as routed here when an encoded slash sits beside a dot segment
+    (``public%2Fx/../api`` reaches ``/api``). None for a request-target the proxy can't build a URL for: ``forward()``
+    refuses it."""
+    try:
+        return httpx.URL(upstream_url("http://site", request)).path
     except (ValueError, httpx.InvalidURL):
-        return False
-    return reserved_site_path(sent)
+        return None
+
+
+def reserved_site_request(request: HTTPConnection, reserved: frozenset[str] = frozenset()) -> bool:
+    """Whether a request or WebSocket on a site's route reaches its data plane or env card, or one of the paths
+    ``reserved`` names (``site_reserved_paths``): by the path as routed here, or by the one its server receives
+    (``site_request_path``). A request-target the proxy can't build a URL for isn't reserved here: ``forward()``
+    refuses it."""
+    if reserved_site_path("/" + request.path_params.get("path", ""), reserved):
+        return True
+    sent = site_request_path(request)
+    return sent is not None and reserved_site_path(sent, reserved)

@@ -1,0 +1,6 @@
+[
+  {"id": "env", "type": "deploy_env", "env_id": "desktop"},
+  {"id": "tools", "type": "env_outcome_verifier", "env_id": "desktop", "file_artifact_id": "check_tools", "verifier_id": "tools", "depends_on": ["env"]},
+  {"id": "reset", "type": "reset_env", "env_id": "desktop", "depends_on": ["tools"], "fail_task_on_error": true},
+  {"id": "again", "type": "env_outcome_verifier", "env_id": "desktop", "file_artifact_id": "check_tools", "verifier_id": "again", "depends_on": ["reset"]}
+]

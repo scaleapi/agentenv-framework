@@ -1,11 +1,14 @@
 """A computer app's own server: it adds the app's launcher, launches a boot app once per boot and says whether the app
 is ready (``computer-app/v1``); its computer's driver finds it on the socket in the app's folder and asks it, lists it
 as a child environment and forwards its requests to it, only with the computer's control token when it has one, and
-leaves the paths it owns out of its own data/get."""
+leaves the paths it owns out of its own data/get. On Windows one that wrote no address isn't answering, or says why it
+failed to start."""
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib.util
+import json
 import os
 import shlex
 import signal
@@ -26,10 +29,11 @@ import base64  # noqa: E402
 import httpx  # noqa: E402
 
 import agentenv_protocol.computer.launch as launcher  # noqa: E402
+import agentenv_protocol.computer.served as transports  # noqa: E402
 from agentenv_protocol import client  # noqa: E402
 from agentenv_protocol.computer import (ComputerAppEnvironment, Launch, ReadyCheck, Ready, linux,  # noqa: E402
                                         ready_check)
-from agentenv_protocol.computer import app, app_runtime, apps, session  # noqa: E402
+from agentenv_protocol.computer import _reaping, _session_posix, app, app_runtime, apps, session  # noqa: E402
 from agentenv_protocol.computer.app import COMPUTER_APP, FAILURE, SOCKET  # noqa: E402
 from agentenv_protocol.computer.platform import Platform  # noqa: E402
 from agentenv_protocol.types import CONTROL_TOKEN_ENV, DATA_OBJECTS_EXTENSION_URI, WELL_KNOWN_PATH  # noqa: E402
@@ -109,6 +113,16 @@ async def test_an_apps_server_is_ready_once_it_launched_the_app_and_each_check_p
     assert after["ready"] is True and after["problems"] == []
 
 
+
+@pytest.mark.parametrize("platform, folder", [("linux", "/run/agentenv/apps"), ("darwin", "/tmp/agentenv/apps")])
+def test_a_launch_is_marked_in_a_folder_a_boot_clears_and_the_session_user_writes(monkeypatch, platform, folder):
+    monkeypatch.setattr(sys, "platform", platform)
+    spec = importlib.util.spec_from_file_location(f"agentenv_protocol.computer._app_runtime_on_{platform}",
+                                                  app_runtime.__file__)
+    loaded = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(loaded)
+    assert loaded.LAUNCHED == Path(folder)
+
 @pytest.mark.asyncio
 async def test_checks_that_fail_hang_or_raise_say_so_at_once_without_holding_up_the_server(desktop, monkeypatch):
     monkeypatch.setattr(app_runtime, "CHECK_TIMEOUT_S", 1.0)
@@ -162,6 +176,25 @@ async def test_a_boot_app_is_launched_once_per_boot_its_clock_from_that_launch_a
 
 
 @pytest.mark.asyncio
+async def test_a_held_boot_launch_leaves_the_app_unlaunched_and_counted_ready_until_it_is_launched(desktop, monkeypatch):
+    shown, launched = desktop
+    monkeypatch.setattr(session, "add_launcher", lambda name, folder: None)
+    monkeypatch.setenv(app_runtime.HOLD_BOOT_LAUNCH_ENV, "1")
+    with tempfile.TemporaryDirectory(dir="/tmp", prefix="apps-") as root:
+        monkeypatch.setattr(apps, "APPS", Path(root))
+        async with _serving(Mail(), Path(root) / "mail", monkeypatch) as mail:
+            await mail._computer_app.start()
+            held = await apps.check(Path(root) / "mail")
+            await mail._computer_app_launch()
+            shown.append({"instance": "mail", "class": "Mail", "title": "Inbox"})
+            mail.synced = True
+            launched_check = await apps.check(Path(root) / "mail")
+
+    assert held == ReadyCheck("app mail", True, "its server answers; its boot launch is held")
+    assert len(launched) == 1 and launched_check == ReadyCheck("app mail", True, "ready")
+
+
+@pytest.mark.asyncio
 async def test_a_restarted_server_finds_the_demand_app_it_launched_and_leaves_it_be(desktop, tmp_path, monkeypatch):
     _, launched = desktop
     monkeypatch.setattr(session, "add_launcher", lambda name, folder: None)
@@ -211,6 +244,18 @@ async def test_a_boot_app_whose_launch_fails_says_why_and_is_launched_again_by_i
     assert (await mail._computer_app_ready())["problems"][0] == (
         "its launch failed: FileNotFoundError: No such file or directory: 'mail'")
     assert not (tmp_path / "launched").exists()
+
+
+@pytest.mark.asyncio
+async def test_on_windows_an_app_whose_server_wrote_no_address_isnt_answering_or_failed_to_start(tmp_path, monkeypatch):
+    monkeypatch.setattr(transports, "LOOPBACK", True)
+    (tmp_path / "gone").mkdir()
+    (tmp_path / "broken" / FAILURE).parent.mkdir(parents=True)
+    (tmp_path / "broken" / FAILURE).write_text("RuntimeError: no mailbox")
+
+    assert [await apps.check(tmp_path / name) for name in ("broken", "gone")] == [
+        ReadyCheck("app broken", False, "its server failed to start: RuntimeError: no mailbox"),
+        ReadyCheck("app gone", False, "its server isn't answering yet")]
 
 
 @pytest.mark.asyncio
@@ -343,7 +388,7 @@ async def test_the_session_launches_an_app_in_a_session_of_its_own_from_its_fold
              "{os.environ['DISPLAY']} {os.getsid(0) == os.getpid()}\")"
 
     await session.launch([sys.executable, "-c", script], tmp_path, {"ENVIRONMENT_NAME": "notes"})
-    await asyncio.gather(*session._running)
+    await asyncio.gather(*_reaping._running)
 
     assert (tmp_path / "seen").read_text() == f"{os.path.realpath(tmp_path)} notes :99 True"
 
@@ -352,12 +397,38 @@ async def test_the_session_launches_an_app_in_a_session_of_its_own_from_its_fold
 async def test_a_stop_ends_what_the_app_started_though_its_first_process_exited(tmp_path):
     sleeper = f"{sys.executable} -c 'import time; time.sleep(60)' & exit 0"
     pid = await session.launch(["sh", "-c", sleeper], tmp_path, {})
-    await asyncio.gather(*session._running)
+    await asyncio.gather(*_reaping._running)
 
     running = session.alive(pid)
     await session.stop(pid, 5)
 
     assert running and not session.alive(pid)
+
+
+@pytest.mark.asyncio
+async def test_a_paused_session_runs_nothing_until_the_block_ends_and_a_stop_ends_it_though_paused(tmp_path):
+    counter = (f"{sys.executable} -c 'import os, time\nn = 0\nwhile True:\n    n += 1\n    open(\"count.new\", \"w\")"
+               ".write(str(n))\n    os.replace(\"count.new\", \"count\")\n    time.sleep(0.02)' & exit 0")
+    pid = await session.launch(["sh", "-c", counter], tmp_path, {})
+    await asyncio.gather(*_reaping._running)
+    await asyncio.sleep(0.5)
+
+    def count() -> int:
+        return int((tmp_path / "count").read_text())
+
+    with session.paused(pid):
+        await asyncio.sleep(0.1)
+        frozen = count()
+        await asyncio.sleep(0.4)
+        while_paused = count()
+    await asyncio.sleep(0.4)
+    after = count()
+    os.killpg(pid, signal.SIGSTOP)
+    started = time.monotonic()
+    await session.stop(pid, 5)
+
+    assert frozen == while_paused < after
+    assert not session.alive(pid) and time.monotonic() - started < 4
 
 
 def test_the_launcher_runs_the_app_through_its_own_server(tmp_path, monkeypatch):
@@ -373,6 +444,7 @@ def test_the_launcher_runs_the_app_through_its_own_server(tmp_path, monkeypatch)
 
 @pytest.mark.asyncio
 async def test_the_sessions_windows_are_listed_by_class_instance_and_title_from_either_name(monkeypatch):
+    monkeypatch.delenv("HYPRLAND_INSTANCE_SIGNATURE", raising=False)
     replies = {("-root", "_NET_CLIENT_LIST"): "_NET_CLIENT_LIST(WINDOW): window id # 0x1e00004, 0x2000003, 0x2200001\n",
                ("-id", "0x1e00004", "WM_CLASS", "_NET_WM_NAME", "WM_NAME"):
                    '_NET_WM_NAME(UTF8_STRING) = "Inbox \\"work\\""\nWM_CLASS(STRING) = "mail", "Mail"\n'
@@ -384,13 +456,15 @@ async def test_the_sessions_windows_are_listed_by_class_instance_and_title_from_
     async def xprop(*args):
         return replies[args]
 
-    monkeypatch.setattr(session, "_xprop", xprop)
+    monkeypatch.setattr(_session_posix, "_xprop", xprop)
     assert await session.windows() == [{"instance": "mail", "class": "Mail", "title": 'Inbox "work"'},
                                        {"instance": "xcalc", "class": "XCalc", "title": "Calculator"}]
 
 
 @pytest.mark.asyncio
-async def test_a_window_listing_cut_short_kills_its_xprop(monkeypatch):
+@pytest.mark.parametrize("hyprland", ["", "sig"])
+async def test_a_window_listing_cut_short_kills_its_xprop_or_hyprctl(hyprland, monkeypatch):
+    monkeypatch.setenv("HYPRLAND_INSTANCE_SIGNATURE", hyprland)
     started, spawn = [], asyncio.create_subprocess_exec
 
     async def hanging(*args, **kwargs):
@@ -402,6 +476,87 @@ async def test_a_window_listing_cut_short_kills_its_xprop(monkeypatch):
         await asyncio.wait_for(session.windows(), 0.2)
 
     assert await asyncio.wait_for(started[0].wait(), 5) == -signal.SIGKILL
+
+
+@pytest.mark.asyncio
+async def test_on_hyprland_the_sessions_windows_are_its_mapped_clients_by_program_class_and_title(monkeypatch):
+    clients = [{"address": "0x55d1", "mapped": True, "class": "org.gnome.Nautilus", "title": "Home", "pid": 41,
+                "xwayland": False},
+               {"address": "0x55d2", "mapped": True, "class": "BenchLab", "title": "Bench Lab", "pid": 42,
+                "xwayland": True},
+               {"address": "0x55d3", "mapped": False, "class": "closing", "title": "", "pid": 43},
+               {"address": "0x55d4", "mapped": True, "class": "gone", "title": "Gone", "pid": 44}]
+    programs = {"/proc/41/exe": "/usr/bin/nautilus", "/proc/42/exe": "/usr/bin/python3.14"}
+    asked = []
+
+    async def output(*argv):
+        asked.append(argv)
+        return json.dumps(clients)
+
+    def readlink(path):
+        if path not in programs:
+            raise FileNotFoundError(path)
+        return programs[path]
+
+    monkeypatch.setenv("HYPRLAND_INSTANCE_SIGNATURE", "sig")
+    monkeypatch.setattr(_session_posix, "_output", output)
+    monkeypatch.setattr(_session_posix.os, "readlink", readlink)
+
+    assert await session.windows() == [{"instance": "nautilus", "class": "org.gnome.Nautilus", "title": "Home"},
+                                       {"instance": "python3.14", "class": "BenchLab", "title": "Bench Lab"},
+                                       {"instance": "", "class": "gone", "title": "Gone"}]
+    assert asked == [("hyprctl", "-j", "clients")]
+
+
+@pytest.mark.asyncio
+async def test_on_hyprland_a_session_whose_ipc_doesnt_answer_has_no_windows(monkeypatch):
+    async def output(*argv):
+        return ""
+
+    monkeypatch.setenv("HYPRLAND_INSTANCE_SIGNATURE", "sig")
+    monkeypatch.setattr(_session_posix, "_output", output)
+    assert await session.windows() == []
+
+
+@pytest.mark.asyncio
+async def test_on_hyprland_the_session_is_up_once_its_wayland_and_ipc_sockets_are_there(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYPRLAND_INSTANCE_SIGNATURE", "sig")
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-1")
+    monkeypatch.setattr(_session_posix, "POLL_S", 0.01)
+    waiting = asyncio.ensure_future(session.wait_until_up())
+
+    (tmp_path / "wayland-1").touch()
+    await asyncio.sleep(0.05)
+    halfway = waiting.done()
+    (tmp_path / "hypr" / "sig").mkdir(parents=True)
+    (tmp_path / "hypr" / "sig" / ".socket.sock").touch()
+    await asyncio.wait_for(waiting, 5)
+
+    assert not halfway
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("variables", "waits"), [({}, 0), ({"DISPLAY": ":0"}, 1),
+                                                  ({"HYPRLAND_INSTANCE_SIGNATURE": "sig"}, 1)])
+async def test_a_boot_app_waits_for_its_x11_or_hyprland_session_and_for_none_without_one(
+        variables, waits, desktop, tmp_path, monkeypatch):
+    for name in ("DISPLAY", "HYPRLAND_INSTANCE_SIGNATURE"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in variables.items():
+        monkeypatch.setenv(name, value)
+    waited = []
+
+    async def up():
+        waited.append(True)
+
+    monkeypatch.setattr(session, "wait_until_up", up)
+    monkeypatch.setattr(session, "add_launcher", lambda name, folder: None)
+    monkeypatch.chdir(tmp_path)
+
+    await Mail()._computer_app.start()
+
+    assert len(waited) == waits
 
 
 @contextlib.asynccontextmanager

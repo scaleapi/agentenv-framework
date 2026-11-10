@@ -134,9 +134,43 @@ def test_every_recorded_sandbox_is_found_once_and_attributed_to_what_made_it():
 
 
 def test_the_sandboxes_a_retry_rolled_back_are_found_like_live_ones():
-    gone = _rolled_back_sandboxes(_context().to_dict(), TaskStepContext().to_dict())
+    gone = _rolled_back_sandboxes(_context().to_dict(), TaskStepContext().to_dict(), {})
     rolled_back = TaskStepContext(metadata={"retry_resets": [{"rolled_back_sandboxes": gone}]})
     assert recorded_sandboxes(rolled_back) == recorded_sandboxes(_context())
+
+
+def _gateway(env_id: str, sandbox_ids: dict) -> DeployedGatewayEnv:
+    return DeployedGatewayEnv(env_id=env_id, env_version=1, gateway_url="http://g", sandbox_id="sb-gw",
+                              sandbox_type="modal", sandbox_ids=sandbox_ids)
+
+
+def test_a_rolled_back_env_record_that_shares_a_survivors_sandboxes_names_only_its_own():
+    # A gateway names its sandbox and every MCP server deployed so far, so a later env's record holds an earlier one's.
+    survivor = _gateway("first", {"gateway": "sb-gw", "mcp_server": {"a": "sb-a"}, "modal_vm": "sb-vm-kept"})
+    later = _gateway("later", {"gateway": "sb-gw", "mcp_server": {"a": "sb-a", "b": "sb-b"},
+                               "modal_vm": "sb-vm", "service_db": {"orders": "sb-db"}})
+    before = TaskStepContext(deployed_envs=[survivor, later]).to_dict()
+    after = TaskStepContext(deployed_envs=[survivor]).to_dict()
+
+    gone = _rolled_back_sandboxes(before, after, {})
+
+    rolled_back = TaskStepContext(metadata={"retry_resets": [{"rolled_back_sandboxes": gone}]})
+    assert recorded_sandboxes(rolled_back) == (
+        RecordedSandbox("sb-b", "modal", "env"),
+        RecordedSandbox("sb-vm", "modal_vm", "env"),
+        RecordedSandbox("sb-db", "modal", "env"),
+    )
+
+
+def test_an_env_record_whose_sandbox_ids_hold_a_value_of_another_shape_still_yields_its_sandboxes():
+    env = _gateway("odd", {"gateway": None, "legacy": ["sb-listed"], "mcp_server": {"a": "sb-a", "b": None}})
+    context = TaskStepContext(deployed_envs=[env])
+    expected = (RecordedSandbox("sb-gw", "modal", "env"), RecordedSandbox("sb-a", "modal", "env"))
+
+    gone = _rolled_back_sandboxes(context.to_dict(), TaskStepContext().to_dict(), {})
+
+    rolled_back = TaskStepContext(metadata={"retry_resets": [{"rolled_back_sandboxes": gone}]})
+    assert recorded_sandboxes(rolled_back) == recorded_sandboxes(context) == expected
 
 
 def test_each_sandbox_is_terminated_through_its_backend_and_recorded_so_a_second_call_does_nothing(terminated):
@@ -350,14 +384,53 @@ def test_a_reattached_local_agent_has_its_container_and_work_folder_removed(sand
         return ""
 
     monkeypatch.setattr(LocalSandbox, "exec_script", record)
+    async def listed(self, *args):
+        return (0, self.container_name, "")
+    monkeypatch.setattr(LocalSandbox, "exec_with_output", listed)
     context = TaskStepContext(deployed_agents=[
         DeployedAgent(agent_name="solver", api_url="http://agent", sandbox_id=agent.sandbox_id, sandbox_type="local")])
 
     report = _run(context)
 
     assert report.terminated == (RecordedSandbox(agent.sandbox_id, "local", "agent"),)
-    assert scripts == [f"docker rm -f {agent.container_name} >/dev/null 2>&1 || true"]
+    assert scripts == [f"docker rm -f {agent.container_name} >/dev/null"]
     assert list(sandbox_root.iterdir()) == []
+
+
+@pytest.mark.parametrize("failure", ["list", "remove", "network"])
+def test_local_docker_refusal_retains_folder_and_retry_removes_it(sandbox_root, tmp_path, monkeypatch, failure):
+    agent = LocalSandbox()
+    (agent.work_dir / ".agent-container-mode").write_text(agent.container_name)
+    if failure == "network":
+        (agent.work_dir / ".closed-network").write_text("closed-owned")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    docker = bindir / "docker"
+    permit, alive = tmp_path / "permit", tmp_path / "alive"
+    alive.touch()
+    docker.write_text(
+        f"#!/bin/sh\n"
+        f"if [ ! -f '{permit}' ] && [ \"$1\" = '{'rm' if failure == 'remove' else 'network' if failure == 'network' else 'ps'}' ]; then "
+        "echo 'daemon unavailable' >&2; exit 1; fi\n"
+        f"if [ \"$1\" = ps ] && [ -f '{alive}' ]; then echo owned-container; fi\n"
+        f"if [ \"$1\" = rm ]; then rm -f '{alive}'; fi\n"
+        "exit 0\n"
+    )
+    docker.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
+    context = TaskStepContext(deployed_agents=[
+        DeployedAgent(agent_name="solver", api_url="http://agent", sandbox_id=agent.sandbox_id, sandbox_type="local")])
+
+    failed = _run(context)
+
+    assert agent.work_dir.is_dir()
+    assert alive.exists() is (failure != "network")
+    assert [entry.sandbox_id for entry in failed.still_up] == [agent.sandbox_id]
+    assert agent.sandbox_id not in context.metadata.get(TORN_DOWN_KEY, [])
+    permit.touch()
+    retried = _run(context)
+    assert retried.terminated == (RecordedSandbox(agent.sandbox_id, "local", "agent"),)
+    assert not agent.work_dir.exists() and not alive.exists()
 
 
 def test_a_slow_folder_removal_does_not_count_against_the_terminate_timeout(sandbox_root, monkeypatch):

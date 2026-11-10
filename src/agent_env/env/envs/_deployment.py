@@ -1,5 +1,6 @@
 """The env side of the environment-provider contract: deploying an env through its provider, the options a provider takes,
-the checks on a plugin's record, loading into a deployment a plugin's provider made, and closing a deployment."""
+the checks on a plugin's record, loading into a deployment a plugin's provider made, emptying a server's data, and closing
+a deployment."""
 
 from __future__ import annotations
 
@@ -7,11 +8,14 @@ import asyncio
 import inspect
 import logging
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Optional
 
+import httpx
 from agentenv_protocol import DATA_OBJECTS_EXTENSION_URI, METHOD_ADD, METHOD_RESET, RPC_PATH, FilePart, client as protocol_v1
 from agent_env.env import legacy_protocol
 from agent_env.env.env import DeployedSandboxEnv, gateway_url_of
+from agent_env.env.gateway.constants import DATA_PLANE_LOAD_TIMEOUT_S
 from agent_env.env.store import register_env_instance
 from agent_env.store.base import ObjectNotFoundError
 from agent_env.utils.paths import validate_file_name
@@ -31,8 +35,10 @@ LOAD_OPERATIONS = (METHOD_RESET, METHOD_ADD)  # the data-plane calls a load make
 
 
 async def deploy_through_provider(env: Env, *, environment_name: str | None, ttl_seconds: int, sandbox_type: str | None,
+                                  then: Callable[[DeployedEnv], Awaitable[None]] | None = None,
                                   **options) -> DeployedEnv:
-    """Deploy env through the provider its env_provider_type names and register the record, the way each built-in env deploys.
+    """Deploy env through the provider its env_provider_type names, await ``then`` on the deployment, whose failure fails the
+    deploy, and register the record, the way each built-in env deploys.
 
     The env's provider deploys it the first time; a deploy of an env that already has a deployment gets a provider of its own,
     so that a failure closes only what it started and leaves the earlier deployment as it was. A deploy onto the env state
@@ -68,6 +74,8 @@ async def deploy_through_provider(env: Env, *, environment_name: str | None, ttl
         else:
             check_plugin_record(env, deployed)
         env._gateway_url = gateway_url_of(deployed)
+        if then is not None:
+            await then(deployed)
         deployed = register_env_instance(deployed, ttl_seconds)
         env._instance_id = deployed.instance_id
         env._deployed, env._replaced = deployed, replaced
@@ -135,6 +143,43 @@ async def load_by_signed_url(env: MCPServerEnv | WebsiteEnv, environment_artifac
                                "can't sign a URL for it; loading into such an env needs an object store that signs URLs (S3, Cloud Storage)")
     await protocol_v1.reset_data(base_url, timeout=timeout)
     await protocol_v1.add_data(base_url, file_parts(environment_artifact, files, urls), timeout=timeout)
+
+
+async def reset_server_data(env: MCPServerEnv | WebsiteEnv, *, mcp: bool) -> bool:
+    """Empty what loads put into ``env``, an MCP server or with ``mcp=False`` a website, as each load does before it adds:
+    through ``data/reset``, or an older server's ``/api/reset``, or else its ``<name>_reset`` tool, which with no seed
+    puts back the data the server boots with; then, behind a gateway of ours, its changelog started afresh, as after a
+    load. ``env`` is attached to its deployment, which may be a MultiEnv's. False, with nothing sent, for one serving no
+    reset, which takes no load either: a card declaring operations without ``data/reset``, a plugin's card offering it
+    no data plane, or an older server answering 404 that offers no ``<name>_reset`` tool."""
+    name = env.environment_name
+    if env._deployed is None and env._gateway_url is None:
+        raise RuntimeError("Environment not deployed - call deploy() first")
+    builtin = as_builtin(env._env_provider)
+    base_url = await legacy_protocol.v1_base_url(env._deployed, env._gateway_url, name, mcp=mcp)
+    if base_url is not None:
+        child = env._deployed.child_env(name, mcp=mcp) if env._deployed is not None and env._deployed.environment_card else None
+        if child is not None and child.serves(METHOD_RESET) is False:
+            return False
+        await protocol_v1.reset_data(base_url, timeout=DATA_PLANE_LOAD_TIMEOUT_S)
+    elif builtin is None:
+        return False
+    else:
+        try:
+            await legacy_protocol.reset_via_rest(legacy_protocol.environment_base_url(env._gateway_url, name, mcp=mcp),
+                                                 timeout=60)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code != 404:
+                raise
+            mcp_url = f"{env._gateway_url.rstrip('/')}/mcp"
+            if not (mcp and await legacy_protocol.offers_tool(mcp_url, f"{name}_reset")):
+                return False
+            if (answer := await legacy_protocol.reset_via_mcp_tool(mcp_url, name)).isError:
+                said = "".join(part.text for part in answer.content if hasattr(part, "text"))
+                raise RuntimeError(f"MCP server '{name}': its {name}_reset tool failed: {said}") from None
+    if builtin is not None:
+        await builtin.install_changelog_triggers(name)
+    return True
 
 
 def file_parts(environment_artifact: EnvironmentArtifact, files: dict[str, FileArtifact], uris: dict[str, str]) -> list[FilePart]:
@@ -209,8 +254,9 @@ def check_plugin_record(env: Env, deployed: DeployedEnv) -> None:
                                "of its MCP servers and websites")
         return
     if isinstance(env, MultiEnv):
-        names = [child.environment_name for child in [*env.mcp_server_envs, *env.website_envs]]
-        if missing := [name for name in names if deployed.get_child_env_card(name) is None]:
+        names = [(child.environment_name, True) for child in env.mcp_server_envs]
+        names += [(child.environment_name, False) for child in env.website_envs]
+        if missing := [name for name, mcp in names if deployed.get_child_env_card(name, mcp=mcp) is None]:
             raise RuntimeError(f"{returned} whose env card lists no child env named {', '.join(map(repr, missing))}; a MultiEnv's card "
                                "lists each of its MCP servers and websites by environment_name")
         if env.name and deployed.mcp_server_name != env.name:
@@ -220,8 +266,9 @@ def check_plugin_record(env: Env, deployed: DeployedEnv) -> None:
         raise RuntimeError(f"{returned} whose env card is named {deployed.environment_card.get('name')!r}; it must be the env's "
                            f"environment_name {env.environment_name!r}, or list a child env of that name")
     else:
-        names = [env.environment_name]
-    if not_paths := [name for name in names if not deployed.get_child_env_card(name).get("url", RPC_PATH).startswith("/")]:
+        names = [(env.environment_name, None)]
+    if not_paths := [name for name, mcp in names
+                     if not deployed.get_child_env_card(name, mcp=mcp).get("url", RPC_PATH).startswith("/")]:
         raise RuntimeError(f"{returned} whose env card gives {', '.join(map(repr, not_paths))} a url that isn't a path; a child env's "
                            "url is a path under the record's address, such as '/svc/<name>/agentenv'")
 
@@ -290,17 +337,19 @@ def deploy_refusal(env: Env, provider: EnvironmentProvider | type[EnvironmentPro
     provider_class = provider if isinstance(provider, type) else type(provider)
     reason = provider_refusal(provider_class, type(env),
                               mcp_names=[child.environment_name for child in getattr(env, "mcp_server_envs", ())],
-                              website_names=[child.environment_name for child in getattr(env, "website_envs", ())])
+                              website_names=[child.environment_name for child in getattr(env, "website_envs", ())],
+                              computer_names=[child.environment_name for child in getattr(env, "computer_envs", ())])
     if reason is not None:
         return f"env '{env.id}' has env_provider_type '{env.env_provider_type}', which {reason}"
     return option_refusal(env, provider, options)
 
 
 def provider_refusal(provider_class: type[EnvironmentProvider], env_class: type[Env], *, mcp_names: Iterable[str] = (),
-                     website_names: Iterable[str] = ()) -> str | None:
+                     website_names: Iterable[str] = (), computer_names: Iterable[str] = ()) -> str | None:
     """Why a provider of provider_class can't deploy an env of env_class, a multi's with children of these environment_names, worded
-    to follow the provider's type, or None: the server provider deploys one MCP server, and a plugin's provider gives a multi one
-    env card, which can't tell an MCP server and a website of one name apart. It needs no env, so a bundle checks it before writing one."""
+    to follow the provider's type, or None: the server provider deploys one MCP server, a plugin's provider gives a multi one
+    env card, which can't tell an MCP server and a website of one name apart, and only a provider whose deploy() takes
+    ``children`` deploys a multi's computers. It needs no env, so a bundle checks it before writing one."""
     from agent_env.env.envs.mcp_server import MCPServerEnv
     from agent_env.env.envs.multi_env import MultiEnv
     from agent_env.providers.env_providers.env_provider import _SandboxEnvironmentProvider
@@ -308,6 +357,9 @@ def provider_refusal(provider_class: type[EnvironmentProvider], env_class: type[
 
     if issubclass(provider_class, EnvironmentServerProvider) and not issubclass(env_class, MCPServerEnv):
         return f"deploys one MCP server, not a {env_class.type} env"
+    computer_names = list(computer_names)
+    if computer_names and "children" not in inspect.signature(provider_class.deploy).parameters:
+        return f"deploys no computers, so not its {', '.join(map(repr, computer_names))}"
     if issubclass(env_class, MultiEnv) and not issubclass(provider_class, _SandboxEnvironmentProvider):
         if shared := set(mcp_names) & set(website_names):
             return (f"gives a multi one env card, so it can't tell an MCP server and a website apart by name, and both are named "

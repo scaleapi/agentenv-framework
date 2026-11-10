@@ -1,6 +1,6 @@
 [project]
 name = "agentenv-framework-protocol"
-version = "0.1.443"
+version = "0.1.511"
 description = "Open data-plane protocol and server SDK for agent environments."
 readme = "README.md"
 license = "Apache-2.0"
@@ -36,18 +36,34 @@ agent = [
     "uvicorn>=0.30",
 ]
 # A computer app's own server: ComputerAppEnvironment serves its card and computer-app/v1 over mcp's FastMCP, on a Unix
-# socket through uvicorn.
+# socket through uvicorn, and a website browser's CDP relay over WebSockets.
 app = [
     "mcp>=1.25,<2",
     "uvicorn>=0.30",
+    "websockets>=13",
 ]
-# A computer driver: ComputerDriverEnvironment serves its tools over mcp's FastMCP, crops and encodes frames, and
-# records the display as H.264 with PyAV (computer-recording/v1).
+# A computer driver: ComputerDriverEnvironment serves its tools over mcp's FastMCP, crops and encodes frames, records
+# the display as H.264 with PyAV (computer-recording/v1), and relays WebSockets to its apps on /svc/<app>/.
 computer = [
     "av>=17",
     "mcp>=1.25,<2",
     "Pillow>=10.4",
     "uvicorn>=0.30",
+    "websockets>=13",
+]
+# A macOS driver on MacOSDriver: ScreenCaptureKit captures the display and Quartz events send its input, through PyObjC.
+macos = [
+    "pyobjc-framework-Quartz>=11; sys_platform == 'darwin'",
+    "pyobjc-framework-ScreenCaptureKit>=11; sys_platform == 'darwin'",
+]
+# A Linux driver on X11Driver: mss captures the X display and XTEST sends its input, through python-xlib.
+x11 = [
+    "mss>=9,<11",
+    "python-xlib>=0.33,<0.34",
+]
+# A Windows driver on WindowsDriver: mss captures the desktop and SendInput, through ctypes, sends its input.
+windows = [
+    "mss>=9,<11",
 ]
 dev = [
     "a2a-sdk[http-server]>=0.3.26,<0.4",
@@ -59,6 +75,7 @@ dev = [
     "fastmcp>=3.4,<4",  # the standalone-fastmcp mount path
     "Pillow>=10.4",  # the computer extra's frame crops and encodings
     "av>=17",  # the computer extra's encoder, and the tests' decoder
+    "websockets>=13",  # the computer extra's /svc/<app>/ relay
 ]
 [project.urls]
 Homepage = "https://www.agentenvframework.com"

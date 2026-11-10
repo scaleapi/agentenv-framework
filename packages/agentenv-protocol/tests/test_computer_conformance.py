@@ -4,8 +4,12 @@ full needs gets those checks unverified; a driver broken one way fails the check
 fronts that exports is asked for its export once; the report's verdicts and the CLI."""
 from __future__ import annotations
 
+import importlib
 import json
-from types import SimpleNamespace
+import subprocess
+import sys
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -15,7 +19,7 @@ pytest.importorskip("PIL")
 from computer_fake import FakeScreen, MinimalDriver  # noqa: E402
 from mcp.types import CallToolResult, TextContent  # noqa: E402
 from PIL import ImageChops  # noqa: E402
-from probe_fake import FixtureDriver, served  # noqa: E402
+from probe_fake import FakeDesk, FixtureDriver, served  # noqa: E402
 
 from agentenv_protocol.computer import (  # noqa: E402
     ComputerSettings,
@@ -31,9 +35,9 @@ from agentenv_protocol.computer import (  # noqa: E402
     type_text,
 )
 from agentenv_protocol.computer.conformance import CheckResult, ProbeReport, run_probe  # noqa: E402
+from agentenv_protocol.computer import _linux  # noqa: E402
 from agentenv_protocol.computer.conformance import checks  # noqa: E402
 from agentenv_protocol.computer.conformance.client import Driver  # noqa: E402
-from agentenv_protocol.computer.conformance.__main__ import main  # noqa: E402
 from agentenv_protocol import CONTROL_TOKEN_ENV  # noqa: E402
 from agentenv_protocol.tool_access import DISABLE_TOOL_EXTENSION_URI  # noqa: E402
 from agentenv_protocol.types import EnvironmentCard  # noqa: E402
@@ -165,13 +169,75 @@ async def test_each_app_a_driver_fronts_that_exports_is_asked_for_its_export_onc
 
 @pytest.mark.asyncio
 async def test_a_driver_without_exec_or_data_add_passes_basic_and_leaves_full_unverified():
-    report = await _probe(MinimalDriver(FakeScreen(640, 400), platform=Platform(os="macos")))
+    report = await _probe(MinimalDriver(FakeScreen(640, 400), platform=Platform(os="freebsd")))
     assert report.passed, _failed(report)
     unverified = [c for c in report.checks if c.status == "unverified"]
     assert {c.check for c in unverified} == {"P3", "P4", "P5", "P6", "P7", "P9"}
     assert "the driver lacks ['urn:agentenv:computer-exec/v1', 'data/add']" in unverified[0].detail
     assert "urn:agentenv:computer-exec/v1" not in report.extensions
     assert report.extensions["urn:agentenv:computer/v1"] == "verified"
+
+
+@pytest.mark.asyncio
+async def test_a_windows_computer_is_probed_with_the_commands_windows_has(monkeypatch):
+    """Its exec checks run Python one-liners rather than a POSIX shell; here they run on this machine's python3."""
+    sent = []
+    run = _linux.run_in_session
+
+    async def recorded(argv, *args, **kwargs):
+        sent.append(list(argv))
+        return await run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(_linux, "run_in_session", recorded)
+    report = await _probe(MinimalDriver(FakeScreen(640, 400), platform=Platform(os="windows", arch="amd64")), "basic")
+
+    assert report.passed, _failed(report)
+    exec_checks = [c for c in report.checks if "urn:agentenv:computer-exec/v1" in c.extensions]
+    assert len(exec_checks) >= 4 and all(c.status == "passed" for c in exec_checks)
+    assert list(checks.WIN_ECHO) in sent and list(checks.WIN_SLEEP) in sent and list(checks.WIN_NOW) in sent
+    assert not [argv for argv in sent if argv[0] == "sh"]
+
+
+class WaylandDesk(FakeDesk):
+    """The GTK desk as the probe uses it: GTK's own Ctrl+A selects a text box's text, and Tk's Ctrl+/ does nothing,
+    so a probe that sent it there would fail."""
+
+    def press(self, keys: list[str]) -> None:
+        if keys != ["Control", "/"]:
+            super().press(["Control", "/"] if keys == ["Control", "a"] else keys)
+
+
+class WaylandDriver(FixtureDriver):
+    """A driver on a Wayland desktop, whose desk is the GTK one, started only from wayland_fixture.py."""
+
+    def __init__(self) -> None:
+        super().__init__(platform=Platform(os="linux", distribution="omarchy", version="4.5.0", arch="amd64",
+                                           display="wayland"))
+        self.desk = WaylandDesk(self)
+        self.staged: list[str] = []
+
+    def _fixture(self, argv):
+        text = " ".join(argv)
+        if f"python3 {checks.STAGE}/wayland_fixture.py" in text:
+            self.staged = sorted(path.name for path in (Path.home() / checks.STAGE).glob("*.py"))
+            self.desk.start()
+            return ExecResult(0, b"4242\n")
+        if f"python3 {checks.STAGE}/fixture.py" in text:
+            return ExecResult(1, b"", b"Tk runs under XWayland here")
+        if argv == [*checks.OWNER, f"{checks.STAGE}/wayland_fixture.py"]:
+            return ExecResult(0, b"1000\n")
+        return super()._fixture(argv)
+
+
+@pytest.mark.asyncio
+async def test_a_wayland_computer_is_probed_with_the_gtk_desk_beside_the_tk_desks_file_selecting_all_with_ctrl_a(home):
+    driver = WaylandDriver()
+
+    report = await _probe(driver)
+
+    assert report.passed, _failed(report)
+    assert driver.staged == ["desk.py", "wayland_fixture.py"]
+    assert ["kill", "4242"] in driver.commands and not (home / checks.STAGE).exists()
 
 
 class NeverReady(FixtureDriver):
@@ -284,6 +350,118 @@ async def test_a_fixture_that_doesnt_start_leaves_full_unverified_and_is_cleaned
     assert (["kill", "4243"] in probed.commands) is (driver is SilentFixture)
 
 
+@pytest.mark.parametrize("delta, steps", [(1, 1), (-3, -3), (120, 1), (-360, -3), (240, 2)],
+                         ids=["aqua-up", "aqua-down-3", "scaled-up", "scaled-down-3", "scaled-up-2"])
+def test_the_fixture_counts_a_wheel_events_steps_whether_tk_scales_them_by_120_or_not(delta, steps, monkeypatch):
+    """Aqua's Tk 8.6 reports a step as a delta of 1; Windows, and Tk 9 everywhere, as 120."""
+    assert _fixture(monkeypatch).wheel_steps(delta) == steps
+
+
+@pytest.mark.parametrize("delta, steps", [(10, (False, 1)), (65526, (False, -1)), (65516, (False, -2)),
+                                          (655360, (True, 1)), (-655360, (True, -1)), (0, None)],
+                         ids=["up", "down", "down-2-coalesced", "left", "right", "still"])
+def test_the_fixture_counts_a_scroll_tk_9_reports_in_pixels_by_the_lines_it_moves(delta, steps, monkeypatch):
+    """The deltas Tk 9 on macOS gave cua-driver's scrolls: 10 pixels a line, two lines at once where macOS coalesced
+    them."""
+    assert _fixture(monkeypatch).touchpad_steps(delta) == steps
+
+
+class _Root:
+    """A Tk root stood in for: the attributes set on it in order, its bindings, the calls made to it, and what
+    ``after`` was given to run, with its delay."""
+
+    def __init__(self):
+        self.set, self.calls, self.bound, self.timers = [], [], {}, []
+        self.last = self
+
+    def focus_lastfor(self):
+        return self.last
+
+    def attributes(self, name, value):
+        self.set.append((name, value))
+
+    def bind(self, sequence, handler, add=None):
+        self.bound[sequence] = handler
+
+    def after(self, ms, callback):
+        self.timers.append((ms, callback))
+        return f"after#{len(self.timers)}"
+
+    def lift(self):
+        self.calls.append("lift")
+
+    def focus_force(self):
+        self.calls.append("focus_force")
+
+
+def test_the_fixture_on_x11_stays_maximized_above_other_windows_and_takes_the_top_back_once_one_covers_it(monkeypatch):
+    """A window an app keeps above, as Typora's licence dialog is for its first seconds, otherwise takes the clicks the
+    probe aims at the fixture."""
+    fixture = _fixture(monkeypatch)
+    now = [100.0]
+    monkeypatch.setattr(fixture.time, "monotonic", lambda: now[0])
+    root = _Root()
+    fixture.keep_on_top(root)
+    seen = root.bound["<Visibility>"]
+
+    seen(SimpleNamespace(widget="a child", state="VisibilityFullyObscured"))
+    for_child = list(root.timers)
+    seen(SimpleNamespace(widget=root, state="VisibilityPartiallyObscured"))
+    seen(SimpleNamespace(widget=root, state="VisibilityPartiallyObscured"))
+    (first, lift), = root.timers
+    lift()
+    lifted = (root.set[2:], list(root.calls))
+    now[0] += 0.1
+    seen(SimpleNamespace(widget=root, state="VisibilityFullyObscured"))
+    second, again = root.timers[1]
+    seen(SimpleNamespace(widget=root, state="VisibilityUnobscured"))
+    again()
+
+    assert root.set[:2] == [("-zoomed", True), ("-topmost", True)] and for_child == []
+    assert first == 0 and lifted == ([("-topmost", False), ("-topmost", True)], ["lift", "focus_force"])
+    assert second == round((fixture.LIFT_GAP_S - 0.1) * 1000) and root.calls == ["lift", "focus_force"]
+
+
+def test_the_fixture_gives_the_focus_back_to_the_text_box_that_had_it_when_it_takes_the_top_back(monkeypatch):
+    """A window an app opens during a typing check would otherwise leave the probe's keys with the fixture's root."""
+    fixture = _fixture(monkeypatch)
+    monkeypatch.setattr(fixture.time, "monotonic", lambda: 100.0)
+    root, name = _Root(), _Root()
+    root.last = name
+    fixture.keep_on_top(root)
+
+    root.bound["<Visibility>"](SimpleNamespace(widget=root, state="VisibilityPartiallyObscured"))
+    (_, lift), = root.timers
+    lift()
+
+    assert root.calls == ["lift"] and name.calls == ["focus_force"]
+
+
+def _fixture(monkeypatch):
+    """The fixture module, which runs in the computer, read with Tk stood in for, as this Python may have none, and
+    with desk.py importable as it is beside the fixture in the computer."""
+    monkeypatch.setitem(sys.modules, "tkinter", ModuleType("tkinter"))
+    monkeypatch.syspath_prepend(str(Path(checks.__file__).parent))
+    monkeypatch.delitem(sys.modules, "agentenv_protocol.computer.conformance.fixture", raising=False)
+    return importlib.import_module("agentenv_protocol.computer.conformance.fixture")
+
+
+def test_the_gtk_desk_starts_on_a_computer_without_tk(monkeypatch):
+    gi = ModuleType("gi")
+    gi.require_version = lambda namespace, version: None
+    gi.repository = SimpleNamespace(Gdk=None, GLib=None, Gtk=None)
+    monkeypatch.setitem(sys.modules, "gi", gi)
+    monkeypatch.setitem(sys.modules, "gi.repository", gi.repository)
+    monkeypatch.setitem(sys.modules, "tkinter", None)
+    monkeypatch.syspath_prepend(str(Path(checks.__file__).parent))
+    for name in ("desk", "wayland_fixture"):
+        monkeypatch.delitem(sys.modules, name, raising=False)
+
+    gtk_desk = importlib.import_module("wayland_fixture")
+
+    assert gtk_desk.AT["grid"] == (400, 160)
+
+
 def test_a_refusal_must_carry_the_code_and_applied_no():
     def result(error: bool, **data) -> CallToolResult:
         return CallToolResult(content=[TextContent(type="text", text="x")], structuredContent=data, isError=error)
@@ -311,15 +489,23 @@ def test_an_extension_is_failed_by_any_check_verified_by_a_pass_and_unverified_o
     assert not report.passed and report.counts() == {"passed": 1, "failed": 1, "unverified": 1, "not_applicable": 0}
 
 
-def test_the_cli_prints_each_check_writes_the_report_and_exits_by_the_result(tmp_path, capsys):
+def test_the_cli_prints_each_check_writes_the_report_and_exits_by_the_result(tmp_path):
     out = tmp_path / "report.json"
     with served(FixtureDriver()) as url:
-        passed = main([url, "--level", "basic", "--json", str(out)])
+        passed = _cli(url, "--level", "basic", "--json", str(out))
     with served(ExitZero()) as url:
-        failed = main([url, "--level", "basic"])
-    unreachable = main(["http://127.0.0.1:9", "--timeout", "2"])
-    printed = capsys.readouterr()
-    assert (passed, failed, unreachable) == (0, 1, 2)
-    assert "PASS P0 computer-ready reports ready" in printed.out and "FAIL X a command's exit code" in printed.out
-    assert "couldn't probe http://127.0.0.1:9" in printed.err
+        failed = _cli(url, "--level", "basic")
+    unreachable = _cli("http://127.0.0.1:9", "--timeout", "2")
+
+    assert (passed.returncode, failed.returncode, unreachable.returncode) == (0, 1, 2)
+    assert "PASS P0 computer-ready reports ready" in passed.stdout
+    assert "FAIL X a command's exit code" in failed.stdout
+    assert "couldn't probe http://127.0.0.1:9" in unreachable.stderr
     assert ProbeReport.model_validate_json(out.read_text()).passed
+
+
+def _cli(*args: str) -> subprocess.CompletedProcess:
+    """The conformance CLI run as its users run it, in a process of its own, so nothing in this one can take a line it
+    prints."""
+    return subprocess.run([sys.executable, "-m", "agentenv_protocol.computer.conformance", *args],
+                          capture_output=True, text=True, timeout=180)

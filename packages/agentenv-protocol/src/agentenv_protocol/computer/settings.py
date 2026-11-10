@@ -3,12 +3,29 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 
 SETTINGS_ENV = "AGENTENV_COMPUTER_SETTINGS"
+#: The prefix a deploy gives the names of the computer's tools, so several computers serve them side by side.
+TOOL_PREFIX_ENV = "AGENTENV_TOOL_PREFIX"
+_TOOL_PREFIX = re.compile(r"[A-Za-z0-9_-]*")
+#: The longest a tool prefix may be, its separator included, so a prefixed name stays well within the 64 characters
+#: model APIs take for a tool's name.
+MAX_TOOL_PREFIX = 16
+
+
+def tool_prefix_problem(prefix: str) -> str | None:
+    """What's wrong with ``prefix`` as a tool prefix, or None: only what a tool's name may hold, at most
+    ``MAX_TOOL_PREFIX`` characters."""
+    if not _TOOL_PREFIX.fullmatch(prefix):
+        return f"tool prefix {prefix!r} holds characters a tool's name can't"
+    if len(prefix) > MAX_TOOL_PREFIX:
+        return f"tool prefix {prefix!r} is {len(prefix)} characters, and a tool prefix is at most {MAX_TOOL_PREFIX}"
+    return None
 
 Space = Literal["frame", "norm"]
 
@@ -30,11 +47,13 @@ class ComputerSettings(BaseModel):
     exec_timeout_s: float = Field(default=60.0, gt=0, le=3600)
 
 
-def load_settings(environ: dict | None = None) -> ComputerSettings:
+def load_settings(environ: dict | None = None, model: type[ComputerSettings] = ComputerSettings) -> ComputerSettings:
+    """The settings in ``environ`` (this process's environment by default), read as ``model``: a driver's ``Settings``,
+    the base ones and those it adds."""
     raw = (os.environ if environ is None else environ).get(SETTINGS_ENV)
     if not raw:
-        return ComputerSettings()
+        return model()
     try:
-        return ComputerSettings.model_validate(json.loads(raw))
+        return model.model_validate(json.loads(raw))
     except (ValueError, ValidationError) as e:
         raise ValueError(f"{SETTINGS_ENV} is not valid computer settings: {e}") from None

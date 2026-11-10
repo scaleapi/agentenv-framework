@@ -107,11 +107,12 @@ class FakeMSS:
 
 class FakeGrab:
     """FFmpeg's x11grab through PyAV: ``frames`` frames a few milliseconds apart, each with its wall-clock time, then
-    ``fail`` raised if set; ``opened`` keeps what each open was asked."""
+    ``fail`` raised if set; ``opened`` keeps what each open was asked, and ``made`` counts the frames made."""
     opened: list = []
     frames = 3
     fail: Exception | None = None
     closed = 0
+    made = 0
 
     def __init__(self, display: str, format: str, options: dict) -> None:
         self.args = (display, format, options)
@@ -131,6 +132,7 @@ class FakeGrab:
     def decode(self, video):
         for n in range(self.frames):
             time.sleep(0.005)
+            FakeGrab.made = n + 1
             yield types.SimpleNamespace(time=1_793_000_000.0 + n / 10, index=n)
         if self.fail is not None:
             raise self.fail
@@ -174,6 +176,7 @@ def x11(monkeypatch):
     module("Xlib", X=X, XK=XK, display=display)
     module("mss", MSS=FakeMSS)
     module("av", open=FakeGrab.open)
+    monkeypatch.delitem(sys.modules, "agentenv_protocol.computer._x11", raising=False)
     monkeypatch.setattr("agentenv_protocol.computer.driver.detect", lambda: LINUX)
     monkeypatch.delenv("ENVIRONMENT_NAME", raising=False)
     monkeypatch.delenv("AGENTENV_COMPUTER_SETTINGS", raising=False)
@@ -272,6 +275,20 @@ async def test_keys_held_by_keyboard_down_stay_down_through_other_input(x11):
     assert typed == [("key-down", a), ("key-up", a)] and chord == [("key-down", a), ("key-up", a)]
     assert clicked == [("move", (1, 1)), ("button-down", 1), ("button-up", 1)]
     assert released == [("key-up", shift)] and not fake.down
+
+
+@pytest.mark.asyncio
+async def test_a_key_held_by_one_another_holds_already_is_not_released_with_it(x11):
+    driver, fake, code = x11
+    shift, a = code("Shift_L"), ord("a") + 8
+    async with mcp_session(driver) as session:
+        await session.call_tool("computer_screenshot", {})
+        held = await _events(fake, session, "computer_keyboard_down", {"keys": ["A"]})
+        again = await _events(fake, session, "computer_keyboard_down", {"keys": ["Shift"]})
+        kept = await _events(fake, session, "computer_keyboard_up", {"keys": ["Shift"]})
+        released = await _events(fake, session, "computer_keyboard_up", {"keys": ["A"]})
+    assert held == [("key-down", shift), ("key-down", a)] and again == kept == []
+    assert released == [("key-up", a), ("key-up", shift)] and not fake.down
 
 
 @pytest.mark.asyncio
@@ -376,6 +393,7 @@ def grab(monkeypatch):
     monkeypatch.setattr(FakeGrab, "frames", 3)
     monkeypatch.setattr(FakeGrab, "fail", None)
     monkeypatch.setattr(FakeGrab, "closed", 0)
+    monkeypatch.setattr(FakeGrab, "made", 0)
     monkeypatch.setenv("DISPLAY", ":99")
     return FakeGrab
 
@@ -398,7 +416,11 @@ async def test_a_failed_grab_raises_from_the_stream_and_a_slow_reader_gets_the_l
     grab.fail, grab.frames = None, 30
     stream = driver.stream(_hints(tmp_path))
     first = await anext(stream)
-    await asyncio.sleep(0.5)
+    for _ in range(500):
+        if grab.made == 30:
+            break
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(0.05)
     rest = [frame async for frame in stream]
     assert first.image.index == 0 and len(rest) < 10 and rest[-1].image.index == 29
 

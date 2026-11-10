@@ -122,6 +122,11 @@ class TaskStep(ABC):
         """Execute this task step."""
         pass
 
+    def deploys_env(self) -> Optional[tuple[str, Optional[int]]]:
+        """The env id this step deploys and the version it pins, None for its latest, which the preflights of the
+        steps after it read that env at; None for a step that deploys no env."""
+        return None
+
     def preflight(self) -> list[str]:
         """Config problems detectable before a run, one message each; empty when fine.
 

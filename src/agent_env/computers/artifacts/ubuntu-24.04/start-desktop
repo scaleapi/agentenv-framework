@@ -15,6 +15,9 @@ case "${1:-}" in
         exec /usr/bin/supervisord -c /etc/supervisor/supervisord.conf
         ;;
     xvfb)
+        # supervisord runs one X at a time, so a lock here is one a killed X left, and X refuses to start while the pid
+        # it names is taken, which after a restart it often is.
+        rm -f "/tmp/.X${DISPLAY#:}-lock"
         exec Xvfb "$DISPLAY" -screen 0 "${resolution}x24" -nolisten tcp -ac
         ;;
     with-x)

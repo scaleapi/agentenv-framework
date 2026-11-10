@@ -19,6 +19,7 @@ from agent_env.providers.sandbox_providers.local_docker.provider import LocalSan
 from agent_env.providers.sandbox_providers.sandbox import into_container
 from agent_env.providers.sandbox_providers.sandbox_provider import reachable_url
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
+from agent_env.task_step.preflight import stored_env
 from agent_env.entity.refs import EntityRef
 from agent_env.entity.scopes import FieldScope
 from agent_env.store.base import NotFoundError
@@ -225,10 +226,12 @@ class LoadArtifactTaskStep(TaskStep):
         """An environment artifact this step names for an env whose type loads none."""
         if self.env_id is None:
             return []
+        env = stored_env(self.env_id)
+        if env is None:  # what the run reports
+            return []
         try:
-            env = Env.get(self.env_id)
             artifacts = [Artifact.get(ref["id"], ref.get("version")) for ref in self.artifacts]
-        except NotFoundError:  # what the run reports
+        except NotFoundError:
             return []
         return [refusal for artifact in artifacts if (refusal := self._unloadable(env, self.env_id, artifact))]
 

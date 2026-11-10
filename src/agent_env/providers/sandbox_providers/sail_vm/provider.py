@@ -133,6 +133,9 @@ class SailVmSandboxProvider(SandboxProvider):
     Sail adds it to the agent's requests to the model endpoint (see ``model_key``)."""
 
     EGRESS_HOSTS: ClassVar[tuple[str, ...]] = ("*.sail.box",)
+    WEBSOCKETS = True
+    # Its create_container is the default VM path's, which sizes /dev/shm.
+    SHARED_MEMORY = True
 
     def __init__(
         self,

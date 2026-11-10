@@ -19,6 +19,7 @@ import os
 import shutil
 import tarfile
 import tempfile
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
@@ -68,6 +69,7 @@ from codex_bridge import (
     find_rollout_path,
     get_last_attribution_snapshot,
     kill_running_clis,
+    now,
     run_codex,
 )
 from codex_kit import DurableSessionRefs, in_thread_to_its_end, install_skill, json_error_bodies, read_object_bytes
@@ -235,6 +237,10 @@ class CodexConfig(AgentConfig):
     project_id: str | None = None
     task_id: str | None = None
     timeout_seconds: int = 1800
+    # Tool calls a turn may make; see run_codex.
+    max_turns: int | None = None
+    # Which of the CLI's own tools it may use. With any selection, the MCP tools agent-env gives it stay.
+    builtin_tools: codex_config.CodexTools | None = None
 
 
 @asynccontextmanager
@@ -666,6 +672,15 @@ class CodexAgent(DurableSessionRefs, AgentEnvAgent):
 
                 try:
                     await codex_config.write_mcp_servers(request.mcp_servers)
+                    # The catalog read a selection may need counts against the turn's time limit.
+                    started = time.monotonic()
+                    catalog = await codex_config.catalog_overrides(cfg.builtin_tools, cfg.timeout_seconds)
+                    remaining_s = cfg.timeout_seconds
+                    if catalog:
+                        remaining_s -= time.monotonic() - started
+                        if remaining_s <= 0:
+                            raise RuntimeError(
+                                f"no time left of the turn's {cfg.timeout_seconds}s after the catalog read")
                     async with _workspace_barrier.shared():
                         result = await run_codex(
                             prompt=prompt,
@@ -674,12 +689,15 @@ class CodexAgent(DurableSessionRefs, AgentEnvAgent):
                             effort=cfg.effort,
                             system_prompt=cfg.system_prompt,
                             output_format=cfg.output_format,
-                            timeout_s=cfg.timeout_seconds,
+                            timeout_s=remaining_s,
                             # Forward LiteLLM attribution per subprocess.
                             project_id=cfg.project_id,
                             task_id=cfg.task_id,
                             event_callback=_record_event,
-                            config_overrides=codex_config.role_overrides(request.mcp_servers, cfg.role),
+                            max_turns=cfg.max_turns,
+                            config_overrides=[*codex_config.role_overrides(request.mcp_servers, cfg.role),
+                                              *codex_config.builtin_tools_overrides(cfg.builtin_tools),
+                                              *catalog],
                         )
                 except Exception as e:
                     logger.error(f"codex CLI invocation raised: {e}", exc_info=True)
@@ -692,6 +710,11 @@ class CodexAgent(DurableSessionRefs, AgentEnvAgent):
 
                 if result.session_id:
                     self.set_session_ref_for_context(context_id, result.session_id)
+                if result.token_usage or result.model_requests is not None:
+                    # Usage the CLI's events omit: a turn it was stopped in has no turn.completed.
+                    request.trajectory.append({"type": "agentenv.usage", "usage": result.token_usage,
+                                               "model_requests": result.model_requests,
+                                               "timestamp": now()})
         finally:
             if execution_task is not None:
                 _discard_execution_task(context_id, execution_task)

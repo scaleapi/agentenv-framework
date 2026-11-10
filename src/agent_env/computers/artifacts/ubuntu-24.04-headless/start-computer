@@ -1,0 +1,8 @@
+#!/bin/sh
+# The base's start: the time zone a deploy passes as AGENTENV_SETTING_TIMEZONE applied for every program, then
+# supervisord.
+set -eu
+timezone="${AGENTENV_SETTING_TIMEZONE:-UTC}"
+[ -f "/usr/share/zoneinfo/$timezone" ] || { echo "timezone '$timezone' isn't in /usr/share/zoneinfo" >&2; exit 2; }
+export TZ="$timezone"
+exec /usr/bin/supervisord -c /etc/supervisor/supervisord.conf

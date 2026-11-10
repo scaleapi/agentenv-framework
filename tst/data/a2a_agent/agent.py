@@ -13,21 +13,29 @@ and it answers each ``send-file <uri>`` line of its prompt with a file part nami
 It installs skills under ``~/skills/<name>/``, a bundle's files downloaded through their read grants, and a
 ``list-skills`` line in its prompt adds a ``skill <name>: <path>=<sha256 prefix>, ...`` line for each one.
 A ``run <command>`` line has it run that command in its container and add a ``ran <command>: <output>`` line.
+
+A ``cdp <name> <url>`` line has it open the URL in a new tab of the browser its cdp-config names so, over raw CDP, and
+add a ``cdp <name> <digest>: <title>`` line, ``<digest>`` the first 12 hex digits of its address's sha256, so a
+reader can tell one address from another without the address. With no endpoint by that name the turn fails.
 """
 
 import asyncio
 import base64
 import contextlib
 import hashlib
+import itertools
+import json
 import os
 import re
 import signal
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
 from agentenv_protocol.a2a_agent import (
+    CDP_CONFIG_V1,
     MCP_CONFIG_V1,
     SKILL_CONFIG_V1,
     TRAJECTORY_V1,
@@ -48,10 +56,13 @@ from agentenv_protocol.a2a_agent import (
     enable,
     extension,
 )
+from websockets.asyncio.client import connect
 
 SEND_FILE = "send-file "
 LIST_SKILLS = "list-skills"
 RUN = "run "
+CDP = "cdp "
+CDP_LOAD_SECONDS = 30
 RUN_TIMEOUT_SECONDS = 60
 SKILLS_DIR = Path.home() / "skills"
 LIVE_STEPS = re.compile(r"live-steps (\d+)")
@@ -105,6 +116,42 @@ async def _ran(command: str) -> str:
     return f"ran {command}: {output.decode(errors='replace').strip()}"
 
 
+async def _opened(endpoint: Mapping[str, Any], name: str, url: str) -> str:
+    """``url`` opened in a new tab over raw CDP at the browser ``endpoint`` names, as the line that reports it."""
+    digest = hashlib.sha256(endpoint["ws_url"].encode()).hexdigest()[:12]
+    try:
+        async with connect(endpoint["ws_url"], max_size=None, additional_headers=endpoint.get("headers")) as browser:
+            ids = itertools.count(1)
+
+            async def call(method: str, params: dict | None = None, session: str | None = None) -> dict:
+                message_id = next(ids)
+                await browser.send(json.dumps({"id": message_id, "method": method, "params": params or {},
+                                               **({"sessionId": session} if session else {})}))
+                while (answer := json.loads(await browser.recv())).get("id") != message_id:
+                    pass
+                if "error" in answer:
+                    raise RuntimeError(answer["error"].get("message"))
+                return answer.get("result") or {}
+
+            target = (await call("Target.createTarget", {"url": url}))["targetId"]
+            session = (await call("Target.attachToTarget", {"targetId": target, "flatten": True}))["sessionId"]
+            deadline, loaded, title = asyncio.get_running_loop().time() + CDP_LOAD_SECONDS, False, ""
+            while not loaded and asyncio.get_running_loop().time() < deadline:
+                # A new tab is about:blank, already complete, until it commits the URL; a page still navigating may
+                # have no context to evaluate in yet.
+                with contextlib.suppress(RuntimeError):
+                    state, title, href = (await call("Runtime.evaluate", {
+                        "expression": "[document.readyState, document.title, location.href]", "returnByValue": True},
+                        session))["result"]["value"]
+                    loaded = state == "complete" and href != "about:blank"
+                if not loaded:
+                    await asyncio.sleep(0.2)
+            await call("Target.closeTarget", {"targetId": target})
+        return f"cdp {name} {digest}: {title}"
+    except Exception as e:
+        return f"cdp {name} {digest} failed: {type(e).__name__}: {e}"
+
+
 def _skills() -> list[str]:
     """One line per installed skill: each file's path and the first 12 hex digits of its sha256."""
     if not SKILLS_DIR.is_dir():
@@ -121,7 +168,7 @@ def _skills() -> list[str]:
         version="1.0.0",
     ),
     config=EchoAgentConfig,
-    extensions=(MCP_CONFIG_V1, enable(TRAJECTORY_V1, live=True), TRIGGERS_V1),
+    extensions=(MCP_CONFIG_V1, CDP_CONFIG_V1, enable(TRAJECTORY_V1, live=True), TRIGGERS_V1),
 )
 class EchoAgent(AgentEnvAgent):
     async def run(self, request: TaskRequest[EchoAgentConfig]) -> TaskResult:
@@ -137,6 +184,8 @@ class EchoAgent(AgentEnvAgent):
             reply = "\n".join([reply, *_skills()])
         runs = [line.removeprefix(RUN).strip() for line in prompt.splitlines() if line.startswith(RUN)]
         reply = "\n".join([reply, *[await _ran(command) for command in runs]])
+        opens = [line.removeprefix(CDP).split() for line in prompt.splitlines() if line.startswith(CDP)]
+        reply = "\n".join([reply, *[await _opened(request.cdp_endpoint(name), name, url) for name, url in opens]])
         sends = [line.removeprefix(SEND_FILE).strip() for line in prompt.splitlines() if line.startswith(SEND_FILE)]
         files = [FilePart(uri=uri, name=uri.rsplit("/", 1)[-1], mime_type="text/plain") for uri in sends]
         request.trajectory.append({"type": "echo", "input": prompt, "output": reply})

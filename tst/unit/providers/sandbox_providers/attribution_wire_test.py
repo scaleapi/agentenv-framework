@@ -106,7 +106,7 @@ def _provider():
 async def test_the_shared_app_gets_the_defaults_and_the_sandbox_gets_the_run():
     provider = _provider()
     attribution = {"team": "t", "cost_center": "research", RUN_ID_KEY: "inst-1"}
-    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox._experimental_create") as create:
+    with patch("agent_env.providers.sandbox_providers.modal_sandbox.modal.Sandbox.create") as create:
         create.aio = AsyncMock(side_effect=RuntimeError("stop"))
         with pytest.raises(RuntimeError):
             await provider.create_container(image_name="img:latest", port=8000, env={}, attribution=attribution)
