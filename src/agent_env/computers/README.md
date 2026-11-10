@@ -218,7 +218,11 @@ in, and it boots the base. At every boot, before SDDM starts the session,
 writes it for `with-seed`, root's and the session user's alone, the seed's trust files first; it sets the hostname and
 the computer's `timezone` (UTC by default; a deploy is refused one that isn't an IANA zone, and one the disk doesn't
 have is written as the refusal every service then names), names `host.docker.internal` at QEMU's address for the launcher, and writes the display's mode for Hyprland
-from the computer's `resolution`. Gate 3 probes it at full. An Omarchy computer has no apps for now: gate 1 refuses one. When
+from the computer's `resolution`. Gate 3 probes it at full. Each app is a layer of its own beside the driver, under
+`/opt/agentenv/apps/<name>`, installed as its `[install."linux/omarchy"]` says: its venv with the protocol's `app`
+extra, its own `.agentenv/` folder the session user's alone, its run scripts and install steps as their scopes say,
+and its server and services as user units beside the driver's. Gate 1 refuses an app asking for `shm_mb`, and a
+driver or app whose Linux install names apt packages, which Omarchy has no apt for. When
 Hyprland crashes, its watchdog brings it back in safe mode, without cua-driver's plugin, and cua-driver reports the
 computer failed for good.
 
