@@ -215,7 +215,8 @@ venv on the system Python, its run scripts), and its services become systemd use
 start with the session, and again with it, through `with-seed`. The composed disk has no ssh: only a compose logs
 in, and it boots the base. At every boot, before SDDM starts the session,
 `agentenv-seed.service` reads the deploy's environment from the NoCloud seed with the Linux disk's own `seed-env` and
-writes it for `with-seed`, root's and the session user's alone, the seed's trust files first; it sets the hostname and
+writes it for `with-seed`, root's and the session user's alone, the seed's trust files first; it makes the folder an
+app's server marks its launches in (`/run/agentenv/apps`) the session user's; it sets the hostname and
 the computer's `timezone` (UTC by default; a deploy is refused one that isn't an IANA zone, and one the disk doesn't
 have is written as the refusal every service then names), names `host.docker.internal` at QEMU's address for the launcher, and writes the display's mode for Hyprland
 from the computer's `resolution`. Gate 3 probes it at full. Each app is a layer of its own beside the driver, under
