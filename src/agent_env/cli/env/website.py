@@ -17,7 +17,8 @@ from agent_env.cli.utils import (
 )
 from agent_env.utils.card_naming import card_name_from_github, card_name_from_source, website_source_from_github, website_source_from_source
 from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM, build_image
-from agent_env.env.envs.website import WebsiteEnv, declared_live, domains_problem, health_path_problem, live_problems
+from agent_env.env.envs.website import (WebsiteEnv, declared_live, domains_problem, health_path_problem, live_problems,
+                                        ready_timeout_problem, shm_problem)
 from agent_env.providers.env_providers.constants import AGENT_ENV_WEBSITE_HEALTH_PATH
 from agent_env.store.ids import derive_id, image_repository
 
@@ -57,6 +58,11 @@ def website():
 @click.option("--allow-host", "allow_hosts", multiple=True,
               help="Another host a live site's pages reach, such as *.githubassets.com (repeatable; default: its "
                    "@website(...)'s allow_hosts)")
+@click.option("--ready-timeout-s", "ready_timeout_s", type=float, default=None,
+              help="How long the site may take from its server starting to ready, in seconds (default: the gateway's "
+                   "health check and wait)")
+@click.option("--shm-mb", "shm_mb", type=int, default=None,
+              help="The shared memory its server gets in /dev/shm, in MiB (default: Docker's 64 MiB)")
 @click.option("--setting", "setting_pairs", multiple=True,
               help="A setting its server is handed, KEY=VALUE (repeatable); a secret's value is a secret:KEY or "
                    "env:NAME reference")
@@ -81,6 +87,8 @@ def put(
     domains: tuple[str, ...],
     live: bool | None,
     allow_hosts: tuple[str, ...],
+    ready_timeout_s: float | None,
+    shm_mb: int | None,
     setting_pairs: tuple[str, ...],
     environment_name: str | None,
     env_provider_type: str,
@@ -108,7 +116,9 @@ def put(
         click.echo("Error: --server-image-ref needs --environment-name, which a registry image's card can't give here",
                    err=True)
         sys.exit(1)
-    if problem := health_path_problem(health_path) or domains_problem(list(domains)):
+    if problem := (health_path_problem(health_path) or domains_problem(list(domains))
+                   or (ready_timeout_s is not None and ready_timeout_problem(ready_timeout_s))
+                   or (shm_mb is not None and shm_problem(shm_mb))):
         click.echo(f"Error: {problem}", err=True)
         sys.exit(1)
     if frontend_dockerfile or frontend_dockerfile_github_url:
@@ -138,7 +148,8 @@ def put(
         source = None
     declared, problems = declared_live(source, live=live, domains=list(domains) or None,
                                        allow_hosts=list(allow_hosts) or None)
-    site = {"health_path": health_path, "domains": list(domains), **declared, "settings": settings}
+    site = {"health_path": health_path, "domains": list(domains), **declared, "settings": settings,
+            "ready_timeout_s": ready_timeout_s, "shm_mb": shm_mb}
     problems += live_problems(site["live"], site["domains"], site["allow_hosts"], settings, site["secret_settings"])
     if problems:
         click.echo("Error: " + "; ".join(problems), err=True)
