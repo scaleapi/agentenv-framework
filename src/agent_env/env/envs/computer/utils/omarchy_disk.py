@@ -224,12 +224,13 @@ def _as(scope: str) -> str:
 def unit(name: str, prefix: PurePosixPath, argv: list[str], environment: dict[str, Any]) -> str:
     """The systemd user unit of the service ``name``: started with the graphical session, which gives it Hyprland's
     instance and Wayland's display, and again with it, as Hyprland restarts under a new instance signature; through
-    ``with-seed``, in its ``prefix``, with ``environment``; again whenever it exits."""
+    ``with-seed``, in its ``prefix``, with ``environment`` set after the deploy's, so a layer's own variables win, as on
+    every OS; again whenever it exits."""
+    own = ["/usr/bin/env", *(f"{key}={value}" for key, value in environment.items())] if environment else []
     lines = ["[Unit]", f"Description=agent-env: {name}", "PartOf=graphical-session.target",
              "After=graphical-session.target", "ConditionEnvironment=WAYLAND_DISPLAY", "",
              "[Service]", f"WorkingDirectory={prefix}",
-             *(f"Environment={_unit_word(f'{key}={value}')}" for key, value in environment.items()),
-             "ExecStart=" + " ".join(_unit_word(word) for word in (str(WITH_SEED), *argv)),
+             "ExecStart=" + " ".join(_unit_word(word) for word in (str(WITH_SEED), *own, *argv)),
              "Restart=always", "RestartSec=1", "",
              "[Install]", "WantedBy=graphical-session.target"]
     return "\n".join(lines) + "\n"

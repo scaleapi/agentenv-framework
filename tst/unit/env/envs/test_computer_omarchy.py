@@ -187,7 +187,8 @@ def test_an_omarchy_env_composes_a_thin_disk_on_its_base_built_from_omarchys_ima
     unit = omarchy_disk.unit("driver-desk-daemon", PurePosixPath(prefix), [f"{prefix}/venv/bin/python", "driver.py"],
                              {"MCP_PORT": 18765})
     assert f"printf %s {shlex.quote(unit)} > /etc/systemd/user/agentenv-driver-desk-daemon.service" in script
-    assert f"ExecStart=/opt/agentenv/with-seed {prefix}/venv/bin/python driver.py" in unit.splitlines()
+    assert f"ExecStart=/opt/agentenv/with-seed /usr/bin/env MCP_PORT=18765 {prefix}/venv/bin/python driver.py" in (
+        unit.splitlines())
     assert {"provision.sh", "context/driver/driver.py", "context/driver/install.sh"} <= set(files)
     computer = env.computer_artifact()
     assert computer.os.distribution == "omarchy" and computer.forms.disk.init == "systemd"
@@ -349,15 +350,14 @@ def test_an_omarchy_disk_boots_at_the_size_hyprland_wants_and_other_linux_disks_
     assert boot.entry_for(boot.DISK_SIZES, "windows") == (4.0, 8192)
 
 
-def test_a_unit_quotes_what_systemd_would_otherwise_split_or_expand():
+def test_a_unit_quotes_what_systemd_would_otherwise_split_or_expand_and_sets_its_own_variables_after_the_deploys():
     text = omarchy_disk.unit("app-desk-sync", PurePosixPath("/opt/agentenv/apps/desk"),
                              ["/opt/agentenv/apps/desk/venv/bin/python", "sync.py", "--title", "100% $HOME's \"desk\""],
                              {"ENVIRONMENT_NAME": "desk", "GREETING": "hello world"})
 
-    assert ('ExecStart=/opt/agentenv/with-seed /opt/agentenv/apps/desk/venv/bin/python sync.py --title '
-            '"100%% $$HOME\'s \\"desk\\""') in text.splitlines()
-    assert 'Environment="GREETING=hello world"' in text.splitlines()
-    assert "Environment=ENVIRONMENT_NAME=desk" in text.splitlines()
+    assert ('ExecStart=/opt/agentenv/with-seed /usr/bin/env ENVIRONMENT_NAME=desk "GREETING=hello world" '
+            '/opt/agentenv/apps/desk/venv/bin/python sync.py --title "100%% $$HOME\'s \\"desk\\""') in text.splitlines()
+    assert not any(line.startswith("Environment=") for line in text.splitlines())
     assert "WantedBy=graphical-session.target" in text.splitlines()
 
 
