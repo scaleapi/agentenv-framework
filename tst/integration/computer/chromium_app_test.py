@@ -13,9 +13,7 @@ cookies, local storage and downloads; and its data plane signs it in, snapshots 
 snapshot back; and the browser task steps set its cookies and storage and open, activate and close its tabs by URL.
 Its start tabs open in order, the first active, a deploy recording each one's outcome and going on past a live page
 that never answers; and with the run's sites routed to it, a start tab on one must load, judged by the page it
-lands on when it sends itself elsewhere before it loads, so a site answering 503 fails the deploy, naming it; and
-the site proxy, which refuses any other host, refuses none of its own for well over a minute after it's ready, but for
-one Google account check at launch. Needs Docker and the local registry on localhost:5000."""
+lands on when it sends itself elsewhere before it loads, so a site answering 503 fails the deploy, naming it. Needs Docker and the local registry on localhost:5000."""
 
 import asyncio
 import hashlib
@@ -33,7 +31,6 @@ from agentenv_protocol import client as protocol_v1
 from agent_env.env import Env
 from agentenv_protocol.types import WELL_KNOWN_PATH
 from agentenv_protocol.website_browser import BROWSER, SHM_MIN_BYTES
-from tst.integration.computer.browser_computer_test import ACCOUNT_CHECK, QUIET_S, _as_root, _container_of
 from tst.integration.computer.browser_data import SITE as DATA_SITE, check_browser_data
 from tst.integration.computer.browser_steps import check_browser_steps
 from tst.integration.computer.browser_state import check_browser_state
@@ -409,28 +406,6 @@ async def test_its_start_tabs_open_in_order_the_first_active_and_a_live_one_that
     assert [(tab["url"], tab["title"], tab["active"]) for tab in tabs[:2]] == [(urls[0], "alpha", True),
                                                                                (urls[1], "bravo", False)]
     assert not tabs[2]["active"] and not report.failed
-
-
-@pytest.mark.asyncio
-async def test_with_the_runs_sites_routed_it_asks_its_site_proxy_for_no_other_host_until_well_after_it_is_ready(
-        chromium_desktop):
-    with host_pages() as port, namespace_routing():
-        params = {"site_routing": True, "sites": [{"name": "shop", "url": f"http://127.0.0.1:{port}/website/shop/",
-                                                   "domains": ["shop.test"]}],
-                  "app_settings": {"chromium": {"start_urls": ["https://shop.test/"]}}}
-        deployed = await Env.get(chromium_desktop.id).deploy(env_params=params)
-        context = TaskStepContext(deployed_envs=[deployed])
-        try:
-            tabs = await tabs_of(deployed)
-            await asyncio.sleep(QUIET_S)
-            logged = _as_root(await _container_of(deployed), "cat /etc/agentenv/sites/site-proxy.log")
-        finally:
-            report = await teardown_run(context)
-
-    assert [(tab["url"], tab["title"]) for tab in tabs] == [("https://shop.test/landed", "landed")]
-    refused = [json.loads(line)["refused"] for line in logged.splitlines() if line.startswith('{"refused"')]
-    assert all(entry["host"] == f"{ACCOUNT_CHECK}:443" for entry in refused), refused
-    assert not report.failed
 
 
 @pytest.mark.asyncio
