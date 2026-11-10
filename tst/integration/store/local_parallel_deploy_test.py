@@ -26,6 +26,7 @@ from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.store.image_store import LocalRegistryImageStore
 from agent_env.task import Task
 from agent_env.task.store import get_task_instance_store
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from tst.integration.utils.registry import REGISTRY_IMAGE
 from tst.task import journal_invariants as journal
@@ -80,6 +81,15 @@ def local_stack_at(monkeypatch: pytest.MonkeyPatch, path: Path):
         _docker("rm", "-f", reg_name)
         pytest.skip("local registry did not become ready")
 
+    # The sandboxes this process makes while the stack is up, whose containers alone it removes: another process's,
+    # as another pytest worker's, share this machine's Docker and its names.
+    made, init = [], LocalSandbox.__init__
+
+    def recorded(self, *args, **kwargs):
+        init(self, *args, **kwargs)
+        made.append(self.sandbox_id)
+
+    monkeypatch.setattr(LocalSandbox, "__init__", recorded)
     monkeypatch.chdir(path)
     for var in ("DOCUMENT", "OBJECT", "IMAGE"):
         monkeypatch.setenv(f"AGENT_ENV_{var}_STORE", "local")
@@ -89,8 +99,9 @@ def local_stack_at(monkeypatch: pytest.MonkeyPatch, path: Path):
     try:
         yield host
     finally:
-        for cid in _docker("ps", "-aq", "--filter", "name=agent-env-local-").stdout.split():
-            _docker("rm", "-f", cid)
+        for sandbox_id in set(made):
+            for cid in _docker("ps", "-aq", "--filter", f"name=agent-env-{sandbox_id}-").stdout.split():
+                _docker("rm", "-f", cid)
         reset_artifact_store()
         reset_config()
         _docker("rm", "-f", reg_name)
