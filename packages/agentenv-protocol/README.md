@@ -954,16 +954,8 @@ are the profile's template. The base class adds:
 - **The flags agentenv owns**, after the subclass's command and before `about:blank`, the one tab its command line
   opens: its profile, its
   HTTP cache under `~/.cache` (`--disk-cache-dir`), `--remote-debugging-pipe`, `--no-first-run`,
-  `--no-default-browser-check`, `--lang`; the flags that stop requests it would make of its own
-  (`QUIET_FLAGS`: `--disable-background-networking`, which stops Safe Browsing's list updates among its other
-  background services, and `--component-updater=url-source=file:///dev/null`, since the component updater checks
-  in for the components Chrome deems critical, its CRLSets among them, whatever `ComponentUpdatesEnabled` says);
-  `--disable-features=AimEnabled,PreconnectToSearch` (`DISABLED_FEATURES`), the AI Mode eligibility check at
-  launch, which no policy stops, and the preconnect to its search engine at launch, which `NetworkPredictionOptions`
-  would stop only by turning off the preconnects and prefetches it makes for pages too, joined to the features a
-  subclass's command turns off, since Chromium takes only the last `--disable-features`; and, when
-  `/dev/shm` holds under 1 GiB (Docker gives 64 MiB), `--disable-dev-shm-usage`, so it keeps its shared memory in
-  files. With
+  `--no-default-browser-check`, `--lang` and, when `/dev/shm` holds under 1 GiB (Docker gives 64 MiB),
+  `--disable-dev-shm-usage`, so it keeps its shared memory in files. With
   `AGENTENV_SITE_PROXY` set, it goes out through that proxy, with WebRTC's non-proxied UDP off.
   Alone it bypasses nothing, loopback included; in a computer it bypasses loopback (`127.0.0.1`,
   `[::1]`, `localhost`), so the apps beside it stay reachable while `*.localhost` names still go
@@ -977,13 +969,7 @@ are the profile's template. The base class adds:
 - **Alone, no desktop**: its launch matches and waits on no window, its server adds no launcher and,
   without `DISPLAY`, waits for no display, and its ready checks say when it's ready.
 - **`write_policies`**, an install step that writes agentenv's unattended-use policies (`POLICIES`)
-  and the subclass's to `agentenv.json` in `policy_dir`. Among them are the ones that stop requests it would make of
-  its own: `BrowserNetworkTimeQueriesEnabled: false`, the network time query; `SpellcheckLanguageBlocklist`, every
-  language it has a dictionary for (`SPELLCHECK_LANGUAGES`), so it fetches none for the deploy's locale
-  (`SpellcheckEnabled: false` would void the blocklist and still fetch one); and `AutofillAddressEnabled` and
-  `AutofillCreditCardEnabled: false`, the autofill server's field predictions for a page's forms. With all of them,
-  one request is left: a Google account check (`accounts.google.com/ListAccounts`) at launch, before it's ready,
-  which nothing tried stops, turning off its account reconcilor included; from a fresh profile it sends no cookie.
+  and the subclass's to `agentenv.json` in `policy_dir`.
 - **A debugging pipe, not a port.** Its server launches it with a new pipe's ends as its fds 3 and 4
   (`session.launch`'s `fds`, moved into place by `computer/_with_fds.py`, run alone with `-I -S`) and keeps the
   other ends as `self.devtools`, a `DevToolsPipe`: `await self.devtools.call(method, params)` returns
