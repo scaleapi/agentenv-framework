@@ -19,7 +19,7 @@ address it resolved and checked itself: one that isn't globally routable (loopba
 metadata service, their IPv6 equivalents) is refused at once with a 403, whether a page or an agent driving the browser
 names it, and each connection and refusal is a JSON line in `/var/log/agentenv/site-proxy.log`. The sandbox's network
 policy still applies beneath it. Its `own_loopback` setting (default `false`) lets the browser reach the computer's own
-loopback, as a test that serves its pages inside the computer needs. A computer that routes sites names the shared site proxy's forward port, `127.0.0.1:3129`, to the
+loopback, as a test that serves its pages inside the computer needs; a probe boots with it on, since the conformance fixture it serves is on that loopback, and so must a conformance run against a deployed browser computer. A computer that routes sites names the shared site proxy's forward port, `127.0.0.1:3129`, to the
 browser instead: it serves the run's sites, refuses every other host and runs out of the agent's reach. It has a
 container form only. Name it from another bundle as `ubuntu-24.04-headless`, or by its id,
 `@local/agentenv-framework/computers/ubuntu-24.04-headless`.

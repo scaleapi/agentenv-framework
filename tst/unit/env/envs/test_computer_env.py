@@ -30,7 +30,7 @@ from agentenv_protocol.tool_access import DISABLE_TOOL_EXTENSION_URI, ENABLE_TOO
 from agentenv_protocol.website_browser import BROWSER
 from click.testing import CliRunner
 
-from agent_env.artifact.artifacts.computer import ComputerArtifact
+from agent_env.artifact.artifacts.computer import ComputerArtifact, Setting
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.artifacts.environment import EnvironmentArtifact
 from agent_env.artifact.artifacts.environment_universe import EnvironmentUniverseArtifact
@@ -359,6 +359,26 @@ def test_the_probe_boots_a_build_at_the_envs_settings_with_a_token_of_its_own_as
         "AGENTENV_SETTING_RESOLUTION": "1600x900", "AGENTENV_SETTING_TIMEZONE": "Europe/Paris"}
     assert len(booted[0]["token"]) >= 32
     probed.assert_awaited_once_with("http://computer", "full", token=booted[0]["token"])
+
+
+def test_the_probe_lets_a_browser_alone_reach_its_own_loopback_where_the_base_declares_it_as_its_fixture_is_there(
+        base, driver, docker, monkeypatch):
+    env = _put(base, driver, compose=False)
+    monkeypatch.setitem(env.computer.config, "own_loopback", Setting(default=False, phase="deploy"))
+    booted = []
+
+    async def fake_boot(link, **kwargs):
+        booted.append(kwargs)
+        return boot.Booted(sandbox=None, url="http://computer", card=CARD)
+
+    monkeypatch.setattr(boot, "boot", fake_boot)
+    monkeypatch.setattr(boot, "discard", AsyncMock())
+    monkeypatch.setattr(probing, "run_probe", AsyncMock(return_value="report"))
+
+    asyncio.run(_probe([SimpleNamespace()], env, driver, "img"))
+
+    assert booted[0]["environment"]["AGENTENV_SETTING_OWN_LOOPBACK"] == "True"
+    assert "own_loopback" not in env.computer_values()  # a deploy still boots at the base's default
 
 
 def test_a_build_the_probe_cant_boot_for_a_setting_that_doesnt_resolve_stays_unverified_until_a_compose_where_it_does(
