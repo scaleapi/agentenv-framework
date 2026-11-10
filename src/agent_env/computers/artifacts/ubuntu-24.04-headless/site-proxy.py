@@ -1,13 +1,14 @@
 """A stand-in for the shared site proxy in this base, on 127.0.0.1:3128: it forwards every request the browser sends
 it, absolute-form HTTP and CONNECT tunnels alike, to the host it names, refusing nothing and never decrypting a tunnel.
-The sandbox's own network policy still decides where a connection can go. Each connection is logged as a JSON line
-when it ends, and each one that fails with its reason."""
+The sandbox's own network policy still decides where a connection can go. Every line it logs is JSON, in the same
+shapes as the shared site proxy's: ``connection`` (host, port, address, bytes each way, start, duration) when one
+ends, and ``failed`` (method, host, port, ``reason`` "doesn't resolve" or "no answer", and the error) for one that
+couldn't open."""
 import http.server
 import json
 import selectors
 import socket
 import socketserver
-import sys
 import time
 import urllib.parse
 
@@ -21,6 +22,10 @@ def log(**fields) -> None:
     print(json.dumps(fields), flush=True)
 
 
+def _error(error: BaseException) -> str:
+    return f"{type(error).__name__}: {error}".removesuffix(": ")
+
+
 class Proxy(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -30,12 +35,12 @@ class Proxy(http.server.BaseHTTPRequestHandler):
         if not port.isdigit():
             self.send_error(400)
             return
-        if (upstream := self._open(host, int(port), "CONNECT")) is None:
+        if (opened := self._open(host, int(port), "CONNECT")) is None:
             return
         self.send_response(200, "Connection established")
         self.end_headers()
         self.close_connection = True
-        self._relay(upstream, host, int(port), b"")
+        self._relay(*opened, host, int(port), b"")
 
     def forward(self):
         url = urllib.parse.urlsplit(self.path)
@@ -43,41 +48,43 @@ class Proxy(http.server.BaseHTTPRequestHandler):
             self.send_error(400)
             return
         port = url.port or 80
-        if (upstream := self._open(url.hostname, port, self.command)) is None:
+        if (opened := self._open(url.hostname, port, self.command)) is None:
             return
         target = (url.path or "/") + (f"?{url.query}" if url.query else "")
         headers = "".join(f"{k}: {v}\r\n" for k, v in self.headers.items() if k.lower() not in HOP)
         head = f"{self.command} {target} HTTP/1.1\r\n{headers}Connection: close\r\n\r\n".encode("latin-1")
         body = self.rfile.read(length) if (length := int(self.headers.get("Content-Length") or 0)) else b""
         self.close_connection = True
-        self._relay(upstream, url.hostname, port, head + body)
+        self._relay(*opened, url.hostname, port, head + body)
 
     do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = do_HEAD = do_OPTIONS = forward
 
-    def _open(self, host: str, port: int, method: str):
+    def _open(self, host: str, port: int, method: str) -> tuple[socket.socket, str] | None:
         """A connection to an address ``host`` resolves to, tried in turn within one ``CONNECT_TIMEOUT_S`` for them
-        all, or None once the browser has its answer: a 502 for a host that doesn't resolve or answer. The connection
-        keeps an ``IDLE_S`` timeout, so a write to a peer that stopped reading ends too."""
+        all, and that address; or None once the browser has its answer, a 502 for a host that doesn't resolve or
+        answer. The connection keeps an ``IDLE_S`` timeout, so a write to a peer that stopped reading ends too."""
         deadline = time.monotonic() + CONNECT_TIMEOUT_S
         try:
             found = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-            addresses = list(dict.fromkeys(info[4][0] for info in found))
         except OSError as error:
-            log(failed={"method": method, "host": host, "port": port, "reason": f"doesn't resolve: {error}"})
+            log(failed={"method": method, "host": host, "port": port, "reason": "doesn't resolve",
+                        "error": _error(error)})
             self._answer(502, f"{host} doesn't resolve\n")
             return None
-        for address in addresses:
+        last = None
+        for address in dict.fromkeys(info[4][0] for info in found):
             if (left := deadline - time.monotonic()) <= 0:
                 break
             try:
                 upstream = socket.create_connection((address, port), timeout=left)
-                upstream.settimeout(IDLE_S)
-                self.address = address
-                return upstream
-            except OSError:
+            except OSError as error:
+                last = error
                 continue
-        log(failed={"method": method, "host": host, "port": port, "reason": "no answer", "addresses": addresses})
-        self._answer(502, f"{host} didn't answer\n")
+            upstream.settimeout(IDLE_S)
+            return upstream, address
+        log(failed={"method": method, "host": host, "port": port, "reason": "no answer",
+                    "error": _error(last) if last else f"none within {CONNECT_TIMEOUT_S} s"})
+        self._answer(502, f"{host}:{port} didn't answer\n")
         return None
 
     def _answer(self, status: int, body: str) -> None:
@@ -91,7 +98,7 @@ class Proxy(http.server.BaseHTTPRequestHandler):
         self.wfile.write(data)
         self.close_connection = True
 
-    def _relay(self, upstream: socket.socket, host: str, port: int, first: bytes) -> None:
+    def _relay(self, upstream: socket.socket, address: str, host: str, port: int, first: bytes) -> None:
         started, began = time.time(), time.monotonic()
         sent, received = len(first), 0
         self.connection.settimeout(IDLE_S)
@@ -101,7 +108,7 @@ class Proxy(http.server.BaseHTTPRequestHandler):
             more, received = _pipe(self.connection, upstream)
             sent += more
         finally:
-            log(connection={"host": host, "port": port, "address": self.address, "bytes_sent": sent,
+            log(connection={"host": host, "port": port, "address": address, "bytes_sent": sent,
                             "bytes_received": received,
                             "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(started)),
                             "duration_s": round(time.monotonic() - began, 3)})
@@ -146,5 +153,5 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 
 if __name__ == "__main__":
-    print(f"site proxy stand-in on 127.0.0.1:{PORT}", file=sys.stderr, flush=True)
+    log(listening={"address": "127.0.0.1", "port": PORT})
     Server(("127.0.0.1", PORT), Proxy).serve_forever()

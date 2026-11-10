@@ -646,8 +646,9 @@ async def test_routing_sites_it_goes_out_only_through_the_forward_port_which_the
     assert (status, line) == ("200", "data: first") and int(seconds) < 15, pages
     assert all(pages[url].startswith("error") and "403" in pages[url] for url in (
         "https://example.com/", "http://127.0.0.1:18765/", "https://127.0.0.1:18765/")), pages
-    assert "site proxy: refused CONNECT example.com:443: no site of this computer" in logged
-    assert "site proxy: refused GET 127.0.0.1:18765: no site of this computer" in logged
+    refused = [json.loads(line)["refused"] for line in logged.splitlines() if line.startswith('{"refused"')]
+    assert {"method": "CONNECT", "host": "example.com:443", "reason": "no site of this computer"} in refused, logged
+    assert {"method": "GET", "host": "127.0.0.1:18765", "reason": "no site of this computer"} in refused, logged
     assert stopped["exit_code"] != 0 and still == serving and after_stop.startswith("200 "), (stopped, after_stop)
     assert back.startswith("200 ") and restarted and restarted != serving, (back, restarted)
     assert after_reset.startswith("200 ") and after_reset.endswith("<title>alpha</title>"), after_reset

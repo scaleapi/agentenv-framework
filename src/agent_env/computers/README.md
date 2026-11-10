@@ -15,8 +15,8 @@ building it. Name it from another bundle as `ubuntu-24.04`, the alias `aliases.t
 browser's page: a browser computer, which agentenv's `chromium` deploys alone as. supervisord runs every program as the
 session user, among them a stand-in site proxy on `127.0.0.1:3128`, the browser's only route out when the computer
 routes no sites. It forwards a request or a `CONNECT` tunnel to any host, never decrypting a tunnel and refusing
-nothing: the sandbox's network policy is all that limits it. Each connection, and each one that fails, is a JSON line in
-`/var/log/agentenv/site-proxy.log`. A computer that routes sites names the shared site proxy's forward port,
+nothing: the sandbox's network policy is all that limits it. Every line it writes to `/var/log/agentenv/site-proxy.log`
+is JSON, one per connection and one per connection that fails, in the same shapes as the shared site proxy's. A computer that routes sites names the shared site proxy's forward port,
 `127.0.0.1:3129`, to the browser instead: it serves the run's sites, refuses every other host and runs out of the agent's reach. It has a
 container form only. Name it from another bundle as `ubuntu-24.04-headless`, or by its id,
 `@local/agentenv-framework/computers/ubuntu-24.04-headless`.
