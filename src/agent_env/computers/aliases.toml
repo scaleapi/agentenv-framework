@@ -1,7 +1,7 @@
 # Ids a task can name these computers by; a store's artifact of the id wins over an alias.
 [artifacts]
 "ubuntu-24.04" = ["ubuntu-24.04"]
-"ubuntu-24.04-headless" = ["ubuntu-24.04-headless"]
+"ubuntu-24.04-browser" = ["ubuntu-24.04-browser"]
 "macos-26" = ["macos-26"]
 "windows-11" = ["windows-11"]
 "omarchy-4.5" = ["omarchy-4.5"]

@@ -83,7 +83,7 @@ def website_browser_desktop(tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def browser_computer(tmp_path_factory):
-    """agentenv's chromium, which deploys alone as a browser computer: the ubuntu-24.04-headless base, with no display, and the
+    """agentenv's chromium, which deploys alone as a browser computer: the ubuntu-24.04-browser base, with no desktop, and the
     page driver, whose screen is the browser's page; composed, through the browser-computer test bundle's task that
     deploys it, as ``desktop`` is."""
     yield from _composed(tmp_path_factory.mktemp("browser-computer"), parse_bundle(BROWSER_COMPUTER), CHROMIUM_ALONE)

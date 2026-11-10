@@ -22,13 +22,13 @@ import agent_env
 
 pytestmark = pytest.mark.usefixtures("socket_enabled")
 
-STAND_IN = Path(agent_env.__file__).parent / "computers" / "artifacts" / "ubuntu-24.04-headless" / "site-proxy.py"
+STAND_IN = Path(agent_env.__file__).parent / "computers" / "artifacts" / "ubuntu-24.04-browser" / "site-proxy.py"
 GITHUB = "140.82.112.3"
 OK = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello"
 
 
 def _stand_in():
-    spec = importlib.util.spec_from_file_location("headless_site_proxy", STAND_IN)
+    spec = importlib.util.spec_from_file_location("browser_site_proxy", STAND_IN)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module

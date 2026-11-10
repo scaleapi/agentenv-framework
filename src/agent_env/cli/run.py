@@ -86,7 +86,7 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
 
     --set sets a key of one of the bundle's envs for this run, as its env.toml would: --set
     envs/desktop.driver=cua-driver runs the env in envs/desktop with that driver, and --set
-    envs/desktop.computer=ubuntu-24.04-headless composes it on that base. The envs it changes, the envs and tasks
+    envs/desktop.computer=ubuntu-24.04-browser composes it on that base. The envs it changes, the envs and tasks
     that name them and the evals that name those tasks are written under ids of their own, ending in the settings,
     such as desktop(desktop.driver cua-driver), and compose and reuse their images as any env does, leaving the
     bundle as written. A key or value the env's type refuses, or a run whose tasks deploy no env it changes, is

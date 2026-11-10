@@ -42,7 +42,7 @@ SITES = SOCKET.parent / "sites.json"
 #: port, since the browser is reached only over its pipe.
 OWNED_FLAGS = ("--user-data-dir", "--remote-debugging-", "--remote-allow-origins", "--proxy-", "--no-proxy-server",
                "--headless", "--window-size", "--lang", "--force-webrtc-ip-handling-policy", "--disk-cache-dir",
-               "--disable-dev-shm-usage")
+               "--disable-dev-shm-usage", "--enable-unsafe-swiftshader")
 #: Below this much /dev/shm, as Docker's 64 MiB default, the browser keeps its shared memory in files instead.
 SHM_MIN_BYTES = 1 << 30
 #: Chromium's content setting that denies a permission without a prompt.
@@ -163,7 +163,8 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
 
     def agentenv_flags(self) -> list[str]:
         """The flags agentenv owns. A browser alone goes out only through its site proxy, so it won't launch without
-        one; in a computer it goes through one when the computer has one, loopback aside."""
+        one; in a computer it goes through one when the computer has one, loopback aside. Alone it runs headful on the
+        X server its computer gives it, where WebGL draws with SwiftShader since no GPU is there, else headless."""
         settings, alone, proxy = self.settings, _alone(), os.environ.get(SITE_PROXY_ENV)
         flags = [f"--user-data-dir={self.profile_dir()}", f"--disk-cache-dir={self.cache_dir()}",
                  "--remote-debugging-pipe", "--no-first-run", "--no-default-browser-check", f"--lang={settings.locale}"]
@@ -179,8 +180,7 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
                              "names none")
         if alone:
             flags.append(f"--window-size={settings.window.width},{settings.window.height}")
-        if alone:
-            flags.append("--headless=new")
+            flags.append("--enable-unsafe-swiftshader" if _x_server() else "--headless=new")
         return flags
 
     def _launch_for(self, launch: Launch) -> Launch:
@@ -304,7 +304,7 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         "is its window's, a PNG of it, and CDP input calls sent to it in order. navigate and history open a URL in "
         "the active tab, or go back, forward or reload; tabs/list, tabs/open, tabs/activate and tabs/close manage "
         "its tabs by their ids; dialog/answer answers the dialog open on the active tab; files/choose gives the file "
-        "chooser open on it files in ~/Uploads, headless; and page/state is the active tab's id, URL and title and "
+        "chooser open on it files in ~/Uploads, alone; and page/state is the active tab's id, URL and title and "
         "what is open on it. cookies/get, cookies/set and cookies/delete, and local_storage/get, local_storage/set and "
         "local_storage/clear, read and change its default context's cookies and local storage as Playwright's "
         "storageState has them, a cookie's max_age set as an expiry on the browser's clock; downloads/list and "
@@ -600,7 +600,7 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
 
     def extension_params(self, uri: str) -> dict:
         if uri == BROWSER:
-            params: dict[str, Any] = {"chromium": self.version, "clock": "real"}
+            params: dict[str, Any] = {"chromium": self.version, "clock": "real", "mode": _mode()}
             if _alone():
                 params["window"] = self.settings.window.model_dump()
             return params
@@ -650,8 +650,18 @@ def start_tab_why(tab: dict) -> str:
 
 
 def _alone() -> bool:
-    """Whether it runs on a computer with no display, a browser computer's, alone and headless."""
+    """Whether it runs on a computer with no display, a browser computer's, alone: its page is that computer's screen."""
     return computer_app.detect().display == "none"
+
+
+def _x_server() -> bool:
+    """Whether an X server is there for it, as a browser computer gives its browser one no agent sees."""
+    return bool(os.environ.get("DISPLAY"))
+
+
+def _mode() -> str:
+    """How it runs: headless alone with no X server, else headful, on its own X server alone or on the desktop."""
+    return "headless" if _alone() and not _x_server() else "headful"
 
 
 def _parsed(model: type[BaseModel], items: Any, what: str) -> list:
