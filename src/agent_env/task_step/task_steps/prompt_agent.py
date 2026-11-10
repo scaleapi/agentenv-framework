@@ -41,7 +41,7 @@ from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import RetryConfig, TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.notification_delivery import delivered_parts, next_message, take_due
 from agent_env.task_step.task_steps.post_turn_hooks import PostTurnHooks, run_post_turn_hooks, validate_hook_specs
-from agent_env.task_step.task_steps.user_sim_gate import UserSimGate, rewrite_request
+from agent_env.task_step.task_steps.user_sim_gate import UserSimGate, judge_call_config, run_gate
 from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import (
     agent_error_text,
     fetch_container_logs,
@@ -143,6 +143,16 @@ class PromptAgentTaskStep(TaskStep):
         FieldScope.USER)}
     DEFAULT_PROMPT_TIMEOUT_SECONDS: ClassVar[int] = 600
     DEFAULT_POLL_INTERVAL_SECONDS: ClassVar[int] = 2
+    # Whether this step type applies user_sim_gate. None: it does when it keeps prompt_agent's conversation; a
+    # subclass that runs its own loop sets True once that loop calls user_sim_gate.run_gate.
+    USER_SIM_GATE_SUPPORTED: ClassVar[Optional[bool]] = None
+    _CONVERSATION_METHODS: ClassVar[tuple[str, ...]] = ("_execute", "_execute_conversation", "_converse")
+
+    @classmethod
+    def applies_user_sim_gate(cls) -> bool:
+        if cls.USER_SIM_GATE_SUPPORTED is not None:
+            return cls.USER_SIM_GATE_SUPPORTED
+        return all(getattr(cls, m) is getattr(PromptAgentTaskStep, m) for m in cls._CONVERSATION_METHODS)
 
     def __init__(
         self,
@@ -229,6 +239,11 @@ class PromptAgentTaskStep(TaskStep):
         # too, as JSON task files and the kwargs form of put() carry it.
         self.user_sim_gate = (UserSimGate.from_dict(user_sim_gate) if isinstance(user_sim_gate, dict)
                               else user_sim_gate)
+        if self.user_sim_gate is not None and not type(self).applies_user_sim_gate():
+            raise ValueError(
+                f"{type(self).__name__} '{id}': user_sim_gate is applied by prompt_agent's own conversation, which "
+                f"this step type replaces; it would be ignored. Call user_sim_gate.run_gate from its loop and set "
+                f"USER_SIM_GATE_SUPPORTED = True, or leave user_sim_gate out")
 
     @staticmethod
     def _validate_parts(parts: list[dict]) -> None:
@@ -1113,37 +1128,32 @@ class _UserSide:
         return await self._gated(number, answer)
 
     async def _gated(self, number: int, answer: dict) -> dict:
-        """Check the user-sim's message; ask for a rewrite while it fails, up to the gate's limit."""
+        """Check the user-sim's message; ask for a rewrite while it fails, up to the gate's limit (``run_gate``)."""
         gate = self._gate
-        if self._gate_call_config is None and gate.judge_model:
-            config = get_config()
-            overrides = self._context.metadata.get("user_overrides", {})
-            self._gate_call_config = config.resolve_model_call(
-                gate.judge_model,
-                default_api_key=config.resolve_reference(
-                    overrides.get("judge_litellm_api_key") or overrides.get("litellm_api_key")),
-                base_override=overrides.get("judge_litellm_base_url") or overrides.get("litellm_base_url"),
-            )
-        for attempt in range(gate.max_rewrites + 1):
-            text = "\n".join(p.get("text", "") for p in answer["message"] if p.get("kind") == "text")
-            verdict = await gate.check(text, self._history, call_config=self._gate_call_config)
+        if self._gate_call_config is None:
+            self._gate_call_config = judge_call_config(gate, self._context.metadata.get("user_overrides", {}))
+        latest = {"answer": answer}
+
+        async def rewrite(note: str) -> Optional[str]:
+            reply = await self._send_to_peer(number, [{"kind": "text", "text": note}])
+            latest["answer"] = reply
+            return None if "end" in reply else _text_of(reply["message"])
+
+        def on_verdict(attempt: int, text: str, verdict) -> None:
             self._record("user_sim_gate", {"turn": number, "attempt": attempt, "chars": len(text), **verdict.to_dict()})
-            if verdict.passed:
-                return answer
-            logger.warning(f"Turn {number}: user-sim message failed the gate (attempt {attempt + 1}/"
-                           f"{gate.max_rewrites + 1}): {'; '.join(verdict.reasons())[:300]}")
-            if attempt == gate.max_rewrites:
-                break
-            answer = await self._send_to_peer(number, [{"kind": "text", "text": rewrite_request(verdict)}])
-            if "end" in answer:
-                return answer
-        if gate.on_fail == "send":
-            return answer
+            if not verdict.passed:
+                logger.warning(f"Turn {number}: user-sim message failed the gate (attempt {attempt + 1}/"
+                               f"{gate.max_rewrites + 1}): {'; '.join(verdict.reasons())[:300]}")
+
+        outcome = await run_gate(gate, _text_of(answer["message"]), self._history, rewrite,
+                                 call_config=self._gate_call_config, on_verdict=on_verdict)
+        if not outcome.invalid:
+            return latest["answer"]
         self._context.metadata.setdefault("user_sim_invalid", {})[self._step.id] = {
-            "turn": number, "reasons": verdict.reasons()}
+            "turn": number, "reasons": outcome.reasons()}
         if gate.on_fail == "fail":
             self.gate_failure = (f"user-sim message at turn {number} still reads as the assistant's after "
-                                 f"{gate.max_rewrites} rewrite(s): {'; '.join(verdict.reasons())[:500]}")
+                                 f"{gate.max_rewrites} rewrite(s): {'; '.join(outcome.reasons())[:500]}")
         return {"end": "user_sim_invalid"}
 
     async def _send_to_peer(self, number: int, agent_parts: list[dict]) -> dict:
@@ -1196,6 +1206,10 @@ class _UserSide:
 
     def _record(self, key: str, entry: dict) -> None:
         self._context.metadata.setdefault(key, {}).setdefault(self._step.id, []).append(entry)
+
+
+def _text_of(parts: list[dict]) -> str:
+    return "\n".join(p.get("text", "") for p in parts if p.get("kind") == "text")
 
 
 def _trigger_answer(resp: dict) -> Optional[dict]:

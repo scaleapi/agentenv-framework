@@ -69,3 +69,76 @@ def test_the_judge_alone_fails_only_a_long_message():
     long = asyncio.run(gate.check("The two states that need contracted physicians are these." + _FILLER, []))
     assert (short.passed, short.judge_in_role) == (True, False)     # recorded, not failed
     assert long.passed is False
+
+
+# ---- run_gate, for any conversation loop ------------------------------------------------------------------------------
+
+def _scripted_gate(verdicts, **settings):
+    from agent_env.task_step.task_steps.user_sim_gate import GateVerdict, UserSimGate
+
+    class Gate(UserSimGate):
+        async def check(self, candidate, history, *, call_config=None):
+            return GateVerdict(passed=verdicts.pop(0), pattern_reasons=["it opens like a report of work done"])
+
+    return Gate(**settings)
+
+
+def test_run_gate_rewrites_until_a_message_passes():
+    import asyncio
+    from agent_env.task_step.task_steps.user_sim_gate import run_gate
+
+    asked, seen = [], []
+
+    async def rewrite(note):
+        asked.append(note)
+        return f"rewrite {len(asked)}"
+
+    outcome = asyncio.run(run_gate(_scripted_gate([False, False, True]), "draft", [], rewrite,
+                                   on_verdict=lambda attempt, text, v: seen.append((attempt, text, v.passed))))
+    assert (outcome.text, outcome.invalid, outcome.stopped) == ("rewrite 2", False, False)
+    assert seen == [(0, "draft", False), (1, "rewrite 1", False), (2, "rewrite 2", True)]
+    assert asked[0].startswith("[Conversation system note, not from the assistant.]")
+
+
+def test_run_gate_marks_a_message_that_never_passes_and_honors_send():
+    import asyncio
+    from agent_env.task_step.task_steps.user_sim_gate import run_gate
+
+    async def rewrite(note):
+        return "still the assistant"
+
+    failed = asyncio.run(run_gate(_scripted_gate([False, False], max_rewrites=1), "draft", [], rewrite))
+    sent = asyncio.run(run_gate(_scripted_gate([False, False], max_rewrites=1, on_fail="send"), "draft", [], rewrite))
+    assert (failed.invalid, len(failed.verdicts)) == (True, 2)
+    assert (sent.invalid, sent.text) == (False, "still the assistant")
+
+
+def test_run_gate_stops_when_the_user_side_ends_instead_of_rewriting():
+    import asyncio
+    from agent_env.task_step.task_steps.user_sim_gate import run_gate
+
+    async def rewrite(note):
+        return None
+
+    outcome = asyncio.run(run_gate(_scripted_gate([False]), "draft", [], rewrite))
+    assert (outcome.stopped, outcome.invalid, len(outcome.verdicts)) == (True, False, 1)
+
+
+# ---- step types that run their own conversation ------------------------------------------------------------------
+
+def test_a_step_type_that_replaces_the_conversation_refuses_the_gate_unless_it_applies_it():
+    import pytest
+    from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
+
+    class OwnLoop(PromptAgentTaskStep):
+        async def _execute(self, context):
+            return context
+
+    class OwnLoopWithGate(OwnLoop):
+        USER_SIM_GATE_SUPPORTED = True
+
+    with pytest.raises(ValueError, match="OwnLoop 'talk': user_sim_gate is applied by prompt_agent's own conversation"):
+        OwnLoop(id="talk", version=None, prompt="hi", user_sim_gate={})
+    assert OwnLoop(id="talk", version=None, prompt="hi").user_sim_gate is None
+    assert OwnLoopWithGate(id="talk", version=None, prompt="hi", user_sim_gate={}).user_sim_gate is not None
+    assert PromptAgentTaskStep.applies_user_sim_gate() and not OwnLoop.applies_user_sim_gate()

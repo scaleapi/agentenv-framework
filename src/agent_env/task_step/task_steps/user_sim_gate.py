@@ -12,7 +12,8 @@ Two checks, either of which can fail a message:
 - ``judge_model``: one model call that reads the last turns and the candidate message and says whether
   the message is written as the user.
 
-Opt in with ``user_sim_gate`` on a ``prompt_agent`` step that has a user-sim::
+Opt in with ``user_sim_gate`` on a ``prompt_agent`` step that has a user-sim (a step type that runs its own
+conversation loop applies the gate with ``run_gate``, and sets ``USER_SIM_GATE_SUPPORTED``)::
 
     {"judge_model": "<a small, fast model>", "max_rewrites": 2, "on_fail": "fail"}
 """
@@ -22,7 +23,7 @@ import json
 import logging
 import re
 from dataclasses import asdict, dataclass, field
-from typing import ClassVar, Optional
+from typing import Awaitable, Callable, ClassVar, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -275,4 +276,67 @@ def rewrite_request(verdict: GateVerdict) -> str:
         f"because it reads as the assistant's reply rather than yours: {why}. You are the user. The assistant does "
         "the work and reports it; you ask, answer what you were asked, decide, push back, or end. Write your next "
         "message to the assistant again, as yourself, in the same reply format as before."
+    )
+
+
+@dataclass
+class GateOutcome:
+    """How one user-sim message fared: the text to send (the last one checked), every verdict in order, and
+    ``invalid`` when it still failed after the rewrites and ``on_fail`` isn't "send". ``stopped`` is set when the
+    rewrite callback ended the exchange instead of returning a new message."""
+
+    text: Optional[str]
+    verdicts: list[GateVerdict] = field(default_factory=list)
+    invalid: bool = False
+    stopped: bool = False
+
+    def reasons(self) -> list[str]:
+        return self.verdicts[-1].reasons() if self.verdicts else []
+
+
+async def run_gate(
+    gate: UserSimGate,
+    text: str,
+    history: list[tuple[str, str]],
+    rewrite: Callable[[str], Awaitable[Optional[str]]],
+    *,
+    call_config=None,
+    on_verdict: Optional[Callable[[int, str, GateVerdict], None]] = None,
+) -> GateOutcome:
+    """Check ``text``; while it fails, send the user-sim ``rewrite_request`` through ``rewrite`` and check its new
+    message, up to ``gate.max_rewrites`` times. ``rewrite`` returns the new message, or None when the user side
+    ended instead. ``on_verdict(attempt, text, verdict)`` sees every check, for recording. Any conversation loop
+    can call this; ``prompt_agent`` does, between a user-sim's reply and the agent's next turn."""
+    outcome = GateOutcome(text=text)
+    for attempt in range(gate.max_rewrites + 1):
+        verdict = await gate.check(text, history, call_config=call_config)
+        outcome.verdicts.append(verdict)
+        if on_verdict is not None:
+            on_verdict(attempt, text, verdict)
+        if verdict.passed:
+            return outcome
+        if attempt == gate.max_rewrites:
+            break
+        new_text = await rewrite(rewrite_request(verdict))
+        if new_text is None:
+            outcome.stopped = True
+            return outcome
+        text = outcome.text = new_text
+    outcome.invalid = gate.on_fail != "send"
+    return outcome
+
+
+def judge_call_config(gate: UserSimGate, user_overrides: dict):
+    """The model call settings for the gate's judge, honoring a run's judge or LiteLLM overrides the way the
+    rubrics verifier does; None without a judge."""
+    if not gate.judge_model:
+        return None
+    from agent_env.store import get_config
+
+    config = get_config()
+    return config.resolve_model_call(
+        gate.judge_model,
+        default_api_key=config.resolve_reference(
+            user_overrides.get("judge_litellm_api_key") or user_overrides.get("litellm_api_key")),
+        base_override=user_overrides.get("judge_litellm_base_url") or user_overrides.get("litellm_base_url"),
     )
