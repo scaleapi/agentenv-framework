@@ -32,6 +32,7 @@ from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
 from tst.integration.computer.browser_computer_test import _cdp_agent_loads
 from tst.integration.computer.multi_env_computers_test import _containers, _gateway, _image
 from tst.integration.store.local_parallel_deploy_test import _seed_bootstrap_envs
+from tst.util import local_sandboxes
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
@@ -51,6 +52,12 @@ def shop(browser_computer):
         uid = uuid.uuid4().hex[:8]
         return WebsiteEnv.put(id=f"@local/~/browsing-{uid}/shop", environment_name="shop", domains=["shop.test"],
                               backend_docker_image_artifact=_image("agentenv_website", f"browsing-shop-{uid}"))
+
+
+@pytest.fixture
+def made(monkeypatch) -> list[str]:
+    """The ids of the local sandboxes this test's process makes, so it finds and counts only its own."""
+    return local_sandboxes.recorded_sandbox_ids(monkeypatch)
 
 
 def _office(shop, browser_envs) -> MultiEnv:
@@ -110,7 +117,7 @@ async def _discovery(http_url: str) -> dict:
 
 @pytest.mark.asyncio
 async def test_chromium_as_a_multi_envs_browser_runs_on_its_own_sandbox_reached_through_the_gateway(
-        browser_computer, shop, caplog):
+        browser_computer, shop, made, caplog):
     caplog.set_level(logging.WARNING, logger="agent_env.providers.env_providers.env_computer_provider")
     with namespace_routing():
         office = _office(shop, [Env.get(browser_computer.id)])
@@ -132,7 +139,7 @@ async def test_chromium_as_a_multi_envs_browser_runs_on_its_own_sandbox_reached_
             after_kill = await _answers_again(deployed)
             after_kill_tabs = (await _drive(deployed))["tabs"]
 
-            subprocess.run(["docker", "restart", _gateway(deployed)], capture_output=True, check=True)
+            subprocess.run(["docker", "restart", _gateway(deployed, made)], capture_output=True, check=True)
             through_restart = await _answers_again(deployed)
             await ResetEnvTaskStep(id="reset-2", version=None, env_id=office.id,
                                    fail_task_on_error=True).execute(context)
