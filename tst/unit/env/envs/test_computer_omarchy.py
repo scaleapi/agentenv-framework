@@ -252,6 +252,15 @@ def test_an_app_asking_for_shared_memory_is_refused_on_omarchy(local_stores, cli
                                                           "shm_mb": 512})
 
 
+def test_an_app_service_that_runs_as_root_is_refused_on_omarchy_as_a_drivers_is(local_stores, cli_routing, tmp_path):
+    base, driver = _base(), _driver(tmp_path / "desk")
+
+    with pytest.raises(ValueError, match="app: @local/~/kit/notes's service 'sync' runs as root, and "
+                                         "@local/~/kit/omarchy-4.5's systemd runs every program as omarchy"):
+        _notes(base, driver, tmp_path / "notes", install={"services": [
+            {"name": "sync", "command": "sync", "scope": "system"}]})
+
+
 def test_a_linux_install_with_apt_packages_is_refused_on_omarchy_for_an_app_and_a_driver(docker, tmp_path):
     base, driver = _base(), _driver(tmp_path / "desk")
     apt = {"packages": {"apt": ["htop"]}, "services": [{"name": "sync", "command": "sync"}]}

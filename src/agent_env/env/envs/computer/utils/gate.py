@@ -70,8 +70,9 @@ def arches(base: ComputerArtifact, driver: ComputerDriverEnv, apps: Sequence[Com
 def check_app(base: ComputerArtifact, driver: ComputerDriverEnv, app: ComputerAppEnv, at: str = "app") -> list[str]:
     """Every way ``app`` doesn't fit a composition of ``base`` and ``driver``, each named from ``at``: a platform it
     doesn't support, no architecture in common, no install for the base's OS, a port the driver listens on too, on
-    Omarchy apt's packages (``_apt_on_omarchy``) or shared memory, whose size its disk doesn't take yet, or on Windows
-    an install step for the session user, as a Windows computer is composed over ssh as its admin."""
+    Omarchy apt's packages (``_apt_on_omarchy``), shared memory, whose size its disk doesn't take yet, or a service as
+    root, as its systemd runs every service as the session user, or on Windows an install step for the session user,
+    as a Windows computer is composed over ssh as its admin."""
     os = base.os
     if not _matching(base, app.declaration.supports):
         named = ", ".join(_shown(platform) for entry in app.declaration.supports for platform in supported(entry))
@@ -85,9 +86,13 @@ def check_app(base: ComputerArtifact, driver: ComputerDriverEnv, app: ComputerAp
         problems.append(f"{at}: {app.id} listens on {', '.join(map(str, taken))}, as {driver.id} does")
     if platform_of(os) == "linux/omarchy":
         problems += _apt_on_omarchy(app.install, os, at, app.id)
-        if (install := for_os(app.install, os)) is not None and install.shm_mb:
+        install = for_os(app.install, os)
+        if install is not None and install.shm_mb:
             problems.append(f"{at}: {app.id} asks for {install.shm_mb} MiB of /dev/shm, which an Omarchy computer "
                             "doesn't size yet: its /dev/shm is systemd's, sized at boot")
+        problems += [f"{at}: {app.id}'s service {service.name!r} runs as root, and {base.id}'s systemd runs every "
+                     f"program as {base.session.user}" for service in (install.services if install else [])
+                     if service.scope == "system"]
     if os.type == "windows" and (session := [step.name for step in app.declaration.install_steps
                                              if step.scope == "session" and (step.os is None or os.type in step.os)]):
         problems.append(f"{at}: {app.id}'s install steps {', '.join(session)} run as the session user, which a Windows "
