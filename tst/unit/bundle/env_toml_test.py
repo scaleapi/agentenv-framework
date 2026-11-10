@@ -155,6 +155,16 @@ def test_a_website_with_only_a_server_dockerfile_builds_one_image(bundle_dir, bu
     assert [call["build"][0] for call in builds] == ["Dockerfile.backend"]
 
 
+def test_a_website_keeps_how_long_its_env_toml_says_it_may_take_to_be_ready_and_its_shared_memory(bundle_dir, builds):
+    _bundle(bundle_dir, {"envs/gitlab/Dockerfile.backend": DOCKERFILE, "envs/gitlab/server.py": CARD.format("gitlab"),
+                         "envs/gitlab/env.toml": 'type = "website"\nready_timeout_s = 240\nshm_mb = 1024\n'}, "gitlab")
+
+    _run(bundle_dir)
+    env = Env.get(f"{ROOT}/gitlab")
+
+    assert (env.ready_timeout_s, env.shm_mb) == (240, 1024)
+
+
 def test_a_multi_names_bundle_and_store_envs_and_is_rewritten_when_a_child_is(bundle_dir, builds):
     with namespace_routing():
         MCPServerEnv.put(id="inbox", docker_image_artifact=_store_image("inbox-image"), environment_name="inbox")
@@ -212,6 +222,10 @@ def _website(name, toml=""):
      "envs/x: env.toml: env_provider_type 'server' deploys one MCP server, not a website env"),
     (_website("x", 'domains = ["Slack.com"]\n'),
      "envs/x: env.toml: domains: 'Slack.com' must be lowercase, with no trailing dot"),
+    (_website("x", 'ready_timeout_s = -5\n'),
+     "envs/x: env.toml: ready_timeout_s is a number of seconds above 0, not -5"),
+    (_website("x", 'shm_mb = "1g"\n'),
+     "envs/x: env.toml: shm_mb is 1 to 65536 MiB, not '1g'"),
     ({**_mcp("x"), "envs/x/env.toml": 'image = { dockerfile = "Dockerfile", build_args = { A = "1" } }\n'},
      "envs/x: image: an image built from this folder takes only dockerfile, not build_args"),
     ({"envs/x/env.toml": 'type = "multi"\nname = "suite"\n'},
@@ -239,7 +253,8 @@ def _website(name, toml=""):
      "(default_service_db_env_id), and a run builds it when it's missing"),
 ], ids=["no-card", "several-cards", "store-image-unnamed", "metadata", "empty-name", "name-escapes-its-line",
         "name-with-a-space", "reserved-name",
-        "website-on-server", "website-bad-domain", "build-args", "multi-without-envs", "multi-name", "multi-wrong-child", "multi-same-names",
+        "website-on-server", "website-bad-domain", "website-bad-ready-timeout", "website-bad-shm",
+        "build-args", "multi-without-envs", "multi-name", "multi-wrong-child", "multi-same-names",
         "multi-same-container", "multi-same-domain",
         "gateway", "service-db"])
 def test_an_env_toml_that_cant_be_written_is_refused_before_any_write(bundle_dir, files, problem):

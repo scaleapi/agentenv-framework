@@ -39,6 +39,29 @@ def test_a_site_declares_its_health_path_and_a_bad_one_is_refused(local_stores):
                                   "'~', '-' and '/' starting with '/'")
 
 
+@pytest.mark.parametrize("field, value, problem", [
+    ("ready_timeout_s", 0, "ready_timeout_s is a number of seconds above 0, not 0"),
+    ("ready_timeout_s", float("inf"), "ready_timeout_s is a number of seconds above 0, not inf"),
+    ("ready_timeout_s", True, "ready_timeout_s is a number of seconds above 0, not True"),
+    ("shm_mb", 0, "shm_mb is 1 to 65536 MiB, not 0"),
+    ("shm_mb", 65537, "shm_mb is 1 to 65536 MiB, not 65537"),
+    ("shm_mb", 1.5, "shm_mb is 1 to 65536 MiB, not 1.5"),
+])
+def test_a_site_keeps_how_long_it_may_take_to_be_ready_and_its_shared_memory_and_refuses_either_out_of_range(
+        local_stores, field, value, problem):
+    WebsiteEnv.put(id="gitlab-site", server_docker_image_artifact=_image("gitlab-server"), environment_name="gitlab",
+                   ready_timeout_s=240.5, shm_mb=1024)
+    stored = Env.get("gitlab-site")
+    plain = WebsiteEnv.put(id="shop-site", server_docker_image_artifact=_image("shop-server"), environment_name="shop")
+
+    assert (stored.ready_timeout_s, stored.shm_mb) == (240.5, 1024)
+    assert {"ready_timeout_s", "shm_mb"}.isdisjoint(plain.to_dict())
+    with pytest.raises(ValueError) as refused:
+        WebsiteEnv(id="bad", version=None, server_docker_image_artifact=_image("bad-server"), environment_name="bad",
+                   **{field: value})
+    assert str(refused.value) == f"website env 'bad': {problem}"
+
+
 def test_a_site_stored_before_the_server_image_reads_its_backend_image_as_it(local_stores):
     backend, frontend = _image("old-backend"), _image("old-frontend")
     old = {"type": "website", "id": "old-site", "version": 1, "environment_name": "old", "metadata": {},

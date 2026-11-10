@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import json
+import math
 import logging
 import re
 import secrets
@@ -155,6 +156,10 @@ class WebsiteConfig:
     # server, each ``secret:`` or ``env:`` reference resolved only as the compose file is written.
     live: bool = False
     settings: dict = field(default_factory=dict)
+    # How long its server may take from its container starting to ready, which its health check allows before it counts
+    # a failure and the deploy waits, and its server's /dev/shm in MiB; None keeps the gateway's own and Docker's.
+    ready_timeout_s: float | None = None
+    shm_mb: int | None = None
 
 
 @dataclass
@@ -572,8 +577,9 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 f' || curl -sf -o /dev/null http://localhost:{AGENT_ENV_WEBSITE_BACKEND_PORT}{wc.health_path}"]',
                 "      interval: 10s",
                 "      timeout: 5s",
-                "      start_period: 30s",
+                f"      start_period: {_seconds(wc.ready_timeout_s) if wc.ready_timeout_s else '30s'}",
                 "      retries: 3",
+                *([f"    shm_size: {wc.shm_mb}m"] if wc.shm_mb else []),
                 *_network_lines(_ENV_NETWORK, *([] if wc.frontend_image or wc.live else sites_network)),
                 "",
             ])
@@ -1552,12 +1558,13 @@ class _GatewayTopology:
 
 
 def website_config(env: WebsiteEnv) -> WebsiteConfig:
-    """A website env as the gateway runs it: its server image, any deprecated frontend image, and its health path."""
+    """A website env as the gateway runs it: its server image, any deprecated frontend image, its health path, how long
+    it may take to be ready and its shared memory."""
     frontend = env.frontend_docker_image_artifact
     return WebsiteConfig(backend_image=env.server_docker_image_artifact.image_name,
                          frontend_image=frontend.image_name if frontend else None,
                          environment_name=env.environment_name, health_path=env.health_path, live=env.live,
-                         settings=dict(env.settings))
+                         settings=dict(env.settings), ready_timeout_s=env.ready_timeout_s, shm_mb=env.shm_mb)
 
 
 def _gateway_topology(env: Env) -> _GatewayTopology:
@@ -1679,6 +1686,11 @@ def _settings_lines(settings: dict) -> list[str]:
     return [f"      - {json.dumps(f'{WEBSITE_SETTINGS_ENV}={json.dumps(resolved)}'.replace('$', '$$'))}"]
 
 
+
+def _seconds(seconds: float) -> str:
+    """``seconds`` as a compose duration, in whole seconds rounded up, so a health check never allows less."""
+    return f"{math.ceil(seconds)}s"
+
 # Budget for reading the gateway's /state once its card is served: answering it runs tool discovery, one server at a
 # time, if startup's didn't complete.
 _STATE_READ_TIMEOUT_S = 60.0
@@ -1695,11 +1707,13 @@ async def _wait_for_websites(gateway_url: str, website_configs: list[WebsiteConf
                              timeout_s: float = WEBSITE_READY_TIMEOUT_S, poll_s: float = WEBSITE_READY_POLL_S) -> None:
     """Wait until each site is ready, as its card says through ``/svc/<name>/``: by ``website/v1``'s ``ready``, or,
     for a card without it or a site serving none, by its stored health path answering 200, which is deprecated.
-    A site whose answer says how long it may take (``timeout_s``) is waited that long and ``WEBSITE_READY_MARGIN_S``,
-    any other ``timeout_s``. Raises naming each site still not ready, and why, once one is waited past its time, and at
-    once, with ``WebsiteContractError``, for a site that answers its card's path with something that isn't a card."""
+    A site whose answer says how long it may take (``timeout_s``) is waited that long, or its own ``ready_timeout_s``
+    if longer, and ``WEBSITE_READY_MARGIN_S``; any other its ``ready_timeout_s`` and the margin, or ``timeout_s`` if
+    longer. Raises naming each site still not ready, and why, once one is waited past its time, and at once, with
+    ``WebsiteContractError``, for a site that answers its card's path with something that isn't a card."""
     started = time.monotonic()
     waiting = {wc.environment_name: wc for wc in website_configs}
+    own = {wc.environment_name: wc.ready_timeout_s or 0 for wc in website_configs}
     why: dict[str, str] = {}
     limit: dict[str, float] = {}
     warned: set[str] = set()
@@ -1707,7 +1721,7 @@ async def _wait_for_websites(gateway_url: str, website_configs: list[WebsiteConf
         for name, wc in list(waiting.items()):
             ready, why[name], declared = await _website_ready(f"{gateway_url}/svc/{name}", wc.health_path)
             if declared is not None:
-                limit[name] = declared + WEBSITE_READY_MARGIN_S
+                limit[name] = max(declared, own[name]) + WEBSITE_READY_MARGIN_S
             if ready is None and name not in warned:
                 warned.add(name)
                 logger.warning(f"website {name!r} has no {WEBSITE_EXTENSION_URI} {WEBSITE_READY_OP} on its card, so its "
@@ -1717,7 +1731,7 @@ async def _wait_for_websites(gateway_url: str, website_configs: list[WebsiteConf
         if not waiting:
             return
         waited = time.monotonic() - started
-        if any(waited >= limit.get(name, timeout_s) for name in waiting):
+        if any(waited >= limit.get(name, max(timeout_s, own[name] + WEBSITE_READY_MARGIN_S)) for name in waiting):
             raise RuntimeError("websites not ready after %ds: %s" % (
                 waited, "; ".join(f"{name} ({why[name]})" for name in waiting)))
         await asyncio.sleep(poll_s)

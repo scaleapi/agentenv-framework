@@ -5891,3 +5891,40 @@ async def test_whoop_clock_consumer(sandbox_provider):
         assert "whoop" in {s["service"] for s in cfg["synced"]}, cfg
     finally:
         await env.close()
+
+
+# A site slower to boot than the gateway's own health check allows: a ready timeout to match, and its shared memory.
+SLOW_BOOT_S = 100
+
+
+@pytest.fixture(scope="module")
+def slow_boot_site_image() -> DockerImageArtifact:
+    """The image of a site that answers nothing until it has booted, from ``tst/data/slow_boot_website``."""
+    result = subprocess.run(["docker", "build", "--platform", "linux/amd64", "-t", "agentenv-slow-boot-website",
+                             str(TST_DATA_DIR / "slow_boot_website")], capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"slow boot website build failed: {result.stderr}")
+    return DockerImageArtifact.put(id="integ-test-slow-boot-website", description="A site slow to boot",
+                                   image_name="agentenv-slow-boot-website")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ready_timeout_s", [SLOW_BOOT_S + 60, None], ids=["ready-timeout", "gateway-default"])
+async def test_a_site_slower_to_boot_than_the_health_check_allows_deploys_with_a_ready_timeout_and_its_shared_memory(
+        slow_boot_site_image, ready_timeout_s):
+    env = WebsiteEnv.put(id="integ-test-slow-boot-site", server_docker_image_artifact=slow_boot_site_image,
+                         environment_name="slowboot", settings={"boot_s": SLOW_BOOT_S},
+                         ready_timeout_s=ready_timeout_s, shm_mb=1024)
+    try:
+        if ready_timeout_s is None:
+            with pytest.raises(RuntimeError, match="slowboot-website-backend"):
+                await env.deploy()
+            return
+        deployed = await env.deploy()
+        async with httpx.AsyncClient() as client:
+            shm = await client.get(f"{deployed.gateway_url}/svc/slowboot/shm", timeout=30)
+    finally:
+        await env.close()
+
+    assert shm.status_code == 200 and int(shm.text) == 1024 << 20, shm.text
+
