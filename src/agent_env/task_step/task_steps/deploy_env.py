@@ -209,6 +209,11 @@ class DeployEnvTaskStep(TaskStep):
         # create_instance runs inside env.deploy(), so an annotation set after it
         # returns has to be persisted explicitly to reach the instance record.
         annotations = {"deploy_step_id": self.id}
+        # A live website's real site may change between runs, so a run that reaches one can't be repeated exactly.
+        if live := env.live_websites():
+            annotations["live"] = True
+            context.metadata.setdefault("live_websites", {})[self.env_id] = live
+            context.metadata["reproducible"] = False
         deployed_env.metadata = {**(deployed_env.metadata or {}), **annotations}
         if deployed_env.instance_id:
             update_env_instance_metadata(deployed_env.instance_id, annotations)

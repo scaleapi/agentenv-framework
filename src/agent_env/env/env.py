@@ -412,6 +412,11 @@ class Env(ABC):
     async def deploy(self, **kwargs) -> DeployedEnv:
         raise NotImplementedError(f"{type(self).__name__} must implement deploy()")
 
+    def live_websites(self) -> list[dict]:
+        """The live websites a deploy of it reaches the real sites of, as a run records them; none but a live website
+        env's, or a multi env's that holds some."""
+        return []
+
     def deploy_refusal(self, *, sandbox_type: Optional[str] = None, env_params: Optional[dict] = None,
                        child_envs: Optional[dict] = None, **options) -> Optional[str]:
         """Why deploy() would refuse these options before building anything, or None. A type that checks its options

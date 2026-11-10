@@ -34,6 +34,7 @@ from urllib.parse import urlsplit
 import httpx
 from agentenv_protocol import client as protocol_client
 from agentenv_protocol.website import WEBSITE_EXTENSION_URI as WEBSITE
+from agentenv_protocol.website import WEBSITE_LIVE_PARAM
 from agentenv_protocol.website_browser import SITE_PROXY_ENV
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -303,12 +304,12 @@ def browser_environment(display: str) -> dict[str, str]:
 
 
 def proxy_config(table: SiteTable, issued: Issued, *, user: Optional[str], os_type: str, forward_port: bool,
-                 upstream_headers: Optional[dict[str, dict[str, str]]] = None) -> dict:
+                 upstream_headers: Optional[dict[str, dict[str, str]]] = None, direct: Iterable[str] = ()) -> dict:
     """What ``site_proxy.py install`` reads: the session user, the CA, the trust files on an ``os_type`` computer and
     the variables naming them, which its profile script sets as the computer's boot environment does, each route with
     its certificate and key, and the headers its gateway's sandbox provider asks requests to it to carry
     (``upstream_headers``, by site), which the proxy sends upstream alone, and with ``forward_port``, for a browser
-    alone, the forward port."""
+    alone, the forward port and the live sites' hosts it takes straight to them (``direct``)."""
     sites = []
     for route in table.routes:
         site = {"name": route.site, "upstream": route.url, "domains": list(route.domains)}
@@ -319,7 +320,7 @@ def proxy_config(table: SiteTable, issued: Issued, *, user: Optional[str], os_ty
         sites.append(site)
     return {"user": user, "ca_pem": issued.ca_pem, "sites": sites, "log": str(LOG),
             "trust_files": trust_files(os_type), "trust_environment": dict(TRUST_ENVIRONMENTS[os_type]),
-            **({"proxy_port": FORWARD_PROXY_PORT} if forward_port else {})}
+            **({"proxy_port": FORWARD_PROXY_PORT, "direct": list(direct)} if forward_port else {})}
 
 
 def reachable_problem(policy: Optional[NetworkPolicy], routes: list[Route]) -> Optional[str]:
@@ -424,18 +425,19 @@ class RootChannel:
 
 
 async def route(sandbox: Sandbox, sites: list[Site], *, user: Optional[str], network: Optional[dict],
-                valid_for: timedelta, label: str, os_type: str, display: str) -> dict:
+                valid_for: timedelta, label: str, os_type: str, display: str, live_hosts: Iterable[str] = ()) -> dict:
     """Have the ``os_type`` computer on ``sandbox`` reach each of ``sites`` by its names: the table made, the CA and
     certificates issued, the proxy installed and started as root, with its forward port on a computer with no
-    ``display``, a browser alone's, and each name checked as ``user``; what the deploy record keeps of it. Raises
-    naming a name that didn't load."""
+    ``display``, a browser alone's, which also takes the run's ``live_hosts`` straight to them, and each name checked
+    as ``user``; what the deploy record keeps of it. Raises naming a name that didn't load."""
     requested = NetworkPolicy.from_dict(network) if network else None
     table = site_table(sites, requested.allow_hosts if requested else ())
     table.routes = [Route(r.site, sandbox.url_from_sandbox(r.url), r.domains) for r in table.routes]
     applied = getattr(sandbox, "network_policy", None) or requested
     if (problem := reachable_problem(applied, table.routes) or gateway_problem(table.routes)) is not None:
         raise RuntimeError(f"site routing: {problem}")
-    if not table.routes:
+    direct = list(live_hosts) if display == ALONE_DISPLAY else []
+    if not table.routes and not direct:
         return {"names": table.to_dict()}
     from agent_env.providers.sandbox_providers.sandbox_provider import sandbox_request_headers_for_url
 
@@ -446,7 +448,7 @@ async def route(sandbox: Sandbox, sites: list[Site], *, user: Optional[str], net
     await channel.write(PROXY, _PROXY_SOURCE.read_text())
     await channel.write_secret(CONFIG, json.dumps(proxy_config(table, issued, user=user, os_type=os_type,
                                                                forward_port=display == ALONE_DISPLAY,
-                                                               upstream_headers=upstream_headers)))
+                                                               upstream_headers=upstream_headers, direct=direct)))
     await channel.run(["chmod", "0600", str(CONFIG)])
     output = await channel.run(["python3", str(PROXY), "install", str(CONFIG)])
     report = json.loads(output.strip().splitlines()[-1])
@@ -486,7 +488,8 @@ async def deployed_sites(deployed_envs: list[DeployedEnv], only: Optional[list[s
     ``only`` keeps the websites of the envs it names, each of which must be deployed, and ``services`` those served
     as the names it holds, each website's environment_name, which its card's name needn't be. Sites of different
     envs that share a name are each named for their env (``_env_qualified``), so they're routed apart, while two
-    that claim one domain are still refused."""
+    that claim one domain are still refused. A live site, whose params say ``live``, is no site the computer routes:
+    the real one is at its names, which the computer reaches over its own network."""
     from agentenv_protocol import client as protocol_v1
     from agentenv_protocol.website import WEBSITE_BROWSE_URL_PARAM, WEBSITE_EXTENSION_URI
 
@@ -510,7 +513,7 @@ async def deployed_sites(deployed_envs: list[DeployedEnv], only: Optional[list[s
             params = protocol_v1.extension_params(child.card, WEBSITE_EXTENSION_URI)
             browse = params.get(WEBSITE_BROWSE_URL_PARAM)
             service = served_as(child)
-            if services is not None and service not in services:
+            if (services is not None and service not in services) or params.get(WEBSITE_LIVE_PARAM) is True:
                 named.add(service)
                 continue
             url = (_joined(address, browse) if isinstance(browse, str) and browse and address

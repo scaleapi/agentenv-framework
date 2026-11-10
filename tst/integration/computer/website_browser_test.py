@@ -6,13 +6,16 @@ first start tab sees the deploy's time zone, and a page on loopback loads; its c
 relaunches it on its profile template, on a new pipe its ready check answers over; and reset_env, a reboot, brings the
 template back too. Its computer's /dev/shm is Docker's
 64 MiB, so it keeps its shared memory in files. In a multi env beside a site that offers website/v1's session,
-browser_sign_in signs it in, and again after reset_env starts it afresh. Needs Docker and the local registry on
-localhost:5000."""
+browser_sign_in signs it in, and again after reset_env starts it afresh. Beside a live site, github.com, which the
+computer reaches over its own network and leaves out of its site table, the browser loads the real site signed in to it
+as well as the synthetic one, and the run is marked live. Needs Docker, the local registry on localhost:5000 and, for
+the live site, github.com."""
 
 import asyncio
 import json
 import platform
 import re
+import time
 import uuid
 from typing import Optional
 
@@ -289,3 +292,71 @@ async def test_browser_sign_in_signs_a_multi_envs_browser_in_to_its_site_and_aga
     assert not report.failed
     assert (before, signed, after_reset, again) == (None, "alex", None, "alex")
     assert context.metadata["browser_steps"]["in"]["names"] == ["shop.test"]
+
+
+@pytest.fixture(scope="module")
+def live_site(session_site):
+    """A live website env at github.com, under session_site's local id: its server reads a public repository through
+    api.github.com."""
+    uid = uuid.uuid4().hex[:8]
+    with namespace_routing():
+        return WebsiteEnv.put(id=f"{session_site.id.rsplit('/', 1)[0]}/github", environment_name="github",
+                              domains=["github.com"], live=True,
+                              allow_hosts=["*.github.com", "*.githubassets.com", "*.githubusercontent.com"],
+                              server_docker_image_artifact=_image("live_github_website", f"live-github-{uid}"))
+
+
+async def _browser(computer: DeployedEnv, op: str, params: Optional[dict] = None) -> dict:
+    owner, _, card = find_browser(computer, None)
+    return await protocol_v1.invoke_extension(owner.environment_url, card, BROWSER, params or {}, 60, method=op,
+                                              headers=owner.control_headers)
+
+
+async def _loads(computer: DeployedEnv, url: str, title: str, timeout_s: float = 90) -> object:
+    """True once the tab ``tabs/open`` opens at ``url`` shows ``title`` in its own, else the tabs it last listed."""
+    await _browser(computer, "tabs/open", {"url": url})
+    deadline, tabs = time.monotonic() + timeout_s, []
+    while time.monotonic() < deadline:
+        tabs = (await _browser(computer, "tabs/list"))["tabs"]
+        if any(tab["url"].startswith(url) and title in (tab.get("title") or "") for tab in tabs):
+            return True
+        await asyncio.sleep(2)
+    return tabs
+
+
+@pytest.mark.asyncio
+async def test_a_live_site_beside_a_synthetic_one_loads_at_its_real_names_signed_in_and_marks_the_run_live(
+        website_browser_desktop, session_site, live_site):
+    with namespace_routing():
+        office = MultiEnv.put(id=f"{session_site.id.rsplit('/', 1)[0]}/office-live", mcp_server_envs=[],
+                              website_envs=[session_site, live_site],
+                              computer_envs=[Env.get(website_browser_desktop.id)], name="office")
+        context = TaskStepContext()
+        try:
+            [deployed] = (await DeployEnvTaskStep(
+                id="office", version=None, env_id=office.id, sandbox_type="local", ttl_seconds=900,
+                child_envs={"desktop": {**CONTAINER, "env_params": {"form": "container", "site_routing": True}}},
+            ).execute(context)).deployed_envs
+            computer = DeployedEnv.from_dict(deployed.child_envs["desktop"])
+            for site, user in ((live_site, "alex"), (session_site, "bea")):
+                await BrowserSignInTaskStep(id=f"in-{site.environment_name}", version=None, env_id=office.id,
+                                            site=site.id, user=user).execute(context)
+            github = await _loads(computer, "https://github.com/", "GitHub")
+            cookies = (await _browser(computer, "cookies/get", {"urls": ["https://github.com/"]}))["cookies"]
+            shop_user = await _signed_in(computer)
+            child = deployed.child_env("github", mcp=False)
+            exported = await protocol_v1.get_data(child.base_url(deployed.environment_url),
+                                                  headers=deployed.control_headers)
+        finally:
+            report = await teardown_run(context)
+
+    assert not report.failed
+    assert computer.metadata["computer"]["sites"]["names"]["routes"] == {"shop": ["shop.test"]}
+    assert github is True, github
+    assert {"name": "agentenv_test_session", "value": "alex"} in [
+        {key: cookie[key] for key in ("name", "value")} for cookie in cookies]
+    assert shop_user == "bea"
+    assert "octocat/Hello-World" in json.dumps(exported.model_dump(mode="json"))
+    assert context.metadata["browser_steps"]["in-github"]["names"] == ["github.com"]
+    assert (context.metadata["reproducible"], [site["environment_name"] for site in
+                                               context.metadata["live_websites"][office.id]]) == (False, ["github"])

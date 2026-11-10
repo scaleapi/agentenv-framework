@@ -392,6 +392,74 @@ async def test_the_forward_port_refuses_any_other_host_at_once_and_logs_it(tmp_p
     assert f"site proxy: refused {method} {named}: no site of this computer" in capsys.readouterr().err
 
 
+@contextlib.contextmanager
+def _live_hosts_at(monkeypatch, upstream_port):
+    """Connections the proxy opens to a live site's host landing on ``upstream_port`` on loopback, and each host it
+    opened one to recorded."""
+    opened, real = [], asyncio.open_connection
+
+    async def open_connection(host, port, **kwargs):
+        if host == "127.0.0.1":
+            return await real(host, port, **kwargs)
+        opened.append((host, port))
+        return await real("127.0.0.1", upstream_port, **kwargs)
+
+    monkeypatch.setattr(site_proxy.asyncio, "open_connection", open_connection)
+    yield opened
+
+
+@pytest.mark.asyncio
+async def test_the_forward_port_tunnels_a_live_sites_host_straight_to_it_and_sends_its_url_on_as_a_path(
+        tmp_path, monkeypatch):
+    async with Upstream() as upstream, Upstream() as live:
+        config, _ = _config(tmp_path, upstream.port)
+        config.direct = ["github.com", "*.githubassets.com"]
+        with _live_hosts_at(monkeypatch, live.port) as opened:
+            async with _forward_port(config) as port:
+                reader, writer = await asyncio.open_connection("127.0.0.1", port)
+                writer.write(b"CONNECT github.githubassets.com:8443 HTTP/1.1\r\nHost: github.githubassets.com\r\n\r\n")
+                established = await reader.readuntil(b"\r\n\r\n")
+                tunnelled = await _exchange(port, b"GET /x HTTP/1.1\r\nHost: github.githubassets.com\r\n\r\n",
+                                            reader_writer=(reader, writer))
+                writer.close()
+                plain = await _exchange(port, b"GET http://github.com/a?b=1 HTTP/1.1\r\nHost: github.com\r\n"
+                                              b"Proxy-Connection: keep-alive\r\n\r\n")
+                plain[3][1].close()
+
+    assert established.startswith(b"HTTP/1.1 200 ") and opened == [("github.githubassets.com", 8443), ("github.com", 80)]
+    assert (tunnelled[0], tunnelled[2], plain[0], plain[2]) == ("HTTP/1.1 200 OK", b"hello", "HTTP/1.1 200 OK", b"hello")
+    assert [request[0] for request in live.requests] == ["GET /x HTTP/1.1", "GET /a?b=1 HTTP/1.1"]
+    assert live.requests[1][1]["connection"] == "close" and "proxy-connection" not in live.requests[1][1]
+    assert upstream.requests == []
+
+
+@pytest.mark.asyncio
+async def test_a_sites_name_within_a_live_hosts_wildcard_is_the_sites_and_no_address_is_ever_taken_straight(
+        tmp_path, monkeypatch, capsys):
+    async with Upstream() as upstream, Upstream() as live:
+        config, issued = _config(tmp_path, upstream.port, gist=["gist.github.com"])
+        config.direct = ["*.github.com", "127.0.0.1", "github.localhost"]
+        with _live_hosts_at(monkeypatch, live.port) as opened:
+            async with _forward_port(config) as port:
+                reader, writer = await asyncio.open_connection("127.0.0.1", port)
+                writer.write(b"CONNECT gist.github.com:443 HTTP/1.1\r\nHost: gist.github.com:443\r\n\r\n")
+                await reader.readuntil(b"\r\n\r\n")
+                await writer.start_tls(ssl.create_default_context(cadata=issued.ca_pem),
+                                       server_hostname="gist.github.com")
+                site = await _exchange(port, b"GET / HTTP/1.1\r\nHost: gist.github.com\r\n\r\n",
+                                       reader_writer=(reader, writer))
+                writer.close()
+                refused = [await _exchange(port, line + b"\r\n\r\n") for line in (
+                    b"CONNECT 127.0.0.1:18765 HTTP/1.1\r\nHost: 127.0.0.1:18765",
+                    b"GET http://github.localhost/ HTTP/1.1\r\nHost: github.localhost")]
+
+    assert site[0] == "HTTP/1.1 200 OK" and upstream.requests[0][0] == "GET /website/gist/ HTTP/1.1"
+    assert [answer[0] for answer in refused] == ["HTTP/1.1 403 Forbidden"] * 2
+    assert opened == [] and live.requests == []
+    assert [Config(user=None, sites=[], direct=["*.github.com", "10.0.0.1"]).is_direct(host) for host in (
+        "api.github.com", "github.com", "a.b.github.com", "10.0.0.1")] == [True, False, False, False]
+
+
 @pytest.mark.asyncio
 async def test_the_forward_port_streams_an_event_stream_as_it_comes(tmp_path):
     release = asyncio.Event()
@@ -728,7 +796,7 @@ def test_install_writes_the_sites_files_names_and_trust_then_starts_the_proxy_on
                               SiteParams(name="bare", url="http://gw/website/bare/")])
     issued = sites.issue(table.routes, valid_for=timedelta(hours=1), label="t")
     (folder / "config.json").write_text(json.dumps(sites.proxy_config(table, issued, user=None, os_type="linux",
-                                                                      forward_port=True)))
+                                                                      forward_port=True, direct=["github.com"])))
     started = []
     monkeypatch.setattr(site_proxy, "start", lambda path, log: started.append(Config.load(path)))
     monkeypatch.setattr(site_proxy, "checks_as", lambda user, path: {"sites": {"notes.test": {"status": 200}},
@@ -741,7 +809,8 @@ def test_install_writes_the_sites_files_names_and_trust_then_starts_the_proxy_on
     assert [(s.name, s.domains, bool(s.cert)) for s in config.sites] == [
         ("notes", ["notes.test"], True), ("chat", ["*.chat.test"], True), ("bare", ["bare.localhost"], False)]
     assert (config.dns_port, config.nameservers) == (53, ["127.0.0.11"])
-    assert config.proxy_port == sites.FORWARD_PROXY_PORT == 3129
+    assert (config.proxy_port, config.direct) == (sites.FORWARD_PROXY_PORT, ["github.com"])
+    assert sites.FORWARD_PROXY_PORT == 3129
     assert [(folder / name).stat().st_mode & 0o777 for name in ("notes.key", "config.json")] == [0o600, 0o600]
     assert folder.stat().st_mode & 0o777 == 0o755
     assert "key_pem" not in (folder / "serve.json").read_text()
@@ -1075,5 +1144,5 @@ def test_the_proxy_is_standard_library_alone_so_the_bases_own_python_runs_it():
     imported = {line.split()[1].split(".")[0] for line in source.splitlines()
                 if line.startswith(("import ", "from ")) and not line.startswith("from __future__")}
 
-    assert imported <= {"asyncio", "base64", "hashlib", "json", "os", "pwd", "re", "shutil", "socket", "ssl", "struct",
-                        "subprocess", "sys", "time", "urllib", "dataclasses", "pathlib", "typing"}
+    assert imported <= {"asyncio", "base64", "hashlib", "ipaddress", "json", "os", "pwd", "re", "shutil", "socket", "ssl",
+                        "struct", "subprocess", "sys", "time", "urllib", "dataclasses", "pathlib", "typing"}

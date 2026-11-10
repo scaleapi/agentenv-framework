@@ -52,7 +52,10 @@ class FakeComputer:
         self.apps, self.reset_fails, self.route_fails, self.load_fails = apps, resets, routes, loads
 
     def composed_apps(self):
-        return [SimpleNamespace(environment_name=app) for app in self.apps]
+        return [SimpleNamespace(environment_name=app, declaration=SimpleNamespace(browser=False)) for app in self.apps]
+
+    def app_defaults(self):
+        return {app: {} for app in self.apps}
 
     def holds(self, environment_name):
         return environment_name in (self.environment_name, *self.apps)
@@ -637,6 +640,34 @@ async def test_a_computer_routing_sites_boots_held_and_routes_the_multi_envs_web
     assert [r.env_id for r in ready.await_args.args[0]] == ["office"]
     assert sorted(log[5:]) == [("routed", "desktop", ["shop", "blog"]), ("routed", "laptop", ["blog"])]
     assert set(deployed.child_envs) == {"desktop", "laptop", "kiosk"}
+
+
+@pytest.mark.asyncio
+async def test_a_routing_computers_start_tabs_are_checked_against_the_names_its_sites_cards_declare_before_it_routes(
+        gateway, providers, monkeypatch):
+    monkeypatch.setattr(_multi_computers.sites, "deployed_sites", AsyncMock(return_value=[
+        {"name": "shop", "url": "u", "domains": ["shop.test"]}, {"name": "blog", "url": "u"}]))
+    monkeypatch.setattr(_multi_computers.sites, "require_ready", AsyncMock())
+
+    def office(urls):
+        desktop = FakeComputer("desktop", log=gateway.log, apps=("browser",))
+        desktop.composed_apps = lambda: [SimpleNamespace(environment_name="browser",
+                                                         declaration=SimpleNamespace(browser=True))]
+        websites = [MagicMock(id=f"{name}-site", environment_name=name, domains=[], live=False, allow_hosts=[])
+                    for name in ("shop", "blog")]  # names the save can't know: their cards declare them
+        return MultiEnv(id="office", version=1, mcp_server_envs=[], website_envs=websites, computer_envs=[desktop]), {
+            "desktop": {"env_params": {"site_routing": True, "app_settings": {"browser": {"start_urls": urls}}}}}
+
+    env, child_envs = office(["https://shop.test/", "http://blog.localhost/"])
+    await env.deploy(child_envs=child_envs)
+    routed = gateway.log[-1]
+    env, child_envs = office(["https://example.com/"])
+    with pytest.raises(ValueError, match=re.escape("multi env 'office': computer 'desktop': browser's start tab "
+                                                   "https://example.com/ names example.com, which none of the multi")):
+        await env.deploy(child_envs=child_envs)
+
+    assert routed == ("routed", "desktop", ["shop", "blog"])
+    assert gateway.log[-2:] == [("close", "desktop"), ("close", "gateway")]
 
 
 @pytest.mark.asyncio

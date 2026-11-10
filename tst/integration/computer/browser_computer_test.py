@@ -622,6 +622,33 @@ async def test_routing_sites_it_goes_out_only_through_the_forward_port_which_the
     assert not report.failed
 
 
+@pytest.mark.asyncio
+async def test_routing_sites_beside_live_ones_its_forward_port_takes_the_live_hosts_straight_to_the_real_site(
+        browser_computer):
+    live = ("github.com", "*.githubassets.com")
+    with host_pages() as port, namespace_routing():
+        params = {"site_routing": True,
+                  "sites": [{"name": "shop", "url": f"http://127.0.0.1:{port}/website/shop/", "domains": ["shop.test"]}],
+                  "app_settings": {"chromium": {"start_urls": ["https://github.com/"]}}}
+        deployed = await Env.get(browser_computer.id).deploy(env_params=params, live_hosts=live)
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            pages = {url: await _through_port(deployed, url) for url in (
+                "https://github.com/", "http://github.com/", "https://github.githubassets.com/favicons/favicon.svg",
+                "https://shop.test/alpha", "https://example.com/")}
+            tabs = await tabs_of(deployed)
+        finally:
+            report = await teardown_run(context)
+
+    assert deployed.metadata["computer"]["live_hosts"] == list(live)
+    assert all(pages[url].startswith("200 ") for url in (
+        "https://github.com/", "http://github.com/", "https://github.githubassets.com/favicons/favicon.svg",
+        "https://shop.test/alpha")), pages
+    assert pages["https://example.com/"].startswith("error") and "403" in pages["https://example.com/"], pages
+    assert any(tab["url"].startswith("https://github.com/") and "GitHub" in (tab.get("title") or "") for tab in tabs), tabs
+    assert not report.failed
+
+
 async def _kill(deployed, pattern: str, oldest: bool = False) -> None:
     """SIGKILL the newest, or oldest, process matching ``pattern``, a second after computer-exec has answered, since the
     driver that runs the command may be the one killed."""

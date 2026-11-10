@@ -83,11 +83,13 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         tool_prefix: str = "",
         reach: str = "",
         sites_later: bool = False,
+        live_hosts: tuple[str, ...] = (),
     ) -> DeployedSandboxEnv:
         """The env's first ready build, in its base's order of forms and arches (or of ``env_params.form``), that the sandbox
         provider runs natively, booted, once what it boots that no compose started is composed; returns the record once
         the driver is ready with the env's display. With ``tool_prefix``, its driver serves its tools under it; with ``reach``,
-        a URL this process reaches, a network that restricts the computer's egress allows its host too. With
+        a URL this process reaches, a network that restricts the computer's egress allows its host too, and the
+        ``live_hosts`` of the run's live websites. With
         ``sites_later``, a computer routing sites, whose sites aren't up yet, boots with its boot apps held and returns
         once its driver answers; ``route_sites`` routes them and finishes its boot."""
         from agent_env.env.envs.computer.env import ComputerEnv
@@ -121,7 +123,8 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
                                 "computer runs inside a launcher container it can't reach; deploy a container form")
         attempt = functools.partial(self._boot, env, builds, params, values, ttl_seconds=ttl_seconds,
                                     disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb, attribution=attribution,
-                                    tool_prefix=tool_prefix, reach=reach, sites_later=sites_later)
+                                    tool_prefix=tool_prefix, reach=reach, sites_later=sites_later,
+                                    live_hosts=tuple(live_hosts))
         return await self._run(sandbox_provider, env.id, attempt)
 
     async def route_sites(self, env: ComputerEnv, record: DeployedSandboxEnv, sites: list[dict]) -> None:
@@ -143,7 +146,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
                     values: dict, sandbox_provider: SandboxProvider, *, ttl_seconds: int,
                     disk_size_gb: float, cpu: float | None, memory_mb: int | None,
                     attribution: Optional[Attribution], tool_prefix: str = "", reach: str = "",
-                    sites_later: bool = False) -> DeployedSandboxEnv:
+                    sites_later: bool = False, live_hosts: tuple[str, ...] = ()) -> DeployedSandboxEnv:
         """One attempt on one sandbox provider: the first build it runs natively, booted and readied; its record."""
         from agent_env.env.envs.computer.env import ComputerEnv
 
@@ -168,7 +171,8 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         values = _values(computer, values)
         app_settings = recorded_app_settings(env.composed_apps(), computer_params.app_settings(env, params.app_settings),
                                              platform_of(env.computer.os))
-        policy = _reaching(NetworkPolicy.from_dict(env.network) if env.network else None, sandbox_provider, reach)
+        policy = _reaching(NetworkPolicy.from_dict(env.network) if env.network else None, sandbox_provider, reach,
+                           live_hosts)
         shm_mb = env.shm_mb()
         booted = await boot(
             sandbox_provider, image=build["image"], port=env.driver.port, network_policy=policy, token=token,
@@ -193,6 +197,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
                     "computer": {"id": env.metadata["computer"]["id"], "version": env.metadata["computer"]["version"]},
                     "port": env.driver.port, "display": values.get("resolution"), "network": env.network,
                     "computer_settings": recorded_settings(computer, values),
+                    **({"live_hosts": list(live_hosts)} if live_hosts else {}),
                     **({"shm_mb": shm_mb} if shm_mb else {}),
                     **({"app_settings": app_settings} if app_settings else {}),
                     **({"tool_prefix": tool_prefix} if tool_prefix else {}),
@@ -247,7 +252,8 @@ async def _finish_boot(env: ComputerEnv, record: DeployedSandboxEnv, sandbox: Sa
     didn't load. What the record keeps of the routing, or None without it."""
     routed = None
     if params.site_routing:
-        routed = await _route_sites(env, sandbox, params, valid_for_s)
+        routed = await _route_sites(env, sandbox, params, valid_for_s,
+                                    tuple(record.metadata["computer"].get("live_hosts") or ()))
         await _launch_held_apps(env, record, record.environment_url, params.sites)
     await _require_display(record, resolution)
     if start_tabs := await _start_tabs(record):
@@ -257,12 +263,12 @@ async def _finish_boot(env: ComputerEnv, record: DeployedSandboxEnv, sandbox: Sa
 
 
 async def _route_sites(env: ComputerEnv, sandbox: Sandbox, params: computer_params.ComputerParams,
-                       valid_for_s: int) -> dict:
-    """The computer on ``sandbox`` routed to ``params.sites`` under a CA of its own, valid ``valid_for_s``; what its
-    record keeps of it."""
+                       valid_for_s: int, live_hosts: tuple[str, ...] = ()) -> dict:
+    """The computer on ``sandbox`` routed to ``params.sites`` under a CA of its own, valid ``valid_for_s``, a browser
+    alone's forward port taking ``live_hosts`` straight to them; what its record keeps of it."""
     routed = await sites.route(sandbox, params.sites, user=env.computer.session.user, network=env.network,
                                valid_for=timedelta(seconds=valid_for_s), label=env.environment_name,
-                               os_type=env.computer.os.type, display=env.computer.os.display)
+                               os_type=env.computer.os.type, display=env.computer.os.display, live_hosts=live_hosts)
     return {**routed, "valid_for_s": valid_for_s}
 
 
@@ -340,10 +346,13 @@ async def end_recordings(record: DeployedSandboxEnv, reason: str) -> None:
         logger.warning(f"'{record.env_id}': its recordings weren't ended before its computer went: {e}")
 
 
-def _reaching(policy: Optional[NetworkPolicy], sandbox_provider: SandboxProvider, url: str) -> Optional[NetworkPolicy]:
-    """``policy``, also allowing ``url``'s host as the sandbox provider's sandboxes reach it when it lists the hosts allowed."""
+def _reaching(policy: Optional[NetworkPolicy], sandbox_provider: SandboxProvider, url: str,
+              live_hosts: tuple[str, ...] = ()) -> Optional[NetworkPolicy]:
+    """``policy``, also allowing ``url``'s host as the sandbox provider's sandboxes reach it, and ``live_hosts``, when
+    it lists the hosts allowed; a network that allows every host is left as it is."""
     host = urlsplit(sandbox_provider.url_from_sandbox(url)).hostname if url else None
-    return policy.with_hosts([host]) if policy is not None and host else policy
+    hosts = [*([host] if host else []), *live_hosts]
+    return policy.with_hosts(hosts) if policy is not None and hosts else policy
 
 
 def _values(computer: ComputerArtifact, values: dict) -> dict:

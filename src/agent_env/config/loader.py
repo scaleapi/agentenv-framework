@@ -134,6 +134,13 @@ def interpolate(value: Any, *, secret_resolver: Optional[SecretResolver] = None)
     return value
 
 
+def is_bare_reference(value: Any) -> bool:
+    """Whether ``value`` names a secret rather than holding one: an ``env:NAME`` or ``secret:KEY`` reference with a
+    name and no ``?`` fallback, whose default would be a value."""
+    return (isinstance(value, str) and value.startswith((ENV_REF_PREFIX, SECRET_REF_PREFIX)) and "?" not in value
+            and value not in (ENV_REF_PREFIX, SECRET_REF_PREFIX))
+
+
 def _resolve_ref(prefix: str, value: str, resolve: SecretResolver) -> str:
     ref, sep, default = value[len(prefix):].partition("?")
     resolved = resolve(ref)
