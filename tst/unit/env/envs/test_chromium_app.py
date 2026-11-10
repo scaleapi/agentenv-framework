@@ -1,6 +1,7 @@
 """agentenv's chromium app as a put reads it: the installed ``browsers`` bundle names it ``chromium``; its class, a website browser, declares the pinned Chrome for Testing archive for each arch and its
-packages, its profile as its data, a launch of Chrome itself matched by its window class, the base's settings, and its
-install step, which unpacks the archive keeping its execute bits, beside the base's, which writes the policies."""
+packages, its profile as its data, 1 GiB of shared memory, a launch of Chrome itself matched by its window
+class, the base's settings, and its install step, which unpacks the archive keeping its execute bits, beside
+the base's, which writes the policies."""
 import os
 import sys
 import zipfile
@@ -42,7 +43,7 @@ def test_chromium_is_a_website_browser_that_declares_its_archives_profile_launch
                                                                           ("arm64", "chromium/chrome-arm64.zip")]
     assert all(f"/chrome-for-testing-public/{chromium.VERSION}/" in d["url"] for d in linux.install["downloads"])
     assert {"libnss3", "libasound2t64", "unzip"} <= set(linux.install["packages"]["apt"])
-    assert linux.paths == [".config/chromium"]
+    assert linux.paths == [".config/chromium"] and linux.install["shm_mb"] == chromium.SHM_MB == 1024
     assert linux.launch.command == ["chromium/chrome/chrome", "--no-sandbox", "--class=Chromium"]
     assert linux.launch.at == "boot" and linux.launch.window == {"class": "Chromium"} and linux.launch.ready.window
     assert {(step.name, step.scope) for step in declared.install_steps} == {("chromium", "system"),

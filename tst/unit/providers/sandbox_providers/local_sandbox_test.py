@@ -654,8 +654,9 @@ async def test_create_container_publishes_the_allocated_host_port(monkeypatch, t
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("shm_mb", [None, 1024])
 async def test_a_container_with_no_network_runs_on_an_internal_network_that_its_relay_publishes_and_is_replaced_with_it(
-        monkeypatch, tmp_path):
+        monkeypatch, tmp_path, shm_mb):
     import agent_env.config as cfg
 
     monkeypatch.setattr(cfg, "get_config", lambda: _StubConfig())
@@ -678,7 +679,7 @@ async def test_a_container_with_no_network_runs_on_an_internal_network_that_its_
             return sandbox
 
     sandbox = await _RecordingProvider().create_container(image_name="img:v1", port=8000, env={},
-                                                          network_policy=NetworkPolicy(mode="allowlist"))
+                                                          network_policy=NetworkPolicy(mode="allowlist"), shm_mb=shm_mb)
 
     network, label = f"closed-{sandbox.sandbox_id}", f"agentenv.sandbox={sandbox.sandbox_id}"
     steps = [s.split()[1] for s in sandbox.scripts]
@@ -686,6 +687,7 @@ async def test_a_container_with_no_network_runs_on_an_internal_network_that_its_
     assert steps == ["pull", "network", "create", "start", "inspect", "run"]
     assert sandbox.scripts[1] == f"docker network create --internal --label {label} {network} >/dev/null"
     assert f"--network {network} " in create and "-p " not in create
+    assert ("--shm-size 1024m " in create) == bool(shm_mb)
     assert sandbox.scripts[-1] == (f"docker run -d --name relay-{sandbox.sandbox_id} --label {label} "
                                    "-p 127.0.0.1:41337:8000 agentenv-relay:test 8000=172.30.0.2:8000 >/dev/null && "
                                    f"docker network connect {network} relay-{sandbox.sandbox_id}")
@@ -693,11 +695,12 @@ async def test_a_container_with_no_network_runs_on_an_internal_network_that_its_
     assert sandbox.network_policy.closed and sandbox.tunnel_urls[8000] == "http://127.0.0.1:41337"
 
     sandbox.scripts.clear()
-    await _RecordingProvider().reset_container(sandbox, image_name="img:v1", port=8000, env={"A": "1"})
+    await _RecordingProvider().reset_container(sandbox, image_name="img:v1", port=8000, env={"A": "1"}, shm_mb=shm_mb)
 
     assert [s.split()[1] for s in sandbox.scripts] == ["rm", "create", "start", "inspect", "run"]
     assert sandbox.scripts[0] == f"docker rm -f agent-{sandbox.sandbox_id} relay-{sandbox.sandbox_id} > /dev/null"
     assert f"--network {network} " in sandbox.scripts[1] and "-e A=1 " in sandbox.scripts[1]
+    assert ("--shm-size 1024m " in sandbox.scripts[1]) == bool(shm_mb)
     assert "-p 127.0.0.1:41337:8000 " in sandbox.scripts[-1]
 
 

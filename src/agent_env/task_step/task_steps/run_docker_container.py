@@ -1,14 +1,16 @@
-"""Run a Docker container task step — builds a user-provided Dockerfile on a
-pre-deployed VM sandbox and runs the resulting container in the background."""
+"""Run a Docker container task step: builds a user-provided Dockerfile on a pre-deployed VM sandbox, or puts a
+docker_image artifact's image there, and runs the container in the background."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import posixpath
 import shlex
 from typing import ClassVar, Optional
 from urllib.parse import urlparse
 
+from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.task_step.context import TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.entity.scopes import FieldScope
@@ -27,6 +29,7 @@ class RunDockerContainerTaskStep(TaskStep):
             version_field="docker_context_artifact_version",
             artifact_type="file_artifact_universe",
         ),
+        EntityRef.artifact("image_artifact_id", version_field="image_artifact_version", artifact_type="docker_image"),
     )
     field_scopes = {**TaskStep.field_scopes, "docker_context_url": FieldScope.USER}
 
@@ -38,6 +41,8 @@ class RunDockerContainerTaskStep(TaskStep):
         docker_context_artifact_id: Optional[str] = None,
         docker_context_artifact_version: Optional[int] = None,
         docker_context_url: Optional[str] = None,
+        image_artifact_id: Optional[str] = None,
+        image_artifact_version: Optional[int] = None,
         dockerfile_path: str = "Dockerfile",
         container_name: str = "task-container",
         image_tag: Optional[str] = None,
@@ -58,8 +63,8 @@ class RunDockerContainerTaskStep(TaskStep):
         fail_task_on_error: bool = True,
     ):
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
-        if docker_context_artifact_id is not None and docker_context_url is not None:
-            raise ValueError("Pass either `docker_context_artifact_id` or `docker_context_url`, not both")
+        if sum(source is not None for source in (docker_context_artifact_id, docker_context_url, image_artifact_id)) > 1:
+            raise ValueError("Pass one of `image_artifact_id`, `docker_context_artifact_id` and `docker_context_url`")
         if command_override and keep_alive_with_base_command:
             raise ValueError(
                 "Pass either `command_override` or `keep_alive_with_base_command`, not both"
@@ -68,6 +73,8 @@ class RunDockerContainerTaskStep(TaskStep):
         self.docker_context_artifact_id = docker_context_artifact_id
         self.docker_context_artifact_version = docker_context_artifact_version
         self.docker_context_url = docker_context_url
+        self.image_artifact_id = image_artifact_id
+        self.image_artifact_version = image_artifact_version
         self.dockerfile_path = dockerfile_path
         self.container_name = container_name
         self.image_tag = image_tag
@@ -95,6 +102,8 @@ class RunDockerContainerTaskStep(TaskStep):
         base["docker_context_artifact_id"] = self.docker_context_artifact_id
         base["docker_context_artifact_version"] = self.docker_context_artifact_version
         base["docker_context_url"] = self.docker_context_url
+        base["image_artifact_id"] = self.image_artifact_id
+        base["image_artifact_version"] = self.image_artifact_version
         base["dockerfile_path"] = self.dockerfile_path
         base["container_name"] = self.container_name
         base["image_tag"] = self.image_tag
@@ -121,6 +130,8 @@ class RunDockerContainerTaskStep(TaskStep):
             docker_context_artifact_id=data.get("docker_context_artifact_id"),
             docker_context_artifact_version=data.get("docker_context_artifact_version"),
             docker_context_url=data.get("docker_context_url"),
+            image_artifact_id=data.get("image_artifact_id"),
+            image_artifact_version=data.get("image_artifact_version"),
             dockerfile_path=data.get("dockerfile_path", "Dockerfile"),
             container_name=data.get("container_name", "task-container"),
             image_tag=data.get("image_tag"),
@@ -140,15 +151,16 @@ class RunDockerContainerTaskStep(TaskStep):
         )
 
     def config_problems(self) -> list[str]:
-        """A step naming no build context to run."""
-        return [] if self._names_a_context() else [self._no_context()]
-
-    def _names_a_context(self) -> bool:
-        return self.docker_context_artifact_id is not None or self.docker_context_url is not None
-
-    def _no_context(self) -> str:
-        return (f"run_docker_container '{self.id}': names no build context; set docker_context_artifact_id or "
-                "docker_context_url (docker_context_url is user scope, so an import leaves it out)")
+        """A step naming no image or build context to run, or build options beside an image it runs as it is."""
+        if self.image_artifact_id is not None:
+            build_only = [name for name in ("image_tag", "build_args") if getattr(self, name)]
+            return [f"run_docker_container '{self.id}': {' and '.join(build_only)} only apply to a build, and "
+                    f"image_artifact_id names an image it runs as it is"] if build_only else []
+        if self.docker_context_artifact_id is None and self.docker_context_url is None:
+            return [f"run_docker_container '{self.id}': names no image or build context; set image_artifact_id, "
+                    "docker_context_artifact_id or docker_context_url (docker_context_url is user scope, so an import "
+                    "leaves it out)"]
+        return []
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         from agent_env.providers.sandbox_providers.sandbox_provider import (
@@ -181,44 +193,11 @@ class RunDockerContainerTaskStep(TaskStep):
         sandbox = await provider.get_sandbox(ds.sandbox_id)
 
         container = sandbox.scoped_name(self.container_name)
-        image_tag = sandbox.scoped_name(self.image_tag) if self.image_tag else f"{container}:latest"
-
-        work_dir = f"/tmp/docker-context-{container}"
-        await sandbox.exec_script(
-            f"rm -rf {shlex.quote(work_dir)} && mkdir -p {shlex.quote(work_dir)}"
-        )
-
-        if self.docker_context_artifact_id is not None:
-            await self._stage_from_universe(sandbox, ds.sandbox_id, work_dir)
-        else:
-            await self._stage_zip_from_url(sandbox, self.docker_context_url, work_dir)
-
-        dockerfile_abs = posixpath.join(work_dir, self.dockerfile_path)
-        await sandbox.exec_script(
-            f"test -f {shlex.quote(dockerfile_abs)} "
-            f"|| (echo {shlex.quote(f'Dockerfile not found at {self.dockerfile_path} inside the build context')} >&2; "
-            f"exit 1)"
-        )
-
-        build_arg_flags = ""
-        if self.build_args:
-            build_arg_flags = " ".join(
-                f"--build-arg {shlex.quote(f'{k}={v}')}" for k, v in self.build_args.items()
-            )
         label = shlex.quote(f"{SANDBOX_LABEL}={ds.sandbox_id}")
-        build_cmd = (
-            f"cd {shlex.quote(work_dir)} && "
-            f"docker build --label {label} "
-            f"-f {shlex.quote(self.dockerfile_path)} "
-            f"-t {shlex.quote(image_tag)} "
-            f"{build_arg_flags} ."
-        )
-        logger.info(
-            f"Building docker image '{image_tag}' on sandbox {ds.sandbox_id} "
-            f"(dockerfile={self.dockerfile_path})"
-        )
-        await _build(sandbox, build_cmd)
-        await sandbox.exec_script(f"rm -rf {shlex.quote(work_dir)}")
+        if self.image_artifact_id is not None:
+            image_tag = await self._load_image(sandbox, ds.sandbox_id)
+        else:
+            image_tag = await self._build_image(sandbox, ds.sandbox_id, container, label)
 
         network_flag = ""
         if self.network:
@@ -299,6 +278,54 @@ class RunDockerContainerTaskStep(TaskStep):
             "network": self.network,
         })
         return context
+
+    async def _load_image(self, sandbox, sandbox_id: str) -> str:
+        """Put the image artifact's image on the sandbox, as an agent's is: pulled, loaded or built from its context
+        only where the sandbox doesn't hold it; its name."""
+        image = await asyncio.to_thread(DockerImageArtifact.get, self.image_artifact_id, self.image_artifact_version)
+        logger.info(f"Loading docker image '{image.image_name}' onto sandbox {sandbox_id}")
+        await sandbox.load_docker_images([image])
+        return image.image_name
+
+    async def _build_image(self, sandbox, sandbox_id: str, container: str, label: str) -> str:
+        """Stage the build context on the sandbox and build it; the image's tag."""
+        image_tag = sandbox.scoped_name(self.image_tag) if self.image_tag else f"{container}:latest"
+        work_dir = f"/tmp/docker-context-{container}"
+        await sandbox.exec_script(
+            f"rm -rf {shlex.quote(work_dir)} && mkdir -p {shlex.quote(work_dir)}"
+        )
+
+        if self.docker_context_artifact_id is not None:
+            await self._stage_from_universe(sandbox, sandbox_id, work_dir)
+        else:
+            await self._stage_zip_from_url(sandbox, self.docker_context_url, work_dir)
+
+        dockerfile_abs = posixpath.join(work_dir, self.dockerfile_path)
+        await sandbox.exec_script(
+            f"test -f {shlex.quote(dockerfile_abs)} "
+            f"|| (echo {shlex.quote(f'Dockerfile not found at {self.dockerfile_path} inside the build context')} >&2; "
+            f"exit 1)"
+        )
+
+        build_arg_flags = ""
+        if self.build_args:
+            build_arg_flags = " ".join(
+                f"--build-arg {shlex.quote(f'{k}={v}')}" for k, v in self.build_args.items()
+            )
+        build_cmd = (
+            f"cd {shlex.quote(work_dir)} && "
+            f"docker build --label {label} "
+            f"-f {shlex.quote(self.dockerfile_path)} "
+            f"-t {shlex.quote(image_tag)} "
+            f"{build_arg_flags} ."
+        )
+        logger.info(
+            f"Building docker image '{image_tag}' on sandbox {sandbox_id} "
+            f"(dockerfile={self.dockerfile_path})"
+        )
+        await _build(sandbox, build_cmd)
+        await sandbox.exec_script(f"rm -rf {shlex.quote(work_dir)}")
+        return image_tag
 
     async def _ensure_network(self, sandbox, name: str) -> str:
         # host / none / bridge / container:<name> are Docker built-in modes, not user bridges -- nothing to create.

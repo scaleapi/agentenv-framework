@@ -46,6 +46,7 @@ from agent_env.env.envs.computer.utils import (
     macos_vm_bundle,
     packages,
     probing,
+    thin_disk,
     windows_disk,
 )
 from agent_env.env.envs.computer.utils.composed import BUILT, REPOSITORY, Record, failed, now, stale
@@ -394,7 +395,7 @@ def _composed_windows_disk(env: ComputerEnv, base: ComputerArtifact, driver: Com
             progress.say(f"{pair}: {line}")
 
         attempt.stage = "base"
-        registry = windows_disk.Registry(_image_store(env), REPOSITORY)
+        registry = thin_disk.Registry(_image_store(env), REPOSITORY)
         disk_gb, user = base.forms.disk.min_disk_gb, base.session.user
         made = windows_disk.base(_key(recipe=_digest(windows_disk.RECIPE), disk_gb=disk_gb, user=user,
                                       form="windows-base", format=FORMAT),
@@ -407,14 +408,14 @@ def _composed_windows_disk(env: ComputerEnv, base: ComputerArtifact, driver: Com
         attempt.stage = "build"
         with holding_locks([f"windows-disk:{key}"], lambda: progress.at(
                 pair, "waiting", "waiting for the compose of the same disk under way on this machine")):
-            if (pinned := registry.served(windows_disk.disk_names(key).tag)) is not None:
+            if (pinned := registry.served(thin_disk.disk_names(windows_disk.GUEST, key).tag)) is not None:
                 progress.at(pair, "reusing", "reusing the disk of the same key, composed earlier")
                 result = {"status": "unverified", "key": key, "image": pinned, "reused": True, "expires": expires,
                           "built_at": now()}
             else:
                 progress.at(pair, "composing", "composing on this machine's Docker")
-                pinned = windows_disk.compose(made, build, key,
-                                              {KEY_LABEL: key, windows_disk.EXPIRES_LABEL: expires}, say, registry)
+                pinned = thin_disk.compose(windows_disk.GUEST, made, build, key,
+                                           {KEY_LABEL: key, windows_disk.EXPIRES_LABEL: expires}, say, registry)
                 result = {"status": "unverified", "key": key, "image": pinned, "reused": False,
                           "builder": "LocalSandboxProvider", "expires": expires, "built_at": now()}
             return _probed(env, driver, "disk", arch, result, provider, progress)

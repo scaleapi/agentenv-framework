@@ -56,6 +56,7 @@ from agent_env.plugins._bundles import ALIASES_FILE, InstalledBundle, installed_
 from agent_env import providers
 from agent_env.providers.env_providers import env_computer_provider
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
+from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
 from agent_env.providers.env_providers.env_provider import DeployRefused
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
@@ -265,6 +266,58 @@ def test_gate_3_probes_a_build_with_its_apps_defaults_as_a_deploy_with_no_env_pa
     assert json.loads(booted[0]["environment"]["AGENTENV_APP_SETTINGS"]) == {"mail": {"signature": "-- Ada",
                                                                                       "theme": "dark"}}
 
+
+
+@pytest.mark.parametrize("asks", [1024, None])
+def test_the_probe_boots_a_build_with_the_shared_memory_its_apps_ask_for_as_a_deploy_does(base, driver, docker,
+                                                                                         tmp_path, monkeypatch, asks):
+    monkeypatch.setenv("MAIL_TOKEN", "t0ken")
+    install = {"python": "requirements.txt", "services": [{"name": "imap", "command": "venv/bin/python imap.py"}],
+               **({"shm_mb": asks} if asks else {})}
+    env = _put(base, driver, compose=False, apps=[_app(base, driver, tmp_path / "mail", compose=False, install=install,
+                                                       defaults={"token": "env:MAIL_TOKEN"})])
+    booted = []
+
+    async def fake_boot(link, **kwargs):
+        booted.append(kwargs)
+        return boot.Booted(sandbox=None, url="http://computer", card=CARD)
+
+    monkeypatch.setattr(boot, "boot", fake_boot)
+    monkeypatch.setattr(boot, "discard", AsyncMock())
+    monkeypatch.setattr(probing, "run_probe", AsyncMock(return_value="report"))
+
+    asyncio.run(_probe([SimpleNamespace()], env, driver, "img"))
+
+    assert booted[0]["shm_mb"] == asks
+
+
+@pytest.mark.asyncio
+async def test_a_boot_asks_for_shared_memory_only_where_its_provider_gives_it_and_logs_where_it_doesnt(monkeypatch,
+                                                                                                    caplog):
+    created, sandbox = [], SimpleNamespace(tunnel_urls={18765: "http://computer"})
+
+    class Gives(SandboxProvider):
+        SHARED_MEMORY = True
+
+        async def create_container(self, **kwargs):
+            created.append(kwargs)
+            return sandbox
+
+    class OldPlugin(SandboxProvider):
+        async def create_container(self, *, image_name, port, env, network_policy=None, disk_size_gb=10, timeout=7200,
+                                   attribution=None):
+            created.append({"image_name": image_name})
+            return sandbox
+
+    monkeypatch.setattr(boot, "ready", AsyncMock(return_value=CARD))
+    with caplog.at_level(logging.INFO, logger="agent_env.env.envs.computer.utils.boot"):
+        for provider in (Gives(), OldPlugin()):
+            await boot.boot(provider, image="img", port=18765, environment={}, token="t", network_policy=None,
+                            timeout=60, attribution=None, shm_mb=1024)
+
+    assert created[0]["shm_mb"] == 1024 and "shm_mb" not in created[1]
+    assert "OldPlugin can't size /dev/shm: the container keeps its default, not the 1024 MiB asked for" in caplog.text
+    assert "Gives can't size" not in caplog.text
 
 @pytest.mark.parametrize("left", [{"status": "building"}, {"status": "unverified", "image": "built", "key": "k"}],
                          ids=["interrupted", "unprobed"])
@@ -874,6 +927,35 @@ async def test_a_reset_ends_the_envs_recordings_then_boots_a_fresh_container_whe
     env_computer_provider.ready.assert_awaited_once_with(deployed.environment_url, boot.READY_TIMEOUT_S,
                                                          deployed.control_token, answering=False)
     assert boots.calls == [(COMPUTER_RECORDING, "end_all", {"reason": "reset"}), "reset_container", (COMPUTER_DISPLAY, "get", None)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asks", [1024, None])
+async def test_a_computer_boots_with_the_shared_memory_its_apps_ask_for_records_it_and_a_reset_keeps_it(
+        base, driver, docker, boots, monkeypatch, tmp_path, asks):
+    monkeypatch.setenv("MAIL_TOKEN", "t0ken")
+    boots.display = (1280, 800)
+    install = {"python": "requirements.txt", "services": [{"name": "imap", "command": "venv/bin/python imap.py"}],
+               **({"shm_mb": asks} if asks else {})}
+    env = _put(base, driver, apps=[_app(base, driver, tmp_path / "mail", compose=False, install=install,
+                                        defaults={"token": "env:MAIL_TOKEN"})])
+    deployed = await Env.get(env.id).deploy()
+    (sandbox,) = boots.sandboxes
+    resets = []
+
+    async def reset_container(self, sandbox, **kwargs):
+        resets.append(kwargs)
+
+    monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "get_sandbox", AsyncMock(return_value=sandbox))
+    monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "reset_container", reset_container)
+    monkeypatch.setattr(env_computer_provider, "ready", AsyncMock(return_value=DRIVER_CARD))
+
+    await ResetEnvTaskStep(id="reset", version=None, env_id=env.id, fail_task_on_error=True).execute(
+        TaskStepContext(deployed_envs=[deployed]))
+
+    ((booted,), (reset,)) = boots.boots, resets
+    assert booted["shm_mb"] == asks and deployed.metadata["computer"].get("shm_mb") == asks
+    assert reset.get("shm_mb") == asks
 
 
 @pytest.mark.asyncio

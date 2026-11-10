@@ -3,8 +3,9 @@ class with ``@linux(...)``: ``files``, a folder of its own copied under the laye
 packages, as apt takes them; ``python``, a requirements file in that folder installed into a venv beside them;
 ``sources``, extra apt repositories to resolve from; ``downloads``, files fetched by URL and checked by sha256;
 ``run``, scripts of the folder run once those are installed; ``services``, the programs the base's init runs from the
-prefix; and ``ports``, those it listens on. Everything but the files is resolved and fetched once at put, and every
-build installs only what was stored then (``packages`` module). The models of packages, sources, downloads and run
+prefix; and ``ports``, those it listens on. An app's Linux install also takes ``shm_mb``, the shared memory it needs in
+``/dev/shm``, in MiB. Everything but the files is resolved and fetched once at put, and every build installs only what
+was stored then (``packages`` module). The models of packages, sources, downloads and run
 scripts are the protocol's, which an app's ``@linux(...)`` uses too. ``[install.macos]`` takes the same, but apt's
 packages and sources; its services are LaunchAgents of the login session, and its ``grants`` the TCC permissions an app
 bundle or an executable it installs needs. ``[install.windows]`` takes the same as macOS but grants: its run scripts are
@@ -24,6 +25,8 @@ from agent_env.artifact.artifacts.computer import DISTRIBUTION, OS_TYPES
 
 #: The highest port a layer can listen on.
 MAX_PORT = 65535
+#: The most shared memory, in MiB, an app can ask its computer's ``/dev/shm`` for.
+MAX_SHM_MB = 65536
 # A requirements line that includes another requirements or constraints file, or installs one editable.
 _INCLUDES = re.compile(r"-[rce]|--(requirement|constraint|editable)(=|$)")
 _FIND_LINKS = re.compile(r"-f|--find-links(=|$)")
@@ -118,9 +121,18 @@ class Install(BaseModel):
 
 
 class AppInstall(Install):
-    """An app's install, which may run no service: a desktop app runs when it's launched."""
+    """An app's install, which may run no service: a desktop app runs when it's launched. ``shm_mb`` is the shared
+    memory it needs in ``/dev/shm``, a Linux computer's alone."""
 
     services: list[Service] = Field(default_factory=list)
+    shm_mb: int | None = None
+
+    @field_validator("shm_mb")
+    @classmethod
+    def _shm_mb(cls, value: int | None) -> int | None:
+        if value is not None and not 1 <= value <= MAX_SHM_MB:
+            raise ValueError(f"shm_mb is 1 to {MAX_SHM_MB} MiB, not {value}")
+        return value
 
 
 class MacInstall(Install):

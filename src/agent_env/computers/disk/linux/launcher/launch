@@ -118,14 +118,19 @@ for port in ${VM_PORTS:-}; do
         exit 2
     fi
     forwards="$forwards,hostfwd=tcp:127.0.0.1:$behind-:$port"
-    socat "TCP-LISTEN:$port,fork,reuseaddr,backlog=1024" "TCP:127.0.0.1:$behind,connect-timeout=0.5,retry=600,interval=0.05" &
-    fronts+=("$!")
 done
 for port in ${VM_HOST_PORTS:-}; do
     if [[ "$taken " == *" $port "* ]]; then
         echo "launch: host port $port can't be forwarded: a guest port's proxy or its forward here takes it" >&2
         exit 2
     fi
+done
+for port in ${VM_PORTS:-}; do
+    socat "TCP-LISTEN:$port,fork,reuseaddr,backlog=1024" \
+        "TCP:127.0.0.1:$((port + 10000)),connect-timeout=0.5,retry=600,interval=0.05" &
+    fronts+=("$!")
+done
+for port in ${VM_HOST_PORTS:-}; do
     forward "$port" &
     fronts+=("$!")
 done

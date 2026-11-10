@@ -21,6 +21,7 @@ from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import get_artifact_store
 from agent_env.env import Env
 from agent_env.config.runtime import Config
+from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.env.envs.computer.utils import boot, composer, probing
 from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.published_images import DISK
@@ -566,6 +567,27 @@ async def test_a_reset_of_a_disk_boots_it_afresh_in_its_vm_with_the_records_sett
     assert kwargs["env"][CONTROL_TOKEN_ENV] == deployed.control_token
     assert kwargs["env"]["AGENTENV_SETTING_RESOLUTION"] == "1600x900"
 
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asks", [1024, None])
+async def test_a_disks_init_is_told_the_shared_memory_its_apps_ask_for_at_boot_and_at_a_reset(disk_base, driver, docker,
+                                                                                            vms, monkeypatch, asks):
+    monkeypatch.setattr(ComputerEnv, "shm_mb", lambda self: asks)
+    env = _put(disk_base, driver, display={"width": 1600, "height": 900})
+    deployed = await Env.get(env.id).deploy(env_params={"form": "disk"})
+    monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "get_sandbox", AsyncMock(
+        return_value=local_sandbox.LocalSandbox(port_map={18765: 20001}, sandbox_id="local-vm1")))
+    monkeypatch.setattr(env_computer_provider, "end_recordings", AsyncMock())
+
+    await ResetEnvTaskStep(id="reset", version=None, env_id=env.id, fail_task_on_error=True).execute(
+        TaskStepContext(deployed_envs=[deployed]))
+
+    ((created,), ((_, reset),)) = vms.created, vms.reset
+    told = {boot.SHM_MB_ENV: str(asks)} if asks else {}
+    assert {key: created["env"][key] for key in created["env"] if key == boot.SHM_MB_ENV} == told
+    assert {key: reset["env"][key] for key in reset["env"] if key == boot.SHM_MB_ENV} == told
+    assert "shm_mb" not in created and deployed.metadata["computer"].get("shm_mb") == asks
 
 def test_a_computer_artifact_takes_a_disk_form_and_reads_its_image(base, docker):
     registry = docker.registry

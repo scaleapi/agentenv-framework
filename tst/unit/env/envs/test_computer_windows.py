@@ -27,7 +27,7 @@ from agent_env.env.env import Env
 from agent_env.env.envs.computer.app_env import ComputerAppEnv
 from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
 from agent_env.env.envs.computer.env import ComputerEnv
-from agent_env.env.envs.computer.utils import composer, gate, windows_disk
+from agent_env.env.envs.computer.utils import composer, gate, thin_disk, windows_disk
 from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.envs.computer.utils.install import WindowsInstall, WindowsService
 from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
@@ -68,7 +68,8 @@ class FakeRegistry:
 
 
 class FakeDocker:
-    """windows_disk on one machine's Docker: bases installed and disks composed and pushed to the image store."""
+    """windows_disk and thin_disk on one machine's Docker: bases installed and disks composed and pushed to the image
+    store."""
 
     def __init__(self, tmp_path: Path, registry: FakeRegistry):
         self.tmp, self.registry, self.bases, self.installs, self.composed = tmp_path, registry, {}, [], []
@@ -77,12 +78,12 @@ class FakeDocker:
         if key not in self.bases:
             self.installs.append((key, iso(), disk_gb, user))
             self.bases[key] = datetime.now(timezone.utc) + timedelta(days=89)
-        return windows_disk.Base(f"agentenv-windows-base:{key[7:23]}", self.tmp / "keys", self.bases[key])
+        return thin_disk.Base(f"agentenv-windows-base:{key[7:23]}", self.tmp / "keys", self.bases[key])
 
-    def compose(self, base, build, key, labels, say, registry):
+    def compose(self, guest, base, build, key, labels, say, registry):
         self.composed.append((base.image, (build / "provision.ps1").read_bytes().decode(),
                               sorted(p.relative_to(build).as_posix() for p in build.rglob("*") if p.is_file()), labels))
-        return registry.push(*windows_disk.disk_names(key))
+        return registry.push(*thin_disk.disk_names(guest, key))
 
 
 @pytest.fixture
@@ -92,8 +93,8 @@ def docker(local_stores, cli_routing, monkeypatch, tmp_path):
     iso.write_bytes(b"iso")
     monkeypatch.setattr(windows_disk, "media", lambda say: iso)
     monkeypatch.setattr(windows_disk, "base", fake.base)
-    monkeypatch.setattr(windows_disk, "compose", fake.compose)
-    monkeypatch.setattr(windows_disk, "Registry", lambda store, repository: fake.registry)
+    monkeypatch.setattr(thin_disk, "compose", fake.compose)
+    monkeypatch.setattr(thin_disk, "Registry", lambda store, repository: fake.registry)
     monkeypatch.setattr(composer, "get_config", lambda: SimpleNamespace(
         get_image_store_for=lambda stored_id: SimpleNamespace(ensure_repository=lambda repository: None)))
     monkeypatch.setattr(composer, "_probed", lambda env, driver, form, arch, result, provider, progress: {
@@ -330,11 +331,11 @@ def test_a_base_is_reused_until_its_evaluation_nears_its_end_then_installed_afre
     expires = datetime.now(timezone.utc) + timedelta(days=days_left)
     installed = []
     monkeypatch.setattr(windows_disk, "present", lambda image: True)
-    monkeypatch.setattr(windows_disk, "_label", lambda image, name: expires.isoformat(timespec="seconds"))
+    monkeypatch.setattr(thin_disk, "label", lambda image, name: expires.isoformat(timespec="seconds"))
     monkeypatch.setattr(windows_disk.subprocess, "run", lambda argv, **kwargs: (keys / "id").write_text("new"))
     monkeypatch.setattr(windows_disk, "_installed", lambda *args: installed.append(args) or {
         "grace_minutes": 90 * 24 * 60, "build": "26200.6584"})
-    monkeypatch.setattr(windows_disk, "_pack", lambda folder, image, labels, base_image: None)
+    monkeypatch.setattr(thin_disk, "pack", lambda guest, folder, image, labels, base_image: None)
     registry = FakeRegistry()
 
     base = windows_disk.base(key, lambda: tmp_path / "windows.iso", 64, "user", lambda line: None, registry)
@@ -352,7 +353,7 @@ def test_a_base_this_machine_holds_goes_to_an_image_store_lacking_it_once(monkey
     (keys / "id").write_text("key")
     expires = datetime.now(timezone.utc) + timedelta(days=30)
     monkeypatch.setattr(windows_disk, "present", lambda image: True)
-    monkeypatch.setattr(windows_disk, "_label", lambda image, name: expires.isoformat(timespec="seconds"))
+    monkeypatch.setattr(thin_disk, "label", lambda image, name: expires.isoformat(timespec="seconds"))
     registry, pushed = FakeRegistry(), []
     push = registry.push
     registry.push = lambda local, tag: pushed.append(local) or push(local, tag)
@@ -373,14 +374,15 @@ def test_composes_of_two_disks_on_a_base_the_store_holds_pull_it_and_take_its_ke
         pulls.append(pinned)
         time.sleep(0.2)
 
-    monkeypatch.setattr(windows_disk, "present", lambda image: made.is_set())
-    monkeypatch.setattr(windows_disk, "docker", lambda *args: None)
-    monkeypatch.setattr(windows_disk, "_take_admin_key", lambda image, at: (at.mkdir(), (at / "id").write_text("key"),
+    monkeypatch.setattr(thin_disk, "present", lambda image: made.is_set())
+    monkeypatch.setattr(thin_disk, "docker", lambda *args: None)
+    monkeypatch.setattr(thin_disk, "take_admin_key", lambda image, at: (at.mkdir(), (at / "id").write_text("key"),
                                                                             made.set()))
     registry = SimpleNamespace(pull=pull)
-    base = windows_disk.Base("agentenv-windows-base:1", keys, datetime.now(timezone.utc), "registry.test/base@sha256:1")
+    base = thin_disk.Base("agentenv-windows-base:1", keys, datetime.now(timezone.utc), "registry.test/base@sha256:1")
 
-    composes = [threading.Thread(target=windows_disk._here, args=(base, registry, lambda line: None)) for _ in range(2)]
+    composes = [threading.Thread(target=thin_disk.here, args=(windows_disk.GUEST, base, registry, lambda line: None))
+                for _ in range(2)]
     for compose in composes:
         compose.start()
     for compose in composes:
@@ -428,9 +430,9 @@ def test_a_disk_is_rewritten_keeping_only_the_clusters_it_uses(monkeypatch, tmp_
         (tmp_path / "compact.img").write_text("compacted")
 
     (tmp_path / "disk.img").write_text("as Windows left it")
-    monkeypatch.setattr(windows_disk.subprocess, "run", run)
+    monkeypatch.setattr(thin_disk.subprocess, "run", run)
 
-    windows_disk._converted(tmp_path, "machine:1", backing=backing, args=args)
+    thin_disk.converted(tmp_path, "machine:1", backing=backing, args=args)
 
     assert ran == [["docker", "run", "--rm", "-v", f"{tmp_path}:/out", *args, "--entrypoint", "qemu-img", "machine:1",
                     "convert", "-O", "qcow2", *over, "/out/disk.img", "/out/compact.img"]]
