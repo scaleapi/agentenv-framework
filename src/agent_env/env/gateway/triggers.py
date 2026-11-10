@@ -20,6 +20,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import httpx
+import regex
 from mcp.types import CallToolResult, TextContent
 
 from .clock import ClockError, _advance, _iso, _parse_duration, _parse_rfc3339, _zone
@@ -30,6 +31,11 @@ from .constants import DEFAULT_ROLE, TRIGGER_IN_FLIGHT_STATUSES, TRIGGER_STATUSE
 logger = logging.getLogger(__name__)
 
 _PREDICATE_KEYS = ("regex", "equals", "exists")
+# A predicate's regex is matched against text the agent or an env server chose, on the event loop every caller shares,
+# so each match is bounded: a pattern and the text it reads are capped, and a match that runs out of time matches nothing.
+_MAX_REGEX_LENGTH = 4_096
+_MAX_REGEX_SUBJECT = 1_000_000
+_REGEX_TIMEOUT_S = 0.1
 _WHEN_TYPES = ("action", "state", "time", "website")
 # The provoking-call roots each when.type's templates and `where` read; a website response streams through unread.
 _CTX_ROOTS = {"action": ("args", "result"), "website": ("args",)}
@@ -134,7 +140,11 @@ def _as_text(value: Any) -> str:
 
 def _eval_predicate(pred: dict, value: Any) -> bool:
     if "regex" in pred:
-        return re.search(pred["regex"], _as_text(value)) is not None
+        try:
+            return regex.search(pred["regex"], _as_text(value)[:_MAX_REGEX_SUBJECT], timeout=_REGEX_TIMEOUT_S) is not None
+        except TimeoutError:
+            logger.warning(f"trigger regex {pred['regex'][:80]!r} ran past {_REGEX_TIMEOUT_S}s; it matches nothing")
+            return False
     if "equals" in pred:
         return value == pred["equals"]
     non_empty = value is not None and value != "" and value != []
@@ -390,9 +400,11 @@ def _validate_predicate(pred: Any, where: str) -> None:
     if not isinstance(pred, dict) or sum(k in pred for k in _PREDICATE_KEYS) != 1:
         raise TriggerError(f"{where}: predicate must have exactly one of {_PREDICATE_KEYS}")
     if "regex" in pred:
+        if not isinstance(pred["regex"], str) or len(pred["regex"]) > _MAX_REGEX_LENGTH:
+            raise TriggerError(f"{where}: regex must be a string of at most {_MAX_REGEX_LENGTH} characters")
         try:
-            re.compile(pred["regex"])
-        except re.error as e:
+            regex.compile(pred["regex"])
+        except regex.error as e:
             raise TriggerError(f"{where}: invalid regex: {e}")
     if "exists" in pred and not isinstance(pred["exists"], bool):
         raise TriggerError(f"{where}: exists must be a boolean")

@@ -161,6 +161,7 @@ dev = [
     "hypothesis>=6.100",  # the property tests of the judge score parse
     "moto>=5.0.0",
     "psycopg2-binary>=2.9.0",  # the gateway server module's driver; outside its container only the tests import it
+    "regex>=2023.12.25",  # the gateway's trigger predicates, matched under a timeout; outside its container only the tests import it
     "websockets>=13",  # the gateway's WebSocket relay to a website; outside its container only the tests import it
     "pytest>=9.0",
     "pytest-asyncio>=0.23.0",

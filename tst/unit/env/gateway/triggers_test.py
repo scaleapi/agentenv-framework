@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -217,6 +218,9 @@ def _registration(**overrides):
       "triggers": [{"id": "x", "when": {"type": "state", "roles": ["executor"], "check": {
           "tool": "t", "predicate": {"exists": True}}}, "actions": [{"type": "nl", "instruction": "hi"}]}]},
      "would provoke it again"),
+    *[({"triggers": [{"id": "x", "when": {"type": "action", "tool": "t", "where": {"q": {"regex": pattern}}},
+                      "actions": []}]}, "regex must be a string of at most 4096 characters")
+      for pattern in ("a" * 4097, 5)],
 ])
 def test_registration_fails_loud(engine, bad, fragment):
     with pytest.raises(TriggerError, match=".*"):
@@ -238,6 +242,18 @@ async def test_executor_role_never_watched_even_if_forced(engine):
     engine.on_tool_call("executor", "search_emails", {}, _result())
     await asyncio.sleep(0.1)
     assert engine._triggers["x"]["status"] == "armed", "executor traffic must never fire a trigger"
+
+
+@pytest.mark.asyncio
+async def test_a_regex_that_runs_away_matches_nothing_within_its_budget_and_its_trigger_stays_armed(engine):
+    engine.register({"triggers": [{"id": "x", "when": {"type": "action", "tool": "search_emails",
+                                                       "where": {"query": {"regex": "^(a+)+$"}}}, "actions": []}]})
+
+    started = time.monotonic()
+    engine.on_tool_call("default", "search_emails", {"query": "a" * 40 + "!"}, _result())
+
+    assert time.monotonic() - started < 5
+    assert engine._triggers["x"]["status"] == "armed"
 
 
 def _trig(which):
