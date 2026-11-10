@@ -483,13 +483,17 @@ class SiteProxy:
                       head: Optional[bytes] = None) -> None:
         """``host``, a live site's, reached straight at ``port``, at an address the proxy resolved and checked itself
         (``allowed``), never resolved again: a tunnel, answered as established, for a ``CONNECT``, else ``head`` sent
-        on; then both ends relayed until either closes, and the connection logged (``log_event``). A host whose every
-        address is internal is refused at once, one that doesn't resolve or answer is a 502."""
+        on; then both ends relayed until either closes, and the connection logged (``log_event``). The lookup and every
+        address's connection attempt share one ``UPSTREAM_TIMEOUT_S``. A host whose every address is internal is
+        refused at once, one that doesn't resolve or answer in time is a 502."""
         method = "CONNECT" if head is None else head.split(b" ", 1)[0].decode("latin-1")
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + UPSTREAM_TIMEOUT_S
         try:
-            found = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
-        except OSError as e:
-            log_event(refused={"method": method, "host": host, "port": port, "reason": f"doesn't resolve: {e}"})
+            found = await asyncio.wait_for(loop.getaddrinfo(host, port, type=socket.SOCK_STREAM), UPSTREAM_TIMEOUT_S)
+        except (OSError, asyncio.TimeoutError) as e:
+            log_event(refused={"method": method, "host": host, "port": port,
+                               "reason": f"doesn't resolve: {e or type(e).__name__}"})
             writer.write(simple_response("502 Bad Gateway", f"{host} doesn't resolve\n", FAILED))
             return
         addresses = list(dict.fromkeys(info[4][0] for info in found))
@@ -500,9 +504,10 @@ class SiteProxy:
                                          "reaches\n", FAILED))
             return
         for address in usable:
+            if (left := deadline - loop.time()) <= 0:
+                continue
             try:
-                up_reader, up_writer = await asyncio.wait_for(asyncio.open_connection(address, port),
-                                                              UPSTREAM_TIMEOUT_S)
+                up_reader, up_writer = await asyncio.wait_for(asyncio.open_connection(address, port), left)
                 break
             except (OSError, asyncio.TimeoutError):
                 continue

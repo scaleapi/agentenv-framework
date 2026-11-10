@@ -17,6 +17,7 @@ import ssl
 import struct
 import subprocess
 import sys
+import time
 import urllib.error
 from datetime import timedelta
 from pathlib import Path
@@ -481,6 +482,34 @@ async def test_a_live_host_resolving_to_an_internal_address_is_refused_and_one_r
     assert [(entry["host"], entry["reason"], entry["addresses"]) for entry in _logged(capsys.readouterr().err, "refused")] == [
         ("github.com", "internal address", ["10.0.0.1"]), ("api.github.com", "internal address", ["169.254.169.254", "::1"])]
     assert live.requests == []
+
+
+@pytest.mark.asyncio
+async def test_a_live_host_whose_every_address_hangs_fails_within_one_deadline_not_one_per_address(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(site_proxy, "UPSTREAM_TIMEOUT_S", 0.5)
+    tried, real_open = [], asyncio.open_connection
+
+    async def hangs(host, port, **kwargs):
+        if host == "127.0.0.1":
+            return await real_open(host, port, **kwargs)
+        tried.append(host)
+        await asyncio.sleep(60)
+
+    async with Upstream() as upstream, Upstream() as live:
+        config, _ = _config(tmp_path, upstream.port)
+        config.direct = ["github.com"]
+        with _live_hosts_at(monkeypatch, live.port, {"github.com": ["140.82.112.3", "140.82.112.4", "140.82.112.5"]}):
+            monkeypatch.setattr(site_proxy.asyncio, "open_connection", hangs)
+            async with _forward_port(config) as port:
+                began = time.monotonic()
+                answer = await _exchange(port, b"CONNECT github.com:443 HTTP/1.1\r\nHost: github.com:443\r\n\r\n")
+                took = time.monotonic() - began
+
+    assert answer[0] == "HTTP/1.1 502 Bad Gateway" and took < 1.2, (answer[0], took)
+    assert tried and tried[0] == "140.82.112.3"
+    [refused] = _logged(capsys.readouterr().err, "refused")
+    assert refused["reason"] == "no answer"
 
 
 @pytest.mark.asyncio

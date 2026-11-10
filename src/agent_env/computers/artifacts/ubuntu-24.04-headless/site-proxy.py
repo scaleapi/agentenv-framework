@@ -90,8 +90,11 @@ class Proxy(http.server.BaseHTTPRequestHandler):
     do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = do_HEAD = do_OPTIONS = forward
 
     def _open(self, host: str, port: int, method: str):
-        """A connection to an address ``host`` resolves to that the proxy may reach, or None once the browser has
-        its answer: a 403 for a host whose every address is refused, a 502 for one that doesn't resolve or answer."""
+        """A connection to an address ``host`` resolves to that the proxy may reach, tried in turn within one
+        ``CONNECT_TIMEOUT_S`` for them all, or None once the browser has its answer: a 403 for a host whose every
+        address is refused, a 502 for one that doesn't resolve or answer. The connection keeps an ``IDLE_S`` timeout,
+        so a write to a peer that stopped reading ends too."""
+        deadline = time.monotonic() + CONNECT_TIMEOUT_S
         try:
             usable, refused = resolve(host, port)
         except OSError as error:
@@ -104,9 +107,11 @@ class Proxy(http.server.BaseHTTPRequestHandler):
             self._answer(403, f"{host} is an internal address, which the browser never reaches\n")
             return None
         for address in usable:
+            if (left := deadline - time.monotonic()) <= 0:
+                break
             try:
-                upstream = socket.create_connection((address, port), timeout=CONNECT_TIMEOUT_S)
-                upstream.settimeout(None)
+                upstream = socket.create_connection((address, port), timeout=left)
+                upstream.settimeout(IDLE_S)
                 self.address = address
                 return upstream
             except OSError:
@@ -129,6 +134,7 @@ class Proxy(http.server.BaseHTTPRequestHandler):
     def _relay(self, upstream: socket.socket, host: str, port: int, first: bytes) -> None:
         started, began = time.time(), time.monotonic()
         sent, received = len(first), 0
+        self.connection.settimeout(IDLE_S)
         try:
             if first:
                 upstream.sendall(first)

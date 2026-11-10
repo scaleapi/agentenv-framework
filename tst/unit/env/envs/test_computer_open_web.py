@@ -13,6 +13,7 @@ import os
 import resource
 import socket
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -172,6 +173,38 @@ def test_the_stand_in_relays_a_connection_whose_sockets_are_numbered_past_1023(p
 
     assert answer.startswith(b"HTTP/1.1 200 Connection established") and answer.endswith(b"hello"), answer
     assert opened == [(GITHUB, 443)]
+
+
+def test_the_stand_in_ends_a_tunnel_whose_server_stopped_reading_instead_of_waiting_on_it_for_ever(monkeypatch, capsys):
+    module = _stand_in()
+    monkeypatch.setattr(module, "IDLE_S", 1)
+    sink, accepted = socket.create_server(("127.0.0.1", 0)), []
+    threading.Thread(target=lambda: accepted.append(sink.accept()), daemon=True).start()  # never reads
+    real_resolve, real_connect = socket.getaddrinfo, socket.create_connection
+    monkeypatch.setattr(module.socket, "getaddrinfo", lambda host, port, *a, **k: [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", (GITHUB, port))] if host == "site.test" else real_resolve(
+        host, port, *a, **k))
+    monkeypatch.setattr(module.socket, "create_connection", lambda address, *a, **k: real_connect(
+        sink.getsockname() if address[0] == GITHUB else address, *a, **k))
+    server = module.Server(("127.0.0.1", 0), module.Proxy)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        with socket.create_connection(server.server_address, timeout=20) as conn:
+            conn.sendall(b"CONNECT site.test:443 HTTP/1.1\r\nHost: site.test:443\r\n\r\n")
+            assert conn.recv(4096).startswith(b"HTTP/1.1 200")
+            began, ended = time.monotonic(), None
+            try:
+                while time.monotonic() - began < 20:
+                    conn.sendall(b"x" * 65536)
+            except OSError:
+                ended = time.monotonic() - began
+    finally:
+        server.shutdown()
+        sink.close()
+
+    assert ended is not None and ended < 15, ended
+    [logged] = _logged(capsys.readouterr().out, "connection")
+    assert logged["host"] == "site.test" and logged["bytes_sent"] > 0
 
 
 def test_the_stand_in_answers_a_name_that_doesnt_resolve_at_once(proxy, capsys):
