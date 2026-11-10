@@ -44,6 +44,14 @@ def test_a_published_image_of_the_same_sources_is_pulled_by_its_amd64_digest_and
     assert docker["calls"] == [["pull", "--platform", "linux/amd64", pinned], ["tag", pinned, "env-gateway"]]
 
 
+def test_an_image_for_another_platform_is_pulled_by_that_platforms_digest(docker):
+    published_image.pull_published_else_build("gateway", IMAGE.dockerfile, IMAGE.dockerfile.parent, "base",
+                                               platform="linux/arm64")
+
+    pinned = f"{IMAGE.ref()}@sha256:{'b' * 64}"
+    assert docker["calls"] == [["pull", "--platform", "linux/arm64", pinned], ["tag", pinned, "base"]]
+
+
 @pytest.mark.parametrize("failing", ["pull", "tag"])
 def test_a_failed_pull_or_tag_builds_the_image_instead(docker, failing, caplog):
     docker["fails"][failing] = "failed to copy: httpReadSeeker: failed open"
