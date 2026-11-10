@@ -3,7 +3,9 @@ settings (config): a repeat trigger's fires side by side, and a time limit for e
 from __future__ import annotations
 
 import asyncio
+import random
 from datetime import timedelta
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -190,6 +192,45 @@ async def test_side_by_side_is_only_for_contact_replies_a_tool_action_trigger_st
     bob.release()
     await _until(lambda: _row(engine, "mirror")["status"] == "armed")
     assert len(bob.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_reply_that_notifies_the_agent_runs_side_by_side_so_its_due_time_shows_and_it_lands_on_time(
+        monkeypatch):
+    """A contact's reply followed by a notify, as a host's reply on a booking site: the second fire, with the shorter
+    delay, used to queue behind the first, unseen in next_event_at, and only drew its delay once the first ended, 17
+    minutes late. Its delay now runs from its own call, its resumes_at shows, and it lands then, the first still
+    waiting."""
+    bob = _Executor(monkeypatch)
+    bob.release()
+    notes: list[str] = []
+    engine, clock, _ = _engine()
+    def notify(channel, text, trigger_id, to):
+        notes.append(_iso(clock.now()))
+        return {"id": f"n{len(notes)}", "to": to}
+
+    engine._gw._notifications = SimpleNamespace(notify=notify)
+    engine.config({"concurrent_fires": True})
+    trigger = _reply_trigger(delay={"dist": "exp", "mean": "PT40M", "seed": 30})
+    trigger["triggers"][0]["actions"].append({"type": "notify", "channel": "Stayncook", "text": "New message"})
+    engine.register(trigger)
+    draws = random.Random(30)
+    slow, quick = draws.expovariate(1 / 2400), draws.expovariate(1 / 2400)  # 1859 s, then 819 s
+    engine.on_tool_call("default", "send_text", {}, _result())
+    clock.advance("2026-03-02T00:00:01Z")
+    engine.on_tool_call("default", "send_text", {}, _result())
+    await _until(lambda: len(_row(engine, "reply")["waits"]) == 2)
+
+    row = _row(engine, "reply")
+    due = _iso(_parse_rfc3339("2026-03-02T00:00:01Z") + timedelta(seconds=quick))
+    assert (row["status"], row["pending"], row["running"]) == ("firing", 0, 2)
+    assert _next(engine) == due < _iso(_parse_rfc3339(MONDAY) + timedelta(seconds=slow))
+
+    clock.advance(due)
+    engine.clock_advanced()
+    await _until(lambda: len(notes) == 1)
+    assert [_iso(c["at"]) for c in bob.calls] == [due] and notes == [due]
+    assert _row(engine, "reply")["running"] == 1
 
 
 @pytest.mark.asyncio
