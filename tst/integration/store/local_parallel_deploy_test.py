@@ -91,12 +91,14 @@ def local_stack_at(monkeypatch: pytest.MonkeyPatch, path: Path):
     try:
         yield host
     finally:
-        for name in local_sandboxes.container_names_carrying(made):
-            if name.startswith("agent-env-"):
-                _docker("rm", "-f", name)
-        reset_artifact_store()
-        reset_config()
-        _docker("rm", "-f", reg_name)
+        try:
+            for name in local_sandboxes.container_names_carrying(made):
+                if name.startswith("agent-env-"):
+                    _docker("rm", "-f", name)
+        finally:
+            reset_artifact_store()
+            reset_config()
+            _docker("rm", "-f", reg_name)
 
 
 def _seed_bootstrap_envs():
