@@ -5894,7 +5894,7 @@ async def test_whoop_clock_consumer(sandbox_provider):
 
 
 # A site slower to boot than the gateway's own health check allows: a ready timeout to match, and its shared memory.
-SLOW_BOOT_S = 180
+SLOW_BOOT_S = 100
 
 
 @pytest.fixture(scope="module")
