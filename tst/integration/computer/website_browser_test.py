@@ -146,9 +146,10 @@ async def test_chromium_runs_with_agentenvs_flags_on_its_pipe_and_a_reset_relaun
     assert argv[0].endswith("chromium/chrome/chrome") and argv[1:3] == ["--no-sandbox", "--class=Chromium"]
     assert argv[3].startswith("--user-data-dir=") and argv[3].endswith("/.config/chromium")
     assert argv[4].startswith("--disk-cache-dir=") and argv[4].endswith("/.cache/chromium")
-    assert argv[5:10] == ["--remote-debugging-pipe", "--no-first-run", "--no-default-browser-check", "--lang=fr-FR",
-                          "--disable-dev-shm-usage"]
-    assert argv[10:] == ["about:blank"]
+    assert argv[5:13] == ["--remote-debugging-pipe", "--no-first-run", "--no-default-browser-check", "--lang=fr-FR",
+                          "--disable-background-networking", "--component-updater=url-source=file:///dev/null",
+                          "--disable-features=AimEnabled", "--disable-dev-shm-usage"]
+    assert argv[13:] == ["about:blank"]
     assert browser["listening"] == 0 and port_file["exit_code"] != 0
     assert zone.startswith("Europe/Paris") and loopback.startswith("Loopback page")
     assert {"BrowserSignin": 0, "DownloadDirectory": "${user_home}/Downloads"}.items() <= json.loads(

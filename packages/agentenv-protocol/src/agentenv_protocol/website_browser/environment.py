@@ -8,7 +8,7 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any, Awaitable, Callable, ClassVar, Literal, Optional
+from typing import Any, Awaitable, Callable, ClassVar, Literal, Optional, Sequence
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
@@ -42,7 +42,22 @@ SITES = SOCKET.parent / "sites.json"
 #: port, since the browser is reached only over its pipe.
 OWNED_FLAGS = ("--user-data-dir", "--remote-debugging-", "--remote-allow-origins", "--proxy-", "--no-proxy-server",
                "--headless", "--window-size", "--lang", "--force-webrtc-ip-handling-policy", "--disk-cache-dir",
-               "--disable-dev-shm-usage")
+               "--disable-dev-shm-usage", "--disable-background-networking", "--component-updater")
+#: Flags that stop requests the browser makes of its own: Safe Browsing's list updates, among its other background
+#: services; and the component updater's checks, pointed at a file it can't fetch, since ``ComponentUpdatesEnabled``
+#: leaves the components Chrome deems critical, such as its CRLSets, checking in at launch and a minute later.
+QUIET_FLAGS = ("--disable-background-networking", "--component-updater=url-source=file:///dev/null")
+#: Features off for the same reason, which no policy turns off: the AI Mode eligibility check at launch. A
+#: ``--disable-features`` in a subclass's command is joined to these, since Chromium takes only the last one.
+DISABLED_FEATURES = ("AimEnabled",)
+DISABLE_FEATURES = "--disable-features="
+#: Every language Chromium has a spellcheck dictionary for, blocklisted, so it fetches none for the deploy's locale at
+#: launch. ``SpellcheckEnabled: false`` would void the blocklist and still fetch it.
+SPELLCHECK_LANGUAGES = ["af", "bg", "ca", "cs", "cy", "da", "de", "de-DE", "el", "en", "en-AU", "en-CA", "en-GB",
+                        "en-GB-oxendict", "en-US", "es", "es-419", "es-AR", "es-ES", "es-MX", "es-US", "et", "fa", "fo",
+                        "fr", "fr-FR", "gl", "he", "hi", "hr", "hu", "hy", "id", "it", "it-IT", "ko", "lt", "lv", "nb",
+                        "nl", "pl", "pt", "pt-BR", "pt-PT", "ro", "ru", "sh", "sk", "sl", "sq", "sr", "sv", "ta", "tg",
+                        "tr", "uk", "vi"]
 #: Below this much /dev/shm, as Docker's 64 MiB default, the browser keeps its shared memory in files instead.
 SHM_MIN_BYTES = 1 << 30
 #: Chromium's content setting that denies a permission without a prompt.
@@ -56,12 +71,19 @@ START_TABS_MARGIN_S = 30.0
 ALONE_BYPASS = "<-loopback>"
 COMPUTER_BYPASS = "<-loopback>;127.0.0.1;[::1];localhost"
 #: Managed policies for unattended use: no sign-in, sync, password manager, autofill, metrics, promotions, translation,
-#: background mode, component updates, default-browser check, download prompt or warning bar for its flags.
+#: background mode, component updates, default-browser check, download prompt or warning bar for its flags; and none of
+#: the requests the browser makes of its own that a policy stops: the preconnect to its search engine at launch, the
+#: network time query, spellcheck dictionaries and the autofill server's field predictions for a page's forms.
 POLICIES: dict[str, Any] = {
     "BrowserSignin": 0,
     "SyncDisabled": True,
     "PasswordManagerEnabled": False,
     "AutofillSettings": [{"url_pattern": "*", "blocked_types": ["all"]}],
+    "AutofillAddressEnabled": False,
+    "AutofillCreditCardEnabled": False,
+    "NetworkPredictionOptions": 2,
+    "BrowserNetworkTimeQueriesEnabled": False,
+    "SpellcheckLanguageBlocklist": SPELLCHECK_LANGUAGES,
     "MetricsReportingEnabled": False,
     "PromotionalTabsEnabled": False,
     "TranslateEnabled": False,
@@ -161,12 +183,15 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         """Its HTTP cache, kept out of its profile, which holds only its data."""
         return Path.home() / ".cache" / Path(self.profile).name
 
-    def agentenv_flags(self) -> list[str]:
-        """The flags agentenv owns. A browser alone goes out only through its site proxy, so it won't launch without
-        one; in a computer it goes through one when the computer has one, loopback aside."""
+    def agentenv_flags(self, disabled_features: Sequence[str] = ()) -> list[str]:
+        """The flags agentenv owns, with ``disabled_features`` turned off beside its own. A browser alone goes out only
+        through its site proxy, so it won't launch without one; in a computer it goes through one when the computer has
+        one, loopback aside."""
         settings, alone, proxy = self.settings, _alone(), os.environ.get(SITE_PROXY_ENV)
+        features = ",".join(dict.fromkeys([*DISABLED_FEATURES, *disabled_features]))
         flags = [f"--user-data-dir={self.profile_dir()}", f"--disk-cache-dir={self.cache_dir()}",
-                 "--remote-debugging-pipe", "--no-first-run", "--no-default-browser-check", f"--lang={settings.locale}"]
+                 "--remote-debugging-pipe", "--no-first-run", "--no-default-browser-check", f"--lang={settings.locale}",
+                 *QUIET_FLAGS, f"{DISABLE_FEATURES}{features}"]
         if (shm := _shm_bytes()) < SHM_MIN_BYTES:
             logger.info(f"/dev/shm holds {shm // 2**20} MiB, under {SHM_MIN_BYTES // 2**20} MiB: the browser keeps its "
                         "shared memory in files")
@@ -184,11 +209,15 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         return flags
 
     def _launch_for(self, launch: Launch) -> Launch:
-        """The subclass's launch with agentenv's flags and the start tabs after its command, and the time zone in its
-        environment; alone, with no window to match or wait for, its ``ready`` keeping its port and command, and
-        none when that leaves it nothing, so its ready checks say when it's ready."""
+        """The subclass's launch with agentenv's flags and the start tabs after its command, any features its command
+        turns off joined to agentenv's, and the time zone in its environment; alone, with no window to match or wait
+        for, its ``ready`` keeping its port and command, and none when that leaves it nothing, so its ready checks say
+        when it's ready."""
         _refuse_owned(type(self).__name__, launch)
-        update: dict[str, Any] = {"command": [*launch.command, *self.agentenv_flags(), *self._command_line_tabs()],
+        command = [arg for arg in launch.command if not arg.startswith(DISABLE_FEATURES)]
+        theirs = [name for arg in launch.command if arg.startswith(DISABLE_FEATURES)
+                  for name in arg.removeprefix(DISABLE_FEATURES).split(",") if name]
+        update: dict[str, Any] = {"command": [*command, *self.agentenv_flags(theirs), *self._command_line_tabs()],
                                   "env": {**(launch.env or {}), "TZ": self.settings.time_zone}}
         if _alone():
             ready = launch.ready

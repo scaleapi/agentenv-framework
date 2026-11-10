@@ -15,7 +15,8 @@ and sets its cookies, local storage and downloads, and its data plane signs it i
 snapshot back and holds up under chaos; the browser task steps set its cookies and storage and open, activate and
 close its tabs by URL; a task whose deploy_env pins a version of the browser, its latest one with none, passes
 preflight on the version pinned and runs its browser steps through task.run; and each start tab's page sees the
-window's size from its first script. Routing sites, it goes out only through the shared site proxy's forward port:
+window's size from its first script. Alone, it makes no request of its own, its proxy seeing only the page an agent
+loads for well over a minute after it's ready, but for one Google account check at launch. Routing sites, it goes out only through the shared site proxy's forward port:
 start tabs on a site over HTTPS and on a .localhost one load through it, an event stream comes through as it's sent,
 any other host and loopback are refused and logged, the session user can't stop the port, killed it comes back, and
 after a reset it serves the sites and refuses the rest again.
@@ -23,6 +24,7 @@ Needs Docker and the local registry on
 localhost:5000, and Node 20 or later and npm for the CDP clients."""
 
 import asyncio
+import calendar
 import itertools
 import json
 import platform
@@ -708,6 +710,47 @@ async def test_alone_on_the_open_web_it_loads_a_public_site_through_its_proxy_an
     assert github and all(entry["bytes_received"] > 0 for entry in github), logged[-2000:]
     assert any(entry.get("failed", {}).get("host") == "agentenv-no-such-host.invalid" for entry in entries), logged[-2000:]
     assert not report.failed
+
+
+#: How long after the browser is ready its proxy log is read: past the component updater's check a minute after launch.
+QUIET_S = 75.0
+#: The one request the browser makes of its own that nothing stops: a Google account check at launch.
+ACCOUNT_CHECK = "accounts.google.com"
+
+
+@pytest.mark.asyncio
+async def test_alone_it_makes_no_request_of_its_own_its_proxy_seeing_only_its_page_until_well_after_it_is_ready(
+        browser_computer):
+    with namespace_routing():
+        deployed = await Env.get(browser_computer.id).deploy()
+        ready = time.time()
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            serving = asyncio.ensure_future(inside.run(deployed, ["python3", "-c", SERVE_SITE, "150"], timeout_s=180))
+            await asyncio.sleep(SERVE_START_S)
+            seen = await _cdp_agent_loads((await _cdp(deployed, "ada"))["ws_url"], [SITE])
+            await asyncio.sleep(max(0.0, ready + QUIET_S - time.time()))
+            container = await _container_of(deployed)
+            # Chromium ended ends each connection it holds open, which its proxy logs as it ends.
+            _as_root(container, "pkill -f '[c]hromium/chrome/chrome'; sleep 3")
+            logged = _as_root(container, "cat /var/log/agentenv/site-proxy.log")
+            serving.cancel()
+        finally:
+            report = await teardown_run(context)
+
+    assert seen[SITE]["title"] == "Home" and not seen[SITE]["error"], seen
+    entries = [(kind, entry) for line in logged.splitlines() if line.startswith("{")
+               for kind, entry in json.loads(line).items() if kind in ("connection", "failed")]
+    own = [(kind, entry) for kind, entry in entries if (entry["host"], entry["port"]) != ("127.0.0.1", 8771)]
+    assert any(kind == "connection" and (entry["host"], entry["port"]) == ("127.0.0.1", 8771)
+               for kind, entry in entries), logged
+    assert all(entry["host"] == ACCOUNT_CHECK for _, entry in own), own
+    assert all(kind == "failed" or _epoch(entry["started"]) <= ready for kind, entry in own), (ready, own)
+    assert not report.failed
+
+
+def _epoch(stamp: str) -> float:
+    return calendar.timegm(time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ"))
 
 
 async def _kill(deployed, pattern: str, oldest: bool = False) -> None:

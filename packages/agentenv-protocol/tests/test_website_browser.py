@@ -22,12 +22,14 @@ from agentenv_protocol.computer import app_runtime
 from agentenv_protocol.computer.errors import DeviceUnavailable, InvalidArgument
 from agentenv_protocol.computer.platform import Platform
 from agentenv_protocol.website_browser import (ALONE_BYPASS, BROWSER, COMPUTER_BYPASS, POLICIES, SITE_PROXY_ENV, SKILL,
-                                               BrowserControl, DevToolsError, WebsiteBrowserEnvironment)
+                                               SPELLCHECK_LANGUAGES, BrowserControl, DevToolsError,
+                                               WebsiteBrowserEnvironment)
 from agentenv_protocol.website_browser.control import STOP
 
 PROXY = "http://127.0.0.1:3128"
 OWNED = ["--user-data-dir", "--disk-cache-dir", "--remote-debugging-pipe", "--no-first-run",
-         "--no-default-browser-check", "--lang=en-US"]
+         "--no-default-browser-check", "--lang=en-US", "--disable-background-networking",
+         "--component-updater=url-source=file:///dev/null", "--disable-features=AimEnabled"]
 # A browser that answers CDP on its debugging pipe, fds 3 and 4, as a Chromium does: Browser.getVersion with its
 # product; its first tab, "start", made known and attached to; Target.createTarget by writing the tab's URL, or a new
 # window's after "window ", to tabs.txt beside it and attaching to the tab; Page.navigate by writing "navigate <tab>
@@ -140,9 +142,11 @@ def test_in_a_computer_with_a_site_proxy_only_loopback_bypasses_it(monkeypatch):
     monkeypatch.setenv(SITE_PROXY_ENV, PROXY)
 
     command = Browser().launch.command
+    proxy = command.index(f"--proxy-server={PROXY}")
 
+    assert command[proxy - 1] == "--disable-features=AimEnabled"
     assert [f"--proxy-server={PROXY}", f"--proxy-bypass-list={COMPUTER_BYPASS}",
-            "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"] == command[8:11]
+            "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"] == command[proxy:proxy + 3]
     assert not any(flag.startswith(("--headless", "--window-size")) for flag in command)
 
 
@@ -186,7 +190,8 @@ def test_alone_it_refuses_to_launch_without_a_site_proxy(monkeypatch):
 
 @pytest.mark.parametrize("flag", ["--remote-debugging-port=9222", "--remote-allow-origins=*", "--headless",
                                   "--proxy-server=http://elsewhere:3128", "--user-data-dir=/tmp/profile",
-                                  "--disk-cache-dir=/tmp/cache", "--disable-dev-shm-usage"])
+                                  "--disk-cache-dir=/tmp/cache", "--disable-dev-shm-usage",
+                                  "--disable-background-networking", "--component-updater=fast-update"])
 def test_a_subclass_whose_command_carries_a_flag_agentenv_owns_is_refused_when_declared(flag):
     @linux(launch=Launch(command=["chromium/chrome", flag]))
     class Widened(WebsiteBrowserEnvironment):
@@ -194,6 +199,19 @@ def test_a_subclass_whose_command_carries_a_flag_agentenv_owns_is_refused_when_d
 
     with pytest.raises(ValueError, match="agentenv sets for every website browser"):
         Widened.declaration()
+
+
+def test_features_a_subclasss_command_turns_off_join_agentenvs_in_one_flag_since_chromium_takes_only_the_last():
+    @linux(launch=Launch(command=["chromium/chrome", "--disable-features=Translate,AimEnabled", "--no-sandbox",
+                                 "--disable-features=MediaRouter"], window={"class": "Chromium"}))
+    class Trimmed(WebsiteBrowserEnvironment):
+        pass
+
+    command = Trimmed().launch.command
+
+    assert [arg for arg in command if arg.startswith("--disable-features")] == [
+        "--disable-features=AimEnabled,Translate,MediaRouter"]
+    assert command[:2] == ["chromium/chrome", "--no-sandbox"]
 
 
 @pytest.mark.parametrize("mib, in_files", [(64, True), (1024, False)], ids=["docker-default", "sized"])
@@ -431,6 +449,8 @@ def test_its_policies_are_agentenvs_with_its_own_over_them_where_its_build_reads
     written = json.loads((tmp_path / "policies" / "agentenv.json").read_text())
     assert written == {**POLICIES, "DefaultGeolocationSetting": 2}
     assert written["DownloadDirectory"] == "${user_home}/Downloads"
+    assert written["SpellcheckLanguageBlocklist"] == SPELLCHECK_LANGUAGES and "en-US" in SPELLCHECK_LANGUAGES
+    assert "SpellcheckEnabled" not in written  # it would void the blocklist, and still fetch a dictionary
     assert [step.name for step in Browser.declaration().install_steps] == ["write_policies"]
 
 
