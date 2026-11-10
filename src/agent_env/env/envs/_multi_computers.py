@@ -187,8 +187,7 @@ class Computers:
                  ) -> Callable[[Optional[str]], Awaitable[list[ExternalChild]]]:
         """The gateway's ``children``: every computer deployed as its child_envs entry says, its tools served under its
         name and ``_``, and its network allowing ``reach``, the gateway's address when the gateway has one yet, and the
-        ``live_hosts`` of the multi env's live websites, the website browser's those hosts alone; then each as the
-        gateway fronts it. A computer routing the multi env's ``websites`` (their environment names by env id)
+        ``live_hosts`` of the multi env's live websites; then each as the gateway fronts it. A computer routing the multi env's ``websites`` (their environment names by env id)
         boots with its boot apps held, for ``finish`` to route them once the gateway is up. A gateway deploy tried again
         deploys them again, after closing the earlier try's."""
         tries = 0
@@ -207,7 +206,7 @@ class Computers:
             results = await asyncio.gather(*(env.deploy(
                 ttl_seconds=ttl_seconds, attribution=attribution, tool_prefix=f"{env.environment_name}_",
                 reach=reach or "", sites_later=env.environment_name in self._routes,
-                **({"live_hosts": live} if live else {}), **({"reach_only": True} if env is self.browser else {}),
+                **({"live_hosts": live} if live else {}),
                 **deploy_options((child_envs or {}).get(env.environment_name), sandbox_type))
                 for env in self.every), return_exceptions=True)
             if failed := [result for result in results if isinstance(result, BaseException)]:

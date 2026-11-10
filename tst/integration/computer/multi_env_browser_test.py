@@ -2,13 +2,12 @@
 on a sandbox of its own as one more computer child, beside a synthetic site, with no playwright-mcp. It routes the site,
 so its start tab loads it by name through the gateway; an agent drives it through the gateway's one /mcp with its tools
 under ``chromium_``; its CDP address, asked through ``/svc/chromium/``, names the gateway and reaches the site by name;
-reset_env brings it back after its container is killed and after the gateway restarts; and local Docker, which can't
-hold its network to the gateway, runs it allowing every host and says so. ``browser_envs = []`` deploys no browser.
+and reset_env brings it back after its container is killed and after the gateway restarts. ``browser_envs = []``
+deploys no browser.
 Needs Docker and the local registry on localhost:5000."""
 
 import asyncio
 import json
-import logging
 import subprocess
 import uuid
 
@@ -117,8 +116,7 @@ async def _discovery(http_url: str) -> dict:
 
 @pytest.mark.asyncio
 async def test_chromium_as_a_multi_envs_browser_runs_on_its_own_sandbox_reached_through_the_gateway(
-        browser_computer, shop, made, caplog):
-    caplog.set_level(logging.WARNING, logger="agent_env.providers.env_providers.env_computer_provider")
+        browser_computer, shop, made):
     with namespace_routing():
         office = _office(shop, [Env.get(browser_computer.id)])
         step = DeployEnvTaskStep(id="office", version=None, env_id=office.id, sandbox_type="local", ttl_seconds=900,
@@ -171,8 +169,6 @@ async def test_chromium_as_a_multi_envs_browser_runs_on_its_own_sandbox_reached_
     # Through a kill and a gateway restart, a reset brings it back.
     assert after_kill and SITE_URL in after_kill_tabs, after_kill_tabs
     assert after_restart, through_restart
-    # Local Docker can't hold its network to the gateway, so it says it allows every host.
-    assert "can't hold a network to the hosts" in caplog.text, caplog.text
 
 
 @pytest.mark.asyncio

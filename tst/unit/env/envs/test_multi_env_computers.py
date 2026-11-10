@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import inspect
-import logging
 import re
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -29,15 +28,10 @@ from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.gateway import ExternalChild
 from agent_env.env.gateway.constants import WELL_KNOWN_PATH
 from agent_env.env.store import EnvInstanceStore
-from agent_env.providers.env_providers import env_computer_provider, env_gateway_provider
+from agent_env.providers.env_providers import env_gateway_provider
 from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider, MCPServerConfig
 from agent_env.providers.env_providers.env_provider import EnvironmentProvider
 from agent_env.providers.env_state import LocalPostgresStateProvider
-from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
-from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
-from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandboxProvider
-from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPolicy
-from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
 from agent_env.task.teardown import env_sandbox_ids
 from agent_env.task_step.task_steps.browser.base import stored_browsers
 from tst.util.sandbox_providers import mock_provider
@@ -877,10 +871,10 @@ async def test_a_browser_computer_deploys_as_a_computer_child_routing_the_sites_
 
     assert chromium.deploys == [{"ttl_seconds": 10800, "attribution": None, "tool_prefix": "chromium_",
                                  "reach": GATEWAY, "sites_later": True,
-                                 "live_hosts": ("github.test", "api.github.test"), "reach_only": True,
+                                 "live_hosts": ("github.test", "api.github.test"),
                                  "sandbox_type": "modal", "cpu": 2, "memory_mb": 4096,
                                  "env_params": {"site_routing": True}}]
-    assert "reach_only" not in desktop.deploys[0] and desktop.deploys[0]["sites_later"] is False
+    assert desktop.deploys[0]["sites_later"] is False
     assert gateway.started == [[ExternalChild("desktop", "https://desktop.example/mcp", "https://desktop.example"),
                                 ExternalChild("chromium", "https://chromium.example/mcp", "https://chromium.example")]]
     assert set(deployed.child_envs) == {"desktop", "chromium"}
@@ -893,7 +887,7 @@ async def test_the_runs_browser_computer_takes_the_same_path(gateway, providers,
     with patch("agent_env.env.env.Env.get", return_value=chromium), \
             run_env_ids({WEBSITE_BROWSER_OVERRIDE: "chromium-computer"}):
         deployed = await _browsing().deploy()
-    assert chromium.deploys[0]["reach_only"] is True and set(deployed.child_envs) == {"chromium"}
+    assert chromium.deploys[0]["tool_prefix"] == "chromium_" and set(deployed.child_envs) == {"chromium"}
 
 
 @pytest.mark.asyncio
@@ -1014,58 +1008,6 @@ async def test_a_redeploy_keeps_the_earlier_browser_for_close(gateway, providers
     assert office._computers.browser is not chromium
     await office.close()
     assert chromium.log.count(("close", "chromium")) == 2  # the earlier deployment's browser and the later one's
-
-
-# --- its website browser: its network ---
-
-def _provider(enforces: bool = True, pulls: bool = True) -> SimpleNamespace:
-    return SimpleNamespace(url_from_sandbox=lambda url: url, supports_network_policy=lambda policy: enforces,
-                           PULLS_UNDER_ALLOWLIST=pulls)
-
-
-def test_a_reach_only_network_allows_the_gateways_host_and_the_live_hosts_alone():
-    env = SimpleNamespace(id="chromium-computer", network=None)
-    policy = env_computer_provider._network(env, _provider(), GATEWAY, ("github.test",), reach_only=True)
-    assert policy == NetworkPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=("gw.example", "github.test"))
-
-
-@pytest.mark.parametrize("enforces, pulls, reach, why", [
-    (False, True, GATEWAY, "can't hold a network to the hosts gw.example"),
-    (True, False, GATEWAY, "pulls a container's image through its network"),
-    (True, True, "", "the gateway's address isn't known"),
-], ids=["provider-cant-enforce", "pull-under-allowlist", "no-gateway-address"])
-def test_a_reach_only_network_the_provider_cant_hold_allows_every_host_and_says_so(enforces, pulls, reach, why,
-                                                                                  caplog):
-    env = SimpleNamespace(id="chromium-computer", network=None)
-    with caplog.at_level(logging.WARNING, logger=env_computer_provider.logger.name):
-        assert env_computer_provider._network(env, _provider(enforces, pulls), reach, (), reach_only=True) is None
-    assert why in caplog.text
-
-
-def test_a_disk_held_to_the_gateway_is_not_let_off_by_a_provider_that_cant_pull_a_container_under_one():
-    env = SimpleNamespace(id="chromium-computer", network=None)
-    policy = env_computer_provider._network(env, _provider(pulls=False), GATEWAY, (), reach_only=True, form="disk")
-    assert policy == NetworkPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=("gw.example",))
-
-
-def test_only_a_provider_that_pulls_outside_its_sandboxs_network_says_it_pulls_under_an_allowlist():
-    class VmPath(SandboxProvider):  # the default VM path: create_vm under the policy, then pull_images
-        async def create_vm(self, **kwargs):
-            raise NotImplementedError
-
-    assert ModalSandboxProvider.PULLS_UNDER_ALLOWLIST
-    assert not any(provider.PULLS_UNDER_ALLOWLIST
-                   for provider in (ModalVmSandboxProvider, LocalSandboxProvider, VmPath))
-
-
-def test_a_computers_own_network_is_widened_as_before_reach_only_or_not():
-    own = {"mode": "allowlist", "allow_hosts": ["pypi.org"]}
-    env = SimpleNamespace(id="desktop-computer", network=own)
-    for reach_only in (False, True):
-        assert env_computer_provider._network(env, _provider(), GATEWAY, (), reach_only).allow_hosts == (
-            "pypi.org", "gw.example")
-    alone = SimpleNamespace(id="x", network=None)
-    assert env_computer_provider._network(alone, _provider(), GATEWAY, (), False) is None
 
 
 # --- its website browser: elsewhere ---
