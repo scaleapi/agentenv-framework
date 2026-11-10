@@ -941,6 +941,20 @@ async def test_the_browser_is_reattached_reset_and_closed_from_its_own_record(ga
     assert ("close", "chromium") in log
 
 
+@pytest.mark.asyncio
+async def test_a_reset_of_the_multi_env_as_stored_resets_the_browser_its_record_holds(gateway, providers, routes,
+                                                                                    monkeypatch):
+    deployed = await _browsing(FakeComputer("desktop"), browser_envs=[FakeBrowser()]).deploy()
+    stored = DeployedEnv.from_dict({**dataclasses.asdict(deployed), "instance_id": "inst-1"})
+    log = []
+    monkeypatch.setattr(MultiEnv, "_attached", classmethod(AsyncMock(return_value=_browsing(websites=()))))
+
+    with patch("agent_env.env.env.Env.get", return_value=FakeBrowser(log=log)):
+        await _browsing(FakeComputer("desktop", log=log), browser_envs=[FakeBrowser()]).reset(stored)
+
+    assert sorted(log) == [("reset", "chromium", "sb-chromium"), ("reset", "desktop", "sb-desktop")]
+
+
 async def _reattached(cls, record):
     browser = cls()
     browser._deployed = record

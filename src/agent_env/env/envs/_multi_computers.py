@@ -168,10 +168,19 @@ class Computers:
 
     def resets(self, deployed: DeployedEnv) -> list[tuple[str, Awaitable[None]]]:
         """Each computer ``deployed``, the multi env's record, holds, by name, with its reset from its own record, as it
-        resets alone; none is awaited yet."""
+        resets alone: the multi env's own, and its website browser, which a multi env read from the store finds in the
+        record; none is awaited yet."""
         records = getattr(deployed, "child_envs", None) or {}
+        browser = self.browser or self._recorded_browser(records)
         return [(env.environment_name, env.reset(DeployedEnv.from_dict(records[env.environment_name])))
-                for env in self.every if env.environment_name in records]
+                for env in [*self.envs, *([browser] if browser else [])] if env.environment_name in records]
+
+    def _recorded_browser(self, records: Mapping[str, dict]) -> Optional[ComputerEnv]:
+        """The website browser ``records``, a multi env's computers' records, hold beside its own computers: the record
+        of a name none of them has, its env at the version it deployed."""
+        own = {env.environment_name for env in self.envs}
+        record = next((record for name, record in records.items() if name not in own), None)
+        return Env.get(record["env_id"], record["env_version"]) if record else None
 
     def deployer(self, child_envs: Optional[dict], *, sandbox_type: str | None, ttl_seconds: int,
                  attribution: Optional[Attribution], websites: Mapping[str, str], live_hosts: Iterable[str] = ()
@@ -250,10 +259,9 @@ class Computers:
                                             for env in self.envs if env.environment_name in records))
         by_name = {env.environment_name: env for env in reattached}
         self.envs = [by_name.get(env.environment_name, env) for env in self.envs]
-        own = {env.environment_name for env in self.envs}
-        if browser := next((record for name, record in records.items() if name not in own), None):
-            record = DeployedEnv.from_dict(browser)
-            self.browser = await type(Env.get(record.env_id, record.env_version)).from_deployed_env(record)
+        if (browser := self._recorded_browser(records)) is not None:
+            self.browser = await type(browser).from_deployed_env(DeployedEnv.from_dict(
+                records[browser.environment_name]))
 
     async def close(self) -> None:
         """Close each computer, and those of the deployments a later deploy replaced, their recordings ended first; one
