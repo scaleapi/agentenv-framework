@@ -48,20 +48,22 @@ HELPER = Path("/opt/agentenv/codex-computer-use/Codex Computer Use.app")
 
 
 class _OS(NamedTuple):
-    """What differs by OS: the protocol driver the computer/v1 operations run on; the pinned ChatGPT app's version and
-    its resources as the install unpacks them; under them, the Node that starts Codex's REPL, its ``node_repl``, its
-    modules, the Codex CLI the app names to it, and Codex Computer Use's service; the sha256 of each executable at the
-    pinned version, by its path under the resources or the helper; what of the driver's environment ``cua_repl`` gets
-    beside the session user's own and the PATH it runs, and launches apps, with, ``{SystemRoot}`` filled in from the
-    environment, its list separator, how the app names the OS to Codex, and the manifest pinned there."""
+    """What differs by OS: the protocol driver the computer/v1 operations run on; the pinned ChatGPT app's version, the
+    folder the install unpacks it into and its resources there; under them, the Node that starts Codex's REPL, its
+    ``node_repl``, its modules, the Codex CLI the app names to it, and Codex Computer Use's service, None for the helper
+    app; the sha256 of each executable at the pinned version, by its path under the driver's folder or the helper; what
+    of the driver's environment ``cua_repl`` gets beside the session user's own and the PATH it runs, and launches apps,
+    with, ``{SystemRoot}`` filled in from the environment, its list separator, how the app names the OS to Codex, and
+    the manifest pinned there."""
     driver: str
     version: str
-    resources: Path
+    app: Path
+    resources: str
     node: str
     node_repl: str
     node_modules: str
     codex_cli: str
-    service: str
+    service: str | None
     executables: dict[str, str]
     kept: tuple[str, ...]
     path: str
@@ -72,25 +74,28 @@ class _OS(NamedTuple):
 
 OSES = {
     "macos": _OS(
-        "MacOSDriver", "26.930.51102", HERE / "ChatGPT.app" / "Contents" / "Resources",
+        "MacOSDriver", "26.930.51102", HERE / "ChatGPT.app", "Contents/Resources",
         "cua_node/bin/node", "cua_node/bin/node_repl", "cua_node/lib/node_modules",
-        "codex-cli/CodexCLI.app/Contents/MacOS/codex", str(HELPER),
-        {"../MacOS/ChatGPT": "1f2989ac3d702e48c740fe4c54b1b6279f9e48e0e4c0ead7d4501464e2ea976e",
-         "cua_node/bin/node": "59f603e9e6d81c8b6bdaf6bb35b1990e7b8048762ca07a524ac7e87ade6fea15",
-         "cua_node/bin/node_repl": "bbd1640851593a724e2a6bc558f3a16078f40b09d4fe76f2f6d89f8b895eb5ed",
-         f"{HELPER}/Contents/MacOS/SkyComputerUseService":
+        "codex-cli/CodexCLI.app/Contents/MacOS/codex", None,
+        {"ChatGPT.app/Contents/MacOS/ChatGPT": "1f2989ac3d702e48c740fe4c54b1b6279f9e48e0e4c0ead7d4501464e2ea976e",
+         "ChatGPT.app/Contents/Resources/cua_node/bin/node":
+             "59f603e9e6d81c8b6bdaf6bb35b1990e7b8048762ca07a524ac7e87ade6fea15",
+         "ChatGPT.app/Contents/Resources/cua_node/bin/node_repl":
+             "bbd1640851593a724e2a6bc558f3a16078f40b09d4fe76f2f6d89f8b895eb5ed",
+         "Codex Computer Use.app/Contents/MacOS/SkyComputerUseService":
              "fa5b5d685f550af82902cff1a345db558a1da3eb526cf78cd4659fa0dcde01a5"},
         ("HOME", "USER", "LOGNAME", "TMPDIR", "LANG"), "/usr/bin:/bin:/usr/sbin:/sbin", ":",
         "Control desktop apps on macOS through Computer Use.", "mcp.json"),
     "windows": _OS(
-        "WindowsDriver", "26.1103.7773.0", HERE / "ChatGPT" / "resources",
+        "WindowsDriver", "26.1103.7773.0", HERE / "ChatGPT", "resources",
         "cua_node/bin/node.exe", "cua_node/bin/node_repl.exe", "cua_node/bin/node_modules", "codex.exe",
         "cua_node/bin/node_modules/@oai/sky/bin/windows/codex-computer-use.exe",
-        {"cua_node/bin/node.exe": "10bc02b8078c896ad9f8cd8b6eed622e8d17a9425403159e98f5b896e26f933c",
-         "cua_node/bin/node_repl.exe": "182c15f8994f20c1a5d8fe631f73b1f2ae3ae1a840e8e1c14d9b35231f3942b3",
-         "cua_node/bin/node_modules/@oai/sky/bin/windows/codex-computer-use.exe":
+        {"ChatGPT/resources/cua_node/bin/node.exe": "10bc02b8078c896ad9f8cd8b6eed622e8d17a9425403159e98f5b896e26f933c",
+         "ChatGPT/resources/cua_node/bin/node_repl.exe":
+             "182c15f8994f20c1a5d8fe631f73b1f2ae3ae1a840e8e1c14d9b35231f3942b3",
+         "ChatGPT/resources/cua_node/bin/node_modules/@oai/sky/bin/windows/codex-computer-use.exe":
              "0ebb47bfaaf729e22bcdb08dcfce1419eefeda80afaefed3edbc088c24a2e778",
-         "cua_node/bin/node_modules/@oai/sky/bin/windows/swift/x64/codex-computer-use-swift.exe":
+         "ChatGPT/resources/cua_node/bin/node_modules/@oai/sky/bin/windows/swift/x64/codex-computer-use-swift.exe":
              "d43d0ff78567b212070efc8f62155b2226ef9305ec030c0c778c4aa4cee55020"},
         ("USERNAME", "USERDOMAIN", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP",
          "SystemRoot", "SystemDrive", "windir", "ComSpec", "PATHEXT", "ProgramData", "ProgramFiles",
@@ -198,7 +203,7 @@ class CodexComputerUse(OSDriver):
     async def _server(self) -> AsyncIterator[tuple[ClientSession, InitializeResult]]:
         """``cua_repl`` connected and initialized, with what it said at connect, its approval requests answered; it
         ends with the block."""
-        server = StdioServerParameters(command=str(OS.resources / OS.node), args=[str(_launcher())],
+        server = StdioServerParameters(command=str(_resources() / OS.node), args=[str(_launcher())],
                                        env=_environment(), cwd=str(_workspace()))
         async with (stdio_client(server) as (read, write),
                     ClientSession(read, write, elicitation_callback=self._approve) as session):
@@ -384,32 +389,37 @@ def _workspace() -> Path:
     return folder
 
 
+def _resources() -> Path:
+    return OS.app / OS.resources
+
+
 def _launcher() -> Path:
-    return OS.resources / OS.node_modules / "@oai" / "cua-repl" / "bin" / "cua-repl.mjs"
+    return _resources() / OS.node_modules / "@oai" / "cua-repl" / "bin" / "cua-repl.mjs"
 
 
 def _environment() -> dict[str, str]:
     """``cua_repl``'s environment, as the ChatGPT app builds it for the plugin, with the computer surface alone."""
-    codex, modules = str(_codex_home()), str(OS.resources / OS.node_modules)
+    codex, modules = str(_codex_home()), str(_resources() / OS.node_modules)
     return {**{name: os.environ[name] for name in OS.kept if name in os.environ},
             "PATH": OS.path.format_map(os.environ),
             "CODEX_HOME": codex,
-            "CODEX_CLI_PATH": str(OS.resources / OS.codex_cli),
+            "CODEX_CLI_PATH": str(_resources() / OS.codex_cli),
             "CUA_REPL_ENABLED_SURFACES": "computer",
-            "CUA_REPL_NODE_REPL_PATH": str(OS.resources / OS.node_repl),
+            "CUA_REPL_NODE_REPL_PATH": str(_resources() / OS.node_repl),
             "NODE_REPL_INSTRUCTIONS_USE_CASE_COMPUTER_USE": OS.use_case,
             "NODE_REPL_NATIVE_PIPE_CONNECT_TIMEOUT_MS": "1000",
             "NODE_REPL_NODE_MODULE_DIRS": modules,
-            "NODE_REPL_NODE_PATH": str(OS.resources / OS.node),
+            "NODE_REPL_NODE_PATH": str(_resources() / OS.node),
             "NODE_REPL_TRUSTED_CODE_PATHS": f"{codex}{OS.separator}{modules}",
             "NODE_REPL_TRUSTED_SERVICES": json.dumps({"sky": "@oai/sky/service"}),
-            "SKY_CUA_SERVICE_PATH": str(OS.resources / OS.service)}
+            "SKY_CUA_SERVICE_PATH": str(HELPER if OS.service is None else _resources() / OS.service)}
 
 
 def _digests() -> dict[str, str | None]:
     """Each pinned executable's sha256, None for one that isn't there."""
     found = {}
     for path in OS.executables:
-        file = OS.resources / path
+        root, _, rest = path.partition("/")
+        file = HELPER / rest if root == HELPER.name else OS.app.parent / path
         found[path] = hashlib.sha256(file.read_bytes()).hexdigest() if file.is_file() else None
     return found
