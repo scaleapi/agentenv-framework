@@ -19,7 +19,7 @@ from pydantic import ValidationError
 from agentenv_protocol.computer import DriverDeclaration
 from agentenv_protocol.computer.app import Download, RunScript
 
-from agent_env.artifact.artifacts.computer import ComputerArtifact, DiskSource
+from agent_env.artifact.artifacts.computer import ComputerArtifact, DiskForm, DiskSource
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.env.env import Env
 from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
@@ -102,7 +102,7 @@ def _base(**changes) -> ComputerArtifact:
     return ComputerArtifact.put(**{
         "id": "@local/~/kit/omarchy-4.5", "arch": ["amd64"], "os": OMARCHY, "session": {"user": "omarchy"},
         "config": {"resolution": {"default": "1920x1080", "phase": "deploy"},
-                   "theme": {"default": "light", "phase": "build"}},
+                   "timezone": {"default": "UTC", "phase": "deploy"}, "theme": {"default": "light", "phase": "build"}},
         "forms": {"disk": DISK}, **changes})
 
 
@@ -154,7 +154,8 @@ def test_an_omarchy_env_composes_a_thin_disk_on_its_base_built_from_omarchys_ima
                  "user=omarchy", f'(cd {prefix} && runuser -u "$user" -- env HOME="$home" PREFIX={prefix} '
                                  f"bash {prefix}/settings.sh)",
                  "systemctl --global enable --quiet agentenv-driver-desk-daemon.service",
-                 "systemctl --global enable --quiet agentenv-driver-desk-driver.service"]:
+                 "systemctl --global enable --quiet agentenv-driver-desk-driver.service",
+                 "systemctl mask --quiet sshd.service sshd.socket"]:
         assert line in lines, line
     assert "printf %s 'export AGENTENV_SETTING_THEME=dark\n' > /opt/agentenv/build-environment" in script
     assert not any("arm.tar.gz" in line for line in lines)
@@ -235,6 +236,20 @@ def test_a_driver_service_that_runs_as_root_is_refused_naming_omarchys_systemd(d
                                          "systemd runs every program as omarchy"):
         _put(_driver(tmp_path / "desk", services=[Service(name="driver", command=SERVE, scope="system")]),
              FakeLinux())
+
+
+def test_a_disk_form_naming_no_source_is_written_without_one_so_an_agent_env_from_before_sources_reads_it():
+    linux = DiskForm(init="supervisord", input_channel="nocloud", min_disk_gb=16).model_dump(by_alias=True)
+
+    assert "source" not in linux and DiskForm(**DISK).model_dump(by_alias=True)["source"] == SOURCE
+
+
+def test_a_time_zone_is_checked_against_ianas_before_the_computer_boots(local_stores, cli_routing):
+    base = _base()
+
+    assert gate.check_computer_settings(base, {"timezone": "America/Chicago"}) == ({"timezone": "America/Chicago"}, [])
+    assert gate.check_computer_settings(base, {"timezone": "Mars/Base"})[1] == [
+        "computer_settings.timezone: 'Mars/Base' isn't an IANA time zone, such as UTC or America/Chicago"]
 
 
 def test_a_windows_disk_names_no_source(local_stores, cli_routing):

@@ -155,8 +155,8 @@ def _root_key(keys: Path) -> str:
 def write(build: Path, parts: list[Part], *, user: str, build_settings: dict[str, Any], image: dict) -> str:
     """Write ``build``'s ``provision.sh``, which installs ``parts`` from ``build/context``, their session-scoped run
     scripts as the session user ``user``, and enables their services for the session, ``build_settings`` as every
-    service's ``AGENTENV_SETTING_<NAME>`` and ``image`` as what the disk says it holds; its text, which a composed disk's
-    key covers."""
+    service's ``AGENTENV_SETTING_<NAME>`` and ``image`` as what the disk says it holds, then leaves the computer no ssh:
+    only a compose logs in, and it boots the base. Its text, which a composed disk's key covers."""
     lines = ["#!/bin/bash", "set -euo pipefail", f"build={BUILD}", f"user={shlex.quote(user)}",
              'home=$(getent passwd "$user" | cut -d: -f6)', _FETCH]
     for part in parts:
@@ -164,7 +164,8 @@ def write(build: Path, parts: list[Part], *, user: str, build_settings: dict[str
     settings = "".join(f"export AGENTENV_SETTING_{name.upper()}={shlex.quote(str(value))}\n"
                        for name, value in build_settings.items())
     lines += [_written(ROOT / "build-environment", settings),
-              _written(ROOT / "image.json", json.dumps(image, sort_keys=True))]
+              _written(ROOT / "image.json", json.dumps(image, sort_keys=True)),
+              "systemctl mask --quiet sshd.service sshd.socket"]
     script = "\n".join(lines) + "\n"
     (build / "provision.sh").write_text(script)
     return script

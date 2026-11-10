@@ -3,8 +3,10 @@ each other and against what the env declares, and every mismatch is named."""
 
 from __future__ import annotations
 
+import functools
 import itertools
 import re
+import zoneinfo
 from collections.abc import Sequence
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
@@ -222,9 +224,17 @@ def check_computer_settings(base: ComputerArtifact, values: Any) -> tuple[dict[s
         elif base.os.type == "windows" and name == "resolution" and value != WINDOWS_DISPLAY:
             problems.append(f"computer_settings.resolution: a Windows computer's display is {WINDOWS_DISPLAY} for now, "
                             f"not {value}")
+        elif name == "timezone" and value not in _time_zones():
+            problems.append(f"computer_settings.timezone: {value!r} isn't an IANA time zone, such as UTC or "
+                            "America/Chicago")
         else:
             checked[name] = value
     return checked, problems
+
+
+@functools.cache
+def _time_zones() -> frozenset[str]:
+    return frozenset(zoneinfo.available_timezones())
 
 
 def _platform(base: ComputerArtifact, driver: ComputerDriverEnv) -> list[str]:

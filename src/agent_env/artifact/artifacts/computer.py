@@ -155,12 +155,13 @@ class DiskForm(BaseModel):
     ``init`` started; on Omarchy, systemd's user units in its graphical session; on Windows, agentenv-session at the
     session user's sign-in. With no ``image``, it's made when composed: from its ``source``, a distribution's own VM
     image, on its recipe; else from the container form's root filesystem on agent-env's Linux boot recipe, or Windows
-    installed from Microsoft's media on this machine (``computers/disk/windows``)."""
+    installed from Microsoft's media on this machine (``computers/disk/windows``). A disk that names no source is
+    written without one, so an agent-env from before sources still reads it."""
 
     model_config = ConfigDict(extra="forbid")
 
     image: ArtifactRef | None = None
-    source: DiskSource | None = None
+    source: DiskSource | None = Field(default=None, exclude_if=lambda source: source is None)
     init: Literal["supervisord", "systemd", "agentenv-session"]
     input_channel: Literal["nocloud"]
     firmware: list[Literal["efi"]] = Field(default=["efi"], min_length=1)
