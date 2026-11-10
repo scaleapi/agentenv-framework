@@ -9,12 +9,15 @@ instructions and its ``js`` and ``js_reset`` tools as pinned for the OS (``mcp.j
 marked as acting on apps where Codex marks it read-only and its input schema one object where Codex's is a choice of
 several, which Anthropic's API refuses; the two it serves only the ChatGPT app are hidden. Codex asks its host before
 each action on an app, and the driver answers: it approves the apps the ``allowed_apps`` setting names, by name or
-identifier, or every app when it names none, and nothing else, recording the computer's audio included. Each call runs
-under Codex's own sandbox, read-only but for Codex's folder and the temporary ones and with no network, unless the
-``js_sandbox`` setting is off; the apps it drives are outside it. No ChatGPT sign-in is needed. The computer/v1
-operations are MacOSDriver's on macOS, where this process's Python is granted Accessibility, Post Event and Screen
-Recording as the plugin's service is, and WindowsDriver's on Windows. It needs ``agentenv-framework-protocol`` with
-``[computer,macos]`` on macOS or ``[computer,windows]`` on Windows, and the pinned ChatGPT app."""
+identifier as the request names it or by the name it shows (on Windows the shown name, since an app run from a renamed
+Python is named as Python), or every app when it names none, and nothing else, recording the computer's audio
+included. On macOS each call runs under Codex's own sandbox, read-only but for Codex's folder and the temporary ones
+and with no network, unless the ``js_sandbox`` setting is off; the apps it drives are outside it. On Windows that
+sandbox refuses to start Codex Computer Use's service, so the JavaScript runs unsandboxed there unless the setting
+turns it on. No ChatGPT sign-in is needed. The computer/v1 operations are MacOSDriver's on macOS, where this process's
+Python is granted Accessibility, Post Event and Screen Recording as the plugin's service is, and WindowsDriver's on
+Windows. It needs ``agentenv-framework-protocol`` with ``[computer,macos]`` on macOS or ``[computer,windows]`` on
+Windows, and the pinned ChatGPT app."""
 from __future__ import annotations
 
 import asyncio
@@ -53,8 +56,9 @@ class _OS(NamedTuple):
     ``node_repl``, its modules, the Codex CLI the app names to it, and Codex Computer Use's service, None for the helper
     app; the sha256 of each executable at the pinned version, by its path under the driver's folder or the helper; what
     of the driver's environment ``cua_repl`` gets beside the session user's own and the PATH it runs, and launches apps,
-    with, ``{SystemRoot}`` filled in from the environment, its list separator, how the app names the OS to Codex, and
-    the manifest pinned there."""
+    with, ``{SystemRoot}`` filled in from the environment, its list separator, how the app names the OS to Codex, the
+    manifest pinned there; whether Codex's sandbox can hold the JavaScript, which on Windows refuses to start Codex
+    Computer Use's own service; and the JavaScript the readiness check runs, one that starts that service."""
     driver: str
     version: str
     app: Path
@@ -70,6 +74,8 @@ class _OS(NamedTuple):
     separator: str
     use_case: str
     manifest: str
+    sandboxed: bool
+    probe: str
 
 
 OSES = {
@@ -85,7 +91,8 @@ OSES = {
          "Codex Computer Use.app/Contents/MacOS/SkyComputerUseService":
              "fa5b5d685f550af82902cff1a345db558a1da3eb526cf78cd4659fa0dcde01a5"},
         ("HOME", "USER", "LOGNAME", "TMPDIR", "LANG"), "/usr/bin:/bin:/usr/sbin:/sbin", ":",
-        "Control desktop apps on macOS through Computer Use.", "mcp.json"),
+        "Control desktop apps on macOS through Computer Use.", "mcp.json", True,
+        "await cua.getState({ emit: false }); nodeRepl.write('ready');"),
     "windows": _OS(
         "WindowsDriver", "26.1103.7773.0", HERE / "ChatGPT", "resources",
         "cua_node/bin/node.exe", "cua_node/bin/node_repl.exe", "cua_node/bin/node_modules", "codex.exe",
@@ -101,7 +108,8 @@ OSES = {
          "SystemRoot", "SystemDrive", "windir", "ComSpec", "PATHEXT", "ProgramData", "ProgramFiles",
          "ProgramFiles(x86)", "ProgramW6432", "CommonProgramFiles", "PUBLIC", "ALLUSERSPROFILE", "COMPUTERNAME"),
         r"{SystemRoot}\System32;{SystemRoot};{SystemRoot}\System32\Wbem;{SystemRoot}\System32\WindowsPowerShell\v1.0",
-        ";", "Control desktop apps on Windows through Computer Use.", "mcp-windows.json"),
+        ";", "Control desktop apps on Windows through Computer Use.", "mcp-windows.json", False,
+        "await cua.getState({ emit: false }); await cua.listWindows(); nodeRepl.write('ready');"),
 }
 OS_NAME = "windows" if sys.platform == "win32" else "macos"
 OS = OSES[OS_NAME]
@@ -118,15 +126,11 @@ ANNOTATIONS = {"js": {"readOnlyHint": False, "destructiveHint": True, "openWorld
 IDLE_S, MAX_REPLS, SWEEP_S = 1800, 8, 60
 #: How long a closed REPL's server has to end before it's cancelled.
 CLOSE_TIMEOUT_S = 10
-#: The JavaScript the readiness check runs: an inventory, which needs no app's approval.
-PROBE = "await cua.getState({ emit: false }); nodeRepl.write('ready');"
 #: The message of the approval Codex asks of its host before it acts on an app, which names it as the request's
 #: metadata does.
 APPROVAL =re.compile(r'Allow (?:Computer Use|Codex) to use "?(?P<app>[^"?]+)"?\?')
 #: The key of the metadata Codex reads its sandbox from on each call.
 SANDBOX_KEY = "codex/sandbox-state-meta"
-#: Where the readiness check writes what ``cua_repl`` lists on an OS with no manifest pinned yet.
-SEEN = HERE / "mcp-seen.json"
 
 
 @computer_driver(name="codex-computer-use",
@@ -136,7 +140,8 @@ class CodexComputerUse(OSDriver):
     class Settings(ComputerSettings):
         #: The apps Codex may act on, by name or identifier, case aside; None for every app.
         allowed_apps: list[str] | None = None
-        js_sandbox: bool = True
+        #: Whether Codex's sandbox holds the JavaScript; None for the OS's way, on macOS and off on Windows.
+        js_sandbox: bool | None = None
 
     def __init__(self) -> None:
         super().__init__()
@@ -224,7 +229,8 @@ class CodexComputerUse(OSDriver):
 
     def _sandbox(self) -> dict:
         """The metadata that sets the sandbox Codex runs the call's JavaScript in."""
-        profile = _read_only() if self.settings.js_sandbox else {"type": "disabled"}
+        sandboxed = OS.sandboxed if self.settings.js_sandbox is None else self.settings.js_sandbox
+        profile = _read_only() if sandboxed else {"type": "disabled"}
         return {SANDBOX_KEY: {"sandboxCwd": _workspace().as_uri(), "permissionProfile": profile}}
 
     async def _pinned_checks(self) -> list[ReadyCheck]:
@@ -237,7 +243,7 @@ class CodexComputerUse(OSDriver):
         try:
             async with self._server() as (session, initialized):
                 listed = (await session.list_tools()).tools
-                probed = await session.call_tool("js", {"code": PROBE}, meta=self._sandbox())
+                probed = await session.call_tool("js", {"code": OS.probe}, meta=self._sandbox())
         except Exception as e:
             return [*checks, ReadyCheck("Codex tools", False, f"cua_repl didn't answer: {type(e).__name__}: {e}")]
         running = {t.name: t.model_dump(mode="json", exclude_none=True) for t in listed}
@@ -245,10 +251,7 @@ class CodexComputerUse(OSDriver):
         answered = ReadyCheck("Codex answers", not probed.isError and "ready" in answer,
                               "it read the computer's apps" if not probed.isError else f"cua.getState() failed: {answer}")
         if not MANIFEST.is_file():
-            SEEN.write_text(json.dumps({"instructions": initialized.instructions,
-                                        "tools": sorted(running.values(), key=lambda t: t["name"])}, indent=2))
-            return [*checks, ReadyCheck("Codex tools", True, f"no {MANIFEST.name} pinned yet: wrote {SEEN.name}"),
-                    answered]
+            return [*checks, ReadyCheck("Codex tools", True, f"no {MANIFEST.name} pinned yet"), answered]
         pinned = {t["name"]: t for t in _manifest()["tools"]}
         changed = ["instructions"] if initialized.instructions != _manifest()["instructions"] else []
         changed += sorted(name for name in running.keys() | pinned.keys() if name not in running or name not in pinned

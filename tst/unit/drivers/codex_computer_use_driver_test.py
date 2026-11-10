@@ -1,10 +1,10 @@
 """The codex-computer-use driver against a fake cua_repl: agents get its js and js_reset as pinned, with its
-instructions, and not the tools it serves only the ChatGPT app; each call carries Codex's read-only sandbox unless the
-setting turns it off; Codex's approval requests are answered from allowed_apps by name or bundle identifier, from the
+instructions, and not the tools it serves only the ChatGPT app, a choice of objects as one; each call carries Codex's
+read-only sandbox on macOS unless the setting turns it off, and on Windows none unless it turns it on; Codex's approval requests are answered from allowed_apps by name or bundle identifier, from the
 request's metadata or its message, every app approved when it names none, and nothing else; each agent session keeps a
 REPL of its own across calls, one that stops starting afresh; cua_repl gets the app's environment and none of the
-driver's; readiness checks the pinned executables, what cua_repl says and lists and that it answers; and the driver's
-files agree on the pinned version."""
+driver's, with Windows paths on Windows; readiness checks the pinned executables, what cua_repl says and lists and
+that it answers; the MSIX unpacks with its names decoded; and the driver's files agree on the pinned versions."""
 from __future__ import annotations
 
 import asyncio
@@ -99,6 +99,7 @@ FAKE = textwrap.dedent('''\
     anyio.run(main)
 ''')
 MACOS = Platform(os="macos", version="26.5", arch="arm64", display="aqua")
+WINDOWS = Platform(os="windows", version="11", arch="amd64", display="dwm")
 
 
 class Granted:
@@ -153,6 +154,7 @@ def windows(monkeypatch, tmp_path):
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setenv("AGENTENV_CONTROL_TOKEN", "a-deploys-secret")
     monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr("agentenv_protocol.computer.driver.detect", lambda: WINDOWS)
     monkeypatch.setitem(sys.modules, "mss", types.ModuleType("mss"))
     monkeypatch.delitem(sys.modules, "agentenv_protocol.computer._windows", raising=False)
     spec = importlib.util.spec_from_file_location("codex_computer_use_driver_windows", DRIVER)
@@ -443,3 +445,30 @@ def test_env_toml_the_windows_install_and_the_driver_agree_on_the_pinned_msix_an
     assert ('"$env:PREFIX\\ChatGPT.msix" "$env:PREFIX\\' + unpacked.replace("/", "\\") + '"') in install
     assert win.app == folder / "ChatGPT" and all(path.startswith(f"{unpacked}/") for path in win.executables)
     assert {f"{unpacked}/{path}" for path in (win.node, win.node_repl, win.service)} <= set(win.executables)
+
+
+def test_on_windows_js_runs_unsandboxed_unless_the_setting_turns_codexs_sandbox_on_and_reaches_agents_as_one_object(
+        windows, monkeypatch):
+    """Codex's sandbox on Windows refuses to start Codex Computer Use's own service (spawn EPERM)."""
+    default, sandboxed = _driver(windows, monkeypatch), _driver(windows, monkeypatch, js_sandbox=True)
+    tools = {t.tool.name: t.tool for t in default.forwarded_tools()}
+    pinned = {t["name"]: t for t in windows._manifest()["tools"]}
+
+    assert default._sandbox()["codex/sandbox-state-meta"]["permissionProfile"] == {"type": "disabled"}
+    assert sandboxed._sandbox()["codex/sandbox-state-meta"]["permissionProfile"]["type"] == "managed"
+    assert "oneOf" in pinned["js"]["inputSchema"] and "oneOf" not in tools["js"].inputSchema
+    assert {"code", "completion_summary"} <= set(tools["js"].inputSchema["properties"])
+    assert tools["js"].inputSchema["required"] == [] and set(tools) == {"js", "js_reset"}
+    assert "listWindows" in windows.OS.probe
+
+
+def test_a_windows_approval_for_an_app_run_from_a_renamed_python_is_matched_by_the_name_it_shows(pinned):
+    """BenchLab and the bench's sentinel both run as copies of pythonw.exe, which the request names; only the name it
+    shows tells them apart."""
+    meta = {"codex_approval_kind": "mcp_tool_call", "connector_id": "computer-use",
+            "tool_params": {"app": "pythonw.exe"},
+            "tool_params_display": [{"display_name": "App", "name": "app", "value": "benchlab"}]}
+
+    names = pinned._app_names("Allow Codex to use benchlab?", meta)
+    assert names == {"pythonw.exe", "benchlab"}
+    assert names & {"benchlab"} and not names & {"benchsentinel"}
