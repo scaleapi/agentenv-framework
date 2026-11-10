@@ -222,6 +222,7 @@ class ModalSandbox(Sandbox):
 
 class ModalSandboxProvider(SandboxProvider):
     EGRESS_HOSTS: ClassVar[tuple[str, ...]] = ("*.modal.host", "*.w.modal.host")
+    PULLS_UNDER_ALLOWLIST = True  # Modal pulls a container sandbox's image itself, outside the sandbox's network
     # Sandbox class this provider produces. A subclass or instance registered under a different
     # ``[sandbox.providers.<name>]`` key can set it to a ``ModalSandbox`` subclass whose
     # ``type`` equals that name — the registry's type-guard requires the produced

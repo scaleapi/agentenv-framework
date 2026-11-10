@@ -37,6 +37,7 @@ from agent_env.providers.sandbox_providers.local_docker.provider import LocalSan
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
 from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPolicy
+from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
 from agent_env.task.teardown import env_sandbox_ids
 from agent_env.task_step.task_steps.browser.base import stored_browsers
 from tst.util.sandbox_providers import mock_provider
@@ -787,6 +788,19 @@ def test_a_browser_computer_needs_a_name_no_other_computer_has():
         _browsing(FakeComputer("chromium"), browser_envs=[FakeBrowser()])
 
 
+def test_an_mcp_server_browser_needs_a_name_no_computer_or_other_mcp_server_has():
+    with pytest.raises(ValueError, match="'playwright-mcp' names 2 of its child envs"):
+        _browsing(FakeComputer("playwright-mcp"), browser_envs=[_playwright()])
+    with pytest.raises(ValueError, match="website browser 'playwright-mcp' has the name of another of its MCP servers"):
+        MultiEnv(id="office", version=1, mcp_server_envs=[_playwright()], browser_envs=[_playwright()])
+
+
+def test_the_runs_mcp_server_browser_is_refused_a_name_a_computer_has(providers):
+    with patch("agent_env.env.env.Env.get", return_value=_playwright()):
+        assert "'playwright-mcp' names 2 of its child envs" in _browsing(
+            FakeComputer("playwright-mcp")).child_envs_refusal(None)
+
+
 # --- its website browser: which one ---
 
 def test_the_browser_is_the_one_named_none_for_an_empty_list_and_else_the_runs_when_there_are_websites(local_stores):
@@ -1008,9 +1022,14 @@ def test_a_disk_held_to_the_gateway_is_not_let_off_by_a_provider_that_cant_pull_
     assert policy == NetworkPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=("gw.example",))
 
 
-def test_modal_vm_says_it_cant_pull_a_container_under_an_allowlist_and_others_say_they_can():
-    assert not ModalVmSandboxProvider.PULLS_UNDER_ALLOWLIST
-    assert ModalSandboxProvider.PULLS_UNDER_ALLOWLIST and LocalSandboxProvider.PULLS_UNDER_ALLOWLIST
+def test_only_a_provider_that_pulls_outside_its_sandboxs_network_says_it_pulls_under_an_allowlist():
+    class VmPath(SandboxProvider):  # the default VM path: create_vm under the policy, then pull_images
+        async def create_vm(self, **kwargs):
+            raise NotImplementedError
+
+    assert ModalSandboxProvider.PULLS_UNDER_ALLOWLIST
+    assert not any(provider.PULLS_UNDER_ALLOWLIST
+                   for provider in (ModalVmSandboxProvider, LocalSandboxProvider, VmPath))
 
 
 def test_a_computers_own_network_is_widened_as_before_reach_only_or_not():
@@ -1028,6 +1047,14 @@ def test_a_computers_own_network_is_widened_as_before_reach_only_or_not():
 def test_a_named_browser_computer_counts_among_a_multi_envs_browsers():
     assert stored_browsers(_browsing(FakeComputer("desktop"), browser_envs=[FakeBrowser()])) == ["chromium"]
     assert stored_browsers(_browsing(browser_envs=[_playwright()])) == []
+
+
+def test_the_runs_browser_computer_counts_among_a_multi_envs_browsers_when_it_names_none():
+    with patch("agent_env.env.env.Env.get", return_value=FakeBrowser()), \
+            run_env_ids({WEBSITE_BROWSER_OVERRIDE: "chromium-computer"}):
+        assert stored_browsers(_browsing()) == ["chromium"]
+    with patch("agent_env.env.env.Env.get", return_value=_playwright()):
+        assert stored_browsers(_browsing()) == []
 
 
 def test_cli_put_takes_a_browser_or_none():

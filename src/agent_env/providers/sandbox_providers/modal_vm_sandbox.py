@@ -299,7 +299,6 @@ class ModalVmSandboxProvider(SandboxProvider):
 
     EGRESS_HOSTS: ClassVar[tuple[str, ...]] = ("*.modal.host", "*.w.modal.host")
     WEBSOCKETS = True
-    PULLS_UNDER_ALLOWLIST = False
 
     @classmethod
     def supports_network_policy(cls, policy: NetworkPolicy) -> bool:

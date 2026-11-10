@@ -132,7 +132,7 @@ class MultiEnv(Env):
         self.browser_envs = list(browser_envs) if browser_envs is not None else None
         problems = browser_problems(self.browser_envs or [])
         if not problems:
-            problems = self._name_problems(self._browser_computer(self.browser_envs[0] if self.browser_envs else None))
+            problems = self._name_problems(self.browser_envs[0] if self.browser_envs else None)
         if problems:
             raise ValueError(f"multi env {id!r}: {'; '.join(problems)}")
         self._sandbox = None
@@ -148,15 +148,22 @@ class MultiEnv(Env):
         """Its computers, each on a sandbox of its own, which the gateway fronts by its name: after a deploy, that deploy's."""
         return self._computers.envs
 
-    def _name_problems(self, browser: Optional[ComputerEnv]) -> list[str]:
-        """What's wrong with the names of its computers, and ``browser``, its website browser when that is a computer,
-        beside its other child envs' (``_multi_computers.name_problems``, ``app_name_problems``)."""
-        computer_envs = [*self.computer_envs, *([browser] if browser is not None else [])]
-        servers = [env.environment_name for env in (*self.mcp_server_envs, *self.website_envs)]
+    def _name_problems(self, browser: Optional[Env]) -> list[str]:
+        """What's wrong with the names of its computers and ``browser``, its website browser, beside its other child
+        envs' (``_multi_computers.name_problems``, ``app_name_problems``): a browser computer named as a computer is,
+        and an MCP server browser as an MCP server, which no other MCP server may name either."""
+        computer = self._browser_computer(browser)
+        server = browser if isinstance(browser, MCPServerEnv) else None
+        computer_envs = [*self.computer_envs, *([computer] if computer is not None else [])]
+        mcp_servers = [env.environment_name for env in (*self.mcp_server_envs, *([server] if server else []))]
+        websites = [env.environment_name for env in self.website_envs]
+        servers = [*mcp_servers, *websites]
         computers = [env.environment_name for env in computer_envs]
-        return [*_multi_computers.name_problems(computers,
-                                                mcp_servers=[env.environment_name for env in self.mcp_server_envs],
-                                                websites=[env.environment_name for env in self.website_envs]),
+        problems = []
+        if server is not None and mcp_servers.count(server.environment_name) > 1:
+            problems.append(f"website browser {server.environment_name!r} has the name of another of its MCP servers, "
+                            "and the gateway runs each as a container of that name")
+        return [*problems, *_multi_computers.name_problems(computers, mcp_servers=mcp_servers, websites=websites),
                 *_multi_computers.app_name_problems({env.environment_name: [app.environment_name
                                                                             for app in env.composed_apps()
                                                                             if app is not env]  # an app deployed alone
@@ -381,7 +388,7 @@ class MultiEnv(Env):
         names = list(dict.fromkeys(env.environment_name for env in (*self.mcp_server_envs, *self.website_envs,
                                                                     *computers.values())))
         # A browser browser_envs names had its names checked at put; the run's is checked here.
-        problems = self._name_problems(computer) if computer is not None and self.browser_envs is None else []
+        problems = self._name_problems(browser) if browser is not None and self.browser_envs is None else []
         for name, entry in child_envs.items():
             extra = sorted(map(str, set(entry) - set(CHILD_ENV_OPTIONS))) if isinstance(entry, dict) else []
             if name not in names:
