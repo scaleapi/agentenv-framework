@@ -45,8 +45,8 @@ SHIPPED = Path(agent_env.__file__).parent / "examples" / "hello"
 
 @pytest.fixture
 def bundle(monkeypatch, tmp_path):
-    """A copy of the shipped hello, with an eval. It isn't called hello, since a folder wins over an installed
-    bundle of the same name. Whatever ran, no sandbox work folder may be left behind."""
+    """A copy of the shipped hello, with an eval. It isn't called hello, since a folder named like an installed
+    bundle is refused. Whatever ran, no sandbox work folder may be left behind."""
     sandboxes = tmp_path / "sandboxes"
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path))
