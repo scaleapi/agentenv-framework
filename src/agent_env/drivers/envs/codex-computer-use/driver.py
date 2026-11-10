@@ -1,17 +1,23 @@
-"""OpenAI's Codex Computer Use as a computer driver on macOS: the ChatGPT app's ``unified-computer-use`` plugin, whose
-MCP server, ``cua_repl``, runs the JavaScript an agent sends against OpenAI's ``cua`` API, which reads apps'
-accessibility trees and acts on them in the background through the plugin's helper app. The pinned app is unpacked
-beside the driver and never run, so it never updates itself; the driver starts ``cua_repl`` as the app would, on the
-app's own Node with the environment the app builds, one server for each agent session, since the REPL keeps its
-bindings between calls, closed once it's left unused or past the most kept, since nothing says when a session ends.
-Agents get the server's instructions and its ``js`` and ``js_reset`` tools as pinned (``mcp.json``), ``js`` marked as
-acting on apps where Codex marks it read-only; the two it serves only the ChatGPT app are hidden. Codex asks its host
-before each action on an app, and the driver answers: it approves the apps the ``allowed_apps`` setting names, by name
-or bundle identifier, or every app when it names none, and nothing else, recording the computer's audio included. Each
-call runs under Codex's own sandbox, read-only but for Codex's folder and the temporary ones and with no network, unless
-the ``js_sandbox`` setting is off; the apps it drives are outside it. No ChatGPT sign-in is needed. The computer/v1
-operations are MacOSDriver's; this process's Python is granted Accessibility, Post Event and Screen Recording, as the
-helper app is. It needs ``agentenv-framework-protocol[computer,macos]`` and the pinned ChatGPT app."""
+"""OpenAI's Codex Computer Use as a computer driver on macOS and on Windows: the ChatGPT app's ``unified-computer-use``
+plugin, whose MCP server, ``cua_repl``, runs the JavaScript an agent sends against OpenAI's ``cua`` API, which reads
+apps' accessibility trees and acts on them through the plugin's service: in the background on macOS, and on Windows in
+the foreground, where OpenAI runs it only on the active desktop. The pinned app is unpacked beside the driver and never
+run, so it never updates itself; the driver starts ``cua_repl`` as the app would, on the app's own Node with the
+environment the app builds, one server for each agent session, since the REPL keeps its bindings between calls, closed
+once it's left unused or past the most kept, since nothing says when a session ends. Agents get the server's
+instructions and its ``js`` and ``js_reset`` tools as pinned for the OS (``mcp.json``, ``mcp-windows.json``), ``js``
+marked as acting on apps where Codex marks it read-only and its input schema one object where Codex's is a choice of
+several, which Anthropic's API refuses; the two it serves only the ChatGPT app are hidden. Codex asks its host before
+each action on an app, and the driver answers: it approves the apps the ``allowed_apps`` setting names, by name or
+identifier as the request names it or by the name it shows (on Windows the shown name, since an app run from a renamed
+Python is named as Python), or every app when it names none, and nothing else, recording the computer's audio
+included. On macOS each call runs under Codex's own sandbox, read-only but for Codex's folder and the temporary ones
+and with no network, unless the ``js_sandbox`` setting is off; the apps it drives are outside it. On Windows that
+sandbox refuses to start Codex Computer Use's service, so the JavaScript runs unsandboxed there unless the setting
+turns it on. No ChatGPT sign-in is needed. The computer/v1 operations are MacOSDriver's on macOS, where this process's
+Python is granted Accessibility, Post Event and Screen Recording as the plugin's service is, and WindowsDriver's on
+Windows. It needs ``agentenv-framework-protocol`` with ``[computer,macos]`` on macOS or ``[computer,windows]`` on
+Windows, and the pinned ChatGPT app."""
 from __future__ import annotations
 
 import asyncio
@@ -22,9 +28,10 @@ import json
 import logging
 import os
 import re
+import sys
 import time
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable, NamedTuple
 
 from mcp import ClientSession, McpError, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -32,35 +39,84 @@ from mcp.shared.context import RequestContext
 from mcp.types import (CONNECTION_CLOSED, CallToolResult, ElicitRequestParams, ElicitResult, InitializeResult,
                        TextContent)
 
-from agentenv_protocol import EnvironmentTool, ForwardedTool, ToolContext, server_instructions
-from agentenv_protocol.computer import ComputerSettings, MacOSDriver, ReadyCheck, computer_driver
+from agentenv_protocol import EnvironmentTool, ForwardedTool, ToolContext, computer, server_instructions
+from agentenv_protocol.computer import ComputerSettings, ReadyCheck, computer_driver
 
 logger = logging.getLogger(__name__)
 
 HERE = Path(__file__).resolve().parent
-#: The pinned ChatGPT app, as install.sh unpacks it, and where in it what starts Codex's REPL is.
-VERSION = "26.930.51102"
-APP = HERE / "ChatGPT.app"
-CUA_NODE = Path("Contents", "Resources", "cua_node")
-NODE = CUA_NODE / "bin" / "node"
-NODE_REPL = CUA_NODE / "bin" / "node_repl"
-NODE_MODULES = CUA_NODE / "lib" / "node_modules"
-LAUNCHER = NODE_MODULES / "@oai" / "cua-repl" / "bin" / "cua-repl.mjs"
-CODEX_CLI = Path("Contents", "Resources", "codex-cli", "CodexCLI.app", "Contents", "MacOS", "codex")
-#: Codex Computer Use's helper app, where install.sh copies it and the layer's grant names it.
+#: Codex Computer Use's service on macOS, the plugin's helper app, where install.sh copies it and the layer's grant names
+#: it; on Windows the plugin's executable, which needs no grant.
 HELPER = Path("/opt/agentenv/codex-computer-use/Codex Computer Use.app")
-#: The sha256 of each executable at the pinned version, by its path under the app or the helper.
-EXECUTABLES = {
-    "ChatGPT.app/Contents/MacOS/ChatGPT": "1f2989ac3d702e48c740fe4c54b1b6279f9e48e0e4c0ead7d4501464e2ea976e",
-    "ChatGPT.app/Contents/Resources/cua_node/bin/node":
-        "59f603e9e6d81c8b6bdaf6bb35b1990e7b8048762ca07a524ac7e87ade6fea15",
-    "ChatGPT.app/Contents/Resources/cua_node/bin/node_repl":
-        "bbd1640851593a724e2a6bc558f3a16078f40b09d4fe76f2f6d89f8b895eb5ed",
-    "Codex Computer Use.app/Contents/MacOS/SkyComputerUseService":
-        "fa5b5d685f550af82902cff1a345db558a1da3eb526cf78cd4659fa0dcde01a5",
+
+
+class _OS(NamedTuple):
+    """What differs by OS: the protocol driver the computer/v1 operations run on; the pinned ChatGPT app's version, the
+    folder the install unpacks it into and its resources there; under them, the Node that starts Codex's REPL, its
+    ``node_repl``, its modules, the Codex CLI the app names to it, and Codex Computer Use's service, None for the helper
+    app; the sha256 of each executable at the pinned version, by its path under the driver's folder or the helper; what
+    of the driver's environment ``cua_repl`` gets beside the session user's own and the PATH it runs, and launches apps,
+    with, ``{SystemRoot}`` filled in from the environment, its list separator, how the app names the OS to Codex, the
+    manifest pinned there; whether Codex's sandbox can hold the JavaScript, which on Windows refuses to start Codex
+    Computer Use's own service; and the JavaScript the readiness check runs, one that starts that service."""
+    driver: str
+    version: str
+    app: Path
+    resources: str
+    node: str
+    node_repl: str
+    node_modules: str
+    codex_cli: str
+    service: str | None
+    executables: dict[str, str]
+    kept: tuple[str, ...]
+    path: str
+    separator: str
+    use_case: str
+    manifest: str
+    sandboxed: bool
+    probe: str
+
+
+OSES = {
+    "macos": _OS(
+        "MacOSDriver", "26.930.51102", HERE / "ChatGPT.app", "Contents/Resources",
+        "cua_node/bin/node", "cua_node/bin/node_repl", "cua_node/lib/node_modules",
+        "codex-cli/CodexCLI.app/Contents/MacOS/codex", None,
+        {"ChatGPT.app/Contents/MacOS/ChatGPT": "1f2989ac3d702e48c740fe4c54b1b6279f9e48e0e4c0ead7d4501464e2ea976e",
+         "ChatGPT.app/Contents/Resources/cua_node/bin/node":
+             "59f603e9e6d81c8b6bdaf6bb35b1990e7b8048762ca07a524ac7e87ade6fea15",
+         "ChatGPT.app/Contents/Resources/cua_node/bin/node_repl":
+             "bbd1640851593a724e2a6bc558f3a16078f40b09d4fe76f2f6d89f8b895eb5ed",
+         "Codex Computer Use.app/Contents/MacOS/SkyComputerUseService":
+             "fa5b5d685f550af82902cff1a345db558a1da3eb526cf78cd4659fa0dcde01a5"},
+        ("HOME", "USER", "LOGNAME", "TMPDIR", "LANG"), "/usr/bin:/bin:/usr/sbin:/sbin", ":",
+        "Control desktop apps on macOS through Computer Use.", "mcp.json", True,
+        "await cua.getState({ emit: false }); nodeRepl.write('ready');"),
+    "windows": _OS(
+        "WindowsDriver", "26.1103.7773.0", HERE / "ChatGPT", "resources",
+        "cua_node/bin/node.exe", "cua_node/bin/node_repl.exe", "cua_node/bin/node_modules", "codex.exe",
+        "cua_node/bin/node_modules/@oai/sky/bin/windows/codex-computer-use.exe",
+        {"ChatGPT/resources/cua_node/bin/node.exe": "10bc02b8078c896ad9f8cd8b6eed622e8d17a9425403159e98f5b896e26f933c",
+         "ChatGPT/resources/cua_node/bin/node_repl.exe":
+             "182c15f8994f20c1a5d8fe631f73b1f2ae3ae1a840e8e1c14d9b35231f3942b3",
+         "ChatGPT/resources/cua_node/bin/node_modules/@oai/sky/bin/windows/codex-computer-use.exe":
+             "0ebb47bfaaf729e22bcdb08dcfce1419eefeda80afaefed3edbc088c24a2e778",
+         "ChatGPT/resources/cua_node/bin/node_modules/@oai/sky/bin/windows/swift/x64/codex-computer-use-swift.exe":
+             "d43d0ff78567b212070efc8f62155b2226ef9305ec030c0c778c4aa4cee55020"},
+        ("USERNAME", "USERDOMAIN", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP",
+         "SystemRoot", "SystemDrive", "windir", "ComSpec", "PATHEXT", "ProgramData", "ProgramFiles",
+         "ProgramFiles(x86)", "ProgramW6432", "CommonProgramFiles", "PUBLIC", "ALLUSERSPROFILE", "COMPUTERNAME"),
+        r"{SystemRoot}\System32;{SystemRoot};{SystemRoot}\System32\Wbem;{SystemRoot}\System32\WindowsPowerShell\v1.0",
+        ";", "Control desktop apps on Windows through Computer Use.", "mcp-windows.json", False,
+        "await cua.getState({ emit: false }); await cua.listWindows(); nodeRepl.write('ready');"),
 }
+OS_NAME = "windows" if sys.platform == "win32" else "macos"
+OS = OSES[OS_NAME]
+OSDriver = getattr(computer, OS.driver)
+VERSION = OS.version
 #: What ``cua_repl`` says at connect and lists at the pinned version: its instructions and its tools.
-MANIFEST = HERE / "mcp.json"
+MANIFEST = HERE / OS.manifest
 #: The tools agents get; the others are the ChatGPT app's own.
 FORWARDED = ("js", "js_reset")
 #: The hints agents get where Codex's own undersell a tool: ``js`` acts on apps, and through them on anything.
@@ -70,12 +126,6 @@ ANNOTATIONS = {"js": {"readOnlyHint": False, "destructiveHint": True, "openWorld
 IDLE_S, MAX_REPLS, SWEEP_S = 1800, 8, 60
 #: How long a closed REPL's server has to end before it's cancelled.
 CLOSE_TIMEOUT_S = 10
-#: What of the driver's environment ``cua_repl`` gets: the session user's own; none of a deploy's values.
-KEPT = ("HOME", "USER", "LOGNAME", "TMPDIR", "LANG")
-#: The PATH it runs, and launches apps, with.
-PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
-#: The JavaScript the readiness check runs: an inventory, which needs no app's approval.
-PROBE = "await cua.getState({ emit: false }); nodeRepl.write('ready');"
 #: The message of the approval Codex asks of its host before it acts on an app, which names it as the request's
 #: metadata does.
 APPROVAL =re.compile(r'Allow (?:Computer Use|Codex) to use "?(?P<app>[^"?]+)"?\?')
@@ -84,12 +134,16 @@ SANDBOX_KEY = "codex/sandbox-state-meta"
 
 
 @computer_driver(name="codex-computer-use",
-                 supports=[{"os": {"type": "macos", "display": ["aqua"]}, "arch": ["arm64"]}])
-class CodexComputerUse(MacOSDriver):
+                 supports=[{"os": {"type": "macos", "display": ["aqua"]}, "arch": ["arm64"]},
+                           {"os": {"type": "windows", "display": ["dwm"]}, "arch": ["amd64"]}])
+class CodexComputerUse(OSDriver):
     class Settings(ComputerSettings):
-        #: The apps Codex may act on, by name or bundle identifier, case aside; None for every app.
+        #: The apps Codex may act on, by name or identifier, case aside; None for every app. One the approval request
+        #: names matches, so on Windows, where it names the program an app runs from (``pythonw.exe`` for any app run
+        #: from a copy of Python), name the app as Codex shows it, never a program several apps share.
         allowed_apps: list[str] | None = None
-        js_sandbox: bool = True
+        #: Whether Codex's sandbox holds the JavaScript; None for the OS's way, on macOS and off on Windows.
+        js_sandbox: bool | None = None
 
     def __init__(self) -> None:
         super().__init__()
@@ -102,7 +156,7 @@ class CodexComputerUse(MacOSDriver):
 
     def forwarded_tools(self) -> list[ForwardedTool]:
         return [ForwardedTool(EnvironmentTool(name=t["name"], description=t["description"],
-                                              inputSchema=t["inputSchema"]),
+                                              inputSchema=_one_object(t["inputSchema"])),
                               functools.partial(self._forward, t["name"]),
                               {**(t.get("annotations") or {}), **ANNOTATIONS.get(t["name"], {})})
                 for t in _manifest()["tools"] if t["name"] in FORWARDED]
@@ -113,7 +167,7 @@ class CodexComputerUse(MacOSDriver):
 
     async def ready_checks(self) -> list[ReadyCheck]:
         """The pinned executables, the tools ``cua_repl`` lists and that it answers, checked until they pass once, and
-        MacOSDriver's TCC permissions every time."""
+        the protocol driver's own checks every time."""
         if self._pinned is None or not all(check.ok for check in self._pinned):
             self._pinned = await self._pinned_checks()
         return [*self._pinned, *await super().ready_checks()]
@@ -156,8 +210,8 @@ class CodexComputerUse(MacOSDriver):
     async def _server(self) -> AsyncIterator[tuple[ClientSession, InitializeResult]]:
         """``cua_repl`` connected and initialized, with what it said at connect, its approval requests answered; it
         ends with the block."""
-        server = StdioServerParameters(command=str(APP / NODE), args=[str(APP / LAUNCHER)], env=_environment(),
-                                       cwd=str(_workspace()))
+        server = StdioServerParameters(command=str(_resources() / OS.node), args=[str(_launcher())],
+                                       env=_environment(), cwd=str(_workspace()))
         async with (stdio_client(server) as (read, write),
                     ClientSession(read, write, elicitation_callback=self._approve) as session):
             yield session, await session.initialize()
@@ -177,12 +231,13 @@ class CodexComputerUse(MacOSDriver):
 
     def _sandbox(self) -> dict:
         """The metadata that sets the sandbox Codex runs the call's JavaScript in."""
-        profile = _read_only() if self.settings.js_sandbox else {"type": "disabled"}
+        sandboxed = OS.sandboxed if self.settings.js_sandbox is None else self.settings.js_sandbox
+        profile = _read_only() if sandboxed else {"type": "disabled"}
         return {SANDBOX_KEY: {"sandboxCwd": _workspace().as_uri(), "permissionProfile": profile}}
 
     async def _pinned_checks(self) -> list[ReadyCheck]:
         digests = await asyncio.to_thread(_digests)
-        differ = sorted(path for path, digest in digests.items() if digest != EXECUTABLES[path])
+        differ = sorted(path for path, digest in digests.items() if digest != OS.executables[path])
         checks = [ReadyCheck("Codex Computer Use", not differ, f"ChatGPT {VERSION}, as pinned" if not differ else
                              f"these differ from the pinned ChatGPT {VERSION}: {', '.join(differ)}")]
         if differ:
@@ -190,7 +245,7 @@ class CodexComputerUse(MacOSDriver):
         try:
             async with self._server() as (session, initialized):
                 listed = (await session.list_tools()).tools
-                probed = await session.call_tool("js", {"code": PROBE}, meta=self._sandbox())
+                probed = await session.call_tool("js", {"code": OS.probe}, meta=self._sandbox())
         except Exception as e:
             return [*checks, ReadyCheck("Codex tools", False, f"cua_repl didn't answer: {type(e).__name__}: {e}")]
         running = {t.name: t.model_dump(mode="json", exclude_none=True) for t in listed}
@@ -203,7 +258,8 @@ class CodexComputerUse(MacOSDriver):
                 ReadyCheck("Codex tools", not changed, f"its instructions and {len(running)} tools, as pinned"
                            if not changed else f"these differ from {MANIFEST.name}: {', '.join(changed)}"),
                 ReadyCheck("Codex answers", not probed.isError and "ready" in answer,
-                           "it read the computer's apps" if not probed.isError else f"cua.getState() failed: {answer}")]
+                           "it read the computer's apps" if not probed.isError else
+                           f"its probe of the computer's apps failed: {answer}")]
 
 
 class _Repl:
@@ -294,9 +350,21 @@ def _manifest() -> dict:
     return json.loads(MANIFEST.read_text())
 
 
+def _one_object(schema: dict) -> dict:
+    """A tool's input schema as agents get it: Codex's own, or where that is a choice of objects at the top, which
+    Anthropic's API refuses, one object with every choice's properties, requiring what all of them require."""
+    choices = schema.get("oneOf")
+    if not choices:
+        return schema
+    required = set.intersection(*(set(choice.get("required") or ()) for choice in choices))
+    properties = {name: spec for choice in choices for name, spec in (choice.get("properties") or {}).items()}
+    return {**{key: value for key, value in schema.items() if key != "oneOf"}, "type": "object",
+            "properties": {**properties, **(schema.get("properties") or {})}, "required": sorted(required)}
+
+
 def _app_names(message: str, meta: dict) -> set[str]:
-    """The app an approval request is for, case aside: its bundle identifier and name as the request's metadata gives
-    them, and the name its message quotes; none for a request that isn't for an app."""
+    """The app an approval request is for, case aside: its identifier and name as the request's metadata gives them,
+    and the name its message quotes; none for a request that isn't for an app."""
     shown = [field.get("value") for field in meta.get("tool_params_display") or [] if field.get("name") == "app"]
     named = APPROVAL.fullmatch(message.strip())
     names = [(meta.get("tool_params") or {}).get("app"), *shown, named and named["app"]]
@@ -324,29 +392,37 @@ def _workspace() -> Path:
     return folder
 
 
+def _resources() -> Path:
+    return OS.app / OS.resources
+
+
+def _launcher() -> Path:
+    return _resources() / OS.node_modules / "@oai" / "cua-repl" / "bin" / "cua-repl.mjs"
+
+
 def _environment() -> dict[str, str]:
     """``cua_repl``'s environment, as the ChatGPT app builds it for the plugin, with the computer surface alone."""
-    codex, modules = str(_codex_home()), str(APP / NODE_MODULES)
-    return {**{name: os.environ[name] for name in KEPT if name in os.environ}, "PATH": PATH,
+    codex, modules = str(_codex_home()), str(_resources() / OS.node_modules)
+    return {**{name: os.environ[name] for name in OS.kept if name in os.environ},
+            "PATH": OS.path.format_map(os.environ),
             "CODEX_HOME": codex,
-            "CODEX_CLI_PATH": str(APP / CODEX_CLI),
+            "CODEX_CLI_PATH": str(_resources() / OS.codex_cli),
             "CUA_REPL_ENABLED_SURFACES": "computer",
-            "CUA_REPL_NODE_REPL_PATH": str(APP / NODE_REPL),
-            "NODE_REPL_INSTRUCTIONS_USE_CASE_COMPUTER_USE": "Control desktop apps on macOS through Computer Use.",
+            "CUA_REPL_NODE_REPL_PATH": str(_resources() / OS.node_repl),
+            "NODE_REPL_INSTRUCTIONS_USE_CASE_COMPUTER_USE": OS.use_case,
             "NODE_REPL_NATIVE_PIPE_CONNECT_TIMEOUT_MS": "1000",
             "NODE_REPL_NODE_MODULE_DIRS": modules,
-            "NODE_REPL_NODE_PATH": str(APP / NODE),
-            "NODE_REPL_TRUSTED_CODE_PATHS": f"{codex}:{modules}",
+            "NODE_REPL_NODE_PATH": str(_resources() / OS.node),
+            "NODE_REPL_TRUSTED_CODE_PATHS": f"{codex}{OS.separator}{modules}",
             "NODE_REPL_TRUSTED_SERVICES": json.dumps({"sky": "@oai/sky/service"}),
-            "SKY_CUA_SERVICE_PATH": str(HELPER)}
+            "SKY_CUA_SERVICE_PATH": str(HELPER if OS.service is None else _resources() / OS.service)}
 
 
 def _digests() -> dict[str, str | None]:
     """Each pinned executable's sha256, None for one that isn't there."""
-    roots = {"ChatGPT.app": APP, "Codex Computer Use.app": HELPER}
     found = {}
-    for path in EXECUTABLES:
+    for path in OS.executables:
         root, _, rest = path.partition("/")
-        file = roots[root] / rest
+        file = HELPER / rest if root == HELPER.name else OS.app.parent / path
         found[path] = hashlib.sha256(file.read_bytes()).hexdigest() if file.is_file() else None
     return found

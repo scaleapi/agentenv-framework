@@ -377,11 +377,14 @@ async def test_container_mode_constructs_internal_mcp_servers_url_format(monkeyp
                 ttl_seconds=60,
                 disk_size_gb=10,
                 mcp_server_name="crm",
+                control_token="t0k",
             )
 
     # Last create_container call is the gateway. Inspect its env var.
     gateway_call = create_calls[-1]
     env = gateway_call["env"]
+    assert [c["image_name"] for c in create_calls if "AGENTENV_CONTROL_TOKEN" in (c.get("env") or {})] == ["agent-gateway"]
+    assert (env["AGENTENV_CONTROL_TOKEN"], result.control_token) == ("t0k", "t0k")
     assert "INTERNAL_MCP_SERVERS" in env
     spec = env["INTERNAL_MCP_SERVERS"]
     # Container mode puts every container on the private network, and the gateway reaches each server there.
@@ -1173,6 +1176,7 @@ def _compose_with_sidecar():
         gateway_image="agent-gateway",
         gateway_port=18765,
         sidecars=[_sidecar_with_secret()],
+        control_token="ctl-token-value",
         # Explicit ServiceDBConfig so rendering never resolves the default-db env
         # from the store (which would hit the network — blocked in unit tests).
         state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
@@ -1214,14 +1218,29 @@ def test_no_sidecars_renders_no_extra_service():
     assert "  relay:" not in compose
 
 
+def test_compose_hands_the_control_token_to_the_gateway_alone():
+    from agent_env.env.envs.service_db import ServiceDBConfig
+
+    services = yaml.safe_load(_compose_with_sidecar())["services"]
+    holders = {name: [item for item in service.get("environment", []) if item.startswith("AGENTENV_CONTROL_TOKEN=")]
+               for name, service in services.items()}
+    assert {name: items for name, items in holders.items() if items} == {
+        GATEWAY_SERVICE_NAME: ["AGENTENV_CONTROL_TOKEN=ctl-token-value"]}
+    assert "AGENTENV_CONTROL_TOKEN" not in EnvironmentGatewayProvider().create_docker_compose(
+        mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")], gateway_image="agent-gateway",
+        state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
+        state_instance=LocalPostgresStateProvider.default_instance())
+
+
 def test_redact_compose_secrets_masks_only_secret_env_lines():
     """The logged compose masks *SECRET/PASSWORD/TOKEN env values but leaves everything else
     (image refs, ports, non-secret env, DATABASE_URL) intact."""
     compose = _compose_with_sidecar()
     redacted = _redact_compose_secrets(compose)
     # secret value gone, key preserved
-    assert "s3cr3t-token-value" not in redacted
+    assert "s3cr3t-token-value" not in redacted and "ctl-token-value" not in redacted
     assert "      - UPSTREAM_CLIENT_SECRET=***" in redacted
+    assert "      - AGENTENV_CONTROL_TOKEN=***" in redacted
     # non-secret lines untouched
     assert "      - UPSTREAM_URL=https://upstream.sandbox.example.com/abc" in redacted
     assert "    image: ecr/relay:1.0.4" in redacted
@@ -2016,7 +2035,7 @@ async def test_create_gateway_hands_the_deploy_path_every_argument(attribution, 
     gp, provider = EnvironmentGatewayProvider(), _vm_provider()
     args = dict(mcp_servers=[MagicMock()], mcp_server_images=[MagicMock()], gateway_port=18999, website_configs=[MagicMock()],
                 website_images=[MagicMock()], gateway_mode=GatewayMode.CONSISTENT, ttl_seconds=61, disk_size_gb=11, cpu=1.5,
-                memory_mb=3072, existing_sandbox=MagicMock(), sidecars=[MagicMock()], mcp_server_name="crm")
+                memory_mb=3072, existing_sandbox=MagicMock(), sidecars=[MagicMock()], mcp_server_name="crm", control_token="t0k")
     with patch.object(gp, "_deploy_via_vm", AsyncMock(return_value=_probed())) as vm, \
          patch.object(env_gateway_provider, "_tool_names", AsyncMock(return_value=set())):
         await gp.create_gateway(sandbox_provider=provider, env_id="crm-env", attribution=attribution, **args)
@@ -2067,7 +2086,9 @@ async def test_deploy_returns_the_gateway_record_for_the_env(caplog):
         env_id="crm-env", env_version=3, gateway_url="https://vm.example", mcp_url="https://vm.example/mcp", db_web_url=None,
         sandbox_id="vm-1", sandbox_type="modal_vm", sandbox_ids={}, db_mcp_url=None,
         environment_card_url="https://vm.example/.well-known/agent-env.json", environment_card=card,
-        environment_card_read_at_utc=record.environment_card_read_at_utc, gateway_mode="consistent", env_state_instance_ids=["st-ext"]))
+        environment_card_read_at_utc=record.environment_card_read_at_utc, gateway_mode="consistent", env_state_instance_ids=["st-ext"],
+        control_token=record.control_token))
+    assert len(record.control_token) >= 43 and compose.call_args.kwargs["control_token"] == record.control_token
     assert record.environment_card_read_at_utc and record.instance_id is None  # unregistered: the env registers it
     assert (record.mcp_url, record.mcp_server_name, record.env_provider_type) == ("https://vm.example/mcp", "env1234", "gateway")
     messages = [r.getMessage() for r in caplog.records if r.getMessage().startswith(("env_deploy_provider_attempt ", "env_deploy_tools_probe "))]

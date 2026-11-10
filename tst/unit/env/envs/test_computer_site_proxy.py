@@ -464,8 +464,8 @@ async def test_a_live_host_that_doesnt_answer_in_time_is_a_502_and_logged(tmp_pa
 
     assert answer[0] == "HTTP/1.1 502 Bad Gateway" and answer[1]["x-agentenv-site-proxy"] == "failed" and took < 1.2
     [failed] = _logged(capsys.readouterr().err, "failed")
-    assert failed == {"method": "CONNECT", "host": "github.com", "port": 443, "reason": "no answer",
-                      "error": "TimeoutError"}
+    assert failed.pop("started").endswith("Z") and failed == {
+        "method": "CONNECT", "host": "github.com", "port": 443, "reason": "no answer", "error": "TimeoutError"}
     assert answer[2] == b"github.com:443 didn't answer\n"
 
 
@@ -510,8 +510,8 @@ async def test_both_proxies_log_a_connection_and_each_way_one_fails_in_the_same_
 
     assert sorted(shape(stand_in_log)) == sorted(shape(shared_log)) == [
         ("connection", ["address", "bytes_received", "bytes_sent", "duration_s", "host", "port", "started"], None),
-        ("failed", ["error", "host", "method", "port", "reason"], "doesn't resolve"),
-        ("failed", ["error", "host", "method", "port", "reason"], "no answer")]
+        ("failed", ["error", "host", "method", "port", "reason", "started"], "doesn't resolve"),
+        ("failed", ["error", "host", "method", "port", "reason", "started"], "no answer")]
 
 
 @pytest.mark.asyncio

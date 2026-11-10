@@ -7,7 +7,11 @@ server only it uses, and keeps its name, `chromium`.
 build Playwright 1.64.1 pins, fetched by sha256 when a computer env that lists it is put and unpacked into
 `/opt/agentenv/apps/chromium/` by its install step. It's a website browser
 (`agentenv_protocol.website_browser.WebsiteBrowserEnvironment`): agentenv launches it on a debugging pipe with its own
-flags, and writes managed policies to `/etc/opt/chrome_for_testing/policies/managed/` for unattended use. It runs
+flags, and writes managed policies to `/etc/opt/chrome_for_testing/policies/managed/` for unattended use. Flags and policies of its own
+(`QUIET_FLAGS`, `DISABLED_FEATURES` and `QUIET_POLICIES` in `chromium.py`, found against this build, to check again
+when its version moves) stop the requests Chrome makes of its own: component and Safe Browsing updates, the network
+time, a spellcheck dictionary, the AI Mode check, autofill predictions and its search engine's preconnect. Its proxy
+sees only its pages' requests, but for one Google account check at launch. It runs
 without Chromium's sandbox, which a container can't give it. Its env.toml spells out its settings and their defaults
 under `[settings]`: `start_urls`, opened at boot in order, the first tab active, each waited on to load; `window`,
 alone only; `locale`; `time_zone`; and
