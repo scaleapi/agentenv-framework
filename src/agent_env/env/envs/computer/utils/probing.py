@@ -32,9 +32,6 @@ if TYPE_CHECKING:
 _PROBE_TTL_S = 1800
 #: How long the probe at full may take on a computer that booted: about ten seconds on a healthy one.
 _PROBE_TIMEOUT_S = 120
-#: Base settings a probe boots with, where the base declares them: a browser alone reaches its computer's own loopback
-#: only with ``own_loopback``, and the probe serves its conformance fixture there. A probe runs no agent.
-_PROBE_SETTINGS = {"own_loopback": True}
 #: How many probes, each on a fresh boot, a build gets when each ends with the connection to its driver dropped, refused
 #: or timed out, which says nothing of the build, before the last one's result is recorded.
 _PROBE_ATTEMPTS = 3
@@ -155,16 +152,13 @@ def _attempted(attempts: list[dict], result: dict) -> dict:
 async def _probe(links: list[SandboxProvider], env: ComputerEnv, driver: ComputerDriverEnv, image: str,
                  form: str = "container") -> tuple[ProbeReport, dict, str]:
     """``image``, of ``form``, booted at the env's settings and its apps' defaults with a control token of its own, as
-    a deploy with no ``env_params`` boots it, but for the base's ``_PROBE_SETTINGS``, on the first of ``links`` that
-    boots it, probed at ``full`` with that token within ``_PROBE_TIMEOUT_S`` and torn down; the report, the driver's
-    card and the provider's name. Raises Unprobed, booting nothing, when a setting it boots with doesn't resolve
-    here."""
+    a deploy with no ``env_params`` boots it, on the first of ``links`` that boots it, probed at ``full`` with that
+    token within ``_PROBE_TIMEOUT_S`` and torn down; the report, the driver's card and the provider's name. Raises
+    Unprobed, booting nothing, when a setting it boots with doesn't resolve here."""
     token = boot.control_token()
-    values = {**env.computer_values(), **{name: value for name, value in _PROBE_SETTINGS.items()
-                                          if name in env.computer.config}}
     try:
         environment = {
-            **boot.settings_environment(env.computer, values, environment_name=env.computer_name),
+            **boot.settings_environment(env.computer, env.computer_values(), environment_name=env.computer_name),
             **boot.app_settings_environment(env.composed_apps(), env.app_defaults(), platform_of(env.computer.os))}
     except ConfigError as e:  # an env: or secret: reference that doesn't resolve here, or no secret store to resolve it
         raise Unprobed(f"a setting it boots with didn't resolve here: {e}") from e

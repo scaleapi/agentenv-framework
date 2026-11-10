@@ -31,8 +31,8 @@ from agent_env.providers.sandbox_providers.local_docker.provider import host_url
 from agent_env.store.routing import namespace_routing
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
-from tst.integration.computer.browser_computer_test import (DATA_PAGE, OWN_LOOPBACK, SERVE_SITE, SERVE_START_S, SITE,
-                                                            _clients, _kill, _ready)
+from tst.integration.computer.browser_computer_test import (DATA_PAGE, SERVE_SITE, SERVE_START_S, SITE, _clients,
+                                                            _kill, _ready)
 from tst.integration.computer.browser_computer_test import _cdp as _driver_cdp
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
@@ -58,7 +58,7 @@ async def test_playwright_and_puppeteer_reach_the_browser_through_the_gateway_an
         browser_computer, cdp_clients, gateway_image):
     with namespace_routing():
         deployed = await Env.get(browser_computer.id).deploy(
-            env_params={**OWN_LOOPBACK, "app_settings": {"chromium": {"start_urls": [SITE]}}})
+            env_params={"app_settings": {"chromium": {"start_urls": [SITE]}}})
         context = TaskStepContext(deployed_envs=[deployed])
         try:
             serving = asyncio.ensure_future(inside.run(deployed, ["python3", "-c", SERVE_SITE, "900"], timeout_s=960))
@@ -93,7 +93,7 @@ async def test_a_gateway_restart_or_a_data_reset_closes_a_live_connection_with_a
         browser_computer, gateway_image):
     with namespace_routing():
         deployed = await Env.get(browser_computer.id).deploy(
-            env_params={**OWN_LOOPBACK, "app_settings": {"chromium": {"start_urls": [DATA_PAGE]}}})
+            env_params={"app_settings": {"chromium": {"start_urls": [DATA_PAGE]}}})
         context = TaskStepContext(deployed_envs=[deployed])
         try:
             async with _gateway(gateway_image, deployed) as (gateway, container):
@@ -126,7 +126,7 @@ async def test_behind_the_gateway_a_browser_down_at_first_is_found_once_up_and_a
         browser_computer, gateway_image):
     with namespace_routing():
         deployed = await Env.get(browser_computer.id).deploy(
-            env_params={**OWN_LOOPBACK, "app_settings": {"chromium": {"start_urls": [DATA_PAGE]}}})
+            env_params={"app_settings": {"chromium": {"start_urls": [DATA_PAGE]}}})
         context = TaskStepContext(deployed_envs=[deployed])
         try:
             token = (await _driver_cdp(deployed, "ada"))["http_url"].split("/cdp/")[1].strip("/")

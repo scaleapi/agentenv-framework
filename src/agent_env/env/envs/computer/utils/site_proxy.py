@@ -85,7 +85,6 @@ NODE_GET = ("require('https').get(process.argv[1], r => { console.log(r.statusCo
 RESTART_DELAY_S = 1.0
 SERVE_USER = "nobody"
 FAILED = (("X-Agentenv-Site-Proxy", "failed"),)
-NAT64 = ipaddress.ip_network("64:ff9b::/96")
 
 
 class BadRequest(Exception):
@@ -107,23 +106,8 @@ def matches(pattern: str, host: str) -> bool:
     return host == pattern
 
 
-def allowed(address: str) -> bool:
-    """Whether the proxy may connect to ``address`` for a host outside the site table: a globally routable one, not
-    multicast, an IPv6 address that carries an IPv4 one (mapped, 6to4 or NAT64) judged as that IPv4 address. The base
-    computers' stand-in proxies judge addresses the same way."""
-    ip = ipaddress.ip_address(address.split("%", 1)[0])
-    if isinstance(ip, ipaddress.IPv6Address):
-        if ip.ipv4_mapped is not None:
-            ip = ip.ipv4_mapped
-        elif ip.sixtofour is not None:
-            ip = ip.sixtofour
-        elif ip in NAT64:
-            ip = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
-    return ip.is_global and not ip.is_multicast
-
-
 def log_event(**fields) -> None:
-    """One JSON line in the proxy's log: a connection to a host outside the site table once it ends, or a refusal."""
+    """One JSON line in the proxy's log: a connection to a live site's host once it ends, or one that failed."""
     print(json.dumps(fields), file=sys.stderr, flush=True)
 
 
@@ -481,41 +465,18 @@ class SiteProxy:
     @staticmethod
     async def _direct(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, host: str, port: int,
                       head: Optional[bytes] = None) -> None:
-        """``host``, a live site's, reached straight at ``port``, at an address the proxy resolved and checked itself
-        (``allowed``), never resolved again: a tunnel, answered as established, for a ``CONNECT``, else ``head`` sent
-        on; then both ends relayed until either closes, and the connection logged (``log_event``). The lookup and every
-        address's connection attempt share one ``UPSTREAM_TIMEOUT_S``. A host whose every address is internal is
-        refused at once, one that doesn't resolve or answer in time is a 502."""
-        method = "CONNECT" if head is None else head.split(b" ", 1)[0].decode("latin-1")
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + UPSTREAM_TIMEOUT_S
+        """``host``, a live site's, reached straight at ``port``: a tunnel, answered as established, for a ``CONNECT``,
+        else ``head`` sent on; then both ends relayed until either closes, and the connection logged (``log_event``).
+        One that doesn't resolve or answer within ``UPSTREAM_TIMEOUT_S``, the lookup and every address's attempt
+        together, is a 502, logged too."""
         try:
-            found = await asyncio.wait_for(loop.getaddrinfo(host, port, type=socket.SOCK_STREAM), UPSTREAM_TIMEOUT_S)
+            up_reader, up_writer = await asyncio.wait_for(asyncio.open_connection(host, port), UPSTREAM_TIMEOUT_S)
         except (OSError, asyncio.TimeoutError) as e:
-            log_event(refused={"method": method, "host": host, "port": port,
-                               "reason": f"doesn't resolve: {e or type(e).__name__}"})
-            writer.write(simple_response("502 Bad Gateway", f"{host} doesn't resolve\n", FAILED))
+            log_event(failed={"method": "CONNECT" if head is None else head.split(b" ", 1)[0].decode("latin-1"),
+                              "host": host, "port": port, "reason": str(e) or type(e).__name__})
+            writer.write(simple_response("502 Bad Gateway", f"{host}:{port} didn't answer: {e}\n", FAILED))
             return
-        addresses = list(dict.fromkeys(info[4][0] for info in found))
-        if not (usable := [address for address in addresses if allowed(address)]):
-            log_event(refused={"method": method, "host": host, "port": port, "reason": "internal address",
-                               "addresses": addresses})
-            writer.write(simple_response("403 Forbidden", f"{host} is an internal address, which the browser never "
-                                         "reaches\n", FAILED))
-            return
-        for address in usable:
-            if (left := deadline - loop.time()) <= 0:
-                continue
-            try:
-                up_reader, up_writer = await asyncio.wait_for(asyncio.open_connection(address, port), left)
-                break
-            except (OSError, asyncio.TimeoutError):
-                continue
-        else:
-            log_event(refused={"method": method, "host": host, "port": port, "reason": "no answer",
-                               "addresses": usable})
-            writer.write(simple_response("502 Bad Gateway", f"{host}:{port} didn't answer\n", FAILED))
-            return
+        address = (up_writer.get_extra_info("peername") or ("",))[0]
         started, began, counts = time.time(), time.monotonic(), [len(head or b""), 0]
         if head is None:
             writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
