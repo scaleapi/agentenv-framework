@@ -376,13 +376,40 @@ def test_a_windows_disk_boots_from_secure_boot_on_ahci_and_e1000e_with_a_fresh_t
     assert running.wait(10) == 143
 
 
-@pytest.mark.parametrize("guest, arch, why", [("windows", "arm64", "a windows guest boots on amd64 alone, not arm64"),
-                                              ("plan9", "amd64", "no guest plan9")])
-def test_the_launcher_refuses_a_guest_it_cant_boot(launcher, tmp_path, guest, arch, why):
+@pytest.mark.parametrize("resolution, display", [(None, "xres=1920,yres=1080"), ("MTI4MHg4MDA=", "xres=1280,yres=800")],
+                         ids=["default", "the-computers-own"])
+def test_a_linux_desktop_guest_gets_a_virtio_gpu_at_its_resolution_trim_its_size_and_its_credentials(
+        launcher, tmp_path, resolution, display):
+    """A Wayland desktop's compositor needs a GPU, at the mode its monitor rule asks for."""
+    launch, calls = launcher
+    disk = tmp_path / "disk" / "disk.img"
+    disk.parent.mkdir()
+    (disk.parent / "guest").write_text("linux-desktop\n")
+    running = launch(VM_DISK=str(disk), VM_PORTS="18765", VM_CREDENTIALS="tmpfiles.extra=ZCAvcnVu ssh.k=YQ==",
+                     **({"VM_ENV_AGENTENV_SETTING_RESOLUTION": resolution} if resolution else {}))
+    (qemu,) = _logged(calls, "qemu-system-x86_64")
+
+    assert "-machine q35,accel=" in qemu and "file=/usr/share/OVMF/OVMF_CODE_4M.fd " in qemu and "secboot" not in qemu
+    assert f"-vga none -device virtio-vga,{display} " in qemu and "-smp 4 -m 8192 " in qemu
+    assert ",format=qcow2,if=virtio,discard=unmap,detect-zeroes=unmap " in qemu
+    assert ("-smbios type=11,value=io.systemd.credential.binary:tmpfiles.extra=ZCAvcnVu "
+            "-smbios type=11,value=io.systemd.credential.binary:ssh.k=YQ== ") in qemu
+    running.terminate()
+    assert running.wait(10) == 143
+
+
+@pytest.mark.parametrize("guest, arch, variables, why", [
+    ("windows", "arm64", {}, "a windows guest boots on amd64 alone, not arm64"),
+    ("plan9", "amd64", {}, "no guest plan9"),
+    ("linux-desktop", "arm64", {}, "a linux-desktop guest boots on amd64 alone, not arm64"),
+    ("linux", "amd64", {"VM_CREDENTIALS": "ssh.k=YQ=="}, "VM_CREDENTIALS are for a linux-desktop guest, not linux"),
+    ("linux-desktop", "amd64", {"VM_ENV_AGENTENV_SETTING_RESOLUTION": "d2lkZQ=="},
+     "the computer's resolution, wide, isn't WIDTHxHEIGHT")])
+def test_the_launcher_refuses_a_guest_it_cant_boot(launcher, tmp_path, guest, arch, variables, why):
     launch, calls = launcher
     (tmp_path / "guest").write_text(guest)
 
-    refused = launch(VM_DISK=str(tmp_path / "disk.img"), VM_ARCH=arch)
+    refused = launch(VM_DISK=str(tmp_path / "disk.img"), VM_ARCH=arch, **variables)
 
     assert refused.wait(10) == 2 and why in refused.stderr.read()
     assert not calls.exists() or "qemu" not in calls.read_text()

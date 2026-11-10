@@ -3,8 +3,10 @@ each other and against what the env declares, and every mismatch is named."""
 
 from __future__ import annotations
 
+import functools
 import itertools
 import re
+import zoneinfo
 from collections.abc import Sequence
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
@@ -67,8 +69,9 @@ def arches(base: ComputerArtifact, driver: ComputerDriverEnv, apps: Sequence[Com
 
 def check_app(base: ComputerArtifact, driver: ComputerDriverEnv, app: ComputerAppEnv, at: str = "app") -> list[str]:
     """Every way ``app`` doesn't fit a composition of ``base`` and ``driver``, each named from ``at``: a platform it
-    doesn't support, no architecture in common, no install for the base's OS, a port the driver listens on too, or on
-    Windows an install step for the session user, as a Windows computer is composed over ssh as its admin."""
+    doesn't support, no architecture in common, no install for the base's OS, a port the driver listens on too, any app
+    on Omarchy, whose disks compose a driver alone for now, or on Windows an install step for the session user, as a
+    Windows computer is composed over ssh as its admin."""
     os = base.os
     if not _matching(base, app.declaration.supports):
         named = ", ".join(_shown(platform) for entry in app.declaration.supports for platform in supported(entry))
@@ -80,6 +83,9 @@ def check_app(base: ComputerArtifact, driver: ComputerDriverEnv, app: ComputerAp
         problems.append(f"{at}: {app.id} declares no install for {_os_shown(base)}")
     elif taken := sorted(set(_ports(app, platform_of(os))) & set(_driver_ports(driver, os))):
         problems.append(f"{at}: {app.id} listens on {', '.join(map(str, taken))}, as {driver.id} does")
+    if platform_of(os) == "linux/omarchy":
+        problems.append(f"{at}: an Omarchy computer composes its driver alone for now; {app.id} would need its install "
+                        "composed onto Omarchy's disk, which agent-env doesn't do yet")
     if os.type == "windows" and (session := [step.name for step in app.declaration.install_steps
                                              if step.scope == "session" and (step.os is None or os.type in step.os)]):
         problems.append(f"{at}: {app.id}'s install steps {', '.join(session)} run as the session user, which a Windows "
@@ -218,9 +224,17 @@ def check_computer_settings(base: ComputerArtifact, values: Any) -> tuple[dict[s
         elif base.os.type == "windows" and name == "resolution" and value != WINDOWS_DISPLAY:
             problems.append(f"computer_settings.resolution: a Windows computer's display is {WINDOWS_DISPLAY} for now, "
                             f"not {value}")
+        elif name == "timezone" and value not in _time_zones():
+            problems.append(f"computer_settings.timezone: {value!r} isn't an IANA time zone, such as UTC or "
+                            "America/Chicago")
         else:
             checked[name] = value
     return checked, problems
+
+
+@functools.cache
+def _time_zones() -> frozenset[str]:
+    return frozenset(zoneinfo.available_timezones())
 
 
 def _platform(base: ComputerArtifact, driver: ComputerDriverEnv) -> list[str]:
@@ -235,7 +249,8 @@ def _platform(base: ComputerArtifact, driver: ComputerDriverEnv) -> list[str]:
     if (install := for_os(driver.install, os)) is None:
         problems.append(f"driver: {driver.id} declares no install for {_os_shown(base)}")
     else:
-        init = base.forms.container.init if base.forms.container is not None else "launchd"
+        form = base.forms.container or base.forms.disk
+        init = form.init if form is not None else "launchd"
         problems += [f"driver: its service {service.name!r} runs as root, and {base.id}'s {init} runs every program as "
                      f"{base.session.user}" for service in install.services if service.scope == "system"]
     return problems

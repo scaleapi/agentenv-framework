@@ -14,9 +14,10 @@ building it. Name it from another bundle as `ubuntu-24.04`, the alias `aliases.t
 (`display = "none"`), for one website browser, which runs headless there, and the `page` driver, whose screen is the
 browser's page: a browser computer, which agentenv's `chromium` deploys alone as. supervisord runs every program as the
 session user, among them a stand-in site proxy on `127.0.0.1:3128`, the browser's only route out when the computer
-routes no sites, which forwards every request to wherever it names, refusing nothing: the sandbox's network policy is
-all that limits it. A computer that routes sites names the shared site proxy's forward port, `127.0.0.1:3129`, to the
-browser instead: it serves the run's sites, refuses every other host and runs out of the agent's reach. It has a
+routes no sites. It forwards a request or a `CONNECT` tunnel to any host, never decrypting a tunnel and refusing
+nothing: the sandbox's network policy is all that limits it. Every line it writes to `/var/log/agentenv/site-proxy.log`
+is JSON, one per connection and one per connection that fails, in the same shapes as the shared site proxy's. A computer that routes sites names the shared site proxy's forward port,
+`127.0.0.1:3129`, to the browser instead: it serves the run's sites, refuses every other host and runs out of the agent's reach. It has a
 container form only. Name it from another bundle as `ubuntu-24.04-headless`, or by its id,
 `@local/agentenv-framework/computers/ubuntu-24.04-headless`.
 
@@ -190,6 +191,36 @@ as its services do, on a loopback port it writes with a token to that folder, wh
 Administrators reach; it launches the app in a Job object, which ends whatever the app started. Composing signs in as
 `agentadmin`, so an app's install step for the session user can't run on Windows, and gate 1 refuses an app that
 declares one there.
+
+`artifacts/omarchy-4.5/` is Omarchy 4.5 (`amd64`), an Arch Linux desktop on Hyprland, as a disk alone: Hyprland needs a
+GPU, which a container doesn't get. Its base is built from Omarchy's own stable VM image, which its `[forms.disk]` names
+by `source`, a URL and a sha256, fetched once into this machine's cache and checked. It's booted once by the QEMU
+launcher as a `linux-desktop` guest (a virtio GPU at the computer's resolution, 4 vCPUs and 8 GB), with root's ssh key
+passed as a systemd credential, Omarchy signing its user `omarchy` in as it does at every boot, and made a base by
+`disk/omarchy/recipe.sh`, run as root over ssh. The recipe refuses an image whose os-release isn't the artifact's
+`omarchy` `4.5.0`; installs cua-driver's Hyprland plugin, pinned by URL and sha256 to the package Omarchy builds for its
+Hyprland; adds `agentenv.lua` to Hyprland's config (the plugin loaded at start, a US keymap, the idle cursor hidden, the
+display's mode); installs the seed unit; has SDDM log back in after a logout; sets Omarchy's toggles for an unattended
+desktop (staying awake, no animations, no screensaver or suspend, notifications silenced); turns off crash toasts,
+dictation and its keys, housekeeping timers that would run at boot, and the firewall, which lets in only ssh and
+LocalSend while the launcher forwards only the computer's own ports; and locks `omarchy`'s password and leaves the
+machine id empty. Trimmed, the image becomes the base's, with the key to root, and is pushed to the env's image store
+under a tag of its recipe and source. Name it as `omarchy-4.5`, or by its id,
+`@local/agentenv-framework/computers/omarchy-4.5`.
+
+An Omarchy computer env is composed on the same machine as a thin disk too, with what's Omarchy's own in
+`omarchy_disk.py`: each layer is installed over ssh as root by a bash script composing writes, as its
+`[install."linux/omarchy"]` says (its files under `/opt/agentenv/drivers/<name>`, its downloads checked by sha256, its
+venv on the system Python, its run scripts), and its services become systemd user units of the graphical session, which
+start with the session, and again with it, through `with-seed`. The composed disk has no ssh: only a compose logs
+in, and it boots the base. At every boot, before SDDM starts the session,
+`agentenv-seed.service` reads the deploy's environment from the NoCloud seed with the Linux disk's own `seed-env` and
+writes it for `with-seed`, root's and the session user's alone, the seed's trust files first; it sets the hostname and
+the computer's `timezone` (UTC by default; a deploy is refused one that isn't an IANA zone, and one the disk doesn't
+have is written as the refusal every service then names), names `host.docker.internal` at QEMU's address for the launcher, and writes the display's mode for Hyprland
+from the computer's `resolution`. Gate 3 probes it at full. An Omarchy computer has no apps for now: gate 1 refuses one. When
+Hyprland crashes, its watchdog brings it back in safe mode, without cua-driver's plugin, and cua-driver reports the
+computer failed for good.
 
 This bundle has no tasks of its own: other bundles pull its computers by alias, and `agent-env run computers` has
 nothing to run.

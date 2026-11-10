@@ -1,6 +1,7 @@
 import io
 import subprocess
 import tarfile
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -86,3 +87,55 @@ def test_a_provision_that_fails_stops_the_compose_with_its_output_and_removes_th
 
     assert [command for _, command in machine.ran][-1] == "provision" and machine.removed == ["container"]
     assert machine.packed is None and machine.pushed == []
+
+
+def _keygen(argv, **kwargs):
+    Path(argv[-1]).write_text("key")
+
+
+def test_a_base_is_built_once_then_reused_packed_from_its_image_and_key_alone_with_the_labels_its_build_gives(
+        monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    built, packed, held = [], [], {}
+    monkeypatch.setattr(thin_disk, "present", lambda image: bool(packed))
+    monkeypatch.setattr(thin_disk, "local_labels", lambda image: packed[-1][1])
+    monkeypatch.setattr(thin_disk.subprocess, "run", _keygen)
+    monkeypatch.setattr(thin_disk, "pack", lambda guest, folder, image, labels, base_image: packed.append(
+        (sorted(path.name for path in folder.iterdir()), labels, base_image)))
+    registry = SimpleNamespace(served=held.get, push=lambda local, tag: held.setdefault(tag, f"registry.test/{tag}"))
+
+    def build(work, keys):
+        built.append(keys)
+        (work / "base.img").write_text("disk")
+        (work / "scratch").mkdir()
+        return {"dev.agentenv.test": "1"}
+
+    key = "sha256:" + "ef" * 32
+    first = thin_disk.base(GUEST, key, build, lambda line: None, registry)
+    again = thin_disk.base(GUEST, key, build, lambda line: None, registry)
+
+    assert len(built) == 1 and packed == [(["admin.key", "base.img"], {thin_disk.KEY_LABEL: key,
+                                                                       "dev.agentenv.test": "1"}, None)]
+    assert first == again == thin_disk.Base(f"agentenv-plan9-base:{'ef' * 8}", built[0], packed[0][1])
+    assert list(held) == [f"plan9-base-{'ef' * 8}"]
+
+
+def test_a_base_the_store_holds_that_its_guest_calls_stale_is_built_afresh_saying_why(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    said, built = [], []
+    monkeypatch.setattr(thin_disk, "present", lambda image: False)
+    monkeypatch.setattr(thin_disk.subprocess, "run", _keygen)
+    monkeypatch.setattr(thin_disk, "pack", lambda guest, folder, image, labels, base_image: None)
+    registry = SimpleNamespace(served=lambda tag: "registry.test/old", labels=lambda pinned: {"age": "old"},
+                               push=lambda local, tag: "registry.test/new")
+
+    def build(work, keys):
+        built.append(keys)
+        (work / "base.img").write_text("disk")
+        return {"age": "new"}
+
+    base = thin_disk.base(GUEST, "sha256:" + "aa" * 32, build, said.append, registry,
+                          stale=lambda labels: "it's old" if labels["age"] == "old" else None)
+
+    assert len(built) == 1 and base.pinned is None and base.labels["age"] == "new"
+    assert "it's old; building it afresh" in said

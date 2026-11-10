@@ -181,7 +181,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
             attribution=attribution,
             disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb,
             ready_s=ready_timeout(env.composed_apps(), platform_of(env.computer.os)), form=form,
-            held=bool(params.site_routing), os_type=env.computer.os.type, shm_mb=shm_mb)
+            held=bool(params.site_routing), platform=platform_of(env.computer.os), shm_mb=shm_mb)
         self._container_sandboxes.append(booted.sandbox)
         self._environment_sandboxes[name] = booted.sandbox
         try:

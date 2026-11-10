@@ -4,3 +4,4 @@
 "ubuntu-24.04-headless" = ["ubuntu-24.04-headless"]
 "macos-26" = ["macos-26"]
 "windows-11" = ["windows-11"]
+"omarchy-4.5" = ["omarchy-4.5"]
