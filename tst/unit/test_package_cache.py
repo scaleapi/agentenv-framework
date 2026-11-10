@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 
 import pytest
@@ -38,6 +39,28 @@ def test_a_lock_a_compose_stored_is_shared_with_its_files_and_seeds_the_next_sto
     assert Lock.model_validate_json(seeded.read(_lock_key())).inputs == _INPUTS
     assert seeded.get_object_metadata(_lock_key()).content_type == "application/json"
     assert {sha256: seeded.read(f"{PREFIX}/files/{sha256}") for sha256 in files} == files
+
+
+def test_where_folders_cant_share_a_hard_link_a_copied_lock_keeps_its_content_type(stores, tmp_path, monkeypatch):
+    """The store names an object's content type by the object's size and modification time, so a copy keeps both."""
+    files = _store_lock(stores, {"apt.deb": b"deb"})
+
+    def cross_device(*_args):
+        raise OSError(errno.EXDEV, "Invalid cross-device link")
+
+    with monkeypatch.context() as across:
+        across.setattr(package_cache.os, "link", cross_device)
+        package_cache.keep()
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "next"))
+        reset_config()
+        configure()
+        package_cache.seed()
+
+    seeded = get_config().get_object_store()
+    assert seeded.get_object_metadata(_lock_key()).content_type == "application/json"
+    assert {sha256: seeded.read(f"{PREFIX}/files/{sha256}") for sha256 in files} == files
+    assert not (tmp_path / "shared" / PREFIX / "files" / next(iter(files))).samefile(
+        stores.root / PREFIX / "files" / next(iter(files)))
 
 
 def test_a_lock_whose_files_arent_all_shared_isnt_seeded(stores, tmp_path, monkeypatch):

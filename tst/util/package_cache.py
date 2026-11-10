@@ -87,7 +87,8 @@ def _link_lock(name: str, source: _Tree, target: _Tree) -> None:
 
 def _link(source: Path, target: Path) -> None:
     """``source`` at ``target`` unless something is there: a hard link, safe as the store never writes an object in
-    place, or a copy where the two folders can't share one."""
+    place, or a copy where the two folders can't share one, keeping its modification time, which the store's record of
+    an object's content type names it by."""
     if target.exists():
         return
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -99,5 +100,5 @@ def _link(source: Path, target: Path) -> None:
         if e.errno not in (errno.EXDEV, errno.EPERM, errno.EMLINK, errno.ENOTSUP, errno.EOPNOTSUPP):
             raise
         staged = target.with_name(f".{target.name}.{os.getpid()}")
-        shutil.copyfile(source, staged)
+        shutil.copy2(source, staged)
         os.replace(staged, target)
