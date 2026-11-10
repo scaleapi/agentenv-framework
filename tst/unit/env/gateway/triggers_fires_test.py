@@ -3,13 +3,18 @@ settings (config): a repeat trigger's fires side by side, and a time limit for e
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 
+import httpx
 import pytest
 
+from agent_env.env.gateway import gateway as gw_mod
+from agent_env.env.gateway.clock import Clock, _iso, _parse_rfc3339
 from agent_env.env.gateway.constants import EXT_TRIGGERS_URI, GATEWAY_EXTENSIONS
+from agent_env.env.gateway.gateway import Gateway
 from agent_env.env.gateway.triggers import TriggerEngine, TriggerError
-from tst.unit.env.gateway.next_event_test import _engine, _next, _row, _until
-from tst.unit.env.gateway.triggers_time_test import _perm, _result
+from tst.unit.env.gateway.next_event_test import MONDAY, _engine, _next, _row, _until
+from tst.unit.env.gateway.triggers_time_test import _FakeGateway, _perm, _result
 
 
 def _reply_trigger(tid: str = "reply", *, delay=None, executor: dict | None = None) -> dict:
@@ -360,3 +365,87 @@ async def test_a_fire_advanced_to_its_resumes_at_goes_on_though_its_delay_ends_b
     engine.clock_advanced()
     await _until(lambda: _row(engine, "reply")["status"] == "armed")
     assert len(bob.calls) == 1
+
+
+# ---- a clock that runs only during the agent's turns ----------------------------------------------------------------
+
+class _RunningNow:
+    """Real time under a running clock: it moves on a microsecond at every read, as time.monotonic does between two."""
+
+    def __init__(self) -> None:
+        self.t = 1000.0
+
+    def __call__(self) -> float:
+        self.t += 1e-6
+        return self.t
+
+
+def _running_engine(rate: float) -> tuple[TriggerEngine, Clock]:
+    clock = Clock(now_fn=_RunningNow())
+    clock.set_time(MONDAY, rate=rate)
+    return TriggerEngine(_FakeGateway(clock)), clock
+
+
+@pytest.mark.parametrize("past", [0, 90], ids=["to its resumes_at", "past it"])
+@pytest.mark.asyncio
+async def test_a_delay_begun_on_a_running_clock_goes_on_when_the_frozen_clock_is_advanced_to_its_resumes_at(
+        monkeypatch, past):
+    """The always_on step's jump: a contact's reply starts its delay during the agent's turn, with the clock running
+    at the task's rate; between turns the step freezes it (set_rate 0) and advances it to the reply's resumes_at.
+    Nothing else moves the clock then, so that must be enough."""
+    bob = _Executor(monkeypatch)
+    bob.release()
+    engine, clock = _running_engine(rate=60)
+    engine.register(_reply_trigger(delay={"dist": "exp", "mean": "PT40M", "seed": 30}))
+    engine.on_tool_call("default", "send_text", {}, _result())
+    await _until(lambda: _row(engine, "reply")["waits"])
+    clock.set_rate(0)
+    to = _parse_rfc3339(_row(engine, "reply")["resumes_at"]) + timedelta(seconds=past)
+
+    clock.advance(_iso(to))
+    assert engine.clock_advanced() == ["reply"]
+    await _until(lambda: _row(engine, "reply")["status"] == "armed")
+    assert [c["at"] for c in bob.calls] == [to]
+
+
+@pytest.mark.asyncio
+async def test_a_fire_waiting_on_a_running_clock_for_its_executor_s_hours_goes_on_when_the_frozen_clock_reaches_them(
+        monkeypatch):
+    bob = _Executor(monkeypatch)
+    bob.release()
+    engine, clock = _running_engine(rate=60)
+    engine.register(_reply_trigger(executor={"hours": {"start": "09:00", "end": "17:00"}}))
+    engine.on_tool_call("default", "send_text", {}, _result())
+    await _until(lambda: _row(engine, "reply")["waits"])
+    clock.set_rate(0)
+    assert _row(engine, "reply")["resumes_at"] == "2026-03-02T09:00:00Z"
+
+    clock.advance("2026-03-02T09:00:00Z")
+    assert engine.clock_advanced() == ["reply"]
+    await _until(lambda: _row(engine, "reply")["status"] == "armed")
+    assert [_iso(c["at"]) for c in bob.calls] == ["2026-03-02T09:00:00Z"]
+
+
+@pytest.mark.asyncio
+async def test_a_rate_change_wakes_a_waiting_fire_to_go_on_when_the_clock_gets_to_its_time(monkeypatch, tmp_path):
+    """On a frozen clock a waiting fire looks at it again only every _VIRTUAL_RECHECK_S real seconds; the next turn's
+    set_rate wakes it to wait out the rest at the new rate, so it goes on when the clock gets to its time, not up to
+    that long after (five virtual minutes at 60x)."""
+    monkeypatch.setattr(gw_mod, "GATEWAY_TRAJECTORY_FILE", str(tmp_path / "trajectory.jsonl"))
+    gw = Gateway(host="127.0.0.1", port=0, server_name="AgentEnvGateway", internal_mcp_servers=[])
+    bob = _Executor(monkeypatch)
+    bob.release()
+    gw._clock.set_time(MONDAY, rate=0)
+    engine = gw._trigger_engine
+    engine.register(_reply_trigger(delay="PT1M"))
+    engine.on_tool_call("default", "send_text", {}, _result())
+    await _until(lambda: _row(engine, "reply")["waits"])
+    try:
+        transport = httpx.ASGITransport(app=gw._mcp.streamable_http_app())
+        async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
+            r = await client.put("/clock/rate", json={"virtual_seconds_per_real_second": 3600})
+            r.raise_for_status()
+        await _until(lambda: bob.calls, seconds=1)  # a virtual minute at 3600x is a sixtieth of a real second
+    finally:
+        await engine.cancel_scheduled()
+        gw._close_trajectory_file()

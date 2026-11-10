@@ -184,6 +184,11 @@ IDLE_JUMPS_MAX = 24
 JUMPS_KEPT_PER_GAP = 20
 PENDING_KEPT = 20
 PENDING_TEXT_CHARS = 300
+# What _small keeps of nesting: past this many levels, a list or dict is summed up as its count.
+KEPT_NESTING_LEVELS = 6
+# A user sim message longer than this, or one with a markdown heading or table, reads like an assistant's reply: its
+# read is flagged (looks_like_assistant).
+ASSISTANT_LIKE_MESSAGE_CHARS = 1200
 BULKY_EVENT_FIELDS = ("input", "raw", "first_answer", "read", "parts_text", "changes")
 # What the prompt response keeps of each wake's parts (source_agent_per_turn_prompt_parts): each text part cut to
 # TURN_TEXT_CHARS, and past TURN_TEXT_TOTAL_CHARS in all, a note for the rest; every wake's full text is in the stored
@@ -482,24 +487,25 @@ class _Run:
         except DuplicateKeyError:
             pass
         ctx.metadata.setdefault("a2a_conversations", {})[step.id] = self.conversation_id
-        self.hook_records.append({"hook": HOOK_NAME, "turn": 0, "started_at": _iso(await self.now())})
-        ctx.metadata.setdefault(HOOK_RECORDS_KEY, {})[step.id] = self.hook_records
         self.user_context_id = uuid.uuid4().hex   # one user sim session per run
         # The agent's session: the step's context_id, as prompt_agent uses it, so a run can go on with the session an
         # earlier step left; else a new one. The graded conversation is the run's own either way.
         self.solver_context_id = step.context_id or uuid.uuid4().hex
 
-        now = await self.now()
-        self.log("start", virtual_time=_iso(now), end_time=_iso(self.end) if self.end else None,
-                 agent=step.agent_name, agent_role=self.recipient, user_sim=step.user_sim, version=self.version,
-                 user_model=self.user_model, max_wakes=step.max_wakes, time_zone=self.zone, multi_day=self.multi_day,
-                 scheduled_checks=self.checks, clock_rate=await self._rate())
-        # What the agent's role sent before the run (a task that gave it message_user earlier) isn't this run's: set it
-        # aside, recorded, so the first wake doesn't take it as its own.
-        before, quiet = await self._take_messages()
-        if before or quiet:
-            self.log("user_chat_before_run", messages=before, stay_quiet_calls=len(quiet))
+        # From here the conversation exists, so whatever fails still closes it and leaves the run's record.
         try:
+            self.hook_records.append({"hook": HOOK_NAME, "turn": 0, "started_at": _iso(await self.now())})
+            ctx.metadata.setdefault(HOOK_RECORDS_KEY, {})[step.id] = self.hook_records
+            now = await self.now()
+            self.log("start", virtual_time=_iso(now), end_time=_iso(self.end) if self.end else None,
+                     agent=step.agent_name, agent_role=self.recipient, user_sim=step.user_sim, version=self.version,
+                     user_model=self.user_model, max_wakes=step.max_wakes, time_zone=self.zone,
+                     multi_day=self.multi_day, scheduled_checks=self.checks, clock_rate=await self._rate())
+            # What the agent's role sent before the run (a task that gave it message_user earlier) isn't this run's:
+            # set it aside, recorded, so the first wake doesn't take it as its own.
+            before, quiet = await self._take_messages()
+            if before or quiet:
+                self.log("user_chat_before_run", messages=before, stay_quiet_calls=len(quiet))
             await self.loop(now)
         except Exception as e:
             self.error = f"{type(e).__name__}: {e}"
@@ -1441,7 +1447,8 @@ class _Run:
         self.history.append({"read": read, "answer": ans})
         mode = self.read_mode
         latency = self._latency(mode)
-        flagged = len(ans.get("message") or "") > 1200 or bool(re.search(r"^\s*(#|\|)", ans.get("message") or "", re.M))
+        flagged = (len(ans.get("message") or "") > ASSISTANT_LIKE_MESSAGE_CHARS
+                   or bool(re.search(r"^\s*(#|\|)", ans.get("message") or "", re.M)))
         entry = self.log("user_sim_read", virtual_time=_iso(now), version=self.version, read=read,
                          input=ans.get("input"), raw=ans.get("raw"), outcome=ans.get("outcome"),
                          message=ans.get("message"), used=ans.get("used"), score=ans.get("score"),
@@ -1758,6 +1765,10 @@ def _actor(change: dict) -> str:
     return str(actor.get("role") or actor.get("kind") or "someone")
 
 
+# The longest wait between two tries of a gateway control call (_call backs off doubling, from 1 s, up to this).
+CALL_RETRY_MAX_SLEEP_SECONDS = 20
+
+
 async def _call(env, uri: str, method: str, params: Optional[dict] = None, *, attempts: int = 6,
                 timeout: int = 60) -> Any:
     """A gateway control call, retried on a transient failure (a busy gateway can take seconds to answer).
@@ -1774,7 +1785,7 @@ async def _call(env, uri: str, method: str, params: Optional[dict] = None, *, at
             if attempt + 1 < attempts:
                 logger.warning(f"always_on: {method} on {getattr(env, 'env_id', env)} failed ({type(e).__name__}: "
                                f"{e}); retry {attempt + 1}/{attempts - 1}")
-                await asyncio.sleep(min(2 ** attempt, 20))
+                await asyncio.sleep(min(2 ** attempt, CALL_RETRY_MAX_SLEEP_SECONDS))
     raise last
 
 
@@ -1821,6 +1832,11 @@ def _busy(row: dict, now: datetime) -> bool:
     return not (row.get("waiting") and row.get("resumes_at") and _utc(row["resumes_at"]) > now)
 
 
+# Words she quotes name one of the agent's messages only when they run to at least this many characters, so a short
+# quote ("ok") can't match one by chance.
+QUOTE_MIN_CHARS = 8
+
+
 def _reply_to(answer: dict, seen: list[dict]) -> Optional[dict]:
     """Which of the agent's messages in a read her answer responds to: the one the plug-in names in ``replying_to``
     (its 1-based number in the read, or words quoted from it); else the one her ``used`` quotes; else the only message
@@ -1831,7 +1847,7 @@ def _reply_to(answer: dict, seen: list[dict]) -> Optional[dict]:
 
     def quoting(quote: Any) -> list[dict]:
         words = " ".join(str(quote or "").split()).lower()
-        return [m for m in seen if len(words) >= 8 and words in " ".join(m["text"].split()).lower()]
+        return [m for m in seen if len(words) >= QUOTE_MIN_CHARS and words in " ".join(m["text"].split()).lower()]
 
     named = answer.get("replying_to")
     if isinstance(named, int) and not isinstance(named, bool) and 1 <= named <= len(seen):
@@ -1863,10 +1879,10 @@ def _bounded(pending: dict) -> dict:
 
 def _small(value: Any, depth: int = 0) -> Any:
     """``value`` kept small for the run's metadata, at any depth: strings cut to ``PENDING_TEXT_CHARS``, lists to their
-    first ``PENDING_KEPT`` items and a count of the rest, nesting past six levels summed up."""
+    first ``PENDING_KEPT`` items and a count of the rest, nesting past ``KEPT_NESTING_LEVELS`` levels summed up."""
     if isinstance(value, str):
         return value[:PENDING_TEXT_CHARS] + "…" if len(value) > PENDING_TEXT_CHARS else value
-    if depth >= 6 and isinstance(value, (list, dict)):
+    if depth >= KEPT_NESTING_LEVELS and isinstance(value, (list, dict)):
         return f"({len(value)} {'items' if isinstance(value, list) else 'fields'})"
     if isinstance(value, dict):
         return {k: _small(v, depth + 1) for k, v in value.items()}
@@ -1882,6 +1898,8 @@ _LOGGED_AS_IS = frozenset({
     "virtual_time", "from", "to", "reason", "state", "outcome", "mode", "read_at", "deliver_at", "end_time", "agent",
     "agent_role", "user_sim", "version", "user_model", "time_zone", "kind", "trigger_id", "env_id", "phase",
     "error_type", "matched_by", "at", "wake", "n", "trajectory_url", "object_url"})
+# Past this length even one of those fields is logged as its length.
+LOGGED_TEXT_CHARS = 200
 
 
 def _log_view(fields: dict, depth: int = 0) -> dict:
@@ -1892,7 +1910,7 @@ def _log_view(fields: dict, depth: int = 0) -> dict:
         if v is None or isinstance(v, (bool, int, float)):
             out[k] = v
         elif isinstance(v, str):
-            out[k] = v if k in _LOGGED_AS_IS and len(v) <= 200 else {"chars": len(v)}
+            out[k] = v if k in _LOGGED_AS_IS and len(v) <= LOGGED_TEXT_CHARS else {"chars": len(v)}
         elif isinstance(v, (list, tuple)):
             out[k] = {"items": len(v)}
         elif isinstance(v, dict):
