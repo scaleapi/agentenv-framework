@@ -5,9 +5,11 @@ time limit get 300 s, and replies still in progress at the end are recorded."""
 from __future__ import annotations
 
 import random
+from datetime import timedelta
 
 import pytest
 
+from agent_env.env.gateway.clock import _iso, _parse_rfc3339
 from agent_env.task_step.task_steps import always_on as ao
 from tst.unit.task_step.always_on_harness import Rig
 
@@ -96,6 +98,39 @@ async def test_one_trigger_s_replies_run_side_by_side_so_a_quick_one_lands_on_ti
     [env] = rig.record(ctx)["settings"]["contacts"]["envs"]
     assert env == {"env_id": "world", "applied": True, "concurrent_fires": parallel,
                    "executor_timeout_seconds": 300.0}
+
+
+@pytest.mark.asyncio
+async def test_a_reply_that_notifies_the_agent_still_runs_side_by_side_so_the_jump_stops_at_the_quick_one(
+        monkeypatch, tmp_path):
+    """As a host's reply on a booking site: the contact answers, then the app notifies the agent. Both replies go to one
+    contact conversation. The second, with the shorter delay, used to queue behind the first and show no due time, so
+    the step jumped straight to the first's and the quick reply landed with it, 17 task minutes late."""
+    draws = random.Random(30)
+    slow, quick = (draws.expovariate(1 / 2400) for _ in range(2))  # 1859 s, then 819 s
+    quick_due = _iso(_parse_rfc3339("2026-11-09T14:00:00Z") + timedelta(seconds=quick))
+
+    def texts_two_hosts(n, texts, rig):
+        if n == 1:
+            rig.provoke("messaging_send_message", {"conversation_id": "CV-000004"})
+            rig.provoke("messaging_send_message", {"conversation_id": "CV-000002"})
+        rig.quiet()
+        return ""
+
+    rig = Rig(monkeypatch, tmp_path, agent=texts_two_hosts)
+    await rig.arm()
+    rig.app_tools("messaging_send_message")
+    host_replies = {**CREW_DM, "id": "host-replies",
+                    "actions": [*CREW_DM["actions"], {"type": "notify", "channel": "Stayncook", "text": "New message"}]}
+    rig.triggers(host_replies, executors={"crew": rig.contact("crew", seconds=0, reply=_crew_texted)})
+    ctx = await rig.run(rig.step())
+
+    first_jump = next(j for j in rig.events(ctx, "clock_jump") if j["from"] != j["to"])
+    assert first_jump["to"] <= quick_due
+    assert [c["at"][:19] for c in rig.contact_calls] == [quick_due[:19], "2026-11-09T14:30:58"]
+    woke = [(w["virtual_time"][:19], w["parts_text"].count("Sam: reply")) for w in rig.events(ctx, "wake")[1:]]
+    assert woke == [("2026-11-09T14:13:39", 1), ("2026-11-09T14:30:58", 1)]
+    assert slow > quick
 
 
 @pytest.mark.asyncio

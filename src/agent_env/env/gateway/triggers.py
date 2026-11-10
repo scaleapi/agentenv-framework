@@ -585,7 +585,9 @@ class TriggerEngine:
         """Set the engine's opt-in settings, each off unless the body sets it (an omitted one resets): with
         ``concurrent_fires``, each further call that provokes a repeat trigger already firing starts its own fire at
         once, side by side, instead of queueing behind the one running, when every action of the trigger is a contact's
-        reply (``nl``); any other trigger still queues, since its tool actions may read and then write the same rows.
+        reply (``nl``) or a notification (``notify``); any other trigger still queues, since its tool actions may read
+        and then write the same rows. A queued fire draws its delay only when its turn comes, and state shows no due
+        time for it, so a quick reply queued behind a slow one would wait out the slow one's delay too.
         Fires of one trigger side by side still take turns on its executor conversation (``_executor_turn``).
         ``executor_timeout_seconds`` is the time limit of each executor whose registration set no
         ``timeout_seconds`` (else 120). ``clear`` resets both."""
@@ -1826,9 +1828,9 @@ def _named_executor(action: dict) -> dict:
 
 
 def _replies_only(spec: dict) -> bool:
-    """Whether every action of a trigger is a contact's reply (``nl``), the only kind ``concurrent_fires`` runs side
-    by side."""
-    return all(action.get("type") == "nl" for action in spec["actions"])
+    """Whether every action of a trigger is a contact's reply (``nl``) or a notification (``notify``, an app telling
+    the agent of the reply), the only kinds ``concurrent_fires`` runs side by side: neither reads and writes rows."""
+    return all(action.get("type") in ("nl", "notify") for action in spec["actions"])
 
 
 def _in_flight_fire(cause: dict) -> dict:
