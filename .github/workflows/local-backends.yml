@@ -185,14 +185,17 @@ jobs:
         run: sudo chmod 666 /dev/kvm
       # A computer image or disk is tagged with a key of everything it is built from. A compose that finds no image of
       # its key in the local registry copies the one the mirror holds, which main's runs share, rather than build it.
+      # Experiment: sample the runner's used memory every 5s while the tests run two at a time.
+      - name: Sample memory
+        run: nohup sh -c 'while true; do free -m | awk "NR==2{print \$3}" >> "$RUNNER_TEMP/mem.log"; sleep 5; done' >/dev/null 2>&1 &
       - name: Slow integration tier on the local defaults
         id: tests
         env:
           AGENTENV_TEST_SHARD: ${{ matrix.shard }}/12
           AGENT_ENV_COMPUTER_IMAGE_MIRROR: ${{ env.COMPUTER_IMAGE_MIRROR }}
         run: |
-          .venv/bin/python -m pytest -m int_test_slow -rA --timeout=1200 --junitxml=junit-integration-slow.xml \
-            tst/integration --ignore=tst/integration/env/gateway/gateway_test.py
+          .venv/bin/python -m pytest -m int_test_slow -n 2 --dist loadfile -rA --timeout=1200 \
+            --junitxml=junit-integration-slow.xml tst/integration --ignore=tst/integration/env/gateway/gateway_test.py
       # Once main's tests pass, every image this runner built or copied goes to the mirror under its key and today's
       # date, which the prune of computer-image-mirror.yml keeps an image a run used within the week by.
       - name: Share the computer images
@@ -202,6 +205,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: .venv/bin/python .github/scripts/share_computer_images.py "$COMPUTER_IMAGE_MIRROR"
+      - name: Peak memory
+        if: always()
+        run: |
+          echo "peak used MB: $(sort -n "$RUNNER_TEMP/mem.log" | tail -1) of $(free -m | awk 'NR==2{print $2}')"
+          if sudo dmesg | grep -q -i -E "out of memory|oom-kill"; then echo "OOM KILL SEEN"; else echo "no OOM kills"; fi
       - name: Skips must be declared capability gaps
         if: always()
         run: |
