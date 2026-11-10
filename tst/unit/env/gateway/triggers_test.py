@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import json
 import random
-import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -245,15 +244,22 @@ async def test_executor_role_never_watched_even_if_forced(engine):
 
 
 @pytest.mark.asyncio
-async def test_a_regex_that_runs_away_matches_nothing_within_its_budget_and_its_trigger_stays_armed(engine):
+async def test_a_regex_that_runs_out_of_its_budget_matches_nothing_and_its_trigger_stays_armed(engine, monkeypatch,
+                                                                                              caplog):
     engine.register({"triggers": [{"id": "x", "when": {"type": "action", "tool": "search_emails",
                                                        "where": {"query": {"regex": "^(a+)+$"}}}, "actions": []}]})
+    budgets = []
 
-    started = time.monotonic()
+    def search(pattern, text, *, timeout):
+        budgets.append(timeout)
+        raise TimeoutError
+    monkeypatch.setattr(triggers_module.regex, "search", search)
+
     engine.on_tool_call("default", "search_emails", {"query": "a" * 40 + "!"}, _result())
 
-    assert time.monotonic() - started < 5
+    assert budgets == [triggers_module._REGEX_TIMEOUT_S]
     assert engine._triggers["x"]["status"] == "armed"
+    assert "ran past 0.1s; it matches nothing" in caplog.text
 
 
 def _trig(which):
