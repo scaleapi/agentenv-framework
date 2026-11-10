@@ -45,6 +45,7 @@ from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
 from agent_env.task_step.task_steps.snapshot_env import SnapshotEnvTaskStep
+from tst.util import local_sandboxes
 from tst.integration.env.envs.server_env_local_test import _items_artifact, _put_items_image
 from tst.integration.store.local_parallel_deploy_test import _docker, _seed_bootstrap_envs
 
@@ -165,13 +166,18 @@ def _containers(sandbox_id: str) -> list[str]:
     return _docker("ps", "-aq", "--filter", f"name=agent-{sandbox_id}").stdout.split()
 
 
-def _ours() -> set[str]:
-    """The containers local sandboxes run: computers' and gateway stacks'."""
-    return {name for name in _docker("ps", "-a", "--format", "{{.Names}}").stdout.split() if name.startswith("agent-")}
+@pytest.fixture
+def made(monkeypatch) -> list[str]:
+    return local_sandboxes.recorded_sandbox_ids(monkeypatch)
 
 
-def _gateway(deployed) -> str:
-    return next(name for name in _ours() if name.endswith("-gateway-1") and deployed.sandbox_id.removeprefix("local-") in name)
+def _containers_made(made: list[str]) -> set[str]:
+    return local_sandboxes.container_names_carrying(made)
+
+
+def _gateway(deployed, made: list[str]) -> str:
+    return next(name for name in _containers_made(made)
+                if name.endswith("-gateway-1") and deployed.sandbox_id.removeprefix("local-") in name)
 
 
 @pytest.mark.asyncio
@@ -251,13 +257,12 @@ async def test_a_computer_in_a_multi_env_is_served_through_its_gateway_under_its
 
 
 @pytest.mark.asyncio
-async def test_two_computers_keep_serving_through_restarts_and_a_failed_redeploy_and_close_ends_them(desktop, items,
+async def test_two_computers_keep_serving_through_restarts_and_a_failed_redeploy_and_close_ends_them(desktop, items, made,
                                                                                                      monkeypatch):
     """One deployment, to keep the tier's time: two computers side by side, the desktop's container killed and started
     again, the gateway restarted, then a redeploy of the same env object whose gateway fails, which leaves this
     deployment as it was; close() ends it all."""
     every = ["list_items", "desktop_computer_screenshot", "laptop_computer_screenshot"]
-    before = _ours()
     with namespace_routing():
         laptop = ComputerEnv.put(id=f"{desktop.id}-laptop", computer=desktop.computer, driver=desktop.driver,
                                  environment_name="laptop")
@@ -272,10 +277,10 @@ async def test_two_computers_keep_serving_through_restarts_and_a_failed_redeploy
             killed = await _answers(deployed, every, until=False)
             _docker("start", desktop_box)
             started = await _answers(deployed, every)
-            _docker("restart", _gateway(deployed))
+            _docker("restart", _gateway(deployed, made))
             restarted = await _answers(deployed, every)
 
-            deployed_before = _ours()
+            deployed_before = _containers_made(made)
             real = EnvironmentGatewayProvider._compose_up
 
             async def no_gateway(self, sandbox, args=""):
@@ -288,7 +293,7 @@ async def test_two_computers_keep_serving_through_restarts_and_a_failed_redeploy
                 with pytest.raises(RuntimeError, match="the gateway didn't start"):
                     await env.deploy(sandbox_type="local", ttl_seconds=900,
                                      child_envs={"desktop": CONTAINER, "laptop": CONTAINER})
-            after_failure = _ours()
+            after_failure = _containers_made(made)
             still = await _answers(deployed, every)
             kept = [computer._deployed.sandbox_id for computer in env.computer_envs]
         finally:
@@ -299,15 +304,15 @@ async def test_two_computers_keep_serving_through_restarts_and_a_failed_redeploy
     assert all(started.values()) and all(restarted.values()), (started, restarted)
     assert after_failure == deployed_before and all(still.values()), (after_failure - deployed_before, still)
     assert kept == [deployed.child_envs[name]["sandbox_id"] for name in ("desktop", "laptop")]
-    assert _ours() == before
+    assert _containers_made(made) == set()
 
 
 @pytest.mark.asyncio
-async def test_a_computer_that_fails_mid_deploy_fails_the_deploy_and_leaves_nothing_up(desktop, items, monkeypatch):
+async def test_a_computer_that_fails_mid_deploy_fails_the_deploy_and_leaves_nothing_up(desktop, items, made,
+                                                                                        monkeypatch):
     async def refuse(self, deployed):
         raise RuntimeError("the computer's tools couldn't be applied")
 
-    before = _ours()
     monkeypatch.setattr(ComputerEnv, "_give_tools", refuse)
     with namespace_routing():
         office = _multi(items, Env.get(desktop.id))
@@ -316,7 +321,7 @@ async def test_a_computer_that_fails_mid_deploy_fails_the_deploy_and_leaves_noth
             await DeployEnvTaskStep(id="office", version=None, env_id=office.id, sandbox_type="local", ttl_seconds=600,
                                     child_envs={"desktop": CONTAINER}).execute(context)
 
-    assert context.deployed_envs == [] and _ours() == before
+    assert context.deployed_envs == [] and _containers_made(made) == set()
 
 
 @pytest.mark.asyncio
