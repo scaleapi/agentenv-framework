@@ -252,6 +252,9 @@ class SandboxProvider(ABC):
     # provider. Derived for a provider class that doesn't declare it (``__init_subclass__``): on for the default VM
     # path, off for a container-only backend and for a class that overrides either method.
     SHARED_MEMORY: ClassVar[bool] = False
+    # Whether a container it runs under a network that allowlists hosts can still pull its image: off where the pull
+    # goes through the sandbox's own allowlist, which leaves the registry out, as a Modal VM's Docker does.
+    PULLS_UNDER_ALLOWLIST: ClassVar[bool] = True
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)

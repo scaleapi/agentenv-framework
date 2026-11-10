@@ -33,6 +33,9 @@ from agent_env.providers.env_providers import env_computer_provider, env_gateway
 from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider, MCPServerConfig
 from agent_env.providers.env_providers.env_provider import EnvironmentProvider
 from agent_env.providers.env_state import LocalPostgresStateProvider
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
+from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
+from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPolicy
 from agent_env.task.teardown import env_sandbox_ids
 from agent_env.task_step.task_steps.browser.base import stored_browsers
@@ -975,8 +978,9 @@ async def test_a_redeploy_keeps_the_earlier_browser_for_close(gateway, providers
 
 # --- its website browser: its network ---
 
-def _provider(enforces: bool = True) -> SimpleNamespace:
-    return SimpleNamespace(url_from_sandbox=lambda url: url, supports_network_policy=lambda policy: enforces)
+def _provider(enforces: bool = True, pulls: bool = True) -> SimpleNamespace:
+    return SimpleNamespace(url_from_sandbox=lambda url: url, supports_network_policy=lambda policy: enforces,
+                           PULLS_UNDER_ALLOWLIST=pulls)
 
 
 def test_a_reach_only_network_allows_the_gateways_host_and_the_live_hosts_alone():
@@ -985,15 +989,28 @@ def test_a_reach_only_network_allows_the_gateways_host_and_the_live_hosts_alone(
     assert policy == NetworkPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=("gw.example", "github.test"))
 
 
-@pytest.mark.parametrize("enforces, reach, why", [
-    (False, GATEWAY, "can't hold a network to the hosts gw.example"),
-    (True, "", "the gateway's address isn't known"),
-], ids=["provider-cant-enforce", "no-gateway-address"])
-def test_a_reach_only_network_the_provider_cant_hold_allows_every_host_and_says_so(enforces, reach, why, caplog):
+@pytest.mark.parametrize("enforces, pulls, reach, why", [
+    (False, True, GATEWAY, "can't hold a network to the hosts gw.example"),
+    (True, False, GATEWAY, "pulls a container's image through its network"),
+    (True, True, "", "the gateway's address isn't known"),
+], ids=["provider-cant-enforce", "pull-under-allowlist", "no-gateway-address"])
+def test_a_reach_only_network_the_provider_cant_hold_allows_every_host_and_says_so(enforces, pulls, reach, why,
+                                                                                  caplog):
     env = SimpleNamespace(id="chromium-computer", network=None)
     with caplog.at_level(logging.WARNING, logger=env_computer_provider.logger.name):
-        assert env_computer_provider._network(env, _provider(enforces), reach, (), reach_only=True) is None
+        assert env_computer_provider._network(env, _provider(enforces, pulls), reach, (), reach_only=True) is None
     assert why in caplog.text
+
+
+def test_a_disk_held_to_the_gateway_is_not_let_off_by_a_provider_that_cant_pull_a_container_under_one():
+    env = SimpleNamespace(id="chromium-computer", network=None)
+    policy = env_computer_provider._network(env, _provider(pulls=False), GATEWAY, (), reach_only=True, form="disk")
+    assert policy == NetworkPolicy(mode=NetworkMode.ALLOWLIST, allow_hosts=("gw.example",))
+
+
+def test_modal_vm_says_it_cant_pull_a_container_under_an_allowlist_and_others_say_they_can():
+    assert not ModalVmSandboxProvider.PULLS_UNDER_ALLOWLIST
+    assert ModalSandboxProvider.PULLS_UNDER_ALLOWLIST and LocalSandboxProvider.PULLS_UNDER_ALLOWLIST
 
 
 def test_a_computers_own_network_is_widened_as_before_reach_only_or_not():

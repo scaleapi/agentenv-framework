@@ -23,7 +23,8 @@ the alias `aliases.toml` gives it, or by its id, `@local/agentenv-framework/brow
 its website browser with `browser_envs = ["chromium"]`, in place of the run's `playwright-mcp`: it then deploys on a
 sandbox of its own beside the multi env's computers, sized by the deploy step's `child_envs.chromium`, its tools served
 under `chromium_`, routing the multi env's synthetic sites through the gateway, and its network allowing the gateway's
-host and the live sites' hosts alone where the sandbox provider enforces an allowlist.
+host and the live sites' hosts alone where the sandbox provider enforces an allowlist and pulls its image under one
+(not yet `modal_vm`, which runs it allowing every host, as logged).
 
 A task changes a browser's state with the steps in `agent_env.task_step.task_steps.browser`, each a call to one
 `browser/v1` operation on the browser in the env `env_id`, the one `browser` names when the env has several:

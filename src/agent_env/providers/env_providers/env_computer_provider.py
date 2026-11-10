@@ -174,7 +174,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         values = _values(computer, values)
         app_settings = recorded_app_settings(env.composed_apps(), computer_params.app_settings(env, params.app_settings),
                                              platform_of(env.computer.os))
-        policy = _network(env, sandbox_provider, reach, live_hosts, reach_only)
+        policy = _network(env, sandbox_provider, reach, live_hosts, reach_only, form)
         shm_mb = env.shm_mb()
         booted = await boot(
             sandbox_provider, image=build["image"], port=env.driver.port, network_policy=policy, token=token,
@@ -349,10 +349,11 @@ async def end_recordings(record: DeployedSandboxEnv, reason: str) -> None:
 
 
 def _network(env: ComputerEnv, sandbox_provider: SandboxProvider, reach: str, live_hosts: tuple[str, ...],
-             reach_only: bool) -> Optional[NetworkPolicy]:
+             reach_only: bool, form: str = "container") -> Optional[NetworkPolicy]:
     """The computer's network: its own, also allowing ``reach``'s host and ``live_hosts`` when it lists the hosts
     allowed (``_reaching``), and with ``reach_only`` one that allows every host held to those hosts alone. A provider
-    that can't enforce that, or a gateway whose address isn't known yet, leaves it allowing every host, as logged."""
+    that can't enforce that, or can't pull a container's image under it (``PULLS_UNDER_ALLOWLIST``), or a gateway
+    whose address isn't known yet, leaves it allowing every host, as logged."""
     own = NetworkPolicy.from_dict(env.network) if env.network else None
     if not reach_only or (own is not None and own.restricts_egress):
         return _reaching(own, sandbox_provider, reach, live_hosts)
@@ -364,6 +365,11 @@ def _network(env: ComputerEnv, sandbox_provider: SandboxProvider, reach: str, li
     if not sandbox_provider.supports_network_policy(held):
         logger.warning(f"{env.id}: {type(sandbox_provider).__name__} can't hold a network to the hosts "
                        f"{', '.join(held.allow_hosts)}, so its network allows every host; use it for development only")
+        return own
+    if form == "container" and not sandbox_provider.PULLS_UNDER_ALLOWLIST:
+        logger.warning(f"{env.id}: {type(sandbox_provider).__name__} pulls a container's image through its "
+                       f"network, which an allowlist of {', '.join(held.allow_hosts)} would cut off, so its network "
+                       "allows every host")
         return own
     return held
 
