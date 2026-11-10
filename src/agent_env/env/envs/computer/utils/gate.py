@@ -239,7 +239,8 @@ def _platform(base: ComputerArtifact, driver: ComputerDriverEnv) -> list[str]:
     if (install := for_os(driver.install, os)) is None:
         problems.append(f"driver: {driver.id} declares no install for {_os_shown(base)}")
     else:
-        init = base.forms.container.init if base.forms.container is not None else "launchd"
+        form = base.forms.container or base.forms.disk
+        init = form.init if form is not None else "launchd"
         problems += [f"driver: its service {service.name!r} runs as root, and {base.id}'s {init} runs every program as "
                      f"{base.session.user}" for service in install.services if service.scope == "system"]
     return problems

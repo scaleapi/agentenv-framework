@@ -541,7 +541,7 @@ def _composed_omarchy_disk(env: ComputerEnv, base: ComputerArtifact, driver: Com
             _key(recipe=_digest(omarchy_disk.RECIPE), seed=hashlib.sha256(omarchy_disk.SEED_ENV.read_bytes()).hexdigest(),
                  source=source.sha256, user=user, os=base.os.model_dump(), form="omarchy-base", format=FORMAT),
             lambda: omarchy_disk.source(source, say), user, base.os.distribution, base.os.version, say, registry)
-        script = omarchy_disk.write(build, parts, build_settings=settings,
+        script = omarchy_disk.write(build, parts, user=user, build_settings=settings,
                                     image={"base": made.image, "layers": [part.folder for part in parts]})
         key = attempt.key = _key(base=made.image, provision=script, context=_digest(context), build_settings=settings,
                                  form="disk", arch=arch, format=FORMAT)

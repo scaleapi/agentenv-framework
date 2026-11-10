@@ -26,7 +26,7 @@ from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
 from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.env.envs.computer.utils import boot, composer, gate, omarchy_disk, thin_disk
 from agent_env.env.envs.computer.utils.composer import Composing
-from agent_env.env.envs.computer.utils.install import Install, Service
+from agent_env.env.envs.computer.utils.install import Install, OmarchyInstall, Service, installs
 from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
 
 URL = "https://example.com/desk.tar.gz"
@@ -106,18 +106,19 @@ def _base(**changes) -> ComputerArtifact:
         "forms": {"disk": DISK}, **changes})
 
 
-def _driver(folder: Path) -> ComputerDriverEnv:
+def _driver(folder: Path, services: list[Service] | None = None) -> ComputerDriverEnv:
     folder.mkdir(parents=True, exist_ok=True)
-    for name, text in (("driver.py", "class Desk: ...\n"), ("requirements.txt", "cua-driver==0.44.0\n"),
-                       ("install.sh", "tar xzf desk.tar.gz\n")):
+    names = ("driver.py", "requirements.txt", "install.sh", "settings.sh")
+    for name, text in zip(names, ("class Desk: ...\n", "cua-driver==0.44.0\n", "tar xzf desk.tar.gz\n",
+                                  "mkdir -p ~/.config/desk\n")):
         (folder / name).write_text(text)
-    files = FileArtifactUniverse.put_bundled("@local/~/kit/desk__files", files={
-        name: folder / name for name in ("driver.py", "requirements.txt", "install.sh")})
-    omarchy = Install(
+    files = FileArtifactUniverse.put_bundled("@local/~/kit/desk__files", files={name: folder / name for name in names})
+    omarchy = OmarchyInstall(
         python="requirements.txt", downloads=[Download(url=URL, sha256="cd" * 32, to="desk.tar.gz", arch="amd64"),
                                               Download(url=URL, sha256="ef" * 32, to="arm.tar.gz", arch="arm64")],
-        run=[RunScript(script="install.sh")],
-        services=[Service(name="daemon", command="venv/bin/python driver.py"), Service(name="driver", command=SERVE)])
+        run=[RunScript(script="install.sh"), RunScript(script="settings.sh", scope="session")],
+        services=services or [Service(name="daemon", command="venv/bin/python driver.py"),
+                              Service(name="driver", command=SERVE)])
     put = ComputerDriverEnv.put(
         id="@local/~/kit/desk", module="driver.py:Desk", files=files, port=18765, install={"linux/omarchy": omarchy},
         declaration=DriverDeclaration.model_validate({
@@ -150,6 +151,8 @@ def test_an_omarchy_env_composes_a_thin_disk_on_its_base_built_from_omarchys_ima
     lines = script.splitlines()
     for line in [f'cp -a "$build/context/driver/." {prefix}/', f"fetch {URL} {'cd' * 32} {prefix}/desk.tar.gz",
                  f"python3 -m venv {prefix}/venv", f"(cd {prefix} && PREFIX={prefix} bash {prefix}/install.sh)",
+                 "user=omarchy", f'(cd {prefix} && runuser -u "$user" -- env HOME="$home" PREFIX={prefix} '
+                                 f"bash {prefix}/settings.sh)",
                  "systemctl --global enable --quiet agentenv-driver-desk-daemon.service",
                  "systemctl --global enable --quiet agentenv-driver-desk-driver.service"]:
         assert line in lines, line
@@ -204,15 +207,34 @@ def test_an_omarchy_computer_refuses_apps_for_now(local_stores, cli_routing, tmp
     ({"forms": {"disk": {**DISK, "image": {"id": "x", "version": 1}}}},
      "forms.disk: a disk names an image or the source its base is built from, not both"),
     ({"forms": {"disk": {key: value for key, value in DISK.items() if key != "source"}}},
-     "forms.disk: with no container form to be made from, a Linux disk names its image or the source its base is "
-     "built from"),
+     "forms.disk: an Omarchy disk's base is built from Omarchy's own image on the machine that composes it, so it "
+     "names that image's source and no image"),
+    ({"forms": {"disk": {**{key: value for key, value in DISK.items() if key != "source"},
+                         "image": {"id": "x", "version": 1}}}},
+     "forms.disk: an Omarchy disk's base is built from Omarchy's own image"),
     ({"forms": {"disk": {**DISK, "source": {"url": "http://example.com/omarchy.qcow2", "sha256": "ab" * 32}}}},
      "url"),
-], ids=["no-container", "disk-required", "systemd", "image-or-source", "names-its-source", "https"])
+], ids=["no-container", "disk-required", "systemd", "image-or-source", "names-its-source", "no-image", "https"])
 def test_an_omarchy_base_is_a_disk_alone_built_from_its_source_and_started_by_systemd(
         local_stores, cli_routing, changes, error):
     with pytest.raises(ValidationError, match=error):
         _base(**changes)
+
+
+def test_an_omarchy_install_names_no_apt_packages_which_a_linux_one_may():
+    table = {"packages": {"apt": ["htop"]}, "services": [{"name": "driver", "command": SERVE}]}
+
+    assert installs({"linux/omarchy": table})[1] == [
+        "install.linux/omarchy: Value error, Omarchy has no apt: fetch what the layer needs with downloads, checked by "
+        "sha256"]
+    assert installs({"linux": table})[1] == []
+
+
+def test_a_driver_service_that_runs_as_root_is_refused_naming_omarchys_systemd(docker, tmp_path):
+    with pytest.raises(ValueError, match="driver: its service 'driver' runs as root, and @local/~/kit/omarchy-4.5's "
+                                         "systemd runs every program as omarchy"):
+        _put(_driver(tmp_path / "desk", services=[Service(name="driver", command=SERVE, scope="system")]),
+             FakeLinux())
 
 
 def test_a_windows_disk_names_no_source(local_stores, cli_routing):

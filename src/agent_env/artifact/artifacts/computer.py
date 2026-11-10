@@ -269,6 +269,9 @@ class ComputerArtifact(Artifact):
                              f"{init}, not {disk.init}")
         if disk is not None and disk.image is not None and disk.source is not None:
             raise ValueError("forms.disk: a disk names an image or the source its base is built from, not both")
+        if platform == "linux/omarchy" and disk is not None and (disk.image is not None or disk.source is None):
+            raise ValueError("forms.disk: an Omarchy disk's base is built from Omarchy's own image on the machine that "
+                             "composes it, so it names that image's source and no image")
         if self.os.type == "windows" and (disk.image is not None or disk.source is not None):
             raise ValueError("forms.disk: a Windows disk is installed from Microsoft's media on the machine that "
                              "composes it, so it names no image or source")

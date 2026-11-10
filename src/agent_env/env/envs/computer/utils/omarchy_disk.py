@@ -152,11 +152,13 @@ def _root_key(keys: Path) -> str:
     return base64.b64encode(lines.encode()).decode()
 
 
-def write(build: Path, parts: list[Part], *, build_settings: dict[str, Any], image: dict) -> str:
-    """Write ``build``'s ``provision.sh``, which installs ``parts`` from ``build/context`` and enables their services
-    for the session, ``build_settings`` as every service's ``AGENTENV_SETTING_<NAME>`` and ``image`` as what the disk says
-    it holds; its text, which a composed disk's key covers."""
-    lines = ["#!/bin/bash", "set -euo pipefail", f"build={BUILD}", _FETCH]
+def write(build: Path, parts: list[Part], *, user: str, build_settings: dict[str, Any], image: dict) -> str:
+    """Write ``build``'s ``provision.sh``, which installs ``parts`` from ``build/context``, their session-scoped run
+    scripts as the session user ``user``, and enables their services for the session, ``build_settings`` as every
+    service's ``AGENTENV_SETTING_<NAME>`` and ``image`` as what the disk says it holds; its text, which a composed disk's
+    key covers."""
+    lines = ["#!/bin/bash", "set -euo pipefail", f"build={BUILD}", f"user={shlex.quote(user)}",
+             'home=$(getent passwd "$user" | cut -d: -f6)', _FETCH]
     for part in parts:
         lines += [f"# {part.folder}", *_installed_part(part)]
     settings = "".join(f"export AGENTENV_SETTING_{name.upper()}={shlex.quote(str(value))}\n"
@@ -169,8 +171,9 @@ def write(build: Path, parts: list[Part], *, build_settings: dict[str, Any], ima
 
 
 def _installed_part(part: Part) -> list[str]:
-    """The lines that install ``part``: its files, downloads, venv and run scripts, and its services as user units of
-    the graphical session, each enabled for every user."""
+    """The lines that install ``part``: its files, downloads, venv and run scripts, each as root or, for ``session``,
+    as the session user in their home, and its services as user units of the graphical session, each enabled for every
+    user."""
     prefix, install = part.prefix, part.install
     lines = [f"install -d {shlex.quote(str(prefix))}",
              f'cp -a "$build/context/{part.folder}/." {shlex.quote(str(prefix))}/']
@@ -186,7 +189,8 @@ def _installed_part(part: Part) -> list[str]:
                   f"{venv}/bin/pip install -q --disable-pip-version-check {' '.join(map(shlex.quote, wants))}",
                   f"{venv}/bin/pip list --format=json > {shlex.quote(str(prefix / 'installed.json'))}"]
     for run in install.run or []:
-        lines.append(f"(cd {shlex.quote(str(prefix))} && PREFIX={shlex.quote(str(prefix))} "
+        as_user = 'runuser -u "$user" -- env HOME="$home" ' if run.scope == "session" else ""
+        lines.append(f"(cd {shlex.quote(str(prefix))} && {as_user}PREFIX={shlex.quote(str(prefix))} "
                      f"bash {shlex.quote(str(prefix / run.script))})")
     for name, argv in part.services.items():
         lines += [_written(UNITS / f"agentenv-{name}.service", unit(name, prefix, argv, part.environment)),
