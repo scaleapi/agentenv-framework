@@ -23,6 +23,7 @@ Needs Docker and the local registry on
 localhost:5000, and Node 20 or later and npm for the CDP clients."""
 
 import asyncio
+import itertools
 import json
 import platform
 import re
@@ -38,6 +39,7 @@ import pytest
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 from PIL import Image
+from websockets.asyncio.client import connect
 
 from agentenv_protocol import client as protocol_v1
 from agentenv_protocol.computer import COMPUTER_PAGE, COMPUTER_READY
@@ -535,9 +537,43 @@ except Exception as e:
 """
 
 
-async def _through_port(deployed, url: str) -> str:
-    done = await inside.run(deployed, ["python3", "-c", THROUGH_PROXY, url, "http://127.0.0.1:3129"], timeout_s=60)
+async def _through_port(deployed, url: str, proxy: str = "http://127.0.0.1:3129") -> str:
+    done = await inside.run(deployed, ["python3", "-c", THROUGH_PROXY, url, proxy], timeout_s=60)
     return done["stdout"].strip()
+
+
+#: What a CDP agent sees of the tab it navigates: its title, its first words, and whether it finished loading.
+PAGE_SEEN = ("JSON.stringify({ready: document.readyState, title: document.title, "
+             "text: document.body ? document.body.innerText.slice(0, 200) : ''})")
+
+
+async def _cdp_agent_loads(ws_url: str, urls: list[str]) -> dict:
+    """What a CDP agent at ``ws_url`` sees navigating a tab of its own to each of ``urls``, one after another:
+    ``Page.navigate``'s error, if any, and the page once it has loaded."""
+    async with connect(ws_url, max_size=None, open_timeout=60) as ws:
+        ids = itertools.count(1)
+
+        async def call(method: str, params: dict, session: str | None = None) -> dict:
+            message_id = next(ids)
+            await ws.send(json.dumps({"id": message_id, "method": method, "params": params,
+                                      **({"sessionId": session} if session else {})}))
+            while (reply := json.loads(await asyncio.wait_for(ws.recv(), 90))).get("id") != message_id:
+                pass
+            return reply
+
+        target = (await call("Target.createTarget", {"url": "about:blank"}))["result"]["targetId"]
+        session = (await call("Target.attachToTarget", {"targetId": target, "flatten": True}))["result"]["sessionId"]
+        seen = {}
+        for url in urls:
+            navigated = await call("Page.navigate", {"url": url}, session)
+            page, deadline = {}, time.monotonic() + 30
+            while page.get("ready") != "complete" and time.monotonic() < deadline:
+                await asyncio.sleep(1)
+                evaluated = await call("Runtime.evaluate", {"expression": PAGE_SEEN, "returnByValue": True}, session)
+                page = json.loads(evaluated.get("result", {}).get("result", {}).get("value") or "{}")
+            seen[url] = {"error": navigated.get("result", {}).get("errorText") or navigated.get("error", {}).get(
+                "message"), **page}
+        return seen
 
 
 async def _container_of(deployed) -> str:
@@ -610,8 +646,9 @@ async def test_routing_sites_it_goes_out_only_through_the_forward_port_which_the
     assert (status, line) == ("200", "data: first") and int(seconds) < 15, pages
     assert all(pages[url].startswith("error") and "403" in pages[url] for url in (
         "https://example.com/", "http://127.0.0.1:18765/", "https://127.0.0.1:18765/")), pages
-    assert "site proxy: refused CONNECT example.com:443: no site of this computer" in logged
-    assert "site proxy: refused GET 127.0.0.1:18765: no site of this computer" in logged
+    refused = [json.loads(line)["refused"] for line in logged.splitlines() if line.startswith('{"refused"')]
+    assert {"method": "CONNECT", "host": "example.com:443", "reason": "no site of this computer"} in refused, logged
+    assert {"method": "GET", "host": "127.0.0.1:18765", "reason": "no site of this computer"} in refused, logged
     assert stopped["exit_code"] != 0 and still == serving and after_stop.startswith("200 "), (stopped, after_stop)
     assert back.startswith("200 ") and restarted and restarted != serving, (back, restarted)
     assert after_reset.startswith("200 ") and after_reset.endswith("<title>alpha</title>"), after_reset
@@ -646,6 +683,30 @@ async def test_routing_sites_beside_live_ones_its_forward_port_takes_the_live_ho
         "https://shop.test/alpha")), pages
     assert pages["https://example.com/"].startswith("error") and "403" in pages["https://example.com/"], pages
     assert any(tab["url"].startswith("https://github.com/") and "GitHub" in (tab.get("title") or "") for tab in tabs), tabs
+    assert not report.failed
+
+
+@pytest.mark.asyncio
+async def test_alone_on_the_open_web_it_loads_a_public_site_through_its_proxy_and_an_agents_tab_and_logs_each_connection(
+        browser_computer):
+    public, nowhere = "https://github.com/", "https://agentenv-no-such-host.invalid/"
+    with namespace_routing():
+        deployed = await Env.get(browser_computer.id).deploy(
+            env_params={"app_settings": {"chromium": {"start_urls": [DATA_PAGE]}}})
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            through = {url: await _through_port(deployed, url, "http://127.0.0.1:3128") for url in (public, nowhere)}
+            seen = await _cdp_agent_loads((await _cdp(deployed, "ada"))["ws_url"], [public])
+            logged = _as_root(await _container_of(deployed), "cat /var/log/agentenv/site-proxy.log")
+        finally:
+            report = await teardown_run(context)
+
+    assert through[public].startswith("200 ") and "502" in through[nowhere], through
+    assert seen[public]["title"].startswith("GitHub") and not seen[public]["error"], seen
+    entries = [json.loads(line) for line in logged.splitlines() if line.startswith("{")]
+    github = [entry["connection"] for entry in entries if entry.get("connection", {}).get("host") == "github.com"]
+    assert github and all(entry["bytes_received"] > 0 for entry in github), logged[-2000:]
+    assert any(entry.get("failed", {}).get("host") == "agentenv-no-such-host.invalid" for entry in entries), logged[-2000:]
     assert not report.failed
 
 

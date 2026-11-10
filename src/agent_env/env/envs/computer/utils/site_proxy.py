@@ -106,6 +106,26 @@ def matches(pattern: str, host: str) -> bool:
     return host == pattern
 
 
+def log_event(**fields) -> None:
+    """One JSON line in the proxy's log, every line it writes being one: ``connection`` (host, port, address, bytes each
+    way, start, duration) when a connection to a live site's host ends, ``failed`` (method, host, port, ``reason``
+    "doesn't resolve" or "no answer", and the error) for one that couldn't open, both in the same shapes as the
+    headless base's stand-in proxy's; ``refused`` for a host that's no site, ``error`` for a connection that failed
+    unexpectedly, and ``restarted`` when ``keep`` starts the proxy again."""
+    print(json.dumps(fields), file=sys.stderr, flush=True)
+
+
+def described(error: BaseException) -> str:
+    return f"{type(error).__name__}: {error}".removesuffix(": ")
+
+
+class Count:
+    """The bytes a relay has carried one way, counted as it goes, so a connection that ends on an error keeps them."""
+
+    def __init__(self, start: int = 0):
+        self.bytes = start
+
+
 @dataclass
 class Site:
     """One site as the proxy serves it: its names, the route on the gateway it forwards to, and its certificate and key
@@ -361,10 +381,13 @@ async def relay_chunked(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         await relay_exact(reader, writer, size + 2)
 
 
-async def relay_until_eof(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+async def relay_until_eof(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+                          count: Optional[Count] = None) -> None:
     while data := await reader.read(CHUNK):
         writer.write(data)
         await writer.drain()
+        if count is not None:
+            count.bytes += len(data)
 
 
 async def relay_body(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, headers: list[tuple[str, str]],
@@ -380,10 +403,11 @@ async def relay_body(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
         await relay_until_eof(reader, writer)
 
 
-async def splice(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-    """One direction of an upgraded connection, closing the other side when it ends, which ends the other direction."""
+async def splice(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, count: Optional[Count] = None) -> None:
+    """One direction of an upgraded connection, closing the other side when it ends, which ends the other direction;
+    the bytes it carries counted in ``count`` when given."""
     try:
-        await relay_until_eof(reader, writer)
+        await relay_until_eof(reader, writer, count)
     except (ConnectionError, OSError, ssl.SSLError):
         pass
     finally:
@@ -455,22 +479,37 @@ class SiteProxy:
     async def _direct(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, host: str, port: int,
                       head: Optional[bytes] = None) -> None:
         """``host``, a live site's, reached straight at ``port``: a tunnel, answered as established, for a ``CONNECT``,
-        else ``head`` sent on; then both ends relayed until either closes."""
+        else ``head`` sent on; then both ends relayed until either closes, and the connection logged (``log_event``).
+        One that doesn't resolve or answer within ``UPSTREAM_TIMEOUT_S``, the lookup and every address's attempt
+        together, is a 502, logged too."""
         try:
             up_reader, up_writer = await asyncio.wait_for(asyncio.open_connection(host, port), UPSTREAM_TIMEOUT_S)
         except (OSError, asyncio.TimeoutError) as e:
-            writer.write(simple_response("502 Bad Gateway", f"{host}:{port} didn't answer: {e}\n", FAILED))
+            unresolved = isinstance(e, socket.gaierror)
+            log_event(failed={"method": "CONNECT" if head is None else head.split(b" ", 1)[0].decode("latin-1"),
+                              "host": host, "port": port, "reason": "doesn't resolve" if unresolved else "no answer",
+                              "error": described(e)})
+            writer.write(simple_response("502 Bad Gateway", f"{host} doesn't resolve\n" if unresolved else
+                                         f"{host}:{port} didn't answer\n", FAILED))
             return
+        address = (up_writer.get_extra_info("peername") or ("",))[0]
+        started, began, sent, received = time.time(), time.monotonic(), Count(len(head or b"")), Count()
         if head is None:
             writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
         else:
             up_writer.write(head)
-        await asyncio.gather(writer.drain(), up_writer.drain())
-        await asyncio.gather(splice(reader, up_writer), splice(up_reader, writer))
+        try:
+            await asyncio.gather(writer.drain(), up_writer.drain())
+            await asyncio.gather(splice(reader, up_writer, sent), splice(up_reader, writer, received))
+        finally:
+            log_event(connection={"host": host, "port": port, "address": address, "bytes_sent": sent.bytes,
+                                  "bytes_received": received.bytes,
+                                  "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(started)),
+                                  "duration_s": round(time.monotonic() - began, 3)})
 
     @staticmethod
     def _refuse(writer: asyncio.StreamWriter, method: str, host: str) -> None:
-        print(f"site proxy: refused {method} {host}: no site of this computer", file=sys.stderr, flush=True)
+        log_event(refused={"method": method, "host": host, "reason": "no site of this computer"})
         writer.write(simple_response("403 Forbidden", f"{host} is no site of this computer, and the browser reaches "
                                      "its sites alone\n", FAILED))
 
@@ -483,7 +522,7 @@ class SiteProxy:
         except (ConnectionError, asyncio.IncompleteReadError, ssl.SSLError, OSError):
             pass
         except Exception as e:
-            print(f"site proxy: a {label} connection failed: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+            log_event(error={"connection": label, "error": described(e)})
         finally:
             try:
                 await writer.drain()
@@ -1101,7 +1140,7 @@ def keep(serve_path: str) -> None:
     while True:
         ended = subprocess.run([sys.executable, os.path.abspath(__file__), "serve", serve_path],
                                stdin=subprocess.DEVNULL).returncode
-        print(f"the site proxy ended ({ended}); starting it again", flush=True)
+        print(json.dumps({"restarted": {"exit_code": ended}}), flush=True)
         time.sleep(RESTART_DELAY_S)
 
 
