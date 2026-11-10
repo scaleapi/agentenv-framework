@@ -1,5 +1,5 @@
-"""WebsiteBrowserEnvironment: agentenv's flags after a subclass's command, in a computer and alone, and the proxy rule
-for each; a subclass refused for carrying one of them; the start tabs, the time zone and the window from its settings;
+"""WebsiteBrowserEnvironment: agentenv's flags after a subclass's command, in a computer and alone, headful on an X
+server alone or headless with none, and the proxy rule for each; a subclass refused for carrying one of them; the start tabs, the time zone and the window from its settings;
 its launch run with no desktop when alone; a CDP connection over a new debugging pipe at each launch, which its ready
 check asks, and a browser launched again when its server restarts; its shared memory in files only on a small
 /dev/shm; an empty cache and the deploy's prompt answers in its profile at each launch; its policies, card params and
@@ -121,9 +121,13 @@ def _settings(monkeypatch, **values) -> None:
     monkeypatch.setenv(APP_SETTINGS_ENV, json.dumps({"chromium": values}))
 
 
-def _alone(monkeypatch) -> None:
-    """On a computer with no display, a browser computer's."""
+def _alone(monkeypatch, x_server: bool = False) -> None:
+    """On a computer with no display, a browser computer's, with an X server only the browser uses or none."""
     monkeypatch.setattr(app, "detect", lambda: Platform(os="linux", display="none"))
+    if x_server:
+        monkeypatch.setenv("DISPLAY", ":99")
+    else:
+        monkeypatch.delenv("DISPLAY", raising=False)
 
 
 def test_in_a_computer_its_flags_follow_its_command_then_its_start_tabs_and_its_window_is_waited_for(browser_home):
@@ -161,6 +165,21 @@ def test_alone_it_goes_through_its_proxy_headless_at_its_window_and_its_launch_w
     assert browser._computer_app.desktop is False and browser._computer_app.timeout_s == 30
 
 
+def test_alone_on_an_x_server_it_runs_headful_at_its_window_with_webgl_and_its_launch_waits_on_no_window(monkeypatch):
+    _alone(monkeypatch, x_server=True)
+    monkeypatch.setenv(SITE_PROXY_ENV, PROXY)
+    _settings(monkeypatch, window={"width": 1024, "height": 768})
+
+    browser = Browser()
+    launch = browser.launch
+
+    assert f"--proxy-bypass-list={ALONE_BYPASS}" in launch.command
+    assert launch.command[-3:] == ["--window-size=1024,768", "--enable-unsafe-swiftshader", "about:blank"]
+    assert not any(flag.startswith("--headless") for flag in launch.command)
+    assert launch.window is None and launch.ready is None
+    assert browser._computer_app.desktop is False
+
+
 def test_alone_its_launch_keeps_the_port_and_command_it_waits_on_and_their_timeout(monkeypatch):
     @linux(launch=Launch(command=["chromium/chrome"], window={"class": "Chromium"},
                          ready=Ready(window=True, port=9000, command=["true"], timeout_s=45)))
@@ -186,7 +205,8 @@ def test_alone_it_refuses_to_launch_without_a_site_proxy(monkeypatch):
 
 @pytest.mark.parametrize("flag", ["--remote-debugging-port=9222", "--remote-allow-origins=*", "--headless",
                                   "--proxy-server=http://elsewhere:3128", "--user-data-dir=/tmp/profile",
-                                  "--disk-cache-dir=/tmp/cache", "--disable-dev-shm-usage"])
+                                  "--disk-cache-dir=/tmp/cache", "--disable-dev-shm-usage",
+                                  "--enable-unsafe-swiftshader"])
 def test_a_subclass_whose_command_carries_a_flag_agentenv_owns_is_refused_when_declared(flag):
     @linux(launch=Launch(command=["chromium/chrome", flag]))
     class Widened(WebsiteBrowserEnvironment):
@@ -434,14 +454,18 @@ def test_its_policies_are_agentenvs_with_its_own_over_them_where_its_build_reads
     assert [step.name for step in Browser.declaration().install_steps] == ["write_policies"]
 
 
-def test_its_card_declares_browser_v1_with_its_build_and_clock_and_alone_its_window(monkeypatch):
+def test_its_card_declares_browser_v1_with_its_build_clock_and_mode_and_alone_its_window(monkeypatch):
     in_computer = Browser().extension_params(BROWSER)
-    _alone(monkeypatch)
     monkeypatch.setenv(SITE_PROXY_ENV, PROXY)
-    alone = Browser().extension_params(BROWSER)
+    _alone(monkeypatch)
+    headless = Browser().extension_params(BROWSER)
+    _alone(monkeypatch, x_server=True)
+    headful = Browser().extension_params(BROWSER)
 
-    assert in_computer == {"chromium": "156.0.8078.4", "clock": "real"}
-    assert alone == {"chromium": "156.0.8078.4", "clock": "real", "window": {"width": 1280, "height": 800}}
+    window = {"width": 1280, "height": 800}
+    assert in_computer == {"chromium": "156.0.8078.4", "clock": "real", "mode": "headful"}
+    assert headless == {"chromium": "156.0.8078.4", "clock": "real", "mode": "headless", "window": window}
+    assert headful == {"chromium": "156.0.8078.4", "clock": "real", "mode": "headful", "window": window}
 
 
 @pytest.mark.asyncio

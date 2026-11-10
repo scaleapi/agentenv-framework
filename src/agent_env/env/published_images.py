@@ -72,8 +72,8 @@ AGENT_IMAGES = tuple(PublishedImage(f"agentenv-{folder.name}", folder / "Dockerf
 EXAMPLE_IMAGES = (PublishedImage("agentenv-mail-mcp", _EXAMPLES / "mail-mcp" / "envs" / "mail" / "Dockerfile"),)
 # The base computers the computers bundle ships, so a run pulls a base rather than building its desktop.
 COMPUTER_IMAGES = (PublishedImage("agentenv-ubuntu-24.04", _COMPUTERS / "ubuntu-24.04" / "Dockerfile"),
-                   PublishedImage("agentenv-ubuntu-24.04-headless",
-                                  _COMPUTERS / "ubuntu-24.04-headless" / "Dockerfile"))
+                   PublishedImage("agentenv-ubuntu-24.04-browser",
+                                  _COMPUTERS / "ubuntu-24.04-browser" / "Dockerfile"))
 # The shipped bundles' published images, whose requirements keep a protocol floor.
 BUNDLE_IMAGES = AGENT_IMAGES + EXAMPLE_IMAGES + COMPUTER_IMAGES
 # What makes and boots a Linux disk form: the disk tools a build runs on its own platform, and the QEMU launcher.

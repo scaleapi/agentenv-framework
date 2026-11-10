@@ -1,5 +1,5 @@
 Base computers that come with agent-env, each a `computer` artifact a computer env composes a driver and apps onto.
-`agent-env run <bundle> --set envs/desktop.computer=ubuntu-24.04-headless` composes a bundle's `desktop` env on
+`agent-env run <bundle> --set envs/desktop.computer=ubuntu-24.04-browser` composes a bundle's `desktop` env on
 another of them for one run, the bundle left as written.
 
 `artifacts/ubuntu-24.04/` is Ubuntu 24.04 (`amd64` and `arm64`) with XFCE on Xvfb, D-Bus and AT-SPI. tini starts
@@ -10,16 +10,19 @@ container form's image is built from the folder's `Dockerfile`, and a release pu
 building it. Name it from another bundle as `ubuntu-24.04`, the alias `aliases.toml` gives it, or by its id,
 `@local/agentenv-framework/computers/ubuntu-24.04`.
 
-`artifacts/ubuntu-24.04-headless/` is Ubuntu 24.04 (`amd64` and `arm64`) with no display server or desktop
-(`display = "none"`), for one website browser, which runs headless there, and the `page` driver, whose screen is the
-browser's page: a browser computer, which agentenv's `chromium` deploys alone as. supervisord runs every program as the
-session user, among them a stand-in site proxy on `127.0.0.1:3128`, the browser's only route out when the computer
+`artifacts/ubuntu-24.04-browser/` is Ubuntu 24.04 (`amd64` and `arm64`) with no desktop (`display = "none"`), for one
+website browser and the `page` driver, whose screen is the browser's page: a browser computer, which agentenv's
+`chromium` deploys alone as. The browser runs headful on an X server of its own, Xvfb on `:99` at 1920x1080, which no
+agent sees, records or drives, so the sites it visits see a browser with a window, not a headless one; the page's size
+is the browser's `window` setting. supervisord runs every program as the session user, among them that X server and a
+stand-in site proxy on `127.0.0.1:3128`, the browser's only route out when the computer
 routes no sites. It forwards a request or a `CONNECT` tunnel to any host, never decrypting a tunnel and refusing
 nothing: the sandbox's network policy is all that limits it. Every line it writes to `/var/log/agentenv/site-proxy.log`
 is JSON, one per connection and one per connection that fails, in the same shapes as the shared site proxy's. A computer that routes sites names the shared site proxy's forward port,
 `127.0.0.1:3129`, to the browser instead: it serves the run's sites, refuses every other host and runs out of the agent's reach. It has a
-container form only. Name it from another bundle as `ubuntu-24.04-headless`, or by its id,
-`@local/agentenv-framework/computers/ubuntu-24.04-headless`.
+container form only. Name it from another bundle as `ubuntu-24.04-browser`, or by its id,
+`@local/agentenv-framework/computers/ubuntu-24.04-browser`. It was called `ubuntu-24.04-headless`, which stays an
+alias of it, and its image was `agentenv-ubuntu-24.04-headless`, which stays published for what pins it.
 
 It also has a disk form, a disk a VM boots from UEFI, which is the container form's root filesystem on the Linux boot
 recipe in `disk/linux/`: a GPT disk of an EFI system partition holding one UKI, Ubuntu's kernel with a busybox initramfs,

@@ -1,10 +1,11 @@
-"""The browser as a computer: agentenv's chromium deployed alone, on the ubuntu-24.04-headless base with no display
-and the page driver, whose screen is chromium's active tab, headless. Gate 3 makes this machine's arch ready with it,
+"""The browser as a computer: agentenv's chromium deployed alone, on the ubuntu-24.04-browser base with no desktop
+and the page driver, whose screen is chromium's active tab, headful on the X server only the browser uses. Gate 3 makes this machine's arch ready with it,
 its input checks and page tools verified on the HTML desk; deployed through the computer provider like any computer,
 its computer_* tools see and drive the page, and its page tools navigate, move in history, answer a dialog, use tabs
-and upload; nothing runs X and nothing listens but the driver and the site proxy; a killed app server or driver is
-started again by supervisord and the computer is ready again; and chromium killed fails it for good, computer-ready/v1
-saying why and the tools answering with it. Through its cdp address, Playwright and Puppeteer drive it two at once,
+and upload; the browser's X server runs but no desktop, and nothing listens but the driver and the site proxy; a
+killed app server or driver is started again by supervisord and the computer is ready again; chromium killed fails it
+for good, computer-ready/v1 saying why and the tools answering with it, and so does its X server killed, which takes
+chromium with it though supervisord starts X again. Through its cdp address, Playwright and Puppeteer drive it two at once,
 each on its own session, by http_url and by ws_url; a wrong token is refused, and so is code in the computer without
 one; one client's close leaves the browser up for the other, which can't open file: URLs; the address outlives a
 relaunch by its app server's restart, and the browser's reset and the computer's end it. browser_connect_cdp hands the echo agent its address, with the computer's
@@ -146,8 +147,8 @@ for table in ("/proc/net/tcp", "/proc/net/tcp6"):
         fields = line.split()
         if fields[3] == "0A":
             ports.add(int(fields[1].rsplit(":", 1)[1], 16))
-x = [p for p in glob.glob("/proc/[0-9]*/comm") if open(p).read().strip() in ("Xvfb", "Xorg", "xfce4-session")]
-print(sorted(ports), bool(x))
+x = sorted({open(p).read().strip() for p in glob.glob("/proc/[0-9]*/comm")} & {"Xvfb", "Xorg", "xfce4-session"})
+print(sorted(ports), ",".join(x))
 """
 
 
@@ -205,8 +206,9 @@ async def test_its_tools_see_and_drive_the_page_that_is_its_screen(browser_compu
     assert clicked["c"] == 1 and doubled["d"] == 1 and typed["v"] == "Hello, World!" and replaced["v"] == "x"
     assert "C-a" in replaced["k"] and "Enter" in entered["k"] and scrolled["y"] >= 300
     assert after.getpixel((200, 150)) != (255, 0, 0)
-    assert json.loads(listening) == [3128, 18765] and x_server.strip() == "False"
-    assert "--headless=new" in command and "--window-size=1280,800" in command
+    assert json.loads(listening) == [3128, 18765] and x_server.strip() == "Xvfb"
+    assert "--headless" not in command and "--window-size=1280,800" in command
+    assert "--enable-unsafe-swiftshader" in command
     assert not report.failed
 
 
@@ -238,6 +240,28 @@ async def test_a_killed_app_server_or_driver_comes_back_and_a_killed_browser_fai
     assert failed["ready"] is False and browser["final"] is True and failed["failed"] == f"browser: {browser['detail']}"
     assert "by signal SIGKILL" in browser["detail"] and "infrastructure failure" in browser["detail"]
     assert refused.isError and "has failed" in refused.content[0].text and "SIGKILL" in refused.content[0].text
+    assert not report.failed
+
+
+@pytest.mark.asyncio
+async def test_a_killed_x_server_comes_back_but_takes_the_browser_with_it_which_fails_the_computer_for_good(
+        browser_computer):
+    with namespace_routing():
+        deployed = await Env.get(browser_computer.id).deploy(
+            env_params={"app_settings": {"chromium": {"start_urls": [PAGE_URL]}}})
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            before = await _screenshot(deployed)
+            await _kill(deployed, "^Xvfb :99", oldest=True)
+            failed = await _until(deployed, lambda status: "failed" in status)
+            x_back = await _until_x(deployed)
+        finally:
+            report = await teardown_run(context)
+
+    assert before.size == (1280, 800)
+    browser = next(check for check in failed["checks"] if check["name"] == "browser")
+    assert failed["ready"] is False and browser["final"] is True and "infrastructure failure" in browser["detail"]
+    assert x_back
     assert not report.failed
 
 
@@ -522,6 +546,17 @@ async def _until(deployed, holds) -> dict:
 async def _ready(deployed) -> dict:
     await asyncio.sleep(2)
     return await _until(deployed, lambda status: status["ready"])
+
+
+async def _until_x(deployed) -> bool:
+    """Whether the browser's X server, which supervisord starts again, answers within the wait."""
+    deadline = time.monotonic() + WAIT_S
+    while time.monotonic() < deadline:
+        if (await inside.run(deployed, ["sh", "-c", "pgrep -x Xvfb >/dev/null && test -S /tmp/.X11-unix/X99 && "
+                                                    "echo up || echo down"], timeout_s=30))["stdout"].strip() == "up":
+            return True
+        await asyncio.sleep(POLL_S)
+    return False
 
 
 #: Loads its URL through the proxy it's given, as a browser alone does, printing the status, the seconds it took and the

@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 AGENTENV, UNKNOWN, EXIT, STOP = "agentenv", "unknown", "exit", "stop"
 #: How long the active tab's check waits on each page.
 ACTIVE_CHECK_TIMEOUT_S = 2.0
-#: How long a tab opened headless may take to be attached and held to its window's size, which is also how long a page
+#: How long a tab opened alone may take to be attached and held to its window's size, which is also how long a page
 #: of agentenv's own may take to reach an origin, and how often it's asked meanwhile.
 PIN_TIMEOUT_S = 10.0
 ARRIVAL_POLL_S = 0.05
@@ -75,7 +75,7 @@ class BrowserControl:
         self._closing: set[str] = set()
         self._open_dialogs: dict[str, dict] = {}
         self._answering: set[str] = set()
-        #: The file chooser each page's session opened that waits, headless, and the tab agentenv last brought to the
+        #: The file chooser each page's session opened that waits, alone, and the tab agentenv last brought to the
         #: front.
         self._choosers: dict[str, dict] = {}
         self._front: Optional[str] = None
@@ -132,7 +132,7 @@ class BrowserControl:
 
     async def open_tab(self, url: Optional[str] = None, background: bool = False) -> str:
         """A new tab at ``url``, else blank, brought to the front, or with ``background`` behind the active tab, which
-        stays active, brought back only if the new tab took its place; its id. Headless, it opens blank and goes to
+        stays active, brought back only if the new tab took its place; its id. Alone, it opens blank and goes to
         ``url`` once it's held to the window's size, so its page loads at that size."""
         active = await self.active_tab() if background else None
         held = self.viewport is not None and url
@@ -151,7 +151,7 @@ class BrowserControl:
     async def load_start_tabs(self, urls: list[str], site_of: Callable[[str], Optional[str]], own_timeout_s: float,
                               live_timeout_s: float = LIVE_START_TAB_TIMEOUT_S) -> list[dict]:
         """Each of ``urls`` in a start tab, in order, the first then active: in the tabs open now, in opened order, and
-        in tabs it opens blank after them; each held to the window's size, headless, before it goes to its URL, and
+        in tabs it opens blank after them; each held to the window's size, alone, before it goes to its URL, and
         all loading at once. A tab settles once it has loaded, once it has failed, which on one of the env's own sites,
         as ``site_of`` names them, an error status is too, or once it has been waited on ``own_timeout_s`` on such a
         site, else ``live_timeout_s``. Each tab's outcome, in order, kept though the browser has gone and the first
@@ -635,8 +635,8 @@ class BrowserControl:
             self._spawn(self._let_run(params["sessionId"]))
 
     async def _let_run(self, session: str) -> None:
-        """A page it attached to, enabled and, headless, held to its window's size, then told to run: a page attached as
-        it opens, a popup say, or any new page headless, waits for that before it runs."""
+        """A page it attached to, enabled and, alone, held to its window's size, then told to run: a page attached as
+        it opens, a popup say, or any new page alone, waits for that before it runs."""
         target = self._sessions.get(session)
         try:
             await self.devtools.call("Page.enable", session_id=session)

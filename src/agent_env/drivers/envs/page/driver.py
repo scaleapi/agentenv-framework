@@ -1,4 +1,4 @@
-"""The page driver, for a computer with no display whose one website browser runs headless: its screen is the browser's
+"""The page driver, for a computer with no display whose one website browser runs alone: its screen is the browser's
 active tab. A screenshot is the page, and input reaches the page as CDP input events, both through the browser's own
 server on its socket (``browser/v1``'s ``page/*`` operations), since only that server holds the browser's debugging pipe.
 The browser ending on its own is an infrastructure failure, since nothing here launches it again. Needs
