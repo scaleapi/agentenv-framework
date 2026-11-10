@@ -47,9 +47,11 @@ OWNED_FLAGS = ("--user-data-dir", "--remote-debugging-", "--remote-allow-origins
 #: services; and the component updater's checks, pointed at a file it can't fetch, since ``ComponentUpdatesEnabled``
 #: leaves the components Chrome deems critical, such as its CRLSets, checking in at launch and a minute later.
 QUIET_FLAGS = ("--disable-background-networking", "--component-updater=url-source=file:///dev/null")
-#: Features off for the same reason, which no policy turns off: the AI Mode eligibility check at launch. A
-#: ``--disable-features`` in a subclass's command is joined to these, since Chromium takes only the last one.
-DISABLED_FEATURES = ("AimEnabled",)
+#: Features off for the same reason: the AI Mode eligibility check at launch, which no policy stops, and the preconnect
+#: to its search engine at launch, which ``NetworkPredictionOptions`` would stop only by turning off the preconnects and
+#: prefetches it makes for pages too. A ``--disable-features`` in a subclass's command is joined to these, since
+#: Chromium takes only the last one.
+DISABLED_FEATURES = ("AimEnabled", "PreconnectToSearch")
 DISABLE_FEATURES = "--disable-features="
 #: Every language Chromium has a spellcheck dictionary for, blocklisted, so it fetches none for the deploy's locale at
 #: launch. ``SpellcheckEnabled: false`` would void the blocklist and still fetch it.
@@ -72,8 +74,8 @@ ALONE_BYPASS = "<-loopback>"
 COMPUTER_BYPASS = "<-loopback>;127.0.0.1;[::1];localhost"
 #: Managed policies for unattended use: no sign-in, sync, password manager, autofill, metrics, promotions, translation,
 #: background mode, component updates, default-browser check, download prompt or warning bar for its flags; and none of
-#: the requests the browser makes of its own that a policy stops: the preconnect to its search engine at launch, the
-#: network time query, spellcheck dictionaries and the autofill server's field predictions for a page's forms.
+#: the requests the browser makes of its own that a policy stops: the network time query, spellcheck dictionaries and
+#: the autofill server's field predictions for a page's forms.
 POLICIES: dict[str, Any] = {
     "BrowserSignin": 0,
     "SyncDisabled": True,
@@ -81,7 +83,6 @@ POLICIES: dict[str, Any] = {
     "AutofillSettings": [{"url_pattern": "*", "blocked_types": ["all"]}],
     "AutofillAddressEnabled": False,
     "AutofillCreditCardEnabled": False,
-    "NetworkPredictionOptions": 2,
     "BrowserNetworkTimeQueriesEnabled": False,
     "SpellcheckLanguageBlocklist": SPELLCHECK_LANGUAGES,
     "MetricsReportingEnabled": False,

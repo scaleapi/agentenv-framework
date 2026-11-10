@@ -958,8 +958,10 @@ are the profile's template. The base class adds:
   (`QUIET_FLAGS`: `--disable-background-networking`, which stops Safe Browsing's list updates among its other
   background services, and `--component-updater=url-source=file:///dev/null`, since the component updater checks
   in for the components Chrome deems critical, its CRLSets among them, whatever `ComponentUpdatesEnabled` says);
-  `--disable-features=AimEnabled`, the AI Mode eligibility check at launch, which no policy stops, joined to the
-  features a subclass's command turns off, since Chromium takes only the last `--disable-features`; and, when
+  `--disable-features=AimEnabled,PreconnectToSearch` (`DISABLED_FEATURES`), the AI Mode eligibility check at
+  launch, which no policy stops, and the preconnect to its search engine at launch, which `NetworkPredictionOptions`
+  would stop only by turning off the preconnects and prefetches it makes for pages too, joined to the features a
+  subclass's command turns off, since Chromium takes only the last `--disable-features`; and, when
   `/dev/shm` holds under 1 GiB (Docker gives 64 MiB), `--disable-dev-shm-usage`, so it keeps its shared memory in
   files. With
   `AGENTENV_SITE_PROXY` set, it goes out through that proxy, with WebRTC's non-proxied UDP off.
@@ -976,8 +978,7 @@ are the profile's template. The base class adds:
   without `DISPLAY`, waits for no display, and its ready checks say when it's ready.
 - **`write_policies`**, an install step that writes agentenv's unattended-use policies (`POLICIES`)
   and the subclass's to `agentenv.json` in `policy_dir`. Among them are the ones that stop requests it would make of
-  its own: `NetworkPredictionOptions: 2`, its search engine's preconnect at launch;
-  `BrowserNetworkTimeQueriesEnabled: false`, the network time query; `SpellcheckLanguageBlocklist`, every
+  its own: `BrowserNetworkTimeQueriesEnabled: false`, the network time query; `SpellcheckLanguageBlocklist`, every
   language it has a dictionary for (`SPELLCHECK_LANGUAGES`), so it fetches none for the deploy's locale
   (`SpellcheckEnabled: false` would void the blocklist and still fetch one); and `AutofillAddressEnabled` and
   `AutofillCreditCardEnabled: false`, the autofill server's field predictions for a page's forms. With all of them,

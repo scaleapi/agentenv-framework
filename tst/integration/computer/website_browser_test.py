@@ -148,7 +148,7 @@ async def test_chromium_runs_with_agentenvs_flags_on_its_pipe_and_a_reset_relaun
     assert argv[4].startswith("--disk-cache-dir=") and argv[4].endswith("/.cache/chromium")
     assert argv[5:13] == ["--remote-debugging-pipe", "--no-first-run", "--no-default-browser-check", "--lang=fr-FR",
                           "--disable-background-networking", "--component-updater=url-source=file:///dev/null",
-                          "--disable-features=AimEnabled", "--disable-dev-shm-usage"]
+                          "--disable-features=AimEnabled,PreconnectToSearch", "--disable-dev-shm-usage"]
     assert argv[13:] == ["about:blank"]
     assert browser["listening"] == 0 and port_file["exit_code"] != 0
     assert zone.startswith("Europe/Paris") and loopback.startswith("Loopback page")

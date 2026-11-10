@@ -193,7 +193,7 @@ async def test_it_runs_chrome_itself_on_its_pipe_answers_prompts_as_the_deploy_s
     assert argv[3].endswith("/.config/chromium") and argv[4].endswith("/.cache/chromium")
     assert argv[5:12] == ["--remote-debugging-pipe", "--no-first-run", "--no-default-browser-check", "--lang=en-US",
                           "--disable-background-networking", "--component-updater=url-source=file:///dev/null",
-                          "--disable-features=AimEnabled"]
+                          "--disable-features=AimEnabled,PreconnectToSearch"]
     assert argv[12:] == ["about:blank"]
     assert browser["listening"] == 0
     assert permissions == ["denied prompt - Google Chrome for Testing"]
