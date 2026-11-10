@@ -27,6 +27,7 @@ import agent_env
 from agent_env.env import Env
 from agent_env.env.envs.computer.utils import inside
 from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT
+from agent_env.providers.sandbox_providers.host_images import host_platform
 from agent_env.providers.sandbox_providers.local_docker.provider import host_url_for
 from agent_env.store.routing import namespace_routing
 from agent_env.task.teardown import teardown_run
@@ -34,6 +35,7 @@ from agent_env.task_step.context import TaskStepContext
 from tst.integration.computer.browser_computer_test import (DATA_PAGE, SERVE_SITE, SERVE_START_S, SITE, _clients,
                                                             _kill, _ready)
 from tst.integration.computer.browser_computer_test import _cdp as _driver_cdp
+from tst.util.published_image import pull_published_else_build
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
@@ -48,7 +50,7 @@ APP_SERVER = "app-chromium"
 @pytest.fixture(scope="module")
 def gateway_image():
     tag = f"agentenv-test-gateway:{uuid.uuid4().hex[:8]}"
-    subprocess.run(["docker", "build", "-q", "-t", tag, str(GATEWAY)], check=True, capture_output=True)
+    pull_published_else_build("gateway", GATEWAY / "Dockerfile", GATEWAY, tag, platform=host_platform())
     yield tag
     subprocess.run(["docker", "rmi", "-f", tag], capture_output=True)
 

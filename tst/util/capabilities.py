@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tomllib
+from pathlib import Path
 
 import pytest
 
@@ -72,6 +74,12 @@ KVM = "kvm"
 #: Composing a Windows computer installs Windows from Microsoft's evaluation ISO, which a run fetches into this machine's
 #: cache once, about 7 GB; a test that composes one needs it there already, and KVM, which boots windows/amd64 disks.
 WINDOWS_MEDIA = "windows_media"
+
+#: Composing an Omarchy computer builds its base from Omarchy's own VM image, which a run fetches into this machine's
+#: cache once, about 4 GB; a test that composes one needs it there already, and KVM, which boots linux/amd64 disks.
+OMARCHY_IMAGE = "omarchy_image"
+#: The shipped Omarchy base, whose source the capability looks for.
+OMARCHY_ARTIFACT = Path(__file__).parents[2] / "src" / "agent_env" / "computers" / "artifacts" / "omarchy-4.5" / "artifact.toml"
 
 
 def missing_capability_reason(capability: str) -> str:
@@ -221,6 +229,21 @@ def windows_media_is_available() -> bool:
     from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
 
     return "windows/amd64" in LocalSandboxProvider.disk_image_platforms() and media_path().exists()
+
+
+def omarchy_image_is_available() -> bool:
+    """Whether this machine boots Omarchy's disks and holds the image the shipped Omarchy base is built from."""
+    from agent_env.env.envs.computer.utils.omarchy_disk import source_path
+    from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
+
+    artifact = OMARCHY_ARTIFACT.read_text()
+    sha256 = tomllib.loads(artifact)["forms"]["disk"]["source"]["sha256"]
+    return "linux/amd64" in LocalSandboxProvider.disk_image_platforms() and source_path(sha256).exists()
+
+
+def skip_without_omarchy_image() -> pytest.MarkDecorator:
+    """Collection-time ``skipif`` for tests that compose an Omarchy computer on local Docker."""
+    return pytest.mark.skipif(not omarchy_image_is_available(), reason=missing_capability_reason(OMARCHY_IMAGE))
 
 
 def skip_without_windows_media() -> pytest.MarkDecorator:

@@ -17,6 +17,7 @@ import pytest
 from agent_env.env.published_images import DISK
 from agent_env.providers.sandbox_providers.host_images import host_platform
 from agent_env.utils.docker.build import DockerBuildError, build_image
+from tst.util.published_image import pull_published_else_build
 
 pytestmark = pytest.mark.integration
 
@@ -46,7 +47,7 @@ rm disk.img disk.raw esp.img root.img
 @pytest.fixture(scope="module")
 def tools():
     tag = f"agentenv-test-disk-tools:{uuid.uuid4().hex[:8]}"
-    build_image(DISK / "tools" / "Dockerfile", DISK / "tools", tag, platform=None)
+    pull_published_else_build("disk tools", DISK / "tools" / "Dockerfile", DISK / "tools", tag, platform=host_platform())
     yield tag
     subprocess.run(["docker", "rmi", "-f", tag], capture_output=True)
 

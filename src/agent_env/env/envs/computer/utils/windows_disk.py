@@ -13,7 +13,6 @@ import re
 import secrets
 import shlex
 import shutil
-import subprocess
 import time
 import urllib.request
 from collections.abc import Callable
@@ -28,7 +27,6 @@ from agent_env.config.paths import cache_root
 from agent_env.env.envs.computer.utils import thin_disk
 from agent_env.env.envs.computer.utils.install import WindowsInstall
 from agent_env.env.envs.computer.utils.thin_disk import Base, Registry
-from agent_env.providers.sandbox_providers.host_images import present
 from agent_env.providers.sandbox_providers.local_docker.disk import launcher
 from agent_env.store.local_state import holding_locks
 
@@ -121,39 +119,24 @@ def media(say: Callable[[str], None]) -> Path:
 
 def base(key: str, iso: Callable[[], Path], disk_gb: int, user: str, say: Callable[[str], None],
          registry: Registry) -> Base:
-    """The base of ``key``: this machine's, pushed to the image store unless it holds one of ``key``; else the one the
-    store holds, pulled, with the key to its admin it carries, when a layer is composed on it; else Windows installed
-    from the ISO ``iso`` gives, and pushed there. One with fewer than ``RENEW_DAYS`` of its evaluation left is installed
-    afresh. One install of a key runs at once on a machine, and another waits for it."""
-    (image, tag), keys = thin_disk.base_names(GUEST, key), cache_root() / "windows" / "bases" / thin_disk.short(key)
-    with holding_locks([thin_disk.base_lock(GUEST, image)],
-                       lambda: say("waiting for the install of the same base under way")):
-        if present(image) and (keys / "id").exists():
-            expires = datetime.fromisoformat(thin_disk.label(image, EXPIRES_LABEL))
-            if not expiring(expires.isoformat()):
-                if registry.served(tag) is None:
-                    say("pushing the base to the image store, which doesn't hold it")
-                    registry.push(image, tag)
-                return Base(image, keys, expires)
-            say(f"its base's evaluation expires {expires:%Y-%m-%d}; installing it afresh")
-        elif (pinned := registry.served(tag)) is not None and not expiring(
-                stored := registry.labels(pinned).get(EXPIRES_LABEL)):
-            return Base(image, keys, datetime.fromisoformat(stored), pinned)
-        shutil.rmtree(keys, ignore_errors=True)
-        keys.mkdir(parents=True)
-        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", f"agentenv {image}", "-f",
-                        str(keys / "id")], check=True)
-        media = iso()
-        with thin_disk.working(GUEST, f"base-{thin_disk.short(key)}") as work:
-            facts = _installed(work, media, keys, disk_gb, user, say)
-            say("packing the base")
-            expires = datetime.now(timezone.utc) + timedelta(minutes=facts["grace_minutes"])
-            shutil.copy(keys / "id", work / thin_disk.ADMIN_KEY.name)
-            thin_disk.pack(GUEST, work, image, {thin_disk.KEY_LABEL: key, EXPIRES_LABEL: expires.isoformat(
-                timespec="seconds"), BUILD_LABEL: facts["build"]}, base_image=None)
-        say("pushing the base to the image store")
-        registry.push(image, tag)
-        return Base(image, keys, expires)
+    """The base of ``key``, as ``thin_disk.base`` finds or builds one: Windows installed from the ISO ``iso`` gives, its
+    session user ``user``, on a disk of ``disk_gb``, recording when its evaluation expires and its build. One with fewer
+    than ``RENEW_DAYS`` of its evaluation left is installed afresh."""
+    def installed(work: Path, keys: Path) -> dict[str, str]:
+        facts = _installed(work, iso(), keys, disk_gb, user, say)
+        expires = datetime.now(timezone.utc) + timedelta(minutes=facts["grace_minutes"])
+        return {EXPIRES_LABEL: expires.isoformat(timespec="seconds"), BUILD_LABEL: facts["build"]}
+
+    return thin_disk.base(GUEST, key, installed, say, registry, stale=_expiring)
+
+
+def _expiring(labels: dict[str, str]) -> str | None:
+    """Why a base of ``labels`` is installed afresh: its evaluation nears its end; None while it doesn't."""
+    if not expiring(expires := labels.get(EXPIRES_LABEL)):
+        return None
+    if expires is None:
+        return "its base doesn't record when its evaluation expires"
+    return f"its base's evaluation expires {datetime.fromisoformat(expires):%Y-%m-%d}"
 
 
 def _installed(work: Path, iso: Path, keys: Path, disk_gb: int, user: str, say: Callable[[str], None]) -> dict:
@@ -170,18 +153,17 @@ def _installed(work: Path, iso: Path, keys: Path, disk_gb: int, user: str, say: 
     for name in ("setup.ps1", "agentenv-session.py"):
         shutil.copy(RECIPE / name, answers / name)
     shutil.copy(keys / "id.pub", answers / "authorized_keys")
-    (out / "guest").write_text("windows")
+    (out / "guest").write_text(GUEST.file)
     (keys / "passwords.json").write_text(json.dumps({ADMIN: admin_password, user: user_password}))
     (keys / "passwords.json").chmod(0o600)
     name = f"agentenv-windows-install-{keys.name}"
     say(f"installing Windows from {iso.name} under QEMU in {name}; this takes about 15 minutes")
     started = time.monotonic()
-    container = thin_disk.launched(
-        name, {"VM_KEEP": "/out/disk.img", "VM_DISK_GB": str(disk_gb), "VM_MEDIA": "/in/media.iso",
-               "VM_FILES": "/in/answers"},
-        ["-v", f"{out}:/out", "-v", f"{iso}:/in/media.iso:ro", "-v", f"{answers}:/in/answers:ro"], launcher())
-    try:
-        port = thin_disk.ssh_port(container)
+    with thin_disk.running(
+            name, {"VM_KEEP": "/out/disk.img", "VM_DISK_GB": str(disk_gb), "VM_MEDIA": "/in/media.iso",
+                   "VM_FILES": "/in/answers"},
+            ["-v", f"{out}:/out", "-v", f"{iso}:/in/media.iso:ro", "-v", f"{answers}:/in/answers:ro"],
+            launcher()) as (container, port):
         deadline = started + INSTALL_TIMEOUT_S
         while not _signed_in(port, keys, user):
             thin_disk.alive(GUEST, container, "installing", deadline)
@@ -191,8 +173,6 @@ def _installed(work: Path, iso: Path, keys: Path, disk_gb: int, user: str, say: 
         facts = json.loads(thin_disk.ssh(port, keys, ADMIN, powershell(_FACTS)).stdout.strip().splitlines()[-1])
         thin_disk.compacted(GUEST, port, keys, say)
         thin_disk.shut_down(GUEST, container, port, keys)
-    finally:
-        subprocess.run(["docker", "rm", "-f", container], capture_output=True)
     thin_disk.converted(out, launcher())
     shutil.move(out / "disk.img", work / "base.img")
     return facts

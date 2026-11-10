@@ -22,6 +22,8 @@ from agentenv_protocol.computer.card import COMPUTER_RECORDING
 from agentenv_protocol.types import WELL_KNOWN_PATH
 
 from agent_env.env.envs import playwright_mcp
+from agent_env.providers.sandbox_providers.host_images import host_platform
+from tst.util.published_image import pull_published_else_build
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
@@ -88,7 +90,7 @@ def _processes(container: str, pattern: str, signal: int | None = None) -> list[
 
 @pytest.fixture(scope="module")
 def image() -> str:
-    _docker("build", "-t", IMAGE, str(CONTEXT))
+    pull_published_else_build("playwright-mcp", CONTEXT / "Dockerfile", CONTEXT, IMAGE, platform=host_platform())
     return IMAGE
 
 

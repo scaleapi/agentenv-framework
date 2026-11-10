@@ -24,10 +24,12 @@ from agent_env.bundle.plan import plan_bundle
 from agent_env.bundle.resolve import BuiltImage, resolve_bundle
 from agent_env.config import configure, reset_config
 from agent_env.env import Env
+from agent_env.providers.sandbox_providers.host_images import host_platform
 from agent_env.store.object_store.local.grant_server import grant_server
 from agent_env.store.routing import namespace_routing
 from agent_env.task.store import get_task_instance_store
 from tst.util import package_cache
+from tst.util.published_image import pull_published_else_build
 
 BASE = Path(agent_env.__file__).parent / "computers" / "artifacts" / "ubuntu-24.04"
 CUA_DRIVER = Path(__file__).parent / "cua-driver"
@@ -42,8 +44,10 @@ CHROMIUM_ALONE = "@local/agentenv-framework/browsers/chromium"
 
 @pytest.fixture(scope="session")
 def base():
+    """The ubuntu-24.04 base for this machine's platform: the image agent-env published from these sources, pulled, or
+    built here when they've changed, so a run doesn't install its desktop from Ubuntu's archive."""
     tag = f"localhost:5000/agentenv-test-ubuntu-24.04:{uuid.uuid4().hex[:8]}"
-    docker("build", "-q", "-t", tag, str(BASE))
+    pull_published_else_build("ubuntu-24.04", BASE / "Dockerfile", BASE, tag, platform=host_platform())
     yield tag
     subprocess.run(["docker", "rmi", "-f", tag], capture_output=True)
 

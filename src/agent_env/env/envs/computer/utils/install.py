@@ -9,7 +9,8 @@ was stored then (``packages`` module). The models of packages, sources, download
 scripts are the protocol's, which an app's ``@linux(...)`` uses too. ``[install.macos]`` takes the same, but apt's
 packages and sources; its services are LaunchAgents of the login session, and its ``grants`` the TCC permissions an app
 bundle or an executable it installs needs. ``[install.windows]`` takes the same as macOS but grants: its run scripts are
-PowerShell, run elevated, and its services run windowless in the session user's sign-in."""
+PowerShell, run elevated, and its services run windowless in the session user's sign-in. ``[install."linux/omarchy"]``
+takes Linux's but apt's packages and sources, Omarchy being Arch."""
 
 from __future__ import annotations
 
@@ -153,6 +154,27 @@ class MacAppInstall(MacInstall):
     services: list[MacService] = Field(default_factory=list)
 
 
+def _without_apt(install: Install, os: str) -> None:
+    if install.packages is not None or install.sources:
+        raise ValueError(f"{os} has no apt: fetch what the layer needs with downloads, checked by sha256")
+
+
+class OmarchyInstall(Install):
+    """How an Omarchy computer installs a layer: as on Linux, but with no apt."""
+
+    @model_validator(mode="after")
+    def _no_apt(self) -> OmarchyInstall:
+        _without_apt(self, "Omarchy")
+        return self
+
+
+class OmarchyAppInstall(AppInstall):
+    @model_validator(mode="after")
+    def _no_apt(self) -> OmarchyAppInstall:
+        _without_apt(self, "Omarchy")
+        return self
+
+
 class WindowsService(Service):
     """A program agentenv-session starts, windowless, in the session user's sign-in, with the deploy's settings."""
 
@@ -178,9 +200,12 @@ class WindowsAppInstall(WindowsInstall):
     services: list[WindowsService] = Field(default_factory=list)
 
 
-#: The install model of each OS type, for a driver and for an app.
-DRIVER_INSTALLS: dict[str, type[Install]] = {"linux": Install, "macos": MacInstall, "windows": WindowsInstall}
-APP_INSTALLS: dict[str, type[Install]] = {"linux": AppInstall, "macos": MacAppInstall, "windows": WindowsAppInstall}
+#: The install model of each OS type, or of a distribution whose differs from its OS type's, for a driver and for an
+#: app.
+DRIVER_INSTALLS: dict[str, type[Install]] = {"linux": Install, "linux/omarchy": OmarchyInstall, "macos": MacInstall,
+                                             "windows": WindowsInstall}
+APP_INSTALLS: dict[str, type[Install]] = {"linux": AppInstall, "linux/omarchy": OmarchyAppInstall,
+                                          "macos": MacAppInstall, "windows": WindowsAppInstall}
 
 
 _Entry = TypeVar("_Entry")
@@ -222,7 +247,7 @@ def for_os(by_platform: dict[str, _Entry], os: Any) -> Optional[_Entry]:
 
 def installs(data: Any, models: dict[str, type[Install]] = DRIVER_INSTALLS) -> tuple[dict[str, Install], list[str]]:
     """The installs ``data``, an ``install`` table, declares by OS type or distribution (``platform_problem``), each
-    its OS type's model of ``models``, and the problems with it, each named by its key."""
+    its platform's model of ``models`` (``entry_for``), and the problems with it, each named by its key."""
     if not isinstance(data, dict):
         return {}, [f"install must be a table of OS types ({', '.join(OS_TYPES)}), not {data!r}"]
     found, problems = {}, []
@@ -231,7 +256,7 @@ def installs(data: Any, models: dict[str, type[Install]] = DRIVER_INSTALLS) -> t
             problems.append(f"install.{key}: an install is for {problem}")
             continue
         try:
-            found[key] = models[os_type_of(key)].model_validate(table)
+            found[key] = entry_for(models, key).model_validate(table)
         except ValidationError as e:
             problems.extend(f"install.{'.'.join(map(str, (key, *error['loc'])))}: {error['msg']}"
                             for error in e.errors())
