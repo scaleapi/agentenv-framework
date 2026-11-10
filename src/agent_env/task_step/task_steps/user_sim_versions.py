@@ -28,7 +28,7 @@ SECTIONS: tuple[tuple[str, str, str], ...] = (
     ("never_supply", "NEVER SUPPLY (the assistant must find these itself)", "N"),
     ("how_you_react", "HOW YOU REACT", "H"),
     ("dont_mention", "DON'T MENTION THESE UNLESS THE ASSISTANT ASKS", "M"),
-    ("phone", "WHAT YOU DO WITH WHAT'S ON YOUR PHONE", "F"),
+    ("phone", "WHAT YOU DO WITH YOUR EMAILS, TEXTS AND NOTIFICATIONS", "F"),
     ("when_done", "WHEN YOU'RE DONE", ""),
 )
 SECTION_KEYS = tuple(key for key, _, _ in SECTIONS)
@@ -69,7 +69,7 @@ DONE_MULTI_DAY_NO_SECTION = ('Only answer "done" with a short sign-off; your mes
                              "and the week goes on.")
 CLOSING = "Your AI assistant sent you this. As {first}, decide: reply, don't reply, or say you're done."
 RETRY = "Your last answer wasn't in the required format. Answer again, only as JSON: " + ANSWER_LINE
-# EARLIER ON YOUR PHONE keeps a long run's reads short: the last week's items, at most this many.
+# The earlier list keeps a long run's reads short: the last week's items, at most this many.
 EARLIER_DAYS = 7
 EARLIER_MAX = 20
 EARLIER_CUT = "  (older messages not shown)"
@@ -93,12 +93,13 @@ def _preamble(person: dict) -> list[str]:
         done = DONE_MULTI_DAY_NO_SECTION
     return [
         f"You are {full}, a real person messaging your personal AI assistant. You are not the AI assistant and not a "
-        "tester. Each message you get shows the time, what's new on your phone, what you sent, and what your AI "
+        "tester. Each message you get shows the time, your new emails, texts and notifications, what you sent, and what "
+        "your AI "
         f"assistant sent. Reply only as {first}. Don't do your assistant's work: never look things up for it or hand "
-        "over facts it should find itself. You can't open your apps; what's new on your phone is listed in each "
-        "message.",
-        "What's new on your phone is for you: your assistant reads your inbox itself. Don't pass it on or make calls "
-        "about it unless the assistant asks, or your description says to.",
+        "over facts it should find itself. You can't open your apps; your new emails, texts and notifications are "
+        "listed in each message.",
+        "What other people and apps send you is for you: your assistant reads your inbox itself. Don't pass it on or "
+        "make calls about it unless the assistant asks, or your description says to.",
         "If the assistant asks something no line below covers: for a choice, choose the way you would; for a fact "
         "about you or anyone else that isn't written below, say you don't know. Never guess facts.",
         done,
@@ -282,12 +283,12 @@ def render(person: dict, history: list[dict], read: dict) -> Optional[str]:
                 else f"on {last.strftime('%a %b')} {last.day} at {_hm(last)}")
         out.append(f"You last messaged your AI assistant {when}.")
     if read.get("phone"):
-        out.append("\nNEW ON YOUR PHONE (since you last checked):")
+        out.append("\nYOUR NEW EMAILS, TEXTS AND NOTIFICATIONS (since you last checked):")
         out += [phone_line(item, True) for item in read["phone"]]
     seen = [item for r in earlier for item in dated(r, r.get("phone") or [])]
     recent = [item for item in seen if (now - at(item)).days < EARLIER_DAYS][-EARLIER_MAX:]
     if seen:
-        out.append("\nEARLIER ON YOUR PHONE (you've already seen these):")
+        out.append("\nYOUR EARLIER EMAILS, TEXTS AND NOTIFICATIONS (you've already seen these):")
         out += [phone_line(item, False) for item in recent]
         if len(recent) < len(seen):
             out.append(EARLIER_CUT)

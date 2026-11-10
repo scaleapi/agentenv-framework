@@ -95,7 +95,7 @@ call that set it off, with `${args.*}` and `${result.*}`:
 
 Each read is one message, in this order:
 - the time, and when they last wrote;
-- NEW ON YOUR PHONE, in full, then EARLIER ON YOUR PHONE, first lines only;
+- YOUR NEW EMAILS, TEXTS AND NOTIFICATIONS, in full, then YOUR EARLIER EMAILS, TEXTS AND NOTIFICATIONS, first lines only;
 - YOU SENT YOUR AI ASSISTANT: only their own lines (the opening request, `user_says` lines and the final check-in,
   never the assistant's alerts);
 - everything new from the assistant at once;

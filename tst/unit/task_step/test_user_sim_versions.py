@@ -157,12 +157,12 @@ def test_a_phone_item_shows_in_full_once_then_by_its_first_line():
     item = {"at": "2026-11-17T16:00:00Z", "channel": "Gmail · Carol Reyes (Mom)",
             "text": "Thursday ✈️\nWhat time do you land?"}
     first = _read(phone=[item])
-    assert "NEW ON YOUR PHONE (since you last checked):\n  [8:00 AM · Gmail · Carol Reyes (Mom)] Thursday ✈️\n" \
+    assert "YOUR NEW EMAILS, TEXTS AND NOTIFICATIONS (since you last checked):\n  [8:00 AM · Gmail · Carol Reyes (Mom)] Thursday ✈️\n" \
            "    What time do you land?" in us.render(PERSON, [], first)
     text = us.render(PERSON, [{"read": first, "answer": NOTHING}], _read("2026-11-18T17:05:00Z"))
-    assert "EARLIER ON YOUR PHONE (you've already seen these):\n  [Tue 8:00 AM · Gmail · Carol Reyes (Mom)] " \
+    assert "YOUR EARLIER EMAILS, TEXTS AND NOTIFICATIONS (you've already seen these):\n  [Tue 8:00 AM · Gmail · Carol Reyes (Mom)] " \
            "Thursday ✈️\n\n" in text
-    assert "NEW ON YOUR PHONE" not in text
+    assert "YOUR NEW EMAILS, TEXTS AND NOTIFICATIONS" not in text
 
 
 def test_every_phone_item_shows_once_at_its_time():
@@ -185,7 +185,7 @@ def test_the_read_after_the_final_check_in_renders_like_any_other_and_its_answer
     assert text == (
         "It's Sun, Nov 22, 6:05 PM.\n"
         "You last messaged your AI assistant at 6:00 PM.\n"
-        "\nEARLIER ON YOUR PHONE (you've already seen these):\n  [Tue 8:00 AM · Gmail · Carol Reyes (Mom)] "
+        "\nYOUR EARLIER EMAILS, TEXTS AND NOTIFICATIONS (you've already seen these):\n  [Tue 8:00 AM · Gmail · Carol Reyes (Mom)] "
         "Thursday ✈️\n"
         "\nYOU SENT YOUR AI ASSISTANT:\n  [6:00 PM] send me the rundown\n"
         "\nNEW FROM YOUR AI ASSISTANT (this is what you're answering):\n  [6:01 PM]\n"
@@ -201,7 +201,7 @@ def test_earlier_on_your_phone_keeps_only_the_last_week():
     week = {"at": "2026-11-11T16:00:00Z", "channel": "Gmail · Carol Reyes (Mom)", "text": "Thursday ✈️"}
     history = [{"read": _read("2026-11-11T17:05:00Z", phone=[old, week]), "answer": NOTHING}]
     text = us.render(PERSON, history, _read())
-    assert "EARLIER ON YOUR PHONE (you've already seen these):\n" \
+    assert "YOUR EARLIER EMAILS, TEXTS AND NOTIFICATIONS (you've already seen these):\n" \
            "  [Wed Nov 11, 8:00 AM · Gmail · Carol Reyes (Mom)] Thursday ✈️\n" + us.EARLIER_CUT + "\n" in text
     assert "Re: the flat" not in text
 
@@ -227,7 +227,7 @@ def test_in_a_long_run_each_read_stays_bounded():
                  {"at": at, "channel": "Tablefern", "text": f"Table {k} confirmed"}]
         read = _read(at, phone=phone, assistant_messages=[{"at": at, "text": f"Update {k}."}])
         text = us.render(PERSON, history, read)
-        section = text.split("EARLIER ON YOUR PHONE (you've already seen these):\n")[1].split("\n\n")[0] if k else ""
+        section = text.split("YOUR EARLIER EMAILS, TEXTS AND NOTIFICATIONS (you've already seen these):\n")[1].split("\n\n")[0] if k else ""
         lines = [line for line in section.splitlines() if line != us.EARLIER_CUT]
         longest = max(longest, len(lines))
         assert len(lines) <= us.EARLIER_MAX
