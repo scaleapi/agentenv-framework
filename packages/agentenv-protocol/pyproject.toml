@@ -61,6 +61,10 @@ x11 = [
     "mss>=9,<11",
     "python-xlib>=0.33,<0.34",
 ]
+# A Windows driver on WindowsDriver: mss captures the desktop and SendInput, through ctypes, sends its input.
+windows = [
+    "mss>=9,<11",
+]
 dev = [
     "a2a-sdk[http-server]>=0.3.26,<0.4",
     "python-multipart>=0.0.13",
