@@ -194,5 +194,30 @@ another ChatGPT version, set `VERSION`, pin the zip's URL and sha256 in `env.tom
 path), and take `mcp.json` again from what that version's `cua_repl` says at connect and lists. Name it as
 `codex-computer-use`.
 
+`envs/aside/` is At Inc.'s Aside Computer Use as a driver, for the same macOS computers. Its MCP server is Aside's CLI,
+`aside mcp --computer-use`, with one tool, `repl`. `repl` runs the agent's JavaScript in a QuickJS sandbox whose only
+app API is the `computer` global, with no file system, network or shell. `computer` reads apps' accessibility trees and
+acts on them in the background through Aside's daemon and its helper app. `driver.py` pins two of At Inc.'s published
+releases: the daemon component as `VERSION`, the CRX Aside's browsers update in the background, and the CLI as
+`CLI_VERSION`. The install downloads both from `releases.aside.com` and checks them by sha256, and `install.sh` unpacks
+them to `/opt/agentenv/aside/`, links `bin/aside` into the CLI app, and writes the account's settings with usage
+analytics off before the daemon first starts. The daemon runs as a direct LaunchAgent of its own executable, since macOS
+gives an app's TCC permissions only to the executable launchd starts itself. `[install.macos]` grants Accessibility,
+Post Event and Screen Recording to the helper app, to the copy the daemon runs from its home, and to the driver's own
+Python. The driver starts one server for each agent session, since the REPL keeps its bindings between calls, with the
+session user's environment, Aside's home and the CLI's update check off. A server that stops is started afresh on the
+next call, and nothing says when a session ends, so one left unused for 30 minutes, or past the eight kept, is closed,
+the least recently used first. Each server gets an `--app` for each app its `allowed_apps` setting names, by name or
+bundle identifier, case aside, so `computer.getApp` opens only those, or every app when it names none. Agents get the
+server's instructions and its `repl` tool, as `mcp.json` pins them, marked as acting on apps. No Aside sign-in is
+needed. Its `computer_*` tools are agent-desktop's, from `MacOSDriver`. `computer-ready` checks the executables' sha256
+and that the daemon's health endpoint answers ready. It turns usage analytics off (`aside settings analytics disable`)
+and Computer Use on (`aside settings computer-use enable`), then checks that the server gives the instructions and lists
+the tool `mcp.json` pins and answers `computer.listApps()`, and the TCC permissions. To move it to other Aside releases,
+set `VERSION` and `CLI_VERSION`, pin both downloads' URLs and sha256 in `env.toml` and the executables' in `driver.py`'s
+`EXECUTABLES`, and take `mcp.json` again from what that version's server says at connect and lists. A unit test checks
+that `env.toml`, `install.sh` and `driver.py` agree on the versions, the folder, the helper and the daemon. Name it as
+`aside`.
+
 This bundle has no tasks of its own: other bundles pull its drivers by alias, and `agent-env run drivers` has nothing
 to run.
