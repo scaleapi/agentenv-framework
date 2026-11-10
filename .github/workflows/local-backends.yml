@@ -169,17 +169,21 @@ jobs:
       - name: Pull the base images from mirror.gcr.io
         run: python3 .github/scripts/mirror_base_images.py src tst
       # A computer image or disk is tagged with a key of everything it is built from, and the composer reuses one the
-      # image store already holds for its key. The registry keeps its storage on the runner, restored from the computer
-      # images main saved latest this week, so a run reuses them rather than building them again. A shard that runs no
-      # computer tests misses.
+      # image store already holds for its key. That key includes the lock of the packages the image installs, which the
+      # composer resolves from Ubuntu's archive, PyPI and download URLs unless the store holds it. The registry keeps
+      # its storage on the runner, and the computer tests share their locks and files in the packages folder
+      # (tst/util/package_cache.py); both are restored from what main saved latest this week, so a run neither resolves
+      # nor builds again what hasn't changed. A shard that runs no computer tests misses.
       - name: Week of the computer images' cache
         id: week
         run: echo "week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
-      - name: Restore the computer images
+      - name: Restore the computer images and packages
         id: computers
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ runner.temp }}/registry
+          path: |
+            ${{ runner.temp }}/registry
+            ${{ runner.temp }}/packages
           key: computers-${{ matrix.shard }}-${{ steps.week.outputs.week }}
           restore-keys: computers-${{ matrix.shard }}-${{ steps.week.outputs.week }}-
       - name: Start the local registry
@@ -195,35 +199,49 @@ jobs:
         id: tests
         env:
           AGENTENV_TEST_SHARD: ${{ matrix.shard }}/12
+          AGENTENV_TEST_PACKAGES: ${{ runner.temp }}/packages
         run: |
           .venv/bin/python -m pytest -m int_test_slow -rA --timeout=1200 --junitxml=junit-integration-slow.xml \
             tst/integration --ignore=tst/integration/env/gateway/gateway_test.py
-      # Only the computer images are kept, and only main saves them, once its tests pass, so pull requests reuse main's
-      # without filling the repository's cache. The entry is named by the image keys the registry holds, so a run that
-      # built any new image saves a new one. The garbage collection frees what only the deleted repositories
-      # referenced; with --delete-untagged it would also delete the untagged platform manifests of an image index, and
-      # their layers.
-      - name: Keep only the computer images
+      # Only the computer images this run used are kept, with the packages, and only main saves them, once its tests
+      # pass, so pull requests reuse main's without filling the repository's cache. An image is used when the registry's
+      # log has a request for it by its tag (prune_registry.py), so what a week's earlier runs built and this one no
+      # longer asks for is dropped. The garbage collection frees what only the dropped tags and repositories referenced;
+      # with --delete-untagged it would also delete the untagged platform manifests of an image index, and their layers.
+      # The entry is named by the image keys the registry holds and the locks the packages hold, so a run that built a
+      # new image or resolved a new lock saves a new one.
+      - name: Keep only the computer images this run used
         id: kept
         if: always()
         run: |
           repositories="$RUNNER_TEMP/registry/docker/registry/v2/repositories"
           if [ ! -d "$repositories/agentenv-computers" ]; then echo "computers=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          docker logs registry > "$RUNNER_TEMP/registry.log" 2>&1
           docker stop registry
           sudo find "$repositories" -mindepth 1 -maxdepth 1 ! -name agentenv-computers -exec rm -rf {} +
+          sudo python3 .github/scripts/prune_registry.py prune "$RUNNER_TEMP/registry" agentenv-computers \
+            "$RUNNER_TEMP/registry.log"
           docker run --rm --volume "$RUNNER_TEMP/registry:/var/lib/registry" mirror.gcr.io/library/registry:2 \
             garbage-collect /etc/docker/registry/config.yml > /dev/null
-          du -sh "$RUNNER_TEMP/registry"
-          tags=$(sudo ls "$repositories/agentenv-computers/_manifests/tags" | sort | sha256sum | cut -c1-16)
-          echo "key=computers-${{ matrix.shard }}-${{ steps.week.outputs.week }}-$tags" >> "$GITHUB_OUTPUT"
+          sudo python3 .github/scripts/prune_registry.py links "$RUNNER_TEMP/registry" agentenv-computers
+          mkdir -p "$RUNNER_TEMP/packages"
+          du -sh "$RUNNER_TEMP/registry" "$RUNNER_TEMP/packages"
+          if [ -z "$(sudo ls "$repositories/agentenv-computers/_manifests/tags")" ]; then
+            echo "computers=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          key=$({ sudo ls "$repositories/agentenv-computers/_manifests/tags"
+                  ls "$RUNNER_TEMP/packages/agentenv-packages/locks" 2>/dev/null; } | sort | sha256sum | cut -c1-16)
+          echo "key=computers-${{ matrix.shard }}-${{ steps.week.outputs.week }}-$key" >> "$GITHUB_OUTPUT"
           echo "computers=true" >> "$GITHUB_OUTPUT"
-      - name: Save the computer images
+      - name: Save the computer images and packages
         if: >-
           always() && github.event_name == 'push' && steps.tests.outcome == 'success'
           && steps.kept.outputs.computers == 'true' && steps.kept.outputs.key != steps.computers.outputs.cache-matched-key
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ runner.temp }}/registry
+          path: |
+            ${{ runner.temp }}/registry
+            ${{ runner.temp }}/packages
           key: ${{ steps.kept.outputs.key }}
       - name: Skips must be declared capability gaps
         if: always()

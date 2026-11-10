@@ -2,7 +2,8 @@
 shipped desktop example's computer env, the cua-driver test bundle's, the chromium test bundle's, the website-browser
 test bundle's, the TLS clients test bundle's and agentenv's chromium deployed alone, each composed once for a module's
 tests;
-``state``, local stores for a test that runs a bundle; ``docker``, which runs the docker CLI for them; and
+``state``, local stores for a test that runs a bundle; each of these stores starts with the packages the run has resolved
+(``tst.util.package_cache``); ``docker``, which runs the docker CLI for them; and
 ``cdp_clients``, Playwright and Puppeteer installed to connect to a CDP address."""
 
 import logging
@@ -27,6 +28,7 @@ from agent_env.providers.sandbox_providers.host_images import host_platform
 from agent_env.store.object_store.local.grant_server import grant_server
 from agent_env.store.routing import namespace_routing
 from agent_env.task.store import get_task_instance_store
+from tst.util import package_cache
 from tst.util.published_image import pull_published_else_build
 
 BASE = Path(agent_env.__file__).parent / "computers" / "artifacts" / "ubuntu-24.04"
@@ -118,9 +120,13 @@ def _composed(root: Path, bundle, env_id: str | None = None):
     patch.setenv("AGENT_ENV_OBJECT_STORE", "local")
     configure()
     reset_artifact_store()
+    package_cache.seed()
     with namespace_routing():
         plan = plan_bundle(resolve_bundle(bundle), installed=installed_bundles)
-        materialize(plan, build_here=frozenset(w.id for w in plan.writes if isinstance(w.source, BuiltImage)))
+        try:
+            materialize(plan, build_here=frozenset(w.id for w in plan.writes if isinstance(w.source, BuiltImage)))
+        finally:
+            package_cache.keep()
         yield Env.get(env_id or f"{bundle.id_root}/desktop")
     reset_artifact_store()
     reset_config()
@@ -142,11 +148,13 @@ def state(monkeypatch, tmp_path):
     monkeypatch.setenv("AGENT_ENV_LOCAL_SANDBOX_DIR", str(sandboxes))
     configure()
     reset_artifact_store()
+    package_cache.seed()
     logging.disable(logging.CRITICAL)
     try:
         yield tmp_path
         assert not sandboxes.exists() or not any(sandboxes.iterdir()), "a run left a sandbox work folder"
     finally:
+        package_cache.keep()
         logging.disable(logging.NOTSET)
         grant_server(None, None).close()
         reset_artifact_store()

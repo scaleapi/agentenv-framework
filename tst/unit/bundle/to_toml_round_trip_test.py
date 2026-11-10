@@ -100,10 +100,11 @@ def test_a_website_env_reads_back_with_both_images_built_from_its_one_folder(hom
     backend = context_image(home, "shop-backend", files, "Dockerfile.backend")
     frontend = context_image(home, "shop-frontend", files, "Dockerfile.frontend")
     WebsiteEnv.put(id="shop", backend_docker_image_artifact=backend, frontend_docker_image_artifact=frontend,
-                   environment_name="shop", domains=["shop.test"])
+                   environment_name="shop", domains=["shop.test"], ready_timeout_s=240, shm_mb=1024)
 
     with _read_back(home, [{"id": "env", "type": "deploy_env", "env_id": "shop"}], "env", "shop") as (read, _):
         assert (type(read), read.environment_name, read.domains) == (WebsiteEnv, "shop", ["shop.test"])
+        assert (read.ready_timeout_s, read.shm_mb) == (240, 1024)
         assert (read.backend_docker_image_artifact.dockerfile_path,
                 read.frontend_docker_image_artifact.dockerfile_path) == ("Dockerfile.backend", "Dockerfile.frontend")
         assert set(_context(read.frontend_docker_image_artifact)) >= {"site/index.html", "Dockerfile.frontend"}

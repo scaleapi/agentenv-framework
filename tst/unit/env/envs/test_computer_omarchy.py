@@ -1,9 +1,9 @@
 """An Omarchy computer env, composed on this machine's Docker with KVM: its base built once from Omarchy's own image in
 this machine's cache, then the driver installed over ssh by a bash provision script as its ``[install."linux/omarchy"]``
 says, its services systemd user units of the graphical session started through with-seed, and packed as a thin layer on
-the base under a tag of its key. An Omarchy base is a disk alone, built from its source, started by systemd; its apps
-are refused for now. The base's build boots Omarchy's image as a linux-desktop guest, root's key a systemd credential,
-and runs the recipe, which refuses an image its artifact mislabels."""
+the base under a tag of its key, with each app a layer of its own beside it. An Omarchy base is a disk alone, built from
+its source, started by systemd. The base's build boots Omarchy's image as a linux-desktop guest, root's key a systemd
+credential, and runs the recipe, which refuses an image its artifact mislabels."""
 
 import base64
 import hashlib
@@ -16,12 +16,13 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from agentenv_protocol.computer import DriverDeclaration
+from agentenv_protocol.computer import AppDeclaration, DriverDeclaration
 from agentenv_protocol.computer.app import Download, RunScript
 
 from agent_env.artifact.artifacts.computer import ComputerArtifact, DiskForm, DiskSource
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.env.env import Env
+from agent_env.env.envs.computer.app_env import ComputerAppEnv
 from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
 from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.env.envs.computer.utils import boot, composer, gate, omarchy_disk, thin_disk
@@ -129,10 +130,32 @@ def _driver(folder: Path, services: list[Service] | None = None) -> ComputerDriv
 
 
 def _put(driver: ComputerDriverEnv, link: SandboxProvider, base: ComputerArtifact | None = None,
-         **settings) -> ComputerEnv:
+         apps: list[ComputerAppEnv] | None = None, **settings) -> ComputerEnv:
     return ComputerEnv.put(id="@local/~/kit/desktop", computer=base or _base(), driver=driver,
                            environment_name="desktop", composing=Composing(sandbox_provider=link),
-                           computer_settings=settings or None, apps=[])
+                           computer_settings=settings or None, apps=apps or [])
+
+
+def _notes(base: ComputerArtifact, driver: ComputerDriverEnv, folder: Path, key: str = "linux/omarchy",
+           install: dict | None = None) -> ComputerAppEnv:
+    """A notes app on Omarchy, its install declared for ``key``: a sync service in the venv its own server gets, a run
+    script, an install step for root and one for the session user, and the edition its env fixes."""
+    folder.mkdir(parents=True, exist_ok=True)
+    for name, text in (("app.py", "class Notes: ...\n"), ("setup.sh", "id -un > run.txt\n")):
+        (folder / name).write_text(text)
+    files = FileArtifactUniverse.put_bundled("@local/~/kit/notes__files", files={
+        name: folder / name for name in ("app.py", "setup.sh")})
+    declaration = AppDeclaration.model_validate({
+        "supports": OMARCHY_SUPPORTS, "permissions": [], "settings": {"type": "object", "properties": {}},
+        "skill": None, "data": [], "ready_checks": [],
+        "build_settings": {"type": "object", "properties": {"edition": {"type": "string", "default": "home"}}},
+        "install_steps": [{"name": "stamp", "scope": "system", "os": None},
+                          {"name": "home", "scope": "session", "os": None}],
+        "os": {key: {"install": install or {"run": [{"script": "setup.sh"}], "services": [
+            {"name": "sync", "command": "venv/bin/python sync.py"}]}}}})
+    return ComputerAppEnv.put(id="@local/~/kit/notes", environment_name="notes", module="app.py:Notes", files=files,
+                              declaration=declaration, computer=base, driver=driver, compose=False,
+                              build_settings={"edition": "pro"})
 
 
 def test_an_omarchy_env_composes_a_thin_disk_on_its_base_built_from_omarchys_image_the_driver_as_user_units(
@@ -164,7 +187,8 @@ def test_an_omarchy_env_composes_a_thin_disk_on_its_base_built_from_omarchys_ima
     unit = omarchy_disk.unit("driver-desk-daemon", PurePosixPath(prefix), [f"{prefix}/venv/bin/python", "driver.py"],
                              {"MCP_PORT": 18765})
     assert f"printf %s {shlex.quote(unit)} > /etc/systemd/user/agentenv-driver-desk-daemon.service" in script
-    assert f"ExecStart=/opt/agentenv/with-seed {prefix}/venv/bin/python driver.py" in unit.splitlines()
+    assert f"ExecStart=/opt/agentenv/with-seed /usr/bin/env MCP_PORT=18765 {prefix}/venv/bin/python driver.py" in (
+        unit.splitlines())
     assert {"provision.sh", "context/driver/driver.py", "context/driver/install.sh"} <= set(files)
     computer = env.computer_artifact()
     assert computer.os.distribution == "omarchy" and computer.forms.disk.init == "systemd"
@@ -187,15 +211,69 @@ def test_a_machine_that_boots_no_linux_disk_composes_no_omarchy_disk(docker, tmp
     assert docker.builds == [] and docker.composed == []
 
 
-def test_an_omarchy_computer_refuses_apps_for_now(local_stores, cli_routing, tmp_path):
-    app = SimpleNamespace(id="@local/~/kit/notes", declaration=SimpleNamespace(supports=OMARCHY_SUPPORTS,
-                                                                               install_steps=[]),
-                          install={"linux/omarchy": Install(services=[Service(name="sync", command="sync")])})
+def test_an_app_is_a_layer_of_its_own_its_server_on_its_venv_its_folder_the_session_users_its_steps_as_scoped(
+        docker, tmp_path):
+    base = _base()
+    driver = _driver(tmp_path / "desk")
+    env = _put(driver, FakeLinux(), base=base, apps=[_notes(base, driver, tmp_path / "notes")])
 
-    problems = gate.check_app(_base(), _driver(tmp_path / "desk"), app)
+    assert env.metadata["composed"]["disk"]["amd64"]["status"] == "ready"
+    ((_, _, script, files, _),) = docker.composed
+    prefix, lines = PurePosixPath("/opt/agentenv/apps/notes"), script.splitlines()
+    python = prefix / "venv" / "bin" / "python"
+    installed = lines[lines.index("# apps/notes") + 1:]
+    assert installed[:8] == [
+        f"install -d {prefix}", f'cp -a "$build/context/apps/notes/." {prefix}/', f"python3 -m venv {prefix}/venv",
+        f"{prefix}/venv/bin/pip install -q --disable-pip-version-check '/opt/agentenv/build/context/protocol[app]'",
+        f"{prefix}/venv/bin/pip list --format=json > {prefix}/installed.json",
+        f'install -d {prefix}/.agentenv && chown "$user": {prefix}/.agentenv && chmod 700 {prefix}/.agentenv',
+        f"(cd {prefix} && PREFIX={prefix} bash {prefix}/setup.sh)",
+        f"(cd {prefix} && AGENTENV_PLATFORM=linux/omarchy {python} -m agentenv_protocol.computer.run_install_step "
+        "app.py:Notes stamp)"]
+    assert installed[8] == (f'(cd {prefix} && runuser -u "$user" -- env HOME="$home" AGENTENV_PLATFORM=linux/omarchy '
+                            f"{python} -m agentenv_protocol.computer.run_install_step app.py:Notes home)")
+    environment = {"ENVIRONMENT_NAME": "notes", "AGENTENV_PLATFORM": "linux/omarchy"}
+    for name, argv in (("app-notes", [str(python), "-m", "agentenv_protocol.computer.serve_app", "app.py:Notes"]),
+                       ("app-notes-sync", [str(python), "sync.py"])):
+        unit = omarchy_disk.unit(name, prefix, argv, environment)
+        assert f"printf %s {shlex.quote(unit)} > /etc/systemd/user/agentenv-{name}.service" in script
+        assert f"systemctl --global enable --quiet agentenv-{name}.service" in installed
+    driver_lines = lines[lines.index("# driver"):lines.index("# apps/notes")]
+    assert not any(".agentenv" in line or "run_install_step" in line for line in driver_lines)
+    assert {"context/apps/notes/app.py", "context/apps/notes/.agentenv/build_settings.json"} <= set(files)
 
-    assert problems == ["app: an Omarchy computer composes its driver alone for now; @local/~/kit/notes would need its "
-                        "install composed onto Omarchy's disk, which agent-env doesn't do yet"]
+
+def test_an_app_asking_for_shared_memory_is_refused_on_omarchy(local_stores, cli_routing, tmp_path):
+    base, driver = _base(), _driver(tmp_path / "desk")
+
+    with pytest.raises(ValueError, match="app: @local/~/kit/notes asks for 512 MiB of /dev/shm, which an Omarchy "
+                                         "computer doesn't size yet: its /dev/shm is systemd's, sized at boot"):
+        _notes(base, driver, tmp_path / "notes", install={"services": [{"name": "sync", "command": "sync"}],
+                                                          "shm_mb": 512})
+
+
+def test_an_app_service_that_runs_as_root_is_refused_on_omarchy_as_a_drivers_is(local_stores, cli_routing, tmp_path):
+    base, driver = _base(), _driver(tmp_path / "desk")
+
+    with pytest.raises(ValueError, match="app: @local/~/kit/notes's service 'sync' runs as root, and "
+                                         "@local/~/kit/omarchy-4.5's systemd runs every program as omarchy"):
+        _notes(base, driver, tmp_path / "notes", install={"services": [
+            {"name": "sync", "command": "sync", "scope": "system"}]})
+
+
+def test_a_linux_install_with_apt_packages_is_refused_on_omarchy_for_an_app_and_a_driver(docker, tmp_path):
+    base, driver = _base(), _driver(tmp_path / "desk")
+    apt = {"packages": {"apt": ["htop"]}, "services": [{"name": "sync", "command": "sync"}]}
+
+    with pytest.raises(ValueError, match="app: @local/~/kit/notes's Linux install names apt packages, which an "
+                                         "Omarchy computer has no apt for; declare its install for linux/omarchy"):
+        _notes(base, driver, tmp_path / "notes", key="linux", install=apt)
+    linux = ComputerDriverEnv.put(
+        id="@local/~/kit/linux-desk", module="driver.py:Desk", files=driver.files, port=18765,
+        install={"linux": Install(packages={"apt": ["htop"]}, services=[Service(name="driver", command=SERVE)])},
+        declaration=driver.declaration)
+    with pytest.raises(ValueError, match="driver: @local/~/kit/linux-desk's Linux install names apt packages"):
+        _put(Env.get(linux.id, linux.version), FakeLinux(), base=base)
 
 
 @pytest.mark.parametrize("changes, error", [
@@ -281,15 +359,14 @@ def test_an_omarchy_disk_boots_at_the_size_hyprland_wants_and_other_linux_disks_
     assert boot.entry_for(boot.DISK_SIZES, "windows") == (4.0, 8192)
 
 
-def test_a_unit_quotes_what_systemd_would_otherwise_split_or_expand():
+def test_a_unit_quotes_what_systemd_would_otherwise_split_or_expand_and_sets_its_own_variables_after_the_deploys():
     text = omarchy_disk.unit("app-desk-sync", PurePosixPath("/opt/agentenv/apps/desk"),
                              ["/opt/agentenv/apps/desk/venv/bin/python", "sync.py", "--title", "100% $HOME's \"desk\""],
                              {"ENVIRONMENT_NAME": "desk", "GREETING": "hello world"})
 
-    assert ('ExecStart=/opt/agentenv/with-seed /opt/agentenv/apps/desk/venv/bin/python sync.py --title '
-            '"100%% $$HOME\'s \\"desk\\""') in text.splitlines()
-    assert 'Environment="GREETING=hello world"' in text.splitlines()
-    assert "Environment=ENVIRONMENT_NAME=desk" in text.splitlines()
+    assert ('ExecStart=/opt/agentenv/with-seed /usr/bin/env ENVIRONMENT_NAME=desk "GREETING=hello world" '
+            '/opt/agentenv/apps/desk/venv/bin/python sync.py --title "100%% $$HOME\'s \\"desk\\""') in text.splitlines()
+    assert not any(line.startswith("Environment=") for line in text.splitlines())
     assert "WantedBy=graphical-session.target" in text.splitlines()
 
 

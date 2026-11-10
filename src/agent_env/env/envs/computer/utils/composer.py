@@ -508,8 +508,9 @@ def _composed_omarchy_disk(env: ComputerEnv, base: ComputerArtifact, driver: Com
                            provider: SandboxProvider, progress: _Progress) -> dict:
     """The Omarchy disk of ``arch``: one of its key the env's image store holds, reused; else composed with this
     machine's Docker and KVM (``omarchy_disk``), on its base, this machine's, the store's or built from Omarchy's own
-    image, the driver installed over ssh as a layer on it, packed and pushed to the store under its key, as Linux disks
-    are. Then probed at full (gate 3). All of it holds a lock of its key, as a Windows disk's compose does."""
+    image, the driver and each app installed over ssh as a layer on it, packed and pushed to the store under its key,
+    as Linux disks are. Then probed at full (gate 3). All of it holds a lock of its key, as a Windows disk's compose
+    does."""
     pair = f"disk/{arch}"
     with (_attempting(env, "disk", arch) as attempt,
           tempfile.TemporaryDirectory(prefix="agentenv-compose-") as work):
@@ -523,10 +524,20 @@ def _composed_omarchy_disk(env: ComputerEnv, base: ComputerArtifact, driver: Com
         protocol = _stage_protocol(context)
         layer, name = _stage_driver(context, driver, base, {}), gate.folder_name(driver.id, "driver")
         prefix = omarchy_disk.DRIVERS / name
-        parts = [omarchy_disk.Part(layer.folder, prefix, layer.install, {
+        parts = [_omarchy_part(layer, prefix, {
             program: omarchy_disk.argv(command, prefix)
             for program, command in _services(f"driver-{name}", layer.install).items()}, {"MCP_PORT": driver.port},
-            (f"{omarchy_disk.BUILD}/context/protocol",) if protocol else ())]
+            protocol)]
+        for app in env.composed_apps():
+            staged = _stage_app(context, app, base, {})
+            prefix = PurePosixPath(staged.prefix)
+            server = [str(prefix / "venv" / "bin" / "python"), "-m", "agentenv_protocol.computer.serve_app",
+                      staged.served]
+            commands = [server, *(omarchy_disk.argv(service.command, prefix) for service in staged.install.services)]
+            environment = {"ENVIRONMENT_NAME": app.environment_name,
+                           **({PLATFORM_ENV: staged.platform} if staged.platform else {})}
+            parts.append(_omarchy_part(staged, prefix, dict(zip(gate.programs(app, platform_of(base.os)), commands)),
+                                       environment, protocol))
         values = env.computer_values()
         settings = {name: values.get(name, setting.default) for name, setting in base.config.items()
                     if setting.phase == "build"}
@@ -570,6 +581,17 @@ def _windows_part(layer: _Layer, prefix: PureWindowsPath, services: dict[str, li
             f"{_PROTOCOL}{extra}=={importlib.metadata.version(_PROTOCOL)}" if layer.app else None)
     return windows_disk.Part(layer.folder, prefix, layer.install, services, environment, (spec,) if spec else (),
                              layer.served, tuple(step for step, _ in layer.steps))
+
+
+def _omarchy_part(layer: _Layer, prefix: PurePosixPath, services: dict[str, list[str]], environment: dict[str, Any],
+                  protocol: bool) -> omarchy_disk.Part:
+    """``layer`` as an Omarchy disk installs it under ``prefix``: its ``services``' argv by name, with ``environment``,
+    an app's own server, install steps and platform, and a venv's protocol as on Windows (``_windows_part``)."""
+    extra = "[app]" if layer.app else ""
+    spec = (f"{omarchy_disk.BUILD}/context/protocol{extra}" if protocol else
+            f"{_PROTOCOL}{extra}=={importlib.metadata.version(_PROTOCOL)}" if layer.app else None)
+    return omarchy_disk.Part(layer.folder, prefix, layer.install, services, environment, (spec,) if spec else (),
+                             layer.served, layer.steps, layer.platform)
 
 
 def _probed(env: ComputerEnv, driver: ComputerDriverEnv, form: str, arch: str, result: dict,

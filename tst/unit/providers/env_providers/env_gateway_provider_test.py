@@ -2584,6 +2584,19 @@ def test_a_websites_server_reaches_the_gateways_clock_at_the_url_the_gateway_han
     assert gateway["networks"] == site["networks"] == ["env-network"]
 
 
+@pytest.mark.parametrize("ready_timeout_s, shm_mb, start_period", [(None, None, "30s"), (240, 1024, "240s"),
+                                                                     (0.5, None, "1s")])
+def test_a_sites_ready_timeout_starts_its_servers_health_check_and_its_shared_memory_sizes_its_dev_shm(
+        ready_timeout_s, shm_mb, start_period):
+    site = yaml.safe_load(_render([], [WebsiteConfig(backend_image="gitlab-be", frontend_image=None,
+                                                     environment_name="gitlab", ready_timeout_s=ready_timeout_s,
+                                                     shm_mb=shm_mb)]))["services"]["gitlab-website-backend"]
+
+    assert site["healthcheck"]["start_period"] == start_period
+    assert (site["healthcheck"]["interval"], site["healthcheck"]["retries"]) == ("10s", 3)
+    assert site.get("shm_size") == (f"{shm_mb}m" if shm_mb else None)
+
+
 def _sites(handler):
     """Route the deploy's site checks to ``handler(request) -> httpx.Response``."""
     real = httpx.AsyncClient
@@ -2692,6 +2705,49 @@ async def test_a_site_past_the_time_it_declared_fails_the_deploy_saying_so(monke
         await env_gateway_provider._wait_for_websites(
             "http://gw", [WebsiteConfig(backend_image="m", frontend_image=None, environment_name="mail")],
             timeout_s=300, poll_s=0)
+
+
+@pytest.mark.asyncio
+async def test_a_sites_own_ready_timeout_waits_it_longer_than_its_card_says_and_than_the_default(monkeypatch):
+    monkeypatch.setattr(env_gateway_provider, "WEBSITE_READY_MARGIN_S", 0)
+    answers = iter([{"ready": False, "problems": ["booting"], "waited_s": 1, "timeout_s": 0},
+                    {"ready": True, "problems": [], "waited_s": 2, "timeout_s": 0}])
+    health = iter([503, 200])
+
+    def site(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/svc/mail/.well-known/agent-env.json":
+            return httpx.Response(200, json=_READY_CARD)
+        if request.url.path == "/svc/mail/agentenv/ext/website/ready":
+            return httpx.Response(200, json=next(answers))
+        if request.url.path == "/svc/shop/.well-known/agent-env.json":
+            return httpx.Response(404)
+        return httpx.Response(next(health)) if request.url.path == "/svc/shop/api/health" else httpx.Response(500)
+
+    with _sites(site):
+        await env_gateway_provider._wait_for_websites(
+            "http://gw", [WebsiteConfig(backend_image="m", frontend_image=None, environment_name="mail",
+                                        ready_timeout_s=600),
+                          WebsiteConfig(backend_image="s", frontend_image=None, environment_name="shop",
+                                        ready_timeout_s=600)], timeout_s=0, poll_s=0)
+    assert (next(answers, "done"), next(health, "done")) == ("done", "done")
+
+
+@pytest.mark.asyncio
+async def test_a_sites_own_ready_timeout_never_shortens_the_wait_its_card_or_the_default_gives_it(monkeypatch):
+    monkeypatch.setattr(env_gateway_provider, "WEBSITE_READY_MARGIN_S", 0)
+    answers = iter([{"ready": False, "problems": ["booting"], "waited_s": 1, "timeout_s": 600},
+                    {"ready": True, "problems": [], "waited_s": 2, "timeout_s": 600}])
+
+    def site(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/.well-known/agent-env.json"):
+            return httpx.Response(200, json=_READY_CARD)
+        return httpx.Response(200, json=next(answers))
+
+    with _sites(site):
+        await env_gateway_provider._wait_for_websites(
+            "http://gw", [WebsiteConfig(backend_image="m", frontend_image=None, environment_name="mail",
+                                        ready_timeout_s=1e-9)], timeout_s=300, poll_s=0)
+    assert next(answers, "done") == "done"
 
 
 @pytest.mark.asyncio
