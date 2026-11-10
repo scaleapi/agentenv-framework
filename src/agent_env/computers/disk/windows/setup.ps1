@@ -1,10 +1,10 @@
 # setup.ps1: a Windows base readied for agent-env, once, elevated, at agentadmin's first sign-in. OpenSSH comes first
 # (agentadmin by agent-env's key alone), which is how agent-env composes the base and reads this setup's log when it
 # fails (setup-failed). Then nothing of Windows' own is left in an agent's way: no updates, lock screen, notifications,
-# widgets, Copilot, first-run pages or apps Windows installs in the background, and no page file, all of which would grow
-# every layer composed on the base. The pinned Python, with Tk, is what layers' venvs and the probe's fixture run on;
-# agentenv-session starts the session's services, windowless, at the session user's sign-in. Then the session user signs
-# in at every boot.
+# widgets, Copilot, OneDrive, first-run pages or apps Windows installs in the background, and no page file, all of
+# which would grow every layer composed on the base. The pinned Python, with Tk, is what layers' venvs and the probe's
+# fixture run on; agentenv-session starts the session's services, windowless, at the session user's sign-in. Then the
+# session user signs in at every boot.
 param([string]$Media, [string]$User, [string]$UserPassword)
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -66,6 +66,12 @@ try {
     Set-Values 'HKU\AgentenvDefault\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement' @{ ScoobeSystemSettingEnabled = 0 } -BestEffort
     Set-Values 'HKU\AgentenvDefault\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager' @{
         SubscribedContentEnabled = 0; SystemPaneSuggestionsEnabled = 0; SilentInstalledAppsEnabled = 0; SoftLandingEnabled = 0 } -BestEffort
+    # OneDrive sets itself up at a new user's first sign-in, from the default profile's Run key, and leaves two RunOnce
+    # deletes behind. Each is a console command, which Windows opens in a Terminal window that takes the foreground, and
+    # a composed disk boots afresh every time, so they would run at every boot and take what an agent types.
+    $run = 'Registry::HKU\AgentenvDefault\Software\Microsoft\Windows\CurrentVersion\Run'
+    (Get-Item $run -ErrorAction SilentlyContinue).Property |
+        Where-Object { (Get-ItemPropertyValue $run $_) -match 'OneDriveSetup' } | ForEach-Object { Remove-ItemProperty $run $_ }
     [gc]::Collect()
     reg.exe unload HKU\AgentenvDefault | Out-Null
 
