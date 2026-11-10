@@ -85,6 +85,7 @@ NODE_GET = ("require('https').get(process.argv[1], r => { console.log(r.statusCo
 RESTART_DELAY_S = 1.0
 SERVE_USER = "nobody"
 FAILED = (("X-Agentenv-Site-Proxy", "failed"),)
+NAT64 = ipaddress.ip_network("64:ff9b::/96")
 
 
 class BadRequest(Exception):
@@ -104,6 +105,26 @@ def matches(pattern: str, host: str) -> bool:
         head, dot, rest = host.partition(".")
         return bool(head) and bool(dot) and rest == pattern[2:]
     return host == pattern
+
+
+def allowed(address: str) -> bool:
+    """Whether the proxy may connect to ``address`` for a host outside the site table: a globally routable one, not
+    multicast, an IPv6 address that carries an IPv4 one (mapped, 6to4 or NAT64) judged as that IPv4 address. The base
+    computers' stand-in proxies judge addresses the same way."""
+    ip = ipaddress.ip_address(address.split("%", 1)[0])
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
+        elif ip.sixtofour is not None:
+            ip = ip.sixtofour
+        elif ip in NAT64:
+            ip = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+    return ip.is_global and not ip.is_multicast
+
+
+def log_event(**fields) -> None:
+    """One JSON line in the proxy's log: a connection to a host outside the site table once it ends, or a refusal."""
+    print(json.dumps(fields), file=sys.stderr, flush=True)
 
 
 @dataclass
@@ -380,10 +401,16 @@ async def relay_body(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
         await relay_until_eof(reader, writer)
 
 
-async def splice(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-    """One direction of an upgraded connection, closing the other side when it ends, which ends the other direction."""
+async def splice(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, counts: Optional[list[int]] = None,
+                 index: int = 0) -> None:
+    """One direction of an upgraded connection, closing the other side when it ends, which ends the other direction;
+    the bytes it carried added to ``counts[index]`` when given."""
     try:
-        await relay_until_eof(reader, writer)
+        while data := await reader.read(CHUNK):
+            writer.write(data)
+            await writer.drain()
+            if counts is not None:
+                counts[index] += len(data)
     except (ConnectionError, OSError, ssl.SSLError):
         pass
     finally:
@@ -454,19 +481,49 @@ class SiteProxy:
     @staticmethod
     async def _direct(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, host: str, port: int,
                       head: Optional[bytes] = None) -> None:
-        """``host``, a live site's, reached straight at ``port``: a tunnel, answered as established, for a ``CONNECT``,
-        else ``head`` sent on; then both ends relayed until either closes."""
+        """``host``, a live site's, reached straight at ``port``, at an address the proxy resolved and checked itself
+        (``allowed``), never resolved again: a tunnel, answered as established, for a ``CONNECT``, else ``head`` sent
+        on; then both ends relayed until either closes, and the connection logged (``log_event``). A host whose every
+        address is internal is refused at once, one that doesn't resolve or answer is a 502."""
+        method = "CONNECT" if head is None else head.split(b" ", 1)[0].decode("latin-1")
         try:
-            up_reader, up_writer = await asyncio.wait_for(asyncio.open_connection(host, port), UPSTREAM_TIMEOUT_S)
-        except (OSError, asyncio.TimeoutError) as e:
-            writer.write(simple_response("502 Bad Gateway", f"{host}:{port} didn't answer: {e}\n", FAILED))
+            found = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        except OSError as e:
+            log_event(refused={"method": method, "host": host, "port": port, "reason": f"doesn't resolve: {e}"})
+            writer.write(simple_response("502 Bad Gateway", f"{host} doesn't resolve\n", FAILED))
             return
+        addresses = list(dict.fromkeys(info[4][0] for info in found))
+        if not (usable := [address for address in addresses if allowed(address)]):
+            log_event(refused={"method": method, "host": host, "port": port, "reason": "internal address",
+                               "addresses": addresses})
+            writer.write(simple_response("403 Forbidden", f"{host} is an internal address, which the browser never "
+                                         "reaches\n", FAILED))
+            return
+        for address in usable:
+            try:
+                up_reader, up_writer = await asyncio.wait_for(asyncio.open_connection(address, port),
+                                                              UPSTREAM_TIMEOUT_S)
+                break
+            except (OSError, asyncio.TimeoutError):
+                continue
+        else:
+            log_event(refused={"method": method, "host": host, "port": port, "reason": "no answer",
+                               "addresses": usable})
+            writer.write(simple_response("502 Bad Gateway", f"{host}:{port} didn't answer\n", FAILED))
+            return
+        started, began, counts = time.time(), time.monotonic(), [len(head or b""), 0]
         if head is None:
             writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
         else:
             up_writer.write(head)
-        await asyncio.gather(writer.drain(), up_writer.drain())
-        await asyncio.gather(splice(reader, up_writer), splice(up_reader, writer))
+        try:
+            await asyncio.gather(writer.drain(), up_writer.drain())
+            await asyncio.gather(splice(reader, up_writer, counts, 0), splice(up_reader, writer, counts, 1))
+        finally:
+            log_event(connection={"host": host, "port": port, "address": address, "bytes_sent": counts[0],
+                                  "bytes_received": counts[1],
+                                  "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(started)),
+                                  "duration_s": round(time.monotonic() - began, 3)})
 
     @staticmethod
     def _refuse(writer: asyncio.StreamWriter, method: str, host: str) -> None:

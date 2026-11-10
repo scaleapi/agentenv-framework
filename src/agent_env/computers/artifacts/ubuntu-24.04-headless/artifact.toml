@@ -12,3 +12,7 @@ input_channel = "env"
 [config.timezone]
 default = "UTC"
 phase = "deploy"
+
+[config.own_loopback]
+default = false
+phase = "deploy"

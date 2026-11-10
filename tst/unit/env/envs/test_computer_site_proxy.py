@@ -9,6 +9,7 @@ import base64
 import contextlib
 import email.message
 import io
+import ipaddress
 import json
 import os
 import socket
@@ -392,25 +393,42 @@ async def test_the_forward_port_refuses_any_other_host_at_once_and_logs_it(tmp_p
     assert f"site proxy: refused {method} {named}: no site of this computer" in capsys.readouterr().err
 
 
+GITHUB = "140.82.112.3"
+
+
 @contextlib.contextmanager
-def _live_hosts_at(monkeypatch, upstream_port):
-    """Connections the proxy opens to a live site's host landing on ``upstream_port`` on loopback, and each host it
-    opened one to recorded."""
-    opened, real = [], asyncio.open_connection
+def _live_hosts_at(monkeypatch, upstream_port, resolves=None):
+    """Each name resolving to the addresses ``resolves`` gives it, else to one of GitHub's, and connections the proxy
+    opens to an address off loopback landing on ``upstream_port``; each address it opened one to recorded."""
+    opened, real_open, real_resolve = [], asyncio.open_connection, socket.getaddrinfo
+
+    def getaddrinfo(host, port, *args, **kwargs):
+        try:
+            ipaddress.ip_address(host)
+            return real_resolve(host, port, *args, **kwargs)
+        except ValueError:
+            return [(socket.AF_INET6 if ":" in address else socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, port))
+                    for address in (resolves or {}).get(host, [GITHUB])]
 
     async def open_connection(host, port, **kwargs):
         if host == "127.0.0.1":
-            return await real(host, port, **kwargs)
+            return await real_open(host, port, **kwargs)
         opened.append((host, port))
-        return await real("127.0.0.1", upstream_port, **kwargs)
+        return await real_open("127.0.0.1", upstream_port, **kwargs)
 
+    monkeypatch.setattr(site_proxy.socket, "getaddrinfo", getaddrinfo)
     monkeypatch.setattr(site_proxy.asyncio, "open_connection", open_connection)
     yield opened
 
 
+def _logged(err: str, kind: str) -> list[dict]:
+    """The proxy's JSON log lines of ``kind`` (``connection`` or ``refused``)."""
+    return [json.loads(line)[kind] for line in err.splitlines() if line.startswith(f'{{"{kind}"')]
+
+
 @pytest.mark.asyncio
 async def test_the_forward_port_tunnels_a_live_sites_host_straight_to_it_and_sends_its_url_on_as_a_path(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, capsys):
     async with Upstream() as upstream, Upstream() as live:
         config, _ = _config(tmp_path, upstream.port)
         config.direct = ["github.com", "*.githubassets.com"]
@@ -425,12 +443,44 @@ async def test_the_forward_port_tunnels_a_live_sites_host_straight_to_it_and_sen
                 plain = await _exchange(port, b"GET http://github.com/a?b=1 HTTP/1.1\r\nHost: github.com\r\n"
                                               b"Proxy-Connection: keep-alive\r\n\r\n")
                 plain[3][1].close()
+                await asyncio.sleep(0.3)  # each connection is logged as it ends
 
-    assert established.startswith(b"HTTP/1.1 200 ") and opened == [("github.githubassets.com", 8443), ("github.com", 80)]
+    assert established.startswith(b"HTTP/1.1 200 ") and opened == [(GITHUB, 8443), (GITHUB, 80)]
     assert (tunnelled[0], tunnelled[2], plain[0], plain[2]) == ("HTTP/1.1 200 OK", b"hello", "HTTP/1.1 200 OK", b"hello")
     assert [request[0] for request in live.requests] == ["GET /x HTTP/1.1", "GET /a?b=1 HTTP/1.1"]
     assert live.requests[1][1]["connection"] == "close" and "proxy-connection" not in live.requests[1][1]
-    assert upstream.requests == []
+    assert live.requests[1][1]["host"] == "github.com" and upstream.requests == []
+    logged = _logged(capsys.readouterr().err, "connection")
+    assert [(entry["host"], entry["port"], entry["address"]) for entry in logged] == [
+        ("github.githubassets.com", 8443, GITHUB), ("github.com", 80, GITHUB)]
+    assert all(entry["bytes_sent"] > 0 and entry["bytes_received"] > 0 and entry["duration_s"] >= 0 for entry in logged)
+
+
+@pytest.mark.asyncio
+async def test_a_live_host_resolving_to_an_internal_address_is_refused_and_one_resolving_both_ways_reaches_the_public_one(
+        tmp_path, monkeypatch, capsys):
+    resolves = {"github.com": ["10.0.0.1"], "api.github.com": ["169.254.169.254", "::1"],
+                "mixed.github.com": ["192.168.1.9", "140.82.112.4"]}
+    async with Upstream() as upstream, Upstream() as live:
+        config, _ = _config(tmp_path, upstream.port)
+        config.direct = ["github.com", "*.github.com"]
+        with _live_hosts_at(monkeypatch, live.port, resolves) as opened:
+            async with _forward_port(config) as port:
+                refused = [await _exchange(port, line + b"\r\n\r\n") for line in (
+                    b"CONNECT github.com:443 HTTP/1.1\r\nHost: github.com:443",
+                    b"GET http://api.github.com/meta HTTP/1.1\r\nHost: api.github.com")]
+                reader, writer = await asyncio.open_connection("127.0.0.1", port)
+                writer.write(b"CONNECT mixed.github.com:443 HTTP/1.1\r\nHost: mixed.github.com:443\r\n\r\n")
+                established = await reader.readuntil(b"\r\n\r\n")
+                writer.close()
+
+    assert [(answer[0], answer[1]["x-agentenv-site-proxy"]) for answer in refused] == [
+        ("HTTP/1.1 403 Forbidden", "failed")] * 2
+    assert refused[0][2] == b"github.com is an internal address, which the browser never reaches\n"
+    assert established.startswith(b"HTTP/1.1 200 ") and opened == [("140.82.112.4", 443)]
+    assert [(entry["host"], entry["reason"], entry["addresses"]) for entry in _logged(capsys.readouterr().err, "refused")] == [
+        ("github.com", "internal address", ["10.0.0.1"]), ("api.github.com", "internal address", ["169.254.169.254", "::1"])]
+    assert live.requests == []
 
 
 @pytest.mark.asyncio

@@ -23,6 +23,7 @@ Needs Docker and the local registry on
 localhost:5000, and Node 20 or later and npm for the CDP clients."""
 
 import asyncio
+import itertools
 import json
 import platform
 import re
@@ -38,6 +39,7 @@ import pytest
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 from PIL import Image
+from websockets.asyncio.client import connect
 
 from agentenv_protocol import client as protocol_v1
 from agentenv_protocol.computer import COMPUTER_PAGE, COMPUTER_READY
@@ -104,6 +106,9 @@ show();
 </script>"""
 PAGE_URL = "data:text/html," + urllib.parse.quote(PAGE)
 SITE = "http://127.0.0.1:8771/"
+#: What a deploy sets so the browser reaches the pages these tests serve on its own loopback, which its proxy refuses
+#: otherwise.
+OWN_LOOPBACK = {"computer_settings": {"own_loopback": True}}
 # Serves, on loopback for the seconds it's given, a home page with a button that asks to confirm and a file input, each
 # saying in the title what came of it, and two more pages.
 SERVE_SITE = """import http.server, sys, threading, time
@@ -167,7 +172,7 @@ def test_gate_3_makes_this_machines_arch_ready_with_the_page_driver_its_input_an
 async def test_its_tools_see_and_drive_the_page_that_is_its_screen(browser_computer):
     with namespace_routing():
         deployed = await Env.get(browser_computer.id).deploy(
-            env_params={"app_settings": {"chromium": {"start_urls": [PAGE_URL]}}})
+            env_params={**OWN_LOOPBACK, "app_settings": {"chromium": {"start_urls": [PAGE_URL]}}})
         context = TaskStepContext(deployed_envs=[deployed])
         try:
             await _state(deployed, lambda s: True)
@@ -212,7 +217,7 @@ async def test_its_tools_see_and_drive_the_page_that_is_its_screen(browser_compu
 async def test_a_killed_app_server_or_driver_comes_back_and_a_killed_browser_fails_it_for_good(browser_computer):
     with namespace_routing():
         deployed = await Env.get(browser_computer.id).deploy(
-            env_params={"app_settings": {"chromium": {"start_urls": [PAGE_URL]}}})
+            env_params={**OWN_LOOPBACK, "app_settings": {"chromium": {"start_urls": [PAGE_URL]}}})
         context = TaskStepContext(deployed_envs=[deployed])
         try:
             await _kill(deployed, "[s]erve_app")
@@ -244,7 +249,7 @@ async def test_an_agent_navigates_moves_in_history_answers_a_dialog_uses_tabs_an
         browser_computer):
     with namespace_routing():
         deployed = await Env.get(browser_computer.id).deploy(
-            env_params={"app_settings": {"chromium": {"start_urls": [SITE]}}})
+            env_params={**OWN_LOOPBACK, "app_settings": {"chromium": {"start_urls": [SITE]}}})
         context = TaskStepContext(deployed_envs=[deployed])
         try:
             serving = asyncio.ensure_future(inside.run(deployed, ["python3", "-c", SERVE_SITE, "900"], timeout_s=960))
@@ -304,7 +309,7 @@ async def test_an_agent_navigates_moves_in_history_answers_a_dialog_uses_tabs_an
 @pytest.mark.asyncio
 async def test_its_cookies_local_storage_and_downloads_are_read_and_set_through_browser_v1(browser_computer):
     with namespace_routing():
-        deployed = await Env.get(browser_computer.id).deploy()
+        deployed = await Env.get(browser_computer.id).deploy(env_params=OWN_LOOPBACK)
         context = TaskStepContext(deployed_envs=[deployed])
         try:
             await _ready(deployed)
@@ -322,7 +327,7 @@ async def test_its_cookies_local_storage_and_downloads_are_read_and_set_through_
 async def test_its_state_operations_hold_up_at_once_through_a_server_restart_and_fail_at_once_with_the_browser_gone(
         browser_computer):
     with namespace_routing():
-        deployed = await Env.get(browser_computer.id).deploy()
+        deployed = await Env.get(browser_computer.id).deploy(env_params=OWN_LOOPBACK)
         context = TaskStepContext(deployed_envs=[deployed])
         try:
             await _ready(deployed)
@@ -343,7 +348,7 @@ async def test_its_state_operations_hold_up_at_once_through_a_server_restart_and
 async def test_its_data_plane_signs_it_in_snapshots_it_resets_it_and_loads_a_snapshot_back_whole(browser_computer):
     with namespace_routing():
         deployed = await Env.get(browser_computer.id).deploy(
-            env_params={"app_settings": {"chromium": {"start_urls": [DATA_SITE]}}})
+            env_params={**OWN_LOOPBACK, "app_settings": {"chromium": {"start_urls": [DATA_SITE]}}})
         context = TaskStepContext(deployed_envs=[deployed])
         try:
             await _ready(deployed)
@@ -369,7 +374,7 @@ async def test_its_task_steps_set_cookies_and_storage_open_a_tab_behind_and_acti
         browser_computer):
     with namespace_routing():
         deployed = await Env.get(browser_computer.id).deploy(
-            env_params={"app_settings": {"chromium": {"start_urls": [DATA_SITE]}}})
+            env_params={**OWN_LOOPBACK, "app_settings": {"chromium": {"start_urls": [DATA_SITE]}}})
         context = TaskStepContext(deployed_envs=[deployed])
         try:
             await _ready(deployed)
@@ -428,7 +433,7 @@ async def test_each_start_tabs_page_sees_the_windows_size_from_its_first_script_
     urls = [SIZED.format(index) for index in range(3)]
     with namespace_routing():
         deployed = await Env.get(browser_computer.id).deploy(
-            env_params={"app_settings": {"chromium": {"start_urls": urls}}})
+            env_params={**OWN_LOOPBACK, "app_settings": {"chromium": {"start_urls": urls}}})
         context = TaskStepContext(deployed_envs=[deployed])
         try:
             tabs = await tabs_of(deployed)
@@ -447,7 +452,7 @@ async def test_each_start_tabs_page_sees_the_windows_size_from_its_first_script_
 async def test_its_data_calls_take_turns_a_server_restart_takes_a_load_and_with_the_browser_gone_they_fail_at_once(
         browser_computer):
     with namespace_routing():
-        deployed = await Env.get(browser_computer.id).deploy()
+        deployed = await Env.get(browser_computer.id).deploy(env_params=OWN_LOOPBACK)
         context = TaskStepContext(deployed_envs=[deployed])
         try:
             await _ready(deployed)
@@ -535,9 +540,43 @@ except Exception as e:
 """
 
 
-async def _through_port(deployed, url: str) -> str:
-    done = await inside.run(deployed, ["python3", "-c", THROUGH_PROXY, url, "http://127.0.0.1:3129"], timeout_s=60)
+async def _through_port(deployed, url: str, proxy: str = "http://127.0.0.1:3129") -> str:
+    done = await inside.run(deployed, ["python3", "-c", THROUGH_PROXY, url, proxy], timeout_s=60)
     return done["stdout"].strip()
+
+
+#: What a CDP agent sees of the tab it navigates: its title, its first words, and whether it finished loading.
+PAGE_SEEN = ("JSON.stringify({ready: document.readyState, title: document.title, "
+             "text: document.body ? document.body.innerText.slice(0, 200) : ''})")
+
+
+async def _cdp_agent_loads(ws_url: str, urls: list[str]) -> dict:
+    """What a CDP agent at ``ws_url`` sees navigating a tab of its own to each of ``urls``, one after another:
+    ``Page.navigate``'s error, if any, and the page once it has loaded."""
+    async with connect(ws_url, max_size=None, open_timeout=60) as ws:
+        ids = itertools.count(1)
+
+        async def call(method: str, params: dict, session: str | None = None) -> dict:
+            message_id = next(ids)
+            await ws.send(json.dumps({"id": message_id, "method": method, "params": params,
+                                      **({"sessionId": session} if session else {})}))
+            while (reply := json.loads(await asyncio.wait_for(ws.recv(), 90))).get("id") != message_id:
+                pass
+            return reply
+
+        target = (await call("Target.createTarget", {"url": "about:blank"}))["result"]["targetId"]
+        session = (await call("Target.attachToTarget", {"targetId": target, "flatten": True}))["result"]["sessionId"]
+        seen = {}
+        for url in urls:
+            navigated = await call("Page.navigate", {"url": url}, session)
+            page, deadline = {}, time.monotonic() + 30
+            while page.get("ready") != "complete" and time.monotonic() < deadline:
+                await asyncio.sleep(1)
+                evaluated = await call("Runtime.evaluate", {"expression": PAGE_SEEN, "returnByValue": True}, session)
+                page = json.loads(evaluated.get("result", {}).get("result", {}).get("value") or "{}")
+            seen[url] = {"error": navigated.get("result", {}).get("errorText") or navigated.get("error", {}).get(
+                "message"), **page}
+        return seen
 
 
 async def _container_of(deployed) -> str:
@@ -649,6 +688,36 @@ async def test_routing_sites_beside_live_ones_its_forward_port_takes_the_live_ho
     assert not report.failed
 
 
+@pytest.mark.asyncio
+async def test_alone_on_the_open_web_it_loads_a_public_site_and_never_an_internal_address_a_page_or_an_agent_names(
+        browser_computer):
+    internal = ["http://169.254.169.254/latest/meta-data/", "https://10.0.0.1/", "http://127.0.0.1:18765/",
+                "https://[::1]/"]
+    with namespace_routing():
+        deployed = await Env.get(browser_computer.id).deploy(
+            env_params={"app_settings": {"chromium": {"start_urls": [DATA_PAGE]}}})
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            through = {url: await _through_port(deployed, url, "http://127.0.0.1:3128")
+                       for url in ["https://github.com/", *internal]}
+            seen = await _cdp_agent_loads((await _cdp(deployed, "ada"))["ws_url"], ["https://github.com/", *internal])
+            logged = _as_root(await _container_of(deployed), "cat /var/log/agentenv/site-proxy.log")
+        finally:
+            report = await teardown_run(context)
+
+    assert through["https://github.com/"].startswith("200 "), through
+    assert all(through[url].startswith("error") and "403" in through[url] for url in internal), through
+    assert seen["https://github.com/"]["title"].startswith("GitHub") and not seen["https://github.com/"]["error"], seen
+    for url in internal:
+        assert (seen[url]["error"] or "").startswith("net::ERR_TUNNEL_CONNECTION_FAILED") or (
+            "is an internal address" in seen[url].get("text", "")), (url, seen[url])
+    entries = [json.loads(line) for line in logged.splitlines() if line.startswith("{")]
+    assert any(entry.get("connection", {}).get("host") == "github.com" for entry in entries), logged[-2000:]
+    assert {entry["refused"]["host"] for entry in entries if "refused" in entry} >= {
+        "169.254.169.254", "10.0.0.1", "127.0.0.1", "::1"}, logged[-2000:]
+    assert not report.failed
+
+
 async def _kill(deployed, pattern: str, oldest: bool = False) -> None:
     """SIGKILL the newest, or oldest, process matching ``pattern``, a second after computer-exec has answered, since the
     driver that runs the command may be the one killed."""
@@ -671,7 +740,7 @@ async def test_playwright_and_puppeteer_drive_it_through_its_cdp_address_which_a
         browser_computer, cdp_clients):
     with namespace_routing():
         deployed = await Env.get(browser_computer.id).deploy(
-            env_params={"app_settings": {"chromium": {"start_urls": [SITE]}}})
+            env_params={**OWN_LOOPBACK, "app_settings": {"chromium": {"start_urls": [SITE]}}})
         context = TaskStepContext(deployed_envs=[deployed])
         try:
             serving = asyncio.ensure_future(inside.run(deployed, ["python3", "-c", SERVE_SITE, "900"], timeout_s=960))
@@ -723,7 +792,7 @@ async def test_browser_connect_cdp_hands_an_agent_its_address_with_the_tools_hid
     with namespace_routing():
         agent = put_test_agent(f"cdp-agent-{uuid.uuid4().hex[:8]}")
         deployed = await Env.get(browser_computer.id).deploy(
-            env_params={"app_settings": {"chromium": {"start_urls": [SITE]}}})
+            env_params={**OWN_LOOPBACK, "app_settings": {"chromium": {"start_urls": [SITE]}}})
         context = TaskStepContext(deployed_envs=[deployed])
         serving = None
         try:
@@ -765,7 +834,7 @@ async def test_a_cdp_agent_keeps_its_address_through_an_app_server_and_a_driver_
     with namespace_routing():
         agent = put_test_agent(f"cdp-chaos-{uuid.uuid4().hex[:8]}")
         deployed = await Env.get(browser_computer.id).deploy(
-            env_params={"app_settings": {"chromium": {"start_urls": [DATA_PAGE]}}})
+            env_params={**OWN_LOOPBACK, "app_settings": {"chromium": {"start_urls": [DATA_PAGE]}}})
         context = TaskStepContext(deployed_envs=[deployed])
         try:
             await _connected(context, agent, browser_computer.id, "solver")
@@ -789,7 +858,7 @@ async def test_two_cdp_agents_drive_one_browser_at_once_each_through_an_address_
     with namespace_routing():
         agent = put_test_agent(f"cdp-pair-{uuid.uuid4().hex[:8]}")
         deployed = await Env.get(browser_computer.id).deploy(
-            env_params={"app_settings": {"chromium": {"start_urls": [DATA_PAGE]}}})
+            env_params={**OWN_LOOPBACK, "app_settings": {"chromium": {"start_urls": [DATA_PAGE]}}})
         context = TaskStepContext(deployed_envs=[deployed])
         try:
             for name in ("solver", "buyer"):

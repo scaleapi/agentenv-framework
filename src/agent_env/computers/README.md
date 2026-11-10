@@ -14,8 +14,12 @@ building it. Name it from another bundle as `ubuntu-24.04`, the alias `aliases.t
 (`display = "none"`), for one website browser, which runs headless there, and the `page` driver, whose screen is the
 browser's page: a browser computer, which agentenv's `chromium` deploys alone as. supervisord runs every program as the
 session user, among them a stand-in site proxy on `127.0.0.1:3128`, the browser's only route out when the computer
-routes no sites, which forwards every request to wherever it names, refusing nothing: the sandbox's network policy is
-all that limits it. A computer that routes sites names the shared site proxy's forward port, `127.0.0.1:3129`, to the
+routes no sites. It forwards a request or a `CONNECT` tunnel to any host, never decrypting a tunnel, but only to an
+address it resolved and checked itself: one that isn't globally routable (loopback, private, link-local and the
+metadata service, their IPv6 equivalents) is refused at once with a 403, whether a page or an agent driving the browser
+names it, and each connection and refusal is a JSON line in `/var/log/agentenv/site-proxy.log`. The sandbox's network
+policy still applies beneath it. Its `own_loopback` setting (default `false`) lets the browser reach the computer's own
+loopback, as a test that serves its pages inside the computer needs. A computer that routes sites names the shared site proxy's forward port, `127.0.0.1:3129`, to the
 browser instead: it serves the run's sites, refuses every other host and runs out of the agent's reach. It has a
 container form only. Name it from another bundle as `ubuntu-24.04-headless`, or by its id,
 `@local/agentenv-framework/computers/ubuntu-24.04-headless`.
