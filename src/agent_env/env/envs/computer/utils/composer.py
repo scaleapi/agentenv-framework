@@ -404,7 +404,7 @@ def _composed_windows_disk(env: ComputerEnv, base: ComputerArtifact, driver: Com
                                  lambda: windows_disk.media(say), disk_gb, user, say, registry)
         script = windows_disk.write(build, parts, user=user, build_settings=settings,
                                     image={"base": made.image, "layers": [part.folder for part in parts]})
-        expires = made.expires.isoformat(timespec="seconds")
+        expires = made.labels[windows_disk.EXPIRES_LABEL]
         key = attempt.key = _key(base=made.image, base_expires=expires, provision=script, context=_digest(context),
                                  build_settings=settings, form="disk", arch=arch, format=FORMAT)
         attempt.stage = "build"

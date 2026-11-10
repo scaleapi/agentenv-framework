@@ -298,7 +298,7 @@ class FakeBuilder:
         monkeypatch.setattr(thin_disk, "compacted", lambda guest, port, keys, say: self.ran.append(("compact",)))
         monkeypatch.setattr(thin_disk, "shut_down", lambda guest, container, port, keys: self.ran.append(("off",)))
         monkeypatch.setattr(thin_disk, "converted", self.convert)
-        monkeypatch.setattr(omarchy_disk.subprocess, "run", self.run)
+        monkeypatch.setattr(thin_disk.subprocess, "run", self.run)
 
     def launch(self, name, variables, mounts, image):
         self.launched = (name, variables, mounts, image)

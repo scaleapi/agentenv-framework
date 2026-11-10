@@ -13,7 +13,6 @@ import hashlib
 import json
 import shlex
 import shutil
-import subprocess
 import time
 import urllib.request
 from collections.abc import Callable
@@ -26,7 +25,6 @@ from agent_env.config.paths import cache_root
 from agent_env.env.envs.computer.utils import thin_disk
 from agent_env.env.envs.computer.utils.install import Install
 from agent_env.env.envs.computer.utils.thin_disk import Base, Registry
-from agent_env.providers.sandbox_providers.host_images import present
 from agent_env.providers.sandbox_providers.local_docker.disk import launcher
 from agent_env.store.local_state import holding_locks
 
@@ -44,8 +42,6 @@ WITH_SEED = ROOT / "with-seed"
 OS_ID_LABEL, OS_VERSION_LABEL = "dev.agentenv.os-release.id", "dev.agentenv.os-release.version-id"
 #: How long a builder may take to answer over ssh, and its recipe to run.
 BOOT_TIMEOUT_S, RECIPE_TIMEOUT_S = 600, 1800
-#: How often a builder is looked for over ssh.
-BOOT_POLL_S = 5
 #: The exit code of a recipe that found its image isn't what its artifact declares.
 MISLABELLED = 3
 #: How many times a provision tries a layer's download, and how long it waits between.
@@ -106,34 +102,13 @@ def source(disk_source: DiskSource, say: Callable[[str], None]) -> Path:
 
 def base(key: str, image: Callable[[], Path], user: str, distribution: str, version: str,
          say: Callable[[str], None], registry: Registry) -> Base:
-    """The base of ``key``: this machine's, pushed to the image store unless it holds one of ``key``; else the one the
-    store holds, pulled with the key to its admin it carries when a layer is composed on it; else built from the image
-    ``image`` gives, its session user ``user``, refused unless it's the ``distribution`` and ``version`` its artifact
-    declares, and pushed there. One build of a key runs at once on a machine, and another waits for it."""
-    (local, tag), keys = thin_disk.base_names(GUEST, key), cache_root() / "omarchy" / "bases" / thin_disk.short(key)
-    with holding_locks([thin_disk.base_lock(GUEST, local)],
-                       lambda: say("waiting for the build of the same base under way")):
-        if present(local) and (keys / "id").exists():
-            if registry.served(tag) is None:
-                say("pushing the base to the image store, which doesn't hold it")
-                registry.push(local, tag)
-            return Base(local, keys)
-        if (pinned := registry.served(tag)) is not None:
-            return Base(local, keys, pinned=pinned)
-        shutil.rmtree(keys, ignore_errors=True)
-        keys.mkdir(parents=True)
-        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", f"agentenv {local}", "-f",
-                        str(keys / "id")], check=True)
-        source_image = image()
-        with thin_disk.working(GUEST, f"base-{thin_disk.short(key)}") as work:
-            _built(work, source_image, keys, user, distribution, version, say)
-            say("packing the base")
-            shutil.copy(keys / "id", work / thin_disk.ADMIN_KEY.name)
-            thin_disk.pack(GUEST, work, local, {thin_disk.KEY_LABEL: key, OS_ID_LABEL: distribution,
-                                                OS_VERSION_LABEL: version}, base_image=None)
-        say("pushing the base to the image store")
-        registry.push(local, tag)
-        return Base(local, keys)
+    """The base of ``key``, as ``thin_disk.base`` finds or builds one: built from the image ``image`` gives, its session
+    user ``user``, refused unless it's the ``distribution`` and ``version`` its artifact declares, which it records."""
+    def built(work: Path, keys: Path) -> dict[str, str]:
+        _built(work, image(), keys, user, distribution, version, say)
+        return {OS_ID_LABEL: distribution, OS_VERSION_LABEL: version}
+
+    return thin_disk.base(GUEST, key, built, say, registry)
 
 
 def _built(work: Path, source_image: Path, keys: Path, user: str, distribution: str, version: str,
@@ -148,14 +123,10 @@ def _built(work: Path, source_image: Path, keys: Path, user: str, distribution: 
     name = f"agentenv-omarchy-build-{keys.name}"
     say(f"booting Omarchy's image in {name}")
     mounts = ("-v", f"{source_image}:/in/source.qcow2:ro")
-    container = thin_disk.launched(name, {"VM_KEEP": "/out/disk.img", "VM_DISK": "/in/source.qcow2",
-                                          "VM_CREDENTIALS": f"tmpfiles.extra={_root_key(keys)}"},
-                                   ["-v", f"{out}:/out", *mounts], launcher())
-    try:
-        port, deadline = thin_disk.ssh_port(container), time.monotonic() + BOOT_TIMEOUT_S
-        while thin_disk.ssh(port, keys, ADMIN, "echo ready", check=False, timeout=60).returncode != 0:
-            thin_disk.alive(GUEST, container, "booting", deadline)
-            time.sleep(BOOT_POLL_S)
+    with thin_disk.running(name, {"VM_KEEP": "/out/disk.img", "VM_DISK": "/in/source.qcow2",
+                                  "VM_CREDENTIALS": f"tmpfiles.extra={_root_key(keys)}"},
+                           ["-v", f"{out}:/out", *mounts], launcher()) as (container, port):
+        thin_disk.answering(GUEST, container, port, keys, time.monotonic() + BOOT_TIMEOUT_S)
         say("making it a base over ssh")
         thin_disk.ssh(port, keys, ADMIN, "rm -rf /root/agentenv-recipe && mkdir /root/agentenv-recipe")
         thin_disk.ssh(port, keys, ADMIN, "tar -xf - -C /root/agentenv-recipe", input=thin_disk.tarred(recipe))
@@ -170,8 +141,6 @@ def _built(work: Path, source_image: Path, keys: Path, user: str, distribution: 
         thin_disk.ssh(port, keys, ADMIN, "rm -rf /root/agentenv-recipe")
         thin_disk.compacted(GUEST, port, keys, say)
         thin_disk.shut_down(GUEST, container, port, keys)
-    finally:
-        subprocess.run(["docker", "rm", "-f", container], capture_output=True)
     thin_disk.converted(out, launcher(), args=mounts)
     shutil.move(out / "disk.img", work / "base.img")
 
