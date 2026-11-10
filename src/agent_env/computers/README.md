@@ -21,8 +21,9 @@ nothing: the sandbox's network policy is all that limits it. Every line it write
 is JSON, one per connection and one per connection that fails, in the same shapes as the shared site proxy's. A computer that routes sites names the shared site proxy's forward port,
 `127.0.0.1:3129`, to the browser instead: it serves the run's sites, refuses every other host and runs out of the agent's reach. It has a
 container form only. Name it from another bundle as `ubuntu-24.04-browser`, or by its id,
-`@local/agentenv-framework/computers/ubuntu-24.04-browser`. It was called `ubuntu-24.04-headless`, which stays an
-alias of it, and its image was `agentenv-ubuntu-24.04-headless`, which stays published for what pins it.
+`@local/agentenv-framework/computers/ubuntu-24.04-browser`. It was `ubuntu-24.04-headless`, a name nothing resolves
+any more, so what still names it fails rather than gets a headful browser; its image, `agentenv-ubuntu-24.04-headless`,
+stays published for what pins it.
 
 It also has a disk form, a disk a VM boots from UEFI, which is the container form's root filesystem on the Linux boot
 recipe in `disk/linux/`: a GPT disk of an EFI system partition holding one UKI, Ubuntu's kernel with a busybox initramfs,
