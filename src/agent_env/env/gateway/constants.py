@@ -150,6 +150,9 @@ AGENT_ENV_ROLE_HEADER = "AgentEnv-Role"
 # Sent by a computer's site proxy, which serves a website's route at the root of the site's own name.
 AGENT_ENV_SITE_ROOT_HEADER = "AgentEnv-Site-Root"
 GATEWAY_PROVIDER_HEADERS_ENV = "AGENTENV_PROVIDER_REQUEST_HEADERS"
+# The address the deploy reaches the gateway at, whose scheme a client reaching it at that host used when a
+# TLS-terminating tunnel in front sends no X-Forwarded-Proto, as Modal's doesn't.
+GATEWAY_PUBLIC_URL_ENV = "AGENTENV_GATEWAY_PUBLIC_URL"
 # MCP request `_meta` keys the gateway stamps on every child tools/call: the caller's role, and on the MCP path a
 # key naming the inbound session, so a child can keep per-caller state behind the gateway's one shared session.
 AGENT_ENV_ROLE_META_KEY = "agentenv.io/role"

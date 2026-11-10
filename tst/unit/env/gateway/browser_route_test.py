@@ -124,15 +124,22 @@ async def _serve(app) -> tuple[uvicorn.Server, str]:
 
 @asynccontextmanager
 async def _gateway(tmp_path, monkeypatch, card: dict | None = None, seen: list[dict] | None = None,
-                   provider_headers: tuple[str, ...] = ()):
+                   provider_headers: tuple[str, ...] = (), public: str | None = None):
     """The real gateway app on loopback, its /svc child ``web`` a browser computer serving ``card``; yields the
     gateway's base URL and a reader of its browser_connection events, which waits for ``at_least``: each is written
     as its connection ends, just after the client sees the close."""
     monkeypatch.setattr(gw_mod, "GATEWAY_TRAJECTORY_FILE", str(tmp_path / "trajectory.jsonl"))
     upstream, upstream_url = await _serve(_browser_computer(_computer_card(_app_card()) if card is None else card, seen))
+    gateway_app = None
+
+    async def app(scope, receive, send):  # the gateway, built once its address is known
+        await gateway_app(scope, receive, send)
+
+    gateway, gateway_url = await _serve(app)
     gw = Gateway(host="127.0.0.1", port=0, server_name="t", internal_mcp_servers=[],
-                 rest_proxy_urls={"web": upstream_url}, provider_headers=provider_headers)
-    gateway, gateway_url = await _serve(gw._asgi_app())
+                 rest_proxy_urls={"web": upstream_url}, provider_headers=provider_headers,
+                 public_url=public and public.format(address=gateway_url.removeprefix("http://")))
+    gateway_app = gw._asgi_app()
     async def events(at_least: int) -> list[dict]:
         for _ in range(50):
             found = [event for event in map(json.loads, (tmp_path / "trajectory.jsonl").read_text().splitlines())
@@ -165,6 +172,19 @@ async def test_the_cdp_answer_and_discovery_name_the_gateway_however_the_browser
     assert [(entry["webSocketDebuggerUrl"], entry["devtoolsFrontendUrl"]) for entry in listed] == [
         (f"{ws}/browser/web/cdp/{TOKEN}/devtools/page/1", "")]
     assert tunnelled["webSocketDebuggerUrl"] == f"wss://{url.removeprefix('http://')}/browser/web/cdp/{TOKEN}/devtools/browser"
+
+
+@pytest.mark.asyncio
+async def test_behind_a_tunnel_that_says_no_scheme_the_addresses_take_the_scheme_the_deploy_reaches_the_gateway_at(
+        tmp_path, monkeypatch):
+    async with _gateway(tmp_path, monkeypatch, public="https://{address}") as (url, _), httpx.AsyncClient() as client:
+        answer = (await client.post(f"{url}/svc/web{CDP_PATH}", json={"user": "solver"})).json()
+        version = (await client.get(f"{url}/browser/web/cdp/{TOKEN}/json/version")).json()
+
+    at = url.removeprefix("http://")
+    assert answer == {"http_url": f"https://{at}/browser/web/cdp/{TOKEN}/",
+                      "ws_url": f"wss://{at}/browser/web/cdp/{TOKEN}/devtools/browser"}
+    assert version["webSocketDebuggerUrl"] == f"wss://{at}/browser/web/cdp/{TOKEN}/devtools/browser"
 
 
 @pytest.mark.asyncio
@@ -298,6 +318,19 @@ def test_the_public_base_is_the_host_the_client_sent_a_bad_one_none():
     assert public_base(request({"host": "[::1]:80"}, scheme="https")) == "https://[::1]:80"
     for bad in ("", "evil.com/path", "a b", "evil.com@x"):
         assert public_base(request({"host": bad})) is None
+
+
+def test_a_tunnel_that_says_no_scheme_takes_the_scheme_of_the_address_the_deploy_reaches_the_gateway_at():
+    def request(headers: dict) -> Request:
+        return Request({"type": "http", "scheme": "http", "path": "/", "headers":
+                        [(k.lower().encode(), v.encode()) for k, v in headers.items()]})
+
+    tunnel = "https://gw-18765.w.modal.host"
+    assert public_base(request({"host": "gw-18765.w.modal.host"}), tunnel) == tunnel
+    assert public_base(request({"host": "GW-18765.w.modal.host"}), tunnel) == "https://GW-18765.w.modal.host"
+    assert public_base(request({"host": "other.example"}), tunnel) == "http://other.example"
+    assert public_base(request({"host": "gw-18765.w.modal.host", "x-forwarded-proto": "http"}), tunnel) == (
+        "http://gw-18765.w.modal.host")
 
 
 def test_no_log_line_shows_a_cdp_addresss_token():

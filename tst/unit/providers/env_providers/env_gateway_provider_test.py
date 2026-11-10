@@ -29,7 +29,7 @@ from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.env.env import DeployedGatewayEnv, _mcp_url
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
-from agent_env.env.envs.service_db import SERVICE_DB_PORT
+from agent_env.env.envs.service_db import SERVICE_DB_PORT, ServiceDBConfig
 from agent_env.env.envs.website import WebsiteEnv
 from agent_env.providers.env_providers import env_gateway_provider, env_provider
 from agent_env.providers.env_providers.constants import GATEWAY_APP_DIR, GATEWAY_SERVICE_NAME
@@ -1267,6 +1267,19 @@ def test_compose_gives_the_gateway_the_names_of_the_providers_request_headers_al
              for name, service in services.items()}
     expected = {GATEWAY_SERVICE_NAME: [f"AGENTENV_PROVIDER_REQUEST_HEADERS={','.join(names)}"]} if names else {}
     assert {name: entries for name, entries in named.items() if entries} == expected
+
+
+@pytest.mark.parametrize("public_url", ["https://gw.w.modal.host", None], ids=["tunnel", "none"])
+def test_the_gateway_alone_is_told_the_address_the_deploy_reaches_it_at(public_url):
+    compose = EnvironmentGatewayProvider().create_docker_compose(
+        mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")], gateway_image="agent-gateway",
+        state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
+        state_instance=LocalPostgresStateProvider.default_instance(), public_url=public_url)
+
+    told = {name: [entry for entry in service.get("environment") or [] if "GATEWAY_PUBLIC_URL" in entry]
+            for name, service in yaml.safe_load(compose)["services"].items()}
+    expected = {GATEWAY_SERVICE_NAME: [f"AGENTENV_GATEWAY_PUBLIC_URL={public_url}"]} if public_url else {}
+    assert {name: entries for name, entries in told.items() if entries} == expected
 
 
 @pytest.mark.asyncio
