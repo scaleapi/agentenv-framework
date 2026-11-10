@@ -21,6 +21,7 @@ from agentenv_protocol.computer import (  # noqa: E402
     Unsupported,
     computer_driver,
 )
+from agentenv_protocol.computer import _desktop  # noqa: E402
 
 WINDOWS = Platform(os="windows", arch="amd64", display="dwm")
 SHIFT, CONTROL, A, ONE = 0xA0, 0xA2, 0x41, 0x31
@@ -206,7 +207,7 @@ async def test_a_drag_presses_at_its_start_moves_through_its_waypoints_and_relea
     assert flags[:2] == [MOVE_ABSOLUTE, LEFT_DOWN] and flags[-1] == LEFT_UP
     moved = [pixel(e[1], e[2], user32) for e in user32.sent[2:-1]]
     assert (40, 0) in moved and moved[-1] == (40, 30)
-    assert all(abs(x1 - x0) + abs(y1 - y0) <= windows.DRAG_STEP_PX for (x0, y0), (x1, y1) in zip(moved, moved[1:]))
+    assert all(abs(x1 - x0) + abs(y1 - y0) <= _desktop.DRAG_STEP_PX for (x0, y0), (x1, y1) in zip(moved, moved[1:]))
 
 
 @pytest.mark.asyncio
@@ -217,6 +218,31 @@ async def test_a_held_key_is_released_only_by_what_pressed_it(desk, user32):
     await desk.keys_up(["Shift"])
 
     assert keys(user32.sent) == [(SHIFT, 0), (A, 0), (A, KEY_UP), (SHIFT, KEY_UP)]
+
+
+@pytest.mark.asyncio
+async def test_a_key_held_twice_is_pressed_once_and_one_another_holds_isnt_released_with_it(desk, user32):
+    await desk.keys_down(["a", "a"])
+    await desk.keys_up(["a"])
+    await desk.keys_down(["A"])
+    await desk.keys_down(["Shift"])
+    await desk.keys_up(["Shift"])
+    await desk.keys_up(["A"])
+
+    assert keys(user32.sent) == [(A, 0), (A, KEY_UP), (SHIFT, 0), (A, 0), (A, KEY_UP), (SHIFT, KEY_UP)]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_release_keeps_its_keys_held_so_the_call_can_be_made_again(desk, user32):
+    await desk.keys_down(["A"])
+    user32.takes = 0
+    with pytest.raises(DeliveryFailed):
+        await desk.keys_up(["A"])
+    user32.takes = None
+    user32.sent.clear()
+    await desk.keys_up(["A"])
+
+    assert keys(user32.sent) == [(A, KEY_UP), (SHIFT, KEY_UP)]
 
 
 @pytest.mark.asyncio

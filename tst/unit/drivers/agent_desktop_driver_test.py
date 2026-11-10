@@ -11,6 +11,7 @@ import importlib.util
 import json
 import sys
 import textwrap
+import tomllib
 import types
 from pathlib import Path
 
@@ -115,7 +116,7 @@ def module(request, monkeypatch, tmp_path):
     if request.param == "windows":
         monkeypatch.setattr(sys, "platform", "linux")
     if request.param in ("windows", "linux"):
-        monkeypatch.setattr(loaded.OSDriver, "ready_checks", input_desktop if loaded.WINDOWS else xtest)
+        monkeypatch.setattr(loaded.OSDriver, "ready_checks", input_desktop if loaded.OS_NAME == "windows" else xtest)
     (tmp_path / "fake").mkdir()
     bin_ = tmp_path / "bin"
     bin_.mkdir()
@@ -149,6 +150,14 @@ def _calls(home: Path) -> list[dict]:
     return [json.loads(line) for line in (home / "fake" / "argv.jsonl").read_text().splitlines()]
 
 
+def test_every_install_downloads_the_release_whose_executables_the_driver_pins(module):
+    installs = tomllib.loads((DRIVER.parent / "env.toml").read_text())["install"]
+    urls = {f"{os_}/{d['arch']}": d["url"] for os_, install in installs.items() for d in install["downloads"]}
+
+    assert set(urls) == set(module.EXECUTABLES)
+    assert all(f"/download/v{module.VERSION}/agent-desktop-v{module.VERSION}-" in url for url in urls.values())
+
+
 def test_its_instructions_and_tools_are_its_servers_at_the_pinned_version(module):
     driver = module.AgentDesktop()
     manifest = json.loads(module.MANIFEST.read_text())
@@ -173,8 +182,8 @@ async def test_a_call_reaches_a_server_of_its_own_headed_when_the_setting_says_w
     (first, second) = _calls(tmp_path)
     assert first["argv"] == ["mcp"] and second["argv"] == ["mcp", "--headed"]
     assert "AGENTENV_CONTROL_TOKEN" not in first["env"] and "HOME" in first["env"]
-    assert set(SESSION) & set(first["env"]) == (set() if module.MACOS or module.WINDOWS else set(SESSION))
-    assert ("SystemRoot" in first["env"]) == module.WINDOWS
+    assert set(SESSION) & set(first["env"]) == (set(SESSION) if module.OS_NAME == "linux" else set())
+    assert ("SystemRoot" in first["env"]) == (module.OS_NAME == "windows")
 
 
 @pytest.mark.asyncio
@@ -219,7 +228,7 @@ async def test_a_server_that_fails_before_it_answers_is_an_error_saying_the_comm
 async def test_readiness_checks_the_pinned_executables_then_the_tools_its_server_lists(module, tmp_path, monkeypatch):
     driver = module.AgentDesktop()
     (wrong, *_) = await driver.ready_checks()
-    key = "macos/arm64" if module.MACOS else "windows/amd64" if module.WINDOWS else "amd64"
+    key = f"{PLATFORMS[module.OS_NAME].os}/{PLATFORMS[module.OS_NAME].arch}"
     monkeypatch.setitem(module.EXECUTABLES, key, {name: hashlib.sha256((tmp_path / "bin" / name).read_bytes()).hexdigest()
                                                   for name in module.EXECUTABLES[key]})
     ready = await driver.ready_checks()
@@ -229,8 +238,8 @@ async def test_readiness_checks_the_pinned_executables_then_the_tools_its_server
     driver._pinned = None
     (_, changed, _) = await driver.ready_checks()
 
-    os_ = "macos" if module.MACOS else "windows" if module.WINDOWS else "linux"
-    differ = "agent-desktop.exe" if module.WINDOWS else f"agent-desktop, {HELPERS[os_]}"
+    os_ = module.OS_NAME
+    differ = "agent-desktop.exe" if os_ == "windows" else f"agent-desktop, {HELPERS[os_]}"
     assert not wrong.ok and wrong.detail.endswith(differ)
     assert [(check.name, check.ok) for check in ready] == [("agent-desktop", True), ("agent-desktop tools", True),
                                                            (OS_CHECKS[os_], True)]
@@ -249,7 +258,7 @@ async def test_its_skill_is_agent_desktops_own_with_its_references_and_its_guide
         "get platform": {"content": "# macOS"},
         "get platform references/tcc.md": {"content": "# TCC"},
     }
-    if module.WINDOWS:
+    if module.OS_NAME == "windows":
         answers = {key: {"content": data["content"].replace("\n", "\r\n")} if "content" in data else data
                    for key, data in answers.items()}
     (tmp_path / "fake" / "skills.json").write_text(json.dumps({key: {"ok": True, "data": data}

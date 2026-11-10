@@ -8,8 +8,9 @@ macOS, WindowsDriver's on Windows and X11Driver's on Linux. On macOS this proces
 Post Event and Screen Recording, and agent-desktop, which it starts, has them as its own. A tool can't pass
 agent-desktop's global flags, so the server's come from the driver's ``headed`` setting: off, agent-desktop's default,
 it acts through the accessibility API alone and refuses what needs physical input (double clicks, hovers, drags, the
-mouse commands); on, it allows those and prefers physical input, moving the pointer and focus. It needs ``agentenv-framework-protocol[computer,macos]`` on macOS,
-``[computer,windows]`` on Windows or ``[computer,x11]`` on Linux, and agent-desktop's release where it runs."""
+mouse commands); on, it allows those and prefers physical input, moving the pointer and focus. It needs
+``agentenv-framework-protocol[computer,macos]`` on macOS, ``[computer,windows]`` on Windows or ``[computer,x11]`` on
+Linux, and agent-desktop's release where it runs."""
 from __future__ import annotations
 
 import asyncio
@@ -21,57 +22,69 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, NamedTuple
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.types import CallToolResult, ImageContent, TextContent
 
-from agentenv_protocol import EnvironmentTool, ForwardedTool, server_instructions
+from agentenv_protocol import EnvironmentTool, ForwardedTool, computer, server_instructions
 from agentenv_protocol.computer import ComputerSettings, ReadyCheck, computer_driver
 
-MACOS, WINDOWS = sys.platform == "darwin", sys.platform == "win32"
-if MACOS:
-    from agentenv_protocol.computer import MacOSDriver as OSDriver
-elif WINDOWS:
-    from agentenv_protocol.computer import WindowsDriver as OSDriver
-else:
-    from agentenv_protocol.computer import X11Driver as OSDriver
+
+class _OS(NamedTuple):
+    """What differs by OS: the protocol driver the computer/v1 operations run on, agent-desktop's executable in bin/,
+    what of the driver's environment it gets beside the session user's own (on Windows the system's folders, which COM
+    and the apps it launches need; on Linux its display and the session bus AT-SPI is found on), and the PATH it runs
+    and launches apps with, ``{SystemRoot}`` filled in from the environment."""
+    driver: str
+    executable: str
+    kept: tuple[str, ...]
+    path: str
+
+
+#: The release env.toml downloads for every OS, whose executables' sha256s EXECUTABLES pins.
+VERSION = "1.2.0"
+OSES = {
+    "macos": _OS("MacOSDriver", "agent-desktop", (), "/usr/bin:/bin:/usr/sbin:/sbin"),
+    "windows": _OS("WindowsDriver", "agent-desktop.exe", (
+        "USERNAME", "USERDOMAIN", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP",
+        "SystemRoot", "SystemDrive", "windir", "ComSpec", "PATHEXT", "ProgramData", "ProgramFiles", "ProgramFiles(x86)",
+        "ProgramW6432", "CommonProgramFiles", "PUBLIC", "ALLUSERSPROFILE", "COMPUTERNAME"),
+        r"{SystemRoot}\System32;{SystemRoot};{SystemRoot}\System32\Wbem;{SystemRoot}\System32\WindowsPowerShell\v1.0"),
+    "linux": _OS("X11Driver", "agent-desktop", ("DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"),
+                 "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"),
+}
+OS_NAME = {"darwin": "macos", "win32": "windows"}.get(sys.platform, "linux")
+OS = OSES[OS_NAME]
+OSDriver = getattr(computer, OS.driver)
 
 HERE = Path(__file__).resolve().parent
-#: agent-desktop's executables, as its release for each OS and arch unpacks into bin/, and the sha256 of each at the
-#: pinned version, 1.2.0.
+#: agent-desktop's executables, as its release for each OS and arch unpacks into bin/, and the sha256 of each.
 BIN = HERE / "bin"
 EXECUTABLES = {
-    "macos/arm64": {"agent-desktop": "dec75e0bba0d1f9b589bdb88188770ad1a199cde9e02cf0a5b94175491f738e9",
-                    "agent-desktop-macos-helper": "4a795a40ba7fc93b726b0834342f0225779c30d83e28f1f219db479860c38a78"},
-    "amd64": {"agent-desktop": "da52a1eb2152cdc21b756ab20e6208d242da8062c73cd20bc8a8ae2a0384392c",
-              "agent-desktop-linux-clipboard-owner": "3e96f92b805c0d1f9de309935d62f4189b8e11e1385ad022bb878487bb3942ec"},
-    "arm64": {"agent-desktop": "915de59a8b3d22c9ad33023740bbcc5fe0b4fa830de9587bbf761237eafeb76f",
-              "agent-desktop-linux-clipboard-owner": "a6bfde6778dadcf9fd04ba94de17cdf205eb0b23b643c3f34073d264d2117cc3"},
-    "windows/amd64": {"agent-desktop.exe": "d274667031322e50b9c2b1ab81c2ca46835d52cc932769a5c34bd4d481fd94c3"},
+    "macos/arm64": {
+        "agent-desktop": "dec75e0bba0d1f9b589bdb88188770ad1a199cde9e02cf0a5b94175491f738e9",
+        "agent-desktop-macos-helper": "4a795a40ba7fc93b726b0834342f0225779c30d83e28f1f219db479860c38a78",
+    },
+    "linux/amd64": {
+        "agent-desktop": "da52a1eb2152cdc21b756ab20e6208d242da8062c73cd20bc8a8ae2a0384392c",
+        "agent-desktop-linux-clipboard-owner": "3e96f92b805c0d1f9de309935d62f4189b8e11e1385ad022bb878487bb3942ec",
+    },
+    "linux/arm64": {
+        "agent-desktop": "915de59a8b3d22c9ad33023740bbcc5fe0b4fa830de9587bbf761237eafeb76f",
+        "agent-desktop-linux-clipboard-owner": "a6bfde6778dadcf9fd04ba94de17cdf205eb0b23b643c3f34073d264d2117cc3",
+    },
+    "windows/amd64": {
+        "agent-desktop.exe": "d274667031322e50b9c2b1ab81c2ca46835d52cc932769a5c34bd4d481fd94c3",
+    },
 }
-EXECUTABLE = BIN / ("agent-desktop.exe" if WINDOWS else "agent-desktop")
+EXECUTABLE = BIN / OS.executable
 #: What ``agent-desktop mcp`` says at connect and lists at the pinned version, the same on macOS, Windows and Linux:
 #: its instructions and its tools.
 MANIFEST = HERE / "mcp.json"
-#: What of the driver's environment agent-desktop gets: the session user's own, on Windows with the system's folders,
-#: which COM and the apps it launches need, and on Linux its display and the session bus AT-SPI is found on; none of a
-#: deploy's values.
-KEPT = ("HOME", "USER", "LOGNAME", "TMPDIR", "LANG") + (
-    () if MACOS else
-    ("USERNAME", "USERDOMAIN", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP",
-     "SystemRoot", "SystemDrive", "windir", "ComSpec", "PATHEXT", "ProgramData", "ProgramFiles", "ProgramFiles(x86)",
-     "ProgramW6432", "CommonProgramFiles", "PUBLIC", "ALLUSERSPROFILE", "COMPUTERNAME") if WINDOWS else
-    ("DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"))
-#: The PATH it runs, and launches apps, with.
-if MACOS:
-    PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
-elif WINDOWS:
-    PATH = ";".join(os.environ["SystemRoot"] + folder for folder in (
-        r"\System32", "", r"\System32\Wbem", r"\System32\WindowsPowerShell\v1.0"))
-else:
-    PATH = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+#: What of the driver's environment agent-desktop gets on every OS: the session user's own; none of a deploy's values.
+KEPT = ("HOME", "USER", "LOGNAME", "TMPDIR", "LANG")
 #: How long one of its commands that reads its skills may take.
 SKILL_TIMEOUT_S = 60
 #: The most bytes of saved screenshots one answer carries.
@@ -145,12 +158,11 @@ class AgentDesktop(OSDriver):
             yield session
 
     async def _pinned_checks(self) -> list[ReadyCheck]:
-        pinned = EXECUTABLES[f"macos/{self.platform.arch}" if MACOS else
-                             f"windows/{self.platform.arch}" if WINDOWS else self.platform.arch]
+        pinned = EXECUTABLES[f"{self.platform.os}/{self.platform.arch}"]
         digests = await asyncio.to_thread(_digests, pinned)
         differ = sorted(name for name, digest in digests.items() if digest != pinned[name])
         checks = [ReadyCheck("agent-desktop", not differ, "the pinned executables" if not differ else
-                             f"these differ from the pinned agent-desktop 1.2.0: {', '.join(differ)}")]
+                             f"these differ from the pinned agent-desktop {VERSION}: {', '.join(differ)}")]
         if differ:
             return checks
         try:
@@ -219,7 +231,8 @@ def _manifest() -> dict:
 
 
 def _environment() -> dict[str, str]:
-    return {**{name: os.environ[name] for name in KEPT if name in os.environ}, "PATH": PATH}
+    return {**{name: os.environ[name] for name in (*KEPT, *OS.kept) if name in os.environ},
+            "PATH": OS.path.format_map(os.environ)}
 
 
 def _digests(names) -> dict[str, str | None]:

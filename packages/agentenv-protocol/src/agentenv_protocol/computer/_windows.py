@@ -9,11 +9,11 @@ import asyncio
 import contextlib
 import ctypes
 import functools
-import math
 import time
 
 import mss
 
+from ._desktop import CLICK_GAP_S, MAX_CLICK_COUNT, MAX_DRAG_POINTS, drag_steps, mss_capture
 from .driver import ComputerDriverEnvironment
 from .errors import DeliveryFailed, DeviceUnavailable, Unsupported
 from .operations import (Display, Image, ReadyCheck, capture, click, display, drag, key_down, key_up, pointer_down,
@@ -40,10 +40,6 @@ EXTENDED_KEYS = {0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x2C, 0x2D, 0x2
 #: The modifiers VkKeyScanW says a character needs, as the bits of its high byte.
 SHIFT_STATE = ((1, 0xA0), (2, 0xA2), (4, 0xA4))
 TYPED = {"\n": 0x0D, "\t": 0x09}
-#: The pause between the presses of a double or triple click, in seconds.
-CLICK_GAP_S = 0.04
-#: How far apart a drag's pointer moves are, in pixels.
-DRAG_STEP_PX = 20
 #: SetProcessDpiAwarenessContext's per-monitor (v2) awareness.
 PER_MONITOR_AWARE_V2 = -4
 #: GetSystemMetrics' indexes of the virtual screen's left, top, width and height.
@@ -101,8 +97,8 @@ class WindowsDriver(ComputerDriverEnvironment):
     """The computer/v1 operations, the pointer and keyboard groups among them, on a Windows desktop."""
 
     buttons = ("left", "right", "middle", "back", "forward")
-    max_click_count = 3
-    max_drag_points = 50
+    max_click_count = MAX_CLICK_COUNT
+    max_drag_points = MAX_DRAG_POINTS
 
     def __init__(self, settings: ComputerSettings | None = None, platform: Platform | None = None) -> None:
         super().__init__(settings, platform)
@@ -116,7 +112,7 @@ class WindowsDriver(ComputerDriverEnvironment):
 
     @capture
     async def grab(self) -> Image:
-        return await asyncio.to_thread(_grab)
+        return await asyncio.to_thread(mss_capture, mss.MSS)
 
     async def ready_checks(self) -> list[ReadyCheck]:
         user32 = _user32()
@@ -142,7 +138,7 @@ class WindowsDriver(ComputerDriverEnvironment):
     @drag
     async def drag_along(self, path, button, duration_ms, modifiers) -> None:
         held = self._pressing(modifiers)
-        steps = _steps(path)
+        steps = drag_steps(path)
         pause = duration_ms / 1000 / len(steps)
         finish = [_button(button, False)] + [_key(vk, False) for vk in reversed(held)]
         try:
@@ -209,7 +205,7 @@ class WindowsDriver(ComputerDriverEnvironment):
         @key_up releases only those. Every key is looked up before the first press."""
         down = self._down()
         planned = {}
-        for key in keys:
+        for key in dict.fromkeys(keys):
             planned[key] = [vk for vk in _virtual_keys(key) if vk not in down]
             down.update(planned[key])
         await asyncio.to_thread(_send, [_key(vk, True) for vks in planned.values() for vk in vks])
@@ -218,8 +214,13 @@ class WindowsDriver(ComputerDriverEnvironment):
 
     @key_up
     async def keys_up(self, keys) -> None:
-        released = [vk for key in keys for vk in reversed(self._held.pop(key, None) or _virtual_keys(key)[-1:])]
+        """Release what each key's @key_down pressed, nothing for one whose keys were down already, and a key none
+        holds as itself; the keys stay held until Windows takes the releases, so a refused call can be made again."""
+        released = [vk for key in dict.fromkeys(keys)
+                    for vk in reversed(self._held[key] if key in self._held else _virtual_keys(key)[-1:])]
         await asyncio.to_thread(_send, [_key(vk, False) for vk in released])
+        for key in keys:
+            self._held.pop(key, None)
 
     def _down(self) -> set[int]:
         return {vk for vks in self._held.values() for vk in vks}
@@ -313,19 +314,3 @@ def _last_error() -> str:
     return ctypes.WinError(ctypes.get_last_error()).strerror
 
 
-def _grab() -> Image:
-    try:
-        with mss.MSS() as m:
-            shot = m.grab(m.monitors[0])
-            return Image(shot.width, shot.height, bytes(shot.bgra), "BGRA")
-    except Exception as e:
-        raise DeviceUnavailable(f"capture failed: {type(e).__name__}: {e}") from None
-
-
-def _steps(path: list) -> list[tuple[float, float]]:
-    """The points a drag moves through after its start, about every DRAG_STEP_PX pixels."""
-    steps = []
-    for (x0, y0), (x1, y1) in zip(path, path[1:]):
-        n = max(2, int(math.hypot(x1 - x0, y1 - y0) / DRAG_STEP_PX))
-        steps += [(x0 + (x1 - x0) * k / n, y0 + (y1 - y0) * k / n) for k in range(1, n + 1)]
-    return steps
