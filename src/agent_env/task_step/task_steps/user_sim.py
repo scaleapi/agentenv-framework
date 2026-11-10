@@ -112,8 +112,8 @@ def schedule_problems(schedule: Any, response_times: Any, max_replies: Any) -> l
         if not (isinstance(busy, list) and all(isinstance(b, dict) and _local_time(b.get("start"))
                                                and _local_time(b.get("end")) for b in busy)):
             out.append('schedule.busy must be a list of {start, end} local times, like "2026-11-12T09:00"')
-    if response_times is not None and schedule is None:  # with no schedule the user reads at once: nothing to hold
-        out.append("response_times needs a schedule; without one, replies are never held")
+    if response_times is not None and not schedule:  # no schedule, or {}: the user reads at once, nothing is held
+        out.append("response_times needs a schedule (an empty one counts as none); without one, replies are never held")
     if response_times is not None:
         if not isinstance(response_times, dict):
             out.append(f"response_times must be an object of minutes by {list(RESPONSE_TIME_KEYS)}")
