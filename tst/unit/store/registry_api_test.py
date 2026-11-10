@@ -408,3 +408,27 @@ def test_a_copy_to_ghcr_asks_again_for_the_push_token_its_first_challenge_didnt_
 
     assert pushed == ["/v2/org/computers/blobs/uploads/u1", f"/v2/org/computers/manifests/{_sha(image)}",
                       "/v2/org/computers/manifests/k"]
+
+
+@pytest.mark.parametrize("location", ["https://elsewhere.example/v2/org/computers/blobs/uploads/u1",
+                                      "http://ghcr.io/v2/org/computers/blobs/uploads/u1"],
+                         ids=["another-host", "plain-http"])
+def test_an_upload_the_registry_sends_elsewhere_is_refused_before_its_credentials_go(fake_registry, location):
+    config = b'{"architecture": "amd64"}'
+    image = json.dumps({"mediaType": OCI_IMAGE, "config": {"digest": _sha(config)}, "layers": []}).encode()
+
+    def registries(request):
+        if request.url.host == "localhost":
+            if "/blobs/" in request.url.path:
+                return httpx.Response(200, content=config)
+            return httpx.Response(200, content=image, headers={"Content-Type": OCI_IMAGE})
+        assert request.url.host == "ghcr.io" and request.url.scheme == "https", request.url
+        if request.method == "HEAD":
+            return httpx.Response(404)
+        return httpx.Response(202, headers={"Location": location})
+
+    fake_registry(registries)
+
+    with pytest.raises(ValueError, match="which its credentials don't go to"):
+        registry_api.copy_image(f"localhost:5000/agentenv-computers:k@{_sha(image)}", "ghcr.io/org/computers:k", None,
+                                RegistryAuth("ghcr.io", "bot", "t"))

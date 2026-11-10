@@ -300,6 +300,10 @@ class _Repository:
             self._raise_for(opened)
             raise ValueError(f"{self._what}: {self._host} opened no upload for {digest} (HTTP {opened.status_code})")
         location = httpx.URL(f"{self._base}/").join(opened.headers["location"])
+        base = httpx.URL(self._base)
+        if (location.scheme, location.netloc) != (base.scheme, base.netloc):
+            raise ValueError(f"{self._what}: {self._host} sent the upload of {digest} to {location.scheme}://"
+                             f"{location.netloc.decode()}, which its credentials don't go to")
         response = self._send("PUT", str(location.copy_merge_params({"digest": digest})), None, stream=False,
                               content=path, content_type="application/octet-stream")
         if response.status_code != 201:
