@@ -201,8 +201,8 @@ jobs:
           AGENTENV_TEST_SHARD: ${{ matrix.shard }}/12
           AGENTENV_TEST_PACKAGES: ${{ runner.temp }}/packages
         run: |
-          .venv/bin/python -m pytest -m int_test_slow -rA --timeout=1200 --junitxml=junit-integration-slow.xml \
-            tst/integration --ignore=tst/integration/env/gateway/gateway_test.py
+          .venv/bin/python -m pytest -m int_test_slow -n 2 --dist loadfile -rA --timeout=1200 \
+            --junitxml=junit-integration-slow.xml tst/integration --ignore=tst/integration/env/gateway/gateway_test.py
       # Only the computer images this run used are kept, with the packages, and only main saves them, once its tests
       # pass, so pull requests reuse main's without filling the repository's cache. An image is used when the registry's
       # log has a request for it by its tag (prune_registry.py), so what a week's earlier runs built and this one no
