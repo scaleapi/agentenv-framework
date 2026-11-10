@@ -109,10 +109,15 @@ def matches(pattern: str, host: str) -> bool:
 def log_event(**fields) -> None:
     """One JSON line in the proxy's log, every line it writes being one: ``connection`` (host, port, address, bytes each
     way, start, duration) when a connection to a live site's host ends, ``failed`` (method, host, port, ``reason``
-    "doesn't resolve" or "no answer", and the error) for one that couldn't open, both in the same shapes as the
+    "doesn't resolve" or "no answer", the error, and when it was asked for) for one that couldn't open, both in the same shapes as the
     headless base's stand-in proxy's; ``refused`` for a host that's no site, ``error`` for a connection that failed
     unexpectedly, and ``restarted`` when ``keep`` starts the proxy again."""
     print(json.dumps(fields), file=sys.stderr, flush=True)
+
+
+def when(at: float) -> str:
+    """A log line's time, to the second, in UTC."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(at))
 
 
 def described(error: BaseException) -> str:
@@ -482,13 +487,14 @@ class SiteProxy:
         else ``head`` sent on; then both ends relayed until either closes, and the connection logged (``log_event``).
         One that doesn't resolve or answer within ``UPSTREAM_TIMEOUT_S``, the lookup and every address's attempt
         together, is a 502, logged too."""
+        asked = time.time()
         try:
             up_reader, up_writer = await asyncio.wait_for(asyncio.open_connection(host, port), UPSTREAM_TIMEOUT_S)
         except (OSError, asyncio.TimeoutError) as e:
             unresolved = isinstance(e, socket.gaierror)
             log_event(failed={"method": "CONNECT" if head is None else head.split(b" ", 1)[0].decode("latin-1"),
                               "host": host, "port": port, "reason": "doesn't resolve" if unresolved else "no answer",
-                              "error": described(e)})
+                              "error": described(e), "started": when(asked)})
             writer.write(simple_response("502 Bad Gateway", f"{host} doesn't resolve\n" if unresolved else
                                          f"{host}:{port} didn't answer\n", FAILED))
             return
@@ -504,7 +510,7 @@ class SiteProxy:
         finally:
             log_event(connection={"host": host, "port": port, "address": address, "bytes_sent": sent.bytes,
                                   "bytes_received": received.bytes,
-                                  "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(started)),
+                                  "started": when(started),
                                   "duration_s": round(time.monotonic() - began, 3)})
 
     @staticmethod
