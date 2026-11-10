@@ -65,7 +65,7 @@ def test_each_arch_has_a_disk_made_from_its_container_on_a_base_disk_made_from_t
                                                                       ("linux/arm64", built["disk-arm64"]["args"]["TOOLS"])}
     assert tools[0]["dockerfile"] == (DISK / "tools" / "Dockerfile").read_text()
     computer = env.computer_artifact()
-    assert computer.forms.disk.model_dump(exclude={"image"}) == {**DISK_FORM, "firmware": ["efi"]}
+    assert computer.forms.disk.model_dump(exclude={"image"}) == {**DISK_FORM, "firmware": ["efi"], "source": None}
     assert computer.disk_image().image_name.startswith("localhost:5000/agentenv-computers:index-")
     assert {arch: r["status"] for arch, r in computer.metadata["validated_images"]["disk"].items()} == {
         "amd64": "passed", "arm64": "passed"}
