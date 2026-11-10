@@ -2,8 +2,8 @@
 it, absolute-form HTTP and CONNECT tunnels alike, to the host it names, refusing nothing and never decrypting a tunnel.
 The sandbox's own network policy still decides where a connection can go. Every line it logs is JSON, in the same
 shapes as the shared site proxy's: ``connection`` (host, port, address, bytes each way, start, duration) when one
-ends, and ``failed`` (method, host, port, ``reason`` "doesn't resolve" or "no answer", and the error) for one that
-couldn't open."""
+ends, and ``failed`` (method, host, port, ``reason`` "doesn't resolve" or "no answer", the error, and when it was
+asked for) for one that couldn't open."""
 import http.server
 import json
 import selectors
@@ -20,6 +20,10 @@ HOP = {"connection", "keep-alive", "proxy-connection", "proxy-authorization"}
 
 def log(**fields) -> None:
     print(json.dumps(fields), flush=True)
+
+
+def _when(at: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(at))
 
 
 def _error(error: BaseException) -> str:
@@ -63,12 +67,12 @@ class Proxy(http.server.BaseHTTPRequestHandler):
         """A connection to an address ``host`` resolves to, tried in turn within one ``CONNECT_TIMEOUT_S`` for them
         all, and that address; or None once the browser has its answer, a 502 for a host that doesn't resolve or
         answer. The connection keeps an ``IDLE_S`` timeout, so a write to a peer that stopped reading ends too."""
-        deadline = time.monotonic() + CONNECT_TIMEOUT_S
+        asked, deadline = time.time(), time.monotonic() + CONNECT_TIMEOUT_S
         try:
             found = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
         except OSError as error:
             log(failed={"method": method, "host": host, "port": port, "reason": "doesn't resolve",
-                        "error": _error(error)})
+                        "error": _error(error), "started": _when(asked)})
             self._answer(502, f"{host} doesn't resolve\n")
             return None
         last = None
@@ -83,7 +87,7 @@ class Proxy(http.server.BaseHTTPRequestHandler):
             upstream.settimeout(IDLE_S)
             return upstream, address
         log(failed={"method": method, "host": host, "port": port, "reason": "no answer",
-                    "error": _error(last) if last else f"none within {CONNECT_TIMEOUT_S} s"})
+                    "error": _error(last) if last else f"none within {CONNECT_TIMEOUT_S} s", "started": _when(asked)})
         self._answer(502, f"{host}:{port} didn't answer\n")
         return None
 
@@ -110,7 +114,7 @@ class Proxy(http.server.BaseHTTPRequestHandler):
         finally:
             log(connection={"host": host, "port": port, "address": address, "bytes_sent": sent,
                             "bytes_received": received,
-                            "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(started)),
+                            "started": _when(started),
                             "duration_s": round(time.monotonic() - began, 3)})
 
     def log_message(self, *args):

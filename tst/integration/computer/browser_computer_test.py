@@ -745,7 +745,7 @@ async def test_alone_it_makes_no_request_of_its_own_its_proxy_seeing_only_its_pa
     assert any(kind == "connection" and (entry["host"], entry["port"]) == ("127.0.0.1", 8771)
                for kind, entry in entries), logged
     assert all(entry["host"] == ACCOUNT_CHECK for _, entry in own), own
-    assert all(kind == "failed" or _epoch(entry["started"]) <= ready for kind, entry in own), (ready, own)
+    assert all(_epoch(entry["started"]) <= ready for _, entry in own), (ready, own)
     assert not report.failed
 
 
