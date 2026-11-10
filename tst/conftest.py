@@ -12,7 +12,7 @@ from agent_env.config import reset_config
 from agent_env.store.document_store import document_store as document_store_module
 from agent_env.store.object_store.local import grant_server as grant_server_module
 from agent_env.store.routing import disable_namespace_routing
-from tst.util import shards
+from tst.util import package_cache, shards
 
 
 def _reset_store_singletons() -> None:
@@ -27,6 +27,7 @@ def _reset_store_singletons() -> None:
 
 
 _STATE_DIR = pytest.StashKey[str]()
+_PACKAGES_DIR = pytest.StashKey[str]()
 _state_home = pytest.MonkeyPatch()
 
 
@@ -36,11 +37,17 @@ def pytest_configure(config):
     (the capability checks behind skip marks)."""
     config.stash[_STATE_DIR] = tempfile.mkdtemp(prefix="agent-env-state-")
     _state_home.setenv("XDG_STATE_HOME", config.stash[_STATE_DIR])
+    # The computer tests' resolved packages, shared by their stores for the run unless CI names a folder it keeps.
+    if not os.environ.get(package_cache.ENV_VAR):
+        config.stash[_PACKAGES_DIR] = tempfile.mkdtemp(prefix="agent-env-packages-")
+        _state_home.setenv(package_cache.ENV_VAR, config.stash[_PACKAGES_DIR])
 
 
 def pytest_unconfigure(config):
     _state_home.undo()
     shutil.rmtree(config.stash[_STATE_DIR], ignore_errors=True)
+    if packages := config.stash.get(_PACKAGES_DIR, None):
+        shutil.rmtree(packages, ignore_errors=True)
 
 
 @pytest.hookimpl(trylast=True)
