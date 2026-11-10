@@ -250,7 +250,8 @@ def test_every_advertised_endpoint_is_a_served_route():
     assert advertised <= served, advertised - served
 
 
-@pytest.mark.parametrize("name", ["WELL_KNOWN_PATH", "RPC_PATH", "PROTOCOL_VERSION", "METHOD_RESET", "METHOD_ADD", "METHOD_GET", "MCP_TRANSPORT"])
+@pytest.mark.parametrize("name", ["WELL_KNOWN_PATH", "RPC_PATH", "PROTOCOL_VERSION", "METHOD_RESET", "METHOD_ADD", "METHOD_GET", "MCP_TRANSPORT",
+                                  "CONTROL_TOKEN_ENV"])
 def test_gateway_constants_mirror_the_protocol(name):
     """constants.py copies these by hand because the gateway image has no agentenv_protocol dependency."""
     assert getattr(gateway_constants, name) == getattr(agentenv_protocol, name)

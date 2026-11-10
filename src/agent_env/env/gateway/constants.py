@@ -68,6 +68,7 @@ METHOD_RESET = "data/reset"
 METHOD_ADD = "data/add"
 METHOD_GET = "data/get"
 MCP_TRANSPORT = "mcp"
+CONTROL_TOKEN_ENV = "AGENTENV_CONTROL_TOKEN"
 
 # Env/gateway-level extensions the gateway itself owns (tool gating + triggers).
 EXT_DISABLE_TOOL_URI = "urn:agentenv:disable-tool/v1"
@@ -159,6 +160,14 @@ DEFAULT_ROLE = "default"
 WILDCARD = "*"
 TOOL_DISABLE_ACTION = "disable"
 TOOL_ENABLE_ACTION = "enable"
+# The harness's routes that take the deploy's control token: the ones that change tool access, triggers and
+# notifications. Every other route stays open for now, the clock's writes included: callers outside agent-env set the
+# clock over plain HTTP and don't send the token yet.
+CONTROL_ROUTES = frozenset({
+    f"/tools/{TOOL_DISABLE_ACTION}", f"/tools/{TOOL_ENABLE_ACTION}",
+    "/triggers/register", "/triggers/remove", "/triggers/clear",
+    "/notifications/config", "/notifications/take", "/notifications/clear",
+})
 
 
 class GatewayMode(str, Enum):

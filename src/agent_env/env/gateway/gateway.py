@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import hmac
 import json
 import logging
 import os
@@ -46,6 +47,7 @@ from .constants import (
     CHANGES_PAGE_DEFAULT,
     CHANGES_PAGE_MAX,
     CHILD_DISCOVERY_TIMEOUT_S,
+    CONTROL_ROUTES,
     DATA_PLANE_LOAD_TIMEOUT_MAX_S,
     DEFAULT_ROLE,
     EXT_WEBSITE_URI,
@@ -138,6 +140,7 @@ class Gateway:
         rest_proxy_urls: dict[str, str] | None = None,
         gateway_mode: GatewayMode = GatewayMode.PERFORMANCE,
         service_db_url: str | None = None,
+        control_token: str | None = None,
         provider_headers: Iterable[str] = (),
     ):
         """`provider_headers` names the headers the sandbox provider in front of the gateway is sent, its credentials,
@@ -159,6 +162,7 @@ class Gateway:
                 log.addFilter(TokenRedaction())
         self.gateway_mode = gateway_mode
         self._service_db_url = service_db_url
+        self._control_bearer = f"Bearer {control_token}".encode() if control_token else None
         self._website_routes: dict[str, list[WebsiteRoute] | None] = {}
         self._db_conn: psycopg2.extensions.connection | None = None
         if service_db_url:
@@ -451,14 +455,24 @@ class Gateway:
     # inherited). Process: child sessions and the time-trigger driver, outer to the MCP session manager's lifespan.
 
     def _asgi_app(self):
-        """The served app: FastMCP's Starlette app with the request's caller bound around it, and the process
-        lifespan wrapped around the MCP session manager's."""
+        """The served app: FastMCP's Starlette app with the request's caller bound around it, the control routes behind
+        the deploy's token when it has one, and the process lifespan wrapped around the MCP session manager's."""
         inner = self._mcp.streamable_http_app()
         inner.router.lifespan_context = self._process_lifespan(inner.router.lifespan_context)
         if self.rest_proxy_urls:
             inner.router.routes.append(WebSocketRoute(BROWSER_ROUTE, self._browsers.relay))
 
         async def app(scope, receive, send):
+            if self._control_bearer and scope["type"] in ("http", "websocket"):
+                headers = scope.get("headers", ())
+                if scope["type"] == "http" and scope["path"] in CONTROL_ROUTES and not hmac.compare_digest(
+                        dict(headers).get(b"authorization", b""), self._control_bearer):
+                    response = self._json_response({"ok": False, "error": "this route takes the env's control token"}, 401)
+                    await response(scope, receive, send)
+                    return
+                # The token is the gateway's own: no route reads it, and no service a route proxies to receives it.
+                scope = {**scope, "headers": [(name, value) for name, value in headers if not (
+                    name == b"authorization" and hmac.compare_digest(value, self._control_bearer))]}
             if scope["type"] != "http":
                 await inner(scope, receive, send)
                 return
