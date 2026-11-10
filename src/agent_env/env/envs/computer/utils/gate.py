@@ -18,7 +18,7 @@ from jsonschema import Draft202012Validator
 from agent_env.artifact.artifacts.computer import FORMS, ComputerArtifact, SettingValue
 from agent_env.config.loader import ENV_REF_PREFIX, SECRET_REF_PREFIX, is_bare_reference
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
-from agent_env.env.envs.computer.utils.install import for_os, platform_of
+from agent_env.env.envs.computer.utils.install import Install, for_os, platform_of
 from agent_env.store.image_store.oci_registry_credentials import names_registry
 
 if TYPE_CHECKING:
@@ -69,9 +69,10 @@ def arches(base: ComputerArtifact, driver: ComputerDriverEnv, apps: Sequence[Com
 
 def check_app(base: ComputerArtifact, driver: ComputerDriverEnv, app: ComputerAppEnv, at: str = "app") -> list[str]:
     """Every way ``app`` doesn't fit a composition of ``base`` and ``driver``, each named from ``at``: a platform it
-    doesn't support, no architecture in common, no install for the base's OS, a port the driver listens on too, any app
-    on Omarchy, whose disks compose a driver alone for now, or on Windows an install step for the session user, as a
-    Windows computer is composed over ssh as its admin."""
+    doesn't support, no architecture in common, no install for the base's OS, a port the driver listens on too, on
+    Omarchy apt's packages (``_apt_on_omarchy``), shared memory, whose size its disk doesn't take yet, or a service as
+    root, as its systemd runs every service as the session user, or on Windows an install step for the session user,
+    as a Windows computer is composed over ssh as its admin."""
     os = base.os
     if not _matching(base, app.declaration.supports):
         named = ", ".join(_shown(platform) for entry in app.declaration.supports for platform in supported(entry))
@@ -84,8 +85,14 @@ def check_app(base: ComputerArtifact, driver: ComputerDriverEnv, app: ComputerAp
     elif taken := sorted(set(_ports(app, platform_of(os))) & set(_driver_ports(driver, os))):
         problems.append(f"{at}: {app.id} listens on {', '.join(map(str, taken))}, as {driver.id} does")
     if platform_of(os) == "linux/omarchy":
-        problems.append(f"{at}: an Omarchy computer composes its driver alone for now; {app.id} would need its install "
-                        "composed onto Omarchy's disk, which agent-env doesn't do yet")
+        problems += _apt_on_omarchy(app.install, os, at, app.id)
+        install = for_os(app.install, os)
+        if install is not None and install.shm_mb:
+            problems.append(f"{at}: {app.id} asks for {install.shm_mb} MiB of /dev/shm, which an Omarchy computer "
+                            "doesn't size yet: its /dev/shm is systemd's, sized at boot")
+        problems += [f"{at}: {app.id}'s service {service.name!r} runs as root, and {base.id}'s systemd runs every "
+                     f"program as {base.session.user}" for service in (install.services if install else [])
+                     if service.scope == "system"]
     if os.type == "windows" and (session := [step.name for step in app.declaration.install_steps
                                              if step.scope == "session" and (step.os is None or os.type in step.os)]):
         problems.append(f"{at}: {app.id}'s install steps {', '.join(session)} run as the session user, which a Windows "
@@ -253,7 +260,19 @@ def _platform(base: ComputerArtifact, driver: ComputerDriverEnv) -> list[str]:
         init = form.init if form is not None else "launchd"
         problems += [f"driver: its service {service.name!r} runs as root, and {base.id}'s {init} runs every program as "
                      f"{base.session.user}" for service in install.services if service.scope == "system"]
+        problems += _apt_on_omarchy(driver.install, os, "driver", driver.id)
     return problems
+
+
+def _apt_on_omarchy(installs: dict[str, Install], os: Any, at: str, who: str) -> list[str]:
+    """Why ``who``'s install, of ``installs``, doesn't fit an Omarchy computer: it's its Linux one, as it declares none
+    for linux/omarchy, and names apt's packages or sources, which Omarchy has no apt for, so they'd be left out."""
+    install = for_os(installs, os)
+    if (platform_of(os) != "linux/omarchy" or "linux/omarchy" in installs or install is None
+            or (install.packages is None and not install.sources)):
+        return []
+    return [f"{at}: {who}'s Linux install names apt packages, which an Omarchy computer has no apt for; declare its "
+            "install for linux/omarchy"]
 
 
 def _matching(base: ComputerArtifact, supports: list) -> list[Platform]:

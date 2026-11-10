@@ -2,9 +2,10 @@
 # agentenv-seed: run each boot by agentenv-seed.service, before SDDM starts the session. It reads the launcher's NoCloud
 # seed (CIDATA, as agentenv_protocol.computer.seed defines it) as the Linux disk's init does, with the same seed-env:
 # the deploy's environment written for with-seed, which each of the computer's services starts through, the seed's trust
-# files before it; the hostname; host.docker.internal at QEMU's address for the launcher; the time zone; and the
-# display's mode, for the session's Hyprland. A seed this disk can't read, or a time zone it doesn't have, is written as
-# its refusal, so every service then stops naming it.
+# files before it; the folder an app's server marks its launches in, the session user's, as /run starts each boot empty;
+# the hostname; host.docker.internal at QEMU's address for the launcher; the time zone; and the display's mode, for the
+# session's Hyprland. A seed this disk can't read, or a time zone it doesn't have, is written as its refusal, so every
+# service then stops naming it.
 set -euo pipefail
 . /opt/agentenv/seed-env
 user=$(cat /opt/agentenv/session-user)
@@ -38,6 +39,7 @@ else
     exports="$exports"$'\n'"refused='its time zone, ${timezone//\'/}, is not in /usr/share/zoneinfo'; false"
 fi
 install -d -m 750 -g "$user" /run/agentenv
+install -d -m 700 -o "$user" -g "$user" /run/agentenv/apps
 install -m 640 -g "$user" /dev/null /run/agentenv/environment
 printf '%s\n' "$exports" > /run/agentenv/environment
 hostname "${hostname:-computer}"

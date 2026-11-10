@@ -1,10 +1,10 @@
 """Omarchy computers' disks, thin disks (``thin_disk``) made with this machine's Docker and KVM. A base is Omarchy's own
 VM image, fetched once into this machine's cache from its artifact's source and checked by sha256, booted once by the
 QEMU launcher as a linux-desktop guest, with root's ssh key passed as a systemd credential, made a computer's base by
-the recipe of ``computers/disk/omarchy`` run as root over ssh, then packed whole as a thin disk's base. A composed disk's
-parts are installed by a bash script, ``provision.sh``, run as root: each layer's files, downloads, venv and run scripts,
-and its services as systemd user units of the graphical session, which start through ``with-seed``, so each boot's
-deploy environment is theirs."""
+the recipe of ``computers/disk/omarchy`` run as root over ssh, then packed whole as a thin disk's base. A composed
+disk's parts are installed by a bash script, ``provision.sh``, run as root: each layer's files, downloads, venv and run
+scripts, an app's own folder, the session user's alone, and its install steps, and each layer's services as systemd user
+units of the graphical session, which start through ``with-seed``, so each boot's deploy environment is theirs."""
 
 from __future__ import annotations
 
@@ -19,6 +19,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
+
+from agentenv_protocol.computer.app import SOCKET
+from agentenv_protocol.computer.platform import PLATFORM_ENV
 
 from agent_env.artifact.artifacts.computer import DiskSource
 from agent_env.config.paths import cache_root
@@ -35,6 +38,9 @@ ADMIN = "root"
 #: Where agent-env's own files are on an Omarchy computer, each layer's folder under them, and its services' units.
 ROOT = PurePosixPath("/opt/agentenv")
 DRIVERS = ROOT / "drivers"
+#: Where an app's folder goes, where the driver finds the apps composed onto its computer
+#: (``agentenv_protocol.computer.apps``).
+APPS = ROOT / "apps"
 BUILD = ROOT / "build"
 UNITS = PurePosixPath("/etc/systemd/user")
 #: What starts every service, with the deploy's environment (``computers/disk/omarchy/with-seed``).
@@ -64,7 +70,8 @@ GUEST = thin_disk.Guest(
 @dataclass(frozen=True)
 class Part:
     """A layer as an Omarchy disk installs it: its folder under ``context/``, its prefix, its install, its services'
-    argv by name, the environment they're given, and what its venv installs beside its requirements."""
+    argv by name, the environment they're given, and what its venv installs beside its requirements; for an app, the
+    ``<file>:<Class>`` its own server serves, its install steps by name and scope, and the platform they're run for."""
 
     folder: str
     prefix: PurePosixPath
@@ -72,6 +79,9 @@ class Part:
     services: dict[str, list[str]]
     environment: dict[str, Any]
     wants: tuple[str, ...] = ()
+    served: str | None = None
+    steps: tuple[tuple[str, str], ...] = ()
+    platform: str | None = None
 
 
 def source_path(sha256: str) -> Path:
@@ -172,9 +182,9 @@ def write(build: Path, parts: list[Part], *, user: str, build_settings: dict[str
 
 
 def _installed_part(part: Part) -> list[str]:
-    """The lines that install ``part``: its files, downloads, venv and run scripts, each as root or, for ``session``,
-    as the session user in their home, and its services as user units of the graphical session, each enabled for every
-    user."""
+    """The lines that install ``part``: its files, downloads, venv, an app's own folder, where its server listens, the
+    session user's alone, then its run scripts and install steps, each as root or, for ``session``, as the session user
+    in their home, and its services as user units of the graphical session, each enabled for every user."""
     prefix, install = part.prefix, part.install
     lines = [f"install -d {shlex.quote(str(prefix))}",
              f'cp -a "$build/context/{part.folder}/." {shlex.quote(str(prefix))}/']
@@ -189,25 +199,38 @@ def _installed_part(part: Part) -> list[str]:
         lines += [f"python3 -m venv {shlex.quote(str(venv))}",
                   f"{venv}/bin/pip install -q --disable-pip-version-check {' '.join(map(shlex.quote, wants))}",
                   f"{venv}/bin/pip list --format=json > {shlex.quote(str(prefix / 'installed.json'))}"]
+    if part.served is not None:
+        own = shlex.quote(str(prefix / SOCKET.parent))
+        lines.append(f'install -d {own} && chown "$user": {own} && chmod 700 {own}')
     for run in install.run or []:
-        as_user = 'runuser -u "$user" -- env HOME="$home" ' if run.scope == "session" else ""
-        lines.append(f"(cd {shlex.quote(str(prefix))} && {as_user}PREFIX={shlex.quote(str(prefix))} "
+        lines.append(f"(cd {shlex.quote(str(prefix))} && {_as(run.scope)}PREFIX={shlex.quote(str(prefix))} "
                      f"bash {shlex.quote(str(prefix / run.script))})")
+    for step, scope in part.steps:
+        platform = f"{PLATFORM_ENV}={shlex.quote(part.platform)} " if part.platform else ""
+        lines.append(f"(cd {shlex.quote(str(prefix))} && {_as(scope)}{platform}{prefix / 'venv' / 'bin' / 'python'} -m "
+                     f"agentenv_protocol.computer.run_install_step {shlex.quote(part.served)} {shlex.quote(step)})")
     for name, argv in part.services.items():
         lines += [_written(UNITS / f"agentenv-{name}.service", unit(name, prefix, argv, part.environment)),
                   f"systemctl --global enable --quiet agentenv-{name}.service"]
     return lines
 
 
+def _as(scope: str) -> str:
+    """What a command starts with to run as ``scope`` says: as root, provision's own user, or for ``session``, as the
+    session user in their home."""
+    return 'runuser -u "$user" -- env HOME="$home" ' if scope == "session" else ""
+
+
 def unit(name: str, prefix: PurePosixPath, argv: list[str], environment: dict[str, Any]) -> str:
     """The systemd user unit of the service ``name``: started with the graphical session, which gives it Hyprland's
     instance and Wayland's display, and again with it, as Hyprland restarts under a new instance signature; through
-    ``with-seed``, in its ``prefix``, with ``environment``; again whenever it exits."""
+    ``with-seed``, in its ``prefix``, with ``environment`` set after the deploy's, so a layer's own variables win, as on
+    every OS; again whenever it exits."""
+    own = ["/usr/bin/env", *(f"{key}={value}" for key, value in environment.items())] if environment else []
     lines = ["[Unit]", f"Description=agent-env: {name}", "PartOf=graphical-session.target",
              "After=graphical-session.target", "ConditionEnvironment=WAYLAND_DISPLAY", "",
              "[Service]", f"WorkingDirectory={prefix}",
-             *(f"Environment={_unit_word(f'{key}={value}')}" for key, value in environment.items()),
-             "ExecStart=" + " ".join(_unit_word(word) for word in (str(WITH_SEED), *argv)),
+             "ExecStart=" + " ".join(_unit_word(word) for word in (str(WITH_SEED), *own, *argv)),
              "Restart=always", "RestartSec=1", "",
              "[Install]", "WantedBy=graphical-session.target"]
     return "\n".join(lines) + "\n"
