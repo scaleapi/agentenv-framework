@@ -22,7 +22,7 @@ import json
 import logging
 import re
 from dataclasses import asdict, dataclass, field
-from typing import Optional
+from typing import ClassVar, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -68,22 +68,39 @@ _HEADER = re.compile(r"^\s*#{1,4} \S", re.M)
 _BOLD_BULLET = re.compile(r"^\s*(?:[-*•]|\d+\.)\s+\*\*", re.M)
 
 
+class PatternLimits:
+    """How long or how formatted a message must be before a shape-based pattern counts. Phrases that only the
+    assistant says (offers, "standing by", "now live") count at any length; shapes a user can also write (an
+    opening like "Done.", a table, "I checked") count only on a message long enough to be a report."""
+
+    REPORT_OPENING_MIN_CHARS: ClassVar[int] = 300
+    DELIVERED_MIN_CHARS: ClassVar[int] = 300
+    FORMATTED_MIN_CHARS: ClassVar[int] = 600
+    FORMATTED_MIN_HEADERS: ClassVar[int] = 2
+    FORMATTED_MIN_BOLD_BULLETS: ClassVar[int] = 3
+    WORK_REPORT_MIN_CHARS: ClassVar[int] = 500
+    WORK_REPORT_MIN_PHRASES: ClassVar[int] = 2
+
+
 def pattern_reasons(text: str) -> list[str]:
     """Why ``text`` reads as the assistant's message, one reason per pattern that matched; empty if none."""
+    lim = PatternLimits
     reasons = []
     n = len(text)
     if _AS_ASSISTANT.search(text):
         reasons.append("it talks like the assistant (offers to do the work, waits on the user, or speaks as the AI)")
-    if _REPORT_OPENING.search(text) and n > 300:
+    if _REPORT_OPENING.search(text) and n > lim.REPORT_OPENING_MIN_CHARS:
         reasons.append("it opens like a report of work done")
     if _NOW_LIVE.search(text):
         reasons.append("it says something is now live or updated")
-    if _DELIVERED.search(text) and n > 300:
+    if _DELIVERED.search(text) and n > lim.DELIVERED_MIN_CHARS:
         reasons.append("it reports something delivered or revised")
-    if (_TABLE.search(text) or len(_HEADER.findall(text)) >= 2 or len(_BOLD_BULLET.findall(text)) >= 3) and n > 600:
+    formatted = (_TABLE.search(text) or len(_HEADER.findall(text)) >= lim.FORMATTED_MIN_HEADERS
+                 or len(_BOLD_BULLET.findall(text)) >= lim.FORMATTED_MIN_BOLD_BULLETS)
+    if formatted and n > lim.FORMATTED_MIN_CHARS:
         reasons.append("it is a formatted deliverable (a table, headings or bold bullet points)")
     work = _WORK_DONE.findall(text)
-    if work and (n > 500 or len(work) >= 2):
+    if work and (n > lim.WORK_REPORT_MIN_CHARS or len(work) >= lim.WORK_REPORT_MIN_PHRASES):
         reasons.append("it reports checking or building things itself")
     return reasons
 
@@ -164,6 +181,10 @@ class UserSimGate:
     context_chars: int = 3000
     judge_timeout_seconds: float = 60
 
+    # How much of a judge error and of the judge's reason a verdict keeps.
+    RECORDED_ERROR_CHARS: ClassVar[int] = 300
+    RECORDED_REASON_CHARS: ClassVar[int] = 500
+
     def __post_init__(self) -> None:
         if self.on_fail not in ON_FAIL:
             raise ValueError(f"user_sim_gate.on_fail must be one of {ON_FAIL}, not {self.on_fail!r}")
@@ -174,7 +195,8 @@ class UserSimGate:
 
     @classmethod
     def from_dict(cls, data: Optional[dict]) -> Optional[UserSimGate]:
-        if not data:
+        """None (no gate) for None; the defaults for {}, as for ``UserSimGate()``."""
+        if data is None:
             return None
         known = set(cls.__dataclass_fields__)
         unknown = set(data) - known
@@ -195,13 +217,13 @@ class UserSimGate:
                 judged = await self._judge(candidate, history, call_config)
             except Exception as e:  # the judge is a second opinion; never let it take the conversation down
                 logger.warning(f"user-sim gate judge call failed ({type(e).__name__}: {e}); using patterns only")
-                verdict.judge_error = f"{type(e).__name__}: {e}"[:300]
+                verdict.judge_error = f"{type(e).__name__}: {e}"[: self.RECORDED_ERROR_CHARS]
                 return verdict
             if judged is None:
                 verdict.judge_error = "unparseable judge output"
                 return verdict
             verdict.judge_in_role = judged["in_role"]
-            verdict.judge_reason = str(judged.get("reason", ""))[:500]
+            verdict.judge_reason = str(judged.get("reason", ""))[: self.RECORDED_REASON_CHARS]
             if not judged["in_role"] and (reasons or len(candidate) >= self.judge_min_chars):
                 verdict.passed = False
         return verdict

@@ -601,6 +601,8 @@ def test_the_gate_round_trips_through_the_step_dict_and_rejects_bad_settings():
     assert again.user_sim_gate == step.user_sim_gate
     assert again.user_sim_gate.max_rewrites == 1
     assert "user_sim_gate" not in _step().to_dict()
+    defaults = _step(user_sim_gate={}).user_sim_gate      # empty settings turn the gate on with its defaults
+    assert defaults is not None and defaults.patterns and defaults.judge_model is None and defaults.max_rewrites == 2
     with pytest.raises(ValueError, match="unknown keys"):
         _step(user_sim_gate={"judge": "x"})
     with pytest.raises(ValueError, match="on_fail"):
