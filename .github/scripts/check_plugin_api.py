@@ -57,6 +57,10 @@ USED = (
     "agent_env.env.envs.website.WebsiteEnv.frontend_docker_image_artifact", "agent_env.env.envs.website.WebsiteEnv.environment_name",
     "agent_env.env.envs.multi_env.MultiEnv.mcp_server_envs", "agent_env.env.envs.multi_env.MultiEnv.website_envs",
     "agent_env.env.envs.multi_env.MultiEnv.name", "agent_env.artifact.artifacts.docker_image.DockerImageArtifact.image_name",
+    # What a plugin step runs and reads inside a deployed computer, as its session user, through its driver.
+    "agent_env.env.envs.computer.utils.inside.run", "agent_env.env.envs.computer.utils.inside.read_file",
+    "agent_env.env.envs.computer.utils.inside.max_timeout_s",
+    "agent_env.env.envs.computer.utils.inside.max_output_bytes",
 )
 SURFACE = BASES + USED
 
