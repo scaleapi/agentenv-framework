@@ -2,8 +2,9 @@
 empty overlay of it as ``disk/disk.img`` and the guest file beside, and a composed disk a layer on its base. A compose
 boots the base on an overlay kept on this machine, gives it its parts over ssh as the base's admin, by the key agent-env
 made for that base, shuts it down and packs the overlay onto the base's image, so every disk composed on a base shares
-one copy of it. What's its guest OS's own, how its admin is reached and what its shell runs, is a ``Guest``; Windows'
-is in ``windows_disk``."""
+one copy of it. A base is found or built by ``base``, the OS's own build making its image. What's its guest OS's own,
+how its admin is reached and what its shell runs, is a ``Guest``; Windows' is in ``windows_disk``, Omarchy's in
+``omarchy_disk``."""
 
 from __future__ import annotations
 
@@ -16,8 +17,7 @@ import subprocess
 import tarfile
 import time
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
@@ -115,18 +115,54 @@ def short(key: str) -> str:
 
 @dataclass(frozen=True)
 class Base:
-    """A base: its image's tag on this machine, the folder of its admin's key, when its OS's licence runs out, for one
-    whose does, and, for one the image store holds that this machine doesn't yet, its ref there, pulled when a layer is
-    composed on it."""
+    """A base: its image's tag on this machine, the folder of its admin's key, the labels its image carries, and, for one
+    the image store holds that this machine doesn't yet, its ref there, pulled when a layer is composed on it."""
 
     image: str
     keys: Path
-    expires: datetime | None = None
+    labels: dict[str, str] = field(default_factory=dict)
     pinned: str | None = None
 
 
 def base_lock(guest: Guest, image: str) -> str:
     return f"{guest.name}-base:{image}"
+
+
+def base(guest: Guest, key: str, build: Callable[[Path, Path], dict[str, str]], say: Callable[[str], None],
+         registry: Registry, stale: Callable[[dict[str, str]], str | None] = lambda labels: None) -> Base:
+    """``guest``'s base of ``key``: this machine's, pushed to the image store unless it holds one of ``key``; else the
+    one the store holds, pulled with the key to its admin it carries when a layer is composed on it; else built and
+    pushed there. One whose labels ``stale`` gives a reason against is built afresh. ``build`` makes ``base.img`` in the
+    work folder it's given, its admin reached by the new key in the folder it's given, and returns the labels the base
+    records beside its key. One build of a key runs at once on a machine, and another waits for it."""
+    (image, tag), keys = base_names(guest, key), cache_root() / guest.name / "bases" / short(key)
+    with holding_locks([base_lock(guest, image)], lambda: say("waiting for the build of the same base under way")):
+        if present(image) and (keys / "id").exists():
+            if (why := stale(labels := local_labels(image))) is None:
+                if registry.served(tag) is None:
+                    say("pushing the base to the image store, which doesn't hold it")
+                    registry.push(image, tag)
+                return Base(image, keys, labels)
+            say(f"{why}; building it afresh")
+        elif (pinned := registry.served(tag)) is not None:
+            if (why := stale(labels := registry.labels(pinned))) is None:
+                return Base(image, keys, labels, pinned)
+            say(f"{why}; building it afresh")
+        shutil.rmtree(keys, ignore_errors=True)
+        keys.mkdir(parents=True)
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", f"agentenv {image}", "-f",
+                        str(keys / "id")], check=True)
+        with working(guest, f"base-{short(key)}") as work:
+            labels = {KEY_LABEL: key, **build(work, keys)}
+            say("packing the base")
+            packed = work / "packed"
+            packed.mkdir()
+            (work / "base.img").replace(packed / "base.img")
+            shutil.copy(keys / "id", packed / ADMIN_KEY.name)
+            pack(guest, packed, image, labels, base_image=None)
+        say("pushing the base to the image store")
+        registry.push(image, tag)
+        return Base(image, keys, labels)
 
 
 def here(guest: Guest, base_: Base, registry: Registry, say: Callable[[str], None]) -> None:
@@ -168,12 +204,9 @@ def compose(guest: Guest, base_: Base, build: Path, key: str, labels: dict[str, 
         name = f"agentenv-{guest.name}-compose-{short(key)}"
         say(f"booting its base in {name}")
         machine = asyncio.run(machine_for(base_.image))
-        container = launched(name, {"VM_KEEP": "/out/disk.img"}, ["-v", f"{out}:/out", *machine.args], machine.image)
-        try:
-            port, deadline = ssh_port(container), time.monotonic() + COMPOSE_TIMEOUT_S
-            while ssh(port, base_.keys, guest.user, "echo ready", check=False, timeout=60).returncode != 0:
-                alive(guest, container, "booting", deadline)
-                time.sleep(BOOT_POLL_S)
+        with running(name, {"VM_KEEP": "/out/disk.img"}, ["-v", f"{out}:/out", *machine.args],
+                     machine.image) as (container, port):
+            answering(guest, container, port, base_.keys, time.monotonic() + COMPOSE_TIMEOUT_S)
             say("installing its layers over ssh")
             ssh(port, base_.keys, guest.user, guest.prepare)
             ssh(port, base_.keys, guest.user, guest.unpack, input=tarred(build), timeout=600)
@@ -183,8 +216,6 @@ def compose(guest: Guest, base_: Base, build: Path, key: str, labels: dict[str, 
             ssh(port, base_.keys, guest.user, guest.cleanup)
             compacted(guest, port, base_.keys, say)
             shut_down(guest, container, port, base_.keys)
-        finally:
-            subprocess.run(["docker", "rm", "-f", container], capture_output=True)
         converted(out, machine.image, backing=f"/{DISK_BASE_FILE}", args=machine.args)
         subprocess.run(["docker", "run", "--rm", "-v", f"{out}:/out", "--entrypoint", "qemu-img", launcher(), "rebase",
                         "-u", "-b", Path(DISK_BASE_FILE).name, "-F", "qcow2", "/out/disk.img"],
@@ -247,6 +278,25 @@ def ssh_port(container: str) -> int:
     return int(docker("port", container, "22/tcp").splitlines()[0].rpartition(":")[2])
 
 
+@contextlib.contextmanager
+def running(name: str, variables: dict[str, str], mounts: list[str], image: str) -> Iterator[tuple[str, int]]:
+    """A launcher container ``launched`` starts, with the port here its guest's ssh is on; removed when its use ends,
+    however it ends."""
+    container = launched(name, variables, mounts, image)
+    try:
+        yield container, ssh_port(container)
+    finally:
+        subprocess.run(["docker", "rm", "-f", container], capture_output=True)
+
+
+def answering(guest: Guest, container: str, port: int, keys: Path, deadline: float) -> None:
+    """Return once ``guest``'s admin answers over ssh; raise as ``alive`` does when its QEMU exits or ``deadline`` passes
+    first."""
+    while ssh(port, keys, guest.user, "echo ready", check=False, timeout=60).returncode != 0:
+        alive(guest, container, "booting", deadline)
+        time.sleep(BOOT_POLL_S)
+
+
 def alive(guest: Guest, container: str, doing: str, deadline: float) -> None:
     """Raise when ``container`` has stopped or ``deadline`` has passed, with the end of its output."""
     running = docker("inspect", "-f", "{{.State.Running}}", container) == "true"
@@ -283,8 +333,6 @@ def pack(guest: Guest, folder: Path, image: str, labels: dict[str, str], base_im
                       f"COPY {owner} disk.img guest /{Path(DISK_FILE).parent}/\n")
     else:
         dockerfile = f"FROM {base_image}\nCOPY {owner} disk.img guest /{Path(DISK_FILE).parent}/\n"
-    for name in ("answers", "out"):
-        shutil.rmtree(folder / name, ignore_errors=True)
     (folder / "Dockerfile").write_text(dockerfile)
     build_image(folder / "Dockerfile", folder, image, platform="linux/amd64", labels=labels)
 
@@ -311,5 +359,6 @@ def tarred(folder: Path) -> bytes:
     return buffer.getvalue()
 
 
-def label(image: str, name: str) -> str:
-    return json.loads(docker("image", "inspect", "-f", "{{json .Config.Labels}}", image) or "{}").get(name, "")
+def local_labels(image: str) -> dict[str, str]:
+    """The labels of ``image`` in this machine's Docker."""
+    return json.loads(docker("image", "inspect", "-f", "{{json .Config.Labels}}", image) or "null") or {}

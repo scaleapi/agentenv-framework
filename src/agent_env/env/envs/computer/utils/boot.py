@@ -18,6 +18,7 @@ from agentenv_protocol import client as protocol_v1
 from agentenv_protocol.computer import APP_SETTINGS_ENV, COMPUTER_READY, SETTINGS_ENV, TOOL_PREFIX_ENV
 from agentenv_protocol.computer.app import COMPUTER_APP
 from agentenv_protocol.computer.apps import ANSWER_TIMEOUT_S
+from agentenv_protocol.computer.platform import entry_for
 
 from agent_env.config import get_config
 from agent_env.env.envs.computer.utils.composed import REPOSITORY
@@ -51,10 +52,10 @@ class ComputerFailed(RuntimeError):
     """The computer's ``computer-ready`` status says it failed for good, a check that can't pass again."""
 #: How many random bytes a computer's control token carries: 256 bits, past guessing.
 CONTROL_TOKEN_BYTES = 32
-#: The size of a disk's VM when a deploy sets none: what the desktop was measured booting and passing the probe in, and
-#: for Windows, what Windows 11 asks of a PC.
+#: The size of a disk's VM when a deploy sets none: what the desktop was measured booting and passing the probe in; for
+#: Windows, what Windows 11 asks of a PC; and for Omarchy, what Hyprland's own CI warns it may crash with less than.
 DISK_CPU, DISK_MEMORY_MB = 2.0, 4096
-WINDOWS_CPU, WINDOWS_MEMORY_MB = 4.0, 8192
+DISK_SIZES = {"linux": (DISK_CPU, DISK_MEMORY_MB), "linux/omarchy": (4.0, 8192), "windows": (4.0, 8192)}
 #: The variable a Linux disk's init sizes its ``/dev/shm`` by, in MiB (``computers/disk/linux/boot/init``).
 SHM_MB_ENV = "AGENTENV_SHM_MB"
 
@@ -178,12 +179,12 @@ async def boot(sandbox_provider: SandboxProvider, *, image: str, port: int, envi
                network_policy: Optional[NetworkPolicy], timeout: int, attribution: Optional[Attribution],
                disk_size_gb: float = 10, cpu: Optional[float] = None, memory_mb: Optional[int] = None,
                ready_s: float = READY_TIMEOUT_S, form: str = "container", held: bool = False,
-               os_type: str = "linux", shm_mb: Optional[int] = None) -> Booted:
+               platform: str = "linux", shm_mb: Optional[int] = None) -> Booted:
     """``image``, of ``form``, booted with ``environment`` and its control ``token`` on ``sandbox_provider``, which the
     caller chose to run its arch natively, its driver's ``port`` reached on the sandbox, its ``/dev/shm`` ``shm_mb`` MiB
     where the sandbox can size it, once the driver, asked with that token, says the computer is ready, or with
     ``held``, its boot apps' launch held, once it answers (``ready``); a boot that fails is torn down."""
-    environment = {**environment, **control_environment(token), **shm_environment(form, os_type, shm_mb)}
+    environment = {**environment, **control_environment(token), **shm_environment(form, platform.partition("/")[0], shm_mb)}
     if form == "vm_bundle":
         sandbox = await sandbox_provider.create_vm(
             image=image, env=environment, exposed_ports=[port], network_policy=network_policy,
@@ -192,8 +193,7 @@ async def boot(sandbox_provider: SandboxProvider, *, image: str, port: int, envi
         sandbox = await sandbox_provider.create_vm(
             image=image, env=environment, exposed_ports=[port], network_policy=network_policy,
             disk_size_gb=disk_size_gb, timeout=timeout, attribution=dict(attribution or {}),
-            cpu=cpu or (WINDOWS_CPU if os_type == "windows" else DISK_CPU),
-            memory=memory_mb or (WINDOWS_MEMORY_MB if os_type == "windows" else DISK_MEMORY_MB))
+            cpu=cpu or entry_for(DISK_SIZES, platform)[0], memory=memory_mb or entry_for(DISK_SIZES, platform)[1])
     else:
         sandbox = await sandbox_provider.create_container(
             image_name=image, port=port, env=environment, network_policy=network_policy, disk_size_gb=disk_size_gb,
