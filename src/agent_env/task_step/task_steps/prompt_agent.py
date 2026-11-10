@@ -41,6 +41,7 @@ from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import RetryConfig, TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.notification_delivery import delivered_parts, next_message, take_due
 from agent_env.task_step.task_steps.post_turn_hooks import PostTurnHooks, run_post_turn_hooks, validate_hook_specs
+from agent_env.task_step.task_steps.user_sim_gate import UserSimGate, rewrite_request
 from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import (
     agent_error_text,
     fetch_container_logs,
@@ -177,6 +178,7 @@ class PromptAgentTaskStep(TaskStep):
         snapshot_config: Optional[SnapshotConfig] = None,
         live_trajectory: bool = False,
         post_turn_hooks: Optional[list[dict]] = None,
+        user_sim_gate: Optional[UserSimGate | dict] = None,
     ):
         # `prompt` is the legacy text-only field; `parts` is the multimodal
         # form that's the authoritative A2A wire shape. Exactly one must be set:
@@ -223,6 +225,10 @@ class PromptAgentTaskStep(TaskStep):
         self.snapshot_config = snapshot_config
         self.live_trajectory = live_trajectory
         self.post_turn_hooks = post_turn_hooks
+        # Checks each user-sim message before the agent gets it (user_sim_gate.py). A dict is accepted
+        # too, as JSON task files and the kwargs form of put() carry it.
+        self.user_sim_gate = (UserSimGate.from_dict(user_sim_gate) if isinstance(user_sim_gate, dict)
+                              else user_sim_gate)
 
     @staticmethod
     def _validate_parts(parts: list[dict]) -> None:
@@ -300,6 +306,8 @@ class PromptAgentTaskStep(TaskStep):
             base["live_trajectory"] = True
         if self.post_turn_hooks is not None:
             base["post_turn_hooks"] = self.post_turn_hooks
+        if self.user_sim_gate is not None:
+            base["user_sim_gate"] = self.user_sim_gate.to_dict()
         return base
 
     @classmethod
@@ -337,6 +345,7 @@ class PromptAgentTaskStep(TaskStep):
             ),
             live_trajectory=data.get("live_trajectory", False),
             post_turn_hooks=data.get("post_turn_hooks"),
+            user_sim_gate=data.get("user_sim_gate"),
         )
 
     def _trajectory_prefix(self) -> str:
@@ -574,7 +583,11 @@ class PromptAgentTaskStep(TaskStep):
             self, context, url=user_url, user_sim=user_sim, is_user_sim=is_user_sim, conversation_id=conversation_id,
             decide_url=decide_url, shareable=sent_to_target,
             decides_quietly=card_request_accepts(decide_method.get("request") or {}, _QUIET_DECIDE),
+            opening_text="\n".join(p.get("text", "") for p in initial_parts if p.get("kind") == "text"),
         )
+        if self.user_sim_gate is not None and not is_user_sim:
+            logger.warning(f"prompt_agent '{self.id}': user_sim_gate is set but the user side isn't a user-sim "
+                           "agent-env deployed; no message is checked")
 
         try:
             for turn in range(self.max_conversation_turns):
@@ -763,6 +776,9 @@ class PromptAgentTaskStep(TaskStep):
             step_id=self.id,
             structured_output=structured_output,
         ))
+
+        if user_side.gate_failure is not None:
+            raise RuntimeError(f"user_sim_gate: {user_side.gate_failure}")
 
         if final_state == TaskState.failed:
             detail_parts = []
@@ -1031,7 +1047,8 @@ class _UserSide:
 
     def __init__(self, step: PromptAgentTaskStep, context: TaskStepContext, *, url: Optional[str],
                  user_sim: Optional[DeployedAgent], is_user_sim: bool, conversation_id: str,
-                 decide_url: Optional[str], decides_quietly: bool, shareable: set[str]) -> None:
+                 decide_url: Optional[str], decides_quietly: bool, shareable: set[str],
+                 opening_text: str = "") -> None:
         self._step = step
         self._context = context
         self._url = url
@@ -1041,9 +1058,23 @@ class _UserSide:
         self._decide_url = decide_url
         self._decides_quietly = decides_quietly
         self._shareable = shareable
+        # The conversation as the user-sim gate reads it: (role, text), role "user" or "assistant".
+        self._history: list[tuple[str, str]] = [("user", opening_text)] if opening_text else []
+        self._gate = step.user_sim_gate if is_user_sim else None
+        self._gate_call_config = None
+        # Set once a user-sim message fails the gate after its rewrites, with on_fail "fail".
+        self.gate_failure: Optional[str] = None
 
     async def ask(self, number: int, solver_message: str, agent_parts: list[dict]) -> dict:
         """The user side's answer: ``{"message": parts}``, or ``{"end": reason}`` with any closing message to record."""
+        self._history.append(("assistant", solver_message or ""))
+        answer = await self._answer(number, agent_parts, solver_message)
+        if "message" in answer and "end" not in answer:
+            self._history.append(("user", "\n".join(p.get("text", "") for p in answer["message"]
+                                                     if p.get("kind") == "text")))
+        return answer
+
+    async def _answer(self, number: int, agent_parts: list[dict], solver_message: str) -> dict:
         if self._decide_url is not None:
             env_triggers = await self._step._read_env_triggers(self._context)
             self._record("env_trigger_snapshots", {"turn": number, "envs": env_triggers})
@@ -1076,6 +1107,46 @@ class _UserSide:
         return answer
 
     async def _ask_peer(self, number: int, agent_parts: list[dict]) -> dict:
+        answer = await self._send_to_peer(number, agent_parts)
+        if self._gate is None or "end" in answer:
+            return answer
+        return await self._gated(number, answer)
+
+    async def _gated(self, number: int, answer: dict) -> dict:
+        """Check the user-sim's message; ask for a rewrite while it fails, up to the gate's limit."""
+        gate = self._gate
+        if self._gate_call_config is None and gate.judge_model:
+            config = get_config()
+            overrides = self._context.metadata.get("user_overrides", {})
+            self._gate_call_config = config.resolve_model_call(
+                gate.judge_model,
+                default_api_key=config.resolve_reference(
+                    overrides.get("judge_litellm_api_key") or overrides.get("litellm_api_key")),
+                base_override=overrides.get("judge_litellm_base_url") or overrides.get("litellm_base_url"),
+            )
+        for attempt in range(gate.max_rewrites + 1):
+            text = "\n".join(p.get("text", "") for p in answer["message"] if p.get("kind") == "text")
+            verdict = await gate.check(text, self._history, call_config=self._gate_call_config)
+            self._record("user_sim_gate", {"turn": number, "attempt": attempt, "chars": len(text), **verdict.to_dict()})
+            if verdict.passed:
+                return answer
+            logger.warning(f"Turn {number}: user-sim message failed the gate (attempt {attempt + 1}/"
+                           f"{gate.max_rewrites + 1}): {'; '.join(verdict.reasons())[:300]}")
+            if attempt == gate.max_rewrites:
+                break
+            answer = await self._send_to_peer(number, [{"kind": "text", "text": rewrite_request(verdict)}])
+            if "end" in answer:
+                return answer
+        if gate.on_fail == "send":
+            return answer
+        self._context.metadata.setdefault("user_sim_invalid", {})[self._step.id] = {
+            "turn": number, "reasons": verdict.reasons()}
+        if gate.on_fail == "fail":
+            self.gate_failure = (f"user-sim message at turn {number} still reads as the assistant's after "
+                                 f"{gate.max_rewrites} rewrite(s): {'; '.join(verdict.reasons())[:500]}")
+        return {"end": "user_sim_invalid"}
+
+    async def _send_to_peer(self, number: int, agent_parts: list[dict]) -> dict:
         step = self._step
         if self._url is None:
             self._url = get_config().get_default_human_a2a_url()
