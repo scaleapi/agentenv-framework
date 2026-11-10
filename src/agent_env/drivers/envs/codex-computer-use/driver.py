@@ -138,7 +138,9 @@ SANDBOX_KEY = "codex/sandbox-state-meta"
                            {"os": {"type": "windows", "display": ["dwm"]}, "arch": ["amd64"]}])
 class CodexComputerUse(OSDriver):
     class Settings(ComputerSettings):
-        #: The apps Codex may act on, by name or identifier, case aside; None for every app.
+        #: The apps Codex may act on, by name or identifier, case aside; None for every app. One the approval request
+        #: names matches, so on Windows, where it names the program an app runs from (``pythonw.exe`` for any app run
+        #: from a copy of Python), name the app as Codex shows it, never a program several apps share.
         allowed_apps: list[str] | None = None
         #: Whether Codex's sandbox holds the JavaScript; None for the OS's way, on macOS and off on Windows.
         js_sandbox: bool | None = None
@@ -247,19 +249,17 @@ class CodexComputerUse(OSDriver):
         except Exception as e:
             return [*checks, ReadyCheck("Codex tools", False, f"cua_repl didn't answer: {type(e).__name__}: {e}")]
         running = {t.name: t.model_dump(mode="json", exclude_none=True) for t in listed}
-        answer = " ".join(c.text for c in probed.content if isinstance(c, TextContent))
-        answered = ReadyCheck("Codex answers", not probed.isError and "ready" in answer,
-                              "it read the computer's apps" if not probed.isError else f"cua.getState() failed: {answer}")
-        if not MANIFEST.is_file():
-            return [*checks, ReadyCheck("Codex tools", True, f"no {MANIFEST.name} pinned yet"), answered]
         pinned = {t["name"]: t for t in _manifest()["tools"]}
         changed = ["instructions"] if initialized.instructions != _manifest()["instructions"] else []
         changed += sorted(name for name in running.keys() | pinned.keys() if name not in running or name not in pinned
                           or any(running[name].get(key) != value for key, value in pinned[name].items()))
+        answer = " ".join(c.text for c in probed.content if isinstance(c, TextContent))
         return [*checks,
                 ReadyCheck("Codex tools", not changed, f"its instructions and {len(running)} tools, as pinned"
                            if not changed else f"these differ from {MANIFEST.name}: {', '.join(changed)}"),
-                answered]
+                ReadyCheck("Codex answers", not probed.isError and "ready" in answer,
+                           "it read the computer's apps" if not probed.isError else
+                           f"its probe of the computer's apps failed: {answer}")]
 
 
 class _Repl:
@@ -347,7 +347,7 @@ def _settle(answer: asyncio.Future, *, result: Any = None, error: BaseException 
 
 @functools.cache
 def _manifest() -> dict:
-    return json.loads(MANIFEST.read_text()) if MANIFEST.is_file() else {"instructions": "", "tools": []}
+    return json.loads(MANIFEST.read_text())
 
 
 def _one_object(schema: dict) -> dict:
