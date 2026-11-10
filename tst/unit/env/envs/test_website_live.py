@@ -124,6 +124,19 @@ def test_a_synthetic_sites_names_stay_as_given_and_a_source_with_two_sites_or_no
     assert card_naming.website_source_in_files({"d.py": tmp_path / "d.py"}, "Dockerfile") == WebsiteSource()
 
 
+def test_a_secret_setting_annotated_as_a_string_is_a_secret_too(tmp_path):
+    (tmp_path / "Dockerfile").write_text("FROM scratch\n")
+    (tmp_path / "site.py").write_text(SOURCE.replace("        token: SecretStr\n", '        token: "SecretStr"\n'
+                                                     '        key: Optional["SecretStr"] = None\n'
+                                                     '        note: "str" = ""\n'))
+
+    source = card_naming.website_source_from_source(str(tmp_path / "Dockerfile"), None)
+
+    assert source.secret_settings == ["token", "key"]
+    with pytest.raises(ValueError, match="settings.token is a secret"):
+        _live(settings={"token": "ghp_plain"}, secret_settings=source.secret_settings)
+
+
 def test_a_source_leaving_live_and_allow_hosts_out_declares_their_defaults_so_a_flag_cant_contradict_it(tmp_path):
     (tmp_path / "Dockerfile").write_text("FROM scratch\n")
     (tmp_path / "site.py").write_text('@website(domains=["shop.test"])\nclass Shop(WebsiteEnvironment):\n    pass\n')

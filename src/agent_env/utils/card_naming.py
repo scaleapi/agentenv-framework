@@ -194,9 +194,18 @@ def _names(node: Optional[ast.expr]) -> Optional[list[str]]:
 
 
 def _secret(annotation: ast.expr) -> bool:
-    """Whether ``annotation`` is ``SecretStr``, optional or not."""
-    return any(isinstance(n, ast.Name) and n.id == "SecretStr" or isinstance(n, ast.Attribute) and n.attr == "SecretStr"
-               for n in ast.walk(annotation))
+    """Whether ``annotation`` is ``SecretStr``, optional or not, written as a name or as a string (``"SecretStr"``,
+    ``Optional["SecretStr"]``)."""
+    for n in ast.walk(annotation):
+        if isinstance(n, ast.Name) and n.id == "SecretStr" or isinstance(n, ast.Attribute) and n.attr == "SecretStr":
+            return True
+        if isinstance(n, ast.Constant) and isinstance(n.value, str):
+            try:
+                if _secret(ast.parse(n.value, mode="eval").body):
+                    return True
+            except SyntaxError:
+                continue
+    return False
 
 
 def _decorator_name(decorator: ast.expr) -> Optional[str]:
