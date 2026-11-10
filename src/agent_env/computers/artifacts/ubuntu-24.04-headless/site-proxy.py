@@ -9,7 +9,7 @@ import http.server
 import ipaddress
 import json
 import os
-import select
+import selectors
 import socket
 import socketserver
 import sys
@@ -145,14 +145,19 @@ class Proxy(http.server.BaseHTTPRequestHandler):
 
 
 def _pipe(client: socket.socket, upstream: socket.socket) -> tuple[int, int]:
-    """Relay both ways until either side closes or both are idle ``IDLE_S``; the bytes sent upstream and received."""
+    """Relay both ways until either side closes or both are idle ``IDLE_S``; the bytes sent upstream and received.
+    It waits with a selector (epoll on Linux), not ``select()``, which refuses a socket numbered past 1023."""
     sent = received = 0
+    waiting = selectors.DefaultSelector()
     try:
+        waiting.register(client, selectors.EVENT_READ)
+        waiting.register(upstream, selectors.EVENT_READ)
         while True:
-            ready, _, _ = select.select([client, upstream], [], [], IDLE_S)
+            ready = waiting.select(IDLE_S)
             if not ready:
                 break
-            for s in ready:
+            for key, _ in ready:
+                s = key.fileobj
                 data = s.recv(65536)
                 if not data:
                     return sent, received
@@ -164,6 +169,7 @@ def _pipe(client: socket.socket, upstream: socket.socket) -> tuple[int, int]:
     except OSError:
         pass
     finally:
+        waiting.close()
         upstream.close()
     return sent, received
 

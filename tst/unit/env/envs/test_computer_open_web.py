@@ -9,6 +9,8 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import json
+import os
+import resource
 import socket
 import threading
 from pathlib import Path
@@ -149,6 +151,27 @@ def test_the_stand_in_tunnels_and_forwards_a_public_host_at_the_address_it_check
         ("site.test", 443, GITHUB), ("mixed.test", 80, "140.82.112.4")]
     assert all(entry["bytes_sent"] > 0 and entry["bytes_received"] > 0 for entry in logged), logged
     assert all(set(entry) >= {"started", "duration_s"} for entry in logged)
+
+
+def test_the_stand_in_relays_a_connection_whose_sockets_are_numbered_past_1023(proxy):
+    port, opened, read, _ = proxy
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if hard != resource.RLIM_INFINITY and hard < 1400:
+        pytest.skip(f"this machine allows {hard} open files, too few to number a socket past 1023")
+    resource.setrlimit(resource.RLIMIT_NOFILE, (max(soft, 1400) if hard == resource.RLIM_INFINITY else
+                                                min(max(soft, 1400), hard), hard))
+    held = [os.pipe() for _ in range(520)]
+    try:
+        answer = _ask(port, b"CONNECT site.test:443 HTTP/1.1\r\nHost: site.test:443\r\n\r\n",
+                      then=b"GET / HTTP/1.1\r\nHost: site.test\r\n\r\n")
+    finally:
+        for pair in held:
+            os.close(pair[0])
+            os.close(pair[1])
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+    assert answer.startswith(b"HTTP/1.1 200 Connection established") and answer.endswith(b"hello"), answer
+    assert opened == [(GITHUB, 443)]
 
 
 def test_the_stand_in_answers_a_name_that_doesnt_resolve_at_once(proxy, capsys):
