@@ -5,6 +5,7 @@ container writes the reward its score is. Needs a Docker daemon."""
 
 import json
 import logging
+import subprocess
 
 import pytest
 from click.testing import CliRunner
@@ -58,12 +59,15 @@ def test_a_task_container_from_an_image_folder_is_built_by_the_first_run_alone(s
     builds, build = [], host_images._build
     monkeypatch.setattr(host_images, "_build", lambda *args: builds.append(args[2]) or build(*args))
 
-    first = CliRunner().invoke(cli, ["run", str(root)])
+    try:
+        first = CliRunner().invoke(cli, ["run", str(root)])
 
-    assert first.exit_code == 0 and "tasks/grade.json v1: passed" in first.output, first.output
-    assert len(builds) == 1, (first.output, builds)
+        assert first.exit_code == 0 and "tasks/grade.json v1: passed" in first.output, first.output
+        assert len(builds) == 1, (first.output, builds)
 
-    again = CliRunner().invoke(cli, ["run", str(root)])
+        again = CliRunner().invoke(cli, ["run", str(root)])
 
-    assert again.exit_code == 0 and "tasks/grade.json v1: passed" in again.output, again.output
-    assert "building with docker" not in again.output and len(builds) == 1, (again.output, builds)
+        assert again.exit_code == 0 and "tasks/grade.json v1: passed" in again.output, again.output
+        assert "building with docker" not in again.output and len(builds) == 1, (again.output, builds)
+    finally:
+        subprocess.run(["docker", "rmi", "-f", *builds], capture_output=True)  # teardown keeps it, for a next run

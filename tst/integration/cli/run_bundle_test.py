@@ -241,7 +241,8 @@ def test_a_signal_mid_run_marks_the_run_cancelled_tears_it_down_and_stops_its_co
                        "bash_cmd": 'sleep 30 & echo $! > "$HOME/nap.pid"; wait'}]},
     ]))
 
-    exit_code, output, held = _signalled([napping], "step 2/2 nap (verify_sandbox)", signum, group)
+    nap = tmp_path / "nap.pid"
+    exit_code, output, held = _signalled([napping], "step 2/2 nap (verify_sandbox)", signum, group, ready=nap.exists)
 
     assert exit_code == code, output
     assert len(held) == 1
@@ -250,7 +251,7 @@ def test_a_signal_mid_run_marks_the_run_cancelled_tears_it_down_and_stops_its_co
     (instance_id,) = re.findall(r"instance (\S+)", output)
     with namespace_routing():
         assert Task.get_instance(instance_id).status == "cancelled"
-    assert not _alive(int((tmp_path / "nap.pid").read_text()))
+    assert not _alive(int(nap.read_text()))
 
 
 def test_a_run_killed_outright_leaves_its_sandboxes_under_its_root_for_a_supervisor_to_terminate(bundle, tmp_path):

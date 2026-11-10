@@ -82,6 +82,16 @@ A package of your own can add env types, providers, task steps and stores to age
 
 Every task in a bundle is an [OpenEnv](https://github.com/openenv/OpenEnv) env, with the `openenv` extra installed (`pip install 'agentenv-framework[openenv]'`). `agent_env.openenv.build_app(bundle)` returns the OpenEnv server for a bundle, a folder or an installed bundle's name, or for a mapping of split names to bundles. Any OpenEnv client resets it to a task, which deploys the task's envs and opens its agent's turn, acts through the envs' tools and an added `end_turn` tool, and gets the task's verifier score as its reward.
 
+An agent a task installs into a container (`install_agent` with `container_name`) is played through AgentEnv's proxy, which an episode installs there in its place. A task image can carry the proxy, so an episode only starts it: copy the installed `agent_env` package's `agents/agents/proxy` folder into the image's build context as `agentenv-proxy`, and end the Dockerfile with
+
+```dockerfile
+COPY --from=ghcr.io/astral-sh/uv:0.13.1@sha256:4a1f3666816dafadd20ceb71eac9a7d56d7ef30279f7d64048519ab901ada336 /uv /opt/agentenv-proxy/bin/uv
+COPY agentenv-proxy /opt/agentenv-proxy/src
+RUN sh /opt/agentenv-proxy/src/bake.sh
+```
+
+A container whose baked proxy holds other requirements than this agent-env's proxy gets the proxy installed afresh. Name the image as `run_docker_container`'s `image_artifact_id`, so it's built once, not every episode.
+
 ## Time zones
 
 Servers and the env clock work in UTC. To run an agent in a user's time zone, the task sets it on the agent's `deploy_agent` step as `env_vars: {"TZ": "America/New_York"}`, which reaches the agent's sandbox, and names the zone in the agent's prompt. While the env clock is armed, the gateway's `get_time` tool takes that IANA name as `time_zone` and adds the `local_time` in that zone, and a trigger executor's working `hours` can take a `time_zone` instead of a fixed `utc_offset`, so they keep their local hours across daylight-saving changes.

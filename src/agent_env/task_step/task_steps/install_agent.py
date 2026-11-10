@@ -22,6 +22,7 @@ from typing import Callable, ClassVar, NamedTuple, Optional
 import httpx
 
 from agent_env.a2a_agent import A2AAgent
+from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.config import get_config
 from agent_env.entity.scopes import FieldScope
 from agent_env.providers.sandbox_providers.local_docker.provider import (
@@ -47,6 +48,9 @@ WORKDIR_HOST_KEY = "workdir_host"
 USER_HOST_KEY = "user_host"
 # The per-step param that installs this agent in place of the step's own, as an episode plays it through a proxy.
 PROXY_PARAM = "proxy"
+# Each agent image's read of its card's install/v1 extension, by the image artifact's id and version, under which the
+# image never changes.
+_INSTALL_EXTENSIONS: dict[tuple[str, Optional[int]], asyncio.Future] = {}
 
 
 class HostPlace(NamedTuple):
@@ -266,7 +270,7 @@ class InstallAgentTaskStep(TaskStep):
         logger.info(f"Loading agent image {agent.docker_image_artifact.image_name} onto VM (needed to read agent card)...")
         await sandbox.load_docker_images([agent.docker_image_artifact])
 
-        install_ext = await self._extract_install_extension(sandbox, agent.docker_image_artifact.image_name)
+        install_ext = await self._extract_install_extension(sandbox, agent.docker_image_artifact)
         params = install_ext.get("params") or {}
         host_mode = self.container_name is None
         commands_key = INSTALL_COMMANDS_HOST_KEY if host_mode else INSTALL_COMMANDS_KEY
@@ -406,7 +410,7 @@ class InstallAgentTaskStep(TaskStep):
             )
         logger.info(f"Loading agent image {agent.docker_image_artifact.image_name} onto VM (to read where it works)...")
         await sandbox.load_docker_images([agent.docker_image_artifact])
-        install_ext = await self._extract_install_extension(sandbox, agent.docker_image_artifact.image_name)
+        install_ext = await self._extract_install_extension(sandbox, agent.docker_image_artifact)
         params = install_ext.get("params") or {}
         workdir, user = params.get(WORKDIR_HOST_KEY), params.get(USER_HOST_KEY)
         if not all(isinstance(value, str) and value for value in (workdir, user)):
@@ -448,10 +452,20 @@ class InstallAgentTaskStep(TaskStep):
                 pass
         return TaskStep.DEFAULT_TTL_SECONDS
 
-    async def _extract_install_extension(self, sandbox, agent_image_name: str) -> dict:
-        """Run the agent image briefly with --entrypoint python3 to dump its AGENT_CARD and find the install/v1 extension."""
-        from agent_env.a2a_agent import A2AAgent
+    async def _extract_install_extension(self, sandbox, image: DockerImageArtifact) -> dict:
+        """The install/v1 extension of the card ``image`` serves, read once in this process for each image artifact
+        version: installs at once share one read, and one that failed, or ran on another event loop, is made again."""
+        key = (image.id, image.version)
+        read = _INSTALL_EXTENSIONS.get(key)
+        if (read is None or read.get_loop() is not asyncio.get_running_loop()
+                or (read.done() and (read.cancelled() or read.exception() is not None))):
+            read = asyncio.ensure_future(self._read_install_extension(sandbox, image.image_name))
+            _INSTALL_EXTENSIONS[key] = read
+        return await asyncio.shield(read)
 
+    @staticmethod
+    async def _read_install_extension(sandbox, agent_image_name: str) -> dict:
+        """Run the agent image briefly with --entrypoint python3 to dump its AGENT_CARD and find the install/v1 extension."""
         script = (
             "import sys, json; sys.path.insert(0, '/app'); "
             "from a2a_server import AGENT_CARD; "
@@ -481,7 +495,7 @@ class InstallAgentTaskStep(TaskStep):
             if other.sandbox_id == sandbox_id and other.api_url == a2a_url:
                 raise RuntimeError(f"Tunnel for port {a2a_port} ({a2a_url}) already serves deployed agent '{other.agent_name}' on sandbox {sandbox_id}; pass a distinct a2a_port on this step")
 
-    async def _wait_for_agent_card(self, a2a_url: str, timeout_s: int = 300, poll_s: int = 5) -> dict:
+    async def _wait_for_agent_card(self, a2a_url: str, timeout_s: int = 300, poll_s: float = 0.5) -> dict:
         deadline = asyncio.get_event_loop().time() + timeout_s
         last_err: Exception | None = None
         async with httpx.AsyncClient() as client:
