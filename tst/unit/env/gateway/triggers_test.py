@@ -217,6 +217,9 @@ def _registration(**overrides):
       "triggers": [{"id": "x", "when": {"type": "state", "roles": ["executor"], "check": {
           "tool": "t", "predicate": {"exists": True}}}, "actions": [{"type": "nl", "instruction": "hi"}]}]},
      "would provoke it again"),
+    *[({"triggers": [{"id": "x", "when": {"type": "action", "tool": "t", "where": {"q": {"regex": pattern}}},
+                      "actions": []}]}, "regex must be a string of at most 4096 characters")
+      for pattern in ("a" * 4097, 5)],
 ])
 def test_registration_fails_loud(engine, bad, fragment):
     with pytest.raises(TriggerError, match=".*"):
@@ -238,6 +241,25 @@ async def test_executor_role_never_watched_even_if_forced(engine):
     engine.on_tool_call("executor", "search_emails", {}, _result())
     await asyncio.sleep(0.1)
     assert engine._triggers["x"]["status"] == "armed", "executor traffic must never fire a trigger"
+
+
+@pytest.mark.asyncio
+async def test_a_regex_that_runs_out_of_its_budget_matches_nothing_and_its_trigger_stays_armed(engine, monkeypatch,
+                                                                                              caplog):
+    engine.register({"triggers": [{"id": "x", "when": {"type": "action", "tool": "search_emails",
+                                                       "where": {"query": {"regex": "^(a+)+$"}}}, "actions": []}]})
+    budgets = []
+
+    def search(pattern, text, *, timeout):
+        budgets.append(timeout)
+        raise TimeoutError
+    monkeypatch.setattr(triggers_module.regex, "search", search)
+
+    engine.on_tool_call("default", "search_emails", {"query": "a" * 40 + "!"}, _result())
+
+    assert budgets == [triggers_module._REGEX_TIMEOUT_S]
+    assert engine._triggers["x"]["status"] == "armed"
+    assert "ran past 0.1s; it matches nothing" in caplog.text
 
 
 def _trig(which):
