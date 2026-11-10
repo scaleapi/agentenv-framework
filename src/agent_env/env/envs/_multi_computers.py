@@ -117,14 +117,16 @@ def refusal(computer: ComputerEnv, entry: dict, sandbox_type: str | None, websit
 
 
 class Computers:
-    """A multi env's computers, and those of each deployment a later deploy replaced, which ``close`` ends too.
+    """A multi env's computers, its website browser when that is a computer, and those of each deployment a later
+    deploy replaced, which ``close`` ends too.
 
     A deploy's computers are its own, as its provider and sandbox are (``deploy_through_provider``): ``begin`` gives it
     fresh ones when these already have a deployment and sets the earlier ones aside, so its failure closes only what it
     made and ``rollback`` puts them back; ``commit`` keeps them for ``close``."""
 
     def __init__(self, envs: list[ComputerEnv], owner: str) -> None:
-        self.envs = envs
+        self.envs = envs  # the multi env's own, as it stores them
+        self.browser: Optional[ComputerEnv] = None  # the deploy's website browser, a computer of its own
         self._owner = owner  # the multi env's id, for what's logged
         self._routes: dict[str, Optional[list[str]]] = {}  # each computer routing sites: the names it routes, or all
         self._entries: dict = {}  # the deploy's child_envs entries, by computer
@@ -132,27 +134,36 @@ class Computers:
         self._replaced: list[ComputerEnv] = []
         self._earlier: Optional[tuple[list[ComputerEnv], list[ComputerEnv]]] = None
 
-    def begin(self) -> None:
-        self._earlier = (self.envs, self._replaced)
+    @property
+    def every(self) -> list[ComputerEnv]:
+        """Each computer a deploy deploys: the multi env's own, then its website browser."""
+        return [*self.envs, *([self.browser] if self.browser is not None else [])]
+
+    def begin(self, browser: Optional[ComputerEnv] = None) -> None:
+        """Start a deploy of the multi env's computers and ``browser``, its website browser when that is a computer."""
+        self._earlier = (self.envs, self.browser, self._replaced)
         if any(env._deployed is not None for env in self.envs):
             self.envs = [Env.get(env.id, env.version) for env in self.envs]
+        self.browser = Env.get(browser.id, browser.version) if browser is not None and browser._deployed else browser
         self._replaced = []
 
     def rollback(self) -> None:
-        (self.envs, self._replaced), self._earlier = self._earlier, None
+        (self.envs, self.browser, self._replaced), self._earlier = self._earlier, None
 
     def commit(self) -> None:
-        (earlier, replaced), self._earlier = self._earlier, None
-        self._replaced = [*replaced, *(earlier if self.envs is not earlier else [])]
+        (envs, browser, replaced), self._earlier = self._earlier, None
+        kept = {id(env) for env in self.every}
+        self._replaced = [*replaced, *(env for env in [*envs, *([browser] if browser else [])]
+                                       if env._deployed is not None and id(env) not in kept)]
 
     def holding(self, environment_name: str) -> Optional[ComputerEnv]:
         """The computer a load of ``environment_name`` reaches: the one of that name, or with an app of it."""
-        return next((env for env in self.envs if env.holds(environment_name)), None)
+        return next((env for env in self.every if env.holds(environment_name)), None)
 
     async def load(self, environments: list[EnvironmentArtifact]) -> None:
         """Load each computer's of ``environments`` into it, in its own order, the computers at once (``each``)."""
         await each(self._owner, "load", [(f"computer {env.environment_name!r}", env.load_environments(held))
-                                         for env in self.envs
+                                         for env in self.every
                                          if (held := [e for e in environments if env.holds(e.environment_name)])])
 
     def resets(self, deployed: DeployedEnv) -> list[tuple[str, Awaitable[None]]]:
@@ -160,14 +171,15 @@ class Computers:
         resets alone; none is awaited yet."""
         records = getattr(deployed, "child_envs", None) or {}
         return [(env.environment_name, env.reset(DeployedEnv.from_dict(records[env.environment_name])))
-                for env in self.envs if env.environment_name in records]
+                for env in self.every if env.environment_name in records]
 
     def deployer(self, child_envs: Optional[dict], *, sandbox_type: str | None, ttl_seconds: int,
                  attribution: Optional[Attribution], websites: Mapping[str, str], live_hosts: Iterable[str] = ()
                  ) -> Callable[[Optional[str]], Awaitable[list[ExternalChild]]]:
         """The gateway's ``children``: every computer deployed as its child_envs entry says, its tools served under its
         name and ``_``, and its network allowing ``reach``, the gateway's address when the gateway has one yet, and the
-        ``live_hosts`` of the multi env's live websites; then each as the gateway fronts it. A computer routing the multi env's ``websites`` (their environment names by env id)
+        ``live_hosts`` of the multi env's live websites, the website browser's those hosts alone; then each as the
+        gateway fronts it. A computer routing the multi env's ``websites`` (their environment names by env id)
         boots with its boot apps held, for ``finish`` to route them once the gateway is up. A gateway deploy tried again
         deploys them again, after closing the earlier try's."""
         tries = 0
@@ -186,15 +198,15 @@ class Computers:
             results = await asyncio.gather(*(env.deploy(
                 ttl_seconds=ttl_seconds, attribution=attribution, tool_prefix=f"{env.environment_name}_",
                 reach=reach or "", sites_later=env.environment_name in self._routes,
-                **({"live_hosts": live} if live else {}),
+                **({"live_hosts": live} if live else {}), **({"reach_only": True} if env is self.browser else {}),
                 **deploy_options((child_envs or {}).get(env.environment_name), sandbox_type))
-                for env in self.envs), return_exceptions=True)
+                for env in self.every), return_exceptions=True)
             if failed := [result for result in results if isinstance(result, BaseException)]:
                 for error in failed[1:]:
                     logger.warning(f"multi env '{self._owner}': another computer failed to deploy too: {error!r}")
                 raise failed[0]
             return [ExternalChild(env.environment_name, record.mcp_url, record.environment_url)
-                    for env, record in zip(self.envs, results)]
+                    for env, record in zip(self.every, results)]
         return deploy
 
     async def finish(self, deployed: DeployedEnv) -> None:
@@ -205,7 +217,7 @@ class Computers:
         if self._routes:
             # Selected by the name each website is served as, its environment_name, which its card's name needn't be.
             routed = {name: await sites.deployed_sites([deployed], services=only) for name, only in self._routes.items()}
-            if problems := [f"computer {env.environment_name!r}: {problem}" for env in self.envs
+            if problems := [f"computer {env.environment_name!r}: {problem}" for env in self.every
                             if env.environment_name in routed for problem in start_tab_problems(
                                 env, self._entries.get(env.environment_name), [
                                     *(name for site in routed[env.environment_name]
@@ -215,7 +227,7 @@ class Computers:
             await sites.require_ready([deployed])
             await each(self._owner, "route its sites", [(f"computer {env.environment_name!r}",
                                                       env.route_sites(routed[env.environment_name]))
-                                                     for env in self.envs if env.environment_name in routed])
+                                                     for env in self.every if env.environment_name in routed])
         self.record(deployed)
 
     def record(self, deployed: DeployedEnv) -> None:
@@ -225,23 +237,28 @@ class Computers:
         if not isinstance(deployed, DeployedGatewayEnv):
             raise TypeError(f"multi env '{self._owner}': its computers are recorded in a gateway's record, not a "
                             f"{type(deployed).__name__}")
-        records = {env.environment_name: env._deployed for env in self.envs}
+        records = {env.environment_name: env._deployed for env in self.every}
         deployed.child_envs = {name: dataclasses.asdict(record) for name, record in records.items()}
         for name, record in records.items():
             deployed.sandbox_ids.setdefault(record.sandbox_type, {})[name] = record.sandbox_id
 
     async def reattach(self, deployed: DeployedEnv) -> None:
-        """Each computer ``deployed``, the multi env's record, holds, reattached from its own record."""
+        """Each computer ``deployed``, the multi env's record, holds, reattached from its own record: the multi env's
+        own, and its website browser, the record of a name none of them has."""
         records = getattr(deployed, "child_envs", None) or {}
         reattached = await asyncio.gather(*(type(env).from_deployed_env(DeployedEnv.from_dict(records[env.environment_name]))
                                             for env in self.envs if env.environment_name in records))
         by_name = {env.environment_name: env for env in reattached}
         self.envs = [by_name.get(env.environment_name, env) for env in self.envs]
+        own = {env.environment_name for env in self.envs}
+        if browser := next((record for name, record in records.items() if name not in own), None):
+            record = DeployedEnv.from_dict(browser)
+            self.browser = await type(Env.get(record.env_id, record.env_version)).from_deployed_env(record)
 
     async def close(self) -> None:
         """Close each computer, and those of the deployments a later deploy replaced, their recordings ended first; one
         that fails to close is logged."""
-        envs = [*self._replaced, *self.envs]
+        envs = [*self._replaced, *self.every]
         results = await asyncio.gather(*(env.close() for env in envs), return_exceptions=True)
         for env, result in zip(envs, results):
             if isinstance(result, Exception):

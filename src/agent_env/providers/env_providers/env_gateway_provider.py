@@ -82,6 +82,7 @@ if TYPE_CHECKING:
 
     from agent_env.artifact import DockerImageArtifact
     from agent_env.env.env import DeployedEnv, Env
+    from agent_env.env.envs.mcp_server import MCPServerEnv
     from agent_env.env.envs.website import WebsiteEnv
     from agent_env.providers.env_state import DatabaseStateProvider, EnvStateInstance, LocalPostgresStoreSpec
 
@@ -93,6 +94,8 @@ _TRAJECTORY_READ_ATTEMPTS = 3
 _ENV_NETWORK = "env-network"
 # The network the website browser shares with the gateway and the sites, and with nothing else in the env.
 _SITES_NETWORK = "website-network"
+# A gateway deploy's website browser when its caller names none: the run's, for one with websites.
+_THE_RUNS = object()
 
 # How much of a service's output a failed deploy's error carries: enough for the end of a traceback.
 _LOG_TAIL_LINES = 30
@@ -667,7 +670,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             mcp_server_images=topology.mcp_server_images, website_configs=topology.website_configs,
             website_images=topology.website_images, mcp_server_name=topology.mcp_server_name, gateway_mode=gateway_mode,
             ttl_seconds=ttl_seconds, disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb, attribution=attribution,
-            children=children,
+            children=children, website_browser=topology.website_browser,
             control_token=new_control_token(),
         )
         return DeployedGatewayEnv(
@@ -791,10 +794,11 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         sidecars: list[SidecarConfig] | None = None,
         mcp_server_name: str | None = None,
         children: "Callable[[Optional[str]], Awaitable[list[ExternalChild]]] | None" = None,
+        website_browser: "MCPServerEnv | None | object" = _THE_RUNS,
         control_token: str | None = None,
     ) -> DeployedGateway:
         from agent_env.env.env import Env
-        from agent_env.config import gateway_env_id, get_config, website_browser_env_id
+        from agent_env.config import gateway_env_id, get_config
 
         website_configs = website_configs or []
         website_images = website_images or []
@@ -803,16 +807,10 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         config = get_config()
         gateway_env = Env.get(gateway_env_id(config))
 
-        # Auto-include the website browser's MCP server when websites are present
-        if website_configs:
-            website_browser_env = Env.get(website_browser_env_id(config))
-            browser_server = MCPServerConfig(
-                image=website_browser_env.docker_image_artifact.image_name,
-                environment_name=website_browser_env.environment_name,
-                networks=(_SITES_NETWORK,),
-            )
-            mcp_servers = list(mcp_servers) + [browser_server]
-            mcp_server_images = list(mcp_server_images) + [website_browser_env.docker_image_artifact]
+        if website_browser is _THE_RUNS:
+            website_browser = run_website_browser() if website_configs else None
+        if website_browser is not None:
+            mcp_servers, mcp_server_images = _with_browser(mcp_servers, mcp_server_images, website_browser)
 
         # Local Postgres also preloads its servicedb image set (servicedb + pgweb + db-mcp); an
         # external store has no co-deployed containers, and image pull dominates VM deploy latency.
@@ -1446,9 +1444,11 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         control_token: str | None = None,
         attribution: Optional[Attribution] = None,
         children: "Callable[[Optional[str]], Awaitable[list[ExternalChild]]] | None" = None,
+        website_browser: "MCPServerEnv | None | object" = _THE_RUNS,
     ) -> DeployedGateway:
         """One gateway deploy on one (unchained) sandbox provider: a VM on one that creates VMs, else a container per
-        server on its private network."""
+        server on its private network. ``website_browser`` runs among its MCP servers, on the network it shares with
+        the sites; by default the run's (``run_website_browser``) when there are websites, which only a VM runs."""
         from agent_env.providers.env_state import LocalPostgresStateProvider, build_state_provider
 
         # Every attempt starts from the caller's store: a failed attempt's close() cleared it.
@@ -1466,6 +1466,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 raise ValueError("existing_sandbox is only supported for VM-mode providers")
             if sidecars:
                 raise NotImplementedError("sidecars are only supported for VM-mode gateway deploys")
+            if website_browser is not _THE_RUNS and website_browser is not None:
+                mcp_servers, mcp_server_images = _with_browser(mcp_servers, mcp_server_images, website_browser)
             return await self._deploy_via_containers(
                 sandbox_provider, mcp_servers, mcp_server_images,
                 gateway_port=gateway_port, website_configs=website_configs, gateway_mode=gateway_mode,
@@ -1480,7 +1482,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 gateway_port=gateway_port, website_configs=website_configs, website_images=website_images,
                 gateway_mode=gateway_mode, ttl_seconds=ttl_seconds, disk_size_gb=disk_size_gb,
                 cpu=cpu, memory_mb=memory_mb, existing_sandbox=existing_sandbox, sidecars=sidecars,
-                mcp_server_name=mcp_server_name, children=children, control_token=control_token, **deploy_kwargs,
+                mcp_server_name=mcp_server_name, children=children, website_browser=website_browser,
+                control_token=control_token, **deploy_kwargs,
             )
         except BaseException:
             await self._terminate_new_sandbox(earlier_sandbox=earlier_sandbox, existing_sandbox=existing_sandbox)
@@ -1574,6 +1577,7 @@ class _GatewayTopology:
     website_images: list[DockerImageArtifact] | None
     mcp_server_name: str | None  # a MultiEnv's name; None draws one
     names_gateway_on_vm: bool  # a MultiEnv's record names its gateway sandbox even on a VM
+    website_browser: "MCPServerEnv | None | object"  # the browser it runs among its MCP servers, or _THE_RUNS
 
 
 def website_config(env: WebsiteEnv) -> WebsiteConfig:
@@ -1586,19 +1590,55 @@ def website_config(env: WebsiteEnv) -> WebsiteConfig:
                          settings=dict(env.settings), ready_timeout_s=env.ready_timeout_s, shm_mb=env.shm_mb)
 
 
+def run_website_browser() -> "MCPServerEnv":
+    """The run's website browser (``website_browser_env_id``), which a gateway with websites runs among its MCP servers
+    when its env names none: an MCP server env, as ``playwright-mcp`` is. A browser computer runs on a sandbox of its
+    own, which only a multi env gives it, so one named here is refused."""
+    from agent_env.config import get_config, website_browser_env_id
+    from agent_env.env.env import Env
+    from agent_env.env.envs.computer import COMPUTER_ENV_TYPE
+    from agent_env.env.registry import get_env_registry
+
+    browser = Env.get(website_browser_env_id(get_config()))
+    if isinstance(browser, get_env_registry()[COMPUTER_ENV_TYPE]):
+        raise ValueError(f"the website browser {browser.id!r} is a {browser.type} env, which runs on a sandbox of "
+                         "its own beside a multi env's websites, not among a gateway's MCP servers: deploy the website "
+                         "in a multi env, or name an MCP server env such as playwright-mcp as the browser")
+    return browser
+
+
+def _with_browser(mcp_servers: list[MCPServerConfig], images: list[DockerImageArtifact],
+                  browser: "MCPServerEnv") -> tuple[list[MCPServerConfig], list[DockerImageArtifact]]:
+    """``mcp_servers`` and their ``images`` with the website browser ``browser`` among them, on the network it shares
+    with the gateway and the sites."""
+    server = MCPServerConfig(image=browser.docker_image_artifact.image_name, environment_name=browser.environment_name,
+                             networks=(_SITES_NETWORK,))
+    return [*mcp_servers, server], [*images, browser.docker_image_artifact]
+
+
+def _named_browser_server(browser_envs: list[Env]) -> "MCPServerEnv | None":
+    """The website browser a multi env's ``browser_envs`` names, when that is an MCP server env its gateway runs."""
+    from agent_env.env.envs.mcp_server import MCPServerEnv
+
+    return next((env for env in browser_envs if isinstance(env, MCPServerEnv)), None)
+
+
 def _gateway_topology(env: Env) -> _GatewayTopology:
     """What a gateway fronts for env: a MultiEnv's MCP servers and websites (whatever their own env_provider_type) under its
-    name, a WebsiteEnv's website, or else the env's one MCP server."""
+    name and the website browser it names or the run's, a WebsiteEnv's website and the run's browser, or else the env's
+    one MCP server."""
     from agent_env.env.envs.multi_env import MultiEnv
     from agent_env.env.envs.website import WebsiteEnv
 
     is_multi = isinstance(env, MultiEnv)
     if is_multi:
         servers, websites, name = env.mcp_server_envs, env.website_envs, env.name
+        browser = _named_browser_server(env.browser_envs) if env.browser_envs is not None else (
+            None if env.browser_computer() is not None else _THE_RUNS)
     elif isinstance(env, WebsiteEnv):
-        servers, websites, name = [], [env], None
+        servers, websites, name, browser = [], [env], None, _THE_RUNS
     else:
-        servers, websites, name = [env], [], None
+        servers, websites, name, browser = [env], [], None, None
     return _GatewayTopology(
         mcp_servers=[MCPServerConfig(image=s.docker_image_artifact.image_name, environment_name=s.environment_name) for s in servers],
         mcp_server_images=[s.docker_image_artifact for s in servers],
@@ -1607,6 +1647,7 @@ def _gateway_topology(env: Env) -> _GatewayTopology:
                         for image in (w.server_docker_image_artifact, w.frontend_docker_image_artifact) if image] or None,
         mcp_server_name=name,
         names_gateway_on_vm=is_multi,
+        website_browser=browser,
     )
 
 

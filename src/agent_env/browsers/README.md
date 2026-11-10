@@ -19,7 +19,11 @@ alone only; `locale`; `time_zone`; and
 (`apps = [{ env = "chromium", settings = { start_urls = ["https://example.test/"] } }]`), and a deploy overrides any of
 them (`env_params.app_settings = {chromium = {start_urls = [...]}}`). Its data is its profile, `~/.config/chromium`, which
 the image has none of, so each deploy and each reset starts with a clean one. Name it from another bundle as `chromium`,
-the alias `aliases.toml` gives it, or by its id, `@local/agentenv-framework/browsers/chromium`.
+the alias `aliases.toml` gives it, or by its id, `@local/agentenv-framework/browsers/chromium`. A multi env names it as
+its website browser with `browser_envs = ["chromium"]`, in place of the run's `playwright-mcp`: it then deploys on a
+sandbox of its own beside the multi env's computers, sized by the deploy step's `child_envs.chromium`, its tools served
+under `chromium_`, routing the multi env's synthetic sites through the gateway, and its network allowing the gateway's
+host and the live sites' hosts alone where the sandbox provider enforces an allowlist.
 
 A task changes a browser's state with the steps in `agent_env.task_step.task_steps.browser`, each a call to one
 `browser/v1` operation on the browser in the env `env_id`, the one `browser` names when the env has several:

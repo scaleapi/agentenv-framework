@@ -201,5 +201,5 @@ def test_a_multi_env_deploys_its_computers_browsers():
     computer = ComputerEnv.__new__(ComputerEnv)
     computer.composed_apps = lambda: [app]
     office = MultiEnv.__new__(MultiEnv)
-    office._computers = SimpleNamespace(envs=[computer])
+    office._computers, office.browser_envs = SimpleNamespace(envs=[computer]), None
     assert stored_browsers(office) == ["chromium"]

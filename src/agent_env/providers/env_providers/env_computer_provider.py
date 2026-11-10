@@ -43,7 +43,7 @@ from agent_env.env.envs.computer.utils.boot import (
 )
 from agent_env.env.gateway.constants import WELL_KNOWN_PATH
 from agent_env.providers.env_providers.env_provider import DeployRefused, _SandboxEnvironmentProvider
-from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
+from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPolicy
 from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider
 from agent_env.utils.progress import current_progress
 
@@ -84,12 +84,14 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         reach: str = "",
         sites_later: bool = False,
         live_hosts: tuple[str, ...] = (),
+        reach_only: bool = False,
     ) -> DeployedSandboxEnv:
         """The env's first ready build, in its base's order of forms and arches (or of ``env_params.form``), that the sandbox
         provider runs natively, booted, once what it boots that no compose started is composed; returns the record once
         the driver is ready with the env's display. With ``tool_prefix``, its driver serves its tools under it; with ``reach``,
         a URL this process reaches, a network that restricts the computer's egress allows its host too, and the
-        ``live_hosts`` of the run's live websites. With
+        ``live_hosts`` of the run's live websites; with ``reach_only``, a network that allows every host is held to
+        those hosts alone, where the provider can enforce that. With
         ``sites_later``, a computer routing sites, whose sites aren't up yet, boots with its boot apps held and returns
         once its driver answers; ``route_sites`` routes them and finishes its boot."""
         from agent_env.env.envs.computer.env import ComputerEnv
@@ -124,7 +126,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         attempt = functools.partial(self._boot, env, builds, params, values, ttl_seconds=ttl_seconds,
                                     disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb, attribution=attribution,
                                     tool_prefix=tool_prefix, reach=reach, sites_later=sites_later,
-                                    live_hosts=tuple(live_hosts))
+                                    live_hosts=tuple(live_hosts), reach_only=reach_only)
         return await self._run(sandbox_provider, env.id, attempt)
 
     async def route_sites(self, env: ComputerEnv, record: DeployedSandboxEnv, sites: list[dict]) -> None:
@@ -146,7 +148,8 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
                     values: dict, sandbox_provider: SandboxProvider, *, ttl_seconds: int,
                     disk_size_gb: float, cpu: float | None, memory_mb: int | None,
                     attribution: Optional[Attribution], tool_prefix: str = "", reach: str = "",
-                    sites_later: bool = False, live_hosts: tuple[str, ...] = ()) -> DeployedSandboxEnv:
+                    sites_later: bool = False, live_hosts: tuple[str, ...] = (),
+                    reach_only: bool = False) -> DeployedSandboxEnv:
         """One attempt on one sandbox provider: the first build it runs natively, booted and readied; its record."""
         from agent_env.env.envs.computer.env import ComputerEnv
 
@@ -171,8 +174,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         values = _values(computer, values)
         app_settings = recorded_app_settings(env.composed_apps(), computer_params.app_settings(env, params.app_settings),
                                              platform_of(env.computer.os))
-        policy = _reaching(NetworkPolicy.from_dict(env.network) if env.network else None, sandbox_provider, reach,
-                           live_hosts)
+        policy = _network(env, sandbox_provider, reach, live_hosts, reach_only)
         shm_mb = env.shm_mb()
         booted = await boot(
             sandbox_provider, image=build["image"], port=env.driver.port, network_policy=policy, token=token,
@@ -344,6 +346,26 @@ async def end_recordings(record: DeployedSandboxEnv, reason: str) -> None:
         return
     except Exception as e:
         logger.warning(f"'{record.env_id}': its recordings weren't ended before its computer went: {e}")
+
+
+def _network(env: ComputerEnv, sandbox_provider: SandboxProvider, reach: str, live_hosts: tuple[str, ...],
+             reach_only: bool) -> Optional[NetworkPolicy]:
+    """The computer's network: its own, also allowing ``reach``'s host and ``live_hosts`` when it lists the hosts
+    allowed (``_reaching``), and with ``reach_only`` one that allows every host held to those hosts alone. A provider
+    that can't enforce that, or a gateway whose address isn't known yet, leaves it allowing every host, as logged."""
+    own = NetworkPolicy.from_dict(env.network) if env.network else None
+    if not reach_only or (own is not None and own.restricts_egress):
+        return _reaching(own, sandbox_provider, reach, live_hosts)
+    if not (reach and urlsplit(sandbox_provider.url_from_sandbox(reach)).hostname):
+        logger.warning(f"{env.id}: the gateway's address isn't known when it boots on {type(sandbox_provider).__name__}"
+                       ", so its network allows every host, not the gateway's alone")
+        return own
+    held = _reaching(NetworkPolicy(mode=NetworkMode.ALLOWLIST), sandbox_provider, reach, live_hosts)
+    if not sandbox_provider.supports_network_policy(held):
+        logger.warning(f"{env.id}: {type(sandbox_provider).__name__} can't hold a network to the hosts "
+                       f"{', '.join(held.allow_hosts)}, so its network allows every host; use it for development only")
+        return own
+    return held
 
 
 def _reaching(policy: Optional[NetworkPolicy], sandbox_provider: SandboxProvider, url: str,

@@ -2042,7 +2042,8 @@ async def test_create_gateway_hands_the_deploy_path_every_argument(attribution, 
 
     [call] = vm.await_args_list
     assert call.args == (provider, args.pop("mcp_servers"), args.pop("mcp_server_images"))
-    assert call.kwargs == {**args, "attribution": forwarded, "children": None}
+    assert call.kwargs == {**args, "attribution": forwarded, "children": None,
+                           "website_browser": env_gateway_provider._THE_RUNS}
     assert call.kwargs["attribution"] is not attribution
 
 
