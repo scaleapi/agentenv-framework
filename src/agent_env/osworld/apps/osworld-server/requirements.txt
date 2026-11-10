@@ -1,0 +1,10 @@
+# The app's own server forwards /osworld/* to the guest server with httpx; the rest is what the guest server imports
+# on Linux. AT-SPI's bindings come from the OS's packages (python3-pyatspi, python3-gi).
+httpx>=0.27.0
+python3-xlib==0.15
+PyAutoGUI==0.9.54
+Pillow==10.1.0
+requests
+flask
+numpy
+lxml
