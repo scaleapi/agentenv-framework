@@ -132,7 +132,7 @@ class Computers:
         self._entries: dict = {}  # the deploy's child_envs entries, by computer
         self._live: tuple[str, ...] = ()  # the live hosts of the multi env's live websites
         self._replaced: list[ComputerEnv] = []
-        self._earlier: Optional[tuple[list[ComputerEnv], list[ComputerEnv]]] = None
+        self._earlier: Optional[tuple[list[ComputerEnv], Optional[ComputerEnv], list[ComputerEnv]]] = None
 
     @property
     def every(self) -> list[ComputerEnv]:

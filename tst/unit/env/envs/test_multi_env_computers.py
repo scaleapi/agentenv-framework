@@ -979,6 +979,32 @@ async def _reattached(cls, record):
 
 
 @pytest.mark.asyncio
+async def test_a_failed_redeploy_closes_only_its_own_browser_and_leaves_the_earlier_one_for_close(gateway, providers,
+                                                                                                routes):
+    earlier = FakeBrowser()
+    office = _browsing(browser_envs=[earlier])
+    await office.deploy()
+    fresh = []
+
+    def get(id, version=None):
+        fresh.append(FakeBrowser())
+        return fresh[-1]
+
+    gateway.fails = RuntimeError("no gateway")
+    with patch("agent_env.env.env.Env.get", side_effect=get), pytest.raises(RuntimeError, match="^no gateway$"):
+        await office.deploy()
+    assert office._computers.browser is earlier and earlier.closes == 0 and [b.closes for b in fresh] == [1]
+
+    gateway.fails = None
+    with patch("agent_env.env.env.Env.get", side_effect=get):
+        await office.deploy()
+    assert office._computers.browser is fresh[1] and earlier.closes == 0
+
+    await office.close()
+    assert earlier.closes == 1 and [b.closes for b in fresh] == [1, 1]
+
+
+@pytest.mark.asyncio
 async def test_a_redeploy_keeps_the_earlier_browser_for_close(gateway, providers, routes):
     chromium = FakeBrowser()
     office = _browsing(browser_envs=[chromium])
