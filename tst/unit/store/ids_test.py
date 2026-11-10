@@ -56,7 +56,6 @@ LEGACY = [
     "",
     " ",
     "__",
-    "@acme/tickets",
     "@LOCAL/upper-namespace",
 ]
 
@@ -120,6 +119,13 @@ def test_parse_namespace_and_is_local_id(entity_id, namespace, local):
 
 def test_a_malformed_local_id_is_not_encoded_as_one():
     assert key_segment("@local") == "@local"
+
+
+def test_an_id_in_another_namespace_encodes_under_that_namespace():
+    segment = key_segment("@acme/tickets")
+    assert segment == "acme/tickets-" + hashlib.sha256(b"@acme/tickets").hexdigest()[:12]
+    assert _OCI_REPOSITORY.fullmatch(image_repository("@acme/tickets"))
+    assert fs_safe("@acme/tickets") == "@acme/tickets"
 
 
 @pytest.mark.parametrize("entity_id", [

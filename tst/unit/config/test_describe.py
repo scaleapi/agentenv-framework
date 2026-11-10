@@ -301,6 +301,14 @@ impls = ["pkg.artifacts:CustomArtifact"]
 [task_steps]
 impls = ["pkg.steps:CustomStep"]
 
+[namespaces.team-a.document]
+impl = "agent_env.store.document_store:LocalSqliteDocumentStore"
+config = { path = "/tmp/team-a.db" }
+
+[namespaces.team-a.object]
+impl = "agent_env.store.object_store:LocalFilesystemObjectStore"
+config = { root = "/tmp/team-a" }
+
 [explorer]
 port = 9999
 
@@ -316,7 +324,7 @@ timeout = 30
 
 _ALIASED = ("document", "object", "image", "secret", "runner")
 _EVERY_TABLE = ("document", "object", "image", "secret", "runner", "model", "conversations",
-                "agents", "sandbox", "state", "envs", "artifacts", "task_steps", "explorer")
+                "agents", "sandbox", "state", "envs", "artifacts", "task_steps", "namespaces", "explorer")
 
 
 @pytest.mark.parametrize("toml", [None, MONGO_TOML, FULL_SURFACE_TOML])

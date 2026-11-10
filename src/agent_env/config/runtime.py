@@ -254,6 +254,8 @@ class Config:
     _routed_stores: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
     _separate_stores: dict[str, tuple[Any, Any]] = field(default_factory=dict, repr=False, compare=False)
     _routing_lock: Any = field(default_factory=threading.RLock, repr=False, compare=False)
+    _namespace_stores_built: dict[str, tuple[Any, Any]] = field(default_factory=dict, repr=False, compare=False)
+    _namespaced: dict[str, tuple[Any, Any]] = field(default_factory=dict, repr=False, compare=False)
     _secret_store: Optional[SecretStore] = field(default=None, repr=False, compare=False)
     _secret_store_lock: Any = field(default_factory=threading.Lock, repr=False, compare=False)
     _model_cfg: Optional[model_config.ModelConfig] = field(default=None, repr=False, compare=False)
@@ -501,13 +503,83 @@ class Config:
         """The control-plane document store (cached): an explicitly-set backend, else the one from
         ``AGENT_ENV_DOCUMENT_STORE`` / config.toml (``local`` → SQLite default). With namespace
         routing on, a local namespace's documents and its runs' records go to that namespace's
-        own local store (``agent_env.store.routing``)."""
+        own local store (``agent_env.store.routing``). A configured namespace's documents always go to its own."""
         from agent_env.store import routing
 
         configured = self._configured_document_store()
+        shared = self._with_namespaces(configured)
         if not routing.namespace_routing_enabled():
+            return shared
+        return self._routed("document", configured, shared)
+
+    def configured_namespaces(self) -> tuple[str, ...]:
+        """The namespaces ``[namespaces.<name>]`` configures, each with document and object stores of its own."""
+        from agent_env.store.ids import validate_namespace_name
+
+        table = self.section("namespaces")
+        for name, entry in table.items():
+            try:
+                validate_namespace_name(name)
+            except ValueError as e:
+                raise ConfigError(f"[namespaces.{name}]: {e}") from e
+            if not isinstance(entry, Mapping) or not all(isinstance(entry.get(kind), Mapping) for kind in ("document", "object")):
+                raise ConfigError(f"[namespaces.{name}] needs a document and an object table, each with an impl")
+        return tuple(table)
+
+    def namespace_document_store(self, namespace: str) -> "DocumentStore":
+        """The configured ``namespace``'s own document store, unrouted."""
+        return self._namespace_store(namespace)[0]
+
+    def namespace_object_store(self, namespace: str) -> ObjectStore:
+        """The configured ``namespace``'s own object store: its table's, with every key under ``<namespace>/``."""
+        return self._namespace_store(namespace)[1]
+
+    def namespace_of(self, entity_id: str) -> Optional[str]:
+        """The configured namespace ``entity_id`` is in, or None."""
+        from agent_env.store.ids import parse_namespace
+
+        namespace = parse_namespace(entity_id)
+        return namespace if namespace is not None and namespace in self.configured_namespaces() else None
+
+    def _namespace_store(self, namespace: str) -> tuple[Any, Any]:
+        from agent_env.store.document_store import DocumentStore
+        from agent_env.store.object_store import ObjectStore
+        from agent_env.store.routing import PrefixedObjectStore
+
+        if namespace not in self.configured_namespaces():
+            raise ConfigError(f"no [namespaces.{namespace}] is configured")
+        with self._routing_lock:
+            if namespace not in self._namespace_stores_built:
+                entry = self.section("namespaces", namespace)
+                documents = config_loader.build_store(dict(entry["document"]), DocumentStore,
+                                                      secret_resolver=self._resolve_secret)
+                objects = config_loader.build_store(dict(entry["object"]), ObjectStore, secret_resolver=self._resolve_secret)
+                self._namespace_stores_built[namespace] = (documents, PrefixedObjectStore(objects, f"{namespace}/"))
+            return self._namespace_stores_built[namespace]
+
+    def _with_namespaces(self, configured: "DocumentStore") -> "DocumentStore":
+        """``configured`` routed beside every configured namespace's document store, or itself when there are none."""
+        from agent_env.store import routing
+
+        names = self.configured_namespaces()
+        if not names:
             return configured
-        return self._routed("document", configured)
+        with self._routing_lock:
+            held = self._namespaced.get("document")
+            if held is None or held[0] is not configured:
+                held = (configured, routing.NamespaceDocumentStore(
+                    configured, {name: self.namespace_document_store(name) for name in names}))
+                self._namespaced["document"] = held
+            return held[1]
+
+    def _run_namespace(self) -> Optional[str]:
+        from agent_env.store import routing
+
+        namespace = routing.run_namespace()
+        return namespace if namespace is not None and namespace in self.configured_namespaces() else None
+
+    def _namespace_owning(self, object_url: str) -> Optional[str]:
+        return next((name for name in self.configured_namespaces() if self.namespace_object_store(name).owns(object_url)), None)
 
     def _configured_document_store(self) -> "DocumentStore":
         if self._document_store is None:
@@ -670,20 +742,38 @@ class Config:
     def get_object_store(self) -> ObjectStore:
         """The object (blob) store (cached): an explicitly-set backend, else the one from
         ``AGENT_ENV_OBJECT_STORE`` / config.toml (``local`` → filesystem default). While an ``@local``
-        task runs under namespace routing, its view of it keeps writes local."""
+        task runs under namespace routing, its view of it keeps writes local; while a configured namespace's task
+        runs, its view writes to that namespace's store."""
         from agent_env.store import routing
 
         configured = self._configured_object_store()
+        if (namespace := self._run_namespace()) is not None:
+            return self._namespace_run_object_store(namespace, configured)
         if not routing.in_local_run():
             return configured
         return self._routed("object", configured)
 
+    def _namespace_run_object_store(self, namespace: str, configured: ObjectStore) -> ObjectStore:
+        from agent_env.store import routing
+
+        with self._routing_lock:
+            held = self._namespaced.get(f"object:{namespace}")
+            if held is None or held[0] is not configured:
+                others = {name: self.namespace_object_store(name) for name in self.configured_namespaces() if name != namespace}
+                held = (configured, routing.NamespaceRunObjectStore(
+                    configured, self.namespace_object_store(namespace), namespace, others))
+                self._namespaced[f"object:{namespace}"] = held
+            return held[1]
+
     def get_object_store_for(self, entity_id: str) -> ObjectStore:
-        """The object store ``entity_id``'s objects are written to: under namespace routing, the
-        per-user local one for an ``@local`` id; otherwise the configured one."""
+        """The object store ``entity_id``'s objects are written to: a configured namespace's own for an id in it, or
+        for any entity a run in that namespace writes; under namespace routing, the per-user local one for an
+        ``@local`` id; otherwise the configured one."""
         from agent_env.store import routing
         from agent_env.store.ids import is_local_id
 
+        if (namespace := self.namespace_of(entity_id) or self._run_namespace()) is not None:
+            return self.namespace_object_store(namespace)
         configured, local = self._namespace_stores("object")
         if local is None:
             return configured
@@ -694,9 +784,11 @@ class Config:
 
     def get_object_store_at(self, object_url: str) -> ObjectStore:
         """The object store ``object_url`` addresses: under namespace routing a url the local store
-        owns is the local store's, unless the configured store owns it too."""
+        owns is the local store's, unless the configured store owns it too; a configured namespace's url is its store's."""
         from agent_env.store import routing
 
+        if (namespace := self._namespace_owning(object_url)) is not None:
+            return self.namespace_object_store(namespace)
         configured, local = self._namespace_stores("object")
         return configured if local is None else routing.object_store_holding(object_url, configured, local)
 
@@ -708,10 +800,19 @@ class Config:
     def check_object_url(self, entity_id: str, object_url: str) -> None:
         """Refuse recording ``object_url`` as ``entity_id``'s object across namespaces: under namespace
         routing an ``@local`` entity's objects live in the local store, a bare one's in the configured
-        store, and an ``@local`` task run writes only locally."""
+        store, and an ``@local`` task run writes only locally. A configured namespace's entity, or any a run in it
+        writes, keeps its objects in that namespace's store, and nothing else records one there."""
         from agent_env.store import routing
         from agent_env.store.ids import is_local_id
 
+        namespace = self.namespace_of(entity_id) or self._run_namespace()
+        owner = self._namespace_owning(object_url)
+        if namespace != owner and namespace is not None:
+            raise ValueError(f"{entity_id!r} keeps its objects in the @{namespace} namespace's store, not {object_url!r}")
+        if namespace != owner:
+            raise ValueError(f"{entity_id!r} is in no configured namespace, so it can't record {object_url!r}, an @{owner} object")
+        if namespace is not None:
+            return
         configured, local = self._namespace_stores("object")
         if local is None:
             return
@@ -903,23 +1004,24 @@ class Config:
             )
         return None if same else local
 
-    def _routed(self, kind: str, configured: Any) -> Any:
-        """``configured`` wrapped by namespace routing, or ``configured`` itself when it already is
-        the local namespaces' store."""
+    def _routed(self, kind: str, configured: Any, shown: Any = None) -> Any:
+        """``shown`` (``configured`` unless given) wrapped by namespace routing, or ``shown`` itself when
+        ``configured`` already is the local namespaces' store."""
         from agent_env.store import routing
 
+        shown = configured if shown is None else shown
         local = self._separate_local_store(kind, configured)
         if local is None:
             if kind == "document":
                 namespace, kept = next((namespace, store) for namespace, store in self._namespace_document_stores().items()
                                        if store.path.resolve() == configured.path.resolve())
                 raise ConfigError(f"{kept.path} is kept for @{namespace} documents; point [stores.document] somewhere else")
-            return configured
+            return shown
         with self._routing_lock:
             routed = self._routed_stores.get(kind)
-            if routed is None or routed.configured is not configured:
+            if routed is None or routed.configured is not shown:
                 if kind == "document":
-                    routed = routing.RoutingDocumentStore(configured, self._namespace_document_stores())
+                    routed = routing.RoutingDocumentStore(shown, self._namespace_document_stores())
                 elif kind == "object":
                     routed = routing.LocalRunObjectStore(configured, local)
                 else:

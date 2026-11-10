@@ -112,10 +112,11 @@ class EnvSnapshot:
             raise ValueError(f"Instance '{instance_id}' has no service_universe loaded")
         universe_id = environment_universe["id"]
         universe_version = environment_universe["version"]
-        if is_local_id(env_id) != is_local_id(universe_id):
+        if is_local_id(env_id) != is_local_id(universe_id) or (
+                get_config().namespace_of(env_id) != get_config().namespace_of(universe_id)):
             raise ValueError(
                 f"env {env_id!r} and universe {universe_id!r} are in different namespaces; a snapshot is recorded "
-                "under both, so both have to be @local ids or neither"
+                "under both, so both have to be in the same one"
             )
         log("reconnect", f"Reconnecting to sandbox {deployed_env.sandbox_id}...", 10)
         multi_env = await MultiEnv.from_deployed_env(deployed_env)
