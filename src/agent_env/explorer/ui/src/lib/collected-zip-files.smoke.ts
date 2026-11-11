@@ -52,6 +52,36 @@ function main(): void {
     assert(byUri['fake://home/c'] === 'elsewhere/c.txt', 'an absolute key elsewhere loses its leading slash');
   }
 
+  // No member name climbs out of the archive or names a root or a drive, whatever the key holds.
+  {
+    const files = collectedZipFiles(
+      {
+        '../../x': 'fake://home/x',
+        '/abs/../../y': 'fake://home/y',
+        'a/../../../z': 'fake://home/z',
+        '..\\..\\w.txt': 'fake://home/w',
+        'C:\\Users\\op\\.ssh\\v': 'fake://home/v',
+        'C:evil': 'fake://home/e',
+        './out/./u.txt': 'fake://home/u',
+        '..': 'fake://home/dots',
+      },
+      '/app',
+    );
+    const byUri = Object.fromEntries(files.map(f => [f.objectUrl, f.path]));
+    assert(byUri['fake://home/x'] === 'x', 'leading .. segments are dropped');
+    assert(byUri['fake://home/y'] === 'y', 'an absolute key outside base_path climbs no higher than the root');
+    assert(byUri['fake://home/z'] === 'z', 'a .. past the start is dropped');
+    assert(byUri['fake://home/w'] === 'w.txt', 'backslashes separate like slashes');
+    assert(byUri['fake://home/v'] === 'Users/op/.ssh/v', 'a drive prefix is dropped');
+    assert(byUri['fake://home/e'] === 'evil', 'a drive-relative prefix is dropped');
+    assert(byUri['fake://home/u'] === 'out/u.txt', '. segments are dropped');
+    assert(byUri['fake://home/dots'] === 'artifact', 'a key with nothing left is named artifact');
+    assert(
+      files.every(f => !f.path.split('/').some(part => part === '..' || part === '') && !/^[A-Za-z]:/.test(f.path)),
+      'every member name is a clean relative path',
+    );
+  }
+
   if (failures > 0) {
     console.error(`\n${failures} assertion(s) failed`);
     process.exit(1);
