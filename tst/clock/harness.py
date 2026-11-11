@@ -118,15 +118,17 @@ def spawn(api: str, seconds: float) -> dict:
 
 def collect(procs, deadline: float, actions=()):
     """Every process's output until all are done or ``deadline`` (raw), running ``actions`` [(raw_time, fn, label)] on
-    the way; when each ran."""
+    the way; when each started and ended."""
     actions = sorted(actions, key=lambda a: a[0])
     ran = []
     while True:
         now = raw()
         while actions and now >= actions[0][0]:
             _, fn, label = actions.pop(0)
+            started = raw()
             info = fn()
-            ran.append({"label": label, "raw": raw(), "info": {k: v for k, v in info.items() if k != "spec"}})
+            ran.append({"label": label, "start_raw": started, "raw": raw(),
+                        "info": {k: v for k, v in info.items() if k != "spec"}})
         live = [p for p in procs if p["done"] is None]
         if not live or now >= deadline:
             break
@@ -153,7 +155,9 @@ def collect(procs, deadline: float, actions=()):
     return ran
 
 
-def result(p, change_raw=None) -> dict:
+def result(p, change=None) -> dict:
+    """``p``'s outcome; with ``change`` (collect's record of it), when it ended after the change's write ended and
+    after it started (ms)."""
     out = {"api": p["api"], "class": "clock_time" if p["api"] in CLOCK_TIME else "elapsed"}
     line = p["line"]
     if line is None:
@@ -161,15 +165,17 @@ def result(p, change_raw=None) -> dict:
     if line.startswith("{"):
         j = json.loads(line)
         out.update(real=round(j["real"], 4), u_mono=round(j["u_mono"], 4), u_rt=round(j["u_rt"], 4), rc=j["rc"])
-        if change_raw is not None:
-            out["end_after_change_ms"] = round((j["start_raw"] + j["real"] - change_raw) * 1000, 1)
+        ended = j["start_raw"] + j["real"]
     elif line.startswith("DONE"):
         _, mono, wall = line.split()
         out.update(real=round(p["done"] - p["ready"], 4), u_mono=round(float(mono), 4), u_rt=round(float(wall), 4))
-        if change_raw is not None:
-            out["end_after_change_ms"] = round((p["done"] - change_raw) * 1000, 1)
+        ended = p["done"]
     else:
         out["status"] = line[:300]
+        return out
+    if change is not None:
+        out["end_after_change_ms"] = round((ended - change["raw"]) * 1000, 1)
+        out["end_after_change_start_ms"] = round((ended - change["start_raw"]) * 1000, 1)
     return out
 
 
@@ -178,9 +184,8 @@ def scenario(name, start_rate, seconds, change=None, change_at=None, limit=8.0, 
     t0 = raw()
     procs = [spawn(a, seconds) for a in apis]
     ran = collect(procs, t0 + limit, [(t0 + change_at, change, "change")] if change else [])
-    change_raw = ran[0]["raw"] if ran else None
     return {"scenario": name, "start_rate": start_rate, "seconds": seconds, "changes": ran,
-            "results": [result(p, change_raw) for p in procs]}
+            "results": [result(p, ran[0] if ran else None) for p in procs]}
 
 
 def waits():
@@ -233,7 +238,8 @@ def jumps(rounds=30, seed=5420):
         for name, (kind, fired, rc) in d["w"].items():
             f = fired / 1e9
             if kind == 0:
-                row["waiters"][name] = {"kind": "in", "after_write_end_ms": round((f - w1) * 1e3, 3), "rc": rc}
+                row["waiters"][name] = {"kind": "in", "after_write_start_ms": round((f - w0) * 1e3, 3),
+                                        "after_write_end_ms": round((f - w1) * 1e3, 3), "rc": rc}
             elif kind == 1:
                 row["waiters"][name] = {"kind": "after", "vs_expected_ms": round((f - (t0 + 5)) * 1e3, 3), "rc": rc}
             else:
@@ -248,7 +254,7 @@ def jumps(rounds=30, seed=5420):
 
 def _jumped(argv, jump: float) -> dict:
     """``argv`` as the session user, jumped ``jump`` seconds 0.3 s after it prints READY: its two JSON lines, before
-    READY and after the jump, and when the jump's write ended (raw)."""
+    READY and after the jump, and when the jump's write started and ended (raw)."""
     p = subprocess.Popen(user_cmd(argv), stdout=subprocess.PIPE, text=True, cwd="/tmp")
     first = None
     for line in p.stdout:
@@ -256,10 +262,19 @@ def _jumped(argv, jump: float) -> dict:
             break
         first = json.loads(line)
     time.sleep(0.3)
+    started = raw()
     advance(jump)
     written = raw()
     out, _ = p.communicate(timeout=30)
-    return {"before": first, "after": json.loads(out), "written_raw": written}
+    return {"before": first, "after": json.loads(out), "write_started_raw": started, "written_raw": written}
+
+
+def _after_write(fired_ns: int, r: dict) -> dict:
+    """When a wait the jump ended fired, from the write's start and from its end (ms); None if it never did."""
+    if not fired_ns:
+        return {"after_write_start_ms": None, "after_write_end_ms": None}
+    return {"after_write_start_ms": round((fired_ns / 1e9 - r["write_started_raw"]) * 1e3, 3),
+            "after_write_end_ms": round((fired_ns / 1e9 - r["written_raw"]) * 1e3, 3)}
 
 
 def cancel():
@@ -270,9 +285,7 @@ def cancel():
     set_clock(time.time() - 182 * DAY, 1)
     r = _jumped(["cancel"], 2 * 3600)
     preload(None)
-    after = r["after"]
-    return {**r["before"], "rc": after["rc"],
-            "after_jump_ms": round((after["fired_raw"] / 1e9 - r["written_raw"]) * 1e3, 3) if after["fired_raw"] else None}
+    return {**r["before"], "rc": r["after"]["rc"], **_after_write(r["after"]["fired_raw"], r)}
 
 
 def timerfds():
@@ -286,9 +299,7 @@ def timerfds():
         r = _jumped(["tfdalias", how], 2 * 3600)
         a = r["after"]
         out[how] = {"same_number": a["same_number"], "failed_calls": a["failed_calls"], "a2_count": a["a2_count"],
-                    "o_fired_early": a["o_fired_early"],
-                    "a2_after_jump_ms": round((a["a2_fired_raw"] / 1e9 - r["written_raw"]) * 1e3, 3)
-                    if a["a2_fired_raw"] else None}
+                    "o_fired_early": a["o_fired_early"], **_after_write(a["a2_fired_raw"], r)}
     preload(None)
     return out
 

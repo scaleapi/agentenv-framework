@@ -16,6 +16,18 @@ JUMP_RC = {"cns_in": {0}, "tfd_poll_in": {1}, "tfd_read_in": {1}, "tfd_epoll_in"
            "poll_rel": {0}, "cond_mono_rel": {ETIMEDOUT}, "tfd_mono_rel": {0}, "cns_mono_rel": {0}}
 
 
+def within(r: dict, low: float, high: float) -> bool:
+    """Ended ``low`` ms or more after the change's write started and ``high`` ms or less after it ended: the page
+    changes, and waits wake, before the write's last step, which a slow machine can take tens of ms over."""
+    return "end_after_change_ms" in r and r["end_after_change_start_ms"] >= low and r["end_after_change_ms"] <= high
+
+
+def at_jump(w: dict) -> bool:
+    """A wait the jump ended: not before its write started (the page changes, and waits wake, before the write's last
+    step), and within 250 ms of the write's end."""
+    return w["after_write_start_ms"] is not None and w["after_write_start_ms"] >= -1 and w["after_write_end_ms"] <= 250
+
+
 def failed(results) -> dict:
     """Results with an error: C and Python report one (a timeout is 0); Java and Node end without one."""
     return {r["api"]: r.get("rc") for r in results
@@ -43,7 +55,7 @@ def test_frozen_a_clock_time_wait_ends_at_the_advance_and_elapsed_time_runs_on(w
     assert len(results) == 64 and not [r for r in results if "status" in r] and failed(results) == {}
     assert {r["api"]: r["real"] for r in results if r["class"] == "elapsed" and not 0.99 <= r["real"] <= 1.3} == {}
     assert {r["api"]: r["end_after_change_ms"] for r in results
-            if r["class"] == "clock_time" and not -5 <= r["end_after_change_ms"] <= 150} == {}
+            if r["class"] == "clock_time" and not within(r, -1, 150)} == {}
 
 
 @pytest.fixture(scope="module")
@@ -57,9 +69,9 @@ def test_a_rate_change_moves_a_clock_time_wait_to_the_new_rate(changes):
     assert len(results) == 19 and not [r for r in results.values() if "status" in r]
     assert failed(results.values()) == {}
     assert {api: r["end_after_change_ms"] for api, r in results.items()
-            if api in SINGLE_CALL_CONDVARS and not (abs(r["end_after_change_ms"]) <= 5 and r["rc"] == 0)} == {}
+            if api in SINGLE_CALL_CONDVARS and not (within(r, -1, 5) and r["rc"] == 0)} == {}
     assert {api: r["end_after_change_ms"] for api, r in results.items()
-            if api not in SINGLE_CALL_CONDVARS and not 140 <= r["end_after_change_ms"] <= 300} == {}
+            if api not in SINGLE_CALL_CONDVARS and not within(r, 140, 300)} == {}
 
 
 def test_a_set_time_back_makes_a_clock_time_wait_wait_on_for_its_deadline(changes):
@@ -68,14 +80,14 @@ def test_a_set_time_back_makes_a_clock_time_wait_wait_on_for_its_deadline(change
     assert {api: r.get("status") for api, r in results.items()
             if api not in SINGLE_CALL_CONDVARS and r.get("status") != "still waiting"} == {}
     assert {api: r.get("end_after_change_ms") for api, r in results.items()
-            if api in SINGLE_CALL_CONDVARS and abs(r.get("end_after_change_ms", 99)) > 5} == {}
+            if api in SINGLE_CALL_CONDVARS and not within(r, -1, 5)} == {}
     assert failed(results.values()) == {}
 
 
 def test_a_jump_ends_the_waits_it_passes_and_none_other_and_monotonic_time_runs_on(waits_gate):
-    """30 forward jumps of 8 h, a day or a week at rate 1: a wait for a clock time inside the jump ends at it, one past it
-    ends when its clock time comes and never early, and a relative wait takes its 3 s of real time; each ends as it
-    should (a timeout, an expiration, a sleep done)."""
+    """30 forward jumps of 8 h, a day or a week at rate 1: a wait for a clock time inside the jump ends at it (once the
+    write has started, and within 250 ms of its end), one past it ends when its clock time comes and never early, and a
+    relative wait takes its 3 s of real time; each ends as it should (a timeout, an expiration, a sleep done)."""
     jumps = waits_gate("jumps")
     assert len(jumps["rounds"]) == 30 and jumps["mono_back_total"] == 0
     assert abs(jumps["mono_rate_final"] - 1) < 1e-3
@@ -85,7 +97,7 @@ def test_a_jump_ends_the_waits_it_passes_and_none_other_and_monotonic_time_runs_
         for name, w in row["waiters"].items():
             if w["rc"] not in JUMP_RC[name]:
                 wrong.append((row["round"], name, w))
-            elif w["kind"] == "in" and not -5 <= w["after_write_end_ms"] <= 250:
+            elif w["kind"] == "in" and not at_jump(w):
                 wrong.append((row["round"], name, w))
             elif w["kind"] == "after" and not -1 <= w["vs_expected_ms"] <= 1000:
                 wrong.append((row["round"], name, w))
@@ -101,16 +113,17 @@ def test_a_cancelled_wait_goes_at_once_and_leaves_nothing_behind(waits_gate):
     r = waits_gate("cancel")
     assert (r["sem_cancelled"], r["sem_waiters"], r["cns_cancelled"], r["cond_cancelled"]) == (1, 0, 1, 600), r
     assert r["misaligned_errno"] == EINVAL and r["misaligned_ms"] < 50, r
-    assert r["rc"] == ETIMEDOUT and -5 <= r["after_jump_ms"] <= 250, r
+    assert r["rc"] == ETIMEDOUT and at_jump(r), r
 
 
 def test_a_timerfd_is_followed_through_its_duplicates_not_its_number(gate):
     """A timerfd armed for a clock time, duplicated and closed, fires at a jump past it through its duplicate, and the
-    monotonic timerfd given its old number doesn't fire with it; dup2, dup3 and close_range calls on it that fail leave it
-    followed."""
+    monotonic timerfd given its old number doesn't fire with it; dup2, dup3 and close_range calls on it that fail leave
+    it followed."""
     runs = gate("timerfds")
     assert runs.keys() == {"dup", "dup2", "dup3", "fcntl", "close_range", "failed"}
     for how, r in runs.items():
         expected = (0, 3) if how == "failed" else (1, 0)
-        assert (r["same_number"], r["failed_calls"]) == expected and (r["a2_count"], r["o_fired_early"]) == (1, 0), (how, r)
-        assert -5 <= r["a2_after_jump_ms"] <= 250, (how, r)
+        assert (r["same_number"], r["failed_calls"]) == expected, (how, r)
+        assert (r["a2_count"], r["o_fired_early"]) == (1, 0), (how, r)
+        assert at_jump(r), (how, r)
