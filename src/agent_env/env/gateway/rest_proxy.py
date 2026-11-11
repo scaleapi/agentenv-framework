@@ -75,6 +75,7 @@ FORWARDED_HOST, FORWARDED_PROTO, FORWARDED_PREFIX = "x-forwarded-host", "x-forwa
 # A host as a site's name: a DNS name, an optional port.
 _LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
 _SITE_HOST = re.compile(rf"({_LABEL}(?:\.{_LABEL})*)(?::([0-9]{{1,5}}))?")
+_MAX_PORT = 65535
 _FORWARDED = frozenset(name.encode() for name in (FORWARDED_HOST, FORWARDED_PROTO, FORWARDED_PREFIX,
                                                    AGENT_ENV_SITE_ROOT_HEADER.lower()))
 # A WebSocket's handshake fields, which the gateway's own connection upstream writes for itself.
@@ -213,7 +214,7 @@ def site_host(request: HTTPConnection, names: tuple[str, ...]) -> str | None:
     itself as the client reached it. None for any other host, which a site never sees as its ``Host``."""
     host = forwarded_address(request).get(FORWARDED_HOST, "")
     found = _SITE_HOST.fullmatch(host)
-    if not found or int(found.group(2) or 0) > 65535:
+    if not found or int(found.group(2) or 0) > _MAX_PORT:
         return None
     return host if named(found.group(1).lower(), names) else None
 
