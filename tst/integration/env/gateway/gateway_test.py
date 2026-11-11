@@ -3358,7 +3358,8 @@ async def test_gateway_clock_extension(sandbox_provider, mcp_server_envs):
             cl = await client.post(f"{gw}/clock/clear", timeout=30)
             assert cl.status_code == 200 and cl.json()["armed"] is False, cl.text
             assert (await _read(client, gw)).status_code == 404, "cleared clock should 404"
-            assert (await client.get(f"{gw}/clock/state", timeout=30)).json() == {"armed": False}, "state after clear"
+            cleared = (await client.get(f"{gw}/clock/state", timeout=30)).json()
+            assert (cleared["armed"], cleared["followers"], "t0" in cleared) == (False, {}, False), f"state after clear: {cleared}"
 
             # Clear round-trips the tool surface byte-for-byte back to the unarmed baseline.
             cleared = await _get_time_surfaces(client, gw, result.mcp_url)
