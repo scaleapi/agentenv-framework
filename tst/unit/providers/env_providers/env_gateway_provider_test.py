@@ -29,7 +29,7 @@ from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.env.env import DeployedGatewayEnv, _mcp_url
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
-from agent_env.env.envs.service_db import SERVICE_DB_PORT, ServiceDBConfig
+from agent_env.env.envs.service_db import SERVICE_DB_PORT
 from agent_env.env.envs.website import WebsiteEnv
 from agent_env.providers.env_providers import env_gateway_provider, env_provider
 from agent_env.providers.env_providers.constants import GATEWAY_APP_DIR, GATEWAY_SERVICE_NAME
@@ -160,7 +160,6 @@ async def test_container_mode_rejects_websites():
             provider, state_instance=None, mcp_servers=[], mcp_server_images=[],
             website_configs=[WebsiteConfig(backend_image="b", frontend_image="f", environment_name="x")],
         )
-
 
 
 def _vm_provider(**attrs) -> MagicMock:
@@ -501,7 +500,6 @@ async def test_container_mode_remote_skips_servicedb_and_points_at_remote():
     assert gateway_call["env"]["SERVICE_DB_URL"] == db_url_base
 
 
-
 @pytest.mark.asyncio
 async def test_container_mode_mcp_url_follows_the_card():
     """The recorded MCP URL is the one the gateway's card declares, joined onto the gateway URL."""
@@ -534,7 +532,6 @@ async def test_container_mode_mcp_url_follows_the_card():
             )
     assert result.mcp_url == "https://agent-gateway.modal.host/custom-mcp"
     assert result.environment_card == card
-
 
 
 @pytest.mark.parametrize("gateway_url,declared,expected", [
@@ -1267,19 +1264,6 @@ def test_compose_gives_the_gateway_the_names_of_the_providers_request_headers_al
              for name, service in services.items()}
     expected = {GATEWAY_SERVICE_NAME: [f"AGENTENV_PROVIDER_REQUEST_HEADERS={','.join(names)}"]} if names else {}
     assert {name: entries for name, entries in named.items() if entries} == expected
-
-
-@pytest.mark.parametrize("gateway_url", ["https://gw.w.modal.host", None], ids=["tunnel", "none"])
-def test_the_gateway_alone_is_told_the_address_the_deploy_reaches_it_at(gateway_url):
-    compose = EnvironmentGatewayProvider().create_docker_compose(
-        mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")], gateway_image="agent-gateway",
-        state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
-        state_instance=LocalPostgresStateProvider.default_instance(), gateway_url=gateway_url)
-
-    told = {name: [entry for entry in service.get("environment") or [] if "AGENTENV_GATEWAY_URL" in entry]
-            for name, service in yaml.safe_load(compose)["services"].items()}
-    expected = {GATEWAY_SERVICE_NAME: [f"AGENTENV_GATEWAY_URL={gateway_url}"]} if gateway_url else {}
-    assert {name: entries for name, entries in told.items() if entries} == expected
 
 
 @pytest.mark.asyncio

@@ -41,8 +41,9 @@ and the browser's `data/add` loads them, which opens the start tabs again while 
 after the load that seeds the site and again after `reset_env`, which starts the browser afresh. Preflight refuses a
 step on an env with no browser, none of the name given, or several and none named. On a multi env, the steps reach
 the browser apps of its computers, each through the computer's own record and control token.
-`browser_connect_cdp` hands an agent a CDP address to the same browser; on a multi env, one at its gateway, asked
-through the gateway's `/svc/<computer>/` route, so the agent reaches the browser through the gateway's CDP relay as it
-reaches the rest of the env, with the multi env's tools hidden from its role; a computer there with several website
-browsers is refused, as the relay doesn't tell them apart yet. A whole state, Playwright's `storageState`
+`browser_connect_cdp` hands an agent a CDP address to the same browser, under the origin where the agent reaches the
+env, so through a tunnel that ends TLS it's https and wss; on a multi env, one at its gateway, asked through the
+gateway's `/svc/<computer>/` route, so the agent reaches the browser through the gateway's CDP relay as it reaches the
+rest of the env, with the multi env's tools hidden from its role; a computer there with several website browsers is
+refused, as the relay doesn't tell them apart yet. A whole state, Playwright's `storageState`
 included, loads through `load_artifact` or `data/add` instead.

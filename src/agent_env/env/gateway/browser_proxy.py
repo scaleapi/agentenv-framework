@@ -5,7 +5,8 @@
 The browser builds those addresses from the address its own server was reached at, so behind the gateway they would
 name the browser's host and a client following one would leave the gateway. The gateway rewrites them by path,
 replacing everything before ``/cdp/<token>/`` with its own address and ``/browser/<key>``, so a rewrite holds whatever
-host an address was minted at."""
+host an address was minted at. It keeps the https or wss of an address the browser minted under an origin its caller
+named, since a tunnel in front of the gateway that ends TLS may not say how it was reached."""
 from __future__ import annotations
 
 import asyncio
@@ -79,12 +80,14 @@ def browsers(card: dict) -> list[Browser]:
 
 def at_gateway(url: str, base: str, key: str) -> str:
     """``url``, a CDP address a browser handed out, at the gateway: everything before its ``/cdp/<token>/`` becomes
-    ``base`` and ``/browser/<key>``, a WebSocket URL staying one. A value that isn't such an address is kept."""
+    ``base`` and ``/browser/<key>``, a WebSocket URL staying one, secure when either is: a browser the gateway reaches
+    over plain http names https only under an origin its caller named. A value that isn't such an address is kept."""
     parts = urlsplit(url)
     match = ADDRESS.search(parts.path)
     if parts.scheme not in ("http", "https", "ws", "wss") or match is None:
         return url
-    secure, host = base.startswith("https://"), base.split("://", 1)[1]
+    secure = base.startswith("https://") or parts.scheme in ("https", "wss")
+    host = base.split("://", 1)[1]
     scheme = ("wss" if secure else "ws") if parts.scheme in ("ws", "wss") else ("https" if secure else "http")
     return f"{scheme}://{host}/browser/{key}{match.group(0)}" + (f"?{parts.query}" if parts.query else "")
 
@@ -99,19 +102,14 @@ def rewritten(body: Any, fields: frozenset[str], base: str, key: str) -> Any:
     return body
 
 
-def public_base(connection: Request | WebSocket, gateway_url: str | None = None) -> str | None:
+def public_base(connection: Request | WebSocket) -> str | None:
     """The address the client reached the gateway at, scheme, host and port: the Host it sent, with the scheme a
-    TLS-terminating tunnel in front says it was reached by (``X-Forwarded-Proto``), else ``gateway_url``'s, the
-    address the deploy reaches the gateway at, when the Host is its host, else the connection's own. None for a Host
-    that isn't a host and port. A rewrite with it goes back only to the client that sent it."""
+    TLS-terminating tunnel in front says it was reached by (``X-Forwarded-Proto``), else the connection's own.
+    None for a Host that isn't a host and port. A rewrite with it goes back only to the client that sent it."""
     host = connection.headers.get("host", "")
     if not HOST.fullmatch(host):
         return None
     proto = connection.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
-    known = urlsplit(gateway_url) if gateway_url else None
-    if proto not in ("http", "https") and known and known.scheme in ("http", "https") \
-            and known.netloc.lower() == host.lower():
-        proto = known.scheme
     if proto not in ("http", "https"):
         proto = "https" if connection.url.scheme in ("https", "wss") else "http"
     return f"{proto}://{host}"
@@ -131,15 +129,12 @@ class BrowserRoutes:
     """The ``/browser/<key>/cdp/<token>/`` route over a gateway's ``/svc`` children, and the rewrite of a browser's
     ``cdp`` answer on their ``/svc`` route. ``log_event`` writes a trajectory event, ``attribution`` names a role's
     caller for one, and ``role_of`` reads the role a connection's ``AgentEnv-Role`` header names. The headers named in
-    ``withheld`` (lower case), the sandbox provider's credentials, reach no browser; ``gateway_url`` is the address the
-    deploy reaches the gateway at (``public_base``)."""
+    ``withheld`` (lower case), the sandbox provider's credentials, reach no browser."""
 
     def __init__(self, rest_proxy_urls: dict[str, str], timeout: httpx.Timeout,
                  log_event: Callable[[dict], Awaitable[Any]], attribution: Callable[[str], dict],
-                 role_of: Callable[[Request | WebSocket], str], *, withheld: frozenset[bytes] = frozenset(),
-                 gateway_url: str | None = None):
+                 role_of: Callable[[Request | WebSocket], str], *, withheld: frozenset[bytes] = frozenset()):
         self._urls = rest_proxy_urls
-        self._gateway_url = gateway_url
         self._withheld = withheld
         self._timeout = timeout
         self._log_event = log_event
@@ -175,7 +170,7 @@ class BrowserRoutes:
         browser = await self.browser(key)
         if isinstance(browser, Response):
             return browser
-        base = public_base(request, self._gateway_url)
+        base = public_base(request)
         if base is None:
             return _error(400, "the Host header isn't a host and port")
         headers = client_headers(request, self._withheld)
@@ -196,7 +191,7 @@ class BrowserRoutes:
         browser = await self.browser(key)
         if not isinstance(browser, Browser) or path != browser.cdp_path:
             return None
-        base = public_base(request, self._gateway_url)
+        base = public_base(request)
         if base is None:
             return _error(400, "the Host header isn't a host and port")
         try:

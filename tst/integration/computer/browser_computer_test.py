@@ -610,10 +610,10 @@ PAGE_SEEN = ("JSON.stringify({ready: document.readyState, title: document.title,
              "text: document.body ? document.body.innerText.slice(0, 200) : ''})")
 
 
-async def _cdp_agent_loads(ws_url: str, urls: list[str]) -> dict:
+async def _cdp_agent_loads(ws_url: str, urls: list[str], tls: ssl.SSLContext | None = None) -> dict:
     """What a CDP agent at ``ws_url`` sees navigating a tab of its own to each of ``urls``, one after another:
-    ``Page.navigate``'s error, if any, and the page once it has loaded."""
-    async with connect(ws_url, max_size=None, open_timeout=60) as ws:
+    ``Page.navigate``'s error, if any, and the page once it has loaded; trusting ``tls`` for a wss address."""
+    async with connect(ws_url, max_size=None, open_timeout=60, **({"ssl": tls} if tls else {})) as ws:
         ids = itertools.count(1)
 
         async def call(method: str, params: dict, session: str | None = None) -> dict:
@@ -1147,13 +1147,16 @@ async def _answers_again(deployed) -> bool:
     return False
 
 
-async def _cdp_at_gateway(deployed, browser: DeployedEnv) -> dict:
-    """The CDP address the browser gives, asked through the gateway's ``/svc/chromium/`` route with the browser's own
-    control token, as agentenv asks a computer child."""
+async def _cdp_at_gateway(deployed, browser: DeployedEnv, *, at: str | None = None, user: str = "ada",
+                          origin: str | None = None, ca: LocalCA | None = None) -> dict:
+    """The CDP address the browser gives ``user``, asked through the gateway's ``/svc/chromium/`` route, at ``at``, a
+    front before it, else its own address, with the browser's own control token, as agentenv asks a computer child,
+    naming ``origin`` or not."""
     app = next(child for child in browser.environment_card["children_environments"] if child["name"] == "chromium")
     path = protocol_v1.find_extension_method(app, BROWSER, "cdp")["endpoint"]
-    async with httpx.AsyncClient(timeout=180) as http:
-        answer = await http.post(f"{deployed.gateway_url}/svc/chromium{path}", json={"user": "ada"},
+    async with httpx.AsyncClient(timeout=180, verify=_trusting(ca) if ca else True) as http:
+        answer = await http.post(f"{at or deployed.gateway_url}/svc/chromium{path}",
+                                 json={"user": user, **({"origin": origin} if origin else {})},
                                  headers=browser.control_headers)
     assert answer.status_code == 200, answer.text
     return answer.json()
@@ -1300,6 +1303,35 @@ async def test_browser_connect_cdp_hands_an_agent_an_address_at_the_multi_envs_g
     assert context.metadata["browser_connections"] == [{
         "step_id": "connect", "env_id": office.id, "agent_name": "solver", "browser": "chromium", "name": "chromium",
         "keep_tools": False, "role": "default", "tools_hidden": "*"}]
+    assert not report.failed
+
+
+@pytest.mark.asyncio
+async def test_behind_a_front_that_ends_tls_the_multi_envs_gateway_hands_out_https_and_wss_and_an_agent_connects(
+        browser_computer, shop):
+    ca = local_ca()
+    with namespace_routing():
+        office = _office(shop, [Env.get(browser_computer.id)])
+        context = TaskStepContext()
+        try:
+            [deployed] = (await DeployEnvTaskStep(id="office", version=None, env_id=office.id, sandbox_type="local",
+                                                  ttl_seconds=900, child_envs={"chromium": MULTI_CHROMIUM}
+                                                  ).execute(context)).deployed_envs
+            browser = DeployedEnv.from_dict(deployed.child_envs["chromium"])
+            gateway = urllib.parse.urlsplit(deployed.gateway_url)
+            async with tls_front(ca, gateway.hostname, gateway.port) as front:
+                named = await _cdp_at_gateway(deployed, browser, at=front, origin=front, ca=ca)
+                unnamed = await _cdp_at_gateway(deployed, browser, at=front, user="bob", ca=ca)
+                discovered = await _discovered(named["http_url"], ca)
+                seen = await _cdp_agent_loads(named["ws_url"], [MULTI_SITE], tls=_trusting(ca))
+        finally:
+            report = await teardown_run(context)
+
+    host = front.removeprefix("https://")
+    assert named["http_url"].startswith(f"{front}/browser/chromium/cdp/"), named
+    assert named["ws_url"].startswith(f"wss://{host}/browser/chromium/cdp/") and discovered == named["ws_url"], named
+    assert unnamed["ws_url"].startswith(f"ws://{host}/browser/chromium/cdp/"), unnamed
+    assert seen[MULTI_SITE]["error"] is None and seen[MULTI_SITE].get("ready") == "complete", seen
     assert not report.failed
 
 

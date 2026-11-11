@@ -98,6 +98,22 @@ async def test_a_browser_in_a_multi_envs_computer_is_reached_through_its_gateway
 
 
 @pytest.mark.asyncio
+async def test_behind_a_tunnel_that_ends_tls_the_gateway_is_asked_under_the_agents_origin_and_hands_out_https_and_wss(
+        monkeypatch):
+    sent = _mock(monkeypatch, tokens=["t1"], relay="gw.w.modal.host")  # the gateway sees plain http, as behind Modal
+    context = TaskStepContext(deployed_envs=[_multi("https://gw.w.modal.host", "modal", _BROWSER_TAKING_ORIGIN)],
+                              deployed_agents=[_agent(sandbox_type="modal")], metadata={})
+
+    await BrowserConnectCdpTaskStep(id="connect", version=None, env_id="office", agent_name="solver").execute(context)
+
+    asked, added, _ = sent
+    assert json.loads(asked.content) == {"user": "solver", "origin": "https://gw.w.modal.host"}
+    assert (json.loads(added.content)["http_url"], json.loads(added.content)["ws_url"]) == (
+        "https://gw.w.modal.host/browser/chromium/cdp/t1/",
+        "wss://gw.w.modal.host/browser/chromium/cdp/t1/devtools/browser")
+
+
+@pytest.mark.asyncio
 async def test_a_cdp_address_the_multi_envs_gateway_didnt_relay_is_refused_before_the_agent_gets_it(monkeypatch):
     sent = _mock(monkeypatch, tokens=["t1"])  # the computer's own address, as a gateway answers for several browsers
     context = TaskStepContext(deployed_envs=[_multi()], deployed_agents=[_agent()], metadata={})
@@ -184,25 +200,27 @@ def _env(children: list | None = None, *, url: str = _ENV, sandbox_type: str = "
                           "children_environments": [_app("chromium")] if children is None else children})
 
 
-def _multi() -> DeployedGatewayEnv:
-    """A multi env's deployment whose computer ``chromium`` is the browser computer ``_env`` gives, its gateway
-    serving tool access on its own card."""
+def _multi(gateway: str = _GATEWAY, sandbox_type: str = "local", browser: dict = _BROWSER) -> DeployedGatewayEnv:
+    """A multi env's deployment at ``gateway`` whose computer ``chromium`` is the browser computer ``_env`` gives,
+    serving ``browser``, its gateway serving tool access on its own card."""
     return DeployedGatewayEnv(
-        env_id="office", env_version=1, gateway_url=_GATEWAY, sandbox_id="gw", sandbox_type="local",
-        control_token="gateway-control", environment_card_url=f"{_GATEWAY}/.well-known/agent-env.json",
+        env_id="office", env_version=1, gateway_url=gateway, sandbox_id="gw", sandbox_type=sandbox_type,
+        control_token="gateway-control", environment_card_url=f"{gateway}/.well-known/agent-env.json",
         environment_card={"name": "office", "capabilities": {"extensions": [_TOOL_ACCESS]},
                           "children_environments": [{"name": "chromium"}]},
-        child_envs={"chromium": dataclasses.asdict(_env())})
+        child_envs={"chromium": dataclasses.asdict(_env([_app("chromium", browser)], sandbox_type=sandbox_type))})
 
 
-def _agent(role: str | None = None, extensions: list | None = None) -> DeployedAgent:
-    return DeployedAgent(agent_name="solver", api_url=_AGENT, a2a_url=_AGENT, sandbox_type="local", role=role,
+def _agent(role: str | None = None, extensions: list | None = None, sandbox_type: str = "local") -> DeployedAgent:
+    return DeployedAgent(agent_name="solver", api_url=_AGENT, a2a_url=_AGENT, sandbox_type=sandbox_type, role=role,
                          a2a_card={"capabilities": {"extensions": [_CDP_CONFIG] if extensions is None else extensions}})
 
 
-def _mock(monkeypatch, *, tokens: list[str], base: str = f"{_ENV}/svc/chromium") -> list[httpx.Request]:
-    """Answer the browser's cdp with each of ``tokens`` in turn, under the origin it names, else at ``base``, and
-    anything else as done; return the requests."""
+def _mock(monkeypatch, *, tokens: list[str], base: str = f"{_ENV}/svc/chromium",
+          relay: str | None = None) -> list[httpx.Request]:
+    """Answer the browser's cdp with each of ``tokens`` in turn, under the origin it names, else at ``base``, or, as a
+    gateway at the host ``relay`` that sees plain http, at its relay in the origin's scheme; anything else as done;
+    return the requests."""
     sent, real, left = [], httpx.AsyncClient, iter(tokens)
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -210,6 +228,8 @@ def _mock(monkeypatch, *, tokens: list[str], base: str = f"{_ENV}/svc/chromium")
         if request.url.path.endswith("/browser/cdp"):
             token, origin = next(left), json.loads(request.content).get("origin")
             at = f"{origin}/svc/chromium" if origin else base
+            if relay:
+                at = f"{'https' if (origin or '').startswith('https') else 'http'}://{relay}/browser/chromium"
             ws = "wss" + at.removeprefix("https") if at.startswith("https") else "ws" + at.removeprefix("http")
             return httpx.Response(200, json={"http_url": f"{at}/cdp/{token}/",
                                              "ws_url": f"{ws}/cdp/{token}/devtools/browser"})

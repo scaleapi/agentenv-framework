@@ -86,11 +86,9 @@ class BrowserConnectCdpTaskStep(BrowserStep):
             raise RuntimeError(f"agent {agent.agent_name!r} can't take a CDP address: its card has no "
                                f"{A2AAgent.EXT_CDP_CONFIG}")
         base, theirs = _env_urls(env, agent)
-        if deployed.env_id == self.env_id:
-            asked = {"user": agent.agent_name, **({"origin": theirs} if _takes_origin(card) else {})}
-            address = await self._call(context, "cdp", asked, CDP_TIMEOUT_S)
-        else:
-            address = await _cdp_at_gateway(env, deployed, card, {"user": agent.agent_name})
+        asked = {"user": agent.agent_name, **({"origin": theirs} if _takes_origin(card) else {})}
+        address = (await self._call(context, "cdp", asked, CDP_TIMEOUT_S) if deployed.env_id == self.env_id
+                   else await _cdp_at_gateway(env, deployed, card, asked))
         http_url = _rebased(address["http_url"], base, theirs)
         ws_url = _rebased(address["ws_url"], _ws(base), _ws(theirs))
         async with httpx.AsyncClient(timeout=ADD_TIMEOUT_S) as client:
@@ -116,7 +114,8 @@ class BrowserConnectCdpTaskStep(BrowserStep):
 async def _cdp_at_gateway(gateway: DeployedEnv, computer: DeployedEnv, card: dict, params: dict) -> dict:
     """The browser's ``cdp`` answer, the browser ``card`` names in ``computer``, one of the multi env ``gateway``'s
     computers: asked through the gateway's ``/svc`` route to that computer, with the computer's control token, so the
-    gateway names its own address in it, its CDP relay's, as it does for any client reaching it there."""
+    gateway names its own address in it, its CDP relay's, as it does for any client reaching it there, keeping the
+    https or wss of the origin in ``params`` the browser minted it under."""
     key = next((name for name, record in (getattr(gateway, "child_envs", None) or {}).items()
                 if record.get("sandbox_id") == computer.sandbox_id), None)
     if key is None:
