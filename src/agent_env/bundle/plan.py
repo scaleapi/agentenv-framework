@@ -59,6 +59,7 @@ from agent_env.store.ids import LOCAL_PREFIX, is_local_id
 from agent_env.store.routing import namespace_routing_enabled
 from agent_env.task.task import Task
 from agent_env.task_step.registry import get_task_step_registry
+from agent_env.task_step.roles import plays_user, prompts_agent_under_test
 from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.install_agent import InstallAgentTaskStep
@@ -1206,24 +1207,22 @@ _UNREAD: Any = object()  # the configured default agent, before a task needs it
 
 
 def solver_steps(steps: Any) -> tuple[str, ...]:
-    """The ids of the steps in ``steps``, a task's config, that deploy or install an agent a ``prompt_agent`` or
-    ``always_on`` step prompts, and not as its user simulator: the solver's."""
-    prompts = [step for step in steps
-               if isinstance(step, dict) and step.get("type") in (PromptAgentTaskStep.type, "always_on")]
+    """The ids of the steps in ``steps``, a task's config, that deploy or install an agent a step prompts as the agent
+    under test (``prompts_agent_under_test``), and not as its user simulator: the solver's."""
+    prompts = [step for step in steps if isinstance(step, dict) and prompts_agent_under_test(step)]
     prompted = {step.get("agent_name") or TaskStep.DEFAULT_AGENT_NAME for step in prompts} - user_sim_agents(steps)
     return tuple(step["id"] for step in steps if isinstance(step, dict) and isinstance(step.get("id"), str)
                  and step.get("type") in (DeployAgentTaskStep.type, InstallAgentTaskStep.type)
-                 and (step.get("agent_name") or TaskStep.DEFAULT_AGENT_NAME) in prompted)
+                 and not plays_user(step) and (step.get("agent_name") or TaskStep.DEFAULT_AGENT_NAME) in prompted)
 
 
 def user_sim_agents(steps: Any) -> set[str]:
     """The agents ``steps``, a task's config, name as a user simulator: each ``prompt_agent`` step's
-    ``user_agent_name``, and the agent each ``user_sim`` step names (its ``agent_name``, else its ``name``)."""
+    ``user_agent_name``, and the agent each step whose class ``plays_user`` deploys."""
     named = {step.get("user_agent_name") or PromptAgentTaskStep.DEFAULT_USER_AGENT_NAME for step in steps
              if isinstance(step, dict) and step.get("type") == PromptAgentTaskStep.type}
-    named |= {step.get("agent_name") or step.get("name") for step in steps
-              if isinstance(step, dict) and step.get("type") == "user_sim"}
-    return named - {None}
+    return named | {step.get("agent_name") or TaskStep.DEFAULT_AGENT_NAME for step in steps
+                    if isinstance(step, dict) and plays_user(step)}
 
 
 def _leaves_an_agent_unset(task: ResolvedEntry) -> bool:

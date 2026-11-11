@@ -35,6 +35,7 @@ from agent_env.openenv.reward import reward_of
 from agent_env.task.task import Task, recorded_scores
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext, sandbox_overrides
+from agent_env.task_step.roles import prompts_agent_under_test
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
 from agent_env.training._openenv import on_session_loop
@@ -231,7 +232,7 @@ def _index_named(prompt: Any, ids: list[str]) -> int:
 
 
 def _first_prompt(task: Task) -> str:
-    return next((step.prompt for step in task.steps if step.type in ("prompt_agent", "always_on")), "")
+    return next((step.prompt for step in task.steps if prompts_agent_under_test(step)), "")
 
 
 def _free_port() -> int:

@@ -52,44 +52,6 @@ from agent_env.store.ids import is_local_id
 logger = logging.getLogger(__name__)
 
 
-def plays_a_user_sim(agent_name: Optional[str], context: TaskStepContext) -> bool:
-    """Whether the run's task names ``agent_name`` in a ``user_sim`` step (its ``agent_name``, else its ``name``) and
-    also has a tested agent to deploy (``bundle.plan.solver_steps``), read from the stored task the run is an instance
-    of. Only tasks with a ``user_sim`` step are affected: a ``prompt_agent`` task's ``user_agent_name`` takes a
-    run-wide pick as it always has. False when the run has no recorded instance or its task can't be read."""
-    from agent_env.bundle.plan import solver_steps
-
-    if not agent_name:
-        return False
-    config = _run_task_config(context)
-    if config is None or not solver_steps(config):
-        return False
-    return agent_name in {step.get("agent_name") or step.get("name") for step in config
-                          if isinstance(step, dict) and step.get("type") == "user_sim"}
-
-
-def _run_task_config(context: TaskStepContext) -> Optional[list[dict]]:
-    """The steps, as config, of the stored task the run is an instance of, with the run's seed applied as ``Task._run``
-    applies it, so a seeded ``<user>`` agent name compares with the name the running step has; None when it has no
-    recorded instance or the task can't be read (logged)."""
-    from agent_env.task.store import find_task_instance
-    from agent_env.task.task import Task, substitute_seed_in_steps
-
-    if not context.instance_id:
-        return None
-    try:
-        instance = find_task_instance(context.instance_id)
-        if instance is None:
-            return None
-        steps = Task.get(instance.task_id, instance.task_version).steps
-        seed = (context.metadata or {}).get("seed") or {}
-        return [step.to_dict() for step in (substitute_seed_in_steps(steps, seed) if seed else steps)]
-    except Exception as e:  # the pick applies as before; say why it couldn't be narrowed
-        logger.warning(f"deploy_agent: could not read run {context.instance_id}'s task to tell its user sim's agent "
-                       f"apart, so a run-wide agent pick applies to every agent: {type(e).__name__}: {e}")
-        return None
-
-
 def linked_sandbox_problem(sandbox_name: str, sandbox_mode: str, ports: Iterable[int | str]) -> str | None:
     """Why an agent can't be placed on the sandbox ``sandbox_name``, deployed in ``sandbox_mode`` with ``ports``
     reachable, or None when it can: only a VM can host another container, and the agent is reached on its A2A port."""
@@ -356,18 +318,11 @@ class DeployAgentTaskStep(TaskStep):
         )
 
     def _resolve_agent_ref(self, context: TaskStepContext) -> tuple[str, Optional[int]]:
-        """Agent id and version for this run: this step's ``step_overrides`` win over the run-wide override and the stored values; an overridden id takes the override's version (latest when unset), never the stored agent's pin.
-
-        The run-wide ``a2a_agent_id`` (``task run --a2a-agent-id``, a hub run's agent pick) swaps the tested agent, so
-        it is not applied to the agent the task names as its user simulator (``plays_a_user_sim``), which keeps its
-        own agent and version."""
+        """Agent id and version for this run: this step's ``step_overrides`` win over the run-wide override and the stored values; an overridden id takes the override's version (latest when unset), never the stored agent's pin."""
         step_overrides = self.step_param_overrides(context)
         user_overrides = context.metadata.get("user_overrides", {})
         if "a2a_agent_id" in step_overrides:
             return step_overrides["a2a_agent_id"], step_overrides.get("a2a_agent_version")
-        if user_overrides.get("a2a_agent_id") and plays_a_user_sim(self.agent_name, context):
-            agent_id = self.a2a_agent_id or get_config().get_default_a2a_agent_id()
-            return agent_id, step_overrides.get("a2a_agent_version", self.a2a_agent_version)
         agent_id = user_overrides.get("a2a_agent_id") or self.a2a_agent_id or get_config().get_default_a2a_agent_id()
         if "a2a_agent_version" in step_overrides:
             return agent_id, step_overrides["a2a_agent_version"]

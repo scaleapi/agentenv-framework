@@ -2,8 +2,9 @@
 
 An outside agent is played through a proxy agent deployed in its place (the ``agents`` bundle's ``proxy``), so steps
 that act on the agent, or in its sandbox, act on the proxy. Every registered step type is either checked
-here (``CHECKS``) or listed as untouched by an outside agent (``UNAFFECTED``). A test holds the registry to the two, so
-a new step type is classified before an episode runs it. Plugin step types aren't inspected.
+here (``CHECKS``) or listed as untouched by an outside agent (``UNAFFECTED``); a step type whose class ``plays_user``
+not in ``CHECKS`` is checked as the user sim's deploy. A test holds the registry to these, so a new step type is
+classified before an episode runs it. Plugin step types aren't inspected.
 """
 
 from __future__ import annotations
@@ -11,6 +12,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+from agent_env.task_step.roles import plays_user
 
 if TYPE_CHECKING:
     from agent_env.task_step.task_step import TaskStep
@@ -43,7 +46,7 @@ def problems(steps: list[TaskStep], outside: list[str]) -> list[str]:
     })
     for step in steps:
         why = ["retry_config can replay an outside turn"] if step.retry_config is not None else []
-        if check := CHECKS.get(step.type):
+        if check := CHECKS.get(step.type) or (_plays_the_user if plays_user(step) else None):
             why += check(step, scope)
         found.extend(f"step {step.id!r}: {reason}" for reason in why)
     return found
@@ -99,6 +102,12 @@ def _needs_the_agent(step: TaskStep, outside: Outside) -> list[str]:
     return [f"{step.type} needs {step.agent_name!r} as a real agent, and it is played from outside"]
 
 
+def _plays_the_user(step: TaskStep, outside: Outside) -> list[str]:
+    if step.agent_name not in outside.agents:
+        return []
+    return [f"{step.type} deploys {step.agent_name!r} to play the user, and it is played from outside"]
+
+
 def _validates_an_agent(step: TaskStep, outside: Outside) -> list[str]:
     return ["validates the task's deployed A2A agent, and an episode plays one from outside"]
 
@@ -135,9 +144,8 @@ CHECKS: dict[str, Callable[..., list[str]]] = {
     "register_agent_triggers": _needs_the_agent,
     "browser_connect_cdp": _needs_the_agent,
     "snapshot_agent_state": _needs_the_agent,
-    # An outside agent can't yet be woken by always_on's loop, nor play its user sim (the agent user_sim names).
+    # An outside agent can't yet be woken by always_on's loop.
     "always_on": _needs_the_agent,
-    "user_sim": _needs_the_agent,
     "collect_artifacts": _collect_artifacts,
     "register_env_triggers": _register_env_triggers,
     "peer_agents": _peer_agents,

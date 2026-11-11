@@ -8,9 +8,9 @@ from agent_env.task.episode.rules import CHECKS, UNAFFECTED
 from agent_env.task.episode.steps import _EpisodeAgentStep
 from agent_env.task.task import substitute_seed_in_steps
 from agent_env.task_step.registry import _builtin_registry
-from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
+from tst.unit.task_step.plays_user_step import PlaysUser, plays_user_registered  # noqa: F401  (a fixture)
 
 ENV = {"id": "env", "type": "deploy_env", "env_id": "portsim"}
 LOAD = {"id": "load", "type": "load_artifact", "env_id": "portsim", "artifact_id": "week-<week>"}
@@ -266,11 +266,13 @@ def test_steps_that_need_only_what_an_outside_player_leaves_are_allowed(replace)
     EpisodeSpec.from_task(_portsim(**replace))
 
 def test_every_built_in_step_type_is_checked_or_unaffected():
-    registered, checked = set(_builtin_registry()), set(CHECKS)
+    registry = _builtin_registry()
+    registered, checked = set(registry), set(CHECKS)
+    plays_the_user = {kind for kind, cls in registry.items() if getattr(cls, "plays_user", False)}
 
-    assert sorted(registered - checked - UNAFFECTED) == []
-    # always_on and user_sim are classified ahead of their step classes (FD-5364).
-    assert sorted((checked | UNAFFECTED) - registered - {"always_on", "user_sim"}) == []
+    assert sorted(registered - checked - UNAFFECTED - plays_the_user) == []
+    # always_on is classified ahead of its step class (FD-5364).
+    assert sorted((checked | UNAFFECTED) - registered - {"always_on"}) == []
     assert sorted(checked & UNAFFECTED) == []
 
 
@@ -280,32 +282,27 @@ class _AlwaysOn(PromptAgentTaskStep):
     type = "always_on"
 
 
-class _UserSim(TaskStep):
-    """A user_sim step as these rules read one: the agent that plays the user, by name."""
-
-    type = "user_sim"
-
-    def __init__(self, id, agent_name):
-        super().__init__(id, None)
-        self.agent_name = agent_name
-
-    async def execute(self, context):
-        return context
-
-
 def test_the_agent_an_always_on_step_wakes_is_the_one_played_and_is_refused_for_now():
     loop = _AlwaysOn.from_dict({**PLAY, "id": "loop"})
-    task = Task(id="dock", version=4, steps=[*_portsim(play=None).steps, loop, _UserSim("user", "linda")])
+    task = Task(id="dock", version=4, steps=[*_portsim(play=None).steps, loop])
 
     assert ("step 'loop': always_on needs 'default-agent' as a real agent, and it is played from outside"
             in _refusal(task))
 
 
-def test_a_user_sim_played_from_outside_is_refused():
-    task = Task(id="dock", version=4, steps=[*_portsim().steps, _UserSim("user", "default-agent")])
+@pytest.mark.usefixtures("plays_user_registered")
+def test_a_step_whose_class_plays_the_user_is_refused_when_its_agent_is_played_from_outside():
+    task = _portsim({"id": "user", "type": PlaysUser.type, "agent_name": "default-agent"})
 
-    assert ("step 'user': user_sim needs 'default-agent' as a real agent, and it is played from outside"
+    assert ("step 'user': test_plays_user deploys 'default-agent' to play the user, and it is played from outside"
             in _refusal(task))
+
+
+@pytest.mark.usefixtures("plays_user_registered")
+def test_a_step_whose_class_plays_the_user_with_its_own_agent_is_allowed():
+    task = _portsim({"id": "user", "type": PlaysUser.type, "agent_name": "linda"})
+
+    assert EpisodeSpec.from_task(task, seed=SEED).trainer_agents == ("default-agent",)
 
 
 def test_the_seed_pass_rebuilds_each_step_as_its_own_class():

@@ -28,6 +28,7 @@ from agent_env.task.store import get_task_instance_store, new_instance_id
 from agent_env.task.teardown import TeardownReport, kind, teardown_run
 from agent_env.task_step.context import TaskStepContext, read_dual_keyed
 from agent_env.task_step.context_ops import build_context_update_ops
+from agent_env.task_step.roles import prompts_agent_under_test
 from agent_env.task_step.task_steps.collect_artifacts import CollectArtifactsTaskStep
 
 
@@ -172,7 +173,7 @@ def _step_output_lines(step, context) -> list[str]:
         if match:
             lines.append(_format_loaded_snapshot(match))
         return lines
-    if step.type in ("prompt_agent", "always_on") and context.prompt_responses:
+    if prompts_agent_under_test(step) and context.prompt_responses:
         return [_format_prompt_response(context.prompt_responses[-1])]
     if step.type == "snapshot_agent_state":
         snapshots = context.metadata.get("agent_snapshots") or []

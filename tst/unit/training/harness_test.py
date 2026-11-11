@@ -25,6 +25,7 @@ from agent_env.training import harness
 from agent_env.training.harness import AgentEnvSessionFactory, prompt_rows
 from tst.unit.bundle._support import layout
 from tst.unit.conftest import local_stores  # noqa: F401
+from tst.unit.task_step.plays_user_step import PlaysUser, plays_user_registered  # noqa: F401  (a fixture)
 from tst.util.fake_vllm import fake_vllm, says, token_ids
 
 MODEL = "Qwen/Qwen3-4B"
@@ -254,3 +255,14 @@ def test_a_rows_prompt_is_an_always_on_steps_as_it_is_a_prompt_agent_steps():
                                   SimpleNamespace(type="always_on", prompt="Watch Tess's shop this month.")])
 
     assert harness._first_prompt(task) == "Watch Tess's shop this month."
+
+
+@pytest.mark.usefixtures("plays_user_registered")
+def test_a_task_whose_user_sim_step_deploys_the_user_trains_only_its_solver():
+    config = [{"id": "solver", "type": "deploy_agent", "a2a_agent_id": "theirs"},
+              {"id": "user", "type": PlaysUser.type, "agent_name": "linda", "a2a_agent_id": "sim"},
+              {"id": "brief", "type": "prompt_agent", "agent_name": "linda", "prompt": "You are Linda."},
+              {"id": "ask", "type": "prompt_agent", "prompt": "Help Linda."}]
+
+    assert harness._untrainable(config) is None
+    assert harness.solver_steps(config) == ("solver",)

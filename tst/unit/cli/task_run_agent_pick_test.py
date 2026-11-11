@@ -1,6 +1,6 @@
-"""``task run --a2a-agent-id`` is a run-wide pick: the CLI leaves it run-wide, at the deploy steps' stored versions, and
-``deploy_agent`` applies it to every agent but the one a ``user_sim`` step names as the user (the one rule, shared with
-a hub run's pick; tst/unit/task_step/deploy_agent_user_sim_pick_test.py)."""
+"""``task run --a2a-agent-id`` is a run-wide pick: the CLI leaves it run-wide, at the deploy steps' stored versions, for
+each step to apply (tst/unit/task_step/run_wide_agent_pick_test.py); a step that plays the user keeps its own agent by
+its class, as it does for a hub run's pick."""
 
 import importlib
 import logging
@@ -54,7 +54,7 @@ def stored(monkeypatch):
     logging.disable(logging.NOTSET)
 
 
-def test_the_pick_stays_run_wide_with_a_user_sim_deployed_and_deploy_agent_narrows_it(stored):
+def test_the_pick_stays_run_wide_with_a_user_agent_deployed(stored):
     recorded = stored(AGENT, USER, ASK)
     result = CliRunner().invoke(cli, ["task", "run", "--id", "t", "--a2a-agent-id", "mine"])
     assert result.exit_code == 0, result.output

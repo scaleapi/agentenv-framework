@@ -10,6 +10,7 @@ from agent_env.task.episode.run import Episode, EpisodeError
 from agent_env.task.episode.steps import _EpisodeAgentStep
 from agent_env.task.task import Task, substitute_seed_in_steps
 from agent_env.task_step.context import TaskStepContext, sandbox_overrides
+from agent_env.task_step.roles import prompts_agent_under_test
 from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 
@@ -72,7 +73,7 @@ class EpisodeSpec:
 
 
 def _trainer_agents(task: Task, steps: list[TaskStep], named: Sequence[str] | None) -> list[str]:
-    prompted = list(dict.fromkeys(step.agent_name for step in steps if step.type in ("prompt_agent", "always_on")))
+    prompted = list(dict.fromkeys(step.agent_name for step in steps if prompts_agent_under_test(step)))
     if named is None:
         if len(prompted) != 1:
             raise EpisodeError(
