@@ -15,7 +15,7 @@ import httpx
 import pytest
 import uvicorn
 import websockets
-from agentenv_protocol.browser_cdp import ROUTE
+from agentenv_protocol.website_browser.cdp import ROUTE
 from agentenv_protocol.computer.app import COMPUTER_APP
 from agentenv_protocol.website_browser import BROWSER
 from pytest_socket import enable_socket

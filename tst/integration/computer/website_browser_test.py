@@ -157,7 +157,8 @@ async def test_chromium_runs_with_agentenvs_flags_on_its_pipe_and_a_reset_relaun
     assert (params["chromium"], params["clock"], sorted(params["methods"])) == (
         "156.0.8078.4", "real", ["cdp", "cookies/delete", "cookies/get", "cookies/set", "dialog/answer", "downloads/get",
                                  "downloads/list", "files/choose", "history", "local_storage/clear",
-                                 "local_storage/get", "local_storage/set", "navigate", "page/capture", "page/input",
+                                 "local_storage/get", "local_storage/set", "log", "navigate", "page/capture",
+                                 "page/input",
                                  "page/state", "page/viewport", "record", "sites/set", "tabs/activate", "tabs/close",
                                  "tabs/list", "tabs/open"])
     assert readiness["ready"] is True, readiness

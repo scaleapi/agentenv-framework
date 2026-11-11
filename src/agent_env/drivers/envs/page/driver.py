@@ -15,6 +15,7 @@ from typing import Any, Optional
 import httpx
 
 from agentenv_protocol import client
+from agentenv_protocol.website_browser.log import TOOL_CALL_HEADER, tool_call_header
 from agentenv_protocol.computer import (
     ComputerDriverEnvironment,
     DeviceUnavailable,
@@ -51,6 +52,7 @@ from agentenv_protocol.computer import (
 )
 from agentenv_protocol.computer import apps
 from agentenv_protocol.computer.served import served
+from agentenv_protocol.tool_context import ROLE_HEADER, ToolContext
 from agentenv_protocol.website_browser import BROWSER
 
 BUTTONS = {"left": 1, "right": 2, "middle": 4, "back": 8, "forward": 16}
@@ -264,7 +266,7 @@ class PageDriver(ComputerDriverEnvironment):
             raise Unsupported(f"the browser in {folder.name} serves no {op}")
         try:
             async with _http(folder) as http:
-                answer = await http.request(method["method"], method["endpoint"],
+                answer = await http.request(method["method"], method["endpoint"], headers=_tool_call(),
                                             **({"json": params} if method["method"] != "GET" else {}))
         except (httpx.HTTPError, OSError) as e:
             raise DeviceUnavailable(_ended(folder) or f"the browser's server isn't answering: {type(e).__name__}: {e}"
@@ -311,6 +313,16 @@ def _ended(folder: Path) -> Optional[str]:
 
 def _http(folder: Path) -> httpx.AsyncClient:
     return served(folder).client(CALL_TIMEOUT_S)
+
+
+def _tool_call() -> dict[str, str]:
+    """The agent's tool call a call to the browser is made for, which the browser's log credits it to: its tool, its
+    call's id, its arguments and its caller's role; nothing outside one."""
+    context = ToolContext.current()
+    if not context.mcp or not context.tool:
+        return {}
+    return {TOOL_CALL_HEADER: tool_call_header(context.tool, context.call_id, context.arguments),
+            **({ROLE_HEADER: context.caller.role} if context.caller.role else {})}
 
 
 def _mouse(kind: str, x: float, y: float, button: str = "none", buttons: int = 0, count: int = 0,

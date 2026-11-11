@@ -61,12 +61,13 @@ def _serve(argv: list[str]) -> None:
             started.cancel()
 
     asgi.router.lifespan_context = lifespan
+    served = app.served_asgi(asgi)
     if LOOPBACK:
         listening, token = bind(Path.cwd())
-        server = uvicorn.Server(uvicorn.Config(guarded(asgi, token), log_level="warning"))
+        server = uvicorn.Server(uvicorn.Config(guarded(served, token), log_level="warning"))
         server.run(sockets=[listening])
     else:
-        server = uvicorn.Server(uvicorn.Config(asgi, uds=str(SOCKET), log_level="warning"))
+        server = uvicorn.Server(uvicorn.Config(served, uds=str(SOCKET), log_level="warning"))
         SOCKET.unlink(missing_ok=True)
         server.run()
     if failed:

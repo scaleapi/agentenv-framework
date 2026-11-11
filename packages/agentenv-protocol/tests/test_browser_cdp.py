@@ -21,12 +21,14 @@ from starlette.routing import WebSocketRoute  # noqa: E402
 from websockets.asyncio.client import connect  # noqa: E402
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK  # noqa: E402
 
-from agentenv_protocol import browser_cdp  # noqa: E402
-from agentenv_protocol.browser_cdp import NO_SESSION, Relay, Tokens, guard  # noqa: E402
+from agentenv_protocol.website_browser import cdp as browser_cdp  # noqa: E402
+from agentenv_protocol.website_browser import log as browser_log  # noqa: E402
+from agentenv_protocol.website_browser.cdp import NO_SESSION, Relay, Tokens, guard  # noqa: E402
+from agentenv_protocol.website_browser.log import REDACTED, TOOL_CALL_HEADER, BrowserLog, Causes, tool_call_header  # noqa: E402
 from agentenv_protocol.computer import Launch, Platform, Ready, app, computer_app, linux  # noqa: E402
 from agentenv_protocol.computer.app import APP_SETTINGS_ENV  # noqa: E402
 from agentenv_protocol.computer.app_runtime import AppReadiness  # noqa: E402
-from agentenv_protocol.computer.errors import DeviceUnavailable  # noqa: E402
+from agentenv_protocol.computer.errors import DeviceUnavailable, InvalidArgument  # noqa: E402
 from agentenv_protocol.website_browser import SITE_PROXY_ENV, WebsiteBrowserEnvironment  # noqa: E402
 
 FORWARDED = {"x-forwarded-host": "computer.test:443", "x-forwarded-proto": "https",
@@ -106,11 +108,11 @@ class SlowClient:
 
 
 @contextlib.asynccontextmanager
-async def _relay(dialogs_answered: bool = False):
+async def _relay(dialogs_answered: bool = False, **logging):
     """The relay over a fake pipe, served on loopback with each connection's user its path's: the pipe, the relay and
     the server's ws:// base."""
     pipe = Pipe()
-    relay = Relay(pipe, dialogs_answered=dialogs_answered)
+    relay = Relay(pipe, dialogs_answered=dialogs_answered, **logging)
 
     async def endpoint(websocket):
         await relay.serve(websocket, websocket.path_params["user"])
@@ -279,6 +281,82 @@ async def test_a_client_that_falls_too_far_behind_is_closed_and_what_waited_for_
     assert "closed_at" in relay.connections[0] and ("Target.detachFromTarget", None) in pipe.sent
 
 
+class Control:
+    """agentenv's control as the relay asks it: the URL of tab T1, a password field focused wherever it's asked, and
+    the causes of tab events; each check made with how many commands ``pipe`` had been sent by then."""
+
+    def __init__(self, pipe=None) -> None:
+        self.causes, self.asked, self.pipe = Causes(), [], pipe
+
+    def url_of(self, target):
+        return "https://a.test/page" if target == "T1" else None
+
+    async def password_focused(self, target) -> bool:
+        self.asked.append((target, len(self.pipe.sent) if self.pipe is not None else None))
+        return True
+
+
+@pytest.mark.asyncio
+async def test_every_relayed_command_is_an_entry_on_its_sessions_tab_an_acting_one_with_its_parameters_kept(tmp_path):
+    log, control = BrowserLog(tmp_path / "browser-chromium.jsonl"), Control()
+    async with _relay(log=log, control=control) as (pipe, relay, base):
+        async with connect(f"{base}/ada") as ada:
+            attached = await _ask(ada, {"id": 1, "method": "Target.attachToTarget",
+                                        "params": {"targetId": "T1", "flatten": True}})
+            child = attached["result"]["sessionId"]
+            for n, (method, params) in enumerate([
+                    ("DOM.getDocument", {"depth": 1}),
+                    ("Network.setCookie", {"name": "sid", "value": "s3cret", "url": "https://a.test/?token=t"}),
+                    ("Input.insertText", {"text": "hunter2"}), ("Boom", {})], start=2):
+                await _ask(ada, {"id": n, "method": method, "params": params, "sessionId": child})
+            await _ask(ada, {"id": 6, "method": "Target.exposeDevToolsProtocol", "params": {"targetId": "T1"}})
+            await _ask(ada, {"id": 7, "method": "Page.navigate", "params": {"url": "https://a.test/"},
+                             "sessionId": "theirs"})
+        await asyncio.sleep(0.05)
+
+    common = {"via": "cdp", "who": "ada", "connection": 1}
+    page = {**common, "tab": "T1", "url": "https://a.test/page"}
+    assert [line["action"] for line in log.read()["lines"]] == [
+        {**page, "method": "Target.attachToTarget", "acts": False, "ok": True},
+        {**page, "method": "DOM.getDocument", "acts": False, "ok": True},
+        {**page, "method": "Network.setCookie", "acts": True, "ok": True,
+         "params": {"name": "sid", "value": REDACTED, "url": f"https://a.test/?token={REDACTED}"}},
+        {**page, "method": "Input.insertText", "acts": True, "ok": True, "params": {"text": {"length": 7}}},
+        {**page, "method": "Boom", "acts": False, "ok": False, "error": "boom"},
+        {**page, "method": "Target.exposeDevToolsProtocol", "acts": False, "ok": False, "guard": "refused",
+         "error": "agentenv refuses Target.exposeDevToolsProtocol: it would give a page's script the browser's own "
+                  "CDP channel"},
+        {**common, "method": "Page.navigate", "acts": True, "tab": None, "url": None, "ok": False,
+         "error": NO_SESSION["message"], "params": {"url": "https://a.test/"}},
+    ]
+    assert [target for target, _ in control.asked] == ["T1"]
+
+
+@pytest.mark.asyncio
+async def test_a_command_is_checked_for_a_password_before_it_is_sent_and_logged_though_its_client_leaves(tmp_path):
+    log = BrowserLog(tmp_path / "browser-chromium.jsonl")
+    async with _relay(log=log) as (pipe, relay, base):
+        control = Control(pipe)
+        relay.control = control
+        async with connect(f"{base}/ada") as ada:
+            child = (await _ask(ada, {"id": 1, "method": "Target.attachToTarget",
+                                      "params": {"targetId": "T1", "flatten": True}}))["result"]["sessionId"]
+            await _ask(ada, {"id": 2, "method": "Input.insertText", "params": {"text": "hunter2"}, "sessionId": child})
+            sent_before = next(n for n, (method, _) in enumerate(pipe.sent) if method == "Input.insertText")
+            await ada.send(json.dumps({"id": 3, "method": "Hang", "params": {}, "sessionId": child}))
+            await asyncio.sleep(0.1)
+        await asyncio.sleep(0.2)
+        after_leaving = log.read()
+        assert pipe.given_up == ["Hang"]
+
+    assert control.asked == [("T1", sent_before)]
+    entries = [line["action"] for line in after_leaving["lines"]]
+    assert [entry["method"] for entry in entries] == ["Target.attachToTarget", "Input.insertText", "Hang"]
+    assert entries[1]["params"] == {"text": {"length": 7}}
+    assert entries[2]["ok"] is False and entries[2]["error"] == browser_cdp.ENDED_UNANSWERED
+    assert after_leaving["last"] == 3
+
+
 def _browser(monkeypatch, tmp_path) -> Browser:
     """The browser alone, in ``tmp_path``."""
     monkeypatch.chdir(tmp_path)
@@ -287,7 +365,155 @@ def _browser(monkeypatch, tmp_path) -> Browser:
     monkeypatch.setenv("ENVIRONMENT_NAME", "chromium")
     monkeypatch.setenv(SITE_PROXY_ENV, "http://127.0.0.1:3128")
     monkeypatch.delenv(APP_SETTINGS_ENV, raising=False)
+    monkeypatch.setattr(browser_log, "LOG_DIR", tmp_path / "logs")
     return Browser()
+
+
+@pytest.mark.asyncio
+async def test_an_op_for_an_agents_tool_call_and_agentenvs_own_acting_ops_are_entries_and_its_own_reads_are_not(
+        monkeypatch, tmp_path):
+    (tmp_path / "logs").mkdir()
+    browser = _browser(monkeypatch, tmp_path)
+
+    async def navigate(url):
+        browser.control._acted_on("T1")
+
+    async def tabs():
+        return []
+
+    monkeypatch.setattr(browser.control, "navigate", navigate)
+    monkeypatch.setattr(browser.control, "tab_list", tabs)
+    monkeypatch.setattr(browser.control, "url_of", lambda target: "https://a.test/" if target else None)
+    asgi = browser.served_asgi(browser.create_app().streamable_http_app())
+
+    def tool(name: str, call: str, args: dict) -> dict:
+        return {TOOL_CALL_HEADER: tool_call_header(name, call, args)}
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=asgi), base_url="http://app") as http:
+        url = "https://a.test/?token=t"
+        await http.post("/agentenv/ext/browser/navigate", json={"url": url},
+                        headers={**tool("computer_navigate", "c1", {"url": url}), "AgentEnv-Role": "ada"})
+        await http.get("/agentenv/ext/browser/tabs/list")
+        await http.get("/agentenv/ext/browser/tabs/list", headers=tool("computer_tabs", "c2", {"action": "list"}))
+        await http.post("/agentenv/ext/browser/sites/set", json={"sites": []})
+        closed = await http.post("/agentenv/ext/browser/tabs/close", json={"tab": "nope"},
+                                 headers=tool("computer_tabs", "c3", {"action": "close", "tab": "nope"}))
+        read = (await http.get("/agentenv/ext/browser/log", params={"after": 0})).json()
+
+    redacted = f"https://a.test/?token={REDACTED}"
+    assert closed.status_code >= 400
+    assert (tmp_path / "logs" / "browser-chromium.jsonl").is_file()
+    assert [line["action"] for line in read["lines"]] == [
+        {"via": "mcp", "op": "navigate", "acts": True, "who": "ada", "tool": "computer_navigate", "call": "c1",
+         "tab": "T1", "url": "https://a.test/", "ok": True, "params": {"url": redacted}, "args": {"url": redacted}},
+        {"via": "mcp", "op": "tabs/list", "acts": False, "who": "default", "tool": "computer_tabs", "call": "c2",
+         "tab": None, "url": None, "ok": True},
+        {"via": "agentenv", "op": "sites/set", "acts": True, "tab": None, "url": None, "ok": True,
+         "params": {"sites": []}},
+        {"via": "mcp", "op": "tabs/close", "acts": True, "who": "default", "tool": "computer_tabs", "call": "c3",
+         "tab": None, "url": None, "ok": False, "error": "no tab nope is open; list the tabs for their ids",
+         "params": {"tab": "nope"}, "args": {"action": "close", "tab": "nope"}},
+    ]
+    assert read["last"] == 4 and not read["more"]
+
+
+@pytest.mark.asyncio
+async def test_a_commands_wait_for_its_password_check_lets_none_after_it_be_sent_first(tmp_path):
+    log = BrowserLog(tmp_path / "browser-chromium.jsonl")
+    async with _relay(log=log) as (pipe, relay, base):
+        control = Control(pipe)
+
+        async def slowly(target) -> bool:
+            await asyncio.sleep(0.2)
+            return False
+
+        control.password_focused = slowly
+        relay.control = control
+        async with connect(f"{base}/ada") as ada:
+            child = (await _ask(ada, {"id": 1, "method": "Target.attachToTarget",
+                                      "params": {"targetId": "T1", "flatten": True}}))["result"]["sessionId"]
+            await ada.send(json.dumps({"id": 2, "method": "Input.insertText", "params": {"text": "desk"},
+                                       "sessionId": child}))
+            await ada.send(json.dumps({"id": 3, "method": "Input.dispatchMouseEvent",
+                                       "params": {"type": "mousePressed", "x": 1, "y": 1}, "sessionId": child}))
+            answered = [json.loads(await ada.recv())["id"] for _ in range(2)]
+
+    sent = [method for method, _ in pipe.sent if method.startswith("Input.")]
+    assert sent == ["Input.insertText", "Input.dispatchMouseEvent"] and sorted(answered) == [2, 3]
+
+
+@pytest.mark.asyncio
+async def test_typing_still_waiting_for_its_check_when_its_client_leaves_is_logged_withheld(tmp_path):
+    log = BrowserLog(tmp_path / "browser-chromium.jsonl")
+    async with _relay(log=log) as (pipe, relay, base):
+        control = Control(pipe)
+
+        async def never(target) -> bool:
+            await asyncio.Event().wait()
+
+        control.password_focused = never
+        relay.control = control
+        async with connect(f"{base}/ada") as ada:
+            child = (await _ask(ada, {"id": 1, "method": "Target.attachToTarget",
+                                      "params": {"targetId": "T1", "flatten": True}}))["result"]["sessionId"]
+            for n, text in ((2, "hunter2"), (3, "hunter3")):
+                await ada.send(json.dumps({"id": n, "method": "Input.insertText", "params": {"text": text},
+                                           "sessionId": child}))
+            await asyncio.sleep(0.1)
+        await asyncio.sleep(0.2)
+
+    typed = [line["action"] for line in log.read()["lines"] if line["action"]["method"] == "Input.insertText"]
+    assert [entry["params"] for entry in typed] == [{"text": {"length": 7}}, {"text": {"length": 7}}]
+    assert all(entry["ok"] is False for entry in typed) and "hunter" not in json.dumps(log.read())
+
+
+@pytest.mark.asyncio
+async def test_typing_that_fails_before_its_check_and_a_failed_navigation_keep_no_secrets(monkeypatch, tmp_path):
+    browser = _browser(monkeypatch, tmp_path)
+
+    async def no_tab(events):
+        raise DeviceUnavailable("the browser has no tab open")
+
+    async def unreachable(url):
+        raise InvalidArgument(f"the browser couldn't open {url}: net::ERR_NAME_NOT_RESOLVED")
+
+    monkeypatch.setattr(browser.control, "dispatch", no_tab)
+    monkeypatch.setattr(browser.control, "navigate", unreachable)
+    asgi = browser.served_asgi(browser.create_app().streamable_http_app())
+    typed = [{"method": "Input.insertText", "params": {"text": "hunter2"}}]
+    url = "https://a.test/?token=secret"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=asgi), base_url="http://app") as http:
+        await http.post("/agentenv/ext/browser/page/input", json={"events": typed},
+                        headers={TOOL_CALL_HEADER: tool_call_header("computer_type", "c1", {"text": "hunter2"})})
+        await http.post("/agentenv/ext/browser/navigate", json={"url": url},
+                        headers={TOOL_CALL_HEADER: tool_call_header("computer_navigate", "c2", {"url": url})})
+        read = (await http.get("/agentenv/ext/browser/log")).json()
+
+    typing, navigating = (line["action"] for line in read["lines"])
+    assert typing["ok"] is False and typing["args"] == {"text": {"length": 7}}
+    assert typing["params"] == {"events": [{"method": "Input.insertText", "params": {"text": {"length": 7}}}]}
+    assert navigating["ok"] is False and "secret" not in navigating["error"] and REDACTED in navigating["error"]
+    assert "hunter2" not in json.dumps(read) and "secret" not in json.dumps(read)
+
+
+@pytest.mark.asyncio
+async def test_an_op_body_too_long_to_keep_is_logged_by_its_length(monkeypatch, tmp_path):
+    browser = _browser(monkeypatch, tmp_path)
+    monkeypatch.setattr("agentenv_protocol.website_browser.environment.LOGGED_BODY_BYTES", 100)
+
+    async def dispatch(events):
+        return None
+
+    monkeypatch.setattr(browser.control, "dispatch", dispatch)
+    asgi = browser.served_asgi(browser.create_app().streamable_http_app())
+    events = [{"method": "Input.insertText", "params": {"text": "x" * 200}}]
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=asgi), base_url="http://app") as http:
+        answered = await http.post("/agentenv/ext/browser/page/input", json={"events": events},
+                                   headers={TOOL_CALL_HEADER: tool_call_header("computer_type", "c1", {"text": "x"})})
+        read = (await http.get("/agentenv/ext/browser/log")).json()
+
+    assert answered.status_code == 200
+    assert read["lines"][0]["action"]["params"] == {"too_long": True, "length": len(answered.request.content)}
 
 
 @pytest.mark.asyncio

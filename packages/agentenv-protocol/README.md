@@ -1000,7 +1000,35 @@ are the profile's template. The base class adds:
   and, completed, its size and sha256; and `dialogs`, each with its type, message, default text, answer
   and who gave it.
   `hidden_page()` gives agentenv a page of its own for reading state, in no window and never in the record.
-- **`browser/v1`** on its card: `chromium` (its `version`), `clock: "real"` and, alone, `window`; and
+- **Its log**, `self.log`, a `BrowserLog` (`agentenv_protocol.website_browser.log`): one entry for each action agents take on it
+  and an event each time a tab opens, navigates or closes. Its server writes it, the one writer, to
+  `/var/log/agentenv/browser-<name>.jsonl` (its own `.agentenv/` folder when that can't be written), one JSON object a
+  line with its `seq` and `at` and one of `action`, `tab`, `outcome` or `reset`. A line's number is taken when what it
+  records begins and the line written when it ends, so `log {after}` returns lines in order up to the last whose every
+  earlier line is written (`last`), and `last` never moves back. An action still going after 60 s is written by the
+  next read as `unfinished`, so it holds back nothing after it, and once it ends an `outcome` line names it (`entry`)
+  with what it ended with. A relayed connection's commands reach the browser in the order they came. The file lasts the
+  computer's boot, a restarted server carrying on the sequence and the
+  browser's own reset (`data/reset`) being a line. A computer's `reset_env` boots it afresh, with a new log, so a task
+  that needs the one before takes it first, with `snapshot_env`.
+  - **An action** is a CDP command through the relay (`via: "cdp"`, `who` the connection's user, its `connection`
+    number, `method`, and the tab its session is on), an op a driver makes for an agent's MCP tool call (`via: "mcp"`,
+    `who` the caller's role, `tool`, `call`, `op`), or an acting op agentenv makes itself (`via: "agentenv"`). Each
+    carries `tab`, `url`, `ok` and, failed, `error`, and is marked `acts` or not by its method or op
+    (`log.acts`, `ACTING_OPS`): input, navigation, tab commands, `Runtime.evaluate` and `callFunctionOn`, DOM
+    writes, faked responses, and viewport and cookie changes act; the rest read. An acting entry keeps its `params`
+    (and a tool call's `args`) with what could carry a secret taken out: text typed while a password field has focus,
+    as its length; cookie and header values; the values of URL query keys that name a credential; a request's body;
+    and each string past 2 KB cut, with its length and sha256. A reading entry keeps none.
+  - **A tab event** (`opened`, `navigated`, `closed`) says what caused it: `by: "command"` with the `entry`, `via` and
+    `who` of the command that asked for it, matched exactly by the target a new tab's command answers with and the
+    loader a navigation's does; `by: "agentenv"`; `exit` or `stop`; or `by: "page"`, with the `after` of the latest
+    acting entry on its tab (its opener's, for a popup), for a click that follows a link, a redirect or a page script.
+  - A driver passes an agent's tool call to the browser in the `AgentEnv-Tool-Call` header (`tool_call_header`), with
+    the caller's `AgentEnv-Role`; the page driver sends it on every call it makes for a tool. `data/get` writes the log
+    beside `browser-state.json` as `browser-log.jsonl`, which `data/add` passes over.
+- **`browser/v1`** on its card: `chromium` (its `version`), `clock: "real"` and, alone, `window`; `log {after}`
+  (GET), framework-only, its log's lines after `after`; and
   `record` (GET), framework-only, which returns that record with `launches`, the app server's log of each
   launch (with its cause: `boot`, `server_restart`, `launch`, `data/add` or `data/reset`), each stop it made
   and each exit it didn't, with its exit `code` or the `signal` that ended it, since the computer booted.
