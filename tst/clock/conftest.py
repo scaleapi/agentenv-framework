@@ -62,7 +62,7 @@ def _chrome_pin(arch: str) -> tuple[str, str, str]:
 
 @pytest.fixture(scope="session")
 def gate(tmp_path_factory):
-    """Run one of harness.py's gates in a fresh container: gate(NAME, *ARGS) -> its JSON."""
+    """Run one of harness.py's gates in a fresh container: gate(NAME, *ARGS, docker_args=()) -> its JSON."""
     arch = subprocess.run(["docker", "version", "--format", "{{.Server.Arch}}"], capture_output=True, text=True,
                           check=True).stdout.strip()
     url, sha256, packages = _chrome_pin(arch)
@@ -78,10 +78,35 @@ def gate(tmp_path_factory):
                             "--build-arg", f"CHROME_PACKAGES={packages}", str(context)], capture_output=True, text=True)
     assert built.returncode == 0, f"the gate image didn't build:\n{built.stderr[-4000:]}"
 
-    def run(name: str, *args, timeout: float = 600):
-        r = subprocess.run(["docker", "run", "--rm", "--shm-size=1g", IMAGE, "python3", "/opt/clock/harness.py", name,
-                            *map(str, args)], capture_output=True, text=True, timeout=timeout)
+    def run(name: str, *args, timeout: float = 600, docker_args=()):
+        r = subprocess.run(["docker", "run", "--rm", "--shm-size=1g", *docker_args, IMAGE, "python3",
+                            "/opt/clock/harness.py", name, *map(str, args)], capture_output=True, text=True,
+                           timeout=timeout)
         assert r.returncode == 0, f"gate {name} failed:\n{r.stderr[-3000:]}"
         return json.loads(r.stdout)
 
     return run
+
+
+#: futex_waitv answered ENOSYS, as a kernel before 5.16 or gVisor answers it; everything else allowed.
+NO_FUTEX_WAITV = {"defaultAction": "SCMP_ACT_ALLOW",
+                  "syscalls": [{"names": ["futex_waitv"], "action": "SCMP_ACT_ERRNO", "errnoRet": 38}]}
+
+
+@pytest.fixture(scope="session")
+def gate_without_waitv(gate, tmp_path_factory):
+    """``gate`` in containers whose seccomp profile refuses futex_waitv, checked to refuse it."""
+    profile = tmp_path_factory.mktemp("seccomp") / "no-futex-waitv.json"
+    profile.write_text(json.dumps(NO_FUTEX_WAITV))
+
+    def run(name: str, *args, timeout: float = 600):
+        return gate(name, *args, timeout=timeout, docker_args=["--security-opt", f"seccomp={profile}"])
+
+    assert run("probe") == {"futex_waitv_errno": 38}
+    return run
+
+
+@pytest.fixture(scope="module", params=["futex_waitv", "without futex_waitv"])
+def waits_gate(request, gate, gate_without_waitv):
+    """The gates for waits that use futex_waitv, run with it and without it (where they wait in slices instead)."""
+    return gate if request.param == "futex_waitv" else gate_without_waitv

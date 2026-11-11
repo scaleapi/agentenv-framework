@@ -22,7 +22,7 @@ RUN /opt/clock-src/build.sh /opt/clock/lib /tmp/lft.tgz \
     && mkdir -p /etc/agentenv /run/agentenv-clock && cp /opt/clock-src/clock.conf /etc/agentenv/clock.conf
 COPY programs /opt/clock/programs
 RUN mkdir -p /opt/clock/bin /opt/clock/java && cd /opt/clock/programs \
-    && for p in uwait jumpwaits condstress2 semstress envrace rtread torn; do \
+    && for p in uwait jumpwaits condstress2 semstress envrace rtread torn cancel tfdalias; do \
         gcc -O2 -o /opt/clock/bin/$p $p.c -lpthread || exit 1; done \
     && javac -d /opt/clock/java UWait.java && chmod 755 marker.sh
 COPY harness.py /opt/clock/harness.py

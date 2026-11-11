@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * agent-env's additions to libfaketime 0.9.12, part 1, included by libfaketime.c (libfaketime.patch) before its
- * time functions: the process's settings, read once at load from /etc/agentenv/clock.conf and the environment, so no
- * getenv() runs after main() starts; who is faked (the session user, unless started with AGENTENV_REAL_TIME=1, a marker
+ * time functions: the process's settings, read once at load from /etc/agentenv/clock.conf, or from the environment
+ * where there is no such file, so no getenv() runs after main() starts; who is faked (the session user, unless started with AGENTENV_REAL_TIME=1, a marker
  * taken out of the environment block in place); and the clock page the follower writes, read without a cache.
  * Derived from libfaketime, so licensed as it is, under the GNU General Public License version 2 (COPYING).
  */

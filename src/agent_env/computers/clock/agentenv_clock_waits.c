@@ -226,11 +226,12 @@ static void ft_tab_unlock(const sigset_t *old)
  * now), its interval at interval / rate, and disarmed while frozen short of it; the helper arms it again on each change.
  * A one-shot timer that has fired is left alone. ----
  */
+#define FT_TIMER_FDS 8
 struct ft_timer
 {
   int kind;                      /* 0 free, 1 timerfd, 2 POSIX timer */
   int tracked;                   /* armed for a realtime clock time */
-  int fd;
+  int nfds, fds[FT_TIMER_FDS];   /* a timerfd's descriptors: the one it was armed through and its duplicates */
   timer_t id;
   int clock;
   int flags;                     /* the caller's flags, TFD_TIMER_CANCEL_ON_SET kept */
@@ -252,7 +253,9 @@ static int ft_tfd_clock[FT_TFD_CLOCKS];   /* clock + 1 as timerfd_create was tol
 static struct ft_timer *ft_timer_find_fd(int fd)
 {
   for (int i = 0; i < ft_timers_top; i++)
-    if (ft_timers[i].kind == 1 && ft_timers[i].fd == fd) return &ft_timers[i];
+    if (ft_timers[i].kind == 1)
+      for (int k = 0; k < ft_timers[i].nfds; k++)
+        if (ft_timers[i].fds[k] == fd) return &ft_timers[i];
   return NULL;
 }
 static struct ft_timer *ft_timer_find_id(timer_t id)
@@ -274,7 +277,7 @@ static struct ft_timer *ft_timer_new(void)
 }
 static int ft_timer_real_get(struct ft_timer *t, struct itimerspec *cur)
 {
-  return t->kind == 1 ? (*real_timerfd_gettime)(t->fd, cur) : (*real_timer_gettime_new)(t->id, cur);
+  return t->kind == 1 ? (*real_timerfd_gettime)(t->fds[0], cur) : (*real_timer_gettime_new)(t->id, cur);
 }
 /* the next expiration at or after ``after``. */
 static int64_t ft_timer_next(const struct ft_timer *t, int64_t after)
@@ -314,7 +317,7 @@ static int ft_timer_arm(struct ft_timer *t, const struct ft_clock_page *s, bool 
   t->pg = *s;
   t->real_set = (at != FT_NEVER);
   if (t->kind == 1)
-    r = (*real_timerfd_settime)(t->fd, TFD_TIMER_ABSTIME | (t->flags & TFD_TIMER_CANCEL_ON_SET), &real, NULL);
+    r = (*real_timerfd_settime)(t->fds[0], TFD_TIMER_ABSTIME | (t->flags & TFD_TIMER_CANCEL_ON_SET), &real, NULL);
   else
     r = (*real_timer_settime_new)(t->id, TIMER_ABSTIME, &real, NULL);
   if (r != 0) t->tracked = 0;
@@ -481,35 +484,69 @@ static void ft_helper_start(void)
 
 /* ---- the waits ---- */
 
+/* the raw system calls below as the cancellation points their callers are (clock_nanosleep, sem_timedwait): cancellation
+   acted on at once for the call alone, as glibc's own waits were before its cancellable system call wrapper. */
+static inline int ft_async_cancel(void)
+{
+  int old;
+  pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, &old);
+  return old;
+}
+static inline void ft_deferred_cancel(int old)
+{
+  int e = errno, ignored;
+  pthread_setcanceltype(old, &ignored);
+  errno = e;
+}
+
 /* a sleep until the universe reaches ``due``, on the page's seq. 0, or EINTR. */
 static int ft_rt_sleep(const struct ft_clock_page *first, int64_t due)
 {
   struct ft_clock_page s = *first;
+  pthread_testcancel();
   for (;;)
   {
     uint32_t seq32 = (uint32_t) s.seq;
     int64_t until;
     struct timespec ts;
+    long r;
+    int ct;
     if (ft_reached(&s, due)) return 0;
     until = ft_real_of(&s, due);
     ts = ft_ts(until);
-    if (ft_raw_syscall6(SYS_futex, (long) &ft_page->seq, FUTEX_WAIT_BITSET | FUTEX_CLOCK_REALTIME, (long) seq32,
-                        until == FT_NEVER ? 0 : (long) &ts, 0, FUTEX_BITSET_MATCH_ANY) == -1 && errno == EINTR)
-      return EINTR;
+    ct = ft_async_cancel();
+    r = ft_raw_syscall6(SYS_futex, (long) &ft_page->seq, FUTEX_WAIT_BITSET | FUTEX_CLOCK_REALTIME, (long) seq32,
+                        until == FT_NEVER ? 0 : (long) &ts, 0, FUTEX_BITSET_MATCH_ANY);
+    ft_deferred_cancel(ct);
+    if (r == -1 && errno == EINTR) return EINTR;
     if (!ft_snap(&s)) return 0;
   }
 }
 
 struct ft_futex_waitv { uint64_t val, uaddr; uint32_t flags, reserved; };
 static volatile int ft_waitv_missing = 0;
-enum { FT_W_WORD, FT_W_PAGE, FT_W_TIMEOUT, FT_W_INTR, FT_W_NOSYS };
+enum { FT_W_WORD, FT_W_PAGE, FT_W_TIMEOUT, FT_W_INTR };
+/* without futex_waitv (before Linux 5.16, under gVisor, or refused by a seccomp filter): the word alone, until the real
+   deadline or a slice (AGENTENV_WAIT_SLICE_MS) at most, and the caller reads the page again between slices. */
+static int ft_wait1(uint32_t *word, uint32_t val, bool private_word, int64_t until)
+{
+  int64_t end = ft_real_rt() + ft_wait_slice_ns;
+  struct timespec ts;
+  if (until < end) end = until;
+  ts = ft_ts(end);
+  if (ft_raw_syscall6(SYS_futex, (long) word,
+                      FUTEX_WAIT_BITSET | FUTEX_CLOCK_REALTIME | (private_word ? FUTEX_PRIVATE_FLAG : 0), (long) val,
+                      (long) &ts, 0, FUTEX_BITSET_MATCH_ANY) == 0 || errno == EAGAIN)
+    return FT_W_WORD;
+  return errno == EINTR ? FT_W_INTR : FT_W_PAGE;
+}
 /* until *word isn't val, the page changes from seq32, or real realtime ``until``. */
 static int ft_wait2(uint32_t *word, uint32_t val, bool private_word, uint32_t seq32, int64_t until)
 {
   struct ft_futex_waitv w[2];
   struct timespec ts = ft_ts(until);
   long r;
-  if (ft_waitv_missing) return FT_W_NOSYS;
+  if (ft_waitv_missing) return ft_wait1(word, val, private_word, until);
   /* the page first: futex_waitv returns the last of the futexes woken, so a caller's wake is never taken for the page's */
   w[0].val = seq32;
   w[0].uaddr = (uint64_t) (uintptr_t) &ft_page->seq;
@@ -526,7 +563,7 @@ static int ft_wait2(uint32_t *word, uint32_t val, bool private_word, uint32_t se
   if (errno == ETIMEDOUT) return FT_W_TIMEOUT;
   if (errno == EINTR) return FT_W_INTR;
   ft_waitv_missing = 1;
-  return FT_W_NOSYS;
+  return ft_wait1(word, val, private_word, until);
 }
 
 /* futex(2) FUTEX_WAIT_BITSET|FUTEX_CLOCK_REALTIME through syscall(): until the universe reaches the deadline,
@@ -536,7 +573,7 @@ static long ft_u_futex_rt(uint32_t *uaddr, int op, uint32_t val, const struct ti
   struct ft_clock_page s;
   int64_t due = ft_ns(abs);
   *handled = false;
-  if (ft_waitv_missing || !ft_snap(&s)) return 0;
+  if (!ft_snap(&s)) return 0;
   *handled = true;
   for (;;)
   {
@@ -562,11 +599,6 @@ static long ft_u_futex_rt(uint32_t *uaddr, int op, uint32_t val, const struct ti
       errno = EINTR;
       return -1;
     }
-    if (k == FT_W_NOSYS)
-    {
-      struct timespec t = ft_ts(ft_real_of(&s, due));
-      return ft_raw_syscall6(SYS_futex, (long) uaddr, op, (long) val, (long) &t, 0, FUTEX_BITSET_MATCH_ANY);
-    }
     if (!ft_snap(&s)) return 0;
   }
 }
@@ -576,42 +608,36 @@ static long ft_u_futex_rt(uint32_t *uaddr, int op, uint32_t val, const struct ti
    futex the value word, which sem_post wakes when there are waiters; ``private`` is glibc's futex flag the other way
    round (0 for a process-private semaphore, FUTEX_PRIVATE_FLAG for a shared one). */
 struct ft_new_sem { uint64_t data; int private_flag; int pad; };
-static int ft_u_sem_wait(sem_t *sem_, int64_t due, bool *handled)
+static void ft_sem_unwait(void *sem)
 {
-  struct ft_new_sem *sem = (struct ft_new_sem *) sem_;
-  struct ft_clock_page s;
-  uint64_t d;
-  int err = 0;
-  *handled = false;
-  if (ft_waitv_missing || sizeof(sem_t) < sizeof(struct ft_new_sem) || !ft_snap(&s)) return 0;
-  *handled = true;
-  d = __atomic_load_n(&sem->data, __ATOMIC_RELAXED);
-  while ((d & 0xffffffffu) > 0)
-    if (__atomic_compare_exchange_n(&sem->data, &d, d - 1, true, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return 0;
-  d = __atomic_fetch_add(&sem->data, (uint64_t) 1 << 32, __ATOMIC_RELAXED);
+  __atomic_fetch_sub(&((struct ft_new_sem *) sem)->data, (uint64_t) 1 << 32, __ATOMIC_RELAXED);
+}
+/* as one of the semaphore's waiters (counted in data's high word): 0 with a token taken, or the error. A cancelled wait
+   leaves the waiters it joined, as glibc's does. */
+static int ft_sem_wait_slow(struct ft_new_sem *sem, struct ft_clock_page *s, int64_t due)
+{
+  volatile int err = 0;
+  pthread_cleanup_push(ft_sem_unwait, sem);
+  uint64_t d = __atomic_fetch_add(&sem->data, (uint64_t) 1 << 32, __ATOMIC_RELAXED);
   for (;;)
   {
     if ((d & 0xffffffffu) == 0)
     {
-      int k;
-      if (ft_reached(&s, due))
+      int k, ct;
+      if (ft_reached(s, due))
       {
         err = ETIMEDOUT;
         break;
       }
-      k = ft_wait2((uint32_t *) &sem->data, 0, sem->private_flag == 0, (uint32_t) s.seq, ft_real_of(&s, due));
+      ct = ft_async_cancel();
+      k = ft_wait2((uint32_t *) &sem->data, 0, sem->private_flag == 0, (uint32_t) s->seq, ft_real_of(s, due));
+      ft_deferred_cancel(ct);
       if (k == FT_W_INTR)
       {
         err = EINTR;
         break;
       }
-      if (k == FT_W_NOSYS)
-      {
-        struct timespec t = {0, 100000000};
-        ft_raw_syscall6(SYS_futex, (long) &sem->data, (FUTEX_WAIT | FUTEX_PRIVATE_FLAG) ^ sem->private_flag, 0,
-                        (long) &t, 0, 0);
-      }
-      if (!ft_snap(&s))
+      if (!ft_snap(s))
       {
         err = ETIMEDOUT;
         break;
@@ -620,11 +646,46 @@ static int ft_u_sem_wait(sem_t *sem_, int64_t due, bool *handled)
     }
     else if (__atomic_compare_exchange_n(&sem->data, &d, d - 1 - ((uint64_t) 1 << 32), true, __ATOMIC_ACQUIRE,
                                          __ATOMIC_RELAXED))
-      return 0;
+      break;
   }
-  __atomic_fetch_sub(&sem->data, (uint64_t) 1 << 32, __ATOMIC_RELAXED);
+  pthread_cleanup_pop(err != 0);
+  return err;
+}
+static int ft_u_sem_wait(sem_t *sem_, int64_t due, bool *handled)
+{
+  struct ft_new_sem *sem = (struct ft_new_sem *) sem_;
+  struct ft_clock_page s;
+  uint64_t d;
+  int err;
+  *handled = false;
+  if (sizeof(sem_t) < sizeof(struct ft_new_sem) || !ft_snap(&s)) return 0;
+  *handled = true;
+  pthread_testcancel();
+  d = __atomic_load_n(&sem->data, __ATOMIC_RELAXED);
+  while ((d & 0xffffffffu) > 0)
+    if (__atomic_compare_exchange_n(&sem->data, &d, d - 1, true, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return 0;
+  err = ft_sem_wait_slow(sem, &s, due);
+  if (err == 0) return 0;
   errno = err;
   return -1;
+}
+
+static void ft_cw_release(void *w)
+{
+  sigset_t old;
+  ft_tab_lock(&old);
+  ((struct ft_cw *) w)->used = 0;
+  ft_tab_unlock(&old);
+}
+/* glibc's wait, a cancellation point: a cancelled wait gives up its entry, so the helper never wakes a condvar that
+   may be gone. */
+static int ft_cw_clockwait(struct ft_cw *w, pthread_cond_t *cond, pthread_mutex_t *mutex, const struct timespec *end)
+{
+  volatile int r;
+  pthread_cleanup_push(ft_cw_release, w);
+  r = real_pthread_cond_clockwait(cond, mutex, CLOCK_REALTIME, end);
+  pthread_cleanup_pop(0);
+  return r;
 }
 
 /* a realtime condvar wait (see ft_cw). -1 leaves it to the caller's own path (no page, table full). */
@@ -664,7 +725,7 @@ static int ft_u_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex, const st
   w->gen = s.generation;
   ft_tab_unlock(&old);
   end = ft_ts(real_due == FT_NEVER ? ft_real_rt() + 86400 * FT_NS : real_due);
-  r = real_pthread_cond_clockwait(cond, mutex, CLOCK_REALTIME, &end);
+  r = ft_cw_clockwait(w, cond, mutex, &end);
   ft_tab_lock(&old);
   woken = w->woken;
   w->used = 0;
@@ -737,7 +798,7 @@ long syscall(long number, ...)
 static int ft_u_timerfd_settime(int fd, int flags, const struct itimerspec *nv, struct itimerspec *ov, bool *handled)
 {
   struct ft_clock_page s;
-  struct ft_timer *t;
+  struct ft_timer *t = NULL;
   struct itimerspec prev;
   sigset_t old;
   int clock, r;
@@ -750,14 +811,11 @@ static int ft_u_timerfd_settime(int fd, int flags, const struct itimerspec *nv, 
   {
     ft_tab_lock(&old);
     t = ft_timer_find_fd(fd);
-    if (t != NULL)
+    if (t != NULL && t->tracked)
     {
-      if (t->tracked)
-      {
-        ft_timer_value(t, &prev);
-        was = true;
-      }
-      t->kind = 0;
+      ft_timer_value(t, &prev);
+      was = true;
+      t->tracked = 0;   /* the record stays, with the timer's descriptors, while any is open */
     }
     ft_tab_unlock(&old);
   }
@@ -769,15 +827,18 @@ static int ft_u_timerfd_settime(int fd, int flags, const struct itimerspec *nv, 
     return r;
   }
   ft_tab_lock(&old);
-  t = ft_timer_new();
+  if ((t = ft_timer_find_fd(fd)) == NULL && (t = ft_timer_new()) != NULL)
+  {
+    t->kind = 1;
+    t->nfds = 1;
+    t->fds[0] = fd;
+  }
   if (t == NULL)
   {
     ft_tab_unlock(&old);
     *handled = false;   /* table full: the caller's own (translated once) path */
     return 0;
   }
-  t->kind = 1;
-  t->fd = fd;
   t->clock = clock;
   t->flags = flags;
   t->due = ft_ns(&nv->it_value);
@@ -791,7 +852,7 @@ static int ft_u_timerfd_settime(int fd, int flags, const struct itimerspec *nv, 
       (*real_timerfd_gettime)(fd, ov);
   }
   r = ft_timer_arm(t, &s, true);
-  if (r != 0) t->kind = 0;
+  if (r != 0) t->tracked = 0;
   ft_timers_any = 1;
   ft_tab_unlock(&old);
   if (r == 0) ft_helper_start();
@@ -812,6 +873,142 @@ static int ft_u_timerfd_gettime(int fd, struct itimerspec *cur, bool *handled)
   }
   ft_tab_unlock(&old);
   return 0;
+}
+
+/*
+ * ---- descriptors: a timerfd's record follows its file, not a number. close() takes a descriptor off it (the record goes
+ * with the last), dup() and its kin add the new one, so the helper never arms a number the program has closed or that
+ * now names another file. A number closed where this can't see (closefrom, a raw system call) is dropped when
+ * timerfd_create hands it out again; a timer with more duplicates than a record holds is left armed as it was. ----
+ */
+static int (*ft_real_close)(int);
+static int (*ft_real_dup)(int);
+static int (*ft_real_dup2)(int, int);
+static int (*ft_real_dup3)(int, int, int);
+static int (*ft_real_fcntl)(int, int, ...);
+static int (*ft_real_fcntl64)(int, int, ...);
+static int (*ft_real_close_range)(unsigned int, unsigned int, int);
+#define FT_RESOLVE(name) do { if (ft_real_##name == NULL) ft_real_##name = dlsym(RTLD_NEXT, #name); } while (0)
+
+static inline bool ft_tfd_known(int fd)
+{
+  return fd >= 0 && fd < FT_TFD_CLOCKS && __atomic_load_n(&ft_tfd_clock[fd], __ATOMIC_RELAXED) != 0;
+}
+/* ``fd`` closed, or about to name another file. Lock held. */
+static void ft_fd_gone_locked(int fd)
+{
+  struct ft_timer *t;
+  ft_tfd_clock[fd] = 0;
+  while ((t = ft_timer_find_fd(fd)) != NULL)
+  {
+    int k = 0;
+    while (t->fds[k] != fd) k++;
+    t->fds[k] = t->fds[--t->nfds];
+    if (t->nfds == 0) t->kind = 0;
+  }
+}
+static void ft_fd_gone(int fd)
+{
+  sigset_t old;
+  if (!ft_tfd_known(fd)) return;
+  ft_tab_lock(&old);
+  ft_fd_gone_locked(fd);
+  ft_tab_unlock(&old);
+}
+/* ``to`` now names ``from``'s file. */
+static void ft_fd_duped(int from, int to)
+{
+  sigset_t old;
+  struct ft_timer *t;
+  if (!ft_tfd_known(from) || to < 0 || to >= FT_TFD_CLOCKS) return;
+  ft_tab_lock(&old);
+  ft_tfd_clock[to] = ft_tfd_clock[from];
+  if ((t = ft_timer_find_fd(from)) != NULL)
+  {
+    if (t->nfds < FT_TIMER_FDS)
+      t->fds[t->nfds++] = to;
+    else
+      t->kind = 0;
+  }
+  ft_tab_unlock(&old);
+}
+
+int close(int fd)
+{
+  ft_fd_gone(fd);
+  FT_RESOLVE(close);
+  return (*ft_real_close)(fd);
+}
+int dup(int fd)
+{
+  int r;
+  FT_RESOLVE(dup);
+  r = (*ft_real_dup)(fd);
+  if (r >= 0) ft_fd_duped(fd, r);
+  return r;
+}
+int dup2(int fd, int fd2)
+{
+  int r;
+  if (fd != fd2) ft_fd_gone(fd2);
+  FT_RESOLVE(dup2);
+  r = (*ft_real_dup2)(fd, fd2);
+  if (r >= 0 && fd != fd2) ft_fd_duped(fd, r);
+  return r;
+}
+int dup3(int fd, int fd2, int flags)
+{
+  int r;
+  if (fd != fd2) ft_fd_gone(fd2);
+  FT_RESOLVE(dup3);
+  r = (*ft_real_dup3)(fd, fd2, flags);
+  if (r >= 0) ft_fd_duped(fd, r);
+  return r;
+}
+/* the argument passed on as glibc's own fcntl reads it, a pointer-sized word whatever the command */
+int fcntl(int fd, int cmd, ...)
+{
+  va_list ap;
+  void *arg;
+  int r;
+  va_start(ap, cmd);
+  arg = va_arg(ap, void *);
+  va_end(ap);
+  FT_RESOLVE(fcntl);
+  r = (*ft_real_fcntl)(fd, cmd, arg);
+  if (r >= 0 && (cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC)) ft_fd_duped(fd, r);
+  return r;
+}
+int fcntl64(int fd, int cmd, ...)
+{
+  va_list ap;
+  void *arg;
+  int r;
+  va_start(ap, cmd);
+  arg = va_arg(ap, void *);
+  va_end(ap);
+  FT_RESOLVE(fcntl64);
+  r = (*ft_real_fcntl64)(fd, cmd, arg);
+  if (r >= 0 && (cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC)) ft_fd_duped(fd, r);
+  return r;
+}
+int close_range(unsigned int first, unsigned int last, int flags)
+{
+  if (!(flags & CLOSE_RANGE_CLOEXEC))
+    for (unsigned int fd = first; fd <= last && fd < FT_TFD_CLOCKS; fd++) ft_fd_gone((int) fd);
+  FT_RESOLVE(close_range);
+  return (*ft_real_close_range)(first, last, flags);
+}
+/* resolved at load, so a first close() in a signal handler doesn't call dlsym */
+static void __attribute__((constructor)) ft_fd_init(void)
+{
+  FT_RESOLVE(close);
+  FT_RESOLVE(dup);
+  FT_RESOLVE(dup2);
+  FT_RESOLVE(dup3);
+  FT_RESOLVE(fcntl);
+  FT_RESOLVE(fcntl64);
+  FT_RESOLVE(close_range);
 }
 
 /* ---- POSIX timers (unversioned: upstream's GLIBC_2.2 / 2.3.3 versions don't bind glibc 2.34's timer_settime) ---- */

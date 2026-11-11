@@ -2,13 +2,16 @@
 processes real, so this driver is on real time while it writes the clock page as the follower would, and every program
 under test runs as the session user, whom the library fakes. Each gate prints one JSON document on stdout.
 
-  harness.py waits | ratechange | jumps [ROUNDS] | condstress [SECONDS] | semstress [SECONDS] | stall | torn [SECONDS]
-             | marker | identity | envrace [SECONDS] | chromium [OURS STOCK PARALLEL]
+  harness.py waits | ratechange | jumps [ROUNDS] | cancel | timerfds | condstress [SECONDS] | semstress [SECONDS]
+             | stall | torn [SECONDS] | deadwriter | marker | identity | envrace [SECONDS]
+             | chromium [OURS STOCK PARALLEL] | probe
 """
+import ctypes
 import json
 import os
 import random
 import select
+import struct
 import subprocess
 import sys
 import time
@@ -243,6 +246,51 @@ def jumps(rounds=30, seed=5420):
     return {"rounds": out, "mono_back_total": out[-1]["mono_back"], "mono_rate_final": out[-1]["mono_rate"]}
 
 
+def _jumped(argv, jump: float) -> dict:
+    """``argv`` as the session user, jumped ``jump`` seconds 0.3 s after it prints READY: its two JSON lines, before
+    READY and after the jump, and when the jump's write ended (raw)."""
+    p = subprocess.Popen(user_cmd(argv), stdout=subprocess.PIPE, text=True, cwd="/tmp")
+    first = None
+    for line in p.stdout:
+        if line.strip() == "READY":
+            break
+        first = json.loads(line)
+    time.sleep(0.3)
+    advance(jump)
+    written = raw()
+    out, _ = p.communicate(timeout=30)
+    return {"before": first, "after": json.loads(out), "written_raw": written}
+
+
+def cancel():
+    """Waits for a clock time cancelled (cancel.c): sem_timedwait and clock_nanosleep threads go at once, the semaphore
+    keeps no waiter for one, and after 600 cancelled condvar waits a condvar wait still ends at a jump past its deadline."""
+    preload()
+    fresh_page()
+    set_clock(time.time() - 182 * DAY, 1)
+    r = _jumped(["cancel"], 2 * 3600)
+    preload(None)
+    after = r["after"]
+    return {**r["before"], "rc": after["rc"],
+            "after_jump_ms": round((after["fired_raw"] / 1e9 - r["written_raw"]) * 1e3, 3) if after["fired_raw"] else None}
+
+
+def timerfds():
+    """A timerfd's tracking through its duplicates (tfdalias.c), one run per way of making one, each jumped 2 h."""
+    preload()
+    fresh_page()
+    set_clock(time.time() - 182 * DAY, 1)
+    out = {}
+    for how in ("dup", "dup2", "dup3", "fcntl", "close_range"):
+        r = _jumped(["tfdalias", how], 2 * 3600)
+        a = r["after"]
+        out[how] = {"same_number": a["same_number"], "a2_count": a["a2_count"], "o_fired_early": a["o_fired_early"],
+                    "a2_after_jump_ms": round((a["a2_fired_raw"] / 1e9 - r["written_raw"]) * 1e3, 3)
+                    if a["a2_fired_raw"] else None}
+    preload(None)
+    return out
+
+
 def _with_page_changes(p) -> int:
     """+10 min every 0.5 s while ``p`` runs; how many."""
     n = 0
@@ -370,6 +418,23 @@ def torn(seconds=10.0):
     return {"writes": writes, **json.loads(o)}
 
 
+def deadwriter():
+    """A writer that died mid-write leaves seq odd; the next write takes the page up, as given, and readers follow it."""
+    preload()
+    fresh_page()
+    set_clock(time.time() - 182 * DAY, 1)
+    m = clockpage.open_page()
+    seq = struct.unpack("<Q", m[8:16])[0] + 1
+    m[8:16] = struct.pack("<Q", seq)
+    m.close()
+    before = time.time()
+    written = set_clock(time.time() + 21 * DAY, 1)
+    after = float(subprocess.run(user_cmd(["date", "+%s.%N"]), capture_output=True, text=True).stdout)
+    preload(None)
+    return {"dead_seq": seq, "seq": page()[2], "continued": written["continued"],
+            "read": _classify(after, before, 21 * DAY)}
+
+
 def _classify(value: float, before: float, universe_offset: float) -> object:
     if abs(value - before) < 30:
         return "real"
@@ -481,8 +546,15 @@ def chromium(ours=60, stock=10, parallel=8, stock_limit=3.0):
     return {"seconds": round(took, 2), "parallel": parallel, **summary}
 
 
-GATES = {f.__name__: f for f in (waits, ratechange, jumps, condstress, semstress, stall, torn, marker, identity, envrace,
-                                 chromium)}
+def probe():
+    """This container's answer to futex_waitv: the errno of an empty call (EINVAL where the kernel has it)."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    r = libc.syscall(ctypes.c_long(449), None, ctypes.c_uint(0), ctypes.c_uint(0), None, ctypes.c_int(0))
+    return {"futex_waitv_errno": ctypes.get_errno() if r == -1 else 0}
+
+
+GATES = {f.__name__: f for f in (waits, ratechange, jumps, cancel, timerfds, condstress, semstress, stall, torn,
+                                 deadwriter, marker, identity, envrace, chromium, probe)}
 
 if __name__ == "__main__":
     gate, args = GATES[sys.argv[1]], [float(a) if "." in a else int(a) for a in sys.argv[2:]]

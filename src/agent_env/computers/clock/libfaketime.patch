@@ -4,9 +4,9 @@ also copies in agentenv_clock_page.c and agentenv_clock_waits.c, included where 
 so licensed as libfaketime is, under the GNU General Public License version 2 (COPYING).
 
 diff -ruN a/src/libfaketime.c b/src/libfaketime.c
---- pa/src/libfaketime.c	2026-11-11 09:07:01
-+++ pb/src/libfaketime.c	2026-11-11 09:07:01
-@@ -231,12 +231,15 @@
+--- a/src/libfaketime.c
++++ b/src/libfaketime.c
+@@ -231,11 +231,14 @@
  static int          (*real___clock_gettime)   (clockid_t clk_id, struct timespec *tp);
  #endif
  #ifdef FAKE_PTHREAD
@@ -20,13 +20,12 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
 +static int          (*real_pthread_cond_clockwait)      (pthread_cond_t *, pthread_mutex_t*, clockid_t, const struct timespec *);
 +static int          (*real_pthread_mutex_timedlock)     (pthread_mutex_t *, const struct timespec *);
 +static int          (*real_pthread_mutex_clocklock)     (pthread_mutex_t *, clockid_t, const struct timespec *);
- #endif
++#endif
 +#ifdef FAKE_TIMERS
 +static int          (*real_timerfd_create)              (int, int);
-+#endif
+ #endif
  
  #ifndef __APPLE__
- #ifdef FAKE_TIMERS
 @@ -334,6 +337,7 @@
  bool          str_array_contains(const char *haystack, const char *needle);
  void *ft_dlvsym(void *handle, const char *symbol, const char *version, const char *full_name, char *ignore_list, bool should_debug_dlsym);
@@ -159,7 +158,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
    if (real_nanosleep == NULL)
    {
      return -1;
-@@ -1395,14 +1418,40 @@
+@@ -1395,13 +1418,39 @@
    struct timespec real_req;
  
    ftpl_init();
@@ -178,7 +177,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
    {
 -    if (flags & TIMER_ABSTIME) /* sleep until absolute time */
 +    if ((flags & TIMER_ABSTIME) && clock_id == CLOCK_REALTIME && ft_translates_wait(req))
-     {
++    {
 +      struct timespec mono, slice;
 +      unsigned long gen;
 +      bool last;
@@ -197,10 +196,9 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
 +      real_req = *req;
 +    }
 +    else if (flags & TIMER_ABSTIME) /* sleep until absolute time */
-+    {
+     {
        struct timespec tdiff, timeadj;
        timespecsub(req, &user_faked_time_timespec, &timeadj);
-       if (user_rate_set)
 @@ -1482,6 +1531,7 @@
    int result;
  
@@ -291,18 +289,12 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
 -int sem_timedwait(sem_t *sem, const struct timespec *abs_timeout)
 +static int ft_sem_wait_until(sem_t *sem, const struct timespec *fake_abs)
  {
-+  struct timespec mono, slice;
-+  unsigned long gen;
-+  bool last;
-   int result;
+-  int result;
 -  struct timespec real_abs_timeout, *real_abs_timeout_pt;
 -
 -  /* sanity check */
 -  if (abs_timeout == NULL)
-+  ft_deadline_from_fake(CLOCK_MONOTONIC, fake_abs, &mono);
-+  gen = ft_tl_gen;
-+  for (;;)
-   {
+-  {
 -    return -1;
 -  }
 -
@@ -315,6 +307,14 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
 -    timespecsub(abs_timeout, &user_faked_time_timespec, &tdiff);
 -
 -    if (user_rate_set)
++  struct timespec mono, slice;
++  unsigned long gen;
++  bool last;
++  int result;
++  ft_deadline_from_fake(CLOCK_MONOTONIC, fake_abs, &mono);
++  gen = ft_tl_gen;
++  for (;;)
++  {
 +    last = ft_slice_end(&mono, &slice);
 +    DONT_FAKE_TIME(result = (*real_sem_clockwait)(sem, CLOCK_MONOTONIC, &slice));
 +    if (result == 0 || errno != ETIMEDOUT) return result;
@@ -330,12 +330,12 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
 -    }
 -    timespecadd(&ftpl_starttime.real, &timeadj, &real_abs_timeout);
 -    real_abs_timeout_pt = &real_abs_timeout;
-   }
+-  }
 -  else
 -  {
 -    /* cast away constness */
 -    real_abs_timeout_pt = (struct timespec *)abs_timeout;
--  }
+   }
 -
 -  DONT_FAKE_TIME(result = (*real_sem_timedwait)(sem, real_abs_timeout_pt));
 -  return result;
@@ -420,24 +420,23 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
  }
  #endif
  
-@@ -1949,6 +1974,24 @@
+@@ -1949,6 +1974,23 @@
   * Faked timer_settime()
   * Does not affect timer speed when stepping clock with each time() call.
   */
-+/* agentenv: per timerfd, whether its clock is other than CLOCK_REALTIME, as timerfd_create was told. */
-+#define FT_TIMERFDS 65536
-+static unsigned char ft_timerfd_other_clock[FT_TIMERFDS];
-+
 +#ifdef __linux__
++/* agentenv: the clock each timerfd was made on (ft_tfd_clock); a record still naming the number is stale. */
 +int timerfd_create(int clockid, int flags)
 +{
 +  int fd;
 +  ftpl_init();
 +  if (real_timerfd_create == NULL) return -1;
 +  fd = real_timerfd_create(clockid, flags);
-+  if (fd >= 0 && fd < FT_TFD_CLOCKS) ft_tfd_clock[fd] = clockid + 1;
-+  if (fd >= 0 && fd < FT_TIMERFDS)
-+    ft_timerfd_other_clock[fd] = (clockid != CLOCK_REALTIME && clockid != CLOCK_REALTIME_ALARM);
++  if (fd >= 0 && fd < FT_TFD_CLOCKS)
++  {
++    ft_fd_gone(fd);
++    ft_tfd_clock[fd] = clockid + 1;
++  }
 +  return fd;
 +}
 +#endif
@@ -445,7 +444,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
  static int
  timer_settime_common(timer_t_or_int timerid, int flags,
           const struct itimerspec *new_value,
-@@ -1977,18 +2020,11 @@
+@@ -1977,18 +2019,11 @@
      {
        if (flags & abstime_flag)
        {
@@ -455,8 +454,8 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
 -        {
 -          timespecmul(&timeadj, 1.0/user_rate, &tdiff);
 -        }
-+        if (ft_disabled || (compat == FT_FD && timerid.int_member >= 0 && timerid.int_member < FT_TIMERFDS
-+                            && ft_timerfd_other_clock[timerid.int_member]))
++        if (ft_disabled || (compat == FT_FD && ft_tfd_known(timerid.int_member)
++                            && !ft_rt_clock(ft_tfd_clock[timerid.int_member] - 1)))
 +          new_real.it_value = new_value->it_value;
          else
 -        {
@@ -468,7 +467,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
        }
        else
        {
-@@ -2061,49 +2097,8 @@
+@@ -2061,47 +2096,6 @@
    return result;
  }
  
@@ -492,8 +491,8 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
 -            FT_COMPAT_GLIBC_2_2, TIMER_ABSTIME));
 -  }
 -}
- 
- /*
+-
+-/*
 - * Faked timer_settime() compatible with implementation in GLIBC 2.3.3
 - */
 -int timer_settime_233(timer_t timerid, int flags,
@@ -513,12 +512,10 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
 -            FT_COMPAT_GLIBC_2_3_3, TIMER_ABSTIME));
 -  }
 -}
--
--/*
+ 
+ /*
   * Faked timer_gettime()
-  * Does not affect timer speed when stepping clock with each time() call.
-  */
-@@ -2151,49 +2146,7 @@
+@@ -2151,48 +2145,6 @@
    return result;
  }
  
@@ -540,7 +537,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
 -         FT_COMPAT_GLIBC_2_2));
 -  }
 -}
- 
+-
 -/*
 - * Faked timer_gettime() compatible with implementation in GLIBC 2.3.3
 - */
@@ -564,11 +561,10 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
 -__asm__(".symver timer_gettime_233, timer_gettime@@GLIBC_2.3.3");
 -__asm__(".symver timer_settime_22, timer_settime@GLIBC_2.2");
 -__asm__(".symver timer_settime_233, timer_settime@@GLIBC_2.3.3");
--
+ 
  #ifdef __linux__
  /*
-  * Faked timerfd_settime
-@@ -2203,6 +2156,14 @@
+@@ -2203,6 +2155,14 @@
           struct itimerspec *old_value)
  {
    ftpl_init();
@@ -583,7 +579,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
    if (real_timerfd_settime == NULL)
    {
      return -1;
-@@ -2222,6 +2183,13 @@
+@@ -2222,6 +2182,13 @@
  int timerfd_gettime(int fd, struct itimerspec *curr_value)
  {
    ftpl_init();
@@ -597,7 +593,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
    if (real_timerfd_gettime == NULL)
    {
      return -1;
-@@ -2379,6 +2347,8 @@
+@@ -2379,6 +2346,8 @@
  #endif
    if (result == -1) return result; /* original function failed */
  
@@ -606,7 +602,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
    /* pass the real current time to our faking version, overwriting it */
    if (fake_monotonic_clock || (clk_id != CLOCK_MONOTONIC && clk_id != CLOCK_MONOTONIC_RAW
  #ifdef CLOCK_MONOTONIC_COARSE
-@@ -2495,12 +2465,25 @@
+@@ -2495,12 +2464,25 @@
          return;
    }
  
@@ -632,7 +628,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
        user_faked_time_tm.tm_isdst = -1;
        nstime_str = strptime(user_faked_time, user_faked_time_fmt, &user_faked_time_tm);
  
-@@ -2518,9 +2501,7 @@
+@@ -2518,9 +2500,7 @@
        }
        else
        {
@@ -643,7 +639,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
        }
        goto parse_modifiers;
        break;
-@@ -2548,6 +2529,11 @@
+@@ -2548,6 +2528,11 @@
        /* Contributed by David North, TDI in version 0.7 */
      case '@': /* Specific time, but clock along relative to that starttime */
        ft_mode = FT_START_AT;
@@ -655,7 +651,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
        user_faked_time_tm.tm_isdst = -1;
        nstime_str = strptime(&user_faked_time[1], user_faked_time_fmt, &user_faked_time_tm);
        if (NULL != nstime_str)
-@@ -2563,12 +2549,17 @@
+@@ -2563,12 +2548,17 @@
        }
        else
        {
@@ -677,7 +673,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
          reset_time();
        goto parse_modifiers;
        break;
-@@ -2577,17 +2568,17 @@
+@@ -2577,17 +2567,17 @@
        ft_mode = FT_START_AT;
        struct stat master_file_stats;
        int ret;
@@ -698,7 +694,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
            exit(1);
          }
          else
-@@ -2596,7 +2587,7 @@
+@@ -2596,7 +2586,7 @@
            user_faked_time_timespec.tv_nsec = 0;
          }
        }
@@ -707,7 +703,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
          reset_time();
        goto parse_modifiers;
        break;
-@@ -2609,7 +2600,15 @@
+@@ -2609,7 +2599,15 @@
        {
          user_rate = atof(strchr(user_faked_time, 'x')+1);
          user_rate_set = true;
@@ -724,7 +720,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
            if (ftpl_timecache.real.tv_nsec >= 0) {
              user_faked_time_timespec.tv_sec  = ftpl_faketimecache.real.tv_sec;
              user_faked_time_timespec.tv_nsec = ftpl_faketimecache.real.tv_nsec;
-@@ -2639,9 +2638,15 @@
+@@ -2639,9 +2637,15 @@
  
    strncpy(user_faked_time_saved, user_faked_time, BUFFERLEN-1);
    user_faked_time_saved[BUFFERLEN-1] = 0;
@@ -740,7 +736,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
  }
  
  
-@@ -2666,8 +2671,8 @@
+@@ -2666,8 +2670,8 @@
    const char *progname = __progname;
  #endif
  
@@ -751,7 +747,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
  #define dlsym(handle, symbol) ft_dlvsym(handle, symbol, NULL, symbol, ignore_list, should_debug_dlsym)
  #define dlvsym(handle, symbol, version) ft_dlvsym(handle, symbol, version, symbol "@" version, ignore_list, should_debug_dlsym)
  
-@@ -2749,32 +2754,25 @@
+@@ -2749,32 +2753,25 @@
  #endif
  
  #ifdef FAKE_PTHREAD
@@ -781,18 +777,18 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
 +  if (NULL == real_pthread_mutex_clocklock)
    {
 -    real_pthread_cond_destroy_232 =  dlsym(RTLD_NEXT, "pthread_cond_destroy");
-+    real_pthread_mutex_clocklock = dlsym(RTLD_NEXT, "pthread_mutex_clocklock");
-   }
+-  }
 -
 -  if (pthread_rwlock_init(&monotonic_conds_lock,NULL) != 0) {
 -    fprintf(stderr,"monotonic_conds_lock init failed\n");
 -    exit(-1);
--  }
++    real_pthread_mutex_clocklock = dlsym(RTLD_NEXT, "pthread_mutex_clocklock");
+   }
 +  real_pthread_mutex_timedlock = dlsym(RTLD_NEXT, "pthread_mutex_timedlock");
  #endif
  #ifdef __APPLE__
    real_clock_get_time =     dlsym(RTLD_NEXT, "clock_get_time");
-@@ -2814,6 +2812,7 @@
+@@ -2814,6 +2811,7 @@
  #endif
  #ifdef __linux__
    real_timerfd_gettime =  dlsym(RTLD_NEXT, "timerfd_gettime");
@@ -800,7 +796,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
    real_timerfd_settime =  dlsym(RTLD_NEXT, "timerfd_settime");
  #endif
  #endif
-@@ -2826,16 +2825,42 @@
+@@ -2826,16 +2824,42 @@
  #undef dlsym
  #undef dlvsym
  
@@ -845,7 +841,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
    {
      fake_stat_disabled = 1;  //Note that this is NOT re-checked
    }
-@@ -2843,7 +2868,7 @@
+@@ -2843,7 +2867,7 @@
  #if defined FAKE_FILE_TIMESTAMPS
  #ifdef FAKE_UTIME
    // fake_utime_disabled is 0 by default
@@ -854,7 +850,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
    {
      if (!*tmp_env || *tmp_env == 'y' || *tmp_env == 'Y' || *tmp_env == 't' || *tmp_env == 'T')
      { /* an empty string or a yes/true value turns off disabling */
-@@ -2860,11 +2885,11 @@
+@@ -2860,11 +2884,11 @@
  #endif
  #endif
  
@@ -868,7 +864,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
    {
      if (0 == strcmp(tmp_env, "1"))
      {
-@@ -2875,7 +2900,7 @@
+@@ -2875,7 +2899,7 @@
    /* Check whether we actually should be faking the returned timestamp. */
  
    /* We can prevent faking time for specified commands */
@@ -877,7 +873,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
    {
      char *skip_cmd, *saveptr, *tmpvar;
      /* Don't mess with the env variable directly. */
-@@ -2904,12 +2929,12 @@
+@@ -2904,12 +2928,12 @@
    }
  
    /* We can limit faking time to specified commands */
@@ -892,7 +888,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
      {
        fprintf(stderr, "Error: Both FAKETIME_SKIP_CMDS and FAKETIME_ONLY_CMDS can't be set.\n");
        exit(EXIT_FAILURE);
-@@ -2941,44 +2966,44 @@
+@@ -2941,44 +2965,44 @@
      }
    }
  
@@ -946,7 +942,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
    {
      if (-1 == (outfile = open(tmp_env, O_RDWR | O_APPEND | O_CLOEXEC | O_CREAT,
                                S_IWUSR | S_IRUSR)))
-@@ -2989,7 +3014,7 @@
+@@ -2989,7 +3013,7 @@
    }
  
    /* load file only if reading timestamps from it is not finished yet */
@@ -955,7 +951,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
    {
      int infile = -1;
      struct stat sb;
-@@ -3021,7 +3046,7 @@
+@@ -3021,7 +3045,7 @@
      infile_set = true;
    }
  
@@ -964,7 +960,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
    if (tmp_env == NULL)
    {
      strcpy(user_faked_time_fmt, "%Y-%m-%d %T");
-@@ -3061,7 +3086,7 @@
+@@ -3061,7 +3085,7 @@
      system_time_from_system(&ftpl_starttime);
    }
    /* fake time supplied as environment variable? */
@@ -973,7 +969,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
    {
      parse_config_file = false;
      parse_ft_string(tmp_env);
-@@ -3070,6 +3095,11 @@
+@@ -3070,6 +3094,11 @@
    {
      read_config_file();
    }
@@ -985,7 +981,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
  
    dont_fake = dont_fake_final;
  }
-@@ -3209,8 +3239,8 @@
+@@ -3209,8 +3238,8 @@
     * a system-wide /etc/faketimerc present.
     * The /etc/faketimerc handling has been contributed by David Burley,
     * Jacob Moorman, and Wayne Davison of SourceForge, Inc. in version 0.6 */
@@ -996,7 +992,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
    if ((faketimerc = open(custom_filename, O_RDONLY)) != -1 ||
        (faketimerc = open(filename, O_RDONLY)) != -1 ||
        (faketimerc = open("/etc/faketimerc", O_RDONLY)) != -1)
-@@ -3248,6 +3278,48 @@
+@@ -3248,6 +3277,48 @@
    tp_save.tv_nsec = tp->tv_nsec;
  
    if (dont_fake) return 0;
@@ -1045,7 +1041,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
    /* Per process timers are only sped up or slowed down */
    if ((clk_id == CLOCK_PROCESS_CPUTIME_ID ) || (clk_id == CLOCK_THREAD_CPUTIME_ID))
    {
-@@ -3262,7 +3334,6 @@
+@@ -3262,7 +3333,6 @@
    volatile int ret = INT_MAX;
  
  #ifdef PTHREAD_SINGLETHREADED_TIME
@@ -1053,7 +1049,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
  
    // block all signals while locked. prevents deadlocks if signal interrupts in in mid-operation.
    sigset_t all_signals, original_mask;
-@@ -3367,6 +3438,19 @@
+@@ -3367,6 +3437,19 @@
      force_cache_expiration = 0;
    }
  
@@ -1073,7 +1069,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
    if (cache_expired == 1)
    {
      static char user_faked_time[BUFFERLEN]; /* changed to static for caching in v0.6 */
-@@ -3377,7 +3461,7 @@
+@@ -3377,7 +3460,7 @@
        fprintf(stderr, "***************++ Cache expired ++**************\n");
      */
  
@@ -1082,7 +1078,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
      {
        strncpy(user_faked_time, tmp_env, BUFFERLEN - 1);
        user_faked_time[BUFFERLEN - 1] = 0;
-@@ -3401,6 +3485,9 @@
+@@ -3401,6 +3484,9 @@
      get_fake_monotonic_setting(&fake_monotonic_clock);
    } /* cache had expired */
  
@@ -1092,7 +1088,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
    if (infile_set)
    {
      if (load_time(tp))
-@@ -3520,6 +3607,7 @@
+@@ -3520,6 +3606,7 @@
  {
    struct timespec ts;
    int ret;
@@ -1100,7 +1096,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
    ts.tv_sec = tv->tv_sec;
    ts.tv_nsec = tv->tv_usec * 1000  + ftpl_starttime.real.tv_nsec % 1000;
  
-@@ -3627,6 +3715,8 @@
+@@ -3627,6 +3714,8 @@
    DONT_FAKE_TIME(result = (*real___clock_gettime)(clk_id, tp));
    if (result == -1) return result; /* original function failed */
  
@@ -1109,11 +1105,18 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
    /* pass the real current time to our faking version, overwriting it */
    if (fake_monotonic_clock || (clk_id != CLOCK_MONOTONIC && clk_id != CLOCK_MONOTONIC_RAW
  #ifdef CLOCK_MONOTONIC_COARSE
-@@ -3723,240 +3813,126 @@
+@@ -3723,238 +3812,124 @@
  
  #ifdef FAKE_PTHREAD
  
 -typedef enum {FT_COMPAT_GLIBC_2_2_5, FT_COMPAT_GLIBC_2_3_2} ft_lib_compat_pthread;
+-
+-struct pthread_cond_monotonic {
+-    pthread_cond_t *ptr;
+-    UT_hash_handle hh;
+-};
+-
+-static struct pthread_cond_monotonic *monotonic_conds = NULL;
 +/*
 + * agentenv: a wait with a CLOCK_REALTIME deadline waits on CLOCK_MONOTONIC instead, until ft_deadline_from_fake's
 + * deadline. A condvar's clock is read from glibc's own condvar word (bit 1 of __wrefs, which glibc's waits read, since
@@ -1123,13 +1126,6 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
 + */
 +#define FT_COND_CLOCK_MONOTONIC 2
  
--struct pthread_cond_monotonic {
--    pthread_cond_t *ptr;
--    UT_hash_handle hh;
--};
--
--static struct pthread_cond_monotonic *monotonic_conds = NULL;
--
 -int pthread_cond_init_232(pthread_cond_t *restrict cond, const pthread_condattr_t *restrict attr)
 +int pthread_cond_timedwait_232(pthread_cond_t *cond, pthread_mutex_t *mutex, const struct timespec *abstime)
  {
@@ -1182,16 +1178,16 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
 -  if (pthread_rwlock_wrlock(&monotonic_conds_lock) != 0) {
 -    fprintf(stderr,"can't acquire write monotonic_conds_lock\n");
 -    exit(-1);
+-  }
+-  HASH_FIND_PTR(monotonic_conds, &cond, e);
+-  if (e) {
+-    HASH_DEL(monotonic_conds, e);
+-    free(e);
 +  if (ft_uw_active() && ft_translates_wait(abstime) && real_pthread_cond_clockwait != NULL)
 +  {
 +    int r = ft_u_cond_wait(cond, mutex, abstime);
 +    if (r != -1) return r;
    }
--  HASH_FIND_PTR(monotonic_conds, &cond, e);
--  if (e) {
--    HASH_DEL(monotonic_conds, e);
--    free(e);
--  }
 -  pthread_rwlock_unlock(&monotonic_conds_lock);
 -
 -  return real_pthread_cond_destroy_232(cond);
@@ -1244,12 +1240,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
 -#ifdef __GLIBC__
 -    /* Here we try to derive the necessity for a forced monotonic fix *
 -     * based on glibc version. What could possibly go wrong?          */
-+  if (clockid != CLOCK_REALTIME || !ft_translates_wait(abstime))
-+    return real_pthread_cond_clockwait(cond, mutex, clockid, abstime);
-+  ft_deadline_from_fake(CLOCK_MONOTONIC, abstime, &mono);
-+  return real_pthread_cond_clockwait(cond, mutex, CLOCK_MONOTONIC, &mono);
-+}
- 
+-
 -    int glibc_major, glibc_minor;
 -    sscanf(glibc_version_string, "%d.%d", &glibc_major, &glibc_minor);
 -
@@ -1260,30 +1251,11 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
 -         ((glibc_minor <= 24) || (glibc_minor >= 30)) )
 -    {
 -      result = true;
-+static int ft_mutex_lock_until(pthread_mutex_t *mutex, const struct timespec *fake_abs)
-+{
-+  struct timespec mono, slice;
-+  unsigned long gen;
-+  bool last;
-+  int result;
-+  ft_deadline_from_fake(CLOCK_MONOTONIC, fake_abs, &mono);
-+  gen = ft_tl_gen;
-+  for (;;)
-+  {
-+    last = ft_slice_end(&mono, &slice);
-+    result = real_pthread_mutex_clocklock(mutex, CLOCK_MONOTONIC, &slice);
-+    if (result == EINVAL && real_pthread_mutex_timedlock != NULL)
-+    { /* a PI mutex on a kernel without FUTEX_LOCK_PI2 takes only CLOCK_REALTIME */
-+      struct timespec real;
-+      ft_deadline_from_fake(CLOCK_REALTIME, fake_abs, &real);
-+      return real_pthread_mutex_timedlock(mutex, &real);
-     }
+-    }
 -    else
 -#endif
 -      result = false; // avoid forced monotonic fixes unless really necessary
-+    if (result != ETIMEDOUT) return result;
-+    if (!ft_deadline_moved(fake_abs, &mono, &gen) && last) return ETIMEDOUT;
-   }
+-  }
 -
 -  if (getenv("FAKETIME_DEBUG") != NULL)
 -#ifdef __GLIBC__
@@ -1295,10 +1267,14 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
 -#endif
 -
 -  return result;
++  if (clockid != CLOCK_REALTIME || !ft_translates_wait(abstime))
++    return real_pthread_cond_clockwait(cond, mutex, clockid, abstime);
++  ft_deadline_from_fake(CLOCK_MONOTONIC, abstime, &mono);
++  return real_pthread_cond_clockwait(cond, mutex, CLOCK_MONOTONIC, &mono);
  }
  
 -int pthread_cond_timedwait_common(pthread_cond_t *cond, pthread_mutex_t *mutex, const struct timespec *abstime, ft_lib_compat_pthread compat)
-+int pthread_mutex_timedlock(pthread_mutex_t *mutex, const struct timespec *abstime)
++static int ft_mutex_lock_until(pthread_mutex_t *mutex, const struct timespec *fake_abs)
  {
 -  struct timespec tp, tdiff_actual, realtime, faketime;
 -  struct timespec *tf = NULL;
@@ -1308,11 +1284,16 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
 -  clockid_t clk_id;
 -  int result = 0;
 -
-   ftpl_init();
+-  ftpl_init();
 -
 -  if (abstime != NULL)
-+  if (real_pthread_mutex_timedlock == NULL) return EINVAL;
-+  if (ft_uw_active() && ft_translates_wait(abstime) && real_pthread_mutex_clocklock != NULL)
++  struct timespec mono, slice;
++  unsigned long gen;
++  bool last;
++  int result;
++  ft_deadline_from_fake(CLOCK_MONOTONIC, fake_abs, &mono);
++  gen = ft_tl_gen;
++  for (;;)
    {
 -    if (pthread_rwlock_rdlock(&monotonic_conds_lock) != 0) {
 -      fprintf(stderr,"can't acquire read monotonic_conds_lock\n");
@@ -1347,7 +1328,14 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
 -      timespecadd(&realtime, &tdiff_actual, &tp);
 -
 -      tf = &tp;
--    }
++    last = ft_slice_end(&mono, &slice);
++    result = real_pthread_mutex_clocklock(mutex, CLOCK_MONOTONIC, &slice);
++    if (result == EINVAL && real_pthread_mutex_timedlock != NULL)
++    { /* a PI mutex on a kernel without FUTEX_LOCK_PI2 takes only CLOCK_REALTIME */
++      struct timespec real;
++      ft_deadline_from_fake(CLOCK_REALTIME, fake_abs, &real);
++      return real_pthread_mutex_timedlock(mutex, &real);
+     }
 -    else
 -    {
 -      timespecsub(abstime, &faketime, &tp);
@@ -1382,10 +1370,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
 -      timespecadd(&realtime, &tdiff_actual, &tp);
 -
 -    tf = &tp;
-+    bool handled;
-+    int r = ft_u_mutex_lock(mutex, ft_ns(abstime), &handled);
-+    if (handled) return r;
-   }
+-  }
 -
 -  switch (compat) {
 -  case FT_COMPAT_GLIBC_2_3_2:
@@ -1394,17 +1379,33 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
 -  case FT_COMPAT_GLIBC_2_2_5:
 -    result = real_pthread_cond_timedwait_225(cond, mutex, tf);
 -    break;
--  }
++    if (result != ETIMEDOUT) return result;
++    if (!ft_deadline_moved(fake_abs, &mono, &gen) && last) return ETIMEDOUT;
+   }
 -  return result;
+ }
+ 
+-int pthread_cond_timedwait_225(pthread_cond_t *cond, pthread_mutex_t *mutex, const struct timespec *abstime)
++int pthread_mutex_timedlock(pthread_mutex_t *mutex, const struct timespec *abstime)
+ {
+-  return pthread_cond_timedwait_common(cond, mutex, abstime, FT_COMPAT_GLIBC_2_2_5);
++  ftpl_init();
++  if (real_pthread_mutex_timedlock == NULL) return EINVAL;
++  if (ft_uw_active() && ft_translates_wait(abstime) && real_pthread_mutex_clocklock != NULL)
++  {
++    bool handled;
++    int r = ft_u_mutex_lock(mutex, ft_ns(abstime), &handled);
++    if (handled) return r;
++  }
 +  if (!ft_translates_wait(abstime) || real_pthread_mutex_clocklock == NULL)
 +    return real_pthread_mutex_timedlock(mutex, abstime);
 +  return ft_mutex_lock_until(mutex, abstime);
  }
  
--int pthread_cond_timedwait_225(pthread_cond_t *cond, pthread_mutex_t *mutex, const struct timespec *abstime)
+-int pthread_cond_timedwait_232(pthread_cond_t *cond, pthread_mutex_t *mutex, const struct timespec *abstime)
 +int pthread_mutex_clocklock(pthread_mutex_t *mutex, clockid_t clockid, const struct timespec *abstime)
  {
--  return pthread_cond_timedwait_common(cond, mutex, abstime, FT_COMPAT_GLIBC_2_2_5);
+-  return pthread_cond_timedwait_common(cond, mutex, abstime, FT_COMPAT_GLIBC_2_3_2);
 +  ftpl_init();
 +  if (real_pthread_mutex_clocklock == NULL) return EINVAL;
 +  if (ft_uw_active() && ft_translates_wait(abstime) && clockid == CLOCK_REALTIME)
@@ -1418,11 +1419,6 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
 +  return ft_mutex_lock_until(mutex, abstime);
  }
  
--int pthread_cond_timedwait_232(pthread_cond_t *cond, pthread_mutex_t *mutex, const struct timespec *abstime)
--{
--  return pthread_cond_timedwait_common(cond, mutex, abstime, FT_COMPAT_GLIBC_2_3_2);
--}
--
 -__asm__(".symver pthread_cond_timedwait_225, pthread_cond_timedwait@GLIBC_2.2.5");
 -#if defined __ARM_ARCH || defined FORCE_PTHREAD_NONVER
 -__asm__(".symver pthread_cond_timedwait_232, pthread_cond_timedwait@@");
@@ -1432,14 +1428,12 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
 -__asm__(".symver pthread_cond_timedwait_232, pthread_cond_timedwait@@GLIBC_2.3.2");
 -__asm__(".symver pthread_cond_init_232, pthread_cond_init@@GLIBC_2.3.2");
 -__asm__(".symver pthread_cond_destroy_232, pthread_cond_destroy@@GLIBC_2.3.2");
- #endif
- 
 -#endif
 -
+ #endif
+ 
  /*
-  *  Intercept calls to time-setting functions if compiled with FAKE_SETTIME set.
-  *  Based on suggestion and prototype by @ojura, see https://github.com/wolfcw/libfaketime/issues/179
-@@ -4005,15 +3981,15 @@
+@@ -4005,15 +3980,15 @@
    /* If FAKETIME_TIMESTAMP_FILE was given in environment,
     * and if FAKETIME_UPDATE_TIMESTAMP_FILE=1, then update it.
     * This allows other process instances to share the same time. */
@@ -1460,7 +1454,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
  
      if ((envfile = fopen(custom_filename, "wt")) != NULL)
      {
-@@ -4034,7 +4010,7 @@
+@@ -4034,7 +4009,7 @@
      {
        fprintf(stderr, "libfaketime: In clock_settime(), failed to "
          "%s while updating FAKETIME_TIMESTAMP_FILE (`%s'): %s\n",
@@ -1469,7 +1463,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
      }
    }
  
-@@ -4125,7 +4101,7 @@
+@@ -4125,7 +4100,7 @@
  
  /* return 0 if no FAKERANDOM_SEED was seen */
  static int bypass_randomness(void* buf, size_t buflen) {
@@ -1478,7 +1472,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
    char *b = buf;
  
    if (seedstring != NULL) {
-@@ -4169,7 +4145,7 @@
+@@ -4169,7 +4144,7 @@
  #else
  pid_t getpid() {
  #endif
@@ -1487,7 +1481,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
    if (pidstring != NULL) {
      long int pid = strtol(pidstring, NULL, 0);
      return (pid_t)(pid);
-@@ -4270,7 +4246,7 @@
+@@ -4270,7 +4245,7 @@
    va_list ap;
    va_start(ap, number);
  #ifdef FAKE_RANDOM
@@ -1496,7 +1490,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
      void *buf;
      size_t buflen;
      unsigned int flags;
-@@ -4282,7 +4258,7 @@
+@@ -4282,7 +4257,7 @@
    }
  #endif
  // static int (*real_clock_gettime) (clockid_t clk_id, struct timespec *tp);
@@ -1506,8 +1500,8 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
      struct timespec *tp;
      clk_id = va_arg(ap, clockid_t);
 diff -ruN a/src/libfaketime.map b/src/libfaketime.map
---- pa/src/libfaketime.map	2026-11-11 09:07:01
-+++ pb/src/libfaketime.map	2026-11-11 09:07:01
+--- a/src/libfaketime.map
++++ b/src/libfaketime.map
 @@ -1,21 +1,9 @@
 -GLIBC_2.2 {
 -  global:

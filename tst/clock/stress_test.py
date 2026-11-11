@@ -1,4 +1,5 @@
-"""Stress: realtime condvar handoffs and sem_timedwait posts, with the page changing under them, lose nothing."""
+"""Stress: realtime condvar handoffs and sem_timedwait posts (with futex_waitv and without it), with the page changing
+under them, lose nothing."""
 import pytest
 
 SECONDS = 10
@@ -26,8 +27,8 @@ def test_a_single_timed_wait_times_out_at_its_clock_time(condvars):
         assert len(results) == 20 and all(rc == "ETIMEDOUT" and low <= real <= high for rc, real in results), (label, results)
 
 
-def test_a_sem_post_is_never_lost_under_a_realtime_timed_wait(gate):
-    rows = gate("semstress", float(SECONDS))
+def test_a_sem_post_is_never_lost_under_a_realtime_timed_wait(waits_gate):
+    rows = waits_gate("semstress", float(SECONDS))
     assert len(rows) == 4
     for r in rows:
         assert r["posts"] == r["taken"] > 0, r

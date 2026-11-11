@@ -10,13 +10,16 @@ What follows the universe, and what doesn't:
 - **Universe time:** clock reads (`CLOCK_REALTIME`, `_COARSE`, `_ALARM`, `CLOCK_TAI`, `gettimeofday`, `time`) and waits
   for a set realtime clock time (`clock_nanosleep` with `TIMER_ABSTIME`, realtime futex waits, `sem_timedwait` and
   `sem_clockwait`, realtime condition variables, absolute realtime timerfds and POSIX timers). A wait is planned in real
-  time and planned again whenever the page changes, so a jump past its deadline ends it at the jump.
+  time and planned again whenever the page changes, so a jump past its deadline ends it at the jump. Where the kernel
+  has no `futex_waitv` (before 5.16, or gVisor), realtime futex and semaphore waits read the page between slices of
+  `AGENTENV_WAIT_SLICE_MS` (100 ms by default) instead, so they see a change within a slice.
 - **Real time:** the monotonic and boot clocks, CPU-time clocks, and every relative sleep and timeout, at any rate.
 - **Who:** only the session user's processes (`AGENTENV_SESSION_UID`). A program started with `AGENTENV_REAL_TIME=1`
   stays real; the marker is taken out of its environment block, so its children are faked.
-- **Settings:** read once as the library loads, from `/etc/agentenv/clock.conf` (`clock.conf` is the default) and the
-  environment, so no `getenv()` runs once the program has started: a `getenv()` racing a program's own `setenv()` made
-  stock libfaketime crash Chromium on about one launch in five.
+- **Settings:** read once as the library loads, from `/etc/agentenv/clock.conf` (`clock.conf` is the default), or from
+  the environment where there is no such file. While the file exists the environment changes none of them; the marker
+  above is the one switch a program's environment has. No `getenv()` runs once the program has started: a `getenv()`
+  racing a program's own `setenv()` made stock libfaketime crash Chromium on about one launch in five.
 
 ## Files
 
@@ -45,6 +48,7 @@ computed from a read a moment earlier) continues from where the page has it inst
 ## Tests
 
 `tst/clock` (`make clock-test`) builds this library and stock 0.9.12 in an Ubuntu 24.04 container and runs its gates
-there: every wait API in C, Python, Java and Node at several rates, jumps, condition-variable and semaphore stress, a
-stalled writer, torn reads, the marker, the environment race and Chromium launches. `.github/workflows/clock.yml` runs
-them on x86_64 and arm64.
+there: every wait API in C, Python, Java and Node at several rates, jumps, cancelled waits, timerfd duplicates,
+condition-variable and semaphore stress, the waits again in a container that refuses `futex_waitv` (as kernels before
+5.16 and gVisor do), a stalled writer, one that died mid-write, torn reads, the marker, the environment race and
+Chromium launches. `.github/workflows/clock.yml` runs them on x86_64 and arm64.
