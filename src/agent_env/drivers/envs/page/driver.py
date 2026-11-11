@@ -465,6 +465,11 @@ class _PlaywrightMcp:
         exited = asyncio.ensure_future(process.wait())
         try:
             await asyncio.wait({called, exited, held.owner}, return_when=asyncio.FIRST_COMPLETED)
+        except asyncio.CancelledError:
+            called.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await called
+            raise
         finally:
             exited.cancel()
         if not called.done():

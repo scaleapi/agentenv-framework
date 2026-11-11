@@ -360,6 +360,25 @@ async def test_a_call_playwright_mcp_ends_under_fails_then_and_isnt_sent_again(s
 
 
 @pytest.mark.asyncio
+async def test_a_call_its_caller_cancels_ends_its_call_on_playwright_mcp_too(stand_in):
+    _, playwright, _, called = stand_in
+    try:
+        await called("ada")
+        waiting = asyncio.ensure_future(called("ada", "browser_wait_for", {"time": 60}))
+        await asyncio.sleep(1)
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        await asyncio.sleep(0.5)
+        left = [task for task in asyncio.all_tasks() if "call_tool" in repr(task.get_coro())]
+        after = await called("ada")
+    finally:
+        await playwright._stop()
+
+    assert left == [] and not after.isError
+
+
+@pytest.mark.asyncio
 async def test_a_callers_session_left_idle_is_closed_when_another_caller_comes(stand_in, monkeypatch):
     module, playwright, _, called = stand_in
     monkeypatch.setattr(module, "PLAYWRIGHT_MCP_SESSION_IDLE_S", 0.5)
