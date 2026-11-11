@@ -20,7 +20,7 @@ from agent_env.a2a_agent.staging import transfer_store
 from agent_env.config import get_config
 from agent_env.config.model import ModelParam
 from agent_env.providers.sandbox_providers.sandbox import into_container
-from agent_env.task_step.context import PromptResponse, TaskStepContext, dual_keyed
+from agent_env.task_step.context import PromptResponse, StepContextError, TaskStepContext, dual_keyed
 from agent_env.task_step.task_steps.verifiers.judge_utils.judge_output_format import (
     SCREENSHOT_GROUNDING,
     JudgeOutputFormat,
@@ -636,7 +636,7 @@ class RubricsVerifierTaskStep(TaskStep):
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         prompt_response = next((pr for pr in context.prompt_responses if pr.prompt_id == self.prompt_id), None)
         if prompt_response is None:
-            raise RuntimeError(f"PromptResponse with prompt_id='{self.prompt_id}' not found in context")
+            raise StepContextError(f"PromptResponse with prompt_id='{self.prompt_id}' not found in context")
         overrides_for_step = self.step_param_overrides(context)
         grade_up_to_turn = (
             _validated_turn(overrides_for_step["grade_up_to_turn"])
@@ -744,7 +744,7 @@ class RubricsVerifierTaskStep(TaskStep):
             if self.agent_name is not None:
                 agent = next((a for a in context.deployed_agents if a.agent_name == self.agent_name), None)
                 if agent is None:
-                    raise RuntimeError(f"Agent '{self.agent_name}' not found in context.deployed_agents")
+                    raise StepContextError(f"Agent '{self.agent_name}' not found in context.deployed_agents")
                 if not agent.sandbox_id:
                     raise RuntimeError(f"Agent '{self.agent_name}' has no sandbox_id")
                 judge_a2a_url = agent.a2a_url or agent.api_url

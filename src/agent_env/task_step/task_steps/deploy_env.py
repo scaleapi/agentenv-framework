@@ -11,7 +11,7 @@ from typing import Any, ClassVar, Optional
 from agent_env.config import get_config
 from agent_env.env.gateway import GatewayMode
 from agent_env.env.store import update_env_instance_metadata
-from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
@@ -155,7 +155,7 @@ class DeployEnvTaskStep(TaskStep):
 
         existing = next((d for d in context.deployed_envs if d.env_id == self.env_id), None)
         if existing is not None:
-            raise RuntimeError(f"Env '{self.env_id}' is already deployed")
+            raise StepContextError(f"Env '{self.env_id}' is already deployed")
 
         env = Env.get(self.env_id, self.env_version)
         user_overrides = context.metadata.get("user_overrides", {})

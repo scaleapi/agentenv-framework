@@ -15,7 +15,7 @@ from agentenv_protocol import SKILL_EXTENSION_URI
 from agentenv_protocol.client import children, find_extension_method
 
 from agent_env.config import get_config
-from agent_env.task_step.context import DeployedAgent, TaskStepContext
+from agent_env.task_step.context import DeployedAgent, StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
@@ -261,7 +261,7 @@ class AddSkillsTaskStep(TaskStep):
             raise ValueError("; ".join(problems))
         agent = next((a for a in context.deployed_agents if a.agent_name == self.agent_name), None)
         if agent is None:
-            raise RuntimeError(f"Agent '{self.agent_name}' not found in context.deployed_agents")
+            raise StepContextError(f"Agent '{self.agent_name}' not found in context.deployed_agents")
         if agent.instance_id is None:
             raise RuntimeError(f"Agent '{self.agent_name}' is missing instance_id; cannot resolve deployment")
 

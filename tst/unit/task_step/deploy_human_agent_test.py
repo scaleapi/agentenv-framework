@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from agent_env.config.errors import ConfigError
-from agent_env.task_step.context import DeployedAgent, TaskStepContext
+from agent_env.task_step.context import DeployedAgent, StepContextError, TaskStepContext
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_steps.deploy_human_agent import DeployHumanAgentTaskStep
 
@@ -94,7 +94,7 @@ async def test_execute_explicit_a2a_url_is_verbatim():
 async def test_execute_rejects_duplicate_agent_name():
     context = TaskStepContext(deployed_agents=[DeployedAgent(agent_name="human", api_url="http://x")])
     step = DeployHumanAgentTaskStep(id="t.dh", version=None, agent_name="human")
-    with pytest.raises(RuntimeError, match="already deployed"):
+    with pytest.raises(StepContextError, match="already deployed"):
         await step.execute(context)
 
 
