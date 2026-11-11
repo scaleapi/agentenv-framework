@@ -404,8 +404,7 @@ class _Logged:
         control = relay.control
         cause = {"seq": begun["seq"], "via": "cdp", "who": begun["action"]["who"]}
         self._landed: Optional[asyncio.Future] = None
-        self._checks_password = False
-        self.password = False
+        self._checks_password = self.password = False
         if control is None or not acting:
             return
         if method == "Target.createTarget":
@@ -420,12 +419,14 @@ class _Logged:
             control.causes.navigates_next(target, cause)
         self._checks_password = method in TYPING_METHODS and bool(target) and any(field in params
                                                                                  for field in KEY_FIELDS)
+        #: What a command that types types is withheld until its check says no password field has focus, so one
+        #: that never gets checked, its connection gone first, keeps it withheld.
+        self.password = self._checks_password
 
     async def check_password(self) -> None:
         """Before a command that types is sent: whether a password field has focus on its tab, true when that can't
         be told."""
         if self._checks_password:
-            self.password = True
             self.password = await self.relay.control.password_focused(self.target)
 
     def finish(self, answer: dict, guarded: Optional[str]) -> None:

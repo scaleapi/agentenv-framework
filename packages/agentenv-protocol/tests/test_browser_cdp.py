@@ -442,6 +442,31 @@ async def test_a_commands_wait_for_its_password_check_lets_none_after_it_be_sent
 
 
 @pytest.mark.asyncio
+async def test_typing_still_waiting_for_its_check_when_its_client_leaves_is_logged_withheld(tmp_path):
+    log = BrowserLog(tmp_path / "browser-chromium.jsonl")
+    async with _relay(log=log) as (pipe, relay, base):
+        control = Control(pipe)
+
+        async def never(target) -> bool:
+            await asyncio.Event().wait()
+
+        control.password_focused = never
+        relay.control = control
+        async with connect(f"{base}/ada") as ada:
+            child = (await _ask(ada, {"id": 1, "method": "Target.attachToTarget",
+                                      "params": {"targetId": "T1", "flatten": True}}))["result"]["sessionId"]
+            for n, text in ((2, "hunter2"), (3, "hunter3")):
+                await ada.send(json.dumps({"id": n, "method": "Input.insertText", "params": {"text": text},
+                                           "sessionId": child}))
+            await asyncio.sleep(0.1)
+        await asyncio.sleep(0.2)
+
+    typed = [line["action"] for line in log.read()["lines"] if line["action"]["method"] == "Input.insertText"]
+    assert [entry["params"] for entry in typed] == [{"text": {"length": 7}}, {"text": {"length": 7}}]
+    assert all(entry["ok"] is False for entry in typed) and "hunter" not in json.dumps(log.read())
+
+
+@pytest.mark.asyncio
 async def test_an_op_body_too_long_to_keep_is_logged_by_its_length(monkeypatch, tmp_path):
     browser = _browser(monkeypatch, tmp_path)
     monkeypatch.setattr("agentenv_protocol.website_browser.environment.LOGGED_BODY_BYTES", 100)
