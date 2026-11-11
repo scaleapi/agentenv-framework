@@ -34,6 +34,7 @@ from agentenv_protocol import (
     agent_skill,
     create_fastmcp_app,
     environment_card,
+    mcp_port,
     extension,
     get_data,
     reset_data,
@@ -1190,6 +1191,15 @@ def test_environment_card_config_inherited_by_subclass(monkeypatch):
 
     app = _Child().mount(_FakeServableMCP())
     assert "items_add_item" in app.tools
+
+
+def test_an_app_serves_on_the_port_mcp_port_names_else_18765(monkeypatch):
+    monkeypatch.delenv("MCP_PORT", raising=False)
+    default = (mcp_port(), create_fastmcp_app(_ToolHandler(), card=EnvironmentCard(name="items")).settings.port)
+    monkeypatch.setenv("MCP_PORT", "40123")
+    named = (mcp_port(), create_fastmcp_app(_ToolHandler(), card=EnvironmentCard(name="items")).settings.port)
+
+    assert default == (18765, 18765) and named == (40123, 40123)
 
 
 def test_create_fastmcp_app_without_mcp_raises_install_hint(monkeypatch):

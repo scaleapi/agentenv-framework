@@ -1,8 +1,9 @@
 """The page driver against a fake browser server on the app's socket: it passes the definition checks with a page
 screen, turns tool calls into the CDP input they mean, shows a tab that paints nothing as white, and once the browser
 has ended on its own, its ready check fails for good and its calls say why. Beside its own tools it serves Playwright
-MCP's from their manifest, the two that run the agent's code hidden, on a Playwright MCP it runs on the CDP address the
-browser issues it under the driver's loopback origin: here a stand-in, which starts on the first call, keeps a session
+MCP's from their manifest, which is of the version its install downloads and lists only tools looked at, the two that run
+the agent's code hidden, on a Playwright MCP it runs on the CDP address the browser issues it under the driver's loopback
+origin, a check its tool calls don't credit to the agent: here a stand-in, which starts on the first call, keeps a session
 per caller, starts again on a new address or once killed, and never gets the driver's environment; a call it ends
 under fails then, a caller's session left idle is closed, and a start that never listens is stopped and tried afresh."""
 from __future__ import annotations
@@ -12,9 +13,12 @@ import base64
 import importlib.util
 import json
 import os
+import re
 import signal
 import sys
+import tomllib
 from pathlib import Path
+from unittest import mock
 
 import httpx
 import pytest
@@ -30,6 +34,18 @@ from agentenv_protocol.website_browser import BROWSER
 from agentenv_protocol.website_browser.log import TOOL_CALL_HEADER
 
 DRIVER = Path(agent_env.__file__).parent / "drivers" / "envs" / "page" / "driver.py"
+PLAYWRIGHT_MCP = DRIVER.parent / "playwright_mcp.py"
+#: Playwright MCP's tools, each looked at for whether it runs the agent's own code and so is hidden by default: an
+#: upgrade that adds a tool fails here until it's been looked at too.
+REVIEWED_TOOLS = {
+    "browser_click", "browser_close", "browser_console_messages", "browser_drag", "browser_drop",
+    "browser_emulate_media", "browser_evaluate", "browser_file_upload", "browser_fill_form", "browser_find",
+    "browser_handle_dialog", "browser_hover", "browser_mouse_click_xy", "browser_mouse_down", "browser_mouse_drag_xy",
+    "browser_mouse_move_xy", "browser_mouse_up", "browser_mouse_wheel", "browser_navigate", "browser_navigate_back",
+    "browser_network_request", "browser_network_requests", "browser_press_key", "browser_resize",
+    "browser_run_code_unsafe", "browser_select_option", "browser_snapshot", "browser_tabs", "browser_take_screenshot",
+    "browser_type", "browser_wait_for",
+}
 NO_DISPLAY = Platform(os="linux", distribution="ubuntu", version="24.04", arch="amd64", display="none")
 PAGE_OPS = ("page/viewport", "page/capture", "page/input", "page/state", "navigate", "history", "tabs/list",
             "tabs/open", "tabs/activate", "tabs/close", "dialog/answer", "files/choose", "cdp")
@@ -73,11 +89,21 @@ app.run("streamable-http")
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + (2).to_bytes(4, "big") + (1).to_bytes(4, "big")
 
 
-def _load():
-    spec = importlib.util.spec_from_file_location("page_driver", DRIVER)
+def _module(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _playwright_mcp():
+    return _module("playwright_mcp", PLAYWRIGHT_MCP)
+
+
+def _load():
+    """driver.py, importing its own playwright_mcp.py as it does where it runs."""
+    with mock.patch.dict(sys.modules, {"playwright_mcp": _playwright_mcp()}):
+        return _module("page_driver", DRIVER)
 
 
 @pytest.fixture
@@ -269,10 +295,19 @@ def test_it_serves_playwright_mcps_tools_from_their_manifest_and_hides_the_two_t
     manifest = json.loads((DRIVER.parent / "playwright-mcp-tools.json").read_text())
     forwarded = page.forwarded_tools()
 
-    assert manifest["version"] == "0.0.84" and manifest["caps"] == ["vision"]
+    assert manifest["caps"] == ["vision"] and {t["name"] for t in manifest["tools"]} == REVIEWED_TOOLS
     assert [f.tool.name for f in forwarded] == [t["name"] for t in manifest["tools"]]
     assert [f.tool.inputSchema for f in forwarded] == [t["inputSchema"] for t in manifest["tools"]]
     assert {f.tool.name for f in forwarded if f.hidden_by_default} == {"browser_evaluate", "browser_run_code_unsafe"}
+
+
+def test_its_manifest_is_of_the_playwright_mcp_its_install_downloads():
+    manifest = json.loads((DRIVER.parent / "playwright-mcp-tools.json").read_text())
+    downloads = tomllib.loads((DRIVER.parent / "env.toml").read_text())["install"]["linux"]["downloads"]
+
+    versions = [m.group(1) for d in downloads if (m := re.search(r"/@playwright/mcp/-/mcp-(.+)\.tgz$", d["url"]))]
+
+    assert versions == [manifest["version"]]
 
 
 @pytest.mark.asyncio
@@ -288,12 +323,12 @@ async def test_it_asks_the_browser_for_playwright_mcps_address_under_its_own_loo
 
     assert endpoint == "ws://127.0.0.1:18765/svc/chromium/cdp/t/devtools/browser"
     assert page.sent[0] == ("cdp", {"user": "playwright-mcp", "origin": f"http://127.0.0.1:18765/svc/{page._browser[0].name}"})
-    assert TOOL_CALL_HEADER not in page.headers[0], "the browser's log credits the agent's call with no address check"
+    assert TOOL_CALL_HEADER not in page.headers[0]
     assert TOOL_CALL_HEADER in page.headers[1]
 
 
 def test_playwright_mcp_attaches_to_the_browser_never_launches_one_and_ends_with_the_driver():
-    command = _load()._command("ws://127.0.0.1:18765/svc/chromium/cdp/t/devtools/browser", 40123)
+    command = _playwright_mcp()._command("ws://127.0.0.1:18765/svc/chromium/cdp/t/devtools/browser", 40123)
 
     assert command[:4] == ["setpriv", "--pdeathsig", "TERM", "--"]
     assert command[command.index("--cdp-endpoint") + 1] == "ws://127.0.0.1:18765/svc/chromium/cdp/t/devtools/browser"
@@ -334,21 +369,21 @@ async def test_playwright_mcp_starts_on_the_first_call_keeps_a_session_per_calle
 
 @pytest.fixture
 def stand_in(monkeypatch, tmp_path):
-    """A ``_PlaywrightMcp`` on the stand-in, its address the last of ``endpoints``, and a way to call it as a caller."""
+    """A ``PlaywrightMcp`` on the stand-in, its address the last of ``endpoints``, and a way to call it as a caller."""
     enable_socket()
-    module = _load()
+    module = _playwright_mcp()
     fake = tmp_path / "fake_playwright_mcp.py"
     fake.write_text(FAKE_PLAYWRIGHT_MCP)
     monkeypatch.setattr(module, "_command", lambda endpoint, port: [
         sys.executable, str(fake), "--cdp-endpoint", endpoint, "--port", str(port), "--marker", str(tmp_path / "m")])
-    monkeypatch.setattr(module, "PLAYWRIGHT_MCP_OUTPUT", tmp_path / "out")
+    monkeypatch.setattr(module, "OUTPUT", tmp_path / "out")
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     endpoints = ["ws://127.0.0.1:18765/svc/chromium/cdp/one/devtools/browser"]
 
     async def endpoint() -> str:
         return endpoints[-1]
 
-    playwright = module._PlaywrightMcp(endpoint)
+    playwright = module.PlaywrightMcp(endpoint)
 
     async def called(caller: str, tool: str = "browser_snapshot", arguments: dict | None = None):
         with bound(ToolContext.as_caller(session=caller)):
@@ -396,7 +431,7 @@ async def test_a_call_its_caller_cancels_ends_its_call_on_playwright_mcp_too(sta
 @pytest.mark.asyncio
 async def test_a_callers_session_left_idle_is_closed_when_another_caller_comes(stand_in, monkeypatch):
     module, playwright, _, called = stand_in
-    monkeypatch.setattr(module, "PLAYWRIGHT_MCP_SESSION_IDLE_S", 0.5)
+    monkeypatch.setattr(module, "SESSION_IDLE_S", 0.5)
     try:
         await called("ada")
         ada = playwright._sessions["ada"]
@@ -413,7 +448,7 @@ async def test_a_callers_session_left_idle_is_closed_when_another_caller_comes(s
 @pytest.mark.asyncio
 async def test_a_start_that_never_listens_is_stopped_and_the_next_call_starts_afresh(stand_in, monkeypatch, tmp_path):
     module, playwright, endpoints, called = stand_in
-    monkeypatch.setattr(module, "PLAYWRIGHT_MCP_START_S", 2.0)
+    monkeypatch.setattr(module, "START_S", 2.0)
     endpoints.append("ws://127.0.0.1:18765/svc/chromium/cdp/silent-once")
     try:
         refused = await called("ada")
@@ -438,7 +473,7 @@ def _gone(pid: int) -> bool:
 @pytest.mark.asyncio
 async def test_a_call_slower_than_its_bound_is_refused_and_its_session_opened_afresh(stand_in, monkeypatch):
     module, playwright, _, called = stand_in
-    monkeypatch.setattr(module, "PLAYWRIGHT_MCP_CALL_TIMEOUT_S", 1.0)
+    monkeypatch.setattr(module, "CALL_TIMEOUT_S", 1.0)
     try:
         await called("ada")
         first = playwright._sessions["ada"]
@@ -455,7 +490,7 @@ async def test_a_call_slower_than_its_bound_is_refused_and_its_session_opened_af
 async def test_a_playwright_mcp_that_never_opens_a_session_is_stopped_and_the_next_call_starts_afresh(
         stand_in, monkeypatch, tmp_path):
     module, playwright, endpoints, called = stand_in
-    monkeypatch.setattr(module, "PLAYWRIGHT_MCP_START_S", 2.0)
+    monkeypatch.setattr(module, "START_S", 2.0)
     endpoints.append("ws://127.0.0.1:18765/svc/chromium/cdp/wedged-once")
     try:
         refused = await asyncio.wait_for(called("ada"), 20)

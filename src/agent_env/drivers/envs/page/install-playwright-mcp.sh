@@ -1,7 +1,7 @@
 #!/bin/sh
 # Node and Playwright MCP, from the tarballs the install downloaded and checked, with no npm install, since an install
-# has no network: Node's binary and licence in node/, and Playwright MCP's three npm packages in node_modules/, each
-# where npm would put it.
+# has no network: Node's binary and licence in node/, and each npm package in node_modules/ where npm would put it, by
+# the name its package.json gives. A package whose dependencies aren't all there, at the versions it names, fails it.
 set -eu
 work=$(mktemp -d)
 tar -xzf node.tar.gz -C "$work"
@@ -9,11 +9,23 @@ mkdir -p node/bin
 mv "$work"/node-*/bin/node node/bin/node
 mv "$work"/node-*/LICENSE node/LICENSE
 rm -rf "$work" node.tar.gz
-unpack() {
-    mkdir -p "node_modules/$2"
-    tar -xzf "$1" -C "node_modules/$2" --strip-components=1
-    rm -f "$1"
-}
-unpack playwright-mcp.tgz @playwright/mcp
-unpack playwright.tgz playwright
-unpack playwright-core.tgz playwright-core
+for package in *.tgz; do
+    work=$(mktemp -d)
+    tar -xzf "$package" -C "$work" --strip-components=1
+    name=$(node/bin/node -p 'require(process.argv[1]).name' "$work/package.json")
+    mkdir -p "node_modules/$(dirname "$name")"
+    mv "$work" "node_modules/$name"
+    rm -f "$package"
+done
+node/bin/node -e '
+const fs = require("fs"), path = require("path");
+const names = fs.readdirSync("node_modules").flatMap(n => n.startsWith("@")
+    ? fs.readdirSync(path.join("node_modules", n)).map(m => `${n}/${m}`) : [n]);
+const unmet = names.flatMap(name => Object.entries(
+    require(path.resolve("node_modules", name, "package.json")).dependencies || {}).flatMap(([dependency, version]) => {
+    const file = path.resolve("node_modules", dependency, "package.json");
+    const found = fs.existsSync(file) ? require(file).version : "none";
+    return found === version ? [] : [`${name} needs ${dependency} ${version}, found ${found}`];
+}));
+if (unmet.length) { console.error(unmet.join("\n")); process.exit(1); }
+'

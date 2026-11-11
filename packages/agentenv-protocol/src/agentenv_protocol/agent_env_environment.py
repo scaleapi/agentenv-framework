@@ -254,6 +254,14 @@ class ForwardedTool(NamedTuple):
     output_schema: dict | None = None
     hidden_by_default: bool = False
 
+    @classmethod
+    def listed(cls, tool: dict, call: Callable[..., Any], *, hidden_by_default: bool = False) -> "ForwardedTool":
+        """The tool another server's ``tools/list`` lists as ``tool``, called through ``call``: its name, description,
+        input and output schemas and annotations as listed."""
+        return cls(EnvironmentTool(name=tool["name"], description=tool.get("description"),
+                                   inputSchema=tool["inputSchema"]),
+                   call, tool.get("annotations"), tool.get("outputSchema"), hidden_by_default)
+
 
 class _ResourceMarker(NamedTuple):
     uri: str
@@ -595,6 +603,11 @@ class AgentEnvStarletteApplication(AgentEnvApplication):
         app.router.routes.append(Route(path, handler, methods=methods))
 
 
+def mcp_port() -> int:
+    """The port ``create_fastmcp_app`` serves on: ``MCP_PORT``'s, else 18765."""
+    return int(os.environ.get("MCP_PORT", "18765"))
+
+
 def create_fastmcp_app(handler: Any, *, card: EnvironmentCard, **fastmcp_kwargs: Any) -> Any:
     """FastMCP app wired for the agent-env deploy contract, with ``handler`` mounted under ``card``; returned un-served."""
     try:
@@ -603,7 +616,7 @@ def create_fastmcp_app(handler: Any, *, card: EnvironmentCard, **fastmcp_kwargs:
         raise ImportError("create_fastmcp_app requires the 'mcp' package: pip install 'mcp>=1.25,<2'") from e
     app = FastMCP(card.name, **{"instructions": _instructions(handler), **fastmcp_kwargs})
     app.settings.host = os.environ.get("MCP_HOST", "0.0.0.0")
-    app.settings.port = int(os.environ.get("MCP_PORT", "18765"))
+    app.settings.port = mcp_port()
     app.settings.transport_security.enable_dns_rebinding_protection = False
     AgentEnvFastMCPApplication(card, handler).add_routes_to_app(app)
     return app

@@ -40,7 +40,7 @@ if sys.platform == "linux":
     from Xlib import display as x_display
     from Xlib.error import ConnectionClosedError, DisplayConnectionError
 
-from agentenv_protocol import EnvironmentTool, ForwardedTool, ToolContext, resource, server_instructions
+from agentenv_protocol import ForwardedTool, ToolContext, resource, server_instructions
 from agentenv_protocol.computer import (
     PRINTABLE_KEYS,
     ComputerDriverEnvironment,
@@ -158,9 +158,8 @@ class CuaDriver(ComputerDriverEnvironment):
         self._reset_bind: dict | None = None
 
     def forwarded_tools(self) -> list[ForwardedTool]:
-        return [ForwardedTool(EnvironmentTool(name=t["name"], description=t["description"], inputSchema=t["inputSchema"]),
-                              functools.partial(self._forward, t["name"], not (t["annotations"] or {}).get("readOnlyHint")),
-                              t["annotations"] or None, t.get("outputSchema"))
+        return [ForwardedTool.listed(t, functools.partial(self._forward, t["name"],
+                                                          not (t["annotations"] or {}).get("readOnlyHint")))
                 for t in _manifest()["tools"]]
 
     @resource("skill://cua-driver/{file}", listed=lambda env: _manifest()["resources"])
