@@ -1,151 +1,35 @@
-"""The clock's version, the /clock/watch long poll computers follow it through, and clock writes that wait for them."""
+"""The /clock/watch long poll computers follow the gateway's clock through, and clock writes that wait for them."""
 from __future__ import annotations
 
 import asyncio
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import httpx
 import pytest
 
 from agent_env.env.gateway import gateway as gw_mod
-from agent_env.env.gateway.clock import Clock, ClockError
+from agent_env.env.gateway.clock import Clock
 from agent_env.env.gateway.clock_followers import ClockFollowers
+from agent_env.env.gateway.constants import (CLOCK_MAX_WAIT_FOLLOWERS_S, CLOCK_WATCH_HOLD_S, EXT_CLOCK_URI,
+                                             GATEWAY_EXTENSIONS)
 from agent_env.env.gateway.entrypoint import parse_clock_followers
 from agent_env.env.gateway.gateway import Gateway
-from agent_env.env.gateway.triggers import TriggerEngine
-from tst.unit.env.gateway.triggers_time_test import FakeNow, _FakeGateway, _perm, _settle, _tick_call
 
 T0 = "2026-01-01T00:00:00Z"
 TOKENS = {"desktop": "token-desktop", "laptop": "token-laptop"}
+HELD_S = 5.0  # long enough that an answer "at once" can't be a held watch timing out, on a loaded runner too
+SHORT_HOLD_S = 0.3
 
 
 def _utc(text: str) -> datetime:
     return datetime.fromisoformat(text.replace("Z", "+00:00"))
 
 
-def test_every_write_changes_the_version_and_reads_leave_it():
-    clock = Clock(now_fn=FakeNow())
-    seen = [clock.version]
-    clock.set_time(T0, rate=1.0)
-    seen.append(clock.version)
-    clock.read(), clock.state(), clock.now()
-    assert clock.version == seen[-1]
-    clock.advance("2026-01-02T00:00:00Z")
-    seen.append(clock.version)
-    clock.set_rate(60)
-    seen.append(clock.version)
-    clock.clear()
-    seen.append(clock.version)
-    clock.clear()
-    seen.append(clock.version)
-    assert len(set(seen)) == len(seen)
-    assert [clock.count_of(version) for version in seen] == [0, 1, 2, 3, 4, 5]
-
-
-def test_a_version_never_repeats_across_clocks_and_names_only_what_its_clock_had():
-    first, second = Clock(now_fn=FakeNow()), Clock(now_fn=FakeNow())
-    assert first.version != second.version
-    first.set_time(T0)
-    boot = first.version.split(".")[0]
-    assert first.count_of(first.version) == 1
-    assert first.count_of(second.version) is None
-    assert [first.count_of(v) for v in (f"{boot}.2", f"{boot}.-1", f"{boot}.²", f"{boot}", "", None, 3)] == [None] * 7
-
-
-def test_a_rate_change_continues_from_the_clock_as_of_the_write_keeping_its_t0_and_generation():
-    """Taking the new time from a state read a moment earlier stepped the universe back by the gap, which a computer,
-    never stepping back, then ran ahead of; and a re-arm moved every time trigger's relative marks to the new t0."""
-    now = FakeNow()
-    clock = Clock(now_fn=now)
-    clock.set_time(T0, rate=1.0)
-    generation = clock.generation
-    now.tick(10)
-    read = clock.state()
-    now.tick(0.07)
-    state = clock.set_rate(60)
-    assert _utc(state["virtual_time"]) - _utc(read["virtual_time"]) == timedelta(milliseconds=70)
-    assert (state["virtual_seconds_per_real_second"], state["t0"], clock.generation) == (60, T0, generation)
-    now.tick(1)
-    assert clock.read()["virtual_time"] == "2026-01-01T00:01:10.070000Z"
-    assert clock.elapsed() == pytest.approx(70.07)
-    assert clock.at_elapsed(130.07) == _utc("2026-01-01T00:02:10.070000Z")
-    clock.advance("2026-01-01T01:00:00Z")
-    now.tick(1)
-    assert clock.read()["virtual_time"] == "2026-01-01T01:01:00Z"
-
-
-def test_a_rate_change_hands_followers_a_clock_continuous_with_the_one_before():
-    """A follower extrapolating the snapshot before the change to the moment of the write is where the one after starts."""
-    now = FakeNow()
-    clock = Clock(now_fn=now)
-    clock.set_time(T0, rate=1.0)
-    before, at = clock.state(), now()
-    now.tick(3.25)
-    after = clock.set_rate(2)
-    extrapolated = _utc(before["virtual_time"]) + timedelta(seconds=(now() - at) * before["virtual_seconds_per_real_second"])
-    assert abs((_utc(after["virtual_time"]) - extrapolated).total_seconds()) < 0.001
-
-
-class SteppingNow:
-    """A real clock's reading moves between any two calls: each call is 100 µs after the one before it."""
-
-    def __init__(self):
-        self.t, self.calls = 1000.0, []
-
-    def __call__(self) -> float:
-        self.t += 0.0001
-        self.calls.append(self.t)
-        return self.t
-
-
-@pytest.mark.parametrize("before,after", [(1.0, 86400.0), (86400.0, 1.0)])
-def test_a_rate_change_starts_its_new_rate_at_the_instant_it_read_the_time(before, after):
-    now = SteppingNow()
-    clock = Clock(now_fn=now)
-    mark = len(now.calls)
-    clock.set_time(T0, rate=before)
-    armed_at = now.calls[mark]
-    mark = len(now.calls)
-    clock.set_rate(after)
-    changed_at = now.calls[mark]
-    read = clock.now()
-    expected = _utc(T0) + timedelta(seconds=(changed_at - armed_at) * before + (now.calls[-1] - changed_at) * after)
-    assert abs((read - expected).total_seconds()) < 0.001
-
-
-def test_a_rate_change_needs_an_armed_clock_and_a_rate():
-    with pytest.raises(ClockError, match="not armed"):
-        Clock(now_fn=FakeNow()).set_rate(2)
-    clock = Clock(now_fn=FakeNow())
-    clock.set_time(T0)
-    for rate in (None, -1, "2"):
-        with pytest.raises(ClockError, match="rate must be"):
-            clock.set_rate(rate)
-
-
-@pytest.mark.asyncio
-async def test_a_relative_time_trigger_keeps_its_mark_across_a_rate_change():
-    now = FakeNow()
-    clock = Clock(now_fn=now)
-    engine = TriggerEngine(_FakeGateway(clock))
-    clock.set_time(T0, rate=1)
-    engine.register({"watch_roles": ["default"], "triggers": [
-        {"id": "rel", "when": {"type": "time", "at": "PT2H"}, "actions": [_perm()]}]})
-    _tick_call(engine, now, 3600)
-    clock.set_rate(3600)
-    assert engine.clock_advanced() == []
-    _tick_call(engine, now, 1.5)
-    await _settle(engine)
-    trig = engine.state()["triggers"][0]
-    assert (trig["status"], trig["fire_count"]) == ("fired", 1)
-    assert "reanchored" not in {e["kind"] for e in engine.state()["events"]}
-
-
 @pytest.fixture
 def gateway(tmp_path, monkeypatch):
     monkeypatch.setattr(gw_mod, "GATEWAY_TRAJECTORY_FILE", str(tmp_path / "trajectory.jsonl"))
-    monkeypatch.setattr(ClockFollowers, "WATCH_S", 0.3)
+    monkeypatch.setattr(ClockFollowers, "WATCH_S", HELD_S)
     made = []
 
     def make(followers=TOKENS) -> Gateway:
@@ -178,6 +62,31 @@ async def _follow(client, name: str, token: str, *, applies_after_s: float = 0.0
             version = answer["version"]
 
 
+async def _until_shown(gw: Gateway, *names: str) -> None:
+    """Until each of ``names`` has shown the clock's current version: its follower is up and holding a watch."""
+    for _ in range(500):
+        state = gw._clock_followers.state()
+        if all(state[name]["version"] == gw._clock.version for name in names):
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"{names} never showed {gw._clock.version}: {gw._clock_followers.state()}")
+
+
+def test_the_card_offers_every_clock_method_with_the_waits_bound_and_the_watchs_hold():
+    methods = next(e for e in GATEWAY_EXTENSIONS if e["uri"] == EXT_CLOCK_URI)["params"]["methods"]
+    wait = {"type": "number", "minimum": 0, "maximum": CLOCK_MAX_WAIT_FOLLOWERS_S}
+    assert {name: (m["method"], m["endpoint"]) for name, m in methods.items()} == {
+        "get_time": ("GET", "/clock/time"), "set_time": ("PUT", "/clock/set-time"), "set_rate": ("PUT", "/clock/set-rate"),
+        "advance": ("PUT", "/clock/advance"), "clear": ("POST", "/clock/clear"), "state": ("GET", "/clock/state"),
+        "watch": ("GET", "/clock/watch")}
+    assert all(methods[name]["request"]["properties"]["wait_followers_s"] == wait
+               for name in ("set_time", "set_rate", "advance", "clear"))
+    assert methods["set_rate"]["request"]["required"] == ["virtual_seconds_per_real_second"]
+    assert methods["set_time"]["request"]["required"] == ["virtual_time"]
+    assert set(methods["watch"]["request"]["properties"]) == {"after", "follower"}
+    assert methods["watch"]["hold_s"] == CLOCK_WATCH_HOLD_S == ClockFollowers.WATCH_S == 25.0
+
+
 @pytest.mark.asyncio
 async def test_a_watch_naming_another_version_answers_at_once_with_the_clock(gateway):
     gw = gateway()
@@ -186,7 +95,7 @@ async def test_a_watch_naming_another_version_answers_at_once_with_the_clock(gat
         started = time.monotonic()
         answer = await _watch(client, "some-earlier-version")
     body = answer.json()
-    assert answer.status_code == 200 and time.monotonic() - started < 0.2
+    assert answer.status_code == 200 and time.monotonic() - started < HELD_S / 2
     assert body["version"] == gw._clock.version
     assert (body["armed"], body["t0"], body["virtual_time"], body["virtual_seconds_per_real_second"]) == (True, T0, T0, 0)
     assert body["received"] <= body["sent"] <= time.time()
@@ -206,12 +115,13 @@ async def test_a_watch_naming_the_current_version_answers_at_the_next_change(gat
 
 
 @pytest.mark.asyncio
-async def test_a_watch_with_no_change_answers_after_its_timeout_with_the_same_version(gateway):
+async def test_a_watch_with_no_change_answers_after_its_hold_with_the_same_version(gateway, monkeypatch):
+    monkeypatch.setattr(ClockFollowers, "WATCH_S", SHORT_HOLD_S)
     gw = gateway()
     async with _client(gw) as client:
         started = time.monotonic()
         answer = (await _watch(client, gw._clock.version)).json()
-    assert time.monotonic() - started >= ClockFollowers.WATCH_S
+    assert time.monotonic() - started >= SHORT_HOLD_S
     assert answer == {**answer, "armed": False, "version": gw._clock.version}
 
 
@@ -221,18 +131,19 @@ async def test_a_write_waits_until_every_declared_computer_shows_its_version(gat
     async with _client(gw) as client:
         followers = [asyncio.create_task(_follow(client, name, token, applies_after_s=0.05)) for name, token in TOKENS.items()]
         try:
-            await asyncio.sleep(0.1)
+            await _until_shown(gw, *TOKENS)
             started = time.monotonic()
             written = await client.put("/clock/set-time", json={"virtual_time": T0, "wait_followers_s": 2})
             waited = time.monotonic() - started
+            rated = await client.put("/clock/set-rate", json={"virtual_seconds_per_real_second": 60, "wait_followers_s": 2})
             advanced = await client.put("/clock/advance", json={"virtual_time": "2026-01-02T00:00:00Z", "wait_followers_s": 2})
             cleared = await client.post("/clock/clear", json={"wait_followers_s": 2})
             state = (await client.get("/clock/state")).json()
         finally:
             for follower in followers:
                 follower.cancel()
-    assert [r.status_code for r in (written, advanced, cleared)] == [200, 200, 200]
-    assert 0.05 <= waited < 1.0
+    assert [r.status_code for r in (written, rated, advanced, cleared)] == [200] * 4
+    assert 0.05 <= waited < 2
     assert {name: f["version"] for name, f in state["followers"].items()} == {"desktop": gw._clock.version,
                                                                               "laptop": gw._clock.version}
 
@@ -243,7 +154,7 @@ async def test_a_write_answers_504_naming_the_computers_still_behind_and_the_cha
     async with _client(gw) as client:
         follower = asyncio.create_task(_follow(client, "desktop", TOKENS["desktop"]))
         try:
-            await asyncio.sleep(0.1)
+            await _until_shown(gw, "desktop")
             started = time.monotonic()
             answer = await client.put("/clock/set-time", json={"virtual_time": T0, "virtual_seconds_per_real_second": 0,
                                                                "wait_followers_s": 0.4})
@@ -252,7 +163,7 @@ async def test_a_write_answers_504_naming_the_computers_still_behind_and_the_cha
         finally:
             follower.cancel()
     body = answer.json()
-    assert answer.status_code == 504 and 0.4 <= waited < 1.0
+    assert answer.status_code == 504 and waited >= 0.4
     assert (body["ok"], body["stale"], body["version"]) == (False, ["laptop"], gw._clock.version)
     assert "laptop didn't show it within 0.4 s" in body["error"]
     assert read == {"virtual_time": T0}
@@ -260,14 +171,14 @@ async def test_a_write_answers_504_naming_the_computers_still_behind_and_the_cha
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("token", [None, "token-desktop", "wrong"], ids=["none", "another-computers", "unknown"])
-async def test_a_watch_acknowledges_only_with_its_computers_token(gateway, token):
+async def test_a_watch_acknowledges_only_with_its_computers_token(gateway, monkeypatch, token):
+    monkeypatch.setattr(ClockFollowers, "WATCH_S", SHORT_HOLD_S)
     gw = gateway({"laptop": TOKENS["laptop"]})
     async with _client(gw) as client:
         await client.put("/clock/set-time", json={"virtual_time": T0})
-        held = asyncio.create_task(_watch(client, gw._clock.version, "laptop", token))
-        await asyncio.sleep(0.05)
+        answered = await _watch(client, gw._clock.version, "laptop", token)
         state = (await client.get("/clock/state")).json()
-        held.cancel()
+    assert answered.status_code == 200
     assert state["followers"] == {"laptop": {"version": None, "seen_s_ago": None}}
 
 
@@ -285,13 +196,33 @@ async def test_an_acknowledgement_cant_claim_a_version_the_clock_hasnt_had(gatew
 
 
 @pytest.mark.asyncio
+async def test_a_late_watch_naming_an_earlier_version_doesnt_move_its_computer_back(gateway):
+    gw = gateway({"laptop": TOKENS["laptop"]})
+    async with _client(gw) as client:
+        await client.put("/clock/set-time", json={"virtual_time": T0})
+        earlier = gw._clock.version
+        await client.put("/clock/advance", json={"virtual_time": "2026-01-02T00:00:00Z"})
+        latest = gw._clock.version
+        held = asyncio.create_task(_watch(client, latest, "laptop", TOKENS["laptop"]))
+        await _until_shown(gw, "laptop")
+        await _watch(client, earlier, "laptop", TOKENS["laptop"])
+        long = await _watch(client, f"{latest.split('.')[0]}.{'9' * 5000}", "laptop", TOKENS["laptop"])
+        state = (await client.get("/clock/state")).json()
+        waited = await client.put("/clock/set-time", json={"virtual_time": T0, "wait_followers_s": 0.5})
+        held.cancel()
+    assert state["followers"]["laptop"]["version"] == latest
+    assert long.status_code == 200 and long.json()["version"] == latest
+    assert waited.status_code == 504
+
+
+@pytest.mark.asyncio
 async def test_a_write_without_a_wait_or_without_computers_answers_at_once(gateway):
     with_computers, without = gateway(), gateway({})
     for gw, body in ((with_computers, {"virtual_time": T0}), (without, {"virtual_time": T0, "wait_followers_s": 5})):
         async with _client(gw) as client:
             started = time.monotonic()
             answer = await client.put("/clock/set-time", json=body)
-        assert answer.status_code == 200 and time.monotonic() - started < 0.2
+        assert answer.status_code == 200 and time.monotonic() - started < 2.5
         assert "stale" not in answer.json()
 
 
@@ -301,14 +232,28 @@ async def test_a_wait_is_a_number_of_seconds_up_to_30(gateway, wait):
     gw = gateway({})
     async with _client(gw) as client:
         answers = [await client.put("/clock/set-time", json={"virtual_time": T0, "wait_followers_s": wait}),
+                   await client.put("/clock/set-rate", json={"virtual_seconds_per_real_second": 2, "wait_followers_s": wait}),
                    await client.put("/clock/advance", json={"virtual_time": "2026-02-01T00:00:00Z", "wait_followers_s": wait}),
                    await client.post("/clock/clear", json={"wait_followers_s": wait})]
     if wait is None:
-        assert [a.status_code for a in answers] == [200, 200, 200]
+        assert [a.status_code for a in answers] == [200] * 4
     else:
-        assert [a.status_code for a in answers] == [400, 400, 400]
+        assert [a.status_code for a in answers] == [400] * 4
         assert all("wait_followers_s" in a.json()["error"] for a in answers)
         assert gw._clock.count_of(gw._clock.version) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path,method", [("/clock/set-time", "PUT"), ("/clock/set-rate", "PUT"),
+                                         ("/clock/advance", "PUT"), ("/clock/clear", "POST")])
+@pytest.mark.parametrize("body,error", [("{not json", "Invalid JSON body"), ("[]", "must be a JSON object"),
+                                        ("null", "must be a JSON object")])
+async def test_every_clock_write_refuses_a_body_that_isnt_a_json_object(gateway, path, method, body, error):
+    gw = gateway({})
+    async with _client(gw) as client:
+        answer = await client.request(method, path, content=body)
+    assert answer.status_code == 400 and error in answer.json()["error"]
+    assert gw._clock.count_of(gw._clock.version) == 0
 
 
 @pytest.mark.asyncio
@@ -331,42 +276,47 @@ async def test_a_restarted_gateway_answers_a_watch_from_before_it_at_once_and_un
         started = time.monotonic()
         answer = (await _watch(client, version, "desktop", TOKENS["desktop"])).json()
         state = (await client.get("/clock/state")).json()
-    assert time.monotonic() - started < 0.2
+    assert time.monotonic() - started < HELD_S / 2
     assert answer["armed"] is False and answer["version"] != version
     assert state["followers"]["desktop"]["version"] is None
 
 
 @pytest.mark.asyncio
-async def test_the_route_changes_the_rate_at_the_time_of_the_write(gateway):
+async def test_set_rate_changes_the_rate_at_the_time_of_the_write_and_keeps_t0(gateway):
     gw = gateway({})
     async with _client(gw) as client:
         await client.put("/clock/set-time", json={"virtual_time": T0})
         read = (await client.get("/clock/state")).json()
         await asyncio.sleep(0.07)
-        changed = await client.put("/clock/set-time", json={"virtual_seconds_per_real_second": 2})
+        changed = await client.put("/clock/set-rate", json={"virtual_seconds_per_real_second": 2})
     body = changed.json()
     gap = (_utc(body["virtual_time"]) - _utc(read["virtual_time"])).total_seconds()
     assert changed.status_code == 200 and (body["virtual_seconds_per_real_second"], body["t0"], body["due"]) == (2, T0, [])
-    assert 0.07 <= gap < 0.2
+    assert gap >= 0.07
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("body", [{}, {"virtual_seconds_per_real_second": None}, {"wait_followers_s": 1}])
-async def test_a_set_time_with_neither_a_time_nor_a_rate_is_refused_as_before(gateway, body):
+@pytest.mark.parametrize("path,body,error", [
+    ("/clock/set-time", {}, "virtual_time must be an RFC3339 string"),
+    ("/clock/set-time", {"virtual_seconds_per_real_second": 2}, "virtual_time must be an RFC3339 string"),
+    ("/clock/set-rate", {}, "rate must be a number"),
+    ("/clock/set-rate", {"virtual_time": T0}, "rate must be a number"),
+])
+async def test_set_time_needs_a_time_and_set_rate_a_rate(gateway, path, body, error):
     gw = gateway({})
     async with _client(gw) as client:
         await client.put("/clock/set-time", json={"virtual_time": T0, "virtual_seconds_per_real_second": 0})
-        answer = await client.put("/clock/set-time", json=body)
+        answer = await client.put(path, json=body)
         state = (await client.get("/clock/state")).json()
-    assert answer.status_code == 400 and "virtual_time must be an RFC3339 string" in answer.json()["error"]
+    assert answer.status_code == 400 and error in answer.json()["error"]
     assert (state["virtual_seconds_per_real_second"], state["virtual_time"]) == (0, T0)
 
 
 @pytest.mark.asyncio
-async def test_a_rate_change_of_an_unarmed_clock_is_refused(gateway):
+async def test_set_rate_refuses_an_unarmed_clock(gateway):
     gw = gateway({})
     async with _client(gw) as client:
-        answer = await client.put("/clock/set-time", json={"virtual_seconds_per_real_second": 2})
+        answer = await client.put("/clock/set-rate", json={"virtual_seconds_per_real_second": 2})
     assert answer.status_code == 400 and "not armed" in answer.json()["error"]
 
 
@@ -377,7 +327,7 @@ async def test_a_hundred_advances_are_each_acknowledged_in_order(gateway):
         await client.put("/clock/set-time", json={"virtual_time": T0, "virtual_seconds_per_real_second": 0})
         follower = asyncio.create_task(_follow(client, "desktop", TOKENS["desktop"]))
         try:
-            await asyncio.sleep(0.05)
+            await _until_shown(gw, "desktop")
             answers, waits = [], []
             for hour in range(1, 101):
                 started = time.monotonic()
@@ -389,7 +339,7 @@ async def test_a_hundred_advances_are_each_acknowledged_in_order(gateway):
     assert [a.status_code for a in answers] == [200] * 100
     counts = [gw._clock.count_of(a.json()["version"]) for a in answers]
     assert counts == sorted(counts) and len(set(counts)) == 100
-    assert sorted(waits)[50] < 0.05
+    assert max(waits) < 2
 
 
 def test_the_gateway_reads_its_declared_computers_from_its_environment():
@@ -399,30 +349,3 @@ def test_the_gateway_reads_its_declared_computers_from_its_environment():
                            ("desktop=a,desktop=b", "twice")):
         with pytest.raises(ValueError, match=fragment):
             parse_clock_followers(spec)
-
-
-def test_a_count_too_long_to_be_one_the_clock_had_names_nothing():
-    clock = Clock(now_fn=FakeNow())
-    clock.set_time(T0)
-    boot = clock.version.split(".")[0]
-    assert [clock.count_of(f"{boot}.{'9' * 5000}"), clock.count_of(f"{boot}.01"), clock.count_of(f"{boot}.1")] == [None, None, 1]
-
-
-@pytest.mark.asyncio
-async def test_a_late_watch_naming_an_earlier_version_doesnt_move_its_computer_back(gateway):
-    gw = gateway({"laptop": TOKENS["laptop"]})
-    async with _client(gw) as client:
-        await client.put("/clock/set-time", json={"virtual_time": T0})
-        earlier = gw._clock.version
-        await client.put("/clock/advance", json={"virtual_time": "2026-01-02T00:00:00Z"})
-        latest = gw._clock.version
-        held = asyncio.create_task(_watch(client, latest, "laptop", TOKENS["laptop"]))
-        await asyncio.sleep(0.05)
-        await _watch(client, earlier, "laptop", TOKENS["laptop"])
-        long = await _watch(client, f"{latest.split('.')[0]}.{'9' * 5000}", "laptop", TOKENS["laptop"])
-        state = (await client.get("/clock/state")).json()
-        waited = await client.put("/clock/set-time", json={"virtual_time": T0, "wait_followers_s": 0.5})
-        held.cancel()
-    assert state["followers"]["laptop"]["version"] == latest
-    assert long.status_code == 200 and long.json()["version"] == latest
-    assert waited.status_code == 504

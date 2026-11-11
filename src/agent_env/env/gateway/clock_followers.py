@@ -9,8 +9,7 @@ import time
 from collections.abc import Callable, Mapping
 
 from .clock import Clock, ClockError
-
-MAX_WAIT_FOLLOWERS_S = 30.0
+from .constants import CLOCK_MAX_WAIT_FOLLOWERS_S, CLOCK_WATCH_HOLD_S
 
 
 def parse_wait(value) -> float:
@@ -19,16 +18,16 @@ def parse_wait(value) -> float:
         return 0.0
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
         raise ClockError(f"wait_followers_s must be a non-negative number, got {value!r}")
-    if value > MAX_WAIT_FOLLOWERS_S:
-        raise ClockError(f"wait_followers_s {value:g} exceeds max {MAX_WAIT_FOLLOWERS_S:g}")
+    if value > CLOCK_MAX_WAIT_FOLLOWERS_S:
+        raise ClockError(f"wait_followers_s {value:g} exceeds max {CLOCK_MAX_WAIT_FOLLOWERS_S:g}")
     return float(value)
 
 
 class ClockFollowers:
-    """The declared followers, each by name with the read token its watch carries, and the version each last showed.
-    A watch acknowledges only with its follower's token; ``ClockFollowers`` is bound to the gateway's event loop."""
+    """The declared followers, each by name with the read token its watch carries, and the version each last showed;
+    bound to the gateway's event loop."""
 
-    WATCH_S = 25.0
+    WATCH_S = CLOCK_WATCH_HOLD_S
 
     def __init__(self, clock: Callable[[], Clock], tokens: Mapping[str, str]):
         self._clock = clock
@@ -43,13 +42,17 @@ class ClockFollowers:
         self._changed.set()
         self._changed = asyncio.Event()
 
-    async def watch(self, after: str, follower: str | None, token: str) -> None:
-        """Take ``after`` as ``follower``'s acknowledgement when ``token`` is its read token and it's a version this clock
+    def follower_for(self, name: str | None, token: str) -> str | None:
+        """``name`` when it's a declared follower and ``token`` its read token, else None."""
+        expected = self._tokens.get(name or "")
+        return name if expected and token and hmac.compare_digest(token.encode(), expected.encode()) else None
+
+    async def watch(self, after: str, follower: str | None) -> None:
+        """Take ``after`` as ``follower``'s acknowledgement (one ``follower_for`` named) when it's a version this clock
         has had, later than the one it last showed; then return at once when the clock's version isn't ``after``, else
         at its next change or after ``WATCH_S``."""
         changed = self._changed
-        expected = self._tokens.get(follower or "")
-        if expected and token and hmac.compare_digest(token.encode(), expected.encode()):
+        if follower is not None:
             count = self._clock().count_of(after)
             async with self._acks:
                 shown = self._shown[follower]
