@@ -124,6 +124,51 @@ async def test_a_server_error_is_retried(monkeypatch):
     assert batches[-1].events == [{"i": 0}]
 
 
+async def _start_following(agent: _Agent, stop: asyncio.Event, *, poll_interval_seconds: float) -> asyncio.Task:
+    async def sink(batch: TrajectoryBatch) -> None:
+        pass
+
+    async def follow() -> None:
+        async with agent.client() as client:
+            await follow_trajectory(
+                _ENDPOINT, "task-1", sink, poll_interval_seconds=poll_interval_seconds, stop=stop, client=client
+            )
+
+    follower = asyncio.create_task(follow())
+    async with asyncio.timeout(5):
+        while not agent.afters:
+            await asyncio.sleep(0.01)
+    return follower
+
+
+@pytest.mark.asyncio
+async def test_a_follower_cancelled_as_it_is_stopped_ends():
+    """A step's teardown sets ``stop`` and cancels its follower in the same tick, against an agent
+    that is gone; on Python 3.11 ``asyncio.wait_for`` dropped that cancel and the follower ran on."""
+    agent = _Agent(httpx.Response(200, json=_page(0, [], "running")), *[httpx.Response(503)] * 100)
+    stop = asyncio.Event()
+    follower = await _start_following(agent, stop, poll_interval_seconds=30)
+
+    stop.set()
+    follower.cancel()
+
+    done, _ = await asyncio.wait({follower}, timeout=2)
+    assert done == {follower}
+
+
+@pytest.mark.asyncio
+async def test_an_agent_that_fails_after_the_turn_ends_ends_following():
+    agent = _Agent(httpx.Response(200, json=_page(0, [], "running")), *[httpx.Response(503)] * 100)
+    stop = asyncio.Event()
+    follower = await _start_following(agent, stop, poll_interval_seconds=30)
+
+    stop.set()
+
+    async with asyncio.timeout(2):
+        await follower
+    assert agent.afters == [0, 0]
+
+
 @pytest.mark.asyncio
 async def test_a_task_the_agent_no_longer_knows_ends_following():
     agent = _Agent(httpx.Response(404, json={"detail": "Unknown task"}))
