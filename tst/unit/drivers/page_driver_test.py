@@ -38,7 +38,8 @@ CARD = {"name": "chromium", "capabilities": {"extensions": [{"uri": BROWSER, "pa
     for op in PAGE_OPS}}}]}}
 #: A stand-in for Playwright MCP on the port and CDP address it's started with: browser_snapshot says what it was
 #: started with and which session called it, and browser_wait_for waits. Started on an address ending /exits, it exits
-#: at once; on one ending /silent-once, the first time it writes its pid to the marker it's given and never listens.
+#: at once; on one ending /silent-once, the first time it writes its pid to the marker it's given and never listens; on
+#: one ending /wedged-once, the first time it listens but never answers.
 FAKE_PLAYWRIGHT_MCP = """import asyncio, json, os, sys, time
 from mcp.server.fastmcp import Context, FastMCP
 args = sys.argv[1:]
@@ -49,6 +50,13 @@ marker = args[args.index("--marker") + 1]
 if endpoint.endswith("/silent-once") and not os.path.exists(marker):
     open(marker, "w").write(str(os.getpid()))
     time.sleep(3600)
+if endpoint.endswith("/wedged-once") and not os.path.exists(marker):
+    import socket
+    open(marker, "w").write(str(os.getpid()))
+    held = socket.create_server(("127.0.0.1", port))
+    accepted = []
+    while True:
+        accepted.append(held.accept())
 app = FastMCP("fake", host="127.0.0.1", port=port)
 @app.tool()
 def browser_snapshot(ctx: Context) -> str:
@@ -418,3 +426,37 @@ def _gone(pid: int) -> bool:
     except ProcessLookupError:
         return True
     return False
+
+
+@pytest.mark.asyncio
+async def test_a_call_slower_than_its_bound_is_refused_and_its_session_opened_afresh(stand_in, monkeypatch):
+    module, playwright, _, called = stand_in
+    monkeypatch.setattr(module, "PLAYWRIGHT_MCP_CALL_TIMEOUT_S", 1.0)
+    try:
+        await called("ada")
+        first = playwright._sessions["ada"]
+        slow = await asyncio.wait_for(called("ada", "browser_wait_for", {"time": 30}), 10)
+        after = await called("ada")
+    finally:
+        await playwright._stop()
+
+    assert slow.isError and "didn't answer browser_wait_for" in slow.content[0].text
+    assert first.close.is_set() and not after.isError
+
+
+@pytest.mark.asyncio
+async def test_a_playwright_mcp_that_never_opens_a_session_is_stopped_and_the_next_call_starts_afresh(
+        stand_in, monkeypatch, tmp_path):
+    module, playwright, endpoints, called = stand_in
+    monkeypatch.setattr(module, "PLAYWRIGHT_MCP_START_S", 2.0)
+    endpoints.append("ws://127.0.0.1:18765/svc/chromium/cdp/wedged-once")
+    try:
+        refused = await asyncio.wait_for(called("ada"), 20)
+        wedged = int((tmp_path / "m").read_text())
+        gone = _gone(wedged)
+        answered = await called("ada")
+    finally:
+        await playwright._stop()
+
+    assert refused.isError and "didn't open a session within 2 s" in refused.content[0].text
+    assert gone and not answered.isError

@@ -17,6 +17,7 @@ import os
 import socket
 import string
 import tempfile
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
@@ -106,7 +107,7 @@ PLAYWRIGHT_MCP_USER = "playwright-mcp"
 KEPT_ENVIRONMENT = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TZ", "TMPDIR")
 #: Where Playwright MCP writes what it names itself, and its log.
 PLAYWRIGHT_MCP_OUTPUT = Path(tempfile.gettempdir()) / "agentenv-playwright-mcp"
-#: How long Playwright MCP may take to listen, and one of its tools to answer.
+#: How long Playwright MCP may take to listen or to open a session, and one of its tools to answer.
 PLAYWRIGHT_MCP_START_S = 30.0
 PLAYWRIGHT_MCP_CALL_TIMEOUT_S = 300.0
 #: How long a caller's session on Playwright MCP is kept with no call: a caller's own MCP session ends with no word to
@@ -461,7 +462,8 @@ class _PlaywrightMcp:
             return _refused(e.message)
         except Exception as e:
             return _refused(f"Playwright MCP didn't answer {tool}: {type(e).__name__}: {e}")
-        called = asyncio.ensure_future(held.session.call_tool(tool, arguments))
+        called = asyncio.ensure_future(held.session.call_tool(
+            tool, arguments, read_timeout_seconds=timedelta(seconds=PLAYWRIGHT_MCP_CALL_TIMEOUT_S)))
         exited = asyncio.ensure_future(process.wait())
         try:
             await asyncio.wait({called, exited, held.owner}, return_when=asyncio.FIRST_COMPLETED)
@@ -479,6 +481,7 @@ class _PlaywrightMcp:
         try:
             return called.result()
         except Exception as e:
+            held.close.set()
             return _refused(f"Playwright MCP didn't answer {tool}: {type(e).__name__}: {e}")
         finally:
             held.used_at = asyncio.get_running_loop().time()
@@ -491,10 +494,14 @@ class _PlaywrightMcp:
                          if key != caller and now - held.used_at > PLAYWRIGHT_MCP_SESSION_IDLE_S]:
                 self._sessions.pop(idle).close.set()
             held = self._sessions.get(caller)
-            if held is None or held.url != url or held.owner.done():
+            if held is None or held.url != url or held.owner.done() or held.close.is_set():
                 if held is not None:
                     held.close.set()
-                held = self._sessions[caller] = await _Session.open(url)
+                try:
+                    held = self._sessions[caller] = await _Session.open(url)
+                except DeviceUnavailable:
+                    await self._stop()
+                    raise
             held.used_at = now
             return held, self._process
 
@@ -547,10 +554,16 @@ class _Session:
 
     @classmethod
     async def open(cls, url: str) -> _Session:
+        """A session on Playwright MCP at ``url``; DeviceUnavailable when it doesn't open one in time, wedged."""
         held = cls(url)
         ready: asyncio.Future = asyncio.get_running_loop().create_future()
         held.owner = asyncio.create_task(held._own(ready))
-        held.session = await ready
+        try:
+            held.session = await asyncio.wait_for(ready, PLAYWRIGHT_MCP_START_S)
+        except asyncio.TimeoutError:
+            held.close.set()
+            held.owner.cancel()
+            raise DeviceUnavailable(f"Playwright MCP didn't open a session within {PLAYWRIGHT_MCP_START_S:.0f} s")
         return held
 
     async def _own(self, ready: asyncio.Future) -> None:
@@ -560,6 +573,8 @@ class _Session:
                     streamable_http_client(self.url, http_client=http) as (read, write, _), \
                     ClientSession(read, write) as session:
                 await session.initialize()
+                if ready.done():
+                    return
                 ready.set_result(session)
                 await self.close.wait()
         except BaseException as e:
