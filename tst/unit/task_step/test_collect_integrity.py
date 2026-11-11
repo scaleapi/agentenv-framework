@@ -190,3 +190,19 @@ async def test_a_read_past_its_deadline_is_abandoned(tmp_path, monkeypatch):
                                  "application/octet-stream")
     assert list(tmp_path.iterdir()) == []
 
+
+@pytest.mark.asyncio
+async def test_a_provider_whose_exec_runs_the_whole_read_is_held_to_the_deadline(tmp_path, monkeypatch):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(collect_artifacts, "_READ_DEADLINE_FLOOR_S", 0.05)
+
+    class _StallingExec(_Sandbox):
+        async def exec(self, *args):
+            await asyncio.Event().wait()
+
+    step = CollectArtifactsTaskStep(id="collect", version=None)
+    with pytest.raises(RuntimeError, match="took more than 0s; abandoned it"):
+        await step._collect_file(_StallingExec(b"", 0, 10), None, "/app/artifact/slow", 10, "slow", _RefusingStore(),
+                                 "uid", 1, "application/octet-stream")
+    assert list(tmp_path.iterdir()) == []
+

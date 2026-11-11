@@ -657,6 +657,25 @@ class TestManifestResolution:
         })
         assert [k for k, _, _ in step._resolve_items(ctx)] == [".bashrc", "logs_run.json", "evil", "dots.txt"]
 
+    def test_manifest_names_that_clean_to_one_key_each_keep_a_key_of_their_own(self):
+        step = CollectArtifactsTaskStep(id="collect", version=None, base_path="/app/workspace", manifest_step_id="m9")
+        ctx = _manifest_ctx({
+            "logs/run.json": "/app/workspace/a.json",
+            "logs_run.json": "/app/workspace/b.json",
+            "../logs/run.json": "/app/workspace/c.json",
+        })
+        assert [(k, src) for k, src, _ in step._resolve_items(ctx)] == [
+            ("logs_run.json", "/app/workspace/a.json"),
+            ("logs_run.json (2)", "/app/workspace/b.json"),
+            ("logs_run.json (3)", "/app/workspace/c.json"),
+        ]
+
+    @pytest.mark.parametrize("base_path", ["/app/./workspace", "/app/workspace/", "/app//workspace"])
+    def test_manifest_entries_are_matched_against_base_path_normalized(self, base_path):
+        step = CollectArtifactsTaskStep(id="collect", version=None, base_path=base_path, manifest_step_id="m9")
+        ctx = _manifest_ctx({"report": "/app/workspace/out/report.md"})
+        assert step._resolve_items(ctx) == [("report", "/app/workspace/out/report.md", "out/report.md")]
+
     def test_enumeration_drops_excluded_basenames(self):
         step = CollectArtifactsTaskStep(
             id="collect", version=None, base_path="/app/workspace",

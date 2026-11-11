@@ -314,3 +314,16 @@ class TestOnThisMachine:
         assert (collected, hard_failures) == ({"bundle.zip"}, [f"{out}/leak"])
         assert uploaded == {"bundle.zip": b"PK bundle"}
 
+    @pytest.mark.asyncio
+    async def test_a_base_path_the_agent_swapped_for_a_link_reaches_only_the_work_dir(self, tmp_path):
+        work, home = tmp_path / "work", tmp_path / "home"
+        (home / ".ssh").mkdir(parents=True)
+        (home / ".ssh" / "id_rsa").write_bytes(b"operator secret")
+        work.mkdir()
+        (work / "artifact").symlink_to(home)
+        step = CollectArtifactsTaskStep(
+            id="c", version=None, sandbox_name="box", base_path="/app/artifact", artifact_paths=[".ssh/id_rsa"],
+        )
+        collected, hard_failures, uploaded = await self._collect(step, LocalSandbox(work_dir=work))
+        assert (collected, hard_failures, uploaded) == (set(), ["/app/artifact/.ssh/id_rsa"], {})
+

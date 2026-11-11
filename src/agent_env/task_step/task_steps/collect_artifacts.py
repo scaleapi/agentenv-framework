@@ -30,7 +30,7 @@ relative entries, to manifest entries and to the no-list enumeration fallback.
 
 Only regular files are read, up to `max_bytes` each. A local sandbox's host is
 this machine, so there a file is read only where it resolves inside the
-sandbox's work dir or base_path.
+sandbox's work dir, or inside a base_path the task names outside /app.
 
 This allows the same step definition to collect different artifacts per seed.
 
@@ -73,6 +73,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import functools
 import logging
 import os
@@ -368,6 +369,8 @@ class CollectArtifactsTaskStep(TaskStep):
             manifest = (structured.get("artifacts") if isinstance(structured, dict) else None) or {}
             items: list[tuple[str, str, str]] = []
             skipped_nonfile: list[str] = []
+            base = posixpath.join(posixpath.normpath(self.base_path or "/"), "")
+            keys: set[str] = set()
             for name, path in manifest.items():
                 if not (isinstance(path, str) and path.startswith("/")):
                     skipped_nonfile.append(name)  # literal value (e.g. coverage_state) or relative path
@@ -376,13 +379,15 @@ class CollectArtifactsTaskStep(TaskStep):
                     continue  # unresolved glob (e.g. per-iteration debug logs) — can't fetch a literal *
                 # The agent writes the manifest, so only a file under base_path, once normalized, is read.
                 path = posixpath.normpath(path)
-                if not path.startswith(self.base_path + "/"):
+                if not path.startswith(base):
                     logger.warning(f"collect '{self.id}': manifest entry {name!r} names {path}, outside "
                                    f"{self.base_path}; not collected")
                     continue
                 if os.path.basename(path) in self.exclude_basenames:
                     continue
-                items.append((_manifest_key(name, path), path, path[len(self.base_path) + 1:]))
+                key = _unused(_manifest_key(name, path), keys)
+                keys.add(key)
+                items.append((key, path, path[len(base):]))
             if skipped_nonfile:
                 logger.debug(
                     "collect(manifest=%s): skipped non-absolute manifest entries "
@@ -498,18 +503,11 @@ class CollectArtifactsTaskStep(TaskStep):
             with tempfile.NamedTemporaryFile(delete=False, suffix=f"-{object_name.replace('/', '_')}") as tmp:
                 local_path = tmp.name
 
-            process = await sandbox.exec(*args)
-            stderr_task = asyncio.create_task(process.stderr.read())
             deadline = _READ_DEADLINE_FLOOR_S + size / _READ_RATE_FLOOR
             try:
-                exit_code = await asyncio.wait_for(_decode_to_file(process, local_path, size), timeout=deadline)
+                exit_code = await asyncio.wait_for(_read_to_file(sandbox, args, local_path, size), timeout=deadline)
             except TimeoutError:
-                stderr_task.cancel()
                 raise RuntimeError(f"reading {source_path} took more than {deadline:.0f}s; abandoned it") from None
-            try:
-                await stderr_task
-            except Exception:
-                pass
             if exit_code != 0:
                 raise RuntimeError(f"base64 read failed for {source_path} (exit {exit_code})")
 
@@ -927,7 +925,7 @@ class CollectArtifactsTaskStep(TaskStep):
         else:
             logger.info(f"Collecting {len(items)} artifacts from {self.base_path}")
 
-        # A local sandbox's host is this machine: only what resolves inside its work dir or base_path is read.
+        # A local sandbox's host is this machine: only what resolves inside its work dir, or a base_path outside /app.
         roots = await self._local_roots(sandbox) if container is None and sandbox.app_dir_on_this_machine else None
         collected: dict[str, str] = {}
         file_artifacts: dict[str, FileArtifact] = {}
@@ -974,7 +972,11 @@ class CollectArtifactsTaskStep(TaskStep):
         return collected, file_artifacts, hard_failures
 
     async def _local_roots(self, sandbox) -> tuple[str, ...]:
-        roots = (str(sandbox.app_dir_on_this_machine.resolve()), await _resolved(sandbox, self.base_path))
+        """The sandbox's work dir, and base_path where the task names a folder of this machine outside /app: under
+        /app the agent may have swapped a folder for a link, so only the work dir it stands for counts."""
+        base = posixpath.normpath(self.base_path or "/")
+        outside_app = base != "/app" and not base.startswith("/app/")
+        roots = (str(sandbox.app_dir_on_this_machine.resolve()), await _resolved(sandbox, base) if outside_app else None)
         return tuple(root.rstrip("/") + "/" for root in roots if root)
 
     def _register_file_artifact(self, store, file_artifacts, artifact_id, key, object_name, content_type, object_url, context):
@@ -1073,6 +1075,31 @@ def _manifest_key(name: str, path: str) -> str:
     dropped, else the file's own name. Consumers write files under these keys, a zip of them among them."""
     parts = [part for part in re.split(r"[\\/]+", name) if part not in ("", ".", "..")]
     return "_".join(parts) or posixpath.basename(path)
+
+
+def _unused(key: str, keys: set[str]) -> str:
+    """``key``, or the first ``key (n)`` not in ``keys``: two manifest names can clean to the same key."""
+    n = 1
+    unused = key
+    while unused in keys:
+        n += 1
+        unused = f"{key} ({n})"
+    return unused
+
+
+async def _read_to_file(sandbox, args: tuple, local_path: str, size: int) -> int:
+    """Run ``args`` and decode its base64 stdout into ``local_path``, draining stderr beside it so the shared output
+    pump can't backpressure-stall; return its exit status. Some providers run the whole command inside ``exec``."""
+    process = await sandbox.exec(*args)
+    stderr = asyncio.create_task(process.stderr.read())
+    try:
+        exit_code = await _decode_to_file(process, local_path, size)
+    except BaseException:
+        stderr.cancel()
+        raise
+    with contextlib.suppress(Exception):
+        await stderr
+    return exit_code
 
 
 async def _decode_to_file(process, local_path: str, size: int) -> int:
