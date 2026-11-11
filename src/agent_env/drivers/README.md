@@ -55,9 +55,10 @@ is `/tmp/agentenv-cua-driver.sock`. `requirements-macos.txt` installs the protoc
 sha256, those tools, and that cua-driver reports Accessibility and Screen Recording granted. Its pointer's actions go in
 the foreground, where cua-driver otherwise keeps from moving a person's pointer over a background app,
 and a click or a drag first rests the pointer where it presses, since an app such as Tk reads where the pointer is when it
-handles the press, and a button the pointer hasn't yet entered loses the click (P4, a button and a checkbox take a click). cua-driver 0.38.0 fails two of the probe's checks on macOS for defects of its own: it posts each typed
-character's key-up with the A key's code (P6, typed text arrives as key events), and a drag's mouse-down after the
-pointer has moved along its path (P7). `env.toml`'s `[[known_failures.macos]]` names both with that reason, so gate 3
+handles the press, and a button the pointer hasn't yet entered loses the click (P4, a button and a checkbox take a click). cua-driver fails two of the probe's checks on macOS for defects of its own: it types each character
+as a key-down and key-up of the A key's code carrying the character as Unicode, so the text arrives but an app reading
+key events sees the A key (P6, typed text arrives as key events), and 0.38.0 posted a drag's mouse-down after the
+pointer had moved along its path (P7), which 0.47.10, posting a drag's events the same way, hasn't yet shown. `env.toml`'s `[[known_failures.macos]]` names both with that reason, so gate 3
 records them in the build's probe (`known_failures`) and doesn't fail the build for them; any other failure still
 does. A driver's `known_failures`, by OS type, names a check by its id and name, with why. One that a probe didn't see
 fail is recorded in its probe (`unused_known_failures`, with what it saw) and warned of, so a waiver doesn't outlive its
