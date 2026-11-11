@@ -1,7 +1,8 @@
 /* A timerfd's tracking follows its file, not its number: A, armed for a clock time an hour ahead, is duplicated as A2
    (by METHOD: dup, dup2, dup3, fcntl's F_DUPFD_CLOEXEC, or dup then close_range) and closed, and A's number goes to a
-   duplicate of O, a monotonic timerfd armed 10 s out. After READY the driver jumps 2 h: A2 must fire at the jump and O,
-   now on A's old number, must not fire early. Prints READY, then {"same_number", "a2_fired_raw", "a2_count",
+   duplicate of O, a monotonic timerfd armed 10 s out. With METHOD failed, A2 is A and dup2, dup3 and close_range calls
+   on it fail, which must leave its tracking as it was. After READY the driver jumps 2 h: A2 must fire at the jump and O
+   must not fire early. Prints READY, then {"same_number", "failed_calls", "a2_fired_raw", "a2_count",
    "o_fired_early"}. */
 #define _GNU_SOURCE
 #include <fcntl.h>
@@ -22,14 +23,21 @@ int main(int argc, char **argv) {
     struct itimerspec ten = {{0, 0}, ts_of(10000000000LL)}, hour = {{0, 0}, ts_of(ns(CLOCK_REALTIME) + 3600000000000LL)};
     unsigned long long count = 0;
     int64_t fired = 0;
+    int failed = 0;
     timerfd_settime(o, 0, &ten, NULL);
     timerfd_settime(a, TFD_TIMER_ABSTIME, &hour, NULL);
-    if (!strcmp(how, "dup2")) a2 = dup2(a, 100);
+    if (!strcmp(how, "failed")) {
+        a2 = a;
+        failed += dup2(-1, a) == -1;
+        failed += dup3(-1, a, 0) == -1;
+        failed += close_range(a, a, 0x40000000) == -1;   /* no such flag */
+    }
+    else if (!strcmp(how, "dup2")) a2 = dup2(a, 100);
     else if (!strcmp(how, "dup3")) a2 = dup3(a, 101, O_CLOEXEC);
     else if (!strcmp(how, "fcntl")) a2 = fcntl(a, F_DUPFD_CLOEXEC, 50);
     else a2 = dup(a);
     if (!strcmp(how, "close_range")) close_range(a, a, 0);
-    else close(a);
+    else if (strcmp(how, "failed")) close(a);
     o2 = dup(o);
     printf("READY\n");
     fflush(stdout);
@@ -37,7 +45,7 @@ int main(int argc, char **argv) {
     if (poll(&p, 1, 5000) == 1 && read(a2, &count, 8) == 8) fired = ns(CLOCK_MONOTONIC_RAW);
     struct pollfd q = {o2, POLLIN, 0};
     int early = poll(&q, 1, 1000) == 1;
-    printf("{\"same_number\": %d, \"a2_fired_raw\": %lld, \"a2_count\": %llu, \"o_fired_early\": %d}\n", o2 == a,
-           (long long)fired, count, early);
+    printf("{\"same_number\": %d, \"failed_calls\": %d, \"a2_fired_raw\": %lld, \"a2_count\": %llu, \"o_fired_early\": %d}\n",
+           o2 == a, failed, (long long)fired, count, early);
     return 0;
 }

@@ -1,14 +1,17 @@
 /* Waits for a clock time cancelled: a thread cancelled in sem_timedwait or clock_nanosleep goes at once, and the
    semaphore keeps no waiter for it; 600 threads cancelled in pthread_cond_timedwait, more than the library's table of
    condvar waits holds, leave it as they found it, which the wait after them shows by ending at the jump past its
-   deadline. Prints {"sem_cancelled", "sem_waiters", "cns_cancelled", "cond_cancelled"}, then READY with the last wait
+   deadline. A realtime futex wait on an unaligned word fails at once, as the kernel's does. Prints {"sem_cancelled",
+   "sem_waiters", "cns_cancelled", "cond_cancelled", "misaligned_errno", "misaligned_ms"}, then READY with the last wait
    in progress, then {"fired_raw", "rc"} once it ends. */
 #define _GNU_SOURCE
 #include <errno.h>
+#include <linux/futex.h>
 #include <pthread.h>
 #include <semaphore.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -61,17 +64,31 @@ static int cancelled(void *(*fn)(void *)) {
     return joined(t, 2, &res) && res == PTHREAD_CANCELED;
 }
 
+/* a realtime futex wait an hour ahead on a word one byte off its alignment: its errno, and how long it took */
+static long misaligned(double *ms) {
+    static uint32_t words[2];
+    struct timespec t = hour_ahead();
+    int64_t t0 = ns(CLOCK_MONOTONIC);
+    long r = syscall(SYS_futex, (char *)words + 1, FUTEX_WAIT_BITSET_PRIVATE | FUTEX_CLOCK_REALTIME, 0, &t, NULL,
+                     FUTEX_BITSET_MATCH_ANY);
+    *ms = (ns(CLOCK_MONOTONIC) - t0) / 1e6;
+    return r == -1 ? errno : 0;
+}
+
 int main(void) {
     int sem_ok, cns_ok, cond_ok = 0;
     uint64_t waiters;
+    double ms;
+    long bad = misaligned(&ms);
     void *res;
     sem_init(&sem, 0, 0);
     sem_ok = cancelled(sem_waiter);
     waiters = *(volatile uint64_t *)&sem >> 32;   /* glibc's semaphore: its waiters in the high word */
     cns_ok = cancelled(cns_waiter);
     for (int i = 0; i < CONDS; i++) cond_ok += cancelled(cond_waiter);
-    printf("{\"sem_cancelled\": %d, \"sem_waiters\": %llu, \"cns_cancelled\": %d, \"cond_cancelled\": %d}\n", sem_ok,
-           (unsigned long long)waiters, cns_ok, cond_ok);
+    printf("{\"sem_cancelled\": %d, \"sem_waiters\": %llu, \"cns_cancelled\": %d, \"cond_cancelled\": %d, "
+           "\"misaligned_errno\": %ld, \"misaligned_ms\": %.3f}\n", sem_ok, (unsigned long long)waiters, cns_ok, cond_ok,
+           bad, ms);
     pthread_t last = started(cond_waiter, (void *)1);
     printf("READY\n");
     fflush(stdout);

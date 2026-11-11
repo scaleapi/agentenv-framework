@@ -6,7 +6,7 @@ import pytest
 #: Single pthread_cond_timedwait/clockwait calls return 0 once when a change moves their deadline without passing it
 #: (a rate change, a set_time back), as POSIX allows of a timed wait; every caller's predicate loop absorbs it.
 SINGLE_CALL_CONDVARS = {"cond_timedwait_rt", "cond_clockwait_rt", "cond_timedwait_gtod"}
-ETIMEDOUT = 110  # Linux's, where the programs run
+ETIMEDOUT, EINVAL = 110, 22  # Linux's, where the programs run
 #: What each jumpwaits waiter returns: a timed wait's error, a timerfd's expirations, a loop's calls (two when the jump
 #: moves its deadline without passing it, one spurious return), 0 for sleeps and POSIX timers.
 JUMP_RC = {"cns_in": {0}, "tfd_poll_in": {1}, "tfd_read_in": {1}, "tfd_epoll_in": {1}, "ptimer_thread_in": {0},
@@ -96,17 +96,21 @@ def test_a_jump_ends_the_waits_it_passes_and_none_other_and_monotonic_time_runs_
 
 def test_a_cancelled_wait_goes_at_once_and_leaves_nothing_behind(waits_gate):
     """sem_timedwait and clock_nanosleep are cancellation points; 600 cancelled condvar waits, more than the library's
-    table holds, leave no entry, so the condvar wait after them still ends at a jump past its deadline."""
+    table holds, leave no entry, so the condvar wait after them still ends at a jump past its deadline. A realtime futex
+    wait on an unaligned word fails at once, as the kernel's does."""
     r = waits_gate("cancel")
     assert (r["sem_cancelled"], r["sem_waiters"], r["cns_cancelled"], r["cond_cancelled"]) == (1, 0, 1, 600), r
+    assert r["misaligned_errno"] == EINVAL and r["misaligned_ms"] < 50, r
     assert r["rc"] == ETIMEDOUT and -5 <= r["after_jump_ms"] <= 250, r
 
 
 def test_a_timerfd_is_followed_through_its_duplicates_not_its_number(gate):
     """A timerfd armed for a clock time, duplicated and closed, fires at a jump past it through its duplicate, and the
-    monotonic timerfd given its old number doesn't fire with it."""
+    monotonic timerfd given its old number doesn't fire with it; dup2, dup3 and close_range calls on it that fail leave it
+    followed."""
     runs = gate("timerfds")
-    assert runs.keys() == {"dup", "dup2", "dup3", "fcntl", "close_range"}
+    assert runs.keys() == {"dup", "dup2", "dup3", "fcntl", "close_range", "failed"}
     for how, r in runs.items():
-        assert (r["same_number"], r["a2_count"], r["o_fired_early"]) == (1, 1, 0), (how, r)
+        expected = (0, 3) if how == "failed" else (1, 0)
+        assert (r["same_number"], r["failed_calls"]) == expected and (r["a2_count"], r["o_fired_early"]) == (1, 0), (how, r)
         assert -5 <= r["a2_after_jump_ms"] <= 250, (how, r)

@@ -484,8 +484,9 @@ static void ft_helper_start(void)
 
 /* ---- the waits ---- */
 
-/* the raw system calls below as the cancellation points their callers are (clock_nanosleep, sem_timedwait): cancellation
-   acted on at once for the call alone, as glibc's own waits were before its cancellable system call wrapper. */
+/* the raw system calls below as the cancellation points their callers are (clock_nanosleep, sem_timedwait):
+   cancellation acted on at once for the call alone, as glibc's own waits were before its cancellable system call
+   wrapper. */
 static inline int ft_async_cancel(void)
 {
   int old;
@@ -525,7 +526,7 @@ static int ft_rt_sleep(const struct ft_clock_page *first, int64_t due)
 
 struct ft_futex_waitv { uint64_t val, uaddr; uint32_t flags, reserved; };
 static volatile int ft_waitv_missing = 0;
-enum { FT_W_WORD, FT_W_PAGE, FT_W_TIMEOUT, FT_W_INTR };
+enum { FT_W_WORD, FT_W_PAGE, FT_W_TIMEOUT, FT_W_INTR, FT_W_ERR };
 /* without futex_waitv (before Linux 5.16, under gVisor, or refused by a seccomp filter): the word alone, until the real
    deadline or a slice (AGENTENV_WAIT_SLICE_MS) at most, and the caller reads the page again between slices. */
 static int ft_wait1(uint32_t *word, uint32_t val, bool private_word, int64_t until)
@@ -538,9 +539,11 @@ static int ft_wait1(uint32_t *word, uint32_t val, bool private_word, int64_t unt
                       FUTEX_WAIT_BITSET | FUTEX_CLOCK_REALTIME | (private_word ? FUTEX_PRIVATE_FLAG : 0), (long) val,
                       (long) &ts, 0, FUTEX_BITSET_MATCH_ANY) == 0 || errno == EAGAIN)
     return FT_W_WORD;
-  return errno == EINTR ? FT_W_INTR : FT_W_PAGE;
+  if (errno == ETIMEDOUT) return FT_W_PAGE;   /* a slice's end, or the deadline: the caller reads the page */
+  return errno == EINTR ? FT_W_INTR : FT_W_ERR;
 }
-/* until *word isn't val, the page changes from seq32, or real realtime ``until``. */
+/* until *word isn't val, the page changes from seq32, or real realtime ``until``; FT_W_ERR with errno the kernel's
+   (an unaligned or unmapped word). */
 static int ft_wait2(uint32_t *word, uint32_t val, bool private_word, uint32_t seq32, int64_t until)
 {
   struct ft_futex_waitv w[2];
@@ -562,6 +565,7 @@ static int ft_wait2(uint32_t *word, uint32_t val, bool private_word, uint32_t se
   if (errno == EAGAIN) return __atomic_load_n(word, __ATOMIC_RELAXED) != val ? FT_W_WORD : FT_W_PAGE;
   if (errno == ETIMEDOUT) return FT_W_TIMEOUT;
   if (errno == EINTR) return FT_W_INTR;
+  if (errno != ENOSYS && errno != EPERM) return FT_W_ERR;   /* EPERM: a seccomp filter that refuses it so */
   ft_waitv_missing = 1;
   return ft_wait1(word, val, private_word, until);
 }
@@ -599,6 +603,7 @@ static long ft_u_futex_rt(uint32_t *uaddr, int op, uint32_t val, const struct ti
       errno = EINTR;
       return -1;
     }
+    if (k == FT_W_ERR) return -1;
     if (!ft_snap(&s)) return 0;
   }
 }
@@ -632,9 +637,9 @@ static int ft_sem_wait_slow(struct ft_new_sem *sem, struct ft_clock_page *s, int
       ct = ft_async_cancel();
       k = ft_wait2((uint32_t *) &sem->data, 0, sem->private_flag == 0, (uint32_t) s->seq, ft_real_of(s, due));
       ft_deferred_cancel(ct);
-      if (k == FT_W_INTR)
+      if (k == FT_W_INTR || k == FT_W_ERR)
       {
-        err = EINTR;
+        err = k == FT_W_INTR ? EINTR : errno;
         break;
       }
       if (!ft_snap(s))
@@ -876,9 +881,9 @@ static int ft_u_timerfd_gettime(int fd, struct itimerspec *cur, bool *handled)
 }
 
 /*
- * ---- descriptors: a timerfd's record follows its file, not a number. close() takes a descriptor off it (the record goes
- * with the last), dup() and its kin add the new one, so the helper never arms a number the program has closed or that
- * now names another file. A number closed where this can't see (closefrom, a raw system call) is dropped when
+ * ---- descriptors: a timerfd's record follows its file, not a number. close() takes a descriptor off it (the record
+ * goes with the last), dup() and its kin add the new one, so the helper never arms a number the program has closed or
+ * that now names another file. A number closed where this can't see (closefrom, a raw system call) is dropped when
  * timerfd_create hands it out again; a timer with more duplicates than a record holds is left armed as it was. ----
  */
 static int (*ft_real_close)(int);
@@ -915,13 +920,11 @@ static void ft_fd_gone(int fd)
   ft_fd_gone_locked(fd);
   ft_tab_unlock(&old);
 }
-/* ``to`` now names ``from``'s file. */
-static void ft_fd_duped(int from, int to)
+/* ``to`` now names ``from``'s file, a known timerfd. Lock held. */
+static void ft_fd_duped_locked(int from, int to)
 {
-  sigset_t old;
   struct ft_timer *t;
-  if (!ft_tfd_known(from) || to < 0 || to >= FT_TFD_CLOCKS) return;
-  ft_tab_lock(&old);
+  if (to < 0 || to >= FT_TFD_CLOCKS) return;
   ft_tfd_clock[to] = ft_tfd_clock[from];
   if ((t = ft_timer_find_fd(from)) != NULL)
   {
@@ -930,7 +933,38 @@ static void ft_fd_duped(int from, int to)
     else
       t->kind = 0;
   }
+}
+static void ft_fd_duped(int from, int to)
+{
+  sigset_t old;
+  if (!ft_tfd_known(from)) return;
+  ft_tab_lock(&old);
+  ft_fd_duped_locked(from, to);
   ft_tab_unlock(&old);
+}
+/* dup2 or dup3 onto ``fd2``. One that replaces a timerfd (whose close doesn't block) makes the change and its
+   bookkeeping under the lock, so a failed call keeps the record and the helper never arms the number in between. */
+static int ft_dup_onto(int fd, int fd2, int flags, bool three)
+{
+  sigset_t old;
+  int r;
+  FT_RESOLVE(dup2);
+  FT_RESOLVE(dup3);
+  if (fd == fd2 || !ft_tfd_known(fd2))
+  {
+    r = three ? (*ft_real_dup3)(fd, fd2, flags) : (*ft_real_dup2)(fd, fd2);
+    if (r >= 0 && fd != fd2) ft_fd_duped(fd, r);
+    return r;
+  }
+  ft_tab_lock(&old);
+  r = three ? (*ft_real_dup3)(fd, fd2, flags) : (*ft_real_dup2)(fd, fd2);
+  if (r >= 0)
+  {
+    ft_fd_gone_locked(fd2);
+    if (ft_tfd_known(fd)) ft_fd_duped_locked(fd, fd2);
+  }
+  ft_tab_unlock(&old);
+  return r;
 }
 
 int close(int fd)
@@ -949,21 +983,11 @@ int dup(int fd)
 }
 int dup2(int fd, int fd2)
 {
-  int r;
-  if (fd != fd2) ft_fd_gone(fd2);
-  FT_RESOLVE(dup2);
-  r = (*ft_real_dup2)(fd, fd2);
-  if (r >= 0 && fd != fd2) ft_fd_duped(fd, r);
-  return r;
+  return ft_dup_onto(fd, fd2, 0, false);
 }
 int dup3(int fd, int fd2, int flags)
 {
-  int r;
-  if (fd != fd2) ft_fd_gone(fd2);
-  FT_RESOLVE(dup3);
-  r = (*ft_real_dup3)(fd, fd2, flags);
-  if (r >= 0) ft_fd_duped(fd, r);
-  return r;
+  return ft_dup_onto(fd, fd2, flags, true);
 }
 /* the argument passed on as glibc's own fcntl reads it, a pointer-sized word whatever the command */
 int fcntl(int fd, int cmd, ...)
@@ -992,12 +1016,24 @@ int fcntl64(int fd, int cmd, ...)
   if (r >= 0 && (cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC)) ft_fd_duped(fd, r);
   return r;
 }
+/* one that closes a timerfd runs under the lock, as dup2 does, so a failed call keeps the records. In practice it runs
+   in a child of fork before exec, where no other thread wants the lock. */
 int close_range(unsigned int first, unsigned int last, int flags)
 {
-  if (!(flags & CLOSE_RANGE_CLOEXEC))
-    for (unsigned int fd = first; fd <= last && fd < FT_TFD_CLOCKS; fd++) ft_fd_gone((int) fd);
+  sigset_t old;
+  bool timerfd = false;
+  int r;
   FT_RESOLVE(close_range);
-  return (*ft_real_close_range)(first, last, flags);
+  if (!(flags & CLOSE_RANGE_CLOEXEC))
+    for (unsigned int fd = first; fd <= last && fd < FT_TFD_CLOCKS && !timerfd; fd++) timerfd = ft_tfd_known((int) fd);
+  if (!timerfd) return (*ft_real_close_range)(first, last, flags);
+  ft_tab_lock(&old);
+  r = (*ft_real_close_range)(first, last, flags);
+  if (r == 0)
+    for (unsigned int fd = first; fd <= last && fd < FT_TFD_CLOCKS; fd++)
+      if (ft_tfd_known((int) fd)) ft_fd_gone_locked((int) fd);
+  ft_tab_unlock(&old);
+  return r;
 }
 /* resolved at load, so a first close() in a signal handler doesn't call dlsym */
 static void __attribute__((constructor)) ft_fd_init(void)

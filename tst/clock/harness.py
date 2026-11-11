@@ -4,7 +4,7 @@ under test runs as the session user, whom the library fakes. Each gate prints on
 
   harness.py waits | ratechange | jumps [ROUNDS] | cancel | timerfds | condstress [SECONDS] | semstress [SECONDS]
              | stall | torn [SECONDS] | deadwriter | marker | identity | envrace [SECONDS]
-             | chromium [OURS STOCK PARALLEL] | probe
+             | chromium [agentenv|stock LAUNCHES PARALLEL LIMIT] | probe
 """
 import ctypes
 import json
@@ -276,15 +276,17 @@ def cancel():
 
 
 def timerfds():
-    """A timerfd's tracking through its duplicates (tfdalias.c), one run per way of making one, each jumped 2 h."""
+    """A timerfd's tracking through its duplicates (tfdalias.c), one run per way of making one and one of calls that fail,
+    each jumped 2 h."""
     preload()
     fresh_page()
     set_clock(time.time() - 182 * DAY, 1)
     out = {}
-    for how in ("dup", "dup2", "dup3", "fcntl", "close_range"):
+    for how in ("dup", "dup2", "dup3", "fcntl", "close_range", "failed"):
         r = _jumped(["tfdalias", how], 2 * 3600)
         a = r["after"]
-        out[how] = {"same_number": a["same_number"], "a2_count": a["a2_count"], "o_fired_early": a["o_fired_early"],
+        out[how] = {"same_number": a["same_number"], "failed_calls": a["failed_calls"], "a2_count": a["a2_count"],
+                    "o_fired_early": a["o_fired_early"],
                     "a2_after_jump_ms": round((a["a2_fired_raw"] / 1e9 - r["written_raw"]) * 1e3, 3)
                     if a["a2_fired_raw"] else None}
     preload(None)
@@ -499,24 +501,26 @@ def _stock_env() -> dict:
             "FAKETIME_FMT": "%s"}
 
 
-def chromium(ours=60, stock=10, parallel=8, stock_limit=3.0):
-    """Chrome launched directly, ``ours`` times with this library in /etc/ld.so.preload, each of which must load
-    about:blank headless, print it and exit 0; then ``stock`` times with stock 0.9.12 by LD_PRELOAD, the positive
-    control, which must fail (crash or hang past ``stock_limit`` seconds), ``parallel`` at a time."""
+def chromium(variant="agentenv", launches=60, parallel=8, limit=20.0):
+    """Chrome launched directly ``launches`` times, ``parallel`` at a time: with this library in /etc/ld.so.preload
+    (``agentenv``), where each launch must load about:blank headless, print it and exit 0 within ``limit`` seconds; or
+    with stock 0.9.12 by LD_PRELOAD (``stock``), the positive control, whose launches fail (crash, or hang past
+    ``limit``). The test runs the two variants in containers side by side."""
     with open("/tmp/stockclock", "w") as f:
         f.write(f"@{int(time.time() - 182 * DAY)}\n")
     os.chmod("/tmp/stockclock", 0o644)
     fresh_page()
     set_clock(time.time() - 182 * DAY, 1)
+    preload(LIB if variant == "agentenv" else None)
 
-    def launch(variant: str, k: int) -> dict:
-        profile = f"/tmp/chrome-{variant}-{k:04d}"  # fixed width, so no profile is a prefix of another
+    def launch(k: int) -> dict:
+        profile = f"/tmp/chrome-{k:04d}"  # fixed width, so no profile is a prefix of another
         argv = [CHROME, "--headless=new", "--no-sandbox", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
                 f"--user-data-dir={profile}", "--dump-dom", "about:blank"]
         started = raw()
         try:
             r = subprocess.run(user_cmd(argv, {} if variant == "agentenv" else _stock_env()), capture_output=True,
-                               text=True, timeout=20 if variant == "agentenv" else stock_limit, cwd="/tmp")
+                               text=True, timeout=limit, cwd="/tmp")
             rc, out, err = r.returncode, r.stdout, r.stderr
         except subprocess.TimeoutExpired as e:
             rc, out, err = "hung", "", "".join(part for part in (e.stdout, e.stderr) if isinstance(part, str))
@@ -524,26 +528,19 @@ def chromium(ours=60, stock=10, parallel=8, stock_limit=3.0):
         subprocess.run(["rm", "-rf", profile])
         signalled = "Received signal" in err
         ok = rc == 0 and not signalled and "<html" in out
-        return {"variant": variant, "rc": rc, "signal": signalled, "ok": ok, "seconds": round(raw() - started, 3),
+        return {"rc": rc, "signal": signalled, "ok": ok, "seconds": round(raw() - started, 3),
                 "tail": "" if ok else err[-200:]}
 
-    def batch(variant: str, n: int) -> list:
-        preload(LIB if variant == "agentenv" else None)
-        with ThreadPoolExecutor(parallel) as pool:
-            return list(pool.map(lambda k: launch(variant, k), range(n)))
-
     started = raw()
-    results = batch("agentenv", ours) + batch("stock", stock)
+    with ThreadPoolExecutor(parallel) as pool:
+        results = list(pool.map(launch, range(launches)))
     took = raw() - started
     preload(None)
-    summary = {}
-    for variant in ("agentenv", "stock"):
-        mine = [r for r in results if r["variant"] == variant]
-        summary[variant] = {"launches": len(mine), "failed": sum(not r["ok"] for r in mine),
-                            "signalled": sum(r["signal"] for r in mine), "hung": sum(r["rc"] == "hung" for r in mine),
-                            "launch_s_max": max((r["seconds"] for r in mine), default=0),
-                            "failures": [r for r in mine if not r["ok"]][:5]}
-    return {"seconds": round(took, 2), "parallel": parallel, **summary}
+    return {"variant": variant, "seconds": round(took, 2), "parallel": parallel, "launches": len(results),
+            "failed": sum(not r["ok"] for r in results), "signalled": sum(r["signal"] for r in results),
+            "hung": sum(r["rc"] == "hung" for r in results),
+            "launch_s_max": max((r["seconds"] for r in results), default=0),
+            "failures": [r for r in results if not r["ok"]][:5]}
 
 
 def probe():
@@ -557,5 +554,6 @@ GATES = {f.__name__: f for f in (waits, ratechange, jumps, cancel, timerfds, con
                                  deadwriter, marker, identity, envrace, chromium, probe)}
 
 if __name__ == "__main__":
-    gate, args = GATES[sys.argv[1]], [float(a) if "." in a else int(a) for a in sys.argv[2:]]
+    gate = GATES[sys.argv[1]]
+    args = [a if a.isalpha() else float(a) if "." in a else int(a) for a in sys.argv[2:]]
     print(json.dumps(gate(*args), indent=1))
