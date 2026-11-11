@@ -138,7 +138,7 @@ async def _gateway(tmp_path, monkeypatch, card: dict | None = None, seen: list[d
     gateway, gateway_url = await _serve(app)
     gw = Gateway(host="127.0.0.1", port=0, server_name="t", internal_mcp_servers=[],
                  rest_proxy_urls={"web": upstream_url}, provider_headers=provider_headers,
-                 public_url=public and public.format(address=gateway_url.removeprefix("http://")))
+                 gateway_url=public and public.format(address=gateway_url.removeprefix("http://")))
     gateway_app = gw._asgi_app()
     async def events(at_least: int) -> list[dict]:
         for _ in range(50):

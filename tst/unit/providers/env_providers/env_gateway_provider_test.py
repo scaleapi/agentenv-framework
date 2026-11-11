@@ -1269,16 +1269,16 @@ def test_compose_gives_the_gateway_the_names_of_the_providers_request_headers_al
     assert {name: entries for name, entries in named.items() if entries} == expected
 
 
-@pytest.mark.parametrize("public_url", ["https://gw.w.modal.host", None], ids=["tunnel", "none"])
-def test_the_gateway_alone_is_told_the_address_the_deploy_reaches_it_at(public_url):
+@pytest.mark.parametrize("gateway_url", ["https://gw.w.modal.host", None], ids=["tunnel", "none"])
+def test_the_gateway_alone_is_told_the_address_the_deploy_reaches_it_at(gateway_url):
     compose = EnvironmentGatewayProvider().create_docker_compose(
         mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")], gateway_image="agent-gateway",
         state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
-        state_instance=LocalPostgresStateProvider.default_instance(), public_url=public_url)
+        state_instance=LocalPostgresStateProvider.default_instance(), gateway_url=gateway_url)
 
-    told = {name: [entry for entry in service.get("environment") or [] if "GATEWAY_PUBLIC_URL" in entry]
+    told = {name: [entry for entry in service.get("environment") or [] if "AGENTENV_GATEWAY_URL" in entry]
             for name, service in yaml.safe_load(compose)["services"].items()}
-    expected = {GATEWAY_SERVICE_NAME: [f"AGENTENV_GATEWAY_PUBLIC_URL={public_url}"]} if public_url else {}
+    expected = {GATEWAY_SERVICE_NAME: [f"AGENTENV_GATEWAY_URL={gateway_url}"]} if gateway_url else {}
     assert {name: entries for name, entries in told.items() if entries} == expected
 
 

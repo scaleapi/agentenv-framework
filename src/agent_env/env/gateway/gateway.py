@@ -142,10 +142,10 @@ class Gateway:
         service_db_url: str | None = None,
         control_token: str | None = None,
         provider_headers: Iterable[str] = (),
-        public_url: str | None = None,
+        gateway_url: str | None = None,
     ):
         """`provider_headers` names the headers the sandbox provider in front of the gateway is sent, its credentials,
-        which the gateway takes off every request it forwards to a service behind it; `public_url`, the address the
+        which the gateway takes off every request it forwards to a service behind it; `gateway_url`, the address the
         deploy reaches it at, gives the scheme of a CDP address it hands a client that reached it there."""
         self.host = host
         self.port = port
@@ -158,7 +158,7 @@ class Gateway:
         self._withheld = frozenset(name.strip().lower().encode() for name in provider_headers if name.strip())
         self._browsers = BrowserRoutes(self.rest_proxy_urls, self.REST_PROXY_TIMEOUT, self._log_event,
                                        self._attribution, self._request_role, withheld=self._withheld,
-                                       public_url=public_url)
+                                       gateway_url=gateway_url)
         for name in _TOKEN_LOGGERS:  # each names a CDP address's path, its token in it, at INFO
             log = logging.getLogger(name)
             if not any(isinstance(f, TokenRedaction) for f in log.filters):

@@ -35,7 +35,7 @@ from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT, ExternalChild, Gat
 from agent_env.env.gateway.constants import (
     DEFAULT_MCP_SERVER_NAME,
     GATEWAY_PROVIDER_HEADERS_ENV,
-    GATEWAY_PUBLIC_URL_ENV,
+    GATEWAY_URL_ENV,
     STATE_TOOL_NAME_CLASHES_KEY,
     WELL_KNOWN_PATH,
     random_mcp_server_name,
@@ -321,7 +321,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         extra_hosts: tuple[str, ...] = (),
         mcp_server_name: str | None = None,
         external_children: tuple[ExternalChild, ...] = (),
-        public_url: str | None = None,
+        gateway_url: str | None = None,
         control_token: str | None = None,
     ) -> str:
         """Generate docker-compose.yml content for a gateway deployment onto a VM/laptop/arbitrary machine.
@@ -537,8 +537,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         gateway_env.extend(f"      - {key}={value}" for key, value in control_environment(control_token).items())
         if provider_headers := sandbox_request_header_names():
             gateway_env.append(f"      - {GATEWAY_PROVIDER_HEADERS_ENV}={','.join(provider_headers)}")
-        if public_url:
-            gateway_env.append(f"      - {GATEWAY_PUBLIC_URL_ENV}={public_url}")
+        if gateway_url:
+            gateway_env.append(f"      - {GATEWAY_URL_ENV}={gateway_url}")
         publish = host_port or (lambda port: port)
         exposed_gateway_ports = []
         if expose_gateway_port:
@@ -886,7 +886,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             host_ips=sandbox.host_ips,
             extra_hosts=sandbox.extra_hosts,
             mcp_server_name=mcp_server_name,
-            public_url=sandbox.tunnel_urls.get(gateway_port),
+            gateway_url=sandbox.tunnel_urls.get(gateway_port),
             control_token=control_token,
         )
         compose_content = compose()
