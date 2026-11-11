@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import bisect
 import contextvars
 import hashlib
 import json
 import logging
 import os
 import re
+import time
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,6 +40,9 @@ ERROR_CHARS = 300
 HEADER_CHARS = 12_000
 #: How many lines a read of the log returns at most.
 READ_LIMIT = 5000
+#: How long a line not yet written holds back a read; past it, a read returns the lines after it, which may then
+#: come before it.
+STALLED_S = 60.0
 #: How long a tab event waits on the commands in flight that may have caused it.
 CAUSE_WAIT_S = 5.0
 #: How long after a reload or a move in history its tab's next navigation is taken as its.
@@ -83,6 +88,12 @@ SECRET_WORDS = frozenset({"token", "key", "apikey", "secret", "password", "passw
                           "ticket", "assertion", "otp", "saml", "samlresponse", "nonce"})
 #: The query keys whose every value is taken out, by their start: signed-URL parameters.
 SECRET_PREFIXES = ("x-amz-", "x-goog-", "x-ms-")
+#: The fields, at any depth, that hold a URL.
+URL_FIELDS = frozenset({"url", "urls", "href", "referrer", "documentURL"})
+#: The fields a page's content or a response's body is in, which an entry withholds, keeping their length and sha256.
+BODY_FIELDS = frozenset({"body", "postData", "html", "rawResponse"})
+#: A tool call's arguments that say what is typed, withheld while a password field has focus.
+TYPED_ARGS = frozenset({"text", "keys"})
 _WORDS = re.compile(r"[A-Z]?[a-z0-9]+|[A-Z]+(?![a-z])")
 
 #: The action under way in this task: the entry an op of the browser's server or a relayed command is, which the
@@ -152,32 +163,43 @@ def _secret_key(key: str) -> bool:
     return lowered.startswith(SECRET_PREFIXES) or bool(SECRET_WORDS & {word.lower() for word in _WORDS.findall(key)})
 
 
-def redacted_params(method: str, params: dict, *, password: bool = False) -> dict:
+def _urls_and_bodies(value: Any) -> Any:
+    """``value`` with every URL field, at any depth, as ``redact_url`` keeps it, and every body or page content
+    withheld."""
+    if isinstance(value, Mapping):
+        return {key: withheld(item) if key in BODY_FIELDS and item not in (None, "") else
+                ([redact_url(url) for url in item] if isinstance(item, list) else redact_url(item))
+                if key in URL_FIELDS else _urls_and_bodies(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_urls_and_bodies(item) for item in value]
+    return value
+
+
+def _cookie_values(cookies: Any) -> Any:
+    return [{**cookie, "value": REDACTED} if isinstance(cookie, Mapping) else cookie for cookie in cookies] \
+        if isinstance(cookies, list) else cookies
+
+
+def redacted_params(method: str, params: Mapping[str, Any], *, password: bool = False) -> dict:
     """The parameters of an acting CDP ``method`` as its entry keeps them: what could carry a secret taken out, and
     with a password field focused, what it types; then cut."""
     kept = dict(params)
-    if method in ("Network.setCookie",) and "value" in kept:
+    if method == "Network.setCookie" and "value" in kept:
         kept["value"] = REDACTED
-    if method in ("Network.setCookies", "Storage.setCookies") and isinstance(kept.get("cookies"), list):
-        kept["cookies"] = [{**cookie, "value": REDACTED} if isinstance(cookie, dict) else cookie
-                           for cookie in kept["cookies"]]
-    if method == "Network.setExtraHTTPHeaders" and isinstance(kept.get("headers"), dict):
+    if method in ("Network.setCookies", "Storage.setCookies"):
+        kept["cookies"] = _cookie_values(kept.get("cookies"))
+    if method == "Network.setExtraHTTPHeaders" and isinstance(kept.get("headers"), Mapping):
         kept["headers"] = {name: REDACTED for name in kept["headers"]}
     for field in ("headers", "responseHeaders"):
         if method.startswith("Fetch.") and isinstance(kept.get(field), list):
-            kept[field] = [{**header, "value": REDACTED} if isinstance(header, dict) else header
+            kept[field] = [{**header, "value": REDACTED} if isinstance(header, Mapping) else header
                            for header in kept[field]]
     if method.startswith("Fetch.") and "binaryResponseHeaders" in kept:
         kept["binaryResponseHeaders"] = REDACTED
-    if method.startswith("Fetch.") and "postData" in kept:
-        kept["postData"] = withheld(kept["postData"])
-    if method == "Fetch.continueWithAuth" and isinstance(kept.get("authChallengeResponse"), dict):
+    if method == "Fetch.continueWithAuth" and isinstance(kept.get("authChallengeResponse"), Mapping):
         kept["authChallengeResponse"] = {key: (REDACTED if key in ("username", "password") else value)
                                          for key, value in kept["authChallengeResponse"].items()}
-    for field in ("url", "urls"):
-        if field in kept:
-            kept[field] = [redact_url(url) for url in kept[field]] if isinstance(kept[field], list) \
-                else redact_url(kept[field])
+    kept = _urls_and_bodies(kept)
     if password and method in TYPING_METHODS:
         kept = {key: value for key, value in kept.items() if key not in KEY_FIELDS}
         if "text" in params:
@@ -192,22 +214,26 @@ def redacted_op(op: str, params: dict, *, password: bool = False) -> dict:
     if op == "page/input" and isinstance(kept.get("events"), list):
         kept["events"] = [{**event, "params": redacted_params(str(event.get("method")), event.get("params") or {},
                                                               password=password)}
-                          if isinstance(event, dict) else event for event in kept["events"]]
-    if op == "cookies/set" and isinstance(kept.get("cookies"), list):
-        kept["cookies"] = [{**cookie, "value": REDACTED} if isinstance(cookie, dict) else cookie
-                           for cookie in kept["cookies"]]
-    if "url" in kept:
-        kept["url"] = redact_url(kept["url"])
+                          if isinstance(event, Mapping) else event for event in kept["events"]]
+    if op == "cookies/set":
+        kept["cookies"] = _cookie_values(kept.get("cookies"))
+    return cut(_urls_and_bodies(kept))
+
+
+def redacted_args(tool: str, args: Mapping[str, Any], *, password: bool = False) -> dict:
+    """An MCP tool call's arguments as its entry keeps them: URLs as ``redact_url`` keeps them, and what it types, its
+    text or its keys in whatever shape the header carried them, as its length while a password field has focus."""
+    kept = _urls_and_bodies(args)
+    if password:
+        kept = {key: {"length": _length(value)} if key in TYPED_ARGS else value for key, value in kept.items()}
     return cut(kept)
 
 
-def redacted_args(tool: str, args: dict, *, password: bool = False) -> dict:
-    """An MCP tool call's arguments as its entry keeps them: URLs as ``redact_url`` keeps them, and typed text, while
-    a password field has focus, as its length."""
-    kept = {key: redact_url(value) if key == "url" else value for key, value in args.items()}
-    if password and isinstance(kept.get("text"), str):
-        kept["text"] = {"length": len(kept["text"])}
-    return cut(kept)
+def _length(value: Any) -> int:
+    """How long typed text or keys were, a cut or withheld value by the length it kept."""
+    if isinstance(value, Mapping) and isinstance(value.get("length"), int):
+        return value["length"]
+    return len(value) if isinstance(value, (str, list, tuple)) else 0
 
 
 def tool_call_header(tool: str, call: str, args: Mapping[str, Any]) -> str:
@@ -245,12 +271,14 @@ class BrowserLog:
     """The log in ``path``: each line a JSON object with its ``seq`` and its time, ``at``, and one of ``action``,
     ``tab`` or ``reset``. A line's sequence number is taken when what it records begins, and the line is written once
     it ends, so lines may be written out of order; a read returns them in order, up to the last whose every earlier
-    line is written. The file is opened at the first line, after any a server before this one wrote."""
+    line is written, or held for more than ``STALLED_S``. The file is opened at the first line, after any a server
+    before this one wrote, and where each line is kept, so a read reads only the lines it returns."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
-        self._seq, self._partial = _last_seq(path)
-        self._pending: set[int] = set()
+        self._seq, self._partial, self._where, self._size = _scan(path)
+        self._seqs = sorted(self._where)
+        self._pending: dict[int, float] = {}
         self._file: Any = None
         self._unwritable = False
         #: Per tab, the sequence number of the latest acting entry on it.
@@ -265,19 +293,24 @@ class BrowserLog:
     def reserve(self) -> int:
         """The next sequence number, held until its line is written."""
         self._seq += 1
-        self._pending.add(self._seq)
+        self._pending[self._seq] = time.monotonic()
         return self._seq
 
     def write(self, seq: int, line: dict, at: Optional[str] = None) -> None:
         """The line held as ``seq`` written, with its time."""
-        self._pending.discard(seq)
+        self._pending.pop(seq, None)
         if self._file is None and not self._open():
             return
+        data = (json.dumps({"seq": seq, "at": at or _now(), **line}, default=str) + "\n").encode()
         try:
-            self._file.write(json.dumps({"seq": seq, "at": at or _now(), **line}, default=str) + "\n")
+            self._file.write(data)
             self._file.flush()
         except (OSError, ValueError) as e:
             logger.warning(f"the browser's log couldn't take line {seq}: {type(e).__name__}: {e}")
+            return
+        self._where[seq] = (self._size, len(data))
+        self._size += len(data)
+        bisect.insort(self._seqs, seq)
 
     def _open(self) -> bool:
         """The file open for appending, on a new line; False, once warned, when it can't be."""
@@ -285,9 +318,10 @@ class BrowserLog:
             return False
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self._file = self.path.open("a", encoding="utf-8")
+            self._file = self.path.open("ab")
             if self._partial:
-                self._file.write("\n")
+                self._file.write(b"\n")
+                self._size += 1
             return True
         except OSError as e:
             logger.warning(f"the browser's log can't be written at {self.path}: {type(e).__name__}: {e}")
@@ -317,48 +351,67 @@ class BrowserLog:
 
     def read(self, after: int = 0, limit: int = READ_LIMIT) -> dict:
         """The lines after sequence number ``after``, in order, up to ``limit`` of them and to the last whose every
-        earlier line is written: ``lines``, ``last``, the sequence number of that last one, and ``more`` when the limit
-        left some."""
-        complete = min(self._pending) - 1 if self._pending else self._seq
+        earlier line is written or stalled: ``lines``, ``last``, the sequence number of that last one, and ``more``
+        when the limit left some."""
+        complete, picked, more = self._picked(after, limit)
+        return self._loaded(after, complete, picked, more)
+
+    async def read_async(self, after: int = 0, limit: int = READ_LIMIT) -> dict:
+        """``read``, its file read in a thread."""
+        complete, picked, more = self._picked(after, limit)
+        return await asyncio.to_thread(self._loaded, after, complete, picked, more)
+
+    def _picked(self, after: int, limit: int) -> tuple[int, list[tuple[int, int, int]], bool]:
+        """Where the lines a read returns are: the last sequence number it may return, and each line's number, offset
+        and length, in order."""
+        now = time.monotonic()
+        held = [seq for seq, began in self._pending.items() if now - began < STALLED_S]
+        complete = min(held) - 1 if held else self._seq
+        start = bisect.bisect_right(self._seqs, after)
+        end = bisect.bisect_right(self._seqs, complete)
+        picked = [(seq, *self._where[seq]) for seq in self._seqs[start:min(end, start + limit)]]
+        return complete, picked, end - start > limit
+
+    def _loaded(self, after: int, complete: int, picked: list[tuple[int, int, int]], more: bool) -> dict:
         lines = []
-        try:
-            with self.path.open(encoding="utf-8") as file:
-                for raw in file:
-                    try:
-                        line = json.loads(raw)
-                    except ValueError:
-                        continue
-                    if isinstance(line, dict) and isinstance(line.get("seq"), int) and after < line["seq"] <= complete:
-                        lines.append(line)
-        except OSError:
-            pass
-        lines.sort(key=lambda line: line["seq"])
-        more = len(lines) > limit
-        lines = lines[:limit]
-        last = (lines[-1]["seq"] if lines else after) if more else max(after, complete)
+        if picked:
+            try:
+                with self.path.open("rb") as file:
+                    for _, offset, length in picked:
+                        file.seek(offset)
+                        try:
+                            lines.append(json.loads(file.read(length)))
+                        except ValueError:
+                            continue
+            except OSError:
+                pass
+        last = (picked[-1][0] if picked else after) if more else max(after, complete)
         return {"lines": lines, "last": last, "more": more}
 
-    def complete_text(self) -> str:
-        """Every line written whose every earlier line is, in order, as the file's text."""
-        read = self.read(0, limit=1 << 30)
+    async def complete_text(self) -> str:
+        """Every line ``read`` returns, in order, as the file's text."""
+        read = await self.read_async(0, limit=1 << 30)
         return "".join(json.dumps(line, default=str) + "\n" for line in read["lines"])
 
 
-def _last_seq(path: Path) -> tuple[int, bool]:
-    """The highest sequence number in the log at ``path``, and whether its last line was left partial."""
+def _scan(path: Path) -> tuple[int, bool, dict[int, tuple[int, int]], int]:
+    """The log at ``path`` as a server before this one left it: its highest sequence number, whether its last line
+    was left partial, where each line is, and its size."""
     try:
         data = path.read_bytes()
     except OSError:
-        return 0, False
-    highest = 0
-    for raw in data.splitlines():
+        return 0, False, {}, 0
+    where: dict[int, tuple[int, int]] = {}
+    offset = 0
+    for raw in data.splitlines(keepends=True):
         try:
             line = json.loads(raw)
         except ValueError:
-            continue
-        if isinstance(line, dict) and isinstance(line.get("seq"), int):
-            highest = max(highest, line["seq"])
-    return highest, bool(data) and not data.endswith(b"\n")
+            line = None
+        if isinstance(line, dict) and isinstance(line.get("seq"), int) and raw.endswith(b"\n"):
+            where[line["seq"]] = (offset, len(raw))
+        offset += len(raw)
+    return max(where, default=0), bool(data) and not data.endswith(b"\n"), where, len(data)
 
 
 def caused(cause: Optional[dict], log: BrowserLog, tab: Optional[str]) -> dict:
@@ -387,6 +440,7 @@ class Causes:
         self._closing: dict[str, dict] = {}
         self._navigating: dict[str, set[asyncio.Future]] = {}
         self._loaders: dict[str, dict] = {}
+        self._same_document: dict[str, dict] = {}
         self._next: dict[str, tuple[dict, float]] = {}
 
     def creating(self, answer: asyncio.Future, cause: dict) -> None:
@@ -404,10 +458,13 @@ class Causes:
         self._closing[target] = cause
 
     def navigating(self, target: str, answer: asyncio.Future, cause: dict) -> None:
-        """A ``Page.navigate`` of ``target`` in flight, ``answer`` its answer's loader id, sent by ``cause``."""
+        """A ``Page.navigate`` of ``target`` in flight, ``answer`` its answer's loader id, sent by ``cause``; one
+        answered with none moved within its document."""
         waiting = self._navigating.setdefault(target, set())
         waiting.add(answer)
         answer.add_done_callback(lambda done: self._landed(done, self._loaders, cause, waiting))
+        answer.add_done_callback(lambda done: done.cancelled() or done.exception() is not None or done.result()
+                                 or self._same_document.__setitem__(target, cause))
 
     def navigates_next(self, target: str, cause: dict) -> None:
         """A reload or a move in history of ``target``, whose answer names no loader: its next navigation is taken as
@@ -435,6 +492,18 @@ class Causes:
             await asyncio.wait(set(self._navigating[target]), timeout=CAUSE_WAIT_S)
         pending = self._next.pop(target, None)
         if loader and (cause := self._loaders.pop(loader, None)) is not None:
+            return cause
+        if pending is not None and pending[1] >= asyncio.get_running_loop().time():
+            return pending[0]
+        return None
+
+    async def navigated_within(self, target: str) -> Optional[dict]:
+        """What moved ``target`` within its document, once its navigations in flight have answered: a navigation
+        answered with no loader, else a reload or move in history, which it uses up."""
+        if target not in self._same_document and self._navigating.get(target):
+            await asyncio.wait(set(self._navigating[target]), timeout=CAUSE_WAIT_S)
+        pending = self._next.pop(target, None)
+        if (cause := self._same_document.pop(target, None)) is not None:
             return cause
         if pending is not None and pending[1] >= asyncio.get_running_loop().time():
             return pending[0]

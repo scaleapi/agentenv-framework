@@ -282,16 +282,16 @@ async def test_a_client_that_falls_too_far_behind_is_closed_and_what_waited_for_
 
 class Control:
     """agentenv's control as the relay asks it: the URL of tab T1, a password field focused wherever it's asked, and
-    the causes of tab events."""
+    the causes of tab events; each check made with how many commands ``pipe`` had been sent by then."""
 
-    def __init__(self) -> None:
-        self.causes, self.asked = Causes(), []
+    def __init__(self, pipe=None) -> None:
+        self.causes, self.asked, self.pipe = Causes(), [], pipe
 
     def url_of(self, target):
         return "https://a.test/page" if target == "T1" else None
 
     async def password_focused(self, target) -> bool:
-        self.asked.append(target)
+        self.asked.append((target, len(self.pipe.sent) if self.pipe is not None else None))
         return True
 
 
@@ -328,7 +328,32 @@ async def test_every_relayed_command_is_an_entry_on_its_sessions_tab_an_acting_o
         {**common, "method": "Page.navigate", "acts": True, "tab": None, "url": None, "ok": False,
          "error": NO_SESSION["message"], "params": {"url": "https://a.test/"}},
     ]
-    assert control.asked == ["T1"]
+    assert [target for target, _ in control.asked] == ["T1"]
+
+
+@pytest.mark.asyncio
+async def test_a_command_is_checked_for_a_password_before_it_is_sent_and_logged_though_its_client_leaves(tmp_path):
+    log = BrowserLog(tmp_path / "browser-chromium.jsonl")
+    async with _relay(log=log) as (pipe, relay, base):
+        control = Control(pipe)
+        relay.control = control
+        async with connect(f"{base}/ada") as ada:
+            child = (await _ask(ada, {"id": 1, "method": "Target.attachToTarget",
+                                      "params": {"targetId": "T1", "flatten": True}}))["result"]["sessionId"]
+            await _ask(ada, {"id": 2, "method": "Input.insertText", "params": {"text": "hunter2"}, "sessionId": child})
+            sent_before = next(n for n, (method, _) in enumerate(pipe.sent) if method == "Input.insertText")
+            await ada.send(json.dumps({"id": 3, "method": "Hang", "params": {}, "sessionId": child}))
+            await asyncio.sleep(0.1)
+        await asyncio.sleep(0.2)
+        after_leaving = log.read()
+        assert pipe.given_up == ["Hang"]
+
+    assert control.asked == [("T1", sent_before)]
+    entries = [line["action"] for line in after_leaving["lines"]]
+    assert [entry["method"] for entry in entries] == ["Target.attachToTarget", "Input.insertText", "Hang"]
+    assert entries[1]["params"] == {"text": {"length": 7}}
+    assert entries[2]["ok"] is False and entries[2]["error"] == browser_cdp.ENDED_UNANSWERED
+    assert after_leaving["last"] == 3
 
 
 def _browser(monkeypatch, tmp_path) -> Browser:
@@ -389,6 +414,26 @@ async def test_an_op_for_an_agents_tool_call_and_agentenvs_own_acting_ops_are_en
          "params": {"tab": "nope"}, "args": {"action": "close", "tab": "nope"}},
     ]
     assert read["last"] == 4 and not read["more"]
+
+
+@pytest.mark.asyncio
+async def test_an_op_body_too_long_to_keep_is_logged_by_its_length(monkeypatch, tmp_path):
+    browser = _browser(monkeypatch, tmp_path)
+    monkeypatch.setattr("agentenv_protocol.website_browser.environment.LOGGED_BODY_BYTES", 100)
+
+    async def dispatch(events):
+        return None
+
+    monkeypatch.setattr(browser.control, "dispatch", dispatch)
+    asgi = browser.served_asgi(browser.create_app().streamable_http_app())
+    events = [{"method": "Input.insertText", "params": {"text": "x" * 200}}]
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=asgi), base_url="http://app") as http:
+        answered = await http.post("/agentenv/ext/browser/page/input", json={"events": events},
+                                   headers={TOOL_CALL_HEADER: tool_call_header("computer_type", "c1", {"text": "x"})})
+        read = (await http.get("/agentenv/ext/browser/log")).json()
+
+    assert answered.status_code == 200
+    assert read["lines"][0]["action"]["params"] == {"too_long": True, "length": len(answered.request.content)}
 
 
 @pytest.mark.asyncio

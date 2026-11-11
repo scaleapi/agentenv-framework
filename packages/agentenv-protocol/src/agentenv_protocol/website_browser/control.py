@@ -172,7 +172,10 @@ class BrowserControl:
         except BaseException:
             landed.cancel()
             raise
-        landed.set_result(answer.get("loaderId"))
+        if answer.get("errorText"):
+            landed.cancel()
+        else:
+            landed.set_result(answer.get("loaderId"))
         return answer
 
     def url_of(self, target: Optional[str]) -> Optional[str]:
@@ -282,9 +285,7 @@ class BrowserControl:
         load.navigating = asyncio.ensure_future(self.devtools.request("Page.navigate", {"url": url},
                                                                       session_id=session))
         load.navigating.add_done_callback(load.answered)
-        load.navigating.add_done_callback(lambda done: landed.done() or landed.set_result(
-            None if done.cancelled() or done.exception() is not None else
-            (done.result().get("result") or {}).get("loaderId")))
+        load.navigating.add_done_callback(lambda done: _landed_at(landed, done))
         return load
 
     async def _settled(self, target: str, load: _StartLoad, timeout_s: float) -> dict:
@@ -627,12 +628,11 @@ class BrowserControl:
             raise InvalidArgument(f"page input takes {', '.join(sorted(PAGE_INPUT))}, not {refused}")
         session = await self.active_session()
         self._acted_on(target := self._sessions.get(session))
-        if (actor := ACTOR.get()) is not None and target is not None and any(
-                event.get("method") in TYPING_METHODS and any(field in (event.get("params") or {}) for field in KEY_FIELDS)
-                for event in events):
-            actor["password"] = await self.password_focused(target)
+        actor = ACTOR.get()
         opened = self._dialog_opened.setdefault(session, asyncio.Event())
         for event in events:
+            if actor is not None and target is not None and not actor["password"] and _types(event):
+                actor["password"] = await self.password_focused(target)
             if self.dialogs == AGENT and session in self._open_dialogs:
                 return
             opened.clear()
@@ -687,17 +687,26 @@ class BrowserControl:
                           launching: bool) -> None:
         """The tab ``target`` opened, in the log as ``seq``, once the commands in flight that may have opened it have
         answered: by the command that did, by agentenv as the browser launched, else by its page, its opener's."""
-        cause = {"via": "agentenv"} if launching else await self.causes.opened(target)
-        self.log.write(seq, {"tab": {"event": "opened", "id": target, "url": redact_url(url),
-                                     **({"opener": opener} if opener else {}),
-                                     **caused(cause, self.log, opener or target)}}, at=at)
+        cause = None
+        try:
+            cause = {"via": "agentenv"} if launching else await self.causes.opened(target)
+        finally:
+            self.log.write(seq, {"tab": {"event": "opened", "id": target, "url": redact_url(url),
+                                         **({"opener": opener} if opener else {}),
+                                         **caused(cause, self.log, opener or target)}}, at=at)
 
-    async def _log_navigated(self, seq: int, at: str, target: str, url: str, loader: Optional[str]) -> None:
+    async def _log_navigated(self, seq: int, at: str, target: str, url: str, loader: Optional[str] | bool) -> None:
         """The tab ``target`` navigated to ``url``, in the log as ``seq``, once its navigations in flight have
-        answered: by the command whose loader it is, else by its page."""
-        cause = await self.causes.navigated(target, loader)
-        self.log.write(seq, {"tab": {"event": "navigated", "id": target, "url": redact_url(url),
-                                     **caused(cause, self.log, target)}}, at=at)
+        answered: by the command whose loader it is, else by its page; with ``loader`` False, within its
+        document."""
+        cause = None
+        try:
+            cause = await (self.causes.navigated(target, loader) if loader is not False else
+                           self.causes.navigated_within(target))
+        finally:
+            self.log.write(seq, {"tab": {"event": "navigated", "id": target, "url": redact_url(url),
+                                         **({"within_document": True} if loader is False else {}),
+                                         **caused(cause, self.log, target)}}, at=at)
 
     def _on_Target_targetInfoChanged(self, params: dict, session: Optional[str]) -> None:
         info = params["targetInfo"]
@@ -717,12 +726,11 @@ class BrowserControl:
             load.check()
 
     def _on_Page_navigatedWithinDocument(self, params: dict, session: Optional[str]) -> None:
-        """A tab's own page moving to another URL of its document, a fragment or its history API, which is its
-        page's."""
+        """A tab's page moving to another URL of its document, a fragment or its history API: a command's, when one
+        asked for it, else its page's."""
         target = self._sessions.get(session)
         if self.log is not None and target in self.tabs and params.get("frameId") == target:
-            self.log.note("tab", {"event": "navigated", "id": target, "url": redact_url(params.get("url", "")),
-                                  "within_document": True, **caused(None, self.log, target)})
+            self._spawn(self._log_navigated(self.log.reserve(), log_time(), target, params.get("url", ""), False))
 
     def _on_Network_requestWillBeSent(self, params: dict, session: Optional[str]) -> None:
         if (load := self._loading.get(session)) is not None and params.get("type") == "Document":
@@ -915,6 +923,23 @@ class _StartLoad:
         if document in self.failures or document in self.loaded or (
                 self.site is not None and status is not None and status >= 400):
             self.settled.set()
+
+
+def _landed_at(landed: asyncio.Future, navigating: asyncio.Future) -> None:
+    """``landed`` given the loader a start tab's navigation answered with; cancelled when it failed or named none."""
+    if landed.done():
+        return
+    answer = None if navigating.cancelled() or navigating.exception() is not None else navigating.result()
+    loader = ((answer or {}).get("result") or {}).get("loaderId")
+    if isinstance(loader, str):
+        landed.set_result(loader)
+    else:
+        landed.cancel()
+
+
+def _types(event: dict) -> bool:
+    """Whether a page input event types something."""
+    return event.get("method") in TYPING_METHODS and any(field in (event.get("params") or {}) for field in KEY_FIELDS)
 
 
 def _cause() -> dict:

@@ -53,6 +53,11 @@ def test_cookie_header_and_body_values_are_taken_out_of_an_acting_entry():
         == {"name": "sid", "value": REDACTED, "url": f"https://a.test/?token={REDACTED}"}
     assert redacted_params("Storage.setCookies", {"cookies": [{"name": "a", "value": "1"}]}) == \
         {"cookies": [{"name": "a", "value": REDACTED}]}
+    assert redacted_params("Network.setCookies", {"cookies": [{"name": "a", "value": "1", "url": "https://a.test/?token=t"}]}) \
+        == {"cookies": [{"name": "a", "value": REDACTED, "url": f"https://a.test/?token={REDACTED}"}]}
+    fulfilled = redacted_params("Fetch.fulfillRequest", {"requestId": "r", "responseCode": 200, "body": "PGh0bWw+"})
+    assert fulfilled["body"] == {"redacted": True, "length": 8, "sha256": hashlib.sha256(b"PGh0bWw+").hexdigest()}
+    assert redacted_params("Page.setDocumentContent", {"frameId": "f", "html": "<p>faked</p>"})["html"]["redacted"]
     assert redacted_params("Network.setExtraHTTPHeaders", {"headers": {"Authorization": "Bearer x"}}) == \
         {"headers": {"Authorization": REDACTED}}
     continued = redacted_params("Fetch.continueRequest", {"requestId": "r", "postData": "cGFzcz0x",
@@ -77,6 +82,9 @@ def test_typing_while_a_password_field_has_focus_keeps_only_how_much_was_typed()
         {"events": [{"method": "Input.insertText", "params": {"text": {"length": 7}}}]}
     assert redacted_args("computer_type", {"text": "hunter2"}, password=True) == {"text": {"length": 7}}
     assert redacted_args("computer_type", {"text": "desk"}) == {"text": "desk"}
+    assert redacted_args("computer_key", {"keys": ["h"]}, password=True) == {"keys": {"length": 1}}
+    long_text = read_tool_call(tool_call_header("computer_type", "c", {"text": "p" * (CUT_CHARS + 5)}))["args"]
+    assert redacted_args("computer_type", long_text, password=True) == {"text": {"length": CUT_CHARS + 5}}
     assert redacted_op("cookies/set", {"cookies": [{"name": "a", "value": "1"}]}) == \
         {"cookies": [{"name": "a", "value": REDACTED}]}
 
@@ -102,7 +110,8 @@ def test_a_tool_call_header_too_long_even_cut_drops_its_arguments(monkeypatch):
     assert read["tool"] == "computer_type" and read["args"] == {}
 
 
-def test_lines_are_numbered_as_they_begin_and_read_in_order_up_to_the_first_unwritten(tmp_path):
+@pytest.mark.asyncio
+async def test_lines_are_numbered_as_they_begin_and_read_in_order_up_to_the_first_unwritten(tmp_path):
     log = BrowserLog(tmp_path / "logs" / "browser-chromium.jsonl")
     first = log.begin({"via": "cdp", "method": "Page.navigate", "acts": True, "tab": "T1"})
     second = log.note("tab", {"event": "navigated", "id": "T1"})
@@ -115,7 +124,19 @@ def test_lines_are_numbered_as_they_begin_and_read_in_order_up_to_the_first_unwr
     assert log.read(after=1)["lines"][0]["tab"] == {"event": "navigated", "id": "T1"}
     assert log.last_acting == {"T1": 1}
     assert log.read(after=1, limit=0) == {"lines": [], "last": 1, "more": True}
-    assert log.complete_text().count("\n") == 2
+    assert (await log.complete_text()).count("\n") == 2
+    assert await log.read_async(after=1) == log.read(after=1)
+
+
+def test_a_line_held_too_long_no_longer_holds_back_a_read(tmp_path, monkeypatch):
+    log = BrowserLog(tmp_path / "browser-chromium.jsonl")
+    stuck = log.reserve()
+    log.note("reset", {})
+    assert log.read()["lines"] == []
+    monkeypatch.setattr(browser_log, "STALLED_S", 0)
+    assert [line["seq"] for line in log.read()["lines"]] == [stuck + 1]
+    log.write(stuck, {"reset": {}})
+    assert [line["seq"] for line in log.read()["lines"]] == [stuck, stuck + 1]
 
 
 def test_a_restarted_server_carries_on_the_sequence_on_a_new_line_after_a_partial_one(tmp_path):
@@ -142,7 +163,7 @@ class Pipe:
     said to commit before its loader is answered, a close said to destroy its target."""
 
     def __init__(self) -> None:
-        self.listeners, self.tabs = [], 0
+        self.listeners, self.tabs, self.focus, self.checked = [], 0, "text", []
 
     def listen(self, listener) -> None:
         self.listeners.append(listener)
@@ -172,6 +193,11 @@ class Pipe:
             return {"success": True}
         if method == "Runtime.evaluate" and "visibilityState" in params["expression"]:
             return {"result": {"value": ["visible", True]}}
+        if method == "Runtime.evaluate" and "password" in params["expression"]:
+            self.checked.append(self.focus == "password")
+            return {"result": {"value": self.focus == "password"}}
+        if method == "Input.dispatchKeyEvent" and params.get("key") == "Tab":
+            self.focus = "password"
         return {}
 
     async def request(self, method, params=None, *, session_id=None):
@@ -181,6 +207,43 @@ class Pipe:
 async def _settled() -> None:
     for _ in range(5):
         await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_a_move_within_a_document_is_the_commands_that_asked_for_it_and_uses_up_a_history_move():
+    causes = browser_log.Causes()
+    asked, back = {"seq": 3, "via": "cdp", "who": "ada"}, {"seq": 4, "via": "mcp", "who": "bo"}
+    answer = asyncio.get_running_loop().create_future()
+    causes.navigating("T1", answer, asked)
+    answer.set_result(None)
+    assert await causes.navigated_within("T1") == asked
+    causes.navigates_next("T1", back)
+    assert await causes.navigated_within("T1") == back
+    assert await causes.navigated("T1", "L-page") is None
+    failed = asyncio.get_running_loop().create_future()
+    causes.navigating("T1", failed, asked)
+    failed.cancel()
+    await asyncio.sleep(0)
+    assert await causes.navigated_within("T1") is None
+
+
+@pytest.mark.asyncio
+async def test_typing_that_tabs_into_a_password_field_is_withheld_from_then_on(tmp_path):
+    pipe = Pipe()
+    control = BrowserControl(pipe, "agent", (1280, 800))
+    control.log = BrowserLog(tmp_path / "browser-chromium.jsonl")
+    pipe.open("T1")
+    await _settled()
+    actor = {"seq": 1, "via": "mcp", "who": "bo", "acts": True, "tab": None, "password": False}
+    token = ACTOR.set(actor)
+    try:
+        await control.dispatch([{"method": "Input.dispatchKeyEvent", "params": {"type": "keyDown", "key": "a", "text": "a"}},
+                                {"method": "Input.dispatchKeyEvent", "params": {"type": "keyDown", "key": "Tab"}},
+                                {"method": "Input.dispatchKeyEvent", "params": {"type": "keyDown", "key": "s", "text": "s"}}])
+    finally:
+        ACTOR.reset(token)
+    assert actor["password"] is True and actor["tab"] == "T1"
+    assert pipe.checked == [False, False, True]
 
 
 @pytest.mark.asyncio

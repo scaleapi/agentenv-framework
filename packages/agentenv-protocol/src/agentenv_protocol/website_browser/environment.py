@@ -41,6 +41,8 @@ SITE_PROXY_ENV = "AGENTENV_SITE_PROXY"
 BROWSER = "urn:agentenv:browser/v1"
 #: Where ``browser/v1``'s ops are served on its server.
 OPS_PATH = f"{RPC_PATH}/ext/browser/"
+#: The largest op body whose parameters its entry keeps; a longer one keeps only its length.
+LOGGED_BODY_BYTES = 1 << 20
 #: Where its server keeps the env's sites ``sites/set`` hands it, which outlive a relaunch or the server's restart.
 SITES = SOCKET.parent / "sites.json"
 #: The flags agentenv sets, by prefix, which a subclass's command may not carry: among them every way to open a debugging
@@ -337,7 +339,7 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
 
     @extension(BROWSER, op="log", method="GET")
     async def browser_log(self, after: int = 0) -> dict:
-        return self.log.read(after)
+        return await self.log.read_async(after)
 
     @extension(BROWSER, op="sites/set")
     async def browser_sites_set(self, sites: list[dict]) -> dict:
@@ -544,7 +546,7 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         with tempfile.TemporaryDirectory(dir=home / ".cache") as staging:
             root = Path(staging)
             (root / data.STATE_FILE).write_text(json.dumps(written, indent=1), encoding="utf-8")
-            (root / data.LOG_FILE).write_text(self.log.complete_text(), encoding="utf-8")
+            (root / data.LOG_FILE).write_text(await self.log.complete_text(), encoding="utf-8")
             with self._computer_app.paused():
                 await app_data.in_thread(data.stage_profile, home, self.profile, root)
             parts = await file_parts(root, [data.STATE_FILE, data.LOG_FILE, self.profile], write_namespace)
@@ -655,11 +657,12 @@ class _LoggedOps:
         call, acting = read_tool_call(headers.get(TOOL_CALL_HEADER.lower())), op_acts(op)
         if call is None and not acting:
             return await self.app(scope, receive, send)
-        body, more = b"", True
+        chunks, more = [], True
         while more:
             message = await receive()
-            body += message.get("body", b"")
+            chunks.append(message.get("body", b""))
             more = message.get("more_body", False) and message["type"] == "http.request"
+        body = b"".join(chunks)
         action: dict[str, Any] = {"via": "mcp" if call else "agentenv", "op": op, "acts": acting}
         if call is not None:
             action.update(who=normalize_role(headers.get(ROLE_HEADER.lower())) or DEFAULT_ROLE, tool=call["tool"],
@@ -695,7 +698,9 @@ class _LoggedOps:
                                       "ok": answered["status"] < 400}
             if answered["status"] >= 400:
                 fields["error"] = _error_text(answered["error"])
-            if acting:
+            if acting and len(body) > LOGGED_BODY_BYTES:
+                fields["params"] = {"too_long": True, "length": len(body)}
+            elif acting:
                 fields["params"] = redacted_op(op, _op_params(scope, body), password=actor["password"])
                 if call is not None:
                     fields["args"] = redacted_args(call["tool"], call["args"], password=actor["password"])
