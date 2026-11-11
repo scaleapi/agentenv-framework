@@ -557,6 +557,88 @@ async def test_a_front_s_own_forwarded_host_and_scheme_win_and_reach_the_upstrea
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("method, headers, host", [
+    ("GET", {"agentenv-site-root": "https://shop.test"}, "shop.test"),
+    ("HEAD", {"agentenv-site-root": "https://shop.test"}, "shop.test"),
+    ("POST", {"agentenv-site-root": "https://Shop.TEST:8443"}, "Shop.TEST:8443"),
+    ("GET", {"x-forwarded-host": "www.shop.test, gw.example", "x-forwarded-proto": "https"}, "www.shop.test"),
+    ("GET", {"host": "shop.test"}, "shop.test"),
+    ("GET", {"agentenv-site-root": "https://api.shop.test"}, "api.shop.test"),
+    ("GET", {"agentenv-site-root": "https://a.b.shop.test"}, "web"),
+    ("GET", {"agentenv-site-root": "https://evil.example"}, "web"),
+    ("GET", {"x-forwarded-host": "shop.test.evil.example"}, "web"),
+    ("GET", {"host": "evil.example"}, "web"),
+    ("GET", {"x-forwarded-host": "shop.test:65536"}, "web"),
+    ("GET", {"x-forwarded-host": "shop.test@evil.example"}, "web"),
+    ("GET", {"x-forwarded-host": "shop..test"}, "web"),
+    ("GET", {"x-forwarded-host": "[::1]:80"}, "web"),
+], ids=["site-root", "head", "case-and-port", "front", "host", "wildcard", "two-labels-under-a-wildcard", "forged-root",
+        "suffix", "forged-host", "bad-port", "userinfo", "empty-label", "address"])
+async def test_a_site_reached_at_one_of_its_names_takes_it_as_its_host_and_at_any_other_keeps_its_own(
+        monkeypatch, method, headers, host):
+    up = _Upstream([b"ok"])
+    up.install(monkeypatch)
+    gw = _gateway(website_urls={"web": "http://web"}, site_names={"web": ["shop.test", "www.shop.test", "*.shop.test"]})
+    await _call(gw, "/website/web/api/x", method=method, headers={"host": "gw.example", **headers})
+    assert [r.headers["host"] for r in up.forwarded] == [host]
+
+
+@pytest.mark.asyncio
+async def test_a_site_with_no_names_and_a_svc_route_keep_their_own_host_wherever_the_client_was(monkeypatch):
+    up = _Upstream([b"ok"])
+    up.install(monkeypatch)
+    gw = Gateway(host="127.0.0.1", port=0, server_name="t", internal_mcp_servers=[],
+                 website_urls={"web": "http://web", "docs": "http://docs"}, rest_proxy_urls={"web": "http://web"},
+                 site_names={"web": ["shop.test"]})
+    for path in ("/website/docs/x", "/svc/web/x"):
+        await _call(gw, path, headers={"host": "shop.test", "agentenv-site-root": "https://shop.test"})
+    assert [r.headers["host"] for r in up.forwarded] == ["docs", "web"]
+
+
+def _card_site(seen: list[str], declared: dict[str, list[str]]):
+    """A site at each host of ``declared`` whose card declares those names; ``seen`` takes each other request's Host,
+    and a host ``declared`` doesn't name serves no card."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/.well-known/agent-env.json":
+            if request.url.host not in declared:
+                return httpx.Response(404)
+            return httpx.Response(200, json={"name": request.url.host, "capabilities": {"extensions": [
+                {"uri": "urn:agentenv:website/v1", "params": {"domains": declared[request.url.host]}}]}})
+        seen.append(request.headers["host"])
+
+        async def body():
+            yield b"ok"
+        return httpx.Response(200, content=body())
+    return httpx.MockTransport(handler)
+
+
+@pytest.mark.asyncio
+async def test_a_site_whose_env_stores_no_names_takes_its_host_from_the_names_its_card_declares(monkeypatch):
+    seen: list[str] = []
+    transport = _card_site(seen, {"notes": ["Notes.Test"], "kept": ["notes.test"]})
+    monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient", lambda **kw: _RealAsyncClient(transport=transport, **kw))
+    gw = _gateway(website_urls={"notes": "http://notes", "kept": "http://kept"}, site_names={"kept": ["kept.test"]})
+    for path, root in (("notes", "https://notes.test"), ("kept", "https://notes.test"), ("kept", "https://kept.test")):
+        await _call(gw, f"/website/{path}/x", headers={"host": "gw.example", "agentenv-site-root": root})
+    assert seen == ["notes.test", "kept", "kept.test"]
+
+
+@pytest.mark.asyncio
+async def test_list_website_urls_gives_a_site_listed_by_name_at_its_first_name_and_any_other_behind_the_gateway(
+        monkeypatch):
+    transport = _card_site([], {"carded": ["carded.test"]})
+    monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient", lambda **kw: _RealAsyncClient(transport=transport, **kw))
+    sites = ("shop", "notes", "wild", "bare", "carded", "other")
+    gw = _gateway(website_urls={site: f"http://{site}" for site in sites},
+                  site_names={"shop": ["*.shop.test", "www.shop.test", "shop.test"], "notes": ["notes.localhost"],
+                              "wild": ["*.wild.test"], "other": ["other.test"]},
+                  listed_by_name=["shop", "notes", "wild", "bare", "carded"])
+    listed = await gw._mcp._tool_manager.get_tool("list_website_urls").fn()
+    assert listed == ["https://www.shop.test/", "http://notes.localhost/", "http://wild", "http://bare",
+                      "https://carded.test/", "http://other"]
+
+
+@pytest.mark.asyncio
 async def test_an_sdk_site_behind_the_gateway_names_the_gateway_s_address(monkeypatch):
     @website(domains=["notes.example"])
     class Notes(WebsiteEnvironment):

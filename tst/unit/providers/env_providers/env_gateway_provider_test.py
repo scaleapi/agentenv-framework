@@ -31,6 +31,7 @@ from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.envs.service_db import SERVICE_DB_PORT
 from agent_env.env.envs.website import WebsiteEnv
+from agent_env.env.gateway.constants import WEBSITE_LISTED_BY_NAME_ENV, WEBSITE_NAMES_ENV
 from agent_env.providers.env_providers import env_gateway_provider, env_provider
 from agent_env.providers.env_providers.constants import GATEWAY_APP_DIR, GATEWAY_SERVICE_NAME
 from agent_env.providers.env_providers.env_gateway_provider import (
@@ -1575,6 +1576,23 @@ def test_each_website_backend_gets_a_session_secret_of_its_own_which_the_logged_
     (notes,) = _env_values(_service_block(compose, "notes-website-backend"), SESSION_SECRET_ENV)
     assert re.fullmatch(r"[0-9a-f]{64}", shop) and re.fullmatch(r"[0-9a-f]{64}", notes) and shop != notes
     assert shop not in _redact_compose_secrets(compose) and notes not in _redact_compose_secrets(compose)
+
+
+def test_the_gateway_is_handed_each_synthetic_sites_stored_names_and_the_sites_it_lists_by_name():
+    compose = _compose_for([], website_configs=[
+        WebsiteConfig(backend_image="b", frontend_image=None, environment_name="shop",
+                      domains=("shop.test", "*.shop.test"), listed_by_name=True),
+        WebsiteConfig(backend_image="b", frontend_image=None, environment_name="notes", listed_by_name=True),
+        WebsiteConfig(backend_image="b", frontend_image=None, environment_name="docs", domains=("docs.test",)),
+        WebsiteConfig(backend_image="b", frontend_image=None, environment_name="github", live=True,
+                      domains=("github.com",), listed_by_name=True),
+    ])
+    gateway = _service_block(compose, "gateway")
+    assert _env_values(gateway, WEBSITE_NAMES_ENV) == ["shop=shop.test|*.shop.test,docs=docs.test"]
+    assert _env_values(gateway, WEBSITE_LISTED_BY_NAME_ENV) == ["shop,notes"]
+    plain = _service_block(_compose_for([], website_configs=[
+        WebsiteConfig(backend_image="b", frontend_image=None, environment_name="notes")]), "gateway")
+    assert _env_values(plain, WEBSITE_NAMES_ENV) == _env_values(plain, WEBSITE_LISTED_BY_NAME_ENV) == []
 
 
 def test_injected_names_are_the_environment_name_not_the_image_or_container_name():

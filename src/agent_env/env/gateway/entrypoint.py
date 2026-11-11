@@ -9,7 +9,7 @@ import httpx
 
 from . import AGENT_ENV_GATEWAY_MCP_PORT, GatewayMode, InternalMCPServer
 from .constants import (CONTROL_TOKEN_ENV, DEFAULT_MCP_SERVER_NAME, GATEWAY_PROVIDER_HEADERS_ENV, MCP_TRANSPORT,
-                        WELL_KNOWN_PATH)
+                        WEBSITE_LISTED_BY_NAME_ENV, WEBSITE_NAMES_ENV, WELL_KNOWN_PATH)
 from .gateway import Gateway, card_url
 
 logger = logging.getLogger(__name__)
@@ -188,6 +188,17 @@ def parse_name_url_map(env_str: str) -> dict[str, str]:
     return urls
 
 
+def parse_site_names(env_str: str) -> dict[str, tuple[str, ...]]:
+    """Each site's names from ``WEBSITE_NAMES``: ``shop=shop.test|www.shop.test,docs=docs.test``."""
+    names: dict[str, tuple[str, ...]] = {}
+    for entry in filter(None, (part.strip() for part in env_str.split(","))):
+        site, sep, listed = entry.partition("=")
+        if not sep or not site.strip():
+            raise ValueError(f"Invalid {WEBSITE_NAMES_ENV} entry: '{entry}' (expected 'site=name|name')")
+        names[site.strip()] = tuple(name.strip() for name in listed.split("|") if name.strip())
+    return names
+
+
 if __name__ == "__main__":
     logging.basicConfig(
         level=logging.INFO,
@@ -218,5 +229,8 @@ if __name__ == "__main__":
         service_db_url=service_db_url,
         control_token=os.environ.get(CONTROL_TOKEN_ENV),
         provider_headers=os.environ.get(GATEWAY_PROVIDER_HEADERS_ENV, "").split(","),
+        site_names=parse_site_names(os.environ.get(WEBSITE_NAMES_ENV, "")),
+        listed_by_name=[site.strip() for site in os.environ.get(WEBSITE_LISTED_BY_NAME_ENV, "").split(",")
+                        if site.strip()],
     )
     gateway.run()

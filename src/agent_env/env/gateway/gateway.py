@@ -80,8 +80,11 @@ from .rest_proxy import (
     ROLE_HEADER_BYTES,
     UpstreamResponse,
     WebsiteRoute,
+    declared_site_names,
     fetch_child_card,
     forward,
+    listed_url,
+    lowered,
     operations,
     refuse_websocket,
     relay_websocket,
@@ -142,15 +145,23 @@ class Gateway:
         service_db_url: str | None = None,
         control_token: str | None = None,
         provider_headers: Iterable[str] = (),
+        site_names: dict[str, Iterable[str]] | None = None,
+        listed_by_name: Iterable[str] = (),
     ):
         """`provider_headers` names the headers the sandbox provider in front of the gateway is sent, its credentials,
-        which the gateway takes off every request it forwards to a service behind it."""
+        which the gateway takes off every request it forwards to a service behind it. `site_names` are each site's names
+        as its env stores them, the names its card declares standing in for a site's that stores none: a site reached at
+        one takes it as its ``Host``. ``list_website_urls`` gives each site `listed_by_name` at its first name, as a
+        browser computer opens it, and the others at their ``website_urls``."""
         self.host = host
         self.port = port
         self.server_name = server_name
         self.internal_mcp_servers = internal_mcp_servers
         self.website_urls = website_urls or {}
         self.rest_proxy_urls = rest_proxy_urls or {}
+        self._site_names = {site: lowered(names) for site, names in (site_names or {}).items()}
+        self._card_site_names: dict[str, tuple[str, ...]] = {}
+        self._listed_by_name = frozenset(listed_by_name)
         self._site_mcp_endpoints = site_mcp_endpoints(internal_mcp_servers, self.website_urls, self.rest_proxy_urls)
         self._site_reserved: dict[str, frozenset[str]] = {}
         self._withheld = frozenset(name.strip().lower().encode() for name in provider_headers if name.strip())
@@ -195,7 +206,7 @@ class Gateway:
         if self.website_urls:
             @self._mcp.tool(name="list_website_urls", description="List available website URLs that can be browsed.")
             async def list_website_urls() -> list[str]:
-                return list(self.website_urls.values())
+                return [await self._listed_url(site, url) for site, url in self.website_urls.items()]
             self._server_tools.setdefault("gateway", []).append(
                 MCPTool(
                     name="list_website_urls",
@@ -659,9 +670,10 @@ class Gateway:
         mcp_endpoint = site_mcp or "mcp"
         if url_map is self.rest_proxy_urls and (cdp := await self._browsers.cdp_answer(request, base_url, role)) is not None:
             return cdp
+        site_names = self._names(service_name) if url_map is self.website_urls else ()
         if request.method in _SAFE_METHODS:
             return await forward(request, base_url, role=role, timeout=self.REST_PROXY_TIMEOUT, mcp_server=mcp_server,
-                                 withheld=self._withheld, mcp_endpoint=mcp_endpoint)
+                                 withheld=self._withheld, mcp_endpoint=mcp_endpoint, site_names=site_names)
         changelog_before = self._query_changelog_id()
         attribution = self._attribution(role)  # at the start: a fire may be gone by the time the response ends
 
@@ -686,7 +698,8 @@ class Gateway:
             })
 
         return await forward(request, base_url, role=role, timeout=self.REST_PROXY_TIMEOUT, mcp_server=mcp_server,
-                             on_done=log_write, withheld=self._withheld, mcp_endpoint=mcp_endpoint)
+                             on_done=log_write, withheld=self._withheld, mcp_endpoint=mcp_endpoint,
+                             site_names=site_names)
 
     async def _proxy_website_request(self, request: Request) -> Response:
         """Proxy a website request; with a website or state trigger registered, feed it to the engine and hold barriers.
@@ -730,7 +743,8 @@ class Gateway:
             await refuse_websocket(websocket, self._json_response({"error": f"Unknown service: {service_name}"}, 404))
             return
         await relay_websocket(websocket, base_url, role=self._request_role(websocket),
-                              open_timeout=self.REST_PROXY_CONNECT_TIMEOUT_S, withheld=self._withheld)
+                              open_timeout=self.REST_PROXY_CONNECT_TIMEOUT_S, withheld=self._withheld,
+                              site_names=self._names(service_name))
 
     async def _fire_website_triggers(self, request: Request, app: str,
                                      status: int) -> tuple[list[asyncio.Task], float | None]:
@@ -803,8 +817,22 @@ class Gateway:
         except ValueError:
             card = None
         address = self.website_urls.get(app) or base_url
+        self._card_site_names[app] = declared_site_names(card) if isinstance(card, dict) else ()
         self._site_reserved[app] = site_reserved_paths(card, address) if isinstance(card, dict) else frozenset()
         return self._site_reserved[app]
+
+    def _names(self, app: str) -> tuple[str, ...]:
+        """The names website ``app`` is reached at: those its env stores, else those its card declares, as last read."""
+        return self._site_names.get(app) or self._card_site_names.get(app, ())
+
+    async def _listed_url(self, site: str, url: str) -> str:
+        """The address ``list_website_urls`` gives ``site``, at ``url`` behind the gateway: for a site listed by name,
+        its first name (``listed_url``), its card read for a site whose env stores none; else, or with none, ``url``."""
+        if site not in self._listed_by_name:
+            return url
+        if site not in self._site_names:
+            await self._site_reserved_paths(site)
+        return listed_url(self._names(site)) or url
 
     def _backing_keys(self) -> list[str]:
         # rest_proxy_urls entries are the env's backing servers: mcp-<svc> (MCP) + <svc> (website
