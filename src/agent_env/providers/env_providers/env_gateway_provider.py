@@ -1616,13 +1616,6 @@ def _with_browser(mcp_servers: list[MCPServerConfig], images: list[DockerImageAr
     return [*mcp_servers, server], [*images, browser.docker_image_artifact]
 
 
-def _named_browser_server(browser_envs: list[Env]) -> "MCPServerEnv | None":
-    """The website browser a multi env's ``browser_envs`` names, when that is an MCP server env its gateway runs."""
-    from agent_env.env.envs.mcp_server import MCPServerEnv
-
-    return next((env for env in browser_envs if isinstance(env, MCPServerEnv)), None)
-
-
 def _gateway_topology(env: Env) -> _GatewayTopology:
     """What a gateway fronts for env: a MultiEnv's MCP servers and websites (whatever their own env_provider_type) under its
     name and the website browser it names or the run's, a WebsiteEnv's website and the run's browser, or else the env's
@@ -1633,8 +1626,8 @@ def _gateway_topology(env: Env) -> _GatewayTopology:
     is_multi = isinstance(env, MultiEnv)
     if is_multi:
         servers, websites, name = env.mcp_server_envs, env.website_envs, env.name
-        browser = _named_browser_server(env.browser_envs) if env.browser_envs is not None else (
-            None if env.browser_computer() is not None else _THE_RUNS)
+        placed = env.website_browser()
+        browser = _THE_RUNS if placed.runs else placed.server
     elif isinstance(env, WebsiteEnv):
         servers, websites, name, browser = [], [env], None, _THE_RUNS
     else:

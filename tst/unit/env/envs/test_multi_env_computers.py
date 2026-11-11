@@ -24,7 +24,7 @@ from agent_env.env.envs import _deployment, _multi_computers
 from agent_env.env.envs.computer import COMPUTER_ENV_TYPE
 from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.env.envs.mcp_server import MCPServerEnv
-from agent_env.env.envs.multi_env import MultiEnv
+from agent_env.env.envs.multi_env import MultiEnv, WebsiteBrowser
 from agent_env.env.gateway import ExternalChild
 from agent_env.env.gateway.constants import WELL_KNOWN_PATH
 from agent_env.env.store import EnvInstanceStore
@@ -774,7 +774,7 @@ def test_browser_envs_takes_one_website_browser_env(browsers, problem):
 
 @pytest.mark.parametrize("browser", [FakeBrowser, _playwright], ids=["browser-computer", "mcp-server"])
 def test_browser_envs_takes_a_browser_computer_or_an_mcp_server_serving_one(browser):
-    assert _browsing(browser_envs=[browser()]).browser_env().id in ("chromium-computer", "playwright-mcp")
+    assert _browsing(browser_envs=[browser()]).website_browser().env.id in ("chromium-computer", "playwright-mcp")
 
 
 def test_a_browser_computer_needs_a_name_no_other_computer_has():
@@ -798,24 +798,25 @@ def test_the_runs_mcp_server_browser_is_refused_a_name_a_computer_has(providers)
 # --- its website browser: which one ---
 
 def test_the_browser_is_the_one_named_none_for_an_empty_list_and_else_the_runs_when_there_are_websites(local_stores):
-    chromium = FakeBrowser()
-    assert _browsing(browser_envs=[chromium]).browser_env() is chromium
-    assert _browsing(browser_envs=[]).browser_env() is None
-    assert _browsing(websites=()).browser_env() is None
+    chromium, playwright = FakeBrowser(), _playwright()
+    assert _browsing(browser_envs=[chromium]).website_browser() == WebsiteBrowser(computer=chromium)
+    assert _browsing(browser_envs=[playwright]).website_browser() == WebsiteBrowser(server=playwright)
+    assert _browsing(browser_envs=[]).website_browser() == WebsiteBrowser()
+    assert _browsing(websites=()).website_browser() == WebsiteBrowser()
     with patch("agent_env.env.env.Env.get", return_value=chromium) as get, \
             run_env_ids({WEBSITE_BROWSER_OVERRIDE: "chromium-computer"}):
-        assert _browsing().browser_env() is chromium and _browsing().browser_computer() is chromium
+        assert _browsing().website_browser() == WebsiteBrowser(computer=chromium)
     get.assert_called_with("chromium-computer")
 
 
 def test_a_runs_browser_the_store_doesnt_hold_yet_is_left_for_the_gateway_to_look_up(local_stores):
     office = _browsing()
-    assert office.browser_env() is None and office.browser_computer() is None
+    assert office.website_browser() == WebsiteBrowser(runs=True)
     assert env_gateway_provider._gateway_topology(office).website_browser is env_gateway_provider._THE_RUNS
 
 
 @pytest.mark.parametrize("browser_envs, runs, expected", [
-    (None, _playwright, "the run's"),
+    (None, _playwright, "playwright-mcp"),
     (None, FakeBrowser, None),
     ([], _playwright, None),
     ("chromium", _playwright, None),
@@ -829,10 +830,7 @@ def test_the_gateway_runs_an_mcp_server_browser_and_leaves_a_browser_computer_to
     with patch("agent_env.env.env.Env.get", return_value=runs()), \
             patch.object(env_gateway_provider, "website_config", return_value=MagicMock()):
         browser = env_gateway_provider._gateway_topology(office).website_browser
-    if expected == "the run's":
-        assert browser is env_gateway_provider._THE_RUNS
-    else:
-        assert getattr(browser, "id", None) == expected
+    assert getattr(browser, "id", None) == expected
 
 
 def test_a_lone_website_with_a_browser_computer_as_the_runs_browser_is_refused_naming_a_multi_env():

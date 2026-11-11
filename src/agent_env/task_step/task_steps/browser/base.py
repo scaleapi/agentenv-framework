@@ -91,7 +91,7 @@ def stored_browsers(env: Env) -> list[str]:
     deployed alone, a multi env's computers' browser apps and its browser computer, the one its browser_envs names or
     the run's; none for any other env."""
     if isinstance(env, MultiEnv):
-        computers = [*env.computer_envs, *([browser] if (browser := env.browser_computer()) else [])]
+        computers = [*env.computer_envs, *([browser] if (browser := env.website_browser().computer) else [])]
         return [name for computer in computers for name in stored_browsers(computer)]
     if not isinstance(env, ComputerEnv):
         return []

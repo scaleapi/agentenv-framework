@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import shlex
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional
 
 import yaml
@@ -63,6 +64,34 @@ from agent_env.attribution import Attribution
 # A child_envs entry's options: a deploy_env step's for that env alone, less the multi env's (lifetime, gateway, state).
 CHILD_ENV_OPTIONS = ("sandbox_type", "cpu", "memory_mb", "disk_size_gb", "env_params")
 
+
+
+@dataclass(frozen=True)
+class WebsiteBrowser:
+    """The website browser a multi env's deploy adds, and where it runs: ``computer``, a browser computer, on a sandbox
+    of its own beside its computers; ``server``, an MCP server env, among its gateway's MCP servers; or neither, with
+    ``runs`` when it is the run's (``website_browser_env_id``) and the store doesn't hold it as either yet, an infra
+    env a run may set up later, which the gateway looks up as it deploys."""
+
+    computer: Optional[ComputerEnv] = None
+    server: Optional[MCPServerEnv] = None
+    runs: bool = False
+
+    @property
+    def env(self) -> Optional[Env]:
+        return self.computer or self.server
+
+
+def placed(browser: Optional[Env]) -> WebsiteBrowser:
+    """``browser`` where a multi env runs it: a computer on a sandbox of its own, an MCP server env among its gateway's
+    MCP servers, and an env of another kind left for the gateway to look up as it deploys."""
+    if browser is None:
+        return WebsiteBrowser()
+    if isinstance(browser, get_env_registry()[COMPUTER_ENV_TYPE]):
+        return WebsiteBrowser(computer=browser)
+    if isinstance(browser, MCPServerEnv):
+        return WebsiteBrowser(server=browser)
+    return WebsiteBrowser(runs=True)
 
 
 def browser_problems(envs: list[Env]) -> list[str]:
@@ -132,7 +161,7 @@ class MultiEnv(Env):
         self.browser_envs = list(browser_envs) if browser_envs is not None else None
         problems = browser_problems(self.browser_envs or [])
         if not problems:
-            problems = self._name_problems(self.browser_envs[0] if self.browser_envs else None)
+            problems = self._name_problems(placed(self.browser_envs[0] if self.browser_envs else None))
         if problems:
             raise ValueError(f"multi env {id!r}: {'; '.join(problems)}")
         self._sandbox = None
@@ -148,12 +177,11 @@ class MultiEnv(Env):
         """Its computers, each on a sandbox of its own, which the gateway fronts by its name: after a deploy, that deploy's."""
         return self._computers.envs
 
-    def _name_problems(self, browser: Optional[Env]) -> list[str]:
+    def _name_problems(self, browser: WebsiteBrowser) -> list[str]:
         """What's wrong with the names of its computers and ``browser``, its website browser, beside its other child
         envs' (``_multi_computers.name_problems``, ``app_name_problems``): a browser computer named as a computer is,
         and an MCP server browser as an MCP server, which no other MCP server may name either."""
-        computer = self._browser_computer(browser)
-        server = browser if isinstance(browser, MCPServerEnv) else None
+        computer, server = browser.computer, browser.server
         computer_envs = [*self.computer_envs, *([computer] if computer is not None else [])]
         mcp_servers = [env.environment_name for env in (*self.mcp_server_envs, *([server] if server else []))]
         websites = [env.environment_name for env in self.website_envs]
@@ -169,28 +197,18 @@ class MultiEnv(Env):
                                                                             if app is not env]  # an app deployed alone
                                                      for env in computer_envs}, [*servers, *computers])]
 
-    def browser_env(self) -> Optional[Env]:
-        """The website browser a deploy adds: the one ``browser_envs`` names, none when it names none, and without it
-        the run's (``website_browser_env_id``) when it has websites, as every env with websites gets. The run's is None
-        while the store doesn't hold it yet: an infra env a run may set up later, which the gateway looks up, as it
-        always has."""
+    def website_browser(self) -> WebsiteBrowser:
+        """The website browser a deploy adds, and where it runs: the one ``browser_envs`` names, none when it names
+        none, and without it the run's (``website_browser_env_id``) when it has websites, as every env with websites
+        gets."""
         if self.browser_envs is not None:
-            return self.browser_envs[0] if self.browser_envs else None
+            return placed(self.browser_envs[0] if self.browser_envs else None)
         if not self.website_envs:
-            return None
+            return WebsiteBrowser()
         try:
-            return Env.get(website_browser_env_id(get_config()))
+            return placed(Env.get(website_browser_env_id(get_config())))
         except NotFoundError:
-            return None
-
-    def browser_computer(self) -> Optional[ComputerEnv]:
-        """Its website browser (``browser_env``) when that is a computer, which runs on a sandbox of its own beside its
-        computers rather than among the gateway's MCP servers."""
-        return self._browser_computer(self.browser_env())
-
-    @staticmethod
-    def _browser_computer(browser: Optional[Env]) -> Optional[ComputerEnv]:
-        return browser if isinstance(browser, get_env_registry()[COMPUTER_ENV_TYPE]) else None
+            return WebsiteBrowser(runs=True)
 
     def to_dict(self) -> dict:
         base = super().to_dict()
@@ -279,12 +297,11 @@ class MultiEnv(Env):
 
     async def deploy(self, ttl_seconds: int = 10800, disk_size_gb: float = 10, gateway_mode: GatewayMode = GatewayMode.PERFORMANCE, cpu: float | None = None, memory_mb: int | None = None, sandbox_type: str | None = None, env_state_type: str | None = None, env_state_instance_id: str | None = None, artifact_id: str | None = None, artifact_version: int | None = None, *, attribution: Optional[Attribution] = None,
                      child_envs: Optional[dict] = None) -> DeployedEnv:
-        browser = self.browser_env()
-        computer = self._browser_computer(browser)
+        browser = self.website_browser()
         if refusal := self._child_envs_refusal(child_envs, sandbox_type, browser):
             raise ValueError(refusal)
-        self._computers.begin(computer)
-        deployer = self._computers.deployer(self._entries(child_envs, computer), sandbox_type=sandbox_type,
+        self._computers.begin(browser.computer)
+        deployer = self._computers.deployer(self._entries(child_envs, browser.computer), sandbox_type=sandbox_type,
                                             ttl_seconds=ttl_seconds, attribution=attribution, websites=self._websites(),
                                             live_hosts=self.live_hosts())
         computers = dict(children=deployer, then=self._computers.finish) if self._computers.every else {}
@@ -371,24 +388,24 @@ class MultiEnv(Env):
 
     def child_envs_refusal(self, child_envs: Optional[dict], *, sandbox_type: str | None = None) -> str | None:
         """Why a deploy would refuse ``child_envs``, each child env's options by its environment name, or None. A
-        computer, and its website browser when that is one (``browser_env``), is checked as its entry, or no entry,
+        computer, and its website browser when that is one (``website_browser``), is checked as its entry, or no entry,
         would deploy it on a sandbox of its own, ``sandbox_type`` (the multi env's) unless the entry names one, the
         browser routing its synthetic websites unless its entry says whether it does; any other child env runs on the
         multi env's sandbox and takes no entry."""
-        return self._child_envs_refusal(child_envs, sandbox_type, self.browser_env())
+        return self._child_envs_refusal(child_envs, sandbox_type, self.website_browser())
 
     def _child_envs_refusal(self, child_envs: Optional[dict], sandbox_type: str | None,
-                            browser: Optional[Env]) -> str | None:
+                            browser: WebsiteBrowser) -> str | None:
         if child_envs and not isinstance(child_envs, dict):
             return f"child_envs is a table of child env names, not {type(child_envs).__name__}"
-        computer = self._browser_computer(browser)
+        computer = browser.computer
         entries = self._entries(child_envs, computer) or {}
         child_envs = child_envs or {}
         computers = {env.environment_name: env for env in [*self.computer_envs, *([computer] if computer else [])]}
         names = list(dict.fromkeys(env.environment_name for env in (*self.mcp_server_envs, *self.website_envs,
                                                                     *computers.values())))
         # A browser browser_envs names had its names checked at put; the run's is checked here.
-        problems = self._name_problems(browser) if browser is not None and self.browser_envs is None else []
+        problems = self._name_problems(browser) if browser.env is not None and self.browser_envs is None else []
         for name, entry in child_envs.items():
             extra = sorted(map(str, set(entry) - set(CHILD_ENV_OPTIONS))) if isinstance(entry, dict) else []
             if name not in names:
