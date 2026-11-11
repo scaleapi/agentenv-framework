@@ -77,6 +77,16 @@ class DeployEnvTaskStep(TaskStep):
         return (user_overrides.get("env_state_type") or self.env_state_type,
                 user_overrides.get("env_state_instance_id") or self.env_state_instance_id)
 
+    def run_env_version(self, context: TaskStepContext) -> Optional[int]:
+        """The env version a run deploys: this step's ``env_version`` step override, over the stored one."""
+        overrides = self.step_param_overrides(context)
+        if "env_version" not in overrides:
+            return self.env_version
+        version = overrides["env_version"]
+        if not isinstance(version, int) or isinstance(version, bool):
+            raise ValueError(f"deploy_env '{self.id}': step override env_version must be an integer, got {version!r}")
+        return version
+
     def to_dict(self) -> dict:
         base = super().to_dict()
         base["env_id"] = self.env_id
@@ -157,7 +167,8 @@ class DeployEnvTaskStep(TaskStep):
         if existing is not None:
             raise RuntimeError(f"Env '{self.env_id}' is already deployed")
 
-        env = Env.get(self.env_id, self.env_version)
+        env_version = self.run_env_version(context)
+        env = Env.get(self.env_id, env_version)
         user_overrides = context.metadata.get("user_overrides", {})
         resolved_sandbox_type = user_overrides.get("env_sandbox") or self.sandbox_type
         resolved_env_state_type, resolved_env_state_instance_id = self.run_state(user_overrides)
@@ -165,7 +176,7 @@ class DeployEnvTaskStep(TaskStep):
         resolved_ttl = _ttl_override if _ttl_override is not None else self.ttl_seconds
         attribution = deploy_attribution(self, context)
         logger.info(
-            f"Deploying env '{self.env_id}' (ttl={resolved_ttl}s, "
+            f"Deploying env '{self.env_id}' (version={env_version}, ttl={resolved_ttl}s, "
             f"disk_size_gb={self.disk_size_gb}, gateway_mode={self.gateway_mode}, "
             f"cpu={self.cpu}, memory_mb={self.memory_mb}, "
             f"sandbox_type={resolved_sandbox_type}, env_state_type={resolved_env_state_type}, "

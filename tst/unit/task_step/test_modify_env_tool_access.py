@@ -51,6 +51,37 @@ async def test_a_gateway_error_raises(monkeypatch):
         await _step("disable").execute(TaskStepContext(deployed_envs=[_record()], metadata={}))
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("step_params, expected", [
+    ({}, ["slack_send"]),
+    ({"tools-1": {"tools": ["mail_send", "mail_delete"]}}, ["mail_send", "mail_delete"]),
+    ({"tools-1": {"tools": []}}, []),
+    ({"other-step": {"tools": ["mail_send"]}}, ["slack_send"]),
+])
+async def test_a_tools_step_override_replaces_the_stored_tools(monkeypatch, step_params, expected):
+    sent = _mock_gateway(monkeypatch, {"ok": True, "disabled": expected, "allowed": []})
+    ctx = TaskStepContext(deployed_envs=[_record()], metadata={"user_overrides": {"step_params": step_params}})
+    step = _step("disable")
+
+    out = await step.execute(ctx)
+
+    [request] = sent
+    assert json.loads(request.content) == {"role": "default", "tools": expected}
+    assert out.metadata["tool_access_changes"][0]["tools_requested"] == expected
+    assert step.tools == ["slack_send"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", ["mail_send", ["mail_send", 3], None, {"mail_send": True}])
+async def test_a_tools_override_that_is_not_a_list_of_strings_raises_before_any_request(monkeypatch, bad):
+    sent = _mock_gateway(monkeypatch, {})
+    ctx = TaskStepContext(deployed_envs=[_record()], metadata={"user_overrides": {"step_params": {"tools-1": {"tools": bad}}}})
+
+    with pytest.raises(ValueError, match="step override tools must be a list of strings"):
+        await _step("disable").execute(ctx)
+    assert sent == []
+
+
 def _step(action: str) -> ModifyEnvToolAccessStep:
     return ModifyEnvToolAccessStep(id="tools-1", version=None, env_id="env-x", action=action, role="default",
                                    tools=["slack_send"])

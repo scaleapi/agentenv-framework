@@ -572,3 +572,34 @@ async def test_execute_refuses_child_envs_for_an_env_whose_deploy_takes_none():
     with patch("agent_env.env.env.Env") as Env, pytest.raises(ValueError, match="have no child envs"):
         Env.get.return_value = env
         await step.execute(TaskStepContext())
+
+
+def _step_overrides(step_id: str, params: dict) -> dict:
+    return {"user_overrides": {"step_params": {step_id: params}}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("metadata, expected", [
+    ({}, 2),
+    (_step_overrides("t-1.deploy_env", {"env_version": 5}), 5),
+    (_step_overrides("another-step", {"env_version": 5}), 2),
+])
+async def test_execute_deploys_the_env_version_a_step_override_names(metadata, expected):
+    step = DeployEnvTaskStep(id="t-1.deploy_env", version=None, env_id="art-1", env_version=2)
+
+    with patch("agent_env.env.env.Env") as Env:
+        Env.get.return_value = _fake_env(_deployed_env(None))
+        await step.execute(TaskStepContext(metadata=metadata))
+
+    Env.get.assert_called_once_with("art-1", expected)
+    assert step.env_version == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", ["5", 5.0, True, None])
+async def test_execute_rejects_an_env_version_override_that_is_not_an_integer(bad):
+    step = DeployEnvTaskStep(id="t-1.deploy_env", version=None, env_id="art-1", env_version=2)
+
+    with patch("agent_env.env.env.Env") as Env, pytest.raises(ValueError, match="env_version must be an integer"):
+        await step.execute(TaskStepContext(metadata=_step_overrides("t-1.deploy_env", {"env_version": bad})))
+    Env.get.assert_not_called()
