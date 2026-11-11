@@ -20,7 +20,9 @@ window's size from its first script. Alone, it makes no request of its own, its 
 loads for well over a minute after it's ready, but for one Google account check at launch. Routing sites, it goes out only through the shared site proxy's forward port:
 start tabs on a site over HTTPS and on a .localhost one load through it, an event stream comes through as it's sent,
 any other host and loopback are refused and logged, the session user can't stop the port, killed it comes back, and
-after a reset it serves the sites and refuses the rest again.
+after a reset it serves the sites and refuses the rest again. Its log has an entry for every action a CDP agent and an
+MCP agent take, over CDP, page tools and pixels, with who, the tab and its URL and no secret either typed or set, and
+each tab event names the command that caused it.
 Needs Docker and the local registry on
 localhost:5000, and Node 20 or later and npm for the CDP clients."""
 
@@ -47,6 +49,7 @@ from websockets.asyncio.client import connect
 from agentenv_protocol import client as protocol_v1
 from agentenv_protocol.computer import COMPUTER_PAGE, COMPUTER_READY
 from agentenv_protocol.computer.conformance.client import image
+from agentenv_protocol.tool_context import ROLE_HEADER
 from agentenv_protocol.website_browser import BROWSER
 
 from agent_env.a2a_agent import conversation_store
@@ -486,6 +489,114 @@ async def test_its_data_calls_take_turns_a_server_restart_takes_a_load_and_with_
             report = await teardown_run(context)
 
     assert not report.failed
+
+
+#: A form whose password field and text field fill the page's top, for typing into either by a click.
+FORM = "data:text/html," + urllib.parse.quote(
+    "<title>form</title><body style='margin:0'><input id=p type=password style='position:absolute;left:0;top:0;"
+    "width:600px;height:80px'><input id=t style='position:absolute;left:0;top:120px;width:600px;height:80px'>")
+#: The secrets the agents send, which the log must never hold, and the text they type that it must.
+SECRETS, TYPED = ("hunter2", "hunter3", "s3cret"), ("standing desk", "oak desk")
+
+
+@pytest.mark.asyncio
+async def test_its_log_has_an_entry_for_every_action_over_cdp_page_tools_and_pixels_with_no_secrets(browser_computer):
+    """M8.19: one task driven over CDP, page tools and pixels has an entry for every action, with its time, who, tab,
+    URL and method or tool, and no secrets; each tab event names the command that caused it."""
+    with namespace_routing():
+        deployed = await Env.get(browser_computer.id).deploy()
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            sent = await _cdp_agent_types((await _cdp(deployed, "ada"))["ws_url"])
+            async with streamablehttp_client(deployed.mcp_url, headers={ROLE_HEADER: "bo"}) as (read, write, _):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    await _tool(session, "computer_navigate", {"url": FORM})
+                    await _tool(session, "computer_click", {"x": 300, "y": 40, "space": "frame"})
+                    await _tool(session, "computer_type", {"text": "hunter3"})
+                    await _tool(session, "computer_click", {"x": 300, "y": 160, "space": "frame"})
+                    await _tool(session, "computer_type", {"text": "oak desk"})
+                    await _tool(session, "computer_tabs", {"action": "list"})
+                    shot = await session.call_tool("computer_screenshot", {"space": "frame"})
+            await asyncio.sleep(1)
+            logged = await _browser_log(deployed)
+        finally:
+            report = await teardown_run(context)
+
+    lines = logged["lines"]
+    actions = [line["action"] | {"seq": line["seq"], "at": line["at"]} for line in lines if "action" in line]
+    tab_events = [line["tab"] for line in lines if "tab" in line]
+    by_ada = [action for action in actions if action["via"] == "cdp" and action["who"] == "ada"]
+    by_bo = [action for action in actions if action["via"] == "mcp"]
+    text = json.dumps(logged)
+    assert not shot.isError and [line["seq"] for line in lines] == sorted(line["seq"] for line in lines)
+    assert [action["method"] for action in by_ada] == [method for method, _ in sent], by_ada
+    assert all(action["at"] and action["tab"] == sent[0][1] and isinstance(action["url"], str) for action in by_ada)
+    assert {action["method"]: action["acts"] for action in by_ada} == {
+        "Target.createTarget": True, "Target.attachToTarget": False, "Runtime.evaluate": True, "Input.insertText": True,
+        "Network.setCookie": True, "DOM.getDocument": False, "Page.navigate": True, "Target.closeTarget": True}
+    typed = [action["params"]["text"] for action in by_ada if action["method"] == "Input.insertText"]
+    assert typed == [{"length": 7}, "standing desk"]
+    tools = {action["tool"] for action in by_bo}
+    assert tools == {"computer_navigate", "computer_click", "computer_type", "computer_tabs", "computer_screenshot"}
+    assert all(action["who"] == "bo" and action["at"] and action["op"] and action["call"] for action in by_bo)
+    acting = [action for action in by_bo if action["acts"]]
+    assert all(action["tab"] and isinstance(action["url"], str) for action in acting), acting
+    assert [action["args"]["text"] for action in acting if action["tool"] == "computer_type"] == \
+        [{"length": 7}, "oak desk"]
+    assert any(action["tool"] == "computer_click" and action["op"] == "page/input" and action["params"]["events"]
+               for action in acting)
+    assert not any(secret in text for secret in SECRETS) and all(words in text for words in TYPED)
+    created = next(action for action in by_ada if action["method"] == "Target.createTarget")
+    navigated = next(action for action in by_ada if action["method"] == "Page.navigate")
+    closed = next(action for action in by_ada if action["method"] == "Target.closeTarget")
+    opened_by_bo = next(action for action in by_bo if action["op"] == "navigate")
+    ada_tab = [event for event in tab_events if event["id"] == created["tab"]]
+    assert {"event": "opened", "by": "command", "entry": created["seq"], "via": "cdp", "who": "ada"}.items() <= \
+        ada_tab[0].items(), ada_tab
+    assert any(event["event"] == "navigated" and event.get("entry") == navigated["seq"] for event in ada_tab), ada_tab
+    assert {"event": "closed", "by": "command", "entry": closed["seq"]}.items() <= ada_tab[-1].items(), ada_tab
+    assert any(event["event"] == "navigated" and event.get("entry") == opened_by_bo["seq"] and event["who"] == "bo"
+               for event in tab_events), tab_events
+    assert not report.failed
+
+
+async def _cdp_agent_types(ws_url: str) -> list[tuple[str, str]]:
+    """A CDP agent, ada, that opens the form in a tab of its own, types a password and a search into it, sets a cookie,
+    reads the page, navigates and closes the tab: each command it sent, in order, and the tab, the same for all."""
+    async with connect(ws_url, max_size=None, open_timeout=60) as ws:
+        ids = itertools.count(1)
+        sent: list[str] = []
+
+        async def call(method: str, params: dict, session: str | None = None) -> dict:
+            message_id = next(ids)
+            sent.append(method)
+            await ws.send(json.dumps({"id": message_id, "method": method, "params": params,
+                                      **({"sessionId": session} if session else {})}))
+            while (reply := json.loads(await asyncio.wait_for(ws.recv(), 60))).get("id") != message_id:
+                pass
+            return reply
+
+        target = (await call("Target.createTarget", {"url": FORM}))["result"]["targetId"]
+        session = (await call("Target.attachToTarget", {"targetId": target, "flatten": True}))["result"]["sessionId"]
+        await asyncio.sleep(1)
+        await call("Runtime.evaluate", {"expression": "document.getElementById('p').focus()"}, session)
+        await call("Input.insertText", {"text": "hunter2"}, session)
+        await call("Runtime.evaluate", {"expression": "document.getElementById('t').focus()"}, session)
+        await call("Input.insertText", {"text": "standing desk"}, session)
+        await call("Network.setCookie", {"name": "sid", "value": "s3cret", "url": "https://shop.test/"}, session)
+        await call("DOM.getDocument", {"depth": 1}, session)
+        await call("Page.navigate", {"url": FORM + "%3C!--again--%3E"}, session)
+        await asyncio.sleep(1)
+        await call("Target.closeTarget", {"targetId": target})
+    return [(method, target) for method in sent]
+
+
+async def _browser_log(deployed, after: int = 0) -> dict:
+    card = (await _get(deployed, "/.well-known/agent-env.json")).json()
+    app = next(child for child in card["children_environments"] if child["name"] == "chromium")
+    path = protocol_v1.find_extension_method(app, BROWSER, "log")["endpoint"]
+    return (await _get(deployed, path, headers=deployed.control_headers, params={"after": after})).json()
 
 
 async def _shown(session: ClientSession, holds) -> dict:

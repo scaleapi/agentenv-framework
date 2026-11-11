@@ -20,8 +20,9 @@ from starlette.routing import WebSocketRoute  # noqa: E402
 from websockets.asyncio.client import connect  # noqa: E402
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK  # noqa: E402
 
-from agentenv_protocol import browser_cdp  # noqa: E402
+from agentenv_protocol import browser_cdp, browser_log  # noqa: E402
 from agentenv_protocol.browser_cdp import NO_SESSION, Relay, Tokens, guard  # noqa: E402
+from agentenv_protocol.browser_log import REDACTED, TOOL_CALL_HEADER, BrowserLog, Causes, tool_call_header  # noqa: E402
 from agentenv_protocol.computer import Launch, Platform, Ready, app, computer_app, linux  # noqa: E402
 from agentenv_protocol.computer.app import APP_SETTINGS_ENV  # noqa: E402
 from agentenv_protocol.computer.app_runtime import AppReadiness  # noqa: E402
@@ -103,11 +104,11 @@ class SlowClient:
 
 
 @contextlib.asynccontextmanager
-async def _relay(dialogs_answered: bool = False):
+async def _relay(dialogs_answered: bool = False, **logging):
     """The relay over a fake pipe, served on loopback with each connection's user its path's: the pipe, the relay and
     the server's ws:// base."""
     pipe = Pipe()
-    relay = Relay(pipe, dialogs_answered=dialogs_answered)
+    relay = Relay(pipe, dialogs_answered=dialogs_answered, **logging)
 
     async def endpoint(websocket):
         await relay.serve(websocket, websocket.path_params["user"])
@@ -274,6 +275,57 @@ async def test_a_client_that_falls_too_far_behind_is_closed_and_what_waited_for_
     assert "closed_at" in relay.connections[0] and ("Target.detachFromTarget", None) in pipe.sent
 
 
+class Control:
+    """agentenv's control as the relay asks it: the URL of tab T1, a password field focused wherever it's asked, and
+    the causes of tab events."""
+
+    def __init__(self) -> None:
+        self.causes, self.asked = Causes(), []
+
+    def url_of(self, target):
+        return "https://a.test/page" if target == "T1" else None
+
+    async def password_focused(self, target) -> bool:
+        self.asked.append(target)
+        return True
+
+
+@pytest.mark.asyncio
+async def test_every_relayed_command_is_an_entry_on_its_sessions_tab_an_acting_one_with_its_parameters_kept(tmp_path):
+    log, control = BrowserLog(tmp_path / "browser-chromium.jsonl"), Control()
+    async with _relay(log=log, control=control) as (pipe, relay, base):
+        async with connect(f"{base}/ada") as ada:
+            attached = await _ask(ada, {"id": 1, "method": "Target.attachToTarget",
+                                        "params": {"targetId": "T1", "flatten": True}})
+            child = attached["result"]["sessionId"]
+            for n, (method, params) in enumerate([
+                    ("DOM.getDocument", {"depth": 1}),
+                    ("Network.setCookie", {"name": "sid", "value": "s3cret", "url": "https://a.test/?token=t"}),
+                    ("Input.insertText", {"text": "hunter2"}), ("Boom", {})], start=2):
+                await _ask(ada, {"id": n, "method": method, "params": params, "sessionId": child})
+            await _ask(ada, {"id": 6, "method": "Target.exposeDevToolsProtocol", "params": {"targetId": "T1"}})
+            await _ask(ada, {"id": 7, "method": "Page.navigate", "params": {"url": "https://a.test/"},
+                             "sessionId": "theirs"})
+        await asyncio.sleep(0.05)
+
+    common = {"via": "cdp", "who": "ada", "connection": 1}
+    page = {**common, "tab": "T1", "url": "https://a.test/page"}
+    assert [line["action"] for line in log.read()["lines"]] == [
+        {**page, "method": "Target.attachToTarget", "acts": False, "ok": True},
+        {**page, "method": "DOM.getDocument", "acts": False, "ok": True},
+        {**page, "method": "Network.setCookie", "acts": True, "ok": True,
+         "params": {"name": "sid", "value": REDACTED, "url": f"https://a.test/?token={REDACTED}"}},
+        {**page, "method": "Input.insertText", "acts": True, "ok": True, "params": {"text": {"length": 7}}},
+        {**page, "method": "Boom", "acts": False, "ok": False, "error": "boom"},
+        {**page, "method": "Target.exposeDevToolsProtocol", "acts": False, "ok": False, "guard": "refused",
+         "error": "agentenv refuses Target.exposeDevToolsProtocol: it would give a page's script the browser's own "
+                  "CDP channel"},
+        {**common, "method": "Page.navigate", "acts": True, "tab": None, "url": None, "ok": False,
+         "error": NO_SESSION["message"], "params": {"url": "https://a.test/"}},
+    ]
+    assert control.asked == ["T1"]
+
+
 def _browser(monkeypatch, tmp_path) -> Browser:
     """The browser alone, in ``tmp_path``."""
     monkeypatch.chdir(tmp_path)
@@ -282,7 +334,56 @@ def _browser(monkeypatch, tmp_path) -> Browser:
     monkeypatch.setenv("ENVIRONMENT_NAME", "chromium")
     monkeypatch.setenv(SITE_PROXY_ENV, "http://127.0.0.1:3128")
     monkeypatch.delenv(APP_SETTINGS_ENV, raising=False)
+    monkeypatch.setattr(browser_log, "LOG_DIR", tmp_path / "logs")
     return Browser()
+
+
+@pytest.mark.asyncio
+async def test_an_op_for_an_agents_tool_call_and_agentenvs_own_acting_ops_are_entries_and_its_own_reads_are_not(
+        monkeypatch, tmp_path):
+    (tmp_path / "logs").mkdir()
+    browser = _browser(monkeypatch, tmp_path)
+
+    async def navigate(url):
+        browser.control._acted_on("T1")
+
+    async def tabs():
+        return []
+
+    monkeypatch.setattr(browser.control, "navigate", navigate)
+    monkeypatch.setattr(browser.control, "tab_list", tabs)
+    monkeypatch.setattr(browser.control, "url_of", lambda target: "https://a.test/" if target else None)
+    asgi = browser.served_asgi(browser.create_app().streamable_http_app())
+
+    def tool(name: str, call: str, args: dict) -> dict:
+        return {TOOL_CALL_HEADER: tool_call_header(name, call, args)}
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=asgi), base_url="http://app") as http:
+        url = "https://a.test/?token=t"
+        await http.post("/agentenv/ext/browser/navigate", json={"url": url},
+                        headers={**tool("computer_navigate", "c1", {"url": url}), "AgentEnv-Role": "ada"})
+        await http.get("/agentenv/ext/browser/tabs/list")
+        await http.get("/agentenv/ext/browser/tabs/list", headers=tool("computer_tabs", "c2", {"action": "list"}))
+        await http.post("/agentenv/ext/browser/sites/set", json={"sites": []})
+        closed = await http.post("/agentenv/ext/browser/tabs/close", json={"tab": "nope"},
+                                 headers=tool("computer_tabs", "c3", {"action": "close", "tab": "nope"}))
+        read = (await http.get("/agentenv/ext/browser/log", params={"after": 0})).json()
+
+    redacted = f"https://a.test/?token={REDACTED}"
+    assert closed.status_code >= 400
+    assert (tmp_path / "logs" / "browser-chromium.jsonl").is_file()
+    assert [line["action"] for line in read["lines"]] == [
+        {"via": "mcp", "op": "navigate", "acts": True, "who": "ada", "tool": "computer_navigate", "call": "c1",
+         "tab": "T1", "url": "https://a.test/", "ok": True, "params": {"url": redacted}, "args": {"url": redacted}},
+        {"via": "mcp", "op": "tabs/list", "acts": False, "who": "default", "tool": "computer_tabs", "call": "c2",
+         "tab": None, "url": None, "ok": True},
+        {"via": "agentenv", "op": "sites/set", "acts": True, "tab": None, "url": None, "ok": True,
+         "params": {"sites": []}},
+        {"via": "mcp", "op": "tabs/close", "acts": True, "who": "default", "tool": "computer_tabs", "call": "c3",
+         "tab": None, "url": None, "ok": False, "error": "no tab nope is open; list the tabs for their ids",
+         "params": {"tab": "nope"}, "args": {"action": "close", "tab": "nope"}},
+    ]
+    assert read["last"] == 4 and not read["more"]
 
 
 @pytest.mark.asyncio

@@ -16,6 +16,9 @@ from .control import DOWNLOADS, UPLOADS
 
 #: The browser's typed state, as ``data/get`` returns it beside its files and ``data/add`` reads it back.
 STATE_FILE = "browser-state.json"
+#: The browser's log, as ``data/get`` returns it beside its state; ``data/add`` passes over it, since a log isn't
+#: loaded back.
+LOG_FILE = "browser-log.jsonl"
 #: What a copy of the profile leaves out: caches, which the browser rebuilds, and the locks a running browser holds,
 #: which would keep another from opening the copy.
 CACHES = frozenset({"Cache", "Code Cache", "GPUCache", "ShaderCache", "GrShaderCache", "GraphiteDawnCache",
@@ -51,6 +54,8 @@ async def sorted_load(parts: list, profile: str) -> Load:
         under = PurePosixPath(path)
         if under in (PurePosixPath(profile), PurePosixPath(DOWNLOADS), PurePosixPath(UPLOADS)):
             raise ValueError(f"{path!r} is a folder of the browser's, not a file in it")
+        if path == LOG_FILE:
+            continue
         if path == STATE_FILE:
             if load.state is not None:
                 raise ValueError(f"data/add takes the browser's state once, as a data part or as {STATE_FILE}")

@@ -20,6 +20,10 @@ alone only; `locale`; `time_zone`; and
 them (`env_params.app_settings = {chromium = {start_urls = [...]}}`). Its data is its profile, `~/.config/chromium`, which
 the image has none of, so each deploy and each reset starts with a clean one. Name it from another bundle as `chromium`,
 the alias `aliases.toml` gives it, or by its id, `@local/agentenv-framework/browsers/chromium`.
+Its server keeps its log in `/var/log/agentenv/browser-chromium.jsonl`: an entry for each CDP command, MCP tool call
+and pixel action an agent takes, and an event for each tab opened, navigated or closed with what caused it, secrets
+taken out (`agentenv_protocol.browser_log`); `browser/v1` `log` reads it and `data/get` exports it as
+`browser-log.jsonl`.
 
 A task changes a browser's state with the steps in `agent_env.task_step.task_steps.browser`, each a call to one
 `browser/v1` operation on the browser in the env `env_id`, the one `browser` names when the env has several:

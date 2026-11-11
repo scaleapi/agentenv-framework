@@ -9,7 +9,7 @@ import shutil
 import tempfile
 from pathlib import Path
 from typing import Any, Awaitable, Callable, ClassVar, Literal, Optional
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 from starlette.requests import Request
@@ -19,14 +19,17 @@ from starlette.websockets import WebSocket
 from ..agent_env_environment import (OP_ADD_DATA, add_data, add_websocket_route, agent_skill, extension, get_data,
                                      reset_data)
 from ..browser_cdp import ROUTE, Relay, Tokens, reached, websocket_form
+from ..browser_log import (ACTOR, ERROR_CHARS, TOOL_CALL_HEADER, UNLOGGED_OPS, BrowserLog, op_acts, read_tool_call,
+                           redacted_args, redacted_op)
 from ..computer import AppDeclaration, ComputerAppEnvironment, Launch, install_step, ready_check
 from ..computer import app as computer_app
 from ..computer import app_data
 from ..computer.app import SOCKET, agent_acted, forget_agent_acted
 from ..computer.dataplane import file_parts
 from ..computer.errors import DeviceUnavailable, InvalidArgument
+from ..tool_context import DEFAULT_ROLE, ROLE_HEADER, normalize_role
 from ..transfers import WriteNamespaceGrant
-from ..types import METHOD_ADD, EnvironmentExtension, IntakeDeclaration, IntakeFormat, intake_extension
+from ..types import METHOD_ADD, RPC_PATH, EnvironmentExtension, IntakeDeclaration, IntakeFormat, intake_extension
 from . import data
 from .control import AGENT, DOWNLOADS, EXIT, LIVE_START_TAB_TIMEOUT_S, LOADED, STOP, UPLOADS, BrowserControl, _now
 from .devtools import PIPE_IN, PIPE_OUT, DevToolsError, DevToolsPipe
@@ -36,6 +39,8 @@ logger = logging.getLogger(__name__)
 
 SITE_PROXY_ENV = "AGENTENV_SITE_PROXY"
 BROWSER = "urn:agentenv:browser/v1"
+#: Where ``browser/v1``'s ops are served on its server.
+OPS_PATH = f"{RPC_PATH}/ext/browser/"
 #: Where its server keeps the env's sites ``sites/set`` hands it, which outlive a relaunch or the server's restart.
 SITES = SOCKET.parent / "sites.json"
 #: The flags agentenv sets, by prefix, which a subclass's command may not carry: among them every way to open a debugging
@@ -140,9 +145,14 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         self.control = BrowserControl(self.devtools, self.settings.dialogs,
                                       (self.settings.window.width, self.settings.window.height) if _alone()
                                       else None)
+        #: Its log: an entry for each action agents take on it, and its tabs' events.
+        self.log = BrowserLog.for_app(os.environ.get("ENVIRONMENT_NAME") or type(self).__name__.lower(),
+                                      SOCKET.parent)
+        self.control.log = self.log
         #: The CDP addresses it has handed out, and the relay agents' connections to them go through.
         self.cdp_tokens = Tokens(SOCKET.parent / "cdp-tokens.json")
-        self.relay = Relay(self.devtools, dialogs_answered=self.settings.dialogs != AGENT)
+        self.relay = Relay(self.devtools, dialogs_answered=self.settings.dialogs != AGENT, log=self.log,
+                           control=self.control)
         self.devtools.on_close(self._pipe_closed)
 
     @classmethod
@@ -269,7 +279,7 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
     async def _open_window(self) -> None:
         """Another window, which a launch of the browser while it runs opens over its pipe: a second copy would only
         hand its window to the first and exit, taking its new pipe with it."""
-        await self.devtools.call("Target.createTarget", {"url": "about:blank", "newWindow": True})
+        await self.control.create_target({"url": "about:blank", "newWindow": True})
 
     @install_step(scope="system")
     def write_policies(self) -> None:
@@ -315,11 +325,18 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         "sites/set hands it the env's own sites, by name and domains: a start tab on one must load, its document's "
         "status 2xx, or its launch counts it failed, while one on any other site is waited on 30 s at most. record "
         "keeps each launch's start_tabs: the URL asked for and ended on, the status, any network error, the load time, "
-        "the env's site and the outcome, loaded, failed or timed_out."))
+        "the env's site and the outcome, loaded, failed or timed_out. log returns its log's lines after the sequence "
+        "number after, in order: an action entry for each CDP command, MCP tool call and pixel action an agent took, "
+        "marked acting or reading, with who, the tab and its URL and, acting, its parameters with secrets taken out; "
+        "and a tab event each time a tab opened, navigated or closed, with what caused it."))
     async def browser_record(self) -> dict:
         return BrowserRecord(**await self.control.record(), launches=self._computer_app.launches(),
                              cdp_connections=list(self.relay.connections),
                              start_tabs=self.start_tab_launches).model_dump()
+
+    @extension(BROWSER, op="log", method="GET")
+    async def browser_log(self, after: int = 0) -> dict:
+        return self.log.read(after)
 
     @extension(BROWSER, op="sites/set")
     async def browser_sites_set(self, sites: list[dict]) -> dict:
@@ -339,6 +356,9 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         await self._until_ready()
         address = self.cdp_tokens.mint(user, reached(request))
         return {"http_url": address.http_url, "ws_url": address.ws_url}
+
+    def served_asgi(self, asgi: Any) -> Any:
+        return _LoggedOps(super().served_asgi(asgi), self)
 
     def create_app(self) -> Any:
         app = super().create_app()
@@ -490,14 +510,15 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         return not agent_acted()
 
     def declared_extensions(self) -> list[EnvironmentExtension]:
-        """Its data plane moves files by their path, a file tree: its state as ``browser-state.json``, its profile, its
-        downloads and files for agents to upload. A load takes its state as a data part too."""
+        """Its data plane moves files by their path, a file tree: its state as ``browser-state.json``, its log, its
+        profile, its downloads and files for agents to upload. A load takes its state as a data part too."""
         tree = IntakeDeclaration(get=[IntakeFormat(part="file", format="file-tree")],
                                  add=[IntakeFormat(part="file", format="file-tree", load="replace"),
                                       IntakeFormat(part="data", format="json", load="replace")])
         return [*super().declared_extensions(), intake_extension(tree, (
             f"data/get returns the browser's state as {data.STATE_FILE}: its cookies and local storage as Playwright's "
-            f"storageState has them, its tabs open and closed, its downloads and its clock; beside it, its profile "
+            f"storageState has them, its tabs open and closed, its downloads and its clock; beside it, its log as "
+            f"{data.LOG_FILE}, which data/add passes over, its profile "
             f"without caches, and its finished downloads. data/add applies such a state, while the browser runs, and "
             f"writes files by their path: its profile, restored with the browser stopped, ~/{DOWNLOADS} and "
             f"~/{UPLOADS}. data/reset puts the profile back as installed and relaunches it at its start tabs."))]
@@ -518,9 +539,10 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         with tempfile.TemporaryDirectory(dir=home / ".cache") as staging:
             root = Path(staging)
             (root / data.STATE_FILE).write_text(json.dumps(written, indent=1), encoding="utf-8")
+            (root / data.LOG_FILE).write_text(self.log.complete_text(), encoding="utf-8")
             with self._computer_app.paused():
                 await app_data.in_thread(data.stage_profile, home, self.profile, root)
-            parts = await file_parts(root, [data.STATE_FILE, self.profile], write_namespace)
+            parts = await file_parts(root, [data.STATE_FILE, data.LOG_FILE, self.profile], write_namespace)
         return parts + await file_parts(home, data.finished_downloads(home), write_namespace)
 
     @add_data
@@ -575,6 +597,7 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         a record that starts now. Its data plane launches it again after, at its start tabs."""
         self.relay.ended()
         self.cdp_tokens.revoke_all()
+        self.log.note("reset", {})
         await app_data.reset(self.paths)
         await app_data.in_thread(data.empty, Path.home(), DOWNLOADS, UPLOADS)
         self.control.forget()
@@ -609,6 +632,91 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
     @agent_skill
     def browser_skill(self) -> tuple[str, str]:
         return "How to use this website browser.", SKILL
+
+
+class _LoggedOps:
+    """Its server's application, with each ``browser/v1`` op an entry in its log as it runs: every op a driver makes
+    for an agent's tool call, which carries that call, and every acting op agentenv makes itself. While it runs, the op
+    is the action the browser's control credits the tab events it causes to."""
+
+    def __init__(self, app: Any, browser: WebsiteBrowserEnvironment) -> None:
+        self.app, self.browser = app, browser
+
+    async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
+        op = scope["path"][len(OPS_PATH):] if scope["type"] == "http" and scope["path"].startswith(OPS_PATH) else None
+        if op is None or op in UNLOGGED_OPS:
+            return await self.app(scope, receive, send)
+        headers = {name.decode("latin-1").lower(): value.decode("latin-1") for name, value in scope.get("headers", [])}
+        call, acting = read_tool_call(headers.get(TOOL_CALL_HEADER.lower())), op_acts(op)
+        if call is None and not acting:
+            return await self.app(scope, receive, send)
+        body, more = b"", True
+        while more:
+            message = await receive()
+            body += message.get("body", b"")
+            more = message.get("more_body", False) and message["type"] == "http.request"
+        action: dict[str, Any] = {"via": "mcp" if call else "agentenv", "op": op, "acts": acting}
+        if call is not None:
+            action.update(who=normalize_role(headers.get(ROLE_HEADER.lower())) or DEFAULT_ROLE, tool=call["tool"],
+                          call=call["call"])
+        log = self.browser.log
+        begun = log.begin(action)
+        actor = {"seq": begun["seq"], "via": action["via"], "who": action.get("who"), "acts": acting, "tab": None,
+                 "password": False}
+        answered: dict[str, Any] = {"status": 500, "error": b""}
+        replayed = False
+
+        async def receiving() -> dict:
+            nonlocal replayed
+            if not replayed:
+                replayed = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            return await receive()
+
+        async def sending(message: dict) -> None:
+            if message["type"] == "http.response.start":
+                answered["status"] = message["status"]
+            elif message["type"] == "http.response.body" and answered["status"] >= 400 and \
+                    len(answered["error"]) < ERROR_CHARS * 4:
+                answered["error"] += message.get("body", b"")
+            await send(message)
+
+        token = ACTOR.set(actor)
+        try:
+            await self.app(scope, receiving, sending)
+        finally:
+            ACTOR.reset(token)
+            fields: dict[str, Any] = {"tab": actor["tab"], "url": self.browser.control.url_of(actor["tab"]),
+                                      "ok": answered["status"] < 400}
+            if answered["status"] >= 400:
+                fields["error"] = _error_text(answered["error"])
+            if acting:
+                fields["params"] = redacted_op(op, _op_params(scope, body), password=actor["password"])
+                if call is not None:
+                    fields["args"] = redacted_args(call["tool"], call["args"], password=actor["password"])
+            log.finish(begun, **fields)
+
+
+def _op_params(scope: dict, body: bytes) -> dict:
+    """An op's parameters: its query's for a GET, else its JSON body's."""
+    if scope.get("method") == "GET":
+        return dict(parse_qsl(scope.get("query_string", b"").decode("latin-1")))
+    try:
+        params = json.loads(body) if body else {}
+    except ValueError:
+        return {}
+    return params if isinstance(params, dict) else {}
+
+
+def _error_text(body: bytes) -> str:
+    """What an op's error answer says, its message when it's agentenv's error shape."""
+    text = body.decode(errors="replace")
+    try:
+        error = json.loads(text).get("error")
+        text = str(error.get("message", error)) if isinstance(error, dict) else str(error or text)
+    except (ValueError, AttributeError):
+        pass
+    return text[:ERROR_CHARS]
 
 
 def _read_sites() -> list[SiteNames]:

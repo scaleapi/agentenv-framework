@@ -19,7 +19,7 @@ and input reaches it as CDP input events, both through `browser/v1`'s `page/*` o
 a tab that paints nothing shows white. It serves the page group too: `computer_navigate`, `computer_history`,
 `computer_tabs`, `computer_dialog` and `computer_upload`, and every frame names the page, its tab and what is open on
 it. The browser ending on its own fails the computer for good: its ready check is
-`final`, and its tools answer with why. Name it as `page`, or by its id, `@local/agentenv-framework/drivers/page`.
+`final`, and its tools answer with why. Each call it makes to the browser for an agent's tool carries that call, its tool, id, arguments and the caller's role, in the `AgentEnv-Tool-Call` and `AgentEnv-Role` headers, so the browser's log credits the action to it. Name it as `page`, or by its id, `@local/agentenv-framework/drivers/page`.
 
 A run that names it writes it: its files, what its class declares for each platform it supports, read without
 `mss`, `python-xlib` or PyAV installed, and how a computer installs it. Its `env.toml`'s `[install.linux]` has a
