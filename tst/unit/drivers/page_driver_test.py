@@ -3,7 +3,8 @@ screen, turns tool calls into the CDP input they mean, shows a tab that paints n
 has ended on its own, its ready check fails for good and its calls say why. Beside its own tools it serves Playwright
 MCP's from their manifest, the two that run the agent's code hidden, on a Playwright MCP it runs on the CDP address the
 browser issues it under the driver's loopback origin: here a stand-in, which starts on the first call, keeps a session
-per caller, starts again on a new address or once killed, and never gets the driver's environment."""
+per caller, starts again on a new address or once killed, and never gets the driver's environment; a call it ends
+under fails then, a caller's session left idle is closed, and a start that never listens is stopped and tried afresh."""
 from __future__ import annotations
 
 import asyncio
@@ -35,19 +36,28 @@ GETS = ("page/viewport", "page/capture", "page/state", "tabs/list")
 CARD = {"name": "chromium", "capabilities": {"extensions": [{"uri": BROWSER, "params": {"methods": {
     op: {"method": "GET" if op in GETS else "POST", "endpoint": f"/agentenv/ext/browser/{op}"}
     for op in PAGE_OPS}}}]}}
-#: A stand-in for Playwright MCP on the port and CDP address it's started with, whose one tool says what it was started
-#: with and which session called it; started on an address ending /exits, it exits at once.
-FAKE_PLAYWRIGHT_MCP = """import json, os, sys
+#: A stand-in for Playwright MCP on the port and CDP address it's started with: browser_snapshot says what it was
+#: started with and which session called it, and browser_wait_for waits. Started on an address ending /exits, it exits
+#: at once; on one ending /silent-once, the first time it writes its pid to the marker it's given and never listens.
+FAKE_PLAYWRIGHT_MCP = """import asyncio, json, os, sys, time
 from mcp.server.fastmcp import Context, FastMCP
 args = sys.argv[1:]
 endpoint, port = args[args.index("--cdp-endpoint") + 1], int(args[args.index("--port") + 1])
 if endpoint.endswith("/exits"):
     sys.exit(3)
+marker = args[args.index("--marker") + 1]
+if endpoint.endswith("/silent-once") and not os.path.exists(marker):
+    open(marker, "w").write(str(os.getpid()))
+    time.sleep(3600)
 app = FastMCP("fake", host="127.0.0.1", port=port)
 @app.tool()
 def browser_snapshot(ctx: Context) -> str:
     return json.dumps({"pid": os.getpid(), "endpoint": endpoint, "session": id(ctx.session), "cwd": os.getcwd(),
                        "env": sorted(os.environ)})
+@app.tool()
+async def browser_wait_for(time: float) -> str:
+    await asyncio.sleep(time)
+    return "waited"
 app.run("streamable-http")
 """
 #: A 2×1 PNG's first 24 bytes: its signature, then its IHDR's length, type, width and height.
@@ -278,26 +288,9 @@ def test_playwright_mcp_attaches_to_the_browser_never_launches_one_and_ends_with
 
 @pytest.mark.asyncio
 async def test_playwright_mcp_starts_on_the_first_call_keeps_a_session_per_caller_and_starts_again_when_it_must(
-        monkeypatch, tmp_path):
-    enable_socket()
-    module = _load()
-    fake = tmp_path / "fake_playwright_mcp.py"
-    fake.write_text(FAKE_PLAYWRIGHT_MCP)
-    monkeypatch.setattr(module, "_command", lambda endpoint, port: [
-        sys.executable, str(fake), "--cdp-endpoint", endpoint, "--port", str(port)])
-    monkeypatch.setattr(module, "PLAYWRIGHT_MCP_OUTPUT", tmp_path / "out")
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        stand_in, monkeypatch, tmp_path):
+    _, playwright, endpoints, called = stand_in
     monkeypatch.setenv("AGENTENV_CONTROL_TOKEN", "secret")
-    endpoints = ["ws://127.0.0.1:18765/svc/chromium/cdp/one/devtools/browser"]
-
-    async def endpoint() -> str:
-        return endpoints[-1]
-
-    playwright = module._PlaywrightMcp(endpoint)
-
-    async def called(caller: str):
-        with bound(ToolContext.as_caller(session=caller)):
-            return await playwright.call("browser_snapshot")
 
     async def snapshot(caller: str) -> dict:
         result = await called(caller)
@@ -322,3 +315,87 @@ async def test_playwright_mcp_starts_on_the_first_call_keeps_a_session_per_calle
     assert moved["pid"] != first["pid"] and moved["endpoint"].endswith("/cdp/two/devtools/browser")
     assert revived["pid"] != moved["pid"]
     assert refused.isError and "exited at start with 3" in refused.content[0].text
+
+
+@pytest.fixture
+def stand_in(monkeypatch, tmp_path):
+    """A ``_PlaywrightMcp`` on the stand-in, its address the last of ``endpoints``, and a way to call it as a caller."""
+    enable_socket()
+    module = _load()
+    fake = tmp_path / "fake_playwright_mcp.py"
+    fake.write_text(FAKE_PLAYWRIGHT_MCP)
+    monkeypatch.setattr(module, "_command", lambda endpoint, port: [
+        sys.executable, str(fake), "--cdp-endpoint", endpoint, "--port", str(port), "--marker", str(tmp_path / "m")])
+    monkeypatch.setattr(module, "PLAYWRIGHT_MCP_OUTPUT", tmp_path / "out")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    endpoints = ["ws://127.0.0.1:18765/svc/chromium/cdp/one/devtools/browser"]
+
+    async def endpoint() -> str:
+        return endpoints[-1]
+
+    playwright = module._PlaywrightMcp(endpoint)
+
+    async def called(caller: str, tool: str = "browser_snapshot", arguments: dict | None = None):
+        with bound(ToolContext.as_caller(session=caller)):
+            return await playwright.call(tool, **(arguments or {}))
+
+    return module, playwright, endpoints, called
+
+
+@pytest.mark.asyncio
+async def test_a_call_playwright_mcp_ends_under_fails_then_and_isnt_sent_again(stand_in):
+    _, playwright, _, called = stand_in
+    try:
+        pid = json.loads((await called("ada")).content[0].text)["pid"]
+        waiting = asyncio.ensure_future(called("ada", "browser_wait_for", {"time": 60}))
+        await asyncio.sleep(1)
+        os.kill(pid, signal.SIGKILL)
+        ended = await asyncio.wait_for(waiting, 10)
+        after = await called("ada")
+    finally:
+        await playwright._stop()
+
+    assert ended.isError and "ended during browser_wait_for, which may have acted" in ended.content[0].text
+    assert not after.isError and json.loads(after.content[0].text)["pid"] != pid
+
+
+@pytest.mark.asyncio
+async def test_a_callers_session_left_idle_is_closed_when_another_caller_comes(stand_in, monkeypatch):
+    module, playwright, _, called = stand_in
+    monkeypatch.setattr(module, "PLAYWRIGHT_MCP_SESSION_IDLE_S", 0.5)
+    try:
+        await called("ada")
+        ada = playwright._sessions["ada"]
+        await asyncio.sleep(1)
+        await called("bob")
+        await asyncio.wait_for(ada.owner, 10)
+        kept = sorted(playwright._sessions)
+    finally:
+        await playwright._stop()
+
+    assert kept == ["bob"] and ada.close.is_set()
+
+
+@pytest.mark.asyncio
+async def test_a_start_that_never_listens_is_stopped_and_the_next_call_starts_afresh(stand_in, monkeypatch, tmp_path):
+    module, playwright, endpoints, called = stand_in
+    monkeypatch.setattr(module, "PLAYWRIGHT_MCP_START_S", 2.0)
+    endpoints.append("ws://127.0.0.1:18765/svc/chromium/cdp/silent-once")
+    try:
+        refused = await called("ada")
+        hung = int((tmp_path / "m").read_text())
+        gone = _gone(hung)
+        answered = await called("ada")
+    finally:
+        await playwright._stop()
+
+    assert refused.isError and "didn't listen within 2 s" in refused.content[0].text
+    assert gone and not answered.isError
+
+
+def _gone(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    return False

@@ -109,6 +109,9 @@ PLAYWRIGHT_MCP_OUTPUT = Path(tempfile.gettempdir()) / "agentenv-playwright-mcp"
 #: How long Playwright MCP may take to listen, and one of its tools to answer.
 PLAYWRIGHT_MCP_START_S = 30.0
 PLAYWRIGHT_MCP_CALL_TIMEOUT_S = 300.0
+#: How long a caller's session on Playwright MCP is kept with no call: a caller's own MCP session ends with no word to
+#: the driver, and each holds a connection to the browser.
+PLAYWRIGHT_MCP_SESSION_IDLE_S = 3600.0
 
 logger = logging.getLogger(__name__)
 
@@ -436,9 +439,10 @@ def _steps(path: list) -> list[tuple[float, float]]:
 
 class _PlaywrightMcp:
     """Playwright MCP, attached to the browser over the CDP address ``endpoint`` gives, and its sessions there, one per
-    caller of the driver's tools, so each agent keeps its own snapshots and tab. It starts on the first call, again once
-    it has exited, and again on a fresh address once the browser's data reset has ended the last; it ends with the
-    driver, so a driver started again finds none of its predecessor's."""
+    caller of the driver's tools, so each agent keeps its own snapshots and tab, each closed once idle for
+    PLAYWRIGHT_MCP_SESSION_IDLE_S. It starts on the first call, again once it has exited or failed to start, and again on
+    a fresh address once the browser's data reset has ended the last; it ends with the driver, so a driver started again
+    finds none of its predecessor's."""
 
     def __init__(self, endpoint: Callable[[], Awaitable[str]]) -> None:
         self._endpoint = endpoint
@@ -449,24 +453,45 @@ class _PlaywrightMcp:
         self._sessions: dict[Optional[str], _Session] = {}
 
     async def call(self, tool: str, /, **arguments: Any) -> CallToolResult:
-        """``tool`` called on Playwright MCP as it answers, or refused saying why it couldn't be."""
+        """``tool`` called on Playwright MCP as it answers, or refused saying why it couldn't be. A call Playwright MCP
+        or its session ends under fails then, and isn't sent again, since it may have acted."""
         try:
-            session = await self._session(ToolContext.current().caller.session)
-            return await session.call_tool(tool, arguments)
+            held, process = await self._session(ToolContext.current().caller.session)
         except DeviceUnavailable as e:
             return _refused(e.message)
         except Exception as e:
             return _refused(f"Playwright MCP didn't answer {tool}: {type(e).__name__}: {e}")
+        called = asyncio.ensure_future(held.session.call_tool(tool, arguments))
+        exited = asyncio.ensure_future(process.wait())
+        try:
+            await asyncio.wait({called, exited, held.owner}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            exited.cancel()
+        if not called.done():
+            called.cancel()
+            held.close.set()
+            return _refused(f"Playwright MCP ended during {tool}, which may have acted before it did")
+        try:
+            return called.result()
+        except Exception as e:
+            return _refused(f"Playwright MCP didn't answer {tool}: {type(e).__name__}: {e}")
+        finally:
+            held.used_at = asyncio.get_running_loop().time()
 
-    async def _session(self, caller: Optional[str]) -> ClientSession:
+    async def _session(self, caller: Optional[str]) -> tuple[_Session, asyncio.subprocess.Process]:
         async with self._lock:
             url = await self._running()
+            now = asyncio.get_running_loop().time()
+            for idle in [key for key, held in self._sessions.items()
+                         if key != caller and now - held.used_at > PLAYWRIGHT_MCP_SESSION_IDLE_S]:
+                self._sessions.pop(idle).close.set()
             held = self._sessions.get(caller)
             if held is None or held.url != url or held.owner.done():
                 if held is not None:
                     held.close.set()
                 held = self._sessions[caller] = await _Session.open(url)
-            return held.session
+            held.used_at = now
+            return held, self._process
 
     async def _running(self) -> str:
         """Playwright MCP's MCP URL, started on the browser's current address for it unless it runs there already."""
@@ -482,8 +507,12 @@ class _PlaywrightMcp:
             self._process = await asyncio.create_subprocess_exec(
                 *_command(endpoint, port), cwd=uploads, env=_environment(), stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.DEVNULL, stderr=log)
+        try:
+            await _listening(port, self._process)
+        except BaseException:
+            await self._stop()
+            raise
         self._running_on, self._url = endpoint, f"http://127.0.0.1:{port}/mcp"
-        await _listening(port, self._process)
         return self._url
 
     async def _stop(self) -> None:
@@ -497,7 +526,7 @@ class _PlaywrightMcp:
             if self._process.returncode is None:
                 self._process.kill()
                 await self._process.wait()
-        self._process = None
+        self._process, self._running_on = None, None
 
 
 class _Session:
@@ -509,6 +538,7 @@ class _Session:
         self.close = asyncio.Event()
         self.session: Optional[ClientSession] = None
         self.owner: Optional[asyncio.Task] = None
+        self.used_at = 0.0
 
     @classmethod
     async def open(cls, url: str) -> _Session:
