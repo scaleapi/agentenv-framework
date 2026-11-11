@@ -2859,6 +2859,28 @@ def test_compose_fronts_each_external_child_as_an_mcp_server_and_a_rest_route_by
     env = dict(line.split("=", 1) for line in compose["services"][GATEWAY_SERVICE_NAME]["environment"])
     assert env["INTERNAL_MCP_SERVERS"].split(",") == ["slack", "desktop=https://desk.example/mcp"]
     assert "desktop=https://desk.example" in env["REST_PROXY_URLS"].split(",")
+    assert "CLOCK_FOLLOWER_TOKENS" not in env
+
+
+def test_compose_declares_the_children_that_follow_the_clock_by_their_read_tokens_and_logs_none_of_them():
+    from agent_env.env.envs.service_db import ServiceDBConfig
+    from agent_env.env.gateway import ExternalChild
+
+    rendered = EnvironmentGatewayProvider().create_docker_compose(
+        mcp_servers=[], gateway_image="agent-gateway",
+        state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
+        state_instance=LocalPostgresStateProvider.default_instance(),
+        external_children=(ExternalChild("desktop", "https://desk.example/mcp", "https://desk.example", "read-desk"),
+                           ExternalChild("phone", "https://phone.example/mcp", "https://phone.example"),
+                           ExternalChild("laptop", "https://lap.example/mcp", "https://lap.example", "read-lap")))
+
+    services = yaml.safe_load(rendered)["services"]
+    holders = {name: [item for item in service.get("environment", []) if item.startswith("CLOCK_FOLLOWER_TOKENS=")]
+               for name, service in services.items()}
+    assert {name: items for name, items in holders.items() if items} == {
+        GATEWAY_SERVICE_NAME: ["CLOCK_FOLLOWER_TOKENS=desktop=read-desk,laptop=read-lap"]}
+    redacted = _redact_compose_secrets(rendered)
+    assert "read-desk" not in redacted and "      - CLOCK_FOLLOWER_TOKENS=***" in redacted
 
 
 def test_no_service_depends_on_the_gateway_so_a_vm_deploy_can_start_them_all_before_it():
@@ -2892,7 +2914,7 @@ async def test_a_vm_deploy_starts_its_children_beside_its_services_and_the_gatew
 
     async def children(reach):
         order.append(("children", reach))
-        return [ExternalChild("desktop", "http://localhost:20001/mcp", "http://localhost:20001")]
+        return [ExternalChild("desktop", "http://localhost:20001/mcp", "http://localhost:20001", "read-desk")]
 
     def compose(**kwargs):
         composes.append(kwargs.get("external_children", ()))
@@ -2919,7 +2941,8 @@ async def test_a_vm_deploy_starts_its_children_beside_its_services_and_the_gatew
 
     assert sorted(order[:2]) == [("children", "https://gw.example"), ("up", f"--scale {GATEWAY_SERVICE_NAME}=0")]
     assert order[2:] == [("up", "")]
-    assert composes == [(), (ExternalChild("desktop", "http://host.docker.internal:20001/mcp", "http://host.docker.internal:20001"),)]
+    assert composes == [(), (ExternalChild("desktop", "http://host.docker.internal:20001/mcp", "http://host.docker.internal:20001",
+                                           "read-desk"),)]
     written = [shlex.split(call.args[0]) for call in sandbox.exec_script.await_args_list]
     assert ["printf", "%s\\n", "compose 2", ">", f"{GATEWAY_APP_DIR}/docker-compose.yml"] in written
 
@@ -2981,7 +3004,7 @@ async def test_container_mode_starts_children_beside_its_servers_and_hands_the_g
 
     async def children(reach):
         reaches.append(reach)
-        return [ExternalChild("desktop", "https://desk.example/mcp", "https://desk.example")]
+        return [ExternalChild("desktop", "https://desk.example/mcp", "https://desk.example", "read-desk")]
 
     gateway_env = MagicMock(docker_image_artifact=_image("agent-gateway"))
     db_env = MagicMock()
@@ -3001,3 +3024,4 @@ async def test_container_mode_starts_children_beside_its_servers_and_hands_the_g
     assert reaches == [None]
     assert env["INTERNAL_MCP_SERVERS"].split(",")[-1] == "desktop=https://desk.example/mcp"
     assert env["REST_PROXY_URLS"].split(",")[-1] == "desktop=https://desk.example"
+    assert env["CLOCK_FOLLOWER_TOKENS"] == "desktop=read-desk"

@@ -69,6 +69,9 @@ METHOD_ADD = "data/add"
 METHOD_GET = "data/get"
 MCP_TRANSPORT = "mcp"
 CONTROL_TOKEN_ENV = "AGENTENV_CONTROL_TOKEN"
+# The computers that follow the gateway's clock, each as `name=read token`, comma-separated; TOKEN in the name keeps
+# it out of logged compose files.
+CLOCK_FOLLOWERS_ENV = "CLOCK_FOLLOWER_TOKENS"
 
 # Env/gateway-level extensions the gateway itself owns (tool gating + triggers).
 EXT_DISABLE_TOOL_URI = "urn:agentenv:disable-tool/v1"
@@ -226,13 +229,14 @@ GATEWAY_EXTENSIONS = [
     },
     {
         "uri": EXT_CLOCK_URI,
-        "description": "Virtual clock (urn:agentenv:clock/v1): read the gateway's virtual time (wall-clock-derived, rate-scaled) via get_time; set-time/advance/clear are the harness control path.",
+        "description": "Virtual clock (urn:agentenv:clock/v1): read the gateway's virtual time (wall-clock-derived, rate-scaled) via get_time; set-time/advance/clear are the harness control path, each changing the clock's version and, given wait_followers_s, answering 504 when a computer following the clock doesn't show it in time; a computer follows it through watch, a long poll naming the version it shows.",
         "params": {"endpoint": "/clock/time", "methods": {
             "get_time": {"method": "GET", "endpoint": "/clock/time"},
-            "set_time": {"method": "PUT", "endpoint": "/clock/set-time", "request": {"type": "object", "properties": {"virtual_time": {"type": "string"}, "virtual_seconds_per_real_second": {"type": "number"}}, "required": ["virtual_time"]}},
-            "advance": {"method": "PUT", "endpoint": "/clock/advance", "request": {"type": "object", "properties": {"virtual_time": {"type": "string"}}, "required": ["virtual_time"]}},
-            "clear": {"method": "POST", "endpoint": "/clock/clear", "request": {"type": "object", "properties": {}}},
-            "state": {"method": "GET", "endpoint": "/clock/state", "request": {"type": "object", "properties": {}}}}},
+            "set_time": {"method": "PUT", "endpoint": "/clock/set-time", "request": {"type": "object", "properties": {"virtual_time": {"type": "string"}, "virtual_seconds_per_real_second": {"type": "number"}, "wait_followers_s": {"type": "number"}}}},
+            "advance": {"method": "PUT", "endpoint": "/clock/advance", "request": {"type": "object", "properties": {"virtual_time": {"type": "string"}, "wait_followers_s": {"type": "number"}}, "required": ["virtual_time"]}},
+            "clear": {"method": "POST", "endpoint": "/clock/clear", "request": {"type": "object", "properties": {"wait_followers_s": {"type": "number"}}}},
+            "state": {"method": "GET", "endpoint": "/clock/state", "request": {"type": "object", "properties": {}}},
+            "watch": {"method": "GET", "endpoint": "/clock/watch"}}},
         "required": False,
     },
     {

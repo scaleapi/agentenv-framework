@@ -10,7 +10,8 @@ import os
 import posixpath
 import socket
 import subprocess
-from collections.abc import Iterable
+import time
+from collections.abc import Iterable, Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -75,6 +76,7 @@ from .caller import Caller
 from .changes import ChangeAttribution
 from .child_sessions import ChildSessions, is_dead_session
 from .clock import Clock, ClockError, _iso
+from .clock_followers import ClockFollowers, parse_wait
 from .get_time import GET_TIME_TOOL_NAME, build_get_time_tool
 from .rest_proxy import (
     ROLE_HEADER_BYTES,
@@ -142,9 +144,11 @@ class Gateway:
         service_db_url: str | None = None,
         control_token: str | None = None,
         provider_headers: Iterable[str] = (),
+        clock_followers: Mapping[str, str] | None = None,
     ):
         """`provider_headers` names the headers the sandbox provider in front of the gateway is sent, its credentials,
-        which the gateway takes off every request it forwards to a service behind it."""
+        which the gateway takes off every request it forwards to a service behind it. `clock_followers` names the
+        computers that follow its clock, each with the read token its watch carries."""
         self.host = host
         self.port = port
         self.server_name = server_name
@@ -204,6 +208,7 @@ class Gateway:
                 )
             )
         self._clock = Clock()
+        self._clock_followers = ClockFollowers(lambda: self._clock, clock_followers or {})
         self._notifications = Notifications(lambda: self._clock)
         self._env_get_time_url_cache: str | None = None
         self._install_role_filters()
@@ -317,11 +322,12 @@ class Gateway:
                 return self._json_response(
                     {"ok": False, "error": f"'{GET_TIME_TOOL_NAME}' is already registered by a backing server"}, 409)
             try:
+                wait = parse_wait(body.get("wait_followers_s"))
                 state = self._clock.set_time(body.get("virtual_time"), body.get("virtual_seconds_per_real_second"))
             except ClockError as e:
                 return self._json_response({"ok": False, "error": str(e)}, 400)
             self._register_get_time_tool()
-            return self._json_response(state, 200)
+            return await self._clock_written(state, wait)
 
         @self._mcp.custom_route("/clock/advance", methods=["PUT"])
         async def clock_advance(request: Request) -> Response:
@@ -332,16 +338,34 @@ class Gateway:
             if not isinstance(body, dict):
                 return self._json_response({"ok": False, "error": "body must be a JSON object"}, 400)
             try:
+                wait = parse_wait(body.get("wait_followers_s"))
                 state = self._clock.advance(body.get("virtual_time"))
             except ClockError as e:
                 return self._json_response({"ok": False, "error": str(e)}, 400)
-            return self._json_response({**state, "due": self._trigger_engine.clock_advanced()}, 200)
+            return await self._clock_written({**state, "due": self._trigger_engine.clock_advanced()}, wait)
 
         @self._mcp.custom_route("/clock/clear", methods=["POST"])
         async def clock_clear(request: Request) -> Response:
+            try:
+                body = await request.json() if await request.body() else {}
+            except Exception:
+                return self._json_response({"ok": False, "error": "Invalid JSON body"}, 400)
+            if not isinstance(body, dict):
+                return self._json_response({"ok": False, "error": "body must be a JSON object"}, 400)
+            try:
+                wait = parse_wait(body.get("wait_followers_s"))
+            except ClockError as e:
+                return self._json_response({"ok": False, "error": str(e)}, 400)
             self._unregister_get_time_tool()
-            state = self._clock.clear()
-            return self._json_response(state, 200)
+            return await self._clock_written(self._clock.clear(), wait)
+
+        @self._mcp.custom_route("/clock/watch", methods=["GET"])
+        async def clock_watch(request: Request) -> Response:
+            received = time.time()
+            token = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+            await self._clock_followers.watch(request.query_params.get("after", ""),
+                                              request.query_params.get("follower"), token)
+            return self._json_response({**self._clock.state(), "received": received, "sent": time.time()}, 200)
 
         @self._mcp.custom_route("/clock/time", methods=["GET"])
         async def clock_time(request: Request) -> Response:
@@ -355,7 +379,7 @@ class Gateway:
             st = self._clock.state()
             if st.get("armed"):
                 st["env_get_time_url"] = await self._env_get_time_url()
-            return self._json_response(st, 200)
+            return self._json_response({**st, "followers": self._clock_followers.state()}, 200)
 
         async def _notifications_write(request: Request, method) -> Response:
             try:
@@ -602,6 +626,17 @@ class Gateway:
                                        "at": "provoking_call", "trigger_ids": trigger_ids, "timeout_s": timeout})
         except Exception:
             logger.exception("Awaiting trigger barriers failed (fail-open)")
+
+    async def _clock_written(self, state: dict, wait_s: float) -> Response:
+        """A clock write's answer, once each declared computer shows its version or ``wait_s`` has passed: 200, or 504
+        naming the computers still behind; the change stands either way."""
+        self._clock_followers.changed()
+        stale = await self._clock_followers.stale_after(state["version"], wait_s) if wait_s else []
+        if stale:
+            return self._json_response({**state, "ok": False, "stale": stale, "error": (
+                f"the clock is at version {state['version']}, but {', '.join(stale)} didn't show it within "
+                f"{wait_s:g} s: their clocks are behind")}, 504)
+        return self._json_response(state, 200)
 
     async def _env_get_time_url(self) -> str:
         """The gateway's own server-reachable /clock/time URL (cached, resolved off the event loop): modal i6pn if resolvable, else the compose service name."""

@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from . import AGENT_ENV_GATEWAY_MCP_PORT, GatewayMode, InternalMCPServer
-from .constants import (CONTROL_TOKEN_ENV, DEFAULT_MCP_SERVER_NAME, GATEWAY_PROVIDER_HEADERS_ENV, MCP_TRANSPORT,
+from .constants import (CLOCK_FOLLOWERS_ENV, CONTROL_TOKEN_ENV, DEFAULT_MCP_SERVER_NAME, GATEWAY_PROVIDER_HEADERS_ENV, MCP_TRANSPORT,
                         WELL_KNOWN_PATH)
 from .gateway import Gateway, card_url
 
@@ -218,5 +218,6 @@ if __name__ == "__main__":
         service_db_url=service_db_url,
         control_token=os.environ.get(CONTROL_TOKEN_ENV),
         provider_headers=os.environ.get(GATEWAY_PROVIDER_HEADERS_ENV, "").split(","),
+        clock_followers=parse_name_url_map(os.environ.get(CLOCK_FOLLOWERS_ENV, "")),
     )
     gateway.run()
