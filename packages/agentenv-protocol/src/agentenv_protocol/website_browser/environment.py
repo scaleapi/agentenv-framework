@@ -670,8 +670,9 @@ def _mode() -> str:
 
 
 def _origin(value: Any) -> str:
-    """``value`` as an origin a CDP address is minted under: an http or https URL, a path allowed, with no query,
-    fragment or credentials; InvalidArgument for anything else."""
+    """``value`` as an origin a CDP address is minted under, its scheme in lower case as the address's WebSocket form
+    reads it: an http or https URL, a path allowed, with no query, fragment or credentials; InvalidArgument for anything
+    else."""
     try:
         parts = urlsplit(value)
         valid = (value.isprintable() and parts.scheme in ("http", "https") and bool(parts.hostname)
@@ -681,7 +682,7 @@ def _origin(value: Any) -> str:
         valid = False
     if not valid:
         raise InvalidArgument("origin is an http or https URL with no query, fragment or credentials")
-    return value
+    return f"{parts.scheme}://{parts.netloc}{parts.path}"
 
 
 def _parsed(model: type[BaseModel], items: Any, what: str) -> list:

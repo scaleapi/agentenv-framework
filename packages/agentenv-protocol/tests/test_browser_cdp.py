@@ -376,6 +376,8 @@ async def test_under_an_origin_its_caller_names_an_address_is_https_and_discover
         ada = (await http.post("/agentenv/ext/browser/cdp", json={"user": "ada", "origin": "https://t.tunnel.test/"},
                                headers=BEHIND_TLS)).json()
         bob = (await http.post("/agentenv/ext/browser/cdp", json={"user": "bob"}, headers=BEHIND_TLS)).json()
+        cy = (await http.post("/agentenv/ext/browser/cdp", json={"user": "cy", "origin": "HTTPS://t.tunnel.test"},
+                              headers=BEHIND_TLS)).json()
         paths = [address["http_url"].split("/svc/chromium", 1)[1] for address in (ada, bob)]
         seen = [(await http.get(f"{path}json/version", headers=BEHIND_TLS)).json()["webSocketDebuggerUrl"]
                 for path in paths]
@@ -385,6 +387,8 @@ async def test_under_an_origin_its_caller_names_an_address_is_https_and_discover
                    "ws_url": f"wss://t.tunnel.test/svc/chromium/cdp/{token}/devtools/browser"}
     assert seen[0] == ada["ws_url"]
     assert bob["ws_url"].startswith("ws://t.tunnel.test/") and seen[1] == bob["ws_url"]
+    assert cy["http_url"].startswith("https://t.tunnel.test/svc/chromium/cdp/")
+    assert cy["ws_url"].startswith("wss://t.tunnel.test/svc/chromium/cdp/")
 
 
 @pytest.mark.asyncio
