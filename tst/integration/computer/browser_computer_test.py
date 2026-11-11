@@ -512,6 +512,7 @@ async def test_its_log_has_an_entry_for_every_action_over_cdp_page_tools_and_pix
                 async with ClientSession(read, write) as session:
                     await session.initialize()
                     await _tool(session, "computer_navigate", {"url": FORM})
+                    await _shown(session, lambda page: page.get("title") == "form")
                     await _tool(session, "computer_click", {"x": 300, "y": 40, "space": "frame"})
                     await _tool(session, "computer_type", {"text": "hunter3"})
                     await _tool(session, "computer_click", {"x": 300, "y": 160, "space": "frame"})
