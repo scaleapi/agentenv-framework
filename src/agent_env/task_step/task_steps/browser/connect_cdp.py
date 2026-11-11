@@ -124,8 +124,16 @@ async def _cdp_at_gateway(gateway: DeployedEnv, computer: DeployedEnv, card: dic
     if find_extension_method(card, BROWSER, "cdp") is None:
         raise RuntimeError(f"the website browser in env {gateway.env_id!r} serves no browser/v1 cdp: rebuild it on a "
                            "newer agentenv-framework-protocol")
-    return await invoke_extension(f"{gateway.environment_url.rstrip('/')}/svc/{key}", card, BROWSER, params,
-                                  CDP_TIMEOUT_S, method="cdp", headers=computer.control_headers)
+    base = gateway.environment_url.rstrip("/")
+    address = await invoke_extension(f"{base}/svc/{key}", card, BROWSER, params, CDP_TIMEOUT_S, method="cdp",
+                                     headers=computer.control_headers)
+    relayed = (f"{base}/browser/{key}/", f"{_ws(base)}/browser/{key}/")
+    if not (str(address.get("http_url", "")).startswith(relayed[0]) and
+            str(address.get("ws_url", "")).startswith(relayed[1])):
+        raise RuntimeError(f"env {gateway.env_id!r}'s gateway didn't put the CDP address of the website browser in its "
+                           f"computer {key!r} at its relay, as it does for a computer with one website browser; one "
+                           "with several it doesn't tell apart yet")
+    return address
 
 
 def _deployed_agent(context: TaskStepContext, agent_name: str) -> DeployedAgent:

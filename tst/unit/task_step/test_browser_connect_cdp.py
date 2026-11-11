@@ -98,6 +98,18 @@ async def test_a_browser_in_a_multi_envs_computer_is_reached_through_its_gateway
 
 
 @pytest.mark.asyncio
+async def test_a_cdp_address_the_multi_envs_gateway_didnt_relay_is_refused_before_the_agent_gets_it(monkeypatch):
+    sent = _mock(monkeypatch, tokens=["t1"])  # the computer's own address, as a gateway answers for several browsers
+    context = TaskStepContext(deployed_envs=[_multi()], deployed_agents=[_agent()], metadata={})
+
+    with pytest.raises(RuntimeError, match="gateway didn't put the CDP address .* at its relay"):
+        await BrowserConnectCdpTaskStep(id="connect", version=None, env_id="office",
+                                        agent_name="solver").execute(context)
+    assert [request.url.path for request in sent] == ["/svc/chromium/svc/chromium/agentenv/ext/browser/cdp"]
+    assert "browser_connections" not in context.metadata
+
+
+@pytest.mark.asyncio
 async def test_a_role_kept_tools_a_name_and_a_gateways_address_are_the_tasks(monkeypatch):
     sent = _mock(monkeypatch, tokens=["t1"], base="https://gateway.test/browser/chromium")
     context = TaskStepContext(deployed_envs=[_env()], deployed_agents=[_agent(role="buyer")], metadata={})
