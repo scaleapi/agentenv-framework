@@ -204,6 +204,9 @@ class _Connection:
         self.sessions = {session}
         #: The tab each session it attached is on.
         self.targets: dict[str, str] = {}
+        #: Held by each of its commands from when it arrives until it's sent, so they're sent in the order they came,
+        #: whatever one waits on before it's sent.
+        self.order = asyncio.Lock()
         self.commands: set[asyncio.Future] = set()
         self.outbox: asyncio.Queue[str | tuple[int, str]] = asyncio.Queue()
         self.waiting_bytes = 0
@@ -277,18 +280,24 @@ class Relay:
         verdict = guard(method, params, dialogs_answered=self.dialogs_answered)
         logged = self._begin(connection, session, method, params)
         answer, guarded = {"error": {"code": SERVER_ERROR, "message": ENDED_UNANSWERED}}, None
+        sending: Optional[asyncio.Future] = None
         try:
-            if logged is not None:
-                await logged.check_password()
-            if session not in connection.sessions:
-                verdict, answer = None, {"error": NO_SESSION}
-            elif verdict.action == "refuse":
-                answer = {"error": {"code": SERVER_ERROR, "message": f"agentenv refuses {method}: {verdict.reason}"}}
-            elif verdict.action != "send":
-                answer = {"result": {}}
-            else:
+            async with connection.order:
+                if logged is not None:
+                    await logged.check_password()
+                if session not in connection.sessions:
+                    verdict, answer = None, {"error": NO_SESSION}
+                elif verdict.action == "refuse":
+                    answer = {"error": {"code": SERVER_ERROR,
+                                        "message": f"agentenv refuses {method}: {verdict.reason}"}}
+                elif verdict.action != "send":
+                    answer = {"result": {}}
+                else:
+                    sending = asyncio.ensure_future(self.devtools.request(method, verdict.params, session_id=session))
+                    await asyncio.sleep(0)
+            if sending is not None:
                 try:
-                    answer = await self.devtools.request(method, verdict.params, session_id=session)
+                    answer = await sending
                 except ConnectionError as e:
                     answer = {"error": {"code": SERVER_ERROR, "message": str(e)}}
             if verdict is not None and (verdict.action != "send" or verdict.changed):
@@ -301,6 +310,8 @@ class Relay:
             if verdict is not None and verdict.action == "close":
                 self._close(connection, CLOSED, dropping=False)
         finally:
+            if sending is not None and not sending.done():
+                sending.cancel()
             if logged is not None:
                 logged.finish(answer, guarded)
 

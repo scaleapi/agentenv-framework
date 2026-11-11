@@ -40,8 +40,8 @@ ERROR_CHARS = 300
 HEADER_CHARS = 12_000
 #: How many lines a read of the log returns at most.
 READ_LIMIT = 5000
-#: How long a line not yet written holds back a read; past it, a read returns the lines after it, which may then
-#: come before it.
+#: How long an action not yet finished holds back a read; past it, a read writes it as ``unfinished`` in its place, and
+#: its outcome, once it ends, is a line of its own.
 STALLED_S = 60.0
 #: How long a tab event waits on the commands in flight that may have caused it.
 CAUSE_WAIT_S = 5.0
@@ -269,16 +269,21 @@ def _now() -> str:
 
 class BrowserLog:
     """The log in ``path``: each line a JSON object with its ``seq`` and its time, ``at``, and one of ``action``,
-    ``tab`` or ``reset``. A line's sequence number is taken when what it records begins, and the line is written once
-    it ends, so lines may be written out of order; a read returns them in order, up to the last whose every earlier
-    line is written, or held for more than ``STALLED_S``. The file is opened at the first line, after any a server
-    before this one wrote, and where each line is kept, so a read reads only the lines it returns."""
+    ``tab``, ``outcome`` or ``reset``. A line's sequence number is taken when what it records begins, and the line is
+    written once it ends, so lines may be written out of order; a read returns them in order, up to the last whose
+    every earlier line is written. An action still going after ``STALLED_S`` is written by the next read as
+    ``unfinished``, so it holds back nothing after it, and its ``outcome`` line names it once it ends. The file is
+    opened at the first line, after any a server before this one wrote, and where each line is kept, so a read reads
+    only the lines it returns."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
         self._seq, self._partial, self._where, self._size = _scan(path)
         self._seqs = sorted(self._where)
         self._pending: dict[int, float] = {}
+        #: The actions begun and not yet finished, and those already written as unfinished.
+        self._begun: dict[int, dict] = {}
+        self._stood_in: set[int] = set()
         self._file: Any = None
         self._unwritable = False
         #: Per tab, the sequence number of the latest acting entry on it.
@@ -334,14 +339,22 @@ class BrowserLog:
         seq = self.reserve()
         if action.get("acts") and action.get("tab"):
             self.last_acting[action["tab"]] = seq
-        return {"seq": seq, "at": _now(), "action": action}
+        self._begun[seq] = begun = {"seq": seq, "at": _now(), "action": action}
+        return begun
 
     def finish(self, begun: dict, **fields: Any) -> None:
-        """The action ``begun`` written, with what it ended with."""
+        """The action ``begun`` written, with what it ended with; one a read already wrote as unfinished gets an
+        ``outcome`` line of its own, naming it."""
+        seq = begun["seq"]
+        self._begun.pop(seq, None)
         action = {**begun["action"], **fields}
-        if action.get("acts") and action.get("tab") and self.last_acting.get(action["tab"], 0) < begun["seq"]:
-            self.last_acting[action["tab"]] = begun["seq"]
-        self.write(begun["seq"], {"action": action}, at=begun["at"])
+        if action.get("acts") and action.get("tab") and self.last_acting.get(action["tab"], 0) < seq:
+            self.last_acting[action["tab"]] = seq
+        if seq in self._stood_in:
+            self._stood_in.discard(seq)
+            self.note("outcome", {"entry": seq, **fields})
+        else:
+            self.write(seq, {"action": action}, at=begun["at"])
 
     def note(self, kind: str, body: dict) -> int:
         """A line of ``kind`` written now: a ``tab`` event, or a ``reset``."""
@@ -365,8 +378,11 @@ class BrowserLog:
         """Where the lines a read returns are: the last sequence number it may return, and each line's number, offset
         and length, in order."""
         now = time.monotonic()
-        held = [seq for seq, began in self._pending.items() if now - began < STALLED_S]
-        complete = min(held) - 1 if held else self._seq
+        for seq, began in list(self._pending.items()):
+            if now - began >= STALLED_S and (begun := self._begun.get(seq)) is not None:
+                self._stood_in.add(seq)
+                self.write(seq, {"action": {**begun["action"], "unfinished": True}}, at=begun["at"])
+        complete = min(self._pending) - 1 if self._pending else self._seq
         start = bisect.bisect_right(self._seqs, after)
         end = bisect.bisect_right(self._seqs, complete)
         picked = [(seq, *self._where[seq]) for seq in self._seqs[start:min(end, start + limit)]]

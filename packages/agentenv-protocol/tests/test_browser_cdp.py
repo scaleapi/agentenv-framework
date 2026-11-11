@@ -417,6 +417,31 @@ async def test_an_op_for_an_agents_tool_call_and_agentenvs_own_acting_ops_are_en
 
 
 @pytest.mark.asyncio
+async def test_a_commands_wait_for_its_password_check_lets_none_after_it_be_sent_first(tmp_path):
+    log = BrowserLog(tmp_path / "browser-chromium.jsonl")
+    async with _relay(log=log) as (pipe, relay, base):
+        control = Control(pipe)
+
+        async def slowly(target) -> bool:
+            await asyncio.sleep(0.2)
+            return False
+
+        control.password_focused = slowly
+        relay.control = control
+        async with connect(f"{base}/ada") as ada:
+            child = (await _ask(ada, {"id": 1, "method": "Target.attachToTarget",
+                                      "params": {"targetId": "T1", "flatten": True}}))["result"]["sessionId"]
+            await ada.send(json.dumps({"id": 2, "method": "Input.insertText", "params": {"text": "desk"},
+                                       "sessionId": child}))
+            await ada.send(json.dumps({"id": 3, "method": "Input.dispatchMouseEvent",
+                                       "params": {"type": "mousePressed", "x": 1, "y": 1}, "sessionId": child}))
+            answered = [json.loads(await ada.recv())["id"] for _ in range(2)]
+
+    sent = [method for method, _ in pipe.sent if method.startswith("Input.")]
+    assert sent == ["Input.insertText", "Input.dispatchMouseEvent"] and sorted(answered) == [2, 3]
+
+
+@pytest.mark.asyncio
 async def test_an_op_body_too_long_to_keep_is_logged_by_its_length(monkeypatch, tmp_path):
     browser = _browser(monkeypatch, tmp_path)
     monkeypatch.setattr("agentenv_protocol.website_browser.environment.LOGGED_BODY_BYTES", 100)

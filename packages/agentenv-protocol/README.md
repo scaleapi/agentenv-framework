@@ -1003,9 +1003,12 @@ are the profile's template. The base class adds:
 - **Its log**, `self.log`, a `BrowserLog` (`agentenv_protocol.browser_log`): one entry for each action agents take on it
   and an event each time a tab opens, navigates or closes. Its server writes it, the one writer, to
   `/var/log/agentenv/browser-<name>.jsonl` (its own `.agentenv/` folder when that can't be written), one JSON object a
-  line with its `seq` and `at` and one of `action`, `tab` or `reset`. A line's number is taken when what it records
-  begins and the line written when it ends, so `log {after}` returns lines in order up to the last whose every earlier
-  line is written (`last`); the file lasts the computer's boot, a restarted server carrying on the sequence and the
+  line with its `seq` and `at` and one of `action`, `tab`, `outcome` or `reset`. A line's number is taken when what it
+  records begins and the line written when it ends, so `log {after}` returns lines in order up to the last whose every
+  earlier line is written (`last`), and `last` never moves back. An action still going after 60 s is written by the
+  next read as `unfinished`, so it holds back nothing after it, and once it ends an `outcome` line names it (`entry`)
+  with what it ended with. A relayed connection's commands reach the browser in the order they came. The file lasts the
+  computer's boot, a restarted server carrying on the sequence and the
   browser's own reset (`data/reset`) being a line. A computer's `reset_env` boots it afresh, with a new log, so a task
   that needs the one before takes it first, with `snapshot_env`.
   - **An action** is a CDP command through the relay (`via: "cdp"`, `who` the connection's user, its `connection`

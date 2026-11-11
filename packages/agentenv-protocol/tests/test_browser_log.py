@@ -128,15 +128,20 @@ async def test_lines_are_numbered_as_they_begin_and_read_in_order_up_to_the_firs
     assert await log.read_async(after=1) == log.read(after=1)
 
 
-def test_a_line_held_too_long_no_longer_holds_back_a_read(tmp_path, monkeypatch):
+def test_an_action_still_going_after_the_limit_is_written_unfinished_and_its_outcome_after(tmp_path, monkeypatch):
     log = BrowserLog(tmp_path / "browser-chromium.jsonl")
-    stuck = log.reserve()
+    slow = log.begin({"via": "cdp", "method": "Runtime.evaluate", "acts": True, "tab": "T1"})
     log.note("reset", {})
     assert log.read()["lines"] == []
     monkeypatch.setattr(browser_log, "STALLED_S", 0)
-    assert [line["seq"] for line in log.read()["lines"]] == [stuck + 1]
-    log.write(stuck, {"reset": {}})
-    assert [line["seq"] for line in log.read()["lines"]] == [stuck, stuck + 1]
+    first = log.read()
+    assert [line["seq"] for line in first["lines"]] == [slow["seq"], slow["seq"] + 1] and first["last"] == 2
+    assert first["lines"][0]["action"] == {"via": "cdp", "method": "Runtime.evaluate", "acts": True, "tab": "T1",
+                                           "unfinished": True}
+    log.finish(slow, ok=True)
+    later = log.read(after=first["last"])
+    assert later["lines"] == [{"seq": 3, "at": later["lines"][0]["at"], "outcome": {"entry": slow["seq"], "ok": True}}]
+    assert [line["seq"] for line in log.read()["lines"]] == [1, 2, 3]
 
 
 def test_a_restarted_server_carries_on_the_sequence_on_a_new_line_after_a_partial_one(tmp_path):
