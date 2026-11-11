@@ -920,6 +920,8 @@ class _Planner:
                 if name is None:
                     continue
                 group = ref.where.partition("[")[0]
+                if group == "browser_envs":  # a browser computer runs as a computer, any other browser as an MCP server
+                    group = "computer_envs" if self._is_computer(ref, store_latest) else "mcp_server_envs"
                 named.setdefault(group, set()).add(name)
                 if group == "computer_envs":
                     computers.append(name)
@@ -1028,8 +1030,10 @@ class _Planner:
                 for child in children:
                     if child.kind is not EntityKind.ENV:
                         continue
-                    held = (self._server_names(child, store_latest) if child.where.startswith("computer_envs[") else
-                            {self._environment_name(child, store_latest)})
+                    computer = child.where.startswith("computer_envs[") or (
+                        child.where.startswith("browser_envs[") and self._is_computer(child, store_latest))
+                    held = (self._server_names(child, store_latest) if computer
+                            else {self._environment_name(child, store_latest)})
                     names |= held if held is not None else {None}
             else:
                 names = {self.accepted.get(_key(ref.local), {}).get("environment_name")}
@@ -1044,8 +1048,10 @@ class _Planner:
         except (NotFoundError, ValueError, KeyError, TypeError):
             return None  # reported by the store ref check
         if isinstance(env, MultiEnv):
-            return {*(child.environment_name for child in [*env.mcp_server_envs, *env.website_envs]),
-                    *(name for computer in env.computer_envs
+            browsers = env.browser_envs or []
+            return {*(child.environment_name for child in [*env.mcp_server_envs, *env.website_envs,
+                                                           *(b for b in browsers if not isinstance(b, ComputerEnv))]),
+                    *(name for computer in [*env.computer_envs, *(b for b in browsers if isinstance(b, ComputerEnv))]
                       for name in (computer.environment_name, *(app.environment_name for app in computer.composed_apps())))}
         if isinstance(env, ComputerEnv):
             return {env.environment_name, *(app.environment_name for app in env.composed_apps())}
@@ -1080,6 +1086,13 @@ class _Planner:
         if ref.local is not None:
             return list(self.accepted.get(_key(ref.local), {}).get("domains") or [])
         return list(getattr(self._store_entity(ref, store_latest), "domains", None) or [])
+
+    def _is_computer(self, ref: Reference, store_latest: dict[tuple[EntityKind, str], int] | None) -> bool:
+        """Whether the env ``ref`` names is a computer env, the bundle's own by its type, a store one's as stored."""
+        if isinstance(ref.local, BundleEntry):
+            cls = get_env_registry().get(ref.local.type)
+            return cls is not None and issubclass(cls, ComputerEnv)
+        return isinstance(self._store_entity(ref, store_latest), ComputerEnv)
 
     def _store_entity(self, ref: Reference, store_latest: dict[tuple[EntityKind, str], int] | None) -> Any:
         """The store's entity ``ref`` names at the version the plan read, or None when that's unknown."""

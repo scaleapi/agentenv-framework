@@ -63,8 +63,14 @@ def _browser_computer(card: dict, seen: list[dict] | None = None) -> Starlette:
     async def served_card(_: Request) -> JSONResponse:
         return JSONResponse(card)
 
+    named: dict[str, str] = {}
+
     async def cdp(request: Request) -> JSONResponse:
         saw(request)
+        if origin := (await request.json()).get("origin"):  # minted under it, as a browser taking one does
+            root = f"{origin.rstrip('/')}{request.headers.get('x-forwarded-prefix', '')}{ROUTE}{TOKEN}"
+            named["ws_url"] = "wss" + root.removeprefix("https") + "/devtools/browser"
+            return JSONResponse({"http_url": f"{root}/", "ws_url": named["ws_url"]})
         return JSONResponse({"http_url": MINTED, "ws_url": "ws://browser-host:7000/svc/chromium/cdp/t0k3n/devtools/browser"})
 
     async def discovery(request: Request) -> JSONResponse:
@@ -75,7 +81,7 @@ def _browser_computer(card: dict, seen: list[dict] | None = None) -> Starlette:
             return JSONResponse([{"id": "1", "type": "page", "title": "Home", "url": "about:blank",
                                   "webSocketDebuggerUrl": f"ws://browser-host:7000/svc/chromium/cdp/{TOKEN}/devtools/page/1",
                                   "devtoolsFrontendUrl": ""}])
-        return JSONResponse({"Browser": "Chrome/156", "webSocketDebuggerUrl":
+        return JSONResponse({"Browser": "Chrome/156", "webSocketDebuggerUrl": named.get("ws_url") or
                              f"ws://browser-host:7000/svc/chromium/cdp/{TOKEN}/devtools/browser"})
 
     async def browser_socket(websocket: WebSocket) -> None:
@@ -165,6 +171,19 @@ async def test_the_cdp_answer_and_discovery_name_the_gateway_however_the_browser
     assert [(entry["webSocketDebuggerUrl"], entry["devtoolsFrontendUrl"]) for entry in listed] == [
         (f"{ws}/browser/web/cdp/{TOKEN}/devtools/page/1", "")]
     assert tunnelled["webSocketDebuggerUrl"] == f"wss://{url.removeprefix('http://')}/browser/web/cdp/{TOKEN}/devtools/browser"
+
+
+@pytest.mark.asyncio
+async def test_behind_a_tunnel_that_says_no_scheme_an_address_minted_under_an_https_origin_stays_https_and_wss(
+        tmp_path, monkeypatch):
+    async with _gateway(tmp_path, monkeypatch) as (url, _), httpx.AsyncClient() as client:
+        answer = (await client.post(f"{url}/svc/web{CDP_PATH}",
+                                    json={"user": "solver", "origin": "https://gw-18765.w.modal.host"})).json()
+        version = (await client.get(f"{url}/browser/web/cdp/{TOKEN}/json/version")).json()
+    at = url.removeprefix("http://")
+    assert answer == {"http_url": f"https://{at}/browser/web/cdp/{TOKEN}/",
+                      "ws_url": f"wss://{at}/browser/web/cdp/{TOKEN}/devtools/browser"}
+    assert version["webSocketDebuggerUrl"] == f"wss://{at}/browser/web/cdp/{TOKEN}/devtools/browser"
 
 
 @pytest.mark.asyncio
@@ -274,6 +293,10 @@ def test_an_address_is_rebased_by_its_path_and_anything_else_is_kept():
     assert at_gateway("ws://x/svc/chromium/cdp/abc/devtools/browser?y=1", base, "b") == (
         "wss://gw.example:8443/browser/b/cdp/abc/devtools/browser?y=1")
     assert at_gateway("ws://x/cdp/abc", "http://gw", "b") == "ws://gw/browser/b/cdp/abc"
+    assert at_gateway("https://named.example/svc/chromium/cdp/abc/", "http://gw", "b") == (
+        "https://gw/browser/b/cdp/abc/")
+    assert at_gateway("wss://named.example/cdp/abc/devtools/browser", "http://gw", "b") == (
+        "wss://gw/browser/b/cdp/abc/devtools/browser")
     for kept in ("", "/devtools/inspector.html?ws=x/cdp/abc", "http://x/devtools/browser", "file:///cdp/abc/"):
         assert at_gateway(kept, base, "b") == kept
     assert rewritten({"webSocketDebuggerUrl": "ws://x/cdp/a/", "other": "ws://x/cdp/a/"}, frozenset({"webSocketDebuggerUrl"}),

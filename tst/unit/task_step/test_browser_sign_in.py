@@ -22,7 +22,6 @@ from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_steps.browser import sign_in
 from agent_env.task_step.task_steps.browser.base import stored_browsers
-from agent_env.task_step.task_steps.browser.connect_cdp import BrowserConnectCdpTaskStep
 from agent_env.task_step.task_steps.browser.cookies import BrowserSetCookiesTaskStep
 from agent_env.task_step.task_steps.browser.sign_in import BrowserSignInTaskStep, scoped
 
@@ -156,14 +155,6 @@ async def test_any_browser_step_reaches_a_browser_in_a_multi_envs_computer_with_
 
 
 @pytest.mark.asyncio
-async def test_a_cdp_address_to_a_browser_in_a_multi_envs_computer_is_refused_for_now(served):
-    with pytest.raises(RuntimeError, match="is in a computer of the multi env 'office'"):
-        await BrowserConnectCdpTaskStep(id="cdp", version=None, env_id="office", agent_name="agent").execute(
-            TaskStepContext(deployed_envs=[_office()], metadata={}))
-    assert served == []
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(("office", "site", "problem"), [
     (_office(session=False), "shop-site", "site 'shop-site' serves no website/v1 session"),
     (_office(), "blog-site", "site 'blog-site' isn't deployed in this run"),
@@ -201,5 +192,5 @@ def test_a_multi_env_deploys_its_computers_browsers():
     computer = ComputerEnv.__new__(ComputerEnv)
     computer.composed_apps = lambda: [app]
     office = MultiEnv.__new__(MultiEnv)
-    office._computers = SimpleNamespace(envs=[computer])
+    office._computers, office.browser_envs, office.website_envs = SimpleNamespace(envs=[computer]), None, []
     assert stored_browsers(office) == ["chromium"]

@@ -41,6 +41,11 @@ def test_anthropic_variables_already_set_are_kept():
     assert (env["ANTHROPIC_AUTH_TOKEN"], env["ANTHROPIC_BASE_URL"]) == ("own", "https://own.example")
 
 
+def test_the_cli_offers_its_tools_up_front_unless_tool_search_is_asked_for():
+    assert claude_bridge.cli_env(GATEWAY)["ENABLE_TOOL_SEARCH"] == "false"
+    assert claude_bridge.cli_env({**GATEWAY, "ENABLE_TOOL_SEARCH": "auto"})["ENABLE_TOOL_SEARCH"] == "auto"
+
+
 def test_no_endpoint_leaves_the_cli_to_its_own_and_an_api_key_alone():
     env = claude_bridge.cli_env({"ANTHROPIC_API_KEY": "direct"}, model="claude-x")
 
@@ -141,7 +146,7 @@ def test_a_404_from_the_endpoint_says_it_may_not_serve_anthropics_messages_api(m
 
 @pytest.mark.parametrize("workspace, project", [
     ("/app", "-app"),
-    ("/workspaces/my_ws.x-y/Sub Dir", "-workspaces-my-ws-x-y-Sub-Dir"),  # as the CLI names it, checked against 2.1.280
+    ("/workspaces/my_ws.x-y/Sub Dir", "-workspaces-my-ws-x-y-Sub-Dir"),  # as the CLI names it, checked against 2.1.322
 ])
 def test_a_sessions_transcripts_are_where_the_cli_keeps_them_for_its_workspace(workspace, project):
     assert claude_bridge.project_dir(Path(workspace)) == claude_bridge.CLAUDE_STATE_DIR / "projects" / project

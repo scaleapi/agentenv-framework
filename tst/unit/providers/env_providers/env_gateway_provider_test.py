@@ -162,7 +162,6 @@ async def test_container_mode_rejects_websites():
         )
 
 
-
 def _vm_provider(**attrs) -> MagicMock:
     """A sandbox provider that creates VMs, where a gateway runs, as every VM provider does."""
     provider = MagicMock(ON_THIS_MACHINE=False, SUPPORTED_SANDBOX_MODES=VMS_AND_CONTAINERS, SANDBOX_ACCEPTS=Accepts.LOADABLE, **attrs)
@@ -501,7 +500,6 @@ async def test_container_mode_remote_skips_servicedb_and_points_at_remote():
     assert gateway_call["env"]["SERVICE_DB_URL"] == db_url_base
 
 
-
 @pytest.mark.asyncio
 async def test_container_mode_mcp_url_follows_the_card():
     """The recorded MCP URL is the one the gateway's card declares, joined onto the gateway URL."""
@@ -534,7 +532,6 @@ async def test_container_mode_mcp_url_follows_the_card():
             )
     assert result.mcp_url == "https://agent-gateway.modal.host/custom-mcp"
     assert result.environment_card == card
-
 
 
 @pytest.mark.parametrize("gateway_url,declared,expected", [
@@ -2042,7 +2039,8 @@ async def test_create_gateway_hands_the_deploy_path_every_argument(attribution, 
 
     [call] = vm.await_args_list
     assert call.args == (provider, args.pop("mcp_servers"), args.pop("mcp_server_images"))
-    assert call.kwargs == {**args, "attribution": forwarded, "children": None}
+    assert call.kwargs == {**args, "attribution": forwarded, "children": None,
+                           "website_browser": env_gateway_provider._THE_RUNS}
     assert call.kwargs["attribution"] is not attribution
 
 
