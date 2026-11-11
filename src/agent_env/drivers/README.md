@@ -47,7 +47,7 @@ with `[tools]`. `requirements.txt` installs `cua-driver==0.38.0` from PyPI, whos
 `cua-driver`, the alias `aliases.toml` gives it, or by its id, `@local/agentenv-framework/drivers/cua-driver`.
 
 On macOS (`arm64`, composed onto a VM bundle such as `macos-26`), cua-driver is CuaDriver.app, from the cua-driver-rs
-0.38.0 release, its tarball checked by sha256 and its app put in `/Applications` by `install-app.sh`. Its daemon is a
+0.47.10 release, its tarball checked by sha256 and its app put in `/Applications` by `install-app.sh`. Its daemon is a
 direct LaunchAgent, CuaDriver.app's own executable, since macOS gives the app's TCC permissions, Accessibility, Post
 Event and Screen Recording, which `[install.macos]` grants it, only to the executable launchd starts itself; its socket
 is `/tmp/agentenv-cua-driver.sock`. `requirements-macos.txt` installs the protocol alone. Agents get the 62 tools
