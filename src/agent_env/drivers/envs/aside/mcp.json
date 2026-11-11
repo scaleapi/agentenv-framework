@@ -1,0 +1,29 @@
+{
+  "instructions": "Operate native apps on this computer with the repl tool. Start with `await computer.getApp('<app name>')` and follow the guide it prints.",
+  "tools": [
+    {
+      "name": "repl",
+      "description": "Run JavaScript in a sandbox whose only API is the `computer` global, which reads and controls native apps on this computer. There is no file system, network, shell, or browser. Variables persist between calls. Start with `await computer.getApp('<app name>')`; it prints the app's state and the full usage guide.",
+      "inputSchema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "code": {
+            "description": "JavaScript to run. Top-level await works.",
+            "type": "string"
+          },
+          "title": {
+            "description": "Action title, e.g. \"Type the note\".",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "type": "object"
+      },
+      "execution": {
+        "taskSupport": "forbidden"
+      }
+    }
+  ]
+}

@@ -279,3 +279,18 @@ def test_a_multi_env_whose_computers_share_an_apps_name_is_refused_before_any_wr
         f"envs/office: computer_envs: app 'mail' of computer '{name}' has the name of another of its child envs, and "
         "loads and snapshots find an environment by its name" for name in ("desktop", "laptop")]
     assert composed == []
+
+
+def test_a_multi_envs_browser_computer_is_told_apart_from_its_computers_by_name_as_they_are(tmp_path, composed):
+    root = layout(tmp_path / "desk", {
+        "envs/desktop/env.toml": DESKTOP, "envs/laptop/env.toml": 'environment_name = "desktop"\n' + DESKTOP,
+        "envs/office/env.toml": 'type = "multi"\ncomputer_envs = ["desktop"]\nbrowser_envs = ["laptop"]\n',
+        "tasks/t.json": json.dumps([{"id": "load", "type": "load_artifact", "env_id": "office",
+                                     "artifact_id": "notes"}]),
+        "artifacts/notes/notes.txt": "a note\n"})
+    with pytest.raises(BundleError) as refused:
+        _plan(root)
+
+    assert ("envs/office: computer_envs: 'desktop' names 2 of its child envs, and the gateway knows a computer by its "
+            "name alone") in refused.value.problems, refused.value
+    assert composed == []

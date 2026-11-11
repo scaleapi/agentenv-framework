@@ -5,7 +5,8 @@
 The browser builds those addresses from the address its own server was reached at, so behind the gateway they would
 name the browser's host and a client following one would leave the gateway. The gateway rewrites them by path,
 replacing everything before ``/cdp/<token>/`` with its own address and ``/browser/<key>``, so a rewrite holds whatever
-host an address was minted at."""
+host an address was minted at. It keeps the https or wss of an address the browser minted under an origin its caller
+named, since a tunnel in front of the gateway that ends TLS may not say how it was reached."""
 from __future__ import annotations
 
 import asyncio
@@ -79,12 +80,14 @@ def browsers(card: dict) -> list[Browser]:
 
 def at_gateway(url: str, base: str, key: str) -> str:
     """``url``, a CDP address a browser handed out, at the gateway: everything before its ``/cdp/<token>/`` becomes
-    ``base`` and ``/browser/<key>``, a WebSocket URL staying one. A value that isn't such an address is kept."""
+    ``base`` and ``/browser/<key>``, a WebSocket URL staying one, secure when either is: a browser the gateway reaches
+    over plain http names https only under an origin its caller named. A value that isn't such an address is kept."""
     parts = urlsplit(url)
     match = ADDRESS.search(parts.path)
     if parts.scheme not in ("http", "https", "ws", "wss") or match is None:
         return url
-    secure, host = base.startswith("https://"), base.split("://", 1)[1]
+    secure = base.startswith("https://") or parts.scheme in ("https", "wss")
+    host = base.split("://", 1)[1]
     scheme = ("wss" if secure else "ws") if parts.scheme in ("ws", "wss") else ("https" if secure else "http")
     return f"{scheme}://{host}/browser/{key}{match.group(0)}" + (f"?{parts.query}" if parts.query else "")
 

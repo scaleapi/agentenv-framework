@@ -24,7 +24,8 @@ run it. The CLI's version is the Dockerfile's
 `node`, without npm or npx, and the Python packages `model-requirements.txt` pins. A `deploy_agent` `builtin_tools`
 selection picks the CLI's own tools: `{"disable": "*"}` and `{"only": [...]}` become its `--tools` list, a list to
 turn off becomes `--disallowedTools`, which keeps the CLI's defaults for the rest, and any selection adds
-`--strict-mcp-config`, so its MCP servers are only the task env's. The names are `ClaudeCodeTool`'s in
+`--strict-mcp-config`, so its MCP servers are only the task env's. Tool search is off unless the agent's environment sets
+`ENABLE_TOOL_SEARCH`, so the CLI sends the env's tools and its own up front. The names are `ClaudeCodeTool`'s in
 `claude_bridge.py`: every tool the pinned CLI has, though which it offers by default depends on the model. A test fails
 when the Dockerfile's `CLAUDE_CODE_VERSION` moves, until `ClaudeCodeTool` and `TOOLS_CLI_VERSION` move with it.
 
