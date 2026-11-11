@@ -527,7 +527,9 @@ async def test_a_client_serving_the_route_at_its_own_root_is_told_no_prefix_and_
     ("javascript://notes.test", (["front.example"], ["https"], [])),
     ("https://notes.test/elsewhere", (["front.example"], ["https"], [])),
     ("https://user@notes.test", (["front.example"], ["https"], [])),
-], ids=["origin", "port", "not-http", "a-path", "userinfo"])
+    ("https://]notes.test[", (["front.example"], ["https"], [])),
+    ("https://nötes.test", (["front.example"], ["https"], [])),
+], ids=["origin", "port", "not-http", "a-path", "userinfo", "unbalanced-bracket", "not-ascii"])
 async def test_a_site_root_naming_an_origin_is_the_address_though_a_front_rewrote_the_forwarded_host(
         monkeypatch, root, expected):
     """A front between a computer's site proxy and the gateway, as a provider's ingress is, may set its own
@@ -535,9 +537,24 @@ async def test_a_site_root_naming_an_origin_is_the_address_though_a_front_rewrot
     up = _Upstream([b"ok"])
     up.install(monkeypatch)
     gw = _gateway(website_urls={"web": "http://web"})
-    await _call(gw, "/website/web/api/x", headers={"host": "gw.example", "x-forwarded-host": "front.example",
-                                                   "x-forwarded-proto": "https", "agentenv-site-root": root})
+    await _call(gw, "/website/web/api/x", raw_headers=[
+        (b"host", b"gw.example"), (b"x-forwarded-host", b"front.example"), (b"x-forwarded-proto", b"https"),
+        (b"agentenv-site-root", root.encode())])
     assert [_forwarded(r) for r in up.forwarded] == [expected]
+
+
+@pytest.mark.asyncio
+async def test_a_host_that_isnt_printable_ascii_names_nothing_and_the_request_still_goes_through(monkeypatch):
+    up = _Upstream([b"ok"])
+    up.install(monkeypatch)
+    gw = _gateway(website_urls={"web": "http://web"}, site_names={"web": ["shop.test"]})
+    answered = [(await _call(gw, "/website/web/x", raw_headers=raw))[0] for raw in (
+        [(b"host", "shöp.test".encode())],
+        [(b"host", b"shop.test"), (b"x-forwarded-host", "shöp.test".encode())],
+        [(b"host", b"gw.example"), (b"x-forwarded-host", b"shop.test\x7f")])]
+    assert answered == [200, 200, 200]
+    assert [(r.headers["host"], _forwarded(r)[0]) for r in up.forwarded] == [
+        ("web", []), ("shop.test", ["shop.test"]), ("web", ["gw.example"])]
 
 
 @pytest.mark.asyncio

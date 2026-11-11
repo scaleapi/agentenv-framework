@@ -174,10 +174,11 @@ def forwarded_address(request: HTTPConnection) -> dict[str, str]:
     (``https://notes.test``) is that root's address, ahead of any ``X-Forwarded-Host``/``-Proto``, which a front
     between the client and the gateway may have rewritten to its own. Like the host, that only changes the links the
     client's own answer names; what the route reaches is the path's alone. A header with nothing to say is left
-    out."""
+    out, as is a host that isn't printable ASCII, which no header upstream could carry."""
     root = request.headers.get(AGENT_ENV_SITE_ROOT_HEADER, "").strip()
     origin = _origin(root)
-    host = origin[1] if origin else _first(request.headers.get(FORWARDED_HOST, "")) or request.headers.get("host", "")
+    host = origin[1] if origin else (_plain(_first(request.headers.get(FORWARDED_HOST, "")))
+                                     or _plain(request.headers.get("host", "")))
     proto = origin[0] if origin else _first(request.headers.get(FORWARDED_PROTO, "")).lower()
     at_root = bool(root)
     scheme = _HTTP_SCHEME.get(request.url.scheme, request.url.scheme)
@@ -188,11 +189,18 @@ def forwarded_address(request: HTTPConnection) -> dict[str, str]:
 
 def _origin(value: str) -> tuple[str, str] | None:
     """The scheme and host of ``value`` when it is an origin (``https://notes.test``, a port allowed), else None."""
-    parts = urlsplit(value)
+    try:
+        parts = urlsplit(value)
+    except ValueError:  # an unbalanced bracket, as in ``https://]x[``
+        return None
     if (parts.scheme in ("http", "https") and parts.netloc and parts.path in ("", "/") and not parts.query
-            and not parts.fragment and "@" not in parts.netloc and value.isprintable()):
+            and not parts.fragment and "@" not in parts.netloc and _plain(value)):
         return parts.scheme, parts.netloc
     return None
+
+
+def _plain(value: str) -> str:
+    return value if value.isascii() and value.isprintable() else ""
 
 
 def _first(value: str) -> str:
