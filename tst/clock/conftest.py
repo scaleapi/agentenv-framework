@@ -1,0 +1,87 @@
+"""The clock tier: agent-env's libfaketime (src/agent_env/computers/clock) built in an Ubuntu 24.04 image with stock
+0.9.12 beside it and the gate programs, each gate run in a container of that image by harness.py. Needs Docker; the
+image is for the Docker daemon's own arch, and Chrome is the browsers bundle's pinned build for it. Chrome's archive and
+upstream libfaketime's tarball are fetched once into AGENTENV_TEST_CLOCK_CACHE (~/.cache/agentenv-clock by default),
+checked by sha256, which CI keeps between runs."""
+import hashlib
+import importlib.util
+import json
+import os
+import re
+import shutil
+import subprocess
+import urllib.request
+from pathlib import Path
+
+import pytest
+
+HERE = Path(__file__).resolve().parent
+REPO = HERE.parents[1]
+RECIPE = REPO / "src" / "agent_env" / "computers" / "clock"
+CHROMIUM_APP = REPO / "src" / "agent_env" / "browsers" / "envs" / "chromium" / "chromium.py"
+IMAGE = "agentenv-clock-gates:test"
+CACHE = Path(os.environ.get("AGENTENV_TEST_CLOCK_CACHE") or Path.home() / ".cache" / "agentenv-clock")
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _fetched(url: str, sha256: str, name: str) -> Path:
+    """``url`` in the cache as ``name``, downloaded once and checked against ``sha256``."""
+    path = CACHE / name
+    if path.exists() and _sha256(path) == sha256:
+        return path
+    CACHE.mkdir(parents=True, exist_ok=True)
+    part = path.with_name(name + ".part")
+    urllib.request.urlretrieve(url, part)
+    assert _sha256(part) == sha256, f"{url} doesn't have the pinned sha256 {sha256}"
+    part.replace(path)
+    return path
+
+
+def _libfaketime_pin() -> tuple[str, str]:
+    """The upstream tarball and sha256 build.sh pins, so the two can't drift apart."""
+    text = (RECIPE / "build.sh").read_text()
+    return re.search(r"https://\S+\.tar\.gz", text).group(0), re.search(r"\b[0-9a-f]{64}\b", text).group(0)
+
+
+def _chrome_pin(arch: str) -> tuple[str, str, str]:
+    """The browsers bundle's Chrome for Testing archive for ``arch``, its sha256, and the packages it links against."""
+    spec = importlib.util.spec_from_file_location("clock_tier_chromium_app", CHROMIUM_APP)
+    app = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(app)
+    path, sha256 = app._ARCHIVES[arch]
+    url = f"https://storage.googleapis.com/chrome-for-testing-public/{app.VERSION}/{path}"
+    return url, sha256, " ".join(p for p in app.PACKAGES if p != "unzip")
+
+
+@pytest.fixture(scope="session")
+def gate(tmp_path_factory):
+    """Run one of harness.py's gates in a fresh container: gate(NAME, *ARGS) -> its JSON."""
+    arch = subprocess.run(["docker", "version", "--format", "{{.Server.Arch}}"], capture_output=True, text=True,
+                          check=True).stdout.strip()
+    url, sha256, packages = _chrome_pin(arch)
+    context = tmp_path_factory.mktemp("clock-gates")
+    shutil.copytree(RECIPE, context / "clock", ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copytree(HERE / "programs", context / "programs")
+    (context / "downloads").mkdir()
+    shutil.copy(_fetched(url, sha256, f"chrome-{arch}-{sha256[:12]}.zip"), context / "downloads" / "chrome.zip")
+    shutil.copy(_fetched(*_libfaketime_pin(), "libfaketime-0.9.12.tar.gz"), context / "downloads" / "libfaketime.tar.gz")
+    for name in ("Dockerfile", "harness.py"):
+        shutil.copy(HERE / name, context / name)
+    built = subprocess.run(["docker", "build", "-q", "-t", IMAGE, "--build-arg", f"CHROME_SHA256={sha256}",
+                            "--build-arg", f"CHROME_PACKAGES={packages}", str(context)], capture_output=True, text=True)
+    assert built.returncode == 0, f"the gate image didn't build:\n{built.stderr[-4000:]}"
+
+    def run(name: str, *args, timeout: float = 600):
+        r = subprocess.run(["docker", "run", "--rm", "--shm-size=1g", IMAGE, "python3", "/opt/clock/harness.py", name,
+                            *map(str, args)], capture_output=True, text=True, timeout=timeout)
+        assert r.returncode == 0, f"gate {name} failed:\n{r.stderr[-3000:]}"
+        return json.loads(r.stdout)
+
+    return run
