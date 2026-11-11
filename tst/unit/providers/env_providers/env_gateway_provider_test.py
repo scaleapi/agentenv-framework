@@ -2685,7 +2685,9 @@ async def test_a_site_with_no_ready_on_its_card_is_waited_for_at_its_health_path
 
 
 @pytest.mark.asyncio
-async def test_a_site_that_never_says_it_is_ready_fails_the_deploy_naming_why():
+async def test_a_site_that_never_says_it_is_ready_fails_the_deploy_naming_why(monkeypatch):
+    monkeypatch.setattr(env_gateway_provider, "WEBSITE_READY_MARGIN_S", 0)
+
     def site(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/.well-known/agent-env.json"):
             return httpx.Response(200, json=_READY_CARD)
@@ -2698,7 +2700,9 @@ async def test_a_site_that_never_says_it_is_ready_fails_the_deploy_naming_why():
 
 
 @pytest.mark.asyncio
-async def test_a_site_whose_ready_answers_no_website_readiness_is_never_ready_and_the_deploy_says_so():
+async def test_a_site_whose_ready_answers_no_website_readiness_is_never_ready_and_the_deploy_says_so(monkeypatch):
+    monkeypatch.setattr(env_gateway_provider, "WEBSITE_READY_MARGIN_S", 0)
+
     def site(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/.well-known/agent-env.json"):
             return httpx.Response(200, json=_READY_CARD)
