@@ -21,7 +21,7 @@ import re
 import uuid
 from typing import ClassVar, Optional
 
-from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
 
@@ -81,7 +81,7 @@ class AgentPromptResponseVerifierTaskStep(TaskStep):
             None,
         )
         if prompt_response is None:
-            raise RuntimeError(f"PromptResponse with prompt_id='{self.prompt_id}' not found in context")
+            raise StepContextError(f"PromptResponse with prompt_id='{self.prompt_id}' not found in context")
 
         if prompt_response.error_type:
             logger.warning(

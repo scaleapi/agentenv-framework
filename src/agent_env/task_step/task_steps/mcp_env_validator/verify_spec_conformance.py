@@ -27,7 +27,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
 from agent_env.env import legacy_protocol
-from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.mcp_env_validator.verify_mcp_tool_schema import (
@@ -405,7 +405,7 @@ class VerifySpecConformanceTaskStep(TaskStep):
 
         deployed = next((d for d in context.deployed_envs if d.env_id == self.env_id), None)
         if deployed is None:
-            raise RuntimeError(f"Env '{self.env_id}' not found in context.deployed_envs")
+            raise StepContextError(f"Env '{self.env_id}' not found in context.deployed_envs")
 
         env = Env.get(self.env_id, deployed.env_version)
         environment_name = env.environment_name
