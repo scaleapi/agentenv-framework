@@ -1727,7 +1727,7 @@ def _redact_compose_secrets(compose_content: str) -> str:
 
 
 def clock_followers_environment(children: Iterable[ExternalChild]) -> dict[str, str]:
-    """The gateway's declared clock followers: each child that follows its clock, by the read token its watch carries."""
+    """The gateway's declared clock followers: each child that is one, by the read token its watch carries."""
     followers = ",".join(f"{child.name}={child.clock_read_token}" for child in children if child.clock_read_token)
     return {CLOCK_FOLLOWERS_ENV: followers} if followers else {}
 

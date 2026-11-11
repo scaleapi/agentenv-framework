@@ -236,7 +236,7 @@ GATEWAY_EXTENSIONS = [
     },
     {
         "uri": EXT_CLOCK_URI,
-        "description": "Virtual clock (urn:agentenv:clock/v1): read the gateway's virtual time (wall-clock-derived, rate-scaled) via get_time; set_time/set_rate/advance/clear are the harness control path, each changing the clock's opaque version and, given wait_followers_s, answering 504 naming the computers following the clock that don't show it in time (set_rate keeps t0, as advance does); a computer follows it through watch, a long poll naming the version it shows.",
+        "description": "Virtual clock (urn:agentenv:clock/v1): read the gateway's virtual time (wall-clock-derived, rate-scaled) via get_time; set_time/set_rate/advance/clear are the harness control path, each changing the clock's opaque version and, given wait_followers_s, answering 504 naming the followers that don't show it in time (set_rate keeps t0, as advance does); a follower follows it through watch, a long poll naming the version it shows and held up to hold_s; state's followers block is diagnostic, not part of the contract.",
         "params": {"endpoint": "/clock/time", "methods": {
             "get_time": {"method": "GET", "endpoint": "/clock/time"},
             "set_time": {"method": "PUT", "endpoint": "/clock/set-time", "request": {"type": "object", "properties": {"virtual_time": {"type": "string"}, "virtual_seconds_per_real_second": {"type": "number"}, **_WAIT_FOLLOWERS}, "required": ["virtual_time"]}},

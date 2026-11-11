@@ -1,5 +1,5 @@
-"""The computers that follow the gateway's clock: each long-polls ``/clock/watch`` with the version it shows, which is
-its acknowledgement, and a clock write can wait until every one shows the write's version."""
+"""The followers of the gateway's clock (the computers on it): each long-polls ``/clock/watch`` with the version it
+shows, which is its acknowledgement, and a clock write can wait until every one shows the write's version."""
 from __future__ import annotations
 
 import asyncio
@@ -16,9 +16,10 @@ def parse_wait(value) -> float:
     """A write's ``wait_followers_s``: how long it waits for the followers, 0 when absent."""
     if value is None:
         return 0.0
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ClockError(f"wait_followers_s must be a non-negative number, got {value!r}")
     # Only a float can be NaN or infinite; math.isfinite on an int past a float's range raises.
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or (isinstance(value, float) and not math.isfinite(value)) \
-            or value < 0:
+    if (isinstance(value, float) and not math.isfinite(value)) or value < 0:
         raise ClockError(f"wait_followers_s must be a non-negative number, got {value!r}")
     if value > CLOCK_MAX_WAIT_FOLLOWERS_S:
         raise ClockError(f"wait_followers_s exceeds max {CLOCK_MAX_WAIT_FOLLOWERS_S:g}")
@@ -26,15 +27,16 @@ def parse_wait(value) -> float:
 
 
 class ClockFollowers:
-    """The declared followers, each by name with the read token its watch carries, and the version each last showed;
-    bound to the gateway's event loop."""
+    """The declared followers, each by name with the read token its watch carries, and the version each last showed.
+    Its event and condition bind to the loop that first waits on them, so one gateway's watches and waiting writes all
+    run on the loop that serves it, never one asyncio.run apiece."""
 
     WATCH_S = CLOCK_WATCH_HOLD_S
 
     def __init__(self, clock: Callable[[], Clock], tokens: Mapping[str, str]):
         self._clock = clock
         self._tokens = dict(tokens)
-        self._shown: dict[str, tuple[int, str] | None] = dict.fromkeys(self._tokens)
+        self._shown: dict[str, int | None] = dict.fromkeys(self._tokens)
         self._seen: dict[str, float] = {}
         self._changed = asyncio.Event()
         self._acks = asyncio.Condition()
@@ -58,8 +60,8 @@ class ClockFollowers:
             count = self._clock().count_of(after)
             async with self._acks:
                 shown = self._shown[follower]
-                if count is not None and (shown is None or count > shown[0]):
-                    self._shown[follower] = (count, after)
+                if count is not None and (shown is None or count > shown):
+                    self._shown[follower] = count
                 self._seen[follower] = time.monotonic()
                 self._acks.notify_all()
         if after == self._clock().version:
@@ -74,7 +76,7 @@ class ClockFollowers:
 
         def stale() -> list[str]:
             return sorted(name for name, shown in self._shown.items()
-                          if shown is None or target is None or shown[0] < target)
+                          if shown is None or target is None or shown < target)
 
         async with self._acks:
             try:
@@ -85,7 +87,7 @@ class ClockFollowers:
 
     def state(self) -> dict:
         """Each follower's last shown version and how long ago it last watched, for ``/clock/state``."""
-        now = time.monotonic()
-        return {name: {"version": shown[1] if shown else None,
+        now, clock = time.monotonic(), self._clock()
+        return {name: {"version": None if shown is None else clock.version_of(shown),
                        "seen_s_ago": round(now - self._seen[name], 3) if name in self._seen else None}
                 for name, shown in self._shown.items()}

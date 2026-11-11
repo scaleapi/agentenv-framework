@@ -352,3 +352,14 @@ def test_the_gateway_reads_its_declared_computers_from_its_environment():
                            ("desktop=a,desktop=b", "twice")):
         with pytest.raises(ValueError, match=fragment):
             parse_clock_followers(spec)
+
+
+@pytest.mark.asyncio
+async def test_a_change_on_the_arm_wakes_the_triggers_and_a_re_arm_leaves_them_to_its_generation(gateway):
+    gw = gateway({})
+    async with _client(gw) as client:
+        armed = (await client.put("/clock/set-time", json={"virtual_time": T0})).json()
+        rated = (await client.put("/clock/set-rate", json={"virtual_seconds_per_real_second": 2})).json()
+        advanced = (await client.put("/clock/advance", json={"virtual_time": "2026-02-01T00:00:00Z"})).json()
+        cleared = (await client.post("/clock/clear")).json()
+    assert ["due" in answer for answer in (armed, rated, advanced, cleared)] == [False, True, True, False]

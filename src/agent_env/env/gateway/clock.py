@@ -149,15 +149,22 @@ class Clock:
     @property
     def version(self) -> str:
         """Opaque, changed by every write: this clock's own id and a count, so it never repeats across restarts."""
-        return f"{self._boot}.{self._count}"
+        return self.version_of(self._count)
+
+    def version_of(self, count: int) -> str:
+        """The version this clock had at its ``count``th write."""
+        return f"{self._boot}.{count}"
 
     def count_of(self, version) -> int | None:
         """The count of ``version`` when this clock has had it; None for another clock's, a later one, or junk."""
         boot, _, count = version.partition(".") if isinstance(version, str) else ("", "", "")
-        current = str(self._count)
-        if boot != self._boot or not (count.isascii() and count.isdigit()) or len(count) > len(current):
+        if boot != self._boot or not (count.isascii() and count.isdigit()):
             return None
-        return int(count) if int(count) <= self._count else None
+        # Counts carry no leading zeros, so one with more digits than the current count is past it, and is refused before
+        # int() reads it: int() of thousands of digits raises.
+        if len(count) > len(str(self._count)) or int(count) > self._count:
+            return None
+        return int(count)
 
     @property
     def rate(self) -> float:

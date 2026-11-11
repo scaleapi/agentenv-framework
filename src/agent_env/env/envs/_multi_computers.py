@@ -95,7 +95,7 @@ def routes_later(entry: Optional[dict]) -> bool:
 
 
 def _clock_read_token(record: DeployedEnv) -> str | None:
-    """The read token a computer's clock watch carries when its card says it follows a clock (``clock/v1``'s
+    """The read token a computer's clock watch carries when its card says it's a clock follower (``clock/v1``'s
     ``sync_time``): for now its control token, which a token of its own can replace without the gateway knowing."""
     return record.control_token if record.supports(EXT_CLOCK_URI, "sync_time") else None
 
