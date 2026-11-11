@@ -7,7 +7,7 @@ import pytest
 
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_steps import always_on as ao
-from agent_env.task_step.task_steps.deploy_user_sim_agent import DeployUserSimAgentTaskStep
+from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import DeployUserSimAgentTaskStep
 from tst.unit.task_step.always_on_harness import Rig
 
 pytestmark = pytest.mark.usefixtures("local_stores")

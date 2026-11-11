@@ -11,8 +11,8 @@ from agent_env.a2a_agent import A2AAgent, conversation_store
 from agent_env.store import Filter, get_config
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
 from agent_env.task_step.task_steps import always_on as ao
-from agent_env.task_step.task_steps import user_sim_versions
-from agent_env.task_step.task_steps.deploy_user_sim_agent import USER_SIMS_KEY
+from agent_env.task_step.task_steps.agent import user_sim_versions
+from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import USER_SIMS_KEY
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from agent_env.task_step.task_steps.verifiers.agent_prompt_response_verifier import AgentPromptResponseVerifierTaskStep
 from tst.unit.task_step.test_deploy_user_sim_agent import HANNAH, _published, _step as _deploy_step

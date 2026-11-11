@@ -41,8 +41,8 @@ from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import RetryConfig, TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.notification_delivery import delivered_parts, next_message, take_due
 from agent_env.task_step.task_steps.post_turn_hooks import PostTurnHooks, run_post_turn_hooks, validate_hook_specs
-from agent_env.task_step.task_steps import user_sim_versions
-from agent_env.task_step.task_steps.user_sim_common import iso, person_of, task_zone, utc
+from agent_env.task_step.task_steps.agent import user_sim_versions
+from agent_env.task_step.task_steps.agent.user_sim_common import iso, person_of, task_zone, utc
 from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import (
     agent_error_text,
     fetch_container_logs,
@@ -400,7 +400,7 @@ class PromptAgentTaskStep(TaskStep):
     def _built_in_user_sim(self, context: TaskStepContext) -> Optional[tuple[dict, str]]:
         """The user deploy_user_sim_agent deployed, when it is this step's user, and their time zone; None for any other
         user. Refuses one this step can't run as deployed, before anything starts."""
-        from agent_env.task_step.task_steps.deploy_user_sim_agent import USER_SIMS_KEY
+        from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import USER_SIMS_KEY
         if self.user_a2a_url is not None or not any(a.agent_name == self.user_agent_name
                                                     for a in context.deployed_agents):
             return None

@@ -77,7 +77,7 @@ from agent_env.a2a_agent import protocol
 from agent_env.config import get_config
 from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.context import TaskStepContext
-from agent_env.task_step.task_steps import user_sim_versions
+from agent_env.task_step.task_steps.agent import user_sim_versions
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 
 logger = logging.getLogger(__name__)

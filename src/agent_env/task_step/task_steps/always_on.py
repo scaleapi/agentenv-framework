@@ -106,11 +106,11 @@ from agent_env.env.gateway.constants import (
 from agent_env.store import DuplicateKeyError, get_config
 from agent_env.task_step.context import PromptResponse, TaskStepContext
 from agent_env.task_step.task_step import TaskStep
-from agent_env.task_step.task_steps import user_sim_versions
-from agent_env.task_step.task_steps.deploy_user_sim_agent import USER_SIMS_KEY
+from agent_env.task_step.task_steps.agent import user_sim_versions
+from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import USER_SIMS_KEY
 from agent_env.task_step.task_steps.notification_delivery import delivered_parts, label_time, take_due
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
-from agent_env.task_step.task_steps.user_sim_common import iso as _iso, person_of, task_zone, utc as _utc
+from agent_env.task_step.task_steps.agent.user_sim_common import iso as _iso, person_of, task_zone, utc as _utc
 
 logger = logging.getLogger(__name__)
 

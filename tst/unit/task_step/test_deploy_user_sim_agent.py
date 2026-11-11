@@ -18,9 +18,9 @@ from agent_env.a2a_agent import protocol
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps import always_on as ao
-from agent_env.task_step.task_steps import user_sim_versions
+from agent_env.task_step.task_steps.agent import user_sim_versions
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
-from agent_env.task_step.task_steps.deploy_user_sim_agent import USER_SIMS_KEY, DeployUserSimAgentTaskStep
+from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import USER_SIMS_KEY, DeployUserSimAgentTaskStep
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from tst.unit.task_step.always_on_harness import USER_SIM, Rig
 

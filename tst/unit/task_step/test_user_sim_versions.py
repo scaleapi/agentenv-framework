@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_env.task_step.task_steps import user_sim_versions as us
+from agent_env.task_step.task_steps.agent import user_sim_versions as us
 
 DATA = Path(__file__).parents[2] / "data" / "user_sim"
 PERSON = json.loads((DATA / "hannah_person.json").read_text())

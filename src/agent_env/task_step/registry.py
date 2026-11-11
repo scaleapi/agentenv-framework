@@ -55,7 +55,7 @@ def _builtin_registry() -> dict[str, type["TaskStep"]]:
     from agent_env.task_step.task_steps.modify_env_tool_access import ModifyEnvToolAccessStep
     from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
     from agent_env.task_step.task_steps.always_on import AlwaysOnTaskStep
-    from agent_env.task_step.task_steps.deploy_user_sim_agent import DeployUserSimAgentTaskStep
+    from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import DeployUserSimAgentTaskStep
     from agent_env.task_step.task_steps.register_env_triggers import RegisterEnvTriggersStep
     from agent_env.task_step.task_steps.register_agent_triggers import RegisterAgentTriggersStep
     from agent_env.task_step.task_steps.sync_env_clock import SyncEnvClockTaskStep
