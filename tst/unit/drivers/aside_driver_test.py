@@ -1,6 +1,7 @@
 """The aside driver against a fake aside CLI: agents get its repl as pinned, with its instructions, marked as acting on
 apps; allowed_apps becomes one --app each, none for every app, and never empty; each agent session keeps a REPL of
-its own across calls, one that stops starting afresh; the CLI gets the session user's environment, Aside's home and
+its own across calls, one that stops starting afresh, and a call its caller gave up while it waited never reaches
+Aside; the CLI gets the session user's environment, Aside's home and
 no update check, and none of the driver's; readiness checks the pinned executables, the daemon's health, turns usage
 analytics off and Computer Use on, and checks what the server says and lists and that it answers; and the driver's
 files agree on the pinned version, folder, helper, daemon and Aside's home, where the helper's runtime copy is placed
@@ -216,6 +217,37 @@ async def test_each_agent_session_keeps_a_repl_of_its_own_and_one_that_stops_sta
     assert (a_value, b_value) == ("1", "2") and a_pid != b_pid
     assert died.isError and "may have run" in _text(died)
     assert after.startswith("None in ") and after != f"None in {a_pid}"
+
+
+@pytest.mark.asyncio
+async def test_a_call_cancelled_while_it_waits_behind_another_never_reaches_aside(pinned):
+    sent, release = [], asyncio.Event()
+
+    class Session:
+        async def call_tool(self, tool, arguments):
+            sent.append(arguments["code"])
+            if arguments["code"] == "slow":
+                await release.wait()
+            return arguments["code"]
+
+    @contextlib.asynccontextmanager
+    async def open_server():
+        yield Session(), None
+
+    repl = pinned._Repl(open_server)
+    slow = asyncio.create_task(repl.call("repl", {"code": "slow"}))
+    while not sent:
+        await asyncio.sleep(0)
+    abandoned = asyncio.create_task(repl.call("repl", {"code": "abandoned"}))
+    await asyncio.sleep(0)
+    abandoned.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await abandoned
+    release.set()
+    answers = (await slow, await repl.call("repl", {"code": "after"}))
+    await repl.close()
+
+    assert answers == ("slow", "after") and sent == ["slow", "after"] and repl.busy == 0
 
 
 @pytest.mark.asyncio

@@ -193,9 +193,9 @@ class AsideDriver(MacOSDriver):
 
 class _Repl:
     """A session's ``aside mcp``, one server at a time, each held open by a task of its own, since a stdio client is
-    entered and left in one task, and reached from any through that server's queue, one call at a time. A server that
-    stops is let go at once, while it still ends, and the next call starts one afresh, without the last one's bindings;
-    ``close`` ends them for good."""
+    entered and left in one task, and reached from any through that server's queue, one call at a time; a call its
+    caller gave up while it waited is dropped, never sent. A server that stops is let go at once, while it still ends,
+    and the next call starts one afresh, without the last one's bindings; ``close`` ends them for good."""
 
     def __init__(self, open_server: Callable[[], contextlib.AbstractAsyncContextManager[
             tuple[ClientSession, InitializeResult]]]) -> None:
@@ -238,6 +238,8 @@ class _Repl:
                 try:
                     while (call := await calls.get()) is not None:
                         tool, arguments, answer = call
+                        if answer.done():
+                            continue
                         try:
                             result = await session.call_tool(tool, arguments)
                         except McpError as e:
