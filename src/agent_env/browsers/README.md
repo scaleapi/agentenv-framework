@@ -24,6 +24,11 @@ its website browser with `browser_envs = ["chromium"]`, in place of the run's `p
 sandbox of its own beside the multi env's computers, sized by the deploy step's `child_envs.chromium`, its tools served
 under `chromium_`, routing the multi env's synthetic sites through the gateway, its network its own env's, as any
 computer child's.
+Its server keeps its log in `/var/log/agentenv/browser-chromium.jsonl`: an entry for each CDP command, MCP tool call
+and pixel action an agent takes, and an event for each tab opened, navigated or closed with what caused it, secrets
+taken out (`agentenv_protocol.website_browser.log`); `browser/v1` `log` reads it and `data/get` exports it as
+`browser-log.jsonl`. It lasts the computer's boot: `reset_env` boots the computer afresh with a new one, so a task that
+needs the log before a reset takes it first with `snapshot_env`.
 
 A task changes a browser's state with the steps in `agent_env.task_step.task_steps.browser`, each a call to one
 `browser/v1` operation on the browser in the env `env_id`, the one `browser` names when the env has several:

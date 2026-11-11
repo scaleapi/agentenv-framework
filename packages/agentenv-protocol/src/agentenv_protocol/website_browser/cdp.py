@@ -18,8 +18,11 @@ from typing import TYPE_CHECKING, Any, Literal, Optional
 from starlette.requests import Request
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
+from .log import ERROR_CHARS, KEY_FIELDS, TYPING_METHODS, BrowserLog, acts, redact_text, redacted_params
+
 if TYPE_CHECKING:
-    from .website_browser import DevToolsPipe
+    from .control import BrowserControl
+    from .devtools import DevToolsPipe
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +58,10 @@ ABOUT_PAGES = frozenset({"about:blank", "about:srcdoc"})
 GUARDED_KEPT = 100
 #: What the record says the guard did, by its action.
 GUARDED = {"refuse": "refused", "send": "changed", "answer": "answered", "close": "closed"}
+#: The commands that navigate a tab without naming the loader they navigate with, whose next navigation is theirs.
+NAVIGATES_NEXT = frozenset({"Page.reload", "Page.navigateToHistoryEntry"})
+#: What a command's entry says when its connection ended before the browser answered it.
+ENDED_UNANSWERED = "the connection ended before the browser answered"
 
 
 @dataclass
@@ -192,9 +199,14 @@ class _Connection:
     """One client's WebSocket, its sessions over the pipe (its browser-level one and those it attached), its unanswered
     commands, what waits to be sent to it, and its entry in the record."""
 
-    def __init__(self, websocket: WebSocket, user: str, session: str, record: dict) -> None:
-        self.websocket, self.user, self.session, self.record = websocket, user, session, record
+    def __init__(self, websocket: WebSocket, user: str, session: str, record: dict, number: int) -> None:
+        self.websocket, self.user, self.session, self.record, self.number = websocket, user, session, record, number
         self.sessions = {session}
+        #: The tab each session it attached is on.
+        self.targets: dict[str, str] = {}
+        #: Held by each of its commands from when it arrives until it's sent, so they're sent in the order they came,
+        #: whatever one waits on before it's sent.
+        self.order = asyncio.Lock()
         self.commands: set[asyncio.Future] = set()
         self.outbox: asyncio.Queue[str | tuple[int, str]] = asyncio.Queue()
         self.waiting_bytes = 0
@@ -205,10 +217,13 @@ class Relay:
     """Each WebSocket connection given its own browser-level session over ``devtools``, its commands sent on it past the
     guard and the answers and events of its sessions sent back, so several clients share one browser; and a record of
     who connected when, and what the guard did to their commands. ``dialogs_answered`` says agentenv answers the
-    browser's dialogs itself."""
+    browser's dialogs itself. With a ``log``, each command is an entry in it, on the tab its session is on, and
+    ``control``, agentenv's own connection, tells its tab's URL, whether a password field has focus there, and what
+    causes the tab events a command brings."""
 
-    def __init__(self, devtools: DevToolsPipe, *, dialogs_answered: bool = False) -> None:
-        self.devtools, self.dialogs_answered = devtools, dialogs_answered
+    def __init__(self, devtools: DevToolsPipe, *, dialogs_answered: bool = False, log: Optional[BrowserLog] = None,
+                 control: Optional[BrowserControl] = None) -> None:
+        self.devtools, self.dialogs_answered, self.log, self.control = devtools, dialogs_answered, log, control
         self.connections: list[dict] = []
         self._by_session: dict[str, _Connection] = {}
         self._open: set[_Connection] = set()
@@ -222,7 +237,7 @@ class Relay:
             await websocket.close(code=1013, reason=f"the browser isn't answering: {type(e).__name__}")
             return
         record = {"user": user, "opened_at": _now(), "guarded": []}
-        connection = _Connection(websocket, user, session, record)
+        connection = _Connection(websocket, user, session, record, len(self.connections) + 1)
         self._by_session[session] = connection
         self._open.add(connection)
         self.connections.append(record)
@@ -263,25 +278,56 @@ class Relay:
         method, params = message["method"], message.get("params") or {}
         session = message.get("sessionId") or connection.session
         verdict = guard(method, params, dialogs_answered=self.dialogs_answered)
-        if session not in connection.sessions:
-            verdict, answer = None, {"error": NO_SESSION}
-        elif verdict.action == "refuse":
-            answer = {"error": {"code": SERVER_ERROR, "message": f"agentenv refuses {method}: {verdict.reason}"}}
-        elif verdict.action != "send":
-            answer = {"result": {}}
-        else:
-            try:
-                answer = await self.devtools.request(method, verdict.params, session_id=session)
-            except ConnectionError as e:
-                answer = {"error": {"code": SERVER_ERROR, "message": str(e)}}
-        if verdict is not None and (verdict.action != "send" or verdict.changed):
-            self._guarded(connection, method, verdict)
-        reply = {"id": message.get("id"), **{key: answer[key] for key in ("result", "error") if key in answer}}
-        if message.get("sessionId"):
-            reply["sessionId"] = message["sessionId"]
-        self._put(connection, reply)
-        if verdict is not None and verdict.action == "close":
-            self._close(connection, CLOSED, dropping=False)
+        logged = self._begin(connection, session, method, params)
+        answer, guarded = {"error": {"code": SERVER_ERROR, "message": ENDED_UNANSWERED}}, None
+        sending: Optional[asyncio.Future] = None
+        try:
+            async with connection.order:
+                if logged is not None:
+                    await logged.check_password()
+                if session not in connection.sessions:
+                    verdict, answer = None, {"error": NO_SESSION}
+                elif verdict.action == "refuse":
+                    answer = {"error": {"code": SERVER_ERROR,
+                                        "message": f"agentenv refuses {method}: {verdict.reason}"}}
+                elif verdict.action != "send":
+                    answer = {"result": {}}
+                else:
+                    sending = asyncio.ensure_future(self.devtools.request(method, verdict.params, session_id=session))
+                    await asyncio.sleep(0)
+            if sending is not None:
+                try:
+                    answer = await sending
+                except ConnectionError as e:
+                    answer = {"error": {"code": SERVER_ERROR, "message": str(e)}}
+            if verdict is not None and (verdict.action != "send" or verdict.changed):
+                guarded = GUARDED[verdict.action]
+                self._guarded(connection, method, verdict)
+            reply = {"id": message.get("id"), **{key: answer[key] for key in ("result", "error") if key in answer}}
+            if message.get("sessionId"):
+                reply["sessionId"] = message["sessionId"]
+            self._put(connection, reply)
+            if verdict is not None and verdict.action == "close":
+                self._close(connection, CLOSED, dropping=False)
+        finally:
+            if sending is not None and not sending.done():
+                sending.cancel()
+            if logged is not None:
+                logged.finish(answer, guarded)
+
+    def _begin(self, connection: _Connection, session: str, method: str, params: dict) -> Optional[_Logged]:
+        """``connection``'s command, begun in the log, if there is one, on the tab ``session`` is on, or for a browser
+        command the tab it names; what it causes made known to the control."""
+        if self.log is None:
+            return None
+        target = connection.targets.get(session) if session != connection.session else None
+        if target is None and isinstance(params.get("targetId"), str):
+            target = params["targetId"]
+        acting = acts(method)
+        url = self.control.url_of(target) if self.control is not None and target else None
+        begun = self.log.begin({"via": "cdp", "who": connection.user, "connection": connection.number,
+                                "method": method, "acts": acting, "tab": target, "url": url})
+        return _Logged(self, begun, method, params, target, acting)
 
     @staticmethod
     def _guarded(connection: _Connection, method: str, verdict: Verdict) -> None:
@@ -297,8 +343,11 @@ class Relay:
         if message.get("method") == "Target.attachedToTarget" and params.get("sessionId"):
             connection.sessions.add(params["sessionId"])
             self._by_session[params["sessionId"]] = connection
+            if isinstance(target := (params.get("targetInfo") or {}).get("targetId"), str):
+                connection.targets[params["sessionId"]] = target
         elif message.get("method") == "Target.detachedFromTarget" and params.get("sessionId"):
             connection.sessions.discard(params["sessionId"])
+            connection.targets.pop(params["sessionId"], None)
             self._by_session.pop(params["sessionId"], None)
         if message["sessionId"] == connection.session:
             message = {key: value for key, value in message.items() if key != "sessionId"}
@@ -341,6 +390,70 @@ class Relay:
                     return
                 connection.waiting_bytes -= len(message)
                 await connection.websocket.send_text(message)
+
+
+class _Logged:
+    """A relayed command's entry in the log, from when it arrives until it's answered or its connection ends: what it
+    causes made known to the control as it's sent, whether a password field has focus on its tab before it types,
+    and its answer."""
+
+    def __init__(self, relay: Relay, begun: dict, method: str, params: dict, target: Optional[str],
+                 acting: bool) -> None:
+        self.relay, self.begun, self.method, self.params, self.target, self.acting = \
+            relay, begun, method, params, target, acting
+        control = relay.control
+        self._cause = cause = {"seq": begun["seq"], "via": "cdp", "who": begun["action"]["who"]}
+        self._landed: Optional[asyncio.Future] = None
+        self._checks_password = self.password = False
+        if control is None or not acting:
+            return
+        if method == "Target.createTarget":
+            self._landed = asyncio.get_running_loop().create_future()
+            control.causes.creating(self._landed, cause)
+        elif method == "Target.closeTarget" and isinstance(params.get("targetId"), str):
+            control.causes.closing(params["targetId"], cause)
+        elif method == "Page.navigate" and target:
+            self._landed = asyncio.get_running_loop().create_future()
+            control.causes.navigating(target, self._landed, cause)
+        elif method in NAVIGATES_NEXT and target:
+            control.causes.navigates_next(target, cause)
+        self._checks_password = method in TYPING_METHODS and bool(target) and any(field in params
+                                                                                 for field in KEY_FIELDS)
+        #: What a command that types types is withheld until its check says no password field has focus, so one
+        #: that never gets checked, its connection gone first, keeps it withheld.
+        self.password = self._checks_password
+
+    async def check_password(self) -> None:
+        """Before a command that types is sent: whether a password field has focus on its tab, true when that can't
+        be told."""
+        if self._checks_password:
+            self.password = await self.relay.control.password_focused(self.target)
+
+    def finish(self, answer: dict, guarded: Optional[str]) -> None:
+        """The entry written with its answer, or with why there is none: whether it worked, why not, what the guard
+        did, and, acting, its parameters as the log keeps them; what it caused made known."""
+        result = answer.get("result") or {}
+        if self._landed is not None and not self._landed.done():
+            if "error" in answer or result.get("errorText"):
+                self._landed.cancel()
+            else:
+                self._landed.set_result(result.get("targetId") if self.method == "Target.createTarget"
+                                        else result.get("loaderId"))
+        fields: dict[str, Any] = {"ok": "error" not in answer}
+        if "error" in answer:
+            fields["error"] = redact_text(str((answer["error"] or {}).get("message", answer["error"])))[:ERROR_CHARS]
+            if self.method in NAVIGATES_NEXT and self.target and self.relay.control is not None:
+                self.relay.control.causes.navigated_nowhere(self.target, self._cause)
+        if guarded is not None:
+            fields["guard"] = guarded
+        if self.acting:
+            fields["params"] = redacted_params(self.method, self.params, password=self.password)
+        opened = result.get("targetId") if self.method == "Target.createTarget" else None
+        if isinstance(opened, str):
+            fields["tab"] = self.target = opened
+        if self.target and self.relay.control is not None and self.begun["action"].get("url") is None:
+            fields["url"] = self.relay.control.url_of(self.target)
+        self.relay.log.finish(self.begun, **fields)
 
 
 def _well_formed(message: Any) -> bool:
