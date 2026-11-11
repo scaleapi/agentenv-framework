@@ -38,6 +38,7 @@ class _Proc:
 
 class _VmSandbox:
     mode = "vm"
+    app_dir_on_this_machine = None
 
     async def exec_with_output(self, *args):
         if "find" in args:
@@ -45,7 +46,7 @@ class _VmSandbox:
                 return 0, "bundle\n", ""
             return 0, "".join(f"{p}\n" for p in FILES), ""
         if "stat" in args:
-            return 0, str(len(next(iter(FILES.values())))), ""
+            return 0, f"regular file:{len(next(iter(FILES.values())))}", ""
         return 0, "", ""
 
     async def exec(self, *args):

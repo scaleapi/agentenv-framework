@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 import tempfile
 import threading
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -80,6 +81,11 @@ class TestSerialization:
             "id": "c", "type": "collect_artifacts", "agent_name": "solver",
         })
         assert step.env_id is None
+
+    def test_max_bytes_round_trips_and_defaults(self):
+        step = CollectArtifactsTaskStep.from_dict({"id": "c", "type": "collect_artifacts", "max_bytes": 4096})
+        assert CollectArtifactsTaskStep.from_dict(step.to_dict()).max_bytes == 4096
+        assert CollectArtifactsTaskStep.from_dict({"id": "c", "type": "collect_artifacts"}).max_bytes == 16 << 30
 
     def test_explicit_agent_name_and_env_id_raises(self):
         try:
@@ -516,6 +522,34 @@ class TestAgentContainerPath:
         except RuntimeError as e:
             assert "could not size" in str(e)
 
+    @pytest.mark.parametrize("kind", ["character special file", "fifo", "directory", "socket"])
+    def test_get_file_size_refuses_anything_but_a_regular_file(self, kind):
+        step = CollectArtifactsTaskStep(id="c", version=None, agent_name="solver")
+        sandbox = MagicMock()
+        sandbox.mode = "container"
+        sandbox.exec_with_output = AsyncMock(return_value=(0, f"{kind}:0\n", ""))
+        with pytest.raises(RuntimeError, match="not a regular file"):
+            _run(step._get_file_size(sandbox, None, "/app/artifact/report.pdf"))
+        assert sandbox.exec_with_output.await_args.args[:4] == ("stat", "-L", "-c", "%F:%s")
+
+    def test_a_file_over_max_bytes_is_a_hard_failure_and_is_not_read(self):
+        step = CollectArtifactsTaskStep(
+            id="c", version=None, base_path="/app/artifact", artifact_paths=["disk.img"], max_bytes=1024,
+        )
+        sandbox = MagicMock()
+        sandbox.mode = "container"
+        sandbox.app_dir_on_this_machine = None
+        sandbox.exec_with_output = AsyncMock(return_value=(0, f"regular file:{8 << 40}\n", ""))
+        sandbox.exec = AsyncMock()
+        provider = MagicMock()
+        provider.close = AsyncMock()
+        ctx = TaskStepContext()
+        collected, _, hard_failures = _run(step._collect_items(
+            provider, sandbox, None, step._resolve_items(ctx), ctx, MagicMock(), "aid", 1,
+        ))
+        assert (collected, hard_failures) == ({}, ["/app/artifact/disk.img"])
+        sandbox.exec.assert_not_awaited()
+
     def test_unreachable_sandbox_is_clear_error(self):
         """A re-run targeting an expired/unreachable sandbox fails with a clear message."""
         step = CollectArtifactsTaskStep(
@@ -598,6 +632,30 @@ class TestManifestResolution:
         # logical name -> (absolute source path, base_path-relative object name)
         assert items["gold_patch"] == ("/app/workspace/patches/gold_patch.diff", "patches/gold_patch.diff")
         assert items["dockerfile"] == ("/app/workspace/Dockerfile", "Dockerfile")
+
+    def test_manifest_entries_outside_base_path_are_not_read(self, caplog):
+        step = CollectArtifactsTaskStep(id="collect", version=None, base_path="/app/workspace", manifest_step_id="m9")
+        ctx = _manifest_ctx({
+            "report": "/home/op/.ssh/id_rsa",
+            "climb": "/app/workspace/../../etc/passwd",
+            "sibling": "/app/workspace-other/notes.md",
+            "kept": "/app/workspace/out/./report.md",
+        })
+        with caplog.at_level("WARNING"):
+            items = step._resolve_items(ctx)
+        assert items == [("kept", "/app/workspace/out/report.md", "out/report.md")]
+        assert "names /home/op/.ssh/id_rsa, outside /app/workspace; not collected" in caplog.text
+        assert "names /etc/passwd, outside /app/workspace" in caplog.text
+
+    def test_manifest_names_become_keys_with_no_separators_or_dot_segments(self):
+        step = CollectArtifactsTaskStep(id="collect", version=None, base_path="/app/workspace", manifest_step_id="m9")
+        ctx = _manifest_ctx({
+            "../../.bashrc": "/app/workspace/payload",
+            "logs/run.json": "/app/workspace/logs/run.json",
+            "..\\..\\evil": "/app/workspace/evil",
+            "..": "/app/workspace/dots.txt",
+        })
+        assert [k for k, _, _ in step._resolve_items(ctx)] == [".bashrc", "logs_run.json", "evil", "dots.txt"]
 
     def test_enumeration_drops_excluded_basenames(self):
         step = CollectArtifactsTaskStep(
@@ -935,6 +993,44 @@ class TestControllerChunkedRead:
                 assert False, "expected RuntimeError on a short read"
             except RuntimeError as e:
                 assert "refusing to upload a partial artifact" in str(e)
+
+    def test_a_file_over_max_bytes_is_refused_before_any_read(self):
+        step = CollectArtifactsTaskStep(id="c", version=None, env_id="ubuntu-cua", max_bytes=1024)
+        calls = []
+
+        async def call(deployed_env, tool_name, arguments):
+            calls.append(tool_name)
+            return json.dumps({"output": f"{8 << 40}\n", "error": "", "returncode": 0})
+
+        with patch.object(step, "_controller_call", side_effect=call), \
+             pytest.raises(RuntimeError, match="over the step's max_bytes of 1024"):
+            _run(step._controller_get_file(_cua_record(), "/x/sparse.img"))
+        assert calls == ["cua_bash"]
+
+    @pytest.mark.parametrize("make, size", [
+        (lambda p, tmp: p.write_bytes(b"hello"), 5),
+        (lambda p, tmp: None, -1),
+        (lambda p, tmp: p.symlink_to(tmp / "gone"), -1),
+        (lambda p, tmp: p.symlink_to("/dev/zero"), None),
+        (lambda p, tmp: os.mkfifo(p), None),
+        (lambda p, tmp: p.mkdir(), None),
+    ], ids=["regular", "absent", "dangling-link", "link-to-dev-zero", "fifo", "directory"])
+    def test_the_size_probe_sizes_only_a_regular_file(self, tmp_path, make, size):
+        """The probe's own script, run by a real shell as cua_bash runs it on the VM."""
+        target = tmp_path / "deliverable"
+        make(target, tmp_path)
+        step = CollectArtifactsTaskStep(id="c", version=None, env_id="ubuntu-cua")
+
+        async def call(deployed_env, tool_name, arguments):
+            done = subprocess.run(["bash", "-c", arguments["script"]], capture_output=True, text=True, timeout=10)
+            return json.dumps({"output": done.stdout, "error": done.stderr, "returncode": done.returncode})
+
+        with patch.object(step, "_controller_call", side_effect=call):
+            if size is None:
+                with pytest.raises(RuntimeError, match="not a regular file"):
+                    _run(step._controller_file_size(_cua_record(), str(target)))
+            else:
+                assert _run(step._controller_file_size(_cua_record(), str(target))) == size
 
     def test_absent_file_raises_filenotfound(self):
         """A missing file (wc errors with 'No such file') is reported absent so the caller

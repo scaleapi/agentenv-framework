@@ -16,7 +16,8 @@ File-access modes:
 Artifact paths come from one of these sources (in priority order):
   1. Manifest (`manifest_step_id`): a prior prompt step's declared artifacts from
      that step's PromptResponse.structured_output["artifacts"] (logical name -> abs path);
-     collected files are keyed by logical name.
+     collected files are keyed by logical name, its separators and dot segments dropped. The
+     agent writes the manifest, so an entry outside base_path is skipped.
   2. Seed data: context.metadata["seed"][artifacts_key] — a comma-separated
      list of filenames (e.g., "Dockerfile,run.sh,codebase.patch")
   3. Static fallback: artifact_paths list in the step definition
@@ -25,7 +26,11 @@ Each entry may be relative (joined to base_path) OR absolute (a leading '/',
 read verbatim). Absolute entries let a task collect deliverables that aren't
 under a single base_path — outputs aren't guaranteed to live on the desktop /
 in /app — without assuming a common directory. base_path only applies to
-relative entries and to the no-list enumeration fallback.
+relative entries, to manifest entries and to the no-list enumeration fallback.
+
+Only regular files are read, up to `max_bytes` each. A local sandbox's host is
+this machine, so there a file is read only where it resolves inside the
+sandbox's work dir or base_path.
 
 This allows the same step definition to collect different artifacts per seed.
 
@@ -67,10 +72,12 @@ base directory is assumed):
 from __future__ import annotations
 
 import asyncio
+import base64
 import functools
 import logging
 import os
 import json
+import posixpath
 import re
 import shlex
 import tempfile
@@ -98,6 +105,11 @@ _CUA_ENV_METADATA_MARKER = "cua_vm_sandbox_id"
 # or under this size take that single-shot path; larger ones stream in fixed byte ranges via
 # cua_bash so no single call has to move the whole file.
 _CUA_SINGLE_SHOT_MAX = 16 * 1024 * 1024  # 16 MB
+# The largest file a step collects unless it sets max_bytes.
+_DEFAULT_MAX_BYTES = 16 << 30
+# A read is abandoned past this floor plus a second for each _READ_RATE_FLOOR bytes of the file.
+_READ_DEADLINE_FLOOR_S = 300
+_READ_RATE_FLOOR = 1 << 20
 _CUA_CHUNK_BYTES = 8 * 1024 * 1024       # 8 MB per ranged read
 
 # artifact_paths entries with a URL scheme are not VM files — they're gold/source
@@ -239,6 +251,7 @@ class CollectArtifactsTaskStep(TaskStep):
         sandbox_name: Optional[str] = None,
         container_name: Optional[str] = None,
         universe_id_suffix: Optional[str] = None,
+        max_bytes: int = _DEFAULT_MAX_BYTES,
         depends_on: Optional[list[TaskStepDependency]] = None,
         fail_task_on_error: bool = True,
     ):
@@ -283,6 +296,7 @@ class CollectArtifactsTaskStep(TaskStep):
         self.exclude_basenames = set(exclude_basenames or [])
         self.sandbox_name = sandbox_name
         self.container_name = container_name
+        self.max_bytes = max_bytes
 
     def to_dict(self) -> dict:
         base = super().to_dict()
@@ -296,6 +310,7 @@ class CollectArtifactsTaskStep(TaskStep):
         base["sandbox_name"] = self.sandbox_name
         base["container_name"] = self.container_name
         base["universe_id_suffix"] = self.universe_id_suffix
+        base["max_bytes"] = self.max_bytes
         return base
 
     @classmethod
@@ -312,6 +327,7 @@ class CollectArtifactsTaskStep(TaskStep):
             sandbox_name=data.get("sandbox_name"),
             container_name=data.get("container_name"),
             universe_id_suffix=data.get("universe_id_suffix"),
+            max_bytes=data.get("max_bytes", _DEFAULT_MAX_BYTES),
         )
 
     def _resolve_filenames(self, context: TaskStepContext) -> list[str]:
@@ -358,14 +374,15 @@ class CollectArtifactsTaskStep(TaskStep):
                     continue
                 if "*" in path:
                     continue  # unresolved glob (e.g. per-iteration debug logs) — can't fetch a literal *
+                # The agent writes the manifest, so only a file under base_path, once normalized, is read.
+                path = posixpath.normpath(path)
+                if not path.startswith(self.base_path + "/"):
+                    logger.warning(f"collect '{self.id}': manifest entry {name!r} names {path}, outside "
+                                   f"{self.base_path}; not collected")
+                    continue
                 if os.path.basename(path) in self.exclude_basenames:
                     continue
-                rel = (
-                    path[len(self.base_path) + 1:]
-                    if path.startswith(self.base_path + "/")
-                    else os.path.basename(path)
-                )
-                items.append((name, path, rel))
+                items.append((_manifest_key(name, path), path, path[len(self.base_path) + 1:]))
             if skipped_nonfile:
                 logger.debug(
                     "collect(manifest=%s): skipped non-absolute manifest entries "
@@ -445,30 +462,34 @@ class CollectArtifactsTaskStep(TaskStep):
         ) from err
 
     async def _get_file_size(self, sandbox, container: Optional[str], source_path: str) -> int:
-        """Get file size on the agent's filesystem. Returns -1 only if the file is genuinely
-        absent; a `stat` that fails for any other reason RAISES so a failed size check is a
-        hard failure rather than a silent 'missing' skip that drops an existing deliverable.
+        """Size of the regular file at ``source_path`` on the agent's filesystem, links followed. Returns -1 only if the
+        file is genuinely absent; a `stat` that fails for any other reason RAISES so a failed size check is a hard
+        failure rather than a silent 'missing' skip that drops an existing deliverable, and so does anything but a
+        regular file (a device, a FIFO, a directory, or a link to one), which could stream without end.
         VM-mode wraps in `docker exec <container>`; container-mode runs `stat` directly."""
-        args = _exec_args(sandbox, container, ("stat", "-c", "%s", source_path))
+        args = _exec_args(sandbox, container, ("stat", "-L", "-c", "%F:%s", source_path))
         exit_code, stdout, stderr = await sandbox.exec_with_output(*args)
         if exit_code != 0:
             if _looks_absent(stderr):
                 return -1
             raise RuntimeError(f"could not size {source_path} (stat exit {exit_code}): {stderr[:200]}")
-        return int(stdout.strip())
+        kind, _, size = stdout.strip().rpartition(":")
+        if kind not in ("regular file", "regular empty file"):
+            raise RuntimeError(f"{source_path} is not a regular file ({kind or 'unknown type'}); refusing to read it")
+        return int(size)
 
     async def _collect_file(
-        self, sandbox, container: Optional[str], source_path: str, object_name: str, store, artifact_id: str,
-        version: int, content_type: str,
+        self, sandbox, container: Optional[str], source_path: str, size: int, object_name: str, store,
+        artifact_id: str, version: int, content_type: str,
     ) -> str:
-        """Read a file out of the sandbox and upload it to S3 — one path, any size.
+        """Read a file of ``size`` bytes out of the sandbox and upload it to S3.
 
         base64-encode in the sandbox (raw binary over a websocket exec transport is
         silently dropped; ASCII survives), stream stdout + decode incrementally to
         a temp file (bounds memory), then multipart-upload. stderr is drained in
-        parallel so the shared output pump can't backpressure-stall."""
-        import base64
-        bash_cmd = f"base64 < {shlex.quote(source_path)}"
+        parallel so the shared output pump can't backpressure-stall. The sandbox reads
+        no more than ``size`` bytes, and a read that outlasts its deadline is abandoned."""
+        bash_cmd = f"head -c {size} < {shlex.quote(source_path)} | base64"
         args = _exec_args(sandbox, container, ("bash", "-c", bash_cmd))
 
         local_path = None
@@ -479,24 +500,12 @@ class CollectArtifactsTaskStep(TaskStep):
 
             process = await sandbox.exec(*args)
             stderr_task = asyncio.create_task(process.stderr.read())
-            stdout = process.stdout
-            with open(local_path, "wb") as fh:
-                if hasattr(stdout, "__aiter__"):
-                    # Async-iterable stdout (websocket exec): stream, decoding 4-char-aligned base64.
-                    pending = bytearray()
-                    async for chunk in stdout:
-                        pending += chunk.translate(None, b"\r\n")  # strip 76-col wrap
-                        n = (len(pending) // 4) * 4
-                        if n:
-                            fh.write(base64.b64decode(pending[:n]))
-                            del pending[:n]
-                    if pending:
-                        fh.write(base64.b64decode(pending))
-                else:
-                    # Modal stdout has read() but no __aiter__: read all, decode once.
-                    data = (await stdout.read()).translate(None, b"\r\n")
-                    fh.write(base64.b64decode(data))
-            exit_code = await process.wait()
+            deadline = _READ_DEADLINE_FLOOR_S + size / _READ_RATE_FLOOR
+            try:
+                exit_code = await asyncio.wait_for(_decode_to_file(process, local_path, size), timeout=deadline)
+            except TimeoutError:
+                stderr_task.cancel()
+                raise RuntimeError(f"reading {source_path} took more than {deadline:.0f}s; abandoned it") from None
             try:
                 await stderr_task
             except Exception:
@@ -558,9 +567,9 @@ class CollectArtifactsTaskStep(TaskStep):
         as a missing file and silently dropping an existing deliverable. ``wc -c`` is
         portable across the Ubuntu and macOS desktop VMs; ``stat``'s flags are not. A
         transport exception from ``_controller_call`` propagates unchanged."""
-        out = await self._controller_call(
-            deployed_env, "cua_bash", {"script": f"wc -c < {shlex.quote(path)}"}
-        )
+        quoted = shlex.quote(path)
+        script = f'[ ! -e {quoted} ] || [ -f {quoted} ] || {{ echo "not a regular file" >&2; exit 1; }}; wc -c < {quoted}'
+        out = await self._controller_call(deployed_env, "cua_bash", {"script": script})
         # A present file (even 0 bytes) prints its size to stdout; empty stdout means wc failed.
         text = _cua_bash_stdout(out).strip()
         if text:
@@ -581,11 +590,11 @@ class CollectArtifactsTaskStep(TaskStep):
         lenient skip). Small files come back in one ``cua_get_file`` call; large ones stream
         in byte ranges straight to disk, so neither the transfer nor this process ever holds
         the whole file in memory."""
-        import base64
-
         size = await self._controller_file_size(deployed_env, path)
         if size < 0:
             raise FileNotFoundError(f"file not found on CUA VM: {path}")
+        if size > self.max_bytes:
+            raise RuntimeError(f"{path} is {size} bytes, over the step's max_bytes of {self.max_bytes}")
         with tempfile.NamedTemporaryFile(delete=False, suffix=f"-{os.path.basename(path)}") as tmp:
             local_path = tmp.name
         try:
@@ -607,8 +616,6 @@ class CollectArtifactsTaskStep(TaskStep):
         than scans. Each range is decoded and written straight to the file so memory stays
         bounded to one chunk. base64 may wrap, so whitespace is stripped before decoding. A
         short read fails loudly rather than leaving a truncated artifact."""
-        import base64
-
         logger.info(
             f"Streaming {path} ({size} bytes) off the CUA VM in {_CUA_CHUNK_BYTES}-byte chunks"
         )
@@ -920,6 +927,8 @@ class CollectArtifactsTaskStep(TaskStep):
         else:
             logger.info(f"Collecting {len(items)} artifacts from {self.base_path}")
 
+        # A local sandbox's host is this machine: only what resolves inside its work dir or base_path is read.
+        roots = await self._local_roots(sandbox) if container is None and sandbox.app_dir_on_this_machine else None
         collected: dict[str, str] = {}
         file_artifacts: dict[str, FileArtifact] = {}
         hard_failures: list[str] = []
@@ -928,16 +937,19 @@ class CollectArtifactsTaskStep(TaskStep):
             # silent skip) and provider.close() below still runs; only a genuinely-absent
             # file (size -1) is the lenient skip.
             try:
-                file_size = await self._get_file_size(sandbox, container, source_path)
+                read_path = source_path if roots is None else await _resolved_inside(sandbox, source_path, roots)
+                file_size = -1 if read_path is None else await self._get_file_size(sandbox, container, read_path)
                 if file_size < 0:
                     logger.warning(f"File not found: {source_path}")
                     continue
+                if file_size > self.max_bytes:
+                    raise RuntimeError(f"{source_path} is {file_size} bytes, over the step's max_bytes of {self.max_bytes}")
 
                 ext = os.path.splitext(object_name)[1]
                 content_type = _CONTENT_TYPES.get(ext, "application/octet-stream")
 
                 object_url = await self._collect_file(
-                    sandbox, container, source_path, object_name, store, artifact_id, version, content_type,
+                    sandbox, container, read_path, file_size, object_name, store, artifact_id, version, content_type,
                 )
 
                 collected[key] = object_url
@@ -960,6 +972,10 @@ class CollectArtifactsTaskStep(TaskStep):
         logger.info(f"Collected {len(collected)}/{len(items)} artifacts")
         await provider.close()
         return collected, file_artifacts, hard_failures
+
+    async def _local_roots(self, sandbox) -> tuple[str, ...]:
+        roots = (str(sandbox.app_dir_on_this_machine.resolve()), await _resolved(sandbox, self.base_path))
+        return tuple(root.rstrip("/") + "/" for root in roots if root)
 
     def _register_file_artifact(self, store, file_artifacts, artifact_id, key, object_name, content_type, object_url, context):
         """Register a FileArtifact document pointing at the already-uploaded S3
@@ -1050,3 +1066,52 @@ class CollectArtifactsTaskStep(TaskStep):
             )
 
         return context
+
+
+def _manifest_key(name: str, path: str) -> str:
+    """The agent's name for a manifest entry as a key no reader takes for a path: its separators and dot segments
+    dropped, else the file's own name. Consumers write files under these keys, a zip of them among them."""
+    parts = [part for part in re.split(r"[\\/]+", name) if part not in ("", ".", "..")]
+    return "_".join(parts) or posixpath.basename(path)
+
+
+async def _decode_to_file(process, local_path: str, size: int) -> int:
+    """Decode ``process``'s base64 stdout into ``local_path`` and return its exit status, refusing a byte past ``size``."""
+    written = 0
+
+    def write(fh, data: bytes) -> None:
+        nonlocal written
+        written += len(data)
+        if written > size:
+            raise RuntimeError(f"the sandbox sent more than the {size} bytes it reported; refusing the rest")
+        fh.write(data)
+
+    stdout = process.stdout
+    with open(local_path, "wb") as fh:
+        if hasattr(stdout, "__aiter__"):
+            # Async-iterable stdout (websocket exec): stream, decoding 4-char-aligned base64.
+            pending = bytearray()
+            async for chunk in stdout:
+                pending += chunk.translate(None, b"\r\n")  # strip 76-col wrap
+                n = (len(pending) // 4) * 4
+                if n:
+                    write(fh, base64.b64decode(pending[:n]))
+                    del pending[:n]
+            if pending:
+                write(fh, base64.b64decode(pending))
+        else:
+            # A provider whose exec hands back its output whole: decode it once. The sandbox reads at most `size` bytes.
+            write(fh, base64.b64decode((await stdout.read()).translate(None, b"\r\n")))
+    return await process.wait()
+
+
+async def _resolved(sandbox, path: str) -> str | None:
+    exit_code, stdout, _ = await sandbox.exec_with_output("readlink", "-f", path)
+    return (stdout.strip() or None) if exit_code == 0 else None
+
+
+async def _resolved_inside(sandbox, path: str, roots: tuple[str, ...]) -> str | None:
+    resolved = await _resolved(sandbox, path)
+    if resolved is not None and not (resolved + "/").startswith(roots):
+        raise RuntimeError(f"{path} resolves to {resolved}, outside the sandbox's work dir and base_path on this machine")
+    return resolved

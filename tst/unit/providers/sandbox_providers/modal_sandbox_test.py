@@ -488,3 +488,17 @@ async def test_get_sandbox_still_raises_for_a_finished_sandbox_so_a_reattach_see
         from_id.aio = AsyncMock(return_value=sb)
         with pytest.raises(modal.exception.ConflictError):
             await _patched_provider.get_sandbox("sb-finished")
+
+
+@pytest.mark.asyncio
+async def test_exec_output_streams_as_modal_yields_it():
+    class _Stream:
+        async def _chunks(self):
+            for chunk in (b"QUJD", b"REVG"):
+                yield chunk
+
+        def __aiter__(self):
+            return self._chunks()
+
+    assert [chunk async for chunk in modal_sandbox._ModalStreamAdapter(_Stream())] == [b"QUJD", b"REVG"]
+

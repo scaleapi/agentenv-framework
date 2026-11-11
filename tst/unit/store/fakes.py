@@ -249,6 +249,7 @@ class CollectingVm:
 
     mode = "vm"
     type = None
+    app_dir_on_this_machine = None
 
     def scoped_name(self, name):
         return name
@@ -258,11 +259,11 @@ class CollectingVm:
 
     async def exec_with_output(self, *args):
         if "stat" in args:
-            return 0, str(len(COLLECTED[args[-1]])), ""
+            return 0, f"regular file:{len(COLLECTED[args[-1]])}", ""
         return 0, "ok", ""
 
     async def exec(self, *args):
-        path = args[-1].split("base64 < ", 1)[1].strip("'")
+        path = args[-1].split(" < ", 1)[1].split(" | ", 1)[0].strip("'")
         return SimpleNamespace(stdout=_Stream(base64.b64encode(COLLECTED[path])), stderr=_Stream(b""),
                                wait=lambda: asyncio.sleep(0, result=0))
 
