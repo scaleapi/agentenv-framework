@@ -13,7 +13,7 @@ STEP_TYPES = sorted(get_task_step_registry().items())
 # A stored step of each built-in type that scopes fields of its own, holding only what the type requires.
 MINIMAL = {
     "add_skills": {"skills": [{"name": "notes", "description": "how notes are kept"}]},
-    "always_on": {"prompt": "hi", "user_sim": "linda"},
+    "always_on": {"user_sim": "linda"},
     "deploy_agent": {},
     "deploy_env": {"env_id": "crm-env"},
     "deploy_user_sim_agent": {"agent_name": "hannah", "model": "m", "multi_day": False, "opening_prompt": "hi",

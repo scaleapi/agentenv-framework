@@ -68,9 +68,9 @@ async def test_the_process_log_carries_no_one_s_words_only_the_timeline_does(mon
     await rig.arm()
     rig.triggers(rig.notify_at("sam", "2026-11-09T15:00:00Z", "SECRET-ALERT Sam's address", channel="noor 30"))
     caplog.set_level("INFO", logger=ao.logger.name)
-    step = ao.AlwaysOnTaskStep("week", None, user_sim="linda", prompt="SECRET-PROMPT sort the cdmx weekend",
-                               prompt_id="ask", agent_name="solver")
-    ctx = await rig.run(step)
+    step = ao.AlwaysOnTaskStep("week", None, user_sim="linda", prompt_id="ask", agent_name="solver")
+    ctx = rig.context(user={"opening": "SECRET-PROMPT sort the cdmx weekend"})
+    ctx = await rig.run(step, ctx)
 
     logged = "\n".join(r.getMessage() for r in caplog.records if r.name == ao.logger.name)
     assert "always_on wake" in logged and "always_on user_sim_read" in logged

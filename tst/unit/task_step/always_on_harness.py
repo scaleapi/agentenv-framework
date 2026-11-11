@@ -210,11 +210,11 @@ class Rig:
         ctx.metadata[USER_SIMS_KEY] = {"linda": {
             "name": "linda", "model": "sim-model", "agent_name": "user-sim", "user_version": "ours",
             "display_name": "Linda Murphy", "first_name": "Linda", "time_zone": "America/New_York",
-            "description": "Linda, planning Noor's 30th.", **(user or {})}}
+            "description": "Linda, planning Noor's 30th.", "opening": "sort the cdmx weekend", **(user or {})}}
         return ctx
 
     def step(self, **settings: Any) -> ao.AlwaysOnTaskStep:
-        return ao.AlwaysOnTaskStep("week", None, user_sim="linda", prompt="sort the cdmx weekend", prompt_id="ask",
+        return ao.AlwaysOnTaskStep("week", None, user_sim="linda", prompt_id="ask",
                                    agent_name="solver", **settings)
 
     async def run(self, step: ao.AlwaysOnTaskStep, ctx: Optional[TaskStepContext] = None) -> TaskStepContext:

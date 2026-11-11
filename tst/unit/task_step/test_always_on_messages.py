@@ -116,7 +116,7 @@ async def test_a_task_can_turn_each_off(monkeypatch, tmp_path):
 
 
 def test_off_survives_a_round_trip():
-    step = ao.AlwaysOnTaskStep("week", None, user_sim="linda", prompt="hi", prompt_id="p", agent_name="a",
+    step = ao.AlwaysOnTaskStep("week", None, user_sim="linda", prompt_id="p", agent_name="a",
                                stay_quiet=False, nudge=False, wake_reminder=False)
     again = ao.AlwaysOnTaskStep.from_dict(step.to_dict())
     assert (again.stay_quiet, again.nudge, again.wake_reminder) == (False, False, False)

@@ -217,15 +217,17 @@ class AlwaysOnTaskStep(PromptAgentTaskStep):
         for unsupported in ("max_conversation_turns", "user_agent_name", "user_a2a_url", "post_turn_hooks",
                             "user_output_format", "user_model", "snapshot_config"):
             prompt_fields.pop(unsupported, None)
-        # With no prompt of its own, the run's prompt is the user sim's opening, read when the run starts.
-        opening_is_prompt = prompt_fields.get("prompt") is None and prompt_fields.get("parts") is None
-        if opening_is_prompt:
-            prompt_fields["prompt"] = ""  # for prompt_agent's check; unset again below
+        # The user's first message is the user sim's opening_prompt, read when the run starts: whoever plays the user
+        # sends it, so the step has no prompt of its own.
+        given = [k for k in ("prompt", "parts") if prompt_fields.get(k) is not None]
+        if given:
+            raise ValueError(f"always_on takes no {' or '.join(given)}: the user's first message is the "
+                             "deploy_user_sim_agent step's opening_prompt; move it there")
+        prompt_fields["prompt"] = ""  # for prompt_agent's check; unset again below
         super().__init__(id, version, max_conversation_turns=max(1, int(max_wakes)), model=model,
                          model_params=model_params, effort=effort, max_thinking_tokens=max_thinking_tokens,
                          harness=harness, trajectory_output_prefix=trajectory_output_prefix, **prompt_fields)
-        if opening_is_prompt:
-            self.prompt = None
+        self.prompt = None
         if not user_sim:
             raise ValueError("always_on needs user_sim, the agent_name of a deploy_user_sim_agent step")
         if end_time is not None:
@@ -462,15 +464,9 @@ class _Run:
             raise ValueError(f"always_on: user sim '{step.user_sim}' sets {' and '.join(timed)}, which need the "
                              "task's clock, and no env's clock is armed; run sync_env_clock before this step, or drop "
                              f"{' and '.join(timed)} from the user sim's persona")
-        if self._opening_is_prompt() and not us.get("opening"):
-            raise ValueError(f"always_on: neither this step nor the user sim '{step.user_sim}' has a prompt; give the "
-                             "deploy_user_sim_agent step an opening_prompt")
-        if us.get("prompt_set") and not self._opening_is_prompt():  # her prompt already says what she texted
-            seeded = self.step._apply_seed([{"kind": "text", "text": us.get("opening") or ""}],
-                                           ctx.metadata.get("seed", {}))
-            if seeded[0]["text"] != self._effective_prompt():
-                raise ValueError(f"always_on: its prompt isn't the opening the user sim '{step.user_sim}' was deployed "
-                                 "with; set the prompt once, as the deploy_user_sim_agent step's opening")
+        if not us.get("opening"):
+            raise ValueError(f"always_on: the user sim '{step.user_sim}' has no opening_prompt, the user's first "
+                             "message; give the deploy_user_sim_agent step one")
         now = await self.now()
         self.opening = {"at": _iso(now), "text": self._effective_prompt()}
         self.person["opening"] = self.opening
@@ -1093,15 +1089,9 @@ class _Run:
             at, self.read_mode = self._available(now)
         await self.read(at, last=True)
 
-    def _opening_is_prompt(self) -> bool:
-        """Whether the step has no prompt of its own, so the user sim's opening is the run's prompt."""
-        return self.step.prompt is None and self.step.parts is None
-
     def _prompt_parts(self) -> list[dict]:
-        """The task's prompt as A2A parts, its seed applied."""
-        parts = ([{"kind": "text", "text": self.us["opening"]}] if self._opening_is_prompt()
-                 else self.step._effective_parts())
-        return self.step._apply_seed(parts, self.ctx.metadata.get("seed", {}))
+        """The user's first message, the user sim's opening, as A2A parts, its seed applied."""
+        return self.step._apply_seed([{"kind": "text", "text": self.us["opening"]}], self.ctx.metadata.get("seed", {}))
 
     def _effective_prompt(self) -> str:
         return "\n".join(p.get("text", "") for p in self._prompt_parts() if p.get("kind") == "text")
@@ -1703,7 +1693,7 @@ class _Run:
         step, ctx = self.step, self.ctx
         traj = next((u for u in reversed(self.per_turn_trajectory_urls) if u), None)
         ctx.prompt_responses.append(PromptResponse(
-            prompt_id=step.prompt_id, response=final_text, prompt_text=self._effective_prompt() if self._opening_is_prompt() else step.prompt,
+            prompt_id=step.prompt_id, response=final_text, prompt_text=self._effective_prompt(),
             agent_trajectory_object_url=traj, agent_trajectory_object_prefix=step._trajectory_prefix(),
             target_agent_per_turn_trajectory_object_urls=self.per_turn_trajectory_urls or None,
             source_agent_per_turn_prompt_parts=self.per_turn_parts or None, tool_call_count=self.tool_calls,

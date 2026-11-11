@@ -20,7 +20,7 @@ What always_on reads from the record (``metadata["user_sims"][agent_name]``):
   ``response_times`` need the task's clock (``sync_env_clock``): always_on refuses to start a run that sets either
   with no clock armed. The user's time zone is the task clock's.
 - ``description``, ``permissions``, ``keep_private``: in ``person``, for the reads.
-- ``opening_prompt``: the user's first message, always_on's prompt when it sets none.
+- ``opening_prompt``: the user's first message, which always_on sends; always_on has no prompt of its own.
 - ``prompt_set``: the system prompt and model are on the agent, so always_on sets neither; ``multi_day``: the done line
   the prompt was written with, which always_on refuses to run against a run of the other kind.
 - ``model``, ``model_source``, ``prompt_sha256``, ``user_version``, ``setup``: for the run's record.

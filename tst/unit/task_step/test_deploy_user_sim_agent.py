@@ -348,16 +348,12 @@ async def test_always_on_refuses_a_user_deployed_for_the_other_kind_of_run(monke
     assert rig.sent == []
 
 
-@pytest.mark.usefixtures("local_stores")
-@pytest.mark.asyncio
-async def test_always_on_refuses_a_prompt_that_isn_t_the_user_s_opening(monkeypatch, tmp_path):
-    rig = Rig(monkeypatch, tmp_path)
-    await rig.arm()
-    ctx = await _rig_context(monkeypatch, rig, multi_day=False)
-    with pytest.raises(ValueError, match="isn't the opening the user sim 'user-sim' was deployed with"):
-        await rig.run(_always_on(prompt="something else"), ctx)
-    ctx = await _rig_context(monkeypatch, rig, multi_day=False)
-    await rig.run(_always_on(prompt="sort the cdmx weekend"), ctx)  # the same text twice is fine
+@pytest.mark.parametrize("given", [{"prompt": "sort the cdmx weekend"},
+                                   {"parts": [{"kind": "text", "text": "sort the cdmx weekend"}]}])
+def test_always_on_takes_no_prompt_of_its_own(given):
+    with pytest.raises(ValueError, match="always_on takes no (prompt|parts): the user's first message is the "
+                                         "deploy_user_sim_agent step's opening_prompt"):
+        _always_on(**given)
 
 
 @pytest.mark.usefixtures("local_stores")
@@ -367,7 +363,7 @@ async def test_always_on_with_no_prompt_needs_the_user_s_opening(monkeypatch, tm
     await rig.arm()
     ctx = await _rig_context(monkeypatch, rig, multi_day=False)
     ctx.metadata[USER_SIMS_KEY]["user-sim"]["opening"] = None  # a record written by hand: the step itself requires one
-    with pytest.raises(ValueError, match="give the deploy_user_sim_agent step an opening_prompt"):
+    with pytest.raises(ValueError, match="has no opening_prompt, the user's first message"):
         await rig.run(_always_on(), ctx)
 
 

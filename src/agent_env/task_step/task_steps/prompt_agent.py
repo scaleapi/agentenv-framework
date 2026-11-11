@@ -1205,6 +1205,7 @@ class _BuiltInUserSim:
         text = "\n".join(p.get("text", "") for p in initial_parts if p.get("kind") == "text") or None
         deployed_with = step._apply_seed([{"kind": "text", "text": record.get("opening") or ""}],
                                          context.metadata.get("seed", {}))[0]["text"].strip()
+        # TODO(FD-5495): the first message is written twice, here and as the user sim's opening_prompt; write it once.
         if (text or "").strip() != deployed_with:
             # Its prompt quotes the opening it was deployed with as what the user sent; another one would contradict it.
             raise ValueError(f"prompt_agent '{step.id}': its prompt isn't the opening_prompt its user "

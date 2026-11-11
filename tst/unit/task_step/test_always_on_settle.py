@@ -171,9 +171,9 @@ async def test_contact_replies_still_in_progress_at_the_end_are_recorded(monkeyp
 
 
 def test_the_contact_settings_survive_a_round_trip_and_a_bad_limit_is_refused():
-    step = ao.AlwaysOnTaskStep("week", None, user_sim="linda", prompt="hi", prompt_id="p", agent_name="a",
+    step = ao.AlwaysOnTaskStep("week", None, user_sim="linda", prompt_id="p", agent_name="a",
                                contact_timeout_seconds=600, contact_replies_in_parallel=False)
     again = ao.AlwaysOnTaskStep.from_dict(step.to_dict())
     assert (again.contact_timeout_seconds, again.contact_replies_in_parallel) == (600.0, False)
     with pytest.raises(ValueError, match="contact_timeout_seconds"):
-        ao.AlwaysOnTaskStep("week", None, user_sim="linda", prompt="hi", agent_name="a", contact_timeout_seconds=0)
+        ao.AlwaysOnTaskStep("week", None, user_sim="linda", agent_name="a", contact_timeout_seconds=0)

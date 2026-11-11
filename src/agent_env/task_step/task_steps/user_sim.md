@@ -31,7 +31,7 @@ Its own fields:
 | `agent_name` | required | The agent's name, and the key always-on's `user_sim` names |
 | `persona` | required | Who the user is: `display_name` (their full name), `first_name` (else the display name's first word), `time_zone` (their IANA zone; else the task clock's, else UTC; a clock that sets a different zone is refused), `description`, `permissions`, `keep_private`, `schedule`, `response_times`, `max_replies` (after that many replies the user stops reading) |
 | `model` | required | The user sim's model. This step's `step_params` `model` wins, then the run's `user_model` (`--user-model`), then this |
-| `opening_prompt` | required | The user's first message. It's the always-on step's prompt when that sets none; one that sets its own must say the same |
+| `opening_prompt` | required | The user's first message. The always-on step sends it and has no prompt of its own |
 | `multi_day` | required, for now | Whether the run goes past the day it starts on (always-on's `end_time` falls on a later day). It picks the prompt's done line; always-on refuses a run of the other kind |
 
 `multi_day` is a stopgap: the prompt is written before the run, so the step has to be told which done line to use.
@@ -44,7 +44,8 @@ whose card takes no system prompt or no model fails the step, since without them
 
 **Used with prompt_agent.** A `prompt_agent` step whose `user_agent_name` is this step's `agent_name` (and sets no
 `user_a2a_url`) talks to the same user in one sitting: each reply of the agent is one read, with no phone. Its prompt
-must be this step's `opening_prompt`, which the user's prompt quotes as what they sent. `reply` is the agent's next prompt; `done` with a message reaches the agent and ends
+must be this step's `opening_prompt`, which the user's prompt quotes as what they sent (FD-5495 is to write it once).
+`reply` is the agent's next prompt; `done` with a message reaches the agent and ends
 the conversation after its answer; `done` without one, or `no_reply`, ends it at once. After `max_replies` replies,
 the last one reaches the agent and the conversation ends after its answer. Each answer is recorded in
 `metadata["user_sim_reads"][<step id>]`. Set `multi_day: false` here, and no `user_output_format` or `user_model` on
