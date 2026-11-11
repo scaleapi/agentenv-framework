@@ -68,6 +68,7 @@ from agent_env.a2a_agent import conversation_store
 from agent_env.artifact import EnvironmentUniverseArtifact
 from agent_env.artifact.artifacts.environment import EnvironmentArtifact
 from agent_env.artifact.artifacts.file import FileArtifact
+from agent_env.config import get_config
 from agent_env.config.runtime import WEBSITE_BROWSER_OVERRIDE, run_env_ids
 from agent_env.env import Env
 from agent_env.env.env import DeployedEnv
@@ -83,6 +84,7 @@ from agent_env.task import Task
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.browser.connect_cdp import BrowserConnectCdpTaskStep
+from agent_env.task_step.task_steps.browser.sign_in import BrowserSignInTaskStep
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
@@ -92,6 +94,7 @@ from tst.integration.computer.browser_data import SITE as DATA_SITE, check_brows
 from tst.integration.computer.browser_steps import check_browser_steps
 from tst.integration.computer.browser_state import check_browser_state, check_browser_state_under_chaos
 from tst.integration.computer.multi_env_computers_test import _containers, _gateway, _image
+from tst.integration.computer.website_browser_test import _signed_in
 from tst.integration.computer.start_tabs import host_pages, tabs_of
 from tst.integration.store.local_parallel_deploy_test import _seed_bootstrap_envs
 from tst.util import local_sandboxes
@@ -1445,6 +1448,57 @@ async def test_behind_a_front_that_ends_tls_the_multi_envs_gateway_hands_out_htt
     assert unnamed["ws_url"].startswith(f"ws://{host}/browser/chromium/cdp/"), unnamed
     assert seen[MULTI_SITE]["error"] is None and seen[MULTI_SITE].get("ready") == "complete", seen
     assert not report.failed
+
+
+#: A page the site that offers session serves, which says who a request signs in, and chromium starting there.
+SESSION_PAGE = "https://shop.test/api/session"
+SESSION_CHROMIUM = {**MULTI_CHROMIUM,
+                    "env_params": {"form": "container", "app_settings": {"chromium": {"start_urls": [SESSION_PAGE]}}}}
+
+
+@pytest.fixture(scope="module")
+def session_shop(browser_computer):
+    """A site named shop.test that offers website/v1 session, under a local id, as a multi env naming chromium's local
+    id must be."""
+    with namespace_routing():
+        _seed_bootstrap_envs()
+        uid = uuid.uuid4().hex[:8]
+        return WebsiteEnv.put(id=f"@local/~/signin-{uid}/shop", environment_name="shop", domains=["shop.test"],
+                              server_docker_image_artifact=_image("session_website", f"signin-shop-{uid}"))
+
+
+@pytest.mark.asyncio
+async def test_under_a_chromium_default_a_site_gets_chromium_unnamed_which_browser_sign_in_signs_in_after_each_reset(
+        browser_computer, session_shop):
+    config = get_config()
+    with namespace_routing():
+        office = MultiEnv.put(id=f"{session_shop.id.rsplit('/', 1)[0]}/office", mcp_server_envs=[],
+                              website_envs=[session_shop], name="office")
+        sign_in = BrowserSignInTaskStep(id="in", version=None, env_id=office.id, site=session_shop.id, user="alex")
+        context = TaskStepContext()
+        config.default_website_browser_env_id = browser_computer.id  # the config's default, not the run's override
+        try:
+            [deployed] = (await DeployEnvTaskStep(id="office", version=None, env_id=office.id, sandbox_type="local",
+                                                  ttl_seconds=900, child_envs={"chromium": SESSION_CHROMIUM}
+                                                  ).execute(context)).deployed_envs
+            browser = DeployedEnv.from_dict(deployed.child_envs["chromium"])
+            before = await _signed_in(browser)
+            await sign_in.execute(context)
+            signed = await _signed_in(browser)
+            await ResetEnvTaskStep(id="reset", version=None, env_id=office.id, fail_task_on_error=True).execute(context)
+            after_reset = await _signed_in(browser)
+            await sign_in.execute(context)
+            again = await _signed_in(browser)
+        finally:
+            config.default_website_browser_env_id = None
+            report = await teardown_run(context)
+
+    assert not report.failed
+    assert office.browser_envs is None and set(deployed.child_envs) == {"chromium"}
+    [start_tab] = deployed.child_envs["chromium"]["metadata"]["computer"]["start_tabs"]["chromium"]
+    assert (start_tab["url"], start_tab["site"], start_tab["outcome"]) == (SESSION_PAGE, "shop", "loaded"), start_tab
+    assert (before, signed, after_reset, again) == (None, "alex", None, "alex")
+    assert context.metadata["browser_steps"]["in"]["names"] == ["shop.test"]
 
 
 @pytest.mark.asyncio
