@@ -321,11 +321,17 @@ class Gateway:
             if GET_TIME_TOOL_NAME in self._tool_server_urls:
                 return self._json_response(
                     {"ok": False, "error": f"'{GET_TIME_TOOL_NAME}' is already registered by a backing server"}, 409)
+            virtual_time, rate = body.get("virtual_time"), body.get("virtual_seconds_per_real_second")
             try:
                 wait = parse_wait(body.get("wait_followers_s"))
-                state = self._clock.set_time(body.get("virtual_time"), body.get("virtual_seconds_per_real_second"))
+                if virtual_time is None and rate is not None:
+                    state = self._clock.set_rate(rate)
+                else:
+                    state = self._clock.set_time(virtual_time, rate)
             except ClockError as e:
                 return self._json_response({"ok": False, "error": str(e)}, 400)
+            if virtual_time is None:
+                return await self._clock_written({**state, "due": self._trigger_engine.clock_advanced()}, wait)
             self._register_get_time_tool()
             return await self._clock_written(state, wait)
 

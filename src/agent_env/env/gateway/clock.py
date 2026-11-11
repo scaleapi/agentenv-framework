@@ -173,25 +173,37 @@ class Clock:
         with self._lock:
             return self._t0
 
-    def set_time(self, virtual_time: str | None, rate=1.0) -> dict:
-        """Arm/re-arm: anchor t0=virtual_time to now, advancing at `rate` virtual s per real s. Without virtual_time an
-        armed clock re-arms at its own time as of the write, so a rate change can't step it back by a stale read."""
-        t0 = None if virtual_time is None else _parse_rfc3339(virtual_time)
+    def set_time(self, virtual_time: str, rate=1.0) -> dict:
+        """Arm/re-arm: anchor t0=virtual_time to now, advancing at `rate` virtual s per real s."""
+        t0 = _parse_rfc3339(virtual_time)
         r = _parse_rate(1.0 if rate is None else rate)
+        if t0 > _MAX_T0 - timedelta(seconds=_OVERFLOW_HORIZON_S * r):
+            raise ClockError(f"virtual_time {virtual_time!r} at rate {r:g} would overflow datetime near the max")
         with self._lock:
-            now = self._now()
-            if t0 is None:
-                if not self._armed or self._t0 is None:
-                    raise ClockError("virtual_time is required to arm the clock")
-                t0 = _advance(self._t0, (now - self._anchor) * self._rate + self._ahead)
-            if t0 > _MAX_T0 - timedelta(seconds=_OVERFLOW_HORIZON_S * r):
-                raise ClockError(f"virtual_time {virtual_time or _iso(t0)!r} at rate {r:g} would overflow datetime near the max")
-            self._bank(t0, now)
+            self._bank(t0)
             self._t0 = t0
             self._rate = r
             self._ahead = 0.0
             self._armed = True
             self._generation += 1
+            self._count += 1
+        return self.state()
+
+    def set_rate(self, rate) -> dict:
+        """Change an armed clock's rate from its time at the call, keeping t0 and generation as an advance does, so time
+        triggers keep their marks and a rate change can't step the clock back by a time read a moment earlier."""
+        r = _parse_rate(rate)
+        with self._lock:
+            if not self._armed or self._t0 is None:
+                raise ClockError("clock is not armed")
+            now = self._now()
+            ran = (now - self._anchor) * self._rate
+            if _advance(self._t0, ran + self._ahead) > _MAX_T0 - timedelta(seconds=_OVERFLOW_HORIZON_S * r):
+                raise ClockError(f"rate {r:g} would overflow datetime near the max")
+            self._lived += ran
+            self._ahead += ran
+            self._anchor = now
+            self._rate = r
             self._count += 1
         return self.state()
 
@@ -259,10 +271,9 @@ class Clock:
                     "virtual_time": _iso(_advance(self._t0, elapsed * self._rate + self._ahead)),
                     "version": self.version}
 
-    def _bank(self, t0: datetime | None = None, now: float | None = None) -> None:
-        """Fold the stretch since the last arm/clear into `_lived` at its rate, and start the next one at `now` (the
-        caller's own reading, when it took one, so the new arm starts at the instant its t0 was read)."""
-        now = self._now() if now is None else now
+    def _bank(self, t0: datetime | None = None) -> None:
+        """Fold the stretch since the last arm/clear into `_lived` at its rate, and start the next one now."""
+        now = self._now()
         ran = (now - self._anchor) * self._rate
         self._lived += ran
         if t0 is not None and self._armed:  # a re-arm forward is time the world lived through; one back adds nothing

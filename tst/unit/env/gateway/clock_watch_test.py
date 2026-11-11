@@ -13,7 +13,8 @@ from agent_env.env.gateway.clock import Clock, ClockError
 from agent_env.env.gateway.clock_followers import ClockFollowers
 from agent_env.env.gateway.entrypoint import parse_clock_followers
 from agent_env.env.gateway.gateway import Gateway
-from tst.unit.env.gateway.triggers_time_test import FakeNow
+from agent_env.env.gateway.triggers import TriggerEngine
+from tst.unit.env.gateway.triggers_time_test import FakeNow, _FakeGateway, _perm, _settle, _tick_call
 
 T0 = "2026-01-01T00:00:00Z"
 TOKENS = {"desktop": "token-desktop", "laptop": "token-laptop"}
@@ -32,7 +33,7 @@ def test_every_write_changes_the_version_and_reads_leave_it():
     assert clock.version == seen[-1]
     clock.advance("2026-01-02T00:00:00Z")
     seen.append(clock.version)
-    clock.set_time(None, rate=60)
+    clock.set_rate(60)
     seen.append(clock.version)
     clock.clear()
     seen.append(clock.version)
@@ -52,20 +53,26 @@ def test_a_version_never_repeats_across_clocks_and_names_only_what_its_clock_had
     assert [first.count_of(v) for v in (f"{boot}.2", f"{boot}.-1", f"{boot}.²", f"{boot}", "", None, 3)] == [None] * 7
 
 
-def test_a_rate_change_without_a_time_continues_from_the_clock_as_of_the_write():
+def test_a_rate_change_continues_from_the_clock_as_of_the_write_keeping_its_t0_and_generation():
     """Taking the new time from a state read a moment earlier stepped the universe back by the gap, which a computer,
-    never stepping back, then ran ahead of."""
+    never stepping back, then ran ahead of; and a re-arm moved every time trigger's relative marks to the new t0."""
     now = FakeNow()
     clock = Clock(now_fn=now)
     clock.set_time(T0, rate=1.0)
+    generation = clock.generation
     now.tick(10)
     read = clock.state()
     now.tick(0.07)
-    state = clock.set_time(None, rate=60)
+    state = clock.set_rate(60)
     assert _utc(state["virtual_time"]) - _utc(read["virtual_time"]) == timedelta(milliseconds=70)
-    assert state["virtual_seconds_per_real_second"] == 60
+    assert (state["virtual_seconds_per_real_second"], state["t0"], clock.generation) == (60, T0, generation)
     now.tick(1)
     assert clock.read()["virtual_time"] == "2026-01-01T00:01:10.070000Z"
+    assert clock.elapsed() == pytest.approx(70.07)
+    assert clock.at_elapsed(130.07) == _utc("2026-01-01T00:02:10.070000Z")
+    clock.advance("2026-01-01T01:00:00Z")
+    now.tick(1)
+    assert clock.read()["virtual_time"] == "2026-01-01T01:01:00Z"
 
 
 def test_a_rate_change_hands_followers_a_clock_continuous_with_the_one_before():
@@ -75,7 +82,7 @@ def test_a_rate_change_hands_followers_a_clock_continuous_with_the_one_before():
     clock.set_time(T0, rate=1.0)
     before, at = clock.state(), now()
     now.tick(3.25)
-    after = clock.set_time(None, rate=2)
+    after = clock.set_rate(2)
     extrapolated = _utc(before["virtual_time"]) + timedelta(seconds=(now() - at) * before["virtual_seconds_per_real_second"])
     assert abs((_utc(after["virtual_time"]) - extrapolated).total_seconds()) < 0.001
 
@@ -100,16 +107,39 @@ def test_a_rate_change_starts_its_new_rate_at_the_instant_it_read_the_time(befor
     clock.set_time(T0, rate=before)
     armed_at = now.calls[mark]
     mark = len(now.calls)
-    clock.set_time(None, rate=after)
+    clock.set_rate(after)
     changed_at = now.calls[mark]
     read = clock.now()
     expected = _utc(T0) + timedelta(seconds=(changed_at - armed_at) * before + (now.calls[-1] - changed_at) * after)
     assert abs((read - expected).total_seconds()) < 0.001
 
 
-def test_a_time_is_needed_to_arm_the_clock():
-    with pytest.raises(ClockError, match="required to arm"):
-        Clock(now_fn=FakeNow()).set_time(None, rate=2)
+def test_a_rate_change_needs_an_armed_clock_and_a_rate():
+    with pytest.raises(ClockError, match="not armed"):
+        Clock(now_fn=FakeNow()).set_rate(2)
+    clock = Clock(now_fn=FakeNow())
+    clock.set_time(T0)
+    for rate in (None, -1, "2"):
+        with pytest.raises(ClockError, match="rate must be"):
+            clock.set_rate(rate)
+
+
+@pytest.mark.asyncio
+async def test_a_relative_time_trigger_keeps_its_mark_across_a_rate_change():
+    now = FakeNow()
+    clock = Clock(now_fn=now)
+    engine = TriggerEngine(_FakeGateway(clock))
+    clock.set_time(T0, rate=1)
+    engine.register({"watch_roles": ["default"], "triggers": [
+        {"id": "rel", "when": {"type": "time", "at": "PT2H"}, "actions": [_perm()]}]})
+    _tick_call(engine, now, 3600)
+    clock.set_rate(3600)
+    assert engine.clock_advanced() == []
+    _tick_call(engine, now, 1.5)
+    await _settle(engine)
+    trig = engine.state()["triggers"][0]
+    assert (trig["status"], trig["fire_count"]) == ("fired", 1)
+    assert "reanchored" not in {e["kind"] for e in engine.state()["events"]}
 
 
 @pytest.fixture
@@ -316,8 +346,20 @@ async def test_the_route_changes_the_rate_at_the_time_of_the_write(gateway):
         changed = await client.put("/clock/set-time", json={"virtual_seconds_per_real_second": 2})
     body = changed.json()
     gap = (_utc(body["virtual_time"]) - _utc(read["virtual_time"])).total_seconds()
-    assert changed.status_code == 200 and body["virtual_seconds_per_real_second"] == 2
+    assert changed.status_code == 200 and (body["virtual_seconds_per_real_second"], body["t0"], body["due"]) == (2, T0, [])
     assert 0.07 <= gap < 0.2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [{}, {"virtual_seconds_per_real_second": None}, {"wait_followers_s": 1}])
+async def test_a_set_time_with_neither_a_time_nor_a_rate_is_refused_as_before(gateway, body):
+    gw = gateway({})
+    async with _client(gw) as client:
+        await client.put("/clock/set-time", json={"virtual_time": T0, "virtual_seconds_per_real_second": 0})
+        answer = await client.put("/clock/set-time", json=body)
+        state = (await client.get("/clock/state")).json()
+    assert answer.status_code == 400 and "virtual_time must be an RFC3339 string" in answer.json()["error"]
+    assert (state["virtual_seconds_per_real_second"], state["virtual_time"]) == (0, T0)
 
 
 @pytest.mark.asyncio
@@ -325,7 +367,7 @@ async def test_a_rate_change_of_an_unarmed_clock_is_refused(gateway):
     gw = gateway({})
     async with _client(gw) as client:
         answer = await client.put("/clock/set-time", json={"virtual_seconds_per_real_second": 2})
-    assert answer.status_code == 400 and "required to arm" in answer.json()["error"]
+    assert answer.status_code == 400 and "not armed" in answer.json()["error"]
 
 
 @pytest.mark.asyncio
