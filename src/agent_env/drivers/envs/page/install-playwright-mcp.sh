@@ -11,6 +11,8 @@ mv "$work"/node-*/LICENSE node/LICENSE
 rm -rf "$work" node.tar.gz
 for package in *.tgz; do
     work=$(mktemp -d)
+    # mktemp's folder is its owner's alone, and the session user runs what's in it.
+    chmod 755 "$work"
     tar -xzf "$package" -C "$work" --strip-components=1
     name=$(node/bin/node -p 'require(process.argv[1]).name' "$work/package.json")
     mkdir -p "node_modules/$(dirname "$name")"
