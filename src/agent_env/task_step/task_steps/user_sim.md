@@ -31,7 +31,7 @@ Its own fields:
 | `agent_name` | required | The agent's name, and the key always-on's `user_sim` names |
 | `persona` | required | Who the user is: `display_name` (their full name), `first_name` (else the display name's first word), `description`, `permissions`, `keep_private`, `schedule`, `response_times`, `max_replies` (after that many replies the user stops reading) |
 | `model` | required | The user sim's model. This step's `step_params` `model` wins, then the run's `user_model` (`--user-model`), then this |
-| `opening` | | The user's first message. It's the always-on step's prompt when that sets none; one that sets its own must say the same |
+| `opening` | required | The user's first message. It's the always-on step's prompt when that sets none; one that sets its own must say the same |
 | `multi_day` | required, for now | Whether the run goes past the day it starts on (always-on's `end_time` falls on a later day). It picks the prompt's done line; always-on refuses a run of the other kind |
 
 `multi_day` is a stopgap: the prompt is written before the run, so the step has to be told which done line to use.

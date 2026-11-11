@@ -144,7 +144,8 @@ def test_the_step_round_trips_and_holds_no_system_prompt():
     ({"agent_name": None}, "agent_name is required"),
     ({"model": None}, "model is required"),
     ({"multi_day": None}, "multi_day must be true or false"),
-    ({"opening": ""}, "opening must be the user's first message"),
+    ({"opening": ""}, "opening is required"),
+    ({"opening": None}, "opening is required"),
     ({"persona": "Hannah."}, "persona must be an object"),
     ({"persona": {**HANNAH, "time_zone": "America/Los_Angeles"}}, "persona has unknown keys ['time_zone']"),
     ({"persona": {**HANNAH, "display_name": ""}}, "persona.display_name is required"),
@@ -343,7 +344,8 @@ async def test_always_on_refuses_a_prompt_that_isn_t_the_user_s_opening(monkeypa
 async def test_always_on_with_no_prompt_needs_the_user_s_opening(monkeypatch, tmp_path):
     rig = Rig(monkeypatch, tmp_path)
     await rig.arm()
-    ctx = await _rig_context(monkeypatch, rig, multi_day=False, opening=None)
+    ctx = await _rig_context(monkeypatch, rig, multi_day=False)
+    ctx.metadata[USER_SIMS_KEY]["user-sim"]["opening"] = None  # a record written by hand: the step itself requires one
     with pytest.raises(ValueError, match="give the deploy_user_sim_agent step an opening"):
         await rig.run(_always_on(), ctx)
 

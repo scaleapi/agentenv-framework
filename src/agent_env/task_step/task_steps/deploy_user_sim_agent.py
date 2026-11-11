@@ -189,8 +189,9 @@ class DeployUserSimAgentTaskStep(DeployAgentTaskStep):
         # from end_time and refuses a run that disagrees; drop this field once the step can learn it from the task.
         if not isinstance(multi_day, bool):
             found.append("multi_day must be true or false: whether the run goes past the day it starts on")
-        if opening is not None and (not isinstance(opening, str) or not opening.strip()):
-            found.append("opening must be the user's first message")
+        # Required: always_on starts the run from it, and refuses a user sim without one only after the deploy.
+        if not isinstance(opening, str) or not opening.strip():
+            found.append("opening is required: the user's first message, which always_on starts the run with")
         found += persona_problems(persona)
         if found:
             raise ValueError(f"{self.type} '{self.agent_name}': " + "; ".join(found))
