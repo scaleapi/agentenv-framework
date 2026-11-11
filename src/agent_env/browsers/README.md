@@ -23,7 +23,8 @@ the alias `aliases.toml` gives it, or by its id, `@local/agentenv-framework/brow
 Its server keeps its log in `/var/log/agentenv/browser-chromium.jsonl`: an entry for each CDP command, MCP tool call
 and pixel action an agent takes, and an event for each tab opened, navigated or closed with what caused it, secrets
 taken out (`agentenv_protocol.browser_log`); `browser/v1` `log` reads it and `data/get` exports it as
-`browser-log.jsonl`.
+`browser-log.jsonl`. It lasts the computer's boot: `reset_env` boots the computer afresh with a new one, so a task that
+needs the log before a reset takes it first with `snapshot_env`.
 
 A task changes a browser's state with the steps in `agent_env.task_step.task_steps.browser`, each a call to one
 `browser/v1` operation on the browser in the env `env_id`, the one `browser` names when the env has several:

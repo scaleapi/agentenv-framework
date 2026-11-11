@@ -1,7 +1,8 @@
 """A website browser's log: one entry for each action agents take on it, through CDP, MCP tools or pixels, and an
 event each time a tab opens, navigates or closes, with what caused it. Its browser's server writes it, as JSON lines
 with a sequence number each, in a file that lasts the computer's boot: a server that restarts carries on the sequence,
-and a reset is a line, not a new file.
+and the browser's own reset is a line, not a new file. A computer's reset boots it afresh, with a new log; a task
+that needs the one before takes it first, with ``snapshot_env``.
 
 An entry is acting or reading by its CDP method or ``browser/v1`` op. An acting entry keeps its parameters with what
 could carry a secret taken out: text typed while a password field has focus, cookie and header values, the values of

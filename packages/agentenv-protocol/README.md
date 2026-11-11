@@ -1005,8 +1005,9 @@ are the profile's template. The base class adds:
   `/var/log/agentenv/browser-<name>.jsonl` (its own `.agentenv/` folder when that can't be written), one JSON object a
   line with its `seq` and `at` and one of `action`, `tab` or `reset`. A line's number is taken when what it records
   begins and the line written when it ends, so `log {after}` returns lines in order up to the last whose every earlier
-  line is written (`last`); the file lasts the computer's boot, a restarted server carrying on the sequence and a
-  reset being a line.
+  line is written (`last`); the file lasts the computer's boot, a restarted server carrying on the sequence and the
+  browser's own reset (`data/reset`) being a line. A computer's `reset_env` boots it afresh, with a new log, so a task
+  that needs the one before takes it first, with `snapshot_env`.
   - **An action** is a CDP command through the relay (`via: "cdp"`, `who` the connection's user, its `connection`
     number, `method`, and the tab its session is on), an op a driver makes for an agent's MCP tool call (`via: "mcp"`,
     `who` the caller's role, `tool`, `call`, `op`), or an acting op agentenv makes itself (`via: "agentenv"`). Each
