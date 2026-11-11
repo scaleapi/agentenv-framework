@@ -319,7 +319,7 @@ def _tool_call() -> dict[str, str]:
     """The agent's tool call a call to the browser is made for, which the browser's log credits it to: its tool, its
     call's id, its arguments and its caller's role; nothing outside one."""
     context = ToolContext.current()
-    if not context.tool:
+    if not context.mcp or not context.tool:
         return {}
     return {TOOL_CALL_HEADER: tool_call_header(context.tool, context.call_id, context.arguments),
             **({ROLE_HEADER: context.caller.role} if context.caller.role else {})}
