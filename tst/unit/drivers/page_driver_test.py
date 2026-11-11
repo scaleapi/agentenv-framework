@@ -1,31 +1,55 @@
 """The page driver against a fake browser server on the app's socket: it passes the definition checks with a page
 screen, turns tool calls into the CDP input they mean, shows a tab that paints nothing as white, and once the browser
-has ended on its own, its ready check fails for good and its calls say why."""
+has ended on its own, its ready check fails for good and its calls say why. Beside its own tools it serves Playwright
+MCP's from their manifest, the two that run the agent's code hidden, on a Playwright MCP it runs on the CDP address the
+browser issues it under the driver's loopback origin: here a stand-in, which starts on the first call, keeps a session
+per caller, starts again on a new address or once killed, and never gets the driver's environment."""
 from __future__ import annotations
 
+import asyncio
 import base64
 import importlib.util
 import json
+import os
+import signal
+import sys
 from pathlib import Path
 
 import httpx
 import pytest
+from pytest_socket import enable_socket
 
 import agent_env
 from agentenv_protocol.computer import (DeviceUnavailable, FileChooser, InvalidArgument, PageDialog, PageState,
                                         Platform, Tab)
 from agentenv_protocol.computer import driver as computer_driver
 from agentenv_protocol.computer.app_runtime import LAUNCHES
+from agentenv_protocol.tool_context import ToolContext, bound
 from agentenv_protocol.website_browser import BROWSER
 
 DRIVER = Path(agent_env.__file__).parent / "drivers" / "envs" / "page" / "driver.py"
 NO_DISPLAY = Platform(os="linux", distribution="ubuntu", version="24.04", arch="amd64", display="none")
 PAGE_OPS = ("page/viewport", "page/capture", "page/input", "page/state", "navigate", "history", "tabs/list",
-            "tabs/open", "tabs/activate", "tabs/close", "dialog/answer", "files/choose")
+            "tabs/open", "tabs/activate", "tabs/close", "dialog/answer", "files/choose", "cdp")
 GETS = ("page/viewport", "page/capture", "page/state", "tabs/list")
 CARD = {"name": "chromium", "capabilities": {"extensions": [{"uri": BROWSER, "params": {"methods": {
     op: {"method": "GET" if op in GETS else "POST", "endpoint": f"/agentenv/ext/browser/{op}"}
     for op in PAGE_OPS}}}]}}
+#: A stand-in for Playwright MCP on the port and CDP address it's started with, whose one tool says what it was started
+#: with and which session called it; started on an address ending /exits, it exits at once.
+FAKE_PLAYWRIGHT_MCP = """import json, os, sys
+from mcp.server.fastmcp import Context, FastMCP
+args = sys.argv[1:]
+endpoint, port = args[args.index("--cdp-endpoint") + 1], int(args[args.index("--port") + 1])
+if endpoint.endswith("/exits"):
+    sys.exit(3)
+app = FastMCP("fake", host="127.0.0.1", port=port)
+@app.tool()
+def browser_snapshot(ctx: Context) -> str:
+    return json.dumps({"pid": os.getpid(), "endpoint": endpoint, "session": id(ctx.session), "cwd": os.getcwd(),
+                       "env": sorted(os.environ)})
+app.run("streamable-http")
+"""
 #: A 2×1 PNG's first 24 bytes: its signature, then its IHDR's length, type, width and height.
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + (2).to_bytes(4, "big") + (1).to_bytes(4, "big")
 
@@ -220,3 +244,81 @@ async def test_a_call_the_browser_refuses_as_given_wrong_is_an_invalid_argument_
     with pytest.raises(InvalidArgument, match="there's no file cv.pdf in ~/Uploads"):
         await page.choose_files(["cv.pdf"])
 
+
+def test_it_serves_playwright_mcps_tools_from_their_manifest_and_hides_the_two_that_run_the_agents_code(page):
+    manifest = json.loads((DRIVER.parent / "playwright-mcp-tools.json").read_text())
+    forwarded = page.forwarded_tools()
+
+    assert manifest["version"] == "0.0.84" and manifest["caps"] == ["vision"]
+    assert [f.tool.name for f in forwarded] == [t["name"] for t in manifest["tools"]]
+    assert [f.tool.inputSchema for f in forwarded] == [t["inputSchema"] for t in manifest["tools"]]
+    assert {f.tool.name for f in forwarded if f.hidden_by_default} == {"browser_evaluate", "browser_run_code_unsafe"}
+
+
+@pytest.mark.asyncio
+async def test_it_asks_the_browser_for_playwright_mcps_address_under_its_own_loopback_origin(page, monkeypatch):
+    monkeypatch.setenv("MCP_PORT", "18765")
+    page.served["cdp"] = {"http_url": "http://127.0.0.1:18765/svc/chromium/cdp/t/",
+                          "ws_url": "ws://127.0.0.1:18765/svc/chromium/cdp/t/devtools/browser"}
+
+    endpoint = await page._playwright_endpoint()
+
+    assert endpoint == "ws://127.0.0.1:18765/svc/chromium/cdp/t/devtools/browser"
+    assert page.sent[-1] == ("cdp", {"user": "playwright-mcp", "origin": f"http://127.0.0.1:18765/svc/{page._browser[0].name}"})
+
+
+def test_playwright_mcp_attaches_to_the_browser_never_launches_one_and_ends_with_the_driver():
+    command = _load()._command("ws://127.0.0.1:18765/svc/chromium/cdp/t/devtools/browser", 40123)
+
+    assert command[:4] == ["setpriv", "--pdeathsig", "TERM", "--"]
+    assert command[command.index("--cdp-endpoint") + 1] == "ws://127.0.0.1:18765/svc/chromium/cdp/t/devtools/browser"
+    assert {"--caps", "vision", "--ignore-roots", "127.0.0.1", "40123"} <= set(command)
+    assert not {"--isolated", "--headless", "--browser", "--allow-unrestricted-file-access"} & set(command)
+
+
+@pytest.mark.asyncio
+async def test_playwright_mcp_starts_on_the_first_call_keeps_a_session_per_caller_and_starts_again_when_it_must(
+        monkeypatch, tmp_path):
+    enable_socket()
+    module = _load()
+    fake = tmp_path / "fake_playwright_mcp.py"
+    fake.write_text(FAKE_PLAYWRIGHT_MCP)
+    monkeypatch.setattr(module, "_command", lambda endpoint, port: [
+        sys.executable, str(fake), "--cdp-endpoint", endpoint, "--port", str(port)])
+    monkeypatch.setattr(module, "PLAYWRIGHT_MCP_OUTPUT", tmp_path / "out")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("AGENTENV_CONTROL_TOKEN", "secret")
+    endpoints = ["ws://127.0.0.1:18765/svc/chromium/cdp/one/devtools/browser"]
+
+    async def endpoint() -> str:
+        return endpoints[-1]
+
+    playwright = module._PlaywrightMcp(endpoint)
+
+    async def called(caller: str):
+        with bound(ToolContext.as_caller(session=caller)):
+            return await playwright.call("browser_snapshot")
+
+    async def snapshot(caller: str) -> dict:
+        result = await called(caller)
+        assert not result.isError, result.content
+        return json.loads(result.content[0].text)
+
+    try:
+        first, again, other = await snapshot("ada"), await snapshot("ada"), await snapshot("bob")
+        endpoints.append("ws://127.0.0.1:18765/svc/chromium/cdp/two/devtools/browser")
+        moved = await snapshot("ada")
+        os.kill(moved["pid"], signal.SIGKILL)
+        await asyncio.sleep(1)
+        revived = await snapshot("ada")
+        endpoints.append("ws://127.0.0.1:18765/svc/chromium/cdp/exits")
+        refused = await called("ada")
+    finally:
+        await playwright._stop()
+
+    assert first["pid"] == again["pid"] == other["pid"] and first["session"] == again["session"] != other["session"]
+    assert first["endpoint"].endswith("/cdp/one/devtools/browser") and first["cwd"] == str(tmp_path / "home" / "Uploads")
+    assert "AGENTENV_CONTROL_TOKEN" not in first["env"] and "HOME" in first["env"]
+    assert moved["pid"] != first["pid"] and moved["endpoint"].endswith("/cdp/two/devtools/browser")
+    assert revived["pid"] != moved["pid"]
+    assert refused.isError and "exited at start with 3" in refused.content[0].text

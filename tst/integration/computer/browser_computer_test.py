@@ -1,7 +1,9 @@
 """The browser as a computer: agentenv's chromium deployed alone, on the ubuntu-24.04-browser base with no desktop
 and the page driver, whose screen is chromium's active tab, headful on the X server only the browser uses. Gate 3 makes this machine's arch ready with it,
 its input checks and page tools verified on the HTML desk; deployed through the computer provider like any computer,
-its computer_* tools see and drive the page, and its page tools navigate, move in history, answer a dialog, use tabs
+its computer_* tools see and drive the page, Playwright MCP's browser_* tools beside them type into it and answer its
+dialog, the two that run code hidden until tool access names one, as the installed Playwright MCP lists them, and
+back after Playwright MCP or the driver is killed, and its page tools navigate, move in history, answer a dialog, use tabs
 and upload; the browser's X server runs but no desktop, and nothing listens but the driver and the site proxy; a
 killed app server or driver is started again by supervisord and the computer is ready again; chromium killed fails it
 for good, computer-ready/v1 saying why and the tools answering with it, and so does its X server killed, which takes
@@ -59,8 +61,10 @@ from agentenv_protocol import client as protocol_v1
 from agentenv_protocol.client import find_extension_method, invoke_extension
 from agentenv_protocol.computer import COMPUTER_PAGE, COMPUTER_READY
 from agentenv_protocol.computer.conformance.client import image
+from agentenv_protocol.tool_access import ENABLE, ENABLE_TOOL_EXTENSION_URI
 from agentenv_protocol.website_browser import BROWSER
 
+import agent_env
 from agent_env.a2a_agent import conversation_store
 from agent_env.artifact import EnvironmentUniverseArtifact
 from agent_env.artifact.artifacts.environment import EnvironmentArtifact
@@ -161,6 +165,16 @@ threading.Thread(target=server.serve_forever, daemon=True).start()
 time.sleep(float(sys.argv[1]))
 """
 SERVE_START_S = 3
+#: Playwright MCP's own tools/list in the computer, from the node and cli.js it's given, as JSON.
+LISTED_TOOLS = """import json, subprocess, sys
+messages = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18",
+             "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}}},
+            {"jsonrpc": "2.0", "method": "notifications/initialized"}, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}]
+out = subprocess.run(sys.argv[1:] + ["--cdp-endpoint", "http://127.0.0.1:9/", "--caps", "vision"], capture_output=True,
+                     input="\\n".join(map(json.dumps, messages)) + "\\n", text=True, timeout=60).stdout
+print(json.dumps(next(r["result"]["tools"] for r in map(json.loads, out.splitlines()) if r.get("id") == 2)))
+"""
+PLAYWRIGHT_MCP_TOOLS = Path(agent_env.__file__).parent / "drivers" / "envs" / "page" / "playwright-mcp-tools.json"
 #: A page that needs no server, so killing the driver, whose child a served site is, leaves it to open.
 DATA_PAGE = "data:text/html,<title>Home</title><h1>Home</h1>"
 #: A page a task's tab steps open, bring to the front and close by its URL.
@@ -880,6 +894,89 @@ async def test_playwright_and_puppeteer_drive_it_through_its_cdp_address_which_a
     assert "error" in after_data_reset["playwright"] and "error" in after_data_reset["puppeteer"], after_data_reset
     assert "error" in after_reset["playwright"] and "error" in after_reset["puppeteer"], after_reset
     assert fresh != ada and not report.failed
+
+
+@pytest.mark.asyncio
+async def test_playwright_mcps_tools_drive_its_page_hide_the_code_tools_and_come_back_after_a_kill(browser_computer):
+    with namespace_routing():
+        deployed = await Env.get(browser_computer.id).deploy(
+            env_params={"app_settings": {"chromium": {"start_urls": [PAGE_URL]}}})
+        context = TaskStepContext(deployed_envs=[deployed])
+        serving = None
+        try:
+            viewport = (await _screenshot(deployed)).size
+            listed = await _tool_names(deployed)
+            typed = await _mcp(deployed, _type_hello)
+            state = await _state(deployed, lambda s: s["v"] == "hello")
+            after_typing = (await _screenshot(deployed)).size
+            serving = asyncio.ensure_future(inside.run(deployed, ["python3", "-c", SERVE_SITE, "900"], timeout_s=960))
+            await asyncio.sleep(SERVE_START_S)
+            confirmed = await _mcp(deployed, _confirm_ask)
+            await deployed.invoke(ENABLE_TOOL_EXTENSION_URI, ENABLE, {"role": "default", "tools": ["browser_evaluate"]})
+            shown, evaluated = await _tool_names(deployed), await _mcp(deployed, _evaluate_title)
+            running = (await inside.run(deployed, ["sh", "-c", "ps -eo args | grep -m1 '[@]playwright/mcp/cli.js'"],
+                                        timeout_s=30))["stdout"].split()
+            installed = json.loads((await inside.run(deployed, ["python3", "-c", LISTED_TOOLS, *running[:2]],
+                                                     timeout_s=120))["stdout"])
+            await _kill(deployed, "[@]playwright/mcp/cli.js")
+            after_its_kill = await _mcp(deployed, _snapshot)
+            await _kill(deployed, "[c]omputer.serve driver.py:PageDriver")
+            await _ready(deployed)
+            after_driver_kill = await _mcp(deployed, _snapshot)
+            count = (await inside.run(deployed, ["sh", "-c", "pgrep -fc '[@]playwright/mcp/cli.js'"],
+                                      timeout_s=30))["stdout"].strip()
+            record = await _record(deployed)
+        finally:
+            if serving is not None:
+                serving.cancel()
+            report = await teardown_run(context)
+
+    playwright = {t["name"] for t in json.loads(PLAYWRIGHT_MCP_TOOLS.read_text())["tools"]}
+    assert playwright - {"browser_evaluate", "browser_run_code_unsafe"} <= set(listed), listed
+    assert not {"browser_evaluate", "browser_run_code_unsafe"} & set(listed) and "computer_screenshot" in listed
+    assert "hello" in typed and state["v"] == "hello" and after_typing == viewport
+    assert "confirmed true" in confirmed, confirmed
+    assert "browser_evaluate" in shown and "browser_run_code_unsafe" not in shown and "confirmed true" in evaluated
+    assert installed == json.loads(PLAYWRIGHT_MCP_TOOLS.read_text())["tools"]
+    assert "Page URL" in after_its_kill and "Page URL" in after_driver_kill and count == "1"
+    assert "playwright-mcp" in {connection["user"] for connection in record["cdp_connections"]}
+    assert not report.failed
+
+
+async def _mcp(deployed, work):
+    """What ``work`` makes of one MCP session on the computer, as a role-less agent opens one."""
+    async with streamablehttp_client(deployed.mcp_url) as (read, write, _):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            return await work(session)
+
+
+async def _called(session: ClientSession, tool: str, arguments: dict) -> str:
+    result = await session.call_tool(tool, arguments)
+    text = "\n".join(part.text for part in result.content if part.type == "text")
+    assert not result.isError, f"{tool}: {text}"
+    return text
+
+
+async def _snapshot(session: ClientSession) -> str:
+    return await _called(session, "browser_snapshot", {})
+
+
+async def _type_hello(session: ClientSession) -> str:
+    ref = re.search(r"textbox \[ref=(\w+)\]", await _snapshot(session)).group(1)
+    return await _called(session, "browser_type", {"target": ref, "text": "hello"})
+
+
+async def _confirm_ask(session: ClientSession) -> str:
+    await _called(session, "browser_navigate", {"url": SITE})
+    ref = re.search(r'button "ask" \[ref=(\w+)\]', await _snapshot(session)).group(1)
+    await session.call_tool("browser_click", {"target": ref})
+    await _called(session, "browser_handle_dialog", {"accept": True})
+    return await _snapshot(session)
+
+
+async def _evaluate_title(session: ClientSession) -> str:
+    return await _called(session, "browser_evaluate", {"function": "() => document.title"})
 
 
 @pytest.mark.asyncio

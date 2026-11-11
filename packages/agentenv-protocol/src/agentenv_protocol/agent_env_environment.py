@@ -245,12 +245,14 @@ def tool(name: str | None = None, *, description: str | None = None, hidden_by_d
 class ForwardedTool(NamedTuple):
     """A tool an environment serves on another server's behalf, as that server lists it: its descriptor, its own
     schema included, its MCP ``annotations`` and its ``output_schema``; ``call`` takes the call's arguments as keywords
-    and returns the other server's ``CallToolResult``, which reaches the caller as it is."""
+    and returns the other server's ``CallToolResult``, which reaches the caller as it is. ``hidden_by_default`` hides it
+    as ``@tool(hidden_by_default=True)`` hides a tool of the environment's own."""
 
     tool: EnvironmentTool
     call: Callable[..., Any]
     annotations: dict | None = None
     output_schema: dict | None = None
+    hidden_by_default: bool = False
 
 
 class _ResourceMarker(NamedTuple):
@@ -450,7 +452,8 @@ class AgentEnvFastMCPApplication(AgentEnvApplication):
             fn_metadata=FuncMetadata(arg_model=_passed_through(), output_schema=schema,
                                      output_model=_as_it_came() if schema is not None else None),
             is_async=True,
-            annotations=_mcp_tool_annotations(forwarded.annotations) if forwarded.annotations is not None else None)
+            annotations=_mcp_tool_annotations(forwarded.annotations) if forwarded.annotations is not None else None,
+            meta={HIDDEN_BY_DEFAULT_META_KEY: True} if forwarded.hidden_by_default else None)
 
     def _register_resource(self, app: Any, resource: _ServedResource) -> None:
         """A resource as it is, its description absent when it has none, or a template through FastMCP's own
@@ -1283,6 +1286,8 @@ def _forwarding(forwarded: ForwardedTool) -> Callable:
         return await forwarded.call(**arguments)
 
     setattr(call, _FORWARDED_ATTR, forwarded)
+    if forwarded.hidden_by_default:
+        setattr(call, _HIDDEN_BY_DEFAULT_ATTR, True)
     return call
 
 

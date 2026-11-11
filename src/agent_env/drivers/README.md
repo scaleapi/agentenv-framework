@@ -21,6 +21,17 @@ a tab that paints nothing shows white. It serves the page group too: `computer_n
 it. The browser ending on its own fails the computer for good: its ready check is
 `final`, and its tools answer with why. Name it as `page`, or by its id, `@local/agentenv-framework/drivers/page`.
 
+Beside those it serves Playwright MCP's `browser_*` tools (0.0.84, `--caps vision`, on Node 24), as
+`playwright-mcp-tools.json` lists them. Its install lays Node and Playwright MCP's three npm packages out from pinned
+downloads, and it runs Playwright MCP itself, attached to the browser over a CDP address the browser's relay issues to
+the user `playwright-mcp`, so the guard applies to it as to any CDP client; it never starts a browser of its own. Each
+caller gets a session of its own there. It starts on the first call, again once it has exited, and again on a fresh
+address after the browser's data is reset; it ends with the driver, gets none of the driver's environment, and its file
+access is `~/Uploads`. `browser_evaluate` and `browser_run_code_unsafe`, which run the agent's own code, are hidden by
+default: a task's tool access shows them by naming them. To move to another version, update the downloads in
+`env.toml` and regenerate the manifest from that version's `tools/list`; the browser computer's integration test checks
+the two agree.
+
 A run that names it writes it: its files, what its class declares for each platform it supports, read without
 `mss`, `python-xlib` or PyAV installed, and how a computer installs it. Its `env.toml`'s `[install.linux]` has a
 computer env's composer put the folder in `/opt/agentenv/drivers/reference/`, install `requirements.txt`, resolved and

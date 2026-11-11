@@ -1,20 +1,31 @@
 """The page driver, for a computer with no display whose one website browser runs alone: its screen is the browser's
 active tab. A screenshot is the page, and input reaches the page as CDP input events, both through the browser's own
 server on its socket (``browser/v1``'s ``page/*`` operations), since only that server holds the browser's debugging pipe.
-The browser ending on its own is an infrastructure failure, since nothing here launches it again. Needs
-``agentenv-framework-protocol[computer]`` where it runs."""
+The browser ending on its own is an infrastructure failure, since nothing here launches it again. Beside its own tools it
+serves Playwright MCP's ``browser_*``, from a Playwright MCP it runs attached to the browser over a CDP address the
+browser's relay issues to it. Needs ``agentenv-framework-protocol[computer]`` where it runs."""
 from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
+import functools
+import json
+import logging
 import math
+import os
+import socket
 import string
+import tempfile
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 import httpx
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
+from mcp.types import CallToolResult, TextContent
 
-from agentenv_protocol import client
+from agentenv_protocol import EnvironmentTool, ForwardedTool, ToolContext, client
 from agentenv_protocol.computer import (
     ComputerDriverEnvironment,
     DeviceUnavailable,
@@ -80,6 +91,26 @@ DRAG_STEP_PX = 20
 BLANK = b"\xff\xff\xff"
 #: How long one call to the browser's server may take.
 CALL_TIMEOUT_S = 30.0
+#: Playwright MCP, as its install lays it out beside the driver, and its tools as 0.0.84 lists them with ``--caps
+#: vision``, which an integration test checks against the one installed.
+HERE = Path(__file__).resolve().parent
+NODE = HERE / "node" / "bin" / "node"
+PLAYWRIGHT_MCP = HERE / "node_modules" / "@playwright" / "mcp" / "cli.js"
+PLAYWRIGHT_MCP_TOOLS = HERE / "playwright-mcp-tools.json"
+#: Playwright MCP's tools that run the agent's own code, in the page and in Playwright MCP's own process: hidden until
+#: a task's tool access names them.
+HIDDEN_TOOLS = frozenset({"browser_evaluate", "browser_run_code_unsafe"})
+#: Whom the browser issues Playwright MCP's CDP address to, as its record names the connections.
+PLAYWRIGHT_MCP_USER = "playwright-mcp"
+#: What Playwright MCP's process keeps of the driver's environment, which holds the deploy's tokens and settings.
+KEPT_ENVIRONMENT = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TZ", "TMPDIR")
+#: Where Playwright MCP writes what it names itself, and its log.
+PLAYWRIGHT_MCP_OUTPUT = Path(tempfile.gettempdir()) / "agentenv-playwright-mcp"
+#: How long Playwright MCP may take to listen, and one of its tools to answer.
+PLAYWRIGHT_MCP_START_S = 30.0
+PLAYWRIGHT_MCP_CALL_TIMEOUT_S = 300.0
+
+logger = logging.getLogger(__name__)
 
 
 @computer_driver(name="page", supports=[{"os": {"type": "linux", "display": ["none"]}, "arch": ["amd64", "arm64"]}])
@@ -94,7 +125,8 @@ class PageDriver(ComputerDriverEnvironment):
              "around it. Its screen is the page's viewport. Go to a URL with computer_navigate, back, forward or "
              "reload with computer_history, and list, open, switch or close tabs with computer_tabs. Each screenshot "
              "names the page, and an open dialog, which computer_dialog answers, or file chooser, which "
-             "computer_upload gives files in ~/Uploads.")
+             "computer_upload gives files in ~/Uploads. Its browser_* tools, Playwright MCP's, act on the same "
+             "browser by the page's accessibility snapshot; browser_file_upload takes files in ~/Uploads too.")
 
     def __init__(self) -> None:
         super().__init__()
@@ -102,6 +134,25 @@ class PageDriver(ComputerDriverEnvironment):
         self._pointer = (0.0, 0.0)
         self._buttons = 0
         self._held: list[str] = []
+        self._playwright = _PlaywrightMcp(self._playwright_endpoint)
+
+    def forwarded_tools(self) -> list[ForwardedTool]:
+        """Playwright MCP's tools, as its manifest lists them, each called in the caller's own session there; those
+        that run the agent's own code hidden until a task's tool access names them."""
+        return [ForwardedTool(EnvironmentTool(name=t["name"], description=t["description"], inputSchema=t["inputSchema"]),
+                              functools.partial(self._playwright_call, t["name"]), t.get("annotations"),
+                              t.get("outputSchema"), hidden_by_default=t["name"] in HIDDEN_TOOLS)
+                for t in json.loads(PLAYWRIGHT_MCP_TOOLS.read_text(encoding="utf-8"))["tools"]]
+
+    async def _playwright_call(self, tool: str, /, **arguments: Any) -> CallToolResult:
+        return await self._playwright.call(tool, **arguments)
+
+    async def _playwright_endpoint(self) -> str:
+        """The CDP address the browser issues Playwright MCP, at this driver's own loopback address, where its relay is
+        reached as any agent reaches it: the same one until the browser's data is reset, which ends it."""
+        folder, _ = await self._found()
+        origin = f"http://127.0.0.1:{os.environ.get('MCP_PORT', '18765')}/svc/{folder.name}"
+        return (await self._call("cdp", {"user": PLAYWRIGHT_MCP_USER, "origin": origin}))["ws_url"]
 
     @display
     async def viewport(self) -> Display:
@@ -381,6 +432,145 @@ def _steps(path: list) -> list[tuple[float, float]]:
         n = max(2, int(math.hypot(x1 - x0, y1 - y0) / DRAG_STEP_PX))
         steps += [(x0 + (x1 - x0) * k / n, y0 + (y1 - y0) * k / n) for k in range(1, n + 1)]
     return steps
+
+
+class _PlaywrightMcp:
+    """Playwright MCP, attached to the browser over the CDP address ``endpoint`` gives, and its sessions there, one per
+    caller of the driver's tools, so each agent keeps its own snapshots and tab. It starts on the first call, again once
+    it has exited, and again on a fresh address once the browser's data reset has ended the last; it ends with the
+    driver, so a driver started again finds none of its predecessor's."""
+
+    def __init__(self, endpoint: Callable[[], Awaitable[str]]) -> None:
+        self._endpoint = endpoint
+        self._lock = asyncio.Lock()
+        self._process: Optional[asyncio.subprocess.Process] = None
+        self._running_on: Optional[str] = None
+        self._url = ""
+        self._sessions: dict[Optional[str], _Session] = {}
+
+    async def call(self, tool: str, /, **arguments: Any) -> CallToolResult:
+        """``tool`` called on Playwright MCP as it answers, or refused saying why it couldn't be."""
+        try:
+            session = await self._session(ToolContext.current().caller.session)
+            return await session.call_tool(tool, arguments)
+        except DeviceUnavailable as e:
+            return _refused(e.message)
+        except Exception as e:
+            return _refused(f"Playwright MCP didn't answer {tool}: {type(e).__name__}: {e}")
+
+    async def _session(self, caller: Optional[str]) -> ClientSession:
+        async with self._lock:
+            url = await self._running()
+            held = self._sessions.get(caller)
+            if held is None or held.url != url or held.owner.done():
+                if held is not None:
+                    held.close.set()
+                held = self._sessions[caller] = await _Session.open(url)
+            return held.session
+
+    async def _running(self) -> str:
+        """Playwright MCP's MCP URL, started on the browser's current address for it unless it runs there already."""
+        endpoint = await self._endpoint()
+        if self._process is not None and self._process.returncode is None and endpoint == self._running_on:
+            return self._url
+        await self._stop()
+        port = _free_port()
+        PLAYWRIGHT_MCP_OUTPUT.mkdir(parents=True, exist_ok=True)
+        uploads = Path.home() / "Uploads"
+        uploads.mkdir(parents=True, exist_ok=True)
+        with (PLAYWRIGHT_MCP_OUTPUT / "playwright-mcp.log").open("ab") as log:
+            self._process = await asyncio.create_subprocess_exec(
+                *_command(endpoint, port), cwd=uploads, env=_environment(), stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.DEVNULL, stderr=log)
+        self._running_on, self._url = endpoint, f"http://127.0.0.1:{port}/mcp"
+        await _listening(port, self._process)
+        return self._url
+
+    async def _stop(self) -> None:
+        for held in self._sessions.values():
+            held.close.set()
+        self._sessions.clear()
+        if self._process is not None and self._process.returncode is None:
+            self._process.terminate()
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self._process.wait(), 10)
+            if self._process.returncode is None:
+                self._process.kill()
+                await self._process.wait()
+        self._process = None
+
+
+class _Session:
+    """One MCP session on Playwright MCP, held open by a task of its own until ``close`` is set, since mcp's client
+    contexts are anyio task groups, which only the task that entered one can leave."""
+
+    def __init__(self, url: str) -> None:
+        self.url = url
+        self.close = asyncio.Event()
+        self.session: Optional[ClientSession] = None
+        self.owner: Optional[asyncio.Task] = None
+
+    @classmethod
+    async def open(cls, url: str) -> _Session:
+        held = cls(url)
+        ready: asyncio.Future = asyncio.get_running_loop().create_future()
+        held.owner = asyncio.create_task(held._own(ready))
+        held.session = await ready
+        return held
+
+    async def _own(self, ready: asyncio.Future) -> None:
+        try:
+            timeout = httpx.Timeout(PLAYWRIGHT_MCP_CALL_TIMEOUT_S, connect=PLAYWRIGHT_MCP_START_S)
+            async with httpx.AsyncClient(timeout=timeout, trust_env=False) as http, \
+                    streamable_http_client(self.url, http_client=http) as (read, write, _), \
+                    ClientSession(read, write) as session:
+                await session.initialize()
+                ready.set_result(session)
+                await self.close.wait()
+        except BaseException as e:
+            if not ready.done():
+                ready.set_exception(e if isinstance(e, Exception) else RuntimeError(repr(e)))
+            elif not isinstance(e, asyncio.CancelledError):
+                logger.warning(f"a session on Playwright MCP ended: {type(e).__name__}: {e}")
+            if not isinstance(e, Exception):
+                raise
+
+
+def _command(endpoint: str, port: int) -> list[str]:
+    """Playwright MCP on loopback ``port``, attached to the browser at ``endpoint``, never a browser of its own, with
+    its file access confined to its working folder, the session user's ~/Uploads; ``setpriv`` ends it with the driver."""
+    return ["setpriv", "--pdeathsig", "TERM", "--", str(NODE), str(PLAYWRIGHT_MCP), "--cdp-endpoint", endpoint,
+            "--host", "127.0.0.1", "--port", str(port), "--caps", "vision", "--ignore-roots",
+            "--output-dir", str(PLAYWRIGHT_MCP_OUTPUT)]
+
+
+def _environment() -> dict[str, str]:
+    return {name: os.environ[name] for name in KEPT_ENVIRONMENT if name in os.environ}
+
+
+def _free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+async def _listening(port: int, process: asyncio.subprocess.Process) -> None:
+    """Once Playwright MCP listens on ``port``; DeviceUnavailable when it exits first or takes too long."""
+    deadline = asyncio.get_running_loop().time() + PLAYWRIGHT_MCP_START_S
+    while asyncio.get_running_loop().time() < deadline:
+        if process.returncode is not None:
+            raise DeviceUnavailable(f"Playwright MCP exited at start with {process.returncode}; its log is in "
+                                    f"{PLAYWRIGHT_MCP_OUTPUT}")
+        with contextlib.suppress(OSError):
+            _, writer = await asyncio.open_connection("127.0.0.1", port)
+            writer.close()
+            return
+        await asyncio.sleep(0.1)
+    raise DeviceUnavailable(f"Playwright MCP didn't listen within {PLAYWRIGHT_MCP_START_S:.0f} s")
+
+
+def _refused(message: str) -> CallToolResult:
+    return CallToolResult(isError=True, content=[TextContent(type="text", text=message)])
 
 
 if __name__ == "__main__":
