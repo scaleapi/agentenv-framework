@@ -58,8 +58,8 @@ def test_an_app_deployed_alone_runs_its_service_on_its_settings_on_a_computer_na
     (deployed,) = context["deployed_envs"]
     assert deployed["env_id"].endswith("/notes") and deployed["environment_card"]["name"] == "notes-driver"
     service = context["metadata"]["script_results"]["service"]
-    version, fastfetch = service.pop("fastfetch")
-    assert version.endswith("~noble") and fastfetch.startswith("fastfetch ")
+    version, compose = service.pop("compose")
+    assert version.endswith("~noble") and compose.startswith("Docker Compose version v")
     assert service == {
         "signature": "-- Ada", "token": "t0ken", "edition": "pro", "font": "DejaVu Sans", "card": "notes-driver",
         "app_ready": [{"name": "app notes", "ok": True, "detail": "ready"}],
@@ -152,7 +152,7 @@ def test_the_locks_debs_and_wheels_install_from_mounts_and_stay_in_no_layer_of_t
 
     made = docker("history", "--no-trunc", "--format", "{{.CreatedBy}}", image).stdout.decode().splitlines()
     installed = docker("run", "--rm", "--entrypoint", "sh", image, "-c",
-                       "dpkg-query -W -f '${Package} ${Status}\\n' hello fastfetch && "
+                       "dpkg-query -W -f '${Package} ${Status}\\n' hello docker-compose-plugin && "
                        "/opt/agentenv/apps/clock/venv/bin/python -c 'import websockets; print(\"websockets\")' && "
                        "if [ -e /tmp/agentenv-packages ]; then echo left; else echo clean; fi"
                        ).stdout.decode().splitlines()
@@ -160,7 +160,7 @@ def test_the_locks_debs_and_wheels_install_from_mounts_and_stay_in_no_layer_of_t
     assert [line for line in made if "packages/" in line and line.startswith("COPY")] == []
     assert any(line.startswith("RUN /bin/sh -c apt-get install -y --no-install-recommends /tmp/agentenv-packages/apt/")
                for line in made)
-    assert sorted(installed[:2]) == ["fastfetch install ok installed", "hello install ok installed"]
+    assert sorted(installed[:2]) == ["docker-compose-plugin install ok installed", "hello install ok installed"]
     assert installed[2:] == ["websockets", "clean"]
 
 
