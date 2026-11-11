@@ -40,8 +40,14 @@ It goes away once the step can learn it from the task.
 `system_prompt` is written from the persona and `opening_prompt`, so the step refuses one set directly. Each read shows times
 in the persona's `time_zone`. A run-wide `a2a_agent_id` never changes the user
 sim's agent, so the agent under test never plays the user; this step's own `step_params` `a2a_agent_id` can. An agent
-whose card takes no system prompt or no model fails the step, since without them it's a different user. A
-`prompt_agent` step can't talk to an agent this step deployed: its user side reads a different answer.
+whose card takes no system prompt or no model fails the step, since without them it's a different user.
+
+**Used with prompt_agent.** A `prompt_agent` step whose `user_agent_name` is this step's `agent_name` (and sets no
+`user_a2a_url`) talks to the same user in one sitting: each reply of the agent is one read, with no phone. Its prompt
+must be this step's `opening_prompt`, which the user's prompt quotes as what they sent. `reply` is the agent's next prompt; `done` with a message reaches the agent and ends
+the conversation after its answer; `done` without one, or `no_reply`, ends it at once. Each answer is recorded in
+`metadata["user_sim_reads"][<step id>]`. Set `multi_day: false` here, and no `user_output_format` or `user_model` on
+the `prompt_agent` step: it refuses them, since the prompt, answer format and model were set here.
 
 The step checks these settings when the task loads, so a mistake fails before a paid run.
 

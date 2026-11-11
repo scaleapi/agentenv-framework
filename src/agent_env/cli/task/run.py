@@ -27,6 +27,7 @@ from agent_env.task.interrupts import Interrupts
 from agent_env.task.store import get_task_instance_store, new_instance_id
 from agent_env.task.teardown import TeardownReport, kind, teardown_run
 from agent_env.task_step.context import TaskStepContext, read_dual_keyed
+from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.context_ops import build_context_update_ops
 from agent_env.task_step.task_steps.collect_artifacts import CollectArtifactsTaskStep
 
@@ -160,7 +161,7 @@ def _format_loaded_snapshot(load: dict) -> str:
 def _step_output_lines(step, context) -> list[str]:
     if step.type == "deploy_env" and context.deployed_envs:
         return [_format_env(context.deployed_envs[-1])]
-    if step.type == "deploy_agent" and context.deployed_agents:
+    if isinstance(step, DeployAgentTaskStep) and context.deployed_agents:
         agent = context.deployed_agents[-1]
         lines = [_format_agent(agent)]
         # If this deploy step also loaded a snapshot, surface its provenance.

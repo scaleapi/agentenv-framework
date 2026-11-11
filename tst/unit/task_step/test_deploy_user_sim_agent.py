@@ -1,7 +1,7 @@
 """The deploy_user_sim_agent step: the prompt it sets on the user's agent is the tested one byte for byte, and so are
 the reads always_on renders from what it records; its checks when the task loads; it fails closed on a card that
 won't take the prompt or the model; the run-wide agent pick never reaches it; its model's precedence; and always_on
-and prompt_agent with a user it deployed."""
+with a user it deployed (prompt_agent's are in test_prompt_agent_built_in_user_sim.py)."""
 
 from __future__ import annotations
 
@@ -9,14 +9,13 @@ import hashlib
 import json
 import logging
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from agent_env.a2a_agent import A2AAgent
 from agent_env.a2a_agent import protocol
-from agent_env.task_step.context import DeployedAgent, TaskStepContext
+from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps import always_on as ao
 from agent_env.task_step.task_steps import user_sim_versions
@@ -123,7 +122,7 @@ async def test_the_seed_fills_the_opening_and_nothing_else(monkeypatch):
 async def test_the_reads_always_on_renders_from_the_record_are_the_tested_ones(monkeypatch):
     record = await _published(monkeypatch, _step())
     us = {**record}
-    person = {**ao._Run._person(SimpleNamespace(), us),
+    person = {**ao.person_of(us),
               "time_zone": ao._task_zone(us, [{"timezone": PERSON["time_zone"]}])}
     for data in RUNS.values():
         for k, read in enumerate(data["reads"]):
@@ -187,8 +186,30 @@ def test_the_tested_schedule_loads():
 # ---- it plays the user, never the agent under test -----------------------------------------------------------------
 def test_only_the_user_sim_step_plays_the_user():
     assert DeployUserSimAgentTaskStep.plays_user is True
-    assert TaskStep.plays_user is False and DeployAgentTaskStep.plays_user is False
-    assert PromptAgentTaskStep.plays_user is False and _step().plays_user is True
+    assert not hasattr(TaskStep, "plays_user") and not hasattr(DeployAgentTaskStep, "plays_user")
+    assert not hasattr(PromptAgentTaskStep, "plays_user") and _step().plays_user is True
+
+
+@pytest.mark.asyncio
+async def test_its_agent_is_deployed_and_recorded_exactly_as_deploy_agent_deploys_one(monkeypatch):
+    """Everything deploy_agent gives an agent, the user sim's gets: the same deployed_agents entry and the same posts,
+    with only its model and answer format set after."""
+    shared = {"a2a_agent_id": "sim-image", "agent_name": "hannah", "role": "user", "agent_description": "the user",
+              "env_vars": {"A": "1"}}
+    card = _config_card("name", "model", "system_prompt", "output_format", "role", "description")
+    user_sim_step = _step(**shared)
+    runs = []
+    for step in (user_sim_step, DeployAgentTaskStep("deploy", None, system_prompt=PROMPT, **shared)):
+        deploy = _Deploy(monkeypatch, card=json.loads(json.dumps(card)))
+        deployed = deploy.agent.deploy.return_value
+        deployed.sandbox_id, deployed.instance_id, deployed.network_policy = "sb-1", "i-1", None
+        runs.append((await deploy.run(step), deploy))
+    (sim_ctx, sim_deploy), (plain_ctx, plain_deploy) = runs
+
+    assert sim_ctx.deployed_agents == plain_ctx.deployed_agents
+    assert sim_deploy.agent.deploy.call_args == plain_deploy.agent.deploy.call_args
+    assert sim_deploy.posts[:-1] == plain_deploy.posts
+    assert set(sim_deploy.posts[-1][1]) == {"model", "output_format"}
 
 
 def test_a_run_wide_agent_pick_swaps_the_tested_agent_but_not_the_user_sim():
@@ -353,19 +374,6 @@ async def test_always_on_with_no_prompt_needs_the_user_s_opening(monkeypatch, tm
 def test_always_on_without_a_prompt_round_trips_without_one():
     step = _always_on()
     assert step.prompt is None and ao.AlwaysOnTaskStep.from_dict(step.to_dict()).prompt is None
-
-
-# ---- prompt_agent can't talk to it --------------------------------------------------------------------------------
-@pytest.mark.asyncio
-async def test_prompt_agent_refuses_a_user_deployed_by_deploy_user_sim_agent():
-    context = TaskStepContext()
-    context.deployed_agents += [DeployedAgent(agent_name="solver", api_url="http://s", a2a_url="http://s"),
-                                DeployedAgent(agent_name="hannah", api_url="http://h", a2a_url="http://h")]
-    context.metadata[USER_SIMS_KEY] = {"hannah": {"agent_name": "hannah"}}
-    step = PromptAgentTaskStep("ask", None, prompt="hi", agent_name="solver", user_agent_name="hannah",
-                               max_conversation_turns=3)
-    with pytest.raises(RuntimeError, match="deployed by deploy_user_sim_agent, which only always_on can talk to"):
-        await step.execute(context)
 
 
 @pytest.mark.usefixtures("local_stores")

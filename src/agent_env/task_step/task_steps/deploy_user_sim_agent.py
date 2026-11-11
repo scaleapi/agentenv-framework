@@ -61,8 +61,8 @@ wrap-up once more, if it sent one: one more ``answer``, its ``read`` shaped like
 line, when it sets one, in ``you_sent``. Its answer is recorded and never delivered; a ``done`` or an error on it
 changes nothing.
 
-The user sim answers ``{outcome, message, used}``, not the ``{message, done}`` prompt_agent's user side reads, so
-prompt_agent refuses to converse with an agent this step deployed.
+prompt_agent with ``user_agent_name`` set to the agent this step deployed reads it with the same ``answer``, in one
+sitting: one read per agent reply, ``phone`` empty, ``done_ends_run`` true, its prompt this step's opening (user_sim.md).
 """
 from __future__ import annotations
 

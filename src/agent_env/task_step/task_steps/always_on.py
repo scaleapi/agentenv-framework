@@ -440,7 +440,7 @@ class _Run:
             raise RuntimeError(f"always_on: no deploy_user_sim_agent step named '{step.user_sim}' ran before this step")
         self.us = us
         self.zone = _task_zone(us, ctx.metadata.get("clock_configurations") or [])
-        self.person = {**self._person(us), "time_zone": self.zone}
+        self.person = {**person_of(us), "time_zone": self.zone}
         self.version = us["user_version"]
         self.user_agent = next((a for a in ctx.deployed_agents if a.agent_name == us["agent_name"]), None)
         if self.user_agent is None:
@@ -535,14 +535,6 @@ class _Run:
             raise
         finally:
             await self.finish()
-
-    def _person(self, us: dict) -> dict:
-        name = us.get("display_name") or us["name"]
-        return {"key": us["name"], "name": name, "first": us.get("first_name") or name.split()[0],
-                "email": us.get("email"), "time_zone": us.get("time_zone"),
-                "description": us.get("description"), "versions": us.get("versions") or {},
-                "output_format": us.get("output_format"),
-                "permissions": us.get("permissions"), "keep_private": us.get("keep_private")}
 
     async def _load_plugin(self, spec: Optional[dict]) -> ModuleType:
         if not spec:
@@ -1818,6 +1810,17 @@ async def _call(env, uri: str, method: str, params: Optional[dict] = None, *, at
                                f"{e}); retry {attempt + 1}/{attempts - 1}")
                 await asyncio.sleep(min(2 ** attempt, CALL_RETRY_MAX_SLEEP_SECONDS))
     raise last
+
+
+def person_of(us: dict) -> dict:
+    """The user a deploy_user_sim_agent record describes, as the user sim's ``answer`` takes them; the caller adds the
+    run's ``time_zone``, ``opening`` and ``done_ends_run``."""
+    name = us.get("display_name") or us["name"]
+    return {"key": us["name"], "name": name, "first": us.get("first_name") or name.split()[0],
+            "email": us.get("email"), "time_zone": us.get("time_zone"),
+            "description": us.get("description"), "versions": us.get("versions") or {},
+            "output_format": us.get("output_format"),
+            "permissions": us.get("permissions"), "keep_private": us.get("keep_private")}
 
 
 def _task_zone(us: dict, clocks: list[dict]) -> str:
