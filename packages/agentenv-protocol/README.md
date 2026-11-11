@@ -1000,7 +1000,7 @@ are the profile's template. The base class adds:
   and, completed, its size and sha256; and `dialogs`, each with its type, message, default text, answer
   and who gave it.
   `hidden_page()` gives agentenv a page of its own for reading state, in no window and never in the record.
-- **Its log**, `self.log`, a `BrowserLog` (`agentenv_protocol.browser_log`): one entry for each action agents take on it
+- **Its log**, `self.log`, a `BrowserLog` (`agentenv_protocol.website_browser.log`): one entry for each action agents take on it
   and an event each time a tab opens, navigates or closes. Its server writes it, the one writer, to
   `/var/log/agentenv/browser-<name>.jsonl` (its own `.agentenv/` folder when that can't be written), one JSON object a
   line with its `seq` and `at` and one of `action`, `tab`, `outcome` or `reset`. A line's number is taken when what it
@@ -1015,7 +1015,7 @@ are the profile's template. The base class adds:
     number, `method`, and the tab its session is on), an op a driver makes for an agent's MCP tool call (`via: "mcp"`,
     `who` the caller's role, `tool`, `call`, `op`), or an acting op agentenv makes itself (`via: "agentenv"`). Each
     carries `tab`, `url`, `ok` and, failed, `error`, and is marked `acts` or not by its method or op
-    (`browser_log.acts`, `ACTING_OPS`): input, navigation, tab commands, `Runtime.evaluate` and `callFunctionOn`, DOM
+    (`log.acts`, `ACTING_OPS`): input, navigation, tab commands, `Runtime.evaluate` and `callFunctionOn`, DOM
     writes, faked responses, and viewport and cookie changes act; the rest read. An acting entry keeps its `params`
     (and a tool call's `args`) with what could carry a secret taken out: text typed while a password field has focus,
     as its length; cookie and header values; the values of URL query keys that name a credential; a request's body;

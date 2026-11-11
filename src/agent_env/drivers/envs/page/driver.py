@@ -15,7 +15,7 @@ from typing import Any, Optional
 import httpx
 
 from agentenv_protocol import client
-from agentenv_protocol.browser_log import TOOL_CALL_HEADER, tool_call_header
+from agentenv_protocol.website_browser.log import TOOL_CALL_HEADER, tool_call_header
 from agentenv_protocol.computer import (
     ComputerDriverEnvironment,
     DeviceUnavailable,

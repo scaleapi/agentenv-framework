@@ -21,9 +21,10 @@ from starlette.routing import WebSocketRoute  # noqa: E402
 from websockets.asyncio.client import connect  # noqa: E402
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK  # noqa: E402
 
-from agentenv_protocol import browser_cdp, browser_log  # noqa: E402
-from agentenv_protocol.browser_cdp import NO_SESSION, Relay, Tokens, guard  # noqa: E402
-from agentenv_protocol.browser_log import REDACTED, TOOL_CALL_HEADER, BrowserLog, Causes, tool_call_header  # noqa: E402
+from agentenv_protocol.website_browser import cdp as browser_cdp  # noqa: E402
+from agentenv_protocol.website_browser import log as browser_log  # noqa: E402
+from agentenv_protocol.website_browser.cdp import NO_SESSION, Relay, Tokens, guard  # noqa: E402
+from agentenv_protocol.website_browser.log import REDACTED, TOOL_CALL_HEADER, BrowserLog, Causes, tool_call_header  # noqa: E402
 from agentenv_protocol.computer import Launch, Platform, Ready, app, computer_app, linux  # noqa: E402
 from agentenv_protocol.computer.app import APP_SETTINGS_ENV  # noqa: E402
 from agentenv_protocol.computer.app_runtime import AppReadiness  # noqa: E402

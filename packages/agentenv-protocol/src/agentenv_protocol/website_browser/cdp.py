@@ -18,11 +18,11 @@ from typing import TYPE_CHECKING, Any, Literal, Optional
 from starlette.requests import Request
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from .browser_log import ERROR_CHARS, KEY_FIELDS, TYPING_METHODS, BrowserLog, acts, redacted_params
+from .log import ERROR_CHARS, KEY_FIELDS, TYPING_METHODS, BrowserLog, acts, redacted_params
 
 if TYPE_CHECKING:
-    from .website_browser import DevToolsPipe
-    from .website_browser.control import BrowserControl
+    from .control import BrowserControl
+    from .devtools import DevToolsPipe
 
 logger = logging.getLogger(__name__)
 

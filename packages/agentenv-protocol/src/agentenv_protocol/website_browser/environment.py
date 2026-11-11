@@ -18,8 +18,8 @@ from starlette.websockets import WebSocket
 
 from ..agent_env_environment import (OP_ADD_DATA, add_data, add_websocket_route, agent_skill, extension, get_data,
                                      reset_data)
-from ..browser_cdp import ROUTE, Relay, Tokens, reached, under, websocket_form
-from ..browser_log import (ACTOR, ERROR_CHARS, TOOL_CALL_HEADER, UNLOGGED_OPS, BrowserLog, op_acts, read_tool_call,
+from .cdp import ROUTE, Relay, Tokens, reached, under, websocket_form
+from .log import (ACTOR, ERROR_CHARS, TOOL_CALL_HEADER, UNLOGGED_OPS, BrowserLog, op_acts, read_tool_call,
                            redacted_args, redacted_op)
 from ..computer import AppDeclaration, ComputerAppEnvironment, Launch, install_step, ready_check
 from ..computer import app as computer_app

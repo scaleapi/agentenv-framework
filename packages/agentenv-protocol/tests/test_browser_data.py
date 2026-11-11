@@ -15,7 +15,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from agentenv_protocol import browser_log, website_browser
+from agentenv_protocol import website_browser
+from agentenv_protocol.website_browser import log as browser_log
 from agentenv_protocol.computer import Launch, Ready, app, linux
 from agentenv_protocol.computer.app import AGENT_ACTED
 from agentenv_protocol.computer.errors import DeviceUnavailable, InvalidArgument

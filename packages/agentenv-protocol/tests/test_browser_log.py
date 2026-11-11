@@ -12,8 +12,8 @@ import types
 
 import pytest
 
-from agentenv_protocol import browser_log
-from agentenv_protocol.browser_log import (ACTOR, CUT_CHARS, REDACTED, BrowserLog, acts, cut, op_acts, read_tool_call,
+from agentenv_protocol.website_browser import log as browser_log
+from agentenv_protocol.website_browser.log import (ACTOR, CUT_CHARS, REDACTED, BrowserLog, acts, cut, op_acts, read_tool_call,
                                            redact_url, redacted_args, redacted_op, redacted_params, tool_call_header)
 from agentenv_protocol.website_browser.control import BrowserControl
 

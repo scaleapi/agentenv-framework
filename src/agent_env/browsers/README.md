@@ -26,7 +26,7 @@ under `chromium_`, routing the multi env's synthetic sites through the gateway, 
 computer child's.
 Its server keeps its log in `/var/log/agentenv/browser-chromium.jsonl`: an entry for each CDP command, MCP tool call
 and pixel action an agent takes, and an event for each tab opened, navigated or closed with what caused it, secrets
-taken out (`agentenv_protocol.browser_log`); `browser/v1` `log` reads it and `data/get` exports it as
+taken out (`agentenv_protocol.website_browser.log`); `browser/v1` `log` reads it and `data/get` exports it as
 `browser-log.jsonl`. It lasts the computer's boot: `reset_env` boots the computer afresh with a new one, so a task that
 needs the log before a reset takes it first with `snapshot_env`.
 
