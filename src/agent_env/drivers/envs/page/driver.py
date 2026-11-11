@@ -110,6 +110,10 @@ PLAYWRIGHT_MCP_OUTPUT = Path(tempfile.gettempdir()) / "agentenv-playwright-mcp"
 #: How long Playwright MCP may take to listen or to open a session, and one of its tools to answer.
 PLAYWRIGHT_MCP_START_S = 30.0
 PLAYWRIGHT_MCP_CALL_TIMEOUT_S = 300.0
+#: How often a start checks whether Playwright MCP listens yet, and how long a stop waits for it to end on SIGTERM
+#: before it's killed.
+PLAYWRIGHT_MCP_POLL_S = 0.1
+PLAYWRIGHT_MCP_STOP_S = 10.0
 #: How long a caller's session on Playwright MCP is kept with no call: a caller's own MCP session ends with no word to
 #: the driver, and each holds a connection to the browser.
 PLAYWRIGHT_MCP_SESSION_IDLE_S = 3600.0
@@ -534,7 +538,7 @@ class _PlaywrightMcp:
         if self._process is not None and self._process.returncode is None:
             self._process.terminate()
             with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(self._process.wait(), 10)
+                await asyncio.wait_for(self._process.wait(), PLAYWRIGHT_MCP_STOP_S)
             if self._process.returncode is None:
                 self._process.kill()
                 await self._process.wait()
@@ -615,7 +619,7 @@ async def _listening(port: int, process: asyncio.subprocess.Process) -> None:
             _, writer = await asyncio.open_connection("127.0.0.1", port)
             writer.close()
             return
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(PLAYWRIGHT_MCP_POLL_S)
     raise DeviceUnavailable(f"Playwright MCP didn't listen within {PLAYWRIGHT_MCP_START_S:.0f} s")
 
 
