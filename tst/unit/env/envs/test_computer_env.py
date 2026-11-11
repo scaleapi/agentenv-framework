@@ -2062,6 +2062,19 @@ def test_a_command_the_resolver_runs_that_fails_ends_it_with_the_commands_code_a
     assert capsys.readouterr().err == ""
 
 
+def test_a_captured_command_that_fails_has_its_error_printed_last(monkeypatch, capsys):
+    def fail(*_args):
+        raise subprocess.CalledProcessError(2, ["dpkg-deb", "-f"], stderr="dpkg-deb: error: not a Debian archive\n")
+
+    monkeypatch.setattr(resolve_in_base, "main", fail)
+
+    with pytest.raises(SystemExit) as exited:
+        resolve_in_base.cli(["request.json", "out"])
+
+    assert exited.value.code == 2
+    assert capsys.readouterr().err.strip().splitlines()[-1] == "dpkg-deb: error: not a Debian archive"
+
+
 def test_the_resolver_installs_the_apt_packages_it_downloads_before_building_wheels(tmp_path, monkeypatch):
     ran = []
     monkeypatch.setattr(resolve_in_base, "KEYRINGS", tmp_path / "keyrings")
