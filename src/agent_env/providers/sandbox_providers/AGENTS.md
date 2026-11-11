@@ -102,6 +102,7 @@ sandboxes off this machine, runs containers' images by name, has no private netw
 | `platform` | the image platform it runs; `linux/amd64` by default, set another when the provider creates it |
 | `exec(*argv)` | returns an object with async `stdout.read()` and `stderr.read()` (bytes) and async `wait()` (exit code). If the platform takes one command string, build it with `shlex.join(argv)` |
 | `terminate()` | abstract; idempotent: terminating a sandbox that is already gone is not an error |
+| `exit_status()`, `output_tail(lines)` | optional: the exit status of the process `create_container` or a disk's `create_vm` made the sandbox run, once it has exited, else `None`; and the last `lines` lines it wrote, a disk's console among them. A computer's boot stops waiting within seconds of that process exiting and puts its last lines in its error. The defaults, `None` and `[]`, leave a boot waiting out its readiness timeout. Local Docker reads its container's; `modal` and `modal_vm` their sandbox's process, its output only once it has exited |
 
 Everything else is built on `exec`. `exec_script` runs `sudo bash -c <script>`, so the exec user needs passwordless sudo.
 When the transport drops without an exit status, return exit code `-1`: callers retry idempotent commands on `-1` and on

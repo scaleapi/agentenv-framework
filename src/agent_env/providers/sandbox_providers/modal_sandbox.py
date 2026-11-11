@@ -59,6 +59,8 @@ _STDIN_CHUNK_BYTES = 8 * 1024 * 1024 - ((8 * 1024 * 1024) % 3)
 _CANCELLED_CREATE_WAIT_SECONDS = 30
 # Terminations started after their create's cancel had gone on, kept so they run to their end.
 _LATE_TERMINATIONS: set[asyncio.Task] = set()
+# How long reading what an ended sandbox's process wrote may take.
+_OUTPUT_READ_SECONDS = 15
 
 
 async def _terminate_created(sb: modal.Sandbox) -> None:
@@ -126,6 +128,21 @@ async def _resolve_i6pn_address(sb: modal.Sandbox) -> Optional[str]:
     return None
 
 
+async def _ended_output(sb: modal.Sandbox) -> Optional[list[str]]:
+    """The lines ``sb``'s process wrote, its output's and then its errors', once it has exited; None while it runs, as
+    Modal hands a sandbox's stream only whole, and none when reading them fails or takes past
+    ``_OUTPUT_READ_SECONDS``."""
+    if await sb.poll.aio() is None:
+        return None
+    try:
+        async with asyncio.timeout(_OUTPUT_READ_SECONDS):
+            stdout, stderr = await asyncio.gather(sb.stdout.read.aio(), sb.stderr.read.aio())
+    except Exception as e:
+        logger.info(f"Couldn't read the output of Modal sandbox {sb.object_id}: {fmt_exc(e)}")
+        return []
+    return [*stdout.splitlines(), *stderr.splitlines()]
+
+
 class _ModalStreamAdapter:
     def __init__(self, stream):
         self._stream = stream
@@ -156,6 +173,7 @@ class ModalSandbox(Sandbox):
         self.vnc_url = None
         self.mode = SANDBOX_MODE_CONTAINER
         self.network_policy = network_policy
+        self._ended: Optional[list[str]] = None
 
     @property
     def private_host(self) -> str | None:
@@ -164,6 +182,15 @@ class ModalSandbox(Sandbox):
 
     async def terminate(self) -> None:
         await self._sb.terminate.aio()
+
+    async def exit_status(self) -> Optional[int]:
+        return await self._sb.poll.aio()
+
+    async def output_tail(self, lines: int) -> list[str]:
+        """The last ``lines`` lines its container wrote, once it has exited; none while it runs."""
+        if self._ended is None:
+            self._ended = await _ended_output(self._sb)
+        return (self._ended or [])[-lines:]
 
     async def exec(self, *command: str):
         process = await self._sb.exec.aio(*command, text=False)
