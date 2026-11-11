@@ -1,8 +1,9 @@
 /* A timerfd's tracking follows its file, not its number: A, armed for a clock time an hour ahead, is duplicated as A2
    (by METHOD: dup, dup2, dup3, fcntl's F_DUPFD_CLOEXEC, or dup then close_range) and closed, and A's number goes to a
    duplicate of O, a monotonic timerfd armed 10 s out. With METHOD failed, A2 is A and dup2, dup3 and close_range calls
-   on it fail, which must leave its tracking as it was. After READY the driver jumps 2 h: A2 must fire at the jump and O
-   must not fire early. Prints READY, then {"same_number", "failed_calls", "a2_fired_raw", "a2_count",
+   on it fail; with vfork_close or vfork_close_range, A2 is A and a vfork child closes it (with close, or close_range of
+   everything from 3) before it exits: each must leave A's tracking as it was. After READY the driver jumps 2 h: A2 must
+   fire at the jump and O must not fire early. Prints READY, then {"same_number", "failed_calls", "a2_fired_raw", "a2_count",
    "o_fired_early"}. */
 #define _GNU_SOURCE
 #include <fcntl.h>
@@ -11,6 +12,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/timerfd.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -32,12 +34,21 @@ int main(int argc, char **argv) {
         failed += dup3(-1, a, 0) == -1;
         failed += close_range(a, a, 0x40000000) == -1;   /* no such flag */
     }
+    else if (!strncmp(how, "vfork_", 6)) {
+        pid_t pid;
+        a2 = a;
+        if ((pid = vfork()) == 0) {
+            if (!strcmp(how, "vfork_close")) close(a); else close_range(3, ~0U, 0);
+            _exit(0);
+        }
+        waitpid(pid, NULL, 0);
+    }
     else if (!strcmp(how, "dup2")) a2 = dup2(a, 100);
     else if (!strcmp(how, "dup3")) a2 = dup3(a, 101, O_CLOEXEC);
     else if (!strcmp(how, "fcntl")) a2 = fcntl(a, F_DUPFD_CLOEXEC, 50);
     else a2 = dup(a);
     if (!strcmp(how, "close_range")) close_range(a, a, 0);
-    else if (strcmp(how, "failed")) close(a);
+    else if (strcmp(how, "failed") && strncmp(how, "vfork_", 6)) close(a);
     o2 = dup(o);
     printf("READY\n");
     fflush(stdout);

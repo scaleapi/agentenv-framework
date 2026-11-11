@@ -432,7 +432,7 @@ diff -ruN a/src/libfaketime.c b/src/libfaketime.c
 +  ftpl_init();
 +  if (real_timerfd_create == NULL) return -1;
 +  fd = real_timerfd_create(clockid, flags);
-+  if (fd >= 0 && fd < FT_TFD_CLOCKS)
++  if (fd >= 0 && fd < FT_TFD_CLOCKS && ft_fd_mine())
 +  {
 +    ft_fd_gone(fd);
 +    ft_tfd_clock[fd] = clockid + 1;

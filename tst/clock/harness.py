@@ -289,14 +289,16 @@ def cancel():
 
 
 def timerfds():
-    """A timerfd's tracking through its duplicates (tfdalias.c), one run per way of making one and one of calls that fail,
-    each jumped 2 h."""
+    """A timerfd's tracking through its duplicates (tfdalias.c), one run per way of making one, one of calls that fail, and
+    ones where a vfork child (Python's subprocess among them, tfdspawn.py) closes it, each jumped 2 h."""
     preload()
     fresh_page()
     set_clock(time.time() - 182 * DAY, 1)
     out = {}
-    for how in ("dup", "dup2", "dup3", "fcntl", "close_range", "failed"):
-        r = _jumped(["tfdalias", how], 2 * 3600)
+    for how in ("dup", "dup2", "dup3", "fcntl", "close_range", "failed", "vfork_close", "vfork_close_range",
+                "python_subprocess"):
+        argv = ["python3", f"{PROGRAMS}/tfdspawn.py"] if how == "python_subprocess" else ["tfdalias", how]
+        r = _jumped(argv, 2 * 3600)
         a = r["after"]
         out[how] = {"same_number": a["same_number"], "failed_calls": a["failed_calls"], "a2_count": a["a2_count"],
                     "o_fired_early": a["o_fired_early"], **_after_write(a["a2_fired_raw"], r)}

@@ -899,6 +899,18 @@ static inline bool ft_tfd_known(int fd)
 {
   return fd >= 0 && fd < FT_TFD_CLOCKS && __atomic_load_n(&ft_tfd_clock[fd], __ATOMIC_RELAXED) != 0;
 }
+/* the process whose descriptors these tables describe: set at load and in the child of each glibc fork. A child that
+   shares this memory without fork (vfork, as Python's subprocess uses, or a CLONE_VM clone) has a descriptor table of
+   its own, so what it closes or duplicates before exec changes nothing here. */
+static volatile pid_t ft_fd_owner = 0;
+static void ft_fd_forked(void)
+{
+  ft_fd_owner = getpid();
+}
+static inline bool ft_fd_mine(void)
+{
+  return getpid() == ft_fd_owner;
+}
 /* ``fd`` closed, or about to name another file. Lock held. */
 static void ft_fd_gone_locked(int fd)
 {
@@ -915,7 +927,7 @@ static void ft_fd_gone_locked(int fd)
 static void ft_fd_gone(int fd)
 {
   sigset_t old;
-  if (!ft_tfd_known(fd)) return;
+  if (!ft_tfd_known(fd) || !ft_fd_mine()) return;
   ft_tab_lock(&old);
   ft_fd_gone_locked(fd);
   ft_tab_unlock(&old);
@@ -937,7 +949,7 @@ static void ft_fd_duped_locked(int from, int to)
 static void ft_fd_duped(int from, int to)
 {
   sigset_t old;
-  if (!ft_tfd_known(from)) return;
+  if (!ft_tfd_known(from) || !ft_fd_mine()) return;
   ft_tab_lock(&old);
   ft_fd_duped_locked(from, to);
   ft_tab_unlock(&old);
@@ -950,7 +962,7 @@ static int ft_dup_onto(int fd, int fd2, int flags, bool three)
   int r;
   FT_RESOLVE(dup2);
   FT_RESOLVE(dup3);
-  if (fd == fd2 || !ft_tfd_known(fd2))
+  if (fd == fd2 || !ft_tfd_known(fd2) || !ft_fd_mine())
   {
     r = three ? (*ft_real_dup3)(fd, fd2, flags) : (*ft_real_dup2)(fd, fd2);
     if (r >= 0 && fd != fd2) ft_fd_duped(fd, r);
@@ -1024,7 +1036,7 @@ int close_range(unsigned int first, unsigned int last, int flags)
   bool timerfd = false;
   int r;
   FT_RESOLVE(close_range);
-  if (!(flags & CLOSE_RANGE_CLOEXEC))
+  if (!(flags & CLOSE_RANGE_CLOEXEC) && ft_fd_mine())
     for (unsigned int fd = first; fd <= last && fd < FT_TFD_CLOCKS && !timerfd; fd++) timerfd = ft_tfd_known((int) fd);
   if (!timerfd) return (*ft_real_close_range)(first, last, flags);
   ft_tab_lock(&old);
@@ -1035,9 +1047,11 @@ int close_range(unsigned int first, unsigned int last, int flags)
   ft_tab_unlock(&old);
   return r;
 }
-/* resolved at load, so a first close() in a signal handler doesn't call dlsym */
+/* the owner, and the real calls resolved at load, so a first close() in a signal handler doesn't call dlsym */
 static void __attribute__((constructor)) ft_fd_init(void)
 {
+  ft_fd_owner = getpid();
+  pthread_atfork(NULL, NULL, ft_fd_forked);
   FT_RESOLVE(close);
   FT_RESOLVE(dup);
   FT_RESOLVE(dup2);

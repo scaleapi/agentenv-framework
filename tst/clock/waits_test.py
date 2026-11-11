@@ -118,12 +118,13 @@ def test_a_cancelled_wait_goes_at_once_and_leaves_nothing_behind(waits_gate):
 
 def test_a_timerfd_is_followed_through_its_duplicates_not_its_number(gate):
     """A timerfd armed for a clock time, duplicated and closed, fires at a jump past it through its duplicate, and the
-    monotonic timerfd given its old number doesn't fire with it; dup2, dup3 and close_range calls on it that fail leave
-    it followed."""
+    monotonic timerfd given its old number doesn't fire with it; dup2, dup3 and close_range calls on it that fail, and a
+    vfork child that closes it (as Python's subprocess makes one), leave it followed."""
     runs = gate("timerfds")
-    assert runs.keys() == {"dup", "dup2", "dup3", "fcntl", "close_range", "failed"}
+    assert runs.keys() == {"dup", "dup2", "dup3", "fcntl", "close_range", "failed", "vfork_close", "vfork_close_range",
+                           "python_subprocess"}
     for how, r in runs.items():
-        expected = (0, 3) if how == "failed" else (1, 0)
+        expected = (0, 3) if how == "failed" else (0, 0) if how.startswith(("vfork_", "python_")) else (1, 0)
         assert (r["same_number"], r["failed_calls"]) == expected, (how, r)
         assert (r["a2_count"], r["o_fired_early"]) == (1, 0), (how, r)
         assert at_jump(r), (how, r)
