@@ -45,7 +45,8 @@ whose card takes no system prompt or no model fails the step, since without them
 **Used with prompt_agent.** A `prompt_agent` step whose `user_agent_name` is this step's `agent_name` (and sets no
 `user_a2a_url`) talks to the same user in one sitting: each reply of the agent is one read, with no phone. Its prompt
 must be this step's `opening_prompt`, which the user's prompt quotes as what they sent. `reply` is the agent's next prompt; `done` with a message reaches the agent and ends
-the conversation after its answer; `done` without one, or `no_reply`, ends it at once. Each answer is recorded in
+the conversation after its answer; `done` without one, or `no_reply`, ends it at once. After `max_replies` replies,
+the last one reaches the agent and the conversation ends after its answer. Each answer is recorded in
 `metadata["user_sim_reads"][<step id>]`. Set `multi_day: false` here, and no `user_output_format` or `user_model` on
 the `prompt_agent` step: it refuses them, since the prompt, answer format and model were set here.
 

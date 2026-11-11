@@ -1195,12 +1195,15 @@ class _BuiltInUserSim:
         self._you_sent = [opening] if opening else []
         self._clock_envs = clock_envs
         self.history: list[dict] = []
+        self._max_replies = person.get("max_replies")
+        self.replies = 0
 
     @classmethod
     async def start(cls, step: PromptAgentTaskStep, context: TaskStepContext, record: dict, initial_parts: list[dict],
                     clock_envs: list) -> _BuiltInUserSim:
         from agent_env.task_step.task_steps.always_on import _task_zone, person_of
-        text = next((p["text"] for p in initial_parts if p.get("kind") == "text"), None)
+        # The prompt's text parts joined, as always_on reads them.
+        text = "\n".join(p.get("text", "") for p in initial_parts if p.get("kind") == "text") or None
         deployed_with = step._apply_seed([{"kind": "text", "text": record.get("opening") or ""}],
                                          context.metadata.get("seed", {}))[0]["text"].strip()
         if (text or "").strip() != deployed_with:
@@ -1208,7 +1211,7 @@ class _BuiltInUserSim:
             raise ValueError(f"prompt_agent '{step.id}': its prompt isn't the opening_prompt its user "
                              f"'{step.user_agent_name}' was deployed with; give both the same text")
         opening = {"at": await _clock_now(step, clock_envs), "text": text} if text else None
-        person = {**person_of(record), "time_zone": _task_zone(record, context.metadata.get("clock_configurations") or []),
+        person = {**person_of(record), "max_replies": record.get("max_replies"), "time_zone": _task_zone(record, context.metadata.get("clock_configurations") or []),
                   "opening": opening, "done_ends_run": True}
         return cls(step, context, person, opening, clock_envs)
 
@@ -1240,6 +1243,11 @@ class _BuiltInUserSim:
         if error:
             return {"end": "user_sim_error"}
         if outcome == "reply" and said:
+            self.replies += 1
+            if self._max_replies and self.replies >= int(self._max_replies):
+                # As in always_on: this last reply is delivered, then the user stops reading.
+                logger.info(f"Turn {number} user sim: reply {self.replies} of max_replies {self._max_replies}")
+                return {"message": [{"kind": "text", "text": ans["message"]}], "end_after": "user_gave_up"}
             return {"message": [{"kind": "text", "text": ans["message"]}]}
         if outcome == "done" and said:
             return {"message": [{"kind": "text", "text": ans["message"]}], "end_after": "user_done"}

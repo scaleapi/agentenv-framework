@@ -12,7 +12,7 @@ from agent_env.task_step.task_steps import always_on as ao
 from agent_env.task_step.task_steps import user_sim_versions
 from agent_env.task_step.task_steps.deploy_user_sim_agent import USER_SIMS_KEY
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
-from tst.unit.task_step.test_deploy_user_sim_agent import _published, _step as _deploy_step
+from tst.unit.task_step.test_deploy_user_sim_agent import HANNAH, _published, _step as _deploy_step
 from tst.unit.task_step.test_prompt_agent_user_side import AGENT, USER, Peers, _stored, exchange, text
 
 pytestmark = pytest.mark.usefixtures("local_stores")
@@ -187,3 +187,29 @@ async def test_the_opening_is_compared_with_the_seed_filled_in(monkeypatch):
                                user_agent_name="hannah", poll_interval_seconds=0, max_conversation_turns=3)
     await step.execute(ctx)
     assert _reads(ctx)[0]["outcome"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_after_max_replies_the_last_reply_reaches_the_agent_then_the_run_ends(monkeypatch):
+    peers = Peers(monkeypatch, {AGENT: [text("draft one"), text("draft two")],
+                                USER: [said("reply", "make it shorter")]})
+    ctx = await _context(monkeypatch, persona={**HANNAH, "max_replies": 1})
+
+    result = await _step().execute(ctx)
+
+    assert [r[1] for r in peers.requests(ctx)] == [f"{AGENT}/a2a"] * 2 + [f"{USER}/a2a"] * 2 + [f"{AGENT}/a2a"] * 2
+    assert len(_reads(ctx)) == 1
+    assert _stored(ctx, peers)["status"] == "closed"
+    assert result.prompt_responses[-1].response == "draft two"
+
+
+@pytest.mark.asyncio
+async def test_an_opening_split_across_text_parts_is_compared_joined(monkeypatch):
+    Peers(monkeypatch, {AGENT: [text("draft one")], USER: [said("done")]})
+    ctx = await _context(monkeypatch, opening_prompt="plan my parents' visit\nthey land friday")
+    step = PromptAgentTaskStep(id="talk", version=None, agent_name="solver", user_agent_name="hannah",
+                               parts=[{"kind": "text", "text": "plan my parents' visit"},
+                                      {"kind": "text", "text": "they land friday"}],
+                               poll_interval_seconds=0, max_conversation_turns=3)
+    await step.execute(ctx)
+    assert _reads(ctx)[0]["read"]["you_sent"][0]["text"] == "plan my parents' visit\nthey land friday"
