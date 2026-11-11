@@ -44,14 +44,17 @@ class ClockFollowers:
         self._changed = asyncio.Event()
 
     async def watch(self, after: str, follower: str | None, token: str) -> None:
-        """Take ``after`` as ``follower``'s acknowledgement when ``token`` is its read token, then return at once when
-        the clock's version isn't ``after``, else at its next change or after ``WATCH_S``."""
+        """Take ``after`` as ``follower``'s acknowledgement when ``token`` is its read token and it's a version this clock
+        has had, later than the one it last showed; then return at once when the clock's version isn't ``after``, else
+        at its next change or after ``WATCH_S``."""
         changed = self._changed
         expected = self._tokens.get(follower or "")
         if expected and token and hmac.compare_digest(token.encode(), expected.encode()):
             count = self._clock().count_of(after)
             async with self._acks:
-                self._shown[follower] = None if count is None else (count, after)
+                shown = self._shown[follower]
+                if count is not None and (shown is None or count > shown[0]):
+                    self._shown[follower] = (count, after)
                 self._seen[follower] = time.monotonic()
                 self._acks.notify_all()
         if after == self._clock().version:

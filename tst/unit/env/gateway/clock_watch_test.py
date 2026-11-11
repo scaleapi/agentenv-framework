@@ -80,6 +80,33 @@ def test_a_rate_change_hands_followers_a_clock_continuous_with_the_one_before():
     assert abs((_utc(after["virtual_time"]) - extrapolated).total_seconds()) < 0.001
 
 
+class SteppingNow:
+    """A real clock's reading moves between any two calls: each call is 100 µs after the one before it."""
+
+    def __init__(self):
+        self.t, self.calls = 1000.0, []
+
+    def __call__(self) -> float:
+        self.t += 0.0001
+        self.calls.append(self.t)
+        return self.t
+
+
+@pytest.mark.parametrize("before,after", [(1.0, 86400.0), (86400.0, 1.0)])
+def test_a_rate_change_starts_its_new_rate_at_the_instant_it_read_the_time(before, after):
+    now = SteppingNow()
+    clock = Clock(now_fn=now)
+    mark = len(now.calls)
+    clock.set_time(T0, rate=before)
+    armed_at = now.calls[mark]
+    mark = len(now.calls)
+    clock.set_time(None, rate=after)
+    changed_at = now.calls[mark]
+    read = clock.now()
+    expected = _utc(T0) + timedelta(seconds=(changed_at - armed_at) * before + (now.calls[-1] - changed_at) * after)
+    assert abs((read - expected).total_seconds()) < 0.001
+
+
 def test_a_time_is_needed_to_arm_the_clock():
     with pytest.raises(ClockError, match="required to arm"):
         Clock(now_fn=FakeNow()).set_time(None, rate=2)
@@ -330,3 +357,30 @@ def test_the_gateway_reads_its_declared_computers_from_its_environment():
                            ("desktop=a,desktop=b", "twice")):
         with pytest.raises(ValueError, match=fragment):
             parse_clock_followers(spec)
+
+
+def test_a_count_too_long_to_be_one_the_clock_had_names_nothing():
+    clock = Clock(now_fn=FakeNow())
+    clock.set_time(T0)
+    boot = clock.version.split(".")[0]
+    assert [clock.count_of(f"{boot}.{'9' * 5000}"), clock.count_of(f"{boot}.01"), clock.count_of(f"{boot}.1")] == [None, None, 1]
+
+
+@pytest.mark.asyncio
+async def test_a_late_watch_naming_an_earlier_version_doesnt_move_its_computer_back(gateway):
+    gw = gateway({"laptop": TOKENS["laptop"]})
+    async with _client(gw) as client:
+        await client.put("/clock/set-time", json={"virtual_time": T0})
+        earlier = gw._clock.version
+        await client.put("/clock/advance", json={"virtual_time": "2026-01-02T00:00:00Z"})
+        latest = gw._clock.version
+        held = asyncio.create_task(_watch(client, latest, "laptop", TOKENS["laptop"]))
+        await asyncio.sleep(0.05)
+        await _watch(client, earlier, "laptop", TOKENS["laptop"])
+        long = await _watch(client, f"{latest.split('.')[0]}.{'9' * 5000}", "laptop", TOKENS["laptop"])
+        state = (await client.get("/clock/state")).json()
+        waited = await client.put("/clock/set-time", json={"virtual_time": T0, "wait_followers_s": 0.5})
+        held.cancel()
+    assert state["followers"]["laptop"]["version"] == latest
+    assert long.status_code == 200 and long.json()["version"] == latest
+    assert waited.status_code == 504

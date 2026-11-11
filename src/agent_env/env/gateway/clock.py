@@ -126,6 +126,8 @@ def _advance(t0: datetime, seconds: float) -> datetime:
 class Clock:
     """Gateway-owned virtual clock — wall-clock-driven, monotonic, threadsafe; `now_fn` injectable for tests."""
 
+    BOOT_ID_BYTES = 6  # a version's per-boot id, random, so a restarted gateway's versions never repeat its last boot's
+
     def __init__(self, now_fn=time.monotonic):
         self._now = now_fn
         self._lock = threading.Lock()
@@ -136,7 +138,7 @@ class Clock:
         self._generation = 0
         self._lived = 0.0  # virtual seconds run before the current arm/clear
         self._ahead = 0.0  # virtual seconds the current arm was advanced by
-        self._boot = secrets.token_hex(6)
+        self._boot = secrets.token_hex(self.BOOT_ID_BYTES)
         self._count = 0
 
     @property
@@ -151,9 +153,10 @@ class Clock:
     def count_of(self, version) -> int | None:
         """The count of ``version`` when this clock has had it; None for another clock's, a later one, or junk."""
         boot, _, count = version.partition(".") if isinstance(version, str) else ("", "", "")
-        if boot != self._boot or not (count.isascii() and count.isdigit()) or int(count) > self._count:
+        current = str(self._count)
+        if boot != self._boot or not (count.isascii() and count.isdigit()) or len(count) > len(current):
             return None
-        return int(count)
+        return int(count) if int(count) <= self._count else None
 
     @property
     def rate(self) -> float:
@@ -176,13 +179,14 @@ class Clock:
         t0 = None if virtual_time is None else _parse_rfc3339(virtual_time)
         r = _parse_rate(1.0 if rate is None else rate)
         with self._lock:
+            now = self._now()
             if t0 is None:
                 if not self._armed or self._t0 is None:
                     raise ClockError("virtual_time is required to arm the clock")
-                t0 = _advance(self._t0, (self._now() - self._anchor) * self._rate + self._ahead)
+                t0 = _advance(self._t0, (now - self._anchor) * self._rate + self._ahead)
             if t0 > _MAX_T0 - timedelta(seconds=_OVERFLOW_HORIZON_S * r):
                 raise ClockError(f"virtual_time {virtual_time or _iso(t0)!r} at rate {r:g} would overflow datetime near the max")
-            self._bank(t0)
+            self._bank(t0, now)
             self._t0 = t0
             self._rate = r
             self._ahead = 0.0
@@ -255,9 +259,10 @@ class Clock:
                     "virtual_time": _iso(_advance(self._t0, elapsed * self._rate + self._ahead)),
                     "version": self.version}
 
-    def _bank(self, t0: datetime | None = None) -> None:
-        """Fold the stretch since the last arm/clear into `_lived` at its rate, and start the next one now."""
-        now = self._now()
+    def _bank(self, t0: datetime | None = None, now: float | None = None) -> None:
+        """Fold the stretch since the last arm/clear into `_lived` at its rate, and start the next one at `now` (the
+        caller's own reading, when it took one, so the new arm starts at the instant its t0 was read)."""
+        now = self._now() if now is None else now
         ran = (now - self._anchor) * self._rate
         self._lived += ran
         if t0 is not None and self._armed:  # a re-arm forward is time the world lived through; one back adds nothing
