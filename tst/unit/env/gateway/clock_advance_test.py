@@ -120,7 +120,8 @@ def test_the_card_offers_advance():
     clock_ext = next(e for e in GATEWAY_EXTENSIONS if e["uri"] == EXT_CLOCK_URI)
     assert clock_ext["params"]["methods"]["advance"] == {
         "method": "PUT", "endpoint": "/clock/advance",
-        "request": {"type": "object", "properties": {"virtual_time": {"type": "string"}}, "required": ["virtual_time"]}}
+        "request": {"type": "object", "properties": {"virtual_time": {"type": "string"}, "wait_followers_s": {
+            "type": "number", "minimum": 0, "maximum": 30.0}}, "required": ["virtual_time"]}}
 
 
 @pytest.fixture

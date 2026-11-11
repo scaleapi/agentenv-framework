@@ -40,7 +40,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     sandbox_request_headers_for_url,
 )
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
-from agent_env.task_step.context import DeployedAgent, TaskStepContext
+from agent_env.task_step.context import DeployedAgent, StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
@@ -356,13 +356,13 @@ class DeployAgentTaskStep(TaskStep):
 
         existing = next((a for a in context.deployed_agents if a.agent_name == self.agent_name), None)
         if existing is not None:
-            raise RuntimeError(f"Agent with name '{self.agent_name}' is already deployed")
+            raise StepContextError(f"Agent with name '{self.agent_name}' is already deployed")
 
         linked_sandbox = None
         if self.sandbox_name:
             ds = next((s for s in context.deployed_sandboxes if s.sandbox_name == self.sandbox_name), None)
             if ds is None:
-                raise RuntimeError(
+                raise StepContextError(
                     f"Sandbox '{self.sandbox_name}' not found in context.deployed_sandboxes; "
                     f"deploy it with DeploySandboxTaskStep before this step"
                 )

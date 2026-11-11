@@ -19,7 +19,7 @@ from agent_env.artifact.store import artifact_write_lock
 from agent_env.env import Env
 from agent_env.env.env import require_gateway_url, website_child
 from agent_env.store.ids import derive_id
-from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef, RefRole
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.task_step.thread_work import finish_on_thread
@@ -160,7 +160,7 @@ class BuildMcpCliTaskStep(TaskStep):
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         deployed = next((d for d in context.deployed_envs if d.env_id == self.env_id), None)
         if deployed is None:
-            raise RuntimeError(f"Env '{self.env_id}' not found in context.deployed_envs")
+            raise StepContextError(f"Env '{self.env_id}' not found in context.deployed_envs")
         gateway_url = require_gateway_url(deployed, "build_mcp_cli")  # the CLI it generates talks to the gateway
 
         env = Env.get(self.env_id, deployed.env_version)

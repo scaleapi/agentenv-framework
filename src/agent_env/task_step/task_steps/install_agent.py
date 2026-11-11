@@ -33,7 +33,7 @@ from agent_env.providers.sandbox_providers.local_docker.provider import (
     trust_env,
 )
 from agent_env.store.base import NotFoundError
-from agent_env.task_step.context import DeployedAgent, TaskStepContext
+from agent_env.task_step.context import DeployedAgent, StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
@@ -226,7 +226,7 @@ class InstallAgentTaskStep(TaskStep):
 
         existing = next((a for a in context.deployed_agents if a.agent_name == self.agent_name), None)
         if existing is not None:
-            raise RuntimeError(f"Agent with name '{self.agent_name}' is already deployed")
+            raise StepContextError(f"Agent with name '{self.agent_name}' is already deployed")
 
         if self.container_name is not None:
             containers = context.metadata.get("deployed_docker_containers", [])
@@ -246,7 +246,7 @@ class InstallAgentTaskStep(TaskStep):
 
         ds = next((s for s in context.deployed_sandboxes if s.sandbox_name == self.sandbox_name), None)
         if ds is None:
-            raise RuntimeError(f"Sandbox '{self.sandbox_name}' not found in context.deployed_sandboxes")
+            raise StepContextError(f"Sandbox '{self.sandbox_name}' not found in context.deployed_sandboxes")
         if ds.sandbox_mode != SANDBOX_MODE_VM:
             raise RuntimeError(
                 f"InstallAgent requires a VM-mode sandbox; '{self.sandbox_name}' is mode={ds.sandbox_mode!r}"

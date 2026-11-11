@@ -9,7 +9,7 @@ from typing import Any, ClassVar, Optional
 import httpx
 
 from agent_env.a2a_agent.a2a_agent import A2AAgent
-from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
@@ -76,7 +76,7 @@ class RegisterAgentTriggersStep(TaskStep):
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         agent = next((a for a in context.deployed_agents if a.agent_name == self.agent_name), None)
         if agent is None:
-            raise RuntimeError(f"Agent '{self.agent_name}' not found in context.deployed_agents")
+            raise StepContextError(f"Agent '{self.agent_name}' not found in context.deployed_agents")
         card = agent.a2a_card or {}
         ext = A2AAgent.find_extension(card, A2AAgent.EXT_TRIGGERS)
         if ext is None:

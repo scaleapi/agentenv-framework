@@ -18,6 +18,7 @@ from click.testing import CliRunner
 
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.cli.env.multi import multi
+from agent_env.config import get_config
 from agent_env.config.runtime import WEBSITE_BROWSER_OVERRIDE, run_env_ids
 from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, DeployedSandboxEnv
 from agent_env.env.envs import _deployment, _multi_computers
@@ -309,6 +310,14 @@ async def test_deploy_hands_the_gateway_each_computer_deployed_under_its_name_an
     assert deployed.sandbox_ids == {"gateway_server": "gw", "modal_vm": {"desktop": "sb-desktop", "laptop": "sb-laptop"}}
     assert sorted(env_sandbox_ids(DeployedEnv.from_dict(dataclasses.asdict(deployed)))) == [
         ("gw", "modal_vm"), ("gw", "modal_vm"), ("sb-desktop", "modal_vm"), ("sb-laptop", "modal_vm")]
+
+
+def test_a_computer_whose_card_follows_a_clock_hands_the_gateway_its_control_token_as_its_read_token():
+    from agent_env.env.envs._multi_computers import _clock_read_token
+
+    following = dataclasses.replace(_record("desktop"), environment_card={"name": "desktop", "capabilities": {"extensions": [
+        {"uri": "urn:agentenv:clock/v1", "params": {"methods": {"sync_time": {"method": "POST", "endpoint": "/clock/sync"}}}}]}})
+    assert (_clock_read_token(following), _clock_read_token(_record("laptop"))) == ("token-desktop", None)
 
 
 @pytest.mark.asyncio
@@ -807,6 +816,18 @@ def test_the_browser_is_the_one_named_none_for_an_empty_list_and_else_the_runs_w
             run_env_ids({WEBSITE_BROWSER_OVERRIDE: "chromium-computer"}):
         assert _browsing().website_browser() == WebsiteBrowser(computer=chromium)
     get.assert_called_with("chromium-computer")
+
+
+def test_without_a_run_override_a_multi_env_with_websites_gets_the_configs_default_browser(local_stores):
+    chromium, config = FakeBrowser(), get_config()
+    config.default_website_browser_env_id = "chromium-computer"
+    try:
+        with patch("agent_env.env.env.Env.get", return_value=chromium) as get:
+            assert _browsing().website_browser() == WebsiteBrowser(computer=chromium)
+            assert _browsing(browser_envs=[]).website_browser() == WebsiteBrowser()
+        get.assert_called_once_with("chromium-computer")
+    finally:
+        config.default_website_browser_env_id = None
 
 
 def test_a_runs_browser_the_store_doesnt_hold_yet_is_left_for_the_gateway_to_look_up(local_stores):

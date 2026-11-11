@@ -80,7 +80,7 @@ from typing import ClassVar, Optional
 from agent_env.config import get_config
 from agent_env.env.gateway.constants import EXT_STEP_URI
 from agent_env.store.ids import derive_path_id, is_local_id, validate_local_id
-from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import find_agent_container
@@ -650,7 +650,7 @@ class CollectArtifactsTaskStep(TaskStep):
         DeployedEnv metadata, so its presence authoritatively marks a CUA env."""
         deployed_env = next((d for d in context.deployed_envs if d.env_id == self.env_id), None)
         if deployed_env is None:
-            raise RuntimeError(
+            raise StepContextError(
                 f"Env '{self.env_id}' not found in context.deployed_envs — cannot collect artifacts via controller"
             )
         if _CUA_ENV_METADATA_MARKER not in (deployed_env.metadata or {}):
@@ -758,7 +758,7 @@ class CollectArtifactsTaskStep(TaskStep):
 
         agent = next((a for a in context.deployed_agents if a.agent_name == self.agent_name), None)
         if agent is None:
-            raise RuntimeError(f"Agent '{self.agent_name}' not found in context.deployed_agents")
+            raise StepContextError(f"Agent '{self.agent_name}' not found in context.deployed_agents")
         if not agent.sandbox_id:
             raise RuntimeError(f"Agent '{self.agent_name}' has no sandbox_id — cannot collect artifacts")
 
@@ -804,7 +804,7 @@ class CollectArtifactsTaskStep(TaskStep):
             (sb for sb in context.deployed_sandboxes if sb.sandbox_name == self.sandbox_name), None
         )
         if ds is None:
-            raise RuntimeError(
+            raise StepContextError(
                 f"Sandbox '{self.sandbox_name}' not found in context.deployed_sandboxes"
             )
 
@@ -862,7 +862,7 @@ class CollectArtifactsTaskStep(TaskStep):
             (s for s in context.deployed_sandboxes if s.sandbox_name == self.sandbox_name), None
         )
         if deployed is None:
-            raise RuntimeError(
+            raise StepContextError(
                 f"Sandbox '{self.sandbox_name}' not found in context.deployed_sandboxes"
             )
 

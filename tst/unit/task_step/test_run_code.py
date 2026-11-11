@@ -25,7 +25,7 @@ from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniv
 from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, DeployedSandboxEnv, EnvNeedsSandbox
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox
 from agent_env.providers.sandbox_providers.sandbox import Sandbox, VmSandbox
-from agent_env.task_step.context import DeployedAgent, DeployedSandbox, TaskStepContext
+from agent_env.task_step.context import DeployedAgent, DeployedSandbox, StepContextError, TaskStepContext
 from agent_env.task_step.task_steps import run_code as _run_code_module
 from tst.unit.computer_home import CARD, TOKEN, Computer
 from tst.unit.event_loop_probe import on_event_loop
@@ -492,7 +492,7 @@ async def test_sandbox_target_honors_the_sandboxs_type():
 
 @pytest.mark.asyncio
 async def test_sandbox_target_names_a_sandbox_the_run_never_deployed():
-    with pytest.raises(RuntimeError, match="^Sandbox 'ghost' not found in context.deployed_sandboxes$"):
+    with pytest.raises(StepContextError, match="^Sandbox 'ghost' not found in context.deployed_sandboxes$"):
         await _step(sandbox_name="ghost")._sandbox_target(_sandbox_context())
 
 

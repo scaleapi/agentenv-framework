@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import random
+import re
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -1131,6 +1133,90 @@ async def test_nl_action_via_stub_executor_with_verify(engine):
         assert any(e["kind"] == "verify_ok" for e in engine._events)
     finally:
         server.shutdown()
+
+
+@contextlib.asynccontextmanager
+async def _executor_answering_after(seconds: float):
+    """A loopback executor whose message/send, like a deployed one's, answers only once its task ends `seconds` later;
+    its task polls answer at once. Yields its URL."""
+    from pytest_socket import enable_socket
+
+    enable_socket()  # re-disabled by the autouse fixture's next setup
+    handlers: set[asyncio.Task] = set()
+
+    async def serve(reader, writer):
+        handlers.add(asyncio.current_task())
+        try:
+            while True:  # one connection carries the send and then the polls
+                head = await reader.readuntil(b"\r\n\r\n")
+                req = json.loads(await reader.readexactly(int(re.search(rb"(?i)content-length: *(\d+)", head)[1])))
+                if req["method"] == "message/send":
+                    await asyncio.sleep(seconds)
+                body = json.dumps({"jsonrpc": "2.0", "id": req["id"], "result": {"id": "task-1", "status": {
+                    "state": "completed", "message": {"parts": [{"kind": "text", "text": "replied"}]}}}}).encode()
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s"
+                             % (len(body), body))
+                await writer.drain()
+        except (asyncio.IncompleteReadError, ConnectionError):
+            pass  # the caller hung up
+        finally:
+            writer.close()
+
+    server = await asyncio.start_server(serve, "127.0.0.1", 0)
+    try:
+        yield f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+    finally:
+        server.close()
+        for task in handlers:
+            task.cancel()
+        await asyncio.gather(*handlers, return_exceptions=True)
+
+
+def _reply_then_post(url: str, timeout_seconds: float) -> dict:
+    return {"executor": {"a2a_url": url, "role": "executor", "timeout_seconds": timeout_seconds},
+            "triggers": [{"id": "x", "when": {"type": "action", "tool": "t"},
+                          "actions": [{"type": "nl", "instruction": "reply to the client"},
+                                      {"type": "tool", "tool": "slack_send_message",
+                                       "args": {"channel": "#c", "text": "the client replied"}}]}]}
+
+
+async def _settled(engine, tid: str, within: float = 10) -> None:
+    for _ in range(int(within / 0.05)):
+        if engine._triggers[tid]["status"] not in ("firing", "queued"):
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"trigger {tid!r} still {engine._triggers[tid]['status']} after {within}s")
+
+
+@pytest.mark.asyncio
+async def test_an_executor_slower_than_the_http_timeout_is_waited_out_and_the_later_actions_run(engine, monkeypatch):
+    """FD-5333: a contact slower than 30 s used to fail its fire on a read timeout, though its reply still landed."""
+    monkeypatch.setattr(triggers_module, "_EXECUTOR_HTTP_TIMEOUT_S", 0.2)  # stands in for the 30 s
+    async with _executor_answering_after(1.0) as url:
+        engine.register(_reply_then_post(url, timeout_seconds=10))
+        engine.on_tool_call("default", "t", {}, _result())
+        await asyncio.sleep(0.4)
+        assert engine._triggers["x"]["status"] == "firing"  # past the HTTP timeout, still in flight
+        await _settled(engine, "x")
+
+    assert engine._triggers["x"]["status"] == "fired", engine.state()["events"][-3:]
+    assert [e["action_index"] for e in engine._events if e["kind"] == "action_ok"] == [0, 1]
+    assert engine._test_gw.calls == [("slack_send_message", {"channel": "#c", "text": "the client replied"})]
+
+
+@pytest.mark.asyncio
+async def test_an_executor_slower_than_its_own_timeout_still_fails_the_fire(engine, monkeypatch):
+    monkeypatch.setattr(triggers_module, "_EXECUTOR_HTTP_TIMEOUT_S", 0.2)
+    async with _executor_answering_after(3.0) as url:
+        engine.register(_reply_then_post(url, timeout_seconds=1.0))
+        engine.on_tool_call("default", "t", {}, _result())
+        await asyncio.sleep(0.4)
+        assert engine._triggers["x"]["status"] == "firing"
+        await _settled(engine, "x", within=2.5)
+
+    [failure] = [e for e in engine._events if e["kind"] == "action_failed"]
+    assert (failure["action_index"], failure["detail"]) == (0, "ReadTimeout")
+    assert engine._triggers["x"]["status"] == "armed" and engine._test_gw.calls == []
 
 
 @pytest.mark.asyncio

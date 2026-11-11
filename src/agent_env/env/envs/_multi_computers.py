@@ -16,6 +16,7 @@ from agentenv_protocol.computer import tool_prefix_problem
 from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, Env
 from agent_env.env.envs.computer.utils import sites
 from agent_env.env.gateway import ExternalChild
+from agent_env.env.gateway.constants import EXT_CLOCK_URI
 from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider, get_env_sandbox_provider
 
 if TYPE_CHECKING:
@@ -91,6 +92,12 @@ def routes_later(entry: Optional[dict]) -> bool:
     gateway, after it: ``site_routing`` with no ``sites`` of its own."""
     params = (entry or {}).get("env_params")  # one that isn't a table is the computer's own params check to refuse
     return isinstance(params, dict) and bool(params.get("site_routing")) and not params.get("sites")
+
+
+def _clock_read_token(record: DeployedEnv) -> str | None:
+    """The read token a computer's clock watch carries when its card says it's a clock follower (``clock/v1``'s
+    ``sync_time``): for now its control token, which a token of its own can replace without the gateway knowing."""
+    return record.control_token if record.supports(EXT_CLOCK_URI, "sync_time") else None
 
 
 def refusal(computer: ComputerEnv, entry: dict, sandbox_type: str | None, websites: Mapping[str, str]) -> str | None:
@@ -213,7 +220,7 @@ class Computers:
                 for error in failed[1:]:
                     logger.warning(f"multi env '{self._owner}': another computer failed to deploy too: {error!r}")
                 raise failed[0]
-            return [ExternalChild(env.environment_name, record.mcp_url, record.environment_url)
+            return [ExternalChild(env.environment_name, record.mcp_url, record.environment_url, _clock_read_token(record))
                     for env, record in zip(self.every, results)]
         return deploy
 
