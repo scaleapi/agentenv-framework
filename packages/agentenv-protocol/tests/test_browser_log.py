@@ -218,7 +218,7 @@ class Pipe:
             return {"currentIndex": 0, "entries": [{"id": 1, "url": "about:blank"}]}
         return {}
 
-    async def request(self, method, params=None, *, session_id=None):
+    async def request(self, method, params=None, *, session_id=None, answered=None):
         return {"result": await self.call(method, params, session_id=session_id)}
 
 
