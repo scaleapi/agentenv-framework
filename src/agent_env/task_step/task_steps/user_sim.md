@@ -47,11 +47,18 @@ whose card takes no system prompt or no model fails the step, since without them
 must be this step's `opening_prompt`, which the user's prompt quotes as what they sent (FD-5495 is to write it once).
 `reply` is the agent's next prompt; `done` with a message reaches the agent and ends
 the conversation after its answer; `done` without one, or `no_reply`, ends it at once. After `max_replies` replies,
-the last one reaches the agent and the conversation ends after its answer. Each answer is recorded in
-`metadata["user_sim_reads"][<step id>]`. Set `multi_day: false` here, and no `user_output_format` or `user_model` on
-the `prompt_agent` step: it refuses them, since the prompt, answer format and model were set here.
+the last one reaches the agent and the conversation ends after its answer; the user isn't asked again, not even by a
+post-turn hook. A user sim that fails or times out ends the conversation and sets the response's `error_type` to
+`user_sim_error`, so verifiers skip the run. Each read leaves a summary in `metadata["user_sim_reads"][<step id>]`
+(`outcome`, `message`, `used`, `score`, `schema_errors`, `retried`, `user_sim_error`, `user_sim_turns`,
+`user_sim_trajectory_urls`); the whole read, with what the user sim was shown and its raw answer, is in the object
+store at the summary's `object_url`. Set `multi_day: false` here, and no `schedule` or `response_times` in the persona,
+since one sitting reads each reply at once. On the `prompt_agent` step set no `user_output_format`, and no
+`user_model` on the step or in its `step_params`, since the prompt, answer format and model were set here.
 
-The step checks these settings when the task loads, so a mistake fails before a paid run.
+This step checks its own settings when the task loads, so a mistake there fails before a paid run. `prompt_agent`
+checks the ones above, its prompt against `opening_prompt`, and the persona's time zone against the task clock's when
+it starts, before its first agent turn; a refused one leaves no conversation.
 
 ## The description
 

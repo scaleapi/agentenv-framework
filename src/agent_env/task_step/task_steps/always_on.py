@@ -110,6 +110,7 @@ from agent_env.task_step.task_steps import user_sim_versions
 from agent_env.task_step.task_steps.deploy_user_sim_agent import USER_SIMS_KEY
 from agent_env.task_step.task_steps.notification_delivery import delivered_parts, label_time, take_due
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
+from agent_env.task_step.task_steps.user_sim_common import iso as _iso, person_of, task_zone, utc as _utc
 
 logger = logging.getLogger(__name__)
 
@@ -1802,26 +1803,8 @@ async def _call(env, uri: str, method: str, params: Optional[dict] = None, *, at
     raise last
 
 
-def person_of(us: dict) -> dict:
-    """The user a deploy_user_sim_agent record describes, as the user sim's ``answer`` takes them; the caller adds the
-    run's ``time_zone``, ``opening`` and ``done_ends_run``."""
-    name = us.get("display_name") or us["name"]
-    return {"key": us["name"], "name": name, "first": us.get("first_name") or name.split()[0],
-            "email": us.get("email"), "time_zone": us.get("time_zone"),
-            "description": us.get("description"), "versions": us.get("versions") or {},
-            "output_format": us.get("output_format"),
-            "permissions": us.get("permissions"), "keep_private": us.get("keep_private")}
-
-
 def _task_zone(us: dict, clocks: list[dict]) -> str:
-    """The user's time zone, else the one sync_env_clock gave the world; refused when the two disagree."""
-    zones = sorted({c["timezone"] for c in clocks if c.get("timezone")})
-    zone = us.get("time_zone")
-    if zone and zones and zones != [zone]:
-        raise ValueError(f"always_on: user sim '{us['name']}' is in {zone} but sync_env_clock set {zones}")
-    if not zone and len(zones) > 1:
-        raise ValueError(f"always_on: sync_env_clock set several time zones {zones}; the user sim needs one")
-    return zone or (zones[0] if zones else "UTC")
+    return task_zone(us, clocks, "always_on")
 
 
 def _step_part(text: str, source: str) -> dict:
@@ -1961,17 +1944,6 @@ def _asleep(hm: tuple[int, int], wake: tuple[int, int], sleep: tuple[int, int]) 
 def _hm(text: str) -> tuple[int, int]:
     h, m = text.split(":")
     return int(h), int(m)
-
-
-def _utc(text: str) -> datetime:
-    at = datetime.fromisoformat(str(text).replace("Z", "+00:00"))
-    if at.tzinfo is None:
-        raise ValueError(f"{text!r} has no UTC offset")
-    return at.astimezone(timezone.utc)
-
-
-def _iso(value: Optional[datetime]) -> Optional[str]:
-    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z") if value else None
 
 
 def _end_instant(end_time: str, t0: datetime) -> datetime:
