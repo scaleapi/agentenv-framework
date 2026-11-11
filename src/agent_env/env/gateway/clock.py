@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 import re
+import secrets
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -28,13 +29,14 @@ _MAX_T0 = datetime.max.replace(tzinfo=timezone.utc)
 def _parse_rate(rate) -> float:
     if isinstance(rate, bool) or not isinstance(rate, (int, float)):
         raise ClockError(f"rate must be a number, got {type(rate).__name__}")
-    # NaN passes both ordered bounds below, then poisons every later read with an uncatchable 500.
-    if not math.isfinite(rate):
+    # NaN passes both ordered bounds below, then poisons every later read with an uncatchable 500; only a float can be
+    # NaN or infinite, and math.isfinite on an int past a float's range raises.
+    if isinstance(rate, float) and not math.isfinite(rate):
         raise ClockError(f"rate must be a finite number, got {rate}")
     if rate < 0:
         raise ClockError("rate must be non-negative")
     if rate > MAX_RATE:
-        raise ClockError(f"rate {rate:g} exceeds max {MAX_RATE:g} (1 real s = 1 virtual day)")
+        raise ClockError(f"rate exceeds max {MAX_RATE:g} (1 real s = 1 virtual day)")
     return float(rate)
 
 
@@ -125,6 +127,8 @@ def _advance(t0: datetime, seconds: float) -> datetime:
 class Clock:
     """Gateway-owned virtual clock — wall-clock-driven, monotonic, threadsafe; `now_fn` injectable for tests."""
 
+    BOOT_ID_BYTES = 6  # a version's per-boot id, random, so a restarted gateway's versions never repeat its last boot's
+
     def __init__(self, now_fn=time.monotonic):
         self._now = now_fn
         self._lock = threading.Lock()
@@ -135,10 +139,32 @@ class Clock:
         self._generation = 0
         self._lived = 0.0  # virtual seconds run before the current arm/clear
         self._ahead = 0.0  # virtual seconds the current arm was advanced by
+        self._boot = secrets.token_hex(self.BOOT_ID_BYTES)
+        self._count = 0
 
     @property
     def armed(self) -> bool:
         return self._armed
+
+    @property
+    def version(self) -> str:
+        """Opaque, changed by every write: this clock's own id and a count, so it never repeats across restarts."""
+        return self.version_of(self._count)
+
+    def version_of(self, count: int) -> str:
+        """The version this clock had at its ``count``th write."""
+        return f"{self._boot}.{count}"
+
+    def count_of(self, version) -> int | None:
+        """The count of ``version`` when this clock has had it; None for another clock's, a later one, or junk."""
+        boot, _, count = version.partition(".") if isinstance(version, str) else ("", "", "")
+        if boot != self._boot or not (count.isascii() and count.isdigit()):
+            return None
+        # Counts carry no leading zeros, so one with more digits than the current count is past it, and is refused before
+        # int() reads it: int() of thousands of digits raises.
+        if len(count) > len(str(self._count)) or int(count) > self._count:
+            return None
+        return int(count)
 
     @property
     def rate(self) -> float:
@@ -168,6 +194,25 @@ class Clock:
             self._ahead = 0.0
             self._armed = True
             self._generation += 1
+            self._count += 1
+        return self.state()
+
+    def set_rate(self, rate) -> dict:
+        """Change an armed clock's rate from its time at the call, keeping t0 and generation as an advance does, so time
+        triggers keep their marks and a rate change can't step the clock back by a time read a moment earlier."""
+        r = _parse_rate(rate)
+        with self._lock:
+            if not self._armed or self._t0 is None:
+                raise ClockError("clock is not armed")
+            now = self._now()
+            ran = (now - self._anchor) * self._rate
+            if _advance(self._t0, ran + self._ahead) > _MAX_T0 - timedelta(seconds=_OVERFLOW_HORIZON_S * r):
+                raise ClockError(f"rate {r:g} would overflow datetime near the max")
+            self._lived += ran
+            self._ahead += ran
+            self._anchor = now
+            self._rate = r
+            self._count += 1
         return self.state()
 
     def advance(self, virtual_time: str) -> dict:
@@ -184,6 +229,7 @@ class Clock:
                 raise ClockError(f"advance only moves forward: {virtual_time!r} is before the current {_iso(current)}")
             self._ahead += jump
             self._lived += jump
+            self._count += 1
         return self.state()
 
     def clear(self) -> dict:
@@ -195,7 +241,8 @@ class Clock:
             self._rate = 1.0
             self._ahead = 0.0
             self._generation += 1
-        return {"ok": True, "armed": False}
+            self._count += 1
+            return {"ok": True, "armed": False, "version": self.version}
 
     def elapsed(self) -> float:
         """Virtual seconds run so far: real time at each arm's rate (1 unarmed), plus each forward re-arm or advance."""
@@ -226,10 +273,11 @@ class Clock:
     def state(self) -> dict:
         with self._lock:
             if not self._armed or self._t0 is None:
-                return {"armed": False}
+                return {"armed": False, "version": self.version}
             elapsed = self._now() - self._anchor
             return {"armed": True, "t0": _iso(self._t0), "virtual_seconds_per_real_second": self._rate,
-                    "virtual_time": _iso(_advance(self._t0, elapsed * self._rate + self._ahead))}
+                    "virtual_time": _iso(_advance(self._t0, elapsed * self._rate + self._ahead)),
+                    "version": self.version}
 
     def _bank(self, t0: datetime | None = None) -> None:
         """Fold the stretch since the last arm/clear into `_lived` at its rate, and start the next one now."""
