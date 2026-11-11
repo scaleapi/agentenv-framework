@@ -672,10 +672,9 @@ class PromptAgentTaskStep(TaskStep):
                     conversation_store.mark_closed(conversation_id)
                     break
                 if end_after is not None:
+                    # The hooks still see this turn, as the last one; the user isn't asked again.
                     logger.info(f"Turn {turn+1}: the agent answered the user's last message; ending multi-turn ({end_after})")
-                    conversation_store.mark_closed(conversation_id)
-                    break
-                last = turn == self.max_conversation_turns - 1
+                last = turn == self.max_conversation_turns - 1 or end_after is not None
                 if last and hooks is None:
                     break
 

@@ -213,3 +213,24 @@ async def test_an_opening_split_across_text_parts_is_compared_joined(monkeypatch
                                poll_interval_seconds=0, max_conversation_turns=3)
     await step.execute(ctx)
     assert _reads(ctx)[0]["read"]["you_sent"][0]["text"] == "plan my parents' visit\nthey land friday"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("persona_extra,user", [({"max_replies": 1}, [said("reply", "make it shorter")]),
+                                                ({}, [said("done", "make it shorter")])])
+async def test_the_agents_answer_to_the_users_last_message_still_runs_the_hooks_as_the_last_turn(
+        monkeypatch, persona_extra, user):
+    from tst.unit.task_step.test_prompt_agent_post_turn_hooks import _hook, _recorded
+    hook = _hook("records", """
+        async def post_turn(turn, params):
+            turn.record({"number": turn.number, "last": turn.last, "reply": turn.agent_reply})
+            return None
+        """)
+    peers = Peers(monkeypatch, {AGENT: [text("draft one"), text("draft two")], USER: user})
+    ctx = await _context(monkeypatch, persona={**HANNAH, **persona_extra})
+
+    await _step(post_turn_hooks=[{"file_artifact_id": hook, "params": {}}]).execute(ctx)
+
+    assert [(r["number"], r["last"], r["reply"]) for r in _recorded(ctx)] == [
+        (1, False, "draft one"), (2, True, "draft two")]
+    assert [r[1] for r in peers.requests(ctx)].count(f"{USER}/a2a") == 2  # asked once
