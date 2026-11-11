@@ -27,7 +27,9 @@ playwright-mcp: its start tab loads the site by name through the gateway, an age
 under ``chromium_``, its CDP address asked through ``/svc/chromium/`` names the gateway and reaches the site by name, a
 later process reattaches it from the instance store, a universe loaded into the multi env sets its cookies, and
 reset_env brings it back after its container is killed and after the gateway restarts; a multi env naming none takes
-the run's browser, chromium too, the same way, and ``browser_envs = []`` deploys none.
+the run's browser, chromium too, the same way, and ``browser_envs = []`` deploys none; and browser_connect_cdp
+hands an agent an address to it at the multi env's gateway, whose relay takes the agent's page to the site by name,
+with the multi env's tools hidden from the agent's role.
 Needs Docker and the local registry on
 localhost:5000, and Node 20 or later and npm for the CDP clients."""
 
@@ -1266,6 +1268,39 @@ async def test_a_multi_env_naming_no_browser_takes_the_runs_and_chromium_runs_as
     assert PLAYWRIGHT_MCP_ENVIRONMENT_NAME not in stated, stated
     [start_tab] = deployed.child_envs["chromium"]["metadata"]["computer"]["start_tabs"]["chromium"]
     assert (start_tab["url"], start_tab["site"], start_tab["outcome"]) == (MULTI_SITE, "shop", "loaded"), start_tab
+
+
+@pytest.mark.asyncio
+async def test_browser_connect_cdp_hands_an_agent_an_address_at_the_multi_envs_gateway_with_its_tools_hidden(
+        browser_computer, shop):
+    with namespace_routing():
+        agent = put_test_agent(f"cdp-agent-{uuid.uuid4().hex[:8]}")
+        office = _office(shop, [Env.get(browser_computer.id)])
+        context = TaskStepContext()
+        try:
+            [deployed] = (await DeployEnvTaskStep(id="office", version=None, env_id=office.id, sandbox_type="local",
+                                                  ttl_seconds=900, child_envs={"chromium": MULTI_CHROMIUM}
+                                                  ).execute(context)).deployed_envs
+            await DeployAgentTaskStep(id="deploy-solver", version=None, env_ids=[], a2a_agent_id=agent.id,
+                                      a2a_agent_version=agent.version, agent_name="solver",
+                                      sandbox_type="local").execute(context)
+            await BrowserConnectCdpTaskStep(id="connect", version=None, env_id=office.id,
+                                            agent_name="solver").execute(context)
+            _, title = await _opened_over_cdp(context, "first", url=MULTI_SITE)
+            tools = await _tool_names(deployed)
+            async with httpx.AsyncClient(timeout=30) as http:
+                lines = (await http.get(f"{deployed.gateway_url}/trajectory")).text.splitlines()
+            relayed = [event for event in map(json.loads, lines) if event.get("event_type") == "browser_connection"]
+        finally:
+            report = await teardown_run(context)
+
+    assert not title.startswith("failed"), title
+    assert tools == [], tools
+    assert [event["browser"] for event in relayed] and all(event["browser"] == "chromium" for event in relayed), relayed
+    assert context.metadata["browser_connections"] == [{
+        "step_id": "connect", "env_id": office.id, "agent_name": "solver", "browser": "chromium", "name": "chromium",
+        "keep_tools": False, "role": "default", "tools_hidden": "*"}]
+    assert not report.failed
 
 
 @pytest.mark.asyncio

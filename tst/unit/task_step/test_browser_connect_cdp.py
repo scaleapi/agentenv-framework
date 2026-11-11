@@ -1,21 +1,24 @@
 """browser_connect_cdp asks the env's website browser for the agent's CDP address under the env's URL as the agent's
-sandbox reaches it, or, of a browser that takes no origin, rebases the address it answers onto that; adds it to the
-agent's cdp-config and hides every tool the env serves from the agent's role unless kept; it refuses an agent that takes
-no CDP address and an env whose browser it can't tell; and connecting under a name already connected replaces its
-record. Only the HTTP boundary is mocked."""
+sandbox reaches it, or, of a browser that takes no origin, rebases the address it answers onto that; a browser in one
+of a multi env's computers is asked through the multi env's gateway, which names its own address, rebased the same
+way; it adds the address to the agent's cdp-config and hides every tool the env serves from the agent's role unless
+kept; it refuses an agent that takes no CDP address and an env whose browser it can't tell; and connecting under a
+name already connected replaces its record. Only the HTTP boundary is mocked."""
 
 from __future__ import annotations
 
+import dataclasses
 import json
 
 import httpx
 import pytest
 
-from agent_env.env.env import DeployedSandboxEnv
+from agent_env.env.env import DeployedGatewayEnv, DeployedSandboxEnv
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
 from agent_env.task_step.task_steps.browser.connect_cdp import BrowserConnectCdpTaskStep
 
 _ENV = "http://localhost:41000"
+_GATEWAY = "http://localhost:43000"
 _AGENT = "http://localhost:42000"
 _BROWSER = {"uri": "urn:agentenv:browser/v1", "params": {
     "endpoint": "/svc/chromium/agentenv/ext/browser", "methods": {"cdp": {"endpoint": "/svc/chromium/agentenv/ext/browser/cdp"}}}}
@@ -71,6 +74,27 @@ async def test_a_browser_that_takes_an_origin_mints_the_agents_address_where_its
     assert json.loads(added.content) == {"name": "chromium", "http_url": f"{origin}/svc/chromium/cdp/t1/",
                                          "ws_url": f"{ws}/svc/chromium/cdp/t1/devtools/browser",
                                          "metadata": {"browser": "chromium"}}
+
+
+@pytest.mark.asyncio
+async def test_a_browser_in_a_multi_envs_computer_is_reached_through_its_gateway_and_its_tools_hidden_there(
+        monkeypatch):
+    sent = _mock(monkeypatch, tokens=["t1"], base=f"{_GATEWAY}/browser/chromium")
+    context = TaskStepContext(deployed_envs=[_multi()], deployed_agents=[_agent()], metadata={})
+
+    await BrowserConnectCdpTaskStep(id="connect", version=None, env_id="office", agent_name="solver").execute(context)
+
+    asked, added, hidden = sent
+    assert (str(asked.url), json.loads(asked.content)) == (
+        f"{_GATEWAY}/svc/chromium/svc/chromium/agentenv/ext/browser/cdp", {"user": "solver"})
+    assert asked.headers["authorization"] == "Bearer control"  # the computer's own token, which the gateway passes on
+    assert json.loads(added.content)["http_url"] == "http://host.docker.internal:43000/browser/chromium/cdp/t1/"
+    assert json.loads(added.content)["ws_url"] == (
+        "ws://host.docker.internal:43000/browser/chromium/cdp/t1/devtools/browser")
+    assert (str(hidden.url), json.loads(hidden.content)) == (f"{_GATEWAY}/tools/disable",
+                                                             {"role": "default", "tools": "*"})
+    assert hidden.headers["authorization"] == "Bearer gateway-control"
+    assert context.metadata["browser_connections"][0]["env_id"] == "office"
 
 
 @pytest.mark.asyncio
@@ -146,6 +170,17 @@ def _env(children: list | None = None, *, url: str = _ENV, sandbox_type: str = "
         environment_card_url=f"{url}/.well-known/agent-env.json",
         environment_card={"name": "chromium", "capabilities": {"extensions": [_TOOL_ACCESS], "operations": ["reset"]},
                           "children_environments": [_app("chromium")] if children is None else children})
+
+
+def _multi() -> DeployedGatewayEnv:
+    """A multi env's deployment whose computer ``chromium`` is the browser computer ``_env`` gives, its gateway
+    serving tool access on its own card."""
+    return DeployedGatewayEnv(
+        env_id="office", env_version=1, gateway_url=_GATEWAY, sandbox_id="gw", sandbox_type="local",
+        control_token="gateway-control", environment_card_url=f"{_GATEWAY}/.well-known/agent-env.json",
+        environment_card={"name": "office", "capabilities": {"extensions": [_TOOL_ACCESS]},
+                          "children_environments": [{"name": "chromium"}]},
+        child_envs={"chromium": dataclasses.asdict(_env())})
 
 
 def _agent(role: str | None = None, extensions: list | None = None) -> DeployedAgent:
