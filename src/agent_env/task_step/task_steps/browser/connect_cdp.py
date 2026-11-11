@@ -8,8 +8,10 @@ import logging
 from typing import ClassVar, Optional
 
 import httpx
+from agentenv_protocol.client import find_extension_method
 from agentenv_protocol.tool_access import DISABLE, DISABLE_TOOL_EXTENSION_URI, WILDCARD
 from agentenv_protocol.tool_context import DEFAULT_ROLE
+from agentenv_protocol.website_browser import BROWSER
 
 from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.entity.refs import EntityRef
@@ -74,7 +76,7 @@ class BrowserConnectCdpTaskStep(BrowserStep):
                    name=data.get("name") or DEFAULT_NAME, keep_tools=data.get("keep_tools", False))
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
-        deployed, browser, _ = self._find(context)
+        deployed, browser, card = self._find(context)
         if deployed.env_id != self.env_id:
             raise RuntimeError(f"the website browser {browser!r} is in a computer of the multi env {self.env_id!r}, whose "
                                "agents reach it through the multi env's gateway; browser_connect_cdp doesn't hand out "
@@ -84,8 +86,11 @@ class BrowserConnectCdpTaskStep(BrowserStep):
         if cdp_config is None or not agent.a2a_url:
             raise RuntimeError(f"agent {agent.agent_name!r} can't take a CDP address: its card has no "
                                f"{A2AAgent.EXT_CDP_CONFIG}")
-        address = await self._call(context, "cdp", {"user": agent.agent_name}, CDP_TIMEOUT_S)
-        http_url, ws_url = _as_agent_reaches(address, deployed, agent)
+        base, theirs = _env_urls(deployed, agent)
+        asked = {"user": agent.agent_name, **({"origin": theirs} if _takes_origin(card) else {})}
+        address = await self._call(context, "cdp", asked, CDP_TIMEOUT_S)
+        http_url = _rebased(address["http_url"], base, theirs)
+        ws_url = _rebased(address["ws_url"], _ws(base), _ws(theirs))
         async with httpx.AsyncClient(timeout=ADD_TIMEOUT_S) as client:
             added = await client.post(agent.a2a_url + cdp_config["params"]["endpoint"], json={
                 "name": self.name, "http_url": http_url, "ws_url": ws_url,
@@ -113,19 +118,27 @@ def _deployed_agent(context: TaskStepContext, agent_name: str) -> DeployedAgent:
     return agent
 
 
-def _as_agent_reaches(address: dict, deployed: DeployedEnv, agent: DeployedAgent) -> tuple[str, str]:
-    """``address``'s URLs as the agent's sandbox reaches them: under the env's URL as the agent reaches that, as
-    deploy_agent gives it MCP URLs. A URL anywhere else, at a gateway's public address say, is kept."""
+def _env_urls(deployed: DeployedEnv, agent: DeployedAgent) -> tuple[str, str]:
+    """The env's URL, and the env's URL as the agent's sandbox reaches it, as deploy_agent gives it MCP URLs: the
+    origin the browser mints the agent's address under, since behind a tunnel that ends TLS the browser can't tell
+    how it was reached."""
     base = deployed.environment_url.rstrip("/")
     if isinstance(deployed, DeployedSandboxEnv):
         theirs = reachable_url(base, from_sandbox_type=deployed.sandbox_type, to_sandbox_type=agent.sandbox_type)
     else:
         theirs = host_url_for(base, agent.sandbox_type)
-    theirs = theirs.rstrip("/")
-    return _rebased(address["http_url"], base, theirs), _rebased(address["ws_url"], _ws(base), _ws(theirs))
+    return base, theirs.rstrip("/")
+
+
+def _takes_origin(card: dict) -> bool:
+    """Whether the browser's cdp takes an origin: one composed before it did refuses any it doesn't know."""
+    method = find_extension_method(card, BROWSER, "cdp") or {}
+    return "origin" in method.get("request", {}).get("properties", {})
 
 
 def _rebased(url: str, base: str, theirs: str) -> str:
+    """``url`` moved under ``theirs`` when it's under the env's URL as the step reaches it, as a gateway's CDP answers
+    are and a browser's that takes no origin; else kept."""
     return theirs + url[len(base):] if url.startswith(base + "/") else url
 
 

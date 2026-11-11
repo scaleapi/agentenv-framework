@@ -8,7 +8,8 @@ for good, computer-ready/v1 saying why and the tools answering with it, and so d
 chromium with it though supervisord starts X again. Through its cdp address, Playwright and Puppeteer drive it two at once,
 each on its own session, by http_url and by ws_url; a wrong token is refused, and so is code in the computer without
 one; one client's close leaves the browser up for the other, which can't open file: URLs; the address outlives a
-relaunch by its app server's restart, and the browser's reset and the computer's end it. browser_connect_cdp hands the echo agent its address, with the computer's
+relaunch by its app server's restart, and the browser's reset and the computer's end it. Behind a front that ends TLS, as a remote provider's tunnel does,
+an address asked for under the origin named is https and wss, as discovery says too, and the clients connect through it. browser_connect_cdp hands the echo agent its address, with the computer's
 tools hidden from its role; after reset_env that address fails until the task runs browser_connect_cdp again, whose
 fresh one its next turn opens the site through. Through an app server's restart, which relaunches the browser, and a
 driver's, the agent's address keeps working, and two agents connected at once each drive the browser through their own. browser/v1 reads
@@ -28,9 +29,11 @@ import asyncio
 import calendar
 import itertools
 import json
+import os
 import platform
 import re
 import shlex
+import ssl
 import subprocess
 import time
 import urllib.parse
@@ -55,6 +58,7 @@ from agent_env.env import Env
 from agent_env.env.envs.computer.utils import inside
 from agent_env.env.store import get_env_store
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
+from agent_env.store.object_store.local.tls import LocalCA, local_ca
 from agent_env.store.routing import namespace_routing
 from agent_env.task import Task
 from agent_env.task.teardown import teardown_run
@@ -68,6 +72,7 @@ from tst.integration.computer.browser_steps import check_browser_steps
 from tst.integration.computer.browser_state import check_browser_state, check_browser_state_under_chaos
 from tst.integration.computer.start_tabs import host_pages, tabs_of
 from tst.util.a2a_test_agent import put_test_agent
+from tst.util.tls_front import tls_front
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
@@ -857,6 +862,36 @@ async def test_playwright_and_puppeteer_drive_it_through_its_cdp_address_which_a
 
 
 @pytest.mark.asyncio
+async def test_behind_a_front_that_ends_tls_an_address_under_the_origin_named_is_https_and_wss_and_clients_connect(
+        browser_computer, cdp_clients):
+    ca = local_ca()
+    with namespace_routing():
+        deployed = await Env.get(browser_computer.id).deploy(
+            env_params={"app_settings": {"chromium": {"start_urls": [SITE]}}})
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            serving = asyncio.ensure_future(inside.run(deployed, ["python3", "-c", SERVE_SITE, "900"], timeout_s=960))
+            await asyncio.sleep(SERVE_START_S)
+            driver = urllib.parse.urlsplit(deployed.environment_url)
+            async with tls_front(ca, driver.hostname, driver.port) as front:
+                named = await _cdp_through(front, deployed, ca, "ada", origin=front)
+                unnamed = await _cdp_through(front, deployed, ca, "bob")
+                discovered = await _discovered(named["http_url"], ca)
+                together = await _clients(cdp_clients, "together", named, ca=ca)
+            serving.cancel()
+        finally:
+            report = await teardown_run(context)
+
+    host = front.removeprefix("https://")
+    assert named["http_url"].startswith(f"{front}/svc/chromium/cdp/"), named
+    assert named["ws_url"].startswith(f"wss://{host}/svc/chromium/cdp/") and discovered == named["ws_url"], named
+    assert unnamed["ws_url"].startswith(f"ws://{host}/svc/chromium/cdp/"), unnamed
+    for client in ("playwright_http", "puppeteer_ws", "playwright_ws"):
+        assert together[client].get("ok", {}).get("title") == "Home", together
+    assert not report.failed
+
+
+@pytest.mark.asyncio
 async def test_browser_connect_cdp_hands_an_agent_its_address_with_the_tools_hidden_which_a_reset_ends_till_it_reruns(
         browser_computer):
     with namespace_routing():
@@ -989,15 +1024,39 @@ async def _cdp(deployed, user: str) -> dict:
     return answer.json()
 
 
-async def _clients(folder: Path, check: str, address: dict, wrong: bool = True) -> dict:
+async def _clients(folder: Path, check: str, address: dict, wrong: bool = True, ca: LocalCA | None = None) -> dict:
     """What the CDP clients saw doing ``check`` at ``address``; for ``refused``, with its token changed unless not
-    ``wrong``."""
+    ``wrong``; trusting ``ca`` too when given."""
     argv = ["node", "connect.mjs", check, address["http_url"], address["ws_url"], SITE] + ([] if wrong else ["exact"])
-    process = await asyncio.create_subprocess_exec(*argv, cwd=folder, stdout=asyncio.subprocess.PIPE,
+    env = {**os.environ, "NODE_EXTRA_CA_CERTS": str(ca.cert_path)} if ca else None
+    process = await asyncio.create_subprocess_exec(*argv, cwd=folder, env=env, stdout=asyncio.subprocess.PIPE,
                                                    stderr=asyncio.subprocess.PIPE)
     out, err = await asyncio.wait_for(process.communicate(), 300)
     assert process.returncode == 0, err.decode()[-2000:]
     return json.loads(out.decode().strip().splitlines()[-1])
+
+
+async def _cdp_through(front: str, deployed, ca: LocalCA, user: str, origin: str | None = None) -> dict:
+    """``user``'s CDP address, asked of the browser through ``front`` as agentenv asks, with the control token,
+    naming ``origin`` or not."""
+    async with httpx.AsyncClient(timeout=120, verify=_trusting(ca)) as http:
+        card = (await http.get(f"{front}/.well-known/agent-env.json")).json()
+        app = next(child for child in card["children_environments"] if child["name"] == "chromium")
+        path = protocol_v1.find_extension_method(app, BROWSER, "cdp")["endpoint"]
+        answer = await http.post(f"{front}{path}", json={"user": user, **({"origin": origin} if origin else {})},
+                                 headers=deployed.control_headers)
+    assert answer.status_code == 200, answer.text
+    return answer.json()
+
+
+async def _discovered(http_url: str, ca: LocalCA) -> str:
+    """The WebSocket ``json/version`` under ``http_url`` names."""
+    async with httpx.AsyncClient(timeout=60, verify=_trusting(ca)) as http:
+        return (await http.get(f"{http_url}json/version")).json()["webSocketDebuggerUrl"]
+
+
+def _trusting(ca: LocalCA) -> ssl.SSLContext:
+    return ssl.create_default_context(cafile=str(ca.cert_path))
 
 
 async def _get(deployed, path: str, **kwargs) -> httpx.Response:
