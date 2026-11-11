@@ -1,6 +1,8 @@
 """A multi env's computers: each deploys on a sandbox of its own, as it would alone, before the gateway starts, which then
 fronts it by its name; its tools are served under that name, its record is kept in the multi env's, and closing the multi
-env closes it."""
+env closes it. Its website browser, which ``browser_envs`` names or the run's: an MCP server env runs among the
+gateway's MCP servers, and a browser computer as one more computer, routing the synthetic sites, its network held to the
+gateway."""
 
 from __future__ import annotations
 
@@ -14,19 +16,24 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from click.testing import CliRunner
 
+from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.cli.env.multi import multi
+from agent_env.config.runtime import WEBSITE_BROWSER_OVERRIDE, run_env_ids
 from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, DeployedSandboxEnv
 from agent_env.env.envs import _deployment, _multi_computers
 from agent_env.env.envs.computer import COMPUTER_ENV_TYPE
 from agent_env.env.envs.computer.env import ComputerEnv
-from agent_env.env.envs.multi_env import MultiEnv
+from agent_env.env.envs.mcp_server import MCPServerEnv
+from agent_env.env.envs.multi_env import MultiEnv, WebsiteBrowser
 from agent_env.env.gateway import ExternalChild
 from agent_env.env.gateway.constants import WELL_KNOWN_PATH
 from agent_env.env.store import EnvInstanceStore
-from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider
+from agent_env.providers.env_providers import env_gateway_provider
+from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider, MCPServerConfig
 from agent_env.providers.env_providers.env_provider import EnvironmentProvider
 from agent_env.providers.env_state import LocalPostgresStateProvider
 from agent_env.task.teardown import env_sandbox_ids
+from agent_env.task_step.task_steps.browser.base import stored_browsers
 from tst.util.sandbox_providers import mock_provider
 
 GATEWAY = "https://gw.example"
@@ -682,3 +689,352 @@ async def test_a_computer_that_fails_to_route_its_sites_fails_the_deploy_and_clo
         await _multi(desktop, websites=["shop"]).deploy(child_envs={"desktop": {"env_params": {"site_routing": True}}})
 
     assert gateway.log[-2:] == [("close", "desktop"), ("close", "gateway")]
+
+
+class FakeBrowser(FakeComputer, ComputerEnv):
+    """A browser computer as a multi env uses one: chromium deployed alone, its one app itself."""
+
+    def __init__(self, name: str = "chromium", *, browser: bool = True, **kwargs):
+        super().__init__(name, **kwargs)
+        self.declaration = SimpleNamespace(browser=browser)
+
+    def composed_apps(self):
+        return [self]
+
+    def app_defaults(self):
+        return {self.environment_name: {}}
+
+    def serves_website_browser(self):
+        return self.declaration.browser
+
+
+def _image(id: str) -> DockerImageArtifact:
+    return DockerImageArtifact(id=id, version=1, description=id, image_name=f"registry.example/{id}:v1",
+                               tar_gz_s3_url=f"s3://bucket/{id}.tar.gz")
+
+
+def _playwright() -> MCPServerEnv:
+    return MCPServerEnv("playwright-mcp", 1, docker_image_artifact=_image("playwright-image"),
+                        environment_name="playwright-mcp")
+
+
+def _site(name: str, live: bool = False) -> MagicMock:
+    return MagicMock(id=f"{name}-site", environment_name=name, domains=[f"{name}.test"], live=live,
+                     allow_hosts=[f"api.{name}.test"] if live else [])
+
+
+def _browsing(*computers, browser_envs=None, websites=("shop",), live=()) -> MultiEnv:
+    return MultiEnv(id="office", version=1, mcp_server_envs=[],
+                    website_envs=[*(_site(name) for name in websites), *(_site(name, live=True) for name in live)],
+                    computer_envs=list(computers), browser_envs=browser_envs)
+
+
+@pytest.fixture
+def routes(monkeypatch):
+    """The sites the gateway's record names, by environment_name, and their readiness, as a deploy reads them."""
+    monkeypatch.setattr(_multi_computers.sites, "deployed_sites",
+                        AsyncMock(side_effect=lambda records, services=None: [{"name": "shop", "domains": ["shop.test"],
+                                                                               "url": f"{GATEWAY}/website/shop/"}]))
+    monkeypatch.setattr(_multi_computers.sites, "require_ready", AsyncMock())
+
+
+# --- its website browser: the field ---
+
+def test_browser_envs_is_written_only_when_set_and_none_and_empty_read_back_as_they_were():
+    chromium = FakeBrowser()
+    assert "browser_envs" not in _browsing().to_dict()
+    assert _browsing(browser_envs=[]).to_dict()["browser_envs"] == []
+    doc = _browsing(browser_envs=[chromium]).to_dict()
+    assert doc["browser_envs"] == [{"id": "chromium-computer", "type": "computer", "version": 1}]
+
+    with patch("agent_env.env.env.Env.get", side_effect=lambda id, version=None: _site("shop") if id == "shop-site"
+               else FakeBrowser()):
+        assert MultiEnv.from_dict(_browsing().to_dict()).browser_envs is None
+        assert MultiEnv.from_dict(_browsing(browser_envs=[]).to_dict()).browser_envs == []
+        [read] = MultiEnv.from_dict(doc).browser_envs
+    assert read.id == "chromium-computer"
+
+
+def test_a_browser_computer_is_kept_out_of_computer_envs():
+    office = _browsing(FakeComputer("desktop"), browser_envs=[FakeBrowser()])
+    assert [env.environment_name for env in office.computer_envs] == ["desktop"]
+    assert office.to_dict()["computer_envs"] == [{"id": "desktop-computer", "type": "computer", "version": 1}]
+
+
+@pytest.mark.parametrize("browsers, problem", [
+    (lambda: [FakeBrowser(), _playwright()], "browser_envs names 2 envs, and a multi env runs one website browser"),
+    (lambda: [FakeBrowser("desktop", browser=False)],
+     "browser_envs[0]: computer env 'desktop-computer' has no website browser among its apps"),
+    (lambda: [_site("blog")], "browser_envs[0]: 'blog-site' is a"),
+], ids=["two", "a-computer-without-a-browser", "not-a-browser-env"])
+def test_browser_envs_takes_one_website_browser_env(browsers, problem):
+    with pytest.raises(ValueError, match=f"^multi env 'office': {re.escape(problem)}"):
+        _browsing(browser_envs=browsers())
+
+
+@pytest.mark.parametrize("browser", [FakeBrowser, _playwright], ids=["browser-computer", "mcp-server"])
+def test_browser_envs_takes_a_browser_computer_or_an_mcp_server_serving_one(browser):
+    assert _browsing(browser_envs=[browser()]).website_browser().env.id in ("chromium-computer", "playwright-mcp")
+
+
+def test_a_browser_computer_needs_a_name_no_other_computer_has():
+    with pytest.raises(ValueError, match="'chromium' names 2 of its child envs"):
+        _browsing(FakeComputer("chromium"), browser_envs=[FakeBrowser()])
+
+
+def test_an_mcp_server_browser_needs_a_name_no_computer_or_other_mcp_server_has():
+    with pytest.raises(ValueError, match="'playwright-mcp' names 2 of its child envs"):
+        _browsing(FakeComputer("playwright-mcp"), browser_envs=[_playwright()])
+    with pytest.raises(ValueError, match="website browser 'playwright-mcp' has the name of another of its MCP servers"):
+        MultiEnv(id="office", version=1, mcp_server_envs=[_playwright()], browser_envs=[_playwright()])
+
+
+def test_the_runs_mcp_server_browser_is_refused_a_name_a_computer_has(providers):
+    with patch("agent_env.env.env.Env.get", return_value=_playwright()):
+        assert "'playwright-mcp' names 2 of its child envs" in _browsing(
+            FakeComputer("playwright-mcp")).child_envs_refusal(None)
+
+
+# --- its website browser: which one ---
+
+def test_the_browser_is_the_one_named_none_for_an_empty_list_and_else_the_runs_when_there_are_websites(local_stores):
+    chromium, playwright = FakeBrowser(), _playwright()
+    assert _browsing(browser_envs=[chromium]).website_browser() == WebsiteBrowser(computer=chromium)
+    assert _browsing(browser_envs=[playwright]).website_browser() == WebsiteBrowser(server=playwright)
+    assert _browsing(browser_envs=[]).website_browser() == WebsiteBrowser()
+    assert _browsing(websites=()).website_browser() == WebsiteBrowser()
+    with patch("agent_env.env.env.Env.get", return_value=chromium) as get, \
+            run_env_ids({WEBSITE_BROWSER_OVERRIDE: "chromium-computer"}):
+        assert _browsing().website_browser() == WebsiteBrowser(computer=chromium)
+    get.assert_called_with("chromium-computer")
+
+
+def test_a_runs_browser_the_store_doesnt_hold_yet_is_left_for_the_gateway_to_look_up(local_stores):
+    office = _browsing()
+    assert office.website_browser() == WebsiteBrowser(runs=True)
+    assert env_gateway_provider._gateway_topology(office).website_browser is env_gateway_provider._THE_RUNS
+
+
+@pytest.mark.parametrize("browser_envs, runs, expected", [
+    (None, _playwright, "playwright-mcp"),
+    (None, FakeBrowser, None),
+    ([], _playwright, None),
+    ("chromium", _playwright, None),
+    ("playwright", FakeBrowser, "playwright-mcp"),
+], ids=["runs-mcp-server", "runs-computer", "none", "named-computer", "named-mcp-server"])
+def test_the_gateway_runs_an_mcp_server_browser_and_leaves_a_browser_computer_to_its_own_sandbox(browser_envs, runs,
+                                                                                                 expected):
+    named = {"chromium": [FakeBrowser()], "playwright": [_playwright()]}[browser_envs] \
+        if isinstance(browser_envs, str) else browser_envs
+    office = _browsing(browser_envs=named)
+    with patch("agent_env.env.env.Env.get", return_value=runs()), \
+            patch.object(env_gateway_provider, "website_config", return_value=MagicMock()):
+        browser = env_gateway_provider._gateway_topology(office).website_browser
+    assert getattr(browser, "id", None) == expected
+
+
+def test_a_lone_website_with_a_browser_computer_as_the_runs_browser_is_refused_naming_a_multi_env():
+    with patch("agent_env.env.env.Env.get", return_value=FakeBrowser()), \
+            pytest.raises(ValueError, match="'chromium-computer' is a computer env, which runs on a sandbox of its own "
+                                            "beside a multi env's websites"):
+        env_gateway_provider.run_website_browser()
+
+
+def test_a_browser_mcp_server_joins_the_gateways_mcp_servers_on_the_sites_network():
+    servers, images = env_gateway_provider._with_browser([], [], _playwright())
+    assert servers == [MCPServerConfig(image="registry.example/playwright-image:v1", environment_name="playwright-mcp",
+                                       networks=(env_gateway_provider._SITES_NETWORK,))]
+    assert [image.id for image in images] == ["playwright-image"]
+
+
+@pytest.mark.asyncio
+async def test_a_named_browser_mcp_server_runs_in_container_mode_too():
+    gp, provider = EnvironmentGatewayProvider(), MagicMock(links=None)
+    with patch.object(gp, "in_vm", return_value=False), patch.object(gp, "sandbox_problem", return_value=None), \
+            patch.object(gp, "_deploy_via_containers", AsyncMock()) as containers:
+        await gp._deploy_gateway(provider, state_instance=None, mcp_servers=[],
+                                 mcp_server_images=[], website_browser=_playwright())
+    assert [server.environment_name for server in containers.await_args.args[1]] == ["playwright-mcp"]
+
+
+# --- its website browser: a browser computer's deploy ---
+
+@pytest.mark.asyncio
+async def test_a_browser_computer_deploys_as_a_computer_child_routing_the_sites_held_to_the_gateway(gateway, providers,
+                                                                                                     routes):
+    chromium, desktop = FakeBrowser(), FakeComputer("desktop")
+
+    deployed = await _browsing(desktop, browser_envs=[chromium], live=("github",)).deploy(
+        sandbox_type="modal_vm", child_envs={"chromium": {"sandbox_type": "modal", "cpu": 2, "memory_mb": 4096}})
+
+    assert chromium.deploys == [{"ttl_seconds": 10800, "attribution": None, "tool_prefix": "chromium_",
+                                 "reach": GATEWAY, "sites_later": True,
+                                 "live_hosts": ("github.test", "api.github.test"),
+                                 "sandbox_type": "modal", "cpu": 2, "memory_mb": 4096,
+                                 "env_params": {"site_routing": True}}]
+    assert desktop.deploys[0]["sites_later"] is False
+    assert gateway.started == [[ExternalChild("desktop", "https://desktop.example/mcp", "https://desktop.example"),
+                                ExternalChild("chromium", "https://chromium.example/mcp", "https://chromium.example")]]
+    assert set(deployed.child_envs) == {"desktop", "chromium"}
+    assert chromium.log[-1] == ("routed", "chromium", ["shop"])
+
+
+@pytest.mark.asyncio
+async def test_the_runs_browser_computer_takes_the_same_path(gateway, providers, routes):
+    chromium = FakeBrowser()
+    with patch("agent_env.env.env.Env.get", return_value=chromium), \
+            run_env_ids({WEBSITE_BROWSER_OVERRIDE: "chromium-computer"}):
+        deployed = await _browsing().deploy()
+    assert chromium.deploys[0]["tool_prefix"] == "chromium_" and set(deployed.child_envs) == {"chromium"}
+
+
+@pytest.mark.asyncio
+async def test_a_browser_entry_saying_whether_it_routes_the_sites_is_kept(gateway, providers):
+    chromium = FakeBrowser()
+    await _browsing(browser_envs=[chromium]).deploy(child_envs={"chromium": {"env_params": {"site_routing": False}}})
+    assert chromium.deploys[0]["env_params"] == {"site_routing": False} and chromium.deploys[0]["sites_later"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_browser_beside_live_sites_alone_routes_nothing(gateway, providers):
+    chromium = FakeBrowser()
+    await _browsing(browser_envs=[chromium], websites=(), live=("github",)).deploy()
+    assert "env_params" not in chromium.deploys[0] and chromium.deploys[0]["live_hosts"] == ("github.test",
+                                                                                            "api.github.test")
+
+
+@pytest.mark.asyncio
+async def test_no_browser_deploys_no_child_and_gives_the_gateway_none(gateway, providers):
+    office = _browsing(browser_envs=[])
+    await office.deploy()
+    assert gateway.options[0]["children"] is None
+    assert env_gateway_provider._gateway_topology(_browsing(browser_envs=[], websites=())).website_browser is None
+
+
+def test_a_browser_computers_entry_is_checked_as_any_computers_and_an_mcp_server_browsers_is_refused(providers):
+    office = _browsing(browser_envs=[FakeBrowser(refusal="no native build")])
+    assert office.child_envs_refusal({"chromium": {"cpu": 2}}) == "child_envs.chromium: no native build"
+    assert office.child_envs_refusal({"chromium": {"ttl_seconds": 60}}).startswith("child_envs.chromium: an entry is")
+    assert _browsing(browser_envs=[_playwright()]).child_envs_refusal({"playwright-mcp": {"cpu": 2}}).startswith(
+        "child_envs.playwright-mcp: env 'office' has no child env named 'playwright-mcp'")
+
+
+def test_the_runs_browser_computer_is_refused_a_name_a_computer_has(providers):
+    with patch("agent_env.env.env.Env.get", return_value=FakeBrowser()), \
+            run_env_ids({WEBSITE_BROWSER_OVERRIDE: "chromium-computer"}):
+        assert "'chromium' names 2 of its child envs" in _browsing(FakeComputer("chromium")).child_envs_refusal(None)
+
+
+# --- its website browser: after the deploy ---
+
+@pytest.mark.asyncio
+async def test_the_browser_is_reattached_reset_and_closed_from_its_own_record(gateway, providers, routes, monkeypatch):
+    deployed = await _browsing(FakeComputer("desktop"), browser_envs=[FakeBrowser()]).deploy()
+    stored = DeployedEnv.from_dict({**dataclasses.asdict(deployed), "instance_id": "inst-1"})
+    monkeypatch.setattr(EnvironmentGatewayProvider, "_reattach", AsyncMock())
+    stored_office = _browsing(FakeComputer("desktop"), browser_envs=[FakeBrowser()])
+
+    with patch("agent_env.env.env.Env.get", side_effect=lambda id, version=None: stored_office if id == "office"
+               else FakeBrowser()), \
+            patch.object(FakeBrowser, "from_deployed_env",
+                         classmethod(lambda cls, record: _reattached(cls, record)), create=True):
+        env = await MultiEnv.from_deployed_env(stored)
+    assert env._computers.browser._deployed == _record("chromium")
+
+    log = []
+    env._computers.browser.log = log
+    monkeypatch.setattr(MultiEnv, "_attached", classmethod(AsyncMock(return_value=_browsing(websites=()))))
+    await env.reset(stored)
+    assert ("reset", "chromium", "sb-chromium") in log
+    await env.close()
+    assert ("close", "chromium") in log
+
+
+@pytest.mark.asyncio
+async def test_a_reset_of_the_multi_env_as_stored_resets_the_browser_its_record_holds(gateway, providers, routes,
+                                                                                    monkeypatch):
+    deployed = await _browsing(FakeComputer("desktop"), browser_envs=[FakeBrowser()]).deploy()
+    stored = DeployedEnv.from_dict({**dataclasses.asdict(deployed), "instance_id": "inst-1"})
+    log = []
+    monkeypatch.setattr(MultiEnv, "_attached", classmethod(AsyncMock(return_value=_browsing(websites=()))))
+
+    with patch("agent_env.env.env.Env.get", return_value=FakeBrowser(log=log)):
+        await _browsing(FakeComputer("desktop", log=log), browser_envs=[FakeBrowser()]).reset(stored)
+
+    assert sorted(log) == [("reset", "chromium", "sb-chromium"), ("reset", "desktop", "sb-desktop")]
+
+
+async def _reattached(cls, record):
+    browser = cls()
+    browser._deployed = record
+    return browser
+
+
+@pytest.mark.asyncio
+async def test_a_failed_redeploy_closes_only_its_own_browser_and_leaves_the_earlier_one_for_close(gateway, providers,
+                                                                                                routes):
+    earlier = FakeBrowser()
+    office = _browsing(browser_envs=[earlier])
+    await office.deploy()
+    fresh = []
+
+    def get(id, version=None):
+        fresh.append(FakeBrowser())
+        return fresh[-1]
+
+    gateway.fails = RuntimeError("no gateway")
+    with patch("agent_env.env.env.Env.get", side_effect=get), pytest.raises(RuntimeError, match="^no gateway$"):
+        await office.deploy()
+    assert office._computers.browser is earlier and earlier.closes == 0 and [b.closes for b in fresh] == [1]
+
+    gateway.fails = None
+    with patch("agent_env.env.env.Env.get", side_effect=get):
+        await office.deploy()
+    assert office._computers.browser is fresh[1] and earlier.closes == 0
+
+    await office.close()
+    assert earlier.closes == 1 and [b.closes for b in fresh] == [1, 1]
+
+
+@pytest.mark.asyncio
+async def test_a_redeploy_keeps_the_earlier_browser_for_close(gateway, providers, routes):
+    chromium = FakeBrowser()
+    office = _browsing(browser_envs=[chromium])
+    await office.deploy()
+    with patch("agent_env.env.env.Env.get", return_value=FakeBrowser(log=chromium.log)):
+        await office.deploy()
+    assert office._computers.browser is not chromium
+    await office.close()
+    assert chromium.log.count(("close", "chromium")) == 2  # the earlier deployment's browser and the later one's
+
+
+# --- its website browser: elsewhere ---
+
+def test_a_named_browser_computer_counts_among_a_multi_envs_browsers():
+    assert stored_browsers(_browsing(FakeComputer("desktop"), browser_envs=[FakeBrowser()])) == ["chromium"]
+    assert stored_browsers(_browsing(browser_envs=[_playwright()])) == []
+
+
+def test_the_runs_browser_computer_counts_among_a_multi_envs_browsers_when_it_names_none():
+    with patch("agent_env.env.env.Env.get", return_value=FakeBrowser()), \
+            run_env_ids({WEBSITE_BROWSER_OVERRIDE: "chromium-computer"}):
+        assert stored_browsers(_browsing()) == ["chromium"]
+    with patch("agent_env.env.env.Env.get", return_value=_playwright()):
+        assert stored_browsers(_browsing()) == []
+
+
+def test_cli_put_takes_a_browser_or_none():
+    chromium = FakeBrowser()
+    slack = MCPServerEnv("slack", 1, docker_image_artifact=_image("slack-image"), environment_name="slack")
+    for args, expected in ((["--browser", "chromium-computer"], [chromium]), (["--no-browser"], []), ([], None)):
+        with patch("agent_env.cli.env.multi.Env.get",
+                   side_effect=lambda id, version=None: chromium if id == "chromium-computer" else slack), \
+                patch("agent_env.cli.env.multi.detect_base_metadata", return_value={}), \
+                patch("agent_env.cli.env.multi.MultiEnv.put", return_value=MagicMock(id="office", version=1)) as put:
+            result = CliRunner().invoke(multi, ["put", "--id", "office", "--mcp-server", "slack", *args])
+        assert result.exit_code == 0, result.output
+        assert put.call_args.kwargs["browser_envs"] == expected
+
+    result = CliRunner().invoke(multi, ["put", "--id", "office", "--mcp-server", "slack", "--browser", "b",
+                                        "--no-browser"])
+    assert result.exit_code == 1 and "--browser and --no-browser can't both be given" in result.output

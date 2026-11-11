@@ -19,7 +19,11 @@ alone only; `locale`; `time_zone`; and
 (`apps = [{ env = "chromium", settings = { start_urls = ["https://example.test/"] } }]`), and a deploy overrides any of
 them (`env_params.app_settings = {chromium = {start_urls = [...]}}`). Its data is its profile, `~/.config/chromium`, which
 the image has none of, so each deploy and each reset starts with a clean one. Name it from another bundle as `chromium`,
-the alias `aliases.toml` gives it, or by its id, `@local/agentenv-framework/browsers/chromium`.
+the alias `aliases.toml` gives it, or by its id, `@local/agentenv-framework/browsers/chromium`. A multi env names it as
+its website browser with `browser_envs = ["chromium"]`, in place of the run's `playwright-mcp`: it then deploys on a
+sandbox of its own beside the multi env's computers, sized by the deploy step's `child_envs.chromium`, its tools served
+under `chromium_`, routing the multi env's synthetic sites through the gateway, its network its own env's, as any
+computer child's.
 
 A task changes a browser's state with the steps in `agent_env.task_step.task_steps.browser`, each a call to one
 `browser/v1` operation on the browser in the env `env_id`, the one `browser` names when the env has several:
@@ -36,7 +40,11 @@ each cookie is set for every name the site is reached by (an exact name by its U
 and the browser's `data/add` loads them, which opens the start tabs again while no agent has acted. A task runs it
 after the load that seeds the site and again after `reset_env`, which starts the browser afresh. Preflight refuses a
 step on an env with no browser, none of the name given, or several and none named. On a multi env, the steps reach
-the browser apps of its computers, each through the computer's own record and control token; `browser_connect_cdp`
-doesn't reach those yet.
-`browser_connect_cdp` hands an agent a CDP address to the same browser. A whole state, Playwright's `storageState`
+the browser apps of its computers, each through the computer's own record and control token.
+`browser_connect_cdp` hands an agent a CDP address to the same browser, under the origin where the agent reaches the
+env, so through a tunnel that ends TLS it's https and wss; on a multi env, one at its gateway, asked through the
+gateway's `/svc/<computer>/` route, so the agent reaches the browser through the gateway's CDP relay as it reaches the
+rest of the env, with the multi env's tools hidden from its role; a computer there with several website browsers is
+refused, as the relay doesn't tell them apart yet, and so, behind a tunnel that ends TLS, is a browser that takes no
+origin, one composed before agentenv-framework 0.9.1505. A whole state, Playwright's `storageState`
 included, loads through `load_artifact` or `data/add` instead.
