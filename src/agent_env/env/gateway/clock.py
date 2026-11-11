@@ -29,13 +29,14 @@ _MAX_T0 = datetime.max.replace(tzinfo=timezone.utc)
 def _parse_rate(rate) -> float:
     if isinstance(rate, bool) or not isinstance(rate, (int, float)):
         raise ClockError(f"rate must be a number, got {type(rate).__name__}")
-    # NaN passes both ordered bounds below, then poisons every later read with an uncatchable 500.
-    if not math.isfinite(rate):
+    # NaN passes both ordered bounds below, then poisons every later read with an uncatchable 500; only a float can be
+    # NaN or infinite, and math.isfinite on an int past a float's range raises.
+    if isinstance(rate, float) and not math.isfinite(rate):
         raise ClockError(f"rate must be a finite number, got {rate}")
     if rate < 0:
         raise ClockError("rate must be non-negative")
     if rate > MAX_RATE:
-        raise ClockError(f"rate {rate:g} exceeds max {MAX_RATE:g} (1 real s = 1 virtual day)")
+        raise ClockError(f"rate exceeds max {MAX_RATE:g} (1 real s = 1 virtual day)")
     return float(rate)
 
 

@@ -227,7 +227,8 @@ async def test_a_write_without_a_wait_or_without_computers_answers_at_once(gatew
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("wait", [-1, "2", True, 31, None], ids=["negative", "string", "bool", "over-30", "null"])
+@pytest.mark.parametrize("wait", [-1, "2", True, 31, 10**309, None],
+                         ids=["negative", "string", "bool", "over-30", "past-a-floats-range", "null"])
 async def test_a_wait_is_a_number_of_seconds_up_to_30(gateway, wait):
     gw = gateway({})
     async with _client(gw) as client:
@@ -301,8 +302,10 @@ async def test_set_rate_changes_the_rate_at_the_time_of_the_write_and_keeps_t0(g
     ("/clock/set-time", {"virtual_seconds_per_real_second": 2}, "virtual_time must be an RFC3339 string"),
     ("/clock/set-rate", {}, "rate must be a number"),
     ("/clock/set-rate", {"virtual_time": T0}, "rate must be a number"),
+    ("/clock/set-rate", {"virtual_seconds_per_real_second": 10**309}, "exceeds max"),
+    ("/clock/set-time", {"virtual_time": T0, "virtual_seconds_per_real_second": 10**309}, "exceeds max"),
 ])
-async def test_set_time_needs_a_time_and_set_rate_a_rate(gateway, path, body, error):
+async def test_set_time_needs_a_time_and_set_rate_a_rate_it_can_run_at(gateway, path, body, error):
     gw = gateway({})
     async with _client(gw) as client:
         await client.put("/clock/set-time", json={"virtual_time": T0, "virtual_seconds_per_real_second": 0})

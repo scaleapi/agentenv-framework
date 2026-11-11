@@ -16,10 +16,12 @@ def parse_wait(value) -> float:
     """A write's ``wait_followers_s``: how long it waits for the followers, 0 when absent."""
     if value is None:
         return 0.0
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+    # Only a float can be NaN or infinite; math.isfinite on an int past a float's range raises.
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or (isinstance(value, float) and not math.isfinite(value)) \
+            or value < 0:
         raise ClockError(f"wait_followers_s must be a non-negative number, got {value!r}")
     if value > CLOCK_MAX_WAIT_FOLLOWERS_S:
-        raise ClockError(f"wait_followers_s {value:g} exceeds max {CLOCK_MAX_WAIT_FOLLOWERS_S:g}")
+        raise ClockError(f"wait_followers_s exceeds max {CLOCK_MAX_WAIT_FOLLOWERS_S:g}")
     return float(value)
 
 
