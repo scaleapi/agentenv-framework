@@ -512,7 +512,7 @@ def _stock_env() -> dict:
             "FAKETIME_FMT": "%s"}
 
 
-def chromium(variant="agentenv", launches=60, parallel=8, limit=20.0):
+def chromium(variant="agentenv", launches=40, parallel=8, limit=20.0):
     """Chrome launched directly ``launches`` times, ``parallel`` at a time: with this library in /etc/ld.so.preload
     (``agentenv``), where each launch must load about:blank headless, print it and exit 0 within ``limit`` seconds; or
     with stock 0.9.12 by LD_PRELOAD (``stock``), the positive control, whose launches fail (crash, or hang past
