@@ -27,6 +27,7 @@ from agentenv_protocol.computer import driver as computer_driver
 from agentenv_protocol.computer.app_runtime import LAUNCHES
 from agentenv_protocol.tool_context import ToolContext, bound
 from agentenv_protocol.website_browser import BROWSER
+from agentenv_protocol.website_browser.log import TOOL_CALL_HEADER
 
 DRIVER = Path(agent_env.__file__).parent / "drivers" / "envs" / "page" / "driver.py"
 NO_DISPLAY = Platform(os="linux", distribution="ubuntu", version="24.04", arch="amd64", display="none")
@@ -87,11 +88,12 @@ def page(monkeypatch, tmp_path):
     monkeypatch.setattr(computer_driver, "detect", lambda: NO_DISPLAY)
     driver = module.PageDriver()
     driver._browser = (tmp_path, CARD)
-    driver.sent, driver.served = [], {"page/viewport": {"width": 1280, "height": 800}}
+    driver.sent, driver.headers, driver.served = [], [], {"page/viewport": {"width": 1280, "height": 800}}
 
     def handler(request: httpx.Request) -> httpx.Response:
         op = request.url.path.removeprefix("/agentenv/ext/browser/")
         driver.sent.append((op, json.loads(request.content) if request.content else None))
+        driver.headers.append(request.headers)
         answer = driver.served.get(op, {})
         return answer if isinstance(answer, httpx.Response) else httpx.Response(200, json=answer)
 
@@ -274,15 +276,20 @@ def test_it_serves_playwright_mcps_tools_from_their_manifest_and_hides_the_two_t
 
 
 @pytest.mark.asyncio
-async def test_it_asks_the_browser_for_playwright_mcps_address_under_its_own_loopback_origin(page, monkeypatch):
+async def test_it_asks_the_browser_for_playwright_mcps_address_under_its_own_loopback_origin_as_its_own_call(
+        page, monkeypatch):
     monkeypatch.setenv("MCP_PORT", "18765")
     page.served["cdp"] = {"http_url": "http://127.0.0.1:18765/svc/chromium/cdp/t/",
                           "ws_url": "ws://127.0.0.1:18765/svc/chromium/cdp/t/devtools/browser"}
 
-    endpoint = await page._playwright_endpoint()
+    with bound(ToolContext(tool="browser_click", call_id="c1", mcp=True)):
+        endpoint = await page._playwright_endpoint()
+        await page.go_to("https://example.com/")
 
     assert endpoint == "ws://127.0.0.1:18765/svc/chromium/cdp/t/devtools/browser"
-    assert page.sent[-1] == ("cdp", {"user": "playwright-mcp", "origin": f"http://127.0.0.1:18765/svc/{page._browser[0].name}"})
+    assert page.sent[0] == ("cdp", {"user": "playwright-mcp", "origin": f"http://127.0.0.1:18765/svc/{page._browser[0].name}"})
+    assert TOOL_CALL_HEADER not in page.headers[0], "the browser's log credits the agent's call with no address check"
+    assert TOOL_CALL_HEADER in page.headers[1]
 
 
 def test_playwright_mcp_attaches_to_the_browser_never_launches_one_and_ends_with_the_driver():

@@ -539,6 +539,10 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
     async def _computer_app_ready(self) -> dict:
         return (await self._computer_app_runtime().readiness()).model_dump()
 
+    def served_asgi(self, asgi: Any) -> Any:
+        """The application its server serves, ``asgi`` as built from its card: a subclass may wrap it."""
+        return asgi
+
     def _computer_app_runtime(self) -> AppRuntime:
         if self._computer_app is None:
             raise TypeError(f"{type(self).__qualname__}.__init__ must call super().__init__()")

@@ -19,7 +19,7 @@ and input reaches it as CDP input events, both through `browser/v1`'s `page/*` o
 a tab that paints nothing shows white. It serves the page group too: `computer_navigate`, `computer_history`,
 `computer_tabs`, `computer_dialog` and `computer_upload`, and every frame names the page, its tab and what is open on
 it. The browser ending on its own fails the computer for good: its ready check is
-`final`, and its tools answer with why. Name it as `page`, or by its id, `@local/agentenv-framework/drivers/page`.
+`final`, and its tools answer with why. Each call it makes to the browser for an agent's tool carries that call, its tool, id, arguments and the caller's role, in the `AgentEnv-Tool-Call` and `AgentEnv-Role` headers, so the browser's log credits the action to it. Name it as `page`, or by its id, `@local/agentenv-framework/drivers/page`.
 
 Beside those it serves Playwright MCP's `browser_*` tools (0.0.84, `--caps vision`, on Node 24), as
 `playwright-mcp-tools.json` lists them. Its install lays Node and Playwright MCP's three npm packages out from pinned

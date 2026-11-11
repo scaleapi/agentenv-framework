@@ -26,7 +26,8 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import CallToolResult, TextContent
 
-from agentenv_protocol import EnvironmentTool, ForwardedTool, ToolContext, client
+from agentenv_protocol import EnvironmentTool, ForwardedTool, client
+from agentenv_protocol.website_browser.log import TOOL_CALL_HEADER, tool_call_header
 from agentenv_protocol.computer import (
     ComputerDriverEnvironment,
     DeviceUnavailable,
@@ -63,6 +64,7 @@ from agentenv_protocol.computer import (
 )
 from agentenv_protocol.computer import apps
 from agentenv_protocol.computer.served import served
+from agentenv_protocol.tool_context import ROLE_HEADER, ToolContext
 from agentenv_protocol.website_browser import BROWSER
 
 BUTTONS = {"left": 1, "right": 2, "middle": 4, "back": 8, "forward": 16}
@@ -160,7 +162,7 @@ class PageDriver(ComputerDriverEnvironment):
         reached as any agent reaches it: the same one until the browser's data is reset, which ends it."""
         folder, _ = await self._found()
         origin = f"http://127.0.0.1:{os.environ.get('MCP_PORT', '18765')}/svc/{folder.name}"
-        return (await self._call("cdp", {"user": PLAYWRIGHT_MCP_USER, "origin": origin}))["ws_url"]
+        return (await self._call("cdp", {"user": PLAYWRIGHT_MCP_USER, "origin": origin}, credited=False))["ws_url"]
 
     @display
     async def viewport(self) -> Display:
@@ -312,9 +314,10 @@ class PageDriver(ComputerDriverEnvironment):
     async def _input(self, events: list[dict]) -> None:
         await self._call("page/input", {"events": events})
 
-    async def _call(self, op: str, params: Optional[dict] = None) -> Any:
-        """``browser/v1``'s ``op`` on the browser's server; DeviceUnavailable when it can't answer or says why not, and
-        once the browser has ended on its own, why, even after its server has launched another."""
+    async def _call(self, op: str, params: Optional[dict] = None, credited: bool = True) -> Any:
+        """``browser/v1``'s ``op`` on the browser's server, credited to the agent's tool call it's made for unless it's
+        the driver's own; DeviceUnavailable when it can't answer or says why not, and once the browser has ended on its
+        own, why, even after its server has launched another."""
         folder, card = await self._found()
         if (failed := _ended(folder)) is not None:
             raise DeviceUnavailable(failed)
@@ -323,7 +326,7 @@ class PageDriver(ComputerDriverEnvironment):
             raise Unsupported(f"the browser in {folder.name} serves no {op}")
         try:
             async with _http(folder) as http:
-                answer = await http.request(method["method"], method["endpoint"],
+                answer = await http.request(method["method"], method["endpoint"], headers=_tool_call() if credited else {},
                                             **({"json": params} if method["method"] != "GET" else {}))
         except (httpx.HTTPError, OSError) as e:
             raise DeviceUnavailable(_ended(folder) or f"the browser's server isn't answering: {type(e).__name__}: {e}"
@@ -370,6 +373,16 @@ def _ended(folder: Path) -> Optional[str]:
 
 def _http(folder: Path) -> httpx.AsyncClient:
     return served(folder).client(CALL_TIMEOUT_S)
+
+
+def _tool_call() -> dict[str, str]:
+    """The agent's tool call a call to the browser is made for, which the browser's log credits it to: its tool, its
+    call's id, its arguments and its caller's role; nothing outside one."""
+    context = ToolContext.current()
+    if not context.mcp or not context.tool:
+        return {}
+    return {TOOL_CALL_HEADER: tool_call_header(context.tool, context.call_id, context.arguments),
+            **({ROLE_HEADER: context.caller.role} if context.caller.role else {})}
 
 
 def _mouse(kind: str, x: float, y: float, button: str = "none", buttons: int = 0, count: int = 0,
