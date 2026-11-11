@@ -1,6 +1,7 @@
 """Whether a sandbox still runs the process it was made to run, and what that process last wrote, as a computer's boot
 asks: a local sandbox's container from Docker, its output and errors as Docker logged them; a Modal sandbox's process
-from Modal, its output once it has exited, read once; and nothing from a sandbox whose provider can't tell."""
+from Modal, its output once it has exited, read once, a chunk at a time, into a bounded tail of each stream, neither
+crowding out the other's last lines; and nothing from a sandbox whose provider can't tell."""
 
 import subprocess
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import agent_env.providers.sandbox_providers.local_docker.provider as ls
+from agent_env.providers.sandbox_providers import modal_sandbox
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandbox
 from agent_env.providers.sandbox_providers.modal_vm_sandbox import ModalVmSandbox
 
@@ -64,12 +66,26 @@ async def test_a_local_sandbox_says_nothing_of_a_container_it_doesnt_run_or_dock
     assert await vm.exit_status() is None and await vm.output_tail(5) == []
 
 
-def _modal_sb(status, stdout="", stderr=""):
+class _Stream:
+    """A Modal sandbox's stream, handed a chunk at a time, which ``reads`` counts."""
+
+    def __init__(self, *chunks):
+        self.chunks, self.reads = chunks, 0
+
+    def __aiter__(self):
+        return self._chunks()
+
+    async def _chunks(self):
+        self.reads += 1
+        for chunk in self.chunks:
+            yield chunk
+
+
+def _modal_sb(status, stdout=(), stderr=()):
     sb = MagicMock()
     sb.object_id = "sb-1"
     sb.poll.aio = AsyncMock(return_value=status)
-    sb.stdout.read.aio = AsyncMock(return_value=stdout)
-    sb.stderr.read.aio = AsyncMock(return_value=stderr)
+    sb.stdout, sb.stderr = _Stream(*stdout), _Stream(*stderr)
     return sb
 
 
@@ -77,26 +93,48 @@ def _modal_sb(status, stdout="", stderr=""):
 @pytest.mark.parametrize("made", [lambda sb: ModalVmSandbox(sb, {}), lambda sb: ModalSandbox(sb, {})],
                          ids=["modal_vm", "modal"])
 async def test_a_modal_sandbox_reads_its_process_output_once_it_has_exited_and_keeps_it(made):
-    running = _modal_sb(None)
+    running = _modal_sb(None, stdout=["never read\n"])
 
     assert await made(running).exit_status() is None and await made(running).output_tail(5) == []
-    running.stdout.read.aio.assert_not_awaited()
+    assert running.stdout.reads == 0
 
-    ended = _modal_sb(2, stdout="[    1.0] Linux version 6.8\nagentenv-init: no filesystem labelled agentenv-root\n",
-                      stderr="launch: the guest powered off\n")
+    ended = _modal_sb(2, stdout=["[    1.0] Linux version 6.8\r\nagentenv-init: no filesystem lab", "elled agentenv-root\n",
+                                 "\n"], stderr=["launch: the guest powered off"])
     sandbox = made(ended)
     assert await sandbox.exit_status() == 2
     assert await sandbox.output_tail(5) == ["[    1.0] Linux version 6.8",
                                             "agentenv-init: no filesystem labelled agentenv-root",
                                             "launch: the guest powered off"]
-    assert await sandbox.output_tail(1) == ["launch: the guest powered off"]
-    ended.stdout.read.aio.assert_awaited_once()
+    assert await sandbox.output_tail(1) == ["agentenv-init: no filesystem labelled agentenv-root"]
+    assert (ended.stdout.reads, ended.stderr.reads) == (1, 1)
 
 
 @pytest.mark.asyncio
-async def test_a_modal_sandbox_whose_output_cant_be_read_gives_none(caplog):
-    sb = _modal_sb(2)
-    sb.stdout.read.aio = AsyncMock(side_effect=RuntimeError("stream gone"))
+async def test_a_modal_sandbox_keeps_a_bounded_tail_of_each_stream_and_neither_crowds_out_the_others_last_lines(
+        monkeypatch):
+    monkeypatch.setattr(modal_sandbox, "_OUTPUT_KEPT_LINES", 300)
+    console = [f"console {n}\n" for n in range(5000)] + ["agentenv-init: can't mount /dev/vda2\n"]
+    sandbox = ModalVmSandbox(_modal_sb(0, stdout=console, stderr=[f"socat {n}\n" for n in range(400)]), {})
 
-    assert await ModalVmSandbox(sb, {}).output_tail(5) == []
-    assert "Couldn't read the output of Modal sandbox sb-1" in caplog.text
+    tail = await sandbox.output_tail(200)
+
+    assert len(sandbox._ended[0]) == len(sandbox._ended[1]) == 300
+    assert tail == [*(f"console {n}" for n in range(4901, 5000)), "agentenv-init: can't mount /dev/vda2",
+                    *(f"socat {n}" for n in range(300, 400))]
+    few = ModalVmSandbox(_modal_sb(0, stdout=["the guest's last words\n"], stderr=[f"socat {n}\n" for n in range(400)]),
+                         {})
+    assert (await few.output_tail(200))[0] == "the guest's last words" and len(await few.output_tail(200)) == 200
+
+
+@pytest.mark.asyncio
+async def test_a_modal_sandbox_whose_output_cant_be_read_to_its_end_keeps_what_it_read(caplog):
+    class Breaks(_Stream):
+        async def _chunks(self):
+            yield "agentenv-init: the image names no command\n"
+            raise RuntimeError("stream gone")
+
+    sb = _modal_sb(2)
+    sb.stdout = Breaks()
+
+    assert await ModalVmSandbox(sb, {}).output_tail(5) == ["agentenv-init: the image names no command"]
+    assert "Couldn't read all the output of Modal sandbox sb-1" in caplog.text
