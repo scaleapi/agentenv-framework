@@ -1,7 +1,8 @@
 """A website browser's CDP addresses: a user's token minted once, kept by hash only, so it still works after the server
 restarts and the computer's session can't use the file; the relay giving each WebSocket connection its own
 browser-level session over one pipe, its answers and events and nobody else's, until the browser goes; the guard on
-each command; and the cdp operation and discovery answered at the address the call reached."""
+each command; and the cdp operation and discovery answered at the address the call reached, or under the origin its
+caller names, which behind a tunnel that ends TLS is the only way to an https address."""
 from __future__ import annotations
 
 import asyncio
@@ -30,6 +31,8 @@ from agentenv_protocol.website_browser import SITE_PROXY_ENV, WebsiteBrowserEnvi
 
 FORWARDED = {"x-forwarded-host": "computer.test:443", "x-forwarded-proto": "https",
              "x-forwarded-prefix": "/svc/chromium"}
+#: What the driver forwards behind a tunnel that ends TLS: the tunnel's host, and http, how the tunnel reached it.
+BEHIND_TLS = {"x-forwarded-host": "t.tunnel.test", "x-forwarded-proto": "http", "x-forwarded-prefix": "/svc/chromium"}
 
 
 @computer_app(supports=[{"os": {"type": "linux", "display": ["x11", "none"]}, "arch": ["amd64"]}])
@@ -138,13 +141,15 @@ def test_a_users_token_is_minted_once_kept_by_hash_and_still_known_after_a_resta
     tokens = Tokens(path)
     ada = tokens.mint("ada", "https://computer.test/svc/chromium")
     again, bob = tokens.mint("ada", "https://elsewhere.test"), tokens.mint("bob", "https://computer.test/svc/chromium")
-    token = ada.http_url.split("/cdp/")[1].strip("/")
+    cy = tokens.mint("cy", "https://t.tunnel.test/svc/chromium", named=True)
+    token, cys = (address.http_url.split("/cdp/")[1].strip("/") for address in (ada, cy))
     restarted = Tokens(path)
 
     assert again == ada and bob != ada and ada.http_url == f"https://computer.test/svc/chromium/cdp/{token}/"
     assert ada.ws_url == f"wss://computer.test/svc/chromium/cdp/{token}/devtools/browser"
     assert token not in path.read_text() and restarted.address(token) == ada and tokens.address("guess") is None
     assert restarted.mint("ada", "https://computer.test").http_url != ada.http_url
+    assert not ada.named and restarted.address(cys) == cy and cy.named
 
 
 @pytest.mark.asyncio
@@ -349,4 +354,52 @@ async def test_the_cdp_operation_and_discovery_answer_at_the_address_reached_and
     browser_methods = next(e["params"]["methods"] for e in card["capabilities"]["extensions"]
                            if e["uri"] == "urn:agentenv:browser/v1")
     assert computer_app_params["agent_routes"] == ["/cdp/"]
-    assert browser_methods["cdp"]["request"]["properties"] == {"user": {"type": "string"}}
+    assert browser_methods["cdp"]["request"]["properties"] == {"user": {"type": "string"},
+                                                               "origin": {"type": "string", "default": None}}
+
+
+@pytest.mark.asyncio
+async def test_under_an_origin_its_caller_names_an_address_is_https_and_discovery_answers_wss_though_reached_over_http(
+        monkeypatch, tmp_path):
+    browser = _browser(monkeypatch, tmp_path)
+
+    async def ready():
+        return None
+
+    async def call(method, params=None, *, session_id=None, timeout_s=None):
+        return {"product": "Chrome/156.0.8078.4", "protocolVersion": "1.3"}
+
+    monkeypatch.setattr(browser, "_until_ready", ready)
+    monkeypatch.setattr(browser.devtools, "call", call)
+    asgi = browser.create_app().streamable_http_app()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=asgi), base_url="http://app") as http:
+        ada = (await http.post("/agentenv/ext/browser/cdp", json={"user": "ada", "origin": "https://t.tunnel.test/"},
+                               headers=BEHIND_TLS)).json()
+        bob = (await http.post("/agentenv/ext/browser/cdp", json={"user": "bob"}, headers=BEHIND_TLS)).json()
+        cy = (await http.post("/agentenv/ext/browser/cdp", json={"user": "cy", "origin": "HTTPS://t.tunnel.test"},
+                              headers=BEHIND_TLS)).json()
+        paths = [address["http_url"].split("/svc/chromium", 1)[1] for address in (ada, bob)]
+        seen = [(await http.get(f"{path}json/version", headers=BEHIND_TLS)).json()["webSocketDebuggerUrl"]
+                for path in paths]
+
+    token = ada["http_url"].split("/cdp/")[1].strip("/")
+    assert ada == {"http_url": f"https://t.tunnel.test/svc/chromium/cdp/{token}/",
+                   "ws_url": f"wss://t.tunnel.test/svc/chromium/cdp/{token}/devtools/browser"}
+    assert seen[0] == ada["ws_url"]
+    assert bob["ws_url"].startswith("ws://t.tunnel.test/") and seen[1] == bob["ws_url"]
+    assert cy["http_url"].startswith("https://t.tunnel.test/svc/chromium/cdp/")
+    assert cy["ws_url"].startswith("wss://t.tunnel.test/svc/chromium/cdp/")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("origin", ["ftp://t.test", "t.test", "https://", "https://t.test/?q=1", "https://t.test/#top",
+                                    "https://ada:pw@t.test", "https://t.test:0", "https://t.test:99999",
+                                    "https://t.test/\n", 7])
+async def test_an_origin_that_isnt_an_http_or_https_url_is_refused_and_mints_nothing(monkeypatch, tmp_path, origin):
+    browser = _browser(monkeypatch, tmp_path)
+    asgi = browser.create_app().streamable_http_app()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=asgi), base_url="http://app") as http:
+        answer = await http.post("/agentenv/ext/browser/cdp", json={"user": "ada", "origin": origin})
+
+    assert answer.status_code == 400 and "origin is an http or https URL" in answer.text, answer.text
+    assert not browser.cdp_tokens.path.exists()

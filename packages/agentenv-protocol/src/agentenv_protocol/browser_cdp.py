@@ -59,11 +59,13 @@ GUARDED = {"refuse": "refused", "send": "changed", "answer": "answered", "close"
 
 @dataclass
 class Address:
-    """A user's CDP address: ``http_url``, the base clients discover from, and ``ws_url``, the browser's WebSocket."""
+    """A user's CDP address: ``http_url``, the base clients discover from, and ``ws_url``, the browser's WebSocket;
+    ``named`` when it's under an origin the caller named, where its agent reaches the env."""
 
     user: str
     http_url: str
     ws_url: str
+    named: bool = False
 
 
 def reached(request: Request) -> str:
@@ -72,6 +74,12 @@ def reached(request: Request) -> str:
     proto = request.headers.get("x-forwarded-proto") or request.url.scheme
     host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
     return f"{proto}://{host}{request.headers.get('x-forwarded-prefix', '')}".rstrip("/")
+
+
+def under(origin: str, request: Request) -> str:
+    """The address a request reached the browser at, under ``origin``, where the caller's agent reaches the env: the
+    origin, then the path prefix the driver forwarded."""
+    return f"{origin.rstrip('/')}{request.headers.get('x-forwarded-prefix', '')}".rstrip("/")
 
 
 def websocket_form(url: str) -> str:
@@ -83,31 +91,33 @@ def _hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-def _address(user: str, base: str, token: str) -> Address:
+def _address(user: str, base: str, named: bool, token: str) -> Address:
     root = f"{base}{ROUTE}{token}"
-    return Address(user, f"{root}/", f"{websocket_form(root)}/devtools/browser")
+    return Address(user, f"{root}/", f"{websocket_form(root)}/devtools/browser", named)
 
 
 class Tokens:
     """The tokens minted, one per user: in memory, so asking twice gives the same address, and in ``path`` only by
-    hash, with the user and the base address, so an address still works after the server restarts while the
-    computer's session, which can read the file, can't use one."""
+    hash, with the user, the base address and whether its caller named it, so an address still works after the server
+    restarts while the computer's session, which can read the file, can't use one."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
         self._minted: dict[str, Address] = {}
         try:
             stored = json.loads(path.read_text())
-            self._known = {digest: (entry["user"], entry["base"]) for digest, entry in stored.items()}
+            self._known = {digest: (entry["user"], entry["base"], entry["named"])
+                           for digest, entry in stored.items()}
         except (OSError, ValueError, TypeError, KeyError):
             self._known = {}
 
-    def mint(self, user: str, base: str) -> Address:
-        """``user``'s address under ``base``: the one minted before, else a new one."""
+    def mint(self, user: str, base: str, *, named: bool = False) -> Address:
+        """``user``'s address under ``base``, ``named`` when its caller named where its agent reaches the env: the one
+        minted before, else a new one."""
         if user not in self._minted:
             token = secrets.token_urlsafe(TOKEN_BYTES)
-            self._minted[user] = _address(user, base, token)
-            self._known[_hash(token)] = (user, base)
+            self._minted[user] = _address(user, base, named, token)
+            self._known[_hash(token)] = (user, base, named)
             self._save()
         return self._minted[user]
 
@@ -124,8 +134,8 @@ class Tokens:
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         part = self.path.with_name(f".{self.path.name}.part")
-        part.write_text(json.dumps({digest: {"user": user, "base": base}
-                                    for digest, (user, base) in self._known.items()}))
+        part.write_text(json.dumps({digest: {"user": user, "base": base, "named": named}
+                                    for digest, (user, base, named) in self._known.items()}))
         os.replace(part, self.path)
 
 
