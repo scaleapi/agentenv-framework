@@ -354,10 +354,8 @@ class BrowserControl:
         """The active tab's page reloaded, or the one before or after it in its history opened."""
         session = await self.active_session()
         self._acted_on(target := self._sessions[session])
-        if direction in ("reload", "back", "forward"):
-            self.causes.navigates_next(target, _cause())
         if direction == "reload":
-            await self.devtools.call("Page.reload", {}, session_id=session)
+            await self._moves(target, "Page.reload", {}, session)
             return
         if direction not in ("back", "forward"):
             raise InvalidArgument(f"direction is back, forward or reload, not {direction!r}")
@@ -365,8 +363,19 @@ class BrowserControl:
         index = history["currentIndex"] + (-1 if direction == "back" else 1)
         if not 0 <= index < len(history["entries"]):
             raise InvalidArgument(f"the active tab has no page to go {direction} to")
-        await self.devtools.call("Page.navigateToHistoryEntry", {"entryId": history["entries"][index]["id"]},
-                                 session_id=session)
+        await self._moves(target, "Page.navigateToHistoryEntry", {"entryId": history["entries"][index]["id"]},
+                          session)
+
+    async def _moves(self, target: str, method: str, params: dict, session: str) -> None:
+        """A reload or move in history of ``target``, whose next navigation the log says the op under way caused,
+        unless it fails."""
+        cause = _cause()
+        self.causes.navigates_next(target, cause)
+        try:
+            await self.devtools.call(method, params, session_id=session)
+        except BaseException:
+            self.causes.navigated_nowhere(target, cause)
+            raise
 
     async def answer_dialog(self, accept: bool, text: Optional[str] = None) -> None:
         """The dialog open on the active tab answered, as the agent's answer; InvalidArgument with none open."""
@@ -631,7 +640,7 @@ class BrowserControl:
         actor = ACTOR.get()
         opened = self._dialog_opened.setdefault(session, asyncio.Event())
         for event in events:
-            if actor is not None and target is not None and not actor["password"] and _types(event):
+            if actor is not None and target is not None and actor["password"] is not True and _types(event):
                 actor["password"] = await self.password_focused(target)
             if self.dialogs == AGENT and session in self._open_dialogs:
                 return

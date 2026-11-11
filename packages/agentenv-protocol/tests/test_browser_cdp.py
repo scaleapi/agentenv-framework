@@ -28,7 +28,7 @@ from agentenv_protocol.website_browser.log import REDACTED, TOOL_CALL_HEADER, Br
 from agentenv_protocol.computer import Launch, Platform, Ready, app, computer_app, linux  # noqa: E402
 from agentenv_protocol.computer.app import APP_SETTINGS_ENV  # noqa: E402
 from agentenv_protocol.computer.app_runtime import AppReadiness  # noqa: E402
-from agentenv_protocol.computer.errors import DeviceUnavailable  # noqa: E402
+from agentenv_protocol.computer.errors import DeviceUnavailable, InvalidArgument  # noqa: E402
 from agentenv_protocol.website_browser import SITE_PROXY_ENV, WebsiteBrowserEnvironment  # noqa: E402
 
 FORWARDED = {"x-forwarded-host": "computer.test:443", "x-forwarded-proto": "https",
@@ -465,6 +465,35 @@ async def test_typing_still_waiting_for_its_check_when_its_client_leaves_is_logg
     typed = [line["action"] for line in log.read()["lines"] if line["action"]["method"] == "Input.insertText"]
     assert [entry["params"] for entry in typed] == [{"text": {"length": 7}}, {"text": {"length": 7}}]
     assert all(entry["ok"] is False for entry in typed) and "hunter" not in json.dumps(log.read())
+
+
+@pytest.mark.asyncio
+async def test_typing_that_fails_before_its_check_and_a_failed_navigation_keep_no_secrets(monkeypatch, tmp_path):
+    browser = _browser(monkeypatch, tmp_path)
+
+    async def no_tab(events):
+        raise DeviceUnavailable("the browser has no tab open")
+
+    async def unreachable(url):
+        raise InvalidArgument(f"the browser couldn't open {url}: net::ERR_NAME_NOT_RESOLVED")
+
+    monkeypatch.setattr(browser.control, "dispatch", no_tab)
+    monkeypatch.setattr(browser.control, "navigate", unreachable)
+    asgi = browser.served_asgi(browser.create_app().streamable_http_app())
+    typed = [{"method": "Input.insertText", "params": {"text": "hunter2"}}]
+    url = "https://a.test/?token=secret"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=asgi), base_url="http://app") as http:
+        await http.post("/agentenv/ext/browser/page/input", json={"events": typed},
+                        headers={TOOL_CALL_HEADER: tool_call_header("computer_type", "c1", {"text": "hunter2"})})
+        await http.post("/agentenv/ext/browser/navigate", json={"url": url},
+                        headers={TOOL_CALL_HEADER: tool_call_header("computer_navigate", "c2", {"url": url})})
+        read = (await http.get("/agentenv/ext/browser/log")).json()
+
+    typing, navigating = (line["action"] for line in read["lines"])
+    assert typing["ok"] is False and typing["args"] == {"text": {"length": 7}}
+    assert typing["params"] == {"events": [{"method": "Input.insertText", "params": {"text": {"length": 7}}}]}
+    assert navigating["ok"] is False and "secret" not in navigating["error"] and REDACTED in navigating["error"]
+    assert "hunter2" not in json.dumps(read) and "secret" not in json.dumps(read)
 
 
 @pytest.mark.asyncio

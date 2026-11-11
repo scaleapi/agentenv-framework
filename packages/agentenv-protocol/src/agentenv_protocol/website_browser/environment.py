@@ -20,7 +20,7 @@ from ..agent_env_environment import (OP_ADD_DATA, add_data, add_websocket_route,
                                      reset_data)
 from .cdp import ROUTE, Relay, Tokens, reached, under, websocket_form
 from .log import (ACTOR, ERROR_CHARS, TOOL_CALL_HEADER, UNLOGGED_OPS, BrowserLog, op_acts, read_tool_call,
-                           redacted_args, redacted_op)
+                  redact_text, redacted_args, redacted_op)
 from ..computer import AppDeclaration, ComputerAppEnvironment, Launch, install_step, ready_check
 from ..computer import app as computer_app
 from ..computer import app_data
@@ -670,7 +670,7 @@ class _LoggedOps:
         log = self.browser.log
         begun = log.begin(action)
         actor = {"seq": begun["seq"], "via": action["via"], "who": action.get("who"), "acts": acting, "tab": None,
-                 "password": False}
+                 "password": None}
         answered: dict[str, Any] = {"status": 500, "error": b""}
         replayed = False
 
@@ -698,12 +698,15 @@ class _LoggedOps:
                                       "ok": answered["status"] < 400}
             if answered["status"] >= 400:
                 fields["error"] = _error_text(answered["error"])
+            # What it typed is kept only once every check it made found no password field focused; one that failed,
+            # or never got to check, keeps it withheld.
+            withheld_typing = actor["password"] is not False or answered["status"] >= 400
             if acting and len(body) > LOGGED_BODY_BYTES:
                 fields["params"] = {"too_long": True, "length": len(body)}
             elif acting:
-                fields["params"] = redacted_op(op, _op_params(scope, body), password=actor["password"])
+                fields["params"] = redacted_op(op, _op_params(scope, body), password=withheld_typing)
                 if call is not None:
-                    fields["args"] = redacted_args(call["tool"], call["args"], password=actor["password"])
+                    fields["args"] = redacted_args(call["tool"], call["args"], password=withheld_typing)
             log.finish(begun, **fields)
 
 
@@ -726,7 +729,7 @@ def _error_text(body: bytes) -> str:
         text = str(error.get("message", error)) if isinstance(error, dict) else str(error or text)
     except (ValueError, AttributeError):
         pass
-    return text[:ERROR_CHARS]
+    return redact_text(text)[:ERROR_CHARS]
 
 
 def _read_sites() -> list[SiteNames]:

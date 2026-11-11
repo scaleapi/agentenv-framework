@@ -13,8 +13,9 @@ import types
 import pytest
 
 from agentenv_protocol.website_browser import log as browser_log
-from agentenv_protocol.website_browser.log import (ACTOR, CUT_CHARS, REDACTED, BrowserLog, acts, cut, op_acts, read_tool_call,
+from agentenv_protocol.website_browser.log import (ACTOR, CUT_CHARS, REDACTED, BrowserLog, acts, cut, op_acts, read_tool_call, redact_text,
                                            redact_url, redacted_args, redacted_op, redacted_params, tool_call_header)
+from agentenv_protocol.computer.errors import InvalidArgument
 from agentenv_protocol.website_browser.control import BrowserControl
 
 
@@ -102,6 +103,16 @@ def test_a_tool_call_header_carries_the_tool_its_call_and_its_arguments_cut():
     assert read == {"tool": "computer_type", "call": "c1", "args": {"text": cut("y" * (CUT_CHARS + 1)), "x": 3}}
     assert read_tool_call(None) is None and read_tool_call("not base64 json") is None
     assert read_tool_call(base64.urlsafe_b64encode(b'{"call": 1}').decode()) is None
+
+
+def test_a_long_url_and_a_url_in_an_error_keep_no_credentials():
+    long_url = "https://a.test/?token=secret&pad=" + "x" * CUT_CHARS
+    sent = read_tool_call(tool_call_header("computer_navigate", "c", {"url": long_url}))["args"]["url"]
+    assert sent["cut"].startswith(f"https://a.test/?token={REDACTED}&pad=") and "secret" not in json.dumps(sent)
+    kept = redacted_args("computer_navigate", {"url": cut(long_url)})["url"]
+    assert kept["cut"].startswith(f"https://a.test/?token={REDACTED}") and "secret" not in json.dumps(kept)
+    assert redact_text("the browser couldn't open https://a.test/?token=t: net::ERR_FAILED") == \
+        f"the browser couldn't open https://a.test/?token={REDACTED}: net::ERR_FAILED"
 
 
 def test_a_tool_call_header_too_long_even_cut_drops_its_arguments(monkeypatch):
@@ -203,6 +214,8 @@ class Pipe:
             return {"result": {"value": self.focus == "password"}}
         if method == "Input.dispatchKeyEvent" and params.get("key") == "Tab":
             self.focus = "password"
+        if method == "Page.getNavigationHistory":
+            return {"currentIndex": 0, "entries": [{"id": 1, "url": "about:blank"}]}
         return {}
 
     async def request(self, method, params=None, *, session_id=None):
@@ -233,13 +246,32 @@ async def test_a_move_within_a_document_is_the_commands_that_asked_for_it_and_us
 
 
 @pytest.mark.asyncio
+async def test_a_move_back_with_nowhere_to_go_leaves_no_cause_behind(tmp_path):
+    pipe = Pipe()
+    control = BrowserControl(pipe, "agent", (1280, 800))
+    control.log = log = BrowserLog(tmp_path / "browser-chromium.jsonl")
+    pipe.open("T1")
+    await _settled()
+    token = ACTOR.set({"seq": 99, "via": "mcp", "who": "bo", "acts": True, "tab": None, "password": None})
+    try:
+        with pytest.raises(InvalidArgument):
+            await control.history("back")
+    finally:
+        ACTOR.reset(token)
+    pipe.emit("Page.frameNavigated", {"frame": {"id": "T1", "url": "https://a.test/", "loaderId": "L-page"}}, "s-T1")
+    await _settled()
+    assert [line["tab"] for line in log.read()["lines"] if line["tab"]["event"] == "navigated"] == [
+        {"event": "navigated", "id": "T1", "url": "https://a.test/", "by": "page", "after": 99}]
+
+
+@pytest.mark.asyncio
 async def test_typing_that_tabs_into_a_password_field_is_withheld_from_then_on(tmp_path):
     pipe = Pipe()
     control = BrowserControl(pipe, "agent", (1280, 800))
     control.log = BrowserLog(tmp_path / "browser-chromium.jsonl")
     pipe.open("T1")
     await _settled()
-    actor = {"seq": 1, "via": "mcp", "who": "bo", "acts": True, "tab": None, "password": False}
+    actor = {"seq": 1, "via": "mcp", "who": "bo", "acts": True, "tab": None, "password": None}
     token = ACTOR.set(actor)
     try:
         await control.dispatch([{"method": "Input.dispatchKeyEvent", "params": {"type": "keyDown", "key": "a", "text": "a"}},

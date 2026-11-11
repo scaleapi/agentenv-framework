@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any, Literal, Optional
 from starlette.requests import Request
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from .log import ERROR_CHARS, KEY_FIELDS, TYPING_METHODS, BrowserLog, acts, redacted_params
+from .log import ERROR_CHARS, KEY_FIELDS, TYPING_METHODS, BrowserLog, acts, redact_text, redacted_params
 
 if TYPE_CHECKING:
     from .control import BrowserControl
@@ -402,7 +402,7 @@ class _Logged:
         self.relay, self.begun, self.method, self.params, self.target, self.acting = \
             relay, begun, method, params, target, acting
         control = relay.control
-        cause = {"seq": begun["seq"], "via": "cdp", "who": begun["action"]["who"]}
+        self._cause = cause = {"seq": begun["seq"], "via": "cdp", "who": begun["action"]["who"]}
         self._landed: Optional[asyncio.Future] = None
         self._checks_password = self.password = False
         if control is None or not acting:
@@ -441,7 +441,9 @@ class _Logged:
                                         else result.get("loaderId"))
         fields: dict[str, Any] = {"ok": "error" not in answer}
         if "error" in answer:
-            fields["error"] = str((answer["error"] or {}).get("message", answer["error"]))[:ERROR_CHARS]
+            fields["error"] = redact_text(str((answer["error"] or {}).get("message", answer["error"])))[:ERROR_CHARS]
+            if self.method in NAVIGATES_NEXT and self.target and self.relay.control is not None:
+                self.relay.control.causes.navigated_nowhere(self.target, self._cause)
         if guarded is not None:
             fields["guard"] = guarded
         if self.acting:

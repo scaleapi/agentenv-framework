@@ -95,6 +95,8 @@ BODY_FIELDS = frozenset({"body", "postData", "html", "rawResponse"})
 #: A tool call's arguments that say what is typed, withheld while a password field has focus.
 TYPED_ARGS = frozenset({"text", "keys"})
 _WORDS = re.compile(r"[A-Z]?[a-z0-9]+|[A-Z]+(?![a-z])")
+#: A URL inside free text, such as an error message.
+_URL_IN_TEXT = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'<>]+")
 
 #: The action under way in this task: the entry an op of the browser's server or a relayed command is, which the
 #: browser's control credits the tab events it causes to, and the tab it acted on.
@@ -158,6 +160,15 @@ def _redact_query(query: str) -> str:
                     for key, value in pairs)
 
 
+def redact_text(text: str) -> str:
+    """``text`` with each URL in it as ``redact_url`` keeps it, the punctuation after it left as it was."""
+    def redacted(found: re.Match) -> str:
+        url = found.group(0)
+        bare = url.rstrip(".,:;!?)]")
+        return redact_url(bare) + url[len(bare):]
+    return _URL_IN_TEXT.sub(redacted, text)
+
+
 def _secret_key(key: str) -> bool:
     lowered = key.lower()
     return lowered.startswith(SECRET_PREFIXES) or bool(SECRET_WORDS & {word.lower() for word in _WORDS.findall(key)})
@@ -168,11 +179,18 @@ def _urls_and_bodies(value: Any) -> Any:
     withheld."""
     if isinstance(value, Mapping):
         return {key: withheld(item) if key in BODY_FIELDS and item not in (None, "") else
-                ([redact_url(url) for url in item] if isinstance(item, list) else redact_url(item))
+                ([_url(url) for url in item] if isinstance(item, list) else _url(item))
                 if key in URL_FIELDS else _urls_and_bodies(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_urls_and_bodies(item) for item in value]
     return value
+
+
+def _url(value: Any) -> Any:
+    """A URL field's value as ``redact_url`` keeps it, a URL already cut by the part it kept."""
+    if isinstance(value, Mapping) and isinstance(value.get("cut"), str):
+        return {**value, "cut": redact_url(value["cut"])[:CUT_CHARS]}
+    return redact_url(value)
 
 
 def _cookie_values(cookies: Any) -> Any:
@@ -239,7 +257,7 @@ def _length(value: Any) -> int:
 def tool_call_header(tool: str, call: str, args: Mapping[str, Any]) -> str:
     """The header a driver forwards a tool call with: the tool, its call's id and its arguments, cut; without them when
     even cut they'd make it too long."""
-    body = {"tool": tool, "call": call, "args": cut(args)}
+    body = {"tool": tool, "call": call, "args": cut(_urls_and_bodies(args))}
     encoded = base64.urlsafe_b64encode(json.dumps(body).encode()).decode()
     if len(encoded) > HEADER_CHARS:
         body["args"] = {key: withheld(cut(value)) for key, value in args.items()}
@@ -486,6 +504,11 @@ class Causes:
         """A reload or a move in history of ``target``, whose answer names no loader: its next navigation is taken as
         its, within ``NEXT_NAVIGATION_S``."""
         self._next[target] = (cause, asyncio.get_running_loop().time() + NEXT_NAVIGATION_S)
+
+    def navigated_nowhere(self, target: str, cause: dict) -> None:
+        """A reload or move in history of ``target`` that failed: its next navigation isn't its."""
+        if (pending := self._next.get(target)) is not None and pending[0] == cause:
+            self._next.pop(target, None)
 
     @staticmethod
     def _landed(done: asyncio.Future, into: dict, cause: dict, waiting: set) -> None:
