@@ -87,18 +87,20 @@ else:
 #: What cua-driver's own MCP server (``cua-driver mcp``) says at connect and lists at the pinned version on each OS: its
 #: instructions, its tools, which the running daemon must list the same, and its skill resources.
 MANIFEST = Path(__file__).with_name(f"mcp-{_desktop()}.json" if _desktop() else "mcp.json")
-#: Where the release's zip is unpacked on Windows, beside this file.
+#: Where the release's zip is unpacked on Windows, and its Linux tarball's executable on Hyprland, beside this file.
 WINDOWS_EXECUTABLE = Path(__file__).with_name("cua-driver") / "cua-driver.exe"
+HYPRLAND_EXECUTABLE = Path(__file__).with_name("cua-driver") / "cua-driver"
 #: CuaDriver.app's executable, which macOS runs the daemon as.
 APP_EXECUTABLE = Path("/Applications/CuaDriver.app/Contents/MacOS/cua-driver")
 #: The sha256 of the cua-driver executable each arch's pinned wheel installs, on macOS CuaDriver.app's, on Windows the
-#: release zip's, and on Hyprland its own pin's wheel's, 0.44, which delivers background input there.
+#: release zip's, and on Hyprland the release tarball's of its own pin, 0.47.4, the release whose Hyprland plugin
+#: Omarchy's base builds.
 EXECUTABLES = {
     "amd64": "bf57b2f3778a0a7daa9388e241f20ce948b32a7a2f4dd102e497f34e54137934",
     "arm64": "26e9eee8165e9ce7b614b5e3d68e5d963231385a82b65236406718b5ce1ff936",
     "macos/arm64": "b4d974a9c1c92a700cd7be7ede987aea4a1e6835e37039ce3d628b71bd5f0ca8",
     "windows/amd64": "ffa58d88779ee219304b0c307f4cfa970fe822f830c6ecf9254eda5c29e22bf2",
-    "hyprland/amd64": "f4259d5135d23d4d03968e074d144a10ece6305ca28ef48edfb3ef5c9e724228",
+    "hyprland/amd64": "8dd0f74928cff484343ed65e3ac4d1dacdccc3950b8665e1102ac463af0a967b",
 }
 #: How the daemon delivers the pointer's actions: in the foreground on macOS, where it doesn't by default.
 FOREGROUND = {"delivery_mode": "foreground"} if MACOS else {}
@@ -474,12 +476,14 @@ def _text(result: dict) -> str:
 
 
 def _executable() -> Path:
-    """cua-driver's executable: CuaDriver.app's on macOS, else the one in the driver's venv, found without importing its
-    package, which loads its SDK."""
+    """cua-driver's executable: CuaDriver.app's on macOS, the release's beside the driver on Windows and Hyprland, else
+    the one in the driver's venv, found without importing its package, which loads its SDK."""
     if MACOS:
         return APP_EXECUTABLE
     if WINDOWS:
         return WINDOWS_EXECUTABLE
+    if HYPRLAND:
+        return HYPRLAND_EXECUTABLE
     return Path(importlib.util.find_spec("cua_driver").submodule_search_locations[0]) / "bin" / "cua-driver"
 
 
