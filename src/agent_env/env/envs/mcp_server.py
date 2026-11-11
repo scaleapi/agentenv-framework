@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import posixpath
+import re
 import shlex
 import uuid
 from importlib.metadata import version as pkg_version
@@ -14,7 +15,7 @@ from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional
 from agentenv_protocol import client as protocol_v1
 from agent_env.artifact import Artifact, DockerImageArtifact
 from agent_env.artifact.artifacts.docker_image import ProgressCallback, refuse_local_github_build
-from agent_env.config import get_config
+from agent_env.config import SECRET_REF_PREFIX, get_config, is_bare_reference
 from agent_env.entity.refs import EntityRef
 from agent_env.env.env import Env, gateway_url_of
 from agent_env.store.ids import derive_id
@@ -44,15 +45,19 @@ class MCPServerEnv(Env):
     type: ClassVar[str] = "mcp_server"
     description = "An MCP server, deployed through the environment provider its env_provider_type names"
     toml_refs: ClassVar[tuple[EntityRef, ...]] = (EntityRef.artifact("image", artifact_type="docker_image"),)
-    toml_keys: ClassVar[dict[str, type]] = {"image": object, "environment_name": str, "env_provider_type": str}
+    toml_keys: ClassVar[dict[str, type]] = {"image": object, "environment_name": str, "env_provider_type": str,
+                                            "secret_env": dict}
     _MCP_MAX_RETRIES: ClassVar[int] = 5
 
-    def __init__(self, id: str, version: Optional[int], docker_image_artifact: DockerImageArtifact, environment_name: Optional[str] = None, *, metadata: Optional[dict[str, str]] = None, env_provider_type: str = "gateway"):
+    def __init__(self, id: str, version: Optional[int], docker_image_artifact: DockerImageArtifact, environment_name: Optional[str] = None, *, metadata: Optional[dict[str, str]] = None, env_provider_type: str = "gateway", secret_env: Optional[dict[str, str]] = None):
         super().__init__(id, version, metadata=metadata)
         if not environment_name:
             raise ValueError("environment_name cannot be empty")
         if not env_provider_type:
             raise ValueError("env_provider_type cannot be empty")
+        if problems := secret_env_problems(secret_env or {}):
+            raise ValueError(f"MCP server env {id!r}: " + "; ".join(problems))
+        self.secret_env = dict(secret_env or {})
         self.docker_image_artifact = docker_image_artifact
         self.environment_name = environment_name
         self.env_provider_type = env_provider_type
@@ -74,6 +79,8 @@ class MCPServerEnv(Env):
         base["service_name"] = self.environment_name
         base["environment_name"] = self.environment_name  # dual-write with service_name during the rename
         base["env_provider_type"] = self.env_provider_type
+        if self.secret_env:
+            base["secret_env"] = dict(self.secret_env)
         return base
 
     @classmethod
@@ -87,6 +94,7 @@ class MCPServerEnv(Env):
             environment_name=data["environment_name"] if "environment_name" in data else data["service_name"],
             metadata=data.get("metadata", {}),
             env_provider_type=data.get("env_provider_type", "gateway"),
+            secret_env=data.get("secret_env") or {},
         )
 
     @classmethod
@@ -95,12 +103,14 @@ class MCPServerEnv(Env):
         under ``ctx.id`` and return it."""
         fields = cls.accept_toml(data, ctx)
         return cls.put(id=ctx.id, docker_image_artifact=ctx.artifact(fields["image"], DockerImageArtifact),
-                       environment_name=fields["environment_name"], env_provider_type=fields["env_provider_type"])
+                       environment_name=fields["environment_name"], env_provider_type=fields["env_provider_type"],
+                       secret_env=fields.get("secret_env") or {})
 
     def to_toml(self, out: ExportContext) -> dict:
         """The env.toml of a folder this env is built from, which ``from_toml`` reads back as it."""
+        secret_env = {"secret_env": dict(self.secret_env)} if self.secret_env else {}
         return {"environment_name": self.environment_name, "image": out.image(self.docker_image_artifact),
-                **self.provider_toml(out, self.env_provider_type)}
+                **secret_env, **self.provider_toml(out, self.env_provider_type)}
 
     @classmethod
     def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:
@@ -447,3 +457,31 @@ class MCPServerEnv(Env):
             metadata=combined_metadata,
             env_provider_type=env_provider_type,
         )
+
+
+# The env vars the gateway sets on every MCP server's container itself, which a secret_env can't replace.
+RESERVED_ENV = frozenset({"MCP_HOST", "MCP_PORT", "SERVICE_NAME", "ENVIRONMENT_NAME", "DATABASE_URL"})
+# The secret store keys an env may name: an env's author picks the image the value is handed to, so a key outside this
+# prefix (the platform's own, such as its database URI or model key) is never handed to one.
+ENV_SECRET_KEY_PREFIX = "env__"
+
+
+def secret_env_problems(secret_env: object) -> list[str]:
+    """Why ``secret_env`` can't be an MCP server env's: a table of an env var's value by its name, each name a POSIX
+    one the gateway doesn't set itself, each value a bare ``secret:KEY`` reference (no ``?default``, never the value,
+    never ``env:``, which would hand over the deploying worker's own environment) to a key under
+    ``ENV_SECRET_KEY_PREFIX``."""
+    if not isinstance(secret_env, dict):
+        return [f"secret_env is a table of an env var's secret reference by its name, not {type(secret_env).__name__}"]
+    problems = []
+    for name, value in secret_env.items():
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            problems.append(f"secret_env: {name!r} isn't an env var's name")
+        elif name in RESERVED_ENV:
+            problems.append(f"secret_env.{name} is set by the gateway itself")
+        elif not (is_bare_reference(value) and value.startswith(SECRET_REF_PREFIX)):
+            problems.append(f"secret_env.{name} is a {SECRET_REF_PREFIX}KEY reference with no ?default, never its value")
+        elif not value[len(SECRET_REF_PREFIX):].startswith(ENV_SECRET_KEY_PREFIX):
+            problems.append(f"secret_env.{name} names {value!r}; an env may name only secret store keys starting "
+                            f"{ENV_SECRET_KEY_PREFIX!r}")
+    return problems

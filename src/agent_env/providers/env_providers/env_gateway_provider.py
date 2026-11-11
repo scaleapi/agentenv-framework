@@ -122,6 +122,7 @@ class MCPServerConfig:
     environment_name: str
     extra_env_vars: dict[str, str] | None = None
     networks: tuple[str, ...] = (_ENV_NETWORK,)
+    secret_env: dict[str, str] = field(default_factory=dict)
 
     @property
     def uses_database(self) -> bool:
@@ -476,6 +477,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             if server.extra_env_vars:
                 for key, value in server.extra_env_vars.items():
                     lines.append(f"      - {key}={value}")
+            lines.extend(_secret_env_lines(server.secret_env))
             lines.extend([
                 "    healthcheck:",
                 f'      test: ["CMD-SHELL", "python3 -c \\"import socket; s=socket.create_connection((\'localhost\',{gateway_port}),2); s.close()\\""]',
@@ -1408,6 +1410,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
     ) -> tuple[str, Sandbox]:
         logger.info(f"Provisioning MCP server '{cfg.environment_name}' from {image_artifact.image_name}...")
         env = dict(cfg.extra_env_vars or {})
+        env.update(_resolved_secret_env(cfg.secret_env))
         env["DATABASE_URL"] = self._state_provider.url_for_environment(cfg.environment_name, instance=state_instance)
         env["ENVIRONMENT_NAME"] = cfg.environment_name
         env.setdefault("MCP_HOST", "::")  # every address, IPv6 included, as a private network may use
@@ -1633,7 +1636,8 @@ def _gateway_topology(env: Env) -> _GatewayTopology:
     else:
         servers, websites, name, browser = [env], [], None, None
     return _GatewayTopology(
-        mcp_servers=[MCPServerConfig(image=s.docker_image_artifact.image_name, environment_name=s.environment_name) for s in servers],
+        mcp_servers=[MCPServerConfig(image=s.docker_image_artifact.image_name, environment_name=s.environment_name,
+                                     secret_env=dict(getattr(s, "secret_env", None) or {})) for s in servers],
         mcp_server_images=[s.docker_image_artifact for s in servers],
         website_configs=[website_config(w) for w in websites] or None,
         website_images=[image for w in websites
@@ -1681,6 +1685,9 @@ def _compose_name_problems(mcp_servers: list[MCPServerConfig], website_configs: 
 # `      - KEY=VALUE` env line.
 _SECRET_ENV_KEY_RE = re.compile(r"^(\s*-\s*)([A-Za-z0-9_]*(?:SECRET|PASSWORD|TOKEN|API_KEY)[A-Za-z0-9_]*)=.*$")
 _SETTINGS_LINE_RE = re.compile(rf'^(\s*-\s*")({WEBSITE_SETTINGS_ENV})=.*$')
+# A quoted `      - "KEY=VALUE"` env line is one a secret was resolved into (a site's settings, an MCP server's
+# secret_env), whatever its name, so it is masked too.
+_QUOTED_ENV_LINE_RE = re.compile(r'^(\s*-\s*")([A-Za-z_][A-Za-z0-9_]*)=.*$')
 
 
 def _compose_ps_rows(text: str) -> list[dict]:
@@ -1717,7 +1724,7 @@ def _network_lines(*networks: str) -> list[str]:
 def _redact_compose_secrets(compose_content: str) -> str:
     """Mask secret-valued env lines so the logged compose never carries a live secret, a site's settings among them."""
     return "\n".join(
-        _SETTINGS_LINE_RE.sub(r'\1\2=***"', _SECRET_ENV_KEY_RE.sub(r"\1\2=***", line))
+        _QUOTED_ENV_LINE_RE.sub(r'\1\2=***"', _SETTINGS_LINE_RE.sub(r'\1\2=***"', _SECRET_ENV_KEY_RE.sub(r"\1\2=***", line)))
         for line in compose_content.splitlines()
     )
 
@@ -1738,6 +1745,19 @@ def _settings_lines(settings: dict) -> list[str]:
     resolved = {name: get_config().resolve_reference(value) for name, value in settings.items()}
     return [f"      - {json.dumps(f'{WEBSITE_SETTINGS_ENV}={json.dumps(resolved)}'.replace('$', '$$'))}"]
 
+
+
+def _resolved_secret_env(secret_env: dict[str, str]) -> dict[str, str]:
+    """``secret_env`` with each ``secret:KEY`` reference resolved through the secret store; a key the store doesn't
+    hold raises ConfigError, failing the deploy rather than starting a server without its credentials."""
+    return {name: str(get_config().resolve_reference(ref)) for name, ref in (secret_env or {}).items()}
+
+
+def _secret_env_lines(secret_env: dict[str, str]) -> list[str]:
+    """The compose env lines handing an MCP server its ``secret_env``, each resolved, quoted so any value (JSON
+    included) is one YAML string, with each ``$`` doubled so Compose interpolates none."""
+    return [f"      - {json.dumps(f'{name}={value}'.replace('$', '$$'))}"
+            for name, value in _resolved_secret_env(secret_env).items()]
 
 
 def _seconds(seconds: float) -> str:
