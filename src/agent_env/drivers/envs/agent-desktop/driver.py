@@ -28,7 +28,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.types import CallToolResult, ImageContent, TextContent
 
-from agentenv_protocol import EnvironmentTool, ForwardedTool, computer, server_instructions
+from agentenv_protocol import ForwardedTool, computer, server_instructions
 from agentenv_protocol.computer import ComputerSettings, ReadyCheck, computer_driver
 
 
@@ -108,9 +108,7 @@ class AgentDesktop(OSDriver):
         self._skill: tuple[str, str, dict[str, str]] | None = None
 
     def forwarded_tools(self) -> list[ForwardedTool]:
-        return [ForwardedTool(EnvironmentTool(name=t["name"], description=t["description"], inputSchema=t["inputSchema"]),
-                              functools.partial(self._forward, t["name"]), t.get("annotations"), t.get("outputSchema"))
-                for t in _manifest()["tools"]]
+        return [ForwardedTool.listed(t, functools.partial(self._forward, t["name"])) for t in _manifest()["tools"]]
 
     @server_instructions
     def agent_desktop_instructions(self) -> str:

@@ -21,6 +21,19 @@ a tab that paints nothing shows white. It serves the page group too: `computer_n
 it. The browser ending on its own fails the computer for good: its ready check is
 `final`, and its tools answer with why. Each call it makes to the browser for an agent's tool carries that call, its tool, id, arguments and the caller's role, in the `AgentEnv-Tool-Call` and `AgentEnv-Role` headers, so the browser's log credits the action to it. Name it as `page`, or by its id, `@local/agentenv-framework/drivers/page`.
 
+Beside those it serves Playwright MCP's `browser_*` tools (with `--caps vision`), as `playwright-mcp-tools.json` lists
+them, from `playwright_mcp.py`. Its install lays Node and every npm package Playwright MCP needs out from pinned
+downloads, refusing a package whose dependencies aren't all there, and it runs Playwright MCP itself, attached to the browser over a CDP address the browser's relay issues to
+the user `playwright-mcp`, so the guard applies to it as to any CDP client; it never starts a browser of its own. Each
+caller gets a session of its own there. It starts on the first call, again once it has exited, and again on a fresh
+address after the browser's data is reset; it ends with the driver, gets none of the driver's environment, and its file
+access is `~/Uploads`. `browser_evaluate` and `browser_run_code_unsafe`, which run the agent's own code, are hidden by
+default: a task's tool access shows them by naming them. To move to another version, run
+`python scripts/upgrade_playwright_mcp.py <version>`, which pins the downloads in `env.toml` and writes the manifest from
+that version's `tools/list`, and look at each new tool it prints: hide it in `HIDDEN_TOOLS` if it runs the agent's own
+code, and add it to the unit test's `REVIEWED_TOOLS`, which fails until you do. The browser computer's integration test
+checks the installed version lists what the manifest does.
+
 A run that names it writes it: its files, what its class declares for each platform it supports, read without
 `mss`, `python-xlib` or PyAV installed, and how a computer installs it. Its `env.toml`'s `[install.linux]` has a
 computer env's composer put the folder in `/opt/agentenv/drivers/reference/`, install `requirements.txt`, resolved and
