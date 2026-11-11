@@ -81,11 +81,14 @@ cua-driver's UI Automation tree, whose walk of it fails.
 On a Hyprland desktop (Wayland), as Omarchy's is, cua-driver runs its Wayland backend (`CUA_DRIVER_RS_ENABLE_WAYLAND=1`)
 and sends input through the seats of Hyprland's `cua-hyprland-plugin`. Hyprland's session turns this on
 (`HYPRLAND_INSTANCE_SIGNATURE`), not any Wayland one, since the driver reaches Hyprland's IPC; `supports` names
-Omarchy's Wayland desktop on amd64, which installs `[install."linux/omarchy"]`: `requirements-omarchy.txt` and the two
-services, with no Hyprland plugin, which Omarchy's base carries. It runs cua-driver 0.44.0, its own pin, since 0.38.0
-refuses background input there, the delivery cua-driver's own tools default to: `computer-ready` checks its wheel's
-executable (`hyprland/amd64` in `EXECUTABLES`) and the tools `mcp-hyprland.json` pins, which `requirements-omarchy.txt`
-installs, while `requirements.txt` keeps 0.38.0 for the other desktops.
+Omarchy's Wayland desktop on amd64, which installs `[install."linux/omarchy"]`: `requirements-omarchy.txt`, cua-driver's
+release tarball for Linux, whose executable `install-hyprland.sh` unpacks into the driver's `cua-driver` folder, and the
+two services, with no Hyprland plugin: Omarchy's base carries the plugin of the same cua-driver release, built by its
+kit. It runs cua-driver 0.47.4, its own pin, which takes background input from any native Wayland app through the
+plugin's agent seats, where 0.38.0 refuses background input there, the delivery cua-driver's own tools default to; it
+comes from the release, since 0.47.4's wheel isn't on PyPI, and moving the pin moves the plugin's release in
+`computers/disk/omarchy/recipe.sh` with it. `computer-ready` checks the release's executable (`hyprland/amd64` in
+`EXECUTABLES`) and the tools `mcp-hyprland.json` pins, while `requirements.txt` keeps 0.38.0 for the other desktops.
 
 The daemon starts once the compositor's socket answers, on a socket in the session user's runtime folder. What the
 driver asks Hyprland (`hyprctl -j`) is in `hyprland.py`, beside `driver.py`. Text goes to the desktop in the foreground,
@@ -116,15 +119,17 @@ failure. The driver's services otherwise restart with the graphical session, as 
 
 To move it to another cua-driver version:
 
-1. Pin the version in `requirements.txt`, and Hyprland's own in `requirements-omarchy.txt`.
+1. Pin the version in `requirements.txt`, and Hyprland's own in `[install."linux/omarchy"]`'s download with the plugin
+   of the same release in `computers/disk/omarchy/recipe.sh`.
 2. Regenerate `mcp.json` from what that version's MCP server, `cua-driver mcp`, says at connect and lists: its
    `instructions`, each tool's `name`, `description`, `inputSchema`, `annotations` and `outputSchema`, and each
    resource's `uri`, `name`, `description` and `mimeType`. That takes a running daemon, so do it on a Linux test
    machine, `mcp-hyprland.json` the same way on a Hyprland desktop at its own pin, `mcp-macos.json` in a macOS
    computer, and `mcp-windows.json` in a Windows computer's signed-in session, on the driver's venv, since
    `cua-driver mcp` refuses Session 0, where ssh lands.
-3. Set `EXECUTABLES` in `driver.py` to the sha256 of `cua_driver/bin/cua-driver` in each arch's wheel, and in the wheel
-   of Hyprland's own pin for `hyprland/amd64`, and of CuaDriver.app's executable for `macos/arm64`, and the release
+3. Set `EXECUTABLES` in `driver.py` to the sha256 of `cua_driver/bin/cua-driver` in each arch's wheel, of the Linux
+   release tarball's `cua-driver` at Hyprland's own pin for `hyprland/amd64`, with the tarball's URL and sha256 in
+   `[install."linux/omarchy"]`, and of CuaDriver.app's executable for `macos/arm64`, and the release
    tarball's URL and sha256 in `env.toml`'s `[install.macos]` and its folder in `install-app.sh`; for `windows/amd64`,
    the zip's `cua-driver.exe`, its URL and sha256 in `[install.windows]` and its folder in `install-windows.ps1`.
 4. Run `tst/unit/drivers/cua_driver_test.py`, then `tst/integration/computer/cua_driver_test.py` on Linux, where

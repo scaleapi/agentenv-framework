@@ -202,13 +202,19 @@ by `source`, a URL and a sha256, fetched once into this machine's cache and chec
 launcher as a `linux-desktop` guest (a virtio GPU at the computer's resolution, 4 vCPUs and 8 GB), with root's ssh key
 passed as a systemd credential, Omarchy signing its user `omarchy` in as it does at every boot, and made a base by
 `disk/omarchy/recipe.sh`, run as root over ssh. The recipe refuses an image whose os-release isn't the artifact's
-`omarchy` `4.5.0`; installs cua-driver's Hyprland plugin, pinned by URL and sha256 to the package Omarchy builds for its
-Hyprland; adds `agentenv.lua` to Hyprland's config (the plugin loaded at start, a US keymap, the idle cursor hidden, the
-display's mode); installs the seed unit; has SDDM log back in after a logout; sets Omarchy's toggles for an unattended
-desktop (staying awake, no animations, no screensaver or suspend, notifications silenced); turns off crash toasts,
-dictation and its keys, housekeeping timers that would run at boot, and the firewall, which lets in only ssh and
-LocalSend while the launcher forwards only the computer's own ports; and locks `omarchy`'s password and leaves the
-machine id empty. Trimmed, the image becomes the base's, with the key to root, and is pushed to the env's image store
+`omarchy` `4.5.0`; adds `agentenv.lua` to Hyprland's config (cua-driver's Hyprland plugin loaded at start, a US keymap,
+the idle cursor hidden, the display's mode); installs the seed unit; has SDDM log back in after a logout; sets Omarchy's
+toggles for an unattended desktop (staying awake, no animations, no screensaver or suspend, notifications silenced);
+turns off crash toasts, dictation and its keys, housekeeping timers that would run at boot, and the firewall, which lets
+in only ssh and LocalSend while the launcher forwards only the computer's own ports; builds the plugin; and locks
+`omarchy`'s password and leaves the machine id empty. The plugin is the one cua-driver's release at the driver's
+Hyprland pin ships, built from its source by that release's kit, unmodified, as `omarchy` with `makepkg`, each archive
+pinned by sha256. The kit builds only on what it pins, Arch's Hyprland 0.56.2-1 and the GCC 16.1.1 it was built with,
+where Omarchy 4.5 ships newer builds of both, so first the recipe installs those from that day of the Arch Linux
+Archive (`disk/omarchy/arch-day.conf`, packages signature-checked by pacman), with the Hyprland libraries of that day,
+and cmake and ninja, which it removes after the build. It ends the builder's desktop session first, as the kit says to
+install it, and only then adds the drop-in: Hyprland reloads its config whenever a file of it changes, and the one
+running there can neither load the plugin nor show, without hanging, the error a config naming a missing one makes. Trimmed, the image becomes the base's, with the key to root, and is pushed to the env's image store
 under a tag of its recipe and source. Name it as `omarchy-4.5`, or by its id,
 `@local/agentenv-framework/computers/omarchy-4.5`.
 
