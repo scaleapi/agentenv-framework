@@ -40,7 +40,7 @@ class _Sandbox:
     async def exec(self, *args):
         return _Proc(_TruncStdout(self._full, self._keep))
     async def exec_with_output(self, *args):
-        return (0, f"regular file:{self._src}\n", "")
+        return (0, f"81a4:{self._src}\n", "")
 
 
 @pytest.mark.asyncio

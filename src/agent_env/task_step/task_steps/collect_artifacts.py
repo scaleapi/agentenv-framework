@@ -81,6 +81,7 @@ import json
 import posixpath
 import re
 import shlex
+import stat
 import tempfile
 import time
 from typing import ClassVar, Optional
@@ -472,15 +473,15 @@ class CollectArtifactsTaskStep(TaskStep):
         failure rather than a silent 'missing' skip that drops an existing deliverable, and so does anything but a
         regular file (a device, a FIFO, a directory, or a link to one), which could stream without end.
         VM-mode wraps in `docker exec <container>`; container-mode runs `stat` directly."""
-        args = _exec_args(sandbox, container, ("stat", "-L", "-c", "%F:%s", source_path))
+        args = _exec_args(sandbox, container, ("stat", "-L", "-c", "%f:%s", source_path))
         exit_code, stdout, stderr = await sandbox.exec_with_output(*args)
         if exit_code != 0:
             if _looks_absent(stderr):
                 return -1
             raise RuntimeError(f"could not size {source_path} (stat exit {exit_code}): {stderr[:200]}")
-        kind, _, size = stdout.strip().rpartition(":")
-        if kind not in ("regular file", "regular empty file"):
-            raise RuntimeError(f"{source_path} is not a regular file ({kind or 'unknown type'}); refusing to read it")
+        mode, _, size = stdout.strip().rpartition(":")
+        if not stat.S_ISREG(int(mode, 16)):
+            raise RuntimeError(f"{source_path} is not a regular file ({stat.filemode(int(mode, 16))}); refusing to read it")
         return int(size)
 
     async def _collect_file(

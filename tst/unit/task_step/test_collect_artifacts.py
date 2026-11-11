@@ -522,15 +522,24 @@ class TestAgentContainerPath:
         except RuntimeError as e:
             assert "could not size" in str(e)
 
-    @pytest.mark.parametrize("kind", ["character special file", "fifo", "directory", "socket"])
-    def test_get_file_size_refuses_anything_but_a_regular_file(self, kind):
+    @pytest.mark.parametrize("mode, shown", [("21b6", "crw-rw-rw-"), ("11a4", "prw-r--r--"), ("41ed", "drwxr-xr-x"),
+                                             ("c1ed", "srwxr-xr-x")], ids=["device", "fifo", "directory", "socket"])
+    def test_get_file_size_refuses_anything_but_a_regular_file(self, mode, shown):
+        """By the raw mode bits stat prints, which no locale translates, as it does a file type's name."""
         step = CollectArtifactsTaskStep(id="c", version=None, agent_name="solver")
         sandbox = MagicMock()
         sandbox.mode = "container"
-        sandbox.exec_with_output = AsyncMock(return_value=(0, f"{kind}:0\n", ""))
-        with pytest.raises(RuntimeError, match="not a regular file"):
+        sandbox.exec_with_output = AsyncMock(return_value=(0, f"{mode}:0\n", ""))
+        with pytest.raises(RuntimeError, match=f"not a regular file \\({shown}\\)"):
             _run(step._get_file_size(sandbox, None, "/app/artifact/report.pdf"))
-        assert sandbox.exec_with_output.await_args.args[:4] == ("stat", "-L", "-c", "%F:%s")
+        assert sandbox.exec_with_output.await_args.args[:4] == ("stat", "-L", "-c", "%f:%s")
+
+    def test_get_file_size_sizes_a_regular_file_even_when_empty(self):
+        step = CollectArtifactsTaskStep(id="c", version=None, agent_name="solver")
+        sandbox = MagicMock()
+        sandbox.mode = "container"
+        sandbox.exec_with_output = AsyncMock(side_effect=[(0, "81a4:0\n", ""), (0, "8180:4096\n", "")])
+        assert [_run(step._get_file_size(sandbox, None, "/x")) for _ in range(2)] == [0, 4096]
 
     def test_a_file_over_max_bytes_is_a_hard_failure_and_is_not_read(self):
         step = CollectArtifactsTaskStep(
@@ -539,7 +548,7 @@ class TestAgentContainerPath:
         sandbox = MagicMock()
         sandbox.mode = "container"
         sandbox.app_dir_on_this_machine = None
-        sandbox.exec_with_output = AsyncMock(return_value=(0, f"regular file:{8 << 40}\n", ""))
+        sandbox.exec_with_output = AsyncMock(return_value=(0, f"81a4:{8 << 40}\n", ""))
         sandbox.exec = AsyncMock()
         provider = MagicMock()
         provider.close = AsyncMock()

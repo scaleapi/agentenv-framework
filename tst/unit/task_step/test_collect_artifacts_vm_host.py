@@ -53,7 +53,7 @@ class _VmSandbox:
         if "stat" in args:
             path = args[-1]
             rel = path.split("/app/artifact/", 1)[-1]
-            return (0, f"regular file:{len(FILES[rel])}", "") if rel in FILES else (-1, "", "no such file")
+            return (0, f"81a4:{len(FILES[rel])}", "") if rel in FILES else (-1, "", "no such file")
         return 0, "", ""
 
     async def exec(self, *args):
