@@ -8,7 +8,7 @@ assistant has messaged the user and the user would look at their phone. The user
 ```json
 {"id": "user", "type": "deploy_user_sim_agent", "a2a_agent_id": "<the user sim's agent>", "agent_name": "hannah",
  "model": "<model>", "multi_day": true,
- "opening": "ok mom and dad are officially coming thu–mon (nov 19–23), can you handle it?",
+ "opening_prompt": "ok mom and dad are officially coming thu–mon (nov 19–23), can you handle it?",
  "persona": {"display_name": "Hannah Reyes", "first_name": "Hannah",
              "schedule": {"wake": "07:00", "sleep": "23:00", "work": ["09:00", "18:00"]},
              "response_times": {"morning": 15, "work": 120, "free": 30},
@@ -29,16 +29,16 @@ Its own fields:
 | Field | | What it is |
 |---|---|---|
 | `agent_name` | required | The agent's name, and the key always-on's `user_sim` names |
-| `persona` | required | Who the user is: `display_name` (their full name), `first_name` (else the display name's first word), `description`, `permissions`, `keep_private`, `schedule`, `response_times`, `max_replies` (after that many replies the user stops reading) |
+| `persona` | required | Who the user is: `display_name` (their full name), `first_name` (else the display name's first word), `time_zone` (their IANA zone; else the task clock's, else UTC; a clock that sets a different zone is refused), `description`, `permissions`, `keep_private`, `schedule`, `response_times`, `max_replies` (after that many replies the user stops reading) |
 | `model` | required | The user sim's model. This step's `step_params` `model` wins, then the run's `user_model` (`--user-model`), then this |
-| `opening` | required | The user's first message. It's the always-on step's prompt when that sets none; one that sets its own must say the same |
+| `opening_prompt` | required | The user's first message. It's the always-on step's prompt when that sets none; one that sets its own must say the same |
 | `multi_day` | required, for now | Whether the run goes past the day it starts on (always-on's `end_time` falls on a later day). It picks the prompt's done line; always-on refuses a run of the other kind |
 
 `multi_day` is a stopgap: the prompt is written before the run, so the step has to be told which done line to use.
 It goes away once the step can learn it from the task.
 
-`system_prompt` is written from the persona and `opening`, so the step refuses one set directly. The user's time zone
-is the task clock's (`sync_env_clock`). A run-wide `a2a_agent_id` never changes the user
+`system_prompt` is written from the persona and `opening_prompt`, so the step refuses one set directly. Each read shows times
+in the persona's `time_zone`. A run-wide `a2a_agent_id` never changes the user
 sim's agent, so the agent under test never plays the user; this step's own `step_params` `a2a_agent_id` can. An agent
 whose card takes no system prompt or no model fails the step, since without them it's a different user. A
 `prompt_agent` step can't talk to an agent this step deployed: its user side reads a different answer.
@@ -63,7 +63,7 @@ user sim names in `used` when it relies on that line.
 | `phone` | F | What they do with what reaches their phone |
 | `when_done` | | When they'd say they're done |
 
-Don't write the opening request into the description. Put it in `opening`: the prompt shows it right
+Don't write the opening request into the description. Put it in `opening_prompt`: the prompt shows it right
 after the first `who_you_are` line ("Earlier you texted the assistant: …").
 
 `permissions` become the "YOUR RULES FOR THE ASSISTANT" lines. Its kinds are `just_do`, `ask_first`, `never` and
@@ -127,5 +127,5 @@ Each read is one message, in this order:
 - everything new from the assistant at once;
 - then the answer format.
 
-Times show in the task clock's time zone. The user sim keeps one session for the whole run, so its earlier answers aren't
+Times show in the user's time zone. The user sim keeps one session for the whole run, so its earlier answers aren't
 shown again.

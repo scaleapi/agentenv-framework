@@ -46,7 +46,7 @@ TAKES_ALL = _config_card("name", "model", "system_prompt", "output_format")
 def _step(**fields) -> DeployUserSimAgentTaskStep:
     return DeployUserSimAgentTaskStep.from_dict({
         "id": "user", "type": "deploy_user_sim_agent", "a2a_agent_id": "sim-image", "agent_name": "hannah",
-        "model": "sim-model", "multi_day": True, "opening": PERSON["opening"]["text"], "persona": HANNAH, **fields})
+        "model": "sim-model", "multi_day": True, "opening_prompt": PERSON["opening"]["text"], "persona": HANNAH, **fields})
 
 
 class _Deploy:
@@ -114,7 +114,7 @@ async def test_the_seed_fills_the_opening_and_nothing_else(monkeypatch):
     persona = {**HANNAH, "description": {**HANNAH["description"], "how_you_write": ["You write <city> in lowercase."]}}
     context = TaskStepContext()
     context.metadata["seed"] = {"city": "sf"}
-    await deploy.run(_step(opening="sort <city> for us", persona=persona), context)
+    await deploy.run(_step(opening_prompt="sort <city> for us", persona=persona), context)
     [prompt] = deploy.fields("system_prompt")
     assert '"sort sf for us"' in prompt and "You write <city> in lowercase." in prompt
 
@@ -144,10 +144,10 @@ def test_the_step_round_trips_and_holds_no_system_prompt():
     ({"agent_name": None}, "agent_name is required"),
     ({"model": None}, "model is required"),
     ({"multi_day": None}, "multi_day must be true or false"),
-    ({"opening": ""}, "opening is required"),
-    ({"opening": None}, "opening is required"),
+        ({"persona": {**HANNAH, "time_zone": "Pacific"}}, "is not an IANA time zone"),
+({"opening_prompt": ""}, "opening_prompt is required"),
+    ({"opening_prompt": None}, "opening_prompt is required"),
     ({"persona": "Hannah."}, "persona must be an object"),
-    ({"persona": {**HANNAH, "time_zone": "America/Los_Angeles"}}, "persona has unknown keys ['time_zone']"),
     ({"persona": {**HANNAH, "display_name": ""}}, "persona.display_name is required"),
     ({"persona": {**HANNAH, "first_name": " "}}, "first_name must be the name the user goes by"),
     ({"persona": {**HANNAH, "description": None}}, "description must be an object of sections"),
@@ -266,7 +266,7 @@ def _always_on(**settings) -> ao.AlwaysOnTaskStep:
 
 async def _rig_context(monkeypatch, rig: Rig, **fields) -> TaskStepContext:
     """The Rig's world, with the user sim as deploy_user_sim_agent records it (agent ``user-sim``)."""
-    step = _step(**{"agent_name": "user-sim", "opening": "sort the cdmx weekend",
+    step = _step(**{"agent_name": "user-sim", "opening_prompt": "sort the cdmx weekend",
                     "persona": {"display_name": "Linda Murphy", "description": DESCRIPTION}, **fields})
     record = await _published(monkeypatch, step)
     ctx = rig.context()
@@ -346,7 +346,7 @@ async def test_always_on_with_no_prompt_needs_the_user_s_opening(monkeypatch, tm
     await rig.arm()
     ctx = await _rig_context(monkeypatch, rig, multi_day=False)
     ctx.metadata[USER_SIMS_KEY]["user-sim"]["opening"] = None  # a record written by hand: the step itself requires one
-    with pytest.raises(ValueError, match="give the deploy_user_sim_agent step an opening"):
+    with pytest.raises(ValueError, match="give the deploy_user_sim_agent step an opening_prompt"):
         await rig.run(_always_on(), ctx)
 
 
@@ -443,3 +443,20 @@ async def test_after_max_replies_the_user_stops_reading(monkeypatch, tmp_path):
     ctx = await rig.run(_always_on(end_time="P3D", max_wakes=6), ctx)
     assert len(rig.events(ctx, "user_gave_up")) == 1
     assert [r["outcome"] for r in rig.events(ctx, "user_sim_read")][:2] == ["reply", "reply"]
+
+
+@pytest.mark.usefixtures("local_stores")
+@pytest.mark.asyncio
+async def test_the_user_s_own_time_zone_is_used_when_the_clock_sets_none(monkeypatch, tmp_path):
+    """The clock runs in UTC (the apps take no zone), and the user lives in their own: reads show times in it."""
+    rig = Rig(monkeypatch, tmp_path)
+    await rig.arm()
+    ctx = await _rig_context(monkeypatch, rig, multi_day=False,
+                             persona={"display_name": "Linda Murphy", "description": DESCRIPTION,
+                                      "time_zone": "America/Chicago"})
+    ctx.metadata["clock_configurations"] = [{"step_id": "clock"}]
+    assert ao._task_zone(ctx.metadata[USER_SIMS_KEY]["user-sim"], ctx.metadata["clock_configurations"]) \
+        == "America/Chicago"
+    ctx.metadata["clock_configurations"] = [{"step_id": "clock", "timezone": "America/New_York"}]
+    with pytest.raises(ValueError, match="is in America/Chicago but sync_env_clock set"):
+        ao._task_zone(ctx.metadata[USER_SIMS_KEY]["user-sim"], ctx.metadata["clock_configurations"])

@@ -3,7 +3,7 @@ in its system prompt, and records the user in ``metadata["user_sims"][agent_name
 names it in ``user_sim`` reads them. How to write a user is in user_sim.md.
 
 When it runs, the step renders the system prompt with the built-in user sim (``user_sim_versions.setup``) from
-``persona``, ``opening`` (its ``<seed>`` placeholders filled in) and ``done_ends_run = not multi_day``; deploys the
+``persona``, ``opening_prompt`` (its ``<seed>`` placeholders filled in) and ``done_ends_run = not multi_day``; deploys the
 agent through deploy_agent with that prompt; then sets its model and answer format through agent-config. A card that
 takes no system prompt or no model fails the step: a user sim without its persona or its model is a different user.
 The model is this step's ``step_params`` ``model``, else the run's ``user_model`` (``task run`` / ``eval run
@@ -20,7 +20,7 @@ What always_on reads from the record (``metadata["user_sims"][agent_name]``):
   ``response_times`` need the task's clock (``sync_env_clock``): always_on refuses to start a run that sets either
   with no clock armed. The user's time zone is the task clock's.
 - ``description``, ``permissions``, ``keep_private``: in ``person``, for the reads.
-- ``opening``: the user's first message, always_on's prompt when it sets none.
+- ``opening_prompt``: the user's first message, always_on's prompt when it sets none.
 - ``prompt_set``: the system prompt and model are on the agent, so always_on sets neither; ``multi_day``: the done line
   the prompt was written with, which always_on refuses to run against a run of the other kind.
 - ``model``, ``model_source``, ``prompt_sha256``, ``user_version``, ``setup``: for the run's record.
@@ -31,7 +31,7 @@ The built-in user sim (``user_sim_versions``) is used directly; its interface, i
     async answer(version: str, person: dict, history: list[dict], read: dict, ask) -> dict
 
 ``person`` is ``{"key": name, "name", "first", "time_zone", "description", "permissions", "keep_private", "opening",
-"done_ends_run"}``, with ``time_zone`` the run's zone (the task clock's, else UTC) and ``opening`` the user's opening
+"done_ends_run"}``, with ``time_zone`` the run's zone (the persona's, else the task clock's, else UTC) and ``opening`` the user's opening
 request, ``{"at": RFC 3339 UTC, "text"}``, so ``setup`` can write it into the system prompt (this step's has no
 ``at``). The opening is also the first line of the first read's ``you_sent``. ``done_ends_run`` is set before
 ``setup``, as each read has it, since the done line is in the system prompt; the built-in user sim uses the multi-day
@@ -86,7 +86,7 @@ USER_SIMS_KEY = "user_sims"
 DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 SCHEDULE_KEYS = ("wake", "sleep", "work", "work_days", "busy")
 RESPONSE_TIME_KEYS = ("morning", "work", "free")
-PERSONA_KEYS = ("display_name", "first_name", "description", "permissions", "keep_private", "schedule",
+PERSONA_KEYS = ("display_name", "first_name", "time_zone", "description", "permissions", "keep_private", "schedule",
                 "response_times", "max_replies")
 # deploy_agent's own fields, which this step takes as they are.
 _DEPLOY_FIELDS = tuple(name for name in inspect.signature(DeployAgentTaskStep.__init__).parameters
@@ -153,6 +153,8 @@ def persona_problems(persona: Any) -> list[str]:
         out.append(f"persona has unknown keys {unknown}; the keys are {list(PERSONA_KEYS)}")
     if not isinstance(persona.get("display_name"), str) or not persona["display_name"].strip():
         out.append("persona.display_name is required: the user's full name")
+    if persona.get("time_zone") is not None:
+        out += user_sim_versions.zone_problems(persona["time_zone"])
     out += schedule_problems(persona.get("schedule"), persona.get("response_times"), persona.get("max_replies"))
     out += [p for p in user_sim_versions.problems(
         {"name": persona.get("display_name") or "?", "first": persona.get("first_name"),
@@ -174,9 +176,9 @@ class DeployUserSimAgentTaskStep(DeployAgentTaskStep):
                     "a2a_agent_version": FieldScope.TASK}
 
     def __init__(self, id: str, version: Optional[int], *, persona: Optional[dict] = None, model: Optional[str] = None,
-                 multi_day: Optional[bool] = None, opening: Optional[str] = None, **deploy: Any):
+                 multi_day: Optional[bool] = None, opening_prompt: Optional[str] = None, **deploy: Any):
         if deploy.get("system_prompt") is not None:
-            raise ValueError(f"{self.type} '{id}': system_prompt is written from the persona and opening; don't set it")
+            raise ValueError(f"{self.type} '{id}': system_prompt is written from the persona and opening_prompt; don't set it")
         deploy.pop("system_prompt", None)
         if not deploy.get("agent_name"):
             raise ValueError(f"{self.type} '{id}': agent_name is required: the user's key, which always_on's user_sim "
@@ -190,17 +192,17 @@ class DeployUserSimAgentTaskStep(DeployAgentTaskStep):
         if not isinstance(multi_day, bool):
             found.append("multi_day must be true or false: whether the run goes past the day it starts on")
         # Required: always_on starts the run from it, and refuses a user sim without one only after the deploy.
-        if not isinstance(opening, str) or not opening.strip():
-            found.append("opening is required: the user's first message, which always_on starts the run with")
+        if not isinstance(opening_prompt, str) or not opening_prompt.strip():
+            found.append("opening_prompt is required: the user's first message, which always_on starts the run with")
         found += persona_problems(persona)
         if found:
             raise ValueError(f"{self.type} '{self.agent_name}': " + "; ".join(found))
         self.persona = persona
         self.model = model
         self.multi_day = multi_day
-        self.opening = opening
+        self.opening_prompt = opening_prompt
 
-    _OWN = ("persona", "model", "multi_day", "opening")
+    _OWN = ("persona", "model", "multi_day", "opening_prompt")
 
     def to_dict(self) -> dict:
         base = super().to_dict()
@@ -233,8 +235,8 @@ class DeployUserSimAgentTaskStep(DeployAgentTaskStep):
                 "opening": {"text": opening} if opening else None, "done_ends_run": not self.multi_day}
 
     def _opening(self, context: TaskStepContext) -> Optional[str]:
-        """``opening`` with the run's ``<seed>`` placeholders filled in, as always_on fills its prompt's."""
-        text = self.opening
+        """``opening_prompt`` with the run's ``<seed>`` placeholders filled in, as always_on fills its prompt's."""
+        text = self.opening_prompt
         if text:
             for key, value in (context.metadata.get("seed") or {}).items():
                 text = text.replace(f"<{key}>", str(value))
@@ -276,10 +278,12 @@ class DeployUserSimAgentTaskStep(DeployAgentTaskStep):
         context.metadata.setdefault(USER_SIMS_KEY, {})[self.agent_name] = {
             "name": self.agent_name, "agent_name": self.agent_name, "step_id": self.id,
             "display_name": persona["display_name"], "first_name": persona.get("first_name"),
+            # The user's own zone; unset, always_on uses the task clock's. A clock that sets a different one is refused.
+            "time_zone": persona.get("time_zone"),
             "description": persona.get("description"), "permissions": persona.get("permissions"),
             "keep_private": persona.get("keep_private"), "schedule": persona.get("schedule"),
             "response_times": persona.get("response_times"), "max_replies": persona.get("max_replies"),
-            "opening": self.opening,
+            "opening": self.opening_prompt,
             "user_version": user_sim_versions.VERSION, "model": model, "model_source": source,
             "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(), "prompt_set": True,
             "multi_day": self.multi_day,

@@ -464,7 +464,7 @@ class _Run:
                              f"{' and '.join(timed)} from the user sim's persona")
         if self._opening_is_prompt() and not us.get("opening"):
             raise ValueError(f"always_on: neither this step nor the user sim '{step.user_sim}' has a prompt; give the "
-                             "deploy_user_sim_agent step an opening")
+                             "deploy_user_sim_agent step an opening_prompt")
         if us.get("prompt_set") and not self._opening_is_prompt():  # her prompt already says what she texted
             seeded = self.step._apply_seed([{"kind": "text", "text": us.get("opening") or ""}],
                                            ctx.metadata.get("seed", {}))
