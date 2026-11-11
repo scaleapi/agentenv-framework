@@ -127,12 +127,16 @@ async def _cdp_at_gateway(gateway: DeployedEnv, computer: DeployedEnv, card: dic
     address = await invoke_extension(f"{base}/svc/{key}", card, BROWSER, params, CDP_TIMEOUT_S, method="cdp",
                                      headers=computer.control_headers)
     relayed = (f"{base}/browser/{key}/", f"{_ws(base)}/browser/{key}/")
-    if not (str(address.get("http_url", "")).startswith(relayed[0]) and
-            str(address.get("ws_url", "")).startswith(relayed[1])):
-        raise RuntimeError(f"env {gateway.env_id!r}'s gateway didn't put the CDP address of the website browser in its "
-                           f"computer {key!r} at its relay, as it does for a computer with one website browser; one "
-                           "with several it doesn't tell apart yet")
-    return address
+    http_url, ws_url = str(address.get("http_url", "")), str(address.get("ws_url", ""))
+    if http_url.startswith(relayed[0]) and ws_url.startswith(relayed[1]):
+        return address
+    if "origin" not in params and http_url.split("://", 1)[-1].startswith(relayed[0].split("://", 1)[1]):
+        raise RuntimeError(f"the website browser in env {gateway.env_id!r}'s computer {key!r} takes no origin, so "
+                           f"behind a tunnel that ends TLS its CDP address doesn't say {base.split('://')[0]} as the "
+                           "gateway is reached: compose it again on agentenv-framework 0.9.1505 or later")
+    raise RuntimeError(f"env {gateway.env_id!r}'s gateway didn't put the CDP address of the website browser in its "
+                       f"computer {key!r} at its relay, as it does for a computer with one website browser; one "
+                       "with several it doesn't tell apart yet")
 
 
 def _deployed_agent(context: TaskStepContext, agent_name: str) -> DeployedAgent:

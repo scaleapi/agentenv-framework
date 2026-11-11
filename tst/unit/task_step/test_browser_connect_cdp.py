@@ -114,6 +114,18 @@ async def test_behind_a_tunnel_that_ends_tls_the_gateway_is_asked_under_the_agen
 
 
 @pytest.mark.asyncio
+async def test_behind_a_tunnel_a_browser_that_takes_no_origin_is_refused_with_word_to_compose_it_again(monkeypatch):
+    _mock(monkeypatch, tokens=["t1"], relay="gw.w.modal.host")  # composed before #608: its cdp takes no origin
+    context = TaskStepContext(deployed_envs=[_multi("https://gw.w.modal.host", "modal")],
+                              deployed_agents=[_agent(sandbox_type="modal")], metadata={})
+
+    with pytest.raises(RuntimeError, match="takes no origin.*compose it again on agentenv-framework 0.9.1505"):
+        await BrowserConnectCdpTaskStep(id="connect", version=None, env_id="office",
+                                        agent_name="solver").execute(context)
+    assert "browser_connections" not in context.metadata
+
+
+@pytest.mark.asyncio
 async def test_a_cdp_address_the_multi_envs_gateway_didnt_relay_is_refused_before_the_agent_gets_it(monkeypatch):
     sent = _mock(monkeypatch, tokens=["t1"])  # the computer's own address, as a gateway answers for several browsers
     context = TaskStepContext(deployed_envs=[_multi()], deployed_agents=[_agent()], metadata={})

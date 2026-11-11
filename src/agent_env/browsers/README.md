@@ -45,5 +45,6 @@ the browser apps of its computers, each through the computer's own record and co
 env, so through a tunnel that ends TLS it's https and wss; on a multi env, one at its gateway, asked through the
 gateway's `/svc/<computer>/` route, so the agent reaches the browser through the gateway's CDP relay as it reaches the
 rest of the env, with the multi env's tools hidden from its role; a computer there with several website browsers is
-refused, as the relay doesn't tell them apart yet. A whole state, Playwright's `storageState`
+refused, as the relay doesn't tell them apart yet, and so, behind a tunnel that ends TLS, is a browser that takes no
+origin, one composed before agentenv-framework 0.9.1505. A whole state, Playwright's `storageState`
 included, loads through `load_artifact` or `data/add` instead.
