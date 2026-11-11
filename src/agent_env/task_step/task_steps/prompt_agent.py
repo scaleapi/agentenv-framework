@@ -455,6 +455,13 @@ class PromptAgentTaskStep(TaskStep):
             raise RuntimeError(f"Agent with name '{self.agent_name}' not found in context.deployed_agents")
         target_url = agent.a2a_url or agent.api_url
         user_sim = next((a for a in context.deployed_agents if a.agent_name == self.user_agent_name), None)
+        from agent_env.task_step.task_steps.deploy_user_sim_agent import USER_SIMS_KEY
+        if user_sim is not None and self.user_a2a_url is None and (
+                self.user_agent_name in (context.metadata.get(USER_SIMS_KEY) or {})):
+            # It answers {outcome, message, used} to always_on's reads, not the {message, done} read here, and the
+            # answer format set here would replace its own.
+            raise RuntimeError(f"prompt_agent '{self.id}': its user '{self.user_agent_name}' was deployed by "
+                               "deploy_user_sim_agent, which only always_on can talk to")
         user_url = self.user_a2a_url or (
             (user_sim.a2a_url or user_sim.api_url) if user_sim else None
         )

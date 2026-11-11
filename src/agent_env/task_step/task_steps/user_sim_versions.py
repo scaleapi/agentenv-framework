@@ -1,5 +1,6 @@
-"""The default user sim: the plug-in the always_on step calls when a user_sim step names none. The interface is in
-user_sim.py; how to write a user sim for it is in user_sim.md. It has one version, ``ours``.
+"""The built-in user sim: deploy_user_sim_agent writes its system prompt with ``setup``, and the always_on step reads
+with ``answer``. The interface is in deploy_user_sim_agent.py; how to write a user for it is in user_sim.md. It has
+one version, ``ours``.
 
 ``setup`` writes the system prompt once per run: fixed lines on how a real person reads and answers, the description
 as tagged sections (with the opening request), the user's rules from ``permissions`` and ``keep_private``, and the

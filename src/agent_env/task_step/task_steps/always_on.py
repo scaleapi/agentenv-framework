@@ -1,9 +1,9 @@
-"""The always_on and user_sim steps: a task that runs over simulated days, the way you'd hand a job to a personal
-assistant, with an LLM user sim.
+"""The always_on step: a task that runs over simulated days, the way you'd hand a job to a personal assistant, with an
+LLM user sim.
 
-The ``user_sim`` step (``user_sim.py``, which documents the interface this step uses) says who the user is and records
-it in the run's metadata under its ``name``; a ``deploy_agent`` step deploys the agent that plays them. The
-``always_on`` step names it with ``user_sim`` and runs the loop:
+The ``deploy_user_sim_agent`` step (``deploy_user_sim_agent.py``, which documents the interface this step uses)
+deploys the agent that plays the user, with its system prompt and model set, and records the user in the run's
+metadata under its ``agent_name``. The ``always_on`` step names it with ``user_sim`` and runs the loop:
 
 - The first wake is the user's request. Each wake opens with what came due for the agent on notifications/v1 (a
   trigger's ``notify``, a scheduled check), labelled ``[time · channel]``, then the user's own messages, each labelled
@@ -107,7 +107,7 @@ from agent_env.store import DuplicateKeyError, get_config
 from agent_env.task_step.context import PromptResponse, TaskStepContext
 from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps import user_sim_versions
-from agent_env.task_step.task_steps.user_sim import USER_SIMS_KEY
+from agent_env.task_step.task_steps.deploy_user_sim_agent import USER_SIMS_KEY
 from agent_env.task_step.task_steps.notification_delivery import delivered_parts, label_time, take_due
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 
@@ -217,11 +217,17 @@ class AlwaysOnTaskStep(PromptAgentTaskStep):
         for unsupported in ("max_conversation_turns", "user_agent_name", "user_a2a_url", "post_turn_hooks",
                             "user_output_format", "user_model", "snapshot_config"):
             prompt_fields.pop(unsupported, None)
+        # With no prompt of its own, the run's prompt is the user sim's opening, read when the run starts.
+        opening_is_prompt = prompt_fields.get("prompt") is None and prompt_fields.get("parts") is None
+        if opening_is_prompt:
+            prompt_fields["prompt"] = ""  # for prompt_agent's check; unset again below
         super().__init__(id, version, max_conversation_turns=max(1, int(max_wakes)), model=model,
                          model_params=model_params, effort=effort, max_thinking_tokens=max_thinking_tokens,
                          harness=harness, trajectory_output_prefix=trajectory_output_prefix, **prompt_fields)
+        if opening_is_prompt:
+            self.prompt = None
         if not user_sim:
-            raise ValueError("always_on needs user_sim, the name of a user_sim step's user")
+            raise ValueError("always_on needs user_sim, the agent_name of a deploy_user_sim_agent step")
         if end_time is not None:
             _end_instant(end_time, datetime.now(timezone.utc))  # validates
         self.user_sim = user_sim
@@ -431,7 +437,7 @@ class _Run:
         self.recipient = self.agent.role or DEFAULT_ROLE
         us = (ctx.metadata.get(USER_SIMS_KEY) or {}).get(step.user_sim)
         if us is None:
-            raise RuntimeError(f"always_on: no user_sim step named '{step.user_sim}' ran before this step")
+            raise RuntimeError(f"always_on: no deploy_user_sim_agent step named '{step.user_sim}' ran before this step")
         self.us = us
         self.zone = _task_zone(us, ctx.metadata.get("clock_configurations") or [])
         self.person = {**self._person(us), "time_zone": self.zone}
@@ -455,13 +461,28 @@ class _Run:
             # time, spinning on the clock it can't move.
             raise ValueError(f"always_on: user sim '{step.user_sim}' sets {' and '.join(timed)}, which need the "
                              "task's clock, and no env's clock is armed; run sync_env_clock before this step, or drop "
-                             f"{' and '.join(timed)} from the user_sim step")
+                             f"{' and '.join(timed)} from the user sim's persona")
+        if self._opening_is_prompt() and not us.get("opening"):
+            raise ValueError(f"always_on: neither this step nor the user sim '{step.user_sim}' has a prompt; give the "
+                             "deploy_user_sim_agent step an opening")
+        if us.get("prompt_set") and not self._opening_is_prompt():  # her prompt already says what she texted
+            seeded = self.step._apply_seed([{"kind": "text", "text": us.get("opening") or ""}],
+                                           ctx.metadata.get("seed", {}))
+            if seeded[0]["text"] != self._effective_prompt():
+                raise ValueError(f"always_on: its prompt isn't the opening the user sim '{step.user_sim}' was deployed "
+                                 "with; set the prompt once, as the deploy_user_sim_agent step's opening")
         now = await self.now()
         self.opening = {"at": _iso(now), "text": self._effective_prompt()}
         self.person["opening"] = self.opening
         t0 = await self._t0() or now
         self.end = _end_instant(step.end_time, t0) if step.end_time else None
         self.multi_day = self.end is not None and self.end.astimezone(self.tz).date() > t0.astimezone(self.tz).date()
+        if us.get("prompt_set") and us.get("multi_day") != self.multi_day:
+            kind = "multi-day" if self.multi_day else "one-sitting"
+            raise ValueError(f"always_on: this run is {kind} (end_time {step.end_time!r}), but the user sim "
+                             f"'{step.user_sim}' was deployed with multi_day {us.get('multi_day')!r}, so its prompt has "
+                             f"the other done line; set multi_day {str(self.multi_day).lower()} on the "
+                             "deploy_user_sim_agent step")
         self.person["done_ends_run"] = not self.multi_day  # for setup, which writes her prompt before any read
         chat_config = {"roles": [self.recipient], "user_name": self.person.get("name") or "your user"}
         if step.stay_quiet:
@@ -569,6 +590,10 @@ class _Run:
             logger.warning("always_on: the agent's card did not accept system_prompt, so the message_user rules go "
                            "on its first wake instead")
 
+        if self.us.get("prompt_set"):  # deploy_user_sim_agent set the user sim's prompt and model at deploy
+            self.user_model, self.user_model_from = self.us["model"], self.us["model_source"]
+            self.user_setup = dict(self.us["setup"])
+            return
         setup = self.plugin.setup(self.version, self.person)
         self.user_model, self.user_model_from = self._user_model()
         user_config = {"model": self.user_model, "system_prompt": setup.get("system_prompt"),
@@ -1076,9 +1101,15 @@ class _Run:
             at, self.read_mode = self._available(now)
         await self.read(at, last=True)
 
+    def _opening_is_prompt(self) -> bool:
+        """Whether the step has no prompt of its own, so the user sim's opening is the run's prompt."""
+        return self.step.prompt is None and self.step.parts is None
+
     def _prompt_parts(self) -> list[dict]:
         """The task's prompt as A2A parts, its seed applied."""
-        return self.step._apply_seed(self.step._effective_parts(), self.ctx.metadata.get("seed", {}))
+        parts = ([{"kind": "text", "text": self.us["opening"]}] if self._opening_is_prompt()
+                 else self.step._effective_parts())
+        return self.step._apply_seed(parts, self.ctx.metadata.get("seed", {}))
 
     def _effective_prompt(self) -> str:
         return "\n".join(p.get("text", "") for p in self._prompt_parts() if p.get("kind") == "text")
@@ -1680,7 +1711,7 @@ class _Run:
         step, ctx = self.step, self.ctx
         traj = next((u for u in reversed(self.per_turn_trajectory_urls) if u), None)
         ctx.prompt_responses.append(PromptResponse(
-            prompt_id=step.prompt_id, response=final_text, prompt_text=step.prompt,
+            prompt_id=step.prompt_id, response=final_text, prompt_text=self._effective_prompt() if self._opening_is_prompt() else step.prompt,
             agent_trajectory_object_url=traj, agent_trajectory_object_prefix=step._trajectory_prefix(),
             target_agent_per_turn_trajectory_object_urls=self.per_turn_trajectory_urls or None,
             source_agent_per_turn_prompt_parts=self.per_turn_parts or None, tool_call_count=self.tool_calls,
@@ -1796,7 +1827,7 @@ def _task_zone(us: dict, clocks: list[dict]) -> str:
     if zone and zones and zones != [zone]:
         raise ValueError(f"always_on: user sim '{us['name']}' is in {zone} but sync_env_clock set {zones}")
     if not zone and len(zones) > 1:
-        raise ValueError(f"always_on: sync_env_clock set several time zones {zones}; give the user_sim step one")
+        raise ValueError(f"always_on: sync_env_clock set several time zones {zones}; the user sim needs one")
     return zone or (zones[0] if zones else "UTC")
 
 

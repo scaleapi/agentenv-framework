@@ -89,6 +89,8 @@ class TaskStep(ABC):
     type: ClassVar[str] = "task_step"
     DEFAULT_TTL_SECONDS: ClassVar[int] = 7200
     DEFAULT_AGENT_NAME: ClassVar[str] = "default-agent"
+    # Whether the agent this step deploys plays the task's user, so it is never the agent under test.
+    plays_user: ClassVar[bool] = False
     # Fields holding env, A2A agent or artifact ids; None means undeclared.
     entity_refs: ClassVar[tuple[EntityRef, ...] | None] = None
     # Each field of a scope other than the task's, by its path in the stored step; any other field is task-scoped. A

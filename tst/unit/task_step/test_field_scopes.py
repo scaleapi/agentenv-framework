@@ -16,6 +16,8 @@ MINIMAL = {
     "always_on": {"prompt": "hi", "user_sim": "linda"},
     "deploy_agent": {},
     "deploy_env": {"env_id": "crm-env"},
+    "deploy_user_sim_agent": {"agent_name": "hannah", "model": "m", "multi_day": False,
+                              "persona": {"display_name": "Hannah Reyes", "description": {"who_you_are": ["Hannah."]}}},
     "deploy_human_agent": {},
     "deploy_sandbox": {"sandbox_name": "box", "sandbox_mode": "vm"},
     "install_agent": {"sandbox_name": "box"},

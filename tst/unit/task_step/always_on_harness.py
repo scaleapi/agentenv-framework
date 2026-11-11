@@ -20,7 +20,7 @@ from agent_env.env.gateway.gateway import Gateway
 from agent_env.env.gateway.triggers import TriggerEngine
 from agent_env.task_step.context import DeployedAgent, TaskStepContext
 from agent_env.task_step.task_steps import always_on as ao
-from agent_env.task_step.task_steps.user_sim import USER_SIMS_KEY
+from agent_env.task_step.task_steps.deploy_user_sim_agent import USER_SIMS_KEY
 
 GATEWAY = "http://gateway.test"
 SOLVER = "http://solver.test"
