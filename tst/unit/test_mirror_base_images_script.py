@@ -7,6 +7,7 @@ import ast
 import json
 import subprocess
 import sys
+import threading
 
 import pytest
 
@@ -139,3 +140,22 @@ def test_a_pull_that_fails_once_is_tried_again(script, monkeypatch, tmp_path):
 
     assert ran[-1] == ["docker", "tag", "mirror.gcr.io/library/postgres:16-alpine", _TAGGED]
     assert ["sleep", 10] in ran and ["sleep", 20] not in ran
+
+
+def test_the_bases_are_pulled_at_once(script, monkeypatch, tmp_path):
+    ran = _docker(monkeypatch, script)
+    fake = script.subprocess.run
+    both_pulling = threading.Barrier(2, timeout=10)
+
+    def run(argv, **kwargs):
+        if argv[:2] == ["docker", "pull"]:
+            both_pulling.wait()
+        return fake(argv, **kwargs)
+
+    monkeypatch.setattr(script.subprocess, "run", run)
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text(f"FROM {_TAGGED}\nFROM public.ecr.aws/docker/library/busybox:1.37\n")
+
+    assert script.main([str(dockerfile)]) == 0
+
+    assert sorted(argv[1] for argv in ran) == ["pull", "pull", "tag", "tag"]
