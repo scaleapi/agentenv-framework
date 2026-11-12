@@ -1,8 +1,8 @@
 """The clock tier: agent-env's libfaketime (src/agent_env/computers/clock) built in an Ubuntu 24.04 image with stock
 0.9.12 beside it and the gate programs, each gate run in a container of that image by harness.py. Needs Docker; the
-image is for the Docker daemon's own arch, and Chrome is the browsers bundle's pinned build for it. Chrome's archive and
-upstream libfaketime's tarball are fetched once into AGENTENV_TEST_CLOCK_CACHE (~/.cache/agentenv-clock by default),
-checked by sha256, which CI keeps between runs."""
+image is for the Docker daemon's own arch, and Chrome is the browsers bundle's pinned build for it. Chrome's archive,
+upstream libfaketime's tarball and OpenSSL 1.1.1w's are fetched once into AGENTENV_TEST_CLOCK_CACHE
+(~/.cache/agentenv-clock by default), checked by sha256, which CI keeps between runs."""
 import hashlib
 import importlib.util
 import json
@@ -24,6 +24,9 @@ IMAGE = "agentenv-clock-gates:test"
 #: Tries at the downloads and the image build (its apt-get), which fail now and then on a network's hiccup.
 TRIES = 3
 CACHE = Path(os.environ.get("AGENTENV_TEST_CLOCK_CACHE") or Path.home() / ".cache" / "agentenv-clock")
+#: OpenSSL 1.1.1w's release, the TLS gate's second copy of OpenSSL beside the system's 3.0, whose symbol versions differ.
+OPENSSL_1_1 = ("https://github.com/openssl/openssl/releases/download/OpenSSL_1_1_1w/openssl-1.1.1w.tar.gz",
+               "cf3098950cb4d853ad95c0841f1f9c6d3dc102dccfcacd521d93925208b76ac8")
 
 
 def _sha256(path: Path) -> str:
@@ -99,6 +102,7 @@ def gate(tmp_path_factory):
     (context / "downloads").mkdir()
     shutil.copy(_fetched(url, sha256, f"chrome-{arch}-{sha256[:12]}.zip"), context / "downloads" / "chrome.zip")
     shutil.copy(_fetched(*_libfaketime_pin(), "libfaketime-0.9.12.tar.gz"), context / "downloads" / "libfaketime.tar.gz")
+    shutil.copy(_fetched(*OPENSSL_1_1, "openssl-1.1.1w.tar.gz"), context / "downloads" / "openssl-1.1.1w.tar.gz")
     for name in ("Dockerfile", "harness.py"):
         shutil.copy(HERE / name, context / name)
     _built(context, {"CHROME_SHA256": sha256, "CHROME_PACKAGES": packages})
