@@ -208,11 +208,16 @@ class UserSimGate:
     def to_dict(self) -> dict:
         return asdict(self)
 
-    async def check(self, candidate: str, history: list[tuple[str, str]], *, call_config=None) -> GateVerdict:
+    async def check(self, candidate: str, history: list[tuple[str, str]], *, call_config=None,
+                    judge_unavailable: Optional[str] = None) -> GateVerdict:
         """Check one message. ``history`` is the conversation so far as ``(role, text)``, role user/assistant.
-        A judge call that errors or can't be parsed doesn't fail the message: the patterns' verdict stands."""
+        A judge call that errors or can't be parsed doesn't fail the message: the patterns' verdict stands. So does a
+        judge that couldn't be set up (``judge_unavailable``, the reason), which isn't called."""
         reasons = pattern_reasons(candidate) if self.patterns else []
         verdict = GateVerdict(passed=not reasons, pattern_reasons=reasons)
+        if self.judge_model and judge_unavailable is not None:
+            verdict.judge_error = judge_unavailable[: self.RECORDED_ERROR_CHARS]
+            return verdict
         if self.judge_model:
             try:
                 judged = await self._judge(candidate, history, call_config)
@@ -301,15 +306,18 @@ async def run_gate(
     rewrite: Callable[[str], Awaitable[Optional[str]]],
     *,
     call_config=None,
+    judge_unavailable: Optional[str] = None,
     on_verdict: Optional[Callable[[int, str, GateVerdict], None]] = None,
 ) -> GateOutcome:
     """Check ``text``; while it fails, send the user-sim ``rewrite_request`` through ``rewrite`` and check its new
     message, up to ``gate.max_rewrites`` times. ``rewrite`` returns the new message, or None when the user side
-    ended instead. ``on_verdict(attempt, text, verdict)`` sees every check, for recording. Any conversation loop
+    ended instead. ``judge_unavailable`` is why the judge couldn't be set up, if it couldn't (see ``check``).
+    ``on_verdict(attempt, text, verdict)`` sees every check, for recording. Any conversation loop
     can call this; ``prompt_agent`` does, between a user-sim's reply and the agent's next turn."""
     outcome = GateOutcome(text=text)
     for attempt in range(gate.max_rewrites + 1):
-        verdict = await gate.check(text, history, call_config=call_config)
+        extra = {} if judge_unavailable is None else {"judge_unavailable": judge_unavailable}
+        verdict = await gate.check(text, history, call_config=call_config, **extra)
         outcome.verdicts.append(verdict)
         if on_verdict is not None:
             on_verdict(attempt, text, verdict)

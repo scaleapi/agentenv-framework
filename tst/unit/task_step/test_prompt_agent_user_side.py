@@ -637,3 +637,19 @@ async def test_a_judge_whose_setup_fails_leaves_the_patterns_verdict_and_is_not_
     assert all(v["judge_error"].startswith("judge setup: KeyError") for v in verdicts)
     assert called == []
     assert peers.requests(ctx)[-2] == send(AGENT, text("shorter, please"), "<id4>", "<ctx>")
+
+
+@pytest.mark.asyncio
+async def test_a_judge_only_gate_whose_setup_fails_sends_the_message_on_with_the_error_recorded(monkeypatch):
+    def no_endpoint(self, model, **kw):
+        raise KeyError("no endpoint configured for judge-model")
+
+    monkeypatch.setattr("agent_env.config.Config.resolve_model_call", no_endpoint, raising=False)
+    peers = Peers(monkeypatch, {AGENT: [text("draft one"), text("draft two")], USER: [sim("shorter, please")]})
+    ctx = _context(user_card=_USER_SIM_CARD)
+
+    await _gated(patterns=False, judge_model="judge-model").execute(ctx)
+
+    (verdict,) = ctx.metadata["user_sim_gate"]["talk"]
+    assert verdict["passed"] is True and verdict["judge_error"].startswith("judge setup: KeyError")
+    assert peers.requests(ctx)[-2] == send(AGENT, text("shorter, please"), "<id3>", "<ctx>")

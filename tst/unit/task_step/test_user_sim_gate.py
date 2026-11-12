@@ -77,7 +77,7 @@ def _scripted_gate(verdicts, **settings):
     from agent_env.task_step.task_steps.user_sim_gate import GateVerdict, UserSimGate
 
     class Gate(UserSimGate):
-        async def check(self, candidate, history, *, call_config=None):
+        async def check(self, candidate, history, *, call_config=None, judge_unavailable=None):
             return GateVerdict(passed=verdicts.pop(0), pattern_reasons=["it opens like a report of work done"])
 
     return Gate(**settings)
@@ -154,3 +154,17 @@ def test_a_saved_always_on_step_with_the_gate_is_refused_as_one_built_in_code_is
     with pytest.raises(ValueError, match="AlwaysOnTaskStep 'week': user_sim_gate is applied by prompt_agent's own"):
         AlwaysOnTaskStep.from_dict(saved)
     assert AlwaysOnTaskStep.from_dict(step.to_dict()).user_sim_gate is None
+
+
+def test_a_judge_that_couldnt_be_set_up_isnt_called_and_the_patterns_verdict_stands():
+    import asyncio
+    from agent_env.task_step.task_steps.user_sim_gate import UserSimGate
+
+    class NeverCalled(UserSimGate):
+        async def _judge(self, candidate, history, call_config):
+            raise AssertionError("the judge was called")
+
+    for patterns in (True, False):
+        gate = NeverCalled(patterns=patterns, judge_model="judge-model")
+        verdict = asyncio.run(gate.check("shorter, please", [], judge_unavailable="judge setup: KeyError: x"))
+        assert (verdict.passed, verdict.judge_error) == (True, "judge setup: KeyError: x")
