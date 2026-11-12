@@ -93,7 +93,7 @@ def _serving(monkeypatch, names: dict | None = None, acts: dict | None = None, *
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         yield SimpleNamespace(port=server.server_address[1], opened=opened, read=read,
-                              upstream_port=upstream.getsockname()[1])
+                              upstream_port=upstream.getsockname()[1], module=module)
     finally:
         server.shutdown()
         upstream.close()

@@ -14,6 +14,7 @@ from ..computer.dataplane import part_bytes
 from ..types import DataPart, FilePart, uploaded_object_path
 from .contexts import CONTEXTS
 from .control import DOWNLOADS, UPLOADS
+from .network import HAR_FILE
 
 #: The browser's typed state, as ``data/get`` returns it beside its files and ``data/add`` reads it back.
 STATE_FILE = "browser-state.json"
@@ -57,7 +58,7 @@ async def sorted_load(parts: list, profile: str) -> Load:
         under = PurePosixPath(path)
         if under in (PurePosixPath(profile), PurePosixPath(DOWNLOADS), PurePosixPath(UPLOADS)):
             raise ValueError(f"{path!r} is a folder of the browser's, not a file in it")
-        if path == LOG_FILE:
+        if path in (LOG_FILE, HAR_FILE):
             continue
         if path == STATE_FILE:
             if load.state is not None:

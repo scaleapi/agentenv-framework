@@ -159,7 +159,7 @@ async def test_chromium_runs_with_agentenvs_flags_on_its_pipe_and_a_reset_relaun
                                  "contexts/list", "contexts/release", "cookies/delete", "cookies/get", "cookies/set",
                                  "dialog/answer", "downloads/get", "downloads/list", "files/choose", "history",
                                  "local_storage/clear", "local_storage/get", "local_storage/set", "log", "navigate",
-                                 "page/capture", "page/input", "page/state", "page/viewport", "record", "sites/set",
+                                 "network", "page/capture", "page/input", "page/state", "page/viewport", "record", "sites/set",
                                  "tabs/activate", "tabs/close", "tabs/list", "tabs/open"])
     assert readiness["ready"] is True, readiness
     assert relaunched["pid"] != browser["pid"] and relaunched["listening"] == 0

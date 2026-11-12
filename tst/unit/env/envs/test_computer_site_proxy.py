@@ -83,8 +83,8 @@ async def _body(reader, headers):
 
 
 @contextlib.asynccontextmanager
-async def _proxy(config, scheme="https"):
-    proxy = SiteProxy(config)
+async def _proxy(config, scheme="https", network=None):
+    proxy = SiteProxy(config, network=network)
     context = site_proxy.tls_context(config) if scheme == "https" else None
     server = await asyncio.start_server(lambda r, w: proxy.handle(r, w, scheme), "127.0.0.1", 0, ssl=context)
     try:
@@ -94,8 +94,8 @@ async def _proxy(config, scheme="https"):
 
 
 @contextlib.asynccontextmanager
-async def _forward_port(config):
-    proxy = SiteProxy(config, tls=site_proxy.tls_context(config))
+async def _forward_port(config, network=None):
+    proxy = SiteProxy(config, tls=site_proxy.tls_context(config), network=network)
     server = await asyncio.start_server(proxy.handle_forward, "127.0.0.1", 0)
     try:
         yield server.sockets[0].getsockname()[1]
@@ -1225,5 +1225,6 @@ def test_the_proxy_is_standard_library_alone_so_the_bases_own_python_runs_it():
     imported = {line.split()[1].split(".")[0] for line in source.splitlines()
                 if line.startswith(("import ", "from ")) and not line.startswith("from __future__")}
 
-    assert imported <= {"asyncio", "base64", "hashlib", "ipaddress", "json", "os", "pwd", "re", "shutil", "socket", "ssl",
-                        "struct", "subprocess", "sys", "time", "urllib", "dataclasses", "pathlib", "typing"}
+    assert imported <= {"asyncio", "base64", "datetime", "hashlib", "ipaddress", "itertools", "json", "os", "pwd", "re",
+                        "shutil", "socket", "ssl", "struct", "subprocess", "sys", "time", "urllib", "dataclasses",
+                        "pathlib", "typing"}
