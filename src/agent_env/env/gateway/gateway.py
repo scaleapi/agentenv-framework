@@ -48,6 +48,7 @@ from .constants import (
     CHANGES_PAGE_DEFAULT,
     CHANGES_PAGE_MAX,
     CHILD_DISCOVERY_TIMEOUT_S,
+    CLOCK_READ_ROUTES,
     CONTROL_ROUTES,
     DATA_PLANE_LOAD_TIMEOUT_MAX_S,
     DEFAULT_ROLE,
@@ -472,6 +473,10 @@ class Gateway:
         async def app(scope, receive, send):
             if self._control_bearer and scope["type"] in ("http", "websocket"):
                 headers = scope.get("headers", ())
+                if scope["type"] == "http" and scope["path"] in CLOCK_READ_ROUTES and (
+                        refusal := self._clock_read_refusal(scope)) is not None:
+                    await refusal(scope, receive, send)
+                    return
                 if scope["type"] == "http" and scope["path"] in CONTROL_ROUTES and not hmac.compare_digest(
                         dict(headers).get(b"authorization", b""), self._control_bearer):
                     response = self._json_response({"ok": False, "error": "this route takes the env's control token"}, 401)
@@ -495,6 +500,26 @@ class Gateway:
                 Caller.reset(token)
 
         return app
+
+    def _clock_read_refusal(self, scope) -> Response | None:
+        """Why a read of the clock is refused, or None when it may go on. It takes the gateway's control token or a
+        declared computer's read token, and a watch carrying a computer's token names that computer (a watch is its
+        acknowledgement of the version it names); 401 without a token, 403 for one that's neither or names another."""
+        authorization = dict(scope.get("headers", ())).get(b"authorization", b"")
+        if hmac.compare_digest(authorization, self._control_bearer):
+            return None
+        if not authorization.startswith(b"Bearer "):
+            return self._json_response({"ok": False, "error": (
+                "the clock's reads take the env's control token or a computer's read token")}, 401)
+        holder = self._clock_followers.holder_of(authorization[len(b"Bearer "):].decode(errors="replace").strip())
+        if holder is None:
+            return self._json_response({"ok": False, "error": "the token is no computer's read token"}, 403)
+        if scope["path"] == "/clock/watch":
+            named = dict(parse_qsl(scope.get("query_string", b"").decode(errors="replace"))).get("follower", "")
+            if named != holder:
+                return self._json_response({"ok": False, "error": (
+                    f"a watch with {holder}'s read token names {holder} as its follower, not {named or 'none'}")}, 403)
+        return None
 
     @asynccontextmanager
     async def _session_lifespan(self, mcp: FastMCP):
@@ -612,7 +637,8 @@ class Gateway:
 
     async def _clock_write(self, request: Request, change, *, body_optional: bool = False) -> Response:
         """A clock write route: its JSON object body (none at all when ``body_optional``) applied by ``change`` through
-        ``_change_clock``; 400 for a body or value the clock refuses, else 200, or 504 naming the followers behind."""
+        ``_change_clock``; 400 for a body or value the clock refuses, else 200, or 504 naming the followers behind, with
+        what each follower last showed and when it last watched."""
         try:
             body = await request.json() if not body_optional or await request.body() else {}
         except Exception:
@@ -625,9 +651,10 @@ class Gateway:
         except ClockError as e:
             return self._json_response({"ok": False, "error": str(e)}, 400)
         if stale:
-            return self._json_response({**state, "ok": False, "stale": stale, "error": (
-                f"the clock is at version {state['version']}, but {', '.join(stale)} didn't show it within "
-                f"{wait:g} s: their clocks are behind")}, 504)
+            return self._json_response({**state, "ok": False, "stale": stale, "followers": self._clock_followers.state(),
+                                        "error": (f"the clock is at version {state['version']}, but {', '.join(stale)} "
+                                                  f"didn't show it (waited up to {wait:g} s; one that has stopped "
+                                                  "watching isn't waited for): their clocks are behind")}, 504)
         return self._json_response(state, 200)
 
     async def _change_clock(self, change, wait_s: float = 0.0) -> tuple[dict, list[str]]:

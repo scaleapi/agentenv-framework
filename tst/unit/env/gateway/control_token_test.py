@@ -1,4 +1,5 @@
-"""The gateway's control routes take the deploy's control token when it has one; every other route stays open."""
+"""The gateway's control routes, the clock's writes among them, take the deploy's control token when it has one; every
+other route but the clock's watch (clock_watch_test) stays open, the clock's time and state included."""
 from __future__ import annotations
 
 import httpx
@@ -13,10 +14,10 @@ CONTROL = {
     "/tools/disable": "POST", "/tools/enable": "POST",
     "/triggers/register": "POST", "/triggers/remove": "POST", "/triggers/clear": "POST",
     "/notifications/config": "POST", "/notifications/take": "POST", "/notifications/clear": "POST",
+    "/clock/set-time": "PUT", "/clock/set-rate": "PUT", "/clock/advance": "PUT", "/clock/clear": "POST",
 }
 OPEN = {"/state": "GET", "/step": "POST", "/clock/time": "GET", "/clock/state": "GET", "/triggers/state": "GET",
-        "/notifications/state": "GET", "/trajectory": "GET", "/changes": "GET", "/.well-known/agent-env.json": "GET",
-        "/clock/set-time": "PUT", "/clock/advance": "PUT", "/clock/clear": "POST"}
+        "/notifications/state": "GET", "/trajectory": "GET", "/changes": "GET", "/.well-known/agent-env.json": "GET"}
 
 
 def _client(token: str | None) -> httpx.AsyncClient:
@@ -51,12 +52,15 @@ async def test_a_control_route_answers_a_call_with_the_token(path):
 
 
 @pytest.mark.asyncio
-async def test_the_clock_is_armed_and_read_without_the_token():
+async def test_the_clock_is_armed_with_the_token_and_read_without_it():
     async with _client(TOKEN) as client:
-        armed = await client.put("/clock/set-time", json={"virtual_time": "2019-06-15T12:00:00Z"})
-        read = await client.get("/clock/time")
-    assert (armed.status_code, read.status_code) == (200, 200)
-    assert read.json()["virtual_time"].startswith("2019-06-15T12:00")
+        refused = await client.put("/clock/set-time", json={"virtual_time": "2019-06-15T12:00:00Z"},
+                                   headers={"Authorization": "Bearer a-computers-read-token"})
+        armed = await client.put("/clock/set-time", json={"virtual_time": "2019-06-15T12:00:00Z"},
+                                 headers={"Authorization": f"Bearer {TOKEN}"})
+        read, state = await client.get("/clock/time"), await client.get("/clock/state")
+    assert (refused.status_code, armed.status_code, read.status_code, state.status_code) == (401, 200, 200, 200)
+    assert read.json()["virtual_time"].startswith("2019-06-15T12:00") and state.json()["armed"] is True
 
 
 @pytest.mark.asyncio

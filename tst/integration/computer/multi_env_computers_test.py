@@ -5,12 +5,15 @@ gateway's one /mcp an agent sees the server's tools and each computer's under it
 and a role rule narrows them as it would a server's; /svc/<computer>/ reaches the computer. A later process reattaches the
 computers from the multi env's record, and the run's teardown leaves nothing up. Two computers keep serving through a
 computer's restart and the gateway's, a failed redeploy leaves the earlier deployment serving, and a computer that fails
-mid-deploy, or an entry the multi env refuses, leaves nothing up. Needs Docker and the local registry on localhost:5000."""
+mid-deploy, or an entry the multi env refuses, leaves nothing up. The gateway's control token, which moves its clock,
+appears nowhere on a computer: in no file, and in no process's environment or command line. Needs Docker and the local
+registry on localhost:5000."""
 
 import asyncio
 import json
 import re
 import shutil
+import subprocess
 import tempfile
 import uuid
 from pathlib import Path
@@ -166,6 +169,40 @@ def _containers(sandbox_id: str) -> list[str]:
     return _docker("ps", "-aq", "--filter", f"name=agent-{sandbox_id}").stdout.split()
 
 
+# Run in a computer: the files and the processes' environments and command lines holding the token read from stdin, as
+# far as the user it runs as can read them (so the token is never in its own environment or command line).
+TRACES = r"""import os, sys
+token = sys.stdin.read().strip().encode()
+found = []
+for root in ("/etc", "/opt", "/home", "/root", "/tmp", "/run", "/var", "/srv", "/usr/local"):
+    for folder, _, names in os.walk(root):
+        for name in names:
+            path = os.path.join(folder, name)
+            try:
+                if os.path.isfile(path) and os.path.getsize(path) < 50_000_000 and token in open(path, "rb").read():
+                    found.append(path)
+            except OSError:
+                pass
+for pid in filter(str.isdigit, os.listdir("/proc")):
+    for part in ("environ", "cmdline"):
+        try:
+            if token in open(f"/proc/{pid}/{part}", "rb").read():
+                found.append(f"/proc/{pid}/{part}")
+        except OSError:
+            pass
+print("\n".join(found))
+"""
+
+
+def _traces(sandbox_id: str, token: str) -> list[str]:
+    """Where in the computer's container ``token`` is, read as root and as the session user (uid 1000), whose processes'
+    environments root can't read there."""
+    (container,) = _containers(sandbox_id)
+    return [line for user in ("0", "1000") for line in subprocess.run(
+        ["docker", "exec", "-i", "-u", user, container, "python3", "-c", TRACES], input=token, capture_output=True,
+        text=True, check=True).stdout.split()]
+
+
 @pytest.fixture
 def made(monkeypatch) -> list[str]:
     return local_sandboxes.recorded_sandbox_ids(monkeypatch)
@@ -226,11 +263,13 @@ async def test_a_computer_in_a_multi_env_is_served_through_its_gateway_under_its
             narrowed, narrowed_shot = await _tools(deployed)
             reattached = await Env.from_instance_id(deployed.instance_id)
             up = _containers(computer["sandbox_id"])
+            traces = _traces(computer["sandbox_id"], deployed.control_token)
 
         finally:
             report = await teardown_run(context)
 
     assert not report.failed
+    assert deployed.control_token and traces == [], traces
     assert deployed.get_child_env_card("desktop") is not None and card["name"] == "desktop"
     assert "list_items" in listed and "desktop_computer_screenshot" in listed and shot
     assert {name for name in listed if "computer_" in name} <= {f"desktop_{tool}" for tool in COMPUTER_TOOLS}

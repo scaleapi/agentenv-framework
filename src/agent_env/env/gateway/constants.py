@@ -168,14 +168,18 @@ DEFAULT_ROLE = "default"
 WILDCARD = "*"
 TOOL_DISABLE_ACTION = "disable"
 TOOL_ENABLE_ACTION = "enable"
-# The harness's routes that take the deploy's control token: the ones that change tool access, triggers and
-# notifications. Every other route stays open for now, the clock's writes included: callers outside agent-env set the
-# clock over plain HTTP and don't send the token yet.
+# The harness's routes that take the deploy's control token: the ones that change tool access, triggers, notifications
+# and the clock. Its reads stay open (the clock's state and time show only the universe's time, its rate and which
+# version each computer shows), but for the watch, CLOCK_READ_ROUTES.
 CONTROL_ROUTES = frozenset({
     f"/tools/{TOOL_DISABLE_ACTION}", f"/tools/{TOOL_ENABLE_ACTION}",
     "/triggers/register", "/triggers/remove", "/triggers/clear",
     "/notifications/config", "/notifications/take", "/notifications/clear",
+    "/clock/set-time", "/clock/set-rate", "/clock/advance", "/clock/clear",
 })
+# The routes that take the deploy's control token or a declared computer's read token: the watch, which is a
+# computer's acknowledgement of the version it names, so a watch carrying a computer's token names that computer.
+CLOCK_READ_ROUTES = frozenset({"/clock/watch"})
 
 
 class GatewayMode(str, Enum):
