@@ -237,12 +237,12 @@ class BrowserControl:
 
     async def tab_list(self, context: Optional[str] = None, *, every: bool = False) -> list[dict]:
         """The open tabs of the context ``context``, the browser's id for a leased one, else of the default context,
-        or with ``every`` of all of them, in opened order, each with its URL and title now and whether it's its
-        context's active tab."""
+        each with whether it's its context's active tab; or with ``every`` all of them, the page's tab the active one;
+        in opened order, each with its URL and title now and its context."""
         await self._refresh()
         if every:
-            active = {await self.active_tab(wanted) for wanted in [None, *self.context_ids()]}
-            return [OpenTab(**tab, active=tab["id"] in active, context=self.label_of(tab)).model_dump()
+            page = await self.page_tab()
+            return [OpenTab(**tab, active=tab["id"] == page, context=self.label_of(tab)).model_dump()
                     for tab in self.tabs.values()]
         active = await self.active_tab(context)
         return [OpenTab(**tab, active=tab["id"] == active, context=self.label_of(tab)).model_dump()

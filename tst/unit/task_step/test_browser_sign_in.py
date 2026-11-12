@@ -78,6 +78,9 @@ def served(monkeypatch) -> list[httpx.Request]:
         sent.append(request)
         if request.url.path.endswith("/website/session"):
             return httpx.Response(200, json={"cookies": [_SESSION], "local_storage": []})
+        if request.url.path.endswith("/contexts/list"):
+            return httpx.Response(200, json={"contexts": [{"context": "buyer", "id": "C1", "made_by": "task",
+                                                           "grants": []}]})
         if request.url.path.endswith("/agentenv"):
             return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {}})
         return httpx.Response(200, json={})
@@ -109,20 +112,27 @@ async def test_a_browser_in_a_multi_envs_computer_is_signed_in_with_the_sites_se
 
 
 @pytest.mark.asyncio
-async def test_a_browser_signed_in_in_a_context_loads_the_session_into_that_lease_and_one_that_leases_none_is_refused(
+async def test_a_browser_signed_in_in_a_lease_loads_the_session_there_and_a_lease_or_leasing_missing_is_refused(
         served):
-    leases = TaskStepContext(deployed_envs=[_office(ops=("cookies/set", "cdp", "contexts/lease"))], metadata={})
-    step = BrowserSignInTaskStep(id="in", version=None, env_id="office", site="shop-site", user="alex",
-                                 context="buyer")
+    ops = ("cookies/set", "cdp", "contexts/lease", "contexts/list")
+    leases = TaskStepContext(deployed_envs=[_office(ops=ops)], metadata={})
 
-    await step.execute(leases)
+    def step(label):
+        return BrowserSignInTaskStep(id="in", version=None, env_id="office", site="shop-site", user="alex",
+                                     context=label)
+
+    await step("buyer").execute(leases)
+    signed_in = len(served)
+    with pytest.raises(RuntimeError, match=r"no context 'byer' is leased .*\['buyer'\].*browser_lease_context"):
+        await step("byer").execute(TaskStepContext(deployed_envs=[_office(ops=ops)], metadata={}))
     with pytest.raises(RuntimeError, match="leases no contexts"):
-        await step.execute(TaskStepContext(deployed_envs=[_office()], metadata={}))
+        await step("buyer").execute(TaskStepContext(deployed_envs=[_office()], metadata={}))
 
-    [loaded] = json.loads(served[1].content)["params"]["parts"]
+    [loaded] = json.loads(served[2].content)["params"]["parts"]
+    assert [request.url.path.rsplit("/", 1)[-1] for request in served[:signed_in]] == ["list", "session", "agentenv"]
     assert list(loaded["data"]) == ["contexts"] and set(loaded["data"]["contexts"]["buyer"]) == {"cookies",
                                                                                                  "local_storage"}
-    assert leases.metadata["browser_steps"]["in"]["context"] == "buyer" and len(served) == 3
+    assert leases.metadata["browser_steps"]["in"]["context"] == "buyer" and len(served) == signed_in + 1
 
 
 @pytest.mark.asyncio

@@ -85,15 +85,16 @@ Preflight refuses an env that has no browser, or none of that name, or several w
         return find_browser(deployed_env(context, self.env_id), self.browser)
 
     async def _call(self, context: TaskStepContext, op: str, params: dict,
-                    timeout_s: float = CALL_TIMEOUT_S) -> Any:
-        """``op``'s answer from the browser, in the step's context when it names one, refused when its card serves no
-        such operation, or none in a context."""
+                    timeout_s: float = CALL_TIMEOUT_S, in_context: bool = True) -> Any:
+        """``op``'s answer from the browser, in the step's context when it names one and ``in_context``, refused when
+        its card serves no such operation, or none in a context."""
         deployed, name, card = self._find(context)
-        for needed in [op, *([LEASES] if self.context_label is not None else [])]:
+        in_context = in_context and self.context_label is not None
+        for needed in [op, *([LEASES] if in_context else [])]:
             if find_extension_method(card, BROWSER, needed) is None:
                 raise RuntimeError(f"the website browser {name or deployed.env_id!r} in env {deployed.env_id!r} serves "
                                    f"no browser/v1 {needed}: rebuild it on a newer agentenv-framework-protocol")
-        if self.context_label is not None:
+        if in_context:
             params = {**params, "context": self.context_label}
         return await invoke_extension(deployed.environment_url, card, BROWSER, params, timeout_s, method=op,
                                       headers=deployed.control_headers)

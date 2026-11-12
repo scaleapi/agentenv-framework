@@ -542,8 +542,12 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         return {"contexts": [lease.record() for lease in self.contexts]}
 
     @extension(BROWSER, op="tabs/list", method="GET")
-    async def browser_tabs_list(self, context: Optional[str] = None) -> dict:
-        return {"tabs": await self.control.tab_list(self.contexts.id_of(context))}
+    async def browser_tabs_list(self, context: Optional[str] = None, every: bool = False) -> dict:
+        """The tabs of the lease ``context`` names, else of the default context; or with ``every`` all of them, each
+        naming its context, the page's tab the active one."""
+        if every and context is not None:
+            raise InvalidArgument("tabs/list takes a context or every, not both")
+        return {"tabs": await self.control.tab_list(self.contexts.id_of(context), every=every)}
 
     @extension(BROWSER, op="tabs/open")
     async def browser_tabs_open(self, url: Optional[str] = None, background: bool = False,

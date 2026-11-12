@@ -249,6 +249,26 @@ async def test_the_pages_operations_follow_a_leased_tab_brought_to_the_front_and
 
 
 @pytest.mark.asyncio
+async def test_every_contexts_tabs_list_together_each_naming_its_context_the_pages_tab_the_active_one(
+        browser_home, monkeypatch):
+    browser = Browser()
+    devtools = StubDevTools()
+    devtools.listen(browser.control._event)
+    browser.devtools = browser.contexts.devtools = browser.control.devtools = devtools
+    monkeypatch.setattr(browser.contexts, "home", lambda: browser_home)
+    await browser.browser_contexts_lease("buyer")
+    _tab(devtools, "D1", "DEFAULT")
+    _tab(devtools, "L1", "C1")
+    await browser.control.activate("L1", "C1")
+
+    listed = (await browser.browser_tabs_list(every=True))["tabs"]
+
+    assert [(tab["id"], tab["context"], tab["active"]) for tab in listed] == [("D1", None, False), ("L1", "buyer", True)]
+    with pytest.raises(InvalidArgument, match="a context or every, not both"):
+        await browser.browser_tabs_list(context="buyer", every=True)
+
+
+@pytest.mark.asyncio
 async def test_a_label_an_agent_disposed_and_a_load_leases_again_at_once_keeps_the_new_folder(browser_home):
     _, _, contexts = _contexts(browser_home)
     old = contexts.made_by_agent("ada", "X1")

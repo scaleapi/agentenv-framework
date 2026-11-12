@@ -536,7 +536,7 @@ async def test_an_op_for_an_agents_tool_call_and_agentenvs_own_acting_ops_are_en
     async def navigate(url):
         browser.control._acted_on("T1")
 
-    async def tabs(context=None):
+    async def tabs(context=None, every=False):
         return []
 
     monkeypatch.setattr(browser.control, "navigate", navigate)
@@ -732,7 +732,7 @@ async def test_the_cdp_operation_and_discovery_answer_at_the_address_reached_and
     async def gone(method, params=None, *, session_id=None, timeout_s=None):
         raise ConnectionError("the browser closed its debugging pipe")
 
-    async def tabs(context=None):
+    async def tabs(context=None, every=False):
         return [{"id": "T1", "url": "https://site.test/", "title": "Site", "active": True}]
 
     monkeypatch.setattr(browser, "_until_ready", ready)
