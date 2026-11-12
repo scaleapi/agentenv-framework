@@ -217,6 +217,24 @@ async def test_route_gives_a_browser_alone_the_forward_port_and_a_computer_with_
 
 
 @pytest.mark.asyncio
+async def test_a_browser_alones_forward_port_takes_the_live_sites_hosts_straight_to_them_with_no_site_to_route():
+    routed, alone, desktop = FakeVm(_REPORT), FakeVm(_REPORT), FakeVm(_REPORT)
+    live = ("github.com", "*.githubassets.com")
+
+    await sites.route(routed, [_site("notes", "notes.test")], user="user", network=None, valid_for=timedelta(hours=1),
+                      label="browser", os_type="linux", display="none", live_hosts=live)
+    for sandbox, display in ((alone, "none"), (desktop, "x11")):
+        await sites.route(sandbox, [], user="user", network=None, valid_for=timedelta(hours=1), label="browser",
+                          os_type="linux", display=display, live_hosts=live)
+
+    beside = json.loads(routed.written["/etc/agentenv/sites/config.json"])
+    only = json.loads(alone.written["/etc/agentenv/sites/config.json"])
+    assert (beside["proxy_port"], beside["direct"]) == (3129, list(live))
+    assert (only["sites"], only["ca_pem"], only["proxy_port"], only["direct"]) == ([], None, 3129, list(live))
+    assert desktop.written == {} and desktop.scripts == []
+
+
+@pytest.mark.asyncio
 async def test_the_config_holding_the_keys_is_written_over_stdin_into_a_private_staging_folder_never_as_text():
     sandbox = FakeVm(_REPORT)
 
@@ -507,6 +525,28 @@ async def test_two_websites_of_one_env_whose_cards_share_a_name_are_each_named_a
     assert len(sites.site_table([Site(**site) for site in found]).routes) == 2  # names of their own: both route
     assert await sites.deployed_sites([gateway], services=["blog"]) == [
         {"name": "Site", "url": "https://gw.example/website/blog/", "domains": ["blog.test"]}]  # alone, its card's name
+
+
+@pytest.mark.asyncio
+async def test_a_website_is_selected_by_the_environment_name_its_gateway_states(monkeypatch):
+    from agentenv_protocol import client as protocol_v1
+
+    from agent_env.env.env import DeployedGatewayEnv
+
+    async def get_card(url, timeout=10, verify=True):
+        raise AssertionError(f"read {url} live")
+
+    monkeypatch.setattr(protocol_v1, "get_card", get_card)
+    card = {"name": "env", "children_environments": [{
+        "name": "Notes", "url": "/sites/notes-v2/agentenv", "environment_name": "notes", "capabilities": {
+            "extensions": [{"uri": "urn:agentenv:website/v1", "params": {"domains": ["notes.test"]}}]}}]}
+    gateway = DeployedGatewayEnv(env_id="sites", env_version=1, sandbox_id="s", gateway_url="https://gw.example",
+                                 environment_card=card,
+                                 website_frontend_urls={"notes": "https://gw.example/website/notes/"})
+
+    found = [{"name": "Notes", "url": "https://gw.example/website/notes/", "domains": ["notes.test"]}]
+    assert await sites.deployed_sites([gateway], services=["notes"]) == found  # not the path's notes-v2
+    assert await sites.deployed_sites([gateway], services=["notes-v2"]) == []
 
 
 @pytest.mark.asyncio

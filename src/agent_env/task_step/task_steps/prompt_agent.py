@@ -35,7 +35,7 @@ from agent_env.env.gateway.constants import (
 )
 from agent_env.store import DuplicateKeyError, get_config
 from agent_env.store.object_store import ObjectStore
-from agent_env.task_step.context import DeployedAgent, PromptResponse, TaskStepContext
+from agent_env.task_step.context import DeployedAgent, PromptResponse, StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import RetryConfig, TaskStep, TaskStepDependency
@@ -452,7 +452,7 @@ class PromptAgentTaskStep(TaskStep):
     ) -> TaskStepContext:
         agent = next((a for a in context.deployed_agents if a.agent_name == self.agent_name), None)
         if agent is None:
-            raise RuntimeError(f"Agent with name '{self.agent_name}' not found in context.deployed_agents")
+            raise StepContextError(f"Agent with name '{self.agent_name}' not found in context.deployed_agents")
         target_url = agent.a2a_url or agent.api_url
         user_sim = next((a for a in context.deployed_agents if a.agent_name == self.user_agent_name), None)
         user_url = self.user_a2a_url or (

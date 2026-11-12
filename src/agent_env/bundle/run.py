@@ -240,7 +240,11 @@ def run_bundle(
     Each run's sandboxes are torn down as it ends, so the contexts returned record sandboxes that are gone.
     ``keep`` leaves them up instead, for the caller to use and then remove with ``BundleRun.teardown()``.
     Ctrl-C or SIGTERM cancels the runs and tears down every one, kept or not, then raises ``RunInterrupted``
-    with the result.
+    with the result. A process killed outright tears down nothing: a supervisor that may have to kill it starts it
+    with an ``AGENT_ENV_LOCAL_SANDBOX_DIR`` of its own in a new session (``start_new_session=True``), so killing the
+    run's whole process group spares the supervisor; on macOS that kill is all that stops the commands the run started
+    on this machine. It then terminates each sandbox ``local_sandbox_ids`` finds there, keeping one whose termination
+    raises, which isn't fully gone, to retry.
 
     It runs its own event loop, and turns namespace routing on for the whole process while it runs, so it
     suits the CLI and scripts, not a service. From async code, call it in a thread; there it can't take over

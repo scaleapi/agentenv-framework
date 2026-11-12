@@ -19,7 +19,7 @@ import tzdata  # noqa: F401
 from agentenv_protocol import client as protocol_v1
 
 from agent_env.env.gateway.constants import EXT_CLOCK_URI
-from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
@@ -124,7 +124,7 @@ class SyncEnvClockTaskStep(TaskStep):
 
         deployed = next((d for d in context.deployed_envs if d.env_id == self.env_id), None)
         if deployed is None:
-            raise RuntimeError(f"Env '{self.env_id}' not found in context.deployed_envs")
+            raise StepContextError(f"Env '{self.env_id}' not found in context.deployed_envs")
         try:
             await deployed.invoke(EXT_CLOCK_URI, "set_time",
                                   {"virtual_time": self.armed_virtual_time, "virtual_seconds_per_real_second": self.virtual_seconds_per_real_second},

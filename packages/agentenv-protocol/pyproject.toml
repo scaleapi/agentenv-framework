@@ -1,6 +1,6 @@
 [project]
 name = "agentenv-framework-protocol"
-version = "0.1.495"
+version = "0.1.532"
 description = "Open data-plane protocol and server SDK for agent environments."
 readme = "README.md"
 license = "Apache-2.0"
@@ -60,6 +60,10 @@ macos = [
 x11 = [
     "mss>=9,<11",
     "python-xlib>=0.33,<0.34",
+]
+# A Windows driver on WindowsDriver: mss captures the desktop and SendInput, through ctypes, sends its input.
+windows = [
+    "mss>=9,<11",
 ]
 dev = [
     "a2a-sdk[http-server]>=0.3.26,<0.4",

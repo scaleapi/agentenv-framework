@@ -13,6 +13,8 @@ STEP_TYPES = sorted(get_task_step_registry().items())
 # A stored step of each built-in type that scopes fields of its own, holding only what the type requires.
 MINIMAL = {
     "add_skills": {"skills": [{"name": "notes", "description": "how notes are kept"}]},
+    "always_on": {"prompt": "hi", "user_sim": "linda"},
+    "always_on_agent_verifier": {"prompt_id": "prompt", "criteria": [{"id": "c1", "description": "says hi"}]},
     "deploy_agent": {},
     "deploy_env": {"env_id": "crm-env"},
     "deploy_human_agent": {},
@@ -29,7 +31,7 @@ MINIMAL = {
 UNSOURCED = {
     "add_skills": "add_skills 's': skill 'notes' names no source",
     "load_artifact": "load_artifact 's': names nothing to load",
-    "run_docker_container": "run_docker_container 's': names no build context",
+    "run_docker_container": "run_docker_container 's': names no image or build context",
 }
 
 

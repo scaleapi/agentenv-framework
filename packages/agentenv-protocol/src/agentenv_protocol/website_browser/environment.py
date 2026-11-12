@@ -9,7 +9,7 @@ import shutil
 import tempfile
 from pathlib import Path
 from typing import Any, Awaitable, Callable, ClassVar, Literal, Optional
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 from starlette.requests import Request
@@ -18,31 +18,39 @@ from starlette.websockets import WebSocket
 
 from ..agent_env_environment import (OP_ADD_DATA, add_data, add_websocket_route, agent_skill, extension, get_data,
                                      reset_data)
-from ..browser_cdp import ROUTE, Relay, Tokens, reached, websocket_form
+from .cdp import ROUTE, Relay, Tokens, reached, under, websocket_form
+from .log import (ACTOR, ERROR_CHARS, TOOL_CALL_HEADER, UNLOGGED_OPS, BrowserLog, op_acts, read_tool_call,
+                  redact_text, redacted_args, redacted_op)
 from ..computer import AppDeclaration, ComputerAppEnvironment, Launch, install_step, ready_check
 from ..computer import app as computer_app
 from ..computer import app_data
 from ..computer.app import SOCKET, agent_acted, forget_agent_acted
 from ..computer.dataplane import file_parts
 from ..computer.errors import DeviceUnavailable, InvalidArgument
+from ..tool_context import DEFAULT_ROLE, ROLE_HEADER, normalize_role
 from ..transfers import WriteNamespaceGrant
-from ..types import METHOD_ADD, EnvironmentExtension, IntakeDeclaration, IntakeFormat, intake_extension
+from ..types import METHOD_ADD, RPC_PATH, EnvironmentExtension, IntakeDeclaration, IntakeFormat, intake_extension
 from . import data
 from .control import AGENT, DOWNLOADS, EXIT, LIVE_START_TAB_TIMEOUT_S, LOADED, STOP, UPLOADS, BrowserControl, _now
 from .devtools import PIPE_IN, PIPE_OUT, DevToolsError, DevToolsPipe
+from .recording import BROWSER_RECORDING, MAX_DURATION_S, MAX_FRAMES, BrowserRecordings
 from .shapes import BrowserRecord, BrowserState, CookieToSet, OriginStorage, SiteNames, StateToLoad
 
 logger = logging.getLogger(__name__)
 
 SITE_PROXY_ENV = "AGENTENV_SITE_PROXY"
 BROWSER = "urn:agentenv:browser/v1"
+#: Where ``browser/v1``'s ops are served on its server.
+OPS_PATH = f"{RPC_PATH}/ext/browser/"
+#: The largest op body whose parameters its entry keeps; a longer one keeps only its length.
+LOGGED_BODY_BYTES = 1 << 20
 #: Where its server keeps the env's sites ``sites/set`` hands it, which outlive a relaunch or the server's restart.
 SITES = SOCKET.parent / "sites.json"
 #: The flags agentenv sets, by prefix, which a subclass's command may not carry: among them every way to open a debugging
 #: port, since the browser is reached only over its pipe.
 OWNED_FLAGS = ("--user-data-dir", "--remote-debugging-", "--remote-allow-origins", "--proxy-", "--no-proxy-server",
                "--headless", "--window-size", "--lang", "--force-webrtc-ip-handling-policy", "--disk-cache-dir",
-               "--disable-dev-shm-usage")
+               "--disable-dev-shm-usage", "--enable-unsafe-swiftshader")
 #: Below this much /dev/shm, as Docker's 64 MiB default, the browser keeps its shared memory in files instead.
 SHM_MIN_BYTES = 1 << 30
 #: Chromium's content setting that denies a permission without a prompt.
@@ -140,9 +148,16 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         self.control = BrowserControl(self.devtools, self.settings.dialogs,
                                       (self.settings.window.width, self.settings.window.height) if _alone()
                                       else None)
+        #: Its log: an entry for each action agents take on it, and its tabs' events.
+        self.log = BrowserLog.for_app(os.environ.get("ENVIRONMENT_NAME") or type(self).__name__.lower(),
+                                      SOCKET.parent)
+        self.control.log = self.log
         #: The CDP addresses it has handed out, and the relay agents' connections to them go through.
         self.cdp_tokens = Tokens(SOCKET.parent / "cdp-tokens.json")
-        self.relay = Relay(self.devtools, dialogs_answered=self.settings.dialogs != AGENT)
+        self.relay = Relay(self.devtools, dialogs_answered=self.settings.dialogs != AGENT, log=self.log,
+                           control=self.control)
+        #: Its recordings: frames of the tab an agent last acted in, and its log, uploaded under each one's grant.
+        self.recordings = BrowserRecordings(self.log, self.control)
         self.devtools.on_close(self._pipe_closed)
 
     @classmethod
@@ -163,7 +178,8 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
 
     def agentenv_flags(self) -> list[str]:
         """The flags agentenv owns. A browser alone goes out only through its site proxy, so it won't launch without
-        one; in a computer it goes through one when the computer has one, loopback aside."""
+        one; in a computer it goes through one when the computer has one, loopback aside. Alone it runs headful on the
+        X server its computer gives it, where WebGL draws with SwiftShader since no GPU is there, else headless."""
         settings, alone, proxy = self.settings, _alone(), os.environ.get(SITE_PROXY_ENV)
         flags = [f"--user-data-dir={self.profile_dir()}", f"--disk-cache-dir={self.cache_dir()}",
                  "--remote-debugging-pipe", "--no-first-run", "--no-default-browser-check", f"--lang={settings.locale}"]
@@ -179,8 +195,7 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
                              "names none")
         if alone:
             flags.append(f"--window-size={settings.window.width},{settings.window.height}")
-        if alone:
-            flags.append("--headless=new")
+            flags.append("--enable-unsafe-swiftshader" if _x_server() else "--headless=new")
         return flags
 
     def _launch_for(self, launch: Launch) -> Launch:
@@ -269,7 +284,7 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
     async def _open_window(self) -> None:
         """Another window, which a launch of the browser while it runs opens over its pipe: a second copy would only
         hand its window to the first and exit, taking its new pipe with it."""
-        await self.devtools.call("Target.createTarget", {"url": "about:blank", "newWindow": True})
+        await self.control.create_target({"url": "about:blank", "newWindow": True})
 
     @install_step(scope="system")
     def write_policies(self) -> None:
@@ -304,22 +319,30 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         "is its window's, a PNG of it, and CDP input calls sent to it in order. navigate and history open a URL in "
         "the active tab, or go back, forward or reload; tabs/list, tabs/open, tabs/activate and tabs/close manage "
         "its tabs by their ids; dialog/answer answers the dialog open on the active tab; files/choose gives the file "
-        "chooser open on it files in ~/Uploads, headless; and page/state is the active tab's id, URL and title and "
+        "chooser open on it files in ~/Uploads, alone; and page/state is the active tab's id, URL and title and "
         "what is open on it. cookies/get, cookies/set and cookies/delete, and local_storage/get, local_storage/set and "
         "local_storage/clear, read and change its default context's cookies and local storage as Playwright's "
         "storageState has them, a cookie's max_age set as an expiry on the browser's clock; downloads/list and "
         "downloads/get are its downloads, get with its file, uploaded under a write_namespace grant or inline. cdp "
-        "returns a user's CDP address, http_url to discover from and ws_url to connect to, "
+        "returns a user's CDP address, http_url to discover from and ws_url to connect to, under origin, where the "
+        "caller's agent reaches the env, when it names one, else at the address the call reached the browser at, "
         "with a token agentenv mints in its path: each connection to it gets its own browser-level session behind a "
         "guard, and record lists them as cdp_connections, each with the commands the guard refused or changed. "
         "sites/set hands it the env's own sites, by name and domains: a start tab on one must load, its document's "
         "status 2xx, or its launch counts it failed, while one on any other site is waited on 30 s at most. record "
         "keeps each launch's start_tabs: the URL asked for and ended on, the status, any network error, the load time, "
-        "the env's site and the outcome, loaded, failed or timed_out."))
+        "the env's site and the outcome, loaded, failed or timed_out. log returns its log's lines after the sequence "
+        "number after, in order: an action entry for each CDP command, MCP tool call and pixel action an agent took, "
+        "marked acting or reading, with who, the tab and its URL and, acting, its parameters with secrets taken out; "
+        "and a tab event each time a tab opened, navigated or closed, with what caused it."))
     async def browser_record(self) -> dict:
         return BrowserRecord(**await self.control.record(), launches=self._computer_app.launches(),
                              cdp_connections=list(self.relay.connections),
                              start_tabs=self.start_tab_launches).model_dump()
+
+    @extension(BROWSER, op="log", method="GET")
+    async def browser_log(self, after: int = 0) -> dict:
+        return await self.log.read_async(after)
 
     @extension(BROWSER, op="sites/set")
     async def browser_sites_set(self, sites: list[dict]) -> dict:
@@ -332,13 +355,58 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         written.replace(SITES)
         return {}
 
+    @extension(BROWSER, op="calls/begin")
+    async def browser_calls_begin(self, user: str, request: Request, acts: bool = True, within_s: float = 600.0) -> dict:
+        """An agent's tool call, from the tool-call header this is sent with, which a driver serves through ``user``'s
+        CDP connections, begun as an entry in the log, by the caller's role: ``user``'s commands are credited to it
+        until ``calls/end`` ends it, or ``within_s`` passes and it's written as never said to have ended. Its entry's
+        sequence number, ``entry``."""
+        call = read_tool_call(request.headers.get(TOOL_CALL_HEADER))
+        if call is None:
+            raise InvalidArgument(f"calls/begin is sent with the tool call it begins, in its {TOOL_CALL_HEADER} header")
+        who = normalize_role(request.headers.get(ROLE_HEADER)) or DEFAULT_ROLE
+        return {"entry": self.relay.begin_call(user, who, call, acts=acts, within_s=within_s)}
+
+    @extension(BROWSER, op="calls/end")
+    async def browser_calls_end(self, entry: int, ok: bool, error: Optional[str] = None) -> dict:
+        """The tool call ``calls/begin`` began as ``entry`` ended, with whether it worked and, if not, why: its entry
+        written, with the tab its commands acted on."""
+        if not self.relay.end_call(entry, ok, error):
+            raise InvalidArgument(f"no tool call is open as entry {entry}")
+        return {}
+
+    @extension(BROWSER_RECORDING, op="start")
+    async def browser_recording_start(self, request_id: str, upload: dict, frames: bool = True) -> dict:
+        """A recording of this browser, its frames and its log uploaded under the write namespace grant ``upload``:
+        with ``frames``, a frame of the tab an agent last acted in at the start, after each burst of its actions
+        settles and at the end. A start again with the same ``request_id`` answers the recording it began."""
+        return await self.recordings.start(request_id, upload, frames)
+
+    @extension(BROWSER_RECORDING, op="end")
+    async def browser_recording_end(self, recording_id: str, upload: Optional[dict] = None,
+                                    reason: str = "end") -> dict:
+        """The recording ``recording_id`` ended, under a fresh grant ``upload`` when one is given: its last frames,
+        its log's lines since its start and its manifest uploaded, and the manifest answered."""
+        return await self.recordings.end(recording_id, upload, reason)
+
+    @extension(BROWSER_RECORDING, op="end_all")
+    async def browser_recording_end_all(self, reason: str = "teardown") -> dict:
+        """Every open recording ended, under its start's grant, as the env closes or resets: their manifests."""
+        return {"recordings": await self.recordings.end_all(reason)}
+
     @extension(BROWSER, op="cdp")
-    async def browser_cdp(self, user: str, request: Request) -> dict:
-        """``user``'s CDP address at the address this call reached the browser at, once it's ready: the same one each
-        time it's asked for, as the server that minted it keeps it."""
+    async def browser_cdp(self, user: str, request: Request, origin: Optional[str] = None) -> dict:
+        """``user``'s CDP address once the browser's ready, the same one each time it's asked for, as the server that
+        minted it keeps it: under ``origin``, where the caller's agent reaches the env, when the caller names it, as a
+        deploy names the env's other addresses, since a tunnel in front of the env may not say how it was reached;
+        else at the address this call reached the browser at."""
+        base = under(_origin(origin), request) if origin is not None else reached(request)
         await self._until_ready()
-        address = self.cdp_tokens.mint(user, reached(request))
+        address = self.cdp_tokens.mint(user, base, named=origin is not None)
         return {"http_url": address.http_url, "ws_url": address.ws_url}
+
+    def served_asgi(self, asgi: Any) -> Any:
+        return _LoggedOps(super().served_asgi(asgi), self)
 
     def create_app(self) -> Any:
         app = super().create_app()
@@ -349,11 +417,11 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         return app
 
     async def _cdp_discovery(self, request: Request) -> Response:
-        """``json/version`` and ``json/list`` under a CDP address, answered from the browser, with its WebSocket at the
-        address the client reached: a browser on a pipe has no endpoints of its own. 403 for a token agentenv didn't
-        mint."""
+        """``json/version`` and ``json/list`` under a CDP address, answered from the browser, with its WebSocket as
+        minted when its caller named the origin, else at the address the client reached: a browser on a pipe has no
+        endpoints of its own. 403 for a token agentenv didn't mint."""
         token = request.path_params["token"]
-        if self.cdp_tokens.address(token) is None:
+        if (address := self.cdp_tokens.address(token)) is None:
             return JSONResponse({"error": "agentenv didn't mint this CDP address"}, status_code=403)
         try:
             version = await self.devtools.call("Browser.getVersion")
@@ -362,7 +430,8 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
                     "Browser": version.get("product"), "Protocol-Version": version.get("protocolVersion"),
                     "User-Agent": version.get("userAgent"), "V8-Version": version.get("jsVersion"),
                     "WebKit-Version": version.get("revision"),
-                    "webSocketDebuggerUrl": f"{websocket_form(reached(request))}{ROUTE}{token}/devtools/browser"})
+                    "webSocketDebuggerUrl": address.ws_url if address.named else
+                    f"{websocket_form(reached(request))}{ROUTE}{token}/devtools/browser"})
             tabs = await self.control.tab_list()
         except (ConnectionError, DevToolsError, asyncio.TimeoutError) as e:
             return JSONResponse({"error": f"the browser isn't answering: {e}"}, status_code=503)
@@ -490,14 +559,15 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         return not agent_acted()
 
     def declared_extensions(self) -> list[EnvironmentExtension]:
-        """Its data plane moves files by their path, a file tree: its state as ``browser-state.json``, its profile, its
-        downloads and files for agents to upload. A load takes its state as a data part too."""
+        """Its data plane moves files by their path, a file tree: its state as ``browser-state.json``, its log, its
+        profile, its downloads and files for agents to upload. A load takes its state as a data part too."""
         tree = IntakeDeclaration(get=[IntakeFormat(part="file", format="file-tree")],
                                  add=[IntakeFormat(part="file", format="file-tree", load="replace"),
                                       IntakeFormat(part="data", format="json", load="replace")])
         return [*super().declared_extensions(), intake_extension(tree, (
             f"data/get returns the browser's state as {data.STATE_FILE}: its cookies and local storage as Playwright's "
-            f"storageState has them, its tabs open and closed, its downloads and its clock; beside it, its profile "
+            f"storageState has them, its tabs open and closed, its downloads and its clock; beside it, its log as "
+            f"{data.LOG_FILE}, which data/add passes over, its profile "
             f"without caches, and its finished downloads. data/add applies such a state, while the browser runs, and "
             f"writes files by their path: its profile, restored with the browser stopped, ~/{DOWNLOADS} and "
             f"~/{UPLOADS}. data/reset puts the profile back as installed and relaunches it at its start tabs."))]
@@ -518,9 +588,10 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         with tempfile.TemporaryDirectory(dir=home / ".cache") as staging:
             root = Path(staging)
             (root / data.STATE_FILE).write_text(json.dumps(written, indent=1), encoding="utf-8")
+            (root / data.LOG_FILE).write_text(await self.log.complete_text(), encoding="utf-8")
             with self._computer_app.paused():
                 await app_data.in_thread(data.stage_profile, home, self.profile, root)
-            parts = await file_parts(root, [data.STATE_FILE, self.profile], write_namespace)
+            parts = await file_parts(root, [data.STATE_FILE, data.LOG_FILE, self.profile], write_namespace)
         return parts + await file_parts(home, data.finished_downloads(home), write_namespace)
 
     @add_data
@@ -575,6 +646,7 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         a record that starts now. Its data plane launches it again after, at its start tabs."""
         self.relay.ended()
         self.cdp_tokens.revoke_all()
+        self.log.note("reset", {})
         await app_data.reset(self.paths)
         await app_data.in_thread(data.empty, Path.home(), DOWNLOADS, UPLOADS)
         self.control.forget()
@@ -599,8 +671,10 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         return self.start_tab_launches[-1]["tabs"] if self.start_tab_launches else []
 
     def extension_params(self, uri: str) -> dict:
+        if uri == BROWSER_RECORDING:
+            return {"max_duration_s": MAX_DURATION_S, "max_frames": MAX_FRAMES, "frames": True}
         if uri == BROWSER:
-            params: dict[str, Any] = {"chromium": self.version, "clock": "real"}
+            params: dict[str, Any] = {"chromium": self.version, "clock": "real", "mode": _mode()}
             if _alone():
                 params["window"] = self.settings.window.model_dump()
             return params
@@ -609,6 +683,97 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
     @agent_skill
     def browser_skill(self) -> tuple[str, str]:
         return "How to use this website browser.", SKILL
+
+
+class _LoggedOps:
+    """Its server's application, with each ``browser/v1`` op an entry in its log as it runs: every op a driver makes
+    for an agent's tool call, which carries that call, and every acting op agentenv makes itself. While it runs, the op
+    is the action the browser's control credits the tab events it causes to."""
+
+    def __init__(self, app: Any, browser: WebsiteBrowserEnvironment) -> None:
+        self.app, self.browser = app, browser
+
+    async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
+        op = scope["path"][len(OPS_PATH):] if scope["type"] == "http" and scope["path"].startswith(OPS_PATH) else None
+        if op is None or op in UNLOGGED_OPS:
+            return await self.app(scope, receive, send)
+        headers = {name.decode("latin-1").lower(): value.decode("latin-1") for name, value in scope.get("headers", [])}
+        call, acting = read_tool_call(headers.get(TOOL_CALL_HEADER.lower())), op_acts(op)
+        if call is None and not acting:
+            return await self.app(scope, receive, send)
+        chunks, more = [], True
+        while more:
+            message = await receive()
+            chunks.append(message.get("body", b""))
+            more = message.get("more_body", False) and message["type"] == "http.request"
+        body = b"".join(chunks)
+        action: dict[str, Any] = {"via": "mcp" if call else "agentenv", "op": op, "acts": acting}
+        if call is not None:
+            action.update(who=normalize_role(headers.get(ROLE_HEADER.lower())) or DEFAULT_ROLE, tool=call["tool"],
+                          call=call["call"])
+        log = self.browser.log
+        begun = log.begin(action)
+        actor = {"seq": begun["seq"], "via": action["via"], "who": action.get("who"), "acts": acting, "tab": None,
+                 "password": None}
+        answered: dict[str, Any] = {"status": 500, "error": b""}
+        replayed = False
+
+        async def receiving() -> dict:
+            nonlocal replayed
+            if not replayed:
+                replayed = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            return await receive()
+
+        async def sending(message: dict) -> None:
+            if message["type"] == "http.response.start":
+                answered["status"] = message["status"]
+            elif message["type"] == "http.response.body" and answered["status"] >= 400 and \
+                    len(answered["error"]) < ERROR_CHARS * 4:
+                answered["error"] += message.get("body", b"")
+            await send(message)
+
+        token = ACTOR.set(actor)
+        try:
+            await self.app(scope, receiving, sending)
+        finally:
+            ACTOR.reset(token)
+            fields: dict[str, Any] = {"tab": actor["tab"], "url": self.browser.control.url_of(actor["tab"]),
+                                      "ok": answered["status"] < 400}
+            if answered["status"] >= 400:
+                fields["error"] = _error_text(answered["error"])
+            # What it typed is kept only once every check it made found no password field focused; one that failed,
+            # or never got to check, keeps it withheld.
+            withheld_typing = actor["password"] is not False or answered["status"] >= 400
+            if acting and len(body) > LOGGED_BODY_BYTES:
+                fields["params"] = {"too_long": True, "length": len(body)}
+            elif acting:
+                fields["params"] = redacted_op(op, _op_params(scope, body), password=withheld_typing)
+                if call is not None:
+                    fields["args"] = redacted_args(call["tool"], call["args"], password=withheld_typing)
+            log.finish(begun, **fields)
+
+
+def _op_params(scope: dict, body: bytes) -> dict:
+    """An op's parameters: its query's for a GET, else its JSON body's."""
+    if scope.get("method") == "GET":
+        return dict(parse_qsl(scope.get("query_string", b"").decode("latin-1")))
+    try:
+        params = json.loads(body) if body else {}
+    except ValueError:
+        return {}
+    return params if isinstance(params, dict) else {}
+
+
+def _error_text(body: bytes) -> str:
+    """What an op's error answer says, its message when it's agentenv's error shape."""
+    text = body.decode(errors="replace")
+    try:
+        error = json.loads(text).get("error")
+        text = str(error.get("message", error)) if isinstance(error, dict) else str(error or text)
+    except (ValueError, AttributeError):
+        pass
+    return redact_text(text)[:ERROR_CHARS]
 
 
 def _read_sites() -> list[SiteNames]:
@@ -650,8 +815,34 @@ def start_tab_why(tab: dict) -> str:
 
 
 def _alone() -> bool:
-    """Whether it runs on a computer with no display, a browser computer's, alone and headless."""
+    """Whether it runs on a computer with no display, a browser computer's, alone: its page is that computer's screen."""
     return computer_app.detect().display == "none"
+
+
+def _x_server() -> bool:
+    """Whether an X server is there for it, as a browser computer gives its browser one no agent sees."""
+    return bool(os.environ.get("DISPLAY"))
+
+
+def _mode() -> str:
+    """How it runs: headless alone with no X server, else headful, on its own X server alone or on the desktop."""
+    return "headless" if _alone() and not _x_server() else "headful"
+
+
+def _origin(value: Any) -> str:
+    """``value`` as an origin a CDP address is minted under, its scheme in lower case as the address's WebSocket form
+    reads it: an http or https URL, a path allowed, with no query, fragment or credentials; InvalidArgument for anything
+    else."""
+    try:
+        parts = urlsplit(value)
+        valid = (value.isprintable() and parts.scheme in ("http", "https") and bool(parts.hostname)
+                 and "@" not in parts.netloc and not parts.query and not parts.fragment
+                 and (parts.port is None or 0 < parts.port))
+    except (AttributeError, TypeError, ValueError):
+        valid = False
+    if not valid:
+        raise InvalidArgument("origin is an http or https URL with no query, fragment or credentials")
+    return f"{parts.scheme}://{parts.netloc}{parts.path}"
 
 
 def _parsed(model: type[BaseModel], items: Any, what: str) -> list:

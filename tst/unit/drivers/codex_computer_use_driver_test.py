@@ -1,10 +1,10 @@
 """The codex-computer-use driver against a fake cua_repl: agents get its js and js_reset as pinned, with its
-instructions, and not the tools it serves only the ChatGPT app; each call carries Codex's read-only sandbox unless the
-setting turns it off; Codex's approval requests are answered from allowed_apps by name or bundle identifier, from the
+instructions, and not the tools it serves only the ChatGPT app, a choice of objects as one; each call carries Codex's
+read-only sandbox on macOS unless the setting turns it off, and on Windows none unless it turns it on; Codex's approval requests are answered from allowed_apps by name or bundle identifier, from the
 request's metadata or its message, every app approved when it names none, and nothing else; each agent session keeps a
 REPL of its own across calls, one that stops starting afresh; cua_repl gets the app's environment and none of the
-driver's; readiness checks the pinned executables, what cua_repl says and lists and that it answers; and the driver's
-files agree on the pinned version."""
+driver's, with Windows paths on Windows; readiness checks the pinned executables, what cua_repl says and lists and
+that it answers; the MSIX unpacks with its names decoded; and the driver's files agree on the pinned versions."""
 from __future__ import annotations
 
 import asyncio
@@ -13,9 +13,12 @@ import hashlib
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import textwrap
 import tomllib
+import types
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -96,6 +99,7 @@ FAKE = textwrap.dedent('''\
     anyio.run(main)
 ''')
 MACOS = Platform(os="macos", version="26.5", arch="arm64", display="aqua")
+WINDOWS = Platform(os="windows", version="11", arch="amd64", display="dwm")
 
 
 class Granted:
@@ -123,23 +127,41 @@ def module(pinned, monkeypatch, tmp_path):
     """The driver's module on a fake ChatGPT app whose Node is the fake cua_repl."""
     (tmp_path / "fake").mkdir()
     (tmp_path / "fake" / "tools.json").write_text(pinned.MANIFEST.read_text())
-    app, helper = tmp_path / "ChatGPT.app", tmp_path / "Codex Computer Use.app"
-    node = app / pinned.NODE
+    helper = tmp_path / "Codex Computer Use.app"
+    monkeypatch.setattr(pinned, "OS", pinned.OS._replace(app=tmp_path / "ChatGPT.app"))
+    monkeypatch.setattr(pinned, "HELPER", helper)
+    node = pinned._resources() / pinned.OS.node
     node.parent.mkdir(parents=True)
     node.write_text(f"#!{sys.executable}\n{FAKE}")
     node.chmod(0o755)
     digests = {}
-    for path in pinned.EXECUTABLES:
+    for path in pinned.OS.executables:
         root, _, rest = path.partition("/")
-        file = (app if root == "ChatGPT.app" else helper) / rest
+        file = helper / rest if root == helper.name else tmp_path / path
         if not file.exists():
             file.parent.mkdir(parents=True, exist_ok=True)
             file.write_text(f"the pinned {file.name}")
         digests[path] = hashlib.sha256(file.read_bytes()).hexdigest()
-    monkeypatch.setattr(pinned, "APP", app)
-    monkeypatch.setattr(pinned, "HELPER", helper)
-    monkeypatch.setattr(pinned, "EXECUTABLES", digests)
+    monkeypatch.setattr(pinned, "OS", pinned.OS._replace(executables=digests))
     return pinned
+
+
+@pytest.fixture
+def windows(monkeypatch, tmp_path):
+    """The driver's module as it loads on Windows, with WindowsDriver under it."""
+    monkeypatch.delenv("AGENTENV_COMPUTER_SETTINGS", raising=False)
+    monkeypatch.setenv("SystemRoot", r"C:\Windows")
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("AGENTENV_CONTROL_TOKEN", "a-deploys-secret")
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr("agentenv_protocol.computer.driver.detect", lambda: WINDOWS)
+    monkeypatch.setitem(sys.modules, "mss", types.ModuleType("mss"))
+    monkeypatch.delitem(sys.modules, "agentenv_protocol.computer._windows", raising=False)
+    spec = importlib.util.spec_from_file_location("codex_computer_use_driver_windows", DRIVER)
+    loaded = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(loaded)
+    monkeypatch.setattr(sys, "platform", "linux")
+    return loaded
 
 
 def _driver(module, monkeypatch, **settings):
@@ -265,12 +287,13 @@ async def test_cua_repl_gets_the_apps_environment_and_none_of_the_drivers(module
 
     (env_file,) = (tmp_path / "fake").glob("env-*.json")
     env = json.loads(env_file.read_text())
-    modules = str(module.APP / module.NODE_MODULES)
+    modules = str(module._resources() / module.OS.node_modules)
     assert "AGENTENV_CONTROL_TOKEN" not in env and env["PATH"] == "/usr/bin:/bin:/usr/sbin:/sbin"
     assert env["CUA_REPL_ENABLED_SURFACES"] == "computer" and env["SKY_CUA_SERVICE_PATH"] == str(module.HELPER)
     assert env["NODE_REPL_TRUSTED_SERVICES"] == '{"sky": "@oai/sky/service"}'
     assert env["NODE_REPL_TRUSTED_CODE_PATHS"] == f"{tmp_path / '.codex'}:{modules}"
-    assert env["CODEX_HOME"] == str(tmp_path / ".codex") and env["NODE_REPL_NODE_PATH"] == str(module.APP / module.NODE)
+    assert env["CODEX_HOME"] == str(tmp_path / ".codex")
+    assert env["NODE_REPL_NODE_PATH"] == str(module._resources() / module.OS.node)
 
 
 @pytest.mark.asyncio
@@ -312,8 +335,8 @@ def test_env_toml_install_sh_and_the_driver_agree_on_the_pinned_version_and_the_
     assert download["url"].endswith(f"/ChatGPT-darwin-arm64-{pinned.VERSION}.zip")
     assert [grant["app"] for grant in macos["grants"] if "app" in grant] == [str(pinned.HELPER)]
     assert f'helper="{pinned.HELPER.name}"\n' in install and f"dest={pinned.HELPER.parent}\n" in install
-    assert pinned.APP == folder / "ChatGPT.app" and all(
-        path.startswith(("ChatGPT.app/", f"{pinned.HELPER.name}/")) for path in pinned.EXECUTABLES)
+    assert pinned.OS.app == folder / "ChatGPT.app" and all(
+        path.startswith(("ChatGPT.app/", f"{pinned.HELPER.name}/")) for path in pinned.OS.executables)
 
 
 @pytest.mark.asyncio
@@ -358,3 +381,94 @@ async def test_calls_a_session_makes_together_while_another_repl_closes_share_on
 
     pids = {call["pid"] for call in _calls(tmp_path) if call["arguments"]["code"] in ("set b", "get")}
     assert pids == {int(after.rpartition(" in ")[2])} and after.startswith("b in ")
+
+
+def test_on_windows_cua_repl_gets_the_apps_environment_with_windows_paths_and_none_of_the_drivers(windows, tmp_path):
+    env = windows._environment()
+    resources = DRIVER.parent / "ChatGPT" / "resources"
+    modules = resources / "cua_node" / "bin" / "node_modules"
+
+    assert windows.OS_NAME == "windows" and windows.OSDriver.__name__ == "WindowsDriver"
+    assert env["PATH"] == (r"C:\Windows\System32;C:\Windows;C:\Windows\System32\Wbem;"
+                           r"C:\Windows\System32\WindowsPowerShell\v1.0")
+    assert env["USERPROFILE"] == str(tmp_path) and env["SystemRoot"] == r"C:\Windows"
+    assert "AGENTENV_CONTROL_TOKEN" not in env and "HOME" not in env
+    assert env["NODE_REPL_NODE_PATH"] == str(resources / "cua_node" / "bin" / "node.exe")
+    assert env["CUA_REPL_NODE_REPL_PATH"] == str(resources / "cua_node" / "bin" / "node_repl.exe")
+    assert env["SKY_CUA_SERVICE_PATH"] == str(modules / "@oai" / "sky" / "bin" / "windows" / "codex-computer-use.exe")
+    assert env["CODEX_CLI_PATH"] == str(resources / "codex.exe")
+    assert env["NODE_REPL_TRUSTED_CODE_PATHS"].endswith(f";{modules}")
+    assert env["NODE_REPL_INSTRUCTIONS_USE_CASE_COMPUTER_USE"].endswith("on Windows through Computer Use.")
+
+
+def test_a_tools_choice_of_objects_reaches_agents_as_one_object_requiring_what_every_choice_requires(pinned):
+    code, timeout, title = {"type": "string"}, {"type": "integer"}, {"type": "string", "description": "a title"}
+    choices = {"description": "Run JavaScript.", "oneOf": [
+        {"type": "object", "properties": {"code": code, "timeout_ms": timeout}, "required": ["code"]},
+        {"type": "object", "properties": {"code": code, "title": title}, "required": ["code", "title"]}]}
+    one = {"type": "object", "properties": {"code": code}, "required": ["code"]}
+
+    assert pinned._one_object(choices) == {"description": "Run JavaScript.", "type": "object", "required": ["code"],
+                                           "properties": {"code": code, "timeout_ms": timeout, "title": title}}
+    assert pinned._one_object(one) is one
+
+
+def test_the_msix_unpacks_into_the_apps_resources_with_their_names_decoded_and_without_its_electron_code(tmp_path):
+    """An MSIX names its entries as URLs do, '@' as %40, which Windows decodes when it installs one."""
+    msix, out = tmp_path / "ChatGPT.msix", tmp_path / "ChatGPT" / "resources"
+    with zipfile.ZipFile(msix, "w") as package:
+        package.writestr("app/resources/cua_node/bin/node_modules/%40oai/cua-repl/bin/cua-repl.mjs", "the launcher")
+        package.writestr("app/resources/cua_node/bin/node_modules/%40img/a%2Bb%24.js", "a module")
+        package.writestr("app/resources/codex.exe", "codex")
+        package.writestr("app/resources/app.asar", "the app's own code")
+        package.writestr("app/ChatGPT.exe", "the app")
+        package.writestr("AppxManifest.xml", "the package's manifest")
+
+    subprocess.run([sys.executable, str(DRIVER.parent / "unpack-msix.py"), str(msix), str(out)], check=True)
+
+    assert sorted(path.relative_to(out).as_posix() for path in out.rglob("*") if path.is_file()) == [
+        "codex.exe", "cua_node/bin/node_modules/@img/a+b$.js", "cua_node/bin/node_modules/@oai/cua-repl/bin/cua-repl.mjs"]
+    assert (out / "cua_node/bin/node_modules/@oai/cua-repl/bin/cua-repl.mjs").read_text() == "the launcher"
+
+
+def test_env_toml_the_windows_install_and_the_driver_agree_on_the_pinned_msix_and_where_it_unpacks(pinned):
+    """OpenAI serves only its latest MSIX, so the pin names that link and a new build moves the sha256 and the version."""
+    folder, win = DRIVER.parent, pinned.OSES["windows"]
+    windows = tomllib.loads((folder / "env.toml").read_text())["install"]["windows"]
+    install = (folder / "install-windows.ps1").read_text()
+    unpacked = f"{win.app.name}/{win.resources}"
+
+    (download,) = windows["downloads"]
+    assert (download["url"], download["to"], download["arch"]) == (
+        "https://persistent.oaistatic.com/codex-app-prod/ChatGPT-x64.msix", "ChatGPT.msix", "amd64")
+    assert len(download["sha256"]) == 64 and windows["run"] == [{"script": "install-windows.ps1"}]
+    assert ('"$env:PREFIX\\ChatGPT.msix" "$env:PREFIX\\' + unpacked.replace("/", "\\") + '"') in install
+    assert win.app == folder / "ChatGPT" and all(path.startswith(f"{unpacked}/") for path in win.executables)
+    assert {f"{unpacked}/{path}" for path in (win.node, win.node_repl, win.service)} <= set(win.executables)
+
+
+def test_on_windows_js_runs_unsandboxed_unless_the_setting_turns_codexs_sandbox_on_and_reaches_agents_as_one_object(
+        windows, monkeypatch):
+    """Codex's sandbox on Windows refuses to start Codex Computer Use's own service (spawn EPERM)."""
+    default, sandboxed = _driver(windows, monkeypatch), _driver(windows, monkeypatch, js_sandbox=True)
+    tools = {t.tool.name: t.tool for t in default.forwarded_tools()}
+    pinned = {t["name"]: t for t in windows._manifest()["tools"]}
+
+    assert default._sandbox()["codex/sandbox-state-meta"]["permissionProfile"] == {"type": "disabled"}
+    assert sandboxed._sandbox()["codex/sandbox-state-meta"]["permissionProfile"]["type"] == "managed"
+    assert "oneOf" in pinned["js"]["inputSchema"] and "oneOf" not in tools["js"].inputSchema
+    assert {"code", "completion_summary"} <= set(tools["js"].inputSchema["properties"])
+    assert tools["js"].inputSchema["required"] == [] and set(tools) == {"js", "js_reset"}
+    assert "listWindows" in windows.OS.probe
+
+
+def test_a_windows_approval_for_an_app_run_from_a_renamed_python_is_matched_by_the_name_it_shows(pinned):
+    """BenchLab and the bench's sentinel both run as copies of pythonw.exe, which the request names; only the name it
+    shows tells them apart."""
+    meta = {"codex_approval_kind": "mcp_tool_call", "connector_id": "computer-use",
+            "tool_params": {"app": "pythonw.exe"},
+            "tool_params_display": [{"display_name": "App", "name": "app", "value": "benchlab"}]}
+
+    names = pinned._app_names("Allow Codex to use benchlab?", meta)
+    assert names == {"pythonw.exe", "benchlab"}
+    assert names & {"benchlab"} and not names & {"benchsentinel"}

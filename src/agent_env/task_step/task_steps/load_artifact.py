@@ -18,7 +18,7 @@ from agent_env.env.env import Env
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox
 from agent_env.providers.sandbox_providers.sandbox import into_container
 from agent_env.providers.sandbox_providers.sandbox_provider import reachable_url
-from agent_env.task_step.context import DeployedAgent, TaskStepContext
+from agent_env.task_step.context import DeployedAgent, StepContextError, TaskStepContext
 from agent_env.task_step.preflight import stored_env
 from agent_env.entity.refs import EntityRef
 from agent_env.entity.scopes import FieldScope
@@ -322,7 +322,7 @@ class LoadArtifactTaskStep(TaskStep):
                 continue
             ref = extract(entry)
             return {"id": ref["id"], "version": ref.get("version")} if ref else None
-        raise RuntimeError(
+        raise StepContextError(
             f"No artifact recorded by step '{step_id}'. Ensure a step that produces "
             f"one (e.g. `collect_artifacts`, `snapshot_env`) ran with that id before "
             f"this load step."
@@ -447,7 +447,7 @@ class LoadArtifactTaskStep(TaskStep):
         if self.env_id is not None:
             deployed = self._deployed_env(context)
             if deployed is None:
-                raise RuntimeError(f"Env '{self.env_id}' not found in context.deployed_envs")
+                raise StepContextError(f"Env '{self.env_id}' not found in context.deployed_envs")
 
         inputs = self._resolve_inputs(context)
         resolved_artifacts = inputs.artifacts
@@ -474,7 +474,7 @@ class LoadArtifactTaskStep(TaskStep):
                     )
             ds = next((s for s in context.deployed_sandboxes if s.sandbox_name == self.sandbox_name), None)
             if ds is None:
-                raise RuntimeError(f"Sandbox '{self.sandbox_name}' not found in context.deployed_sandboxes")
+                raise StepContextError(f"Sandbox '{self.sandbox_name}' not found in context.deployed_sandboxes")
             provider = (
                 build_sandbox_provider(ds.sandbox_type) if ds.sandbox_type else get_sandbox_provider()
             )
@@ -545,7 +545,7 @@ class LoadArtifactTaskStep(TaskStep):
                 else:
                     agent = next((a for a in context.deployed_agents if a.agent_name == self.agent_name), None)
                     if agent is None or not agent.instance_id:
-                        raise RuntimeError(f"Agent '{self.agent_name}' not found in context.deployed_agents (or missing instance_id)")
+                        raise StepContextError(f"Agent '{self.agent_name}' not found in context.deployed_agents (or missing instance_id)")
                     deployed_agent = get_a2a_agent_instance_store().get(agent.instance_id)
                     destination = (destination_path or "/tmp/file_artifacts").rstrip("/") or "/"
                     files = await A2AAgent.load_file_artifact_universe(
@@ -582,7 +582,7 @@ class LoadArtifactTaskStep(TaskStep):
                     else:
                         agent = next((a for a in context.deployed_agents if a.agent_name == self.agent_name), None)
                         if agent is None or not agent.sandbox_id:
-                            raise RuntimeError(
+                            raise StepContextError(
                                 f"Agent '{self.agent_name}' not found in context.deployed_agents (or missing sandbox_id)"
                             )
                         provider = (
@@ -641,7 +641,7 @@ class LoadArtifactTaskStep(TaskStep):
                     raise RuntimeError("env_id is required when loading a CliArtifact (for gateway_url)")
                 agent = next((a for a in context.deployed_agents if a.agent_name == self.agent_name), None)
                 if agent is None or not agent.instance_id:
-                    raise RuntimeError(f"Agent '{self.agent_name}' not found in context.deployed_agents (or missing instance_id)")
+                    raise StepContextError(f"Agent '{self.agent_name}' not found in context.deployed_agents (or missing instance_id)")
                 deployed_agent = get_a2a_agent_instance_store().get(agent.instance_id)
                 gateway_url = require_gateway_url(deployed, "Installing a CliArtifact")
                 # A local sandbox's host is this machine, which reaches the gateway as it was issued.
@@ -664,7 +664,7 @@ class LoadArtifactTaskStep(TaskStep):
             else:
                 agent = next((a for a in context.deployed_agents if a.agent_name == self.agent_name), None)
                 if agent is None or not agent.sandbox_id:
-                    raise RuntimeError(f"Agent '{self.agent_name}' not found in context.deployed_agents (or missing sandbox_id)")
+                    raise StepContextError(f"Agent '{self.agent_name}' not found in context.deployed_agents (or missing sandbox_id)")
                 provider = (
                     build_sandbox_provider(agent.sandbox_type)
                     if agent.sandbox_type

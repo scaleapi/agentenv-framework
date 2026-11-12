@@ -7,6 +7,7 @@ from pathlib import Path
 import click
 
 from agent_env.bundle.importer import BundleImport, import_eval, import_task
+from agent_env.bundle.installed import path_like
 from agent_env.bundle.parse import BundleKind
 from agent_env.bundle.register import describe_target, register_bundle
 from agent_env.bundle.requires import Declaring, UnmetRequirements, declaring_for
@@ -71,7 +72,8 @@ def _report(imported: BundleImport, folder: Path) -> None:
         click.echo(f"{title}:")
         for line in lines:
             click.echo(f"  {line}")
-    click.echo(f"Run it with: agent-env run {folder}")
+    # Spelled as a path, which `agent-env run` never reads as an installed bundle of the same name.
+    click.echo(f"Run it with: agent-env run {folder if path_like(str(folder)) else f'./{folder}'}")
 
 
 @bundle.command("register")

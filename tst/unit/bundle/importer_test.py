@@ -508,6 +508,15 @@ def test_the_cli_imports_and_says_what_it_wrote_left_out_and_floats(store):
     assert lines[-1] == f"Run it with: agent-env run {store / 'triage'}"
 
 
+def test_the_cli_spells_a_relative_folder_as_a_path_so_run_reads_it_as_that_folder(store, monkeypatch):
+    monkeypatch.chdir(store)
+
+    result = CliRunner().invoke(cli, ["bundle", "init", "triage", "--from-task", "triage"])
+
+    assert result.exit_code == 0, result.output
+    assert result.output.splitlines()[-1] == "Run it with: agent-env run ./triage"
+
+
 @pytest.mark.parametrize("args", [[], ["--from-task", "triage", "--from-eval", "e"]])
 def test_the_cli_takes_exactly_one_source(store, args):
     result = CliRunner().invoke(cli, ["bundle", "init", str(store / "x"), *args])

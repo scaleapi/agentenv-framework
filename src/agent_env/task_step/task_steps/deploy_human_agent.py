@@ -10,7 +10,7 @@ from typing import ClassVar, Optional
 
 import httpx
 
-from agent_env.task_step.context import DeployedAgent, TaskStepContext
+from agent_env.task_step.context import DeployedAgent, StepContextError, TaskStepContext
 from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
@@ -60,7 +60,7 @@ class DeployHumanAgentTaskStep(TaskStep):
                 "only one human agent is allowed per task"
             )
         if any(a.agent_name == self.agent_name for a in context.deployed_agents):
-            raise RuntimeError(f"Agent with name '{self.agent_name}' is already deployed")
+            raise StepContextError(f"Agent with name '{self.agent_name}' is already deployed")
 
         if self.a2a_url:
             url = self.a2a_url

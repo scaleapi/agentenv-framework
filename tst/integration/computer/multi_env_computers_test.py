@@ -17,6 +17,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from agentenv_protocol import client as protocol_v1
 from agentenv_protocol.tool_access import (DISABLE, DISABLE_TOOL_EXTENSION_URI, ENABLE, ENABLE_TOOL_EXTENSION_URI,
                                            WILDCARD)
 from agentenv_protocol.tool_context import DEFAULT_ROLE
@@ -34,6 +35,7 @@ from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.envs.playwright_mcp import PLAYWRIGHT_MCP_ENVIRONMENT_NAME
 from agent_env.env.envs.website import WebsiteEnv
+from agent_env.env.legacy_protocol import card_servers
 from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
 from agent_env.store.routing import namespace_routing
@@ -43,6 +45,7 @@ from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
 from agent_env.task_step.task_steps.snapshot_env import SnapshotEnvTaskStep
+from tst.util import local_sandboxes
 from tst.integration.env.envs.server_env_local_test import _items_artifact, _put_items_image
 from tst.integration.store.local_parallel_deploy_test import _docker, _seed_bootstrap_envs
 
@@ -163,13 +166,18 @@ def _containers(sandbox_id: str) -> list[str]:
     return _docker("ps", "-aq", "--filter", f"name=agent-{sandbox_id}").stdout.split()
 
 
-def _ours() -> set[str]:
-    """The containers local sandboxes run: computers' and gateway stacks'."""
-    return {name for name in _docker("ps", "-a", "--format", "{{.Names}}").stdout.split() if name.startswith("agent-")}
+@pytest.fixture
+def made(monkeypatch) -> list[str]:
+    return local_sandboxes.recorded_sandbox_ids(monkeypatch)
 
 
-def _gateway(deployed) -> str:
-    return next(name for name in _ours() if name.endswith("-gateway-1") and deployed.sandbox_id.removeprefix("local-") in name)
+def _containers_made(made: list[str]) -> set[str]:
+    return local_sandboxes.container_names_carrying(made)
+
+
+def _gateway(deployed, made: list[str]) -> str:
+    return next(name for name in _containers_made(made)
+                if name.endswith("-gateway-1") and deployed.sandbox_id.removeprefix("local-") in name)
 
 
 @pytest.mark.asyncio
@@ -185,6 +193,10 @@ async def test_a_computer_in_a_multi_env_is_served_through_its_gateway_under_its
             [deployed] = (await step.execute(context)).deployed_envs
             computer = deployed.child_envs["desktop"]
             listed, shot = await _tools(deployed)
+            stated = {child.environment_name: child.name for child in protocol_v1.children(deployed.environment_card)}
+            site = deployed.child_env("shop", mcp=False)
+            servers = {(server.environment_name, server.mcp)
+                       for server in card_servers(deployed.environment_card, deployed.environment_url)}
             async with httpx.AsyncClient(timeout=30) as client:
                 card = (await client.get(f"{deployed.gateway_url}/svc/desktop{WELL_KNOWN_PATH}")).json()
             # Load, snapshot and reset reach the computer through the multi env, beside its MCP server.
@@ -230,6 +242,13 @@ async def test_a_computer_in_a_multi_env_is_served_through_its_gateway_under_its
     assert json.dumps(deployed.child_envs)  # the record stores as JSON
     assert note == "from the universe" and "snap-x" in listed_items
     assert {"items", "desktop"} <= set(snapshot) and snapshot["desktop"]["Documents/note.txt"] == b"from the universe"
+    # The gateway states each child's environment_name, which lookups, servers and snapshots go by: the shop
+    # website's card is named webitems.
+    assert {name: stated.get(name) for name in ("items", "shop", "desktop")} == {
+        "items": "items", "shop": "webitems", "desktop": "desktop"}, stated
+    assert site is not None and site.url.startswith("/svc/shop/"), site
+    assert {("items", True), ("shop", False)} <= servers and not any(name == "webitems" for name, _ in servers), servers
+    assert "shop" in snapshot and "webitems" not in snapshot, sorted(snapshot)
     assert after_reset == "gone" and all(reset_answers.values()), reset_answers
     assert computer["metadata"]["computer"]["sites"]["names"]["routes"] == {"shop": ["shop.test"]}
     assert routed == routed_after_reset == "200"
@@ -238,13 +257,12 @@ async def test_a_computer_in_a_multi_env_is_served_through_its_gateway_under_its
 
 
 @pytest.mark.asyncio
-async def test_two_computers_keep_serving_through_restarts_and_a_failed_redeploy_and_close_ends_them(desktop, items,
+async def test_two_computers_keep_serving_through_restarts_and_a_failed_redeploy_and_close_ends_them(desktop, items, made,
                                                                                                      monkeypatch):
     """One deployment, to keep the tier's time: two computers side by side, the desktop's container killed and started
     again, the gateway restarted, then a redeploy of the same env object whose gateway fails, which leaves this
     deployment as it was; close() ends it all."""
     every = ["list_items", "desktop_computer_screenshot", "laptop_computer_screenshot"]
-    before = _ours()
     with namespace_routing():
         laptop = ComputerEnv.put(id=f"{desktop.id}-laptop", computer=desktop.computer, driver=desktop.driver,
                                  environment_name="laptop")
@@ -259,10 +277,10 @@ async def test_two_computers_keep_serving_through_restarts_and_a_failed_redeploy
             killed = await _answers(deployed, every, until=False)
             _docker("start", desktop_box)
             started = await _answers(deployed, every)
-            _docker("restart", _gateway(deployed))
+            _docker("restart", _gateway(deployed, made))
             restarted = await _answers(deployed, every)
 
-            deployed_before = _ours()
+            deployed_before = _containers_made(made)
             real = EnvironmentGatewayProvider._compose_up
 
             async def no_gateway(self, sandbox, args=""):
@@ -275,7 +293,7 @@ async def test_two_computers_keep_serving_through_restarts_and_a_failed_redeploy
                 with pytest.raises(RuntimeError, match="the gateway didn't start"):
                     await env.deploy(sandbox_type="local", ttl_seconds=900,
                                      child_envs={"desktop": CONTAINER, "laptop": CONTAINER})
-            after_failure = _ours()
+            after_failure = _containers_made(made)
             still = await _answers(deployed, every)
             kept = [computer._deployed.sandbox_id for computer in env.computer_envs]
         finally:
@@ -286,15 +304,15 @@ async def test_two_computers_keep_serving_through_restarts_and_a_failed_redeploy
     assert all(started.values()) and all(restarted.values()), (started, restarted)
     assert after_failure == deployed_before and all(still.values()), (after_failure - deployed_before, still)
     assert kept == [deployed.child_envs[name]["sandbox_id"] for name in ("desktop", "laptop")]
-    assert _ours() == before
+    assert _containers_made(made) == set()
 
 
 @pytest.mark.asyncio
-async def test_a_computer_that_fails_mid_deploy_fails_the_deploy_and_leaves_nothing_up(desktop, items, monkeypatch):
+async def test_a_computer_that_fails_mid_deploy_fails_the_deploy_and_leaves_nothing_up(desktop, items, made,
+                                                                                        monkeypatch):
     async def refuse(self, deployed):
         raise RuntimeError("the computer's tools couldn't be applied")
 
-    before = _ours()
     monkeypatch.setattr(ComputerEnv, "_give_tools", refuse)
     with namespace_routing():
         office = _multi(items, Env.get(desktop.id))
@@ -303,7 +321,7 @@ async def test_a_computer_that_fails_mid_deploy_fails_the_deploy_and_leaves_noth
             await DeployEnvTaskStep(id="office", version=None, env_id=office.id, sandbox_type="local", ttl_seconds=600,
                                     child_envs={"desktop": CONTAINER}).execute(context)
 
-    assert context.deployed_envs == [] and _ours() == before
+    assert context.deployed_envs == [] and _containers_made(made) == set()
 
 
 @pytest.mark.asyncio

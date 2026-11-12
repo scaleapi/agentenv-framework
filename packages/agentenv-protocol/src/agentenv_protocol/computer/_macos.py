@@ -14,6 +14,7 @@ import time
 from contextlib import contextmanager
 from typing import Any, Callable, Iterator
 
+from ._desktop import CLICK_GAP_S, DRAG_STEP_PX, MAX_CLICK_COUNT, MAX_DRAG_POINTS
 from .driver import ComputerDriverEnvironment
 from .errors import DeliveryFailed, DeviceUnavailable, Unsupported
 from .keys import PRINTABLE_KEYS
@@ -59,10 +60,6 @@ MOVED = 5
 SETTLE_S = 0.2
 #: How long a click holds its button down, as a hand does: a press released at once is lost now and then.
 CLICK_HOLD_S = 0.03
-#: The pause between the presses of a double or triple click.
-CLICK_GAP_S = 0.04
-#: How far apart a drag's pointer moves are, in pixels.
-DRAG_STEP_PX = 20
 #: The pause between a scroll's wheel notches, as a wheel turned by hand has: notches posted back to back reach an app
 #: as fewer.
 SCROLL_GAP_S = 0.05
@@ -81,8 +78,8 @@ class MacOSDriver(ComputerDriverEnvironment):
     released."""
 
     buttons = ("left", "right", "middle")
-    max_click_count = 3
-    max_drag_points = 50
+    max_click_count = MAX_CLICK_COUNT
+    max_drag_points = MAX_DRAG_POINTS
     keys = (*MODIFIERS, *NAMED, *PRINTABLE_KEYS)
 
     def __init__(self, settings: ComputerSettings | None = None, platform: Platform | None = None) -> None:
