@@ -6,6 +6,7 @@ Start Center first; every LibreOffice launcher on the computer, those that open 
 through ``open.py``, so its server starts every copy and a load or a reset can stop it. Its data is its profile, which
 the image has none of, so each deploy and each reset starts with a clean one, under the same defaults."""
 import asyncio
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -20,6 +21,8 @@ SOFFICE = "/usr/lib/libreoffice/program/soffice"
 #: Every LibreOffice main window's WM_CLASS instance, the Start Center's and each document's; its dialogs are soffice's.
 WINDOW = {"instance": "libreoffice"}
 PROFILE = ".config/libreoffice"
+#: Where ``open.py`` leaves what it opens for its server's launch, beside the server.
+OPENS = Path(".agentenv", "opens")
 #: Where its defaults go: the first layer of its configuration on Debian and Ubuntu, read before the user's profile.
 REGISTRY = Path("/etc/libreoffice/registry")
 #: Its own launchers, and those that take their place: a desktop entry here has precedence over one of the same name in
@@ -31,16 +34,26 @@ DESKTOP_ENTRIES, OVERRIDES = Path("/usr/share/applications"), Path("/usr/local/s
 @linux(packages=Packages(apt=PACKAGES), paths=[PROFILE], skill="SKILL.md",
        launch=Launch(at="demand", command=[SOFFICE, "--nologo"], window=WINDOW, ready=Ready(window=True)))
 class LibreOffice(ComputerAppEnvironment):
-    """A launch while it runs goes to the copy that runs, as one of LibreOffice's own does, which opens no window while
-    a document is open: a second copy its server started would only hand it to the first and exit, leaving its server
-    with no copy it knows."""
+    """A launch while it runs goes to the copy that runs: what waits in ``OPENS``, oldest first, or with nothing
+    waiting, a launch as one of LibreOffice's own, which opens no window while a document is open. A second copy its
+    server started would only hand it to the first and exit, leaving its server with no copy it knows; and handed on in
+    its server's launch, it's handed on in the turn a load or a reset takes too, so neither stops that copy in
+    between."""
 
     def _launch_running(self):
         return self._hand_on
 
     async def _hand_on(self) -> None:
-        handed = await asyncio.create_subprocess_exec(SOFFICE, "--nologo")
-        await handed.wait()
+        calls = []
+        for request in sorted(OPENS.glob("*.json")):
+            try:
+                calls += json.loads(request.read_text(encoding="utf-8"))
+                request.unlink()
+            except FileNotFoundError:
+                continue
+        for arguments in calls or [[]]:
+            handed = await asyncio.create_subprocess_exec(SOFFICE, "--nologo", *arguments)
+            await handed.wait()
 
     @install_step(scope="system", os="linux")
     def configure(self) -> None:

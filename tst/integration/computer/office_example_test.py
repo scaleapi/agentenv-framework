@@ -1,8 +1,8 @@
 """The shipped office example: its check, run against a computer of its desktop, says each file isn't there before
-any is, finds a deck with no animation unanimated, and passes the memo and deck LibreOffice saves in Office formats,
-converted headless from text and from a flat ODP whose second slide's list enters with an animation; and an agent
-given LibreOffice's skill writes both through the computer_* tools under a recording. Needs Docker and the local
-registry; the agent's task, a model endpoint too."""
+any is, fails the animation of a deck whose list doesn't enter, with no animation or with its title's alone, and passes
+the memo and deck LibreOffice saves in Office formats, converted headless from text and from a flat ODP whose second
+slide's list enters with an animation; and an agent given LibreOffice's skill writes both through the computer_* tools
+under a recording. Needs Docker and the local registry; the agent's task, a model endpoint too."""
 
 import importlib.util
 import re
@@ -41,8 +41,8 @@ DECK = """<?xml version="1.0" encoding="UTF-8"?>
     <draw:text-box><text:p>Quarterly Plan</text:p></draw:text-box></draw:frame>
   </draw:page>
   <draw:page draw:name="page2">
-   <draw:frame presentation:class="title" svg:x="2cm" svg:y="2cm" svg:width="24cm" svg:height="3cm">
-    <draw:text-box><text:p>Next Steps</text:p></draw:text-box></draw:frame>
+   <draw:frame presentation:class="title" draw:id="heading" xml:id="heading" svg:x="2cm" svg:y="2cm" svg:width="24cm"
+    svg:height="3cm"><draw:text-box><text:p>Next Steps</text:p></draw:text-box></draw:frame>
    <draw:frame presentation:class="outline" draw:id="steps" xml:id="steps" svg:x="2cm" svg:y="6cm" svg:width="24cm"
     svg:height="10cm"><draw:text-box><text:list>
      <text:list-item><text:p>Hire</text:p></text:list-item><text:list-item><text:p>Ship</text:p></text:list-item>
@@ -58,6 +58,8 @@ DECK = """<?xml version="1.0" encoding="UTF-8"?>
  </office:presentation></office:body>
 </office:document>
 """
+#: The same deck with its second slide's title entering instead of its list.
+TITLE_ANIMATED = DECK.replace('smil:targetElement="steps"', 'smil:targetElement="heading"')
 UNANIMATED = re.sub(r'<anim:par presentation:node-type="timing-root">.*?</anim:seq></anim:par>', "", DECK, flags=re.S)
 WRITE = ("import pathlib, sys; path = pathlib.Path(sys.argv[1]); path.parent.mkdir(parents=True, exist_ok=True); "
          "path.write_text(sys.argv[2])")
@@ -79,6 +81,9 @@ async def test_the_check_names_what_isnt_there_or_isnt_animated_and_passes_what_
                 await _write(deployed, "/tmp/office/quarterly-plan.fodp", UNANIMATED)
                 await _run(deployed, ["sh", "-c", CONVERT])
                 unanimated = await verify(f"{deployed.environment_url}/mcp", deployed.environment_url)
+                await _write(deployed, "/tmp/office/quarterly-plan.fodp", TITLE_ANIMATED)
+                await _run(deployed, ["sh", "-c", CONVERT])
+                title_animated = await verify(f"{deployed.environment_url}/mcp", deployed.environment_url)
                 await _write(deployed, "/tmp/office/quarterly-plan.fodp", DECK)
                 await _run(deployed, ["sh", "-c", CONVERT])
                 saved = await verify(f"{deployed.environment_url}/mcp", deployed.environment_url)
@@ -90,6 +95,8 @@ async def test_the_check_names_what_isnt_there_or_isnt_animated_and_passes_what_
     assert "quarterly-plan.docx isn't there" in missing[0]["description"], missing
     assert {result["id"]: result["result"] for result in unanimated} == {"memo": True, "slides": True,
                                                                          "animation": False}, unanimated
+    assert {result["id"]: result["result"] for result in title_animated} == {"memo": True, "slides": True,
+                                                                             "animation": False}, title_animated
     assert all(result["result"] for result in saved), saved
     assert not report.failed
 
