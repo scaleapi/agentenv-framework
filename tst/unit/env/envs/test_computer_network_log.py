@@ -82,9 +82,10 @@ async def _over_tls(port, issued, request: bytes):
 
 
 async def _ended(path, timeout_s: float = 5.0) -> None:
-    """Until every entry in the log at ``path`` has ended, as a connection's does once both its ends have closed."""
+    """Until the log at ``path`` has an entry and every entry in it has ended, as a connection's does once both its
+    ends have closed."""
     for _ in range(int(timeout_s / 0.02)):
-        if not any("_open" in entry for entry in _entries(path)):
+        if (entries := _entries(path)) and not any("_open" in entry for entry in entries):
             return
         await asyncio.sleep(0.02)
 

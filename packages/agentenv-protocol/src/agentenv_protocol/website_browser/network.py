@@ -129,7 +129,7 @@ def har(lines: list[dict]) -> dict:
     for key, record in opened.items():
         try:
             entries.append(_entry(record, ended.get(key)))
-        except (KeyError, TypeError, ValueError, AttributeError, IndexError):
+        except (KeyError, TypeError, ValueError, AttributeError, IndexError, OverflowError):
             unreadable += 1
     entries.sort(key=lambda entry: entry["startedDateTime"])
     log = {"version": "1.2", "creator": {"name": "agentenv", "version": _version()}, "entries": entries}
@@ -341,10 +341,10 @@ def _http_date(text: str) -> Optional[str]:
     """An HTTP date, as a cookie's ``Expires`` has it, in ISO 8601 as HAR wants; None for one that doesn't parse."""
     try:
         moment = parsedate_to_datetime(text)
-    except (TypeError, ValueError, IndexError):
+        moment = moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+        return moment.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    except (TypeError, ValueError, IndexError, OverflowError):
         return None
-    moment = moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
-    return moment.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _ms(start: Optional[str], end: Optional[str]) -> float:

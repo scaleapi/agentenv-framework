@@ -320,12 +320,12 @@ def test_a_line_that_cant_be_an_entry_is_left_out_and_counted_and_the_rest_expor
 
 def test_a_cookies_expiry_is_iso_8601_and_one_that_doesnt_parse_is_left_out():
     response = _ok([["Set-Cookie", "a=1; Expires=Wed, 09 Jun 2027 10:18:14 GMT"],
-                    ["Set-Cookie", "b=2; Expires=someday"]])
+                    ["Set-Cookie", "b=2; Expires=someday"], ["Set-Cookie", "c=3; Expires=Fri, 31 Dec 9999 23:59:59 -0100"]])
 
     [entry] = har(_exchange("1-1", _get(), response))["log"]["entries"]
 
-    first, second = entry["response"]["cookies"]
-    assert first["expires"] == "2027-06-09T10:18:14.000Z" and "expires" not in second
+    first, second, third = entry["response"]["cookies"]
+    assert first["expires"] == "2027-06-09T10:18:14.000Z" and "expires" not in second and "expires" not in third
 
 
 def test_an_answer_the_proxy_couldnt_read_says_so():
