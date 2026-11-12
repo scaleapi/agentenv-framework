@@ -106,10 +106,10 @@ class Contexts:
         """The lease ``label``: the one leased under it before, as a retried step finds it, else a new context, its
         downloads going to its own folder. A task's label is checked; one ``made_by`` an agent may start ``agent-``,
         as a load of a snapshot restores such leases."""
-        if label not in self.leases and (problem := label_problem(label, by_task=made_by == TASK)):
-            raise InvalidArgument(problem)
         async with self._lock:
             if (lease := self.leases.get(label)) is None:
+                if problem := label_problem(label, by_task=made_by == TASK):
+                    raise InvalidArgument(problem)
                 context_id = (await self.devtools.call("Target.createBrowserContext", {"disposeOnDetach": False}))[
                     "browserContextId"]
                 lease = self._record(Lease(label, context_id, made_by))

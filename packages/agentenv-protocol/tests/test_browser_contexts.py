@@ -272,6 +272,21 @@ async def test_a_load_into_an_agents_lease_finds_it_though_a_task_couldnt_lease_
 
 
 @pytest.mark.asyncio
+async def test_a_load_waiting_on_an_agents_lease_that_ends_meanwhile_cant_lease_its_label_as_the_tasks(browser_home):
+    _, _, contexts = _contexts(browser_home)
+    contexts.made_by_agent("ada", "X1")
+
+    async with contexts._lock:
+        waiting = asyncio.ensure_future(contexts.lease("agent-ada-1"))
+        await asyncio.sleep(0)
+        contexts.disposed("X1")
+    with pytest.raises(InvalidArgument, match="names a context an agent made"):
+        await waiting
+
+    assert contexts.get("agent-ada-1") is None
+
+
+@pytest.mark.asyncio
 async def test_a_context_made_unseen_keeps_the_origins_its_pages_loaded_before_it_was_found(browser_home):
     devtools, control, contexts = _contexts(browser_home, {
         "Target.getBrowserContexts": {"browserContextIds": ["X9"]}})
