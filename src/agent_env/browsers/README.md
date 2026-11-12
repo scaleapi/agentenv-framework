@@ -29,6 +29,11 @@ and pixel action an agent takes, and an event for each tab opened, navigated or 
 taken out (`agentenv_protocol.website_browser.log`); `browser/v1` `log` reads it and `data/get` exports it as
 `browser-log.jsonl`. It lasts the computer's boot: `reset_env` boots the computer afresh with a new one, so a task that
 needs the log before a reset takes it first with `snapshot_env`.
+Its proxy keeps its network log (`agentenv_protocol.website_browser.network`), which `browser/v1` `network` reads and
+`data/get` exports as HAR 1.2, `network.har`, the file a network grader such as WebArena-Verified's reads: routing
+sites, the shared site proxy's, `/etc/agentenv/sites/network.jsonl`, each exchange whole, a site's sign-in headers
+taken out; else the base's stand-in's, `/var/log/agentenv/network.jsonl`, each connection, since it decrypts none.
+Like its log, it lasts the computer's boot.
 
 A task changes a browser's state with the steps in `agent_env.task_step.task_steps.browser`, each a call to one
 `browser/v1` operation on the browser in the env `env_id`, the one `browser` names when the env has several:

@@ -35,7 +35,7 @@ import httpx
 from agentenv_protocol import client as protocol_client
 from agentenv_protocol.website import WEBSITE_EXTENSION_URI as WEBSITE
 from agentenv_protocol.website import WEBSITE_LIVE_PARAM
-from agentenv_protocol.website_browser import SITE_PROXY_ENV
+from agentenv_protocol.website_browser import NETWORK_LOG_ENV, SITE_PROXY_ENV
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -64,6 +64,9 @@ FORWARD_PROXY_PORT = 3129
 FORWARD_PROXY = f"http://127.0.0.1:{FORWARD_PROXY_PORT}"
 ALONE_DISPLAY = "none"
 LOG = FOLDER / "site-proxy.log"
+#: The network log a browser alone's site proxy writes, in the folder root keeps, so the session user can read it and
+#: can't change or replace it.
+NETWORK_LOG = FOLDER / "network.jsonl"
 SYNTHETIC, ALLOWLIST = "synthetic", "allowlist"
 RANKS = (SYNTHETIC, ALLOWLIST)
 VALID_MARGIN = timedelta(days=1)
@@ -298,9 +301,10 @@ def trust_environment(os_type: str, sites: list[Site], *, later: bool = False) -
 
 
 def browser_environment(display: str) -> dict[str, str]:
-    """For a computer routing sites, the variable naming the forward port to a browser alone, which runs on a computer
-    with no display; none on one with a display, whose apps reach the sites by name on the transparent listeners."""
-    return {SITE_PROXY_ENV: FORWARD_PROXY} if display == ALONE_DISPLAY else {}
+    """For a computer routing sites, the variables naming the forward port and its network log to a browser alone,
+    which runs on a computer with no display; none on one with a display, whose apps reach the sites by name on the
+    transparent listeners."""
+    return {SITE_PROXY_ENV: FORWARD_PROXY, NETWORK_LOG_ENV: str(NETWORK_LOG)} if display == ALONE_DISPLAY else {}
 
 
 def proxy_config(table: SiteTable, issued: Issued, *, user: Optional[str], os_type: str, forward_port: bool,
@@ -309,7 +313,7 @@ def proxy_config(table: SiteTable, issued: Issued, *, user: Optional[str], os_ty
     the variables naming them, which its profile script sets as the computer's boot environment does, each route with
     its certificate and key, and the headers its gateway's sandbox provider asks requests to it to carry
     (``upstream_headers``, by site), which the proxy sends upstream alone, and with ``forward_port``, for a browser
-    alone, the forward port and the live sites' hosts it takes straight to them (``direct``)."""
+    alone, the forward port, the live sites' hosts it takes straight to them (``direct``) and its network log."""
     sites = []
     for route in table.routes:
         site = {"name": route.site, "upstream": route.url, "domains": list(route.domains)}
@@ -320,7 +324,8 @@ def proxy_config(table: SiteTable, issued: Issued, *, user: Optional[str], os_ty
         sites.append(site)
     return {"user": user, "ca_pem": issued.ca_pem, "sites": sites, "log": str(LOG),
             "trust_files": trust_files(os_type), "trust_environment": dict(TRUST_ENVIRONMENTS[os_type]),
-            **({"proxy_port": FORWARD_PROXY_PORT, "direct": list(direct)} if forward_port else {})}
+            **({"proxy_port": FORWARD_PROXY_PORT, "direct": list(direct), "network_log": str(NETWORK_LOG)}
+               if forward_port else {})}
 
 
 def reachable_problem(policy: Optional[NetworkPolicy], routes: list[Route]) -> Optional[str]:

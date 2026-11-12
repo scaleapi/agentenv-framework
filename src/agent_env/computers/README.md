@@ -18,7 +18,9 @@ is the browser's `window` setting. supervisord runs every program as the session
 stand-in site proxy on `127.0.0.1:3128`, the browser's only route out when the computer
 routes no sites. It forwards a request or a `CONNECT` tunnel to any host, never decrypting a tunnel and refusing
 nothing: the sandbox's network policy is all that limits it. Every line it writes to `/var/log/agentenv/site-proxy.log`
-is JSON, one per connection and one per connection that fails, in the same shapes as the shared site proxy's. A computer that routes sites names the shared site proxy's forward port,
+is JSON, one per connection and one per connection that fails, in the same shapes as the shared site proxy's. It
+keeps the browser's network log too, in `/var/log/agentenv/network.jsonl`, which `AGENTENV_NETWORK_LOG` names: an
+`open` and an `end` line for each connection, numbered, in the shared site proxy's shapes. A computer that routes sites names the shared site proxy's forward port,
 `127.0.0.1:3129`, to the browser instead: it serves the run's sites, refuses every other host and runs out of the agent's reach. It has a
 container form only. Name it from another bundle as `ubuntu-24.04-browser`, or by its id,
 `@local/agentenv-framework/computers/ubuntu-24.04-browser`. It was `ubuntu-24.04-headless`, a name nothing resolves
