@@ -16,7 +16,7 @@ from pydantic import BaseModel, ValidationError
 
 from ..computer.errors import InvalidArgument
 from ..transfers import NamespaceUploader, WriteNamespaceGrant
-from .log import BrowserLog
+from .log import ERROR_CHARS, BrowserLog
 
 if TYPE_CHECKING:
     from .control import BrowserControl
@@ -40,6 +40,10 @@ AGENTS = ("cdp", "mcp")
 CONTENT_TYPES = {"jpg": "image/jpeg", "png": "image/png"}
 #: How long the recordings a server ended are kept for an end that comes again.
 KEEP_ENDED = 64
+#: How long an end waits for the entries still in flight to be written, so its log covers them, and how often it
+#: looks again.
+LOG_WAIT_S = 10.0
+LOG_POLL_S = 0.2
 
 
 class RecordedFrame(BaseModel):
@@ -60,7 +64,8 @@ class RecordedFrame(BaseModel):
 
 class BrowserRecordingManifest(BaseModel):
     """A recording as it ended: its frames, and its log's lines, entries ``log_after`` + 1 to ``log_last``, as
-    ``log``, the actions and tab events between its start and its end."""
+    ``log``, the actions and tab events between its start and its end, with any of those entries it doesn't hold, still
+    unwritten or unreadable at its end, in ``log_missing``."""
 
     recording_id: str
     started_at: str
@@ -73,6 +78,7 @@ class BrowserRecordingManifest(BaseModel):
     log_after: int = 0
     log_last: int = 0
     log_uploaded: bool = False
+    log_missing: list[int] = []
 
     @property
     def missing_frames(self) -> int:
@@ -181,7 +187,7 @@ class _Recording:
                 await self.uploader.upload(self._path(frame.path), base64.b64decode(data))
                 frame.uploaded = True
             except Exception as e:
-                frame.error = f"{type(e).__name__}: {e}"[:300]
+                frame.error = f"{type(e).__name__}: {e}"[:ERROR_CHARS]
                 logger.warning("browser recording %s: frame %d: %s", self.manifest.recording_id, index, frame.error)
 
     async def end(self, grant: Optional[WriteNamespaceGrant], reason: str) -> dict:
@@ -197,15 +203,16 @@ class _Recording:
             await self.take("last")
         manifest = self.manifest
         manifest.log_last = self.recordings.log.next_seq - 1
-        lines = await self.recordings.log.read_async(manifest.log_after, limit=1 << 30)
-        text = "".join(json.dumps(line, default=str) + "\n" for line in lines["lines"]
-                       if line.get("seq", 0) <= manifest.log_last)
+        lines = await self._log_lines()
+        manifest.log_missing = sorted(set(range(manifest.log_after + 1, manifest.log_last + 1))
+                                      - {line.get("seq") for line in lines})
+        text = "".join(json.dumps(line, default=str) + "\n" for line in lines)
         manifest.log = LOG
         try:
             await self.uploader.upload(self._path(LOG), text.encode())
             manifest.log_uploaded = True
         except Exception as e:
-            manifest.error = f"the log didn't upload: {type(e).__name__}: {e}"[:300]
+            manifest.error = f"the log didn't upload: {type(e).__name__}: {e}"[:ERROR_CHARS]
         manifest.ended_at, manifest.ended_by = _iso(), reason
         wire = manifest.model_dump(mode="json")
         try:
@@ -213,6 +220,18 @@ class _Recording:
         except Exception as e:
             logger.warning("browser recording %s: its manifest didn't upload: %s", manifest.recording_id, e)
         return wire
+
+    async def _log_lines(self) -> list[dict]:
+        """The log's lines from the recording's start to its end, once every one of them is written, or what's
+        written of them after ``LOG_WAIT_S``."""
+        manifest, log = self.manifest, self.recordings.log
+        deadline = asyncio.get_running_loop().time() + LOG_WAIT_S
+        while True:
+            lines = [line for line in (await log.read_async(manifest.log_after, limit=1 << 30))["lines"]
+                     if line.get("seq", 0) <= manifest.log_last]
+            if len(lines) >= manifest.log_last - manifest.log_after or asyncio.get_running_loop().time() >= deadline:
+                return lines
+            await asyncio.sleep(LOG_POLL_S)
 
     def _path(self, name: str) -> str:
         return f"{self.manifest.recording_id}/{name}"

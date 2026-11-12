@@ -120,12 +120,14 @@ class EndBrowserRecordingTaskStep(TaskStep):
 
 
 def incomplete(entry: dict) -> Optional[str]:
-    """What's missing from the recording ``entry`` records: that it didn't end, its log, or its frames; None for a
-    complete one."""
+    """What's missing from the recording ``entry`` records: that it didn't end, its log or entries of it, or its
+    frames; None for a complete one."""
     if entry.get("state") != "ended":
         return f"it didn't end: {entry.get('error')}"
     if not entry.get("log_uploaded"):
         return f"its log didn't upload: {entry.get('error')}"
+    if entry.get("log_missing"):
+        return f"its log is missing {entry['log_missing']} of the entries between its start and its end"
     if entry.get("frames") and entry.get("missing_frames"):
         return f"{entry['missing_frames']} of its {entry['frames_taken'] + entry['missing_frames']} frames are missing"
     return None
@@ -199,7 +201,8 @@ def _registered(context: TaskStepContext, name: str, entry: dict, manifest: Brow
         return
     taken = [frame for frame in manifest.frames if frame.uploaded]
     entry.update(state="ended", ended_by=manifest.ended_by, frames_taken=len(taken),
-                 missing_frames=manifest.missing_frames, log_uploaded=manifest.log_uploaded)
+                 missing_frames=manifest.missing_frames, log_uploaded=manifest.log_uploaded,
+                 log_missing=len(manifest.log_missing))
     if manifest.error:
         entry["error"] = manifest.error
     logger.info("browser recording %s: %d frames, %d missing, ended by %s", name, len(taken), manifest.missing_frames,

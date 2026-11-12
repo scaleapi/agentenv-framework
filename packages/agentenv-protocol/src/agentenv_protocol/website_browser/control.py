@@ -101,6 +101,9 @@ class BrowserControl:
         #: Each tab's latest capture, which shows while a dialog keeps its page from painting; and, by session, what
         #: input sent there waits on to learn a dialog opened.
         self._shots: dict[str, str] = {}
+        #: Each tab's latest frame, the image and its format, which a frame shows again while a dialog keeps it from
+        #: painting.
+        self._frames: dict[str, tuple[str, str]] = {}
         self._dialog_opened: dict[str, asyncio.Event] = {}
         self._pinned: dict[str, asyncio.Event] = {}
         self._tasks: set[asyncio.Future] = set()
@@ -620,9 +623,10 @@ class BrowserControl:
 
     async def frame(self, target: Optional[str], load_wait_s: float) -> tuple[str, str, Optional[str], Optional[str]]:
         """A frame of the tab ``target``, else, for none or one that's gone, of the active tab: once its page has loaded,
-        waiting up to ``load_wait_s``, a JPEG of it as it shows, or, with a dialog keeping it from painting, the PNG it
-        last took. The image base64, its format and the tab and its URL; DeviceUnavailable with no tab open, or for one
-        that paints nothing in time."""
+        waiting up to ``load_wait_s``, a JPEG of it as it shows, or, with a dialog keeping it from painting, the frame it
+        last took, else its last capture, a PNG; a tab that closes while its page loads is the active tab's. The image
+        base64, its format and the tab and its URL; DeviceUnavailable with no tab open, or for one that paints nothing
+        in time."""
         session = next((s for s, t in self._sessions.items() if t == target), None) if target else None
         if session is None:
             session = await self.active_session()
@@ -630,10 +634,15 @@ class BrowserControl:
         deadline = asyncio.get_running_loop().time() + load_wait_s
         while target in self._page_loading and asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(LOAD_POLL_S)
+        if session not in self._sessions:
+            session = await self.active_session()
+            target = self._sessions[session]
         if session in self._open_dialogs:
-            if (shot := self._shots.get(target)) is None:
+            if (earlier := self._frames.get(target)) is None and (shot := self._shots.get(target)) is not None:
+                earlier = shot, "png"
+            if earlier is None:
                 raise DeviceUnavailable("a dialog keeps the tab from painting and it had no capture before it")
-            return shot, "png", target, self.url_of(target)
+            return *earlier, target, self.url_of(target)
         try:
             shot = await self.devtools.call("Page.captureScreenshot", {
                 "format": "jpeg", "quality": FRAME_QUALITY, "optimizeForSpeed": True}, session_id=session,
@@ -642,6 +651,7 @@ class BrowserControl:
             raise DeviceUnavailable(f"the tab painted nothing within {CAPTURE_TIMEOUT_S:g} s") from None
         except (ConnectionError, DevToolsError) as e:
             raise DeviceUnavailable(f"the tab couldn't be captured: {e}") from None
+        self._frames[target] = shot["data"], "jpg"
         return shot["data"], "jpg", target, self.url_of(target)
 
     async def _capture(self, session: str) -> Optional[str]:
@@ -840,6 +850,7 @@ class BrowserControl:
     def _on_Target_detachedFromTarget(self, params: dict, session: Optional[str]) -> None:
         if (target := self._sessions.pop(params["sessionId"], None)) is not None:
             self._shots.pop(target, None)
+            self._frames.pop(target, None)
             self._pinned.pop(target, None)
             self._page_loading.discard(target)
         self._choosers.pop(params["sessionId"], None)

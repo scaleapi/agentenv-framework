@@ -110,6 +110,22 @@ async def test_a_burst_still_settling_at_the_end_gets_its_frame_before_the_last(
 
 
 @pytest.mark.asyncio
+async def test_an_end_waits_for_entries_in_flight_and_lists_any_still_unwritten_as_missing(recorded, monkeypatch):
+    log, control, uploads, recordings = recorded
+    monkeypatch.setattr(browser_recording, "LOG_WAIT_S", 0.3)
+    started = await recordings.start("run-1:record", _grant(), frames=False)
+    finishing = log.begin({"via": "cdp", "who": "ada", "method": "Page.navigate", "acts": True, "tab": "T1"})
+    asyncio.get_running_loop().call_later(0.1, lambda: log.finish(finishing, ok=True))
+    complete = await recordings.end(started["recording_id"])
+    started = await recordings.start("run-2:record", _grant(), frames=False)
+    stuck = log.begin({"via": "cdp", "who": "ada", "method": "Page.navigate", "acts": True, "tab": "T1"})
+    incomplete = await recordings.end(started["recording_id"])
+
+    assert complete["log_missing"] == [] and complete["log_last"] == finishing["seq"]
+    assert incomplete["log_missing"] == [stuck["seq"]]
+
+
+@pytest.mark.asyncio
 async def test_a_frame_the_browser_cant_take_is_kept_with_why_and_counts_as_missing(recorded):
     log, control, uploads, recordings = recorded
     started = await recordings.start("run-1:record", _grant())
@@ -197,3 +213,37 @@ async def test_a_frame_waits_for_its_tabs_page_to_load_then_captures_it_as_a_jpe
     assert (session, extension, tab, base64.b64decode(data)) == ("s-T1", "jpg", "T1", b"jpeg")
     assert params["format"] == "jpeg" and params["quality"] == 80 and captured_at >= loaded_at
     assert (await control.frame("closed", load_wait_s=0))[2] == "T1"
+
+
+def _two_tabs() -> tuple[Pipe, BrowserControl]:
+    pipe = Pipe()
+    control = BrowserControl(pipe, "agent", (1280, 800))
+    for tab in ("T1", "T2"):
+        pipe.emit("Target.targetCreated", {"targetInfo": {"targetId": tab, "type": "page", "url": "about:blank"}})
+        pipe.emit("Target.attachedToTarget", {"sessionId": f"s-{tab}", "targetInfo": {"targetId": tab, "type": "page"}})
+    return pipe, control
+
+
+@pytest.mark.asyncio
+async def test_while_a_dialog_keeps_a_tab_from_painting_its_frame_is_the_last_it_took():
+    pipe, control = _two_tabs()
+    first = await control.frame("T1", load_wait_s=0)
+    pipe.emit("Page.javascriptDialogOpening", {"type": "confirm", "message": "Delete?", "url": "https://a.test/"}, "s-T1")
+
+    during = await control.frame("T1", load_wait_s=0)
+
+    assert during[:3] == first[:3] == (base64.b64encode(b"jpeg").decode(), "jpg", "T1") and len(pipe.captured) == 1
+    pipe.emit("Page.javascriptDialogOpening", {"type": "alert", "message": "Hi", "url": "https://a.test/"}, "s-T2")
+    with pytest.raises(DeviceUnavailable, match="no capture before it"):
+        await control.frame("T2", load_wait_s=0)
+
+
+@pytest.mark.asyncio
+async def test_a_tab_that_closes_while_its_page_loads_is_framed_as_the_active_tab():
+    pipe, control = _two_tabs()
+    pipe.emit("Page.frameNavigated", {"frame": {"id": "T2", "url": "https://a.test/pop", "loaderId": "L2"}}, "s-T2")
+    asyncio.get_running_loop().call_later(0.1, pipe.emit, "Target.detachedFromTarget", {"sessionId": "s-T2"})
+
+    _, _, tab, _ = await control.frame("T2", load_wait_s=5)
+
+    assert tab != "T2" and [session for session, _, _ in pipe.captured] == [f"s-{tab}"]

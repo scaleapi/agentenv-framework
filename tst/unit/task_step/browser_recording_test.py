@@ -8,10 +8,13 @@ from __future__ import annotations
 import json
 
 import pytest
+from agentenv_protocol.computer import COMPUTER_RECORDING
 from agentenv_protocol.website_browser import BROWSER, BROWSER_RECORDING
 
 from agent_env.artifact import Artifact
 from agent_env.config import set_object_store
+from agent_env.env.env import EnvCapabilityUnsupported
+from agent_env.providers.env_providers.env_computer_provider import end_recordings
 from agent_env.task import teardown
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.browser.recording import (
@@ -32,12 +35,13 @@ class _BrowserComputer:
     """A browser computer whose chromium records: its end uploads a frame, the log and the manifest under its grant,
     with a frame it couldn't take when ``misses``; it ``forgets`` the recording or lists no browser recording."""
 
-    def __init__(self, store, misses: bool = False, forgets: bool = False, recording: bool = True) -> None:
+    def __init__(self, store, misses: bool = False, forgets: bool = False, recording: bool = True,
+                 gaps: bool = False) -> None:
         children = [_BROWSER if recording else {**_BROWSER, "capabilities": {"extensions": [
             _BROWSER["capabilities"]["extensions"][0]]}}]
         self.env_id, self.sandbox_type, self.metadata = "browser", "local", None
         self.environment_card = {"name": "browser", "children_environments": children}
-        self.store, self.misses, self.forgets = store, misses, forgets
+        self.store, self.misses, self.forgets, self.gaps = store, misses, forgets, gaps
         self.calls: list[tuple[str, dict, str]] = []
 
     async def invoke(self, uri, method, params=None, environment_name=None, **_):
@@ -59,7 +63,8 @@ class _BrowserComputer:
             self.store.put(f"{root}/rec-1/frames/0001.jpg", b"jpeg-1", content_type="image/jpeg")
         self.store.put(f"{root}/rec-1/log.jsonl", b'{"seq": 1}\n', content_type="application/x-ndjson")
         manifest = {"recording_id": "rec-1", "started_at": "2026-11-12T10:00:00.000Z", "ended_by": params["reason"],
-                    "frames": frames, "log": "log.jsonl", "log_after": 0, "log_last": 1, "log_uploaded": True}
+                    "frames": frames, "log": "log.jsonl", "log_after": 0, "log_last": 2, "log_uploaded": True,
+                    "log_missing": [2] if self.gaps else []}
         self.store.put(f"{root}/rec-1/manifest.json", json.dumps(manifest).encode(), content_type="application/json")
         return manifest
 
@@ -112,6 +117,32 @@ async def test_a_missing_frame_fails_the_end_as_an_infrastructure_failure_unless
     tolerated = await _start().execute(_context(_BrowserComputer(store, misses=True), instance_id="run-2"))
     tolerated = await _end(fail_task_on_error=False).execute(tolerated)
     assert tolerated.metadata[RECORDINGS_KEY]["run"]["missing_frames"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_log_missing_entries_fails_the_end(store):
+    context = await _start().execute(_context(_BrowserComputer(store, gaps=True)))
+    with pytest.raises(RuntimeError, match="its log is missing 1 of the entries"):
+        await _end().execute(context)
+
+
+@pytest.mark.asyncio
+async def test_a_computer_ends_its_browsers_recordings_before_it_goes():
+    calls = []
+
+    class Record:
+        env_id = "browser"
+        environment_card = {"name": "browser", "children_environments": [{"name": "page"}, _BROWSER]}
+
+        async def invoke(self, uri, method, params=None, environment_name=None, timeout=None):
+            calls.append((uri, method, params, environment_name))
+            if uri == COMPUTER_RECORDING:
+                raise EnvCapabilityUnsupported(uri, method, "browser", None, None)
+            return {"recordings": []}
+
+    await end_recordings(Record(), "reset")
+
+    assert calls[1:] == [(BROWSER_RECORDING, "end_all", {"reason": "reset"}, "chromium")]
 
 
 @pytest.mark.asyncio
