@@ -27,9 +27,10 @@ under a single base_path — outputs aren't guaranteed to live on the desktop /
 in /app — without assuming a common directory. base_path only applies to
 relative entries and to the no-list enumeration fallback.
 
-Only regular files are read, and a link is not one. A sandbox that runs on this
-machine reads its host files here, so there a manifest entry is read only where
-it resolves inside its /app, or inside a base_path the task names outside /app.
+Only regular files are read, and a link is not one. A local sandbox runs its host
+commands on this machine, its work dir standing for /app, so there a manifest
+entry is read only where it resolves inside the work dir, or inside a base_path
+the task names outside /app.
 
 This allows the same step definition to collect different artifacts per seed.
 
@@ -905,9 +906,10 @@ class CollectArtifactsTaskStep(TaskStep):
         else:
             logger.info(f"Collecting {len(items)} artifacts from {self.base_path}")
 
-        # A local sandbox's host is this machine: the agent's manifest reaches only its /app, or a base_path outside it.
-        on_this_machine = self.manifest_step_id and container is None and sandbox.ON_THIS_MACHINE
-        roots = await self._local_roots(sandbox) if on_this_machine else None
+        # A local sandbox's host commands run on this machine, its work dir standing for /app: there the agent's
+        # manifest reaches only that, or a base_path outside /app. A VM on this machine runs them inside itself.
+        work_dir = getattr(sandbox, "work_dir", None) if self.manifest_step_id and container is None else None
+        roots = await self._local_roots(sandbox, work_dir) if work_dir else None
         collected: dict[str, str] = {}
         file_artifacts: dict[str, FileArtifact] = {}
         hard_failures: list[str] = []
@@ -950,12 +952,12 @@ class CollectArtifactsTaskStep(TaskStep):
         await provider.close()
         return collected, file_artifacts, hard_failures
 
-    async def _local_roots(self, sandbox) -> tuple[str, ...]:
-        """Where the sandbox's /app is, and base_path where the task names a folder outside /app: under /app the agent
-        may have swapped a folder for a link, so only /app itself counts."""
+    async def _local_roots(self, sandbox, work_dir) -> tuple[str, ...]:
+        """The work dir, and base_path where the task names a folder outside /app: under /app the agent may have
+        swapped a folder for a link, so only the work dir it stands for counts."""
         base = posixpath.normpath(self.base_path or "/")
         outside_app = base != "/app" and not base.startswith("/app/")
-        roots = (await _resolved(sandbox, "/app"), await _resolved(sandbox, base) if outside_app else None)
+        roots = (str(work_dir.resolve()), await _resolved(sandbox, base) if outside_app else None)
         return tuple(root.rstrip("/") + "/" for root in roots if root)
 
     def _register_file_artifact(self, store, file_artifacts, artifact_id, key, object_name, content_type, object_url, context):
@@ -1119,5 +1121,5 @@ async def _resolved(sandbox, path: str) -> str | None:
 async def _resolved_inside(sandbox, path: str, roots: tuple[str, ...]) -> str | None:
     resolved = await _resolved(sandbox, path)
     if resolved is not None and not (resolved + "/").startswith(roots):
-        raise RuntimeError(f"{path} resolves to {resolved}, outside the sandbox's /app and base_path on this machine")
+        raise RuntimeError(f"{path} resolves to {resolved}, outside the sandbox's work dir and base_path on this machine")
     return resolved

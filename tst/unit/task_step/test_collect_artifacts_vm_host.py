@@ -256,6 +256,44 @@ class TestAgentPathUnchanged:
         assert seen.get("called") is True
 
 
+class _GuestVm:
+    """A VM on this machine whose commands run inside it, so no work dir stands for its /app; records every command."""
+
+    mode = "vm"
+    ON_THIS_MACHINE = True
+
+    def __init__(self, files: dict[str, bytes]):
+        self.files, self.calls = files, []
+
+    async def exec_with_output(self, *args):
+        self.calls.append(args)
+        path = args[-1]
+        return (0, f"81a4:{len(self.files[path])}", "") if path in self.files else (1, "", "No such file")
+
+    async def exec(self, *args):
+        self.calls.append(args)
+        return _Proc(base64.b64encode(self.files[args[-1].split(" < ", 1)[1].split(" | ", 1)[0].strip("'")]))
+
+
+@pytest.mark.asyncio
+async def test_a_manifest_on_a_vm_of_this_machine_reads_anywhere_in_the_vm_as_before():
+    vm = _GuestVm({"/tmp/output/summary.docx": b"summary", "/app/artifact/report.md": b"# report"})
+    ctx = TaskStepContext()
+    ctx.prompt_responses.append(PromptResponse(prompt_id="p", response="{}", step_id="m9", structured_output={
+        "artifacts": {"summary": "/tmp/output/summary.docx", "report": "/app/artifact/report.md"},
+    }))
+    step = CollectArtifactsTaskStep(id="c", version=None, sandbox_name="box", base_path="/app/artifact", manifest_step_id="m9")
+    provider = MagicMock()
+    provider.close = AsyncMock()
+    store = MagicMock()
+    store.put_object_file.side_effect = lambda **kw: f"s3://bucket/{kw['object_name']}"
+    collected, _, hard_failures = await step._collect_items(
+        provider, vm, None, step._resolve_items(ctx), ctx, store, "aid", 1,
+    )
+    assert (set(collected), hard_failures) == ({"summary", "report"}, [])
+    assert not any("readlink" in call for call in vm.calls)
+
+
 @skip_without_gnu_stat()
 class TestOnThisMachine:
     """A local sandbox's host is the operator's: no link is read, and an agent's manifest entry only where it resolves
