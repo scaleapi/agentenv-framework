@@ -102,6 +102,14 @@ class ResolvedEntry:
     references: tuple[Reference, ...]
     outputs: tuple[Output, ...]
 
+    @property
+    def entity_ids(self) -> dict[str, str]:
+        """For a task, each id a field of its steps names as written that ``config`` names by another id, to that id
+        (``Task.entity_ids``); a reference the plan adds without rewriting a field, as ``--agent``'s, adds nothing."""
+        if self.entry.kind is not BundleKind.TASK:
+            return {}
+        return _rewritten_ids(self.entry.config, self.config)
+
 
 @dataclass(frozen=True)
 class ResolvedBundle:
@@ -561,3 +569,18 @@ def _strings(value: Any, path: str = "") -> Iterator[tuple[str, str]]:
     elif isinstance(value, list):
         for i, item in enumerate(value):
             yield from _strings(item, f"{path}[{i}]")
+
+
+def _rewritten_ids(written: list[dict], resolved: list[dict]) -> dict[str, str]:
+    """Each id a reference field of ``written``'s steps holds that the same field of ``resolved``'s holds another id
+    in place of, to that id."""
+    registry = get_task_step_registry()
+    renamed = {}
+    for before, after in zip(written, resolved):
+        cls = registry.get(before.get("type"))
+        if cls is None or not cls.entity_refs:
+            continue
+        now = {site.path: site.value for site in ref_sites(cls.entity_refs, after)}
+        renamed.update((site.value, now[site.path]) for site in ref_sites(cls.entity_refs, before)
+                       if site.path in now and now[site.path] != site.value)
+    return renamed

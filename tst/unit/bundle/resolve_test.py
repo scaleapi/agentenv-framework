@@ -2,6 +2,7 @@
 
 import json
 import random
+from dataclasses import replace
 
 import pytest
 
@@ -147,6 +148,24 @@ def test_an_output_is_named_under_its_task_and_later_steps_find_it(make):
             entry.config[2]["cli_artifact_ids"][0]] == [output] * 3
     assert entry.outputs == (Output(EntityKind.ARTIFACT, output, 0, "cli", "cli"),)
     assert refs(entry) == [(EntityKind.ENV, f"{ROOT}/tickets", None, "tickets")]
+
+
+def test_a_task_records_each_id_it_rewrote_as_written(make):
+    entry = resolved(make(tasks={"t": [
+        {"id": "deploy", "type": "deploy_env", "env_id": "tickets"},
+        {"id": "seed", "type": "load_artifact", "env_id": "tickets", "artifact_id": "shared-artifact"},
+        {"id": "cli", "type": "build_mcp_cli", "env_id": "tickets", "cli_artifact_id": "tickets-cli"},
+    ]}), "t")
+    assert entry.entity_ids == {"tickets": f"{ROOT}/tickets", "tickets-cli": f"{ROOT}/t/tickets-cli"}
+
+
+def test_a_reference_added_without_rewriting_a_field_is_not_a_renamed_id(make):
+    bundle = make(tasks={"t": [{"id": "deploy", "type": "deploy_env", "env_id": "tickets"}]})
+    entry = resolved(bundle, "t")
+    solver = next(e for e in bundle.entries if e.name == "solver")
+    swapped = replace(entry, references=(*entry.references,
+                                          Reference(EntityKind.AGENT, solver.id, None, solver, "--agent 'solver'", None)))
+    assert swapped.entity_ids == entry.entity_ids == {"tickets": f"{ROOT}/tickets"}
 
 
 def test_an_output_id_a_step_derives_is_named_under_its_task_too(make):
