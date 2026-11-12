@@ -13,7 +13,7 @@ from typing import ClassVar, Optional
 
 from agentenv_protocol.client import find_extension
 from agentenv_protocol.website_browser import BROWSER_RECORDING, BrowserRecordingManifest, RecordedFrame
-from agentenv_protocol.website_browser.recording import LOG, MANIFEST, MAX_FRAMES
+from agentenv_protocol.website_browser.recording import LOG, MANIFEST, MAX_FRAMES, frame_of
 
 from agent_env.artifact import FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
@@ -25,16 +25,26 @@ from agent_env.store.ids import derive_id, is_local_id, validate_local_id
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.browser.base import BrowserStep, deployed_env, find_browser
-from agent_env.task_step.task_steps.computer_recording import recording_grant, recording_namespace, refuse_no_network
+from agent_env.task_step.task_steps.recordings import (
+    ERROR_CHARS,
+    end_open,
+    recording_grant,
+    recording_namespace,
+    refuse_no_network,
+    register_open,
+    why,
+)
 
 logger = logging.getLogger(__name__)
 
 #: ``context.metadata[RECORDINGS_KEY][name]``: each browser recording a run started, open or ended.
 RECORDINGS_KEY = "browser_recordings"
 _KEY_PREFIX = "agentenv-browser-recordings"
-#: A grant's limits: every frame, the log and the manifest, each frame or the log at most this big.
+#: A grant's limits: each frame or the log at most this big, and the whole recording at most this.
 MAX_OBJECT_BYTES = 256 << 20
 MAX_RECORDING_BYTES = 16 << 30
+#: What a recording uploads besides its frames, which its grant has room for too.
+BESIDE_FRAMES = (LOG, MANIFEST)
 
 
 class StartBrowserRecordingTaskStep(BrowserStep):
@@ -76,7 +86,7 @@ class StartBrowserRecordingTaskStep(BrowserStep):
                 environment_name=browser)
         except Exception as e:
             recordings[self.name] = {"env_id": self.env_id, "browser": self.browser, "frames": self.frames,
-                                     "state": "failed", "error": f"{type(e).__name__}: {e}"[:500]}
+                                     "state": "failed", "error": why(e)}
             logger.warning("start_browser_recording %s on %s: %s", self.name, self.env_id, e)
             if self.fail_task_on_error:
                 raise
@@ -136,23 +146,13 @@ def incomplete(entry: dict) -> Optional[str]:
 async def end_open_browser_recordings(context: TaskStepContext, env_ids: Optional[list[str]] = None) -> None:
     """End and register every browser recording still open in ``context`` (of ``env_ids`` only, when given), each with
     a fresh grant, before its env is torn down; ``end_browser_recording`` says what happened to each."""
-    for name, entry in list((context.metadata.get(RECORDINGS_KEY) or {}).items()):
-        if entry.get("state") == "open" and (env_ids is None or entry["env_id"] in env_ids):
-            await end_browser_recording(context, name, "teardown")
+    await end_open(context, RECORDINGS_KEY, env_ids, end_browser_recording)
 
 
 def register_open_browser_recordings(context: TaskStepContext, env_ids: Optional[list[str]] = None) -> None:
     """Register every browser recording still open in ``context`` (of ``env_ids`` only, when given) from what its
     namespace holds, once its env has closed. Never raises: each entry says what happened."""
-    for name, entry in list((context.metadata.get(RECORDINGS_KEY) or {}).items()):
-        if entry.get("state") == "open" and (env_ids is None or entry["env_id"] in env_ids):
-            try:
-                manifest = _from_namespace(entry)
-            except Exception as e:
-                logger.warning("browser recording %s: listing its namespace failed: %s", name, e)
-                entry["state"], entry["error"] = "failed", f"{type(e).__name__}: {e}"[:500]
-                continue
-            _registered(context, name, entry, manifest)
+    register_open(context, RECORDINGS_KEY, env_ids, _from_namespace, _registered, "browser recording")
 
 
 async def end_browser_recording(context: TaskStepContext, name: str, reason: str) -> None:
@@ -169,12 +169,12 @@ async def end_browser_recording(context: TaskStepContext, name: str, reason: str
             "reason": reason}, environment_name=browser))
     except Exception as e:
         logger.warning("end_browser_recording %s: %s; registering what its namespace holds", name, e)
-        entry["error"] = f"{type(e).__name__}: {e}"[:500]
+        entry["error"] = why(e)
         try:
             manifest = _from_namespace(entry)
         except Exception as listing:
             logger.warning("end_browser_recording %s: listing its namespace failed: %s", name, listing)
-            entry["state"], entry["error"] = "failed", f"{entry['error']}; then {type(listing).__name__}: {listing}"[:500]
+            entry["state"], entry["error"] = "failed", f"{entry['error']}; then {why(listing)}"[:ERROR_CHARS]
             return
     _registered(context, name, entry, manifest)
 
@@ -187,8 +187,8 @@ def _grant(record: DeployedEnv, card: dict, namespace: str, method: str = "start
         raise EnvCapabilityUnsupported(BROWSER_RECORDING, method, record.env_id, getattr(record, "instance_id", None),
                                        card.get("name"))
     params = extension.get("params") or {}
-    return recording_grant(record, params, namespace, params.get("max_frames", MAX_FRAMES) + 2, MAX_OBJECT_BYTES,
-                           MAX_RECORDING_BYTES)
+    return recording_grant(record, params, namespace, params.get("max_frames", MAX_FRAMES) + len(BESIDE_FRAMES),
+                           MAX_OBJECT_BYTES, MAX_RECORDING_BYTES)
 
 
 def _registered(context: TaskStepContext, name: str, entry: dict, manifest: BrowserRecordingManifest) -> None:
@@ -197,7 +197,7 @@ def _registered(context: TaskStepContext, name: str, entry: dict, manifest: Brow
         entry["artifact"] = _register(context, name, entry["namespace"], manifest)
     except Exception as e:
         logger.warning("browser recording %s: registering it failed: %s", name, e)
-        entry["state"], entry["error"] = "failed", f"{type(e).__name__}: {e}"[:500]
+        entry["state"], entry["error"] = "failed", why(e)
         return
     taken = [frame for frame in manifest.frames if frame.uploaded]
     entry.update(state="ended", ended_by=manifest.ended_by, frames_taken=len(taken),
@@ -211,18 +211,20 @@ def _registered(context: TaskStepContext, name: str, entry: dict, manifest: Brow
 
 def _from_namespace(entry: dict) -> BrowserRecordingManifest:
     """What the recording's namespace holds, for one its browser didn't end for the run: the manifest the browser
-    uploaded when it ended it, or else its frames there, with no log."""
+    uploaded when it ended it, or else its frames there, each by the index its file is named by, its kind and when it
+    was taken unknown, and its log if that uploaded."""
     store = get_config().get_object_store()
     root = f"{entry['namespace'].rstrip('/')}/{entry.get('recording_id')}/"
     urls = store.list_at(root)
     if (uploaded := f"{root}{MANIFEST}") in urls:
         return BrowserRecordingManifest.model_validate(json.loads(store.get(uploaded)))
-    paths = sorted(url[len(root):] for url in urls if url[len(root):].startswith("frames/"))
+    frames = sorted((found, url[len(root):]) for url in urls if (found := frame_of(url[len(root):])))
+    logged = f"{root}{LOG}" in urls
     return BrowserRecordingManifest(
         recording_id=entry.get("recording_id") or "", started_at=entry.get("started_at") or "", ended_by="error",
-        error=entry.get("error"), frames_on=bool(entry.get("frames")), log_uploaded=f"{root}{LOG}" in urls,
-        log=LOG if f"{root}{LOG}" in urls else None,
-        frames=[RecordedFrame(index=i, kind="action", at="", path=path, uploaded=True) for i, path in enumerate(paths)])
+        error=entry.get("error"), frames_on=bool(entry.get("frames")), log_uploaded=logged, log=LOG if logged else None,
+        frames=[RecordedFrame(index=index, path=path, content_type=content_type, uploaded=True)
+                for (index, content_type), path in frames])
 
 
 def _register(context: TaskStepContext, name: str, namespace: str, manifest: BrowserRecordingManifest) -> dict:
@@ -240,7 +242,7 @@ def _register(context: TaskStepContext, name: str, namespace: str, manifest: Bro
         files[manifest.log] = (f"{root}/{manifest.log}", "application/x-ndjson")
     for frame in manifest.frames:
         if frame.uploaded and frame.path:
-            files[frame.path.replace("/", "-")] = (f"{root}/{frame.path}", frame.content_type or "image/jpeg")
+            files[frame.path.replace("/", "-")] = (f"{root}/{frame.path}", frame.content_type)
     stored = {filename: documents.put_document(FileArtifact(
         id=derive_id(universe_id, filename), filename=filename, content_type=content_type, object_url=url,
         description=f"Browser recording {name!r} of task instance {context.instance_id}"))

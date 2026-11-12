@@ -147,13 +147,19 @@ async def test_a_computer_ends_its_browsers_recordings_before_it_goes():
 
 @pytest.mark.asyncio
 async def test_a_recording_the_browser_forgot_is_registered_from_its_namespace_and_fails_for_its_missing_log(store):
-    context = await _start().execute(_context(_BrowserComputer(store, forgets=True)))
+    computer = _BrowserComputer(store, forgets=True)
+    context = await _start().execute(_context(computer))
+    store.put(f"{computer.root}/rec-1/frames/0003.png", b"png-3", content_type="image/png")
     with pytest.raises(RuntimeError, match="its log didn't upload"):
         await _end().execute(context)
     entry = context.metadata[RECORDINGS_KEY]["run"]
+    universe = Artifact.get(entry["artifact"]["id"], version=entry["artifact"]["version"])
+    manifest = json.loads(store.get(Artifact.get(universe.file_artifact_ids["manifest.json"]).object_url))
 
-    assert (entry["state"], entry["frames_taken"], entry["log_uploaded"]) == ("ended", 1, False)
+    assert (entry["state"], entry["frames_taken"], entry["log_uploaded"]) == ("ended", 2, False)
     assert "no recording rec-1" in entry["error"]
+    assert [(f["index"], f["kind"], f["at"], f["content_type"]) for f in manifest["frames"]] == [
+        (0, None, None, "image/jpeg"), (3, None, None, "image/png")]
 
 
 @pytest.mark.asyncio

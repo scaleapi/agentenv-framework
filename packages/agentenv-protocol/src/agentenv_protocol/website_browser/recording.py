@@ -8,6 +8,7 @@ import asyncio
 import base64
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Literal, Optional
@@ -48,11 +49,12 @@ LOG_POLL_S = 0.2
 
 class RecordedFrame(BaseModel):
     """One frame: the first, one after a burst of actions, whose entries it names in ``after``, or the last; its tab
-    and URL, and its file under the recording's folder, or why there is none."""
+    and URL, and its file under the recording's folder, or why there is none. Its ``kind`` and ``at`` are None where
+    they aren't known, in a manifest rebuilt from the files a recording uploaded."""
 
     index: int
-    kind: Literal["first", "action", "last"]
-    at: str
+    kind: Optional[Literal["first", "action", "last"]] = None
+    at: Optional[str] = None
     after: list[int] = []
     tab: Optional[str] = None
     url: Optional[str] = None
@@ -83,6 +85,18 @@ class BrowserRecordingManifest(BaseModel):
     @property
     def missing_frames(self) -> int:
         return sum(1 for frame in self.frames if not frame.uploaded)
+
+
+def frame_path(index: int, extension: str) -> str:
+    """Where frame ``index`` uploads, under its recording's folder."""
+    return f"{FRAMES}/{index:04d}.{extension}"
+
+
+def frame_of(path: str) -> Optional[tuple[int, str]]:
+    """The index and content type of the frame ``frame_path`` put at ``path``, or None for another file."""
+    if (found := re.fullmatch(rf"{FRAMES}/(\d+)\.(\w+)", path)) and found[2] in CONTENT_TYPES:
+        return int(found[1]), CONTENT_TYPES[found[2]]
+    return None
 
 
 class BrowserRecordings:
@@ -183,7 +197,7 @@ class _Recording:
             try:
                 data, extension, frame.tab, frame.url = await self.recordings.control.frame(self.tab, LOAD_WAIT_S)
                 frame.at = _iso()
-                frame.path, frame.content_type = f"{FRAMES}/{index:04d}.{extension}", CONTENT_TYPES[extension]
+                frame.path, frame.content_type = frame_path(index, extension), CONTENT_TYPES[extension]
                 await self.uploader.upload(self._path(frame.path), base64.b64decode(data))
                 frame.uploaded = True
             except Exception as e:
