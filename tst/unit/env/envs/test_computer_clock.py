@@ -75,8 +75,9 @@ async def test_a_reset_writes_the_kept_config_again_with_the_records_token_and_o
 
 @pytest.mark.asyncio
 async def test_a_follower_that_cant_follow_is_logged_as_a_warning_naming_why_and_the_reset_goes_on(synced, caplog):
-    answer = httpx.Response(503, text='{"error": "it can\'t reach the gateway: URLError: refused"}',
-                            request=httpx.Request("POST", "http://desktop/agentenv/ext/sync_time"))
+    answer = httpx.Response(503, json={"ok": False, "error": {"code": "target_unavailable", "message": (
+        "this computer's clock follower isn't following the gateway: it can't reach the gateway: URLError: refused"),
+        "retryable": False}}, request=httpx.Request("POST", "http://desktop/agentenv/ext/sync_time"))
     synced.side_effect = httpx.HTTPStatusError("503", request=answer.request, response=answer)
     written = {}
 
@@ -86,7 +87,9 @@ async def test_a_follower_that_cant_follow_is_logged_as_a_warning_naming_why_and
 
     assert len(written) == 1
     assert ("desktop: its clock follower doesn't follow the gateway at https://gw.example/clock/watch, so its session "
-            "reads real time until it does") in caplog.text and "URLError: refused" in caplog.text
+            "reads real time until it does: 503 target_unavailable: this computer's clock follower isn't following "
+            "the gateway: it can't reach the gateway: URLError: refused") in caplog.text
+    assert "retryable" not in caplog.text
 
 
 def test_a_computer_follows_the_clock_when_its_card_serves_sync_time():
