@@ -173,6 +173,27 @@ async def test_a_last_read_that_would_fall_in_her_night_waits_for_the_morning(mo
 
 
 @pytest.mark.asyncio
+async def test_a_read_whose_time_passed_during_a_turn_that_ran_into_her_night_waits_for_the_morning(monkeypatch,
+                                                                                                    tmp_path):
+    def runs_late(n, texts, rig):
+        if n == 1:
+            rig.message("booked the house")
+            rig.gw._clock.advance("2026-11-10T05:00:00Z")  # midnight in New York: past her bedtime
+            return "sent"
+        rig.quiet()
+        return "nothing new"
+
+    rig = Rig(monkeypatch, tmp_path, agent=runs_late, answers=[{"outcome": "reply", "message": "great"}])
+    await rig.arm()
+    ctx = await rig.run(rig.step(max_wakes=3), rig.context(user=DAY))
+
+    [read, *_] = rig.reads
+    assert read["time"] == "2026-11-10T12:30:00Z"  # 7:30 AM, when she wakes, not at midnight
+    [event, *_] = rig.events(ctx, "user_sim_read")
+    assert (event["mode"], event["deliver_at"]) == ("morning", "2026-11-10T12:45:00Z")
+
+
+@pytest.mark.asyncio
 async def test_a_done_on_the_last_read_is_recorded_and_changes_nothing(monkeypatch, tmp_path):
     rig = Rig(monkeypatch, tmp_path, agent=_recaps, answers=[{"outcome": "done", "message": "thanks!!"}])
     await rig.arm()
