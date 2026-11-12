@@ -40,7 +40,7 @@ if sys.platform == "linux":
     from Xlib import display as x_display
     from Xlib.error import ConnectionClosedError, DisplayConnectionError
 
-from agentenv_protocol import EnvironmentTool, ForwardedTool, ToolContext, resource, server_instructions
+from agentenv_protocol import ForwardedTool, ToolContext, resource, server_instructions
 from agentenv_protocol.computer import (
     PRINTABLE_KEYS,
     ComputerDriverEnvironment,
@@ -98,7 +98,7 @@ APP_EXECUTABLE = Path("/Applications/CuaDriver.app/Contents/MacOS/cua-driver")
 EXECUTABLES = {
     "amd64": "bf57b2f3778a0a7daa9388e241f20ce948b32a7a2f4dd102e497f34e54137934",
     "arm64": "26e9eee8165e9ce7b614b5e3d68e5d963231385a82b65236406718b5ce1ff936",
-    "macos/arm64": "b4d974a9c1c92a700cd7be7ede987aea4a1e6835e37039ce3d628b71bd5f0ca8",
+    "macos/arm64": "f026e4dea3d058c7c702dfebca93853e6f9410ce76b73c06f35eae1a81bbc873",
     "windows/amd64": "ffa58d88779ee219304b0c307f4cfa970fe822f830c6ecf9254eda5c29e22bf2",
     "hyprland/amd64": "8dd0f74928cff484343ed65e3ac4d1dacdccc3950b8665e1102ac463af0a967b",
 }
@@ -158,9 +158,8 @@ class CuaDriver(ComputerDriverEnvironment):
         self._reset_bind: dict | None = None
 
     def forwarded_tools(self) -> list[ForwardedTool]:
-        return [ForwardedTool(EnvironmentTool(name=t["name"], description=t["description"], inputSchema=t["inputSchema"]),
-                              functools.partial(self._forward, t["name"], not (t["annotations"] or {}).get("readOnlyHint")),
-                              t["annotations"] or None, t.get("outputSchema"))
+        return [ForwardedTool.listed(t, functools.partial(self._forward, t["name"],
+                                                          not (t["annotations"] or {}).get("readOnlyHint")))
                 for t in _manifest()["tools"]]
 
     @resource("skill://cua-driver/{file}", listed=lambda env: _manifest()["resources"])

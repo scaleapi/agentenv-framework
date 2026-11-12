@@ -28,7 +28,7 @@ from mcp.client.stdio import stdio_client
 from mcp.types import CONNECTION_CLOSED, CallToolResult, InitializeResult, TextContent
 from pydantic import Field
 
-from agentenv_protocol import EnvironmentTool, ForwardedTool, ToolContext, server_instructions
+from agentenv_protocol import ForwardedTool, ToolContext, server_instructions
 from agentenv_protocol.computer import ComputerSettings, MacOSDriver, ReadyCheck, computer_driver
 
 HERE = Path(__file__).resolve().parent
@@ -89,10 +89,9 @@ class AsideDriver(MacOSDriver):
         self._closing: set[asyncio.Task] = set()
 
     def forwarded_tools(self) -> list[ForwardedTool]:
-        return [ForwardedTool(EnvironmentTool(name=t["name"], description=t["description"],
-                                              inputSchema=t["inputSchema"]),
-                              functools.partial(self._forward, t["name"]),
-                              {**(t.get("annotations") or {}), **ANNOTATIONS.get(t["name"], {})})
+        return [ForwardedTool.listed({**t, "annotations": {**(t.get("annotations") or {}),
+                                                           **ANNOTATIONS.get(t["name"], {})}},
+                                     functools.partial(self._forward, t["name"]))
                 for t in _manifest()["tools"]]
 
     @server_instructions

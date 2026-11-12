@@ -42,7 +42,7 @@ from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniv
 from agent_env.env.env import DeployedSandboxEnv, require_sandbox
 from agent_env.env.envs.computer.utils import inside
 from agent_env.providers.sandbox_providers.sandbox import into_container
-from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
@@ -406,7 +406,7 @@ class RunCodeTaskStep(TaskStep):
         if deployed is not None:
             deployed = require_sandbox(deployed, "run_code on the env's host")
         if deployed is None or not deployed.sandbox_id:
-            raise RuntimeError(
+            raise StepContextError(
                 f"Env '{self.env_id}' not found in context.deployed_envs "
                 "(or missing sandbox_id)"
             )
@@ -457,7 +457,7 @@ class RunCodeTaskStep(TaskStep):
             (s for s in context.deployed_sandboxes if s.sandbox_name == self.sandbox_name), None
         )
         if deployed is None:
-            raise RuntimeError(f"Sandbox '{self.sandbox_name}' not found in context.deployed_sandboxes")
+            raise StepContextError(f"Sandbox '{self.sandbox_name}' not found in context.deployed_sandboxes")
         provider = (
             build_sandbox_provider(deployed.sandbox_type)
             if deployed.sandbox_type
@@ -487,7 +487,7 @@ class RunCodeTaskStep(TaskStep):
             (a for a in context.deployed_agents if a.agent_name == self.agent_name), None
         )
         if agent is None or not agent.sandbox_id:
-            raise RuntimeError(
+            raise StepContextError(
                 f"Agent '{self.agent_name}' not found in context.deployed_agents "
                 "(or missing sandbox_id)"
             )

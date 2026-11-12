@@ -1,8 +1,9 @@
 """The page driver, for a computer with no display whose one website browser runs alone: its screen is the browser's
 active tab. A screenshot is the page, and input reaches the page as CDP input events, both through the browser's own
 server on its socket (``browser/v1``'s ``page/*`` operations), since only that server holds the browser's debugging pipe.
-The browser ending on its own is an infrastructure failure, since nothing here launches it again. Needs
-``agentenv-framework-protocol[computer]`` where it runs."""
+The browser ending on its own is an infrastructure failure, since nothing here launches it again. Beside its own tools it
+serves Playwright MCP's ``browser_*``, from a Playwright MCP it runs attached to the browser over a CDP address the
+browser's relay issues to it. Needs ``agentenv-framework-protocol[computer]`` where it runs."""
 from __future__ import annotations
 
 import asyncio
@@ -13,8 +14,9 @@ from pathlib import Path
 from typing import Any, Optional
 
 import httpx
+from mcp.types import CallToolResult
 
-from agentenv_protocol import client
+from agentenv_protocol import ForwardedTool, client, mcp_port
 from agentenv_protocol.website_browser.log import TOOL_CALL_HEADER, tool_call_header
 from agentenv_protocol.computer import (
     ComputerDriverEnvironment,
@@ -54,6 +56,8 @@ from agentenv_protocol.computer import apps
 from agentenv_protocol.computer.served import served
 from agentenv_protocol.tool_context import ROLE_HEADER, ToolContext
 from agentenv_protocol.website_browser import BROWSER
+
+import playwright_mcp
 
 BUTTONS = {"left": 1, "right": 2, "middle": 4, "back": 8, "forward": 16}
 MODIFIERS = {"Alt": 1, "Control": 2, "Meta": 4, "Shift": 8}
@@ -96,7 +100,8 @@ class PageDriver(ComputerDriverEnvironment):
              "around it. Its screen is the page's viewport. Go to a URL with computer_navigate, back, forward or "
              "reload with computer_history, and list, open, switch or close tabs with computer_tabs. Each screenshot "
              "names the page, and an open dialog, which computer_dialog answers, or file chooser, which "
-             "computer_upload gives files in ~/Uploads.")
+             "computer_upload gives files in ~/Uploads. Its browser_* tools, Playwright MCP's, act on the same "
+             "browser by the page's accessibility snapshot; browser_file_upload takes files in ~/Uploads too.")
 
     def __init__(self) -> None:
         super().__init__()
@@ -104,6 +109,22 @@ class PageDriver(ComputerDriverEnvironment):
         self._pointer = (0.0, 0.0)
         self._buttons = 0
         self._held: list[str] = []
+        self._playwright = playwright_mcp.PlaywrightMcp(self._playwright_endpoint)
+
+    def forwarded_tools(self) -> list[ForwardedTool]:
+        """Playwright MCP's, called through a method rather than ``self._playwright``, since reading the class at put
+        makes it without ``__init__``."""
+        return playwright_mcp.tools(self._playwright_call)
+
+    async def _playwright_call(self, tool: str, /, **arguments: Any) -> CallToolResult:
+        return await self._playwright.call(tool, **arguments)
+
+    async def _playwright_endpoint(self) -> str:
+        """The CDP address the browser issues Playwright MCP, at this driver's own loopback address, where its relay is
+        reached as any agent reaches it: the same one until the browser's data is reset, which ends it."""
+        folder, _ = await self._found()
+        origin = f"http://127.0.0.1:{mcp_port()}/svc/{folder.name}"
+        return (await self._call("cdp", {"user": playwright_mcp.CDP_USER, "origin": origin}, credited=False))["ws_url"]
 
     @display
     async def viewport(self) -> Display:
@@ -255,9 +276,10 @@ class PageDriver(ComputerDriverEnvironment):
     async def _input(self, events: list[dict]) -> None:
         await self._call("page/input", {"events": events})
 
-    async def _call(self, op: str, params: Optional[dict] = None) -> Any:
-        """``browser/v1``'s ``op`` on the browser's server; DeviceUnavailable when it can't answer or says why not, and
-        once the browser has ended on its own, why, even after its server has launched another."""
+    async def _call(self, op: str, params: Optional[dict] = None, credited: bool = True) -> Any:
+        """``browser/v1``'s ``op`` on the browser's server, credited to the agent's tool call it's made for unless it's
+        the driver's own; DeviceUnavailable when it can't answer or says why not, and once the browser has ended on its
+        own, why, even after its server has launched another."""
         folder, card = await self._found()
         if (failed := _ended(folder)) is not None:
             raise DeviceUnavailable(failed)
@@ -266,7 +288,7 @@ class PageDriver(ComputerDriverEnvironment):
             raise Unsupported(f"the browser in {folder.name} serves no {op}")
         try:
             async with _http(folder) as http:
-                answer = await http.request(method["method"], method["endpoint"], headers=_tool_call(),
+                answer = await http.request(method["method"], method["endpoint"], headers=_tool_call() if credited else {},
                                             **({"json": params} if method["method"] != "GET" else {}))
         except (httpx.HTTPError, OSError) as e:
             raise DeviceUnavailable(_ended(folder) or f"the browser's server isn't answering: {type(e).__name__}: {e}"

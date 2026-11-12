@@ -8,8 +8,9 @@ from urllib.parse import urlsplit
 import httpx
 
 from . import AGENT_ENV_GATEWAY_MCP_PORT, GatewayMode, InternalMCPServer
-from .constants import (CONTROL_TOKEN_ENV, DEFAULT_MCP_SERVER_NAME, GATEWAY_PROVIDER_HEADERS_ENV, MCP_TRANSPORT,
-                        WEBSITE_LISTED_BY_NAME_ENV, WEBSITE_NAMES_ENV, WELL_KNOWN_PATH)
+from .constants import (CLOCK_FOLLOWERS_ENV, CONTROL_TOKEN_ENV, DEFAULT_MCP_SERVER_NAME,
+                        GATEWAY_PROVIDER_HEADERS_ENV, MCP_TRANSPORT, WEBSITE_LISTED_BY_NAME_ENV,
+                        WEBSITE_NAMES_ENV, WELL_KNOWN_PATH)
 from .gateway import Gateway, card_url
 
 logger = logging.getLogger(__name__)
@@ -188,6 +189,19 @@ def parse_name_url_map(env_str: str) -> dict[str, str]:
     return urls
 
 
+def parse_clock_followers(spec: str) -> dict[str, str]:
+    """``CLOCK_FOLLOWER_TOKENS``: each computer that follows the clock as ``name=read token``, comma-separated."""
+    followers: dict[str, str] = {}
+    for entry in filter(None, (part.strip() for part in spec.split(","))):
+        name, _, token = (part.strip() for part in entry.partition("="))
+        if not name or not token:
+            raise ValueError(f"invalid {CLOCK_FOLLOWERS_ENV} entry for {name or '?'!r}: expected 'name=read token'")
+        if name in followers:
+            raise ValueError(f"{CLOCK_FOLLOWERS_ENV} names {name!r} twice")
+        followers[name] = token
+    return followers
+
+
 def parse_site_names(env_str: str) -> dict[str, tuple[str, ...]]:
     """Each site's names from ``WEBSITE_NAMES``: ``shop=shop.test|www.shop.test,docs=docs.test``."""
     names: dict[str, tuple[str, ...]] = {}
@@ -229,6 +243,7 @@ if __name__ == "__main__":
         service_db_url=service_db_url,
         control_token=os.environ.get(CONTROL_TOKEN_ENV),
         provider_headers=os.environ.get(GATEWAY_PROVIDER_HEADERS_ENV, "").split(","),
+        clock_followers=parse_clock_followers(os.environ.get(CLOCK_FOLLOWERS_ENV, "")),
         site_names=parse_site_names(os.environ.get(WEBSITE_NAMES_ENV, "")),
         listed_by_name=[site.strip() for site in os.environ.get(WEBSITE_LISTED_BY_NAME_ENV, "").split(",")
                         if site.strip()],

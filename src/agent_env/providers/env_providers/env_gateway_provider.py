@@ -12,7 +12,8 @@ import secrets
 import shlex
 import time
 from collections import Counter
-from dataclasses import dataclass, field
+from collections.abc import Iterable
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
@@ -33,6 +34,7 @@ from agent_env.config import get_config
 from agent_env.env.env import DeployedGatewayEnv, _mcp_url
 from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT, ExternalChild, GatewayMode
 from agent_env.env.gateway.constants import (
+    CLOCK_FOLLOWERS_ENV,
     DEFAULT_MCP_SERVER_NAME,
     GATEWAY_PROVIDER_HEADERS_ENV,
     STATE_TOOL_NAME_CLASHES_KEY,
@@ -544,6 +546,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         gateway_env.append(f"      - GATEWAY_MODE={gateway_mode.value}")
         gateway_env.append(f"      - SERVICE_DB_URL={state_provider.base_url(state_instance)}")
         gateway_env.extend(f"      - {key}={value}" for key, value in control_environment(control_token).items())
+        gateway_env.extend(f"      - {key}={value}" for key, value in clock_followers_environment(external_children).items())
         if provider_headers := sandbox_request_header_names():
             gateway_env.append(f"      - {GATEWAY_PROVIDER_HEADERS_ENV}={','.join(provider_headers)}")
         publish = host_port or (lambda port: port)
@@ -923,8 +926,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             for result in (up, started):
                 if isinstance(result, BaseException):
                     raise result
-            external = tuple(ExternalChild(child.name, sandbox.url_from_sandbox(child.mcp_url),
-                                           sandbox.url_from_sandbox(child.base_url)) for child in started)
+            external = tuple(replace(child, mcp_url=sandbox.url_from_sandbox(child.mcp_url),
+                                     base_url=sandbox.url_from_sandbox(child.base_url)) for child in started)
             await self._write_file(sandbox, DOCKER_COMPOSE_PATH, compose(external_children=external))
             await self._compose_up(sandbox)
 
@@ -1120,6 +1123,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 "SERVICE_DB_URL": self._state_provider.base_url(state_instance),
                 "MCP_SERVER_NAME": mcp_server_name or DEFAULT_MCP_SERVER_NAME,
                 **control_environment(control_token),
+                **clock_followers_environment(external),
                 **({GATEWAY_PROVIDER_HEADERS_ENV: ",".join(names)} if (names := sandbox_request_header_names()) else {}),
             }
             gateway_sb = await sandbox_provider.create_container(
@@ -1734,6 +1738,12 @@ def _redact_compose_secrets(compose_content: str) -> str:
         _SETTINGS_LINE_RE.sub(r'\1\2=***"', _SECRET_ENV_KEY_RE.sub(r"\1\2=***", line))
         for line in compose_content.splitlines()
     )
+
+
+def clock_followers_environment(children: Iterable[ExternalChild]) -> dict[str, str]:
+    """The gateway's declared clock followers: each child that is one, by the read token its watch carries."""
+    followers = ",".join(f"{child.name}={child.clock_read_token}" for child in children if child.clock_read_token)
+    return {CLOCK_FOLLOWERS_ENV: followers} if followers else {}
 
 
 def _frontend_urls(gateway_url: str, website_configs: Optional[list[WebsiteConfig]]) -> Optional[dict[str, str]]:

@@ -69,6 +69,14 @@ METHOD_ADD = "data/add"
 METHOD_GET = "data/get"
 MCP_TRANSPORT = "mcp"
 CONTROL_TOKEN_ENV = "AGENTENV_CONTROL_TOKEN"
+# The computers that follow the gateway's clock, each as `name=read token`, comma-separated; TOKEN in the name keeps
+# it out of logged compose files.
+CLOCK_FOLLOWERS_ENV = "CLOCK_FOLLOWER_TOKENS"
+# How long /clock/watch holds a watch naming the current version before answering it unchanged; a follower's request
+# timeout must be longer. The card's watch method advertises it as hold_s.
+CLOCK_WATCH_HOLD_S = 25.0
+# The longest a clock write's wait_followers_s may ask it to wait for the followers.
+CLOCK_MAX_WAIT_FOLLOWERS_S = 30.0
 
 # Env/gateway-level extensions the gateway itself owns (tool gating + triggers).
 EXT_DISABLE_TOOL_URI = "urn:agentenv:disable-tool/v1"
@@ -205,6 +213,8 @@ _STEP_REQUEST = {
     "if": {"properties": {"action": {"const": "call_tool"}}},
     "then": {"required": ["tool_name"]},
 }
+_WAIT_FOLLOWERS = {"wait_followers_s": {"type": "number", "minimum": 0, "maximum": CLOCK_MAX_WAIT_FOLLOWERS_S}}
+
 GATEWAY_EXTENSIONS = [
     {
         "uri": EXT_DISABLE_TOOL_URI,
@@ -230,13 +240,15 @@ GATEWAY_EXTENSIONS = [
     },
     {
         "uri": EXT_CLOCK_URI,
-        "description": "Virtual clock (urn:agentenv:clock/v1): read the gateway's virtual time (wall-clock-derived, rate-scaled) via get_time; set-time/advance/clear are the harness control path.",
+        "description": "Virtual clock (urn:agentenv:clock/v1): read the gateway's virtual time (wall-clock-derived, rate-scaled) via get_time; set_time/set_rate/advance/clear are the harness control path, each changing the clock's opaque version and, given wait_followers_s, answering 504 naming the followers that don't show it in time (set_rate keeps t0, as advance does); a follower follows it through watch, a long poll naming the version it shows and held up to hold_s; state's followers block is diagnostic, not part of the contract.",
         "params": {"endpoint": "/clock/time", "methods": {
             "get_time": {"method": "GET", "endpoint": "/clock/time"},
-            "set_time": {"method": "PUT", "endpoint": "/clock/set-time", "request": {"type": "object", "properties": {"virtual_time": {"type": "string"}, "virtual_seconds_per_real_second": {"type": "number"}}, "required": ["virtual_time"]}},
-            "advance": {"method": "PUT", "endpoint": "/clock/advance", "request": {"type": "object", "properties": {"virtual_time": {"type": "string"}}, "required": ["virtual_time"]}},
-            "clear": {"method": "POST", "endpoint": "/clock/clear", "request": {"type": "object", "properties": {}}},
-            "state": {"method": "GET", "endpoint": "/clock/state", "request": {"type": "object", "properties": {}}}}},
+            "set_time": {"method": "PUT", "endpoint": "/clock/set-time", "request": {"type": "object", "properties": {"virtual_time": {"type": "string"}, "virtual_seconds_per_real_second": {"type": "number"}, **_WAIT_FOLLOWERS}, "required": ["virtual_time"]}},
+            "set_rate": {"method": "PUT", "endpoint": "/clock/set-rate", "request": {"type": "object", "properties": {"virtual_seconds_per_real_second": {"type": "number"}, **_WAIT_FOLLOWERS}, "required": ["virtual_seconds_per_real_second"]}},
+            "advance": {"method": "PUT", "endpoint": "/clock/advance", "request": {"type": "object", "properties": {"virtual_time": {"type": "string"}, **_WAIT_FOLLOWERS}, "required": ["virtual_time"]}},
+            "clear": {"method": "POST", "endpoint": "/clock/clear", "request": {"type": "object", "properties": {**_WAIT_FOLLOWERS}}},
+            "state": {"method": "GET", "endpoint": "/clock/state", "request": {"type": "object", "properties": {}}},
+            "watch": {"method": "GET", "endpoint": "/clock/watch", "hold_s": CLOCK_WATCH_HOLD_S, "request": {"type": "object", "properties": {"after": {"type": "string"}, "follower": {"type": "string"}}}}}},
         "required": False,
     },
     {

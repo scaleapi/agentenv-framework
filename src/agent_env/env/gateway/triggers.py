@@ -59,6 +59,8 @@ _BARRIER_KEYS = ("at", "timeout_seconds")
 _DROP = object()  # an unresolved `${x?}` used as a whole value: drop the key / element
 # Real seconds between re-reads of the clock while waiting out virtual time, so a rate change, re-arm or clear is followed.
 _VIRTUAL_RECHECK_S = 5.0
+# Seconds an executor call waits to connect, and for a task poll's answer.
+_EXECUTOR_HTTP_TIMEOUT_S = 30.0
 # An allowlist, not a size bound: identifier/metadata keys only, since bodies and addresses are PII.
 _ECHO_KEYS = frozenset({
     "action", "createdTime", "fileName", "kind", "mimeType", "modifiedTime", "name", "role",
@@ -1576,8 +1578,10 @@ class TriggerEngine:
             return None
         url = f"{executor['a2a_url']}/a2a"
         deadline = asyncio.get_running_loop().time() + executor["timeout_seconds"]
-        async with httpx.AsyncClient(timeout=30) as client:
-            send = await client.post(url, json={
+        async with httpx.AsyncClient(timeout=_EXECUTOR_HTTP_TIMEOUT_S) as client:
+            # an executor holds message/send open until its task ends, so the read waits as long as the executor may take
+            read_s = max(_EXECUTOR_HTTP_TIMEOUT_S, executor["timeout_seconds"])
+            send = await client.post(url, timeout=httpx.Timeout(_EXECUTOR_HTTP_TIMEOUT_S, read=read_s), json={
                 "jsonrpc": "2.0", "id": str(uuid.uuid4()), "method": "message/send",
                 "params": {"message": {"role": "user", "messageId": uuid.uuid4().hex,
                                        "contextId": context_id,
