@@ -1,9 +1,10 @@
 """agent-env's libfaketime on a real computer: the clock desktop test bundle's, the ubuntu-24.04 desktop with the
-reference driver and agentenv's chromium, every process loading the library. Composed, it passes the conformance probe
-at full. Deployed, with its clock page written as root, as the computer's follower will write it: a shell, Chrome's
-JavaScript and the driver read universe time through 30 forward jumps of 8 h, a day or a week, a rate change and a
-freeze; Chrome, Xvfb and the desktop's panel run on through them; and the driver's input reaches Chrome after every jump
-and, frozen, is drawn. Needs Docker and the local registry on localhost:5000."""
+reference driver and agentenv's chromium, every process loading the library. Composed, it passes the conformance
+probe at full. Deployed, with its clock page written as root, as the computer's follower will write it: curl and
+Python reach a live site, its certificate checked against real time by the TLS shim; a shell, Chrome's JavaScript and
+the driver read universe time through 30 forward jumps of 8 h, a day or a week, a rate change and a freeze; Chrome,
+Xvfb and the desktop's panel run on through them; and the driver's input reaches Chrome after every jump and, frozen,
+is drawn. Needs Docker and the local registry on localhost:5000."""
 
 import ast
 import asyncio
@@ -40,6 +41,11 @@ WINDOWS = ('for w in $(xprop -root _NET_CLIENT_LIST | sed "s/.*# //; s/,//g"); d
 #: The processes that must run on through the clock's changes: Xvfb, the desktop's panel and Chrome's browser process.
 PIDS = "pgrep -o -x Xvfb; pgrep -o -x xfce4-panel; pgrep -o -f -- --remote-debugging-pipe"
 PAGE_WRITER = "/opt/agentenv/clock/clockpage.py"
+#: A live site reached from the session, the clock months back, with no proxy: each exits 0 once its certificate
+#: verifies.
+REACH = {"curl": "curl -sS -o /dev/null --noproxy '*' --max-time 30 https://example.com/",
+         "python": ("python3 -c \"import urllib.request; urllib.request.build_opener(urllib.request.ProxyHandler({}))"
+                    ".open('https://example.com/', timeout=30)\"")}
 LIBRARY = "/opt/agentenv/clock/libfaketimeMT.so.1"
 
 
@@ -65,6 +71,8 @@ async def test_the_desktop_follows_the_universe_through_jumps_a_rate_change_and_
             loaded = await _run(deployed, f"grep -c {LIBRARY} /proc/{pids[2]}/maps")
             clock.set(time.time() - 182 * DAY, 1)
             await asyncio.sleep(2)  # each program maps the page the next time it reads the clock, within a second
+            reached = {client: await inside.run(deployed, ["sh", "-c", command], timeout_s=60)
+                       for client, command in REACH.items()}
             async with streamablehttp_client(f"{deployed.environment_url}/mcp") as (read, write, _):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
@@ -95,6 +103,8 @@ async def test_the_desktop_follows_the_universe_through_jumps_a_rate_change_and_
             report = await teardown_run(context)
 
     assert int(loaded) >= 1, "Chrome's browser process didn't load the library"
+    # The TLS shim: a live site's certificate verifies against real time, the clock 182 days back.
+    assert {client: ran["exit_code"] for client, ran in reached.items()} == {"curl": 0, "python": 0}, reached
     assert [r for r in rounds
             if not (r["shell"] and r["chrome_s"] is not None and r["typed"] and r["screenshot"])] == []
     assert max(r["chrome_s"] for r in rounds) <= LATE_S + 0.2  # the page's title updates every 200 ms

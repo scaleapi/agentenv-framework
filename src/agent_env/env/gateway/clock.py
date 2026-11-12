@@ -199,7 +199,8 @@ class Clock:
 
     def set_rate(self, rate) -> dict:
         """Change an armed clock's rate from its time at the call, keeping t0 and generation as an advance does, so time
-        triggers keep their marks and a rate change can't step the clock back by a time read a moment earlier."""
+        triggers keep their marks and a rate change can't step the clock back by a time read a moment earlier; 0 freezes
+        the clock."""
         r = _parse_rate(rate)
         with self._lock:
             if not self._armed or self._t0 is None:

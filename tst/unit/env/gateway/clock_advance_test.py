@@ -124,6 +124,61 @@ def test_the_card_offers_advance():
             "type": "number", "minimum": 0, "maximum": 30.0}}, "required": ["virtual_time"]}}
 
 
+def test_set_rate_keeps_the_time_t0_and_generation_and_runs_on_at_the_new_rate():
+    clock, now = _armed(rate=60)
+    now.tick(60)  # an hour at 60x
+    gen, lived = clock.generation, clock.elapsed()
+    state = clock.set_rate(0)
+    assert (state["virtual_time"], state["t0"], state["virtual_seconds_per_real_second"]) == (
+        "2026-01-01T01:00:00Z", T0, 0)
+    now.tick(600)
+    assert clock.read()["virtual_time"] == "2026-01-01T01:00:00Z" and clock.generation == gen
+    clock.set_rate(2)
+    now.tick(30)
+    assert clock.read()["virtual_time"] == "2026-01-01T01:01:00Z"
+    assert clock.elapsed() == pytest.approx(lived + 60)
+    clock.advance("2026-01-02T00:00:00Z")
+    assert clock.read()["virtual_time"] == "2026-01-02T00:00:00Z"
+
+
+def test_set_rate_refuses_a_bad_rate_and_an_unarmed_clock():
+    clock, _ = _armed()
+    with pytest.raises(ClockError, match="non-negative"):
+        clock.set_rate(-1)
+    with pytest.raises(ClockError, match="must be a number"):
+        clock.set_rate(None)
+    with pytest.raises(ClockError, match="not armed"):
+        Clock(now_fn=FakeNow()).set_rate(0)
+
+
+@pytest.mark.asyncio
+async def test_a_relative_mark_keeps_its_place_across_rate_changes():
+    """A re-arm (set_time) would re-anchor a relative or recurring mark to the new t0; set_rate leaves it put."""
+    now = FakeNow()
+    clock = Clock(now_fn=now)
+    engine = TriggerEngine(_FakeGateway(clock))
+    clock.set_time(T0, rate=60)
+    engine.register({"watch_roles": ["default"], "triggers": [
+        {"id": "rel", "when": {"type": "time", "at": "PT2H"}, "actions": [_perm()]}]})
+    _tick_call(engine, now, 1)
+    for rate in (0, 60, 0, 60):
+        clock.set_rate(rate)
+        _tick_call(engine, now, 30)  # 30 real s: half an hour at 60x, nothing while frozen
+    await _settle(engine)
+    assert clock.read()["virtual_time"] == "2026-01-01T01:01:00Z"
+    assert engine.state()["triggers"][0]["next_mark"] == "2026-01-01T02:00:00Z"
+    clock.set_rate(60)
+    _tick_call(engine, now, 60)
+    await _settle(engine)
+    assert engine.state()["triggers"][0]["status"] == "fired"
+    assert "reanchored" not in {e["kind"] for e in engine.state()["events"]}
+
+
+def test_the_card_offers_set_rate():
+    clock_ext = next(e for e in GATEWAY_EXTENSIONS if e["uri"] == EXT_CLOCK_URI)
+    assert clock_ext["params"]["methods"]["set_rate"]["endpoint"] == "/clock/set-rate"
+
+
 @pytest.fixture
 def gateway(tmp_path, monkeypatch) -> Gateway:
     monkeypatch.setattr(gw_mod, "GATEWAY_TRAJECTORY_FILE", str(tmp_path / "trajectory.jsonl"))
@@ -166,3 +221,39 @@ def test_route_refuses_a_backwards_advance(gateway):
     gateway._clock.set_time("2026-01-04T08:00:00Z", rate=0)
     resp = _put(gateway, "/clock/advance", {"virtual_time": T0})
     assert resp.status_code == 400 and "only moves forward" in resp.json()["error"]
+
+
+def test_route_sets_the_rate_of_an_armed_clock(gateway):
+    gateway._clock.set_time(T0, rate=0)
+    resp = _put(gateway, "/clock/set-rate", {"virtual_seconds_per_real_second": 60})
+    assert resp.status_code == 200 and resp.json()["virtual_seconds_per_real_second"] == 60
+    assert _put(gateway, "/clock/set-rate", {"virtual_seconds_per_real_second": -1}).status_code == 400
+
+
+def test_route_freezes_the_clock_at_rate_0(gateway):
+    gateway._clock.set_time(T0, rate=60)
+    gateway._clock._now.tick(60)  # an hour at 60x
+    resp = _put(gateway, "/clock/set-rate", {"virtual_seconds_per_real_second": 0})
+    assert resp.status_code == 200 and resp.json()["virtual_seconds_per_real_second"] == 0
+    gateway._clock._now.tick(600)
+    assert gateway._clock.read()["virtual_time"] == "2026-01-01T01:00:00Z"
+
+
+@pytest.mark.parametrize("path,body", [
+    ("/clock/set-time", {"virtual_time": "2026-01-02T00:00:00Z"}),
+    ("/clock/set-rate", {"virtual_seconds_per_real_second": 0}),
+    ("/clock/advance", {"virtual_time": "2026-01-02T00:00:00Z"}),
+    ("/clock/clear", {}),
+])
+def test_every_clock_write_wakes_the_fires_waiting_out_virtual_time(gateway, path, body):
+    gateway._clock.set_time(T0, rate=60)
+    moved = gateway._trigger_engine._clock_moved
+    method = "POST" if path == "/clock/clear" else "PUT"
+
+    async def _do() -> httpx.Response:
+        transport = httpx.ASGITransport(app=gateway._mcp.streamable_http_app())
+        async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
+            return await client.request(method, path, json=body)
+
+    assert asyncio.run(_do()).status_code == 200
+    assert moved.is_set()

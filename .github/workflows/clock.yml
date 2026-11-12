@@ -4,8 +4,8 @@ name: Clock gates
 # universe time, built with stock 0.9.12 beside it in an Ubuntu 24.04 image and run through tst/clock's gates on x86_64
 # and arm64: every wait API in C, Python, Java and Node at several rates, jumps, cancelled waits, timerfd duplicates,
 # condvar and semaphore stress, the waits again with futex_waitv refused, a stalled writer and a dead one, torn page
-# reads, the marker, the environment race and Chromium launches. It runs on pull requests that touch the library, its
-# tier or Chrome's pin, weekly, and on demand; it isn't a required check.
+# reads, the marker, the environment race, the TLS shim and Chromium launches. It runs on pull requests that touch the
+# library, its tier or Chrome's pin, weekly, and on demand; it isn't a required check.
 
 on:
   pull_request:
@@ -47,12 +47,12 @@ jobs:
         run: |
           python -m pip install --quiet -r .github/ci-requirements.txt
           uv sync --locked --extra dev --python "$(command -v python)"
-      # Chrome's archive and upstream's tarball, checked by sha256 when the tier uses them; a new pin is a new key.
+      # Chrome's archive and the tarballs, checked by sha256 when the tier uses them; a new pin is a new key.
       - name: Downloads
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.AGENTENV_TEST_CLOCK_CACHE }}
-          key: clock-downloads-${{ matrix.arch }}-${{ hashFiles('src/agent_env/browsers/envs/chromium/chromium.py', 'src/agent_env/computers/clock/build.sh') }}
+          key: clock-downloads-${{ matrix.arch }}-${{ hashFiles('src/agent_env/browsers/envs/chromium/chromium.py', 'src/agent_env/computers/clock/build.sh', 'tst/clock/conftest.py') }}
       - name: Clock gates
         run: .venv/bin/python -m pytest tst/clock -rA --timeout=2400 --junitxml=junit-clock-${{ matrix.arch }}.xml
       - name: No skips

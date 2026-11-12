@@ -44,6 +44,13 @@ PAGES = [{"type": "page"}]
 #: The CDP input a computer's page driver may send to the active tab, and how long its screenshot may take.
 PAGE_INPUT = frozenset({"Input.dispatchMouseEvent", "Input.dispatchKeyEvent", "Input.insertText"})
 CAPTURE_TIMEOUT_S, UNNAVIGATED_CAPTURE_TIMEOUT_S = 3.0, 1.0
+#: A frame's quality as a JPEG, which is a fifth to a tenth of the PNG's size.
+FRAME_QUALITY = 80
+#: How long a frame's capture may go unanswered before a second capture is sent: Chrome answers a capture of a tab
+#: behind the active one only once another capture of it arrives, and then answers both.
+NUDGE_S = 0.5
+#: How often a wait for a tab to load looks again.
+LOAD_POLL_S = 0.1
 #: Where an agent's files to upload are, and where downloads land, under the session user's home.
 UPLOADS = "Uploads"
 DOWNLOADS = "Downloads"
@@ -97,11 +104,15 @@ class BrowserControl:
         #: Each tab's latest capture, which shows while a dialog keeps its page from painting; and, by session, what
         #: input sent there waits on to learn a dialog opened.
         self._shots: dict[str, str] = {}
+        #: Each tab's latest frame, the image and its format, which a frame shows again while a dialog keeps it from
+        #: painting.
+        self._frames: dict[str, tuple[str, str]] = {}
         self._dialog_opened: dict[str, asyncio.Event] = {}
         self._pinned: dict[str, asyncio.Event] = {}
         self._tasks: set[asyncio.Future] = set()
-        #: Each start tab loading, by its session.
+        #: Each start tab loading, by its session; and each tab whose page has committed and not yet loaded.
         self._loading: dict[str, _StartLoad] = {}
+        self._page_loading: set[str] = set()
         #: Every http and https origin a page or frame it follows loaded since this server started, and the sessions
         #: of agentenv's own pages whose requests it answers itself.
         self.origins: set[str] = set()
@@ -691,6 +702,63 @@ class BrowserControl:
         await self._refresh(target)
         return {**({"png": png} if png is not None else {"blank": True}), "page": self._state_of(target)}
 
+    async def frame(self, target: Optional[str], load_wait_s: float) -> tuple[str, str, Optional[str], Optional[str]]:
+        """A frame of the tab ``target``, else, for none or one that's gone, of the active tab: once its page has loaded,
+        waiting up to ``load_wait_s``, a JPEG of it as it shows, or, with a dialog keeping it from painting, the frame it
+        last took, else its last capture, a PNG; a tab that closes while its page loads is the active tab's. The image
+        base64, its format and the tab and its URL; DeviceUnavailable with no tab open, or for one that paints nothing
+        in time."""
+        session = next((s for s, t in self._sessions.items() if t == target), None) if target else None
+        if session is None:
+            session = await self.active_session()
+        target = self._sessions[session]
+        deadline = asyncio.get_running_loop().time() + load_wait_s
+        while target in self._page_loading and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(LOAD_POLL_S)
+        if session not in self._sessions:
+            session = await self.active_session()
+            target = self._sessions[session]
+        if session in self._open_dialogs:
+            if (earlier := self._frames.get(target)) is None and (shot := self._shots.get(target)) is not None:
+                earlier = shot, "png"
+            if earlier is None:
+                raise DeviceUnavailable("a dialog keeps the tab from painting and it had no capture before it")
+            return *earlier, target, self.url_of(target)
+        try:
+            shot = await self._nudged_capture(session)
+        except asyncio.TimeoutError:
+            raise DeviceUnavailable(f"the tab painted nothing within {CAPTURE_TIMEOUT_S:g} s") from None
+        except (ConnectionError, DevToolsError) as e:
+            raise DeviceUnavailable(f"the tab couldn't be captured: {e}") from None
+        self._frames[target] = shot["data"], "jpg"
+        return shot["data"], "jpg", target, self.url_of(target)
+
+    async def _nudged_capture(self, session: str) -> dict:
+        """The tab's JPEG from the first of its captures to answer: a second follows one unanswered after ``NUDGE_S``,
+        since a tab behind the active one answers only then, all within ``CAPTURE_TIMEOUT_S``."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + CAPTURE_TIMEOUT_S
+
+        def capture() -> asyncio.Future:
+            return asyncio.ensure_future(self.devtools.call("Page.captureScreenshot", {
+                "format": "jpeg", "quality": FRAME_QUALITY, "optimizeForSpeed": True}, session_id=session,
+                timeout_s=max(0.0, deadline - loop.time())))
+
+        captures = {capture()}
+        try:
+            done, _ = await asyncio.wait(captures, timeout=NUDGE_S)
+            if not done:
+                captures.add(capture())
+            while True:
+                done, captures = await asyncio.wait(captures, return_when=asyncio.FIRST_COMPLETED)
+                if answers := [c.result() for c in done if c.exception() is None]:
+                    return answers[0]
+                if not captures:
+                    raise next(iter(done)).exception()
+        finally:
+            for pending in captures:
+                pending.cancel()
+
     async def _capture(self, session: str) -> Optional[str]:
         """The tab's page as it shows now; with a dialog open on it, which keeps it from painting, the last it took."""
         target = self._sessions[session]
@@ -806,6 +874,8 @@ class BrowserControl:
             self._saw(params.get("frame", {}).get("url", ""),
                       self.tabs.get(self._sessions[session], {}).get("context_id"))
         frame = params.get("frame", {})
+        if not frame.get("parentId") and (target := self._sessions.get(session)) is not None:
+            self._page_loading.add(target)
         if self.log is not None and not frame.get("parentId") and (target := self._sessions.get(session)) in self.tabs:
             self._spawn(self._log_navigated(self.log.reserve(), log_time(), target, frame.get("url", ""),
                                             frame.get("loaderId")))
@@ -886,13 +956,16 @@ class BrowserControl:
     def _on_Target_detachedFromTarget(self, params: dict, session: Optional[str]) -> None:
         if (target := self._sessions.pop(params["sessionId"], None)) is not None:
             self._shots.pop(target, None)
+            self._frames.pop(target, None)
             self._pinned.pop(target, None)
+            self._page_loading.discard(target)
         self._choosers.pop(params["sessionId"], None)
         self._dialog_opened.pop(params["sessionId"], None)
 
     def _on_Page_loadEventFired(self, params: dict, session: Optional[str]) -> None:
         self._choosers.pop(session, None)
         if (target := self._sessions.get(session)) is not None:
+            self._page_loading.discard(target)
             self._spawn(self._refresh(target))
         if (load := self._loading.get(session)) is not None and load.commits:
             load.loaded.add(load.commits[-1])
