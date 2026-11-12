@@ -312,6 +312,14 @@ async def test_deploy_hands_the_gateway_each_computer_deployed_under_its_name_an
         ("gw", "modal_vm"), ("gw", "modal_vm"), ("sb-desktop", "modal_vm"), ("sb-laptop", "modal_vm")]
 
 
+def test_a_computer_whose_card_follows_a_clock_hands_the_gateway_its_control_token_as_its_read_token():
+    from agent_env.env.envs._multi_computers import _clock_read_token
+
+    following = dataclasses.replace(_record("desktop"), environment_card={"name": "desktop", "capabilities": {"extensions": [
+        {"uri": "urn:agentenv:clock/v1", "params": {"methods": {"sync_time": {"method": "POST", "endpoint": "/clock/sync"}}}}]}})
+    assert (_clock_read_token(following), _clock_read_token(_record("laptop"))) == ("token-desktop", None)
+
+
 @pytest.mark.asyncio
 async def test_a_multi_env_without_computers_gives_the_gateway_no_children(gateway, providers):
     await _multi(mcp=["slack"]).deploy()

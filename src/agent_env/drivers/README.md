@@ -19,7 +19,20 @@ and input reaches it as CDP input events, both through `browser/v1`'s `page/*` o
 a tab that paints nothing shows white. It serves the page group too: `computer_navigate`, `computer_history`,
 `computer_tabs`, `computer_dialog` and `computer_upload`, and every frame names the page, its tab and what is open on
 it. The browser ending on its own fails the computer for good: its ready check is
-`final`, and its tools answer with why. Each call it makes to the browser for an agent's tool carries that call, its tool, id, arguments and the caller's role, in the `AgentEnv-Tool-Call` and `AgentEnv-Role` headers, so the browser's log credits the action to it. Name it as `page`, or by its id, `@local/agentenv-framework/drivers/page`.
+`final`, and its tools answer with why. Each call it makes to the browser for an agent's tool carries that call, its tool, id, arguments and the caller's role, in the `AgentEnv-Tool-Call` and `AgentEnv-Role` headers, so the browser's log credits the action to it. Each `browser_*` call is an entry too, begun and ended with `calls/begin` and `calls/end`, which Playwright MCP's CDP commands meanwhile, and the tab events they cause, name as `for`. Name it as `page`, or by its id, `@local/agentenv-framework/drivers/page`.
+
+Beside those it serves Playwright MCP's `browser_*` tools (with `--caps vision`), as `playwright-mcp-tools.json` lists
+them, from `playwright_mcp.py`. Its install lays Node and every npm package Playwright MCP needs out from pinned
+downloads, refusing a package whose dependencies aren't all there, and it runs Playwright MCP itself, attached to the browser over a CDP address the browser's relay issues to
+the user `playwright-mcp`, so the guard applies to it as to any CDP client; it never starts a browser of its own. Each
+caller gets a session of its own there. It starts on the first call, again once it has exited, and again on a fresh
+address after the browser's data is reset; it ends with the driver, gets none of the driver's environment, and its file
+access is `~/Uploads`. `browser_evaluate` and `browser_run_code_unsafe`, which run the agent's own code, are hidden by
+default: a task's tool access shows them by naming them. To move to another version, run
+`python scripts/upgrade_playwright_mcp.py <version>`, which pins the downloads in `env.toml` and writes the manifest from
+that version's `tools/list`, and look at each new tool it prints: hide it in `HIDDEN_TOOLS` if it runs the agent's own
+code, and add it to the unit test's `REVIEWED_TOOLS`, which fails until you do. The browser computer's integration test
+checks the installed version lists what the manifest does.
 
 A run that names it writes it: its files, what its class declares for each platform it supports, read without
 `mss`, `python-xlib` or PyAV installed, and how a computer installs it. Its `env.toml`'s `[install.linux]` has a
@@ -47,7 +60,7 @@ with `[tools]`. `requirements.txt` installs `cua-driver==0.38.0` from PyPI, whos
 `cua-driver`, the alias `aliases.toml` gives it, or by its id, `@local/agentenv-framework/drivers/cua-driver`.
 
 On macOS (`arm64`, composed onto a VM bundle such as `macos-26`), cua-driver is CuaDriver.app, from the cua-driver-rs
-0.38.0 release, its tarball checked by sha256 and its app put in `/Applications` by `install-app.sh`. Its daemon is a
+0.47.10 release, its tarball checked by sha256 and its app put in `/Applications` by `install-app.sh`. Its daemon is a
 direct LaunchAgent, CuaDriver.app's own executable, since macOS gives the app's TCC permissions, Accessibility, Post
 Event and Screen Recording, which `[install.macos]` grants it, only to the executable launchd starts itself; its socket
 is `/tmp/agentenv-cua-driver.sock`. `requirements-macos.txt` installs the protocol alone. Agents get the 62 tools
@@ -55,9 +68,10 @@ is `/tmp/agentenv-cua-driver.sock`. `requirements-macos.txt` installs the protoc
 sha256, those tools, and that cua-driver reports Accessibility and Screen Recording granted. Its pointer's actions go in
 the foreground, where cua-driver otherwise keeps from moving a person's pointer over a background app,
 and a click or a drag first rests the pointer where it presses, since an app such as Tk reads where the pointer is when it
-handles the press, and a button the pointer hasn't yet entered loses the click (P4, a button and a checkbox take a click). cua-driver 0.38.0 fails two of the probe's checks on macOS for defects of its own: it posts each typed
-character's key-up with the A key's code (P6, typed text arrives as key events), and a drag's mouse-down after the
-pointer has moved along its path (P7). `env.toml`'s `[[known_failures.macos]]` names both with that reason, so gate 3
+handles the press, and a button the pointer hasn't yet entered loses the click (P4, a button and a checkbox take a click). cua-driver fails two of the probe's checks on macOS for defects of its own: it types each character
+as a key-down and key-up of the A key's code carrying the character as Unicode, so the text arrives but an app reading
+key events sees the A key (P6, typed text arrives as key events), and 0.38.0 posted a drag's mouse-down after the
+pointer had moved along its path (P7), which 0.47.10, posting a drag's events the same way, hasn't yet shown. `env.toml`'s `[[known_failures.macos]]` names both with that reason, so gate 3
 records them in the build's probe (`known_failures`) and doesn't fail the build for them; any other failure still
 does. A driver's `known_failures`, by OS type, names a check by its id and name, with why. One that a probe didn't see
 fail is recorded in its probe (`unused_known_failures`, with what it saw) and warned of, so a waiver doesn't outlive its

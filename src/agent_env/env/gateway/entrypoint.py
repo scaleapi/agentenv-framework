@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from . import AGENT_ENV_GATEWAY_MCP_PORT, GatewayMode, InternalMCPServer
-from .constants import (CONTROL_TOKEN_ENV, DEFAULT_MCP_SERVER_NAME, GATEWAY_PROVIDER_HEADERS_ENV, MCP_TRANSPORT,
+from .constants import (CLOCK_FOLLOWERS_ENV, CONTROL_TOKEN_ENV, DEFAULT_MCP_SERVER_NAME, GATEWAY_PROVIDER_HEADERS_ENV, MCP_TRANSPORT,
                         WELL_KNOWN_PATH)
 from .gateway import Gateway, card_url
 
@@ -188,6 +188,19 @@ def parse_name_url_map(env_str: str) -> dict[str, str]:
     return urls
 
 
+def parse_clock_followers(spec: str) -> dict[str, str]:
+    """``CLOCK_FOLLOWER_TOKENS``: each computer that follows the clock as ``name=read token``, comma-separated."""
+    followers: dict[str, str] = {}
+    for entry in filter(None, (part.strip() for part in spec.split(","))):
+        name, _, token = (part.strip() for part in entry.partition("="))
+        if not name or not token:
+            raise ValueError(f"invalid {CLOCK_FOLLOWERS_ENV} entry for {name or '?'!r}: expected 'name=read token'")
+        if name in followers:
+            raise ValueError(f"{CLOCK_FOLLOWERS_ENV} names {name!r} twice")
+        followers[name] = token
+    return followers
+
+
 if __name__ == "__main__":
     logging.basicConfig(
         level=logging.INFO,
@@ -218,5 +231,6 @@ if __name__ == "__main__":
         service_db_url=service_db_url,
         control_token=os.environ.get(CONTROL_TOKEN_ENV),
         provider_headers=os.environ.get(GATEWAY_PROVIDER_HEADERS_ENV, "").split(","),
+        clock_followers=parse_clock_followers(os.environ.get(CLOCK_FOLLOWERS_ENV, "")),
     )
     gateway.run()

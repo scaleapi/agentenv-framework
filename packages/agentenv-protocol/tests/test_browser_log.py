@@ -13,8 +13,9 @@ import types
 import pytest
 
 from agentenv_protocol.website_browser import log as browser_log
-from agentenv_protocol.website_browser.log import (ACTOR, CUT_CHARS, REDACTED, BrowserLog, acts, cut, op_acts, read_tool_call, redact_text,
-                                           redact_url, redacted_args, redacted_op, redacted_params, tool_call_header)
+from agentenv_protocol.website_browser.log import (ACTOR, CUT_CHARS, REDACTED, BrowserLog, acts, caused, cut, op_acts, read_tool_call,
+                                           redact_text, redact_url, redacted_args, redacted_op, redacted_params,
+                                           tool_call_header)
 from agentenv_protocol.computer.errors import InvalidArgument
 from agentenv_protocol.website_browser.control import BrowserControl
 
@@ -88,6 +89,28 @@ def test_typing_while_a_password_field_has_focus_keeps_only_how_much_was_typed()
     assert redacted_args("computer_type", long_text, password=True) == {"text": {"length": CUT_CHARS + 5}}
     assert redacted_op("cookies/set", {"cookies": [{"name": "a", "value": "1"}]}) == \
         {"cookies": [{"name": "a", "value": REDACTED}]}
+
+
+def test_playwright_mcps_typing_arguments_keep_only_their_length_while_a_password_field_has_focus():
+    fields = {"fields": [{"name": "Email", "type": "textbox", "value": "ada@x.test"},
+                         {"name": "Password", "type": "textbox", "value": "hunter2"}, {"name": "Remember"}]}
+    assert redacted_args("browser_type", {"target": "e3", "text": "hunter2"}, password=True) == \
+        {"target": "e3", "text": {"length": 7}}
+    assert redacted_args("browser_press_key", {"key": "h"}, password=True) == {"key": {"length": 1}}
+    assert redacted_args("browser_fill_form", fields, password=True) == {"fields": [
+        {"name": "Email", "type": "textbox", "value": {"length": 10}},
+        {"name": "Password", "type": "textbox", "value": {"length": 7}}, {"name": "Remember"}]}
+    assert redacted_args("browser_fill_form", fields) == fields
+
+
+def test_a_tab_event_a_tool_calls_command_caused_names_the_call(tmp_path):
+    log = BrowserLog(tmp_path / "browser-chromium.jsonl")
+    command = {"seq": 7, "via": "cdp", "who": "playwright-mcp"}
+
+    assert caused({**command, "for": 5}, log, "T1") == {"by": "command", "entry": 7, "via": "cdp",
+                                                         "who": "playwright-mcp", "for": 5}
+    assert caused({**command, "for": [5, 6]}, log, "T1")["for"] == [5, 6]
+    assert "for" not in caused(command, log, "T1")
 
 
 def test_a_long_value_is_cut_with_its_length_and_sha256():
@@ -218,7 +241,7 @@ class Pipe:
             return {"currentIndex": 0, "entries": [{"id": 1, "url": "about:blank"}]}
         return {}
 
-    async def request(self, method, params=None, *, session_id=None):
+    async def request(self, method, params=None, *, session_id=None, answered=None):
         return {"result": await self.call(method, params, session_id=session_id)}
 
 

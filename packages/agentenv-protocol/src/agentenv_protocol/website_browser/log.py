@@ -75,8 +75,9 @@ ACTING_METHODS: dict[str, tuple[str, ...]] = {
 ACTING_OPS = frozenset({"page/input", "navigate", "history", "tabs/open", "tabs/activate", "tabs/close",
                         "dialog/answer", "files/choose", "cookies/set", "cookies/delete", "local_storage/set",
                         "local_storage/clear", "sites/set"})
-#: The ``browser/v1`` ops an agent's calls are never logged for: the log itself, and agentenv's own bookkeeping.
-UNLOGGED_OPS = frozenset({"log", "record"})
+#: The ``browser/v1`` ops an agent's calls are never logged for: the log itself, and agentenv's own bookkeeping, a
+#: driver's calls that begin and end a tool call's own entry among them.
+UNLOGGED_OPS = frozenset({"log", "record", "calls/begin", "calls/end"})
 #: The CDP methods and ops whose text is typed into the page.
 TYPING_METHODS = frozenset({"Input.insertText", "Input.dispatchKeyEvent", "Input.imeSetComposition"})
 #: What a key event says of the key it types, all of it dropped when a password field has focus.
@@ -92,8 +93,10 @@ SECRET_PREFIXES = ("x-amz-", "x-goog-", "x-ms-")
 URL_FIELDS = frozenset({"url", "urls", "href", "referrer", "documentURL"})
 #: The fields a page's content or a response's body is in, which an entry withholds, keeping their length and sha256.
 BODY_FIELDS = frozenset({"body", "postData", "html", "rawResponse"})
-#: A tool call's arguments that say what is typed, withheld while a password field has focus.
-TYPED_ARGS = frozenset({"text", "keys"})
+#: A tool call's arguments that say what is typed, withheld while a password field has focus: text, keys, or a key.
+TYPED_ARGS = frozenset({"text", "keys", "key"})
+#: A tool call's argument that lists form fields, each typed into as its ``value`` says.
+FIELDS_ARG = "fields"
 _WORDS = re.compile(r"[A-Z]?[a-z0-9]+|[A-Z]+(?![a-z])")
 #: A URL inside free text, such as an error message.
 _URL_IN_TEXT = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'<>]+")
@@ -240,10 +243,15 @@ def redacted_op(op: str, params: dict, *, password: bool = False) -> dict:
 
 def redacted_args(tool: str, args: Mapping[str, Any], *, password: bool = False) -> dict:
     """An MCP tool call's arguments as its entry keeps them: URLs as ``redact_url`` keeps them, and what it types, its
-    text or its keys in whatever shape the header carried them, as its length while a password field has focus."""
+    text, its keys or its form fields' values, in whatever shape the header carried them, as its length while a
+    password field has focus."""
     kept = _urls_and_bodies(args)
     if password:
         kept = {key: {"length": _length(value)} if key in TYPED_ARGS else value for key, value in kept.items()}
+        if isinstance(kept.get(FIELDS_ARG), list):
+            kept[FIELDS_ARG] = [{**field, "value": {"length": _length(field["value"])}}
+                                if isinstance(field, Mapping) and "value" in field else field
+                                for field in kept[FIELDS_ARG]]
     return cut(kept)
 
 
@@ -449,14 +457,16 @@ def _scan(path: Path) -> tuple[int, bool, dict[int, tuple[int, int]], int]:
 
 
 def caused(cause: Optional[dict], log: BrowserLog, tab: Optional[str]) -> dict:
-    """What a tab event says caused it: the command it was, by its entry, ``via`` and ``who``; agentenv itself; or,
-    with no ``cause``, the page, after the latest acting entry on ``tab`` if there is one."""
+    """What a tab event says caused it: the command it was, by its entry, ``via`` and ``who``, and the tool call it
+    served ``for`` when it was credited to one; agentenv itself; or, with no ``cause``, the page, after the latest
+    acting entry on ``tab`` if there is one."""
     if cause is None:
         after = log.last_acting.get(tab) if tab else None
         return {"by": "page", **({"after": after} if after else {})}
     if cause.get("via") == "agentenv":
         return {"by": "agentenv"}
-    return {"by": "command", "entry": cause["seq"], "via": cause["via"], "who": cause.get("who")}
+    return {"by": "command", "entry": cause["seq"], "via": cause["via"], "who": cause.get("who"),
+            **({"for": cause["for"]} if cause.get("for") is not None else {})}
 
 
 def log_time() -> str:
