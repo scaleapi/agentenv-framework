@@ -341,10 +341,10 @@ async def relay_websocket(websocket: WebSocket, base_url: str, *, role: str,
     offered = [protocol.strip() for value in websocket.headers.getlist("sec-websocket-protocol")
                for protocol in value.split(",") if protocol.strip()]
     try:
-        upstream = await connect_websocket(uri, additional_headers=headers,
+        upstream = await connect_websocket(uri, additional_headers=headers,  # never through a proxy: it's internal
                                            subprotocols=offered or None, user_agent_header=None,
                                            open_timeout=open_timeout, max_size=WEBSOCKET_MESSAGE_MAX_BYTES,
-                                           **destination)
+                                           proxy=None, **destination)
     except InvalidStatus as e:
         refusal = Response(content=bytes(e.response.body or b""), status_code=e.response.status_code)
         refusal.raw_headers = [*(item for item in refusal.raw_headers if item[0] == b"content-length"),

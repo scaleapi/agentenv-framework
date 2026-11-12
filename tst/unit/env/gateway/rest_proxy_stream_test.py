@@ -643,18 +643,22 @@ async def test_a_site_whose_env_stores_no_names_takes_its_host_from_the_names_it
 
 @pytest.mark.parametrize("upstream, destination", [
     ("https://notes.internal", {"host": "notes.internal", "port": 443, "server_hostname": "notes.internal"}),
-    ("http://notes.internal", {"host": "notes.internal", "port": 80, "server_hostname": None}),
+    ("http://notes.internal", {"host": "notes.internal", "port": 80, "server_hostname": "unset"}),
     ("https://notes.internal:8443", {"host": "notes.internal", "port": 8443, "server_hostname": "notes.internal"}),
 ], ids=["https", "http", "https-port"])
 def test_a_websocket_to_a_site_reached_by_name_connects_to_its_upstream_and_checks_the_upstreams_certificate(
         monkeypatch, upstream, destination):
+    """Straight to the upstream, never through a proxy the environment names, which would tunnel to the site's
+    name: a real domain for a site named after one."""
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:3128")
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example:3128")
     transport = _card_site([], {})
     monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient",
                         lambda **kw: _RealAsyncClient(transport=transport, **kw))
     asked = []
 
     async def connect(uri, **kwargs):
-        asked.append((uri, {key: kwargs.get(key) for key in ("host", "port", "server_hostname")}))
+        asked.append((uri, {key: kwargs.get(key, "unset") for key in ("host", "port", "server_hostname", "proxy")}))
         raise OSError("refused")
     monkeypatch.setattr(rest_proxy_module, "connect_websocket", connect)
     gw = _gateway(website_urls={"notes": upstream}, site_names={"notes": ["notes.test"]})
@@ -663,7 +667,7 @@ def test_a_websocket_to_a_site_reached_by_name_connects_to_its_upstream_and_chec
                                                          headers={"AgentEnv-Site-Root": "https://notes.test"}):
             pass
     scheme = "wss" if upstream.startswith("https") else "ws"
-    assert asked == [(f"{scheme}://notes.test/live", destination)]
+    assert asked == [(f"{scheme}://notes.test/live", {**destination, "proxy": None})]
 
 
 @pytest.mark.asyncio
