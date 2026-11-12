@@ -262,7 +262,7 @@ class CollectingVm:
         return 0, "ok", ""
 
     async def exec(self, *args):
-        path = args[-1].split(" < ", 1)[1].split(" | ", 1)[0].strip("'")
+        path = args[-1].split("base64 < ", 1)[1].strip("'")
         return SimpleNamespace(stdout=_Stream(base64.b64encode(COLLECTED[path])), stderr=_Stream(b""),
                                wait=lambda: asyncio.sleep(0, result=0))
 

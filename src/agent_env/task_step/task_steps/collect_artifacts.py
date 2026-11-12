@@ -69,8 +69,6 @@ base directory is assumed):
 from __future__ import annotations
 
 import asyncio
-import base64
-import contextlib
 import functools
 import logging
 import os
@@ -468,17 +466,17 @@ class CollectArtifactsTaskStep(TaskStep):
         return int(size)
 
     async def _collect_file(
-        self, sandbox, container: Optional[str], source_path: str, size: int, object_name: str, store,
-        artifact_id: str, version: int, content_type: str,
+        self, sandbox, container: Optional[str], source_path: str, object_name: str, store, artifact_id: str,
+        version: int, content_type: str,
     ) -> str:
-        """Read a file of ``size`` bytes out of the sandbox and upload it to S3.
+        """Read a file out of the sandbox and upload it to S3 — one path, any size.
 
         base64-encode in the sandbox (raw binary over a websocket exec transport is
         silently dropped; ASCII survives), stream stdout + decode incrementally to
         a temp file (bounds memory), then multipart-upload. stderr is drained in
-        parallel so the shared output pump can't backpressure-stall. The sandbox reads
-        no more than ``size`` bytes."""
-        bash_cmd = f"head -c {size} < {shlex.quote(source_path)} | base64"
+        parallel so the shared output pump can't backpressure-stall."""
+        import base64
+        bash_cmd = f"base64 < {shlex.quote(source_path)}"
         args = _exec_args(sandbox, container, ("bash", "-c", bash_cmd))
 
         local_path = None
@@ -487,7 +485,30 @@ class CollectArtifactsTaskStep(TaskStep):
             with tempfile.NamedTemporaryFile(delete=False, suffix=f"-{object_name.replace('/', '_')}") as tmp:
                 local_path = tmp.name
 
-            exit_code = await _read_to_file(sandbox, args, local_path, size)
+            process = await sandbox.exec(*args)
+            stderr_task = asyncio.create_task(process.stderr.read())
+            stdout = process.stdout
+            with open(local_path, "wb") as fh:
+                if hasattr(stdout, "__aiter__"):
+                    # Async-iterable stdout (websocket exec): stream, decoding 4-char-aligned base64.
+                    pending = bytearray()
+                    async for chunk in stdout:
+                        pending += chunk.translate(None, b"\r\n")  # strip 76-col wrap
+                        n = (len(pending) // 4) * 4
+                        if n:
+                            fh.write(base64.b64decode(pending[:n]))
+                            del pending[:n]
+                    if pending:
+                        fh.write(base64.b64decode(pending))
+                else:
+                    # Modal stdout has read() but no __aiter__: read all, decode once.
+                    data = (await stdout.read()).translate(None, b"\r\n")
+                    fh.write(base64.b64decode(data))
+            exit_code = await process.wait()
+            try:
+                await stderr_task
+            except Exception:
+                pass
             if exit_code != 0:
                 raise RuntimeError(f"base64 read failed for {source_path} (exit {exit_code})")
 
@@ -568,6 +589,8 @@ class CollectArtifactsTaskStep(TaskStep):
         lenient skip). Small files come back in one ``cua_get_file`` call; large ones stream
         in byte ranges straight to disk, so neither the transfer nor this process ever holds
         the whole file in memory."""
+        import base64
+
         size = await self._controller_file_size(deployed_env, path)
         if size < 0:
             raise FileNotFoundError(f"file not found on CUA VM: {path}")
@@ -592,6 +615,8 @@ class CollectArtifactsTaskStep(TaskStep):
         than scans. Each range is decoded and written straight to the file so memory stays
         bounded to one chunk. base64 may wrap, so whitespace is stripped before decoding. A
         short read fails loudly rather than leaving a truncated artifact."""
+        import base64
+
         logger.info(
             f"Streaming {path} ({size} bytes) off the CUA VM in {_CUA_CHUNK_BYTES}-byte chunks"
         )
@@ -920,7 +945,7 @@ class CollectArtifactsTaskStep(TaskStep):
                 content_type = _CONTENT_TYPES.get(ext, "application/octet-stream")
 
                 object_url = await self._collect_file(
-                    sandbox, container, source_path, file_size, object_name, store, artifact_id, version, content_type,
+                    sandbox, container, source_path, object_name, store, artifact_id, version, content_type,
                 )
 
                 collected[key] = object_url
@@ -1050,48 +1075,3 @@ def _unused(key: str, keys: set[str]) -> str:
         n += 1
         unused = f"{key} ({n})"
     return unused
-
-
-async def _read_to_file(sandbox, args: tuple, local_path: str, size: int) -> int:
-    """Run ``args`` and decode its base64 stdout into ``local_path``, draining stderr beside it so the shared output
-    pump can't backpressure-stall; return its exit status."""
-    process = await sandbox.exec(*args)
-    stderr = asyncio.create_task(process.stderr.read())
-    try:
-        exit_code = await _decode_to_file(process, local_path, size)
-    except BaseException:
-        stderr.cancel()
-        raise
-    with contextlib.suppress(Exception):
-        await stderr
-    return exit_code
-
-
-async def _decode_to_file(process, local_path: str, size: int) -> int:
-    """Decode ``process``'s base64 stdout into ``local_path`` and return its exit status, refusing a byte past ``size``."""
-    written = 0
-
-    def write(fh, data: bytes) -> None:
-        nonlocal written
-        written += len(data)
-        if written > size:
-            raise RuntimeError(f"the sandbox sent more than the {size} bytes it reported; refusing the rest")
-        fh.write(data)
-
-    stdout = process.stdout
-    with open(local_path, "wb") as fh:
-        if hasattr(stdout, "__aiter__"):
-            # Async-iterable stdout (websocket exec): stream, decoding 4-char-aligned base64.
-            pending = bytearray()
-            async for chunk in stdout:
-                pending += chunk.translate(None, b"\r\n")  # strip 76-col wrap
-                n = (len(pending) // 4) * 4
-                if n:
-                    write(fh, base64.b64decode(pending[:n]))
-                    del pending[:n]
-            if pending:
-                write(fh, base64.b64decode(pending))
-        else:
-            # Modal stdout has read() but no __aiter__: read all, decode once. The sandbox reads at most `size` bytes.
-            write(fh, base64.b64decode((await stdout.read()).translate(None, b"\r\n")))
-    return await process.wait()

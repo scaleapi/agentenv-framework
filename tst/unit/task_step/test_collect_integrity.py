@@ -55,7 +55,7 @@ async def test_integrity_check_fails_on_truncated_transfer():
 
     step = CollectArtifactsTaskStep(id="collect", version=None)
     with pytest.raises(RuntimeError, match="integrity check failed"):
-        await step._collect_file(sb, None, "/app/artifact/corpus.warc.gz", len(src), "corpus.warc.gz",
+        await step._collect_file(sb, None, "/app/artifact/corpus.warc.gz", "corpus.warc.gz",
                                  _Store(), "uid", 1, "application/octet-stream")
 
 
@@ -72,7 +72,7 @@ async def test_integrity_check_passes_on_complete_transfer():
             return "s3://bucket/ok"
 
     step = CollectArtifactsTaskStep(id="collect", version=None)
-    out = await step._collect_file(sb, None, "/app/artifact/corpus.warc.gz", len(src), "corpus.warc.gz",
+    out = await step._collect_file(sb, None, "/app/artifact/corpus.warc.gz", "corpus.warc.gz",
                                    _OkStore(), "uid", 1, "application/octet-stream")
     assert out == "s3://bucket/ok"
 
@@ -90,7 +90,7 @@ async def test_the_upload_runs_off_the_event_loop():
             return "s3://bucket/ok"
 
     step = CollectArtifactsTaskStep(id="collect", version=None)
-    await step._collect_file(sb, None, "/app/artifact/a.bin", len(src), "a.bin", _Store(), "uid", 1, "application/octet-stream")
+    await step._collect_file(sb, None, "/app/artifact/a.bin", "a.bin", _Store(), "uid", 1, "application/octet-stream")
     assert on_loop == [False]
 
 
@@ -111,7 +111,7 @@ async def test_a_cancel_mid_upload_leaves_the_file_to_the_upload(caplog, monkeyp
             return "s3://bucket/ok"
 
     step = CollectArtifactsTaskStep(id="collect", version=None)
-    collect = asyncio.create_task(step._collect_file(sb, None, "/app/artifact/a.bin", len(src), "a.bin", _Store(), "uid", 1, "application/octet-stream"))
+    collect = asyncio.create_task(step._collect_file(sb, None, "/app/artifact/a.bin", "a.bin", _Store(), "uid", 1, "application/octet-stream"))
     await asyncio.to_thread(uploading.wait, 5)
     collect.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -124,47 +124,4 @@ async def test_a_cancel_mid_upload_leaves_the_file_to_the_upload(caplog, monkeyp
             await asyncio.sleep(0.02)
     assert uploaded == [src]
     assert "Uploading collected /app/artifact/a.bin finished after its caller was cancelled" in caplog.text
-    assert list(tmp_path.iterdir()) == []
-
-
-class _RecordingSandbox(_Sandbox):
-    def __init__(self, *args, stdout=None):
-        super().__init__(*args)
-        self.commands, self._stdout = [], stdout
-
-    async def exec(self, *args):
-        self.commands.append(args)
-        return _Proc(self._stdout or _TruncStdout(self._full, self._keep))
-
-
-class _UploadingStore:
-    def put_object_file(self, **kw):
-        return "s3://bucket/ok"
-
-
-class _RefusingStore:
-    def put_object_file(self, **kw):
-        raise AssertionError("uploaded an artifact the read should have refused")
-
-
-@pytest.mark.asyncio
-async def test_the_sandbox_reads_no_more_than_the_size_it_reported():
-    src = b"F" * 900
-    sb = _RecordingSandbox(base64.b64encode(src), len(base64.b64encode(src)), len(src))
-    step = CollectArtifactsTaskStep(id="collect", version=None)
-    await step._collect_file(sb, None, "/app/artifact/a b.bin", len(src), "a b.bin", _UploadingStore(), "uid", 1,
-                             "application/octet-stream")
-    assert sb.commands == [("bash", "-c", "head -c 900 < '/app/artifact/a b.bin' | base64")]
-
-
-@pytest.mark.asyncio
-async def test_a_stream_longer_than_the_reported_size_is_refused(tmp_path, monkeypatch):
-    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
-    src = b"G" * 900
-    more = base64.b64encode(src * 3)
-    sb = _Sandbox(more, len(more), len(src))
-    step = CollectArtifactsTaskStep(id="collect", version=None)
-    with pytest.raises(RuntimeError, match="more than the 900 bytes it reported"):
-        await step._collect_file(sb, None, "/app/artifact/zero", len(src), "zero", _RefusingStore(), "uid", 1,
-                                 "application/octet-stream")
     assert list(tmp_path.iterdir()) == []

@@ -59,7 +59,7 @@ class _VmSandbox:
         self.calls.append(args)
         assert args[0] == "sudo", f"VM-host command must run as root: {args}"
         bash_cmd = args[-1]
-        path = bash_cmd.split(" < ", 1)[1].split(" | ", 1)[0].strip("'")
+        path = bash_cmd.split("base64 < ", 1)[1].strip().strip("'")
         rel = path.split("/app/artifact/", 1)[-1]
         return _Proc(base64.b64encode(FILES[rel]))
 
@@ -142,7 +142,7 @@ class TestNoDockerOnTheVmPath:
         # sudo'd but not container-wrapped: host-mode agents write as uid 0
         assert all(c.startswith(("sudo ", "echo ")) for c in flat), flat
         assert any(c.startswith("sudo find /app/artifact") for c in flat), flat
-        assert any(c.startswith("sudo bash -c head -c ") for c in flat), flat
+        assert any(c.startswith("sudo bash -c base64 < ") for c in flat), flat
 
     @pytest.mark.asyncio
     async def test_it_does_not_need_a_deployed_agent(self, vm):
