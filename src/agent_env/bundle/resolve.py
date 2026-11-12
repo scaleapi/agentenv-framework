@@ -3,8 +3,9 @@
 References are the fields step types declare in ``entity_refs`` and the toml keys entity types declare
 in ``toml_refs``. The name of one of this bundle's entities becomes that entity's id, a name an output
 of the same task writes becomes the output's id, and anything else is a store id, left as written;
-whether store ids exist is checked later, with the other checks that read a store. An id renamed so is
-also renamed in each path into the run's context a step type declares in ``context_paths``.
+whether store ids exist is checked later, with the other checks that read a store. An env renamed so is
+also renamed where a path into the run's context a step type declares in ``context_paths`` names it
+(``sync_context_paths``).
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ from agent_env.plugins import _registration
 from agent_env.plugins._requirements import unmet_problems
 from agent_env.store.ids import HF_PREFIX, derive_id, is_local_id, validate_local_id
 from agent_env.store.image_store.oci_registry_credentials import names_registry
-from agent_env.task_step.context import context_path_segments, renamed_context_path
+from agent_env.task_step.context import ENV_KEYED_METADATA, context_path, context_path_segments
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_step import TaskStep, attach_retry_config, dependencies
 
@@ -264,9 +265,8 @@ class _Resolver:
                     continue
                 self._resolve(entry, site, f"{where}{site.path}", site.value, site.version, outputs,
                               functools.partial(_upstream, edges, index), references)
-        renamed = _rewritten_ids(entry.config, steps)
-        for _, step, cls in declared:
-            self._rename_context_paths(entry, step, cls, renamed)
+        sync_context_paths(entry.config, steps)
+        self._undeclared_paths(entry, declared, _rewritten_ids(entry.config, steps, EntityKind.ENV))
         return ResolvedEntry(entry, steps, tuple(references), tuple(outputs.values()))
 
     def _image_folder(self, entry: BundleEntry) -> bool:
@@ -493,19 +493,17 @@ class _Resolver:
             self._problem(entry, f"{where}{path} = {value!r} names {named}, but {cls.type} doesn't declare its "
                           "entity_refs, so it can't be rewritten")
 
-    def _rename_context_paths(self, entry: BundleEntry, step: dict, cls: type, renamed: dict[str, str]) -> None:
-        """Rename each id ``renamed`` holds in the paths into the run's context ``cls`` declares (``context_paths``).
-        Warn of a path naming one in a field ``cls`` doesn't declare, which the run would look up as written."""
-        for path in cls.context_paths:
-            for _, holder, key in field_sites(step, path):
-                if isinstance(holder[key], str):
-                    holder[key] = renamed_context_path(holder[key], renamed.get)
-        for where, value in _strings(step):
-            segments = context_path_segments(value) or []
-            if named := next((segment for segment in segments[1:] if segment in renamed), None):
-                logger.warning("%s: step %r: %s = %r names %r, which this bundle writes as %r, but %s doesn't declare "
-                               "the field in context_paths, so it isn't rewritten", relative(self.bundle.root, entry.path),
-                               step.get("id"), where, value, named, renamed[named], cls.type)
+    def _undeclared_paths(self, entry: BundleEntry, declared: list[tuple[int, dict, type]],
+                          renamed: dict[str, str]) -> None:
+        """Warn of a path naming a renamed env in a field its step's type doesn't declare (``context_paths``), which
+        the run would look up as written."""
+        for _, step, cls in declared:
+            for where, value in _strings(step):
+                if (env := _named_env(value)) in renamed:
+                    logger.warning("%s: step %r: %s = %r names %r, which this bundle writes as %r, but %s doesn't "
+                                   "declare the field in context_paths, so it isn't rewritten",
+                                   relative(self.bundle.root, entry.path), step.get("id"), where, value, env,
+                                   renamed[env], cls.type)
 
     def _problem(self, entry: BundleEntry, message: str) -> None:
         self.problems.append(f"{relative(self.bundle.root, entry.path)}: {message}")
@@ -536,6 +534,25 @@ def _registry_problem(key: str, name: Any) -> str | None:
     if isinstance(name, str) and names_registry(name):
         return None
     return f"{key}: {name!r} doesn't name its registry; spell it out, as in docker.io/library/{name}"
+
+
+def sync_context_paths(written: list[dict], steps: list[dict]) -> None:
+    """Point each path into the run's context a step of ``steps`` declares (``TaskStep.context_paths``) at the env its
+    task's env fields name now, rebuilt from the path ``written``, the task as written, gives it. Only a segment that
+    names an env changes, so a key that just shares an entity's name, such as a verifier id, is kept. Each place that
+    rewrites a task's env fields calls it after, and calling it again changes nothing."""
+    renamed = _rewritten_ids(written, steps, EntityKind.ENV)
+    registry = get_task_step_registry()
+    authored = {step.get("id"): step for step in written}
+    for step in steps:
+        cls = registry.get(step.get("type")) if isinstance(step.get("type"), str) else None
+        if cls is None or (before := authored.get(step.get("id"))) is None:
+            continue
+        for path in cls.context_paths:
+            was = {where: holder[key] for where, holder, key in field_sites(before, path)}
+            for where, holder, key in field_sites(step, path):
+                if isinstance(was.get(where), str):
+                    holder[key] = _env_renamed(was[where], renamed)
 
 
 def build_step(step: dict) -> TaskStep:
@@ -594,16 +611,31 @@ def _strings(value: Any, path: str = "") -> Iterator[tuple[str, str]]:
             yield from _strings(item, f"{path}[{i}]")
 
 
-def _rewritten_ids(written: list[dict], resolved: list[dict]) -> dict[str, str]:
-    """Each id a reference field of ``written``'s steps holds that the same field of ``resolved``'s holds another id
-    in place of, to that id."""
+def _rewritten_ids(written: list[dict], resolved: list[dict], kind: EntityKind | None = None) -> dict[str, str]:
+    """Each id a reference field of ``written``'s steps holds, of ``kind`` when given, that the same field of
+    ``resolved``'s holds another id in place of, to that id."""
     registry = get_task_step_registry()
     renamed = {}
     for before, after in zip(written, resolved):
         cls = registry.get(before.get("type"))
         if cls is None or not cls.entity_refs:
             continue
-        now = {site.path: site.value for site in ref_sites(cls.entity_refs, after)}
-        renamed.update((site.value, now[site.path]) for site in ref_sites(cls.entity_refs, before)
+        refs = [ref for ref in cls.entity_refs if kind is None or ref.kind is kind]
+        now = {site.path: site.value for site in ref_sites(refs, after)}
+        renamed.update((site.value, now[site.path]) for site in ref_sites(refs, before)
                        if site.path in now and now[site.path] != site.value)
     return renamed
+
+
+def _named_env(path: Any) -> str | None:
+    """The env a path into a run's context names: the segment after a key whose entries are keyed by env id."""
+    segments = context_path_segments(path) or []
+    return segments[1] if len(segments) > 1 and segments[0] in ENV_KEYED_METADATA else None
+
+
+def _env_renamed(path: str, renamed: dict[str, str]) -> str:
+    """``path`` naming the env ``renamed`` gives its env segment's id for by that id."""
+    if (env := _named_env(path)) not in renamed:
+        return path
+    segments = context_path_segments(path)
+    return context_path([segments[0], renamed[env], *segments[2:]])

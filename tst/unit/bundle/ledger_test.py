@@ -312,7 +312,7 @@ def test_a_task_written_before_its_context_paths_named_the_bundle_s_ids_is_writt
              "prompt_id": "p1", "context_facts_for_judge": {"wf-1": "env_trigger_state.tickets.statuses.wf-1"}}
     (bundle_dir / "tasks" / "t.json").write_text(_steps(judge))
     with monkeypatch.context() as earlier:
-        earlier.setattr(resolve_module._Resolver, "_rename_context_paths", lambda *args: None)
+        earlier.setattr(resolve_module, "sync_context_paths", lambda *args: None)
         _run(bundle_dir)
 
     checks = _run(bundle_dir)

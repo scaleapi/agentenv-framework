@@ -169,18 +169,20 @@ def test_a_reference_added_without_rewriting_a_field_is_not_a_renamed_id(make):
     assert swapped.entity_ids == entry.entity_ids == {"tickets": f"{ROOT}/tickets"}
 
 
-def test_a_context_fact_naming_what_the_bundle_renamed_names_it_by_its_new_id(make):
-    facts = {"wf-1": "env_trigger_state.tickets.statuses.wf-1", "cli": "env_changes.tickets-cli.rows",
-             "store env": "env_trigger_state.elsewhere.statuses.wf-1", "score": "verifications.judge.score"}
-    entry = resolved(make(tasks={"t": [
-        {"id": "deploy", "type": "deploy_env", "env_id": "tickets"},
-        {"id": "cli", "type": "build_mcp_cli", "env_id": "tickets", "cli_artifact_id": "tickets-cli"},
-        {"id": "judge", "type": "rubrics_verifier", "context_facts_for_judge": facts},
-    ]}), "t")
+def test_a_context_fact_naming_a_bundle_env_names_it_by_its_new_id_and_keeps_any_other_key(make):
+    facts = {"wf-1": "env_trigger_state.tickets.statuses.wf-1", "store env": "env_trigger_state.elsewhere.statuses.wf-1",
+             "verifier named as the agent": "verifications.solver.score", "an output": "env_changes.tickets-cli.rows"}
+    steps = [{"id": "deploy", "type": "deploy_env", "env_id": "tickets"},
+             {"id": "agent", "type": "deploy_agent", "env_ids": ["tickets"], "a2a_agent_id": "solver"},
+             {"id": "cli", "type": "build_mcp_cli", "env_id": "tickets", "cli_artifact_id": "tickets-cli"},
+             {"id": "judge", "type": "rubrics_verifier", "context_facts_for_judge": facts}]
+    entry = resolved(make(tasks={"t": steps}), "t")
 
-    assert entry.config[2]["context_facts_for_judge"] == {
-        "wf-1": f"env_trigger_state[{ROOT}/tickets].statuses.wf-1", "cli": f"env_changes[{ROOT}/t/tickets-cli].rows",
-        "store env": "env_trigger_state.elsewhere.statuses.wf-1", "score": "verifications.judge.score"}
+    assert entry.config[3]["context_facts_for_judge"] == {
+        **facts, "wf-1": f"env_trigger_state[{ROOT}/tickets].statuses.wf-1"}
+    again = json.loads(json.dumps(entry.config))
+    resolve_module.sync_context_paths(steps, again)
+    assert again == entry.config
 
 
 def test_a_path_naming_what_the_bundle_renamed_in_a_field_its_step_doesnt_declare_is_warned_of(make, caplog):

@@ -17,6 +17,8 @@ from agent_env.providers.sandbox_providers.sandbox_provider import reachable_url
 HEARTBEAT_KEY = "_heartbeat_fn"
 # context.metadata[ENTITY_IDS_KEY]: the run's task's Task.entity_ids, set by Task.run.
 ENTITY_IDS_KEY = "entity_ids"
+# The context.metadata keys whose entries are keyed by a deployed env's id, so a path into one names an env next.
+ENV_KEYED_METADATA = frozenset({"env_trigger_state", "env_changes", "env_trajectory", "live_websites"})
 
 
 def run_entity_id(metadata: dict, entity_id: str) -> str:
@@ -32,14 +34,17 @@ def context_path_segments(path: Any) -> list[str] | None:
     return [plain or bracketed for plain, bracketed in _CONTEXT_PATH_SEGMENT.findall(path)]
 
 
+def context_path(segments: list[str]) -> str:
+    """The path into a run's context that walks ``segments``: each that a dotted path can't hold in brackets."""
+    return "".join(_path_segment(segment, first=i == 0) for i, segment in enumerate(segments))
+
+
 def renamed_context_path(path: str, rename: Callable[[str], str | None]) -> str:
     """``path`` with each segment ``rename`` gives another id for naming that id; ``path`` itself when it isn't a path
     into a run's context or ``rename`` renames none of its segments."""
     segments = context_path_segments(path) or []
     renamed = [rename(segment) or segment for segment in segments]
-    if renamed == segments:
-        return path
-    return "".join(_path_segment(segment, first=i == 0) for i, segment in enumerate(renamed))
+    return path if renamed == segments else context_path(renamed)
 
 
 class StepContextError(RuntimeError):

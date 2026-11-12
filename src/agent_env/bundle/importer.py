@@ -4,6 +4,7 @@ runs with no store; nothing is written to a store."""
 from __future__ import annotations
 
 import contextlib
+import copy
 import json
 import os
 import re
@@ -52,10 +53,9 @@ from agent_env.bundle.parse import (
 )
 from agent_env.bundle.plan import STORE_GETTERS, check_bundle
 from agent_env.bundle.requires import Providers, Use, detected
-from agent_env.bundle.resolve import resolve_bundle
+from agent_env.bundle.resolve import resolve_bundle, sync_context_paths
 from agent_env.config import get_config
 from agent_env.entity.export import ExportContext, Unwritable, checked_path
-from agent_env.entity.paths import field_sites
 from agent_env.entity.refs import EntityKind, EntityRef, RefRole, RefSite, default_agent_refs, ref_sites
 from agent_env.entity.scopes import FieldScope, prune
 from agent_env.env.env import Env
@@ -67,7 +67,6 @@ from agent_env.store.ids import LOCAL_PREFIX, is_local_id
 from agent_env.store.image_store.oci_registry_credentials import names_registry
 from agent_env.store.image_store.registry_api import pin_digest
 from agent_env.task.task import Task
-from agent_env.task_step.context import renamed_context_path
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.utils.paths import os_reason
 
@@ -214,6 +213,7 @@ class _Importer:
         name = self._name("tasks", task.id)
         path = f"tasks/{name}.json"
         steps = task.to_dict()["steps"]
+        stored = copy.deepcopy(steps)
         registry = get_task_step_registry()
         found = []
         for step in steps:
@@ -240,7 +240,7 @@ class _Importer:
                 if _key(site) not in outputs:  # the run writes an output again, so it's no entity to write here
                     self._ref(site, f"{where}: {site.path}", pins)
             self._default_agents(step, cls.entity_refs or (), where)
-        _rename_context_paths(found, sites)
+        sync_context_paths(stored, steps)
         self.files[path] = json.dumps(steps, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
         self.tasks.append(ImportedTask(path, task.id, task.version, len(steps)))
         self.declared += task.requires or ()
@@ -674,15 +674,3 @@ def _key(site: RefSite) -> tuple[EntityKind, str]:
 
 def _nfc(text: str) -> str:
     return unicodedata.normalize("NFC", text)
-
-
-def _rename_context_paths(found: list[tuple[dict, type, Any, list[RefSite]]], sites: list[RefSite]) -> None:
-    """Rename, in the paths into the run's context each step's type declares, each id a field of the task was
-    rewritten from to what it names in the folder, so a path names an entity as its field does."""
-    renamed = {site.value: site.owner[site.key] for site in sites
-               if isinstance(site.owner[site.key], str) and site.owner[site.key] != site.value}
-    for step, cls, *_ in found:
-        for path in cls.context_paths:
-            for _, holder, key in field_sites(step, path):
-                if isinstance(holder[key], str):
-                    holder[key] = renamed_context_path(holder[key], renamed.get)

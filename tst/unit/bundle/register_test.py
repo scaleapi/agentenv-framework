@@ -323,14 +323,12 @@ def test_an_at_local_id_left_in_a_path_into_the_run_s_context_is_refused(home):
         "tasks/t.json: [0].metadata.from names '@local/~/elsewhere/x', which only this machine's stores hold",)
 
 
-def test_a_context_fact_naming_a_bundle_entity_names_its_registry_id(home):
-    judge = {"id": "judge", "type": "rubrics_verifier", "criteria": [{"id": "c", "description": "d"}],
-             "prompt_id": "p1", "context_facts_for_judge": {"greeting": "loaded.greeting.version"}}
-    steps = [BOX, _load("greet", "greeting"), _load("docs", "docs"), judge]
+def test_an_at_local_id_in_a_path_into_the_run_s_context_takes_its_registry_id():
+    facts = {"wf-1": "env_trigger_state[@local/~/triage/crm].statuses.wf-1", "score": "verifications.judge.score"}
 
-    register_bundle(layout(home / "triage", {**TRIAGE, "tasks/t.json": json.dumps(steps)}))
+    renamed = register_module._renamed({"context_facts_for_judge": facts}, {"@local/~/triage/crm": "triage-crm"})
 
-    assert _steps("triage-t")[-1]["context_facts_for_judge"] == {"greeting": "loaded.triage-greeting.version"}
+    assert renamed == {"context_facts_for_judge": {**facts, "wf-1": "env_trigger_state.triage-crm.statuses.wf-1"}}
 
 
 def test_a_shared_store_refuses_a_credential_or_reference_in_env_vars_and_a_url_only_this_machine_reaches(

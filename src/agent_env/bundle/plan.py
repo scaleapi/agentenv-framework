@@ -70,7 +70,7 @@ from .authoring import AuthoringContext, entry_files, staged_build_context
 from .parse import NAMED_BY, Bundle, BundleEntry, BundleError, BundleKind, parse_bundle
 from .variants import Varied
 from .resolve import (BuiltImage, BundleImage, Reference, ResolvedBundle, ResolvedEntry, build_step, entity_class,
-                      resolve_bundle)
+                      resolve_bundle, sync_context_paths)
 
 if TYPE_CHECKING:
     from .installed import InstalledBundle
@@ -1255,6 +1255,8 @@ def _renamed(entry: ResolvedEntry, ids: Mapping[tuple[EntityKind, str], str]) ->
     for site in sites:
         if site.ref.role is RefRole.INPUT and (site.ref.kind, site.value) in ids:
             site.rewrite(ids[site.ref.kind, site.value])
+    if entry.entry.kind is BundleKind.TASK:
+        sync_context_paths(entry.entry.config, config)
     return config
 
 
