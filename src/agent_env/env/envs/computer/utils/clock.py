@@ -2,8 +2,10 @@
 computer's name as the gateway knows it and its read token, written through the sandbox's root channel and never
 through the driver, which runs as the session user, so whatever it could write the session user could too, and point
 the follower at a clock of its own. Only root and the follower can read it; it's written beside its place and renamed
-into it, so the follower, which reads it every quarter second, never reads half of one. The deploy record keeps the URL
-and name (``metadata.computer.clock``) beside its control token, the read token for now, so a reset configures the fresh
+into it, so the follower, which reads it every quarter second, never reads half of one. Core then calls the computer's
+own clock/v1 ``sync_time``, which answers once the follower has answered from the gateway, so a deploy or a reset returns
+with the computer on the universe's clock, or fails saying why it can't follow. The deploy record keeps the URL and name
+(``metadata.computer.clock``) beside its control token, the read token for now, so a reset configures the fresh
 computer as the one it replaced."""
 from __future__ import annotations
 
@@ -13,6 +15,7 @@ import uuid
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Optional
 
+import httpx
 from agentenv_protocol.computer.clock import CONFIG, FOLLOWER_USER
 
 from agent_env.env.envs.computer.utils.sites import RootChannel
@@ -23,6 +26,7 @@ if TYPE_CHECKING:
     from agent_env.providers.sandbox_providers.sandbox_provider import Sandbox
 
 WATCH_PATH = "/clock/watch"
+TIME_PATH = "/clock/time"
 
 
 def follows(record: DeployedEnv) -> bool:
@@ -42,12 +46,25 @@ async def configure(sandbox: Sandbox, record: DeployedEnv, gateway_url: str, nam
     watch_url = sandbox.url_from_sandbox(gateway_url.rstrip("/") + WATCH_PATH)
     await _write(sandbox, {"watch_url": watch_url, "name": name, "token": record.control_token})
     record.metadata.setdefault("computer", {})["clock"] = {"watch_url": watch_url, "name": name}
+    await _following(record, watch_url)
 
 
 async def reconfigure(sandbox: Sandbox, record: DeployedEnv) -> None:
     """The config ``record`` keeps, written again on the fresh computer a reset booted; nothing for one that has none."""
     if (kept := recorded(record)) is not None:
         await _write(sandbox, {**kept, "token": record.control_token})
+        await _following(record, kept["watch_url"])
+
+
+async def _following(record: DeployedEnv, watch_url: str) -> None:
+    """Once the computer's follower has taken its config and answered from the gateway at ``watch_url``: the
+    computer's own ``sync_time``, handed the gateway's time URL as the computer reaches it, says so, or why not."""
+    try:
+        await record.invoke(EXT_CLOCK_URI, "sync_time",
+                            {"env_get_time_url": watch_url.removesuffix(WATCH_PATH) + TIME_PATH}, timeout=30)
+    except httpx.HTTPStatusError as e:
+        raise RuntimeError(f"{record.env_id}: its clock follower doesn't follow the gateway at {watch_url}: "
+                           f"{e.response.text[:500]}") from e
 
 
 async def _write(sandbox: Sandbox, config: dict) -> None:
