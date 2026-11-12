@@ -4,6 +4,7 @@ each context's tabs, cookies, local storage and downloads its own; a release tha
 deletes its folder; and what a load may name."""
 from __future__ import annotations
 
+import asyncio
 from pathlib import PurePosixPath
 
 import pytest
@@ -213,6 +214,16 @@ async def test_a_release_closes_its_tabs_as_agentenvs_deletes_its_folder_and_doe
     assert (await control.record())["closed_tabs"][0]["context"] == "buyer"
     assert await contexts.release("buyer") is False
     assert await control.tab_list() == []
+
+
+@pytest.mark.asyncio
+async def test_a_label_released_and_leased_again_at_once_keeps_the_new_leases_folder(browser_home):
+    _, _, contexts = _contexts(browser_home)
+    await contexts.lease("buyer")
+
+    released, again = await asyncio.gather(contexts.release("buyer"), contexts.lease("buyer"))
+
+    assert released is True and again.id == "C2" and again.downloads(browser_home).is_dir()
 
 
 @pytest.mark.asyncio

@@ -223,10 +223,12 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         return ["about:blank"]
 
     async def _launch_fds(self) -> dict[int, int]:
-        """Before each launch, an empty cache and the deploy's prompt answers in its profile; and a new debugging pipe:
-        the browser's ends as its fds 3 and 4, this server's ends its CDP connection, which follows the browser and
-        then opens the start tabs its command line can't."""
+        """Before each launch, an empty cache, no lease's folder, as a server killed with leases leaves them, and the
+        deploy's prompt answers in its profile; and a new debugging pipe: the browser's ends as its fds 3 and 4, this
+        server's ends its CDP connection, which follows the browser and then opens the start tabs its command line
+        can't."""
         shutil.rmtree(self.cache_dir(), ignore_errors=True)
+        self.contexts.ended()
         self._write_prompt_answers()
         to_browser_read, to_browser_write = os.pipe()
         from_browser_read, from_browser_write = os.pipe()

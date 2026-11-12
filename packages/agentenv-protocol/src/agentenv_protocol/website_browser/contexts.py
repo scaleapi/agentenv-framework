@@ -137,7 +137,7 @@ class Contexts:
             self.control.closing_context(lease.id)
             with contextlib.suppress(DevToolsError):
                 await self.devtools.call("Target.disposeBrowserContext", {"browserContextId": lease.id})
-        await asyncio.to_thread(shutil.rmtree, lease.folder(self.home()), True)
+            await asyncio.to_thread(shutil.rmtree, lease.folder(self.home()), True)
         return True
 
     def made_by_agent(self, user: str, context_id: str) -> Lease:
