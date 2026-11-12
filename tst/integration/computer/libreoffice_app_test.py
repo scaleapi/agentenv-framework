@@ -39,9 +39,10 @@ MAKE_FILES = ("cd ~/Documents && printf 'Agenda\\nFirst item\\n' > memo.txt && p
               "costs.csv && soffice --headless --convert-to docx memo.txt && soffice --headless --convert-to xlsx "
               "costs.csv && soffice --headless --convert-to pdf memo.txt && soffice --headless "
               "--infilter=impress_pdf_import --convert-to pptx memo.pdf && rm memo.txt memo.pdf && ls")
-#: Each file opened, and the class of the window it opens in.
-OPENS = {"memo.docx": "libreoffice-writer", "memo.pptx": "libreoffice-impress", "costs.xlsx": "libreoffice-calc",
-         "costs.csv": "libreoffice-calc"}
+#: Each file opened, and the class of the window it opens in: the memo last, so its window is the one on top when it's
+#: typed in.
+OPENS = {"costs.csv": "libreoffice-calc", "costs.xlsx": "libreoffice-calc", "memo.pptx": "libreoffice-impress",
+         "memo.docx": "libreoffice-writer"}
 #: Each top-level window: its WM_CLASS instance and class, and its title.
 WINDOWS = ('for w in $(xprop -root _NET_CLIENT_LIST | sed "s/.*# //; s/,//g"); do '
            'xprop -id "$w" WM_CLASS _NET_WM_NAME | tr "\\n" " "; echo; done')
