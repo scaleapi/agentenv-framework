@@ -110,7 +110,8 @@ class Ledger:
         if digest is None:
             untracked = ("its inputs aren't tracked yet, so it is written every run",)
             return Check(write, None, None, untracked, stored, needs)
-        orphan = self._orphan(write, stored, digest)
+        stale = _predates_entity_ids(write, stored_doc)
+        orphan = None if stale else self._orphan(write, stored, digest)
         if orphan is not None:
             return Check(write, digest, orphan, ("written by an interrupted run that didn't record it",), stored, needs,
                          adopted=True)
@@ -123,7 +124,7 @@ class Ledger:
             reasons.append("new" if row is None else f"its v{recorded} is not in the store")
         elif stored != recorded:
             reasons.append(f"the store's latest, v{stored}, wasn't recorded by this bundle")
-        elif write.kind is BundleKind.TASK and (stored_doc.get("entity_ids") or {}) != write.source.entity_ids:
+        elif stale:
             reasons.append("its stored version doesn't record the ids the bundle gave what it names")
         if row is not None:
             reasons.extend(_changes(row, digest))
@@ -353,3 +354,9 @@ def _file_sha256(path: Path) -> str:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _predates_entity_ids(write: Write, stored: dict | None) -> bool:
+    """Whether the store's latest version of task ``write``, written before tasks recorded them, lacks the entity_ids
+    its bundle gives it now, so reusing it would leave its runs naming those entities as written."""
+    return write.kind is BundleKind.TASK and stored is not None and (stored.get("entity_ids") or {}) != write.source.entity_ids

@@ -538,6 +538,19 @@ def test_a_version_an_interrupted_run_wrote_is_kept_and_recorded_not_written_aga
     assert [row["status"] for row in local_store().query(LEDGER_COLLECTION, Filter.of(id=GREETING))] == ["done"]
 
 
+def test_a_task_an_interrupted_earlier_run_wrote_without_its_renamed_ids_is_written_again(bundle_dir, monkeypatch):
+    plan = plan_of(bundle_dir)
+    task = next(w for w in plan.writes if w.id == f"{ROOT}/t")
+    with monkeypatch.context() as earlier:
+        earlier.setattr(resolve_module.ResolvedEntry, "entity_ids", property(lambda self: {}))
+        _interrupted_after_its_write(Ledger.for_plan(plan), task, earlier)
+
+    check = Ledger.for_plan(plan).check(task, {})
+
+    assert not check.unchanged and not check.adopted
+    assert check.reasons == ("the store's latest, v1, wasn't recorded by this bundle",)
+
+
 @pytest.mark.parametrize("since", ["another-write", "an-edit"])
 def test_an_interrupted_runs_version_is_written_over_once_the_store_or_the_files_have_moved_on(
     bundle_dir, monkeypatch, since,

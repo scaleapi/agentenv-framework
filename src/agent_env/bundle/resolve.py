@@ -90,7 +90,6 @@ class Output:
     step: int  # the writing step's index in the task
     step_id: Any
     artifact_type: str | None
-    name: str  # as the step names it
 
 
 @dataclass(frozen=True)
@@ -105,11 +104,11 @@ class ResolvedEntry:
 
     @property
     def entity_ids(self) -> dict[str, str]:
-        """Each id the entry's config names that resolving rewrote, as written, to the id it names now
-        (``Task.entity_ids``): one of the bundle's entities by its name, an output a step writes by the name it gave."""
-        renamed = {output.name: output.id for output in self.outputs}
-        renamed.update((ref.local.name, ref.id) for ref in self.references if isinstance(ref.local, BundleEntry))
-        return {name: id for name, id in renamed.items() if name != id}
+        """For a task, each id a field of its steps names as written that ``config`` names by another id, to that id
+        (``Task.entity_ids``); a reference the plan adds without rewriting a field, as ``--agent``'s, adds nothing."""
+        if self.entry.kind is not BundleKind.TASK:
+            return {}
+        return _rewritten_ids(self.entry.config, self.config)
 
 
 @dataclass(frozen=True)
@@ -401,7 +400,7 @@ class _Resolver:
                                   "root, which only a bundle run from the Hugging Face Hub writes under its own")
                     continue
                 site.rewrite(output_id)
-                outputs[kind, name] = Output(kind, output_id, index, step.get("id"), site.ref.artifact_type, name)
+                outputs[kind, name] = Output(kind, output_id, index, step.get("id"), site.ref.artifact_type)
         return outputs
 
     def _depends_on(self, entry: BundleEntry, steps: list[dict]) -> list[list[str] | None]:
@@ -570,3 +569,18 @@ def _strings(value: Any, path: str = "") -> Iterator[tuple[str, str]]:
     elif isinstance(value, list):
         for i, item in enumerate(value):
             yield from _strings(item, f"{path}[{i}]")
+
+
+def _rewritten_ids(written: list[dict], resolved: list[dict]) -> dict[str, str]:
+    """Each id a reference field of ``written``'s steps holds that the same field of ``resolved``'s holds another id
+    in place of, to that id."""
+    registry = get_task_step_registry()
+    renamed = {}
+    for before, after in zip(written, resolved):
+        cls = registry.get(before.get("type"))
+        if cls is None or not cls.entity_refs:
+            continue
+        now = {site.path: site.value for site in ref_sites(cls.entity_refs, after)}
+        renamed.update((site.value, now[site.path]) for site in ref_sites(cls.entity_refs, before)
+                       if site.path in now and now[site.path] != site.value)
+    return renamed
