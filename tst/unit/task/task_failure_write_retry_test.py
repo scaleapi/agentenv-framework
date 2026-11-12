@@ -212,3 +212,46 @@ def test_registering_a_given_instance_id_raises_when_the_store_fails(monkeypatch
     monkeypatch.setattr(TaskInstanceStore, "upsert_instance", unreachable)
     with pytest.raises(ConnectionError):
         register_task_instance("t", 1, 1, instance_id="i")
+
+
+def test_failure_text_keeps_a_message_and_names_a_messageless_error_and_its_cause():
+    assert store_mod.failure_text(RuntimeError("the model refused this task")) == "the model refused this task"
+    assert store_mod.failure_text(TimeoutError()) == "TimeoutError"
+    try:
+        try:
+            raise ConnectionResetError("peer reset")
+        except ConnectionResetError as e:
+            raise TimeoutError() from e
+    except TimeoutError as chained:
+        assert store_mod.failure_text(chained) == "TimeoutError (from ConnectionResetError: peer reset)"
+    try:
+        try:
+            raise KeyError("")
+        except KeyError:
+            raise EOFError()
+    except EOFError as implicit:
+        assert store_mod.failure_text(implicit) == "EOFError (from KeyError: '')"
+    try:
+        try:
+            raise OSError()
+        except OSError:
+            raise EOFError() from None
+    except EOFError as suppressed:
+        assert store_mod.failure_text(suppressed) == "EOFError"
+
+
+@pytest.mark.asyncio
+async def test_a_run_failed_by_a_messageless_error_records_its_class(tmp_path, monkeypatch):
+    monkeypatch.setattr(store_mod, "_FAILURE_WRITE_BACKOFF_SECONDS", 0)
+    store = _sqlite_store(tmp_path)
+    store.upsert_instance(instance_id="inst-1", task_id="t", task_version=1, total_steps=5)
+    set_task_instance_store(store)
+    try:
+        await record_task_failure(
+            instance_id="inst-1", failing_step_id="prompt_agent", context=TaskStepContext(),
+            error=TimeoutError(), completed_at_utc="2026-11-12 19:00 UTC",
+        )
+        inst = store.get("inst-1")
+    finally:
+        set_task_instance_store(None)
+    assert (inst.status, inst.error) == ("failed", "TimeoutError")
