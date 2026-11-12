@@ -181,14 +181,14 @@ class SyncEnvClockTaskStep(TaskStep):
             if tolerate:
                 logger.info(f"sync_env_clock: {service} does not advertise {EXT_CLOCK_URI}; skipping")
                 return {"synced": False, "reason": "not_advertised"}
-            raise RuntimeError(f"{service} does not advertise {EXT_CLOCK_URI}")
+            raise StepContextError(f"{service} does not advertise {EXT_CLOCK_URI}")
         if not env_get_time_url:
             raise RuntimeError(f"gateway did not expose env_get_time_url; cannot sync {service}")
         params = {"env_get_time_url": env_get_time_url}
         if self.timezone is not None:
             method = protocol_v1.find_extension_method(card, EXT_CLOCK_URI, "sync_time") or {}
             if "timezone" not in ((method.get("request") or {}).get("properties") or {}):
-                raise RuntimeError(f"{service} advertises {EXT_CLOCK_URI} but its sync_time takes no timezone; "
+                raise StepContextError(f"{service} advertises {EXT_CLOCK_URI} but its sync_time takes no timezone; "
                                    f"rebuild its image or drop timezone={self.timezone!r} from the task")
             params["timezone"] = self.timezone
         result = await protocol_v1.invoke_extension(base_url, card, EXT_CLOCK_URI,
