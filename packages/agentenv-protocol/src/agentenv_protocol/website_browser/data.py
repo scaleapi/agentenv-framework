@@ -12,6 +12,7 @@ from typing import Any, Optional
 from ..computer.app_data import write_within
 from ..computer.dataplane import part_bytes
 from ..types import DataPart, FilePart, uploaded_object_path
+from .contexts import CONTEXTS
 from .control import DOWNLOADS, UPLOADS
 
 #: The browser's typed state, as ``data/get`` returns it beside its files and ``data/add`` reads it back.
@@ -31,11 +32,13 @@ PARTIAL = ".crdownload"
 
 @dataclass
 class Load:
-    """A ``data/add``'s parts sorted by what each is: the typed state, the profile's files, and files for the folders
-    the browser downloads into and uploads from, each by its path under the home."""
+    """A ``data/add``'s parts sorted by what each is: the typed state, the profile's files, files for the folders
+    the browser downloads into and uploads from, and each lease's downloads by its label, each by its path under the
+    home."""
     state: Optional[dict] = None
     profile: dict[str, bytes] = field(default_factory=dict)
     files: dict[str, bytes] = field(default_factory=dict)
+    context_files: dict[str, dict[str, bytes]] = field(default_factory=dict)
 
 
 async def sorted_load(parts: list, profile: str) -> Load:
@@ -64,10 +67,20 @@ async def sorted_load(parts: list, profile: str) -> Load:
             load.profile[path] = await part_bytes(part)
         elif under.is_relative_to(DOWNLOADS) or under.is_relative_to(UPLOADS):
             load.files[path] = await part_bytes(part)
+        elif (label := context_of(under)) is not None:
+            load.context_files.setdefault(label, {})[path] = await part_bytes(part)
         else:
             raise ValueError(f"{path!r} is none of the browser's: its state, {STATE_FILE}, and files under its "
-                             f"profile, {profile}, ~/{DOWNLOADS} and ~/{UPLOADS}")
+                             f"profile, {profile}, ~/{DOWNLOADS}, ~/{UPLOADS} and a lease's "
+                             f"~/{CONTEXTS}/<label>/{DOWNLOADS}")
     return load
+
+
+def context_of(path: PurePosixPath) -> Optional[str]:
+    """The label of the lease whose downloads folder holds the file at ``path``, under the home; None for any other
+    path."""
+    parts = path.parts
+    return parts[1] if len(parts) > 3 and parts[0] == CONTEXTS and parts[2] == DOWNLOADS else None
 
 
 def _json(raw: bytes) -> Any:
@@ -102,12 +115,13 @@ def _copied(source: Path, target: Path) -> None:
         pass
 
 
-def finished_downloads(home: Path) -> list[str]:
-    """The path under the home of each file in the downloads folder the browser has finished writing."""
-    folder = home / DOWNLOADS
+def finished_downloads(home: Path, under: str = DOWNLOADS) -> list[str]:
+    """The path under the home of each file in the downloads folder ``under`` it, ``~/Downloads`` else a lease's, the
+    browser has finished writing."""
+    folder = home / under
     if not folder.is_dir():
         return []
-    return sorted(f"{DOWNLOADS}/{path.relative_to(folder).as_posix()}" for path in folder.rglob("*")
+    return sorted(f"{under}/{path.relative_to(folder).as_posix()}" for path in folder.rglob("*")
                   if path.is_file() and not path.name.endswith(PARTIAL))
 
 

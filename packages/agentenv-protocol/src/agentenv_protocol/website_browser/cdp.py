@@ -22,6 +22,7 @@ from .log import (ERROR_CHARS, KEY_FIELDS, TYPING_METHODS, BrowserLog, acts, red
                   redacted_params)
 
 if TYPE_CHECKING:
+    from .contexts import Contexts
     from .control import BrowserControl
     from .devtools import DevToolsPipe
 
@@ -51,6 +52,8 @@ MALFORMED = {"code": -32600, "message": "a command is an object with a string me
 ENDS_BROWSER = frozenset({"Browser.close", "Browser.crash", "Browser.crashGpuProcess"})
 #: The commands that set how and where downloads are saved, which agentenv keeps as its own.
 SETS_DOWNLOADS = frozenset({"Browser.setDownloadBehavior", "Page.setDownloadBehavior"})
+#: The commands that make and end a browser context, which agentenv records as leases.
+MAKES_CONTEXT, ENDS_CONTEXT = "Target.createBrowserContext", "Target.disposeBrowserContext"
 #: The schemes of the browser's own files, settings and tools, which an agent's navigation or new tab may not open.
 OWN_SCHEMES = frozenset({"file", "chrome", "chrome-extension", "chrome-untrusted", "view-source", "devtools"})
 #: The ``about:`` pages that aren't the browser's own under another name.
@@ -158,10 +161,11 @@ class Verdict:
     changed: bool = False
 
 
-def guard(method: str, params: dict, *, dialogs_answered: bool) -> Verdict:
+def guard(method: str, params: dict, *, dialogs_answered: bool, download_path: Optional[str] = None) -> Verdict:
     """What the relay does with an agent's ``method``, so it can't end the browser others share, route around the site
-    proxy, save downloads elsewhere, open the browser's own pages or race the dialogs agentenv answers when
-    ``dialogs_answered``: a guardrail, since the sandbox's network is the boundary."""
+    proxy, save downloads elsewhere than its context's folder, ``download_path`` for a lease's, open the browser's own
+    pages or race the dialogs agentenv answers when ``dialogs_answered``: a guardrail, since the sandbox's network is
+    the boundary."""
     if method in ENDS_BROWSER:
         return Verdict("close", params)
     if method == "Target.exposeDevToolsProtocol":
@@ -173,8 +177,8 @@ def guard(method: str, params: dict, *, dialogs_answered: bool) -> Verdict:
     if method in ("Page.navigate", "Target.createTarget") and (scheme := _own_scheme(params.get("url"))):
         return Verdict("refuse", params, f"{scheme}: URLs open the browser's own files, settings and tools")
     if method in SETS_DOWNLOADS:
-        pinned = {"behavior": "default",
-                  **{key: params[key] for key in ("browserContextId", "eventsEnabled") if key in params}}
+        pinned = {"behavior": "default"} if download_path is None else {"behavior": "allow", "downloadPath": download_path}
+        pinned.update({key: params[key] for key in ("browserContextId", "eventsEnabled") if key in params})
         return Verdict("send", pinned, changed=pinned != params)
     if method == "Page.handleJavaScriptDialog" and dialogs_answered:
         return Verdict("answer", params)
@@ -212,6 +216,9 @@ class _Connection:
         self.outbox: asyncio.Queue[str | tuple[int, str]] = asyncio.Queue()
         self.waiting_bytes = 0
         self.closing = False
+        #: Whether it set how downloads are saved, and the contexts it made that end as it detaches.
+        self.set_downloads = False
+        self.ends_on_detach: set[str] = set()
 
 
 class _Call:
@@ -242,11 +249,14 @@ class Relay:
     browser's dialogs itself. With a ``log``, each command is an entry in it, on the tab its session is on, and
     ``control``, agentenv's own connection, tells its tab's URL, whether a password field has focus there, and what
     causes the tab events a command brings. An agent's tool call a driver serves through a CDP user's connections,
-    such as Playwright MCP's, is an entry too, which that user's commands are credited to while it's open."""
+    such as Playwright MCP's, is an entry too, which that user's commands are credited to while it's open. With
+    ``contexts``, a context a connection makes is leased to its user, only one it made may it dispose, and a lease's
+    downloads stay in its folder."""
 
     def __init__(self, devtools: DevToolsPipe, *, dialogs_answered: bool = False, log: Optional[BrowserLog] = None,
-                 control: Optional[BrowserControl] = None) -> None:
+                 control: Optional[BrowserControl] = None, contexts: Optional[Contexts] = None) -> None:
         self.devtools, self.dialogs_answered, self.log, self.control = devtools, dialogs_answered, log, control
+        self.contexts = contexts
         self.connections: list[dict] = []
         self._by_session: dict[str, _Connection] = {}
         self._open: set[_Connection] = set()
@@ -315,6 +325,7 @@ class Relay:
             await asyncio.gather(*connection.commands, sending, return_exceptions=True)
             with contextlib.suppress(Exception):
                 await self.devtools.call("Target.detachFromTarget", {"sessionId": session})
+            self._detached(connection)
 
     def ended(self) -> None:
         """The browser has gone: every connection is closed with a reason a client may connect again after."""
@@ -329,7 +340,7 @@ class Relay:
             return
         method, params = message["method"], message.get("params") or {}
         session = message.get("sessionId") or connection.session
-        verdict = guard(method, params, dialogs_answered=self.dialogs_answered)
+        verdict = self._verdict(connection, session, method, params)
         logged = self._begin(connection, session, method, params)
         answer, guarded = {"error": {"code": SERVER_ERROR, "message": ENDED_UNANSWERED}}, None
         sending: Optional[asyncio.Future] = None
@@ -338,6 +349,8 @@ class Relay:
         def reply(answer: dict) -> None:
             nonlocal replied
             replied = True
+            if sending is not None and isinstance(answer.get("result"), dict):
+                self._answered(connection, method, params, answer["result"])
             self._put(connection, _reply(message, answer))
 
         try:
@@ -372,6 +385,46 @@ class Relay:
                 sending.cancel()
             if logged is not None:
                 logged.finish(answer, guarded)
+
+    def _verdict(self, connection: _Connection, session: str, method: str, params: dict) -> Verdict:
+        """The guard's verdict on ``connection``'s command, with what its contexts say: where a lease's downloads
+        go, and that only a context it made may it dispose."""
+        if self.contexts is None:
+            return guard(method, params, dialogs_answered=self.dialogs_answered)
+        if method == ENDS_CONTEXT and (reason := self.contexts.may_dispose(connection.user,
+                                                                           params.get("browserContextId"))):
+            return Verdict("refuse", params, reason)
+        download_path = None
+        if method in SETS_DOWNLOADS:
+            connection.set_downloads = True
+            context = params.get("browserContextId") if method.startswith("Browser.") else \
+                self._context_of(connection.targets.get(session))
+            download_path = self.contexts.download_path(context)
+        return guard(method, params, dialogs_answered=self.dialogs_answered, download_path=download_path)
+
+    def _context_of(self, target: Optional[str]) -> Optional[str]:
+        return self.control.tabs.get(target, {}).get("context_id") if self.control is not None and target else None
+
+    def _answered(self, connection: _Connection, method: str, params: dict, result: dict) -> None:
+        """A context ``connection`` made leased to its user before it hears the answer, and one it disposed ended."""
+        if self.contexts is None:
+            return
+        if method == MAKES_CONTEXT and isinstance(made := result.get("browserContextId"), str):
+            self.contexts.made_by_agent(connection.user, made)
+            if params.get("disposeOnDetach"):
+                connection.ends_on_detach.add(made)
+        elif method == ENDS_CONTEXT:
+            self.contexts.disposed(params.get("browserContextId"))
+
+    def _detached(self, connection: _Connection) -> None:
+        """``connection`` gone: the contexts it made to end as it detached ended, and the leases' downloads sent to
+        their folders again if it set downloads, which its session's end may set otherwise."""
+        if self.contexts is None:
+            return
+        for context in connection.ends_on_detach:
+            self.contexts.disposed(context)
+        if connection.set_downloads:
+            self.contexts.resend_downloads()
 
     def _begin(self, connection: _Connection, session: str, method: str, params: dict) -> Optional[_Logged]:
         """``connection``'s command, begun in the log, if there is one, on the tab ``session`` is on, or for a browser

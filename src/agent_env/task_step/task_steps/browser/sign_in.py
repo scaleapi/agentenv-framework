@@ -8,6 +8,7 @@ from typing import ClassVar, Optional
 
 from agentenv_protocol import METHOD_ADD, DataPart, client as protocol_v1
 from agentenv_protocol.website import WEBSITE_EXTENSION_URI
+from agentenv_protocol.website_browser import BROWSER
 
 from agent_env.entity.refs import EntityRef
 from agent_env.env.env import DeployedEnv, Env, website_child
@@ -17,7 +18,7 @@ from agent_env.store.base import NotFoundError
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.preflight import stored_env
 from agent_env.task_step.task_step import TaskStepDependency
-from agent_env.task_step.task_steps.browser.base import BrowserStep
+from agent_env.task_step.task_steps.browser.base import LEASES, BrowserStep
 
 logger = logging.getLogger(__name__)
 
@@ -29,16 +30,18 @@ ADD_TIMEOUT_S = 120
 class BrowserSignInTaskStep(BrowserStep):
     """Sign the browser in to the website env ``site``, deployed in the run on its own or in a multi env, as ``user``:
     the site's ``session {user}`` gives the cookies and local storage, each cookie is set for every name the site is
-    reached by, and the browser's ``data/add`` loads them, which opens its start tabs again while no agent has acted.
-    A task runs it after the load that seeds the site, and again after a reset, which starts the browser afresh."""
+    reached by, and the browser's ``data/add`` loads them, which opens its start tabs again while no agent has acted;
+    in the lease ``context`` names, leased if it isn't, they load there and no tabs open again. A task runs it after
+    the load that seeds the site, and again after a reset, which starts the browser afresh and ends every lease."""
 
     type: ClassVar[str] = "browser_sign_in"
     entity_refs = (EntityRef.env("env_id"), EntityRef.env("site"))
 
     def __init__(self, id: str, version: Optional[int], env_id: str, site: str, user: str,
                  browser: Optional[str] = None, depends_on: Optional[list[TaskStepDependency]] = None,
-                 fail_task_on_error: bool = True):
-        super().__init__(id, version, env_id, browser, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
+                 fail_task_on_error: bool = True, context: Optional[str] = None):
+        super().__init__(id, version, env_id, browser, depends_on=depends_on, fail_task_on_error=fail_task_on_error,
+                         context=context)
         self.site = site
         self.user = user
 
@@ -64,7 +67,7 @@ class BrowserSignInTaskStep(BrowserStep):
 
     @classmethod
     def from_dict(cls, data: dict) -> BrowserSignInTaskStep:
-        return cls(**cls._browser_from_dict(data), site=data.get("site"), user=data.get("user"))
+        return cls(**cls._in_context_from_dict(data), site=data.get("site"), user=data.get("user"))
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         record, child, names = await self._site(context)
@@ -77,7 +80,12 @@ class BrowserSignInTaskStep(BrowserStep):
         if protocol_v1.serves(card, METHOD_ADD) is False:
             raise RuntimeError(f"the website browser {browser or owner.env_id!r} serves no data/add: rebuild it on a "
                                "newer agentenv-framework-protocol")
+        if self.context_label is not None and protocol_v1.find_extension_method(card, BROWSER, LEASES) is None:
+            raise RuntimeError(f"the website browser {browser or owner.env_id!r} leases no contexts: rebuild it on a "
+                               "newer agentenv-framework-protocol")
         state = {"cookies": cookies, "local_storage": session.get("local_storage") or []}
+        if self.context_label is not None:
+            state = {"contexts": {self.context_label: state}}
         await protocol_v1.add_data(_data_plane(owner, browser), [DataPart(data=state)], timeout=ADD_TIMEOUT_S,
                                    headers=owner.control_headers)
         self._record(context, site=self.site, user=self.user,

@@ -41,13 +41,13 @@ class FakeControl:
         self.cookie_list = [{"name": "sid", "value": "s1", "domain": "shop.test", "path": "/", "expires": -1,
                              "httpOnly": True, "secure": False, "sameSite": "Lax"}]
 
-    async def cookies(self, urls=None):
+    async def cookies(self, urls=None, context=None):
         return self.cookie_list
 
-    async def local_storage(self, origins=None):
+    async def local_storage(self, origins=None, context=None):
         return [{"origin": "https://shop.test", "localStorage": [{"name": "cart", "value": "3"}]}]
 
-    async def tab_list(self):
+    async def tab_list(self, context=None, *, every=False):
         return [{"id": "t1", "url": "https://shop.test/", "title": "Shop", "opened_at": "t0", "opener": None,
                  "active": True}]
 
@@ -55,18 +55,21 @@ class FakeControl:
         return {"closed_tabs": [{"id": "t0", "url": "about:blank", "title": "", "opened_at": "t0", "opener": None,
                                  "closed_at": "t1", "closed_by": "agentenv"}], "downloads": []}
 
+    def download_list(self, context=None, *, every=False):
+        return []
+
     async def _done(self, what, value=None):
         if self.fail == what:
             raise RuntimeError(f"{what} failed")
         self.did.append((what, value))
 
-    async def set_cookies(self, cookies):
+    async def set_cookies(self, cookies, context=None):
         await self._done("cookies", [cookie.name for cookie in cookies])
 
-    async def set_local_storage(self, origins):
+    async def set_local_storage(self, origins, context=None):
         await self._done("local_storage", [origin.origin for origin in origins])
 
-    async def replace_tabs(self, tabs):
+    async def replace_tabs(self, tabs, context=None):
         await self._done("tabs", [(tab.url, tab.active) for tab in tabs])
 
     async def load_start_tabs(self, urls, site_of, own_timeout_s, live_timeout_s):
@@ -147,7 +150,8 @@ async def test_data_get_is_its_state_its_profile_without_caches_or_locks_and_its
     files = _files(await browser.browser_get_data())
 
     state = json.loads(files.pop("browser-state.json"))
-    assert set(state) == {"cookies", "local_storage", "tabs", "closed_tabs", "downloads", "clock", "start_tabs"}
+    assert set(state) == {"cookies", "local_storage", "tabs", "closed_tabs", "downloads", "clock", "start_tabs",
+                          "contexts"}
     assert state["cookies"] == FakeControl().cookie_list and "partitionKey" not in state["cookies"][0]
     assert state["clock"]["mode"] == "real" and state["tabs"][0]["id"] == "t1" and state["closed_tabs"][0]["id"] == "t0"
     assert files == {f"{PROFILE}/Default/Cookies": b"db", f"{PROFILE}/Default/Cookies-journal": b"j",

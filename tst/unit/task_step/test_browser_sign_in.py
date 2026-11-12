@@ -45,7 +45,7 @@ def _browser_card(ops=("cookies/set", "cdp")) -> dict:
                     op: {"endpoint": f"{prefix}/{op}"} for op in ops}}}]}}
 
 
-def _office(*, session: bool = True, card_name: str = "shop") -> DeployedGatewayEnv:
+def _office(*, session: bool = True, card_name: str = "shop", ops=("cookies/set", "cdp")) -> DeployedGatewayEnv:
     """A multi env's record: the shop website among its card's children, served as shop whatever its card names it,
     and the desktop computer, whose card lists chromium, kept whole in its child_envs, as the gateway's card lists the
     computer without its apps."""
@@ -56,7 +56,7 @@ def _office(*, session: bool = True, card_name: str = "shop") -> DeployedGateway
     desktop = DeployedSandboxEnv(
         env_id="desktop-computer", env_version=1, sandbox_id="sb-desktop", sandbox_type="local",
         control_token="desktop-token", environment_card_url=f"{_DESKTOP}/.well-known/agent-env.json",
-        environment_card={"name": "desktop", "children_environments": [_browser_card()]})
+        environment_card={"name": "desktop", "children_environments": [_browser_card(ops)]})
     return DeployedGatewayEnv(
         env_id="office", env_version=1, sandbox_id="gw", sandbox_type="local", gateway_url=_GATEWAY,
         control_token="gateway-token", environment_card_url=f"{_GATEWAY}/.well-known/agent-env.json",
@@ -106,6 +106,23 @@ async def test_a_browser_in_a_multi_envs_computer_is_signed_in_with_the_sites_se
     assert context.metadata["browser_steps"]["in"] == {
         "env_id": "office", "browser": None, "site": "shop-site", "user": "alex", "cookies": ["agentenv_session_shop"],
         "names": ["shop.test", "*.shop.test"]}
+
+
+@pytest.mark.asyncio
+async def test_a_browser_signed_in_in_a_context_loads_the_session_into_that_lease_and_one_that_leases_none_is_refused(
+        served):
+    leases = TaskStepContext(deployed_envs=[_office(ops=("cookies/set", "cdp", "contexts/lease"))], metadata={})
+    step = BrowserSignInTaskStep(id="in", version=None, env_id="office", site="shop-site", user="alex",
+                                 context="buyer")
+
+    await step.execute(leases)
+    with pytest.raises(RuntimeError, match="leases no contexts"):
+        await step.execute(TaskStepContext(deployed_envs=[_office()], metadata={}))
+
+    [loaded] = json.loads(served[1].content)["params"]["parts"]
+    assert list(loaded["data"]) == ["contexts"] and set(loaded["data"]["contexts"]["buyer"]) == {"cookies",
+                                                                                                 "local_storage"}
+    assert leases.metadata["browser_steps"]["in"]["context"] == "buyer" and len(served) == 3
 
 
 @pytest.mark.asyncio
