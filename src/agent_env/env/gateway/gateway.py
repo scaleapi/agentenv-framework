@@ -108,6 +108,14 @@ _TOKEN_LOGGERS = ("uvicorn.access", "uvicorn.error", "httpx")
 _STEP_API = {"source": "step_api"}
 
 
+class SiteCard(NamedTuple):
+    """What the gateway keeps from a site's card: the paths it advertises for agentenv, which its route refuses, and
+    the names it declares."""
+
+    reserved: frozenset[str]
+    names: tuple[str, ...]
+
+
 class ToolNameClash(ValueError):
     """More than one source serves a tool under one name, so an agent couldn't tell which it calls: the gateway serves
     none of its servers' tools rather than a set missing some."""
@@ -160,10 +168,9 @@ class Gateway:
         self.website_urls = website_urls or {}
         self.rest_proxy_urls = rest_proxy_urls or {}
         self._site_names = {site: lowered(names) for site, names in (site_names or {}).items()}
-        self._card_site_names: dict[str, tuple[str, ...]] = {}
         self._listed_by_name = frozenset(listed_by_name)
         self._site_mcp_endpoints = site_mcp_endpoints(internal_mcp_servers, self.website_urls, self.rest_proxy_urls)
-        self._site_reserved: dict[str, frozenset[str]] = {}
+        self._site_cards: dict[str, SiteCard] = {}
         self._withheld = frozenset(name.strip().lower().encode() for name in provider_headers if name.strip())
         self._browsers = BrowserRoutes(self.rest_proxy_urls, self.REST_PROXY_TIMEOUT, self._log_event,
                                        self._attribution, self._request_role, withheld=self._withheld)
@@ -657,8 +664,10 @@ class Gateway:
                 self._db_conn = None
             return None
 
-    async def _proxy_rest_request(self, request: Request, url_map: dict[str, str] | None = None) -> Response:
-        """Reverse-proxy an HTTP request to an internal service, streaming the response through."""
+    async def _proxy_rest_request(self, request: Request, url_map: dict[str, str] | None = None,
+                                  site_names: tuple[str, ...] = ()) -> Response:
+        """Reverse-proxy an HTTP request to an internal service, streaming the response through; a site reached at one
+        of its `site_names` takes it as its ``Host``."""
         url_map = self.rest_proxy_urls if url_map is None else url_map
         service_name = request.path_params["service_name"]
         base_url = url_map.get(service_name)
@@ -670,7 +679,6 @@ class Gateway:
         mcp_endpoint = site_mcp or "mcp"
         if url_map is self.rest_proxy_urls and (cdp := await self._browsers.cdp_answer(request, base_url, role)) is not None:
             return cdp
-        site_names = self._names(service_name) if url_map is self.website_urls else ()
         if request.method in _SAFE_METHODS:
             return await forward(request, base_url, role=role, timeout=self.REST_PROXY_TIMEOUT, mcp_server=mcp_server,
                                  withheld=self._withheld, mcp_endpoint=mcp_endpoint, site_names=site_names)
@@ -706,13 +714,13 @@ class Gateway:
         A site's data plane and card, and every path its card advertises for agentenv (``site_reserved_paths``), are
         never reached through its route, so an agent browsing the site can't read its data or what grades it; agentenv
         reaches them through /svc/<name>/."""
-        reserved = await self._site_reserved_paths(request.path_params["service_name"])
-        if reserved is None:
-            return self._json_response({"error": "website card unavailable"}, 503)
-        if reserved_site_request(request, reserved):
-            return self._json_response({"error": "not found"}, 404)
-        response = await self._proxy_rest_request(request, url_map=self.website_urls)
         app = request.path_params["service_name"]
+        card = await self._site_card(app)
+        if card is None:
+            return self._json_response({"error": "website card unavailable"}, 503)
+        if reserved_site_request(request, card.reserved):
+            return self._json_response({"error": "not found"}, 404)
+        response = await self._proxy_rest_request(request, url_map=self.website_urls, site_names=self._names(app, card))
         engine = self._trigger_engine
         if app in self.website_urls and (engine.has_website_triggers or engine.has_state_triggers):
             path = site_request_path(request) or "/" + request.path_params.get("path", "")
@@ -730,21 +738,21 @@ class Gateway:
         """Relay a WebSocket on a site's route to its server, as its HTTP requests are: its data plane and card, and
         every path its card advertises for agentenv (``site_reserved_paths``), are refused, and it goes upstream with
         the role, role key and forwarded address an HTTP request would carry."""
-        reserved = await self._site_reserved_paths(websocket.path_params["service_name"])
-        if reserved is None:
+        service_name = websocket.path_params["service_name"]
+        card = await self._site_card(service_name)
+        if card is None:
             await refuse_websocket(websocket, self._json_response({"error": "website card unavailable"}, 503))
             return
-        if reserved_site_request(websocket, reserved):
+        if reserved_site_request(websocket, card.reserved):
             await refuse_websocket(websocket, self._json_response({"error": "not found"}, 404))
             return
-        service_name = websocket.path_params["service_name"]
         base_url = self.website_urls.get(service_name)
         if base_url is None:
             await refuse_websocket(websocket, self._json_response({"error": f"Unknown service: {service_name}"}, 404))
             return
         await relay_websocket(websocket, base_url, role=self._request_role(websocket),
                               open_timeout=self.REST_PROXY_CONNECT_TIMEOUT_S, withheld=self._withheld,
-                              site_names=self._names(service_name))
+                              site_names=self._names(service_name, card))
 
     async def _fire_website_triggers(self, request: Request, app: str,
                                      status: int) -> tuple[list[asyncio.Task], float | None]:
@@ -793,16 +801,17 @@ class Gateway:
         read of its own, so answering a request waits on no card."""
         return route_name(self._website_routes.get(app) or [], method, path)
 
-    async def _site_reserved_paths(self, app: str) -> frozenset[str] | None:
-        """The paths ``app``'s card advertises for agentenv (``site_reserved_paths``), read once from its server, the one
-        its /svc/ route reaches (else the one its website route does), and kept; none for a site serving no card, one
-        whose card path answers a 4xx or what isn't a JSON object, and None, read again next time, while its card can't
-        be read, unreachable or answering a 5xx, so its route serves nothing until it knows what to refuse."""
-        if app in self._site_reserved:
-            return self._site_reserved[app]
+    async def _site_card(self, app: str) -> SiteCard | None:
+        """What ``app``'s card says (``SiteCard``): the paths it advertises for agentenv (``site_reserved_paths``) and
+        the names it declares, read once from its server, the one its /svc/ route reaches (else the one its website
+        route does), and kept; neither for a site serving no card, one whose card path answers a 4xx or what isn't a
+        JSON object, and None, read again next time, while its card can't be read, unreachable or answering a 5xx, so
+        its route serves nothing until it knows what to refuse."""
+        if app in self._site_cards:
+            return self._site_cards[app]
         base_url = self.rest_proxy_urls.get(app) or self.website_urls.get(app)
         if base_url is None:
-            return frozenset()
+            return SiteCard(frozenset(), ())
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.get(f"{base_url.rstrip('/')}{WELL_KNOWN_PATH}", timeout=CARD_FETCH_TIMEOUT_S)
@@ -817,22 +826,21 @@ class Gateway:
         except ValueError:
             card = None
         address = self.website_urls.get(app) or base_url
-        self._card_site_names[app] = declared_site_names(card) if isinstance(card, dict) else ()
-        self._site_reserved[app] = site_reserved_paths(card, address) if isinstance(card, dict) else frozenset()
-        return self._site_reserved[app]
+        self._site_cards[app] = (SiteCard(site_reserved_paths(card, address), declared_site_names(card))
+                                 if isinstance(card, dict) else SiteCard(frozenset(), ()))
+        return self._site_cards[app]
 
-    def _names(self, app: str) -> tuple[str, ...]:
-        """The names website ``app`` is reached at: those its env stores, else those its card declares, as last read."""
-        return self._site_names.get(app) or self._card_site_names.get(app, ())
+    def _names(self, app: str, card: SiteCard | None) -> tuple[str, ...]:
+        """The names website ``app`` is reached at: those its env stores, else those its ``card`` declares."""
+        return self._site_names.get(app) or (card.names if card else ())
 
     async def _listed_url(self, site: str, url: str) -> str:
         """The address ``list_website_urls`` gives ``site``, at ``url`` behind the gateway: for a site listed by name,
         its first name (``listed_url``), its card read for a site whose env stores none; else, or with none, ``url``."""
         if site not in self._listed_by_name:
             return url
-        if site not in self._site_names:
-            await self._site_reserved_paths(site)
-        return listed_url(self._names(site)) or url
+        card = None if site in self._site_names else await self._site_card(site)
+        return listed_url(self._names(site, card)) or url
 
     def _backing_keys(self) -> list[str]:
         # rest_proxy_urls entries are the env's backing servers: mcp-<svc> (MCP) + <svc> (website
