@@ -423,3 +423,20 @@ async def test_a_write_waits_for_a_computer_that_hasnt_watched_yet(gateway):
         answer = await client.put("/clock/set-time", json={"virtual_time": T0, "wait_followers_s": 0.5})
         waited = time.monotonic() - started
     assert answer.status_code == 504 and answer.json()["stale"] == ["laptop"] and waited >= 0.5
+
+
+@pytest.mark.asyncio
+async def test_a_write_stops_waiting_for_a_computer_when_it_goes_quiet_during_the_wait(gateway, monkeypatch):
+    """One that watched shortly before the write is waited for until its quiet deadline, not for the whole wait."""
+    monkeypatch.setattr(ClockFollowers, "WATCH_S", SHORT_HOLD_S)
+    monkeypatch.setattr(ClockFollowers, "QUIET_S", 1.0)
+    gw = gateway({"laptop": TOKENS["laptop"]})
+    async with _client(gw) as client:
+        await client.put("/clock/set-time", json={"virtual_time": T0})
+        await _watch(client, "", "laptop", TOKENS["laptop"])  # answered at once: laptop watched, then stops
+        await asyncio.sleep(0.3)
+        started = time.monotonic()
+        answer = await client.put("/clock/advance", json={"virtual_time": "2026-01-02T00:00:00Z", "wait_followers_s": 10})
+        waited = time.monotonic() - started
+    assert answer.status_code == 504 and answer.json()["stale"] == ["laptop"], answer.text
+    assert 0.5 <= waited < 3, waited

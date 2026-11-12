@@ -172,6 +172,7 @@ def _containers(sandbox_id: str) -> list[str]:
 # Run in a computer: the files and the processes' environments and command lines holding the token read from stdin, as
 # far as the user it runs as can read them (so the token is never in its own environment or command line).
 TRACES = r"""import os, sys
+LARGEST_FILE_BYTES = 50_000_000  # past this a file is media or a database, not a config or a secret
 token = sys.stdin.read().strip().encode()
 found = []
 for root in ("/etc", "/opt", "/home", "/root", "/tmp", "/run", "/var", "/srv", "/usr/local"):
@@ -179,7 +180,7 @@ for root in ("/etc", "/opt", "/home", "/root", "/tmp", "/run", "/var", "/srv", "
         for name in names:
             path = os.path.join(folder, name)
             try:
-                if os.path.isfile(path) and os.path.getsize(path) < 50_000_000 and token in open(path, "rb").read():
+                if os.path.isfile(path) and os.path.getsize(path) < LARGEST_FILE_BYTES and token in open(path, "rb").read():
                     found.append(path)
             except OSError:
                 pass
