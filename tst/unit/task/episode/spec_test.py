@@ -10,7 +10,6 @@ from agent_env.task.task import substitute_seed_in_steps
 from agent_env.task_step.registry import _builtin_registry
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
-from tst.unit.task_step.plays_user_step import PlaysUser, plays_user_registered  # noqa: F401  (a fixture)
 
 ENV = {"id": "env", "type": "deploy_env", "env_id": "portsim"}
 LOAD = {"id": "load", "type": "load_artifact", "env_id": "portsim", "artifact_id": "week-<week>"}
@@ -22,6 +21,9 @@ VERIFY = {"id": "verify", "type": "env_outcome_verifier", "env_id": "portsim", "
           "verifier_id": "berth"}
 BOB = {"id": "bob", "type": "deploy_agent", "agent_name": "bob", "a2a_agent_id": "echo"}
 ASK_BOB = {"id": "ask-bob", "type": "prompt_agent", "agent_name": "bob", "prompt": "Check the plan."}
+USER_SIM = {"id": "user", "type": "deploy_user_sim_agent", "agent_name": "linda", "model": "sim-model",
+            "multi_day": False, "opening_prompt": "Plan week <week>.",
+            "persona": {"display_name": "Linda Murphy", "description": {"who_you_are": ["Runs the port's berths."]}}}
 SEED = {"week": "3", "port": "Valencia"}
 
 
@@ -268,11 +270,9 @@ def test_steps_that_need_only_what_an_outside_player_leaves_are_allowed(replace)
 def test_every_built_in_step_type_is_checked_or_unaffected():
     registry = _builtin_registry()
     registered, checked = set(registry), set(CHECKS)
-    plays_the_user = {kind for kind, cls in registry.items() if getattr(cls, "plays_user", False)}
 
-    assert sorted(registered - checked - UNAFFECTED - plays_the_user) == []
-    # always_on is classified ahead of its step class (FD-5364).
-    assert sorted((checked | UNAFFECTED) - registered - {"always_on"}) == []
+    assert sorted(registered - checked - UNAFFECTED) == []
+    assert sorted((checked | UNAFFECTED) - registered) == []
     assert sorted(checked & UNAFFECTED) == []
 
 
@@ -290,17 +290,15 @@ def test_the_agent_an_always_on_step_wakes_is_the_one_played_and_is_refused_for_
             in _refusal(task))
 
 
-@pytest.mark.usefixtures("plays_user_registered")
-def test_a_step_whose_class_plays_the_user_is_refused_when_its_agent_is_played_from_outside():
-    task = _portsim({"id": "user", "type": PlaysUser.type, "agent_name": "default-agent"})
+def test_the_user_sims_deploy_is_refused_when_its_agent_is_played_from_outside():
+    task = _portsim({**USER_SIM, "agent_name": "default-agent"})
 
-    assert ("step 'user': test_plays_user deploys 'default-agent' to play the user, and it is played from outside"
+    assert ("step 'user': deploy_user_sim_agent deploys 'default-agent', which is played from outside"
             in _refusal(task))
 
 
-@pytest.mark.usefixtures("plays_user_registered")
-def test_a_step_whose_class_plays_the_user_with_its_own_agent_is_allowed():
-    task = _portsim({"id": "user", "type": PlaysUser.type, "agent_name": "linda"})
+def test_the_user_sims_deploy_with_its_own_agent_is_allowed():
+    task = _portsim(USER_SIM)
 
     assert EpisodeSpec.from_task(task, seed=SEED).trainer_agents == ("default-agent",)
 

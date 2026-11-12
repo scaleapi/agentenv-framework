@@ -2,9 +2,8 @@
 
 An outside agent is played through a proxy agent deployed in its place (the ``agents`` bundle's ``proxy``), so steps
 that act on the agent, or in its sandbox, act on the proxy. Every registered step type is either checked
-here (``CHECKS``) or listed as untouched by an outside agent (``UNAFFECTED``); a step type whose class ``plays_user``
-not in ``CHECKS`` is checked as the user sim's deploy. A test holds the registry to these, so a new step type is
-classified before an episode runs it. Plugin step types aren't inspected.
+here (``CHECKS``) or listed as untouched by an outside agent (``UNAFFECTED``). A test holds the registry to the two, so
+a new step type is classified before an episode runs it. Plugin step types aren't inspected.
 """
 
 from __future__ import annotations
@@ -12,8 +11,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
-
-from agent_env.task_step.roles import plays_user
 
 if TYPE_CHECKING:
     from agent_env.task_step.task_step import TaskStep
@@ -46,7 +43,7 @@ def problems(steps: list[TaskStep], outside: list[str]) -> list[str]:
     })
     for step in steps:
         why = ["retry_config can replay an outside turn"] if step.retry_config is not None else []
-        if check := CHECKS.get(step.type) or (_plays_the_user if plays_user(step) else None):
+        if check := CHECKS.get(step.type):
             why += check(step, scope)
         found.extend(f"step {step.id!r}: {reason}" for reason in why)
     return found
@@ -100,12 +97,6 @@ def _needs_the_agent(step: TaskStep, outside: Outside) -> list[str]:
     if step.agent_name not in outside.agents:
         return []
     return [f"{step.type} needs {step.agent_name!r} as a real agent, and it is played from outside"]
-
-
-def _plays_the_user(step: TaskStep, outside: Outside) -> list[str]:
-    if step.agent_name not in outside.agents:
-        return []
-    return [f"{step.type} deploys {step.agent_name!r} to play the user, and it is played from outside"]
 
 
 def _validates_an_agent(step: TaskStep, outside: Outside) -> list[str]:
