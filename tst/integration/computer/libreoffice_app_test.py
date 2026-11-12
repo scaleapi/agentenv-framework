@@ -15,6 +15,7 @@ import pytest
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
+from agentenv_protocol import client as protocol_v1
 from agentenv_protocol.computer import apps
 from agentenv_protocol.types import WELL_KNOWN_PATH
 
@@ -23,7 +24,6 @@ from agent_env.env.envs.computer.utils import inside
 from agent_env.store.routing import namespace_routing
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
-from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
@@ -45,7 +45,10 @@ OPENS = {"memo.docx": "libreoffice-writer", "memo.pptx": "libreoffice-impress", 
 #: Each top-level window: its WM_CLASS instance and class, and its title.
 WINDOWS = ('for w in $(xprop -root _NET_CLIENT_LIST | sed "s/.*# //; s/,//g"); do '
            'xprop -id "$w" WM_CLASS _NET_WM_NAME | tr "\\n" " "; echo; done')
+WINDOW_LINE = r'WM_CLASS\(STRING\) = "([^"]*)", "([^"]*)"\s*_NET_WM_NAME\(UTF8_STRING\) = "(.*)"'
 PROCESSES = "pgrep -c -x soffice.bin || true"
+#: A file in its profile, which a reset of its data takes away.
+MARKER = ".config/libreoffice/agentenv-marker"
 
 
 def test_gate_3_makes_this_machines_arch_ready_with_libreoffice(office_desktop):
@@ -82,11 +85,12 @@ async def test_office_files_open_by_type_in_the_copy_its_server_launched_asking_
             await _run(deployed, ["sh", "-c", LAUNCHER])
             centered = await _window_of(deployed, "libreoffice-startcenter", "LibreOffice")
             copies_after_launcher = await _run(deployed, ["sh", "-c", PROCESSES])
-            await _run(deployed, ["touch", ".config/libreoffice/agentenv-marker"])
-            await ResetEnvTaskStep(id="reset", version=None, env_id=office_desktop.id,
-                                   fail_task_on_error=True).execute(context)
+            await _run(deployed, ["touch", MARKER])
+            await protocol_v1.reset_data(f"{deployed.environment_url}/svc/libreoffice",
+                                         headers=deployed.control_headers)
             relaunched = await _ready(deployed, card)
-            marker = await _run(deployed, ["sh", "-c", "test -e .config/libreoffice/agentenv-marker && echo kept || echo gone"])
+            marker = await _run(deployed, ["sh", "-c", f"test -e {MARKER} && echo kept || echo gone"])
+            copies_after_reset = await _run(deployed, ["sh", "-c", PROCESSES])
             await _run(deployed, ["exo-open", "Documents/memo.docx"], timeout_s=120)
             reopened = await _window_of(deployed, "libreoffice-writer", "memo.docx")
             asked_after_reset = await _dialogs(deployed)
@@ -101,7 +105,7 @@ async def test_office_files_open_by_type_in_the_copy_its_server_launched_asking_
     assert copies == "1" and copies_after_launcher == "1" and ready["ready"], (copies, copies_after_launcher, ready)
     assert locks == "0" and int(saved_after) > int(saved_before)
     assert centered and relaunched["ready"] and reopened, (centered, relaunched, reopened)
-    assert marker == "gone"
+    assert marker == "gone" and copies_after_reset == "1", (marker, copies_after_reset)
     assert not report.failed
 
 
@@ -116,7 +120,7 @@ async def _windows(deployed) -> list[tuple[str, str, str]]:
     listed = await _run(deployed, ["sh", "-c", WINDOWS])
     found = []
     for line in listed.splitlines():
-        if match := re.search(r'WM_CLASS\(STRING\) = "([^"]*)", "([^"]*)"\s*_NET_WM_NAME\(UTF8_STRING\) = "(.*)"', line):
+        if match := re.search(WINDOW_LINE, line):
             found.append(match.groups())
     return found
 
