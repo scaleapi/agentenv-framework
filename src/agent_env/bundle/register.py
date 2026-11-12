@@ -37,6 +37,7 @@ from agent_env.store.document_store import DocumentStore, LocalSqliteDocumentSto
 from agent_env.store.ids import LOCAL_PREFIX, is_local_id
 from agent_env.store.image_store.oci_registry_credentials import is_loopback_host
 from agent_env.store.routing import configured_store, namespace_routing
+from agent_env.task_step.context import context_path_segments, renamed_context_path
 from agent_env.task_step.registry import get_task_step_registry
 
 from ._secrets import credentials_in
@@ -286,9 +287,13 @@ def _aliased(use: AliasUse, ids: Mapping[str, str]) -> AliasUse:
 
 
 def _renamed(value: Any, ids: Mapping[str, str]) -> Any:
-    """A copy of ``value`` with each string that's an ``@local`` id in ``ids``, or derived from one, its registry id."""
+    """A copy of ``value`` with each string that's an ``@local`` id in ``ids``, or derived from one, its registry id, and
+    each such id in a path into a run's context its registry id too."""
     if isinstance(value, str):
-        return ids.get(value) or _derived(value, ids) or value if is_local_id(value) else value
+        if is_local_id(value):
+            return ids.get(value) or _derived(value, ids) or value
+        return renamed_context_path(value, lambda segment: (ids.get(segment) or _derived(segment, ids))
+                                    if is_local_id(segment) else None)
     if isinstance(value, dict):
         return {key: _renamed(item, ids) for key, item in value.items()}
     if isinstance(value, list):
@@ -360,8 +365,10 @@ def _unregistrable(plan: Plan, shared: bool) -> Iterator[str]:
             continue
         where = plan.path(write.source.entry)
         for path, text in _strings(write.source.config):
-            if is_local_id(text):
-                yield f"{where}: {path or 'its value'} names {text!r}, which only this machine's stores hold"
+            local = text if is_local_id(text) else next(
+                (segment for segment in context_path_segments(text) or () if is_local_id(segment)), None)
+            if local is not None:
+                yield f"{where}: {path or 'its value'} names {local!r}, which only this machine's stores hold"
             elif shared and (url := _local_url(text)) is not None:
                 yield f"{where}: {path or 'its value'} names {url}, which only this machine reaches"
         if shared:

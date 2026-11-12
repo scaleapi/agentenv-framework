@@ -3,13 +3,15 @@
 References are the fields step types declare in ``entity_refs`` and the toml keys entity types declare
 in ``toml_refs``. The name of one of this bundle's entities becomes that entity's id, a name an output
 of the same task writes becomes the output's id, and anything else is a store id, left as written;
-whether store ids exist is checked later, with the other checks that read a store.
+whether store ids exist is checked later, with the other checks that read a store. An id renamed so is
+also renamed in each path into the run's context a step type declares in ``context_paths``.
 """
 
 from __future__ import annotations
 
 import copy
 import functools
+import logging
 import unicodedata
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
@@ -19,6 +21,7 @@ from typing import Any
 from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.registry import canonical_type, get_artifact_registry
+from agent_env.entity.paths import field_sites
 from agent_env.entity.refs import EntityKind, EntityRef, RefRole, RefSite, parse_toml_ref, ref_sites
 from agent_env.env.envs.gateway_server import GatewayEnv
 from agent_env.env.envs.service_db import ServiceDBEnv
@@ -28,6 +31,7 @@ from agent_env.plugins import _registration
 from agent_env.plugins._requirements import unmet_problems
 from agent_env.store.ids import HF_PREFIX, derive_id, is_local_id, validate_local_id
 from agent_env.store.image_store.oci_registry_credentials import names_registry
+from agent_env.task_step.context import context_path_segments, renamed_context_path
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_step import TaskStep, attach_retry_config, dependencies
 
@@ -35,6 +39,8 @@ from ._fs import fold, relative, show
 from .authoring import AuthoringContext, default_dockerfile
 from .parse import BUNDLE_TOML, DOCKERFILE, NAMED_BY, Bundle, BundleEntry, BundleError, BundleKind, foreign_hub_id
 from .requires import UnmetRequirements
+
+logger = logging.getLogger(__name__)
 
 # Step keys that hold step ids, never entity ids.
 _STEP_ID_KEYS = ("id", "type", "depends_on")
@@ -258,6 +264,9 @@ class _Resolver:
                     continue
                 self._resolve(entry, site, f"{where}{site.path}", site.value, site.version, outputs,
                               functools.partial(_upstream, edges, index), references)
+        renamed = _rewritten_ids(entry.config, steps)
+        for _, step, cls in declared:
+            self._rename_context_paths(entry, step, cls, renamed)
         return ResolvedEntry(entry, steps, tuple(references), tuple(outputs.values()))
 
     def _image_folder(self, entry: BundleEntry) -> bool:
@@ -483,6 +492,20 @@ class _Resolver:
                 continue
             self._problem(entry, f"{where}{path} = {value!r} names {named}, but {cls.type} doesn't declare its "
                           "entity_refs, so it can't be rewritten")
+
+    def _rename_context_paths(self, entry: BundleEntry, step: dict, cls: type, renamed: dict[str, str]) -> None:
+        """Rename each id ``renamed`` holds in the paths into the run's context ``cls`` declares (``context_paths``).
+        Warn of a path naming one in a field ``cls`` doesn't declare, which the run would look up as written."""
+        for path in cls.context_paths:
+            for _, holder, key in field_sites(step, path):
+                if isinstance(holder[key], str):
+                    holder[key] = renamed_context_path(holder[key], renamed.get)
+        for where, value in _strings(step):
+            segments = context_path_segments(value) or []
+            if named := next((segment for segment in segments[1:] if segment in renamed), None):
+                logger.warning("%s: step %r: %s = %r names %r, which this bundle writes as %r, but %s doesn't declare "
+                               "the field in context_paths, so it isn't rewritten", relative(self.bundle.root, entry.path),
+                               step.get("id"), where, value, named, renamed[named], cls.type)
 
     def _problem(self, entry: BundleEntry, message: str) -> None:
         self.problems.append(f"{relative(self.bundle.root, entry.path)}: {message}")

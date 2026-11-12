@@ -29,6 +29,7 @@ from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RUN_CONTEX
 class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
     type: ClassVar[str] = "always_on_agent_verifier"
     entity_refs = RubricsVerifierTaskStep.entity_refs  # the judge, as rubrics_verifier's
+    context_paths = RubricsVerifierTaskStep.context_paths
 
     def __init__(
         self,

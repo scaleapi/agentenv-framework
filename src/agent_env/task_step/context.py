@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -20,6 +22,24 @@ ENTITY_IDS_KEY = "entity_ids"
 def run_entity_id(metadata: dict, entity_id: str) -> str:
     """The id the run's task gave the entity it names as ``entity_id`` (``Task.entity_ids``), else ``entity_id``."""
     return (metadata.get(ENTITY_IDS_KEY) or {}).get(entity_id, entity_id)
+
+
+def context_path_segments(path: Any) -> list[str] | None:
+    """The keys and list indexes a path into a run's context walks, or None when ``path`` isn't one. A segment is
+    letters, digits, ``_`` and ``-`` after a ``.``, or any id in brackets: ``env_trigger_state[@local/x/crm].statuses``."""
+    if not isinstance(path, str) or not _CONTEXT_PATH.fullmatch(path):
+        return None
+    return [plain or bracketed for plain, bracketed in _CONTEXT_PATH_SEGMENT.findall(path)]
+
+
+def renamed_context_path(path: str, rename: Callable[[str], str | None]) -> str:
+    """``path`` with each segment ``rename`` gives another id for naming that id; ``path`` itself when it isn't a path
+    into a run's context or ``rename`` renames none of its segments."""
+    segments = context_path_segments(path) or []
+    renamed = [rename(segment) or segment for segment in segments]
+    if renamed == segments:
+        return path
+    return "".join(_path_segment(segment, first=i == 0) for i, segment in enumerate(renamed))
 
 
 class StepContextError(RuntimeError):
@@ -293,3 +313,14 @@ class TaskStepContext:
             agent_harness=data.get("agent_harness"),
             instance_id=data.get("instance_id"),
         )
+
+
+_PLAIN_SEGMENT = re.compile(r"[\w-]+")
+_CONTEXT_PATH = re.compile(r"(?:[\w-]+|\[[^\[\]]+\])(?:\.[\w-]+|\[[^\[\]]+\])*")
+_CONTEXT_PATH_SEGMENT = re.compile(r"\.?([\w-]+)|\[([^\[\]]+)\]")
+
+
+def _path_segment(segment: str, *, first: bool) -> str:
+    if not _PLAIN_SEGMENT.fullmatch(segment):
+        return f"[{segment}]"
+    return segment if first else f".{segment}"

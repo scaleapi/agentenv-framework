@@ -1,6 +1,7 @@
 """Resolving a parsed bundle: every declared reference rewritten to the id it names, before any write."""
 
 import json
+import logging
 import random
 from dataclasses import replace
 
@@ -166,6 +167,33 @@ def test_a_reference_added_without_rewriting_a_field_is_not_a_renamed_id(make):
     swapped = replace(entry, references=(*entry.references,
                                           Reference(EntityKind.AGENT, solver.id, None, solver, "--agent 'solver'", None)))
     assert swapped.entity_ids == entry.entity_ids == {"tickets": f"{ROOT}/tickets"}
+
+
+def test_a_context_fact_naming_what_the_bundle_renamed_names_it_by_its_new_id(make):
+    facts = {"wf-1": "env_trigger_state.tickets.statuses.wf-1", "cli": "env_changes.tickets-cli.rows",
+             "store env": "env_trigger_state.elsewhere.statuses.wf-1", "score": "verifications.judge.score"}
+    entry = resolved(make(tasks={"t": [
+        {"id": "deploy", "type": "deploy_env", "env_id": "tickets"},
+        {"id": "cli", "type": "build_mcp_cli", "env_id": "tickets", "cli_artifact_id": "tickets-cli"},
+        {"id": "judge", "type": "rubrics_verifier", "context_facts_for_judge": facts},
+    ]}), "t")
+
+    assert entry.config[2]["context_facts_for_judge"] == {
+        "wf-1": f"env_trigger_state[{ROOT}/tickets].statuses.wf-1", "cli": f"env_changes[{ROOT}/t/tickets-cli].rows",
+        "store env": "env_trigger_state.elsewhere.statuses.wf-1", "score": "verifications.judge.score"}
+
+
+def test_a_path_naming_what_the_bundle_renamed_in_a_field_its_step_doesnt_declare_is_warned_of(make, caplog):
+    steps = [{"id": "deploy", "type": "deploy_env", "env_id": "tickets"},
+             {"id": "note", "type": "plugin_test", "path": "env_trigger_state.tickets.statuses", "file": "tickets.json"}]
+
+    with caplog.at_level(logging.WARNING, logger="agent_env.bundle.resolve"):
+        entry = resolved(make(tasks={"t": steps}), "t")
+
+    assert entry.config[1] == steps[1]
+    assert [record.getMessage() for record in caplog.records] == [
+        "tasks/t.json: step 'note': path = 'env_trigger_state.tickets.statuses' names 'tickets', which this bundle "
+        f"writes as '{ROOT}/tickets', but plugin_test doesn't declare the field in context_paths, so it isn't rewritten"]
 
 
 def test_an_output_id_a_step_derives_is_named_under_its_task_too(make):
