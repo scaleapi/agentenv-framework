@@ -140,9 +140,13 @@ async def _ended_output(sb: modal.Sandbox) -> Optional[tuple[list[str], list[str
     output, errors = collections.deque(maxlen=_OUTPUT_KEPT_LINES), collections.deque(maxlen=_OUTPUT_KEPT_LINES)
     try:
         async with asyncio.timeout(_OUTPUT_READ_SECONDS):
-            await asyncio.gather(_read_lines(sb.stdout, output), _read_lines(sb.stderr, errors))
-    except Exception as e:
-        logger.info(f"Couldn't read all the output of Modal sandbox {sb.object_id}: {fmt_exc(e)}")
+            failures = await asyncio.gather(_read_lines(sb.stdout, output), _read_lines(sb.stderr, errors),
+                                            return_exceptions=True)
+    except TimeoutError:
+        failures = [TimeoutError(f"reading took past {_OUTPUT_READ_SECONDS} s")]
+    for failure in failures:
+        if failure is not None:
+            logger.info(f"Couldn't read all the output of Modal sandbox {sb.object_id}: {fmt_exc(failure)}")
     return list(output), list(errors)
 
 

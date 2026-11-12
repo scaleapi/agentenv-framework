@@ -3,6 +3,7 @@ asks: a local sandbox's container from Docker, its output and errors as Docker l
 from Modal, its output once it has exited, read once, a chunk at a time, into a bounded tail of each stream, neither
 crowding out the other's last lines; and nothing from a sandbox whose provider can't tell."""
 
+import asyncio
 import subprocess
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -127,14 +128,36 @@ async def test_a_modal_sandbox_keeps_a_bounded_tail_of_each_stream_and_neither_c
 
 
 @pytest.mark.asyncio
-async def test_a_modal_sandbox_whose_output_cant_be_read_to_its_end_keeps_what_it_read(caplog):
+async def test_a_modal_sandbox_whose_stream_breaks_keeps_what_it_read_and_all_the_other_stream_says(caplog):
     class Breaks(_Stream):
         async def _chunks(self):
-            yield "agentenv-init: the image names no command\n"
+            yield "launch: the computer's QEMU exited\n"
             raise RuntimeError("stream gone")
 
-    sb = _modal_sb(2)
-    sb.stdout = Breaks()
+    class Slow(_Stream):
+        async def _chunks(self):
+            for line in ("[    1.0] Linux version 6.8\n", "agentenv-init: the image names no command\n"):
+                await asyncio.sleep(0.05)
+                yield line
 
-    assert await ModalVmSandbox(sb, {}).output_tail(5) == ["agentenv-init: the image names no command"]
-    assert "Couldn't read all the output of Modal sandbox sb-1" in caplog.text
+    sb = _modal_sb(2)
+    sb.stdout, sb.stderr = Slow(), Breaks()
+
+    assert await ModalVmSandbox(sb, {}).output_tail(5) == [
+        "[    1.0] Linux version 6.8", "agentenv-init: the image names no command", "launch: the computer's QEMU exited"]
+    assert "Couldn't read all the output of Modal sandbox sb-1: builtins.RuntimeError: stream gone" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_modal_sandbox_whose_output_takes_too_long_to_read_keeps_what_it_read(monkeypatch, caplog):
+    class Endless(_Stream):
+        async def _chunks(self):
+            yield "agentenv-init: no filesystem labelled agentenv-root\n"
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(modal_sandbox, "_OUTPUT_READ_SECONDS", 0.2)
+    sb = _modal_sb(2)
+    sb.stdout = Endless()
+
+    assert await ModalVmSandbox(sb, {}).output_tail(5) == ["agentenv-init: no filesystem labelled agentenv-root"]
+    assert "reading took past 0.2 s" in caplog.text
