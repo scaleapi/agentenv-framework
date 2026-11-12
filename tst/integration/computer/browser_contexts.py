@@ -2,8 +2,8 @@
 to a loopback site as its own user, by cookies and local storage of its own, in tabs of its own the default context
 doesn't list; five leases of one label at once are one; a lease's download lands in its own folder, listed in it alone;
 a context an agent makes over CDP is leased to it as agent-<user>-<n>, another agent and the task's lease can't be
-disposed by it, its own can; data/get carries each lease, and a load leases a missing one back with its cookies; and a
-release, then a reset, end them and delete their folders."""
+disposed by it, its own can; data/get carries each lease, and once agents have acted a load still leases a missing one
+back with its cookies; and a release, then a reset, end them and delete their folders."""
 
 import asyncio
 import base64
@@ -143,8 +143,9 @@ async def check_browser_contexts(deployed, env_id: str, op_url: Callable[[str], 
         seller_folder = (await inside.run(deployed, ["sh", "-c", "test -e ~/Contexts/seller && echo kept || echo gone"],
                                           timeout_s=30))["stdout"].strip()
         await protocol_v1.add_data(data_url, [DataPart(data={"contexts": {"seller": {
-            "cookies": [{"name": "sid", "value": "seller", "url": SITE}], "tabs": [{"url": SITE, "active": True}]}}})],
-            timeout=120, headers=deployed.control_headers)
+            "cookies": [{"name": "sid", "value": "seller", "url": SITE}]}}})], timeout=120,
+            headers=deployed.control_headers)
+        await call("tabs/open", {"url": SITE, "context": "seller"})
         reloaded = await titled("seller", "signed in as seller theme none")
     finally:
         for task in serving:
