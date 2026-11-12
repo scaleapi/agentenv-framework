@@ -1,6 +1,7 @@
 """A run-wide agent pick (``user_overrides.a2a_agent_id``: ``task run --a2a-agent-id``, a hub run's agent pick) reaches
-every ``deploy_agent`` and ``install_agent`` step, a ``prompt_agent`` task's user agent included, exactly as on main. A
-step that plays the user keeps its own agent by its own class (``plays_user``), not by anything these steps read."""
+every ``deploy_agent`` and ``install_agent`` step, a ``prompt_agent`` task's user agent included, exactly as on main.
+A ``deploy_user_sim_agent`` step keeps its own agent through its own ``_resolve_agent_ref``, not anything these steps
+read."""
 
 from __future__ import annotations
 

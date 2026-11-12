@@ -59,12 +59,11 @@ from agent_env.store.ids import LOCAL_PREFIX, is_local_id
 from agent_env.store.routing import namespace_routing_enabled
 from agent_env.task.task import Task
 from agent_env.task_step.registry import get_task_step_registry
-from agent_env.task_step.roles import plays_user
 from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.install_agent import InstallAgentTaskStep
 from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
-from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep, is_prompt_step
+from agent_env.task_step.task_steps.prompt_agent import is_prompt_step, user_sim_agents
 
 from ._fs import fold, relative, with_article
 from .authoring import AuthoringContext, entry_files, staged_build_context
@@ -1226,16 +1225,7 @@ def solver_steps(steps: Any) -> tuple[str, ...]:
     prompted = {step.get("agent_name") or TaskStep.DEFAULT_AGENT_NAME for step in prompts} - user_sim_agents(steps)
     return tuple(step["id"] for step in steps if isinstance(step, dict) and isinstance(step.get("id"), str)
                  and step.get("type") in (DeployAgentTaskStep.type, InstallAgentTaskStep.type)
-                 and not plays_user(step) and (step.get("agent_name") or TaskStep.DEFAULT_AGENT_NAME) in prompted)
-
-
-def user_sim_agents(steps: Any) -> set[str]:
-    """The agents ``steps``, a task's config, name as a user simulator: each ``prompt_agent`` step's
-    ``user_agent_name``, and the agent each step whose class ``plays_user`` deploys."""
-    named = {step.get("user_agent_name") or PromptAgentTaskStep.DEFAULT_USER_AGENT_NAME for step in steps
-             if isinstance(step, dict) and step.get("type") == PromptAgentTaskStep.type}
-    return named | {step.get("agent_name") or TaskStep.DEFAULT_AGENT_NAME for step in steps
-                    if isinstance(step, dict) and plays_user(step)}
+                 and (step.get("agent_name") or TaskStep.DEFAULT_AGENT_NAME) in prompted)
 
 
 def _leaves_an_agent_unset(task: ResolvedEntry) -> bool:

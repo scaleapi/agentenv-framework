@@ -9,7 +9,7 @@ from click.testing import CliRunner
 from agent_env.bundle import BundleError, dry_run_bundle, parse_bundle, run_bundle
 from agent_env.bundle import preflight as preflight_module
 from agent_env.bundle.installed import InstalledBundle
-from agent_env.bundle.plan import AgentOverride, plan_bundle, solver_steps, user_sim_agents
+from agent_env.bundle.plan import AgentOverride, plan_bundle, solver_steps
 from agent_env.bundle.resolve import resolve_bundle
 from agent_env.cli import cli
 from agent_env.entity.refs import EntityKind
@@ -17,8 +17,8 @@ from agent_env.plugins._bundles import ALIASES_FILE
 from agent_env.task.task import Task
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.install_agent import InstallAgentTaskStep
+from agent_env.task_step.task_steps.prompt_agent import user_sim_agents
 from tst.unit.bundle._support import layout, store_agent
-from tst.unit.task_step.plays_user_step import PlaysUser, plays_user_registered  # noqa: F401  (a fixture)
 
 ROOT = "@local/~/triage"
 SOLVER = "@local/demo-dist/kit/solver"
@@ -120,33 +120,30 @@ def test_only_the_steps_deploying_or_installing_the_agent_a_step_prompts_are_the
     assert solver_steps(steps) == ("solver", "installed")
 
 
-@pytest.mark.usefixtures("plays_user_registered")
 def test_the_agent_an_always_on_step_wakes_is_the_solver():
     steps = [
         {"id": "solver", "type": "deploy_agent"},
-        {"id": "user", "type": PlaysUser.type, "agent_name": "linda"},
-        {"id": "loop", "type": "always_on", "prompt": "Help Linda."},
+        {"id": "user", "type": "deploy_user_sim_agent", "agent_name": "linda"},
+        {"id": "loop", "type": "always_on", "user_sim": "linda"},
     ]
 
     assert solver_steps(steps) == ("solver",)
 
 
-@pytest.mark.usefixtures("plays_user_registered")
-def test_the_agent_a_step_whose_class_plays_the_user_deploys_is_never_the_solvers():
+def test_the_agent_an_always_on_step_talks_to_as_its_user_is_never_the_solvers():
     """Even when a step prompts it, as a briefing would, and another step installs it."""
     steps = [
         {"id": "solver", "type": "deploy_agent"},
-        {"id": "user", "type": PlaysUser.type, "agent_name": "linda"},
+        {"id": "user", "type": "deploy_user_sim_agent", "agent_name": "linda"},
         {"id": "installed", "type": "install_agent", "agent_name": "linda", "sandbox_name": "box"},
         {"id": "brief", "type": "prompt_agent", "agent_name": "linda"},
-        {"id": "loop", "type": "always_on", "prompt": "Help Linda."},
+        {"id": "loop", "type": "always_on", "user_sim": "linda"},
     ]
 
     assert solver_steps(steps) == ("solver",)
     assert user_sim_agents(steps) == {"linda", "human_agent"}
 
 
-@pytest.mark.usefixtures("plays_user_registered")
 def test_a_prompt_agent_tasks_solver_and_user_agents_are_as_on_main():
     steps = [
         {"id": "solver", "type": "deploy_agent"},

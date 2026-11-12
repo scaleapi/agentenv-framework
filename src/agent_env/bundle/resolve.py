@@ -29,9 +29,8 @@ from agent_env.plugins._requirements import unmet_problems
 from agent_env.store.ids import HF_PREFIX, derive_id, is_local_id, validate_local_id
 from agent_env.store.image_store.oci_registry_credentials import names_registry
 from agent_env.task_step.registry import get_task_step_registry
-from agent_env.task_step.roles import plays_user
 from agent_env.task_step.task_step import TaskStep, attach_retry_config, dependencies
-from agent_env.task_step.task_steps.prompt_agent import is_prompt_step
+from agent_env.task_step.task_steps.prompt_agent import is_prompt_step, user_sim_agents
 
 from ._fs import fold, relative, show
 from .authoring import AuthoringContext, default_dockerfile
@@ -127,13 +126,12 @@ def resolve_bundle(bundle: Bundle) -> ResolvedBundle:
 
 
 def played_deploys(entry: ResolvedEntry) -> frozenset[str]:
-    """The ``deploy_agent`` steps of a task's only agent under test, the one a step prompts as it and no step plays the
-    user as, which a caller playing that agent itself (``EpisodeSpec``) stands in for; none when the entry isn't a
-    task, or prompts no agent or several."""
+    """The ``deploy_agent`` steps of a task's only agent under test, the one a step prompts as it and no step talks to
+    as its user (``user_sim_agents``), which a caller playing that agent itself (``EpisodeSpec``) stands in for; none
+    when the entry isn't a task, or prompts no agent or several."""
     if entry.entry.kind is not BundleKind.TASK:
         return frozenset()
-    prompted = ({_agent_name(step) for step in entry.config if is_prompt_step(step)}
-                - {_agent_name(step) for step in entry.config if plays_user(step)})
+    prompted = {_agent_name(step) for step in entry.config if is_prompt_step(step)} - user_sim_agents(entry.config)
     if len(prompted) != 1:
         return frozenset()
     return frozenset(step.get("id") for step in entry.config

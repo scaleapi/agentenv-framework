@@ -25,7 +25,6 @@ from agent_env.training import harness
 from agent_env.training.harness import AgentEnvSessionFactory, prompt_rows
 from tst.unit.bundle._support import layout
 from tst.unit.conftest import local_stores  # noqa: F401
-from tst.unit.task_step.plays_user_step import PlaysUser, plays_user_registered  # noqa: F401  (a fixture)
 from tst.util.fake_vllm import fake_vllm, says, token_ids
 
 MODEL = "Qwen/Qwen3-4B"
@@ -259,7 +258,7 @@ def test_a_rows_prompt_is_an_always_on_steps_as_it_is_a_prompt_agent_steps():
 
 def test_a_rows_prompt_with_no_step_prompt_is_the_named_user_sims_opening():
     def user_sim(name, opening):
-        return SimpleNamespace(type="deploy_user_sim_agent", plays_user=True, agent_name=name, opening_prompt=opening)
+        return SimpleNamespace(type="deploy_user_sim_agent", agent_name=name, opening_prompt=opening)
 
     always_on = SimpleNamespace(type="always_on", prompt=None, user_sim="nora")
     task = SimpleNamespace(steps=[user_sim("other", "Not this one."), user_sim("nora", "Find me a sofa."), always_on])
@@ -274,19 +273,20 @@ def test_a_rows_prompt_with_no_step_prompt_is_the_named_user_sims_opening():
 
 
 def test_a_rows_prompt_skips_a_briefing_sent_to_the_user_sim():
-    sim = SimpleNamespace(type="deploy_user_sim_agent", plays_user=True, agent_name="nora", opening_prompt="Find a sofa.")
+    sim = SimpleNamespace(type="deploy_user_sim_agent", agent_name="nora", opening_prompt="Find a sofa.")
     briefing = SimpleNamespace(type="prompt_agent", agent_name="nora", prompt="You are Nora; stay in character.")
     always_on = SimpleNamespace(type="always_on", agent_name="solver", prompt=None, user_sim="nora")
 
     assert harness._first_prompt(SimpleNamespace(steps=[sim, briefing, always_on])) == "Find a sofa."
 
 
-@pytest.mark.usefixtures("plays_user_registered")
 def test_a_task_whose_user_sim_step_deploys_the_user_trains_only_its_solver():
-    config = [{"id": "solver", "type": "deploy_agent", "a2a_agent_id": "theirs"},
-              {"id": "user", "type": PlaysUser.type, "agent_name": "linda", "a2a_agent_id": "sim"},
+    user = {"id": "user", "type": "deploy_user_sim_agent", "agent_name": "linda", "a2a_agent_id": "sim",
+            "model": "sim-model", "multi_day": False, "opening_prompt": "Help Linda.",
+            "persona": {"display_name": "Linda Murphy", "description": {"who_you_are": ["Plans her family's week."]}}}
+    config = [{"id": "solver", "type": "deploy_agent", "a2a_agent_id": "theirs"}, user,
               {"id": "brief", "type": "prompt_agent", "agent_name": "linda", "prompt": "You are Linda."},
-              {"id": "ask", "type": "prompt_agent", "prompt": "Help Linda."}]
+              {"id": "ask", "type": "prompt_agent", "prompt": "Help Linda.", "user_agent_name": "linda"}]
 
     assert harness._untrainable(config) is None
     assert harness.solver_steps(config) == ("solver",)

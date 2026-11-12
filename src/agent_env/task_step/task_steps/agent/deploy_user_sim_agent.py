@@ -168,7 +168,6 @@ class DeployUserSimAgentTaskStep(DeployAgentTaskStep):
     ``agent_name`` in ``metadata["user_sims"]``."""
 
     type: ClassVar[str] = "deploy_user_sim_agent"
-    plays_user: ClassVar[bool] = True
     system_prompt_required: ClassVar[bool] = True
     entity_refs = DeployAgentTaskStep.entity_refs
     # Which agent plays the user is part of the task, not the user's setup: written out for elsewhere, the task keeps it.

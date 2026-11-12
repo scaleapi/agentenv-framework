@@ -16,12 +16,10 @@ import pytest
 from agent_env.a2a_agent import A2AAgent
 from agent_env.a2a_agent import protocol
 from agent_env.task_step.context import TaskStepContext
-from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps import always_on as ao
 from agent_env.task_step.task_steps.agent import user_sim_versions
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import USER_SIMS_KEY, DeployUserSimAgentTaskStep
-from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from tst.unit.task_step.always_on_harness import USER_SIM, Rig
 
 DATA = Path(__file__).parents[2] / "data" / "user_sim"
@@ -184,12 +182,6 @@ def test_the_tested_schedule_loads():
 
 
 # ---- it plays the user, never the agent under test -----------------------------------------------------------------
-def test_only_the_user_sim_step_plays_the_user():
-    assert DeployUserSimAgentTaskStep.plays_user is True
-    assert not hasattr(TaskStep, "plays_user") and not hasattr(DeployAgentTaskStep, "plays_user")
-    assert not hasattr(PromptAgentTaskStep, "plays_user") and _step().plays_user is True
-
-
 @pytest.mark.asyncio
 async def test_its_agent_is_deployed_and_recorded_exactly_as_deploy_agent_deploys_one(monkeypatch):
     """Everything deploy_agent gives an agent, the user sim's gets: the same deployed_agents entry and the same posts,

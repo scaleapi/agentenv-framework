@@ -14,7 +14,6 @@ from agent_env.entity.refs import EntityKind, EntityRef
 from agent_env.env.env import Env
 from agent_env.task import Task
 from agent_env.task_step.task_step import TaskStep
-from tst.unit.task_step.plays_user_step import PlaysUser, plays_user_registered  # noqa: F401  (a fixture)
 
 ROOT = "@local/~/triage"
 LAYOUT = {
@@ -598,13 +597,12 @@ def test_a_bad_depends_on_on_a_step_deriving_its_output_is_named_once(make, depe
     ]})) == (f"tasks/t.json: step 'cli': {problem}",)
 
 
-@pytest.mark.usefixtures("plays_user_registered")
 def test_the_agent_an_always_on_step_wakes_is_the_one_a_caller_plays():
     task = SimpleNamespace(entry=SimpleNamespace(kind=BundleKind.TASK), config=[
         {"id": "agent", "type": "deploy_agent"},
-        {"id": "user", "type": PlaysUser.type, "agent_name": "linda"},
+        {"id": "user", "type": "deploy_user_sim_agent", "agent_name": "linda"},
         {"id": "brief", "type": "prompt_agent", "agent_name": "linda"},
-        {"id": "loop", "type": "always_on", "prompt": "Help Linda."},
+        {"id": "loop", "type": "always_on", "user_sim": "linda"},
     ])
 
     assert played_deploys(task) == frozenset({"agent"})

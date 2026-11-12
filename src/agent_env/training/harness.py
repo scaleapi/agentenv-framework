@@ -35,9 +35,8 @@ from agent_env.openenv.reward import reward_of
 from agent_env.task.task import Task, recorded_scores
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext, sandbox_overrides
-from agent_env.task_step.roles import plays_user
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
-from agent_env.task_step.task_steps.prompt_agent import is_prompt_step
+from agent_env.task_step.task_steps.prompt_agent import is_prompt_step, user_sim_agents
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
 from agent_env.training._openenv import on_session_loop
 
@@ -235,8 +234,8 @@ def _index_named(prompt: Any, ids: list[str]) -> int:
 def _first_prompt(task: Task) -> str:
     """The user's first message to the agent under test: its step's prompt, else the opening of the user sim the step
     names (an always_on step's ``user_sim``, a prompt_agent step's ``user_agent_name``), as it was written. A step that
-    prompts an agent a ``plays_user`` step deploys (the user sim, say a briefing) isn't the agent under test's."""
-    users = {getattr(each, "agent_name", None) for each in task.steps if plays_user(each)} - {None}
+    prompts an agent another step talks to as its user (the user sim, say a briefing) isn't the agent under test's."""
+    users = user_sim_agents(task.steps)
     step = next((each for each in task.steps
                  if is_prompt_step(each) and getattr(each, "agent_name", None) not in users), None)
     if step is None:
@@ -244,8 +243,8 @@ def _first_prompt(task: Task) -> str:
     if getattr(step, "prompt", None):
         return step.prompt
     user = getattr(step, "user_sim", None) or getattr(step, "user_agent_name", None)
-    sim = next((each for each in task.steps if plays_user(each) and user and getattr(each, "agent_name", None) == user),
-               None)
+    sim = next((each for each in task.steps
+                if user and getattr(each, "agent_name", None) == user and getattr(each, "opening_prompt", None)), None)
     return getattr(sim, "opening_prompt", None) or ""
 
 
