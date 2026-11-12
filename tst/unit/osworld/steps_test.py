@@ -72,6 +72,9 @@ class _Provider:
         self.create_container = AsyncMock(return_value=SimpleNamespace(
             sandbox_id="sb-1", mode="container", type="docker", tunnel_urls={8000: CONTROLLER}))
 
+    def url_from_sandbox(self, url):
+        return url
+
 
 @pytest.fixture
 def deploy(monkeypatch):
@@ -109,10 +112,27 @@ async def test_deploy_runs_the_controller_against_the_card_endpoint_and_records_
     deploy.ready.assert_awaited_once_with(CONTROLLER)
     assert env.metadata == {"existing": "kept", guest.CONTROLLER_URL_KEY: CONTROLLER,
                             guest.CONTROLLER_SANDBOX_ID_KEY: "sb-1", guest.GUEST_URL_KEY: f"{ENV_URL}/apps/7/osworld"}
+    # The run's stored context keeps them too: the env's record is stored once, when it is deployed.
+    assert context.metadata[guest.CONTROLLERS_KEY] == {"desk": {
+        guest.CONTROLLER_URL_KEY: CONTROLLER, guest.CONTROLLER_SANDBOX_ID_KEY: "sb-1",
+        guest.GUEST_URL_KEY: f"{ENV_URL}/apps/7/osworld"}}
     [sandbox] = context.deployed_sandboxes
     assert (sandbox.sandbox_name, sandbox.sandbox_id, sandbox.tunnel_urls) == \
         ("osworld-controller-desk", "sb-1", {"8000": CONTROLLER})
     assert TOKEN not in caplog.text and LITELLM not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_deploy_gives_the_controller_the_guest_server_and_model_endpoint_as_its_sandbox_reaches_them(deploy):
+    deploy.provider.url_from_sandbox = lambda url: url.replace("https://", "https://from-sandbox.")
+    env = computer(card("/apps/7/osworld"))
+    await OSWorldDeployControllerTaskStep(id="ctl", version=1, env_id="desk").execute(_context(env))
+
+    sent = deploy.provider.create_container.call_args.kwargs["env"]
+    assert sent["REMOTE_VM_IP"] == f"{ENV_URL}/apps/7/osworld".replace("https://", "https://from-sandbox.")
+    assert sent["LITELLM_BASE_URL"] == "https://from-sandbox.model.example"
+    # Later steps call the guest server from this process, by the address it reaches.
+    assert env.metadata[guest.GUEST_URL_KEY] == f"{ENV_URL}/apps/7/osworld"
 
 
 @pytest.mark.asyncio
@@ -337,3 +357,12 @@ async def test_evaluate_refuses_to_grade_an_unstaged_computer(ctl, files, answer
         await OSWorldEvaluateTaskStep(id="e", version=1, env_id="desk", verifier_id="v",
                                       evaluator={"funcs": "compare_table"}).execute(context)
     assert "/evaluate_async" not in ctl.paths()
+
+
+def test_the_controller_is_found_in_the_runs_context_when_the_env_record_was_stored_without_it():
+    env = computer(card("/apps/7/osworld"))
+    context = _context(env)
+    context.metadata[guest.CONTROLLERS_KEY] = {"desk": {guest.CONTROLLER_URL_KEY: CONTROLLER}}
+    assert guest.controller_url(env, context) == CONTROLLER
+    with pytest.raises(RuntimeError, match="run osworld_deploy_controller"):
+        guest.controller_url(env, _context(computer(card("/apps/7/osworld"))))

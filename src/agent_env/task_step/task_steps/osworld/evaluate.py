@@ -110,7 +110,7 @@ class OSWorldEvaluateTaskStep(TaskStep):
         deployed = next((d for d in context.deployed_envs if d.env_id == self.env_id), None)
         if deployed is None:
             raise RuntimeError(f"Env '{self.env_id}' not found in context.deployed_envs")
-        url = guest.controller_url(deployed)
+        url = guest.controller_url(deployed, context)
         await self._stage_result_files(url, context)
         prompt_response = context.prompt_responses[-1] if context.prompt_responses else None
         if self.osworld_v2_task_path:

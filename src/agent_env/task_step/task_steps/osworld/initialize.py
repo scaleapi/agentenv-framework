@@ -45,7 +45,7 @@ class OSWorldInitializeTaskStep(TaskStep):
         deployed = next((d for d in context.deployed_envs if d.env_id == self.env_id), None)
         if deployed is None:
             raise RuntimeError(f"Env '{self.env_id}' not found in context.deployed_envs")
-        url = guest.controller_url(deployed)
+        url = guest.controller_url(deployed, context)
         if self.osworld_v2_task_path:
             logger.info(f"OSWorld-V2 initialize '{self.id}': task_ref={self.osworld_v2_task_path}")
             # /initialize_task refuses to run before a reset.

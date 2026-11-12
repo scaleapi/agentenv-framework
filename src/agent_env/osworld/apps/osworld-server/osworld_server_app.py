@@ -29,9 +29,10 @@ TIMEOUT_S = 1800.0
 _DROPPED_REQUEST = frozenset({"host", "content-length", "connection", "transfer-encoding", "authorization"})
 _DROPPED_RESPONSE = frozenset({"content-length", "connection", "transfer-encoding", "content-encoding"})
 #: What a CUA VM installs for the guest server that Ubuntu 24.04's desktop computer lacks: AT-SPI's Python bindings
-#: for its accessibility tree, Tk for pyautogui, the window and input tools its setup routes run, ffmpeg for recordings.
-PACKAGES = ["python3-pyatspi", "python3-gi", "gir1.2-atspi-2.0", "at-spi2-core", "python3-tk", "ffmpeg", "wmctrl",
-            "xdotool", "x11-xkb-utils", "x11-xserver-utils"]
+#: for its accessibility tree, Tk for pyautogui, scrot for pyautogui's screenshots on X11, the window and input tools its
+#: setup routes run, ffmpeg for recordings.
+PACKAGES = ["python3-pyatspi", "python3-gi", "gir1.2-atspi-2.0", "at-spi2-core", "python3-tk", "scrot", "ffmpeg",
+            "wmctrl", "xdotool", "x11-xkb-utils", "x11-xserver-utils"]
 
 
 async def forward(request: Request, client: httpx.AsyncClient, upstream: str = UPSTREAM) -> Response:
@@ -58,7 +59,7 @@ def guest_server_check() -> ReadyCheck:
 
 @computer_app(supports=[{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]}])
 @linux(packages=Packages(apt=PACKAGES), python="requirements.txt",
-       services=[Service(name="osworld-server", command="start-osworld-server.sh")])
+       services=[Service(name="osworld-server", command="bash start-osworld-server.sh")])
 class OSWorldServer(ComputerAppEnvironment):
     """The OSWorld guest server, forwarded under ``/osworld/`` to the controller beside the computer."""
 

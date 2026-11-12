@@ -89,12 +89,16 @@ class OSWorldDeployControllerTaskStep(TaskStep):
         image = Artifact.get(self.controller_image_artifact_id or DEFAULT_CONTROLLER_IMAGE_ARTIFACT_ID)
         if not isinstance(image, DockerImageArtifact):
             raise TypeError(f"the controller image {image.id!r} is a {image.type} artifact, not a docker image")
-        env = self.controller_env(deployed, guest_url)
-        logger.info(f"Deploying the OSWorld controller for env '{self.env_id}' (image={image.id} v{image.version}, "
-                    f"env={sorted(env)})")
         provider = skip_refusing(get_sandbox_provider(),
                                  lambda link: pull_problem(image.pinned_name, on_this_machine=link.ON_THIS_MACHINE),
                                  what=f"sandbox '{sandbox_name}'")
+        # The guest server and the model endpoint as the controller's sandbox reaches them: a local container reaches
+        # this machine's loopback by another name.
+        env = self.controller_env(deployed, provider.url_from_sandbox(guest_url))
+        if "LITELLM_BASE_URL" in env:
+            env["LITELLM_BASE_URL"] = provider.url_from_sandbox(env["LITELLM_BASE_URL"])
+        logger.info(f"Deploying the OSWorld controller for env '{self.env_id}' (image={image.id} v{image.version}, "
+                    f"env={sorted(env)})")
         sandbox = await provider.create_container(image_name=image.pinned_name, port=CONTROLLER_PORT, env=env,
                                                   cpu=self.cpu, memory=self.memory_mb, disk_size_gb=10,
                                                   timeout=self.ttl_seconds, attribution=deploy_attribution(self, context))
@@ -104,7 +108,9 @@ class OSWorldDeployControllerTaskStep(TaskStep):
             tunnel_urls={str(p): u for p, u in sandbox.tunnel_urls.items()} if sandbox.tunnel_urls else None))
         controller_url = sandbox.tunnel_urls[CONTROLLER_PORT]
         await controller.wait_ready(controller_url)
-        deployed.metadata = {**(deployed.metadata or {}), guest.CONTROLLER_URL_KEY: controller_url,
-                             guest.CONTROLLER_SANDBOX_ID_KEY: sandbox.sandbox_id, guest.GUEST_URL_KEY: guest_url}
+        recorded = {guest.CONTROLLER_URL_KEY: controller_url, guest.CONTROLLER_SANDBOX_ID_KEY: sandbox.sandbox_id,
+                    guest.GUEST_URL_KEY: guest_url}
+        deployed.metadata = {**(deployed.metadata or {}), **recorded}
+        context.metadata.setdefault(guest.CONTROLLERS_KEY, {})[self.env_id] = recorded
         logger.info(f"OSWorld controller for env '{self.env_id}' at {controller_url} (sandbox {sandbox.sandbox_id})")
         return context

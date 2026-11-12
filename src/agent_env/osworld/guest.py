@@ -19,6 +19,9 @@ logger = logging.getLogger(__name__)
 CONTROLLER_URL_KEY = "osworld_controller_url"
 CONTROLLER_SANDBOX_ID_KEY = "osworld_controller_sandbox_id"
 GUEST_URL_KEY = "osworld_guest_url"
+#: ``context.metadata[CONTROLLERS_KEY][env_id]``: the same three, where the run's stored context keeps them; a deployed
+#: env's record is stored once, when it is deployed, so what a later step writes on it lasts only the process.
+CONTROLLERS_KEY = "osworld_controllers"
 #: A computer's card lists an app without its extensions until the app's server answers: how long resolving waits for
 #: the guest extension, and how often it reads the card again.
 CARD_WAIT_S = 120.0
@@ -66,8 +69,10 @@ async def resolve_guest_url(deployed: Any, *, wait_s: float | None = None, poll_
     return _joined(environment_url, endpoint)
 
 
-def controller_url(deployed: Any) -> str:
-    """The controller ``osworld_deploy_controller`` recorded on ``deployed``."""
-    if url := (deployed.metadata or {}).get(CONTROLLER_URL_KEY):
+def controller_url(deployed: Any, context: Any = None) -> str:
+    """The controller ``osworld_deploy_controller`` recorded for ``deployed``: in ``context``'s metadata, else on
+    ``deployed`` itself."""
+    recorded = ((getattr(context, "metadata", None) or {}).get(CONTROLLERS_KEY) or {}).get(deployed.env_id) or {}
+    if url := recorded.get(CONTROLLER_URL_KEY) or (deployed.metadata or {}).get(CONTROLLER_URL_KEY):
         return str(url)
     raise RuntimeError(f"env '{deployed.env_id}' has no {CONTROLLER_URL_KEY}: run osworld_deploy_controller on it first")

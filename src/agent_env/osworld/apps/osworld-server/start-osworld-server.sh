@@ -4,6 +4,8 @@
 cd "$(dirname "$0")/payload"
 export DISPLAY="${DISPLAY:-:0}"
 export PYTHONUNBUFFERED=1
+# python-xlib refuses to connect without an Xauthority file; the computer's X server takes connections without one.
+[ -e "${XAUTHORITY:-$HOME/.Xauthority}" ] || touch "${XAUTHORITY:-$HOME/.Xauthority}"
 while true; do
     ../venv/bin/python -c 'import runpy, sys; sys.path.append("/usr/lib/python3/dist-packages"); sys.argv = ["main.py"]; runpy.run_path("main.py", run_name="__main__")'
     echo "osworld-server exited ($?); restarting in 5s" >&2
