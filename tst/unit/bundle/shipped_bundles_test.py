@@ -26,8 +26,8 @@ SHIPPED = sorted(_shipped())
 
 
 def test_agentenv_framework_ships_its_bundles():
-    assert SHIPPED == ["advance-to-next-event", "agents", "browsers", "computers", "desktop", "drivers", "echo-mcp", "hello",
-                       "mail-mcp", "next-env-event"]
+    assert SHIPPED == ["advance-to-next-event", "agents", "apps", "browsers", "computers", "desktop", "drivers", "echo-mcp",
+                       "hello", "mail-mcp", "next-env-event", "office"]
 
 
 @pytest.mark.parametrize("name", SHIPPED)
@@ -54,7 +54,7 @@ def test_the_shipped_aliases_are_agent_envs_alone_and_claude_code_names_the_defa
 
 
 
-def test_the_shipped_env_aliases_name_the_mail_env_the_validator_deploys_the_drivers_and_the_browsers():
+def test_the_shipped_env_aliases_name_the_mail_env_the_validator_deploys_the_drivers_the_browsers_and_the_apps():
     table = installed_aliases(tuple(_shipped().values()), ENV_ALIASES)
 
     assert table.refused == {} and table.refused_claims == {}
@@ -65,7 +65,8 @@ def test_the_shipped_env_aliases_name_the_mail_env_the_validator_deploys_the_dri
         "macos-harness": "@local/agentenv-framework/drivers/macos-harness",
         "codex-computer-use": "@local/agentenv-framework/drivers/codex-computer-use",
         "aside": "@local/agentenv-framework/drivers/aside",
-        "chromium": "@local/agentenv-framework/browsers/chromium"}
+        "chromium": "@local/agentenv-framework/browsers/chromium",
+        "libreoffice": "@local/agentenv-framework/apps/libreoffice"}
     assert A2AAgent.VALIDATION_ENV_ID == "mail"
 
 def test_a_task_naming_no_agent_plans_with_the_shipped_default(tmp_path, monkeypatch, local_stores, cli_routing):

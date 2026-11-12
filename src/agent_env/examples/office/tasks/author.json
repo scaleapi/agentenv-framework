@@ -1,0 +1,11 @@
+[
+  {"id": "env", "type": "deploy_env", "env_id": "desktop"},
+  {"id": "agent", "type": "deploy_agent", "env_ids": ["desktop"]},
+  {"id": "skills", "type": "add_skills", "env_ids": ["desktop"]},
+  {"id": "record", "type": "start_computer_recording", "env_id": "desktop", "name": "agent", "depends_on": ["env"]},
+  {"id": "task", "type": "prompt_agent", "depends_on": ["skills", "record"],
+   "prompt": "Use LibreOffice on this computer to write two files, both saved in the Documents folder. First, a memo titled Quarterly Plan, with at least two paragraphs under the title, saved as quarterly-plan.docx in Word format. Second, a presentation of two slides, saved as quarterly-plan.pptx in PowerPoint format: the first slide titled Quarterly Plan, and the second titled Next Steps, with a list of three steps that appears with an entrance animation. Use only the computer_* tools, and reply DONE once both files are saved."},
+  {"id": "check", "type": "env_outcome_verifier", "env_id": "desktop", "file_artifact_id": "check_office",
+   "verifier_id": "office", "depends_on": ["task"]},
+  {"id": "end", "type": "end_computer_recording", "name": "agent", "depends_on": ["task"]}
+]

@@ -182,6 +182,7 @@ agent-env = "agent_env.cli:cli"
 
 [project.entry-points."agent_env.bundles"]
 agents = "agent_env"
+apps = "agent_env"
 browsers = "agent_env"
 computers = "agent_env"
 drivers = "agent_env"
@@ -190,6 +191,7 @@ hello = "agent_env.examples"
 echo-mcp = "agent_env.examples"
 mail-mcp = "agent_env.examples"
 next-env-event = "agent_env.examples"
+office = "agent_env.examples"
 advance-to-next-event = "agent_env.examples"
 
 [project.urls]

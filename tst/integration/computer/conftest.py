@@ -90,6 +90,14 @@ def desktop(tmp_path_factory):
 
 
 @pytest.fixture(scope="module")
+def office_desktop(tmp_path_factory):
+    """The shipped office example's computer env, the ubuntu-24.04 base and the reference driver with the apps bundle's
+    libreoffice, composed as ``desktop`` is."""
+    bundle = find_bundle("office")
+    yield from _composed(tmp_path_factory.mktemp("office"), parse_bundle(bundle.root, id_root=bundle.id_root))
+
+
+@pytest.fixture(scope="module")
 def cua_desktop(tmp_path_factory):
     """The cua-driver test bundle's desktop, the ubuntu-24.04 base with the cua-driver driver, composed as ``desktop``
     is."""
