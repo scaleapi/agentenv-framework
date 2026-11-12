@@ -1,6 +1,6 @@
 """The always_on step waits for the world to settle by following AI-played contacts' real progress: a contact's reply
-is in progress until it lands or its time limit passes, one trigger's replies run side by side, contacts that set no
-time limit get 300 s, and replies still in progress at the end are recorded."""
+is in progress until it lands or its time limit passes (the one it was registered with), one trigger's replies run side
+by side, and replies still in progress at the end are recorded."""
 
 from __future__ import annotations
 
@@ -97,7 +97,7 @@ async def test_one_trigger_s_replies_run_side_by_side_so_a_quick_one_lands_on_ti
         assert woke == [("2026-11-09T14:30:58", 2)]
     [env] = rig.record(ctx)["settings"]["contacts"]["envs"]
     assert env == {"env_id": "world", "applied": True, "concurrent_fires": parallel,
-                   "executor_timeout_seconds": 300.0}
+                   "contact_timeouts": [{"name": "crew", "timeout_seconds": 120.0}]}
 
 
 @pytest.mark.asyncio
@@ -134,18 +134,23 @@ async def test_a_reply_that_notifies_the_agent_still_runs_side_by_side_so_the_ju
 
 
 @pytest.mark.asyncio
-async def test_a_contact_that_sets_no_limit_gets_300_s_and_one_that_does_keeps_its_own(monkeypatch, tmp_path):
+async def test_each_contact_keeps_the_limit_it_was_registered_with_and_the_longest_caps_a_settle(monkeypatch,
+                                                                                                    tmp_path):
     rig = Rig(monkeypatch, tmp_path)
     await rig.arm()
     rig.triggers(_ask_live_oak("2026-11-09T15:00:00Z"),
                  {**_ask_live_oak("2026-11-09T16:00:00Z"), "id": "northwick-quote",
                   "actions": [{"type": "nl", "executor": "northwick", "instruction": "quote Tess"}]},
                  executors={"liveoak": rig.contact("liveoak", seconds=0, reply=_estimate),
-                            "northwick": rig.contact("northwick", seconds=0, reply=_estimate, timeout_seconds=120)})
-    ctx = await rig.run(rig.step())
+                            "northwick": rig.contact("northwick", seconds=0, reply=_estimate, timeout_seconds=600)})
+    step = rig.step()
+    ctx = await rig.run(step)
 
-    assert [(c["contact"], c["timeout_seconds"]) for c in rig.contact_calls] == [("liveoak", 300), ("northwick", 120)]
-    assert rig.record(ctx)["settings"]["contacts"]["timeout_seconds"] == ao.CONTACT_TIMEOUT_SECONDS == 300
+    # liveoak was registered with no limit of its own: the gateway's 120 s
+    assert [(c["contact"], c["timeout_seconds"]) for c in rig.contact_calls] == [("liveoak", 120), ("northwick", 600)]
+    settings = rig.record(ctx)["settings"]
+    assert settings["contacts"]["longest_timeout_seconds"] == 600
+    assert settings["wake_reserve_seconds"] == step.wake_reserve_seconds(600) > step.wake_reserve_seconds()
 
 
 @pytest.mark.asyncio
@@ -170,10 +175,11 @@ async def test_contact_replies_still_in_progress_at_the_end_are_recorded(monkeyp
     assert trigger["waits"] == [{"resumes_at": "2026-11-09T14:30:58.882035Z"}]
 
 
-def test_the_contact_settings_survive_a_round_trip_and_a_bad_limit_is_refused():
+def test_the_contact_setting_survives_a_round_trip_and_the_step_sets_no_contact_time_limit():
     step = ao.AlwaysOnTaskStep("week", None, user_sim="linda", prompt="hi", prompt_id="p", agent_name="a",
-                               contact_timeout_seconds=600, contact_replies_in_parallel=False)
-    again = ao.AlwaysOnTaskStep.from_dict(step.to_dict())
-    assert (again.contact_timeout_seconds, again.contact_replies_in_parallel) == (600.0, False)
-    with pytest.raises(ValueError, match="contact_timeout_seconds"):
-        ao.AlwaysOnTaskStep("week", None, user_sim="linda", prompt="hi", agent_name="a", contact_timeout_seconds=0)
+                               contact_replies_in_parallel=False)
+    stored = step.to_dict()
+    assert ao.AlwaysOnTaskStep.from_dict(stored).contact_replies_in_parallel is False
+    assert "contact_timeout_seconds" not in stored  # a contact's limit is register_env_triggers' executor_timeout_seconds
+    with pytest.raises(TypeError, match="contact_timeout_seconds"):
+        ao.AlwaysOnTaskStep("week", None, user_sim="linda", prompt="hi", agent_name="a", contact_timeout_seconds=600)

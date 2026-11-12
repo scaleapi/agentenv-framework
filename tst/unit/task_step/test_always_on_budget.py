@@ -34,11 +34,13 @@ async def test_once_another_wake_might_end_past_the_budget_the_agent_gets_its_cl
     await rig.arm()
     for day in range(10, 20):
         rig.triggers(rig.notify_at(f"alert-{day}", f"2026-11-{day}T14:00:00Z", "Sam: news?", channel="noor 30"))
-    step = rig.step(time_budget_seconds=12120)  # reserve 4380 s: closes once 7740 s are spent
+    step = rig.step(time_budget_seconds=12120)  # no contacts, so a reserve of 3780 s: closes once 8340 s are spent
     ctx = await rig.run(step)
 
     record = rig.record(ctx)
-    assert step.wake_reserve_seconds() == 4380 and record["settings"]["time_budget_seconds"] == 12120
+    assert record["settings"]["contacts"]["longest_timeout_seconds"] == 0
+    assert record["settings"]["wake_reserve_seconds"] == step.wake_reserve_seconds(0) == 3780
+    assert record["settings"]["time_budget_seconds"] == 12120
     wakes = rig.events(ctx, "wake")
     assert len(wakes) == 4 and wakes[-1]["woke_by"] == ["step:final"] and wakes[-1]["last"] is True
     assert wakes[-1]["virtual_time"] == "2026-11-11T14:00:00Z"  # where the run was; the clock doesn't jump
@@ -51,7 +53,7 @@ async def test_once_another_wake_might_end_past_the_budget_the_agent_gets_its_cl
                                                      "its real-time budget.")
 
 
-@pytest.mark.parametrize("timeout,hours", [(600, 6.62), (1800, 5.95), (3600, 4.95)])
+@pytest.mark.parametrize("timeout,hours", [(600, 6.72), (1800, 6.05), (3600, 5.05)])
 def test_the_default_budget_is_7_h_lowered_so_the_closing_wake_fits_the_8_h_job(timeout, hours):
     step = _step(timeout_seconds=timeout)
     budget = step.effective_time_budget()
@@ -80,45 +82,98 @@ def test_the_budget_survives_a_round_trip():
 
 # ---- the reserve is a real bound -------------------------------------------------------------------------------------
 
+@pytest.mark.parametrize("contact", [ao.CONTACT_TIMEOUT_DEFAULT_SECONDS, 0, 900], ids=["default", "none", "900 s"])
 @pytest.mark.parametrize("settings", [{}, {"nudge": False}, {"timeout_seconds": 1800, "user_timeout_seconds": 900},
-                                      {"contact_timeout_seconds": 900, "settle_timeout_seconds": 600},
-                                      {"time_budget_seconds": 5 * 3600}])
-def test_the_reserve_adds_up_every_capped_part_and_the_budget_plus_one_turn_fits_the_job(settings):
+                                      {"settle_timeout_seconds": 600}, {"time_budget_seconds": 5 * 3600}])
+def test_the_reserve_adds_up_every_capped_part_and_the_budget_plus_one_turn_fits_the_job(settings, contact):
     step = _step(**settings)
-    settle = (step.contact_timeout_seconds or ao.CONTACT_TIMEOUT_SECONDS) + ao.CONTACT_GRACE_SECONDS \
-        + step.settle_timeout_seconds
+    settle = contact + ao.CONTACT_GRACE_SECONDS + step.settle_timeout_seconds
     turn = step.timeout_seconds + ao.TURN_GRACE_SECONDS + ao.TRAJECTORY_FETCH_SECONDS
     read = ao.READ_ASKS * (step.user_timeout_seconds + ao.TURN_GRACE_SECONDS + ao.TRAJECTORY_FETCH_SECONDS)
     wake = turn * (2 if step.nudge else 1) + settle + ao.GATEWAY_ALLOWANCE_SECONDS
-    assert step.settle_cap_seconds() == settle and step.read_cap_seconds() == read
+    assert step.settle_cap_seconds(contact) == settle and step.read_cap_seconds() == read
     # a jump's settle, then a wake (its turns, its settle, the step's calls), then a read and its calls
-    assert step.wake_reserve_seconds() == settle + wake + read + ao.GATEWAY_ALLOWANCE_SECONDS
-    assert step.effective_time_budget() + step.wake_reserve_seconds() + ao.JOB_HEADROOM_SECONDS <= ao.JOB_LIMIT_SECONDS
+    reserve = step.wake_reserve_seconds(contact)
+    assert reserve == settle + wake + read + ao.GATEWAY_ALLOWANCE_SECONDS
+    assert step.effective_time_budget(contact) + reserve + ao.JOB_HEADROOM_SECONDS <= ao.JOB_LIMIT_SECONDS
+    if contact == ao.CONTACT_TIMEOUT_DEFAULT_SECONDS:  # what the task is checked with when it loads
+        assert (step.settle_cap_seconds(), step.wake_reserve_seconds()) == (settle, reserve)
 
 
 def _estimate(rig, n):
     rig.alert(f"Live Oak: estimate {n}", channel="Gmail · Live Oak Arbor")
 
 
+def _ask_live_oak(rig, contact: dict) -> None:
+    rig.triggers({"id": "estimate", "when": {"type": "time", "at": "2026-11-09T15:00:00Z"},
+                  "actions": [{"type": "nl", "executor": "liveoak", "instruction": "send your estimate"}]},
+                 executors={"liveoak": contact})
+
+
 @pytest.mark.asyncio
-async def test_a_settle_stops_at_its_cap_though_a_contact_s_own_limit_is_longer(monkeypatch, tmp_path):
-    """The contact's own limit is 5 s, past contact_timeout_seconds (0.3 s): the settle used to wait for it."""
+async def test_a_settle_is_capped_by_the_limit_the_contact_was_registered_with(monkeypatch, tmp_path):
+    """The contact was registered with a 0.3 s limit and overruns it: the settle stops at that limit, its grace and
+    settle_timeout_seconds (0.5 s), not at the gateway's default."""
     monkeypatch.setattr(ao, "CONTACT_GRACE_SECONDS", 0.1)
     rig = Rig(monkeypatch, tmp_path)
     await rig.arm()
-    slow = rig.contact("liveoak", seconds=5, reply=_estimate, timeout_seconds=5, keeps_to_its_limit=False)
-    rig.triggers({"id": "estimate", "when": {"type": "time", "at": "2026-11-09T15:00:00Z"},
-                  "actions": [{"type": "nl", "executor": "liveoak", "instruction": "send your estimate"}]},
-                 executors={"liveoak": slow})
-    step = rig.step(contact_timeout_seconds=0.3, settle_timeout_seconds=0.1)
+    _ask_live_oak(rig, rig.contact("liveoak", seconds=5, reply=_estimate, timeout_seconds=0.3,
+                                   keeps_to_its_limit=False))
+    step = rig.step(settle_timeout_seconds=0.1)
     try:
         ctx = await rig.run(step)
     finally:
         await rig.close()
 
-    assert step.settle_cap_seconds() == pytest.approx(0.5)
+    assert rig.record(ctx)["settings"]["contacts"]["longest_timeout_seconds"] == pytest.approx(0.3)
+    assert step.settle_cap_seconds(0.3) == pytest.approx(0.5)
     [jump] = [j for j in rig.events(ctx, "clock_jump") if j["to"] == "2026-11-09T15:00:00Z"]
     assert not jump["settled"] and jump["settle"]["seconds"] < 1.5
+
+
+@pytest.mark.asyncio
+async def test_the_run_s_budget_is_worked_out_again_from_its_contacts_limits(monkeypatch, tmp_path):
+    rig = Rig(monkeypatch, tmp_path)
+    await rig.arm()
+    _ask_live_oak(rig, rig.contact("liveoak", seconds=0, reply=_estimate, timeout_seconds=1800))
+    step = rig.step(timeout_seconds=1800)
+    ctx = await rig.run(step)
+
+    settings = rig.record(ctx)["settings"]
+    assert settings["contacts"]["longest_timeout_seconds"] == 1800
+    assert settings["wake_reserve_seconds"] == step.wake_reserve_seconds(1800)
+    assert settings["time_budget_seconds"] == step.effective_time_budget(1800) < step.effective_time_budget()
+    assert settings["time_budget_seconds"] + settings["wake_reserve_seconds"] + ao.JOB_HEADROOM_SECONDS \
+        <= ao.JOB_LIMIT_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_a_contact_whose_limit_leaves_no_room_for_a_run_is_refused_when_the_run_starts(monkeypatch, tmp_path):
+    rig = Rig(monkeypatch, tmp_path)
+    await rig.arm()
+    _ask_live_oak(rig, rig.contact("liveoak", seconds=0, reply=_estimate, timeout_seconds=2 * 3600))
+    with pytest.raises(ValueError, match="no run fits the hub's 8 h job"):
+        await rig.run(rig.step())
+    assert rig.sent == []  # before the agent's first wake
+
+
+@pytest.mark.asyncio
+async def test_a_gateway_that_doesn_t_report_its_contacts_limits_gets_the_gateway_s_default(monkeypatch, tmp_path):
+    rig = Rig(monkeypatch, tmp_path)
+    await rig.arm()
+    engine = rig.gw._trigger_engine
+    real_state = engine.state
+
+    def without_limits():
+        state = real_state()
+        return {**state, "config": {k: v for k, v in state["config"].items() if k != "executor_timeouts"}}
+
+    monkeypatch.setattr(engine, "state", without_limits)
+    ctx = await rig.run(rig.step())
+
+    contacts = rig.record(ctx)["settings"]["contacts"]
+    assert contacts["longest_timeout_seconds"] == ao.CONTACT_TIMEOUT_DEFAULT_SECONDS
+    assert contacts["envs"][0]["contact_timeouts"] is None
 
 
 @pytest.mark.asyncio
@@ -185,7 +240,7 @@ async def test_a_read_is_cut_off_at_its_cap_as_a_user_sim_error(monkeypatch, tmp
 @pytest.mark.asyncio
 async def test_a_turn_of_the_loop_past_the_reserve_ends_the_run_on_a_step_error(monkeypatch, tmp_path):
     """Every part is capped on its own; only calls hanging past their allowance reach this last cut-off."""
-    monkeypatch.setattr(ao.AlwaysOnTaskStep, "wake_reserve_seconds", lambda step: 0.5)
+    monkeypatch.setattr(ao.AlwaysOnTaskStep, "wake_reserve_seconds", lambda step, contact_seconds=0: 0.5)
     rig = Rig(monkeypatch, tmp_path)
 
     real_take = ao._Run._take_messages

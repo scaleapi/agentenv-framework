@@ -72,16 +72,15 @@ async def test_the_gateway_settings_the_step_changed_are_as_they_were_after_the_
     await rig.arm()
     gw = rig.gw
     gw._user_chat.configure({"roles": ["planner"], "user_name": "Tess"})
-    gw._trigger_engine.config({"executor_timeout_seconds": 90})
     gw._notifications.configure({"roles": ["planner"], "min_interval": "PT2H", "max_active": 4})
     await rig.run(rig.step(end_time="P2D"))
 
     during = rig.during[0]
     assert during["user_chat_roles"] == ("default",) and during["stay_quiet"]
-    assert during["trigger_settings"] == {"concurrent_fires": True, "executor_timeout_seconds": 300.0}
+    assert during["trigger_settings"] == {"concurrent_fires": True}
     assert during["check_roles"] == ("planner", "default") and during["clock_rate"] == 60
     assert (gw._user_chat.roles, gw._user_chat.user_name, gw._user_chat.stay_quiet) == (("planner",), "Tess", False)
-    assert gw._trigger_engine.state()["settings"] == {"concurrent_fires": False, "executor_timeout_seconds": 90.0}
+    assert gw._trigger_engine.state()["settings"] == {"concurrent_fires": False}
     assert (gw._notifications.roles, gw._notifications.min_interval, gw._notifications.max_active) == (
         ("planner",), "PT2H", 4)
     assert gw._clock.rate == 60
@@ -95,5 +94,5 @@ async def test_a_gateway_the_task_left_alone_is_back_to_its_defaults(monkeypatch
 
     gw = rig.gw
     assert (gw._user_chat.roles, gw._user_chat.stay_quiet, gw._notifications.roles) == ((), False, ())
-    assert gw._trigger_engine.state()["settings"] == {"concurrent_fires": False, "executor_timeout_seconds": None}
+    assert gw._trigger_engine.state()["settings"] == {"concurrent_fires": False}
     assert not {"message_user", "stay_quiet", "schedule_check"} & await rig.tools()

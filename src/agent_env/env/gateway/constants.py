@@ -210,10 +210,10 @@ GATEWAY_EXTENSIONS = [
     },
     {
         "uri": EXT_TRIGGERS_URI,
-        "description": "Register (additive add-by-id), remove, clear, or read (state) typed Action/State triggers + the firing log (harness control path). config sets the engine's opt-in settings: concurrent_fires (a repeat trigger whose actions are all contact replies (nl) or notifications (notify) runs its fires side by side instead of queueing) and executor_timeout_seconds (the time limit of an executor that sets none).",
+        "description": "Register (additive add-by-id), remove, clear, or read (state) typed Action/State triggers + the firing log (harness control path). config sets the engine's opt-in setting concurrent_fires (a repeat trigger whose actions are all contact replies (nl) or notifications (notify) runs its fires side by side instead of queueing).",
         "params": {"endpoint": "/triggers/register", "features": list(TRIGGER_FEATURES), "methods": {
             "register": {"method": "POST", "endpoint": "/triggers/register", "request": {"type": "object", "properties": {"watch_roles": {"type": "array", "items": {"type": "string"}}, "executor": {"type": "object"}, "executors": {"type": "object"}, "triggers": {"type": "array"}}, "required": ["triggers"]}},
-            "config": {"method": "POST", "endpoint": "/triggers/config", "request": {"type": "object", "properties": {"concurrent_fires": {"type": "boolean"}, "executor_timeout_seconds": {"type": "number", "exclusiveMinimum": 0}}}},
+            "config": {"method": "POST", "endpoint": "/triggers/config", "request": {"type": "object", "properties": {"concurrent_fires": {"type": "boolean"}}}},
             "remove": {"method": "POST", "endpoint": "/triggers/remove", "request": {"type": "object", "properties": {"ids": {"type": "array", "items": {"type": "string"}}}, "required": ["ids"]}},
             "clear": {"method": "POST", "endpoint": "/triggers/clear", "request": {"type": "object", "properties": {}}},
             "state": {"method": "GET", "endpoint": "/triggers/state", "request": {"type": "object", "properties": {}}}}},

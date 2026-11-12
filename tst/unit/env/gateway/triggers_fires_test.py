@@ -303,17 +303,16 @@ def test_a_fire_that_can_t_be_scheduled_leaves_no_count():
     assert trig["running"] == 0
 
 
-# ---- executor_timeout_seconds ---------------------------------------------------------------------------------------
+# ---- executor time limits -------------------------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_the_configured_limit_applies_only_to_executors_that_set_none(monkeypatch):
+async def test_each_executor_keeps_the_time_limit_it_was_registered_with_and_state_reports_it(monkeypatch):
     bob = _Executor(monkeypatch)
     bob.release()
     engine, _, _ = _engine()
-    engine.config({"executor_timeout_seconds": 300})
     engine.register({"watch_roles": ["default"],
                      "executors": {"bob": {"a2a_url": "http://bob", "role": "bob"},
-                                   "ann": {"a2a_url": "http://ann", "role": "ann", "timeout_seconds": 120}},
+                                   "ann": {"a2a_url": "http://ann", "role": "ann", "timeout_seconds": 300}},
                      "triggers": [{"id": tid, "when": {"type": "action", "tool": "send_text"},
                                    "actions": [{"type": "nl", "executor": tid, "instruction": "answer"}]}
                                   for tid in ("bob", "ann")]})
@@ -321,23 +320,22 @@ async def test_the_configured_limit_applies_only_to_executors_that_set_none(monk
     await _until(lambda: len(bob.calls) == 2)
 
     assert sorted((c["context_id"], c["timeout_seconds"]) for c in bob.calls) == [
-        ("trigger-ann", 120), ("trigger-bob", 300)]
-    assert engine.state()["settings"] == {"concurrent_fires": False, "executor_timeout_seconds": 300.0}
+        ("trigger-ann", 300), ("trigger-bob", 120)]
+    assert engine.state()["config"]["executor_timeouts"] == [{"name": "ann", "timeout_seconds": 300.0},
+                                                             {"name": "bob", "timeout_seconds": 120.0}]
 
 
-@pytest.mark.asyncio
-async def test_without_config_an_executor_that_sets_no_limit_keeps_120_s(monkeypatch):
-    bob = _Executor(monkeypatch)
-    bob.release()
+def test_state_lists_the_unnamed_executor_s_time_limit_first():
     engine, _, _ = _engine()
-    engine.register(_reply_trigger())
-    engine.on_tool_call("default", "send_text", {}, _result())
-    await _until(lambda: bob.calls)
-    assert bob.calls[0]["timeout_seconds"] == 120
+    assert engine.state()["config"]["executor_timeouts"] == []
+    engine.register({"watch_roles": ["default"], "executor": {"a2a_url": "http://exec", "role": "exec"},
+                     "executors": {"ann": {"a2a_url": "http://ann", "role": "ann", "timeout_seconds": 45}},
+                     "triggers": []})
+    assert engine.state()["config"]["executor_timeouts"] == [{"name": None, "timeout_seconds": 120.0},
+                                                             {"name": "ann", "timeout_seconds": 45.0}]
 
 
-@pytest.mark.parametrize("body", [{"concurrent_fires": "yes"}, {"executor_timeout_seconds": 0},
-                                  {"executor_timeout_seconds": True}, {"executor_timeout_seconds": float("inf")},
+@pytest.mark.parametrize("body", [{"concurrent_fires": "yes"}, {"executor_timeout_seconds": 300},
                                   {"parallel": True}, []])
 def test_bad_settings_are_refused(body):
     engine, _, _ = _engine()
@@ -347,12 +345,11 @@ def test_bad_settings_are_refused(body):
 
 def test_settings_are_off_until_set_and_clear_resets_them():
     engine, _, _ = _engine()
-    assert engine.state()["settings"] == {"concurrent_fires": False, "executor_timeout_seconds": None}
-    assert engine.config({"concurrent_fires": True, "executor_timeout_seconds": 300})["concurrent_fires"] is True
-    engine.config({"concurrent_fires": True})
-    assert engine.state()["settings"] == {"concurrent_fires": True, "executor_timeout_seconds": None}
+    assert engine.state()["settings"] == {"concurrent_fires": False}
+    assert engine.config({"concurrent_fires": True})["concurrent_fires"] is True
+    assert engine.state()["settings"] == {"concurrent_fires": True}
     engine.clear()
-    assert engine.state()["settings"] == {"concurrent_fires": False, "executor_timeout_seconds": None}
+    assert engine.state()["settings"] == {"concurrent_fires": False}
 
 
 def test_the_card_offers_config():

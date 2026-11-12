@@ -449,8 +449,6 @@ class TriggerEngine:
         self._clock_moved = asyncio.Event()  # set, and replaced, when the clock changes under waiting actions
         # Opt-in settings (`config`), off by default so a registration behaves as it always has.
         self._concurrent_fires = False  # a contact-reply trigger's repeat fires run side by side instead of queueing
-        self._executor_timeout_default: float | None = None  # the time limit of an executor that sets none
-        self._unset_timeouts: set[str | None] = set()  # executors registered without a timeout_seconds of their own
         # One turn at a time per executor conversation (its URL and context id): fires of one trigger running side by
         # side would otherwise resume the same session at once.
         self._executor_locks: dict[tuple[str, str], asyncio.Lock] = {}
@@ -461,7 +459,7 @@ class TriggerEngine:
         if not isinstance(body, dict):
             raise TriggerError("body must be a JSON object")
         watch_roles = self._resolve_watch_roles(body)
-        executors, unset_timeouts = self._resolve_executors(body, watch_roles)
+        executors = self._resolve_executors(body, watch_roles)
         triggers = body.get("triggers")
         if not isinstance(triggers, list):
             raise TriggerError("triggers must be a list")
@@ -493,7 +491,6 @@ class TriggerEngine:
         self._readonly_tools = None
         self._watch_roles = watch_roles
         self._executors = executors
-        self._unset_timeouts |= unset_timeouts
         self._config_set = True
         for tid, spec in to_add:
             # `running` counts its fires in flight, `alongside` holds those run beside the first (concurrent_fires),
@@ -575,8 +572,6 @@ class TriggerEngine:
         self._config_set = False
         self._readonly_tools = None
         self._concurrent_fires = False
-        self._executor_timeout_default = None
-        self._unset_timeouts = set()
         self._executor_locks = {}
         self._recompute_time_flag()
         return {"ok": True}
@@ -589,33 +584,20 @@ class TriggerEngine:
         and then write the same rows. A queued fire draws its delay only when its turn comes, and state shows no due
         time for it, so a quick reply queued behind a slow one would wait out the slow one's delay too.
         Fires of one trigger side by side still take turns on its executor conversation (``_executor_turn``).
-        ``executor_timeout_seconds`` is the time limit of each executor whose registration set no
-        ``timeout_seconds`` (else 120). ``clear`` resets both."""
+        ``clear`` resets it."""
         if not isinstance(body, dict):
             raise TriggerError("body must be a JSON object")
-        unknown = sorted(set(body) - {"concurrent_fires", "executor_timeout_seconds"})
+        unknown = sorted(set(body) - {"concurrent_fires"})
         if unknown:
-            raise TriggerError(f"unknown setting(s) {unknown}; expected concurrent_fires, executor_timeout_seconds")
+            raise TriggerError(f"unknown setting(s) {unknown}; expected concurrent_fires")
         concurrent = body.get("concurrent_fires", False)
         if not isinstance(concurrent, bool):
             raise TriggerError(f"concurrent_fires must be true or false (got {concurrent!r})")
-        timeout = body.get("executor_timeout_seconds")
-        if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
-                                    or not math.isfinite(timeout) or timeout <= 0):
-            raise TriggerError(f"executor_timeout_seconds must be a positive, finite number (got {timeout!r})")
         self._concurrent_fires = concurrent
-        self._executor_timeout_default = None if timeout is None else float(timeout)
         return {"ok": True, **self._settings()}
 
     def _settings(self) -> dict:
-        return {"concurrent_fires": self._concurrent_fires,
-                "executor_timeout_seconds": self._executor_timeout_default}
-
-    def _executor_timeout(self, name: str | None, executor: dict) -> float:
-        """The executor's time limit: its own, else the configured default, else 120."""
-        if self._executor_timeout_default is not None and name in self._unset_timeouts:
-            return self._executor_timeout_default
-        return executor["timeout_seconds"]
+        return {"concurrent_fires": self._concurrent_fires}
 
     def _recompute_time_flag(self) -> None:
         # "firing" counts: a recurrence mid-fire returns to "armed" and still needs the driver.
@@ -674,15 +656,14 @@ class TriggerEngine:
             raise TriggerError(f"watch_roles {sorted(new)} conflicts with the already-registered {sorted(self._watch_roles)} — clear to change it")
         return new
 
-    def _resolve_executors(self, body: dict, watch_roles: set[str]) -> tuple[dict[str | None, dict], set[str | None]]:
+    def _resolve_executors(self, body: dict, watch_roles: set[str]) -> dict[str | None, dict]:
         """The executors once this register lands: those before, plus the body's `executor` (under None) and
-        `executors`, each set once; and those of them new here that set no `timeout_seconds` of their own."""
+        `executors`, each set once."""
         named = body.get("executors")
         if named is not None and (not isinstance(named, dict) or not all(isinstance(n, str) and n for n in named)):
             raise TriggerError("executors must be an object keyed by non-empty executor names")
         incoming = ({None: body["executor"]} if body.get("executor") is not None else {}) | (named or {})
         merged = dict(self._executors)
-        unset: set[str | None] = set()
         for name, raw in incoming.items():
             normalized = self._normalize_executor(raw, "executor" if name is None else f"executors[{name!r}]",
                                                   watch_roles)
@@ -691,10 +672,8 @@ class TriggerEngine:
                                    if name is None else
                                    f"executor {name!r} conflicts with the already-registered executor of that name — "
                                    "clear to change it")
-            if name not in merged and raw.get("timeout_seconds") is None:
-                unset.add(name)
             merged[name] = normalized
-        return merged, unset
+        return merged
 
     @staticmethod
     def _normalize_executor(raw: Any, where: str, watch_roles: set[str]) -> dict:
@@ -961,7 +940,11 @@ class TriggerEngine:
         return {
             "config": {"watch_roles": sorted(self._watch_roles),
                        "executor_configured": None in self._executors,
-                       "executors": sorted(n for n in self._executors if n is not None)},
+                       "executors": sorted(n for n in self._executors if n is not None),
+                       # Each executor's time limit (``name`` null for the unnamed one), for a harness that waits on
+                       # its calls.
+                       "executor_timeouts": [{"name": n, "timeout_seconds": e["timeout_seconds"]}
+                                             for n, e in sorted(self._executors.items(), key=lambda i: i[0] or "")]},
             "settings": self._settings(),  # what `config` set
             # `running` counts a trigger's fires in flight, `waits` says when each of them waiting out a delay or its
             # executor's hours goes on, and `executor_calls` lists each call to an executor in progress, with the
@@ -1651,9 +1634,7 @@ class TriggerEngine:
         context_id = f"trigger-{tid}"
         if executor is None:
             return await self._call_executor(executor, instruction, context_id=context_id)
-        timeout = self._executor_timeout(name, executor)
-        if timeout != executor["timeout_seconds"]:
-            executor = {**executor, "timeout_seconds": timeout}
+        timeout = executor["timeout_seconds"]
         lock = self._executor_locks.setdefault((executor["a2a_url"], context_id), asyncio.Lock())
         async with lock:
             fires = self._in_flight.setdefault(executor["role"], [])
