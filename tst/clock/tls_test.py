@@ -23,10 +23,12 @@ def test_with_the_shim_certificates_are_checked_against_real_time_and_bad_ones_s
     # The clock library alone checks against the universe's date: a certificate valid only from real now isn't valid
     # yet, and one that expired since the universe's date still is.
     assert (_all({"now": alone["now"]}, "refused"), _all({"past": alone["past"]}, "ok")) == ({}, {}), alone
-    # With the shim, against real time: the other way round.
+    # With the shim, against real time: the other way round, the expired one refused.
     assert (_all({"now": shimmed["now"]}, "ok"), _all({"past": shimmed["past"]}, "refused")) == ({}, {}), shimmed
     assert len(tls["with_shim"]["live"]) == 6 and _all(tls["with_shim"]["live"], "ok") == {}, tls["with_shim"]["live"]
-    assert len(tls["with_shim"]["bad"]) == 2 and _all(tls["with_shim"]["bad"], "refused") == {}, tls["with_shim"]["bad"]
+    # Valid at real time but issued by no one the system's roots trust: still refused.
+    assert _all({"untrusted": tls["with_shim"]["untrusted"]}, "refused") == {}, tls["with_shim"]["untrusted"]
+    assert set(tls["with_shim"]["untrusted"]) == CLIENTS, tls["with_shim"]["untrusted"]
 
 
 def test_two_copies_of_openssl_in_one_process_each_check_with_their_own(tls):

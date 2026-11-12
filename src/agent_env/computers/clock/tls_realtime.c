@@ -25,17 +25,14 @@ typedef struct X509_VERIFY_PARAM_st X509_VERIFY_PARAM;
 #define TLS_USE_CHECK_TIME 0x2
 #define TLS_SYSTEM_LIBCRYPTO "libcrypto.so.3"
 
-/* OpenSSL's functions as one copy of it has them, and the object whose calls they answer */
+/* OpenSSL's functions as one copy of it has them */
 struct tls_openssl
 {
-  void *caller_base;
   int (*verify)(X509_STORE_CTX *);
   void (*set_time)(X509_STORE_CTX *, unsigned long, time_t);
   X509_VERIFY_PARAM *(*get0_param)(X509_STORE_CTX *);
   unsigned long (*get_flags)(const X509_VERIFY_PARAM *);
 };
-/* the last calling object's, per thread: libssl calls from the same place handshake after handshake */
-static __thread struct tls_openssl tls_last;
 
 int X509_verify_cert(X509_STORE_CTX *ctx);
 
@@ -76,7 +73,9 @@ static void tls_take(void *scope, struct tls_openssl *out)
 
 /* OpenSSL as the object at ``caller`` sees it: from that object's own dependencies (libssl's libcrypto, whichever copy
    it is); for a caller that isn't a shared library depending on one (a program calling it itself), the next definition
-   in the global scope; else the system's libcrypto where it was loaded privately (a Python extension's) */
+   in the global scope; else the system's libcrypto where it was loaded privately (a Python extension's). Looked up on
+   every call, once a handshake: a copy of OpenSSL unloaded and another loaded at its address must not be handed the
+   first one's functions. */
 static void tls_resolve(void *caller, struct tls_openssl *out)
 {
   Dl_info info;
@@ -84,7 +83,6 @@ static void tls_resolve(void *caller, struct tls_openssl *out)
   memset(out, 0, sizeof *out);
   if (dladdr(caller, &info))
   {
-    out->caller_base = info.dli_fbase;
     if (info.dli_fname != NULL && info.dli_fname[0] != 0
         && (handle = dlopen(info.dli_fname, RTLD_NOW | RTLD_NOLOAD)) != NULL)
     {
@@ -104,16 +102,14 @@ static void tls_resolve(void *caller, struct tls_openssl *out)
 
 int X509_verify_cert(X509_STORE_CTX *ctx)
 {
-  void *caller = __builtin_return_address(0);
-  Dl_info info;
-  struct tls_openssl *ssl = &tls_last;
-  if (ssl->verify == NULL || !dladdr(caller, &info) || info.dli_fbase != ssl->caller_base) tls_resolve(caller, ssl);
-  if (ssl->verify == NULL) return -1;
-  if (ctx != NULL && ssl->set_time != NULL && ssl->get0_param != NULL && ssl->get_flags != NULL)
+  struct tls_openssl ssl;
+  tls_resolve(__builtin_return_address(0), &ssl);
+  if (ssl.verify == NULL) return -1;
+  if (ctx != NULL && ssl.set_time != NULL && ssl.get0_param != NULL && ssl.get_flags != NULL)
   {
-    X509_VERIFY_PARAM *param = ssl->get0_param(ctx);
+    X509_VERIFY_PARAM *param = ssl.get0_param(ctx);
     long now = tls_real_time();
-    if (param != NULL && !(ssl->get_flags(param) & TLS_USE_CHECK_TIME) && now > 0) ssl->set_time(ctx, 0, (time_t) now);
+    if (param != NULL && !(ssl.get_flags(param) & TLS_USE_CHECK_TIME) && now > 0) ssl.set_time(ctx, 0, (time_t) now);
   }
-  return ssl->verify(ctx);
+  return ssl.verify(ctx);
 }

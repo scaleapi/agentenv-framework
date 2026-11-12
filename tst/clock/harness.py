@@ -567,10 +567,8 @@ def forklock(forks=1000):
     return json.loads(r.stdout)
 
 
-#: Live sites the TLS gate reaches, with the clock armed 182 days back (most rotate certificates within 90 days), and
-#: ones whose certificates are refused at any time.
+#: Live sites the TLS gate reaches, with the clock armed 182 days back (most rotate certificates within 90 days).
 TLS_LIVE = ["example.com", "www.google.com", "github.com", "pypi.org", "www.wikipedia.org", "letsencrypt.org"]
-TLS_REFUSED = ["expired.badssl.com", "untrusted-root.badssl.com"]
 # A TLS client's answer for https://HOST:PORT: ok (the certificate verified), refused (it didn't), or network ...
 TLS_PYTHON = """import ssl, sys, urllib.error, urllib.request
 host, port, cafile = sys.argv[1], int(sys.argv[2]), sys.argv[3] or None
@@ -630,8 +628,9 @@ def tls():
     """The TLS shim, with the clock 182 days back and no proxy, through curl, Python and openssl s_client. Two local
     servers check it uses real time: one's certificate is valid only from now (not yet valid at the universe date),
     the other's was valid at the universe date but has expired. With the clock library alone each client answers by
-    the universe date; with the shim by real time, and live sites verify while badssl's bad ones still don't. The same
-    two certificates are verified through two copies of OpenSSL in one process (tlscopies.c), each with its own."""
+    the universe date; with the shim by real time: live sites verify, while the expired certificate, and the one valid
+    now checked against the system's roots, which don't hold its issuer, are still refused. The same two certificates
+    are verified through two copies of OpenSSL in one process (tlscopies.c), each with its own."""
     clients = ("curl", "python", "s_client")
     work = "/tmp/tlsgate"
     os.makedirs(work, exist_ok=True)
@@ -660,7 +659,7 @@ def tls():
             copies = {mode: _copies(work, mode) for mode in ("global", "private")}
             out["with_shim" if shim else "without_shim"] = {"local": local, "copies": copies}
         out["with_shim"]["live"] = {host: {c: _tls(c, host) for c in clients} for host in TLS_LIVE}
-        out["with_shim"]["bad"] = {host: {c: _tls(c, host) for c in clients} for host in TLS_REFUSED}
+        out["with_shim"]["untrusted"] = {c: _tls(c, "localhost", 8443) for c in clients}
     finally:
         for server in servers:
             server.kill()

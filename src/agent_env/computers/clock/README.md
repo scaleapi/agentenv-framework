@@ -58,11 +58,12 @@ there: every wait API in C, Python, Java and Node at several rates, jumps, cance
 condition-variable and semaphore stress, the waits again in a container that refuses `futex_waitv` (as kernels before
 5.16 and gVisor do), a stalled writer, one that died mid-write, torn reads, the marker, the environment race, forks
 while another thread closes a timerfd, the TLS shim (curl, Python and `openssl s_client` with the clock 182 days back:
-live sites verify, badssl's expired and untrusted ones don't, two local servers show the check is on real time,
-and two copies of OpenSSL in one process, the system's 3.0 and a 1.1, each check with their own),
-and Chromium launches. `.github/workflows/clock.yml` runs them on x86_64 and arm64. The gates hold correctness strictly (no wait ends early, every wait returns what it should, nothing is lost or
-torn) and lateness to `tst/clock/bounds.py`, a bound a broken library misses by seconds and a slow machine doesn't
-reach. `tst/integration/computer/clock_desktop_test.py` composes the library into a real computer (the ubuntu-24.04
-desktop, the reference driver and agentenv's chromium, every process preloading it), which must pass the conformance
-probe at full; then, its page written as root, a shell, Chrome's JavaScript and the driver's input follow the universe
-through 30 jumps, a rate change and a freeze, with Chrome, Xvfb and the desktop's panel running on.
+live sites verify, two local servers show the check is on real time and expired and untrusted certificates are still
+refused, and two copies of OpenSSL in one process, the system's 3.0 and a 1.1, each check with their own), and
+Chromium launches. `.github/workflows/clock.yml` runs them on x86_64 and arm64. The gates hold correctness strictly
+(no wait ends early, every wait returns what it should, nothing is lost or torn) and lateness to
+`tst/clock/bounds.py`, a bound a broken library misses by seconds and a slow machine doesn't reach.
+`tst/integration/computer/clock_desktop_test.py` composes the library into a real computer (the ubuntu-24.04 desktop,
+the reference driver and agentenv's chromium, every process preloading it), which must pass the conformance probe at
+full; then, its page written as root, a shell, Chrome's JavaScript and the driver's input follow the universe through
+30 jumps, a rate change and a freeze, with Chrome, Xvfb and the desktop's panel running on.
