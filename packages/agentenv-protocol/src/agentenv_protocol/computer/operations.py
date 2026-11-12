@@ -76,11 +76,13 @@ class Effect:
 
 @dataclass(frozen=True)
 class Tab:
-    """A tab of a website browser: its id, the browser's own, and its page's URL and title."""
+    """A tab of a website browser: its id, the browser's own, its page's URL and title, and the label of the lease
+    it's in, None for the browser's default context."""
     id: str
     url: str
     title: str
     active: bool = False
+    context: str | None = None
 
 
 @dataclass(frozen=True)

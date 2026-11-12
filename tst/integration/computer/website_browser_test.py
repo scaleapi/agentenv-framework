@@ -155,7 +155,8 @@ async def test_chromium_runs_with_agentenvs_flags_on_its_pipe_and_a_reset_relaun
         policies["stdout"]).items()
     params = protocol_v1.extension_params(card, BROWSER)
     assert (params["chromium"], params["clock"], sorted(params["methods"])) == (
-        "156.0.8078.4", "real", ["calls/begin", "calls/end", "cdp", "cookies/delete", "cookies/get", "cookies/set",
+        "156.0.8078.4", "real", ["calls/begin", "calls/end", "cdp", "contexts/grant", "contexts/lease",
+                                 "contexts/list", "contexts/release", "cookies/delete", "cookies/get", "cookies/set",
                                  "dialog/answer", "downloads/get", "downloads/list", "files/choose", "history",
                                  "local_storage/clear", "local_storage/get", "local_storage/set", "log", "navigate",
                                  "network", "page/capture", "page/input", "page/state", "page/viewport", "record", "sites/set",

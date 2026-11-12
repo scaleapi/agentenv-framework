@@ -100,6 +100,7 @@ from agent_env.store.routing import namespace_routing
 from agent_env.task import Task
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_steps.browser.connect_cdp import BrowserConnectCdpTaskStep
 from agent_env.task_step.task_steps.browser.recording import (RECORDINGS_KEY as BROWSER_RECORDINGS,
                                                              EndBrowserRecordingTaskStep, StartBrowserRecordingTaskStep)
@@ -109,6 +110,7 @@ from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
+from tst.integration.computer.browser_contexts import check_browser_contexts
 from tst.integration.computer.browser_data import SITE as DATA_SITE, check_browser_data, check_browser_data_under_chaos
 from tst.integration.computer.browser_steps import check_browser_steps
 from tst.integration.computer.browser_state import check_browser_state, check_browser_state_under_chaos
@@ -466,6 +468,27 @@ async def test_its_task_steps_set_cookies_and_storage_open_a_tab_behind_and_acti
             app = next(child for child in card["children_environments"] if child["name"] == "chromium")
             await check_browser_steps(deployed, browser_computer.id, lambda op: deployed.environment_url
                                       + protocol_v1.find_extension_method(app, BROWSER, op)["endpoint"])
+        finally:
+            report = await teardown_run(context)
+
+    assert not report.failed
+
+
+@pytest.mark.asyncio
+async def test_its_contexts_are_leased_by_steps_and_by_agents_each_with_its_own_state_and_end_with_a_reset(
+        browser_computer):
+    with namespace_routing():
+        deployed = await Env.get(browser_computer.id).deploy(
+            env_params={"app_settings": {"chromium": {"start_urls": [DATA_SITE]}}})
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            await _ready(deployed)
+            card = (await _get(deployed, "/.well-known/agent-env.json")).json()
+            app = next(child for child in card["children_environments"] if child["name"] == "chromium")
+            await check_browser_contexts(
+                deployed, browser_computer.id,
+                lambda op: deployed.environment_url + protocol_v1.find_extension_method(app, BROWSER, op)["endpoint"],
+                f"{deployed.environment_url}/svc/chromium", lambda user: _cdp(deployed, user))
         finally:
             report = await teardown_run(context)
 
@@ -1756,6 +1779,72 @@ async def test_chromium_as_a_multi_envs_browser_runs_on_its_own_sandbox_reached_
     # Through a kill and a gateway restart, a reset brings it back.
     assert after_kill and MULTI_SITE in after_kill_tabs, after_kill_tabs
     assert after_restart, through_restart
+
+
+@pytest.mark.asyncio
+async def test_two_leases_in_a_multi_envs_browser_each_sign_in_to_its_site_by_name_through_the_gateway(
+        browser_computer, session_shop):
+    """M8.15: in a multi env whose browser is chromium, two leases are each signed in to the env's site as a user of
+    their own, and a tab of each opens the site by its name, over https through the gateway, as that user; the
+    default context has none of their cookies."""
+    with namespace_routing():
+        office = _office(session_shop, [Env.get(browser_computer.id)])
+        context = TaskStepContext()
+
+        def step(type: str, **fields):
+            return get_task_step_registry()[type].from_dict({
+                "id": f"{type}-{fields.get('label') or fields.get('context')}", "version": None, "type": type,
+                "env_id": office.id, **fields})
+
+        try:
+            [deployed] = (await DeployEnvTaskStep(
+                id="office", version=None, env_id=office.id, sandbox_type="local", ttl_seconds=900,
+                child_envs={"chromium": {"sandbox_type": "local", "env_params": {
+                    "form": "container", "app_settings": {"chromium": {"start_urls": ["about:blank"]}}}}},
+            ).execute(context)).deployed_envs
+            browser = DeployedEnv.from_dict(deployed.child_envs["chromium"])
+            for label, user in (("buyer", "alex"), ("seller", "bo")):
+                context = await step("browser_lease_context", label=label).execute(context)
+                context = await step("browser_sign_in", site=session_shop.id, user=user, context=label).execute(context)
+                context = await step("browser_open_tab", url=SESSION_PAGE, context=label).execute(context)
+            address = await _cdp_at_gateway(deployed, browser)
+            seen = {label: await _lease_page_text(browser, address["ws_url"], label) for label in ("buyer", "seller")}
+            default_cookies = (await _browser_op(browser, "cookies/get", {"urls": ["https://shop.test/"]}))["cookies"]
+        finally:
+            report = await teardown_run(context)
+
+    assert not report.failed
+    assert '"alex"' in seen["buyer"] and '"bo"' in seen["seller"], seen
+    assert default_cookies == [], default_cookies
+
+
+async def _lease_page_text(browser: DeployedEnv, ws_url: str, label: str) -> str:
+    """The text of the page the one tab of the lease ``label`` shows once it's on shop.test, read over the CDP
+    address ``ws_url``; what it last read if that never says who's signed in."""
+    text, deadline = "", time.monotonic() + WAIT_S
+    while time.monotonic() < deadline:
+        [tab] = (await _browser_op(browser, "tabs/list", {"context": label}))["tabs"]
+        if tab["url"].startswith("https://shop.test/"):
+            async with connect(ws_url, max_size=None, open_timeout=60) as ws:
+                ids = itertools.count(1)
+
+                async def call(method: str, params: dict, session: str | None = None) -> dict:
+                    message_id = next(ids)
+                    await ws.send(json.dumps({"id": message_id, "method": method, "params": params,
+                                              **({"sessionId": session} if session else {})}))
+                    while (reply := json.loads(await asyncio.wait_for(ws.recv(), 60))).get("id") != message_id:
+                        pass
+                    return reply
+
+                session = (await call("Target.attachToTarget", {"targetId": tab["id"], "flatten": True}))[
+                    "result"]["sessionId"]
+                text = (await call("Runtime.evaluate", {"expression": "document.body ? document.body.innerText : ''",
+                                                         "returnByValue": True}, session))["result"]["result"].get(
+                    "value", "")
+            if '"user"' in text:
+                return text
+        await asyncio.sleep(POLL_S)
+    return text
 
 
 @pytest.mark.asyncio

@@ -74,7 +74,7 @@ ACTING_METHODS: dict[str, tuple[str, ...]] = {
 #: The ``browser/v1`` ops that act; any other reads.
 ACTING_OPS = frozenset({"page/input", "navigate", "history", "tabs/open", "tabs/activate", "tabs/close",
                         "dialog/answer", "files/choose", "cookies/set", "cookies/delete", "local_storage/set",
-                        "local_storage/clear", "sites/set"})
+                        "local_storage/clear", "sites/set", "contexts/lease", "contexts/grant", "contexts/release"})
 #: The ``browser/v1`` ops an agent's calls are never logged for: the logs themselves, and agentenv's own bookkeeping,
 #: a driver's calls that begin and end a tool call's own entry among them.
 UNLOGGED_OPS = frozenset({"log", "network", "record", "calls/begin", "calls/end"})

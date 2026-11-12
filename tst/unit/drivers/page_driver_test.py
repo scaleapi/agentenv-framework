@@ -117,10 +117,13 @@ def page(monkeypatch, tmp_path):
     driver = module.PageDriver()
     driver._browser = (tmp_path, CARD)
     driver.sent, driver.headers, driver.served = [], [], {"page/viewport": {"width": 1280, "height": 800}}
+    driver.list_queries = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         op = request.url.path.removeprefix("/agentenv/ext/browser/")
         driver.sent.append((op, json.loads(request.content) if request.content else None))
+        if op == "tabs/list":
+            driver.list_queries.append(request.url.query.decode())
         driver.headers.append(request.headers)
         answer = driver.served.get(op, {})
         return answer if isinstance(answer, httpx.Response) else httpx.Response(200, json=answer)
@@ -269,6 +272,26 @@ async def test_its_page_operations_call_the_browsers_and_a_tab_action_answers_wi
         ("tabs/open", {"url": "https://mail.test/"}), ("tabs/activate", {"tab": "A1"}), ("tabs/close", {"tab": "A1"}),
         ("dialog/answer", {"accept": False}), ("dialog/answer", {"accept": True, "text": "Grace"}),
         ("files/choose", {"paths": ["cv.pdf"]})]
+
+
+@pytest.mark.asyncio
+async def test_on_a_browser_that_leases_contexts_its_tabs_are_every_contexts_and_a_leases_is_acted_on_in_it(page):
+    leases = {**CARD["capabilities"]["extensions"][0]["params"]["methods"],
+              "contexts/lease": {"method": "POST", "endpoint": "/agentenv/ext/browser/contexts/lease"}}
+    page._browser = (page._browser[0], {"name": "chromium", "capabilities": {"extensions": [
+        {"uri": BROWSER, "params": {"methods": leases}}]}})
+    page.served["tabs/list"] = {"tabs": [
+        {"id": "A1", "url": "https://mail.test/", "title": "Inbox", "active": False, "context": None},
+        {"id": "B1", "url": "https://mail.test/", "title": "Bo's inbox", "active": True, "context": "bo"}]}
+
+    listed = await page.tab_action("switch", "B1", None)
+    await page.tab_action("close", "A1", None)
+
+    assert listed == [Tab("A1", "https://mail.test/", "Inbox", False, None),
+                      Tab("B1", "https://mail.test/", "Bo's inbox", True, "bo")]
+    assert [entry for entry in page.sent if entry[0] != "tabs/list"] == [
+        ("tabs/activate", {"tab": "B1", "context": "bo"}), ("tabs/close", {"tab": "A1"})]
+    assert page.list_queries and all(query == "every=true" for query in page.list_queries)
 
 
 @pytest.mark.asyncio

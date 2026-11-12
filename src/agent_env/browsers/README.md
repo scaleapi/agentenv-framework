@@ -48,7 +48,13 @@ values, the origin's other keys left as they are; `browser_clear_local_storage {
 `browser_open_tab {url, background?}`, in front, or with `background` behind the active tab, which stays active; and
 `browser_close_tab {url}` and `browser_activate_tab {url}`, on the one open tab at that URL as the browser shows it
 (scheme and host lowercase, no default port, `/` for an empty path), none or several failing the step with the tabs
-open listed. `browser_sign_in {site, user}` signs the browser in to `site`, a website env deployed in the run on its
+open listed. `browser_lease_context {label, grants?}` leases a context of the browser's beside its default one, its own
+cookies, local storage, tabs and downloads (in `~/Contexts/<label>/Downloads`), recorded as granted to the agents
+`grants` names, which nothing enforces yet; leasing a label again finds the same lease. Each step above, and
+`browser_sign_in`, takes a `context`, a lease's label, to act in it instead of the default context.
+`browser_release_context {label}` ends a lease, closing its tabs and deleting its folder; a reset or relaunch of the
+browser ends every lease, so a task leases again after `reset_env`. A context an agent makes over its CDP address is
+leased to it as `agent-<agent name>-<n>`, and only that agent may dispose it. `browser_sign_in {site, user}` signs the browser in to `site`, a website env deployed in the run on its
 own or in a multi env, by its env id: the site's `website/v1` `session {user}` gives the cookies and local storage,
 each cookie is set for every name the site is reached by (an exact name by its URL, a `*.` name as a domain cookie),
 and the browser's `data/add` loads them, which opens the start tabs again while no agent has acted. A task runs it

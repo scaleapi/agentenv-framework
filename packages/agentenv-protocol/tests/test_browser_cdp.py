@@ -24,6 +24,8 @@ from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK  # n
 from agentenv_protocol.website_browser import cdp as browser_cdp  # noqa: E402
 from agentenv_protocol.website_browser import log as browser_log  # noqa: E402
 from agentenv_protocol.website_browser.cdp import NO_SESSION, Relay, Tokens, guard  # noqa: E402
+from agentenv_protocol.website_browser.contexts import Contexts  # noqa: E402
+from agentenv_protocol.website_browser.control import BrowserControl  # noqa: E402
 from agentenv_protocol.website_browser.log import REDACTED, TOOL_CALL_HEADER, BrowserLog, Causes, tool_call_header  # noqa: E402
 from agentenv_protocol.computer import Launch, Platform, Ready, app, computer_app, linux  # noqa: E402
 from agentenv_protocol.computer.app import APP_SETTINGS_ENV  # noqa: E402
@@ -90,6 +92,26 @@ class Pipe:
         return {"result": {"method": method, "session": session_id}}
 
 
+class ContextPipe(Pipe):
+    """A browser's pipe that makes a context ``TASK`` for agentenv's own connection and ``A<n>`` for an agent's."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.made = 0
+
+    async def call(self, method, params=None, *, session_id=None, timeout_s=None):
+        if method == "Target.createBrowserContext":
+            return {"browserContextId": "TASK"}
+        return await super().call(method, params, session_id=session_id, timeout_s=timeout_s)
+
+    async def request(self, method, params=None, *, session_id=None, answered=None):
+        if method == "Target.createBrowserContext":
+            self.sent.append((method, session_id))
+            self.made += 1
+            return {"result": {"browserContextId": f"A{self.made}"}}
+        return await super().request(method, params, session_id=session_id, answered=answered)
+
+
 class SlowClient:
     """A client's WebSocket that takes in nothing sent to it until ``reading`` is set, and records what it got and how
     it was closed."""
@@ -114,10 +136,10 @@ class SlowClient:
 
 
 @contextlib.asynccontextmanager
-async def _relay(dialogs_answered: bool = False, **logging):
-    """The relay over a fake pipe, served on loopback with each connection's user its path's: the pipe, the relay and
-    the server's ws:// base."""
-    pipe = Pipe()
+async def _relay(dialogs_answered: bool = False, pipe=None, **logging):
+    """The relay over a fake pipe, ``pipe`` when given, served on loopback with each connection's user its path's: the
+    pipe, the relay and the server's ws:// base."""
+    pipe = pipe or Pipe()
     relay = Relay(pipe, dialogs_answered=dialogs_answered, **logging)
 
     async def endpoint(websocket):
@@ -278,6 +300,41 @@ async def test_the_guard_keeps_the_browser_up_its_traffic_and_downloads_its_own_
         ("Target.sendMessageToTarget", "refused")]
     assert [(entry["method"], entry["did"]) for entry in relay.connections[1]["guarded"]] == [
         ("Browser.close", "closed")]
+
+
+@pytest.mark.asyncio
+async def test_a_context_an_agent_makes_is_its_lease_keeping_downloads_in_its_folder_and_only_it_may_end_it(tmp_path):
+    pipe = ContextPipe()
+    contexts = Contexts(pipe, BrowserControl(pipe, "agent"), home=lambda: tmp_path)
+    task = await contexts.lease("buyer")
+    async with _relay(pipe=pipe, contexts=contexts) as (_, relay, base):
+        async with connect(f"{base}/ada") as ada, connect(f"{base}/bob") as bob:
+            made = await _ask(ada, {"id": 1, "method": "Target.createBrowserContext", "params": {}})
+            await _ask(ada, {"id": 2, "method": "Browser.setDownloadBehavior", "params": {
+                "behavior": "allowAndName", "browserContextId": "A1", "downloadPath": "/tmp/elsewhere",
+                "eventsEnabled": True}})
+            downloads = pipe.params["Browser.setDownloadBehavior"]
+            theirs = await _ask(bob, {"id": 1, "method": "Target.disposeBrowserContext",
+                                      "params": {"browserContextId": "A1"}})
+            tasks = await _ask(ada, {"id": 3, "method": "Target.disposeBrowserContext",
+                                     "params": {"browserContextId": task.id}})
+            ended = await _ask(ada, {"id": 4, "method": "Target.disposeBrowserContext",
+                                     "params": {"browserContextId": "A1"}})
+            await _ask(bob, {"id": 2, "method": "Target.createBrowserContext", "params": {"disposeOnDetach": True}})
+            while_bob = [lease.label for lease in contexts]
+        for _ in range(500):
+            if contexts.get("agent-bob-1") is None:
+                break
+            await asyncio.sleep(0.01)
+
+    assert made == {"id": 1, "result": {"browserContextId": "A1"}}
+    assert downloads == {"behavior": "allow", "downloadPath": str(tmp_path / "Contexts" / "agent-ada-1" / "Downloads"),
+                         "browserContextId": "A1", "eventsEnabled": True}
+    assert theirs["error"]["message"] == ("agentenv refuses Target.disposeBrowserContext: the context 'agent-ada-1' "
+                                          "is another agent's")
+    assert "the context 'buyer' is the task's" in tasks["error"]["message"] and "result" in ended
+    assert while_bob == ["buyer", "agent-bob-1"] and [lease.label for lease in contexts] == ["buyer"]
+    assert [entry["did"] for entry in relay.connections[0]["guarded"]] == ["changed", "refused"]
 
 
 @pytest.mark.asyncio
@@ -479,7 +536,7 @@ async def test_an_op_for_an_agents_tool_call_and_agentenvs_own_acting_ops_are_en
     async def navigate(url):
         browser.control._acted_on("T1")
 
-    async def tabs():
+    async def tabs(context=None, every=False):
         return []
 
     monkeypatch.setattr(browser.control, "navigate", navigate)
@@ -675,7 +732,7 @@ async def test_the_cdp_operation_and_discovery_answer_at_the_address_reached_and
     async def gone(method, params=None, *, session_id=None, timeout_s=None):
         raise ConnectionError("the browser closed its debugging pipe")
 
-    async def tabs():
+    async def tabs(context=None, every=False):
         return [{"id": "T1", "url": "https://site.test/", "title": "Site", "active": True}]
 
     monkeypatch.setattr(browser, "_until_ready", ready)
