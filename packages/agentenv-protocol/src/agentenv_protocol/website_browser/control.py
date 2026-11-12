@@ -46,6 +46,9 @@ PAGE_INPUT = frozenset({"Input.dispatchMouseEvent", "Input.dispatchKeyEvent", "I
 CAPTURE_TIMEOUT_S, UNNAVIGATED_CAPTURE_TIMEOUT_S = 3.0, 1.0
 #: A frame's quality as a JPEG, which is a fifth to a tenth of the PNG's size.
 FRAME_QUALITY = 80
+#: How long a frame's capture may go unanswered before a second capture is sent: Chrome answers a capture of a tab
+#: behind the active one only once another capture of it arrives, and then answers both.
+NUDGE_S = 0.5
 #: How often a wait for a tab to load looks again.
 LOAD_POLL_S = 0.1
 #: Where an agent's files to upload are, and where downloads land, under the session user's home.
@@ -644,15 +647,39 @@ class BrowserControl:
                 raise DeviceUnavailable("a dialog keeps the tab from painting and it had no capture before it")
             return *earlier, target, self.url_of(target)
         try:
-            shot = await self.devtools.call("Page.captureScreenshot", {
-                "format": "jpeg", "quality": FRAME_QUALITY, "optimizeForSpeed": True}, session_id=session,
-                timeout_s=CAPTURE_TIMEOUT_S)
+            shot = await self._nudged_capture(session)
         except asyncio.TimeoutError:
             raise DeviceUnavailable(f"the tab painted nothing within {CAPTURE_TIMEOUT_S:g} s") from None
         except (ConnectionError, DevToolsError) as e:
             raise DeviceUnavailable(f"the tab couldn't be captured: {e}") from None
         self._frames[target] = shot["data"], "jpg"
         return shot["data"], "jpg", target, self.url_of(target)
+
+    async def _nudged_capture(self, session: str) -> dict:
+        """The tab's JPEG from the first of its captures to answer: a second follows one unanswered after ``NUDGE_S``,
+        since a tab behind the active one answers only then, all within ``CAPTURE_TIMEOUT_S``."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + CAPTURE_TIMEOUT_S
+
+        def capture() -> asyncio.Future:
+            return asyncio.ensure_future(self.devtools.call("Page.captureScreenshot", {
+                "format": "jpeg", "quality": FRAME_QUALITY, "optimizeForSpeed": True}, session_id=session,
+                timeout_s=max(0.0, deadline - loop.time())))
+
+        captures = {capture()}
+        try:
+            done, _ = await asyncio.wait(captures, timeout=NUDGE_S)
+            if not done:
+                captures.add(capture())
+            while True:
+                done, captures = await asyncio.wait(captures, return_when=asyncio.FIRST_COMPLETED)
+                if answers := [c.result() for c in done if c.exception() is None]:
+                    return answers[0]
+                if not captures:
+                    raise next(iter(done)).exception()
+        finally:
+            for pending in captures:
+                pending.cancel()
 
     async def _capture(self, session: str) -> Optional[str]:
         """The tab's page as it shows now; with a dialog open on it, which keeps it from painting, the last it took."""

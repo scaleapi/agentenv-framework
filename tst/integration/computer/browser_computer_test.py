@@ -1111,6 +1111,63 @@ async def test_a_browser_recording_frames_each_burst_of_an_agents_actions_keyed_
     assert all(files[frame["path"].replace("/", "-")][:2] == b"\xff\xd8" for frame in frames)
 
 
+@pytest.mark.asyncio
+async def test_a_browser_recording_frames_a_cdp_agents_own_tab_behind_the_active_one(browser_computer):
+    with namespace_routing():
+        deployed = await Env.get(browser_computer.id).deploy(
+            env_params={"app_settings": {"chromium": {"start_urls": [PAGE_URL]}}})
+        context = TaskStepContext(instance_id=f"run-{uuid.uuid4().hex[:8]}", deployed_envs=[deployed])
+        try:
+            context = await StartBrowserRecordingTaskStep(id="start", version=None, env_id=browser_computer.id,
+                                                          name="behind").execute(context)
+            tab = await _cdp_agent_acts_behind((await _cdp(deployed, "pi"))["ws_url"])
+            active = [t for t in (await _browser_op(deployed, "tabs/list", {}))["tabs"] if t.get("active")]
+            context = await EndBrowserRecordingTaskStep(id="end", version=None, name="behind",
+                                                        fail_task_on_error=False).execute(context)
+        finally:
+            report = await teardown_run(context)
+            grant_server(None, None).close()
+        entry = context.metadata[BROWSER_RECORDINGS]["behind"]
+        universe = Artifact.get(entry["artifact"]["id"], version=entry["artifact"]["version"])
+        manifest = json.loads(get_config().get_object_store().get(
+            Artifact.get(universe.file_artifact_ids["manifest.json"]).object_url))
+
+    frames = manifest["frames"]
+    assert active and active[0]["id"] != tab, active
+    assert not report.failed and (entry["state"], entry["missing_frames"]) == ("ended", 0), frames
+    assert [f["tab"] for f in frames if f["kind"] == "action"] and frames[-1]["tab"] == tab, frames
+    assert "Own two" in urllib.parse.unquote(frames[-1]["url"]), frames[-1]
+
+
+#: The pages a CDP agent moves between in a tab of its own behind the active one.
+BEHIND = ("data:text/html,<title>Own one</title><h1>Own one</h1>", "data:text/html,<title>Own two</title><h1>Own two</h1>")
+
+
+async def _cdp_agent_acts_behind(ws_url: str) -> str:
+    """A CDP agent, pi, that opens a tab of its own behind the active one and never brings it to the front: it
+    navigates it, changes its page and navigates it again. The tab."""
+    async with connect(ws_url, max_size=None, open_timeout=60) as ws:
+        ids = itertools.count(1)
+
+        async def call(method: str, params: dict, session: str | None = None) -> dict:
+            message_id = next(ids)
+            await ws.send(json.dumps({"id": message_id, "method": method, "params": params,
+                                      **({"sessionId": session} if session else {})}))
+            while (reply := json.loads(await asyncio.wait_for(ws.recv(), 60))).get("id") != message_id:
+                pass
+            return reply
+
+        target = (await call("Target.createTarget", {"url": "about:blank", "background": True}))["result"]["targetId"]
+        session = (await call("Target.attachToTarget", {"targetId": target, "flatten": True}))["result"]["sessionId"]
+        await call("Page.navigate", {"url": BEHIND[0]}, session)
+        await asyncio.sleep(2)
+        await call("Runtime.evaluate", {"expression": "document.body.append('typed')"}, session)
+        await asyncio.sleep(2)
+        await call("Page.navigate", {"url": BEHIND[1]}, session)
+        await asyncio.sleep(2)
+    return target
+
+
 async def _mcp(deployed, work):
     """What ``work`` makes of one MCP session on the computer, as a role-less agent opens one."""
     async with streamablehttp_client(deployed.mcp_url) as (read, write, _):

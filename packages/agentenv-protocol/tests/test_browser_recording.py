@@ -15,7 +15,7 @@ import pytest
 from agentenv_protocol.computer.errors import DeviceUnavailable, InvalidArgument
 from agentenv_protocol.transfers import HttpPostPolicyGrant, WriteNamespaceGrant
 from agentenv_protocol.website_browser import recording as browser_recording
-from agentenv_protocol.website_browser.control import BrowserControl
+from agentenv_protocol.website_browser.control import NUDGE_S, BrowserControl
 from agentenv_protocol.website_browser.log import BrowserLog
 from agentenv_protocol.website_browser.recording import BrowserRecordingManifest, BrowserRecordings
 
@@ -236,6 +236,41 @@ async def test_while_a_dialog_keeps_a_tab_from_painting_its_frame_is_the_last_it
     pipe.emit("Page.javascriptDialogOpening", {"type": "alert", "message": "Hi", "url": "https://a.test/"}, "s-T2")
     with pytest.raises(DeviceUnavailable, match="no capture before it"):
         await control.frame("T2", load_wait_s=0)
+
+
+class BehindPipe(Pipe):
+    """A pipe whose tab is behind the active one, as Chrome answers its captures: only once another arrives, then
+    both."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.waiting: list[asyncio.Future] = []
+
+    async def call(self, method, params=None, *, session_id=None, timeout_s=None):
+        if method != "Page.captureScreenshot":
+            return {}
+        self.captured.append((session_id, params, asyncio.get_running_loop().time()))
+        answer = asyncio.get_running_loop().create_future()
+        self.waiting.append(answer)
+        if len(self.waiting) > 1:
+            for waiting in self.waiting:
+                if not waiting.done():
+                    waiting.set_result({"data": base64.b64encode(b"behind").decode()})
+            self.waiting = []
+        return await asyncio.wait_for(answer, timeout_s)
+
+
+@pytest.mark.asyncio
+async def test_a_tab_behind_the_active_one_is_framed_once_a_second_capture_nudges_it():
+    pipe = BehindPipe()
+    control = BrowserControl(pipe, "agent", (1280, 800))
+    pipe.emit("Target.targetCreated", {"targetInfo": {"targetId": "T1", "type": "page", "url": "about:blank"}})
+    pipe.emit("Target.attachedToTarget", {"sessionId": "s-T1", "targetInfo": {"targetId": "T1", "type": "page"}})
+
+    data, _, tab, _ = await control.frame("T1", load_wait_s=0)
+
+    (_, _, first), (_, _, second) = pipe.captured
+    assert (base64.b64decode(data), tab) == (b"behind", "T1") and second - first >= NUDGE_S
 
 
 @pytest.mark.asyncio
