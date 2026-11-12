@@ -32,6 +32,9 @@ from agentenv_protocol.computer import DeliveryFailed, DeviceUnavailable, Platfo
 from agentenv_protocol.computer.platform import supported
 
 DRIVER = Path(agent_env.__file__).parent / "drivers" / "envs" / "cua-driver" / "driver.py"
+#: cua-driver's Linux release tarball, its version the group.
+RELEASE_TARBALL = (r"https://github\.com/trycua/cua/releases/download/cua-driver-rs-v([\d.]+)/"
+                   r"cua-driver-rs-\1-linux-x86_64-binary\.tar\.gz")
 
 
 def _png(width: int, height: int) -> str:
@@ -758,6 +761,7 @@ def test_in_a_hyprland_session_the_driver_pins_hyprlands_manifest_and_tells_agen
     loaded = _loaded(monkeypatch)
 
     assert loaded.MANIFEST.name == "mcp-hyprland.json" and loaded.CuaDriver.notes == loaded.hyprland.NOTES
+    assert loaded._executable() == DRIVER.with_name("cua-driver") / "cua-driver"
     assert module.MANIFEST.name == "mcp.json" and module.CuaDriver.notes == ""
 
 
@@ -769,7 +773,21 @@ def test_an_omarchy_computer_installs_cua_driver_at_hyprlands_pin_and_the_driver
     assert str(for_os(found, omarchy).python) == "requirements-omarchy.txt"
     assert str(for_os(found, ubuntu).python) == "requirements.txt"
     assert for_os(found, omarchy).services == for_os(found, ubuntu).services
-    pins = (DRIVER.parent / "requirements-omarchy.txt").read_text().splitlines()
-    assert any(re.fullmatch(r"cua-driver==\d+(\.\d+)+", line) for line in pins)
+    assert [(d.to, d.arch) for d in for_os(found, omarchy).downloads] == [("cua-driver.tar.gz", "amd64")]
+    assert re.fullmatch(RELEASE_TARBALL, for_os(found, omarchy).downloads[0].url)
+    assert [run.script for run in for_os(found, omarchy).run] == ["install-hyprland.sh"]
+    assert not any(line.startswith("cua-driver") for line in
+                   (DRIVER.parent / "requirements-omarchy.txt").read_text().splitlines())
     platforms = [platform for entry in module.CuaDriver.supports for platform in supported(entry)]
     assert Platform(os="linux", distribution="omarchy", arch="amd64", display="wayland") in platforms
+
+
+def test_omarchys_base_builds_the_hyprland_plugin_of_the_cua_driver_release_its_computers_install():
+    found, _ = installs(tomllib.loads((DRIVER.parent / "env.toml").read_text())["install"])
+    pin = re.fullmatch(RELEASE_TARBALL, for_os(found, SimpleNamespace(type="linux", distribution="omarchy"))
+                       .downloads[0].url)[1]
+    recipe = (Path(agent_env.__file__).parent / "computers" / "disk" / "omarchy" / "recipe.sh").read_text()
+
+    release = re.search(r"^plugin_release=\S+/cua-driver-rs-v(\S+)$", recipe, re.MULTILINE)[1]
+    source = re.search(r"^plugin=cua-hyprland-plugin-(\S+)-[0-9a-f]{40}$", recipe, re.MULTILINE)[1]
+    assert release == source == pin

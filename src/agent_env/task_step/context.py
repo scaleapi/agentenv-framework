@@ -13,6 +13,19 @@ from agent_env.providers.sandbox_providers.local_docker.provider import LocalSan
 from agent_env.providers.sandbox_providers.sandbox_provider import reachable_url
 
 HEARTBEAT_KEY = "_heartbeat_fn"
+# context.metadata[ENTITY_IDS_KEY]: the run's task's Task.entity_ids, set by Task.run.
+ENTITY_IDS_KEY = "entity_ids"
+
+
+def run_entity_id(metadata: dict, entity_id: str) -> str:
+    """The id the run's task gave the entity it names as ``entity_id`` (``Task.entity_ids``), else ``entity_id``."""
+    return (metadata.get(ENTITY_IDS_KEY) or {}).get(entity_id, entity_id)
+
+
+class StepContextError(RuntimeError):
+    """The run's context can't satisfy a step: something the step needs from an earlier step is missing, or
+    something it would create is already there. Running the step again on the same context fails the same
+    way, so a runner should not retry it."""
 
 _REDACTED_KEYS = {
     "litellm_api_key", "judge_litellm_api_key", "usersim_api_key", "remote_tokens", "cf_access_client_secret",

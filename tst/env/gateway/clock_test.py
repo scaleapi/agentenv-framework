@@ -119,7 +119,7 @@ def test_monotonic_non_decreasing():
 def test_state_reports_fields():
     now = FakeNow()
     c = Clock(now_fn=now)
-    assert c.state() == {"armed": False}
+    assert c.state() == {"armed": False, "version": c.version}
     st = c.set_time(T0, rate=3600)
     assert st["armed"] is True and st["virtual_seconds_per_real_second"] == 3600.0 and st["t0"] == T0 and st["virtual_time"] == T0
     now.tick(1)

@@ -1,0 +1,14 @@
+type = "computer"
+description = "Ubuntu 24.04 with no desktop, for one website browser, headful on an X server only it uses, and a page driver whose screen is its page; run by supervisord as the session user"
+arch = ["amd64", "arm64"]
+os = { type = "linux", distribution = "ubuntu", version = "24.04", display = "none" }
+session = { user = "user" }
+
+[forms.container]
+image = { dockerfile = "Dockerfile" }
+init = "supervisord"
+input_channel = "env"
+
+[config.timezone]
+default = "UTC"
+phase = "deploy"

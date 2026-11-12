@@ -116,13 +116,13 @@ except ConfigError as e:
 
 
 @functools.cache
-def _closure(extras: frozenset[str]) -> frozenset[str]:
-    """The distributions installing this package with ``extras`` pulls in."""
+def _closure(extras: frozenset[str], pruned: frozenset[str] = frozenset()) -> frozenset[str]:
+    """The distributions installing this package with ``extras`` pulls in, not reaching any through ``pruned``."""
     seen: set[tuple[str, frozenset[str]]] = set()
     pending = [(SELF, extras)]
     while pending:
         name, wanted = pending.pop()
-        if (name, wanted) in seen:
+        if (name, wanted) in seen or name in pruned:
             continue
         seen.add((name, wanted))
         try:
@@ -137,14 +137,26 @@ def _closure(extras: frozenset[str]) -> frozenset[str]:
     return frozenset(name for name, _ in seen) - {SELF}
 
 
+def _named_by(extra: str) -> frozenset[str]:
+    """The distributions ``extra`` requires by name."""
+    named = set()
+    for line in importlib.metadata.requires(SELF) or []:
+        requirement = Requirement(line)
+        marker = requirement.marker
+        if marker is not None and marker.evaluate({"extra": extra}) and not marker.evaluate({"extra": ""}):
+            named.add(canonicalize_name(requirement.name))
+    return frozenset(named)
+
+
 def _only_in(extra: str) -> list[str]:
     """Module paths the extra installs and neither a core install nor any other extra does, but for an extra that
     includes it (``trl`` includes ``openenv``): a distribution two extras share (grpcio, for gcp and tensorlake) stays
-    for the other's modules."""
+    for the other's modules. A distribution the extra names stays the extra's though a core dependency brings it too
+    (litellm requires boto3 from 1.98), so core is still shown to import without it."""
     mine = _closure(frozenset({extra}))
     others = [other for other in _optional_requirements()
               if other != extra and not mine <= _closure(frozenset({other}))]
-    core = _closure(frozenset()) | set().union(*(_closure(frozenset({other})) for other in others))
+    core = _closure(frozenset(), _named_by(extra)) | set().union(*(_closure(frozenset({other})) for other in others))
     provided_by_core = set().union(*(_module_paths(d) for d in core))
     extra_only = _closure(frozenset({extra})) - core
     return sorted(set().union(*(_module_paths(d) for d in extra_only)) - provided_by_core)

@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 from agentenv_protocol import website_browser
+from agentenv_protocol.website_browser import log as browser_log
 from agentenv_protocol.computer import Launch, Ready, app, linux
 from agentenv_protocol.computer.app import AGENT_ACTED
 from agentenv_protocol.computer.errors import DeviceUnavailable, InvalidArgument
@@ -90,6 +91,8 @@ def browser(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path / "folder")
     monkeypatch.setenv("ENVIRONMENT_NAME", "chromium")
     monkeypatch.setenv("AGENTENV_APP_SETTINGS", json.dumps({"chromium": {"start_urls": ["https://shop.test/"]}}))
+    monkeypatch.setattr(browser_log, "LOG_DIR", tmp_path / "logs")
+    monkeypatch.setenv("AGENTENV_NETWORK_LOG", str(tmp_path / "network.jsonl"))
     made = Browser()
     made.control = FakeControl()
     launches = []
@@ -145,12 +148,77 @@ async def test_data_get_is_its_state_its_profile_without_caches_or_locks_and_its
     files = _files(await browser.browser_get_data())
 
     state = json.loads(files.pop("browser-state.json"))
+    assert json.loads(files.pop("network.har"))["log"]["entries"] == []
     assert set(state) == {"cookies", "local_storage", "tabs", "closed_tabs", "downloads", "clock", "start_tabs"}
     assert state["cookies"] == FakeControl().cookie_list and "partitionKey" not in state["cookies"][0]
     assert state["clock"]["mode"] == "real" and state["tabs"][0]["id"] == "t1" and state["closed_tabs"][0]["id"] == "t0"
     assert files == {f"{PROFILE}/Default/Cookies": b"db", f"{PROFILE}/Default/Cookies-journal": b"j",
-                     f"{PROFILE}/Default/Local Storage/leveldb/CURRENT": b"m", "Downloads/report.csv": b"a,b"}
+                     f"{PROFILE}/Default/Local Storage/leveldb/CURRENT": b"m", "Downloads/report.csv": b"a,b",
+                     "browser-log.jsonl": b""}
     assert not list((home / ".cache").iterdir())
+
+
+@pytest.mark.asyncio
+async def test_data_get_exports_the_log_written_so_far_and_data_add_passes_over_it(browser):
+    browser.log.note("reset", {})
+    pending = browser.log.reserve()
+    files = _files(await browser.browser_get_data())
+    browser.log.write(pending, {"reset": {}})
+
+    logged = [json.loads(line) for line in files["browser-log.jsonl"].decode().splitlines()]
+    assert [line["seq"] for line in logged] == [1] and logged[0]["reset"] == {}
+    await browser.browser_add_data(_parts(_file("browser-state.json", _snapshot_state()),
+                                          _file("browser-log.jsonl", files["browser-log.jsonl"])))
+    assert ("cookies", ["sid"]) in browser.control.did
+
+
+@pytest.mark.asyncio
+async def test_data_get_exports_the_network_log_as_har_and_data_add_passes_over_it(browser, tmp_path):
+    lines = [{"seq": 1, "at": "2026-11-11T10:00:00.000Z", "open": {
+                 "id": "1-1", "kind": "exchange", "started": "2026-11-11T10:00:00.000Z",
+                 "request": {"method": "GET", "url": "https://shop.test/cart?n=2", "http_version": "HTTP/1.1",
+                             "headers": [["Host", "shop.test"]]}}},
+             {"seq": 2, "at": "2026-11-11T10:00:00.250Z", "end": {
+                 "id": "1-1", "ended": "2026-11-11T10:00:00.250Z", "answered": "2026-11-11T10:00:00.200Z",
+                 "response": {"status": 200, "reason": "OK", "http_version": "HTTP/1.1",
+                              "headers": [["Content-Type", "application/json"]],
+                              "body": {"size": 2, "sha256": "x", "base64": base64.b64encode(b"{}").decode()}}}}]
+    (tmp_path / "network.jsonl").write_text("".join(json.dumps(line) + "\n" for line in lines))
+
+    files = _files(await browser.browser_get_data())
+    [entry] = json.loads(files["network.har"])["log"]["entries"]
+
+    assert (entry["request"]["url"], entry["response"]["status"], entry["response"]["content"]["text"]) == (
+        "https://shop.test/cart?n=2", 200, "{}")
+    assert entry["time"] == 250 and entry["timings"]["wait"] == 200
+    assert (await browser.browser_network(after=1)) == {"lines": [lines[1]], "last": 2, "more": False}
+    await browser.browser_add_data(_parts(_file("browser-state.json", _snapshot_state()),
+                                          _file("network.har", files["network.har"])))
+    assert ("cookies", ["sid"]) in browser.control.did
+
+
+@pytest.mark.asyncio
+async def test_a_browser_no_proxy_logs_for_exports_no_har_and_network_reads_nothing(tmp_path, monkeypatch, browser):
+    monkeypatch.delenv("AGENTENV_NETWORK_LOG")
+    made = Browser()
+    made.control, made._computer_app = browser.control, browser._computer_app
+
+    files = _files(await made.browser_get_data())
+
+    assert made.network is None and "network.har" not in files and "browser-state.json" in files
+    assert await made.browser_network(after=3) == {"lines": [], "last": 3, "more": False}
+
+
+@pytest.mark.asyncio
+async def test_with_its_network_setting_off_data_get_exports_no_har_and_network_reads_nothing(browser, tmp_path):
+    (tmp_path / "network.jsonl").write_text(json.dumps({"seq": 1, "at": "t", "end": {"id": "1-1", "ended": "t"}})
+                                            + "\n")
+    browser.settings = browser.settings.model_copy(update={"network": False})
+
+    files = _files(await browser.browser_get_data())
+
+    assert "network.har" not in files and "browser-state.json" in files
+    assert await browser.browser_network(after=0) == {"lines": [], "last": 0, "more": False}
 
 
 @pytest.mark.asyncio
@@ -183,7 +251,8 @@ async def test_data_get_leaves_out_what_the_browser_removes_while_it_copies(brow
     monkeypatch.setattr(website_browser.data.shutil, "copy2", removed_meanwhile)
     files = _files(await browser.browser_get_data())
 
-    assert set(files) == {"browser-state.json", f"{PROFILE}/Default/Cookies", f"{PROFILE}/Default/Session Storage/LOG"}
+    assert set(files) == {"browser-state.json", "browser-log.jsonl", "network.har", f"{PROFILE}/Default/Cookies",
+                          f"{PROFILE}/Default/Session Storage/LOG"}
 
 
 def _snapshot_state(**changes) -> bytes:

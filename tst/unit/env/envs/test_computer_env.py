@@ -13,6 +13,7 @@ import json
 import logging
 import re
 import shutil
+import subprocess
 import urllib.parse
 from datetime import timedelta
 from pathlib import Path
@@ -925,7 +926,7 @@ async def test_a_reset_ends_the_envs_recordings_then_boots_a_fresh_container_whe
     assert (kwargs["env"]["AGENTENV_SETTING_TIMEZONE"], kwargs["env"]["ENVIRONMENT_NAME"]) == ("Asia/Tokyo", "desktop")
     assert kwargs["env"][CONTROL_TOKEN_ENV] == deployed.control_token
     env_computer_provider.ready.assert_awaited_once_with(deployed.environment_url, boot.READY_TIMEOUT_S,
-                                                         deployed.control_token, answering=False)
+                                                         deployed.control_token, answering=False, sandbox=sandbox)
     assert boots.calls == [(COMPUTER_RECORDING, "end_all", {"reason": "reset"}), "reset_container", (COMPUTER_DISPLAY, "get", None)]
 
 
@@ -1562,7 +1563,7 @@ async def test_a_boot_hands_the_computer_its_token_and_one_never_ready_takes_its
                         attribution=None)
 
     assert create.await_args.kwargs["env"] == {"ENVIRONMENT_NAME": "desk", CONTROL_TOKEN_ENV: "t0ken"}
-    assert boot.ready.await_args.args[2] == "t0ken"
+    assert boot.ready.await_args.args[2] == "t0ken" and boot.ready.await_args.kwargs["sandbox"] is sandbox
     sandbox.terminate.assert_awaited_once()
     assert local_sandbox.LocalSandbox.find_work_dir("local-unready") is None
 
@@ -2044,6 +2045,34 @@ def _local(work, context):
     shutil.copytree(context, work / builder.CONTEXT)
     base = SimpleNamespace(image_name="ghcr.io/acme/base:1", pinned_name="ghcr.io/acme/base:1")
     return builder.LocalBuilder("LocalSandboxProvider", work, base, "linux/arm64")
+
+
+def test_a_command_the_resolver_runs_that_fails_ends_it_with_the_commands_code_and_no_traceback(monkeypatch, capsys):
+    """The composer reports the output's last line as the reason: it must be the command's error, apt's ``E:`` line,
+    not a traceback naming the command."""
+    def fail(*_args):
+        raise subprocess.CalledProcessError(100, ["apt-get", "install"])
+
+    monkeypatch.setattr(resolve_in_base, "main", fail)
+
+    with pytest.raises(SystemExit) as exited:
+        resolve_in_base.cli(["request.json", "out"])
+
+    assert exited.value.code == 100
+    assert capsys.readouterr().err == ""
+
+
+def test_a_captured_command_that_fails_has_its_error_printed_last(monkeypatch, capsys):
+    def fail(*_args):
+        raise subprocess.CalledProcessError(2, ["dpkg-deb", "-f"], stderr="dpkg-deb: error: not a Debian archive\n")
+
+    monkeypatch.setattr(resolve_in_base, "main", fail)
+
+    with pytest.raises(SystemExit) as exited:
+        resolve_in_base.cli(["request.json", "out"])
+
+    assert exited.value.code == 2
+    assert capsys.readouterr().err.strip().splitlines()[-1] == "dpkg-deb: error: not a Debian archive"
 
 
 def test_the_resolver_installs_the_apt_packages_it_downloads_before_building_wheels(tmp_path, monkeypatch):

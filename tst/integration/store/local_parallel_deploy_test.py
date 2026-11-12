@@ -9,9 +9,11 @@ prior step", which would serialise the branches and prove nothing.
 """
 
 import contextlib
+import fcntl
 import json
 import socket
 import subprocess
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -26,14 +28,17 @@ from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.store.image_store import LocalRegistryImageStore
 from agent_env.task import Task
 from agent_env.task.store import get_task_instance_store
-from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from tst.integration.utils.registry import REGISTRY_IMAGE
+from tst.util import local_sandboxes
 from tst.task import journal_invariants as journal
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
 _TST_DATA = Path(__file__).resolve().parents[2] / "data"
+# Test workers share one Docker daemon, and two builds naming the same tag at once can fail with
+# "image ... already exists", so the bootstrap builds take turns.
+_BUILD_LOCK = Path(tempfile.gettempdir()) / "agentenv-test-bootstrap-builds.lock"
 
 
 def _free_port() -> int:
@@ -81,15 +86,7 @@ def local_stack_at(monkeypatch: pytest.MonkeyPatch, path: Path):
         _docker("rm", "-f", reg_name)
         pytest.skip("local registry did not become ready")
 
-    # The sandboxes this process makes while the stack is up, whose containers alone it removes: another process's,
-    # as another pytest worker's, share this machine's Docker and its names.
-    made, init = [], LocalSandbox.__init__
-
-    def recorded(self, *args, **kwargs):
-        init(self, *args, **kwargs)
-        made.append(self.sandbox_id)
-
-    monkeypatch.setattr(LocalSandbox, "__init__", recorded)
+    made = local_sandboxes.recorded_sandbox_ids(monkeypatch)
     monkeypatch.chdir(path)
     for var in ("DOCUMENT", "OBJECT", "IMAGE"):
         monkeypatch.setenv(f"AGENT_ENV_{var}_STORE", "local")
@@ -99,12 +96,14 @@ def local_stack_at(monkeypatch: pytest.MonkeyPatch, path: Path):
     try:
         yield host
     finally:
-        for sandbox_id in set(made):
-            for cid in _docker("ps", "-aq", "--filter", f"name=agent-env-{sandbox_id}-").stdout.split():
-                _docker("rm", "-f", cid)
-        reset_artifact_store()
-        reset_config()
-        _docker("rm", "-f", reg_name)
+        try:
+            for name in local_sandboxes.container_names_carrying(made):
+                if name.startswith("agent-env-"):
+                    _docker("rm", "-f", name)
+        finally:
+            reset_artifact_store()
+            reset_config()
+            _docker("rm", "-f", reg_name)
 
 
 def _seed_bootstrap_envs():
@@ -121,7 +120,9 @@ def _seed_bootstrap_envs():
     from agent_env.env.envs.service_db import ServiceDBEnv
 
     def build(dockerfile: Path, context: Path, tag: str) -> DockerImageArtifact:
-        result = _docker("build", "-f", str(dockerfile), "-t", tag, str(context))
+        with open(_BUILD_LOCK, "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            result = _docker("build", "-f", str(dockerfile), "-t", tag, str(context))
         assert result.returncode == 0, f"build {tag} failed: {result.stderr[-2000:]}"
         return DockerImageArtifact.put(id=tag, description="bootstrap", image_name=tag)
 

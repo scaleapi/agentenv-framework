@@ -87,9 +87,9 @@ def test_a_reference_by_id_is_repointed_at_the_variant(tmp_path):
     steps = [{**DEPLOY, "env_id": f"{ROOT}/desktop"}, {**AGENT, "env_ids": [f"{ROOT}/desktop"]}, PROMPT]
     root = _bundle(tmp_path / "desk", steps, {"evals/e.toml": f'tasks = ["{ROOT}/t"]\n'})
 
-    bundle = _varied(root, "envs/desktop.computer=ubuntu-24.04-headless", "envs/desktop.tools=standard")
+    bundle = _varied(root, "envs/desktop.computer=ubuntu-24.04-browser", "envs/desktop.tools=standard")
 
-    label = "desktop.computer ubuntu-24.04-headless, desktop.tools standard"
+    label = "desktop.computer ubuntu-24.04-browser, desktop.tools standard"
     assert [step.get("env_id") or step.get("env_ids") for step in _entry(bundle, "t").config] == [
         f"{ROOT}/desktop({label})", [f"{ROOT}/desktop({label})"], None]
     assert _entry(bundle, "e").config["tasks"] == [f"{ROOT}/t({label})"]

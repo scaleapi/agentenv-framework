@@ -11,7 +11,7 @@ from typing import ClassVar, Optional
 from urllib.parse import urlparse
 
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
-from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.entity.scopes import FieldScope
 from agent_env.providers.sandbox_providers.sandbox import SANDBOX_LABEL, port_bindings
@@ -177,7 +177,7 @@ class RunDockerContainerTaskStep(TaskStep):
             None,
         )
         if ds is None:
-            raise RuntimeError(
+            raise StepContextError(
                 f"Sandbox '{self.sandbox_name}' not found in context.deployed_sandboxes; "
                 f"deploy it with DeploySandboxTaskStep before this step"
             )

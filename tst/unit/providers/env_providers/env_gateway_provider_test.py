@@ -31,6 +31,7 @@ from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.envs.service_db import SERVICE_DB_PORT
 from agent_env.env.envs.website import WebsiteEnv
+from agent_env.env.gateway.constants import WEBSITE_LISTED_BY_NAME_ENV, WEBSITE_NAMES_ENV
 from agent_env.providers.env_providers import env_gateway_provider, env_provider
 from agent_env.providers.env_providers.constants import GATEWAY_APP_DIR, GATEWAY_SERVICE_NAME
 from agent_env.providers.env_providers.env_gateway_provider import (
@@ -160,7 +161,6 @@ async def test_container_mode_rejects_websites():
             provider, state_instance=None, mcp_servers=[], mcp_server_images=[],
             website_configs=[WebsiteConfig(backend_image="b", frontend_image="f", environment_name="x")],
         )
-
 
 
 def _vm_provider(**attrs) -> MagicMock:
@@ -377,11 +377,14 @@ async def test_container_mode_constructs_internal_mcp_servers_url_format(monkeyp
                 ttl_seconds=60,
                 disk_size_gb=10,
                 mcp_server_name="crm",
+                control_token="t0k",
             )
 
     # Last create_container call is the gateway. Inspect its env var.
     gateway_call = create_calls[-1]
     env = gateway_call["env"]
+    assert [c["image_name"] for c in create_calls if "AGENTENV_CONTROL_TOKEN" in (c.get("env") or {})] == ["agent-gateway"]
+    assert (env["AGENTENV_CONTROL_TOKEN"], result.control_token) == ("t0k", "t0k")
     assert "INTERNAL_MCP_SERVERS" in env
     spec = env["INTERNAL_MCP_SERVERS"]
     # Container mode puts every container on the private network, and the gateway reaches each server there.
@@ -498,7 +501,6 @@ async def test_container_mode_remote_skips_servicedb_and_points_at_remote():
     assert gateway_call["env"]["SERVICE_DB_URL"] == db_url_base
 
 
-
 @pytest.mark.asyncio
 async def test_container_mode_mcp_url_follows_the_card():
     """The recorded MCP URL is the one the gateway's card declares, joined onto the gateway URL."""
@@ -531,7 +533,6 @@ async def test_container_mode_mcp_url_follows_the_card():
             )
     assert result.mcp_url == "https://agent-gateway.modal.host/custom-mcp"
     assert result.environment_card == card
-
 
 
 @pytest.mark.parametrize("gateway_url,declared,expected", [
@@ -1173,6 +1174,7 @@ def _compose_with_sidecar():
         gateway_image="agent-gateway",
         gateway_port=18765,
         sidecars=[_sidecar_with_secret()],
+        control_token="ctl-token-value",
         # Explicit ServiceDBConfig so rendering never resolves the default-db env
         # from the store (which would hit the network — blocked in unit tests).
         state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
@@ -1214,14 +1216,29 @@ def test_no_sidecars_renders_no_extra_service():
     assert "  relay:" not in compose
 
 
+def test_compose_hands_the_control_token_to_the_gateway_alone():
+    from agent_env.env.envs.service_db import ServiceDBConfig
+
+    services = yaml.safe_load(_compose_with_sidecar())["services"]
+    holders = {name: [item for item in service.get("environment", []) if item.startswith("AGENTENV_CONTROL_TOKEN=")]
+               for name, service in services.items()}
+    assert {name: items for name, items in holders.items() if items} == {
+        GATEWAY_SERVICE_NAME: ["AGENTENV_CONTROL_TOKEN=ctl-token-value"]}
+    assert "AGENTENV_CONTROL_TOKEN" not in EnvironmentGatewayProvider().create_docker_compose(
+        mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")], gateway_image="agent-gateway",
+        state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
+        state_instance=LocalPostgresStateProvider.default_instance())
+
+
 def test_redact_compose_secrets_masks_only_secret_env_lines():
     """The logged compose masks *SECRET/PASSWORD/TOKEN env values but leaves everything else
     (image refs, ports, non-secret env, DATABASE_URL) intact."""
     compose = _compose_with_sidecar()
     redacted = _redact_compose_secrets(compose)
     # secret value gone, key preserved
-    assert "s3cr3t-token-value" not in redacted
+    assert "s3cr3t-token-value" not in redacted and "ctl-token-value" not in redacted
     assert "      - UPSTREAM_CLIENT_SECRET=***" in redacted
+    assert "      - AGENTENV_CONTROL_TOKEN=***" in redacted
     # non-secret lines untouched
     assert "      - UPSTREAM_URL=https://upstream.sandbox.example.com/abc" in redacted
     assert "    image: ecr/relay:1.0.4" in redacted
@@ -1559,6 +1576,23 @@ def test_each_website_backend_gets_a_session_secret_of_its_own_which_the_logged_
     (notes,) = _env_values(_service_block(compose, "notes-website-backend"), SESSION_SECRET_ENV)
     assert re.fullmatch(r"[0-9a-f]{64}", shop) and re.fullmatch(r"[0-9a-f]{64}", notes) and shop != notes
     assert shop not in _redact_compose_secrets(compose) and notes not in _redact_compose_secrets(compose)
+
+
+def test_the_gateway_is_handed_each_synthetic_sites_stored_names_and_the_sites_it_lists_by_name():
+    compose = _compose_for([], website_configs=[
+        WebsiteConfig(backend_image="b", frontend_image=None, environment_name="shop",
+                      domains=("shop.test", "*.shop.test"), listed_by_name=True),
+        WebsiteConfig(backend_image="b", frontend_image=None, environment_name="notes", listed_by_name=True),
+        WebsiteConfig(backend_image="b", frontend_image=None, environment_name="docs", domains=("docs.test",)),
+        WebsiteConfig(backend_image="b", frontend_image=None, environment_name="github", live=True,
+                      domains=("github.com",), listed_by_name=True),
+    ])
+    gateway = _service_block(compose, "gateway")
+    assert _env_values(gateway, WEBSITE_NAMES_ENV) == ["shop=shop.test|*.shop.test,docs=docs.test"]
+    assert _env_values(gateway, WEBSITE_LISTED_BY_NAME_ENV) == ["shop,notes"]
+    plain = _service_block(_compose_for([], website_configs=[
+        WebsiteConfig(backend_image="b", frontend_image=None, environment_name="notes")]), "gateway")
+    assert _env_values(plain, WEBSITE_NAMES_ENV) == _env_values(plain, WEBSITE_LISTED_BY_NAME_ENV) == []
 
 
 def test_injected_names_are_the_environment_name_not_the_image_or_container_name():
@@ -2016,14 +2050,15 @@ async def test_create_gateway_hands_the_deploy_path_every_argument(attribution, 
     gp, provider = EnvironmentGatewayProvider(), _vm_provider()
     args = dict(mcp_servers=[MagicMock()], mcp_server_images=[MagicMock()], gateway_port=18999, website_configs=[MagicMock()],
                 website_images=[MagicMock()], gateway_mode=GatewayMode.CONSISTENT, ttl_seconds=61, disk_size_gb=11, cpu=1.5,
-                memory_mb=3072, existing_sandbox=MagicMock(), sidecars=[MagicMock()], mcp_server_name="crm")
+                memory_mb=3072, existing_sandbox=MagicMock(), sidecars=[MagicMock()], mcp_server_name="crm", control_token="t0k")
     with patch.object(gp, "_deploy_via_vm", AsyncMock(return_value=_probed())) as vm, \
          patch.object(env_gateway_provider, "_tool_names", AsyncMock(return_value=set())):
         await gp.create_gateway(sandbox_provider=provider, env_id="crm-env", attribution=attribution, **args)
 
     [call] = vm.await_args_list
     assert call.args == (provider, args.pop("mcp_servers"), args.pop("mcp_server_images"))
-    assert call.kwargs == {**args, "attribution": forwarded, "children": None}
+    assert call.kwargs == {**args, "attribution": forwarded, "children": None,
+                           "website_browser": env_gateway_provider._THE_RUNS}
     assert call.kwargs["attribution"] is not attribution
 
 
@@ -2067,7 +2102,9 @@ async def test_deploy_returns_the_gateway_record_for_the_env(caplog):
         env_id="crm-env", env_version=3, gateway_url="https://vm.example", mcp_url="https://vm.example/mcp", db_web_url=None,
         sandbox_id="vm-1", sandbox_type="modal_vm", sandbox_ids={}, db_mcp_url=None,
         environment_card_url="https://vm.example/.well-known/agent-env.json", environment_card=card,
-        environment_card_read_at_utc=record.environment_card_read_at_utc, gateway_mode="consistent", env_state_instance_ids=["st-ext"]))
+        environment_card_read_at_utc=record.environment_card_read_at_utc, gateway_mode="consistent", env_state_instance_ids=["st-ext"],
+        control_token=record.control_token))
+    assert len(record.control_token) >= 43 and compose.call_args.kwargs["control_token"] == record.control_token
     assert record.environment_card_read_at_utc and record.instance_id is None  # unregistered: the env registers it
     assert (record.mcp_url, record.mcp_server_name, record.env_provider_type) == ("https://vm.example/mcp", "env1234", "gateway")
     messages = [r.getMessage() for r in caplog.records if r.getMessage().startswith(("env_deploy_provider_attempt ", "env_deploy_tools_probe "))]
@@ -2838,6 +2875,28 @@ def test_compose_fronts_each_external_child_as_an_mcp_server_and_a_rest_route_by
     env = dict(line.split("=", 1) for line in compose["services"][GATEWAY_SERVICE_NAME]["environment"])
     assert env["INTERNAL_MCP_SERVERS"].split(",") == ["slack", "desktop=https://desk.example/mcp"]
     assert "desktop=https://desk.example" in env["REST_PROXY_URLS"].split(",")
+    assert "CLOCK_FOLLOWER_TOKENS" not in env
+
+
+def test_compose_declares_the_children_that_follow_the_clock_by_their_read_tokens_and_logs_none_of_them():
+    from agent_env.env.envs.service_db import ServiceDBConfig
+    from agent_env.env.gateway import ExternalChild
+
+    rendered = EnvironmentGatewayProvider().create_docker_compose(
+        mcp_servers=[], gateway_image="agent-gateway",
+        state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
+        state_instance=LocalPostgresStateProvider.default_instance(),
+        external_children=(ExternalChild("desktop", "https://desk.example/mcp", "https://desk.example", "read-desk"),
+                           ExternalChild("phone", "https://phone.example/mcp", "https://phone.example"),
+                           ExternalChild("laptop", "https://lap.example/mcp", "https://lap.example", "read-lap")))
+
+    services = yaml.safe_load(rendered)["services"]
+    holders = {name: [item for item in service.get("environment", []) if item.startswith("CLOCK_FOLLOWER_TOKENS=")]
+               for name, service in services.items()}
+    assert {name: items for name, items in holders.items() if items} == {
+        GATEWAY_SERVICE_NAME: ["CLOCK_FOLLOWER_TOKENS=desktop=read-desk,laptop=read-lap"]}
+    redacted = _redact_compose_secrets(rendered)
+    assert "read-desk" not in redacted and "      - CLOCK_FOLLOWER_TOKENS=***" in redacted
 
 
 def test_no_service_depends_on_the_gateway_so_a_vm_deploy_can_start_them_all_before_it():
@@ -2871,7 +2930,7 @@ async def test_a_vm_deploy_starts_its_children_beside_its_services_and_the_gatew
 
     async def children(reach):
         order.append(("children", reach))
-        return [ExternalChild("desktop", "http://localhost:20001/mcp", "http://localhost:20001")]
+        return [ExternalChild("desktop", "http://localhost:20001/mcp", "http://localhost:20001", "read-desk")]
 
     def compose(**kwargs):
         composes.append(kwargs.get("external_children", ()))
@@ -2898,7 +2957,8 @@ async def test_a_vm_deploy_starts_its_children_beside_its_services_and_the_gatew
 
     assert sorted(order[:2]) == [("children", "https://gw.example"), ("up", f"--scale {GATEWAY_SERVICE_NAME}=0")]
     assert order[2:] == [("up", "")]
-    assert composes == [(), (ExternalChild("desktop", "http://host.docker.internal:20001/mcp", "http://host.docker.internal:20001"),)]
+    assert composes == [(), (ExternalChild("desktop", "http://host.docker.internal:20001/mcp", "http://host.docker.internal:20001",
+                                           "read-desk"),)]
     written = [shlex.split(call.args[0]) for call in sandbox.exec_script.await_args_list]
     assert ["printf", "%s\\n", "compose 2", ">", f"{GATEWAY_APP_DIR}/docker-compose.yml"] in written
 
@@ -2960,7 +3020,7 @@ async def test_container_mode_starts_children_beside_its_servers_and_hands_the_g
 
     async def children(reach):
         reaches.append(reach)
-        return [ExternalChild("desktop", "https://desk.example/mcp", "https://desk.example")]
+        return [ExternalChild("desktop", "https://desk.example/mcp", "https://desk.example", "read-desk")]
 
     gateway_env = MagicMock(docker_image_artifact=_image("agent-gateway"))
     db_env = MagicMock()
@@ -2980,3 +3040,4 @@ async def test_container_mode_starts_children_beside_its_servers_and_hands_the_g
     assert reaches == [None]
     assert env["INTERNAL_MCP_SERVERS"].split(",")[-1] == "desktop=https://desk.example/mcp"
     assert env["REST_PROXY_URLS"].split(",")[-1] == "desktop=https://desk.example"
+    assert env["CLOCK_FOLLOWER_TOKENS"] == "desktop=read-desk"

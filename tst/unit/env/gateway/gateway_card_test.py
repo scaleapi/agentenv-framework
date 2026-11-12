@@ -202,12 +202,12 @@ def test_rewrite_child_card_drops_the_childs_interfaces():
     assert _gateway({"mcp-slack": "http://slack:18765"})._rewrite_child_card("mcp-slack", child)["additionalInterfaces"] == []
 
 
-def test_gateway_card_lists_its_nine_extensions():
+def test_gateway_card_lists_its_ten_extensions():
     assert _gateway({})._gateway_extensions() is gateway_constants.GATEWAY_EXTENSIONS
     assert [e["uri"] for e in _gateway({})._gateway_extensions()] == [
         "urn:agentenv:disable-tool/v1", "urn:agentenv:enable-tool/v1", "urn:agentenv:triggers/v1",
         "urn:agentenv:clock/v1", "urn:agentenv:trajectory/v1", "urn:agentenv:step/v1", "urn:agentenv:state/v1",
-        "urn:agentenv:changes/v1", "urn:agentenv:notifications/v1",
+        "urn:agentenv:changes/v1", "urn:agentenv:notifications/v1", "urn:agentenv:user-chat/v1",
     ]
 
 
@@ -250,7 +250,8 @@ def test_every_advertised_endpoint_is_a_served_route():
     assert advertised <= served, advertised - served
 
 
-@pytest.mark.parametrize("name", ["WELL_KNOWN_PATH", "RPC_PATH", "PROTOCOL_VERSION", "METHOD_RESET", "METHOD_ADD", "METHOD_GET", "MCP_TRANSPORT"])
+@pytest.mark.parametrize("name", ["WELL_KNOWN_PATH", "RPC_PATH", "PROTOCOL_VERSION", "METHOD_RESET", "METHOD_ADD", "METHOD_GET", "MCP_TRANSPORT",
+                                  "CONTROL_TOKEN_ENV"])
 def test_gateway_constants_mirror_the_protocol(name):
     """constants.py copies these by hand because the gateway image has no agentenv_protocol dependency."""
     assert getattr(gateway_constants, name) == getattr(agentenv_protocol, name)
@@ -388,11 +389,11 @@ async def test_env_data_plane_unknown_method():
 
 
 def test_triggers_advertised_as_one_extension():
-    """Triggers ride a single urn:agentenv:triggers/v1 (register/remove/clear/state) — no separate get URI."""
+    """Triggers ride a single urn:agentenv:triggers/v1 (register/config/remove/clear/state) — no separate get URI."""
     exts = _gateway({})._gateway_extensions()
     trigger = [e for e in exts if e["uri"] == "urn:agentenv:triggers/v1"]
     assert len(trigger) == 1
-    assert set(trigger[0]["params"]["methods"]) == {"register", "remove", "clear", "state"}
+    assert set(trigger[0]["params"]["methods"]) == {"register", "config", "remove", "clear", "state"}
     assert not any(e["uri"] == "urn:agentenv:get-triggers/v1" for e in exts)
 
 

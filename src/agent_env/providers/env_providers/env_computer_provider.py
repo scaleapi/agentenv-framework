@@ -14,7 +14,8 @@ from agentenv_protocol import client as protocol_v1
 from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_RECORDING, tool_prefix_problem
 from agentenv_protocol.computer.app import COMPUTER_APP
 from agentenv_protocol.computer.app_runtime import HOLD_BOOT_LAUNCH_ENV
-from agentenv_protocol.website_browser import BROWSER, LOADED, start_tab_why
+from agentenv_protocol.website_browser import BROWSER, BROWSER_RECORDING, LOADED, start_tab_why
+from agentenv_protocol.website_browser.recording import END_S as BROWSER_RECORDING_END_S
 
 from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.attribution import Attribution
@@ -236,7 +237,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         except NotImplementedError as e:  # a reset the env supports, which this provider can't carry out
             raise RuntimeError(f"'{env.id}' can't be reset on {type(sandbox_provider).__name__}: {e}") from None
         card = await ready(deployed.environment_url, ready_timeout(env.composed_apps(), platform_of(env.computer.os)),
-                           deployed.control_token, answering=bool(params.site_routing))
+                           deployed.control_token, answering=bool(params.site_routing), sandbox=sandbox)
         _require_name(env, card)
         valid_for_s = (record.get("sites") or {}).get("valid_for_s", 0)
         if routed := await _finish_boot(env, deployed, sandbox, params, valid_for_s, values.get("resolution")):
@@ -336,14 +337,24 @@ def _refuse_failed_start_tabs(record: DeployedSandboxEnv, start_tabs: dict[str, 
 
 
 async def end_recordings(record: DeployedSandboxEnv, reason: str) -> None:
-    """Have the computer's driver end every recording not yet ended, each uploading what's left and its manifest under
-    the grant it was started with, before the computer goes; a driver that doesn't record has none."""
+    """Have the computer's driver, and each browser app on it that records, end every recording not yet ended, each
+    uploading what's left and its manifest under the grant it was started with, before the computer goes; a driver or
+    app that doesn't record has none."""
     try:
         await record.invoke(COMPUTER_RECORDING, "end_all", {"reason": reason}, timeout=_END_RECORDINGS_TIMEOUT_S)
     except EnvCapabilityUnsupported:
-        return
+        pass
     except Exception as e:
         logger.warning(f"'{record.env_id}': its recordings weren't ended before its computer went: {e}")
+    for child in (record.environment_card or {}).get("children_environments") or []:
+        if protocol_v1.find_extension(child, BROWSER_RECORDING) is None:
+            continue
+        try:
+            await record.invoke(BROWSER_RECORDING, "end_all", {"reason": reason}, environment_name=child.get("name"),
+                                timeout=max(_END_RECORDINGS_TIMEOUT_S, BROWSER_RECORDING_END_S))
+        except Exception as e:
+            logger.warning(f"'{record.env_id}': {child.get('name')}'s browser recordings weren't ended before its "
+                           f"computer went: {e}")
 
 
 def _reaching(policy: Optional[NetworkPolicy], sandbox_provider: SandboxProvider, url: str,

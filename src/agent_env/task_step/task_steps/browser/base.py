@@ -88,9 +88,11 @@ class BrowserStep(TaskStep):
 
 def stored_browsers(env: Env) -> list[str]:
     """The names of the website browsers a stored env deploys: a computer env's browser apps, the app itself for one
-    deployed alone, a multi env's computers' browser apps; none for any other env."""
+    deployed alone, a multi env's computers' browser apps and its browser computer, the one its browser_envs names or
+    the run's; none for any other env."""
     if isinstance(env, MultiEnv):
-        return [name for computer in env.computer_envs for name in stored_browsers(computer)]
+        computers = [*env.computer_envs, *([browser] if (browser := env.website_browser().computer) else [])]
+        return [name for computer in computers for name in stored_browsers(computer)]
     if not isinstance(env, ComputerEnv):
         return []
     return [app.environment_name for app in env.composed_apps() if app.declaration.browser]

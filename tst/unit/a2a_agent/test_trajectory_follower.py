@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import time
 
@@ -122,6 +123,60 @@ async def test_a_server_error_is_retried(monkeypatch):
 
     assert agent.afters == [0, 0]
     assert batches[-1].events == [{"i": 0}]
+
+
+@contextlib.asynccontextmanager
+async def _following(agent: _Agent, stop: asyncio.Event, *, poll_interval_seconds: float):
+    """A follower of ``agent``'s task, yielded once it has made its first read; cancelled on the way out
+    if it is still running, so a failing test leaves no follower behind."""
+
+    async def sink(batch: TrajectoryBatch) -> None:
+        pass
+
+    async def follow() -> None:
+        async with agent.client() as client:
+            await follow_trajectory(
+                _ENDPOINT, "task-1", sink, poll_interval_seconds=poll_interval_seconds, stop=stop, client=client
+            )
+
+    follower = asyncio.create_task(follow())
+    try:
+        async with asyncio.timeout(5):
+            while not agent.afters:
+                await asyncio.sleep(0.01)
+        yield follower
+    finally:
+        follower.cancel()
+        await asyncio.wait({follower})
+
+
+@pytest.mark.asyncio
+async def test_a_follower_cancelled_as_it_is_stopped_ends():
+    """A step's teardown sets ``stop`` and cancels its follower in the same tick. The agent keeps
+    answering, so only the cancel can end the follower; on Python 3.11 ``asyncio.wait_for`` dropped it."""
+    agent = _Agent(*[httpx.Response(200, json=_page(0, [], "running"))] * 100)
+    stop = asyncio.Event()
+    async with _following(agent, stop, poll_interval_seconds=30) as follower:
+        stop.set()
+        follower.cancel()
+
+        done, _ = await asyncio.wait({follower}, timeout=2)
+
+        assert done == {follower}
+        assert follower.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_an_agent_that_fails_after_the_turn_ends_ends_following():
+    agent = _Agent(httpx.Response(200, json=_page(0, [], "running")), *[httpx.Response(503)] * 100)
+    stop = asyncio.Event()
+    async with _following(agent, stop, poll_interval_seconds=30) as follower:
+        stop.set()
+
+        async with asyncio.timeout(2):
+            await follower
+
+    assert agent.afters == [0, 0]
 
 
 @pytest.mark.asyncio

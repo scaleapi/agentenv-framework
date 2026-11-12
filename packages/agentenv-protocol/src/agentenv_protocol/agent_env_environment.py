@@ -245,12 +245,22 @@ def tool(name: str | None = None, *, description: str | None = None, hidden_by_d
 class ForwardedTool(NamedTuple):
     """A tool an environment serves on another server's behalf, as that server lists it: its descriptor, its own
     schema included, its MCP ``annotations`` and its ``output_schema``; ``call`` takes the call's arguments as keywords
-    and returns the other server's ``CallToolResult``, which reaches the caller as it is."""
+    and returns the other server's ``CallToolResult``, which reaches the caller as it is. ``hidden_by_default`` hides it
+    as ``@tool(hidden_by_default=True)`` hides a tool of the environment's own."""
 
     tool: EnvironmentTool
     call: Callable[..., Any]
     annotations: dict | None = None
     output_schema: dict | None = None
+    hidden_by_default: bool = False
+
+    @classmethod
+    def listed(cls, tool: dict, call: Callable[..., Any], *, hidden_by_default: bool = False) -> "ForwardedTool":
+        """The tool another server's ``tools/list`` lists as ``tool``, called through ``call``: its name, description,
+        input and output schemas and annotations as listed."""
+        return cls(EnvironmentTool(name=tool["name"], description=tool.get("description"),
+                                   inputSchema=tool["inputSchema"]),
+                   call, tool.get("annotations"), tool.get("outputSchema"), hidden_by_default)
 
 
 class _ResourceMarker(NamedTuple):
@@ -450,7 +460,8 @@ class AgentEnvFastMCPApplication(AgentEnvApplication):
             fn_metadata=FuncMetadata(arg_model=_passed_through(), output_schema=schema,
                                      output_model=_as_it_came() if schema is not None else None),
             is_async=True,
-            annotations=_mcp_tool_annotations(forwarded.annotations) if forwarded.annotations is not None else None)
+            annotations=_mcp_tool_annotations(forwarded.annotations) if forwarded.annotations is not None else None,
+            meta={HIDDEN_BY_DEFAULT_META_KEY: True} if forwarded.hidden_by_default else None)
 
     def _register_resource(self, app: Any, resource: _ServedResource) -> None:
         """A resource as it is, its description absent when it has none, or a template through FastMCP's own
@@ -592,6 +603,11 @@ class AgentEnvStarletteApplication(AgentEnvApplication):
         app.router.routes.append(Route(path, handler, methods=methods))
 
 
+def mcp_port() -> int:
+    """The port ``create_fastmcp_app`` serves on: ``MCP_PORT``'s, else 18765."""
+    return int(os.environ.get("MCP_PORT", "18765"))
+
+
 def create_fastmcp_app(handler: Any, *, card: EnvironmentCard, **fastmcp_kwargs: Any) -> Any:
     """FastMCP app wired for the agent-env deploy contract, with ``handler`` mounted under ``card``; returned un-served."""
     try:
@@ -600,7 +616,7 @@ def create_fastmcp_app(handler: Any, *, card: EnvironmentCard, **fastmcp_kwargs:
         raise ImportError("create_fastmcp_app requires the 'mcp' package: pip install 'mcp>=1.25,<2'") from e
     app = FastMCP(card.name, **{"instructions": _instructions(handler), **fastmcp_kwargs})
     app.settings.host = os.environ.get("MCP_HOST", "0.0.0.0")
-    app.settings.port = int(os.environ.get("MCP_PORT", "18765"))
+    app.settings.port = mcp_port()
     app.settings.transport_security.enable_dns_rebinding_protection = False
     AgentEnvFastMCPApplication(card, handler).add_routes_to_app(app)
     return app
@@ -1283,6 +1299,8 @@ def _forwarding(forwarded: ForwardedTool) -> Callable:
         return await forwarded.call(**arguments)
 
     setattr(call, _FORWARDED_ATTR, forwarded)
+    if forwarded.hidden_by_default:
+        setattr(call, _HIDDEN_BY_DEFAULT_ATTR, True)
     return call
 
 

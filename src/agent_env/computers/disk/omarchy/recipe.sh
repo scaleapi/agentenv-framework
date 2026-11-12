@@ -1,19 +1,27 @@
 #!/bin/bash
 # recipe.sh USER DISTRIBUTION VERSION: run once as root over ssh in an Omarchy base's builder, Omarchy's own image booted
 # by the QEMU launcher with its session user USER signed in. It refuses an image that isn't the DISTRIBUTION and VERSION
-# its artifact declares, then makes it a computer's base: cua-driver's Hyprland plugin, pinned to the package built for
-# this Omarchy's Hyprland; agent-env's Hyprland drop-in; the seed unit that hands each boot its deploy's environment;
-# SDDM logging back in after a logout; Omarchy's toggles for an unattended desktop; and off, what a trial doesn't want:
-# crash toasts, dictation and its keys, housekeeping timers that would run at boot, and the firewall, which would stop
-# the computer's own ports. The session user's password is locked, and the machine id left empty, as Omarchy's own
-# sealed images leave it.
+# its artifact declares, then makes it a computer's base: agent-env's Hyprland drop-in; the seed unit that hands each
+# boot its deploy's environment; SDDM logging back in after a logout; Omarchy's toggles for an unattended desktop; off,
+# what a trial doesn't want: crash toasts, dictation and its keys, housekeeping timers that would run at boot, and the
+# firewall, which would stop the computer's own ports; and cua-driver's Hyprland plugin, built by its release's kit on
+# what the kit pins. The session user's password is locked, and the machine id left empty, as Omarchy's own sealed
+# images leave it.
 set -euo pipefail
 user=$1 distribution=$2 version=$3
 here=$(cd "$(dirname "$0")" && pwd)
 home=$(getent passwd "$user" | cut -d: -f6)
-#: cua-driver's Hyprland plugin, as Omarchy's own repository builds it for Omarchy 4.5's Hyprland 0.56.2-4.
-plugin_url=https://pkgs.omarchy.org/stable/x86_64/cua-hyprland-plugin-0.33.2-3-x86_64.pkg.tar.zst
-plugin_sha256=48a25c70dafdd423118c9937d3b469953e89a15cc0f278662f8fd728b523c47e
+#: cua-driver's Hyprland plugin, as its release's source and build kit, which the driver's Hyprland pin matches.
+plugin_release=https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.47.4
+plugin=cua-hyprland-plugin-0.47.4-09b38ab661aa8b7d46deb5ff98ca00063019f592
+plugin_sha256=fd2e7f6426388753c19b8898a920f1f0d19f3ce81d5f7d7ae9ef3a2dee2c3b98
+plugin_kit_sha256=4da83523664049e9fa5a5f3269294dfad9602e6c5a02b0534a8c6f5b29920354
+#: What the kit builds on, in place of Omarchy's newer builds: Arch's Hyprland 0.56.2-1 with the libraries it was built
+#: against, and the GCC 16.1.1 it was built with, from that day of the Arch Linux Archive (arch-day.conf).
+pinned=(hyprland aquamarine hyprtoolkit hyprland-guiutils gcc gcc-libs libasan libatomic libgcc libgfortran libgomp
+        libhwasan liblsan libobjc libquadmath libstdc++ libtsan libubsan)
+#: What the kit builds with that Omarchy lacks, removed once it has.
+build_tools=(cmake ninja)
 
 . /etc/os-release
 if [ "$ID" != "$distribution" ] || [ "$VERSION_ID" != "$version" ]; then
@@ -21,12 +29,6 @@ if [ "$ID" != "$distribution" ] || [ "$VERSION_ID" != "$version" ]; then
     exit 3
 fi
 echo "os-release: ID=$ID VERSION_ID=$VERSION_ID"
-
-plugin=$(mktemp --suffix=.pkg.tar.zst)
-curl -fsSL --retry 5 -o "$plugin" "$plugin_url"
-echo "$plugin_sha256  $plugin" | sha256sum --check --quiet
-pacman -U --noconfirm --needed "$plugin"
-rm -f "$plugin"
 
 install -d /opt/agentenv
 install -m 644 "$here/seed-env" /opt/agentenv/seed-env
@@ -36,10 +38,6 @@ install -m 644 "$here/agentenv-seed.service" /etc/systemd/system/agentenv-seed.s
 systemctl enable --quiet agentenv-seed.service
 install -d /etc/sddm.conf.d
 install -m 644 "$here/sddm-relogin.conf" /etc/sddm.conf.d/zz-agentenv.conf
-
-install -m 644 -o "$user" -g "$user" "$here/agentenv.lua" "$home/.config/hypr/agentenv.lua"
-grep -q 'require("hypr.agentenv")' "$home/.config/hypr/hyprland.lua" \
-    || echo 'require("hypr.agentenv")' >> "$home/.config/hypr/hyprland.lua"
 
 systemctl --global mask --quiet omarchy-crash-watch.service superwhisper.service
 systemctl mask --quiet snapper-cleanup.timer plocate-updatedb.timer man-db.timer shadow.timer \
@@ -67,6 +65,36 @@ session omarchy toggle animations off
 session omarchy toggle notification silencing
 session omarchy toggle screensaver
 session omarchy toggle suspend
+
+# The rest with the desktop session ended, as the plugin's kit says to install it: Hyprland reloads its config whenever
+# a file of it changes, and the Hyprland running here can neither load the plugin nor show the error its config naming a
+# missing one makes without hanging. The computer boots the pinned Hyprland with the drop-in loading the plugin.
+systemctl stop sddm.service
+loginctl terminate-user "$user"
+for _ in $(seq 60); do pgrep -x Hyprland > /dev/null || break; sleep 1; done
+if pgrep -x Hyprland > /dev/null; then
+    echo "recipe: Hyprland still runs a minute after the desktop session ended" >&2
+    exit 1
+fi
+install -m 644 -o "$user" -g "$user" "$here/agentenv.lua" "$home/.config/hypr/agentenv.lua"
+grep -q 'require("hypr.agentenv")' "$home/.config/hypr/hyprland.lua" \
+    || echo 'require("hypr.agentenv")' >> "$home/.config/hypr/hyprland.lua"
+# The plugin's kit runs makepkg as an ordinary user, in a folder of its own, and its package goes in from there.
+pacman --config "$here/arch-day.conf" -Sy
+pacman --config "$here/arch-day.conf" -S --needed --noconfirm "${pinned[@]}" "${build_tools[@]}"
+kit=$(mktemp -d) download=$(mktemp -d)
+curl -fsSL --retry 5 -o "$kit/$plugin.tar.gz" "$plugin_release/$plugin.tar.gz"
+curl -fsSL --retry 5 -o "$download/kit.tar.gz" "$plugin_release/$plugin-build-kit.tar.gz"
+echo "$plugin_sha256  $kit/$plugin.tar.gz" | sha256sum --check --quiet
+echo "$plugin_kit_sha256  $download/kit.tar.gz" | sha256sum --check --quiet
+tar -xzf "$download/kit.tar.gz" -C "$kit"
+(cd "$kit" && sha256sum --check --quiet SHA256SUMS)
+chown -R "$user:$user" "$kit"
+runuser -u "$user" -- env HOME="$home" bash -c 'cd "$1" && makepkg --noconfirm' makepkg "$kit"
+pacman -U --noconfirm "$kit"/cua-hyprland-plugin-*.pkg.tar.zst
+pacman -Rns --noconfirm "${build_tools[@]}"
+rm -rf "$kit" "$download" /var/lib/pacman/sync/core.db* /var/lib/pacman/sync/extra.db*
+pacman -Q hyprland gcc cua-hyprland-plugin
 
 passwd --lock --quiet "$user" 2>/dev/null || passwd -l "$user" > /dev/null
 truncate -s 0 /etc/machine-id

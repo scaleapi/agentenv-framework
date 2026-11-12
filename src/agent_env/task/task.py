@@ -13,7 +13,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Callable, ClassVar, Optional
 
 from agentenv_protocol import client as protocol_v1
@@ -25,7 +25,7 @@ from agent_env.store.document_store import UnknownDocumentTypeError
 from agent_env.store.routing import run_scope
 from agent_env.task_step.preflight import pinned
 from agent_env.task.teardown import env_record_ids
-from agent_env.task_step.context import TaskStepContext, regraft_redacted_keys
+from agent_env.task_step.context import ENTITY_IDS_KEY, TaskStepContext, regraft_redacted_keys
 from agent_env.task_step.context_ops import ContextUpdateOps, build_context_update_ops
 from agent_env.task_step.task_step import RetryConfig, TaskStep
 
@@ -349,6 +349,8 @@ class Task:
     encoded in each step's depends_on. Independent steps run concurrently.
     ``requires`` names the plugin packages its steps and what they reference use, as pip requirements, which a
     registration records (``agent-env bundle register``); None when nothing recorded it.
+    ``entity_ids`` maps each id a bundle rewrote in the task's steps, as the task names it, to the id the bundle gave
+    it; ``run`` puts it in ``context.metadata`` for ``run_entity_id``. None for a task stored as written.
     """
 
     type: ClassVar[str] = "task"
@@ -359,12 +361,26 @@ class Task:
         version: Optional[int],
         steps: list[TaskStep] | None = None,
         requires: Sequence[str] | None = None,
+        entity_ids: Mapping[str, str] | None = None,
     ):
         self.id = id
         self.version = version
         self.steps: list[TaskStep] = steps or []
         self.requires: list[str] | None = list(requires) if requires is not None else None
+        self.entity_ids: dict[str, str] | None = dict(entity_ids) if entity_ids else None
         self._validate_dag(self.steps)
+        self._validate_pairings(self.steps)
+
+    @staticmethod
+    def _validate_pairings(steps: list[TaskStep]) -> None:
+        """Refuse steps that don't go together (``TaskStep.task_problems``), such as a verifier on a prompt it can't
+        grade. A step built without TaskStep, as some tests build one, has none."""
+        problems = []
+        for step in steps:
+            if (check := getattr(step, "task_problems", None)) is not None:
+                problems.extend(check(steps))
+        if problems:
+            raise ValueError("; ".join(problems))
 
     @classmethod
     def _validate_dag(cls, steps: list[TaskStep]) -> None:
@@ -424,6 +440,8 @@ class Task:
         }
         if self.requires is not None:
             data["requires"] = list(self.requires)
+        if self.entity_ids:
+            data["entity_ids"] = dict(self.entity_ids)
         return data
 
     @classmethod
@@ -450,6 +468,7 @@ class Task:
             version=data.get("version"),
             steps=steps,
             requires=data["requires"] if isinstance(data.get("requires"), list) else None,
+            entity_ids=data["entity_ids"] if isinstance(data.get("entity_ids"), dict) else None,
         )
 
     async def run(
@@ -495,6 +514,8 @@ class Task:
         if context is None:
             context = TaskStepContext()
         context.metadata.setdefault("run_group_id", uuid.uuid4().hex)
+        if self.entity_ids:
+            context.metadata.setdefault(ENTITY_IDS_KEY, dict(self.entity_ids))
 
         # Seed substitution for EVERY step field, not just prompts. The hub's
         # "Seed values" box writes context.metadata["seed"], and until now only

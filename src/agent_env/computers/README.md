@@ -1,5 +1,5 @@
 Base computers that come with agent-env, each a `computer` artifact a computer env composes a driver and apps onto.
-`agent-env run <bundle> --set envs/desktop.computer=ubuntu-24.04-headless` composes a bundle's `desktop` env on
+`agent-env run <bundle> --set envs/desktop.computer=ubuntu-24.04-browser` composes a bundle's `desktop` env on
 another of them for one run, the bundle left as written.
 
 `artifacts/ubuntu-24.04/` is Ubuntu 24.04 (`amd64` and `arm64`) with XFCE on Xvfb, D-Bus and AT-SPI. tini starts
@@ -10,16 +10,22 @@ container form's image is built from the folder's `Dockerfile`, and a release pu
 building it. Name it from another bundle as `ubuntu-24.04`, the alias `aliases.toml` gives it, or by its id,
 `@local/agentenv-framework/computers/ubuntu-24.04`.
 
-`artifacts/ubuntu-24.04-headless/` is Ubuntu 24.04 (`amd64` and `arm64`) with no display server or desktop
-(`display = "none"`), for one website browser, which runs headless there, and the `page` driver, whose screen is the
-browser's page: a browser computer, which agentenv's `chromium` deploys alone as. supervisord runs every program as the
-session user, among them a stand-in site proxy on `127.0.0.1:3128`, the browser's only route out when the computer
+`artifacts/ubuntu-24.04-browser/` is Ubuntu 24.04 (`amd64` and `arm64`) with no desktop (`display = "none"`), for one
+website browser and the `page` driver, whose screen is the browser's page: a browser computer, which agentenv's
+`chromium` deploys alone as. The browser runs headful on an X server of its own, Xvfb on `:99` at 1920x1080, which no
+agent sees, records or drives, so the sites it visits see a browser with a window, not a headless one; the page's size
+is the browser's `window` setting. supervisord runs every program as the session user, among them that X server and a
+stand-in site proxy on `127.0.0.1:3128`, the browser's only route out when the computer
 routes no sites. It forwards a request or a `CONNECT` tunnel to any host, never decrypting a tunnel and refusing
 nothing: the sandbox's network policy is all that limits it. Every line it writes to `/var/log/agentenv/site-proxy.log`
-is JSON, one per connection and one per connection that fails, in the same shapes as the shared site proxy's. A computer that routes sites names the shared site proxy's forward port,
+is JSON, one per connection and one per connection that fails, in the same shapes as the shared site proxy's. It
+keeps the browser's network log too, in `/var/log/agentenv/network.jsonl`, which `AGENTENV_NETWORK_LOG` names: an
+`open` and an `end` line for each connection, numbered, in the shared site proxy's shapes. A computer that routes sites names the shared site proxy's forward port,
 `127.0.0.1:3129`, to the browser instead: it serves the run's sites, refuses every other host and runs out of the agent's reach. It has a
-container form only. Name it from another bundle as `ubuntu-24.04-headless`, or by its id,
-`@local/agentenv-framework/computers/ubuntu-24.04-headless`.
+container form only. Name it from another bundle as `ubuntu-24.04-browser`, or by its id,
+`@local/agentenv-framework/computers/ubuntu-24.04-browser`. It was `ubuntu-24.04-headless`, a name nothing resolves
+any more, so what still names it fails rather than gets a headful browser; its image, `agentenv-ubuntu-24.04-headless`,
+stays published for what pins it.
 
 It also has a disk form, a disk a VM boots from UEFI, which is the container form's root filesystem on the Linux boot
 recipe in `disk/linux/`: a GPT disk of an EFI system partition holding one UKI, Ubuntu's kernel with a busybox initramfs,
@@ -198,13 +204,19 @@ by `source`, a URL and a sha256, fetched once into this machine's cache and chec
 launcher as a `linux-desktop` guest (a virtio GPU at the computer's resolution, 4 vCPUs and 8 GB), with root's ssh key
 passed as a systemd credential, Omarchy signing its user `omarchy` in as it does at every boot, and made a base by
 `disk/omarchy/recipe.sh`, run as root over ssh. The recipe refuses an image whose os-release isn't the artifact's
-`omarchy` `4.5.0`; installs cua-driver's Hyprland plugin, pinned by URL and sha256 to the package Omarchy builds for its
-Hyprland; adds `agentenv.lua` to Hyprland's config (the plugin loaded at start, a US keymap, the idle cursor hidden, the
-display's mode); installs the seed unit; has SDDM log back in after a logout; sets Omarchy's toggles for an unattended
-desktop (staying awake, no animations, no screensaver or suspend, notifications silenced); turns off crash toasts,
-dictation and its keys, housekeeping timers that would run at boot, and the firewall, which lets in only ssh and
-LocalSend while the launcher forwards only the computer's own ports; and locks `omarchy`'s password and leaves the
-machine id empty. Trimmed, the image becomes the base's, with the key to root, and is pushed to the env's image store
+`omarchy` `4.5.0`; adds `agentenv.lua` to Hyprland's config (cua-driver's Hyprland plugin loaded at start, a US keymap,
+the idle cursor hidden, the display's mode); installs the seed unit; has SDDM log back in after a logout; sets Omarchy's
+toggles for an unattended desktop (staying awake, no animations, no screensaver or suspend, notifications silenced);
+turns off crash toasts, dictation and its keys, housekeeping timers that would run at boot, and the firewall, which lets
+in only ssh and LocalSend while the launcher forwards only the computer's own ports; builds the plugin; and locks
+`omarchy`'s password and leaves the machine id empty. The plugin is the one cua-driver's release at the driver's
+Hyprland pin ships, built from its source by that release's kit, unmodified, as `omarchy` with `makepkg`, each archive
+pinned by sha256. The kit builds only on what it pins, Arch's Hyprland 0.56.2-1 and the GCC 16.1.1 it was built with,
+where Omarchy 4.5 ships newer builds of both, so first the recipe installs those from that day of the Arch Linux
+Archive (`disk/omarchy/arch-day.conf`, packages signature-checked by pacman), with the Hyprland libraries of that day,
+and cmake and ninja, which it removes after the build. It ends the builder's desktop session first, as the kit says to
+install it, and only then adds the drop-in: Hyprland reloads its config whenever a file of it changes, and the one
+running there can neither load the plugin nor show, without hanging, the error a config naming a missing one makes. Trimmed, the image becomes the base's, with the key to root, and is pushed to the env's image store
 under a tag of its recipe and source. Name it as `omarchy-4.5`, or by its id,
 `@local/agentenv-framework/computers/omarchy-4.5`.
 

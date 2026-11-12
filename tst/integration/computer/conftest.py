@@ -1,15 +1,19 @@
 """The ubuntu-24.04 base computer, built from its folder once for the tests here and tagged for the local registry; the
 shipped desktop example's computer env, the cua-driver test bundle's, the chromium test bundle's, the website-browser
-test bundle's, the TLS clients test bundle's and agentenv's chromium deployed alone, each composed once for a module's
-tests;
+test bundle's, the TLS clients test bundle's, the clock desktop test bundle's and agentenv's chromium deployed alone, each
+composed once for a module's tests;
 ``state``, local stores for a test that runs a bundle; each of these stores starts with the packages the run has resolved
 (``tst.util.package_cache``); ``docker``, which runs the docker CLI for them; and
-``cdp_clients``, Playwright and Puppeteer installed to connect to a CDP address."""
+``cdp_clients``, Playwright and Puppeteer installed to connect to a CDP address. A compose's build of an image waits for
+another test worker's build of the same tag."""
 
+import fcntl
+import hashlib
 import logging
 import re
 import shutil
 import subprocess
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -24,6 +28,7 @@ from agent_env.bundle.plan import plan_bundle
 from agent_env.bundle.resolve import BuiltImage, resolve_bundle
 from agent_env.config import configure, reset_config
 from agent_env.env import Env
+from agent_env.env.envs.computer.utils import builder
 from agent_env.providers.sandbox_providers.host_images import host_platform
 from agent_env.store.object_store.local.grant_server import grant_server
 from agent_env.store.routing import namespace_routing
@@ -37,9 +42,29 @@ CHROMIUM = Path(__file__).parent / "chromium"
 WEBSITE_BROWSER = Path(__file__).parent / "website-browser"
 BROWSER_COMPUTER = Path(__file__).parent / "browser-computer"
 TLS = Path(__file__).parent / "tls"
+CLOCK_DESKTOP = Path(__file__).parent / "clock-desktop"
+#: agent-env's libfaketime recipe, which the clock desktop's universe-clock app builds.
+CLOCK_RECIPE = Path(agent_env.__file__).parent / "computers" / "clock"
 #: Playwright and Puppeteer, which connect to a cdp address from Node.
 CDP_CLIENTS = Path(__file__).parent / "cdp_clients"
 CHROMIUM_ALONE = "@local/agentenv-framework/browsers/chromium"
+
+
+@pytest.fixture(scope="session", autouse=True)
+def one_build_of_a_tag_at_a_time():
+    """Test workers share one Docker daemon, and two composes of the same computer in stores of their own build the
+    same tag, which fails with "image ... already exists" when both builds finish at once, so they take turns."""
+    built = builder.build_image
+
+    def build_image(dockerfile, context, tag, **kwargs):
+        lock = Path(tempfile.gettempdir()) / f"agentenv-test-build-{hashlib.sha256(tag.encode()).hexdigest()[:16]}.lock"
+        with open(lock, "w") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            return built(dockerfile, context, tag, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(builder, "build_image", build_image)
+        yield
 
 
 @pytest.fixture(scope="session")
@@ -83,7 +108,7 @@ def website_browser_desktop(tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def browser_computer(tmp_path_factory):
-    """agentenv's chromium, which deploys alone as a browser computer: the ubuntu-24.04-headless base, with no display, and the
+    """agentenv's chromium, which deploys alone as a browser computer: the ubuntu-24.04-browser base, with no desktop, and the
     page driver, whose screen is the browser's page; composed, through the browser-computer test bundle's task that
     deploys it, as ``desktop`` is."""
     yield from _composed(tmp_path_factory.mktemp("browser-computer"), parse_bundle(BROWSER_COMPUTER), CHROMIUM_ALONE)
@@ -94,6 +119,19 @@ def tls_desktop(tmp_path_factory):
     """The TLS clients test bundle's desktop, the ubuntu-24.04 base and the reference driver with Node, an apt JDK, a
     copy of it under /opt and curl, composed as ``desktop`` is."""
     yield from _composed(tmp_path_factory.mktemp("tls-desktop"), parse_bundle(TLS))
+
+
+@pytest.fixture(scope="module")
+def clock_desktop(tmp_path_factory):
+    """The clock desktop test bundle's desktop, the ubuntu-24.04 base and the reference driver with agentenv's chromium
+    and the universe-clock app, which builds agent-env's libfaketime from a copy of its recipe and preloads it into every
+    process; composed as ``desktop`` is."""
+    root = tmp_path_factory.mktemp("clock-desktop")
+    bundle = root / "bundle"
+    shutil.copytree(CLOCK_DESKTOP, bundle)
+    shutil.copytree(CLOCK_RECIPE, bundle / "envs" / "universe-clock" / "clock",
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    yield from _composed(root, parse_bundle(bundle))
 
 
 @pytest.fixture(scope="module")

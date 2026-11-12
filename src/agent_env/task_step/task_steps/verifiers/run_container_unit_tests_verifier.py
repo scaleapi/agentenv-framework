@@ -50,7 +50,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     registered_sandbox_provider_classes,
 )
 from agent_env.store.ids import derive_id, is_local_id, key_segment, validate_local_id
-from agent_env.task_step.context import TaskStepContext, dual_keyed
+from agent_env.task_step.context import StepContextError, TaskStepContext, dual_keyed
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.run_code import _DriverTarget
 
@@ -395,7 +395,7 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
             )
         ds = next((s for s in context.deployed_sandboxes if s.sandbox_name == self.sandbox_name), None)
         if ds is None:
-            raise RuntimeError(f"Sandbox '{self.sandbox_name}' not found in context.deployed_sandboxes")
+            raise StepContextError(f"Sandbox '{self.sandbox_name}' not found in context.deployed_sandboxes")
 
         provider = (
             build_sandbox_provider(ds.sandbox_type) if ds.sandbox_type else get_sandbox_provider()
@@ -439,7 +439,7 @@ class RunContainerUnitTestsVerifierTaskStep(TaskStep):
         timeout."""
         deployed = next((d for d in context.deployed_envs if d.env_id == self.env_id), None)
         if deployed is None:
-            raise RuntimeError(f"Env '{self.env_id}' not found in context.deployed_envs")
+            raise StepContextError(f"Env '{self.env_id}' not found in context.deployed_envs")
         deployed = require_sandbox(deployed, "Running a verifier in an env")
         if missing := inside.missing(deployed):
             raise RuntimeError(f"env '{self.env_id}' doesn't serve {', '.join(missing)}, which running a verifier in "

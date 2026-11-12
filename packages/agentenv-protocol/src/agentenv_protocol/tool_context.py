@@ -97,6 +97,8 @@ class ToolContext:
     tool: str = ""
     arguments: Mapping[str, Any] = dataclasses.field(default_factory=lambda: types.MappingProxyType({}), hash=False)
     call_id: str = ""
+    #: Whether the call is an MCP tool call, rather than a REST or extension call.
+    mcp: bool = False
 
     @property
     def role(self) -> Optional[str]:
@@ -189,7 +191,7 @@ def context_from_mcp(context: Any, tool: str, arguments: Mapping[str, Any]) -> T
     request = getattr(request_context, "request", None)
     headers = getattr(request, "headers", None) if request is not None else None
     return ToolContext(caller=caller_from_request(extra, headers), tool=tool, arguments=_frozen(arguments),
-                       call_id=uuid.uuid4().hex)
+                       call_id=uuid.uuid4().hex, mcp=True)
 
 
 def _meta_entries(meta: Any) -> Optional[Mapping[str, Any]]:

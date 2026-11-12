@@ -29,22 +29,32 @@ def multi():
 @click.option("--computer", "computers", multiple=True,
               help="ComputerEnv id[:version], deployed on a sandbox of its own; its tools are served under its "
                    "environment_name and '_'")
+@click.option("--browser", "browsers", multiple=True,
+              help="Website browser env id[:version]: an MCP server env serving one, such as playwright-mcp, or a "
+                   "computer env with a website browser app, such as chromium, deployed on a sandbox of its own "
+                   "(default: the run's website_browser_env_id when there are websites)")
+@click.option("--no-browser", is_flag=True, default=False, help="Deploy no website browser, even with websites")
 @click.option("--metadata", "metadata_pairs", multiple=True, help="Metadata key=value pair (repeatable)")
 @click.option("--name", default=None, help="Name agents see this env's MCP server under, e.g. crm -> mcp__crm__<tool> (default: env + 4 random digits per deploy)")
 @env_provider_type_option("What deploys the env: 'gateway' (a gateway in front of its servers and websites, whatever their own "
                           "env_provider_type), or the type of an installed agent_env.env_providers plugin, which deploys them all", "multi")
 @click.option("--validate", "run_validation", is_flag=True, default=False, help="Validate the environment after registering it")
 def put(env_id: str, mcp_servers: tuple[str, ...], websites: tuple[str, ...], computers: tuple[str, ...],
-        metadata_pairs: tuple[str, ...], name: str | None, env_provider_type: str, run_validation: bool):
+        browsers: tuple[str, ...], no_browser: bool, metadata_pairs: tuple[str, ...], name: str | None,
+        env_provider_type: str, run_validation: bool):
     """Create a MultiEnv from MCPServerEnv, WebsiteEnv and ComputerEnv ids."""
 
     if not mcp_servers and not websites and not computers:
         click.echo("Error: At least one of --mcp-server, --website or --computer must be provided.", err=True)
         raise SystemExit(1)
+    if browsers and no_browser:
+        click.echo("Error: --browser and --no-browser can't both be given.", err=True)
+        raise SystemExit(1)
 
     mcp_server_envs = _fetch(mcp_servers, "mcp_server", "MCPServerEnv")
     website_envs = _fetch(websites, "website", "WebsiteEnv")
     computer_envs = _fetch(computers, COMPUTER_ENV_TYPE, "ComputerEnv")
+    browser_envs = [] if no_browser else _fetch(browsers, None, "website browser env") if browsers else None
 
     user_metadata = {}
     for pair in metadata_pairs:
@@ -57,7 +67,8 @@ def put(env_id: str, mcp_servers: tuple[str, ...], websites: tuple[str, ...], co
 
     try:
         refusal = MultiEnv(id=env_id, version=None, mcp_server_envs=mcp_server_envs, website_envs=website_envs, name=name,
-                           env_provider_type=env_provider_type, computer_envs=computer_envs).save_refusal()
+                           env_provider_type=env_provider_type, computer_envs=computer_envs,
+                           browser_envs=browser_envs).save_refusal()
     except ValueError as e:
         refusal = str(e)
     if refusal:
@@ -65,7 +76,8 @@ def put(env_id: str, mcp_servers: tuple[str, ...], websites: tuple[str, ...], co
         raise SystemExit(1)
     click.echo("Creating MultiEnv...")
     multi_env = MultiEnv.put(id=env_id, mcp_server_envs=mcp_server_envs, website_envs=website_envs, metadata=metadata if metadata else None, name=name,
-                             env_provider_type=env_provider_type, computer_envs=computer_envs)
+                             env_provider_type=env_provider_type, computer_envs=computer_envs,
+                             browser_envs=browser_envs)
     click.echo(f"Created MultiEnv: id={multi_env.id} version={multi_env.version} env_provider_type={multi_env.env_provider_type}")
     if run_validation:
         click.echo("\nValidating environment...")
@@ -73,14 +85,14 @@ def put(env_id: str, mcp_servers: tuple[str, ...], websites: tuple[str, ...], co
         click.echo(f"Validation task: {instance_id}")
 
 
-def _fetch(refs: tuple[str, ...], env_type: str, label: str) -> list[Env]:
-    """The env each of ``refs`` (id[:version]) names, exiting unless each is an ``env_type`` env."""
+def _fetch(refs: tuple[str, ...], env_type: str | None, label: str) -> list[Env]:
+    """The env each of ``refs`` (id[:version]) names, exiting unless each is an ``env_type`` env, when one is named."""
     envs = []
     for ref in refs:
         env_id, version = parse_env_ref(ref)
         click.echo(f"Fetching {label}: id={env_id} version={version or 'latest'}...")
         env = Env.get(env_id, version=version)
-        if env.type != env_type:
+        if env_type is not None and env.type != env_type:
             click.echo(f"Error: {env_id} is type '{env.type}', expected '{env_type}'", err=True)
             raise SystemExit(1)
         envs.append(env)

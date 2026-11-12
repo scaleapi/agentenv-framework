@@ -1,7 +1,7 @@
 """A notes app for the computer app tests: its service writes the settings a deploy gave it to ~/.notes.json, and its
 own server launches its window once the desktop session is up; it's ready once both have happened. It requires no
 Python of its own, so its service and window run in the venv every app gets for its server. Its install takes an apt
-package from Ubuntu's archive and one only a Launchpad PPA has, which its run script uses, a download checked by sha256,
+package from Ubuntu's archive and one only Docker's apt repository has, which its run script uses, a download checked by sha256,
 and an install step run as the session user on the build setting its env.toml fixes, which also leaves a welcome note
 in ~/Notes, where it keeps its data, so its server serves that folder as its data plane. On Linux its settings gain a
 font, and its install step and ready check are Linux's."""
@@ -13,7 +13,9 @@ from agentenv_protocol.computer import (AptSource, ComputerAppEnvironment, Downl
                                         Service, computer_app, install_step, linux, ready_check)
 
 LICENSE = "https://raw.githubusercontent.com/python/cpython/v3.12.0/LICENSE"
-FASTFETCH = "https://ppa.launchpadcontent.net/zhangsongcui3371/fastfetch/ubuntu"
+# A source outside Ubuntu, with its own key: Docker's apt repository (download.docker.com, key 9DC8 5822 9FC7 DD38 854A
+# E2D8 8D81 803C 0EBF CD88), whose compose plugin Ubuntu doesn't ship and which needs no other package.
+DOCKER = "https://download.docker.com/linux/ubuntu"
 
 
 class LinuxSettings(BaseModel):
@@ -21,8 +23,8 @@ class LinuxSettings(BaseModel):
 
 
 @computer_app(supports=[{"os": {"type": "linux", "display": ["x11"]}, "arch": ["amd64", "arm64"]}])
-@linux(packages=Packages(apt=["hello", "fastfetch"]),
-       sources=[AptSource(apt=FASTFETCH, suite="noble", components=["main"], key="fastfetch.asc")],
+@linux(packages=Packages(apt=["hello", "docker-compose-plugin"]),
+       sources=[AptSource(apt=DOCKER, suite="noble", components=["stable"], key="docker.asc")],
        downloads=[Download(url=LICENSE, to="LICENSE.txt",
                            sha256="3b2f81fe21d181c499c59a256c8e1968455d6689d269aa85373bfb6af41da3bf")],
        run=[RunScript(script="setup.sh")],
