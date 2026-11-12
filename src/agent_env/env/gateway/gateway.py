@@ -630,7 +630,8 @@ class Gateway:
 
     async def _clock_write(self, request: Request, change, *, body_optional: bool = False) -> Response:
         """A clock write route: its JSON object body (none at all when ``body_optional``) applied by ``change`` through
-        ``_change_clock``; 400 for a body or value the clock refuses, else 200, or 504 naming the followers behind."""
+        ``_change_clock``; 400 for a body or value the clock refuses, else 200, or 504 naming the followers behind, with
+        what each follower last showed and when it last watched."""
         try:
             body = await request.json() if not body_optional or await request.body() else {}
         except Exception:
@@ -643,9 +644,10 @@ class Gateway:
         except ClockError as e:
             return self._json_response({"ok": False, "error": str(e)}, 400)
         if stale:
-            return self._json_response({**state, "ok": False, "stale": stale, "error": (
-                f"the clock is at version {state['version']}, but {', '.join(stale)} didn't show it within "
-                f"{wait:g} s: their clocks are behind")}, 504)
+            return self._json_response({**state, "ok": False, "stale": stale, "followers": self._clock_followers.state(),
+                                        "error": (f"the clock is at version {state['version']}, but {', '.join(stale)} "
+                                                  f"didn't show it (waited up to {wait:g} s; one that has stopped "
+                                                  "watching isn't waited for): their clocks are behind")}, 504)
         return self._json_response(state, 200)
 
     async def _change_clock(self, change, wait_s: float = 0.0) -> tuple[dict, list[str]]:
