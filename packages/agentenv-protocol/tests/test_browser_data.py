@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 from agentenv_protocol import website_browser
+from agentenv_protocol.website_browser import log as browser_log
 from agentenv_protocol.computer import Launch, Ready, app, linux
 from agentenv_protocol.computer.app import AGENT_ACTED
 from agentenv_protocol.computer.errors import DeviceUnavailable, InvalidArgument
@@ -90,6 +91,7 @@ def browser(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path / "folder")
     monkeypatch.setenv("ENVIRONMENT_NAME", "chromium")
     monkeypatch.setenv("AGENTENV_APP_SETTINGS", json.dumps({"chromium": {"start_urls": ["https://shop.test/"]}}))
+    monkeypatch.setattr(browser_log, "LOG_DIR", tmp_path / "logs")
     made = Browser()
     made.control = FakeControl()
     launches = []
@@ -149,8 +151,23 @@ async def test_data_get_is_its_state_its_profile_without_caches_or_locks_and_its
     assert state["cookies"] == FakeControl().cookie_list and "partitionKey" not in state["cookies"][0]
     assert state["clock"]["mode"] == "real" and state["tabs"][0]["id"] == "t1" and state["closed_tabs"][0]["id"] == "t0"
     assert files == {f"{PROFILE}/Default/Cookies": b"db", f"{PROFILE}/Default/Cookies-journal": b"j",
-                     f"{PROFILE}/Default/Local Storage/leveldb/CURRENT": b"m", "Downloads/report.csv": b"a,b"}
+                     f"{PROFILE}/Default/Local Storage/leveldb/CURRENT": b"m", "Downloads/report.csv": b"a,b",
+                     "browser-log.jsonl": b""}
     assert not list((home / ".cache").iterdir())
+
+
+@pytest.mark.asyncio
+async def test_data_get_exports_the_log_written_so_far_and_data_add_passes_over_it(browser):
+    browser.log.note("reset", {})
+    pending = browser.log.reserve()
+    files = _files(await browser.browser_get_data())
+    browser.log.write(pending, {"reset": {}})
+
+    logged = [json.loads(line) for line in files["browser-log.jsonl"].decode().splitlines()]
+    assert [line["seq"] for line in logged] == [1] and logged[0]["reset"] == {}
+    await browser.browser_add_data(_parts(_file("browser-state.json", _snapshot_state()),
+                                          _file("browser-log.jsonl", files["browser-log.jsonl"])))
+    assert ("cookies", ["sid"]) in browser.control.did
 
 
 @pytest.mark.asyncio
@@ -183,7 +200,8 @@ async def test_data_get_leaves_out_what_the_browser_removes_while_it_copies(brow
     monkeypatch.setattr(website_browser.data.shutil, "copy2", removed_meanwhile)
     files = _files(await browser.browser_get_data())
 
-    assert set(files) == {"browser-state.json", f"{PROFILE}/Default/Cookies", f"{PROFILE}/Default/Session Storage/LOG"}
+    assert set(files) == {"browser-state.json", "browser-log.jsonl", f"{PROFILE}/Default/Cookies",
+                          f"{PROFILE}/Default/Session Storage/LOG"}
 
 
 def _snapshot_state(**changes) -> bytes:

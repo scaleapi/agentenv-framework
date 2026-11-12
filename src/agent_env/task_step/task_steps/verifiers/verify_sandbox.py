@@ -35,7 +35,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     get_agent_sandbox_provider,
     get_sandbox_provider,
 )
-from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import find_agent_container
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
@@ -194,7 +194,7 @@ class VerifySandboxTaskStep(TaskStep):
             None,
         )
         if agent is None:
-            raise RuntimeError(f"Agent '{self.agent_name}' not found in context.deployed_agents")
+            raise StepContextError(f"Agent '{self.agent_name}' not found in context.deployed_agents")
         if not agent.sandbox_id:
             raise RuntimeError(f"Agent '{self.agent_name}' has no sandbox_id")
         provider = (
@@ -210,7 +210,7 @@ class VerifySandboxTaskStep(TaskStep):
             None,
         )
         if deployed is None:
-            raise RuntimeError(
+            raise StepContextError(
                 f"Sandbox '{self.sandbox_name}' not found in context.deployed_sandboxes "
                 f"(deployed: {[s.sandbox_name for s in context.deployed_sandboxes]})"
             )

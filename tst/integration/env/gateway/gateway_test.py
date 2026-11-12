@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -13,6 +14,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
+import yaml
 from typing import NamedTuple
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
@@ -39,11 +41,13 @@ from agent_env.env.envs.playwright_mcp import (
 )
 from agentenv_protocol.computer.card import COMPUTER_RECORDING
 from agentenv_protocol.types import WELL_KNOWN_PATH
-from agent_env.providers.env_providers.constants import GATEWAY_APP_DIR
+from agent_env.providers.env_providers.constants import DOCKER_COMPOSE_PATH, GATEWAY_APP_DIR, GATEWAY_SERVICE_NAME
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
+from tst.integration.env.envs.playwright_mcp_local_test import PROCESSES
 from agent_env.env.snapshot_store import compute_env_fingerprint
 from agent_env.config import get_config
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
+from tst.util.published_image import pull_published_else_build
 from tst.util.capabilities import (
     MCP_SERVER_SOURCES,
     missing_capability_reason,
@@ -146,19 +150,15 @@ SLACK_WEBSITE_FRONTEND_IMAGE = DockerImageConfig(
     service_name="slack",
 )
 
+def _pull_published_else_build(img: DockerImageConfig) -> None:
+    pull_published_else_build(img.name, img.dockerfile, img.context, img.tag)
+
 
 @pytest.fixture(scope="module")
 def gateway_env() -> GatewayEnv:
     """Build gateway image, create artifact, and create GatewayEnv."""
     img = GATEWAY_IMAGE
-    logger.info(f"Building {img.name} Docker image...")
-    result = subprocess.run(
-        ["docker", "build", "--platform", "linux/amd64", "-f", str(img.dockerfile), "-t", img.tag, str(img.context)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"{img.name} build failed: {result.stderr}")
+    _pull_published_else_build(img)
 
     artifact = DockerImageArtifact.put(
         id=f"gateway-{img.name}",
@@ -178,14 +178,7 @@ def gateway_env() -> GatewayEnv:
 def service_db_env() -> ServiceDBEnv:
     """Build service-db image, create artifact, and create ServiceDBEnv."""
     img = SERVICE_DB_IMAGE
-    logger.info(f"Building {img.name} Docker image...")
-    result = subprocess.run(
-        ["docker", "build", "--platform", "linux/amd64", "-f", str(img.dockerfile), "-t", img.tag, str(img.context)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"{img.name} build failed: {result.stderr}")
+    _pull_published_else_build(img)
 
     db_artifact = DockerImageArtifact.put(
         id=f"service-db-{img.name}",
@@ -194,14 +187,7 @@ def service_db_env() -> ServiceDBEnv:
     )
 
     db_web = DB_WEB_IMAGE
-    logger.info(f"Building {db_web.name} Docker image...")
-    result = subprocess.run(
-        ["docker", "build", "--platform", "linux/amd64", "-f", str(db_web.dockerfile), "-t", db_web.tag, str(db_web.context)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"{db_web.name} build failed: {result.stderr}")
+    _pull_published_else_build(db_web)
 
     db_web_artifact = DockerImageArtifact.put(
         id="db-web-service-db",
@@ -211,14 +197,7 @@ def service_db_env() -> ServiceDBEnv:
 
     # Build db-mcp image
     db_mcp = DB_MCP_IMAGE
-    logger.info(f"Building {db_mcp.name} Docker image...")
-    result = subprocess.run(
-        ["docker", "build", "--platform", "linux/amd64", "-f", str(db_mcp.dockerfile), "-t", db_mcp.tag, str(db_mcp.context)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"{db_mcp.name} build failed: {result.stderr}")
+    _pull_published_else_build(db_mcp)
     db_mcp_artifact = DockerImageArtifact.put(
         id="db-mcp-service-db",
         description="PostgreSQL MCP server for direct database access",
@@ -239,15 +218,7 @@ def service_db_env() -> ServiceDBEnv:
 def website_browser_env() -> MCPServerEnv:
     """Build the Playwright MCP browser's image, create artifact, and create MCPServerEnv."""
     img = PLAYWRIGHT_MCP_IMAGE
-    logger.info(f"Building {img.name} Docker image...")
-    result = subprocess.run(
-        ["docker", "build", "--platform", "linux/amd64",
-         "-f", str(img.dockerfile), "-t", img.tag, str(img.context)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"{img.name} build failed: {result.stderr}")
+    _pull_published_else_build(img)
 
     artifact = DockerImageArtifact.put(
         id=f"playwright-mcp-{img.name}",
@@ -268,15 +239,7 @@ def slack_website_env() -> WebsiteEnv:
     """Build slack website frontend/backend images and create WebsiteEnv."""
     # Build backend
     be = SLACK_WEBSITE_BACKEND_IMAGE
-    logger.info(f"Building {be.name} Docker image...")
-    result = subprocess.run(
-        ["docker", "build", "--platform", "linux/amd64",
-         "-f", str(be.dockerfile), "-t", be.tag, str(be.context)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"{be.name} build failed: {result.stderr}")
+    _pull_published_else_build(be)
     backend_artifact = DockerImageArtifact.put(
         id="integ-test-website-backend-slack",
         description="Slack website backend",
@@ -285,15 +248,7 @@ def slack_website_env() -> WebsiteEnv:
 
     # Build frontend
     fe = SLACK_WEBSITE_FRONTEND_IMAGE
-    logger.info(f"Building {fe.name} Docker image...")
-    result = subprocess.run(
-        ["docker", "build", "--platform", "linux/amd64",
-         "-f", str(fe.dockerfile), "-t", fe.tag, str(fe.context)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"{fe.name} build failed: {result.stderr}")
+    _pull_published_else_build(fe)
     frontend_artifact = DockerImageArtifact.put(
         id="integ-test-website-frontend-slack",
         description="Slack website frontend",
@@ -327,14 +282,7 @@ def mcp_server_envs() -> dict[str, MCPServerEnv]:
     """Build MCP server images, create artifacts, and create MCPServerEnvs."""
     envs = {}
     for img in ALL_MCP_SERVER_IMAGES:
-        logger.info(f"Building {img.name} Docker image...")
-        result = subprocess.run(
-            ["docker", "build", "--platform", "linux/amd64", "-f", str(img.dockerfile), "-t", img.tag, str(img.context)],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"{img.name} build failed: {result.stderr}")
+        _pull_published_else_build(img)
 
         artifact = DockerImageArtifact.put(
             id=f"mcp-{img.name}",
@@ -420,13 +368,7 @@ def agentenv_website_env() -> WebsiteEnv:
 
     # Reuse the static slack frontend — its content is irrelevant to the backend v1 path.
     fe = SLACK_WEBSITE_FRONTEND_IMAGE
-    result = subprocess.run(
-        ["docker", "build", "--platform", "linux/amd64", "-f", str(fe.dockerfile), "-t", fe.tag, str(fe.context)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"{fe.name} build failed: {result.stderr}")
+    _pull_published_else_build(fe)
     frontend_artifact = DockerImageArtifact.put(
         id="integ-test-website-frontend-webitems",
         description="Static website frontend (reused)",
@@ -767,7 +709,7 @@ async def test_gateway_with_single_mcp_server(mcp_server_envs, email_service_art
 
         # Role-based tool filtering: disable list_emails for "default" role, verify it's hidden from
         # default callers but still accessible to a non-default role; then re-enable and verify recovery.
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=result.control_headers) as client:
             resp = await client.post(
                 f"{result.gateway_url}/tools/{TOOL_DISABLE_ACTION}",
                 json={"role": "default", "tools": ["list_emails"]},
@@ -843,7 +785,7 @@ async def test_gateway_with_single_mcp_server(mcp_server_envs, email_service_art
             assert "alex.chen@techcorp.com" in (await cli_session.call_tool("list_emails", {"folder_name": "INBOX"})).text
 
         # Re-enable: list_emails accessible to default role again
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=result.control_headers) as client:
             resp = await client.post(
                 f"{result.gateway_url}/tools/{TOOL_ENABLE_ACTION}",
                 json={"role": "default", "tools": ["list_emails"]},
@@ -867,7 +809,7 @@ async def test_gateway_with_single_mcp_server(mcp_server_envs, email_service_art
 
         # Global disable (role="*"): tool should be hidden from every role, including never-seen ones,
         # and become visible to everyone again on global enable.
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=result.control_headers) as client:
             resp = await client.post(
                 f"{result.gateway_url}/tools/{TOOL_DISABLE_ACTION}",
                 json={"role": "*", "tools": ["list_emails"]},
@@ -905,7 +847,7 @@ async def test_gateway_with_single_mcp_server(mcp_server_envs, email_service_art
                 tools_result = await session.list_tools()
                 assert "list_emails" not in [t.name for t in tools_result.tools]
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=result.control_headers) as client:
             resp = await client.post(
                 f"{result.gateway_url}/tools/{TOOL_ENABLE_ACTION}",
                 json={"role": "*", "tools": ["list_emails"]},
@@ -924,7 +866,7 @@ async def test_gateway_with_single_mcp_server(mcp_server_envs, email_service_art
         # Override scenario: globally disable everything via the wildcard tool sentinel ("*"), then
         # re-enable everything for one specific role. Verifies (a) per-role allow beats global deny,
         # and (b) wildcard rules apply to all tools without snapshotting (future-tool semantic).
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=result.control_headers) as client:
             resp = await client.post(
                 f"{result.gateway_url}/tools/{TOOL_DISABLE_ACTION}",
                 json={"role": "*", "tools": "*"},
@@ -1432,11 +1374,15 @@ async def test_gateway_with_single_website_env(slack_website_env, slack_service_
             gateway_tool_names = [t["name"] for t in gateway_entry["tools"]]
             assert "list_website_urls" in gateway_tool_names
 
-        # The browser is a child of the deploy's card, read where deploys read it, and serves the same card on its MCP
-        # port, where its recorder fronts Playwright MCP; a recording through the gateway films the page an agent opens.
+        # The browser is a child of the deploy's card, which the gateway reads on its MCP port as it reads every MCP
+        # server's, its recorder fronting Playwright MCP there; a recording through the gateway films the page opened.
         browser = protocol_v1.find_child(result.environment_card, PLAYWRIGHT_MCP_ENVIRONMENT_NAME)
         assert browser is not None, result.environment_card.get("children_environments")
         sandbox = await LocalSandboxProvider().get_sandbox(result.sandbox_id)
+        compose = yaml.safe_load(await sandbox.exec_script(f"cat {DOCKER_COMPOSE_PATH}"))
+        proxied = dict(item.split("=", 1) for item in compose["services"][GATEWAY_SERVICE_NAME]["environment"])
+        assert (f"mcp-{PLAYWRIGHT_MCP_ENVIRONMENT_NAME}=http://{PLAYWRIGHT_MCP_ENVIRONMENT_NAME}:18765"
+                in proxied["REST_PROXY_URLS"].split(",")), proxied["REST_PROXY_URLS"]
         card_url = f"http://127.0.0.1:18765{WELL_KNOWN_PATH}"
         read_card = f"import urllib.request; print(urllib.request.urlopen('{card_url}').read().decode())"
         served = await sandbox.exec_script(f"cd {GATEWAY_APP_DIR} && docker compose exec -T "
@@ -1483,6 +1429,82 @@ async def test_gateway_with_single_website_env(slack_website_env, slack_service_
 
 @pytest.mark.asyncio
 @pytest.mark.integration
+async def test_the_browsers_card_and_recording_through_the_gateway_survive_its_recorder_and_container_restarting(
+        slack_website_env):
+    """The gateway reaches the browser's card and recording on its MCP port, where the recorder fronts Playwright MCP.
+    The recorder killed comes back with the MCP server behind it untouched, the browser's container restarted comes
+    back whole, and after each the card answers through the gateway and a recording through it films the page."""
+    browser_name = PLAYWRIGHT_MCP_ENVIRONMENT_NAME
+    result = await slack_website_env.deploy()
+    try:
+        sandbox = await LocalSandboxProvider().get_sandbox(result.sandbox_id)
+        browser = protocol_v1.find_child(result.environment_card, browser_name)
+        assert browser is not None, result.environment_card.get("children_environments")
+        start, end = (protocol_v1.find_extension_method(browser, COMPUTER_RECORDING, op)["endpoint"]
+                      for op in ("start", "end"))
+        compose = f"cd {GATEWAY_APP_DIR} && docker compose"
+        # The recorder by its interpreter, which nothing else runs: the local sandbox rewrites /app in a script.
+        recorder_python = "/opt/recorder/bin/python"
+
+        async def processes(pattern: str, signal: int | None = None) -> list[str]:
+            argv = [pattern, *([str(signal)] if signal is not None else [])]
+            out = await sandbox.exec_script(f"{compose} exec -T {browser_name} {recorder_python} -c "
+                                            f"{shlex.quote(PROCESSES)} {' '.join(map(shlex.quote, argv))}")
+            return out.strip().splitlines()[-1].split() if out.strip() else []
+
+        async def card(client: httpx.AsyncClient) -> dict:
+            deadline, last = time.monotonic() + 90, None
+            while time.monotonic() < deadline:
+                try:
+                    response = await client.get(f"{result.gateway_url}/svc/mcp-{browser_name}{WELL_KNOWN_PATH}")
+                    if response.status_code == 200:
+                        return response.json()
+                    last = f"HTTP {response.status_code}"
+                except httpx.HTTPError as e:
+                    last = repr(e)
+                await asyncio.sleep(1)
+            raise AssertionError(f"the browser's card didn't answer through the gateway: {last}")
+
+        async def record(client: httpx.AsyncClient, request_id: str) -> dict:
+            started = await client.post(f"{result.gateway_url}{start}", json={"request_id": request_id, "fps": 5})
+            started.raise_for_status()
+            await _step_call_tool(client, result.gateway_url, "browser_navigate",
+                                  {"url": "http://slack-website-frontend:80"})
+            await asyncio.sleep(3)
+            ended = await client.post(f"{result.gateway_url}{end}",
+                                      json={"recording_id": started.json()["recording_id"]})
+            ended.raise_for_status()
+            return ended.json()
+
+        async def started_at() -> str:
+            return (await sandbox.exec_script(f"{compose} ps -q {browser_name} | xargs docker inspect -f "
+                                              "'{{.State.StartedAt}}'")).strip()
+
+        def filmed(manifest: dict) -> bool:
+            return bool(manifest["segments"]) and sum(segment["frames"] for segment in manifest["segments"]) > 0
+
+        async with httpx.AsyncClient(headers=result.control_headers, timeout=120) as client:
+            assert (await card(client))["name"] == browser_name
+            assert filmed(await record(client, "chaos:before")), "a recording before any restart filmed nothing"
+
+            serving, recorder = await processes("@playwright/mcp"), await processes(recorder_python)
+            assert serving and recorder and await processes(recorder_python, 9) == recorder
+            assert (await card(client))["name"] == browser_name
+            assert (back := await processes(recorder_python)) and back != recorder
+            assert await processes("@playwright/mcp") == serving
+            assert filmed(await record(client, "chaos:recorder-killed")), "no film after the recorder came back"
+
+            first_start = await started_at()
+            await sandbox.exec_script(f"{compose} restart {browser_name}")
+            assert (await card(client))["name"] == browser_name
+            assert await started_at() != first_start
+            assert filmed(await record(client, "chaos:container-restarted")), "no film after the container restarted"
+    finally:
+        await slack_website_env.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
 async def test_gateway_with_multi_env_including_website(multi_env_with_website, environment_universe_artifact):
     """Test MultiEnv with MCP servers + website: deploy, browse website, load universe artifact."""
 
@@ -1499,6 +1521,12 @@ async def test_gateway_with_multi_env_including_website(multi_env_with_website, 
         content_text = "".join(c.text for c in result.content if hasattr(c, "text"))
         logger.info(f"browser_navigate result: {content_text[:500]}")
         assert "Slack Workspace" in content_text, f"Expected 'Slack Workspace' in navigate result, got {content_text}"
+
+        for url in ("http://slack/", "http://email/", "http://slack-website-backend:8000/api/health",
+                    "http://servicedb:5432/", "http://pgweb:8081/", "http://db-mcp:8000/mcp"):
+            result = await session.call_tool("browser_navigate", {"url": url})
+            content_text = "".join(c.text for c in result.content if hasattr(c, "text"))
+            assert "ERR_NAME_NOT_RESOLVED" in content_text, f"The browser reached {url}: {content_text[:300]}"
 
         await session.call_tool("browser_close", {})
 
@@ -2297,7 +2325,7 @@ async def test_gateway_with_agentenv_environment(agentenv_items_env, monkeypatch
 
         await _verify_list_tools(mcp_url=result.mcp_url, tool_verifier_callback=assert_list_items_present)
 
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=30, headers=result.control_headers) as client:
             r = await client.post(
                 f"{result.gateway_url}{disable_params['endpoint']}",
                 json={"role": "default", "tools": ["list_items"]},
@@ -2539,7 +2567,7 @@ async def test_gateway_triggers_extension(sandbox_provider, mcp_server_envs, ema
                                      "predicate": {"regex": r"alex\.chen@techcorp\.com"}}}]},
         ]
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=result.control_headers) as client:
             # Baseline: pre-disable send_email for role default so the grant has a visible effect.
             r = await client.post(f"{gw}/tools/{TOOL_DISABLE_ACTION}",
                                   json={"role": "default", "tools": ["send_email"]}, timeout=30)
@@ -2706,7 +2734,7 @@ async def test_gateway_barrier_orders_a_templated_mirror(sandbox_provider, mcp_s
         result = await email_env.deploy()
         gw = result.gateway_url
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=result.control_headers) as client:
             reg = await client.post(f"{gw}/triggers/register",
                                     json={"watch_roles": ["default"], "triggers": [mirror]}, timeout=30)
             assert reg.status_code == 200, f"register failed: {reg.status_code} {reg.text}"
@@ -2818,7 +2846,7 @@ async def test_gateway_trigger_rearms_after_a_failed_mirror(sandbox_provider, mc
         result = await email_env.deploy()
         gw = result.gateway_url
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=result.control_headers) as client:
             reg = await client.post(f"{gw}/triggers/register",
                                     json={"watch_roles": ["default"], "triggers": [breaks]}, timeout=30)
             assert reg.status_code == 200, f"register failed: {reg.status_code} {reg.text}"
@@ -2890,7 +2918,7 @@ async def test_gateway_trigger_registration_is_fail_loud(sandbox_provider, mcp_s
         result = await email_env.deploy()
         gw = result.gateway_url
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=result.control_headers) as client:
             # Force discovery, so the unknown-tool checks are live rather than skipped.
             lt = await client.post(f"{gw}/step", json={"action": "list_tools"}, timeout=30)
             assert "send_email" in [t["name"] for t in lt.json()["tools"]], lt.text
@@ -2925,7 +2953,7 @@ async def test_gateway_website_trigger_fires_on_a_request_through_the_website_pr
         card = await protocol_v1.get_card(gw)
         assert TRIGGER_WEBSITE in protocol_v1.extension_params(card, EXT_TRIGGERS_URI)["features"], card
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=result.control_headers) as client:
             unknown = await client.post(f"{gw}/triggers/register", timeout=30, json={
                 "triggers": [{**visit, "when": {**visit["when"], "app": "calendar"}}]})
             assert unknown.status_code == 400 and "unknown website 'calendar'" in unknown.text, unknown.text
@@ -2979,7 +3007,7 @@ async def test_gateway_queued_trigger_is_not_reported_settled(sandbox_provider, 
         result = await email_env.deploy()
         gw = result.gateway_url
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=result.control_headers) as client:
             reg = await client.post(f"{gw}/triggers/register",
                                     json={"watch_roles": ["default"], "triggers": [slow]}, timeout=30)
             assert reg.status_code == 200, f"register failed: {reg.status_code} {reg.text}"
@@ -3077,7 +3105,7 @@ async def test_gateway_triggers_nl_executor(sandbox_provider, mcp_server_envs, e
         await email_env.load_environment_artifact(email_service_artifact)
         ctx = TaskStepContext(deployed_envs=[result], metadata={})
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=result.control_headers) as client:
             # Lock the executor role to exactly one tool (deny-all, then allow send_email). Wrong
             # realizations become structurally impossible, and the executor's own call stays outside
             # watch_roles (no cascade).
@@ -3233,7 +3261,7 @@ async def test_gateway_clock_extension(sandbox_provider, mcp_server_envs):
         result = await env.deploy()
         gw = result.gateway_url
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=result.control_headers) as client:
             # Off-by-default + unconditional advertisement.
             assert (await _read(client, gw)).status_code == 404, "unarmed clock should 404"
             card = (await client.get(f"{gw}/.well-known/agent-env.json", timeout=30)).json()
@@ -3257,6 +3285,16 @@ async def test_gateway_clock_extension(sandbox_provider, mcp_server_envs):
                                      timeout=30)).status_code == 400
             assert GET_TIME not in (await _get_time_surfaces(client, gw, result.mcp_url)).mcp
             assert (await _read(client, gw)).status_code == 404, "rejected arm must not arm the clock"
+
+            # Without the deploy's control token, every control route refuses; the clock's routes and the reads stay open.
+            async with httpx.AsyncClient() as agent:
+                for method, path in (("POST", "/tools/enable"), ("POST", "/tools/disable"), ("POST", "/triggers/register"),
+                                     ("POST", "/triggers/remove"), ("POST", "/triggers/clear"),
+                                     ("POST", "/notifications/config"), ("POST", "/notifications/take"),
+                                     ("POST", "/notifications/clear")):
+                    refused = await agent.request(method, f"{gw}{path}", timeout=30, json={})
+                    assert refused.status_code == 401, (path, refused.text)
+                assert (await agent.get(f"{gw}/clock/time", timeout=30)).status_code == 404
 
             # Arm at t0a, rate=3600 (1 real s -> 1 virtual h); baseline near t0a.
             armed_at = time.monotonic()
@@ -3320,7 +3358,8 @@ async def test_gateway_clock_extension(sandbox_provider, mcp_server_envs):
             cl = await client.post(f"{gw}/clock/clear", timeout=30)
             assert cl.status_code == 200 and cl.json()["armed"] is False, cl.text
             assert (await _read(client, gw)).status_code == 404, "cleared clock should 404"
-            assert (await client.get(f"{gw}/clock/state", timeout=30)).json() == {"armed": False}, "state after clear"
+            cleared = (await client.get(f"{gw}/clock/state", timeout=30)).json()
+            assert (cleared["armed"], cleared["followers"], "t0" in cleared) == (False, {}, False), f"state after clear: {cleared}"
 
             # Clear round-trips the tool surface byte-for-byte back to the unarmed baseline.
             cleared = await _get_time_surfaces(client, gw, result.mcp_url)
@@ -3427,7 +3466,7 @@ async def test_gateway_clock_rate_accuracy(sandbox_provider, mcp_server_envs):
     try:
         result = await env.deploy()
         gw = result.gateway_url
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=result.control_headers) as client:
             for rate in rates:
                 arm = await client.put(f"{gw}/clock/set-time", json={"virtual_time": t0, "virtual_seconds_per_real_second": rate}, timeout=30)
                 assert arm.status_code == 200 and arm.json()["virtual_seconds_per_real_second"] == rate, f"rate={rate}: {arm.text}"
@@ -3500,7 +3539,7 @@ async def test_gateway_time_trigger_extension(sandbox_provider, mcp_server_envs)
     try:
         result = await env.deploy()
         gw = result.gateway_url
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=result.control_headers) as client:
             # Pre-disable send_email so the flagship's permission mutation is observable.
             await client.post(f"{gw}/tools/{TOOL_DISABLE_ACTION}",
                               json={"role": "default", "tools": ["send_email"]}, timeout=30)
@@ -3596,7 +3635,7 @@ async def test_gateway_autonomous_time_trigger(sandbox_provider, mcp_server_envs
     try:
         result = await env.deploy()
         gw = result.gateway_url
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=result.control_headers) as client:
             # rate 3600: 1 real s = 1 virtual h, so PT2H lands in ~2 real s and PT1H arrives ~1/real s.
             arm = await client.put(f"{gw}/clock/set-time",
                                    json={"virtual_time": t0, "virtual_seconds_per_real_second": 3600}, timeout=30)
@@ -5577,7 +5616,7 @@ async def _set_async_wait(result, tool_name, min_seconds, max_seconds=None, scal
 
 async def _clock_clear(result) -> None:
     """Disarm the gateway clock (POST /clock/clear); it then 404s on /clock/time."""
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(headers=result.control_headers) as client:
         r = await client.post(f"{result.gateway_url}/clock/clear", timeout=30)
         assert r.status_code == 200 and r.json()["armed"] is False, r.text
 
@@ -5863,3 +5902,40 @@ async def test_whoop_clock_consumer(sandbox_provider):
         assert "whoop" in {s["service"] for s in cfg["synced"]}, cfg
     finally:
         await env.close()
+
+
+# A site slower to boot than the gateway's own health check allows: a ready timeout to match, and its shared memory.
+SLOW_BOOT_S = 100
+
+
+@pytest.fixture(scope="module")
+def slow_boot_site_image() -> DockerImageArtifact:
+    """The image of a site that answers nothing until it has booted, from ``tst/data/slow_boot_website``."""
+    result = subprocess.run(["docker", "build", "--platform", "linux/amd64", "-t", "agentenv-slow-boot-website",
+                             str(TST_DATA_DIR / "slow_boot_website")], capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"slow boot website build failed: {result.stderr}")
+    return DockerImageArtifact.put(id="integ-test-slow-boot-website", description="A site slow to boot",
+                                   image_name="agentenv-slow-boot-website")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ready_timeout_s", [SLOW_BOOT_S + 60, None], ids=["ready-timeout", "gateway-default"])
+async def test_a_site_slower_to_boot_than_the_health_check_allows_deploys_with_a_ready_timeout_and_its_shared_memory(
+        slow_boot_site_image, ready_timeout_s):
+    env = WebsiteEnv.put(id="integ-test-slow-boot-site", server_docker_image_artifact=slow_boot_site_image,
+                         environment_name="slowboot", settings={"boot_s": SLOW_BOOT_S},
+                         ready_timeout_s=ready_timeout_s, shm_mb=1024)
+    try:
+        if ready_timeout_s is None:
+            with pytest.raises(RuntimeError, match="slowboot-website-backend"):
+                await env.deploy()
+            return
+        deployed = await env.deploy()
+        async with httpx.AsyncClient() as client:
+            shm = await client.get(f"{deployed.gateway_url}/svc/slowboot/shm", timeout=30)
+    finally:
+        await env.close()
+
+    assert shm.status_code == 200 and int(shm.text) == 1024 << 20, shm.text
+

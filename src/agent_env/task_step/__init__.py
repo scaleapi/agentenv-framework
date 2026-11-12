@@ -1,7 +1,7 @@
 """TaskStep module for AgentEnv."""
 
 from agent_env.env.env import DeployedEnv
-from .context import DeployedAgent, PromptResponse, TaskStepContext
+from .context import DeployedAgent, PromptResponse, StepContextError, TaskStepContext
 from .task_step import TaskStep
 from .task_steps import AddSkillsTaskStep, AgentPromptResponseVerifierTaskStep, BuildMcpCliTaskStep, CombineUniverseVerdictsStep, DeployAgentTaskStep, DeployEnvTaskStep, EnvOutcomeVerifierTaskStep, LoadArtifactTaskStep, ModifyEnvToolAccessStep, PromptAgentTaskStep, RubricsVerifierTaskStep, ScoreAggregator, ValidationGateAggregatorStep, VerifyCoreA2AProtocolStep, VerifyCoreEnvironmentProtocolStep, VerifyEnvironmentCardStep, VerifyMCPEnvAssessmentStep, VerifyMCPToolSchemaTaskStep, VerifySpecConformanceTaskStep, VerifyUniverseLoadExportRoundtripStep, VerifyA2AAgentCardStep, VerifyA2AAgentMCPStep, VerifyA2ASkillConfigStep, VerifyA2ATrajectoryStep
 from .task_steps.verifiers.judge_utils.judge_output_format import JudgeOutputFormat, get_judge_output_format_spec
@@ -14,6 +14,7 @@ __all__ = [
     "get_judge_output_format_spec",
     "PromptResponse",
     "ScoreAggregator",
+    "StepContextError",
     "TaskStepContext",
     "TaskStep",
     "AddSkillsTaskStep",

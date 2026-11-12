@@ -60,7 +60,10 @@ mount --move /sys /newroot/sys
 mount --move /dev /newroot/dev
 mkdir -p /newroot/dev/pts /newroot/dev/shm
 mount -t devpts -o gid=5,mode=620,ptmxmode=666 devpts /newroot/dev/pts
-mount -t tmpfs -o mode=1777,size=512m shm /newroot/dev/shm
+# /dev/shm holds what the computer's apps need (AGENTENV_SHM_MB, in MiB) when the deploy says, else 512 MiB.
+case "$AGENTENV_SHM_MB" in ''|0|*[!0-9]*) shm_mb=512 ;; *) shm_mb=$AGENTENV_SHM_MB ;; esac
+unset AGENTENV_SHM_MB
+mount -t tmpfs -o mode=1777,size="${shm_mb}m" shm /newroot/dev/shm
 log "starting $* as $user ($uid:$gid) in $workdir"
 # Last, as busybox runs its applets through /proc/self/exe.
 mount --move /proc /newroot/proc

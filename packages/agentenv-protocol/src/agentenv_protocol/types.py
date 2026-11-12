@@ -200,6 +200,8 @@ class EnvironmentCard(BaseModel):
     additionalInterfaces: list[EnvironmentInterface] = Field(default_factory=list)
     capabilities: EnvironmentCapabilities = Field(default_factory=EnvironmentCapabilities)
     children_environments: Optional[list[EnvironmentCard]] = None
+    # Set by a composer on each child it nests: the name the child env is registered as, which its own name needn't be.
+    environment_name: Optional[str] = None
 
 
 EnvironmentCard.model_rebuild()

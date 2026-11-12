@@ -7,7 +7,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
+import re
 import secrets
+import signal
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
@@ -17,6 +20,7 @@ from agentenv_protocol import client as protocol_v1
 from agentenv_protocol.computer import APP_SETTINGS_ENV, COMPUTER_READY, SETTINGS_ENV, TOOL_PREFIX_ENV
 from agentenv_protocol.computer.app import COMPUTER_APP
 from agentenv_protocol.computer.apps import ANSWER_TIMEOUT_S
+from agentenv_protocol.computer.platform import entry_for
 
 from agent_env.config import get_config
 from agent_env.env.envs.computer.utils.composed import REPOSITORY
@@ -31,6 +35,8 @@ if TYPE_CHECKING:
     from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, Sandbox
     from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
 
+logger = logging.getLogger(__name__)
+
 #: How long a computer may take from its container starting to its driver saying it's ready.
 READY_TIMEOUT_S = 180.0
 #: How much longer than the slowest starting app's own readiness timeout a computer may take, for the rest of it first.
@@ -40,18 +46,36 @@ _STATUS_TIMEOUT_S = int(ANSWER_TIMEOUT_S) + 15
 _POLL_S = 0.5
 #: How long one read of the driver's card may take.
 _CARD_TIMEOUT_S = 5
+#: How often a boot asks whether the computer's sandbox still runs it.
+_EXIT_POLL_S = 2.0
+#: How many of the last lines the computer's sandbox wrote a boot reads, and how long that may take.
+_OUTPUT_LINES, _OUTPUT_TIMEOUT_S = 200, 20
+#: How many of them a boot's error names: the last that say why, and the last of all.
+_REASON_LINES, _LAST_LINES = 3, 5
+#: How the lines a disk's guest init and its launcher say why with begin (``computers/disk/linux``).
+_REASONS = ("agentenv-init:", "launch:", "launch reset:")
+_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 #: How a setting a record keeps shows a secret's or a generated one's value, which it never holds.
 WITHHELD = "<withheld>"
 
 
 class ComputerFailed(RuntimeError):
     """The computer's ``computer-ready`` status says it failed for good, a check that can't pass again."""
+
+
+class ComputerStopped(ComputerFailed):
+    """The computer's sandbox stopped running it before it was ready: its container, or the launcher booting its disk,
+    exited."""
+
+
 #: How many random bytes a computer's control token carries: 256 bits, past guessing.
 CONTROL_TOKEN_BYTES = 32
-#: The size of a disk's VM when a deploy sets none: what the desktop was measured booting and passing the probe in, and
-#: for Windows, what Windows 11 asks of a PC.
+#: The size of a disk's VM when a deploy sets none: what the desktop was measured booting and passing the probe in; for
+#: Windows, what Windows 11 asks of a PC; and for Omarchy, what Hyprland's own CI warns it may crash with less than.
 DISK_CPU, DISK_MEMORY_MB = 2.0, 4096
-WINDOWS_CPU, WINDOWS_MEMORY_MB = 4.0, 8192
+DISK_SIZES = {"linux": (DISK_CPU, DISK_MEMORY_MB), "linux/omarchy": (4.0, 8192), "windows": (4.0, 8192)}
+#: The variable a Linux disk's init sizes its ``/dev/shm`` by, in MiB (``computers/disk/linux/boot/init``).
+SHM_MB_ENV = "AGENTENV_SHM_MB"
 
 
 @dataclass
@@ -150,16 +174,35 @@ def control_environment(token: Optional[str]) -> dict[str, str]:
     return {CONTROL_TOKEN_ENV: token} if token else {}
 
 
+def shm_environment(form: str, os_type: str, shm_mb: Optional[int]) -> dict[str, str]:
+    """What sizes a Linux disk's ``/dev/shm`` to ``shm_mb`` in its boot environment, which its init reads; nothing for a
+    container, which its sandbox sizes, or without a size, which leaves the init's own."""
+    return {SHM_MB_ENV: str(shm_mb)} if shm_mb and form == "disk" and os_type == "linux" else {}
+
+
+def shm_kwargs(sandbox_provider: SandboxProvider, shm_mb: Optional[int]) -> dict[str, int]:
+    """What ``create_container`` and ``reset_container`` take for the container's ``/dev/shm`` to hold ``shm_mb`` MiB:
+    the size for a provider whose SHARED_MEMORY says it gives that, else nothing, logged, the container keeping its
+    provider's own."""
+    if not shm_mb:
+        return {}
+    if sandbox_provider.SHARED_MEMORY:
+        return {"shm_mb": shm_mb}
+    logger.info("%s can't size /dev/shm: the container keeps its default, not the %d MiB asked for",
+                type(sandbox_provider).__name__, shm_mb)
+    return {}
+
+
 async def boot(sandbox_provider: SandboxProvider, *, image: str, port: int, environment: dict[str, str], token: str,
                network_policy: Optional[NetworkPolicy], timeout: int, attribution: Optional[Attribution],
                disk_size_gb: float = 10, cpu: Optional[float] = None, memory_mb: Optional[int] = None,
                ready_s: float = READY_TIMEOUT_S, form: str = "container", held: bool = False,
-               os_type: str = "linux") -> Booted:
+               platform: str = "linux", shm_mb: Optional[int] = None) -> Booted:
     """``image``, of ``form``, booted with ``environment`` and its control ``token`` on ``sandbox_provider``, which the
-    caller chose to run its arch natively, its driver's ``port`` reached on the sandbox, once the driver, asked with that
-    token, says the computer is ready, or with ``held``, its boot apps' launch held, once it answers (``ready``); a boot
-    that fails is torn down."""
-    environment = {**environment, **control_environment(token)}
+    caller chose to run its arch natively, its driver's ``port`` reached on the sandbox, its ``/dev/shm`` ``shm_mb`` MiB
+    where the sandbox can size it, once the driver, asked with that token, says the computer is ready, or with
+    ``held``, its boot apps' launch held, once it answers (``ready``); a boot that fails is torn down."""
+    environment = {**environment, **control_environment(token), **shm_environment(form, platform.partition("/")[0], shm_mb)}
     if form == "vm_bundle":
         sandbox = await sandbox_provider.create_vm(
             image=image, env=environment, exposed_ports=[port], network_policy=network_policy,
@@ -168,15 +211,15 @@ async def boot(sandbox_provider: SandboxProvider, *, image: str, port: int, envi
         sandbox = await sandbox_provider.create_vm(
             image=image, env=environment, exposed_ports=[port], network_policy=network_policy,
             disk_size_gb=disk_size_gb, timeout=timeout, attribution=dict(attribution or {}),
-            cpu=cpu or (WINDOWS_CPU if os_type == "windows" else DISK_CPU),
-            memory=memory_mb or (WINDOWS_MEMORY_MB if os_type == "windows" else DISK_MEMORY_MB))
+            cpu=cpu or entry_for(DISK_SIZES, platform)[0], memory=memory_mb or entry_for(DISK_SIZES, platform)[1])
     else:
         sandbox = await sandbox_provider.create_container(
             image_name=image, port=port, env=environment, network_policy=network_policy, disk_size_gb=disk_size_gb,
-            timeout=timeout, attribution=dict(attribution or {}), **_size_kwargs(cpu, memory_mb))
+            timeout=timeout, attribution=dict(attribution or {}), **_size_kwargs(cpu, memory_mb),
+            **shm_kwargs(sandbox_provider, shm_mb))
     try:
         url = sandbox.tunnel_urls[port]
-        return Booted(sandbox, url, await ready(url, ready_s, token, answering=held))
+        return Booted(sandbox, url, await ready(url, ready_s, token, answering=held, sandbox=sandbox))
     except BaseException:
         await discard(sandbox)
         raise
@@ -201,16 +244,19 @@ def ready_timeout(apps: list[ComputerAppEnv], platform: str) -> float:
                                    if (launch := app.launch(platform)) and launch.at == "boot" and launch.ready)])
 
 
-async def ready(url: str, timeout: float, token: Optional[str] = None, *, answering: bool = False) -> dict:
+async def ready(url: str, timeout: float, token: Optional[str] = None, *, answering: bool = False,
+                sandbox: Optional[Sandbox] = None) -> dict:
     """The card of the driver at ``url``, read once its ``computer-ready`` status, asked with its control ``token``,
     says it's ready, so each app it fronts is on it as the app's own server serves it, or with ``answering``, once it
     answers at all: a computer whose boot apps' launch is held can't be ready before they launch, as a page driver's
-    screen is its browser's page. Raises ComputerFailed as soon as the status says it failed, and TimeoutError, naming
-    what it last saw, when it isn't ready within ``timeout`` seconds."""
-    last, failed = "nothing answered", None
+    screen is its browser's page. Raises ComputerFailed as soon as the status says it failed, ComputerStopped within
+    seconds of ``sandbox``, the sandbox running the computer, no longer running it, and TimeoutError, naming what it
+    last saw, when it isn't ready within ``timeout`` seconds; each error ends with what ``sandbox`` last wrote."""
+    last, failed, stopped, asked = "nothing answered", None, None, None
+    loop = asyncio.get_running_loop()
     try:
         async with asyncio.timeout(timeout):
-            while failed is None:
+            while failed is None and stopped is None:
                 try:
                     card = await protocol_v1.get_card(url, timeout=_CARD_TIMEOUT_S)
                     status = await protocol_v1.invoke_extension(url, card, COMPUTER_READY, None, _STATUS_TIMEOUT_S,
@@ -223,11 +269,59 @@ async def ready(url: str, timeout: float, token: Optional[str] = None, *, answer
                                                      for check in status.get("checks", []) if not check.get("ok"))
                 except Exception as e:
                     last = f"{type(e).__name__}: {e}"
-                if failed is None:
+                if failed is None and sandbox is not None and (asked is None or loop.time() - asked >= _EXIT_POLL_S):
+                    asked = loop.time()
+                    stopped = await _exit_status(sandbox)
+                if failed is None and stopped is None:
                     await asyncio.sleep(_POLL_S)
     except TimeoutError:
-        raise TimeoutError(f"the computer at {url} wasn't ready within {timeout:.0f} s ({last})") from None
-    raise ComputerFailed(f"the computer at {url} failed: {failed}")
+        raise TimeoutError(f"the computer at {url} wasn't ready within {timeout:.0f} s ({last})"
+                           f"{await _last_written(sandbox)}") from None
+    if stopped is not None:
+        raise ComputerStopped(f"the computer at {url} stopped before it was ready, exiting with {_described(stopped)}"
+                              f"{await _last_written(sandbox)}")
+    raise ComputerFailed(f"the computer at {url} failed: {failed}{await _last_written(sandbox)}")
+
+
+async def _exit_status(sandbox: Sandbox) -> Optional[int]:
+    """``sandbox.exit_status()``, None when asking fails, which the next ask may not."""
+    try:
+        return await sandbox.exit_status()
+    except Exception as e:
+        logger.debug("Couldn't ask whether sandbox %s still runs its computer: %s", sandbox.sandbox_id, e)
+        return None
+
+
+async def _last_written(sandbox: Optional[Sandbox]) -> str:
+    """What an error adds of the lines ``sandbox`` last wrote (``said_why``); nothing when there are none, it can't
+    read them, or reading them takes past ``_OUTPUT_TIMEOUT_S``."""
+    if sandbox is None:
+        return ""
+    try:
+        async with asyncio.timeout(_OUTPUT_TIMEOUT_S):
+            lines = said_why(await sandbox.output_tail(_OUTPUT_LINES))
+    except Exception as e:
+        logger.info("Couldn't read what sandbox %s last wrote: %s", sandbox.sandbox_id, e)
+        return ""
+    return "; its sandbox last wrote:\n" + "\n".join(f"  {line}" for line in lines) if lines else ""
+
+
+def said_why(lines: list[str]) -> list[str]:
+    """Of ``lines``, the last a sandbox wrote, each without its terminal escapes and surrounding space, in their order:
+    the last few a disk's guest init and its launcher say why with, and the last few that aren't blank."""
+    cleaned = [text for line in lines if (text := _ESCAPE.sub("", line).strip())]
+    reasons = [index for index, line in enumerate(cleaned) if line.startswith(_REASONS)][-_REASON_LINES:]
+    return [cleaned[index] for index in sorted({*reasons, *range(max(0, len(cleaned) - _LAST_LINES), len(cleaned))})]
+
+
+def _described(status: int) -> str:
+    """``status``, a process's exit status, naming the signal that ended it when one did, as a shell's 128 plus its
+    number, or Python's minus it, says."""
+    number = status - 128 if status > 128 else -status
+    with contextlib.suppress(ValueError):
+        if number > 0:
+            return f"{status} ({signal.Signals(number).name})"
+    return str(status)
 
 
 async def listed(url: str, apps: list[str], timeout: float) -> dict:

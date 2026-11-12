@@ -14,6 +14,12 @@ from agent_env.providers.sandbox_providers.sandbox_provider import reachable_url
 
 HEARTBEAT_KEY = "_heartbeat_fn"
 
+
+class StepContextError(RuntimeError):
+    """The run's context can't satisfy a step: something the step needs from an earlier step is missing, or
+    something it would create is already there. Running the step again on the same context fails the same
+    way, so a runner should not retry it."""
+
 _REDACTED_KEYS = {
     "litellm_api_key", "judge_litellm_api_key", "usersim_api_key", "remote_tokens", "cf_access_client_secret",
     HEARTBEAT_KEY,

@@ -8,8 +8,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from pytest_socket import enable_socket, socket_allow_hosts
 
 import agent_env.providers.sandbox_providers.sandbox_provider as sandbox_provider
+import agent_env.task.episode.run as episode_run
 from agent_env.artifact import EnvironmentUniverseArtifact, FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.artifact.store import get_artifact_store
@@ -24,7 +26,9 @@ from agent_env.store.image_store import OciRegistryImageStore
 from agent_env.store.object_store import LocalFilesystemObjectStore
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox
 from agent_env.store.routing import LocalRunWriteError, run_scope
+from agent_env.task import EpisodeSpec
 from agent_env.task.task import Task
+from agent_env.task.teardown import TeardownReport
 from agent_env.task_step.context import DeployedSandbox, TaskStepContext
 from agent_env.task_step.snapshot_utils.snapshot_series import SnapshotConfig, SnapshotSeries
 from agent_env.task_step.task_step import TaskStep
@@ -347,6 +351,39 @@ async def test_an_local_runs_verifier_outputs_are_named_after_the_run(sentinels,
         artifact = FileArtifact.get(entry[f"{stream}_artifact"]["id"])
         assert artifact.id.startswith(derive_id(context.instance_id, f"verifier-{stream}-verify-"))
         assert artifact.load() == text
+
+
+@pytest.fixture
+def loopback():
+    """Loopback connections and no others, for the proxy agent an episode serves in this process."""
+    enable_socket()
+    socket_allow_hosts(["127.0.0.1"], allow_unix_socket=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("loopback")
+async def test_an_local_episodes_verifier_outputs_are_named_after_its_run(sentinels, vm, monkeypatch):
+    """An episode is a run of its task, as ``agent-env run``'s is: what its steps name after the run stays local."""
+    monkeypatch.setattr(episode_run, "teardown_run", lambda context, **_: asyncio.sleep(0, result=TeardownReport()))
+
+    def box(context):
+        context.deployed_sandboxes.append(vm)
+        context.metadata["deployed_docker_containers"] = [{"container_name": "c", "sandbox_name": "box"}]
+
+    played = Task.from_dict({"id": LOCAL_TASK, "version": 1, "steps": [
+        {"id": "alice", "type": "deploy_agent", "agent_name": "alice", "env_ids": []},
+        {"id": "turn", "type": "prompt_agent", "agent_name": "alice", "prompt_id": "turn", "prompt": "Fix it.",
+         "timeout_seconds": 5, "poll_interval_seconds": 0.05},
+        {"id": "verify", "type": "run_container_unit_tests_verifier", "sandbox_name": "box", "container_name": "c",
+         "command": "true"},
+    ]})
+    episode = await EpisodeSpec.from_task(Task(id=LOCAL_TASK, version=1, steps=[_Step("box", box), *played.steps])).start()
+    await (await episode.next_turn()).end("Fixed.")
+
+    assert await episode.result() == {"verify": 1.0}
+    entry = Task.get_instance(episode.id).context["metadata"]["verifications"]["verify"]
+    assert FileArtifact.get(entry["stdout_artifact"]["id"]).id.startswith(derive_id(episode.id, "verifier-stdout-verify-"))
+    assert episode.id.startswith(f"{LOCAL_TASK}-")
 
 
 @pytest.mark.asyncio

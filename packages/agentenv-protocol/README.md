@@ -200,7 +200,10 @@ address the card was fetched from. On the client side, `client.mcp_path(card)` r
 declared path, or `/mcp` for a card without one.
 
 A composed card, such as a gateway's, nests each backing environment's card under
-`children_environments`, its `url` and endpoints rooted at the route the composer serves it at.
+`children_environments`, its `url` and endpoints rooted at the route the composer serves it at,
+and its `environment_name`: the name the child env is registered as, which its own card's `name`
+needn't be. A lookup by name finds a child by its `environment_name`, else, from a composer that
+states none, by its card's `name` (`ChildEnv.known_as`).
 `client.children(card)` returns each as a `ChildEnv` (its `name`, `url` and `card`, with its
 `extensions`, `operations` and `serves(method)`, and `base_url(address)`, its data plane resolved
 against the composed card's address). Two children may share a name, as a website and an MCP
@@ -254,6 +257,16 @@ On the client side each call takes `headers`, and `client.control_headers(token)
 Code that names none runs under `client.authorized({env_url: client.control_headers(token)})`:
 within it, a call to an address under `env_url` sends those headers. agent-env runs every task
 step, a verifier's `verify` included, under such a grant for each environment it deployed.
+
+The env gateway agent-env deploys in front of an environment's servers takes the same token in the
+same header, but for now checks it only on tool access (`POST /tools/disable`, `POST /tools/enable`)
+and on the writes of triggers and notifications (`/triggers/register`, `/triggers/remove`,
+`/triggers/clear`, `/notifications/config`, `/notifications/take`, `/notifications/clear`). A call to
+one of those without it gets 401 and `{"ok": false, "error": "this route takes the env's control
+token"}`. Its other routes, the clock's writes, the state reads, `/svc` and `/agentenv` among them,
+stay open while callers outside agent-env use them without the token. No card, the gateway's or an
+environment's, marks which routes take it: a client sends the token to every route but the MCP
+endpoint and the card, and an open route ignores it.
 
 ### Tool access without a gateway
 
@@ -487,6 +500,50 @@ called with the caller's role in `ToolContext`. The site's `/mcp` is one of the 
 browsing route (`/website/<name>/`) never reaches. `python -m agentenv_protocol.website.conformance` checks a declared
 endpoint (`mcp`): it answers `initialize` and lists the tools the card does.
 
+## Live websites
+
+A live site is a real one, such as github.com, that a task puts in a multi env beside synthetic sites. Its server serves
+none of its pages: the real site does, and the computer reaches it over its own network. The server holds what agentenv
+knows of the site: its card, a data plane that seeds and reads the task's account through the real site's API, `ready`
+saying the account works, and `session`, the account's cookies and local storage, which `browser_sign_in` loads into the
+browser.
+
+```python
+from pydantic import BaseModel, SecretStr
+from agentenv_protocol.website import WebsiteEnvironment, ready_check, session_state, website
+
+
+@website(domains=["github.com"], live=True, allow_hosts=["*.githubassets.com", "api.github.com"])
+class GitHub(WebsiteEnvironment):
+    class Settings(BaseModel):
+        token: SecretStr                  # in env.toml as a secret:KEY or env:NAME reference
+
+    @ready_check
+    def account_works(self) -> bool:
+        ...                               # the API answers for self.settings.token
+
+    @session_state
+    def account(self, user: str | None) -> dict:
+        ...                               # {"cookies": [...], "local_storage": [...]} that sign a browser in
+```
+
+- **Its names:** `domains` are the real site's, where start tabs may open and `browser_sign_in` sets the session's
+  cookies. `allow_hosts` are the other hosts its pages reach, such as its assets and API. A computer whose network is an
+  allowlist may reach both; one that allows every host is left as it is. A name a synthetic site of the run also claims
+  is that site's.
+- **Its card:** `website/v1` says `live` (`WEBSITE_LIVE_PARAM`) and `allow_hosts` (`WEBSITE_ALLOW_HOSTS_PARAM`) beside
+  `domains`, and names no routes. The server serves no `/api/session` page route. `@website` refuses a live site
+  with no domains or a static folder, and `allow_hosts` on a site that isn't live.
+- **Its session:** the method marked `@session_state` answers `session {user}`. A live site must mark one, since only
+  the real site's cookies sign a browser in to it. Each cookie carries no domain and a `max_age`, as a synthetic
+  site's does.
+- **Settings:** any site may declare `Settings`. A deploy hands them to its server in `WEBSITE_SETTINGS_ENV`, a JSON
+  object, and the site reads them as `self.settings`, unless it has a member of that name of its own. A `SecretStr`
+  field's value in env.toml is a `secret:` or `env:` reference, which agentenv resolves only as it writes the server's
+  container, and every record shows it as withheld.
+- **The run:** a run that deploys a live site is marked live. The deploy record says `live`, and the run's metadata lists
+  its live sites with `reproducible: false`, because the real site may change between runs.
+
 ## Computer drivers
 
 A computer driver is what runs inside a computer an agent uses through screenshots and input. Write
@@ -584,8 +641,9 @@ driver has them, through the `served_tools`, `served_extensions` and `served_ope
   features, among them `screen`: `desktop`, or `page` for a driver whose screen is a website
   browser's active tab, which a computer env pairs with exactly one website browser. The driver serves its skill through `skill/v1` (an `@agent_skill` handler on the base
   class): a SKILL.md written from the computer as it booted (its platform, session user and home,
-  the live screen size, what its input takes, its OS's shortcuts) and ending with the driver
-  class's `notes`, markdown for what its card can't say. A driver whose software ships a skill of
+  the live screen size, what its input takes, its platform's shortcuts, a distribution's where it
+  has its own, as Omarchy does) and ending with the driver class's `notes`, markdown for what its
+  card can't say. A driver whose software ships a skill of
   its own returns it from `bundled_skill()` (its description, body and other files), and the
   computer skill leads with it, the computer's part following.
 - **Framework extensions.** `computer-ready/v1` (`status`: real checks of the display and a
@@ -776,8 +834,10 @@ class MailApp(ComputerAppEnvironment):
   installed into the venv every app gets beside them; `sources`, extra apt repositories
   (`AptSource`, with a key file in the folder); `downloads`, files fetched by URL and checked by
   sha256 (`Download`); `run`, scripts of the folder run as root or the session user (`RunScript`);
-  `services`, programs the computer's init runs from the prefix as the session user; and `ports`,
-  those it listens on. Packages, requirements and downloads are resolved and fetched once, when the
+  `services`, programs the computer's init runs from the prefix as the session user; `ports`,
+  those it listens on; and `shm_mb`, the shared memory it needs in `/dev/shm`, in MiB, which a
+  computer of it gets, the most its apps ask for, where its sandbox can size it (Chrome, say, which
+  keeps its renderers' memory there). Packages, requirements and downloads are resolved and fetched once, when the
   computer env is put, and every build installs only those stored files, with the network closed.
   Each value is checked as the class is defined: a URL, a sha256, a path that stays in the folder.
   Installs are exact: apt installs each package without its recommends, and the venv gets exactly
@@ -940,7 +1000,43 @@ are the profile's template. The base class adds:
   and, completed, its size and sha256; and `dialogs`, each with its type, message, default text, answer
   and who gave it.
   `hidden_page()` gives agentenv a page of its own for reading state, in no window and never in the record.
-- **`browser/v1`** on its card: `chromium` (its `version`), `clock: "real"` and, alone, `window`; and
+- **Its log**, `self.log`, a `BrowserLog` (`agentenv_protocol.website_browser.log`): one entry for each action agents take on it
+  and an event each time a tab opens, navigates or closes. Its server writes it, the one writer, to
+  `/var/log/agentenv/browser-<name>.jsonl` (its own `.agentenv/` folder when that can't be written), one JSON object a
+  line with its `seq` and `at` and one of `action`, `tab`, `outcome` or `reset`. A line's number is taken when what it
+  records begins and the line written when it ends, so `log {after}` returns lines in order up to the last whose every
+  earlier line is written (`last`), and `last` never moves back. An action still going after 60 s is written by the
+  next read as `unfinished`, so it holds back nothing after it, and once it ends an `outcome` line names it (`entry`)
+  with what it ended with. A relayed connection's commands reach the browser in the order they came. The file lasts the
+  computer's boot, a restarted server carrying on the sequence and the
+  browser's own reset (`data/reset`) being a line. A computer's `reset_env` boots it afresh, with a new log, so a task
+  that needs the one before takes it first, with `snapshot_env`.
+  - **An action** is a CDP command through the relay (`via: "cdp"`, `who` the connection's user, its `connection`
+    number, `method`, and the tab its session is on), an op a driver makes for an agent's MCP tool call (`via: "mcp"`,
+    `who` the caller's role, `tool`, `call`, `op`), an agent's MCP tool call a driver serves through a CDP user's
+    connections, such as Playwright MCP's (`via: "mcp"`, `who`, `tool`, `call`, with no `op`, between `calls/begin`
+    and `calls/end`), or an acting op agentenv makes itself (`via: "agentenv"`). A CDP command of a user with such a
+    call open names it, `for` its entry, or `for` a list of entries when several are open; the call's entry takes
+    the tab its commands acted on, and keeps what it typed only once each typing command of its own found no
+    password field focused. Each
+    carries `tab`, `url`, `ok` and, failed, `error`, and is marked `acts` or not by its method or op
+    (`log.acts`, `ACTING_OPS`): input, navigation, tab commands, `Runtime.evaluate` and `callFunctionOn`, DOM
+    writes, faked responses, and viewport and cookie changes act; the rest read. An acting entry keeps its `params`
+    (and a tool call's `args`) with what could carry a secret taken out: text typed while a password field has focus,
+    as its length; cookie and header values; the values of URL query keys that name a credential; a request's body;
+    and each string past 2 KB cut, with its length and sha256. A reading entry keeps none.
+  - **A tab event** (`opened`, `navigated`, `closed`) says what caused it: `by: "command"` with the `entry`, `via` and
+    `who` of the command that asked for it, and its `for`, matched exactly by the target a new tab's command answers with and the
+    loader a navigation's does; `by: "agentenv"`; `exit` or `stop`; or `by: "page"`, with the `after` of the latest
+    acting entry on its tab (its opener's, for a popup), for a click that follows a link, a redirect or a page script.
+  - A driver passes an agent's tool call to the browser in the `AgentEnv-Tool-Call` header (`tool_call_header`), with
+    the caller's `AgentEnv-Role`; the page driver sends it on every call it makes for a tool. `data/get` writes the log
+    beside `browser-state.json` as `browser-log.jsonl`, which `data/add` passes over.
+- **`browser/v1`** on its card: `chromium` (its `version`), `clock: "real"` and, alone, `window`; `log {after}`
+  (GET), framework-only, its log's lines after `after`; `calls/begin {user, acts?, within_s?}`, framework-only,
+  sent with the tool-call header, which begins the entry of an agent's tool call that `user`'s CDP connections
+  serve and answers its `entry`, and `calls/end {entry, ok, error?}`, which ends it, a call not ended within
+  `within_s` (600 s by default) written as never said to have ended; and
   `record` (GET), framework-only, which returns that record with `launches`, the app server's log of each
   launch (with its cause: `boot`, `server_restart`, `launch`, `data/add` or `data/reset`), each stop it made
   and each exit it didn't, with its exit `code` or the `signal` that ended it, since the computer booted.

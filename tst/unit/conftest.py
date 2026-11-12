@@ -8,8 +8,16 @@ their own interpreter so they are unaffected (e.g. generated CLI scripts).
 
 A test that genuinely needs a socket can opt out with @pytest.mark.enable_socket.
 
+``import litellm`` fetches its model cost map from GitHub unless told to read the copy it ships, and in every release
+pyproject.toml allows a blocked socket fails the import instead of falling back, so the unit suite reads the shipped
+copy.
+
 The AWS backends' tests live in store/aws, whose conftest gives them placeholder credentials.
 """
+
+import os
+
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 
 import pytest
 from pytest_socket import disable_socket, enable_socket

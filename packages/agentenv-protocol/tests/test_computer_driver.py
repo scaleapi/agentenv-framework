@@ -222,6 +222,18 @@ async def test_the_skill_is_written_from_the_computer_as_it_booted_under_the_nam
 
 
 @pytest.mark.asyncio
+async def test_the_skills_shortcuts_are_its_distributions_own_where_it_has_them(monkeypatch):
+    monkeypatch.setattr("agentenv_protocol.computer.skill.getpass.getuser", lambda: "omarchy")
+    omarchy = Platform(os="linux", distribution="omarchy", version="4.5.0", arch="amd64", display="wayland")
+    async with http_client(FakeDriver(platform=omarchy)) as http:
+        skill_md = (await http.get("/agentenv/ext/skill/get", params={"name": "computer-desktop"})).json()["skill_md"]
+
+    shortcuts = skill_md.partition("## Shortcuts")[2]
+    assert "- Omarchy 4.5.0 (amd64), a Wayland session" in skill_md
+    assert "`['Super', 'Alt', ' ']` the app launcher" in shortcuts and "`['Alt', 'Tab']`" not in skill_md
+
+
+@pytest.mark.asyncio
 async def test_a_driver_whose_software_ships_a_skill_leads_with_it_and_the_computers_part_follows(monkeypatch):
     class Bundling(FakeDriver):
         keys = ("Enter", "Escape", *(chr(code) for code in range(0x21, 0x7F)))

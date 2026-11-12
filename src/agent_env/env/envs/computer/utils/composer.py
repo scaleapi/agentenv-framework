@@ -44,8 +44,10 @@ from agent_env.env.envs.computer.utils import (
     clashes,
     gate,
     macos_vm_bundle,
+    omarchy_disk,
     packages,
     probing,
+    thin_disk,
     windows_disk,
 )
 from agent_env.env.envs.computer.utils.composed import BUILT, REPOSITORY, Record, failed, now, stale
@@ -138,10 +140,11 @@ def compose(env: ComputerEnv, pairs: list[tuple[str, str]] | None = None,
         containers = {arch: pool.submit(_composed, env, base, driver, form, arch, builds, progress)
                       for form, arch in pairs if form == "container"}
         futures = {future: ("container", arch) for arch, future in containers.items()}
+        built_from = {"windows": _composed_windows_disk, "linux/omarchy": _composed_omarchy_disk}.get(platform_of(base.os))
         futures |= {pool.submit(_composed_disk, env, base, driver, arch, containers.get(arch), builds, progress):
-                    ("disk", arch) for form, arch in pairs if form == "disk" and base.os.type != "windows"}
-        futures |= {pool.submit(_composed_windows_disk, env, base, driver, arch, provider, progress): ("disk", arch)
-                    for form, arch in pairs if form == "disk" and base.os.type == "windows"}
+                    ("disk", arch) for form, arch in pairs if form == "disk" and built_from is None}
+        futures |= {pool.submit(built_from, env, base, driver, arch, provider, progress): ("disk", arch)
+                    for form, arch in pairs if form == "disk" and built_from is not None}
         futures |= {pool.submit(_composed_vm_bundle, env, base, driver, arch, provider, progress): ("vm_bundle", arch)
                     for form, arch in pairs if form == "vm_bundle"}
         for future in as_completed(futures):
@@ -394,27 +397,27 @@ def _composed_windows_disk(env: ComputerEnv, base: ComputerArtifact, driver: Com
             progress.say(f"{pair}: {line}")
 
         attempt.stage = "base"
-        registry = windows_disk.Registry(_image_store(env), REPOSITORY)
+        registry = thin_disk.Registry(_image_store(env), REPOSITORY)
         disk_gb, user = base.forms.disk.min_disk_gb, base.session.user
         made = windows_disk.base(_key(recipe=_digest(windows_disk.RECIPE), disk_gb=disk_gb, user=user,
                                       form="windows-base", format=FORMAT),
                                  lambda: windows_disk.media(say), disk_gb, user, say, registry)
         script = windows_disk.write(build, parts, user=user, build_settings=settings,
                                     image={"base": made.image, "layers": [part.folder for part in parts]})
-        expires = made.expires.isoformat(timespec="seconds")
+        expires = made.labels[windows_disk.EXPIRES_LABEL]
         key = attempt.key = _key(base=made.image, base_expires=expires, provision=script, context=_digest(context),
                                  build_settings=settings, form="disk", arch=arch, format=FORMAT)
         attempt.stage = "build"
         with holding_locks([f"windows-disk:{key}"], lambda: progress.at(
                 pair, "waiting", "waiting for the compose of the same disk under way on this machine")):
-            if (pinned := registry.served(windows_disk.disk_names(key).tag)) is not None:
+            if (pinned := registry.served(thin_disk.disk_names(windows_disk.GUEST, key).tag)) is not None:
                 progress.at(pair, "reusing", "reusing the disk of the same key, composed earlier")
                 result = {"status": "unverified", "key": key, "image": pinned, "reused": True, "expires": expires,
                           "built_at": now()}
             else:
                 progress.at(pair, "composing", "composing on this machine's Docker")
-                pinned = windows_disk.compose(made, build, key,
-                                              {KEY_LABEL: key, windows_disk.EXPIRES_LABEL: expires}, say, registry)
+                pinned = thin_disk.compose(windows_disk.GUEST, made, build, key,
+                                           {KEY_LABEL: key, windows_disk.EXPIRES_LABEL: expires}, say, registry)
                 result = {"status": "unverified", "key": key, "image": pinned, "reused": False,
                           "builder": "LocalSandboxProvider", "expires": expires, "built_at": now()}
             return _probed(env, driver, "disk", arch, result, provider, progress)
@@ -501,6 +504,73 @@ def _part(layer: _Layer, programs: dict[str, str], environment: dict[str, Any], 
                           environment, _venv(layer), spec if _venv(layer) else None, layer.served, layer.steps)
 
 
+def _composed_omarchy_disk(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, arch: str,
+                           provider: SandboxProvider, progress: _Progress) -> dict:
+    """The Omarchy disk of ``arch``: one of its key the env's image store holds, reused; else composed with this
+    machine's Docker and KVM (``omarchy_disk``), on its base, this machine's, the store's or built from Omarchy's own
+    image, the driver and each app installed over ssh as a layer on it, packed and pushed to the store under its key,
+    as Linux disks are. Then probed at full (gate 3). All of it holds a lock of its key, as a Windows disk's compose
+    does."""
+    pair = f"disk/{arch}"
+    with (_attempting(env, "disk", arch) as attempt,
+          tempfile.TemporaryDirectory(prefix="agentenv-compose-") as work):
+        if not boot.native_links(provider, arch, "disk", env.stored_id, base.os.type):
+            raise builder.Unbuildable(f"no link of {' or '.join(type(link).__name__ for link in provider.links)} boots "
+                                      f"linux/{arch} disks, so it can't be composed here: compose it on a Linux machine "
+                                      "with KVM, with the local sandbox provider")
+        build = Path(work) / "build"
+        context = build / "context"
+        context.mkdir(parents=True)
+        protocol = _stage_protocol(context)
+        layer, name = _stage_driver(context, driver, base, {}), gate.folder_name(driver.id, "driver")
+        prefix = omarchy_disk.DRIVERS / name
+        parts = [_omarchy_part(layer, prefix, {
+            program: omarchy_disk.argv(command, prefix)
+            for program, command in _services(f"driver-{name}", layer.install).items()}, {"MCP_PORT": driver.port},
+            protocol)]
+        for app in env.composed_apps():
+            staged = _stage_app(context, app, base, {})
+            prefix = PurePosixPath(staged.prefix)
+            server = [str(prefix / "venv" / "bin" / "python"), "-m", "agentenv_protocol.computer.serve_app",
+                      staged.served]
+            commands = [server, *(omarchy_disk.argv(service.command, prefix) for service in staged.install.services)]
+            environment = {"ENVIRONMENT_NAME": app.environment_name,
+                           **({PLATFORM_ENV: staged.platform} if staged.platform else {})}
+            parts.append(_omarchy_part(staged, prefix, dict(zip(gate.programs(app, platform_of(base.os)), commands)),
+                                       environment, protocol))
+        values = env.computer_values()
+        settings = {name: values.get(name, setting.default) for name, setting in base.config.items()
+                    if setting.phase == "build"}
+
+        def say(line: str) -> None:
+            progress.say(f"{pair}: {line}")
+
+        attempt.stage = "base"
+        registry = thin_disk.Registry(_image_store(env), REPOSITORY)
+        source, user = base.forms.disk.source, base.session.user
+        made = omarchy_disk.base(
+            _key(recipe=_digest(omarchy_disk.RECIPE), seed=hashlib.sha256(omarchy_disk.SEED_ENV.read_bytes()).hexdigest(),
+                 source=source.sha256, user=user, os=base.os.model_dump(), form="omarchy-base", format=FORMAT),
+            lambda: omarchy_disk.source(source, say), user, base.os.distribution, base.os.version, say, registry)
+        script = omarchy_disk.write(build, parts, user=user, build_settings=settings,
+                                    image={"base": made.image, "layers": [part.folder for part in parts]})
+        key = attempt.key = _key(base=made.image, provision=script, context=_digest(context), build_settings=settings,
+                                 form="disk", arch=arch, format=FORMAT)
+        attempt.stage = "build"
+        with holding_locks([f"omarchy-disk:{key}"], lambda: progress.at(
+                pair, "waiting", "waiting for the compose of the same disk under way on this machine")):
+            if (pinned := registry.served(thin_disk.disk_names(omarchy_disk.GUEST, key).tag)) is not None:
+                progress.at(pair, "reusing", "reusing the disk of the same key, composed earlier")
+                result = {"status": "unverified", "key": key, "image": pinned, "reused": True, "built_at": now()}
+            else:
+                progress.at(pair, "composing", "composing on this machine's Docker")
+                pinned = thin_disk.compose(omarchy_disk.GUEST, made, build, key, {KEY_LABEL: key}, say, registry)
+                result = {"status": "unverified", "key": key, "image": pinned, "reused": False,
+                          "builder": "LocalSandboxProvider", "built_at": now()}
+            return _probed(env, driver, "disk", arch, result, provider, progress)
+    return attempt.result
+
+
 def _windows_part(layer: _Layer, prefix: PureWindowsPath, services: dict[str, list[str]],
                   environment: dict[str, Any], protocol: bool) -> windows_disk.Part:
     """``layer`` as a Windows disk installs it under ``prefix``: its ``services``' argv by name, with ``environment``,
@@ -511,6 +581,17 @@ def _windows_part(layer: _Layer, prefix: PureWindowsPath, services: dict[str, li
             f"{_PROTOCOL}{extra}=={importlib.metadata.version(_PROTOCOL)}" if layer.app else None)
     return windows_disk.Part(layer.folder, prefix, layer.install, services, environment, (spec,) if spec else (),
                              layer.served, tuple(step for step, _ in layer.steps))
+
+
+def _omarchy_part(layer: _Layer, prefix: PurePosixPath, services: dict[str, list[str]], environment: dict[str, Any],
+                  protocol: bool) -> omarchy_disk.Part:
+    """``layer`` as an Omarchy disk installs it under ``prefix``: its ``services``' argv by name, with ``environment``,
+    an app's own server, install steps and platform, and a venv's protocol as on Windows (``_windows_part``)."""
+    extra = "[app]" if layer.app else ""
+    spec = (f"{omarchy_disk.BUILD}/context/protocol{extra}" if protocol else
+            f"{_PROTOCOL}{extra}=={importlib.metadata.version(_PROTOCOL)}" if layer.app else None)
+    return omarchy_disk.Part(layer.folder, prefix, layer.install, services, environment, (spec,) if spec else (),
+                             layer.served, layer.steps, layer.platform)
 
 
 def _probed(env: ComputerEnv, driver: ComputerDriverEnv, form: str, arch: str, result: dict,
@@ -976,12 +1057,12 @@ def _computer(env: ComputerEnv, base: ComputerArtifact, built: dict[str, str], d
               bundles: dict[str, str]) -> dict | None:
     """Write the env's computer over the images ``built``, by arch, joined into one index in the env's image store, signed
     in to it: its arches those, its OS and session the base's, its settings the base's with the env's values as their
-    defaults; with a disk form over ``disks`` when there's one for each of those arches; for a macOS base, over its VM
-    bundles alone. None when nothing built."""
+    defaults; with a disk form over ``disks`` when there's one for each of those arches; for a base that's a disk alone,
+    Windows or Omarchy, over its disks alone; for a macOS base, over its VM bundles alone. None when nothing built."""
     config = {name: setting.model_dump() for name, setting in base.config.items()}
     for name, value in env.computer_values().items():
         config[name]["default"] = value
-    if base.os.type == "windows":
+    if base.forms.container is None and base.forms.disk is not None:
         if not disks:
             return None
         return _written(env, base, [arch for arch in base.arch if arch in disks], config,

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentenv-framework"
-version = "0.9.1480"
+version = "0.9.1516"
 description = "SDK and CLI for building, deploying and running agent environments and the tasks that grade agents in them."
 readme = "README.md"
 license = "Apache-2.0"
@@ -37,7 +37,7 @@ dependencies = [
     "huggingface_hub>=1.0",  # agent-env run hf:// resolves and downloads a Hub bundle; checked on 1.0, 1.33 and 2.4
     "idna>=3.0",  # a browser tab step matches a URL's host as Chromium spells it, by UTS 46
     "jsonschema>=4.20",  # checks an app's settings against its Settings' schema before a deploy
-    "litellm>=1.96.0,<1.97",
+    "litellm>=1.104.0,<1.107",  # 1.104.0 is past every range GHSA-7hp6-4w63-5g45 lists (a proxy-server advisory; only the client is used); checked on 1.104.0 and 1.106.6
     "mcp>=1.25,<2",  # same floor as env/gateway/requirements.txt and agentenv-protocol; 2.0.0 removed mcp.server.fastmcp, imported at module scope by env/gateway
     "packaging>=22",  # parses a bundle.toml's requires; evaluates a plugin's requirement markers with no extra
     "a2a-sdk==0.3.26",
@@ -161,7 +161,8 @@ dev = [
     "hypothesis>=6.100",  # the property tests of the judge score parse
     "moto>=5.0.0",
     "psycopg2-binary>=2.9.0",  # the gateway server module's driver; outside its container only the tests import it
-    "websockets>=13",  # the gateway's WebSocket relay to a website; outside its container only the tests import it
+    "regex>=2023.12.25",  # the gateway's trigger predicates, matched under a timeout; outside its container only the tests import it
+    "websockets>=15",  # the gateway's WebSocket relay to a website; outside its container only the tests import it
     "pytest>=9.0",
     "pytest-asyncio>=0.23.0",
     "pytest-dependency>=0.6.0",

@@ -115,6 +115,27 @@ async def test_messages_and_the_sites_close_are_relayed_with_the_gateways_header
 
 
 @pytest.mark.asyncio
+async def test_a_websocket_reached_at_the_sites_name_takes_it_as_its_host_and_at_any_other_keeps_its_own():
+    site = EchoSite()
+    site_server, site_port = await serve(site.app)
+    gateway = Gateway(host="127.0.0.1", port=0, server_name="t", internal_mcp_servers=[],
+                      rest_proxy_urls={"notes": f"http://127.0.0.1:{site_port}"},
+                      website_urls={"notes": f"http://127.0.0.1:{site_port}"}, site_names={"notes": ["notes.test"]})
+    gateway_server, gateway_port = await serve(gateway._asgi_app())
+    try:
+        for root in ("https://notes.test", "https://evil.example"):
+            async with connect(f"ws://127.0.0.1:{gateway_port}/website/notes/live",
+                               additional_headers=[("AgentEnv-Site-Root", root)]) as websocket:
+                await websocket.send("hi")
+                assert await asyncio.wait_for(websocket.recv(), 5) == "HI"
+    finally:
+        await gateway_server.shutdown()
+        await site_server.shutdown()
+    assert [(headers["host"], headers.get("x-forwarded-host")) for _, headers in site.handshakes] == [
+        ("notes.test", "notes.test"), (f"127.0.0.1:{site_port}", "evil.example")]
+
+
+@pytest.mark.asyncio
 async def test_the_sites_handshake_answer_reaches_the_client_with_each_cookie_apart(stack):
     _, route = stack
     async with connect(f"{route}/session") as websocket:

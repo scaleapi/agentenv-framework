@@ -17,6 +17,7 @@ from mcp.server.fastmcp import FastMCP  # noqa: E402
 from mcp.types import CallToolResult, TextContent  # noqa: E402
 
 from agentenv_protocol import (  # noqa: E402
+    HIDDEN_BY_DEFAULT_META_KEY,
     ROLE_HEADER,
     ROLE_META_KEY,
     AgentEnvEnvironment,
@@ -138,6 +139,34 @@ async def test_a_forwarded_tool_is_listed_and_refused_by_role_like_any_tool():
                 agent_tools, refused = await _names(agent), await agent.call_tool("click", {})
     assert listed == ["click", "read", "write"] and called.content[0].text == "clicked"
     assert agent_tools == ["read", "write"] and refused.isError
+
+
+@pytest.mark.asyncio
+async def test_a_forwarded_tool_hidden_by_default_stays_hidden_through_every_tool_rule_until_a_rule_names_it():
+    class Forwarding(_Env):
+        def forwarded_tools(self):
+            async def evaluate(**arguments):
+                return CallToolResult(content=[TextContent(type="text", text="evaluated")])
+            return [ForwardedTool(EnvironmentTool(name="evaluate", inputSchema={"type": "object"}), evaluate,
+                                  hidden_by_default=True)]
+
+    with anyio.fail_after(30):
+        async with _served(Forwarding()) as (rest, session):
+            async with session("agent") as agent:
+                listed, refused = await _names(agent), await agent.call_tool("evaluate", {})
+            await rest.post("/tools/enable", json={"role": "agent", "tools": "*"})
+            async with session("agent") as agent:
+                after_every_tool = await _names(agent)
+            await rest.post("/tools/enable", json={"role": "agent", "tools": ["evaluate"]})
+            async with session("agent") as agent:
+                shown = {t.name: t for t in (await agent.list_tools()).tools}
+                called = await agent.call_tool("evaluate", {})
+            async with session() as anyone:
+                anyone_tools = await _names(anyone)
+    assert listed == after_every_tool == anyone_tools == ["read", "write"]
+    assert refused.isError and refused.structuredContent["code"] == "permission_denied"
+    assert sorted(shown) == ["evaluate", "read", "write"] and not called.isError
+    assert shown["evaluate"].meta == {HIDDEN_BY_DEFAULT_META_KEY: True} and called.content[0].text == "evaluated"
 
 
 @pytest.mark.asyncio

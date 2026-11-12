@@ -108,7 +108,7 @@ from agent_env.env.gateway.constants import (
     EXT_USER_CHAT_URI,
 )
 from agent_env.store import DuplicateKeyError, get_config
-from agent_env.task_step.context import PromptResponse, TaskStepContext
+from agent_env.task_step.context import PromptResponse, StepContextError, TaskStepContext
 from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.agent import user_sim_versions
 from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import USER_SIMS_KEY
@@ -454,19 +454,19 @@ class _Run:
         step, ctx = self.step, self.ctx
         self.agent = next((a for a in ctx.deployed_agents if a.agent_name == step.agent_name), None)
         if self.agent is None:
-            raise RuntimeError(f"Agent with name '{step.agent_name}' not found in context.deployed_agents")
+            raise StepContextError(f"Agent with name '{step.agent_name}' not found in context.deployed_agents")
         self.target_url = self.agent.a2a_url or self.agent.api_url
         self.recipient = self.agent.role or DEFAULT_ROLE
         us = (ctx.metadata.get(USER_SIMS_KEY) or {}).get(step.user_sim)
         if us is None:
-            raise RuntimeError(f"always_on: no deploy_user_sim_agent step named '{step.user_sim}' ran before this step")
+            raise StepContextError(f"always_on: no deploy_user_sim_agent step named '{step.user_sim}' ran before this step")
         self.us = us
         self.zone = _task_zone(us, ctx.metadata.get("clock_configurations") or [])
         self.person = {**person_of(us), "time_zone": self.zone}
         self.version = us["user_version"]
         self.user_agent = next((a for a in ctx.deployed_agents if a.agent_name == us["agent_name"]), None)
         if self.user_agent is None:
-            raise RuntimeError(f"always_on: the user sim agent '{us['agent_name']}' is not deployed")
+            raise StepContextError(f"always_on: the user sim agent '{us['agent_name']}' is not deployed")
         self.user_url = self.user_agent.a2a_url or self.user_agent.api_url
         self.plugin = await self._load_plugin(us.get("plugin"))
         self.tz = ZoneInfo(self.zone)

@@ -27,6 +27,7 @@ from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.browser.connect_cdp import BrowserConnectCdpTaskStep
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
+from tst.util import package_cache
 from tst.util.fake_openai import FakeOpenAI, Text, ToolCall
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
@@ -69,11 +70,13 @@ def state(monkeypatch, tmp_path, endpoint):
         monkeypatch.delenv(name, raising=False)
     configure()
     reset_artifact_store()
+    package_cache.seed()
     logging.disable(logging.CRITICAL)  # pytest's live logging would take CliRunner's stdout
     try:
         yield tmp_path
         assert not sandboxes.exists() or not any(sandboxes.iterdir()), "a run left a sandbox work folder"
     finally:
+        package_cache.keep()
         logging.disable(logging.NOTSET)
         grant_server(None, None).close()
         reset_artifact_store()

@@ -505,6 +505,8 @@ def test_the_default_roots_hold_the_workspace_and_the_clis_state(agent_dirs):
 def _changelog_client(monkeypatch, tmp_path) -> tuple[TestClient, a2a_server.ClaudeCodeChangelogAgent]:
     monkeypatch.setenv("A2A_PORT", "8000")
     monkeypatch.setattr(a2a_server, "changelog_dir", lambda environ: tmp_path / "changelog")
+    monkeypatch.setattr(a2a_server, "_changelog_roots",
+                        lambda: [str(a2a_server.CLAUDE_STATE_DIR), str(a2a_server.WORKSPACE_DIR)])
     agent = a2a_server.ClaudeCodeChangelogAgent()
     return TestClient(a2a_server.build_app(agent)), agent
 
