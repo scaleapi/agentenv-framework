@@ -408,6 +408,35 @@ def _exports(module: griffe.Module) -> list[str] | None:
     return [] if module.exports is not None else None
 
 
+def _value_changes(old: griffe.Object | griffe.Alias, new: griffe.Object | griffe.Alias,
+                   seen: set[str]) -> Iterator[griffe.Breakage]:
+    """The attribute value changes under ``old`` and ``new``, which griffe stopped reporting in 2.4.1
+    (mkdocstrings/griffe#506), found over the members its ``find_breaking_changes`` walks."""
+    after = new.all_members
+    for name, member in old.all_members.items():
+        if member.is_public and name in after:
+            yield from _value_change(member, after[name], seen)
+
+
+def _value_change(old: griffe.Object | griffe.Alias, new: griffe.Object | griffe.Alias,
+                  seen: set[str]) -> Iterator[griffe.Breakage]:
+    if old.path in seen:
+        return
+    seen.add(old.path)
+    if old.is_alias or new.is_alias:
+        try:
+            old, new = (m.target if m.is_alias else m for m in (old, new))
+        except griffe.AliasResolutionError:
+            return
+        yield from _value_change(old, new, seen)
+    elif new.kind is not old.kind:
+        return
+    elif old.is_module or old.is_class:
+        yield from _value_changes(old, new, seen)
+    elif old.is_attribute and old.value != new.value:
+        yield griffe.AttributeChangedValueBreakage(new, old.value, "unset" if new.value is None else new.value)
+
+
 def caller_breaks(path: str, old: griffe.Object, new: griffe.Object, reshaped: set[str]) -> list[str]:
     found = []
     if old.is_class:
@@ -426,7 +455,7 @@ def caller_breaks(path: str, old: griffe.Object, new: griffe.Object, reshaped: s
             found += [f"{path}.{name}: no longer in __all__"
                       for name in sorted(set(before or ()) - set(after or ())) if name in new.members]
     scope = (old.parent, new.parent) if old.is_function else (old, new)
-    for breakage in griffe.find_breaking_changes(*scope):
+    for breakage in [*griffe.find_breaking_changes(*scope), *_value_changes(*scope, set())]:
         if (old.is_function and breakage.obj.path != old.path) or _benign(breakage, old, new) \
                 or breakage.obj.path in reshaped:
             continue
