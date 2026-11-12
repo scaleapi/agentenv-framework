@@ -95,9 +95,10 @@ async def check_browser_contexts(deployed, env_id: str, op_url: Callable[[str], 
     async def tabs(label: str | None = None) -> list[dict]:
         return (await call("tabs/list", {"context": label} if label else None, method="GET"))["tabs"]
 
-    def titled(label: str, title: str):
-        return _until(lambda: tabs(label), lambda found: any(tab["title"] == title for tab in found),
-                      f"a tab of {label} titled {title!r}")
+    async def titled(label: str, title: str) -> dict:
+        found = await _until(lambda: tabs(label), lambda found: any(tab["title"] == title for tab in found),
+                             f"a tab of {label} titled {title!r}")
+        return next(tab for tab in found if tab["title"] == title)
 
     serving = [asyncio.ensure_future(inside.run(deployed, ["python3", "-c", script, str(SERVE_S)],
                                                 timeout_s=SERVE_S + 60)) for script in (SERVE_SITE, SERVE_FILE)]
