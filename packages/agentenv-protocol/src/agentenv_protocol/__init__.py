@@ -21,6 +21,7 @@ from .agent_env_environment import (
     extension,
     get_data,
     injecting,
+    mcp_port,
     reset_data,
     tool,
 )
@@ -94,6 +95,7 @@ __all__ = [
     "AgentEnvStarletteApplication",
     "ForwardedTool",
     "create_fastmcp_app",
+    "mcp_port",
     "environment_card",
     "reset_data",
     "add_data",

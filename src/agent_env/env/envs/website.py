@@ -3,12 +3,26 @@ built before the server image held its pages may still name a separate frontend 
 
 A deploy reads whether the site is ready from its env card, the protocol layer: ``website/v1``'s ``ready``, as
 ``computer-app/v1``'s says of an app. ``health_path`` (env.toml's ``health``) is read only for a site whose card has no
-``ready``, or that serves no card, and is deprecated."""
+``ready``, or that serves no card, and is deprecated.
+
+A live website env (``live``) is a real site, at its ``domains``, its pages reaching the ``allow_hosts`` too: its server
+serves none of its pages, only its card, data plane, readiness and session, so a computer reaches the real site over
+its own network, and a gateway gives it no site route. The env keeps them, as it keeps ``domains``, since a computer's
+network is fixed before any card is read. ``settings`` are what its server is handed as ``WEBSITE_SETTINGS_ENV``,
+each of its ``secret_settings`` (its ``Settings``' ``SecretStr`` fields) a ``secret:`` or ``env:`` reference, resolved only
+when its container is written.
+
+``ready_timeout_s`` (env.toml's too) is how long the site may take from its server's container starting to ready: the
+gateway's health check of that container allows it before it counts a failure, and the deploy waits that long, or as
+long as its card's ``ready`` says if longer, before it gives up. ``shm_mb`` is the shared memory its server's container
+gets in ``/dev/shm``, in MiB. Without them, the health check and the wait are the gateway's own and ``/dev/shm`` is
+Docker's."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import posixpath
 import shlex
@@ -19,11 +33,14 @@ from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional
 
 from agentenv_protocol import client as protocol_v1
 from agent_env.artifact import Artifact, DockerImageArtifact, EnvironmentArtifact
+from agent_env.config import ENV_REF_PREFIX, SECRET_REF_PREFIX, is_bare_reference
 from agent_env.artifact.artifacts.docker_image import ProgressCallback, refuse_local_github_build
 from agent_env.entity.refs import EntityRef
 from agent_env.env.env import Env, gateway_url_of
+from agent_env.env.envs.computer.utils.install import MAX_SHM_MB
 from agent_env.env.envs.computer.utils.sites import name_problem
 from agent_env.store.ids import derive_id
+from agent_env.utils.card_naming import WebsiteSource
 from agent_env.env import legacy_protocol
 from agent_env.env.envs._deployment import (
     as_builtin, builtin_provider_for, close_deployed, close_replaced, deploy_refusal, deploy_through_provider, host_staging_refusal,
@@ -53,7 +70,9 @@ class WebsiteEnv(Env):
                                                   EntityRef.artifact("frontend_image", artifact_type="docker_image",
                                                                      optional=True))
     toml_keys: ClassVar[dict[str, type]] = {"backend_image": object, "frontend_image": object, "environment_name": str,
-                                            "health": str, "domains": list, "env_provider_type": str}
+                                            "health": str, "domains": list, "env_provider_type": str, "live": bool,
+                                            "allow_hosts": list, "settings": dict, "ready_timeout_s": object,
+                                            "shm_mb": object}
 
     def __init__(
         self,
@@ -68,6 +87,12 @@ class WebsiteEnv(Env):
         domains: Optional[list[str]] = None,
         metadata: Optional[dict[str, str]] = None,
         env_provider_type: str = "gateway",
+        live: bool = False,
+        allow_hosts: Optional[list[str]] = None,
+        settings: Optional[dict[str, Any]] = None,
+        secret_settings: Optional[list[str]] = None,
+        ready_timeout_s: Optional[float] = None,
+        shm_mb: Optional[int] = None,
     ):
         super().__init__(id, version, metadata=metadata)
         if not environment_name:
@@ -85,6 +110,17 @@ class WebsiteEnv(Env):
         if problem := domains_problem(domains or []):
             raise ValueError(f"website env {id!r}: {problem}")
         self.domains = list(domains or [])
+        if problems := live_problems(live, self.domains, allow_hosts or [], settings or {}, secret_settings or []):
+            raise ValueError(f"website env {id!r}: {'; '.join(problems)}")
+        if problem := (ready_timeout_s is not None and ready_timeout_problem(ready_timeout_s)) or (
+                shm_mb is not None and shm_problem(shm_mb)):
+            raise ValueError(f"website env {id!r}: {problem}")
+        self.ready_timeout_s = ready_timeout_s
+        self.shm_mb = shm_mb
+        self.live = live
+        self.allow_hosts = list(allow_hosts or [])
+        self.settings = dict(settings or {})
+        self.secret_settings = list(secret_settings or [])
         self.environment_name = environment_name
         self.env_provider_type = env_provider_type
         self._sandbox = None
@@ -93,6 +129,14 @@ class WebsiteEnv(Env):
         self._gateway_url = None
         self._deployed: Optional[DeployedEnv] = None
         self._replaced: list[tuple] = []  # the provider and sandbox of each deployment a later deploy replaced, for close()
+
+    def live_websites(self) -> list[dict]:
+        """The live site it is, as a run records one: its env id, environment name, domains and ``allow_hosts``;
+        none for a synthetic site."""
+        if not self.live:
+            return []
+        return [{"env_id": self.id, "environment_name": self.environment_name, "domains": list(self.domains),
+                 "allow_hosts": list(self.allow_hosts)}]
 
     @property
     def backend_docker_image_artifact(self) -> DockerImageArtifact:
@@ -114,6 +158,18 @@ class WebsiteEnv(Env):
         base["health_path"] = self.health_path
         if self.domains:
             base["domains"] = list(self.domains)
+        if self.live:
+            base["live"] = True
+        if self.allow_hosts:
+            base["allow_hosts"] = list(self.allow_hosts)
+        if self.settings:
+            base["settings"] = dict(self.settings)
+        if self.secret_settings:
+            base["secret_settings"] = list(self.secret_settings)
+        if self.ready_timeout_s is not None:
+            base["ready_timeout_s"] = self.ready_timeout_s
+        if self.shm_mb is not None:
+            base["shm_mb"] = self.shm_mb
         base["service_name"] = self.environment_name
         base["environment_name"] = self.environment_name  # dual-write with service_name during the rename
         base["env_provider_type"] = self.env_provider_type
@@ -134,6 +190,12 @@ class WebsiteEnv(Env):
             domains=data.get("domains") or [],
             metadata=data.get("metadata", {}),
             env_provider_type=data.get("env_provider_type", "gateway"),
+            live=bool(data.get("live", False)),
+            allow_hosts=data.get("allow_hosts") or [],
+            settings=data.get("settings") or {},
+            secret_settings=data.get("secret_settings") or [],
+            ready_timeout_s=data.get("ready_timeout_s"),
+            shm_mb=data.get("shm_mb"),
         )
 
     @classmethod
@@ -157,7 +219,13 @@ class WebsiteEnv(Env):
                        environment_name=fields["environment_name"],
                        health_path=fields.get("health", DEFAULT_HEALTH_PATH),
                        domains=fields.get("domains") or [],
-                       env_provider_type=fields["env_provider_type"])
+                       env_provider_type=fields["env_provider_type"],
+                       live=fields.get("live", False),
+                       allow_hosts=fields.get("allow_hosts") or [],
+                       settings=fields.get("settings") or {},
+                       secret_settings=fields.get("secret_settings") or [],
+                       ready_timeout_s=fields.get("ready_timeout_s"),
+                       shm_mb=fields.get("shm_mb"))
 
     def to_toml(self, out: ExportContext) -> dict:
         """The env.toml of a folder this env's images are built from, which ``from_toml`` reads back as it."""
@@ -169,6 +237,16 @@ class WebsiteEnv(Env):
             toml["health"] = self.health_path
         if self.domains:
             toml["domains"] = list(self.domains)
+        if self.live:
+            toml["live"] = True
+        if self.allow_hosts:
+            toml["allow_hosts"] = list(self.allow_hosts)
+        if self.settings:
+            toml["settings"] = dict(self.settings)
+        if self.ready_timeout_s is not None:
+            toml["ready_timeout_s"] = self.ready_timeout_s
+        if self.shm_mb is not None:
+            toml["shm_mb"] = self.shm_mb
         return {**toml, **self.provider_toml(out, self.env_provider_type)}
 
     @classmethod
@@ -182,7 +260,18 @@ class WebsiteEnv(Env):
         domains = data.get("domains", [])
         if isinstance(domains, list) and (problem := domains_problem(domains)):
             ctx.refuse([ctx.config_problem(problem)])
-        return ctx.accept_env(data, cls, named_by="backend_image")
+        if problems := [problem for key, check in (("ready_timeout_s", ready_timeout_problem), ("shm_mb", shm_problem))
+                        if key in data and (problem := check(data[key]))]:
+            ctx.refuse([ctx.config_problem(problem) for problem in problems])
+        fields = ctx.accept_env(data, cls, named_by="backend_image")
+        declared, problems = declared_live(ctx.website_source("backend_image"), live=fields.get("live"),
+                                           domains=fields.get("domains"), allow_hosts=fields.get("allow_hosts"))
+        problems += live_problems(declared["live"], declared.get("domains", fields.get("domains") or []),
+                                  declared["allow_hosts"], fields.get("settings") or {}, declared["secret_settings"])
+        fields.update({key: value for key, value in declared.items() if value})
+        if problems:
+            ctx.refuse([ctx.config_problem(problem) for problem in problems])
+        return fields
 
     async def deploy(self, ttl_seconds: int = 10800, disk_size_gb: float = 10, gateway_mode: GatewayMode = GatewayMode.PERFORMANCE, cpu: float | None = None, memory_mb: int | None = None, sandbox_type: str | None = None, env_state_type: str | None = None, env_state_instance_id: str | None = None, artifact_id: str | None = None, artifact_version: int | None = None, *, attribution: Optional[Attribution] = None) -> DeployedEnv:
         return await deploy_through_provider(
@@ -357,6 +446,12 @@ class WebsiteEnv(Env):
         env_provider_type: str = "gateway",
         health_path: str = DEFAULT_HEALTH_PATH,
         domains: list[str] | None = None,
+        live: bool = False,
+        allow_hosts: list[str] | None = None,
+        settings: dict[str, Any] | None = None,
+        secret_settings: list[str] | None = None,
+        ready_timeout_s: float | None = None,
+        shm_mb: int | None = None,
     ) -> WebsiteEnv:
         """Build the server image, from ``backend_dockerfile_github_url``, and any deprecated frontend image from
         GitHub in parallel, and create a WebsiteEnv."""
@@ -407,6 +502,12 @@ class WebsiteEnv(Env):
             env_provider_type=env_provider_type,
             health_path=health_path,
             domains=domains,
+            live=live,
+            allow_hosts=allow_hosts,
+            settings=settings,
+            secret_settings=secret_settings,
+            ready_timeout_s=ready_timeout_s,
+            shm_mb=shm_mb,
         )
         return env
 
@@ -417,6 +518,74 @@ def health_path_problem(health_path: str) -> str | None:
     if _HEALTH_PATH.fullmatch(health_path):
         return None
     return f"health: {health_path!r} is not a path of letters, digits, '.', '_', '~', '-' and '/' starting with '/'"
+
+
+def ready_timeout_problem(ready_timeout_s: Any) -> str | None:
+    """Why ``ready_timeout_s`` can't be how long a site may take from its container starting to ready, or None: it's a
+    number of seconds above 0, as ``@website``'s is."""
+    if isinstance(ready_timeout_s, bool) or not isinstance(ready_timeout_s, (int, float)) or not (
+            0 < ready_timeout_s < math.inf):
+        return f"ready_timeout_s is a number of seconds above 0, not {ready_timeout_s!r}"
+    return None
+
+
+def shm_problem(shm_mb: Any) -> str | None:
+    """Why ``shm_mb`` can't be the shared memory a site's server gets in ``/dev/shm``, or None: it's 1 to MAX_SHM_MB
+    MiB, as an app's is."""
+    if isinstance(shm_mb, bool) or not isinstance(shm_mb, int) or not 1 <= shm_mb <= MAX_SHM_MB:
+        return f"shm_mb is 1 to {MAX_SHM_MB} MiB, not {shm_mb!r}"
+    return None
+
+
+def declared_live(source: Optional[WebsiteSource], *, live: Optional[bool] = None, domains: Optional[list[str]] = None,
+                  allow_hosts: Optional[list[str]] = None) -> tuple[dict, list[str]]:
+    """A website env's ``live``, ``allow_hosts``, ``secret_settings`` and, for a live one, ``domains``: each one
+    given, else what ``source``, its server's ``@website(...)``, declares; and the problems, one for each value given
+    that the source declares otherwise, since the env and the site's card would then disagree. A synthetic site's
+    domains stay as given: without them its card's are read at deploy."""
+    source = source or WebsiteSource()
+    problems = [f"{key} is {given!r} here, but the site's @website(...) declares {key}={declared!r}"
+                for key, given, declared in (("live", live, source.live), ("allow_hosts", allow_hosts, source.allow_hosts))
+                if given is not None and declared is not None and given != declared]
+    resolved = live if live is not None else bool(source.live)
+    fields = {"live": resolved, "allow_hosts": list(allow_hosts if allow_hosts is not None else source.allow_hosts or []),
+              "secret_settings": list(source.secret_settings)}
+    if resolved:
+        if domains and source.domains is not None and list(domains) != source.domains:
+            problems.append(f"domains are {list(domains)!r} here, but the site's @website(...) declares "
+                            f"domains={source.domains!r}")
+        fields["domains"] = list(domains or source.domains or [])
+    return fields, problems
+
+
+def live_problems(live: Any, domains: list[str], allow_hosts: list[str], settings: dict, secret_settings: list[str]
+                  ) -> list[str]:
+    """Why these can't be a website env's: a live site names the domains the real site is at, its ``allow_hosts`` are
+    host names as ``domains`` are and only a live site's, each setting's value is a string, number or boolean, and each
+    of the secret settings given is a ``secret:`` or ``env:`` reference, never its value."""
+    problems = []
+    if not isinstance(live, bool):
+        problems.append(f"live is true or false, not {live!r}")
+    elif live and not domains:
+        problems.append("a live website env names the domains the real site is at")
+    if not isinstance(allow_hosts, list):
+        problems.append(f"allow_hosts is a list of host names, not {allow_hosts!r}")
+    elif allow_hosts:
+        if live is not True:
+            problems.append("allow_hosts are the other hosts a live site's pages reach; set live = true")
+        if problem := domains_problem(allow_hosts):
+            problems.append(problem.replace("domains:", "allow_hosts:", 1))
+    if not isinstance(settings, dict):
+        return [*problems, f"settings is a table of a setting's value by its name, not {settings!r}"]
+    for name, value in settings.items():
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            problems.append(f"settings: {name!r} isn't a setting's name")
+        elif not isinstance(value, (str, int, float, bool)):
+            problems.append(f"settings.{name} is a string, number or boolean, not {value!r}")
+        elif name in secret_settings and not is_bare_reference(value):
+            problems.append(f"settings.{name} is a secret, so it's a {SECRET_REF_PREFIX}KEY or {ENV_REF_PREFIX}NAME "
+                            "reference with no ?default, never its value")
+    return problems
 
 
 def domains_problem(domains: list[str]) -> str | None:

@@ -481,7 +481,7 @@ async def test_a_rate_change_wakes_a_waiting_fire_to_go_on_when_the_clock_gets_t
     try:
         transport = httpx.ASGITransport(app=gw._mcp.streamable_http_app())
         async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
-            r = await client.put("/clock/rate", json={"virtual_seconds_per_real_second": 3600})
+            r = await client.put("/clock/set-rate", json={"virtual_seconds_per_real_second": 3600})
             r.raise_for_status()
         await _until(lambda: bob.calls, seconds=1)  # a virtual minute at 3600x is a sixtieth of a real second
     finally:

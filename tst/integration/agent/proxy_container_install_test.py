@@ -41,7 +41,7 @@ def test_installed_into_a_container_the_proxy_serves_and_its_bash_runs_the_shell
     assert has_bash == (shell == "bash")
     folder = tmp_path / "agent"
     folder.mkdir()
-    for file in ("install.sh", "a2a_server.py"):
+    for file in ("install.sh", "versions.sh", "a2a_server.py"):
         shutil.copy(AGENT_DIR / file, folder / file)
     (folder / "requirements.txt").write_text("agentenv-framework-protocol[agent] @ file:///tmp/protocol\n")
     subprocess.run(["docker", "cp", f"{PROTOCOL_DIR}/.", f"{name}:/tmp/protocol"], check=True, capture_output=True)

@@ -56,11 +56,11 @@ MODEL_HEADERS_ENV = "LITELLM_EXTRA_HEADERS"
 
 
 # The CLI version ClaudeCodeTool names the tools of; a test holds it to the Dockerfile's CLAUDE_CODE_VERSION.
-TOOLS_CLI_VERSION = "2.1.280"
+TOOLS_CLI_VERSION = "2.1.322"
 # The CLI's own tools, by the names its model sees. Which of them it offers by default depends on the model, and its MCP
 # resource tools come only with MCP servers.
 ClaudeCodeTool = Literal["Agent", "Bash", "CronCreate", "CronDelete", "CronList", "Edit", "EnterWorktree",
-                         "ExitWorktree", "ListAgents", "ListMcpResourcesTool", "NotebookEdit", "Read",
+                         "ExitWorktree", "ListAgents", "ListMcpResourcesTool", "Monitor", "NotebookEdit", "Read",
                          "ReadMcpResourceDirTool", "ReadMcpResourceTool", "ReportFindings", "ScheduleWakeup",
                          "SendMessage", "Skill", "TaskCreate", "TaskGet", "TaskList", "TaskStop", "TaskUpdate",
                          "WebFetch", "WebSearch", "Workflow", "Write"]
@@ -194,6 +194,8 @@ def cli_env(environ: Mapping[str, str], *, model: str | None = None, project_id:
         env["ANTHROPIC_CUSTOM_HEADERS"] = "\n".join(f"{name}: {value}" for name, value in headers.items())
     if max_thinking_tokens:
         env["MAX_THINKING_TOKENS"] = str(max_thinking_tokens)
+    # Left on, the CLI sends no MCP tool and only some of its own until the model searches for them.
+    env.setdefault("ENABLE_TOOL_SEARCH", "false")
     # Older CLIs prepend a changing attribution block to the system prompt on custom base URLs, which defeats the
     # provider's prefix cache.
     env["CLAUDE_CODE_ATTRIBUTION_HEADER"] = "0"
@@ -593,8 +595,8 @@ async def _stream_cli(proc, stdin_data: bytes, on_line: Callable[[str], None]) -
 
 # Behind a gateway the CLI gives a bare id of these a 200K window, and envs whose tool definitions alone pass that
 # make it exit with "Autocompact is thrashing". Add a model only once the pinned CLI maps its [1m] form.
-_NATIVE_1M_MODELS = frozenset({"claude-opus-5", "claude-opus-5-5", "claude-fable-5-1", "claude-opus-4-8",
-                               "claude-opus-4-7"})
+_NATIVE_1M_MODELS = frozenset({"claude-opus-5", "claude-opus-5-5", "claude-fable-5-1", "claude-fable-5-2",
+                               "claude-opus-4-8", "claude-opus-4-7"})
 
 
 def _with_1m_window(model: str) -> str:

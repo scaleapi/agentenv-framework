@@ -90,6 +90,8 @@ _REAP_SECONDS = 5
 # how much of each stream is kept, the end of it: above the largest output core reads whole, run_code's 50 MiB result.
 _OUTPUT_GRACE_SECONDS = 1
 _OUTPUT_TAIL_BYTES = 64 * 1024 * 1024
+# How much of a failed Docker command's stderr a teardown error carries.
+_ERROR_TAIL_CHARS = 300
 
 # Every command a local sandbox runs carries this, set to the sandbox's id, and so does whatever the command starts, so
 # teardown can find a process left running on this machine, such as the agent a host-mode install started.
@@ -306,6 +308,33 @@ class LocalSandbox(VmSandbox):
         """Whether create_container started ``container_name`` for this sandbox, not an agent placed on it."""
         return (self._work_dir / _CONTAINER_MODE_MARKER).exists()
 
+    async def exit_status(self) -> Optional[int]:
+        """The exit status of the container it was made to run, a computer's or the launcher booting a disk, once it
+        has exited; None while it runs, when it runs none, or when Docker doesn't say."""
+        if not self.owns_container:
+            return None
+        try:
+            state = await asyncio.to_thread(docker, "container", "inspect", "--format",
+                                            "{{.State.Status}} {{.State.ExitCode}}", self.container_name,
+                                            timeout=_DOCKER_QUERY_SECONDS)
+        except (DockerFailed, subprocess.TimeoutExpired):
+            return None
+        status, _, code = state.partition(" ")
+        return int(code) if status in ("exited", "dead") else None
+
+    async def output_tail(self, lines: int) -> list[str]:
+        """The last ``lines`` lines that container wrote, its output's and its errors' together as Docker logged them,
+        with no order kept between the two; none when it runs none, or when Docker doesn't say."""
+        if not self.owns_container:
+            return []
+        try:
+            done = await asyncio.to_thread(subprocess.run, ["docker", "logs", "--tail", str(lines), self.container_name],
+                                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                           timeout=_DOCKER_QUERY_SECONDS)
+        except subprocess.TimeoutExpired:
+            return []
+        return done.stdout.decode(errors="replace").splitlines() if done.returncode == 0 else []
+
     @property
     def work_dir(self) -> Path:
         return self._work_dir
@@ -335,50 +364,95 @@ class LocalSandbox(VmSandbox):
         this, local runs leak their containers/compose stacks, which squat host ports and block the
         next deploy. Prod backends override terminate() to tear the whole VM down.
         Processes its commands left running on this machine are stopped first (on Linux; see ``_marked_pids``),
-        then, once none is left to run from it, what its steps staged in /tmp is removed.
+        then, once none is left to run from it, what its steps staged in /tmp is removed. With no Docker installed,
+        nothing of it can have been started; with Docker unreachable, the teardown fails only for a sandbox whose folder
+        records Docker objects of its own.
         """
+        failures: list[Exception] = []
         try:
-            if await _stop_marked(self.sandbox_id):
-                await asyncio.to_thread(_remove_staged, self.sandbox_id)
-            if self.mode == SANDBOX_MODE_VM and not self.owns_container:
-                await self._remove_labeled()
-        finally:  # a container that wouldn't go must not keep the compose stack up
-            await self.exec_script(f"docker rm -f {shlex.quote(self.container_name)} >/dev/null 2>&1 || true")
-            if self.closed_network is not None:
-                await self._remove_labeled()
-            if self.mode == SANDBOX_MODE_VM and (self._work_dir / "docker-compose.yml").exists():
-                # No `|| true`: `docker compose down` is idempotent (an already-down stack exits 0), so a
-                # non-zero exit is a real failure — surface it (exec_script raises, with the compose output)
-                # instead of silently leaving the stack running and its host ports held. Callers wrap
-                # terminate() in try/except, so a raised teardown failure is caught, not fatal.
+            if not await _stop_marked(self.sandbox_id):
+                raise RuntimeError(f"Sandbox {self.sandbox_id} still has marked processes")
+            await asyncio.to_thread(_remove_staged, self.sandbox_id)
+        except Exception as error:
+            failures.append(error)
+        try:
+            code, _, stderr = await self.exec_with_output("docker", "version", "--format", "{{.Server.Version}}")
+        except FileNotFoundError:
+            code, stderr = None, ""
+        if code == 0:
+            await self._remove_docker_objects(failures)
+        elif code is not None:
+            reason = stderr.strip()[-_ERROR_TAIL_CHARS:]
+            if self._made_docker_objects:
+                failures.append(RuntimeError(f"Docker can't be reached to remove sandbox {self.sandbox_id}'s container, "
+                                             f"compose stack or network: {reason}"))
+            else:
+                logger.warning("Could not reach Docker (%s); anything sandbox %s's steps started with it is still there. "
+                               "Remove it with: docker rm -f $(docker ps -aq --filter label=%s=%s)",
+                               reason, self.sandbox_id, SANDBOX_LABEL, self.sandbox_id)
+        if failures:
+            raise RuntimeError("Local sandbox teardown incomplete: " + "; ".join(str(error) for error in failures)) from failures[0]
+
+    @property
+    def _made_docker_objects(self) -> bool:
+        """Whether its folder records Docker objects of its own: its container, a compose stack or a closed network."""
+        return self.owns_container or self.closed_network is not None or (self._work_dir / "docker-compose.yml").exists()
+
+    async def _remove_docker_objects(self, failures: list[Exception]) -> None:
+        """Remove its container, compose stack and labeled objects, each attempted whatever the others did, adding
+        what failed to ``failures``."""
+        try:
+            await self._remove_own_container()
+        except Exception as error:
+            failures.append(error)
+        if self.mode == SANDBOX_MODE_VM and (self._work_dir / "docker-compose.yml").exists():
+            try:
                 await self.exec_script(
                     f"cd {shlex.quote(str(self._work_dir))} && docker compose down -v --remove-orphans"
                 )
+            except Exception as error:
+                failures.append(error)
+        if (self.mode == SANDBOX_MODE_VM and not self.owns_container) or self.closed_network is not None:
+            try:
+                await self._remove_labeled()
+            except Exception as error:
+                failures.append(error)
+
+    async def _remove_own_container(self) -> None:
+        """Remove this sandbox's named container, or verify that it is absent."""
+        name = f"name=^{re.escape(self.container_name)}$"
+        code, stdout, stderr = await self.exec_with_output("docker", "ps", "-aq", "--filter", name)
+        if code != 0:
+            raise RuntimeError(f"Could not list sandbox {self.sandbox_id}'s container: "
+                               f"{stderr.strip()[-_ERROR_TAIL_CHARS:]}")
+        if containers := stdout.split():
+            await self.exec_script(f"docker rm -f {shlex.join(containers)} >/dev/null")
 
     async def _remove_labeled(self) -> None:
-        """Remove what steps started on this host for this sandbox (``run_docker_container``'s containers, their
-        images and networks), which a real VM would take down with it. Images and networks go best-effort: another
-        local sandbox's container can still be using one."""
+        """Remove labeled containers and networks; images can still be shared and are best-effort."""
         label = f"label={SANDBOX_LABEL}={self.sandbox_id}"
-        try:
-            exit_code, stdout, stderr = await self.exec_with_output("docker", "ps", "-aq", "--filter", label)
-        except FileNotFoundError:  # no Docker installed: nothing could have been started
-            return
-        if exit_code != 0:
-            # No Docker to reach (a run that never needed it) or Docker is down; either way nothing can be removed now.
-            logger.warning(
-                "Could not list %s's containers (%s); anything it started is still there. Remove it with: "
-                "docker rm -f $(docker ps -aq --filter %s)", self.sandbox_id, stderr.strip()[-300:], label,
-            )
-            return
+        failures: list[Exception] = []
+        for resource, args in (
+            ("containers", ("docker", "ps", "-aq", "--filter", label)),
+            ("networks", ("docker", "network", "ls", "-q", "--filter", label)),
+        ):
+            try:
+                code, stdout, stderr = await self.exec_with_output(*args)
+                if code != 0:
+                    raise RuntimeError(f"Could not list sandbox {self.sandbox_id}'s {resource}: "
+                                       f"{stderr.strip()[-_ERROR_TAIL_CHARS:]}")
+                if identifiers := stdout.split():
+                    command = "docker rm -f" if resource == "containers" else "docker network rm"
+                    await self.exec_script(f"{command} {shlex.join(identifiers)} >/dev/null")
+            except Exception as error:
+                failures.append(error)
         q = shlex.quote(label)
-        if stdout.split():
-            await self.exec_script(f"docker rm -f {' '.join(stdout.split())} >/dev/null")
         await self.exec_script(
             f"ids=$(docker images -q --filter {q} | sort -u); [ -z \"$ids\" ] || docker rmi -f $ids >/dev/null 2>&1; "
-            f"ids=$(docker network ls -q --filter {q}); [ -z \"$ids\" ] || docker network rm $ids >/dev/null 2>&1; "
             f"exit 0"
         )
+        if failures:
+            raise RuntimeError("; ".join(str(error) for error in failures)) from failures[0]
 
     async def exec(self, *command: str) -> Any:
         """Execute a command locally via subprocess.
@@ -637,6 +711,21 @@ def _copy_into_container(source: Path, container: str, destination: str) -> None
         raise RuntimeError(f"Could not copy {source} into container {container}: {copied.stderr.strip()}")
 
 
+def local_sandbox_ids() -> list[str]:
+    """The ids of the local sandboxes with a work folder under the sandbox root, made before anything its sandbox runs:
+    a supervisor that gave a run its own ``AGENT_ENV_LOCAL_SANDBOX_DIR`` terminates each after killing it, removing its
+    folder, and keeps one whose ``LocalSandboxProvider().terminate_sandbox`` raises, not fully gone, to retry."""
+    root = _local_sandbox_root_path()
+    if not root.is_dir():
+        return []
+    prefix, found = "agent-env-", set()
+    for entry in root.iterdir():
+        sandbox_id, _, suffix = entry.name.removeprefix(prefix).rpartition("-")
+        if entry.name.startswith(prefix) and sandbox_id and suffix and entry.is_dir() and not entry.is_symlink():
+            found.add(sandbox_id)
+    return sorted(found)
+
+
 def remove_local_work_dir(sandbox_id: str) -> Path | None:
     """Delete a local sandbox's work folder, and return it, when it lies directly under the sandbox root and
     isn't a symlink; anything else, a legacy folder under the temp dir included, is left alone. Raises OSError
@@ -659,6 +748,7 @@ class LocalSandboxProvider(SandboxProvider):
     SANDBOX_ACCEPTS = Accepts.NAME_OR_CONTEXT
     CONTAINER_ACCEPTS = Accepts.NAME_OR_CONTEXT
     WEBSOCKETS = True
+    SHARED_MEMORY = True
 
     @property
     def _prepared(self) -> set[str]:
@@ -767,11 +857,12 @@ class LocalSandboxProvider(SandboxProvider):
         timeout: int = 3600 * 2,
         attribution: Optional[Attribution] = None,
         network_policy: Optional[NetworkPolicy] = None,
+        shm_mb: Optional[int] = None,
     ) -> LocalSandbox:
         refuse_unenforceable_policy(self, network_policy)
         if network_policy is not None and network_policy.closed:
             sandbox = await self._create_closed(image_name=image_name, port=port, env=env, timeout=timeout,
-                                                attribution=attribution)
+                                                attribution=attribution, shm_mb=shm_mb)
         else:
             sandbox = await super().create_container(
                 image_name=image_name,
@@ -783,6 +874,7 @@ class LocalSandboxProvider(SandboxProvider):
                 timeout=timeout,
                 attribution=attribution,
                 network_policy=network_policy,
+                shm_mb=shm_mb,
             )
         # The marker is how a later get_sandbox() (post-run teardown rebuilds the sandbox from disk)
         # learns this is a container and removes it. If we can't persist it, that reconstructed
@@ -815,7 +907,7 @@ class LocalSandboxProvider(SandboxProvider):
         return sandbox
 
     async def _create_closed(self, *, image_name: str, port: int, env: dict[str, str], timeout: int,
-                             attribution: Optional[Attribution]) -> LocalSandbox:
+                             attribution: Optional[Attribution], shm_mb: Optional[int] = None) -> LocalSandbox:
         """The container on an internal network of its own, with no route out, and a relay on that network and the
         default bridge publishing its ``port``: Docker publishes no port of a container on an internal network alone."""
         relay = await relay_image()
@@ -826,7 +918,7 @@ class LocalSandboxProvider(SandboxProvider):
             label = shlex.quote(f"{SANDBOX_LABEL}={sandbox.sandbox_id}")
             (sandbox.work_dir / _CLOSED_NETWORK_FILE).write_text(network)
             await sandbox.exec_script(f"docker network create --internal --label {label} {network} >/dev/null")
-            await self._run_closed(sandbox, relay, image_name=image_name, port=port, env=env)
+            await self._run_closed(sandbox, relay, image_name=image_name, port=port, env=env, shm_mb=shm_mb)
             sandbox.mode = SANDBOX_MODE_CONTAINER
         except BaseException:
             try:
@@ -838,22 +930,23 @@ class LocalSandboxProvider(SandboxProvider):
         sandbox.network_policy = NetworkPolicy(mode="allowlist")
         return sandbox
 
-    async def reset_container(self, sandbox: Sandbox, *, image_name: str, port: int, env: dict[str, str]) -> None:
+    async def reset_container(self, sandbox: Sandbox, *, image_name: str, port: int, env: dict[str, str],
+                              shm_mb: Optional[int] = None) -> None:
         """Reset the sandbox's container to a fresh one, and on a closed network its relay too, since the fresh
         container's address on that network may differ."""
         if not (isinstance(sandbox, LocalSandbox) and sandbox.closed_network):
-            await super().reset_container(sandbox, image_name=image_name, port=port, env=env)
+            await super().reset_container(sandbox, image_name=image_name, port=port, env=env, shm_mb=shm_mb)
             return
         await sandbox.exec_script(f"docker rm -f {shlex.quote(sandbox.container_name)} "
                                   f"{shlex.quote(sandbox.scoped_name('relay'))} > /dev/null")
-        await self._run_closed(sandbox, await relay_image(), image_name=image_name, port=port, env=env)
+        await self._run_closed(sandbox, await relay_image(), image_name=image_name, port=port, env=env, shm_mb=shm_mb)
 
     async def _run_closed(self, sandbox: LocalSandbox, relay: str, *, image_name: str, port: int,
-                          env: dict[str, str]) -> None:
+                          env: dict[str, str], shm_mb: Optional[int] = None) -> None:
         """The container on the sandbox's closed network, then the relay publishing its ``port`` at its address there."""
         network, relay_name = sandbox.closed_network, sandbox.scoped_name("relay")
         label = shlex.quote(f"{SANDBOX_LABEL}={sandbox.sandbox_id}")
-        await self._start_container(sandbox, image_name=image_name, port=port, env=env)
+        await self._start_container(sandbox, image_name=image_name, port=port, env=env, shm_mb=shm_mb)
         address = await sandbox.exec_script(
             f"docker inspect -f '{{{{(index .NetworkSettings.Networks \"{network}\").IPAddress}}}}' "
             f"{shlex.quote(sandbox.container_name)}")
@@ -867,14 +960,16 @@ class LocalSandboxProvider(SandboxProvider):
         network = sandbox.closed_network if isinstance(sandbox, LocalSandbox) else None
         return f"--network {shlex.quote(network)}" if network is not None else super()._publish_args(sandbox, port)
 
-    async def _start_container(self, sandbox: VmSandbox, *, image_name: str, port: int, env: dict[str, str]) -> None:
+    async def _start_container(self, sandbox: VmSandbox, *, image_name: str, port: int, env: dict[str, str],
+                               shm_mb: Optional[int] = None) -> None:
         """Where the configured store hands out local grants, create the container, copy the local transfer CA's
         trust files in, then start it, so its TLS clients trust the grant server. Variables the caller sets win."""
         trust_dir = await asyncio.to_thread(local_grant_trust)
         if trust_dir is None:
-            await super()._start_container(sandbox, image_name=image_name, port=port, env=env)
+            await super()._start_container(sandbox, image_name=image_name, port=port, env=env, shm_mb=shm_mb)
             return
-        args = self._container_args(sandbox, image_name=image_name, port=port, env={**LOCAL_TRUST_ENV, **env})
+        args = self._container_args(sandbox, image_name=image_name, port=port, env={**LOCAL_TRUST_ENV, **env},
+                                    shm_mb=shm_mb)
         await sandbox.exec_script(f"docker create {args} > /dev/null")
         await start_trusting(sandbox, sandbox.container_name, trust_dir)
 
@@ -989,8 +1084,10 @@ def _found(sandbox_id: str) -> LocalSandbox:
     work_dir = LocalSandbox.find_work_dir(sandbox_id)
     if work_dir is None:
         raise RuntimeError(f"Local sandbox work directory not found for sandbox_id={sandbox_id!r}")
-    port_map = work_dir / _PORT_MAP_FILE
-    ports = {int(c): h for c, h in json.loads(port_map.read_text()).items()} if port_map.exists() else None
+    try:
+        ports = {int(c): h for c, h in json.loads((work_dir / _PORT_MAP_FILE).read_text()).items()}
+    except (OSError, ValueError):  # none written, or cut short by a run killed while writing it
+        ports = None
     return LocalSandbox(sandbox_id=sandbox_id, work_dir=work_dir, port_map=ports)
 
 

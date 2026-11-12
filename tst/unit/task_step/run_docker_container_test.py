@@ -1,4 +1,4 @@
-"""Unit tests for RunDockerContainerTaskStep's keep_alive_with_base_command flag."""
+"""Unit tests for RunDockerContainerTaskStep: its fields, its build context, and an image it runs as it is."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from agent_env.config import set_object_store
 from agent_env.providers.sandbox_providers import sandbox_provider
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox
 from agent_env.task_step.context import DeployedSandbox, TaskStepContext
+from agent_env.task_step.task_steps import run_docker_container
 from agent_env.task_step.task_steps.run_docker_container import (
     RunDockerContainerTaskStep as Step,
 )
@@ -265,3 +266,64 @@ async def test_what_it_starts_maps_the_sandboxs_extra_hosts(monkeypatch, extra_h
 
     (run,) = [s for s in sandbox.scripts if "docker run -d" in s]
     assert ("--add-host host.docker.internal:host-gateway" in run) is bool(extra_hosts)
+
+
+def test_an_image_artifact_roundtrips_in_place_of_a_build_context():
+    step = Step(id="s", version=None, sandbox_name="h", image_artifact_id="ota-task-7", image_artifact_version=3)
+
+    restored = Step.from_dict(step.to_dict())
+
+    assert (restored.image_artifact_id, restored.image_artifact_version) == ("ota-task-7", 3)
+    assert restored.config_problems() == []
+
+
+@pytest.mark.parametrize("sources", [
+    {"image_artifact_id": "img", "docker_context_artifact_id": "u"},
+    {"image_artifact_id": "img", "docker_context_url": "https://example.com/ctx.zip"},
+    {"docker_context_artifact_id": "u", "docker_context_url": "https://example.com/ctx.zip"},
+], ids=["image-and-context", "image-and-url", "context-and-url"])
+def test_a_step_naming_two_sources_is_refused(sources):
+    with pytest.raises(ValueError, match="Pass one of `image_artifact_id`, `docker_context_artifact_id` and"):
+        Step(id="s", version=None, sandbox_name="h", **sources)
+
+
+@pytest.mark.parametrize(("build_only", "named"), [
+    ({"image_tag": "task:latest"}, "image_tag"),
+    ({"build_args": {"PY": "3.12"}}, "build_args"),
+    ({"image_tag": "task:latest", "build_args": {"PY": "3.12"}}, "image_tag and build_args"),
+])
+def test_build_options_beside_an_image_artifact_are_a_config_problem(build_only, named):
+    step = Step(id="s", version=None, sandbox_name="h", image_artifact_id="img", **build_only)
+
+    assert step.config_problems() == [f"run_docker_container 's': {named} only apply to a build, and "
+                                      "image_artifact_id names an image it runs as it is"]
+
+
+class _ImageSandbox(_RunSandbox):
+    def __init__(self):
+        super().__init__()
+        self.loaded_images: list = []
+
+    async def load_docker_images(self, artifacts):
+        self.loaded_images.extend(artifacts)
+
+
+@pytest.mark.asyncio
+async def test_an_image_artifact_is_put_on_the_sandbox_and_run_with_nothing_staged_or_built(monkeypatch):
+    sandbox, image, got = _ImageSandbox(), SimpleNamespace(image_name="ota/task-7:base"), []
+    monkeypatch.setattr(run_docker_container, "DockerImageArtifact",
+                        SimpleNamespace(get=lambda id, version: got.append((id, version)) or image))
+    monkeypatch.setattr(sandbox_provider, "build_sandbox_provider",
+                        lambda _type: SimpleNamespace(get_sandbox=AsyncMock(return_value=sandbox)))
+    context = TaskStepContext(deployed_sandboxes=[
+        DeployedSandbox(sandbox_name="h", sandbox_id="local-1", sandbox_mode="vm", sandbox_type="local"),
+    ])
+
+    await Step(id="s", version=None, sandbox_name="h", image_artifact_id="ota-task-7", image_artifact_version=3,
+               container_name="task", command_override="sleep infinity").execute(context)
+
+    assert got == [("ota-task-7", 3)] and sandbox.loaded_images == [image]
+    assert not [s for s in sandbox.scripts if "docker build" in s or "docker-context" in s]
+    (run,) = [s for s in sandbox.scripts if "docker run -d" in s]
+    assert run.endswith(" ota/task-7:base sleep infinity")
+    assert context.metadata["deployed_docker_containers"][0]["image_tag"] == "ota/task-7:base"

@@ -54,8 +54,8 @@ with `exposed_ports=[port]` and returns the VM, and the deploy then loads and st
 | `create_sandbox(*, image_name, port, env, cpu, memory, disk_size_gb, timeout, attribution, network_policy) -> Sandbox` | yes (a VM backend wraps `create_vm`) | an agent's sandbox (`provider.create_sandbox`); `create_container` of a container-only backend |
 | `get_sandbox(sandbox_id) -> Sandbox` | yes | every step after the one that created the sandbox, and teardown |
 | `terminate_sandbox(sandbox_id)` | no | teardown. The default calls `get_sandbox` then `terminate()`, and treats `SandboxNotFoundError` as done; override when you can terminate without a live handle |
-| `create_container(...)` | inherited | containers that run an env or agent image. Override only when the platform boots images natively |
-| `reset_container(sandbox, *, image_name, port, env)` | inherited | a computer env's reset, which replaces the container `create_container` ran with a fresh one on the same sandbox and port. The default works on a VM backend; one whose sandbox is the container itself raises `NotImplementedError` |
+| `create_container(...)` | inherited | containers that run an env or agent image. Override only when the platform boots images natively. Its `shm_mb` is the MiB the container's `/dev/shm` holds (`--shm-size` on the default VM path), passed only where `SHARED_MEMORY` is on |
+| `reset_container(sandbox, *, image_name, port, env, shm_mb)` | inherited | a computer env's reset, which replaces the container `create_container` ran with a fresh one on the same sandbox and port, its `/dev/shm` as before. The default works on a VM backend; one whose sandbox is the container itself raises `NotImplementedError` |
 | `native_platforms()` | no | a computer env's deploy and gate 3, which boot a build only on a provider that runs its arch without emulation. The default is `linux/amd64`; local Docker returns this machine's |
 | `disk_image_platforms()` | no | the same for a computer's disk form: the platforms whose disks `create_vm` boots without emulation. The default is none; local Docker returns this machine's where it can pass `/dev/kvm` to a container, and `modal_vm` `linux/amd64` and `windows/amd64`, booting the launcher as its sandbox's image under nested virtualization, a Windows disk's base carried beside it |
 | `vm_bundle_platforms()` | no | the same for a computer's vm_bundle form, a whole saved VM (`format = "lume"`): the platforms, as `<os>/<arch>`, whose VM bundles `create_vm` boots. The default is none; `lume` returns `macos/arm64` on an Apple Silicon Mac. A provider that names one implements the VM-bundle methods below too |
@@ -87,6 +87,7 @@ sandboxes off this machine, runs containers' images by name, has no private netw
 | `SANDBOX_ACCEPTS` | an agent's sandbox runs different images than the default (a provider that implements `create_vm` defaults to `LOADABLE`) |
 | `PRIVATE_NETWORK` | `create_container(private_network=True)` puts containers on a network they share |
 | `WEBSOCKETS` | its sandboxes' exposed ports carry WebSockets both ways, as `tst/integration/providers/sandbox_providers/websockets_live_test.py` or its tunnel's documentation show; a computer with a website browser among its apps, whose CDP address agents reach by WebSocket, refuses a provider without it at preflight, and a chain skips it at deploy |
+| `SHARED_MEMORY` | the container `create_container` or `reset_container` runs has the `/dev/shm` their `shm_mb` asks for, or more: sized to it, or larger by default, as Modal's host-sized tmpfs is. A deploy passes `shm_mb` to no other provider and logs that the container keeps its default. Derived when undeclared: on for the default VM path, off for a container-only backend and for a class that overrides either method |
 
 ## Sandbox handle contract
 
@@ -101,6 +102,7 @@ sandboxes off this machine, runs containers' images by name, has no private netw
 | `platform` | the image platform it runs; `linux/amd64` by default, set another when the provider creates it |
 | `exec(*argv)` | returns an object with async `stdout.read()` and `stderr.read()` (bytes) and async `wait()` (exit code). If the platform takes one command string, build it with `shlex.join(argv)` |
 | `terminate()` | abstract; idempotent: terminating a sandbox that is already gone is not an error |
+| `exit_status()`, `output_tail(lines)` | optional: the exit status of the process `create_container` or a disk's `create_vm` made the sandbox run, once it has exited, else `None`; and the last `lines` lines it wrote, a disk's console among them. A computer's boot stops waiting within seconds of that process exiting and puts its last lines in its error. The defaults, `None` and `[]`, leave a boot waiting out its readiness timeout. Local Docker reads its container's; `modal` and `modal_vm` their sandbox's process, its output only once it has exited |
 
 Everything else is built on `exec`. `exec_script` runs `sudo bash -c <script>`, so the exec user needs passwordless sudo.
 When the transport drops without an exit status, return exit code `-1`: callers retry idempotent commands on `-1` and on

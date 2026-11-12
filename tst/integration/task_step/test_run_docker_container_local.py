@@ -1,4 +1,5 @@
-"""What run_docker_container starts on a local sandbox is gone once the run is torn down.
+"""What run_docker_container starts on a local sandbox is gone once the run is torn down, and an image artifact it
+runs is built once and kept for the next run.
 
 A VM takes its containers down with it; a local sandbox shares this host's Docker, so it removes what
 carries its label. Needs Docker and a pull of a small public image.
@@ -15,9 +16,10 @@ import uuid
 import httpx
 import pytest
 
-from agent_env.artifact import FileArtifact, FileArtifactUniverse
+from agent_env.artifact import DockerImageArtifact, FileArtifact, FileArtifactUniverse
 from agent_env.artifact.store import reset_artifact_store
 from agent_env.config import configure, reset_config
+from agent_env.providers.sandbox_providers import host_images
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.deploy_sandbox import DeploySandboxTaskStep
@@ -161,3 +163,37 @@ async def test_urls_load_into_a_run_docker_container_container(local_backends):
         report = await teardown_run(context)
 
     assert not report.still_up
+
+
+@pytest.mark.asyncio
+async def test_runs_of_an_image_artifact_build_it_once_and_teardown_leaves_it_for_the_next(local_backends, monkeypatch):
+    """The first run builds the image from its context, a later run starts its container from it with nothing built,
+    and a sandbox's teardown removes only what it started."""
+    suffix = uuid.uuid4().hex[:8]
+    (local_backends / "image").mkdir()
+    (local_backends / "image/Dockerfile").write_text(
+        f"FROM mirror.gcr.io/library/debian:bookworm-slim\nRUN echo {suffix} > /built\n")
+    image = DockerImageArtifact.put_context(f"rdc4-img-{suffix}", description="a task image",
+                                            context_path=str(local_backends / "image"), dockerfile_path="Dockerfile",
+                                            platform=None)
+    builds, build = [], host_images._build
+    monkeypatch.setattr(host_images, "_build", lambda *args: builds.append(args[2]) or build(*args))
+    try:
+        for run in "ab":
+            context = TaskStepContext(instance_id=f"rdc4-{run}-{suffix}")
+            try:
+                await DeploySandboxTaskStep(
+                    id="box", version=None, sandbox_name="box", sandbox_mode="vm", sandbox_type="local",
+                ).execute(context)
+                await RunDockerContainerTaskStep(
+                    id="ctr", version=None, sandbox_name="box", image_artifact_id=image.id, container_name="task",
+                    command_override="sleep infinity",
+                ).execute(context)
+                assert _docker("exec", f"task-{context.deployed_sandboxes[0].sandbox_id}", "cat", "/built") == suffix
+            finally:
+                report = await teardown_run(context)
+            assert not report.still_up
+            assert builds == [image.image_name]
+            assert _docker("images", "-q", image.image_name)
+    finally:
+        subprocess.run(["docker", "rmi", "-f", image.image_name], capture_output=True)

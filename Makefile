@@ -1,4 +1,4 @@
-.PHONY: help install lint unit-test int-test int-test-fast int-test-slow installer-test trl-test nemo-gym-test verl-test skyrl-test miles-test slime-test clean-install-test test clean
+.PHONY: help install lint unit-test int-test int-test-fast int-test-slow installer-test clock-test trl-test nemo-gym-test verl-test skyrl-test miles-test slime-test clean-install-test test clean
 
 VENV := .venv
 VENV_BIN := $(abspath $(VENV))/bin
@@ -66,6 +66,12 @@ installer-test: ## Run plugin add/remove through the real pip, uv and pipx, and 
 
 # The TRL contract tier trains one GRPOTrainer step on CPU through agent_env.training.trl, with a tiny model from the
 # Hub. trl and torch aren't in the dev extra: install them first, as .github/workflows/trl.yml does.
+# The clock tier builds agent-env's libfaketime (src/agent_env/computers/clock) and stock 0.9.12 in an Ubuntu 24.04 image
+# for this machine's Docker and runs its gates there, Chromium launches included; .github/workflows/clock.yml runs it on
+# x86_64 and arm64.
+clock-test: ## Build agent-env's libfaketime and run its gates in Docker (tst/clock)
+	$(PYTHON) -m pytest tst/clock --timeout=2400 $(PYTEST_ARGS)
+
 trl-test: ## Run one GRPOTrainer step on CPU through the TRL helper (needs trl and CPU torch, and the Hub)
 	$(PYTHON) -m pytest tst/trl --timeout=900 $(PYTEST_ARGS)
 

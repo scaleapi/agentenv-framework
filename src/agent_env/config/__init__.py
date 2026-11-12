@@ -12,6 +12,7 @@ from agent_env.config.loader import (
     build_store,
     discover_config_path,
     interpolate,
+    is_bare_reference,
     load_config_file,
     load_impl,
 )
@@ -39,6 +40,7 @@ __all__ = [
     "build_store",
     "discover_config_path",
     "interpolate",
+    "is_bare_reference",
     "load_config_file",
     "load_impl",
     "Config",

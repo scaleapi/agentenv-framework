@@ -268,6 +268,20 @@ async def test_a_forwarded_tool_is_listed_with_its_own_schema_and_called_with_it
     assert {t.name: t.inputSchema for t in env.mounted_card().capabilities.tools}["click"] == _CLICK
 
 
+def test_a_tool_another_server_lists_is_forwarded_as_it_lists_it():
+    async def call(**arguments) -> CallToolResult:
+        return CallToolResult(content=[])
+
+    click = ForwardedTool.listed({"name": "click", "title": "Click", "description": "Click an element.",
+                                  "inputSchema": _CLICK, "outputSchema": _FOUND, "annotations": {"readOnlyHint": False}},
+                                 call)
+    find = ForwardedTool.listed({"name": "find", "inputSchema": {"type": "object"}}, call, hidden_by_default=True)
+
+    assert click == ForwardedTool(EnvironmentTool(name="click", description="Click an element.", inputSchema=_CLICK),
+                                  call, {"readOnlyHint": False}, _FOUND)
+    assert find == ForwardedTool(EnvironmentTool(name="find", inputSchema={"type": "object"}), call, None, None, True)
+
+
 _OTHER_FILES = [
     {"uri": "skill://other/SKILL.md", "name": "other", "description": "The skill.", "mimeType": "text/markdown"},
     {"uri": "skill://other/LINUX.md", "name": "LINUX.md", "mimeType": "text/markdown"},

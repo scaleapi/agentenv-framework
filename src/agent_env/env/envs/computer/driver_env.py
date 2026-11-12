@@ -10,12 +10,13 @@ import sys
 from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, Optional
 
 from agentenv_protocol.computer.driver import DriverDeclaration
+from agentenv_protocol.computer.platform import entry_for
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from agent_env.artifact import Artifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.env.env import Env
-from agent_env.env.envs.computer.utils.install import (DRIVER_INSTALLS, Install, folder_problems, installs, os_type_of,
+from agent_env.env.envs.computer.utils.install import (DRIVER_INSTALLS, Install, folder_problems, installs,
                                                         platform_problem, unsupported)
 from agent_env.store.ids import derive_id
 
@@ -70,7 +71,7 @@ class ComputerDriverEnv(Env):
     @classmethod
     def from_dict(cls, data: dict) -> ComputerDriverEnv:
         files = Artifact.get(data["files"]["id"], version=data["files"]["version"])
-        install = {key: DRIVER_INSTALLS[os_type_of(key)].model_validate(table)
+        install = {key: entry_for(DRIVER_INSTALLS, key).model_validate(table)
                    for key, table in (data.get("install") or {}).items()}
         return cls(id=data["id"], version=data.get("version"), module=data["module"], files=files,
                    declaration=DriverDeclaration.model_validate(data["declaration"]), install=install,

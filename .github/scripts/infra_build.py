@@ -57,7 +57,7 @@ IMAGES = {
     "agentenv-pydantic-ai": "src/agent_env/agents/agents/pydantic-ai/Dockerfile",
     "agentenv-mail-mcp": "src/agent_env/examples/mail-mcp/envs/mail/Dockerfile",
     "agentenv-ubuntu-24.04": "src/agent_env/computers/artifacts/ubuntu-24.04/Dockerfile",
-    "agentenv-ubuntu-24.04-headless": "src/agent_env/computers/artifacts/ubuntu-24.04-headless/Dockerfile",
+    "agentenv-ubuntu-24.04-browser": "src/agent_env/computers/artifacts/ubuntu-24.04-browser/Dockerfile",
     "agentenv-disk-tools": "src/agent_env/computers/disk/linux/tools/Dockerfile",
     "agentenv-qemu-launcher": "src/agent_env/computers/disk/linux/launcher/Dockerfile",
     "agentenv-ubuntu-24.04-disk": "src/agent_env/computers/disk/linux/boot/Dockerfile",
@@ -125,7 +125,7 @@ _SMOKES = {
                               " s=$(supervisorctl -c /etc/supervisor/supervisord.conf status);"
                               " echo \"$s\" | grep -q ' RUNNING ' && ! echo \"$s\" | grep -qv ' RUNNING ' && exit 0;"
                               " done; supervisorctl -c /etc/supervisor/supervisord.conf status; exit 1"],
-    "agentenv-ubuntu-24.04-headless": [
+    "agentenv-ubuntu-24.04-browser": [
         "docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
         "start-computer & for _ in $(seq 60); do sleep 1;"
         " s=$(supervisorctl -c /etc/supervisor/supervisord.conf status);"

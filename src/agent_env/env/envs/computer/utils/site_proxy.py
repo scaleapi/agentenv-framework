@@ -8,8 +8,8 @@ store, Firefox's policies, Chromium's managed policies and the session user's NS
 checks, as the session user, that each name loads. ``serve`` listens on loopback: on 443 for a name served over HTTPS,
 on 80 to redirect those to HTTPS and to serve ``.localhost`` names over HTTP, on 53 for DNS, over UDP and TCP, when a
 name is a wildcard, which a hosts file can't list, and, on a browser computer, on ``proxy_port`` (3129) as a forward
-proxy, a browser alone's only route out, which serves the same sites to ``CONNECT`` and to requests naming their URLs
-and refuses any other host at once; it then drops to ``SERVE_USER`` (``nobody``), else the session user, so the agent,
+proxy, a browser alone's only route out, which serves the same sites to ``CONNECT`` and to requests naming their URLs,
+takes a live site's hosts (``direct``) straight to them, and refuses any other host at once; it then drops to ``SERVE_USER`` (``nobody``), else the session user, so the agent,
 which runs as the session user, can't stop it, and ``keep``, as root, starts it again should it end. The site sees
 itself at ``/`` under its own name: the path goes upstream under the route's prefix, ``X-Forwarded-Host`` and
 ``X-Forwarded-Proto`` say the name and scheme the browser used, ``AgentEnv-Site-Root`` has the gateway tell the site no
@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -105,6 +106,31 @@ def matches(pattern: str, host: str) -> bool:
     return host == pattern
 
 
+def log_event(**fields) -> None:
+    """One JSON line in the proxy's log, every line it writes being one: ``connection`` (host, port, address, bytes each
+    way, start, duration) when a connection to a live site's host ends, ``failed`` (method, host, port, ``reason``
+    "doesn't resolve" or "no answer", the error, and when it was asked for) for one that couldn't open, both in the same shapes as the
+    headless base's stand-in proxy's; ``refused`` for a host that's no site, ``error`` for a connection that failed
+    unexpectedly, and ``restarted`` when ``keep`` starts the proxy again."""
+    print(json.dumps(fields), file=sys.stderr, flush=True)
+
+
+def when(at: float) -> str:
+    """A log line's time, to the second, in UTC."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(at))
+
+
+def described(error: BaseException) -> str:
+    return f"{type(error).__name__}: {error}".removesuffix(": ")
+
+
+class Count:
+    """The bytes a relay has carried one way, counted as it goes, so a connection that ends on an error keeps them."""
+
+    def __init__(self, start: int = 0):
+        self.bytes = start
+
+
 @dataclass
 class Site:
     """One site as the proxy serves it: its names, the route on the gateway it forwards to, and its certificate and key
@@ -152,6 +178,7 @@ class Config:
     proxy_port: Optional[int] = None
     dns_port: Optional[int] = None
     nameservers: list[str] = field(default_factory=list)
+    direct: list[str] = field(default_factory=list)
 
     @classmethod
     def load(cls, path: str) -> Config:
@@ -170,7 +197,7 @@ class Config:
                    listen=data.get("listen", LOOPBACK),
                    https_port=data.get("https_port", 443), http_port=data.get("http_port", 80),
                    proxy_port=data.get("proxy_port"), dns_port=data.get("dns_port"),
-                   nameservers=list(data.get("nameservers") or []))
+                   nameservers=list(data.get("nameservers") or []), direct=list(data.get("direct") or []))
 
     def site_for(self, host: str) -> Optional[Site]:
         """The site ``host`` names: one naming it exactly before one whose wildcard covers it."""
@@ -180,6 +207,17 @@ class Config:
                 if any(matches(name, host) for name in site.domains if name.startswith("*.") != exact):
                     return site
         return None
+
+    def is_direct(self, host: str) -> bool:
+        """Whether the forward port takes ``host`` straight to it: a name of a live site's (``direct``), never an
+        address or a ``.localhost`` name."""
+        host = host.lower().rstrip(".")
+        try:
+            ipaddress.ip_address(host)
+            return False
+        except ValueError:
+            pass
+        return bool(host) and not is_local(host) and any(matches(pattern, host) for pattern in self.direct)
 
 
 def header(headers: list[tuple[str, str]], name: str) -> Optional[str]:
@@ -271,6 +309,18 @@ def upstream_request(method: str, target: str, headers: list[tuple[str, str]], s
     return ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1")
 
 
+def direct_head(start: str, headers: list[tuple[str, str]]) -> bytes:
+    """A request a browser alone named by its URL, as it goes straight to a live site's host: the path alone on its
+    request line, the proxy's own headers dropped, and a connection that closes after it."""
+    method, target, version = start.split(" ")
+    parts = urlsplit(target)
+    kept = [(key, value) for key, value in headers
+            if key.lower() not in {"connection", "keep-alive", "proxy-connection", "proxy-authorization"}]
+    lines = [f"{method} {urlunsplit(('', '', parts.path or '/', parts.query, ''))} {version}",
+             *(f"{key}: {value}" for key, value in kept), "Connection: close"]
+    return ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1")
+
+
 def response_head(status_line: str, headers: list[tuple[str, str]], site: Site, *, scheme: str, host: str,
                   connection: str) -> bytes:
     _, _, status = status_line.partition(" ")
@@ -336,10 +386,13 @@ async def relay_chunked(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         await relay_exact(reader, writer, size + 2)
 
 
-async def relay_until_eof(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+async def relay_until_eof(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+                          count: Optional[Count] = None) -> None:
     while data := await reader.read(CHUNK):
         writer.write(data)
         await writer.drain()
+        if count is not None:
+            count.bytes += len(data)
 
 
 async def relay_body(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, headers: list[tuple[str, str]],
@@ -355,10 +408,11 @@ async def relay_body(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
         await relay_until_eof(reader, writer)
 
 
-async def splice(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-    """One direction of an upgraded connection, closing the other side when it ends, which ends the other direction."""
+async def splice(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, count: Optional[Count] = None) -> None:
+    """One direction of an upgraded connection, closing the other side when it ends, which ends the other direction;
+    the bytes it carries counted in ``count`` when given."""
     try:
-        await relay_until_eof(reader, writer)
+        await relay_until_eof(reader, writer, count)
     except (ConnectionError, OSError, ssl.SSLError):
         pass
     finally:
@@ -391,9 +445,15 @@ class SiteProxy:
 
     async def _proxied(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, peer: str) -> None:
         while (head := await read_head(reader)) is not None:
-            method, _, rest = parse_head(head)[0].partition(" ")
+            start, headers = parse_head(head)
+            method, _, rest = start.partition(" ")
             if method == "CONNECT":
                 await self._tunnel(reader, writer, peer, rest.rpartition(" ")[0])
+                return
+            target = urlsplit(rest.rpartition(" ")[0])
+            if target.hostname and self.config.site_for(target.hostname) is None and self.config.is_direct(
+                    target.hostname):
+                await self._direct(reader, writer, target.hostname, target.port or 80, direct_head(start, headers))
                 return
             if not await self.exchange(reader, writer, "http", peer, head=head, forward=True):
                 return
@@ -401,9 +461,14 @@ class SiteProxy:
     async def _tunnel(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, peer: str,
                       authority: str) -> None:
         """A ``CONNECT`` to ``authority``: the site it names, whose certificate the tunnel's TLS needs before any
-        request in it, then each request in it, as the port serves them."""
+        request in it, then each request in it, as the port serves them; or a live site's host, tunnelled straight
+        to it."""
         host = split_host(authority)
         if (site := self.config.site_for(host)) is None:
+            if self.config.is_direct(host):
+                port = authority.rpartition(":")[2] if host != authority else ""
+                await self._direct(reader, writer, host, int(port) if port.isdigit() else 443)
+                return
             self._refuse(writer, "CONNECT", authority)
             return
         writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
@@ -416,8 +481,41 @@ class SiteProxy:
         await self._requests(reader, writer, "https" if tls else "http", peer, forward=True)
 
     @staticmethod
+    async def _direct(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, host: str, port: int,
+                      head: Optional[bytes] = None) -> None:
+        """``host``, a live site's, reached straight at ``port``: a tunnel, answered as established, for a ``CONNECT``,
+        else ``head`` sent on; then both ends relayed until either closes, and the connection logged (``log_event``).
+        One that doesn't resolve or answer within ``UPSTREAM_TIMEOUT_S``, the lookup and every address's attempt
+        together, is a 502, logged too."""
+        asked = time.time()
+        try:
+            up_reader, up_writer = await asyncio.wait_for(asyncio.open_connection(host, port), UPSTREAM_TIMEOUT_S)
+        except (OSError, asyncio.TimeoutError) as e:
+            unresolved = isinstance(e, socket.gaierror)
+            log_event(failed={"method": "CONNECT" if head is None else head.split(b" ", 1)[0].decode("latin-1"),
+                              "host": host, "port": port, "reason": "doesn't resolve" if unresolved else "no answer",
+                              "error": described(e), "started": when(asked)})
+            writer.write(simple_response("502 Bad Gateway", f"{host} doesn't resolve\n" if unresolved else
+                                         f"{host}:{port} didn't answer\n", FAILED))
+            return
+        address = (up_writer.get_extra_info("peername") or ("",))[0]
+        started, began, sent, received = time.time(), time.monotonic(), Count(len(head or b"")), Count()
+        if head is None:
+            writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
+        else:
+            up_writer.write(head)
+        try:
+            await asyncio.gather(writer.drain(), up_writer.drain())
+            await asyncio.gather(splice(reader, up_writer, sent), splice(up_reader, writer, received))
+        finally:
+            log_event(connection={"host": host, "port": port, "address": address, "bytes_sent": sent.bytes,
+                                  "bytes_received": received.bytes,
+                                  "started": when(started),
+                                  "duration_s": round(time.monotonic() - began, 3)})
+
+    @staticmethod
     def _refuse(writer: asyncio.StreamWriter, method: str, host: str) -> None:
-        print(f"site proxy: refused {method} {host}: no site of this computer", file=sys.stderr, flush=True)
+        log_event(refused={"method": method, "host": host, "reason": "no site of this computer"})
         writer.write(simple_response("403 Forbidden", f"{host} is no site of this computer, and the browser reaches "
                                      "its sites alone\n", FAILED))
 
@@ -430,7 +528,7 @@ class SiteProxy:
         except (ConnectionError, asyncio.IncompleteReadError, ssl.SSLError, OSError):
             pass
         except Exception as e:
-            print(f"site proxy: a {label} connection failed: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+            log_event(error={"connection": label, "error": described(e)})
         finally:
             try:
                 await writer.drain()
@@ -1002,7 +1100,8 @@ def install(config_path: str, paths: Paths = Paths()) -> dict:
                                               for name, value in given["trust_environment"].items()))
         trust["environment"] = str(paths.profile)
     serving = {"user": user, "serve_user": serve_user(user), "sites": sites,
-               **{key: given[key] for key in ("listen", "https_port", "http_port", "proxy_port") if key in given}}
+               **{key: given[key] for key in ("listen", "https_port", "http_port", "proxy_port", "direct")
+                  if key in given}}
     if wildcard:
         serving.update(dns_port=given.get("dns_port", 53), nameservers=nameservers)
     if upstream_headers:
@@ -1047,7 +1146,7 @@ def keep(serve_path: str) -> None:
     while True:
         ended = subprocess.run([sys.executable, os.path.abspath(__file__), "serve", serve_path],
                                stdin=subprocess.DEVNULL).returncode
-        print(f"the site proxy ended ({ended}); starting it again", flush=True)
+        print(json.dumps({"restarted": {"exit_code": ended}}), flush=True)
         time.sleep(RESTART_DELAY_S)
 
 

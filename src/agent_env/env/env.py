@@ -146,7 +146,7 @@ class DeployedEnv:
         composed = isinstance(card.get("children_environments"), list)
         if (not composed or protocol_v1.operations(card)) and card.get("name") == environment_name:
             return protocol_v1.ChildEnv(name=card.get("name"), url=card.get("url"), card=card)
-        found = [child for child in protocol_v1.children(card) if child.name == environment_name]
+        found = [child for child in protocol_v1.children(card) if child.known_as == environment_name]
         if len(found) > 1 and mcp is not None:
             found = [child for child in found if website_child(child) is not mcp]
         if len(found) > 1:
@@ -412,6 +412,11 @@ class Env(ABC):
     async def deploy(self, **kwargs) -> DeployedEnv:
         raise NotImplementedError(f"{type(self).__name__} must implement deploy()")
 
+    def live_websites(self) -> list[dict]:
+        """The live websites a deploy of it reaches the real sites of, as a run records them; none but a live website
+        env's, or a multi env's that holds some."""
+        return []
+
     def deploy_refusal(self, *, sandbox_type: Optional[str] = None, env_params: Optional[dict] = None,
                        child_envs: Optional[dict] = None, **options) -> Optional[str]:
         """Why deploy() would refuse these options before building anything, or None. A type that checks its options
@@ -514,7 +519,7 @@ class Env(ABC):
 def website_child(child: protocol_v1.ChildEnv) -> bool:
     """Whether a child env is a website: its card carries ``website/v1``, or, for a site serving none, its url is at a
     website's gateway route, ``/svc/{name}`` (an MCP server's is ``/svc/mcp-{name}``)."""
-    route, url = f"/svc/{child.name}", (child.url or "").rstrip("/")
+    route, url = f"/svc/{child.known_as}", (child.url or "").rstrip("/")
     return child.find_extension(WEBSITE_EXTENSION_URI) is not None or url == route or url.startswith(f"{route}/")
 
 

@@ -23,9 +23,10 @@ def _deployed_env(metadata):
     )
 
 
-def _fake_env(deployed_env):
+def _fake_env(deployed_env, live_websites=()):
     env = MagicMock()
     env.deploy = AsyncMock(return_value=deployed_env)
+    env.live_websites.return_value = list(live_websites)
     return env
 
 
@@ -188,6 +189,21 @@ async def test_execute_persists_annotations_to_the_instance_record():
 
     update.assert_called_once_with("art-1-abcd1234", {"deploy_step_id": "t-1.deploy_env"})
     assert deployed_env.metadata["deploy_step_id"] == "t-1.deploy_env"
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_deploys_a_live_website_is_marked_live_and_not_reproducible():
+    deployed_env = _deployed_env(None)
+    deployed_env.instance_id = "art-1-abcd1234"
+    live = [{"env_id": "github-site", "environment_name": "github", "domains": ["github.com"], "allow_hosts": []}]
+    step = DeployEnvTaskStep(id="t-1.deploy_env", version=None, env_id="art-1", env_version=2)
+
+    with patch("agent_env.env.env.Env") as Env, patch(_UPDATE_TARGET) as update:
+        Env.get.return_value = _fake_env(deployed_env, live)
+        context = await step.execute(TaskStepContext())
+
+    update.assert_called_once_with("art-1-abcd1234", {"deploy_step_id": "t-1.deploy_env", "live": True})
+    assert (context.metadata["live_websites"], context.metadata["reproducible"]) == ({"art-1": live}, False)
 
 
 @pytest.mark.asyncio
@@ -359,6 +375,7 @@ def _preflight(env, **options) -> list[str]:
 def _env_with_fixed_deploy(deployed_env):
     """An env whose deploy() takes a fixed param list, like every built-in env."""
     env = MagicMock()
+    env.live_websites.return_value = []
 
     async def deploy(ttl_seconds=10800, disk_size_gb=10, gateway_mode=None, cpu=None,
                      memory_mb=None, sandbox_type=None, priority=None, env_state_type=None,
