@@ -1044,7 +1044,8 @@ are the profile's template. The base class adds:
   and, for text, JSON, forms, XML and scripts, its body up to 1 MB, as it came, in base64, any other type's size and
   sha256 alone; a WebSocket's messages and bytes each way; and each tunnel to a live host, refusal and failure. The
   stand-in, which decrypts nothing, keeps each connection: its host, port, address and bytes each way, and a plain
-  request's method and URL. Unless its `network` setting is off, `data/get` writes it as HAR 1.2, `network.har`,
+  request's method and URL. A browser on a computer with a desktop has none, since no proxy logs for it and nothing
+  names one. When it has one and its `network` setting is on, `data/get` writes it as HAR 1.2, `network.har`,
   which `data/add` passes over: an entry
   for each request and tunnel in the order they started, one still going marked `_open`, bodies decoded from gzip and
   deflate, and br and zstd with the `app` extra's `brotli` and `zstandard`, up to 1 MB, and agentenv's own fields

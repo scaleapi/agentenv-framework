@@ -32,7 +32,7 @@ except ImportError:
 
 #: The environment variable naming the network log of the proxy the browser goes out through.
 NETWORK_LOG_ENV = "AGENTENV_NETWORK_LOG"
-#: The stand-in's, which a base names when no site routing names the shared proxy's instead.
+#: The stand-in's, which its base names when no site routing names the shared proxy's instead.
 DEFAULT_NETWORK_LOG = Path("/var/log/agentenv/network.jsonl")
 #: The network log as ``data/get`` returns it, beside the browser's state; ``data/add`` passes over it.
 HAR_FILE = "network.har"
@@ -48,9 +48,10 @@ DECODE_ERRORS = (zlib.error, ValueError, *((brotli.error,) if brotli else ()),
                  *((zstandard.ZstdError,) if zstandard else ()))
 
 
-def log_path() -> Path:
-    """The network log of the proxy this browser goes out through."""
-    return Path(os.environ.get(NETWORK_LOG_ENV) or DEFAULT_NETWORK_LOG)
+def log_path() -> Optional[Path]:
+    """The network log of the proxy this browser goes out through, or None for a browser none logs for, as on a
+    computer with a desktop, which names none."""
+    return Path(named) if (named := os.environ.get(NETWORK_LOG_ENV)) else None
 
 
 class NetworkLog:

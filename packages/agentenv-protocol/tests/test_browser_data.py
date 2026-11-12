@@ -198,6 +198,18 @@ async def test_data_get_exports_the_network_log_as_har_and_data_add_passes_over_
 
 
 @pytest.mark.asyncio
+async def test_a_browser_no_proxy_logs_for_exports_no_har_and_network_reads_nothing(tmp_path, monkeypatch, browser):
+    monkeypatch.delenv("AGENTENV_NETWORK_LOG")
+    made = Browser()
+    made.control, made._computer_app = browser.control, browser._computer_app
+
+    files = _files(await made.browser_get_data())
+
+    assert made.network is None and "network.har" not in files and "browser-state.json" in files
+    assert await made.browser_network(after=3) == {"lines": [], "last": 3, "more": False}
+
+
+@pytest.mark.asyncio
 async def test_with_its_network_setting_off_data_get_exports_no_har_and_network_reads_nothing(browser, tmp_path):
     (tmp_path / "network.jsonl").write_text(json.dumps({"seq": 1, "at": "t", "end": {"id": "1-1", "ended": "t"}})
                                             + "\n")

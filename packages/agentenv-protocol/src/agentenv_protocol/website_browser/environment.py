@@ -156,8 +156,8 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         self.log = BrowserLog.for_app(os.environ.get("ENVIRONMENT_NAME") or type(self).__name__.lower(),
                                       SOCKET.parent)
         self.control.log = self.log
-        #: Its network log, as the proxy it goes out through writes it.
-        self.network = NetworkLog(log_path())
+        #: Its network log, as the proxy it goes out through writes it; None when no proxy logs for it.
+        self.network = NetworkLog(path) if (path := log_path()) is not None else None
         #: The CDP addresses it has handed out, and the relay agents' connections to them go through.
         self.cdp_tokens = Tokens(SOCKET.parent / "cdp-tokens.json")
         self.relay = Relay(self.devtools, dialogs_answered=self.settings.dialogs != AGENT, log=self.log,
@@ -345,8 +345,8 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         "an open line once a request has gone upstream or a tunnel has opened and an end line, with the same id, once "
         "it's done or has failed. The shared site proxy writes a whole exchange, the request and the answer with their "
         "headers and bodies, the sign-in headers a site declares removed, and a WebSocket's message counts; the base's "
-        "stand-in writes each connection, its host, address and bytes each way. With the network setting off, network "
-        "returns no lines."))
+        "stand-in writes each connection, its host, address and bytes each way. With the network setting off, or on a "
+        "computer with a desktop, where no proxy logs for it, network returns no lines."))
     async def browser_record(self) -> dict:
         return BrowserRecord(**await self.control.record(), launches=self._computer_app.launches(),
                              cdp_connections=list(self.relay.connections),
@@ -358,7 +358,7 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
 
     @extension(BROWSER, op="network", method="GET")
     async def browser_network(self, after: int = 0) -> dict:
-        if not self.settings.network:
+        if self.network is None or not self.settings.network:
             return {"lines": [], "last": after, "more": False}
         return await self.network.read_async(after)
 
@@ -586,7 +586,8 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         return [*super().declared_extensions(), intake_extension(tree, (
             f"data/get returns the browser's state as {data.STATE_FILE}: its cookies and local storage as Playwright's "
             f"storageState has them, its tabs open and closed, its downloads and its clock; beside it, its log as "
-            f"{data.LOG_FILE} and, unless its network setting is off, its network log as HAR 1.2 in {HAR_FILE}, an "
+            f"{data.LOG_FILE} and, when a proxy logs for it and its network setting is on, its network log as HAR "
+            f"1.2 in {HAR_FILE}, an "
             f"entry for each request and tunnel in the order they started, both of which data/add passes over, its "
             f"profile "
             f"without caches, and its finished downloads. data/add applies such a state, while the browser runs, and "
@@ -595,8 +596,8 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
 
     @get_data
     async def browser_get_data(self, write_namespace: Optional[WriteNamespaceGrant] = None) -> list:
-        """Its state, as ``browser-state.json``, its log, its network log as HAR unless its ``network`` setting is
-        off, its profile without caches, copied
+        """Its state, as ``browser-state.json``, its log, its network log as HAR when it has one and its ``network``
+        setting is on, its profile without caches, copied
         with the browser paused so its files are of one moment, and its finished downloads: each a file uploaded under
         ``write_namespace`` when there is one, else inline."""
         home = Path.home()
@@ -612,7 +613,7 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
             (root / data.STATE_FILE).write_text(json.dumps(written, indent=1), encoding="utf-8")
             (root / data.LOG_FILE).write_text(await self.log.complete_text(), encoding="utf-8")
             exported = [data.STATE_FILE, data.LOG_FILE]
-            if self.settings.network:
+            if self.network is not None and self.settings.network:
                 (root / HAR_FILE).write_text(await self.network.har_text(), encoding="utf-8")
                 exported.append(HAR_FILE)
             with self._computer_app.paused():

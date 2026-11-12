@@ -33,7 +33,8 @@ needs the log before a reset takes it first with `snapshot_env`.
 Its proxy keeps its network log (`agentenv_protocol.website_browser.network`), which `browser/v1` `network` reads and
 `data/get` exports as HAR 1.2, `network.har`, the file a network grader such as WebArena-Verified's reads: routing
 sites, the shared site proxy's, `/etc/agentenv/sites/network.jsonl`, each exchange whole, a site's sign-in headers
-taken out; else the base's stand-in's, `/var/log/agentenv/network.jsonl`, each connection, since it decrypts none.
+taken out; else the base's stand-in's, `/var/log/agentenv/network.jsonl`, each connection, since it decrypts none. On
+a computer with a desktop it has none, and its export no `network.har`.
 Like its log, it lasts the computer's boot. It keeps cookies and form bodies as the site saw them, sign-in passwords
 among them, so a run that needs no network grader turns it off with `network = false`: its export then has no
 `network.har` and `network` returns no lines.
