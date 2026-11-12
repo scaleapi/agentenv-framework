@@ -609,3 +609,31 @@ def test_the_gate_round_trips_through_the_step_dict_and_rejects_bad_settings():
         _step(user_sim_gate={"on_fail": "retry"})
     with pytest.raises(ValueError, match="needs patterns"):
         _step(user_sim_gate={"patterns": False})
+
+
+@pytest.mark.asyncio
+async def test_a_judge_whose_setup_fails_leaves_the_patterns_verdict_and_is_not_called(monkeypatch):
+    from agent_env.task_step.task_steps import user_sim_gate
+
+    called = []
+
+    async def judge(self, candidate, history, call_config):
+        called.append(candidate)
+        return {"in_role": True}
+
+    def no_endpoint(self, model, **kw):
+        raise KeyError("no endpoint configured for judge-model")
+
+    monkeypatch.setattr(user_sim_gate.UserSimGate, "_judge", judge)
+    monkeypatch.setattr("agent_env.config.Config.resolve_model_call", no_endpoint, raising=False)
+    peers = Peers(monkeypatch, {AGENT: [text("draft one"), text("draft two")],
+                                USER: [sim(_SWAP), sim("shorter, please")]})
+    ctx = _context(user_card=_USER_SIM_CARD)
+
+    await _gated(judge_model="judge-model").execute(ctx)
+
+    verdicts = ctx.metadata["user_sim_gate"]["talk"]
+    assert [v["passed"] for v in verdicts] == [False, True]        # the patterns still held the swap back
+    assert all(v["judge_error"].startswith("judge setup: KeyError") for v in verdicts)
+    assert called == []
+    assert peers.requests(ctx)[-2] == send(AGENT, text("shorter, please"), "<id4>", "<ctx>")

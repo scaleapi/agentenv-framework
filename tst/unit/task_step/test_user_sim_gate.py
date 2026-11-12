@@ -142,3 +142,15 @@ def test_a_step_type_that_replaces_the_conversation_refuses_the_gate_unless_it_a
     assert OwnLoop(id="talk", version=None, prompt="hi").user_sim_gate is None
     assert OwnLoopWithGate(id="talk", version=None, prompt="hi", user_sim_gate={}).user_sim_gate is not None
     assert PromptAgentTaskStep.applies_user_sim_gate() and not OwnLoop.applies_user_sim_gate()
+
+
+def test_a_saved_always_on_step_with_the_gate_is_refused_as_one_built_in_code_is():
+    import pytest
+    from agent_env.task_step.task_steps.always_on import AlwaysOnTaskStep
+
+    step = AlwaysOnTaskStep("week", None, user_sim="user-sim", prompt_id="ask", agent_name="solver")
+    saved = {**step.to_dict(), "user_sim_gate": {}}
+
+    with pytest.raises(ValueError, match="AlwaysOnTaskStep 'week': user_sim_gate is applied by prompt_agent's own"):
+        AlwaysOnTaskStep.from_dict(saved)
+    assert AlwaysOnTaskStep.from_dict(step.to_dict()).user_sim_gate is None

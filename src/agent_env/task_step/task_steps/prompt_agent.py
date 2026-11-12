@@ -9,6 +9,7 @@ import logging
 import time
 import uuid
 from contextlib import nullcontext
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, ClassVar, Optional
 import httpx
@@ -1139,6 +1140,7 @@ class _UserSide:
         self._history: list[tuple[str, str]] = [("user", opening_text)] if opening_text else []
         self._gate = step.user_sim_gate if is_user_sim else None
         self._gate_call_config = None
+        self._gate_judge_setup_error: Optional[str] = None
         # Set once a user-sim message fails the gate after its rewrites, with on_fail "fail".
         self.gate_failure: Optional[str] = None
         self._end_after: Optional[str] = None
@@ -1240,8 +1242,15 @@ class _UserSide:
     async def _gated(self, number: int, answer: dict) -> dict:
         """Check the user-sim's message; ask for a rewrite while it fails, up to the gate's limit (``run_gate``)."""
         gate = self._gate
-        if self._gate_call_config is None:
-            self._gate_call_config = judge_call_config(gate, self._context.metadata.get("user_overrides", {}))
+        if self._gate_call_config is None and self._gate_judge_setup_error is None and gate.judge_model:
+            # Judge setup (its key, its endpoint) can fail as the judge call can: like a call, it never takes the
+            # conversation down; the patterns' verdict stands, with the error recorded on it.
+            try:
+                self._gate_call_config = judge_call_config(gate, self._context.metadata.get("user_overrides", {}))
+            except Exception as e:
+                self._gate_judge_setup_error = f"judge setup: {type(e).__name__}: {e}"[: gate.RECORDED_ERROR_CHARS]
+                logger.warning(f"user-sim gate {self._gate_judge_setup_error}; using patterns only")
+        checking = replace(gate, judge_model=None) if self._gate_judge_setup_error else gate
         latest = {"answer": answer}
 
         async def rewrite(note: str) -> Optional[str]:
@@ -1250,12 +1259,14 @@ class _UserSide:
             return None if "end" in reply else _text_of(reply["message"])
 
         def on_verdict(attempt: int, text: str, verdict) -> None:
+            if self._gate_judge_setup_error and verdict.judge_error is None:
+                verdict.judge_error = self._gate_judge_setup_error
             self._record("user_sim_gate", {"turn": number, "attempt": attempt, "chars": len(text), **verdict.to_dict()})
             if not verdict.passed:
                 logger.warning(f"Turn {number}: user-sim message failed the gate (attempt {attempt + 1}/"
                                f"{gate.max_rewrites + 1}): {'; '.join(verdict.reasons())[:300]}")
 
-        outcome = await run_gate(gate, _text_of(answer["message"]), self._history, rewrite,
+        outcome = await run_gate(checking, _text_of(answer["message"]), self._history, rewrite,
                                  call_config=self._gate_call_config, on_verdict=on_verdict)
         if not outcome.invalid:
             return latest["answer"]
