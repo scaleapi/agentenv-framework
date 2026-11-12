@@ -239,3 +239,8 @@ computer failed for good.
 
 This bundle has no tasks of its own: other bundles pull its computers by alias, and `agent-env run computers` has
 nothing to run.
+
+`envs/clock/` is the `clock` app, which a Linux X11 computer env composes (`apps = ["clock"]`) to follow its multi env's
+gateway clock: agent-env's libfaketime from `clock/`, preloaded into every process, and the clock follower that keeps it
+on the gateway's universe time once `sync_env_clock` arms the multi env. `clock/README.md` says how. Name it from
+another bundle as `clock`, the alias `aliases.toml` gives it, or by its id, `@local/agentenv-framework/computers/clock`.

@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""The computer's clock follower: keeps the clock page agent-env's libfaketime reads in step with the gateway's clock.
+
+It runs as its own user (agentenv-clock), restarted by root's ``follow`` loop, so the session user can't stop it, read
+its config or write the page. Core writes its config through the sandbox's root channel at arm time, never through the
+driver: ``{"watch_url", "token", "follower", "config_id"}`` in CONFIG, readable by this user alone.
+
+Each round long-polls the gateway's ``/clock/watch`` with the version it last showed, which is its acknowledgement of
+that version. The gateway answers at once when the clock is at another version, else at its next change or after its
+hold. On a new version it writes the page (``clockpage.write``): the universe the gateway reported, at its rate, from
+the local real time the gateway's ``sent`` stamp corresponds to, the offset between the two clocks estimated from four
+stamps as NTP does. Then it records what it showed in STATUS, which anyone may read, for the clock app's ``sync_time``.
+A failed round is recorded there too and retried with backoff; a changed config starts over from no version."""
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import clockpage  # noqa: E402  (beside this file, in /opt/agentenv/clock)
+
+CONFIG = os.environ.get("AGENTENV_CLOCK_FOLLOWER_CONFIG", "/etc/agentenv/clock-follower/follower.json")
+STATUS = os.environ.get("AGENTENV_CLOCK_FOLLOWER_STATUS", "/run/agentenv-clock/status.json")
+#: Beyond the gateway's hold (CLOCK_WATCH_HOLD_S, 25 s), how long a watch may take before it's given up and tried again.
+WATCH_TIMEOUT_S = 40.0
+BACKOFF_S = (0.2, 0.5, 1.0, 2.0, 5.0)
+
+
+def load_config() -> dict | None:
+    try:
+        with open(CONFIG) as f:
+            config = json.load(f)
+    except FileNotFoundError:
+        return None
+    missing = [key for key in ("watch_url", "token", "follower", "config_id") if not config.get(key)]
+    if missing:
+        raise ValueError(f"{CONFIG} has no {', '.join(missing)}")
+    return config
+
+
+def epoch(rfc3339: str) -> float:
+    return datetime.fromisoformat(rfc3339.replace("Z", "+00:00")).timestamp()
+
+
+def watch(config: dict, after: str) -> tuple[dict, float, float]:
+    """One watch: the gateway's answer, and the local real times it was sent and received."""
+    query = urllib.parse.urlencode({"follower": config["follower"], "after": after})
+    request = urllib.request.Request(f"{config['watch_url']}?{query}",
+                                     headers={"Authorization": f"Bearer {config['token']}"})
+    sent = time.time()
+    with urllib.request.urlopen(request, timeout=WATCH_TIMEOUT_S) as response:
+        body = json.load(response)
+    return body, sent, time.time()
+
+
+def show(state: dict, sent: float, received: float) -> dict:
+    """Write the page for the gateway's ``state``, its ``received`` and ``sent`` stamps against ours."""
+    offset = ((state["received"] - sent) + (state["sent"] - received)) / 2  # gateway's real time minus ours
+    if not state.get("armed"):
+        return clockpage.write(0, 0.0, 1.0, time.time())
+    return clockpage.write(1, epoch(state["virtual_time"]), float(state["virtual_seconds_per_real_second"]),
+                           state["sent"] - offset)
+
+
+def record(status: dict) -> None:
+    os.makedirs(os.path.dirname(STATUS), exist_ok=True)
+    with open(STATUS + ".part", "w") as f:
+        json.dump({**status, "at": time.time()}, f)
+    os.chmod(STATUS + ".part", 0o644)
+    os.replace(STATUS + ".part", STATUS)
+
+
+def main() -> None:
+    # The clock file and the status are the follower's to write and anyone's to read, whatever umask it was started
+    # with: one of 0000 (docker exec's) would let the session user rewrite the clock file.
+    os.umask(0o022)
+    after, config_id, failures = "", None, 0
+    while True:
+        try:
+            config = load_config()
+            if config is None:
+                time.sleep(1)
+                continue
+            if config["config_id"] != config_id:
+                after, config_id = "", config["config_id"]
+            state, sent, received = watch(config, after)
+            if state.get("version") != after:
+                written = show(state, sent, received)
+                after = state["version"]
+                record({"config_id": config_id, "version": after, "armed": bool(state.get("armed")),
+                        "virtual_time": state.get("virtual_time"), "page": written.get("spec")})
+            failures = 0
+        except Exception as e:  # any round's failure is the status's to show; the next round tries again
+            record({"config_id": config_id, "version": after or None, "error": f"{type(e).__name__}: {e}"})
+            time.sleep(BACKOFF_S[min(failures, len(BACKOFF_S) - 1)])
+            failures += 1
+
+
+if __name__ == "__main__":
+    main()

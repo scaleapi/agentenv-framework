@@ -5,3 +5,7 @@
 "macos-26" = ["macos-26"]
 "windows-11" = ["windows-11"]
 "omarchy-4.5" = ["omarchy-4.5"]
+
+# Ids a computer env's apps can name these by; a store's env of the id wins over an alias.
+[envs]
+clock = ["clock"]

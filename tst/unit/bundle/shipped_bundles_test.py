@@ -65,7 +65,7 @@ def test_the_shipped_env_aliases_name_the_mail_env_the_validator_deploys_the_dri
         "macos-harness": "@local/agentenv-framework/drivers/macos-harness",
         "codex-computer-use": "@local/agentenv-framework/drivers/codex-computer-use",
         "aside": "@local/agentenv-framework/drivers/aside",
-        "chromium": "@local/agentenv-framework/browsers/chromium"}
+        "chromium": "@local/agentenv-framework/browsers/chromium", "clock": "@local/agentenv-framework/computers/clock"}
     assert A2AAgent.VALIDATION_ENV_ID == "mail"
 
 def test_a_task_naming_no_agent_plans_with_the_shipped_default(tmp_path, monkeypatch, local_stores, cli_routing):

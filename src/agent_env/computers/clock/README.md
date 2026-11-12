@@ -38,10 +38,40 @@ What follows the universe, and what doesn't:
 | `tls_realtime.c` | the TLS shim: OpenSSL's certificate checks on real time, preloaded after the library | Apache-2.0 |
 | `clockpage.py` | the clock page's writer, which the follower uses | Apache-2.0 |
 | `clock.conf` | the library's default settings | Apache-2.0 |
+| `clock-follower` | the follower: keeps the page in step with the gateway's clock (below) | Apache-2.0 |
+| `follow` | root's loop that keeps the follower running as `agentenv-clock` | Apache-2.0 |
 
 Build it on x86_64 or aarch64 Linux with a C toolchain, make, patch and curl:
 
     src/agent_env/computers/clock/build.sh OUT [TARBALL]
+
+## On a computer: the `clock` app and the follower
+
+A computer env follows its multi env's gateway clock by composing the `clock` app (`../envs/clock`, the alias
+`clock`): `apps = ["clock"]` on a Linux X11 computer, `amd64` or `arm64`. Its install builds this library at compose,
+installs `clock.conf` and preloads the library into every process (`/etc/ld.so.preload`), and adds the follower, its
+loop and a user of its own, `agentenv-clock`, whose uid `clock.conf` names as the page's owner, so the library trusts no
+page another user made.
+
+When `sync_env_clock` arms a multi env whose computer composes it, core configures the computer's follower before the
+arm, as root, through the sandbox's root channel (`agent_env.env.envs.computer.utils.clock`), never through the driver,
+which runs as the session user. It writes the follower's config (the gateway's `/clock/watch` URL as the computer's
+sandbox reaches it, the computer's read token, its follower name and a config id) to
+`/etc/agentenv/clock-follower/follower.json`, the follower's alone to read; makes the page, the follower's from its first
+byte; and starts `follow`, which runs `clock-follower` as `agentenv-clock` and runs it again within a second whenever it
+exits. The arm then waits for the computer to show the clock (`wait_followers_s`) and fails the step naming it if it
+doesn't; the app's `clock/v1` `sync_time` reports what the follower showed for that config id.
+
+Each round, the follower long-polls `/clock/watch` with the version it last showed, which acknowledges that version. On a
+new version it writes the page: the universe the gateway reported, at its rate, from the local real time the gateway's
+`sent` stamp corresponds to, the offset between the two clocks estimated from the watch's four stamps as NTP does. It
+records what it showed in `/run/agentenv-clock/status.json`. A failed round is recorded there and retried with backoff,
+and a new config starts it over from no version.
+
+The session user can't write the page or the clock file, read the follower's config, or stop either process: each is
+another user's. Not covered yet: a computer reset (`reset_env`) boots it afresh with no follower until the next arm;
+agent-env's own servers run on universe time too, with no real-time marker; and routed sites' certificates, Chromium's
+time zone and an egress proxy for live sites at other dates are later work.
 
 ## The clock page
 

@@ -1,0 +1,16 @@
+#!/bin/sh
+# As root: the computer's clock follower, kept running as agentenv-clock, back within a second whenever it exits. Core
+# starts it through the sandbox's root channel once it has written the follower's config; a second start replaces the
+# first. The session user can't stop either process: each runs as another user.
+set -u
+# Whatever exec started it (docker exec's is 0000), nothing the follower writes is any other user's to change.
+umask 022
+for pid in $(pgrep -f 'opt/agentenv/clock/follow$'); do
+    [ "$pid" != "$$" ] && kill "$pid" 2>/dev/null
+done
+pkill -u agentenv-clock 2>/dev/null
+while :; do
+    setpriv --reuid=agentenv-clock --regid=agentenv-clock --init-groups --no-new-privs --reset-env \
+        python3 /opt/agentenv/clock/clock-follower
+    sleep 1
+done
