@@ -199,26 +199,25 @@ def run_context(output: str) -> dict:
 
 #: What root runs: tini, the init it started, which is root's supervisord, and the ps that lists them.
 ROOTS = ("/usr/bin/tini -- /usr/local/bin/start-desktop init",
-         "/usr/bin/python3 /usr/bin/supervisord -c /etc/supervisor/root.conf", "ps -eo uid=,args=")
+         "/usr/bin/python3 /usr/bin/supervisord -c /etc/supervisor/root.conf", "ps -eo user:32=,args=")
 FOLLOWER = "/usr/local/lib/agentenv-clock/clock-follower"
 
 
 def process_owners(name: str) -> dict[str, list[str]]:
-    """Each process's command line in the container ``name``, by the uid that runs it."""
+    """Each process's command line in the container ``name``, by the user that runs it."""
     owners: dict[str, list[str]] = {}
-    for line in _exec_text(name, "ps", "-eo", "uid=,args=").splitlines():
-        uid, _, args = line.strip().partition(" ")
-        owners.setdefault(uid, []).append(args.strip())
+    for line in _exec_text(name, "ps", "-eo", "user:32=,args=").splitlines():
+        user, _, args = line.strip().partition(" ")
+        owners.setdefault(user, []).append(args.strip())
     return owners
 
 
-def only_session_and_clock(name: str, owners: dict[str, list[str]]) -> bool:
+def only_session_and_clock(owners: dict[str, list[str]]) -> bool:
     """Whether root runs nothing but its init and supervisord, the clock's user nothing but the follower, and every
     other process is the session user's."""
-    clock = _exec_text(name, "id", "-u", "agentenv-clock").strip()
-    assert set(owners) == {"0", clock, "1000"}, owners
-    assert all(args in ROOTS for args in owners["0"]), owners["0"]
-    assert owners[clock] == [f"/usr/bin/python3 -I {FOLLOWER}"], owners[clock]
+    assert set(owners) == {"root", "agentenv-clock", "user"}, owners
+    assert all(args in ROOTS for args in owners["root"]), owners["root"]
+    assert owners["agentenv-clock"] == [f"/usr/bin/python3 -I {FOLLOWER}"], owners["agentenv-clock"]
     return True
 
 

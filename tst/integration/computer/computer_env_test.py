@@ -94,7 +94,7 @@ async def test_the_image_of_this_machines_arch_boots_as_the_session_user_and_pas
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
     for report in reports:
         assert report.passed, [f"{c.check} {c.name}: {c.detail}" for c in report.checks if c.status == "failed"]
-    assert only_session_and_clock(name, owners)
+    assert only_session_and_clock(owners)
 
 
 def test_an_env_that_changes_only_its_display_and_name_reuses_the_image(desktop):
