@@ -151,20 +151,24 @@ class Count:
 
 
 class Capture:
-    """A body as it is relayed: its size and sha256, and, when ``keep``, its first ``limit`` bytes."""
+    """A body as it is relayed: its size and, when it is ``logged``, its sha256 and, when ``keep``, its first ``limit``
+    bytes; with no network log to write it to, its size alone, so nothing is held or hashed for nothing."""
 
-    def __init__(self, limit: int, keep: bool = True):
-        self.limit, self.keep, self.size = limit, keep, 0
-        self.data, self.digest = bytearray(), hashlib.sha256()
+    def __init__(self, limit: int, keep: bool = True, logged: bool = True):
+        self.limit, self.keep, self.size = limit, keep and logged, 0
+        self.data, self.digest = bytearray(), hashlib.sha256() if logged else None
 
     def add(self, data: bytes) -> None:
         self.size += len(data)
-        self.digest.update(data)
+        if self.digest is not None:
+            self.digest.update(data)
         if self.keep and len(self.data) < self.limit:
             self.data += data[:self.limit - len(self.data)]
 
     def record(self) -> dict:
         """The body as the network log keeps it: its bytes base64, kept or not, and cut or not."""
+        if self.digest is None:
+            return {"size": self.size}
         kept = {"base64": base64.b64encode(bytes(self.data)).decode(), "truncated": self.size > self.limit} \
             if self.keep else {}
         return {"size": self.size, "sha256": self.digest.hexdigest(), **kept}
@@ -597,6 +601,9 @@ class SiteProxy:
         if self.network is not None:
             self.network.write(kind, record)
 
+    def _capture(self, limit: int, keep: bool = True) -> Capture:
+        return Capture(limit, keep, logged=self.network is not None)
+
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, scheme: str) -> None:
         await self._serving(writer, scheme, self._requests(reader, writer, scheme, _peer(writer), forward=False))
 
@@ -694,8 +701,11 @@ class SiteProxy:
     async def _direct_exchange(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, start: str,
                                headers: list[tuple[str, str]], host: str, port: int) -> None:
         """A request a browser alone named by its URL on a live site's ``host``, sent straight to it at ``port`` with its
-        path alone and a connection that closes after it, and its answer relayed back as it came. The exchange is in
-        the network log in full, and the connection is logged (``log_event``) as a tunnel's is."""
+        path alone and a connection that closes after it. Its body and the answer go both ways at once, as a tunnel's
+        bytes do, so an answer that comes before the body is done, a ``100 Continue`` or an early 413, reaches the
+        browser as it comes. The exchange is in the network log in full; an answer the proxy can't read as HTTP is
+        relayed as it came, its entry saying so (``unparsed``). The connection is logged (``log_event``) as a tunnel's
+        is."""
         method, _, rest = start.partition(" ")
         target, _, version = rest.rpartition(" ")
         key, started = self._id(), stamp()
@@ -706,28 +716,55 @@ class SiteProxy:
         up_reader, up_writer, address = opened
         head = direct_head(start, headers)
         wall, began, sent, received = time.time(), time.monotonic(), Count(len(head)), Count()
-        body, kept, ended, noted = Capture(REQUEST_BODY_LIMIT), None, {"id": key}, False
-        try:
-            up_writer.write(head)
-            await relay_body(reader, up_writer, headers, to_eof=False, capture=body)
-            await up_writer.drain()
-            sent.bytes += body.size
+        body, kept, ended, noted = self._capture(REQUEST_BODY_LIMIT), None, {"id": key}, []
+
+        def sent_request() -> dict:
+            return {**request, **({"body": body.record()} if body.size else {})}
+
+        async def upload() -> None:
+            try:
+                up_writer.write(head)
+                await relay_body(reader, up_writer, headers, to_eof=False, capture=body)
+                await up_writer.drain()
+            except (BadRequest, ConnectionError, OSError, asyncio.IncompleteReadError) as e:
+                ended.setdefault("failed", {"reason": "the request broke off", "error": described(e)})
+                up_writer.close()
+                return
             self._note("open", {**record, "id": key, "started": started, "address": address,
-                                "request": {**request, **({"body": body.record()} if body.size else {})}})
-            noted = True
+                                "request": sent_request()})
+            noted.append(True)
+
+        sending = asyncio.ensure_future(upload())
+        try:
             while True:
-                if (answer := await read_head(up_reader)) is None:
-                    writer.write(simple_response("502 Bad Gateway", f"{host} closed without answering\n", FAILED))
-                    ended["failed"] = {"reason": "no answer", "error": f"{host} closed without answering"}
+                try:
+                    answer = await up_reader.readuntil(b"\r\n\r\n")
+                    status_line, answer_headers = parse_head(answer)
+                    code = status_parts(status_line)[1]
+                except asyncio.IncompleteReadError as e:
+                    if not e.partial.strip():
+                        writer.write(simple_response("502 Bad Gateway", f"{host} closed without answering\n",
+                                                     FAILED))
+                        ended.setdefault("failed", {"reason": "no answer",
+                                                    "error": f"{host} closed without answering"})
+                        return
+                    await self._unparsed(up_reader, writer, e.partial, received, ended, "the answer's head ended early")
+                    return
+                except asyncio.LimitOverrunError:
+                    await self._unparsed(up_reader, writer, await up_reader.read(HEAD_LIMIT), received, ended,
+                                         "a head over the limit")
+                    return
+                except BadRequest as e:
+                    await self._unparsed(up_reader, writer, answer, received, ended, str(e))
                     return
                 received.bytes += len(answer)
                 writer.write(answer)
-                status_line, answer_headers = parse_head(answer)
-                if not 100 <= status_parts(status_line)[1] < 200:
+                if not 100 <= code < 200:
                     break
+                await writer.drain()
             ended.update(answered=stamp(), response=answered(status_line, answer_headers))
-            kept = Capture(ANSWER_BODY_LIMIT, kept_answer(answer_headers))
-            if method != "HEAD" and status_parts(status_line)[1] not in (204, 304):
+            kept = self._capture(ANSWER_BODY_LIMIT, kept_answer(answer_headers))
+            if method != "HEAD" and code not in (204, 304):
                 await relay_body(up_reader, writer, answer_headers, to_eof=True, capture=kept)
             await writer.drain()
             received.bytes += kept.size
@@ -735,13 +772,28 @@ class SiteProxy:
             ended.setdefault("failed", {"reason": "the exchange broke off", "error": described(e)})
             raise
         finally:
+            if not sending.done():
+                sending.cancel()
+            await asyncio.gather(sending, return_exceptions=True)
+            sent.bytes += body.size
             if kept is not None and kept.size:
                 ended["response"]["body"] = kept.record()
-            self._note("end", {**ended, "ended": stamp(), **({} if noted else {**record, "started": started})})
+            alone = {} if noted else {**record, "request": sent_request(), "started": started, "address": address}
+            self._note("end", {**ended, "ended": stamp(), **alone})
             log_event(connection={"host": host, "port": port, "address": address, "bytes_sent": sent.bytes,
                                   "bytes_received": received.bytes, "started": when(wall),
                                   "duration_s": round(time.monotonic() - began, 3)})
             up_writer.close()
+
+    @staticmethod
+    async def _unparsed(up_reader: asyncio.StreamReader, writer: asyncio.StreamWriter, first: bytes, received: Count,
+                        ended: dict, why: str) -> None:
+        """An answer the proxy can't read as HTTP, relayed as it came, from ``first`` to its end."""
+        ended["unparsed"] = {"reason": "an answer the proxy can't read as HTTP", "error": why}
+        received.add(first)
+        writer.write(first)
+        await writer.drain()
+        await relay_until_eof(up_reader, writer, received)
 
     def _refuse(self, writer: asyncio.StreamWriter, method: str, host: str) -> None:
         log_event(refused={"method": method, "host": host, "reason": "no site of this computer"})
@@ -826,7 +878,7 @@ class SiteProxy:
                        scheme, host, peer, upgrade, key, started, request) -> bool:
         """The request sent on to the site's route and its answer relayed back; whether the connection takes another.
         The request is in the network log once it has gone upstream, and its answer once it is done."""
-        body, kept, ended, noted = Capture(REQUEST_BODY_LIMIT), None, {"id": key}, False
+        body, kept, ended, noted = self._capture(REQUEST_BODY_LIMIT), None, {"id": key}, False
         try:
             up_writer.write(upstream_request(method, target, headers, site, scheme=scheme, host=host, peer=peer,
                                              upgrade=upgrade))
@@ -869,7 +921,7 @@ class SiteProxy:
             ended.update(answered=stamp(), response=answered(status_line, shown))
             writer.write(response_head(status_line, answer_headers, site, scheme=scheme, host=host,
                                        connection=connection))
-            kept = Capture(ANSWER_BODY_LIMIT, kept_answer(answer_headers))
+            kept = self._capture(ANSWER_BODY_LIMIT, kept_answer(answer_headers))
             if not bodiless:
                 try:
                     await relay_body(up_reader, writer, answer_headers, to_eof=True, capture=kept)

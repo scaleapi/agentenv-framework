@@ -102,15 +102,17 @@ class Proxy(http.server.BaseHTTPRequestHandler):
         key, started, record = _key(), _stamp(), {"kind": "tunnel", "host": host, "port": int(port)}
         if (opened := self._open(host, int(port), "CONNECT", key, started, record)) is None:
             return
-        _note("open", {**record, "id": key, "started": started, "address": opened[1]})
-        self.send_response(200, "Connection established")
-        self.end_headers()
         self.close_connection = True
-        self._relay(*opened, host, int(port), b"", key)
+        self._relay(*opened, host, int(port), b"", key, {**record, "id": key, "started": started}, established=True)
 
     def forward(self):
         url = urllib.parse.urlsplit(self.path)
         if not url.hostname:
+            self.send_error(400)
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
             self.send_error(400)
             return
         port = url.port or 80
@@ -118,13 +120,11 @@ class Proxy(http.server.BaseHTTPRequestHandler):
         record = {"kind": "tunnel", "host": url.hostname, "port": port, "method": self.command, "url": self.path}
         if (opened := self._open(url.hostname, port, self.command, key, started, record)) is None:
             return
-        _note("open", {**record, "id": key, "started": started, "address": opened[1]})
         target = (url.path or "/") + (f"?{url.query}" if url.query else "")
         headers = "".join(f"{k}: {v}\r\n" for k, v in self.headers.items() if k.lower() not in HOP)
         head = f"{self.command} {target} HTTP/1.1\r\n{headers}Connection: close\r\n\r\n".encode("latin-1")
-        body = self.rfile.read(length) if (length := int(self.headers.get("Content-Length") or 0)) else b""
         self.close_connection = True
-        self._relay(*opened, url.hostname, port, head + body, key)
+        self._relay(*opened, url.hostname, port, head, key, {**record, "id": key, "started": started}, length=length)
 
     do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = do_HEAD = do_OPTIONS = forward
 
@@ -174,16 +174,28 @@ class Proxy(http.server.BaseHTTPRequestHandler):
         self.wfile.write(data)
         self.close_connection = True
 
-    def _relay(self, upstream: socket.socket, address: str, host: str, port: int, first: bytes, key: str) -> None:
+    def _relay(self, upstream: socket.socket, address: str, host: str, port: int, first: bytes, key: str,
+               opening: dict, *, established: bool = False, length: int = 0) -> None:
+        """The connection to ``upstream`` relayed both ways, in the network log from its ``open`` line to its ``end``
+        line, which is written however it ends: a tunnel's ``established`` answer, or a request's ``length`` bytes of
+        body after its head ``first``, are sent within it."""
         started, began = time.time(), time.monotonic()
-        sent, received = len(first), 0
-        self.connection.settimeout(IDLE_S)
+        sent = received = 0
         try:
+            _note("open", {**opening, "address": address})
+            if established:
+                self.send_response(200, "Connection established")
+                self.end_headers()
+            if length:
+                first += self.rfile.read(length)
+            self.connection.settimeout(IDLE_S)
             if first:
                 upstream.sendall(first)
+                sent = len(first)
             more, received = _pipe(self.connection, upstream)
             sent += more
         finally:
+            upstream.close()
             _note("end", {"id": key, "ended": _stamp(), "bytes_sent": sent, "bytes_received": received})
             log(connection={"host": host, "port": port, "address": address, "bytes_sent": sent,
                             "bytes_received": received,

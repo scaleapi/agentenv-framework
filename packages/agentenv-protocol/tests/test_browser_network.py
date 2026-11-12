@@ -285,3 +285,52 @@ async def test_the_har_text_is_every_line_as_har(tmp_path):
     exported = json.loads(await NetworkLog(path).har_text())
 
     assert exported["log"]["entries"][0]["response"]["content"]["text"] == "hi"
+
+
+@pytest.mark.parametrize("coding, encode", [
+    ("gzip", gzip.compress),
+    ("br", brotli.compress),
+    ("zstd", lambda data: zstandard.ZstdCompressor().compress(data)),
+], ids=["gzip", "br", "zstd"])
+def test_a_small_body_that_decodes_huge_stops_at_the_limit_answer_and_request_alike(coding, encode):
+    wire = encode(b"a" * (64 << 20))
+    response = _ok([["Content-Type", "text/plain"], ["Content-Encoding", coding]], _body(wire))
+    request = _get(method="POST", headers=[["Content-Type", "text/plain"], ["Content-Encoding", coding]],
+                   body=_body(wire))
+
+    [entry] = har(_exchange("1-1", request, response))["log"]["entries"]
+
+    answer, sent = entry["response"]["content"], entry["request"]["postData"]
+    assert (len(answer["text"]), answer["_truncated"]) == (network.DECODED_LIMIT, True)
+    assert (len(sent["text"]), sent["_truncated"]) == (network.REQUEST_DECODED_LIMIT, True)
+
+
+def test_a_line_that_cant_be_an_entry_is_left_out_and_counted_and_the_rest_export():
+    good = _exchange("1-1", _get(), _ok([["Content-Type", "text/plain"]], _body(b"hi")))
+    lines = [*good, {"seq": 3, "at": T0, "open": {"kind": "exchange"}},
+             {"seq": 4, "at": T0, "end": {"id": 7}}, {"seq": 5, "at": T0, "open": {"id": "1-2", "started": 5}},
+             {"seq": 6, "at": T0, "end": {"id": "1-3", "started": T0, "response": {"status": "x", "headers": 3}}},
+             {"seq": 7, "at": T0}]
+
+    exported = har(lines)["log"]
+
+    assert [entry["response"]["content"]["text"] for entry in exported["entries"]] == ["hi"]
+    assert exported["_unreadable"] == 5
+
+
+def test_a_cookies_expiry_is_iso_8601_and_one_that_doesnt_parse_is_left_out():
+    response = _ok([["Set-Cookie", "a=1; Expires=Wed, 09 Jun 2027 10:18:14 GMT"],
+                    ["Set-Cookie", "b=2; Expires=someday"]])
+
+    [entry] = har(_exchange("1-1", _get(), response))["log"]["entries"]
+
+    first, second = entry["response"]["cookies"]
+    assert first["expires"] == "2027-06-09T10:18:14.000Z" and "expires" not in second
+
+
+def test_an_answer_the_proxy_couldnt_read_says_so():
+    [entry] = har(_exchange("1-1", _get("http://live.test/"), None,
+                            unparsed={"reason": "an answer the proxy can't read as HTTP", "error": "bad"}))["log"][
+        "entries"]
+
+    assert entry["_unparsed"]["error"] == "bad" and entry["response"]["status"] == 0

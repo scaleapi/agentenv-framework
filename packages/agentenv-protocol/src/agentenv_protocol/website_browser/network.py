@@ -14,7 +14,8 @@ import json
 import os
 import re
 import zlib
-from datetime import datetime
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any, Optional
@@ -38,8 +39,8 @@ HAR_FILE = "network.har"
 #: How many lines, and how many of their bytes, one read returns at most.
 READ_LIMIT = 500
 READ_BYTES = 32 << 20
-#: How much of a body an entry keeps, once decoded.
-DECODED_LIMIT = 1 << 20
+#: How much of an answer's body, and of a request's, an entry keeps once decoded; decoding stops there.
+DECODED_LIMIT, REQUEST_DECODED_LIMIT = 1 << 20, 10 << 20
 #: A ``charset`` in a ``Content-Type``.
 CHARSET = re.compile(r"charset=\"?([\w.:-]+)", re.I)
 #: What undoing a coding raises on a body that isn't what its coding says.
@@ -101,32 +102,46 @@ class NetworkLog:
         return lines
 
     async def har_text(self) -> str:
-        """Every line as HAR, as ``data/get`` writes it."""
-        return json.dumps(har(await asyncio.to_thread(self.every_line)), indent=1)
+        """Every line as HAR, as ``data/get`` writes it, made off the event loop."""
+        return await asyncio.to_thread(lambda: json.dumps(har(self.every_line()), indent=1))
 
 
 def har(lines: list[dict]) -> dict:
     """``lines`` as HAR 1.2: each request or tunnel one entry, its ``open`` and ``end`` lines joined by ``id``, the
     entries in the order they started, and those that started in the same millisecond in the order they were first
-    written."""
-    opened: dict[str, dict] = {}
+    written. A line that isn't one, or an entry that can't be read, is left out and counted in ``_unreadable``, so one
+    bad line can't cost an export the rest."""
+    opened: dict[str, Optional[dict]] = {}
     ended: dict[str, dict] = {}
+    unreadable = 0
     for line in lines:
-        if isinstance(line.get("open"), dict):
-            if opened.get(key := line["open"]["id"]) is None:
+        kind = "open" if isinstance(line.get("open"), dict) else "end" if isinstance(line.get("end"), dict) else None
+        key = line[kind].get("id") if kind else None
+        if not isinstance(key, str):
+            unreadable += 1
+        elif kind == "open":
+            if opened.get(key) is None:
                 opened[key] = line["open"]
-        elif isinstance(line.get("end"), dict):
-            ended.setdefault(line["end"]["id"], line["end"])
-            opened.setdefault(line["end"]["id"], None)
-    entries = [_entry(record, ended.get(key)) for key, record in opened.items()]
+        else:
+            ended.setdefault(key, line["end"])
+            opened.setdefault(key, None)
+    entries = []
+    for key, record in opened.items():
+        try:
+            entries.append(_entry(record, ended.get(key)))
+        except (KeyError, TypeError, ValueError, AttributeError, IndexError):
+            unreadable += 1
     entries.sort(key=lambda entry: entry["startedDateTime"])
-    return {"log": {"version": "1.2", "creator": {"name": "agentenv", "version": _version()}, "entries": entries}}
+    log = {"version": "1.2", "creator": {"name": "agentenv", "version": _version()}, "entries": entries}
+    return {"log": {**log, **({"_unreadable": unreadable} if unreadable else {})}}
 
 
 def _entry(opened: Optional[dict], ended: Optional[dict]) -> dict:
     record = {**(ended or {}), **(opened or {})}
     finished = (ended or {}).get("ended")
     started = record.get("started") or finished or ""
+    if not isinstance(started, str):
+        raise TypeError("started")
     answered = (ended or {}).get("answered") or finished
     entry: dict[str, Any] = {"startedDateTime": started, "time": _ms(started, finished)}
     if record.get("kind") == "tunnel":
@@ -145,7 +160,7 @@ def _entry(opened: Optional[dict], ended: Optional[dict]) -> dict:
             entry["serverIPAddress"] = record["address"]
     entry["cache"] = {}
     entry["timings"] = {"send": 0, "wait": _ms(started, answered), "receive": _ms(answered, finished)}
-    for key in ("failed", "refused"):
+    for key in ("failed", "refused", "unparsed"):
         if (ended or {}).get(key):
             entry[f"_{key}"] = ended[key]
     if ended is None:
@@ -194,7 +209,8 @@ def _request(request: dict) -> dict:
                                    for name, value in parse_qsl(urlsplit(url).query, keep_blank_values=True)],
                    "headersSize": -1, "bodySize": body["size"] if body else 0}
     if body and body.get("size"):
-        text, extra = _text(body, _header(headers, "content-encoding"), _header(headers, "content-type"), None)
+        text, extra = _text(body, _header(headers, "content-encoding"), _header(headers, "content-type"),
+                            REQUEST_DECODED_LIMIT)
         har_request["postData"] = {"mimeType": _header(headers, "content-type") or "", "text": text, **extra}
     return har_request
 
@@ -219,7 +235,7 @@ def _response(response: Optional[dict]) -> dict:
             "headersSize": -1, "bodySize": body["size"] if body else 0}
 
 
-def _text(body: dict, coding: Optional[str], mime: Optional[str], limit: Optional[int]) -> tuple[str, dict]:
+def _text(body: dict, coding: Optional[str], mime: Optional[str], limit: int) -> tuple[str, dict]:
     """A body's text, decoded from ``coding`` and its charset, up to ``limit``, and what a HAR says beside it: that the
     proxy or the limit cut it, how much compression saved, or, for a coding that can't be undone here, the raw body as
     base64 with the coding named."""
@@ -233,7 +249,7 @@ def _text(body: dict, coding: Optional[str], mime: Optional[str], limit: Optiona
             return base64.b64encode(raw).decode(), {**extra, "encoding": "base64", "_undecoded": coding}
         extra["compression"] = max(0, len(decoded) - len(raw))
         raw = decoded
-    if limit is not None and len(raw) > limit:
+    if len(raw) > limit:
         raw, extra["_truncated"] = raw[:limit], True
     charset = (CHARSET.search(mime or "") or [None, "utf-8"])[1]
     try:
@@ -242,11 +258,11 @@ def _text(body: dict, coding: Optional[str], mime: Optional[str], limit: Optiona
         return raw.decode("utf-8", errors="replace"), extra
 
 
-def _decompressed(raw: bytes, coding: str, limit: Optional[int]) -> Optional[bytes]:
+def _decompressed(raw: bytes, coding: str, limit: int) -> Optional[bytes]:
     """``raw`` with each of ``coding``'s codings undone, last first, as far as it goes, so a body the proxy cut decodes
-    up to the cut; None for a coding this can't undo."""
-    data = raw
-    most = limit + 1 if limit else 0
+    up to the cut, and each stopping past ``limit``, so a small body can't expand without bound; None for a coding
+    this can't undo."""
+    data, most = raw, limit + 1
     for name in reversed([part.strip().lower() for part in coding.split(",") if part.strip()]):
         try:
             if name in ("gzip", "x-gzip"):
@@ -257,14 +273,22 @@ def _decompressed(raw: bytes, coding: str, limit: Optional[int]) -> Optional[byt
                 except zlib.error:
                     data = zlib.decompressobj(-zlib.MAX_WBITS).decompress(data, most)
             elif name == "br" and brotli is not None:
-                data = brotli.Decompressor().process(data)
+                data = brotli.Decompressor().process(data, output_buffer_limit=most)[:most]
             elif name == "zstd" and zstandard is not None:
-                data = zstandard.ZstdDecompressor().decompressobj().decompress(data)
+                data = _zstd(data, most)
             elif name != "identity":
                 return None
         except DECODE_ERRORS:
             return None
     return data
+
+
+def _zstd(data: bytes, most: int) -> bytes:
+    out = bytearray()
+    with zstandard.ZstdDecompressor().stream_reader(data) as reader:
+        while len(out) < most and (chunk := reader.read(most - len(out))):
+            out += chunk
+    return bytes(out)
 
 
 def _headers(headers: list) -> list[dict]:
@@ -299,8 +323,10 @@ def _set_cookies(headers: list) -> list[dict]:
         for attribute in attributes:
             attr, _, attr_value = attribute.strip().partition("=")
             lower = attr.lower()
-            if lower in ("path", "domain", "expires"):
+            if lower in ("path", "domain"):
                 cookie[lower] = attr_value
+            elif lower == "expires" and (expires := _http_date(attr_value)):
+                cookie["expires"] = expires
             elif lower == "httponly":
                 cookie["httpOnly"] = True
             elif lower == "secure":
@@ -309,6 +335,16 @@ def _set_cookies(headers: list) -> list[dict]:
                 cookie["sameSite"] = attr_value
         cookies.append(cookie)
     return cookies
+
+
+def _http_date(text: str) -> Optional[str]:
+    """An HTTP date, as a cookie's ``Expires`` has it, in ISO 8601 as HAR wants; None for one that doesn't parse."""
+    try:
+        moment = parsedate_to_datetime(text)
+    except (TypeError, ValueError, IndexError):
+        return None
+    moment = moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _ms(start: Optional[str], end: Optional[str]) -> float:

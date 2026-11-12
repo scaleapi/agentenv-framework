@@ -341,3 +341,137 @@ def test_the_stand_in_numbers_after_the_last_line_the_file_holds_and_ends_a_cut_
 
     assert [line["seq"] for line in NetworkReader(path).every_line()] == [4, 5]
 
+
+
+async def _live(handle):
+    """A live host on loopback, each connection given to ``handle(reader, writer)``."""
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    return server, server.sockets[0].getsockname()[1]
+
+
+async def _head(reader) -> bytes:
+    return await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 5)
+
+
+@pytest.mark.asyncio
+async def test_a_live_host_s_100_continue_reaches_the_browser_before_it_sends_its_body(tmp_path, monkeypatch):
+    path = tmp_path / "network.jsonl"
+
+    async def handle(reader, writer):
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(b"HTTP/1.1 100 Continue\r\n\r\n")
+        await writer.drain()
+        body = await reader.readexactly(5)
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\n" + body)
+        await writer.drain()
+        writer.close()
+
+    server, port = await _live(handle)
+    async with Upstream() as upstream:
+        config, _ = _config(tmp_path, upstream.port)
+        config.direct = ["live.test"]
+        with _live_hosts_at(monkeypatch, port):
+            async with _forward_port(config, network=NetworkLog.open(str(path))) as proxy:
+                reader, writer = await asyncio.open_connection("127.0.0.1", proxy)
+                writer.write(b"POST http://live.test/up HTTP/1.1\r\nHost: live.test\r\nContent-Length: 5\r\n"
+                             b"Expect: 100-continue\r\n\r\n")
+                await writer.drain()
+                go_on = await _head(reader)
+                writer.write(b"hello")
+                answered = await _head(reader)
+                echoed = await reader.readexactly(5)
+                writer.close()
+                await _ended(path)
+    server.close()
+
+    [entry] = _entries(path)
+    assert go_on.startswith(b"HTTP/1.1 100 ") and answered.startswith(b"HTTP/1.1 200 ") and echoed == b"hello"
+    assert (entry["response"]["status"], entry["request"]["postData"]["text"],
+            entry["response"]["content"]["text"]) == (200, "hello", "hello")
+
+
+@pytest.mark.asyncio
+async def test_a_live_host_that_turns_an_upload_down_early_is_answered_at_once(tmp_path, monkeypatch):
+    path = tmp_path / "network.jsonl"
+    done = asyncio.Event()
+
+    async def handle(reader, writer):
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(b"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\n\r\n")
+        await writer.drain()
+        await done.wait()
+        writer.close()
+
+    server, port = await _live(handle)
+    async with Upstream() as upstream:
+        config, _ = _config(tmp_path, upstream.port)
+        config.direct = ["live.test"]
+        with _live_hosts_at(monkeypatch, port):
+            async with _forward_port(config, network=NetworkLog.open(str(path))) as proxy:
+                reader, writer = await asyncio.open_connection("127.0.0.1", proxy)
+                writer.write(b"POST http://live.test/up HTTP/1.1\r\nHost: live.test\r\nContent-Length: %d\r\n\r\n"
+                             % (64 << 20))
+                sending = asyncio.ensure_future(_send_slowly(writer, 64 << 20))
+                answered = await _head(reader)
+                sending.cancel()
+                writer.close()
+                await _ended(path)
+    done.set()
+    server.close()
+
+    [entry] = _entries(path)
+    assert answered.startswith(b"HTTP/1.1 413 ")
+    assert entry["response"]["status"] == 413 and entry["request"]["bodySize"] < 64 << 20
+
+
+async def _send_slowly(writer, size: int) -> None:
+    for _ in range(size // 65536):
+        writer.write(b"x" * 65536)
+        await writer.drain()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", [b"HTTP/1.1 200 OK\r\nNoColonHere\r\n\r\nhello",
+                                    b"HTTP/1.1 200 OK\nContent-Length: 5\n\nhello"], ids=["no-colon", "bare-lf"])
+async def test_a_live_host_s_answer_the_proxy_cant_read_is_relayed_as_it_came(tmp_path, monkeypatch, answer):
+    path = tmp_path / "network.jsonl"
+
+    async def handle(reader, writer):
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(answer)
+        await writer.drain()
+        writer.close()
+
+    server, port = await _live(handle)
+    async with Upstream() as upstream:
+        config, _ = _config(tmp_path, upstream.port)
+        config.direct = ["live.test"]
+        with _live_hosts_at(monkeypatch, port):
+            async with _forward_port(config, network=NetworkLog.open(str(path))) as proxy:
+                reader, writer = await asyncio.open_connection("127.0.0.1", proxy)
+                writer.write(b"GET http://live.test/ HTTP/1.1\r\nHost: live.test\r\n\r\n")
+                got = await asyncio.wait_for(reader.read(), 5)
+                writer.close()
+                await _ended(path)
+    server.close()
+
+    [entry] = _entries(path)
+    assert got == answer
+    assert entry["_unparsed"]["reason"] == "an answer the proxy can't read as HTTP"
+
+
+def test_with_no_network_log_a_body_is_counted_but_neither_kept_nor_hashed():
+    capture = site_proxy.SiteProxy(site_proxy.Config(user=None, sites=[]))._capture(1 << 20)
+    capture.add(b"x" * 4096)
+
+    assert capture.record() == {"size": 4096} and not capture.data and capture.digest is None
+
+
+def test_the_stand_in_turns_down_a_bad_content_length_before_it_connects(monkeypatch, tmp_path):
+    path = tmp_path / "network.jsonl"
+    with _serving(monkeypatch) as proxy:
+        monkeypatch.setattr(proxy.module, "NETWORK", proxy.module.NetworkLog(str(path)))
+        answer = _ask(proxy.port, b"POST http://site.test/a HTTP/1.1\r\nHost: site.test\r\nContent-Length: abc\r\n\r\n")
+
+    assert answer.startswith(b"HTTP/1.1 400 ") and proxy.opened == []
+    assert NetworkReader(path).every_line() == []
