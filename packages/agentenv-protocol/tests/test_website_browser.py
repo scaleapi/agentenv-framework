@@ -517,7 +517,7 @@ class StubDevTools:
         answer = self.answers.get(method, {})
         return answer(params, session_id) if callable(answer) else answer
 
-    async def request(self, method, params=None, *, session_id=None):
+    async def request(self, method, params=None, *, session_id=None, answered=None):
         try:
             return {"result": await self.call(method, params, session_id=session_id)}
         except DevToolsError as e:

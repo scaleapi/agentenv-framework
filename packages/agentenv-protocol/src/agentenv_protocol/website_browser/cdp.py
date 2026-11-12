@@ -333,6 +333,13 @@ class Relay:
         logged = self._begin(connection, session, method, params)
         answer, guarded = {"error": {"code": SERVER_ERROR, "message": ENDED_UNANSWERED}}, None
         sending: Optional[asyncio.Future] = None
+        replied = False
+
+        def reply(answer: dict) -> None:
+            nonlocal replied
+            replied = True
+            self._put(connection, _reply(message, answer))
+
         try:
             async with connection.order:
                 if logged is not None:
@@ -345,7 +352,8 @@ class Relay:
                 elif verdict.action != "send":
                     answer = {"result": {}}
                 else:
-                    sending = asyncio.ensure_future(self.devtools.request(method, verdict.params, session_id=session))
+                    sending = asyncio.ensure_future(self.devtools.request(method, verdict.params, session_id=session,
+                                                                          answered=reply))
                     await asyncio.sleep(0)
             if sending is not None:
                 try:
@@ -355,10 +363,8 @@ class Relay:
             if verdict is not None and (verdict.action != "send" or verdict.changed):
                 guarded = GUARDED[verdict.action]
                 self._guarded(connection, method, verdict)
-            reply = {"id": message.get("id"), **{key: answer[key] for key in ("result", "error") if key in answer}}
-            if message.get("sessionId"):
-                reply["sessionId"] = message["sessionId"]
-            self._put(connection, reply)
+            if not replied:
+                reply(answer)
             if verdict is not None and verdict.action == "close":
                 self._close(connection, CLOSED, dropping=False)
         finally:
@@ -513,6 +519,13 @@ class _Logged:
         for call in self.calls:
             call.credit(self.target, self.acting, self._checks_password, self.password, alone=len(self.calls) == 1)
         self.relay.log.finish(self.begun, **fields)
+
+
+def _reply(message: dict, answer: dict) -> dict:
+    """The client's answer to its command ``message``: the browser's ``answer``, or the relay's own, under its id and
+    on its session."""
+    return {"id": message.get("id"), **{key: answer[key] for key in ("result", "error") if key in answer},
+            **({"sessionId": message["sessionId"]} if message.get("sessionId") else {})}
 
 
 def _well_formed(message: Any) -> bool:

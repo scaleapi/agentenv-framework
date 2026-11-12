@@ -45,7 +45,8 @@ class Browser(WebsiteBrowserEnvironment):
 
 class Pipe:
     """A browser's pipe: each connection's browser-level session ``b<n>``, an attach on a session making its child
-    ``<session>-c`` and saying so on that session, ``Boom`` failing, ``Hang`` never answered, anything else echoed;
+    ``<session>-c`` and saying so on that session, ``Boom`` failing, ``Hang`` never answered, ``Ordered`` answered and
+    then followed at once by an event, as the real pipe reads them when both came in one read, anything else echoed;
     every request recorded with the last params of each method, and each ``Hang`` given up."""
 
     def __init__(self) -> None:
@@ -65,9 +66,14 @@ class Pipe:
             return {"sessionId": f"b{self.sessions}"}
         return {}
 
-    async def request(self, method, params=None, *, session_id=None):
+    async def request(self, method, params=None, *, session_id=None, answered=None):
         self.sent.append((method, session_id))
         self.params[method] = params
+        if method == "Ordered":
+            answer = {"result": {"method": method}}
+            answered(answer)
+            self.emit({"method": "Page.after", "sessionId": session_id, "params": {}})
+            return answer
         if method == "Target.attachToTarget":
             child = f"{session_id}-c"
             self.emit({"method": "Target.attachedToTarget", "sessionId": session_id,
@@ -152,6 +158,16 @@ def test_a_users_token_is_minted_once_kept_by_hash_and_still_known_after_a_resta
     assert token not in path.read_text() and restarted.address(token) == ada and tokens.address("guess") is None
     assert restarted.mint("ada", "https://computer.test").http_url != ada.http_url
     assert not ada.named and restarted.address(cys) == cy and cy.named
+
+
+@pytest.mark.asyncio
+async def test_an_answer_reaches_its_client_before_the_events_the_browser_sent_after_it():
+    async with _relay() as (pipe, relay, base):
+        async with connect(f"{base}/ada") as ada:
+            await ada.send(json.dumps({"id": 1, "method": "Ordered"}))
+            first, second = json.loads(await ada.recv()), json.loads(await ada.recv())
+
+    assert first == {"id": 1, "result": {"method": "Ordered"}} and second == {"method": "Page.after", "params": {}}
 
 
 @pytest.mark.asyncio
