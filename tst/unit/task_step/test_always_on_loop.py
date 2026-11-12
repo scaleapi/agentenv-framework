@@ -7,7 +7,7 @@ import pytest
 
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_steps import always_on as ao
-from agent_env.task_step.task_steps.user_sim import UserSimTaskStep
+from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import DeployUserSimAgentTaskStep
 from tst.unit.task_step.always_on_harness import Rig
 
 pytestmark = pytest.mark.usefixtures("local_stores")
@@ -303,7 +303,8 @@ async def test_a_user_and_a_world_in_different_time_zones_are_refused(monkeypatc
 
 def test_both_steps_are_registered():
     registry = get_task_step_registry()
-    assert registry["always_on"] is ao.AlwaysOnTaskStep and registry["user_sim"] is UserSimTaskStep
+    assert registry["always_on"] is ao.AlwaysOnTaskStep
+    assert registry["deploy_user_sim_agent"] is DeployUserSimAgentTaskStep and "user_sim" not in registry
 
 
 # ---- the user's schedule --------------------------------------------------------------------------------------------

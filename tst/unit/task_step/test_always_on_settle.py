@@ -176,10 +176,10 @@ async def test_contact_replies_still_in_progress_at_the_end_are_recorded(monkeyp
 
 
 def test_the_contact_setting_survives_a_round_trip_and_the_step_sets_no_contact_time_limit():
-    step = ao.AlwaysOnTaskStep("week", None, user_sim="linda", prompt="hi", prompt_id="p", agent_name="a",
+    step = ao.AlwaysOnTaskStep("week", None, user_sim="linda", prompt_id="p", agent_name="a",
                                contact_replies_in_parallel=False)
     stored = step.to_dict()
     assert ao.AlwaysOnTaskStep.from_dict(stored).contact_replies_in_parallel is False
     assert "contact_timeout_seconds" not in stored  # a contact's limit is register_env_triggers' executor_timeout_seconds
     with pytest.raises(TypeError, match="contact_timeout_seconds"):
-        ao.AlwaysOnTaskStep("week", None, user_sim="linda", prompt="hi", agent_name="a", contact_timeout_seconds=600)
+        ao.AlwaysOnTaskStep("week", None, user_sim="linda", agent_name="a", contact_timeout_seconds=600)

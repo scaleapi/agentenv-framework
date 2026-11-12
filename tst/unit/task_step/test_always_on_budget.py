@@ -17,7 +17,7 @@ NOTICE = ao.FINAL_REMINDER.format(first="Linda")
 
 
 def _step(**settings) -> ao.AlwaysOnTaskStep:
-    return ao.AlwaysOnTaskStep("week", None, user_sim="linda", prompt="hi", prompt_id="p", agent_name="a", **settings)
+    return ao.AlwaysOnTaskStep("week", None, user_sim="linda", prompt_id="p", agent_name="a", **settings)
 
 
 @pytest.mark.asyncio
