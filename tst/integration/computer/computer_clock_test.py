@@ -2,7 +2,7 @@
 the gateway, as the computer's sandbox reaches it, under the computer's name and control token, which the record
 keeps but the token; sync_env_clock arms the clock as a task does, calling the computer's sync_time; the session
 reads universe time, and each change is acknowledged in time for a write that waits for it; a follower killed comes
-back within 2 s and acknowledges the next advance; and a reset brings the page and the follower back on the clock's
+back within 3 s and acknowledges the next advance; and a reset brings the page and the follower back on the clock's
 current version. Needs Docker and the local registry on localhost:5000."""
 
 import asyncio
@@ -24,7 +24,7 @@ from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
 from agent_env.task_step.task_steps.sync_env_clock import SyncEnvClockTaskStep
-from tst.integration.computer.conftest import CONTAINER, kill_follower, multi_env
+from tst.integration.computer.conftest import CONTAINER, FOLLOWER_BACK_S, kill_follower, multi_env
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
@@ -76,7 +76,7 @@ async def test_a_multi_envs_computer_follows_its_gateways_clock_through_arming_a
     assert [entry["service"] for entry in synced if entry.get("service") == "desktop"] == ["desktop"]
     assert abs(armed) < 5 and abs(advanced) < 5 and abs(after_kill) < 5 and abs(after_reset) < 5, (
         armed, advanced, after_kill, after_reset)
-    assert back not in ("-", killed) and came_back < 2, came_back
+    assert back not in ("-", killed) and came_back < FOLLOWER_BACK_S, came_back
     assert state_after_reset["followers"]["desktop"]["version"] == state_after_reset["version"], state_after_reset
     assert not report.failed
 

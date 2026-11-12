@@ -246,6 +246,11 @@ print(killed, back or "-", time.monotonic() - start)
 """
 
 
+#: How soon supervisord has a killed follower back: it notices the exit when it next wakes, up to a second later,
+#: and the follower starts Python; on a CI runner busy with other tests that has taken 2.03 s.
+FOLLOWER_BACK_S = 3
+
+
 def kill_follower(name: str) -> tuple[str, str, float]:
     """The clock follower in the container ``name`` killed with SIGKILL: its pid, the pid of the one back ("-" if
     none within 10 s), and how long that took, timed in the container."""
