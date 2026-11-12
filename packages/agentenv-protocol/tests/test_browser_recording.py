@@ -346,6 +346,20 @@ async def test_a_frame_whose_session_is_gone_is_taken_on_the_session_its_tab_was
 
 
 @pytest.mark.asyncio
+async def test_a_frame_whose_only_tab_is_attached_anew_only_after_a_retry_waits_for_it_within_its_budget():
+    pipe = RefusingPipe(refusals=1, why="Page.captureScreenshot: Session with given id not found")
+    control = _one_tab(pipe)
+    loop = asyncio.get_running_loop()
+    loop.call_later(0.05, pipe.emit, "Target.detachedFromTarget", {"sessionId": "s-T1"})
+    loop.call_later(0.6, pipe.emit, "Target.attachedToTarget",
+                    {"sessionId": "s-T1b", "targetInfo": {"targetId": "T1", "type": "page"}})
+
+    _, _, tab, _ = await control.frame("T1", load_wait_s=0)
+
+    assert tab == "T1" and [s for s, _, _ in pipe.captured] == ["s-T1", "s-T1b"]
+
+
+@pytest.mark.asyncio
 async def test_a_frame_the_browser_refuses_for_another_reason_is_missing_at_once():
     pipe = RefusingPipe(refusals=5, why="Page.captureScreenshot: Internal error")
 

@@ -664,9 +664,15 @@ class BrowserControl:
             except ConnectionError as e:
                 raise DeviceUnavailable(f"the tab couldn't be captured: {e}") from None
             await asyncio.sleep(FRAME_RETRY_S)
-            if session not in self._sessions:
-                session = next((s for s, t in self._sessions.items() if t == target), None) or await self.active_session()
-                target = self._sessions[session]
+            while session not in self._sessions:
+                try:
+                    session = next((s for s, t in self._sessions.items() if t == target), None) or (
+                        await self.active_session())
+                except DeviceUnavailable:
+                    if loop.time() + FRAME_RETRY_S >= deadline:
+                        raise
+                    await asyncio.sleep(FRAME_RETRY_S)
+            target = self._sessions[session]
         self._frames[target] = shot["data"], "jpg"
         return shot["data"], "jpg", target, self.url_of(target)
 
