@@ -88,6 +88,7 @@ EXT_STEP_URI = "urn:agentenv:step/v1"
 EXT_STATE_URI = "urn:agentenv:state/v1"
 EXT_CHANGES_URI = "urn:agentenv:changes/v1"
 EXT_NOTIFICATIONS_URI = "urn:agentenv:notifications/v1"
+EXT_USER_CHAT_URI = "urn:agentenv:user-chat/v1"
 EXT_WEBSITE_URI = "urn:agentenv:website/v1"
 EXT_BROWSER_URI = "urn:agentenv:browser/v1"
 EXT_COMPUTER_APP_URI = "urn:agentenv:computer-app/v1"
@@ -139,9 +140,11 @@ TRIGGER_EXECUTOR_HOURS_TIME_ZONE = "executor_hours_time_zone"
 TRIGGER_NEXT_EVENT_AT = "next_event_at"
 TRIGGER_NOTIFY = "notify"
 TRIGGER_WEBSITE_OP = "website_op"
+# state reports each fire in flight (running, waits) and each executor call in progress (executor_calls).
+TRIGGER_FIRES_IN_STATE = "fires_in_state"
 TRIGGER_FEATURES = (TRIGGER_NAMED_EXECUTORS, TRIGGER_PROVOKING_ROLES, TRIGGER_ACTION_DELAY, TRIGGER_EXECUTOR_HOURS,
                     TRIGGER_UNLESS, TRIGGER_WEBSITE, TRIGGER_EXECUTOR_HOURS_TIME_ZONE, TRIGGER_NEXT_EVENT_AT,
-                    TRIGGER_NOTIFY, TRIGGER_WEBSITE_OP)
+                    TRIGGER_NOTIFY, TRIGGER_WEBSITE_OP, TRIGGER_FIRES_IN_STATE)
 
 # The one `source` a /step call may name instead of step_api, with the id of the hook artifact that made it.
 STEP_SOURCE_POST_TURN_HOOK = "post_turn_hook"
@@ -230,9 +233,10 @@ GATEWAY_EXTENSIONS = [
     },
     {
         "uri": EXT_TRIGGERS_URI,
-        "description": "Register (additive add-by-id), remove, clear, or read (state) typed Action/State triggers + the firing log (harness control path).",
+        "description": "Register (additive add-by-id), remove, clear, or read (state) typed Action/State triggers + the firing log (harness control path). config sets the engine's opt-in setting concurrent_fires (a repeat trigger whose actions are all contact replies (nl) or notifications (notify) runs its fires side by side instead of queueing).",
         "params": {"endpoint": "/triggers/register", "features": list(TRIGGER_FEATURES), "methods": {
             "register": {"method": "POST", "endpoint": "/triggers/register", "request": {"type": "object", "properties": {"watch_roles": {"type": "array", "items": {"type": "string"}}, "executor": {"type": "object"}, "executors": {"type": "object"}, "triggers": {"type": "array"}}, "required": ["triggers"]}},
+            "config": {"method": "POST", "endpoint": "/triggers/config", "request": {"type": "object", "properties": {"concurrent_fires": {"type": "boolean"}}}},
             "remove": {"method": "POST", "endpoint": "/triggers/remove", "request": {"type": "object", "properties": {"ids": {"type": "array", "items": {"type": "string"}}}, "required": ["ids"]}},
             "clear": {"method": "POST", "endpoint": "/triggers/clear", "request": {"type": "object", "properties": {}}},
             "state": {"method": "GET", "endpoint": "/triggers/state", "request": {"type": "object", "properties": {}}}}},
@@ -240,11 +244,11 @@ GATEWAY_EXTENSIONS = [
     },
     {
         "uri": EXT_CLOCK_URI,
-        "description": "Virtual clock (urn:agentenv:clock/v1): read the gateway's virtual time (wall-clock-derived, rate-scaled) via get_time; set_time/set_rate/advance/clear are the harness control path, each changing the clock's opaque version and, given wait_followers_s, answering 504 naming the followers that don't show it in time (set_rate keeps t0, as advance does); a follower follows it through watch, a long poll naming the version it shows and held up to hold_s; state's followers block is diagnostic, not part of the contract.",
+        "description": "Virtual clock (urn:agentenv:clock/v1): read the gateway's virtual time (wall-clock-derived, rate-scaled) via get_time; set_time/set_rate/advance/clear are the harness control path, each changing the clock's opaque version and, given wait_followers_s, answering 504 naming the followers that don't show it in time (set_rate keeps t0, as advance does, so time triggers keep their marks; rate 0 freezes the clock); a follower follows it through watch, a long poll naming the version it shows and held up to hold_s; state's followers block is diagnostic, not part of the contract.",
         "params": {"endpoint": "/clock/time", "methods": {
             "get_time": {"method": "GET", "endpoint": "/clock/time"},
             "set_time": {"method": "PUT", "endpoint": "/clock/set-time", "request": {"type": "object", "properties": {"virtual_time": {"type": "string"}, "virtual_seconds_per_real_second": {"type": "number"}, **_WAIT_FOLLOWERS}, "required": ["virtual_time"]}},
-            "set_rate": {"method": "PUT", "endpoint": "/clock/set-rate", "request": {"type": "object", "properties": {"virtual_seconds_per_real_second": {"type": "number"}, **_WAIT_FOLLOWERS}, "required": ["virtual_seconds_per_real_second"]}},
+            "set_rate": {"method": "PUT", "endpoint": "/clock/set-rate", "request": {"type": "object", "properties": {"virtual_seconds_per_real_second": {"type": "number", "minimum": 0}, **_WAIT_FOLLOWERS}, "required": ["virtual_seconds_per_real_second"]}},
             "advance": {"method": "PUT", "endpoint": "/clock/advance", "request": {"type": "object", "properties": {"virtual_time": {"type": "string"}, **_WAIT_FOLLOWERS}, "required": ["virtual_time"]}},
             "clear": {"method": "POST", "endpoint": "/clock/clear", "request": {"type": "object", "properties": {**_WAIT_FOLLOWERS}}},
             "state": {"method": "GET", "endpoint": "/clock/state", "request": {"type": "object", "properties": {}}},
@@ -293,6 +297,19 @@ GATEWAY_EXTENSIONS = [
             "take": {"method": "POST", "endpoint": "/notifications/take", "request": {"type": "object", "properties": {
                 "to": {"type": "string"}, "until": {"type": "string"}}}},
             "clear": {"method": "POST", "endpoint": "/notifications/clear", "request": {"type": "object", "properties": {}}}}},
+        "required": False,
+    },
+    {
+        "uri": EXT_USER_CHAT_URI,
+        "description": "User chat (urn:agentenv:user-chat/v1): the message_user tool, for the roles config names, is how an always-on agent reaches its user; each message is queued with its virtual time until the harness takes it. With stay_quiet the roles also get stay_quiet, which sends nothing and is recorded for the next take. Built in: role rules don't hide them from a configured role.",
+        "params": {"endpoint": "/user_chat/state", "methods": {
+            "config": {"method": "POST", "endpoint": "/user_chat/config", "request": {"type": "object", "properties": {
+                "roles": {"type": "array", "items": {"type": "string"}}, "user_name": {"type": "string"},
+                "stay_quiet": {"type": "boolean"}}}},
+            "state": {"method": "GET", "endpoint": "/user_chat/state", "request": {"type": "object", "properties": {}}},
+            "take": {"method": "POST", "endpoint": "/user_chat/take", "request": {"type": "object", "properties": {
+                "take_id": {"type": "string"}, "from": {"type": "string"}}}},
+            "clear": {"method": "POST", "endpoint": "/user_chat/clear", "request": {"type": "object", "properties": {}}}}},
         "required": False,
     },
 ]

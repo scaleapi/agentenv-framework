@@ -24,7 +24,10 @@ window's size from its first script. Alone, it makes no request of its own, its 
 loads for well over a minute after it's ready, but for one Google account check at launch. Routing sites, it goes out only through the shared site proxy's forward port:
 start tabs on a site over HTTPS and on a .localhost one load through it, an event stream comes through as it's sent,
 any other host and loopback are refused and logged, the session user can't stop the port, killed it comes back, and
-after a reset it serves the sites and refuses the rest again. As a multi env's website browser, ``browser_envs =
+after a reset it serves the sites and refuses the rest again; its network log has each exchange whole, so that
+WebArena-Verified's own loader, reading the network.har its data/get exports, sees an agent's sign-in form, redirect,
+cookie, JSON and multipart as its grader reads them, and the live hosts' tunnels and plain requests beside them; alone,
+it has each connection the base's stand-in made, and each that failed. As a multi env's website browser, ``browser_envs =
 [chromium]``, it deploys on a sandbox of its own as one more computer child beside a synthetic site, with no
 playwright-mcp: its start tab loads the site by name through the gateway, an agent drives it through the gateway's /mcp
 under ``chromium_``, its CDP address asked through ``/svc/chromium/`` names the gateway and reaches the site by name, a
@@ -39,16 +42,21 @@ Needs Docker and the local registry on
 localhost:5000, and Node 20 or later and npm for the CDP clients."""
 
 import asyncio
+import base64
 import calendar
 import contextlib
+import gzip
+import http.server
 import itertools
 import json
 import os
 import platform
 import re
 import shlex
+import shutil
 import ssl
 import subprocess
+import threading
 import time
 import urllib.parse
 import uuid
@@ -67,7 +75,8 @@ from agentenv_protocol.computer import COMPUTER_PAGE, COMPUTER_READY
 from agentenv_protocol.computer.conformance.client import image
 from agentenv_protocol.tool_access import ENABLE, ENABLE_TOOL_EXTENSION_URI
 from agentenv_protocol.tool_context import ROLE_HEADER
-from agentenv_protocol.website_browser import BROWSER
+from agentenv_protocol.types import uploaded_object_path
+from agentenv_protocol.website_browser import BROWSER, HAR_FILE
 
 import agent_env
 from agent_env.a2a_agent import conversation_store
@@ -654,6 +663,24 @@ async def _cdp_agent_types(ws_url: str) -> list[tuple[str, str]]:
     return [(method, target) for method in sent]
 
 
+async def _network_log(deployed, after: int = 0) -> dict:
+    card = (await _get(deployed, "/.well-known/agent-env.json")).json()
+    app = next(child for child in card["children_environments"] if child["name"] == "chromium")
+    path = protocol_v1.find_extension_method(app, BROWSER, "network")["endpoint"]
+    return (await _get(deployed, path, headers=deployed.control_headers, params={"after": after})).json()
+
+
+async def _har(deployed) -> bytes:
+    """The browser's network log as its data/get exports it, ``network.har``."""
+    answer = await protocol_v1.get_data(f"{deployed.environment_url}/svc/chromium", timeout=120,
+                                        headers=deployed.control_headers)
+    return next(base64.b64decode(part.file.bytes) for part in answer.parts if uploaded_object_path(part) == HAR_FILE)
+
+
+async def _har_entries(deployed) -> list[dict]:
+    return json.loads(await _har(deployed))["log"]["entries"]
+
+
 async def _browser_log(deployed, after: int = 0) -> dict:
     card = (await _get(deployed, "/.well-known/agent-env.json")).json()
     app = next(child for child in card["children_environments"] if child["name"] == "chromium")
@@ -874,6 +901,7 @@ async def test_routing_sites_beside_live_ones_its_forward_port_takes_the_live_ho
                 "https://github.com/", "http://github.com/", "https://github.githubassets.com/favicons/favicon.svg",
                 "https://shop.test/alpha", "https://example.com/")}
             tabs = await tabs_of(deployed)
+            entries = await _har_entries(deployed)
         finally:
             report = await teardown_run(context)
 
@@ -883,6 +911,160 @@ async def test_routing_sites_beside_live_ones_its_forward_port_takes_the_live_ho
         "https://shop.test/alpha")), pages
     assert pages["https://example.com/"].startswith("error") and "403" in pages["https://example.com/"], pages
     assert any(tab["url"].startswith("https://github.com/") and "GitHub" in (tab.get("title") or "") for tab in tabs), tabs
+    by_url = {entry["request"]["url"]: entry for entry in entries}
+    assert by_url["https://shop.test/alpha"]["response"]["content"]["text"] == "<title>alpha</title>", by_url.keys()
+    assert by_url["http://github.com/"]["response"]["status"] in (200, 301, 308) and \
+        by_url["http://github.com/"]["request"]["method"] == "GET"
+    github = [entry for entry in entries if entry["request"]["url"] == "https://github.com:443/" and "_open" not in entry]
+    assert any(entry["request"]["method"] == "CONNECT" and entry["response"]["status"] == 200 and
+               entry["_tunnel"]["bytes_received"] > 0 for entry in github), github
+    assert by_url["https://example.com:443/"]["_refused"] == {"reason": "no site of this computer"}
+    assert not report.failed
+
+
+#: A shop's pages under its route: a form that signs in by POST, answered with a redirect that sets a cookie, onto a
+#: cart whose script saves an item as JSON, answered gzipped, then uploads a file as multipart, each answer saying in
+#: the title what came of it.
+SHOP_FORM = ("<title>form</title><form method=post action=/login><input name=user value=amy>"
+             "<input name=note value='caf\u00e9 & tea'><button>go</button></form>").encode()
+SHOP_CART = b"""<title>cart</title><script>
+fetch('/api/items', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                     body: JSON.stringify({name: 'desk', qty: 2})})
+  .then(answer => answer.json()).then(item => {
+    const form = new FormData();
+    form.append('title', 'Trip');
+    form.append('file', new Blob(['notes'], {type: 'text/plain'}), 'a.txt');
+    return fetch('/upload', {method: 'POST', body: form}).then(() => document.title = 'saved ' + item.id);
+  });
+</script>"""
+SAVED = json.dumps({"id": 7, "name": "desk"}).encode()
+#: What WebArena-Verified's own loader reads of each entry of a HAR it grades, as JSON.
+WEBARENA_READS = """import json, sys
+from pathlib import Path
+from webarena_verified.types.tracing import NetworkTrace
+trace = NetworkTrace.from_har(Path(sys.argv[1]))
+print(json.dumps([{"method": e.http_method, "url": e.url, "status": e.request_status, "post_data": e.post_data,
+                   "content": e.response_content, "redirect": e.redirect_url, "cookies": e.response_cookies,
+                   "navigation": e.is_navigation_event, "referer": e.referer} for e in trace.evaluation_events]))
+"""
+WEBARENA_VERIFIED = "webarena-verified==1.2.3"
+
+
+@contextlib.contextmanager
+def _shop_pages():
+    """``SHOP_FORM`` and the rest served on every address of this machine under ``/website/shop/``, at the port it
+    yields."""
+
+    class Shop(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def _send(self, status: int, body: bytes = b"", **headers) -> None:
+            self.send_response(status)
+            for name, value in {"Content-Length": str(len(body)), **headers}.items():
+                self.send_header(name.replace("_", "-"), value)
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            pages = {"/website/shop/form": SHOP_FORM, "/website/shop/cart": SHOP_CART}
+            if (path := self.path.partition("?")[0]) in pages:
+                self._send(200, pages[path], Content_Type="text/html; charset=utf-8")
+            else:
+                self._send(404)
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            if self.path == "/website/shop/login":
+                self._send(303, Location="/website/shop/cart", Set_Cookie="sid=s2; Path=/website/shop/; HttpOnly")
+            elif self.path == "/website/shop/api/items":
+                self._send(201, gzip.compress(SAVED), Content_Type="application/json", Content_Encoding="gzip")
+            else:
+                self._send(204)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("0.0.0.0", 0), Shop)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield server.server_address[1]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+async def _cdp_agent_shops(ws_url: str) -> str:
+    """A CDP agent that opens the shop's form, signs in with a click and waits on the cart to save: the title it ends
+    on."""
+    async with connect(ws_url, max_size=None, open_timeout=60) as ws:
+        ids = itertools.count(1)
+
+        async def call(method: str, params: dict, session: str | None = None) -> dict:
+            message_id = next(ids)
+            await ws.send(json.dumps({"id": message_id, "method": method, "params": params,
+                                      **({"sessionId": session} if session else {})}))
+            while (reply := json.loads(await asyncio.wait_for(ws.recv(), 90))).get("id") != message_id:
+                pass
+            return reply
+
+        async def title() -> str:
+            evaluated = await call("Runtime.evaluate", {"expression": "document.title", "returnByValue": True}, session)
+            return evaluated.get("result", {}).get("result", {}).get("value") or ""
+
+        target = (await call("Target.createTarget", {"url": "https://shop.test/form"}))["result"]["targetId"]
+        session = (await call("Target.attachToTarget", {"targetId": target, "flatten": True}))["result"]["sessionId"]
+        deadline = time.monotonic() + 60
+        while await title() != "form" and time.monotonic() < deadline:
+            await asyncio.sleep(0.5)
+        await call("Runtime.evaluate", {"expression": "document.querySelector('button').click()",
+                                        "userGesture": True}, session)
+        shown = ""
+        while not shown.startswith("saved") and time.monotonic() < deadline:
+            await asyncio.sleep(0.5)
+            shown = await title()
+        return shown
+
+
+@pytest.mark.asyncio
+async def test_routing_sites_its_network_har_has_what_webarena_verifieds_grader_reads(browser_computer, tmp_path):
+    """M8.20: an agent signs in to a site by a form, follows the redirect and saves an item as JSON and a file as
+    multipart; WebArena-Verified's own loader, reading the network.har data/get exports, sees each request's method,
+    URL, form, JSON and multipart fields and referer, each answer's status, redirect, cookie and decoded JSON, and the
+    page loads as navigations."""
+    if shutil.which("uvx") is None:
+        pytest.skip(f"uvx runs {WEBARENA_VERIFIED} in an environment of its own")
+    with _shop_pages() as port, namespace_routing():
+        params = {"site_routing": True,
+                  "sites": [{"name": "shop", "url": f"http://127.0.0.1:{port}/website/shop/", "domains": ["shop.test"]}],
+                  "app_settings": {"chromium": {"start_urls": [DATA_PAGE]}}}
+        deployed = await Env.get(browser_computer.id).deploy(env_params=params)
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            shown = await _cdp_agent_shops((await _cdp(deployed, "ada"))["ws_url"])
+            await asyncio.sleep(1)
+            exported = await _har(deployed)
+            lines = (await _network_log(deployed))["lines"]
+        finally:
+            report = await teardown_run(context)
+
+    (tmp_path / HAR_FILE).write_bytes(exported)
+    read = subprocess.run(["uvx", "--from", WEBARENA_VERIFIED, "python", "-I", "-c", WEBARENA_READS,
+                           str(tmp_path / HAR_FILE)], capture_output=True, text=True, timeout=600)
+    assert read.returncode == 0, read.stderr[-3000:]
+    events = {(event["method"], event["url"]): event for event in json.loads(read.stdout)}
+    assert shown == "saved 7", shown
+    form, login = events[("GET", "https://shop.test/form")], events[("POST", "https://shop.test/login")]
+    cart = events[("GET", "https://shop.test/cart")]
+    saved, uploaded = events[("POST", "https://shop.test/api/items")], events[("POST", "https://shop.test/upload")]
+    assert (form["status"], form["navigation"]) == (200, True), form
+    assert (login["post_data"], login["status"], login["redirect"], login["cookies"]) == (
+        {"user": "amy", "note": "caf\u00e9 & tea"}, 303, "/cart", {"sid": "s2"}), login
+    assert (cart["status"], cart["navigation"], cart["referer"]) == (200, True, "https://shop.test/form"), cart
+    assert (saved["post_data"], saved["status"], saved["content"]) == ({"name": "desk", "qty": 2}, 201,
+                                                                       {"id": 7, "name": "desk"}), saved
+    assert (uploaded["post_data"], uploaded["status"]) == ({"title": "Trip", "file": "notes"}, 204), uploaded
+    assert [line["seq"] for line in lines] == list(range(1, len(lines) + 1))
     assert not report.failed
 
 
@@ -898,6 +1080,8 @@ async def test_alone_on_the_open_web_it_loads_a_public_site_through_its_proxy_an
             through = {url: await _through_port(deployed, url, "http://127.0.0.1:3128") for url in (public, nowhere)}
             seen = await _cdp_agent_loads((await _cdp(deployed, "ada"))["ws_url"], [public])
             logged = _as_root(await _container_of(deployed), "cat /var/log/agentenv/site-proxy.log")
+            lines = (await _network_log(deployed))["lines"]
+            exported = await _har_entries(deployed)
         finally:
             report = await teardown_run(context)
 
@@ -907,6 +1091,13 @@ async def test_alone_on_the_open_web_it_loads_a_public_site_through_its_proxy_an
     github = [entry["connection"] for entry in entries if entry.get("connection", {}).get("host") == "github.com"]
     assert github and all(entry["bytes_received"] > 0 for entry in github), logged[-2000:]
     assert any(entry.get("failed", {}).get("host") == "agentenv-no-such-host.invalid" for entry in entries), logged[-2000:]
+    assert [line["seq"] for line in lines] == list(range(1, len(lines) + 1)), lines[:5]
+    tunnels = [entry for entry in exported if entry["request"]["url"] == "https://github.com:443/"]
+    assert tunnels and all(entry["request"]["method"] == "CONNECT" and entry["_tunnel"]["bytes_received"] > 0
+                           and entry["serverIPAddress"] for entry in tunnels if "_open" not in entry), tunnels
+    assert any(entry["request"]["url"] == "https://agentenv-no-such-host.invalid:443/" and
+               entry.get("_failed", {}).get("reason") == "doesn't resolve" for entry in exported), exported[-5:]
+    assert [entry["startedDateTime"] for entry in exported] == sorted(entry["startedDateTime"] for entry in exported)
     assert not report.failed
 
 

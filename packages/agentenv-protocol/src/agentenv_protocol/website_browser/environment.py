@@ -21,6 +21,7 @@ from ..agent_env_environment import (OP_ADD_DATA, add_data, add_websocket_route,
 from .cdp import ROUTE, Relay, Tokens, reached, under, websocket_form
 from .log import (ACTOR, ERROR_CHARS, TOOL_CALL_HEADER, UNLOGGED_OPS, BrowserLog, op_acts, read_tool_call,
                   redact_text, redacted_args, redacted_op)
+from .network import HAR_FILE, NetworkLog, log_path
 from ..computer import AppDeclaration, ComputerAppEnvironment, Launch, install_step, ready_check
 from ..computer import app as computer_app
 from ..computer import app_data
@@ -107,6 +108,9 @@ class BrowserSettings(BaseModel):
     notifications: Literal["deny", "ask"] = "deny"
     #: Who answers a page's JavaScript dialogs: the agent, or agentenv accepting or dismissing each.
     dialogs: Literal["agent", "accept", "dismiss"] = "agent"
+    #: Whether ``data/get`` exports its network log, ``network.har``, and ``browser/v1`` ``network`` reads it: off, a
+    #: run's export holds none of the cookies and form bodies the log keeps.
+    network: bool = True
 
     @field_validator("start_urls")
     @classmethod
@@ -152,6 +156,8 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         self.log = BrowserLog.for_app(os.environ.get("ENVIRONMENT_NAME") or type(self).__name__.lower(),
                                       SOCKET.parent)
         self.control.log = self.log
+        #: Its network log, as the proxy it goes out through writes it; None when no proxy logs for it.
+        self.network = NetworkLog(path) if (path := log_path()) is not None else None
         #: The CDP addresses it has handed out, and the relay agents' connections to them go through.
         self.cdp_tokens = Tokens(SOCKET.parent / "cdp-tokens.json")
         self.relay = Relay(self.devtools, dialogs_answered=self.settings.dialogs != AGENT, log=self.log,
@@ -334,7 +340,13 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         "the env's site and the outcome, loaded, failed or timed_out. log returns its log's lines after the sequence "
         "number after, in order: an action entry for each CDP command, MCP tool call and pixel action an agent took, "
         "marked acting or reading, with who, the tab and its URL and, acting, its parameters with secrets taken out; "
-        "and a tab event each time a tab opened, navigated or closed, with what caused it."))
+        "and a tab event each time a tab opened, navigated or closed, with what caused it. network returns its "
+        "network log's lines after the sequence number after, in order, as the proxy it goes out through writes them: "
+        "an open line once a request has gone upstream or a tunnel has opened and an end line, with the same id, once "
+        "it's done or has failed. The shared site proxy writes a whole exchange, the request and the answer with their "
+        "headers and bodies, the sign-in headers a site declares removed, and a WebSocket's message counts; the base's "
+        "stand-in writes each connection, its host, address and bytes each way. With the network setting off, or on a "
+        "computer with a desktop, where no proxy logs for it, network returns no lines."))
     async def browser_record(self) -> dict:
         return BrowserRecord(**await self.control.record(), launches=self._computer_app.launches(),
                              cdp_connections=list(self.relay.connections),
@@ -343,6 +355,12 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
     @extension(BROWSER, op="log", method="GET")
     async def browser_log(self, after: int = 0) -> dict:
         return await self.log.read_async(after)
+
+    @extension(BROWSER, op="network", method="GET")
+    async def browser_network(self, after: int = 0) -> dict:
+        if self.network is None or not self.settings.network:
+            return {"lines": [], "last": after, "more": False}
+        return await self.network.read_async(after)
 
     @extension(BROWSER, op="sites/set")
     async def browser_sites_set(self, sites: list[dict]) -> dict:
@@ -560,23 +578,28 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
 
     def declared_extensions(self) -> list[EnvironmentExtension]:
         """Its data plane moves files by their path, a file tree: its state as ``browser-state.json``, its log, its
-        profile, its downloads and files for agents to upload. A load takes its state as a data part too."""
+        network log as HAR, its profile, its downloads and files for agents to upload. A load takes its state as a data
+        part too."""
         tree = IntakeDeclaration(get=[IntakeFormat(part="file", format="file-tree")],
                                  add=[IntakeFormat(part="file", format="file-tree", load="replace"),
                                       IntakeFormat(part="data", format="json", load="replace")])
         return [*super().declared_extensions(), intake_extension(tree, (
             f"data/get returns the browser's state as {data.STATE_FILE}: its cookies and local storage as Playwright's "
             f"storageState has them, its tabs open and closed, its downloads and its clock; beside it, its log as "
-            f"{data.LOG_FILE}, which data/add passes over, its profile "
+            f"{data.LOG_FILE} and, when a proxy logs for it and its network setting is on, its network log as HAR "
+            f"1.2 in {HAR_FILE}, an "
+            f"entry for each request and tunnel in the order they started, both of which data/add passes over, its "
+            f"profile "
             f"without caches, and its finished downloads. data/add applies such a state, while the browser runs, and "
             f"writes files by their path: its profile, restored with the browser stopped, ~/{DOWNLOADS} and "
             f"~/{UPLOADS}. data/reset puts the profile back as installed and relaunches it at its start tabs."))]
 
     @get_data
     async def browser_get_data(self, write_namespace: Optional[WriteNamespaceGrant] = None) -> list:
-        """Its state, as ``browser-state.json``, its profile without caches, copied with the browser paused so its files
-        are of one moment, and its finished downloads: each a file uploaded under ``write_namespace`` when there is
-        one, else inline."""
+        """Its state, as ``browser-state.json``, its log, its network log as HAR when it has one and its ``network``
+        setting is on, its profile without caches, copied
+        with the browser paused so its files are of one moment, and its finished downloads: each a file uploaded under
+        ``write_namespace`` when there is one, else inline."""
         home = Path.home()
         state = BrowserState(cookies=await self.control.cookies(), local_storage=await self.control.local_storage(),
                              tabs=await self.control.tab_list(),
@@ -589,9 +612,13 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
             root = Path(staging)
             (root / data.STATE_FILE).write_text(json.dumps(written, indent=1), encoding="utf-8")
             (root / data.LOG_FILE).write_text(await self.log.complete_text(), encoding="utf-8")
+            exported = [data.STATE_FILE, data.LOG_FILE]
+            if self.network is not None and self.settings.network:
+                (root / HAR_FILE).write_text(await self.network.har_text(), encoding="utf-8")
+                exported.append(HAR_FILE)
             with self._computer_app.paused():
                 await app_data.in_thread(data.stage_profile, home, self.profile, root)
-            parts = await file_parts(root, [data.STATE_FILE, data.LOG_FILE, self.profile], write_namespace)
+            parts = await file_parts(root, [*exported, self.profile], write_namespace)
         return parts + await file_parts(home, data.finished_downloads(home), write_namespace)
 
     @add_data
