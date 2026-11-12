@@ -3,7 +3,7 @@ processes real, so this driver is on real time while it writes the clock page as
 under test runs as the session user, whom the library fakes. Each gate prints one JSON document on stdout.
 
   harness.py waits | ratechange | jumps [ROUNDS] | cancel | timerfds | condstress [SECONDS] | semstress [SECONDS]
-             | stall | torn [SECONDS] | deadwriter | marker | identity | envrace [SECONDS] | forklock [FORKS]
+             | stall | torn [SECONDS] | deadwriter | marker | identity | envrace [SECONDS] | forklock [FORKS] | tls
              | chromium [agentenv|stock LAUNCHES PARALLEL LIMIT] | probe
 """
 import ctypes
@@ -21,6 +21,7 @@ sys.path.insert(0, "/opt/clock")
 import clockpage  # noqa: E402
 
 LIB = "/opt/clock/lib/libfaketimeMT.so.1"
+SHIM = "/opt/clock/lib/libtls_realtime.so"
 STOCK = "/opt/clock/stock/libfaketimeMT.so.1"
 PROGRAMS = "/opt/clock/programs"
 CHROME = "/opt/chrome/chrome"
@@ -56,9 +57,10 @@ def raw() -> float:
     return time.clock_gettime(RAW)
 
 
-def preload(lib=LIB) -> None:
+def preload(lib=LIB, shim=False) -> None:
+    """/etc/ld.so.preload listing ``lib`` (none for None), and the TLS shim after it with ``shim``."""
     with open("/etc/ld.so.preload", "w") as f:
-        f.write(lib + "\n" if lib else "")
+        f.write("".join(f"{path}\n" for path in (lib, SHIM if shim else None) if path))
 
 
 def user_cmd(argv, env=None):
@@ -565,6 +567,106 @@ def forklock(forks=1000):
     return json.loads(r.stdout)
 
 
+#: Live sites the TLS gate reaches, with the clock armed 182 days back (most rotate certificates within 90 days).
+TLS_LIVE = ["example.com", "www.google.com", "github.com", "pypi.org", "www.wikipedia.org", "letsencrypt.org"]
+# A TLS client's answer for https://HOST:PORT: ok (the certificate verified), refused (it didn't), or network ...
+TLS_PYTHON = """import ssl, sys, urllib.error, urllib.request
+host, port, cafile = sys.argv[1], int(sys.argv[2]), sys.argv[3] or None
+context = ssl.create_default_context(cafile=cafile)
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=context))
+try:
+    opener.open(f"https://{host}:{port}/", timeout=20)
+    print("ok")
+except urllib.error.HTTPError:
+    print("ok")
+except Exception as e:
+    reason = getattr(e, "reason", e)
+    refused = isinstance(reason, ssl.SSLCertVerificationError)
+    print("refused" if refused else f"network {type(reason).__name__}: {reason}")
+"""
+
+
+def _tls(client: str, host: str, port: int = 443, cafile: str = "") -> str:
+    """``client``'s answer for https://``host``:``port`` as the session user, trusting ``cafile`` (else the system's
+    roots), through no proxy: ok, refused, or network (tried three times)."""
+    for _ in range(3):
+        if client == "curl":
+            r = subprocess.run(user_cmd(["curl", "-sS", "-o", "/dev/null", "--noproxy", "*", "--max-time", "20",
+                                         *(["--cacert", cafile] if cafile else []), f"https://{host}:{port}/"]),
+                               capture_output=True, text=True, timeout=60)
+            answer = ("ok" if r.returncode == 0 else "refused" if r.returncode == 60 else
+                      f"network {r.returncode}: {r.stderr[-160:]}")
+        elif client == "python":
+            r = subprocess.run(user_cmd(["python3", "-c", TLS_PYTHON, host, str(port), cafile]), capture_output=True,
+                               text=True, timeout=60)
+            answer = r.stdout.strip() or f"network: {r.stderr[-160:]}"
+        else:
+            r = subprocess.run(user_cmd(["openssl", "s_client", "-connect", f"{host}:{port}", "-servername", host,
+                                         "-verify_return_error", *(["-CAfile", cafile] if cafile else [])]),
+                               input="", capture_output=True, text=True, timeout=60)
+            text = r.stdout + r.stderr
+            refused = "verify error" in text or "Verify return code: " in text
+            answer = ("ok" if r.returncode == 0 and "Verify return code: 0 (ok)" in text else
+                      "refused" if refused else f"network: {text[-160:]}")
+        if not answer.startswith("network"):
+            return answer
+        time.sleep(2)
+    return answer
+
+
+def _copies(work: str, mode: str) -> dict:
+    """tlscopies' answers in ``mode`` for the two local certificates by copy ({"3.0"|"1.1": {"version", "now", "past"}}),
+    or how it failed."""
+    r = subprocess.run(user_cmd(["tlscopies", mode, "now.pem", "past.pem"]), cwd=work, capture_output=True, text=True,
+                       timeout=60)
+    if r.returncode:
+        return {"failed": {"exit": r.returncode, "stderr": r.stderr[-300:]}}
+    return {copy: {k.removesuffix(".pem"): v for k, v in answers.items()} for copy, answers in json.loads(r.stdout).items()}
+
+
+def tls():
+    """The TLS shim, with the clock 182 days back and no proxy, through curl, Python and openssl s_client. Two local
+    servers check it uses real time: one's certificate is valid only from now (not yet valid at the universe date),
+    the other's was valid at the universe date but has expired. With the clock library alone each client answers by
+    the universe date; with the shim by real time: live sites verify, while the expired certificate, and the one valid
+    now checked against the system's roots, which don't hold its issuer, are still refused. The same two certificates
+    are verified through two copies of OpenSSL in one process (tlscopies.c), each with its own."""
+    clients = ("curl", "python", "s_client")
+    work = "/tmp/tlsgate"
+    os.makedirs(work, exist_ok=True)
+    os.chmod(work, 0o777)
+    preload()
+    fresh_page()
+    req = ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=localhost",
+           "-addext", "subjectAltName=DNS:localhost"]
+    subprocess.run([*req, "-days", "30", "-keyout", f"{work}/now.key", "-out", f"{work}/now.pem"], check=True,
+                   capture_output=True)
+    set_clock(time.time() - 200 * DAY, 1)  # made at the universe's now, by the session user: expired 100 days ago
+    subprocess.run(user_cmd([*req, "-days", "100", "-keyout", f"{work}/past.key", "-out", f"{work}/past.pem"]),
+                   check=True, capture_output=True)
+    servers = [subprocess.Popen(["openssl", "s_server", "-quiet", "-www", "-accept", str(port),
+                                 "-cert", f"{work}/{name}.pem", "-key", f"{work}/{name}.key"],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+               for name, port in (("now", 8443), ("past", 8444))]
+    time.sleep(1)
+    set_clock(time.time() - 182 * DAY, 1)
+    out = {}
+    try:
+        for shim in (False, True):
+            preload(shim=shim)
+            local = {name: {c: _tls(c, "localhost", port, f"{work}/{name}.pem") for c in clients}
+                     for name, port in (("now", 8443), ("past", 8444))}
+            copies = {mode: _copies(work, mode) for mode in ("global", "private")}
+            out["with_shim" if shim else "without_shim"] = {"local": local, "copies": copies}
+        out["with_shim"]["live"] = {host: {c: _tls(c, host) for c in clients} for host in TLS_LIVE}
+        out["with_shim"]["untrusted"] = {c: _tls(c, "localhost", 8443) for c in clients}
+    finally:
+        for server in servers:
+            server.kill()
+        preload(None)
+    return out
+
+
 def probe():
     """This container's answer to futex_waitv: the errno of an empty call (EINVAL where the kernel has it)."""
     libc = ctypes.CDLL(None, use_errno=True)
@@ -573,7 +675,7 @@ def probe():
 
 
 GATES = {f.__name__: f for f in (waits, ratechange, jumps, cancel, timerfds, condstress, semstress, stall, torn,
-                                 deadwriter, marker, identity, envrace, forklock, chromium, probe)}
+                                 deadwriter, marker, identity, envrace, forklock, chromium, tls, probe)}
 
 if __name__ == "__main__":
     gate = GATES[sys.argv[1]]

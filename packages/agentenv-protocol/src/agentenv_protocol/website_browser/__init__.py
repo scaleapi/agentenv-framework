@@ -12,14 +12,17 @@ from .devtools import MAX_MESSAGE_BYTES, PIPE_IN, PIPE_OUT, DevToolsError, DevTo
 from .environment import (ALONE_BYPASS, BLOCK, BROWSER, COMPUTER_BYPASS, OWNED_FLAGS, POLICIES, READY_POLL_S,
                           SHM_MIN_BYTES, SITE_PROXY_ENV, SITES, SKILL, BrowserSettings, WebsiteBrowserEnvironment,
                           Window, start_tab_why)
+from .recording import BROWSER_RECORDING, BrowserRecordingManifest, BrowserRecordings, RecordedFrame
 from .shapes import (BrowserRecord, ClosedTab, Cookie, CookieToSet, Dialog, Download, LaunchEntry, OpenTab,
                      OriginStorage, PartitionKey, SiteNames, StartTab, StartTabsLaunch, StorageItem, origin_of)
 
-__all__ = ["ACTIVE_CHECK_TIMEOUT_S", "AGENT", "AGENTENV", "ALONE_BYPASS", "BLOCK", "BROWSER", "CAPTURE_TIMEOUT_S",
+__all__ = ["ACTIVE_CHECK_TIMEOUT_S", "AGENT", "AGENTENV", "ALONE_BYPASS", "BLOCK", "BROWSER", "BROWSER_RECORDING",
+           "CAPTURE_TIMEOUT_S",
            "COMPUTER_BYPASS", "DOWNLOADS", "EXIT", "FAILED", "HASH_CHUNK_BYTES", "LIVE_START_TAB_TIMEOUT_S", "LOADED",
            "MAX_MESSAGE_BYTES", "OWNED_FLAGS", "PAGE_INPUT", "PAGES", "PIN_TIMEOUT_S", "PIPE_IN", "PIPE_OUT",
            "POLICIES", "READY_POLL_S", "SHM_MIN_BYTES", "SITE_PROXY_ENV", "SITES", "SKILL", "STOP", "TIMED_OUT",
            "UNKNOWN", "UNNAVIGATED_CAPTURE_TIMEOUT_S", "UPLOADS", "BrowserControl", "BrowserSettings", "DevToolsError",
            "DevToolsPipe", "WebsiteBrowserEnvironment", "Window", "BrowserRecord", "ClosedTab", "Cookie", "CookieToSet",
            "Dialog", "Download", "LaunchEntry", "OpenTab", "OriginStorage", "PartitionKey", "SiteNames", "StartTab",
-           "StartTabsLaunch", "StorageItem", "origin_of", "start_tab_why"]
+           "StartTabsLaunch", "StorageItem", "origin_of", "start_tab_why", "BrowserRecordingManifest", "BrowserRecordings",
+           "RecordedFrame"]

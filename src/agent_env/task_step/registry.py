@@ -44,6 +44,10 @@ def _builtin_registry() -> dict[str, type["TaskStep"]]:
         EndComputerRecordingTaskStep,
         StartComputerRecordingTaskStep,
     )
+    from agent_env.task_step.task_steps.browser.recording import (
+        EndBrowserRecordingTaskStep,
+        StartBrowserRecordingTaskStep,
+    )
     from agent_env.task_step.task_steps.mcp_cli_builder.build_mcp_cli import BuildMcpCliTaskStep
     from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
     from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
@@ -114,6 +118,8 @@ def _builtin_registry() -> dict[str, type["TaskStep"]]:
         _get_type(CollectArtifactsTaskStep): CollectArtifactsTaskStep,
         _get_type(StartComputerRecordingTaskStep): StartComputerRecordingTaskStep,
         _get_type(EndComputerRecordingTaskStep): EndComputerRecordingTaskStep,
+        _get_type(StartBrowserRecordingTaskStep): StartBrowserRecordingTaskStep,
+        _get_type(EndBrowserRecordingTaskStep): EndBrowserRecordingTaskStep,
         _get_type(DeployAgentTaskStep): DeployAgentTaskStep,
         _get_type(DeployEnvTaskStep): DeployEnvTaskStep,
         _get_type(DeployHumanAgentTaskStep): DeployHumanAgentTaskStep,
