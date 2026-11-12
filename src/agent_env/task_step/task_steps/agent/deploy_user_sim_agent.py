@@ -259,12 +259,20 @@ class DeployUserSimAgentTaskStep(DeployAgentTaskStep):
             return run, "run_user_model"
         return self.model, "user_sim_step"
 
-    async def execute(self, context: TaskStepContext) -> TaskStepContext:
+    async def _execute(self, context: TaskStepContext, deployed_agents: list) -> TaskStepContext:
+        # Inside deploy_agent's execute, so an agent whose model can't be set is closed like any failed deploy.
+        setup = self._setup(context)
+        context = await super()._execute(context, deployed_agents)
+        agent = next(a for a in reversed(context.deployed_agents) if a.agent_name == self.agent_name)
+        try:
+            return await self._set_user(context, agent, setup)
+        except BaseException:
+            context.deployed_agents.remove(agent)  # closed by execute; a retry must not find it
+            raise
+
+    async def _set_user(self, context: TaskStepContext, agent, setup: dict) -> TaskStepContext:
         from agent_env.a2a_agent import A2AAgent
 
-        setup = self._setup(context)
-        context = await super().execute(context)
-        agent = next(a for a in context.deployed_agents if a.agent_name == self.agent_name)
         model, source = self._user_model(context)
         wanted = {"model": model, "output_format": setup.get("output_format")}
         negotiated = A2AAgent.negotiate_agent_config(agent.a2a_card or {}, {k: v for k, v in wanted.items() if v})

@@ -387,3 +387,29 @@ async def test_the_user_reads_every_text_part_of_the_agents_reply(monkeypatch):
     [entry] = _reads(ctx)
     stored = _full(entry)
     assert "Blue house, $280 a night." in stored["input"] and "Book it?" in stored["input"]
+
+
+@pytest.mark.asyncio
+async def test_a_trigger_s_reply_and_the_message_it_answered_reach_the_user_at_the_next_read(monkeypatch):
+    from agent_env.env.env import DeployedGatewayEnv
+    from agent_env.env.gateway.constants import EXT_TRIGGERS_URI, GATEWAY_EXTENSIONS, WELL_KNOWN_PATH
+    from tst.unit.task_step.test_prompt_agent_user_side import ENV, _TRIGGERS_CARD
+
+    Peers(monkeypatch, {AGENT: [text("Blue house or green?"), text("Booked the blue one."), text("Enjoy!")],
+                        USER: [said("done", "great, thanks")]},
+          decide=[{"fired": ["pick"], "done": False, "parts": text("blue please")}, {"fired": [], "done": False}])
+    ctx = await _context(monkeypatch)
+    hannah = next(a for a in ctx.deployed_agents if a.agent_name == "hannah")
+    hannah.a2a_card = _TRIGGERS_CARD
+    ctx.deployed_envs.append(DeployedGatewayEnv(
+        env_id="env", env_version=1, gateway_url=ENV, mcp_url="", sandbox_id="sb-env",
+        environment_card_url=f"{ENV}{WELL_KNOWN_PATH}",
+        environment_card={"capabilities": {"extensions": [e for e in GATEWAY_EXTENSIONS if e["uri"] == EXT_TRIGGERS_URI]}}))
+    ctx.metadata["agent_trigger_registrations"] = [{"step_id": "reg", "agent_name": "hannah", "added": ["pick"]}]
+
+    await _step().execute(ctx)
+
+    [entry] = _reads(ctx)  # turn 1 was the trigger's; the user sim read once, at turn 2
+    read = _full(entry)["read"]
+    assert [m["text"] for m in read["assistant_messages"]] == ["Blue house or green?", "Booked the blue one."]
+    assert [m["text"] for m in read["you_sent"]] == [PROMPT, "blue please"]

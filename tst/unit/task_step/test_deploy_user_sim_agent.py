@@ -278,6 +278,24 @@ async def test_a_card_that_won_t_take_the_model_fails_the_step(monkeypatch):
     with pytest.raises(RuntimeError, match="takes no model"):
         await deploy.run(_step(), context)
     assert USER_SIMS_KEY not in context.metadata
+    deploy.agent.close.assert_awaited_once()  # the deployed agent doesn't keep running
+    assert context.deployed_agents == []  # and a retry doesn't find it
+
+
+@pytest.mark.asyncio
+async def test_a_failed_model_post_closes_the_agent_and_leaves_no_record(monkeypatch):
+    deploy = _Deploy(monkeypatch)
+
+    async def refuse(url, fields):
+        if "model" in fields:
+            raise RuntimeError("agent-config refused")
+
+    monkeypatch.setattr(protocol, "post_agent_config", refuse)
+    context = TaskStepContext()
+    with pytest.raises(RuntimeError, match="agent-config refused"):
+        await deploy.run(_step(), context)
+    deploy.agent.close.assert_awaited_once()
+    assert context.deployed_agents == [] and USER_SIMS_KEY not in context.metadata
 
 
 # ---- always_on with the user it deployed -------------------------------------------------------------------------
