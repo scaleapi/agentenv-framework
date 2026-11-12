@@ -31,6 +31,8 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
 from agent_env.task.interrupts import tearing_down
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.computer_recording import end_open_recordings, register_open_recordings
+from agent_env.task_step.task_steps.browser.recording import (end_open_browser_recordings,
+                                                             register_open_browser_recordings)
 
 logger = logging.getLogger(__name__)
 
@@ -116,8 +118,8 @@ async def teardown_run(context: TaskStepContext, *, timeout: float = TERMINATE_T
 
 async def tear_down(context: TaskStepContext, sandboxes: Sequence[RecordedSandbox], envs: Sequence[DeployedEnv], *,
                     timeout: float) -> TeardownReport:
-    """End the recordings the run left open on ``envs`` with fresh grants, close each env still up, register any
-    recording still open from its namespace, then terminate each of ``sandboxes`` by id, all at once and each within
+    """End the recordings the run left open on ``envs``, its computers' and its browsers', with fresh grants, close each
+    env still up, register any recording still open from its namespace, then terminate each of ``sandboxes`` by id, all at once and each within
     ``timeout`` seconds, and remove a local one's work folder once it's down. A close that fails is logged: its env's sandboxes are terminated by id regardless, which leaves one the
     close took down as it is. Cancelling it returns what it reached, with the rest in ``left``."""
     pending = _pending(context, sandboxes)
@@ -127,11 +129,13 @@ async def tear_down(context: TaskStepContext, sandboxes: Sequence[RecordedSandbo
         try:
             async with asyncio.timeout(timeout):
                 await end_open_recordings(context, env_ids)
+                await end_open_browser_recordings(context, env_ids)
         except TimeoutError:
             logger.warning("teardown: the run's open recordings weren't all ended within %gs", timeout)
         await asyncio.gather(*(_close(env, timeout) for env in envs
                                if any(sandbox_id in up for sandbox_id, _ in env_sandbox_ids(env))))
         await asyncio.to_thread(register_open_recordings, context, env_ids)
+        await asyncio.to_thread(register_open_browser_recordings, context, env_ids)
     except asyncio.CancelledError:
         return TeardownReport(left=pending)
     terminated, failed = [], []

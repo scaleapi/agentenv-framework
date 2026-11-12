@@ -70,7 +70,7 @@ from agentenv_protocol.website_browser import BROWSER
 
 import agent_env
 from agent_env.a2a_agent import conversation_store
-from agent_env.artifact import EnvironmentUniverseArtifact
+from agent_env.artifact import Artifact, EnvironmentUniverseArtifact
 from agent_env.artifact.artifacts.environment import EnvironmentArtifact
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.config import get_config
@@ -84,12 +84,15 @@ from agent_env.env.envs.computer.utils import inside
 from agent_env.env.store import get_env_store
 from agent_env.providers.env_providers.constants import AGENT_ENV_WEBSITE_BACKEND_PORT, AGENT_ENV_WEBSITE_BACKEND_SUFFIX
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
+from agent_env.store.object_store.local.grant_server import grant_server
 from agent_env.store.object_store.local.tls import LocalCA, local_ca
 from agent_env.store.routing import namespace_routing
 from agent_env.task import Task
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.browser.connect_cdp import BrowserConnectCdpTaskStep
+from agent_env.task_step.task_steps.browser.recording import (RECORDINGS_KEY as BROWSER_RECORDINGS,
+                                                             EndBrowserRecordingTaskStep, StartBrowserRecordingTaskStep)
 from agent_env.task_step.task_steps.browser.sign_in import BrowserSignInTaskStep
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
@@ -1072,6 +1075,40 @@ async def test_playwright_mcps_tools_drive_its_page_hide_the_code_tools_and_come
     assert "Page URL" in after_its_kill and "Page URL" in after_driver_kill and count == "1"
     assert "playwright-mcp" in {connection["user"] for connection in record["cdp_connections"]}
     assert not report.failed
+
+
+@pytest.mark.asyncio
+async def test_a_browser_recording_frames_each_burst_of_an_agents_actions_keyed_to_its_log_and_ends_on_its_last_page(
+        browser_computer):
+    with namespace_routing():
+        deployed = await Env.get(browser_computer.id).deploy(
+            env_params={"app_settings": {"chromium": {"start_urls": [PAGE_URL]}}})
+        context = TaskStepContext(instance_id=f"run-{uuid.uuid4().hex[:8]}", deployed_envs=[deployed])
+        try:
+            context = await StartBrowserRecordingTaskStep(id="start", version=None, env_id=browser_computer.id,
+                                                          name="run").execute(context)
+            await _mcp(deployed, _type_hello)
+            await _mcp(deployed, lambda session: _called(session, "browser_navigate", {"url": DATA_PAGE}))
+            context = await EndBrowserRecordingTaskStep(id="end", version=None, name="run").execute(context)
+        finally:
+            report = await teardown_run(context)
+            grant_server(None, None).close()
+        entry = context.metadata[BROWSER_RECORDINGS]["run"]
+        universe = Artifact.get(entry["artifact"]["id"], version=entry["artifact"]["version"])
+        objects = get_config().get_object_store()
+        files = {name: objects.get(Artifact.get(artifact_id).object_url)
+                 for name, artifact_id in universe.file_artifact_ids.items()}
+
+    manifest = json.loads(files["manifest.json"])
+    log = [json.loads(line) for line in files["log.jsonl"].decode().splitlines()]
+    calls = {line["action"]["tool"]: line["seq"] for line in log if line.get("action", {}).get("via") == "mcp"}
+    frames = manifest["frames"]
+    followed = {seq for frame in frames for seq in frame["after"]}
+    assert not report.failed and (entry["state"], entry["missing_frames"]) == ("ended", 0), entry
+    assert frames[0]["kind"] == "first" and frames[-1]["kind"] == "last" and "action" in {f["kind"] for f in frames}
+    assert {calls["browser_type"], calls["browser_navigate"]} <= followed, (calls, frames)
+    assert frames[-1]["url"].startswith("data:text/html,") and "Home" in urllib.parse.unquote(frames[-1]["url"])
+    assert all(files[frame["path"].replace("/", "-")][:2] == b"\xff\xd8" for frame in frames)
 
 
 async def _mcp(deployed, work):

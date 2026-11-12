@@ -88,8 +88,8 @@ class StartComputerRecordingTaskStep(TaskStep):
         request_id = f"{context.instance_id}:{self.id}" if context.instance_id else uuid.uuid4().hex
         try:
             deployed = _deployed(context, self.env_id)
-            _refuse_no_network(deployed)
-            namespace = _namespace(request_id)
+            refuse_no_network(deployed)
+            namespace = recording_namespace(request_id)
             grant = _grant(deployed, namespace, self.environment_name)
             started = await deployed.invoke(COMPUTER_RECORDING, "start", {
                 "request_id": request_id, "fps": self.fps, "max_edge": self.max_edge, "cursor": self.cursor,
@@ -214,43 +214,51 @@ def _deployed(context: TaskStepContext, env_id: str):
     return deployed
 
 
-def _refuse_no_network(deployed) -> None:
-    """A computer deployed with no network can't reach the store its recording's segments upload to."""
+def refuse_no_network(deployed) -> None:
+    """A computer deployed with no network can't reach the store its recordings upload to."""
     network = ((deployed.metadata or {}).get("computer") or {}).get("network")
     if network and NetworkPolicy.from_dict(network).closed:
         raise RuntimeError(f"env {deployed.env_id!r} was deployed with no network, so its computer can't upload a "
-                           "recording's segments")
+                           "recording")
 
 
-def _namespace(request_id: str) -> str:
-    """Where a recording's segments go: named by its start's request id, so a retried start uploads alongside."""
+def recording_namespace(request_id: str, prefix: str = _KEY_PREFIX) -> str:
+    """Where a recording's files go: named by its start's request id, so a retried start uploads alongside."""
     config = get_config()
     key = uuid.uuid5(uuid.NAMESPACE_URL, request_id).hex
-    return config.get_object_store().object_url(f"{config.get_artifact_key_prefix()}{_KEY_PREFIX}/{key}")
+    return config.get_object_store().object_url(f"{config.get_artifact_key_prefix()}{prefix}/{key}")
 
 
-def _grant(deployed, namespace: str, environment_name: Optional[str] = None, method: str = "start") -> dict:
-    """A grant that uploads under ``namespace``, lasting the recorded env's ``max_duration_s`` and a margin, or the
-    longest the store issues. EnvCapabilityUnsupported when the env's card, or its child's, declares no recording."""
-    card = deployed.environment_card if environment_name is None else deployed.get_child_env_card(environment_name)
-    extension = find_extension(card or {}, COMPUTER_RECORDING)
-    if extension is None:
-        raise EnvCapabilityUnsupported(COMPUTER_RECORDING, method, deployed.env_id,
-                                       getattr(deployed, "instance_id", None), environment_name)
-    params = extension.get("params") or {}
+def recording_grant(deployed, params: dict, namespace: str, max_objects: int, max_object_bytes: int,
+                    max_total_bytes: int) -> dict:
+    """A grant that uploads under ``namespace``, within the limits given and the store's own, lasting the recording
+    extension's ``max_duration_s`` (``params``) and a margin, or the longest the store issues; refused when the store
+    issues no grant that reaches the env's sandbox."""
     store = get_config().get_object_store()
     sandbox_type = getattr(deployed, "sandbox_type", None)
     if not issues_grants_to(store, sandbox_type):
         raise RuntimeError(f"the object store issues no upload grant that reaches env {deployed.env_id}'s sandbox "
                            f"({sandbox_type or 'unknown'}), so its recording couldn't upload")
-    duration = params["max_duration_s"]
-    cap = min(store.max_single_upload_bytes or _MAX_SEGMENT_BYTES, _MAX_SEGMENT_BYTES)
-    limits = ObjectLimits(max_objects=MAX_SEGMENTS + 1, max_object_bytes=cap, max_total_bytes=MAX_RECORDING_BYTES)
+    limits = ObjectLimits(max_objects=max_objects, max_object_bytes=min(store.max_single_upload_bytes or max_object_bytes,
+                                                                        max_object_bytes),
+                          max_total_bytes=max_total_bytes)
     try:
-        grant = namespace_grant(store, namespace, limits=limits, expires_in=duration + GRANT_MARGIN_S)
+        grant = namespace_grant(store, namespace, limits=limits, expires_in=params["max_duration_s"] + GRANT_MARGIN_S)
     except GrantUnavailableError:
         grant = namespace_grant(store, namespace, limits=limits, expires_in=store.grant_lifetime_seconds)
     return grant.model_dump(mode="json")
+
+
+def _grant(deployed, namespace: str, environment_name: Optional[str] = None, method: str = "start") -> dict:
+    """A grant for a computer recording's segments and manifest. EnvCapabilityUnsupported when the env's card, or its
+    child's, declares no recording."""
+    card = deployed.environment_card if environment_name is None else deployed.get_child_env_card(environment_name)
+    extension = find_extension(card or {}, COMPUTER_RECORDING)
+    if extension is None:
+        raise EnvCapabilityUnsupported(COMPUTER_RECORDING, method, deployed.env_id,
+                                       getattr(deployed, "instance_id", None), environment_name)
+    return recording_grant(deployed, extension.get("params") or {}, namespace, MAX_SEGMENTS + 1, _MAX_SEGMENT_BYTES,
+                           MAX_RECORDING_BYTES)
 
 
 def _from_namespace(entry: dict) -> RecordingManifest:
