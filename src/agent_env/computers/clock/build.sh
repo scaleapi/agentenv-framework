@@ -1,7 +1,8 @@
 #!/bin/sh
 # Builds agent-env's libfaketime: upstream 0.9.12 from its sha256-pinned tarball, libfaketime.patch applied and the two
 # engine files beside it copied in, the multithreaded library with stat and utime faking compiled out (file times stay
-# real). Writes OUT/libfaketimeMT.so.1. Needs a C toolchain, make, patch and curl; builds on x86_64 and aarch64.
+# real); and the TLS shim beside it (tls_realtime.c). Writes OUT/libfaketimeMT.so.1 and OUT/libtls_realtime.so, which
+# /etc/ld.so.preload lists in that order. Needs a C toolchain, make, patch and curl; builds on x86_64 and aarch64.
 #   build.sh OUT [TARBALL]   (TARBALL: a local copy of upstream's v0.9.12 tarball, else it is downloaded)
 set -eu
 out=$1
@@ -18,3 +19,4 @@ cp "$here/agentenv_clock_page.c" "$here/agentenv_clock_waits.c" "$src/src/"
 make -s -C "$src/src" FAKETIME_COMPILE_CFLAGS="-UFAKE_STAT -UFAKE_UTIME" libfaketimeMT.so.1
 mkdir -p "$out"
 cp "$src/src/libfaketimeMT.so.1" "$out/"
+${CC:-cc} -std=gnu99 -O2 -fPIC -shared -Wall -Wextra -Werror -o "$out/libtls_realtime.so" "$here/tls_realtime.c" -ldl

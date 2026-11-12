@@ -5,7 +5,7 @@ FROM public.ecr.aws/docker/library/ubuntu:24.04@sha256:24737cef17f4e22b1977df7d9
 ARG CHROME_SHA256
 ARG CHROME_PACKAGES
 RUN apt-get update -q \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends build-essential patch curl \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends build-essential patch curl openssl \
         ca-certificates python3 openjdk-21-jdk-headless nodejs util-linux unzip $CHROME_PACKAGES >/dev/null \
     && rm -rf /var/lib/apt/lists/* \
     && userdel -r ubuntu && useradd -m -u 1000 user
