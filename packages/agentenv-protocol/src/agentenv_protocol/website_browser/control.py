@@ -85,6 +85,10 @@ PASSWORD_FOCUSED = """(() => {
 PASSWORD_CHECK_TIMEOUT_S = 2.0
 
 
+class _TabGone(Exception):
+    """The tab a capture was asked of went away while the capture was waiting: the browser answers it never."""
+
+
 class BrowserControl:
     """agentenv's control of a browser over its pipe: at each launch it attaches to every page with flattened sessions
     and keeps a record of the browser since this server started, its open tabs in opened order, those closed and who
@@ -750,6 +754,10 @@ class BrowserControl:
             except DevToolsError as e:
                 if not any(why in str(e) for why in FOR_THE_MOMENT) or loop.time() + FRAME_RETRY_S >= deadline:
                     raise DeviceUnavailable(f"the tab couldn't be captured: {e}") from None
+            except _TabGone:
+                if loop.time() + FRAME_RETRY_S >= deadline:
+                    raise DeviceUnavailable(f"the tab went away while its frame was taken, {FRAME_CAPTURE_S:g} s in all"
+                                            ) from None
             except ConnectionError as e:
                 raise DeviceUnavailable(f"the tab couldn't be captured: {e}") from None
             await asyncio.sleep(FRAME_RETRY_S)
@@ -776,7 +784,8 @@ class BrowserControl:
 
     async def _nudged_capture(self, session: str, timeout_s: float) -> dict:
         """The tab's JPEG from the first of its captures to answer: a second follows one unanswered after ``NUDGE_S``,
-        since a tab behind the active one answers only then, all within ``timeout_s``."""
+        since a tab behind the active one answers only then, all within ``timeout_s``; _TabGone once the tab's session
+        is gone with none answered, as a closed tab's captures never are."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_s
 
@@ -791,11 +800,13 @@ class BrowserControl:
             if not done:
                 captures.add(capture())
             while True:
-                done, captures = await asyncio.wait(captures, return_when=asyncio.FIRST_COMPLETED)
+                done, captures = await asyncio.wait(captures, timeout=FRAME_RETRY_S, return_when=asyncio.FIRST_COMPLETED)
                 if answers := [c.result() for c in done if c.exception() is None]:
                     return answers[0]
                 if not captures:
                     raise next(iter(done)).exception()
+                if session not in self._sessions:
+                    raise _TabGone()
         finally:
             for pending in captures:
                 pending.cancel()

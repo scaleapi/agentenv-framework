@@ -1375,6 +1375,88 @@ async def _cdp_agent_acts_behind(ws_url: str) -> str:
     return target
 
 
+@pytest.mark.asyncio
+async def test_a_browser_recording_that_ends_while_an_agents_command_is_in_flight_logs_it_unfinished(browser_computer):
+    with namespace_routing():
+        deployed = await Env.get(browser_computer.id).deploy(
+            env_params={"app_settings": {"chromium": {"start_urls": [PAGE_URL]}}})
+        context = TaskStepContext(instance_id=f"run-{uuid.uuid4().hex[:8]}", deployed_envs=[deployed])
+        try:
+            context = await StartBrowserRecordingTaskStep(id="start", version=None, env_id=browser_computer.id,
+                                                          name="flight").execute(context)
+            ws_url = (await _cdp(deployed, "pi"))["ws_url"]
+            async with _cdp_calls(ws_url, reply_s=300) as waiting, _cdp_calls(ws_url) as call:
+                target = await _page_target(call)
+                held = (await waiting("Target.attachToTarget", {"targetId": target, "flatten": True}))["result"]["sessionId"]
+                hanging = asyncio.ensure_future(waiting("Runtime.evaluate", {
+                    "expression": "new Promise((done) => setTimeout(done, 120000))", "awaitPromise": True}, held))
+                await asyncio.sleep(1)
+                session = (await call("Target.attachToTarget", {"targetId": target, "flatten": True}))["result"]["sessionId"]
+                for n in range(3):
+                    await call("Runtime.evaluate", {"expression": f"document.body.append('after {n}')"}, session)
+                context = await EndBrowserRecordingTaskStep(id="end", version=None, name="flight",
+                                                            fail_task_on_error=False).execute(context)
+                hanging.cancel()
+        finally:
+            report = await teardown_run(context)
+            grant_server(None, None).close()
+        entry = context.metadata[BROWSER_RECORDINGS]["flight"]
+        lines = _recorded_log(entry)
+
+    evaluated = [line["action"] for line in lines if (line.get("action") or {}).get("method") == "Runtime.evaluate"
+                 and line["action"].get("who") == "pi"]
+    assert not report.failed and (entry["state"], entry["log_missing"]) == ("ended", 0), entry
+    assert [bool(action.get("unfinished")) for action in evaluated] == [True, False, False, False], evaluated
+
+
+@pytest.mark.asyncio
+async def test_a_browser_recording_frames_the_active_tab_when_the_agents_tab_closes_mid_capture(browser_computer):
+    with namespace_routing():
+        deployed = await Env.get(browser_computer.id).deploy(
+            env_params={"app_settings": {"chromium": {"start_urls": [PAGE_URL]}}})
+        context = TaskStepContext(instance_id=f"run-{uuid.uuid4().hex[:8]}", deployed_envs=[deployed])
+        try:
+            context = await StartBrowserRecordingTaskStep(id="start", version=None, env_id=browser_computer.id,
+                                                          name="closing").execute(context)
+            async with _cdp_calls((await _cdp(deployed, "pi"))["ws_url"]) as call:
+                tab = (await call("Target.createTarget", {"url": BEHIND[0]}))["result"]["targetId"]
+                session = (await call("Target.attachToTarget", {"targetId": tab, "flatten": True}))["result"]["sessionId"]
+                await asyncio.sleep(2)
+                await call("Runtime.evaluate", {"expression":
+                           "setTimeout(() => { const t = Date.now(); while (Date.now() - t < 8000) {} }, 200)"}, session)
+                await asyncio.sleep(1.5)
+                await call("Target.closeTarget", {"targetId": tab})
+                await asyncio.sleep(3)
+            context = await EndBrowserRecordingTaskStep(id="end", version=None, name="closing",
+                                                        fail_task_on_error=False).execute(context)
+        finally:
+            report = await teardown_run(context)
+            grant_server(None, None).close()
+        entry = context.metadata[BROWSER_RECORDINGS]["closing"]
+        manifest = _recorded_manifest(entry)
+
+    frames = manifest["frames"]
+    missing = [(frame["index"], frame.get("error")) for frame in frames if not frame["uploaded"]]
+    assert not report.failed and (entry["state"], missing) == ("ended", []), missing
+
+
+async def _page_target(call) -> str:
+    """The first page the browser has open, as a CDP agent finds it."""
+    targets = (await call("Target.getTargets", {}))["result"]["targetInfos"]
+    return next(t["targetId"] for t in targets if t["type"] == "page")
+
+
+def _recorded_manifest(entry: dict) -> dict:
+    universe = Artifact.get(entry["artifact"]["id"], version=entry["artifact"]["version"])
+    return json.loads(get_config().get_object_store().get(Artifact.get(universe.file_artifact_ids["manifest.json"]).object_url))
+
+
+def _recorded_log(entry: dict) -> list[dict]:
+    universe = Artifact.get(entry["artifact"]["id"], version=entry["artifact"]["version"])
+    text = get_config().get_object_store().get(Artifact.get(universe.file_artifact_ids["log.jsonl"]).object_url).decode()
+    return [json.loads(line) for line in text.splitlines() if line.strip()]
+
+
 async def _mcp(deployed, work):
     """What ``work`` makes of one MCP session on the computer, as a role-less agent opens one."""
     async with streamablehttp_client(deployed.mcp_url) as (read, write, _):
