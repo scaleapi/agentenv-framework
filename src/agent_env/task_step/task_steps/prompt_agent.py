@@ -418,6 +418,10 @@ class PromptAgentTaskStep(TaskStep):
         if self.step_param_overrides(context).get("user_model"):
             raise ValueError(f"{where}, which set its model; drop user_model from this step's step_params and set "
                              "model there")
+        if any(r.get("agent_name") == self.user_agent_name for r in context.metadata.get("agent_trigger_registrations", [])):
+            # TODO(FD-5702): a trigger's line would reach the agent as the user's, and the user sim would never see it.
+            raise ValueError(f"{where}, and agent triggers are registered for it; scripted user lines with the "
+                             "built-in user sim aren't supported yet (FD-5702), so drop that register_agent_triggers step")
         timed = [k for k in ("schedule", "response_times") if record.get(k)]
         if timed:
             raise ValueError(f"{where} with persona {' and '.join(timed)}, which one sitting ignores (the user reads "
@@ -1117,7 +1121,6 @@ class _UserSide:
             logger.info(f"Turn {number} agent-trigger decide: fired={resp.get('fired', [])} done={resp.get('done')}")
             answer = _trigger_answer(resp)
             if answer is not None:
-                await self._skipped(number, solver_message, agent_parts, answer)
                 return answer
             # no trigger fired -> fall through to the LLM user-sim for this turn (hybrid)
         if self._built_in is not None:
@@ -1181,14 +1184,7 @@ class _UserSide:
         if answer is not None:
             self._record("env_trigger_snapshots", {"turn": number, "envs": env_triggers})
             self._record("agent_trigger_firings", {"turn": number, "fired": resp.get("fired", [])})
-            await self._skipped(number, solver_message, None, answer)
         return answer
-
-    async def _skipped(self, number: int, solver_message: str, agent_parts: Optional[list[dict]], answer: dict) -> None:
-        """A trigger answered for the built-in user: it reads that agent message, and the trigger's line as one it
-        sent, at its next read."""
-        if self._built_in is not None:
-            await self._built_in.skipped(number, _agent_text(solver_message, agent_parts), _joined_text(answer.get("message") or []))
 
     async def _ask_peer(self, number: int, agent_parts: list[dict]) -> dict:
         step = self._step
@@ -1252,7 +1248,6 @@ class _BuiltInUserSim:
         self._context = context
         self.person = person
         self._you_sent = [opening] if opening else []
-        self._unread: list[dict] = []  # agent messages a trigger answered for the user, by turn
         self._clock_envs = clock_envs
         self.history: list[dict] = []
         self._max_replies = person.get("max_replies")
@@ -1269,23 +1264,13 @@ class _BuiltInUserSim:
                   "opening": opening, "done_ends_run": True}
         return cls(step, context, person, opening, clock_envs)
 
-    async def skipped(self, number: int, reply: str, sent: str) -> None:
-        """A trigger answered the agent's ``reply`` at turn ``number`` with ``sent``, on the user's behalf: the next
-        read shows both, so the user sim never contradicts what was sent for it."""
-        now = await _clock_now(self._step, self._clock_envs)
-        if reply and not any(m["turn"] == number for m in self._unread):
-            self._unread.append({"turn": number, "at": now, "text": reply})
-        if sent:
-            self._you_sent.append({"at": now, "text": sent})
-
     async def ask(self, number: int, reply: str, ask_user_sim) -> dict:
         """The user's answer to the agent's ``reply``: ``{"message": parts}``, with ``end_after`` when the agent's answer
         to it ends the conversation, or ``{"end": reason}``."""
         now = await _clock_now(self._step, self._clock_envs)
-        earlier = [{"at": m["at"], "text": m["text"]} for m in self._unread if m["turn"] != number]
-        read = {"time": now, "assistant_messages": [*earlier, {"at": now, "text": reply}], "phone": [],
+        read = {"time": now, "assistant_messages": [{"at": now, "text": reply}], "phone": [],
                 "you_sent": self._you_sent, "done_ends_run": True}
-        self._you_sent, self._unread = [], []
+        self._you_sent = []
         calls: list[dict] = []
 
         async def ask(text: str) -> dict:

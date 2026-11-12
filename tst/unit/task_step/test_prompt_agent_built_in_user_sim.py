@@ -390,7 +390,7 @@ async def test_the_user_reads_every_text_part_of_the_agents_reply(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_trigger_s_reply_and_the_message_it_answered_reach_the_user_at_the_next_read(monkeypatch):
+async def test_agent_triggers_registered_for_the_built_in_user_are_refused_before_the_chat_starts(monkeypatch):
     from agent_env.env.env import DeployedGatewayEnv
     from agent_env.env.gateway.constants import EXT_TRIGGERS_URI, GATEWAY_EXTENSIONS, WELL_KNOWN_PATH
     from tst.unit.task_step.test_prompt_agent_user_side import ENV, _TRIGGERS_CARD
@@ -407,9 +407,7 @@ async def test_a_trigger_s_reply_and_the_message_it_answered_reach_the_user_at_t
         environment_card={"capabilities": {"extensions": [e for e in GATEWAY_EXTENSIONS if e["uri"] == EXT_TRIGGERS_URI]}}))
     ctx.metadata["agent_trigger_registrations"] = [{"step_id": "reg", "agent_name": "hannah", "added": ["pick"]}]
 
-    await _step().execute(ctx)
-
-    [entry] = _reads(ctx)  # turn 1 was the trigger's; the user sim read once, at turn 2
-    read = _full(entry)["read"]
-    assert [m["text"] for m in read["assistant_messages"]] == ["Blue house or green?", "Booked the blue one."]
-    assert [m["text"] for m in read["you_sent"]] == [PROMPT, "blue please"]
+    with pytest.raises(ValueError, match="agent triggers are registered for it; scripted user lines with the built-in "
+                                         "user sim aren't supported yet"):
+        await _step().execute(ctx)
+    assert "user_sim_reads" not in ctx.metadata

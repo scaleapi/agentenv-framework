@@ -55,6 +55,8 @@ post-turn hook. A user sim that fails or times out ends the conversation and set
 store at the summary's `object_url`. Set `multi_day: false` here, and no `schedule` or `response_times` in the persona,
 since one sitting reads each reply at once. On the `prompt_agent` step set no `user_output_format`, and no
 `user_model` on the step or in its `step_params`, since the prompt, answer format and model were set here.
+Scripted user lines (agent triggers registered for this user) are refused for now: the user sim would never see
+them (FD-5702).
 
 This step checks its own settings when the task loads, so a mistake there fails before a paid run. `prompt_agent`
 checks the ones above, its prompt against `opening_prompt`, and the persona's time zone against the task clock's when
