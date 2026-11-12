@@ -142,6 +142,7 @@ CHECKS: dict[str, Callable[..., list[str]]] = {
     "register_env_triggers": _register_env_triggers,
     "peer_agents": _peer_agents,
     "rubrics_verifier": _rubrics_verifier,
+    "always_on_agent_verifier": _rubrics_verifier,
     **dict.fromkeys((
         "verify_a2a_agent_card", "verify_a2a_agent_config_identity", "verify_a2a_agent_mcp", "verify_a2a_builtin_tools",
         "verify_a2a_core_protocol", "verify_a2a_install", "verify_a2a_modalities", "verify_a2a_peer_agents",

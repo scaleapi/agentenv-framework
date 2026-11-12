@@ -64,6 +64,9 @@ metadata under its ``agent_name``. The ``always_on`` step names it with ``user_s
   ``user_reads_at``.
 - The run's metadata keeps a summary in ``metadata["always_on"][step_id]`` (small enough for a running job to report
   back); the full timeline goes to the object store, at the summary's ``object_url``.
+- An always_on_agent_verifier (``verifiers/always_on_agent_verifier.py``) grades the step's prompt from the user's chat
+  and the run's context, the run wake by wake among it (``render_for_judge``); a plain rubrics_verifier on it is
+  refused when the task loads.
 - The agent: the message_user rules go in its system prompt when the step sets one and the agent's card takes it,
   else on its first wake; its session is the step's ``context_id`` when set, as prompt_agent's is, else the run's own.
 - When the step ends it puts back the gateway settings it changed for the run (the user chat's roles and stay_quiet,
@@ -325,6 +328,19 @@ class AlwaysOnTaskStep(PromptAgentTaskStep):
         fields = {k: data[k] for k in cls._PROMPT_FIELDS if k in data and data[k] is not None}
         own = {k: data[k] for k in cls._OWN if k in data and data[k] is not None}
         return cls(**cls._base_from_dict(data), retry_config=data.get("retry_config"), **fields, **own)
+
+    def task_problems(self, steps: list[TaskStep]) -> list[str]:
+        """Its prompt is graded by always_on_agent_verifier: a plain rubrics_verifier, which would grade it from every
+        wake's trajectory, is refused."""
+        # Here, not at the top: that module imports this one.
+        from agent_env.task_step.task_steps.verifiers.always_on_agent_verifier import AlwaysOnAgentVerifier
+        from agent_env.task_step.task_steps.verifiers.rubrics_verifier import is_rubrics_verifier
+
+        return [f"step '{s.id}' ({s.type}) grades the prompt '{self.prompt_id}' of always_on step '{self.id}', which "
+                f"is graded from the user's chat and the run's context, not its wakes' trajectories: use type "
+                f"{AlwaysOnAgentVerifier.type}"
+                for s in steps if is_rubrics_verifier(s) and s.prompt_id == self.prompt_id
+                and not isinstance(s, AlwaysOnAgentVerifier)]
 
     async def _execute(self, context: TaskStepContext) -> TaskStepContext:
         run = _Run(self, context)
@@ -1712,7 +1728,7 @@ class _Run:
 
 
 # ==================================================================================================================
-# What a judge reads of the run beyond the user's chat (rubrics_verifier, for an always_on step's prompt).
+# What a judge reads of the run beyond the user's chat (always_on_agent_verifier, for an always_on step's prompt).
 JUDGE_CHANGES_PER_WAKE = 10
 JUDGE_WAKES = 300
 _WOKE_BY = {"user_request": "the user's request", "user_reply": "the user's reply", "user_says": "a user message",

@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 import json
 import logging
 import re
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
-from typing import ClassVar, Optional
+from typing import Any, ClassVar, Optional
 
 from agent_env.a2a_agent.object_transfer import (
     TrajectoryUpload,
@@ -624,28 +624,10 @@ class RubricsVerifierTaskStep(TaskStep):
             judge_batch_concurrency=data.get("judge_batch_concurrency"),
         )
 
-    # An always_on step's prompt: what this verifier grades it from, set on the copy ``_for_always_on`` makes.
-    _always_on_wakes: Optional[str] = None
-
-    async def _for_always_on(self, context: TaskStepContext, record: dict) -> "RubricsVerifierTaskStep":
-        """This verifier as it grades an always_on step's prompt, which may run 40–60 wakes: from the user's chat (the
-        prompt's response and conversation) and the run's context (the trigger log, and the run wake by wake with the
-        app changes each made), never every wake's trajectory, which may not fit and costs a lot. A copy, since one
-        step instance is shared across concurrent rollouts; every other prompt is graded as before."""
-        if self._spec().cites_evidence:
-            raise RuntimeError(f"Verifier '{self.verifier_id}': output_format={self.output_format.value} cites "
-                               "per-criterion screenshots, and an always_on step's prompt is graded without its "
-                               "wakes' trajectories.")
-        if "grade_up_to_turn" in self.step_param_overrides(context) or self.grade_up_to_turn is not None:
-            raise RuntimeError(f"Verifier '{self.verifier_id}': grade_up_to_turn can't cut an always_on step's "
-                               "prompt, whose conversation turns are not its wakes.")
-        from agent_env.task_step.task_steps.always_on import render_for_judge  # its module imports this one's peers
-
-        twin = copy.copy(self)
-        twin.use_trajectory = False
-        twin.run_context_for_judge = self.run_context_for_judge or list(RUN_CONTEXT_PARTS)
-        twin._always_on_wakes = await asyncio.to_thread(render_for_judge, record)
-        return twin
+    async def judge_prompt_sections(self, context: TaskStepContext, prompt_response: PromptResponse) -> list[str]:
+        """Sections a subclass adds to this run's judge prompt, after the run context: an override point, called once
+        per run (never for one skipped) with the prompt's stored response. None here."""
+        return []
 
     def _resolved_criteria(self, context: TaskStepContext) -> list[dict]:
         """Criteria for this run: a per-run ``step_params`` override replaces the stored list.
@@ -661,15 +643,6 @@ class RubricsVerifierTaskStep(TaskStep):
         prompt_response = next((pr for pr in context.prompt_responses if pr.prompt_id == self.prompt_id), None)
         if prompt_response is None:
             raise RuntimeError(f"PromptResponse with prompt_id='{self.prompt_id}' not found in context")
-        always_on = (context.metadata.get("always_on") or {}).get(prompt_response.step_id)
-        if always_on is not None and self._always_on_wakes is None:
-            if prompt_response.error_type:  # skipped before the always_on settings are checked, as any errored prompt
-                logger.warning(f"Skipping verification '{self.verifier_id}': prompt had "
-                               f"error_type={prompt_response.error_type}")
-                self._write_skipped_entries(
-                    context, "prompt_error", f"Skipped: prompt had error_type={prompt_response.error_type}")
-                return context
-            return await (await self._for_always_on(context, always_on)).execute(context)
         overrides_for_step = self.step_param_overrides(context)
         grade_up_to_turn = (
             _validated_turn(overrides_for_step["grade_up_to_turn"])
@@ -695,6 +668,7 @@ class RubricsVerifierTaskStep(TaskStep):
             run_context = await load_run_context(context, stored_response)
             if grade_up_to_turn is not None:
                 run_context = run_context.as_of(grade_up_to_turn)
+        extra_sections = await self.judge_prompt_sections(context, stored_response)
 
         per_turn_uris = [u for u in (prompt_response.target_agent_per_turn_trajectory_object_urls or []) if u]
         if self.use_trajectory and not (per_turn_uris or prompt_response.agent_trajectory_object_url):
@@ -889,6 +863,7 @@ class RubricsVerifierTaskStep(TaskStep):
                         loaded_artifacts=loaded_for_judge,
                         context_facts=context_facts,
                         run_context=run_context,
+                        extra_sections=extra_sections,
                     )
                     if self.use_trajectory and multiturn:
                         prompt += self._MULTITURN_DIR_NOTE.format(n=len(per_turn_uris))
@@ -902,6 +877,7 @@ class RubricsVerifierTaskStep(TaskStep):
                         per_criterion_frames=compacted.per_criterion,
                         context_facts=context_facts,
                         run_context=run_context,
+                        extra_sections=extra_sections,
                     )
                     if image_blocks:
                         logger.info(
@@ -1543,9 +1519,11 @@ class RubricsVerifierTaskStep(TaskStep):
         per_criterion_frames: bool = False,
         context_facts: Optional[list[tuple[str, str]]] = None,
         run_context: Optional[Run] = None,
+        extra_sections: Sequence[str] = (),
     ) -> str:
         """``context_facts`` are rendered ``(label, value)`` pairs (``resolve_context_facts``); ``image_blocks``
-        are the blocks attached to the judge message, labels included when ``per_criterion_frames``."""
+        are the blocks attached to the judge message, labels included when ``per_criterion_frames``;
+        ``extra_sections`` are ``judge_prompt_sections``', after the run context."""
         spec = self._spec()
         # Only the rubric_evidence templates have this placeholder; the others ignore the argument.
         checks_instruction = evidence_checks_instruction(has_policy=bool(self.grading_policy_prompt))
@@ -1578,8 +1556,8 @@ class RubricsVerifierTaskStep(TaskStep):
             base += "\n\n" + render_run_context(run_context, self.run_context_for_judge,
                                                  message_max_chars=self.RUN_CONTEXT_MESSAGE_MAX_CHARS,
                                                  firings_max=self.RUN_CONTEXT_FIRINGS_MAX)
-        if self._always_on_wakes:
-            base += "\n\n" + self._always_on_wakes
+        for section in extra_sections:
+            base += "\n\n" + section
         if context_facts:
             # Facts before the policy: they are inputs, the policy is how to read them.
             base += "\n\n## Context facts\n" + self._CONTEXT_FACTS_LEAD + "\n" + "\n".join(
@@ -1623,3 +1601,16 @@ class RubricsVerifierTaskStep(TaskStep):
             "Do not rely solely on the agent's response text — verify against the actual files when possible.",
         ]
         return "\n".join(lines)
+
+
+def is_rubrics_verifier(step_or_config: TaskStep | dict[str, Any]) -> bool:
+    """Whether a step, or a stored step (its dict, its ``type`` looked up in the step registry), is a rubrics_verifier
+    or a subclass of one, such as always_on_agent_verifier: what code that would check the type string asks instead,
+    so the subclasses count. A dict of an unknown type is not one."""
+    if isinstance(step_or_config, dict):
+        from agent_env.task_step.registry import get_task_step_registry  # its built-ins import this module
+
+        cls = get_task_step_registry().get(step_or_config.get("type"))
+    else:
+        cls = type(step_or_config)
+    return isinstance(cls, type) and issubclass(cls, RubricsVerifierTaskStep)

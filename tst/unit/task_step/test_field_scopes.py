@@ -14,6 +14,7 @@ STEP_TYPES = sorted(get_task_step_registry().items())
 MINIMAL = {
     "add_skills": {"skills": [{"name": "notes", "description": "how notes are kept"}]},
     "always_on": {"user_sim": "linda"},
+    "always_on_agent_verifier": {"prompt_id": "prompt", "criteria": [{"id": "c1", "description": "says hi"}]},
     "deploy_agent": {},
     "deploy_env": {"env_id": "crm-env"},
     "deploy_user_sim_agent": {"agent_name": "hannah", "model": "m", "multi_day": False, "opening_prompt": "hi",

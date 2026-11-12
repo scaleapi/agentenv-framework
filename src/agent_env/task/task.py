@@ -365,6 +365,18 @@ class Task:
         self.steps: list[TaskStep] = steps or []
         self.requires: list[str] | None = list(requires) if requires is not None else None
         self._validate_dag(self.steps)
+        self._validate_pairings(self.steps)
+
+    @staticmethod
+    def _validate_pairings(steps: list[TaskStep]) -> None:
+        """Refuse steps that don't go together (``TaskStep.task_problems``), such as a verifier on a prompt it can't
+        grade. A step built without TaskStep, as some tests build one, has none."""
+        problems = []
+        for step in steps:
+            if (check := getattr(step, "task_problems", None)) is not None:
+                problems.extend(check(steps))
+        if problems:
+            raise ValueError("; ".join(problems))
 
     @classmethod
     def _validate_dag(cls, steps: list[TaskStep]) -> None:
