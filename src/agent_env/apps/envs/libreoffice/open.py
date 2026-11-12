@@ -27,6 +27,8 @@ OPENS = FOLDER / ".agentenv" / "opens"
 #: Comma-separated, double-quoted, UTF-8 (76), from the first line: what a CSV the agent opens most likely is.
 CSV = "--infilter=CSV:44,34,76,1"
 READY_S = 60.0
+#: How often it asks the server whether the app it launched is ready.
+READY_POLL_S = 0.25
 
 
 def invocations(argv: list[str]) -> list[list[str]]:
@@ -62,7 +64,7 @@ def handed_on(request: Optional[Path], timeout_s: float = READY_S) -> None:
             while not http.get(endpoint(card, "ready")).raise_for_status().json().get("ready"):
                 if time.monotonic() > deadline:
                     raise SystemExit(f"LibreOffice wasn't ready within {timeout_s:g} s of its server launching it")
-                time.sleep(0.25)
+                time.sleep(READY_POLL_S)
             if time.monotonic() > deadline:
                 raise SystemExit(f"LibreOffice's server didn't hand it {request.name} within {timeout_s:g} s")
 
