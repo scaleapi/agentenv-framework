@@ -188,10 +188,12 @@ CONTEXT_FACT_NOT_AVAILABLE = "(not available)"  # rendered for a path that does 
 _MISSING = object()
 
 
-def _lookup_dotted_path(root: object, path: str) -> object:
+def _lookup_dotted_path(root: object, path: str, bundle_root: Optional[str] = None) -> object:
     node = root
     for segment in path.split("."):
         if isinstance(node, dict):
+            if segment not in node and bundle_root is not None:
+                segment = f"{bundle_root}/{segment}"
             if segment not in node:
                 return _MISSING
             node = node[segment]
@@ -217,10 +219,13 @@ def _render_fact(value: object) -> str:
 def resolve_context_facts(facts: dict[str, str], metadata: dict) -> list[tuple[str, str]]:
     """Resolve ``{label: dotted path}`` against ``metadata`` into ``[(label, rendered value)]``, in order.
     A path walks dicts by key and lists by index; one that does not resolve renders as
-    ``CONTEXT_FACT_NOT_AVAILABLE`` so the judge sees the fact was requested. Never raises."""
+    ``CONTEXT_FACT_NOT_AVAILABLE`` so the judge sees the fact was requested. Never raises.
+    In a bundle run a key is also found under the id the bundle gave it, ``<bundle id root>/<key>``, so a path
+    naming an env as the task wrote it resolves as it does in the store the task came from."""
     rendered: list[tuple[str, str]] = []
+    bundle_root = _bundle_root(metadata.get("task_id"))
     for label, path in facts.items():
-        value = _lookup_dotted_path(metadata, path)
+        value = _lookup_dotted_path(metadata, path, bundle_root)
         if value is _MISSING:
             text = CONTEXT_FACT_NOT_AVAILABLE
         else:
@@ -1588,3 +1593,11 @@ class RubricsVerifierTaskStep(TaskStep):
             "Do not rely solely on the agent's response text — verify against the actual files when possible.",
         ]
         return "\n".join(lines)
+
+
+def _bundle_root(task_id: object) -> Optional[str]:
+    """The id root of the bundle a run's task came from, its id up to the last segment, or None for a task the
+    store holds under its own id."""
+    if not isinstance(task_id, str) or not is_local_id(task_id):
+        return None
+    return task_id.rsplit("/", 1)[0]
