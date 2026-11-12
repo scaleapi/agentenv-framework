@@ -936,10 +936,23 @@ def _stage(context: Path, layer: _Layer, what: str, files: FileArtifactUniverse,
     (context / layer.conf).write_text(_programs(programs, layer.prefix, environment))
 
 
+#: agent-env's own servers in a computer, the driver's (whose recorder runs in it) and an app's: the only programs on
+#: real time, through the clock library's marker, which it takes out of their environment so what they start is on the
+#: universe's, as every other program a driver or app runs is.
+REAL_TIME_MODULES = ("agentenv_protocol.computer.serve", "agentenv_protocol.computer.serve_app")
+REAL_TIME_MARKER = {"AGENTENV_REAL_TIME": "1"}
+
+
+def _real_time(command: str) -> bool:
+    argv = shlex.split(command)
+    return any(argv[i] == "-m" and argv[i + 1] in REAL_TIME_MODULES for i in range(len(argv) - 1))
+
+
 def _programs(commands: dict[str, str], prefix: str, environment: dict[str, Any]) -> str:
-    variables = ",".join(f'{key}="{value}"' for key, value in environment.items())
     programs = []
     for name, command in commands.items():
+        own = {**environment, **(REAL_TIME_MARKER if _real_time(command) else {})}
+        variables = ",".join(f'{key}="{value}"' for key, value in own.items())
         program, _, rest = command.partition(" ")
         if "/" in program and not program.startswith("/"):
             program = f"{prefix}/{program}"
@@ -982,7 +995,8 @@ def _dockerfile(source: str, layers: list[_Layer], base: ComputerArtifact, build
     lock's .debs, mounted into the RUN that installs them, then each layer's files under its prefix, its venv beside
     them from the lock's wheels, mounted the same way, its run scripts
     and an app's install steps, each run as root or the session user, every install with the network closed; then its
-    programs, and an app's server's folder owned by the session user."""
+    programs, and an app's server's folder owned by the session user. It starts as the base's container form says: as
+    the session user, or as root, whose init starts the session as its user."""
     user = base.session.user
     lines = [f"FROM {source}", "USER root",
              *(f"ENV AGENTENV_SETTING_{name.upper()}={json.dumps(str(value))}" for name, value in build_settings.items())]
@@ -1012,7 +1026,8 @@ def _dockerfile(source: str, layers: list[_Layer], base: ComputerArtifact, build
         if _venv(layer):
             checks.append(f"test -x {prefix}/venv/bin/python")
         lines.append(f"RUN {' && '.join(checks)}")
-    lines.append(f"USER {user}")
+    container = base.forms.container
+    lines.append("USER root" if container is not None and container.start_as == "root" else f"USER {user}")
     return "\n".join(lines) + "\n"
 
 

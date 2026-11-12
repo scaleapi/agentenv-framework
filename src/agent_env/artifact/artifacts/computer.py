@@ -138,6 +138,9 @@ class ContainerForm(BaseModel):
     image: ArtifactRef
     init: Literal["supervisord"]
     input_channel: Literal["env"]
+    start_as: Literal["session", "root"] = Field(default="session", description=(
+        "Who its init starts as: the session user, or root, which sets up what the session must not touch (the clock "
+        "follower, as its own user) before it starts the session as its user"))
 
 
 class DiskSource(BaseModel):

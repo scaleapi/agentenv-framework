@@ -355,7 +355,7 @@ MAIL_BUILD = {"properties": {"edition": {"default": "home", "enum": ["home", "pr
 #: The program of the mail app's own server.
 MAIL_SERVER = ("[program:app-mail]\ncommand=/opt/agentenv/apps/mail/venv/bin/python -m "
                "agentenv_protocol.computer.serve_app app.py:Mail\ndirectory=/opt/agentenv/apps/mail\n"
-               "environment=ENVIRONMENT_NAME=\"mail\"\nautorestart=true\nredirect_stderr=true\n"
+               "environment=ENVIRONMENT_NAME=\"mail\",AGENTENV_REAL_TIME=\"1\"\nautorestart=true\nredirect_stderr=true\n"
                "stdout_logfile=/var/log/agentenv/app-mail.log\n")
 
 

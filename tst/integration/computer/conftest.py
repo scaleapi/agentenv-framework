@@ -43,8 +43,6 @@ WEBSITE_BROWSER = Path(__file__).parent / "website-browser"
 BROWSER_COMPUTER = Path(__file__).parent / "browser-computer"
 TLS = Path(__file__).parent / "tls"
 CLOCK_DESKTOP = Path(__file__).parent / "clock-desktop"
-#: agent-env's libfaketime recipe, which the clock desktop's universe-clock app builds.
-CLOCK_RECIPE = Path(agent_env.__file__).parent / "computers" / "clock"
 #: Playwright and Puppeteer, which connect to a cdp address from Node.
 CDP_CLIENTS = Path(__file__).parent / "cdp_clients"
 CHROMIUM_ALONE = "@local/agentenv-framework/browsers/chromium"
@@ -123,15 +121,9 @@ def tls_desktop(tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def clock_desktop(tmp_path_factory):
-    """The clock desktop test bundle's desktop, the ubuntu-24.04 base and the reference driver with agentenv's chromium
-    and the universe-clock app, which builds agent-env's libfaketime from a copy of its recipe and preloads it into every
-    process; composed as ``desktop`` is."""
-    root = tmp_path_factory.mktemp("clock-desktop")
-    bundle = root / "bundle"
-    shutil.copytree(CLOCK_DESKTOP, bundle)
-    shutil.copytree(CLOCK_RECIPE, bundle / "envs" / "universe-clock" / "clock",
-                    ignore=shutil.ignore_patterns("__pycache__"))
-    yield from _composed(root, parse_bundle(bundle))
+    """The clock desktop test bundle's desktop, the ubuntu-24.04 base, whose every process loads agent-env's
+    libfaketime, and the reference driver with agentenv's chromium and curl; composed as ``desktop`` is."""
+    yield from _composed(tmp_path_factory.mktemp("clock-desktop"), parse_bundle(CLOCK_DESKTOP))
 
 
 @pytest.fixture(scope="module")
@@ -203,3 +195,32 @@ def run_context(output: str) -> dict:
     """The context of the run whose ``agent-env run`` output ``output`` is."""
     with namespace_routing():
         return get_task_instance_store().get(re.search(r"instance (@local/.+)$", output, re.M).group(1)).context
+
+
+#: What root runs: tini, the init it started, which is root's supervisord, and the ps that lists them.
+ROOTS = ("/usr/bin/tini -- /usr/local/bin/start-desktop init",
+         "/usr/bin/python3 /usr/bin/supervisord -c /etc/supervisor/root.conf", "ps -eo uid=,args=")
+FOLLOWER = "/usr/local/lib/agentenv-clock/clock-follower"
+
+
+def process_owners(name: str) -> dict[str, list[str]]:
+    """Each process's command line in the container ``name``, by the uid that runs it."""
+    owners: dict[str, list[str]] = {}
+    for line in _exec_text(name, "ps", "-eo", "uid=,args=").splitlines():
+        uid, _, args = line.strip().partition(" ")
+        owners.setdefault(uid, []).append(args.strip())
+    return owners
+
+
+def only_session_and_clock(name: str, owners: dict[str, list[str]]) -> bool:
+    """Whether root runs nothing but its init and supervisord, the clock's user nothing but the follower, and every
+    other process is the session user's."""
+    clock = _exec_text(name, "id", "-u", "agentenv-clock").strip()
+    assert set(owners) == {"0", clock, "1000"}, owners
+    assert all(args in ROOTS for args in owners["0"]), owners["0"]
+    assert owners[clock] == [f"/usr/bin/python3 -I {FOLLOWER}"], owners[clock]
+    return True
+
+
+def _exec_text(name: str, *argv: str) -> str:
+    return subprocess.run(["docker", "exec", name, *argv], check=True, capture_output=True, text=True).stdout

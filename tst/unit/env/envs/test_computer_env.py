@@ -121,7 +121,8 @@ def test_a_computer_env_is_composed_for_each_arch_and_written_with_the_computer_
     assert composed["arm64"]["lock"].startswith("sha256:") and composed["arm64"]["lock"] != composed["amd64"]["lock"]
     assert arm64["conf"] == (
         "[program:driver-desk-driver]\ncommand=/opt/agentenv/drivers/desk/venv/bin/python -m agentenv_protocol.computer.serve "
-        'driver.py:Desk\ndirectory=/opt/agentenv/drivers/desk\nenvironment=MCP_PORT="18765"\nautorestart=true\n'
+        'driver.py:Desk\ndirectory=/opt/agentenv/drivers/desk\nenvironment=MCP_PORT="18765",AGENTENV_REAL_TIME="1"\n'
+        'autorestart=true\n'
         "redirect_stderr=true\nstdout_logfile=/var/log/agentenv/driver-desk-driver.log\n")
     assert ComputerEnv.from_dict(stored.to_dict()).to_dict() == stored.to_dict()
 

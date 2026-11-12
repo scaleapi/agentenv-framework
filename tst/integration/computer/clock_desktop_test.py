@@ -1,6 +1,7 @@
 """agent-env's libfaketime on a real computer: the clock desktop test bundle's, the ubuntu-24.04 desktop with the
 reference driver and agentenv's chromium, every process loading the library. Composed, it passes the conformance
-probe at full. Deployed, with its clock page written as root, as the computer's follower will write it: curl and
+probe at full. Deployed alone, with no gateway for its follower to follow, and its clock page written as the
+follower's user, as the follower writes it: curl and
 Python reach a live site, its certificate checked against real time by the TLS shim; a shell, Chrome's JavaScript and
 the driver read universe time through 30 forward jumps of 8 h, a day or a week, a rate change and a freeze; Chrome,
 Xvfb and the desktop's panel run on through them; and the driver's input reaches Chrome after every jump and, frozen,
@@ -40,20 +41,20 @@ WINDOWS = ('for w in $(xprop -root _NET_CLIENT_LIST | sed "s/.*# //; s/,//g"); d
            'xprop -id "$w" _NET_WM_NAME; done')
 #: The processes that must run on through the clock's changes: Xvfb, the desktop's panel and Chrome's browser process.
 PIDS = "pgrep -o -x Xvfb; pgrep -o -x xfce4-panel; pgrep -o -f -- --remote-debugging-pipe"
-PAGE_WRITER = "/opt/agentenv/clock/clockpage.py"
+PAGE_WRITER = "/usr/local/lib/agentenv-clock/clockpage.py"
 #: A live site reached from the session, the clock months back, with no proxy: each exits 0 once its certificate
 #: verifies.
 REACH = {"curl": "curl -sS -o /dev/null --noproxy '*' --max-time 30 https://example.com/",
          "python": ("python3 -c \"import urllib.request; urllib.request.build_opener(urllib.request.ProxyHandler({}))"
                     ".open('https://example.com/', timeout=30)\"")}
-LIBRARY = "/opt/agentenv/clock/libfaketimeMT.so.1"
+LIBRARY = "/usr/local/lib/agentenv-clock/libfaketimeMT.so.1"
 
 
 def test_composed_with_the_library_in_every_process_the_computer_passes_the_probe_at_full(clock_desktop):
     results = clock_desktop.metadata["composed"]["container"]
 
     assert results[ARCH]["status"] == "ready" and results[ARCH]["probe"]["passed"], results[ARCH]
-    assert [app.environment_name for app in clock_desktop.composed_apps()] == ["chromium", "universe-clock"]
+    assert [app.environment_name for app in clock_desktop.composed_apps()] == ["chromium", "curl"]
 
 
 @pytest.mark.asyncio
@@ -118,7 +119,8 @@ async def test_the_desktop_follows_the_universe_through_jumps_a_rate_change_and_
 
 
 class _Clock:
-    """The computer's clock page, written as root as its follower writes it, and what the session reads of it."""
+    """The computer's clock page, written as its follower's user, as its follower writes it, and what the session
+    reads of it."""
 
     def __init__(self, deployed):
         self.container = _container(deployed)
@@ -127,7 +129,7 @@ class _Clock:
     def set(self, universe: float, rate: float) -> dict:
         """The page written to ``universe`` at ``rate``: the write's own answer, its rate, and when it started."""
         started = time.time()
-        out = subprocess.run(["docker", "exec", "-u", "0", self.container, "python3", PAGE_WRITER, "set",
+        out = subprocess.run(["docker", "exec", "-u", "agentenv-clock", self.container, "python3", PAGE_WRITER, "set",
                               repr(universe), repr(rate)], capture_output=True, text=True, check=True).stdout
         self.page = ast.literal_eval(out.strip())
         self.page.update(rate=rate, started=started)
