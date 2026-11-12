@@ -332,9 +332,12 @@ async def relay_websocket(websocket: WebSocket, base_url: str, *, role: str,
                upstream_headers(websocket, role, withheld=withheld, site_names=site_names).multi_items()
                if key.lower() not in _WEBSOCKET_HANDSHAKE and key.lower() != "host"]
     uri, destination = "ws" + target_url.removeprefix("http"), {}
-    if host := site_host(websocket, site_names):  # websockets writes Host from the URI; the TCP goes to the upstream
+    if host := site_host(websocket, site_names):  # websockets writes Host from the URI; TCP and TLS go to the upstream
         parts = urlsplit(uri)
-        uri, destination = urlunsplit(parts._replace(netloc=host)), {"host": parts.hostname, "port": parts.port or 80}
+        secure = parts.scheme == "wss"
+        destination = {"host": parts.hostname, "port": parts.port or (443 if secure else 80),
+                       **({"server_hostname": parts.hostname} if secure else {})}
+        uri = urlunsplit(parts._replace(netloc=host))
     offered = [protocol.strip() for value in websocket.headers.getlist("sec-websocket-protocol")
                for protocol in value.split(",") if protocol.strip()]
     try:

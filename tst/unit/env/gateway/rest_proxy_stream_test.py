@@ -633,18 +633,45 @@ def _card_site(seen: list[str], declared: dict[str, list[str]]):
 async def test_a_site_whose_env_stores_no_names_takes_its_host_from_the_names_its_card_declares(monkeypatch):
     seen: list[str] = []
     transport = _card_site(seen, {"notes": ["Notes.Test"], "kept": ["notes.test"]})
-    monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient", lambda **kw: _RealAsyncClient(transport=transport, **kw))
+    monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient",
+                        lambda **kw: _RealAsyncClient(transport=transport, **kw))
     gw = _gateway(website_urls={"notes": "http://notes", "kept": "http://kept"}, site_names={"kept": ["kept.test"]})
     for path, root in (("notes", "https://notes.test"), ("kept", "https://notes.test"), ("kept", "https://kept.test")):
         await _call(gw, f"/website/{path}/x", headers={"host": "gw.example", "agentenv-site-root": root})
     assert seen == ["notes.test", "kept", "kept.test"]
 
 
+@pytest.mark.parametrize("upstream, destination", [
+    ("https://notes.internal", {"host": "notes.internal", "port": 443, "server_hostname": "notes.internal"}),
+    ("http://notes.internal", {"host": "notes.internal", "port": 80, "server_hostname": None}),
+    ("https://notes.internal:8443", {"host": "notes.internal", "port": 8443, "server_hostname": "notes.internal"}),
+], ids=["https", "http", "https-port"])
+def test_a_websocket_to_a_site_reached_by_name_connects_to_its_upstream_and_checks_the_upstreams_certificate(
+        monkeypatch, upstream, destination):
+    transport = _card_site([], {})
+    monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient",
+                        lambda **kw: _RealAsyncClient(transport=transport, **kw))
+    asked = []
+
+    async def connect(uri, **kwargs):
+        asked.append((uri, {key: kwargs.get(key) for key in ("host", "port", "server_hostname")}))
+        raise OSError("refused")
+    monkeypatch.setattr(rest_proxy_module, "connect_websocket", connect)
+    gw = _gateway(website_urls={"notes": upstream}, site_names={"notes": ["notes.test"]})
+    with pytest.raises(Exception):
+        with TestClient(gw._asgi_app()).websocket_connect("/website/notes/live",
+                                                         headers={"AgentEnv-Site-Root": "https://notes.test"}):
+            pass
+    scheme = "wss" if upstream.startswith("https") else "ws"
+    assert asked == [(f"{scheme}://notes.test/live", destination)]
+
+
 @pytest.mark.asyncio
 async def test_list_website_urls_gives_a_site_listed_by_name_at_its_first_name_and_any_other_behind_the_gateway(
         monkeypatch):
     transport = _card_site([], {"carded": ["carded.test"]})
-    monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient", lambda **kw: _RealAsyncClient(transport=transport, **kw))
+    monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient",
+                        lambda **kw: _RealAsyncClient(transport=transport, **kw))
     sites = ("shop", "notes", "wild", "bare", "carded", "other")
     gw = _gateway(website_urls={site: f"http://{site}" for site in sites},
                   site_names={"shop": ["*.shop.test", "www.shop.test", "shop.test"], "notes": ["notes.localhost"],
@@ -664,7 +691,8 @@ async def test_an_sdk_site_behind_the_gateway_names_the_gateway_s_address(monkey
             return {"base_url": ctx.base_url}
 
     transport = httpx.ASGITransport(app=Notes().create_app())
-    monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient", lambda **kw: _RealAsyncClient(transport=transport, **kw))
+    monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient",
+                        lambda **kw: _RealAsyncClient(transport=transport, **kw))
     gw = _gateway(website_urls={"notes": "http://notes"})
 
     async def whoami(path: str) -> tuple[int, dict, bytes]:

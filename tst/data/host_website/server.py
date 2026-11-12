@@ -38,7 +38,8 @@ async def home(request):
 
 
 async def host(request):
-    return JSONResponse({"host": request.headers.get("host"), "forwarded_host": request.headers.get("x-forwarded-host")})
+    return JSONResponse({"host": request.headers.get("host"),
+                         "forwarded_host": request.headers.get("x-forwarded-host")})
 
 
 app = Starlette(routes=[Route("/.well-known/agent-env.json", card), Route("/api/health", health),
