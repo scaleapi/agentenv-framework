@@ -137,6 +137,9 @@ class ClaudeCodeConfig(AgentConfig):
     max_thinking_tokens: int | None = None
     # Which of the CLI's own tools it may use. With any selection, its MCP servers are only the ones agent-env gives it.
     builtin_tools: ClaudeCodeTools | None = None
+    # What a turn cut short by a transient API error is resumed with; unset, the bridge asks the model to finish the
+    # request it was given, which suits a task but not a simulated user.
+    resume_prompt: str | None = None
 
 
 def _rewrite_session_ids(jsonl_text: str, session_id: str) -> tuple[list[str], int]:
@@ -492,6 +495,7 @@ class ClaudeCodeAgent(DurableSessionRefs, AgentEnvAgent):
                 max_turns=cfg.max_turns,
                 max_thinking_tokens=cfg.max_thinking_tokens,
                 builtin_tools=cfg.builtin_tools,
+                resume_prompt=cfg.resume_prompt,
                 event_callback=request.trajectory.append,
             )
         except Exception as e:

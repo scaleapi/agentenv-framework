@@ -68,7 +68,7 @@ def test_the_config_takes_every_field_prompt_agent_sends_that_the_cli_has(app):
     config = _extensions(app)["urn:agentenv:agent-config/v1"]["params"]["methods"]
     assert config["set"]["request"]["supported"] == [
         "allowed_tools", "builtin_tools", "description", "effort", "max_thinking_tokens", "max_turns", "model", "name",
-        "output_format", "project_id", "role", "system_prompt", "task_id", "timeout_seconds",
+        "output_format", "project_id", "resume_prompt", "role", "system_prompt", "task_id", "timeout_seconds",
     ]
     assert set(config["set"]["request"]["schema"]["properties"]) == set(config["set"]["request"]["supported"])
     assert config["get"] == {"method": "GET", "response": {"required": ["config"]}}
