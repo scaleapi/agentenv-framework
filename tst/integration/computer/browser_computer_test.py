@@ -80,7 +80,7 @@ from agentenv_protocol.website_browser import BROWSER, HAR_FILE
 
 import agent_env
 from agent_env.a2a_agent import conversation_store
-from agent_env.artifact import EnvironmentUniverseArtifact
+from agent_env.artifact import Artifact, EnvironmentUniverseArtifact
 from agent_env.artifact.artifacts.environment import EnvironmentArtifact
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.config import get_config
@@ -94,12 +94,15 @@ from agent_env.env.envs.computer.utils import inside
 from agent_env.env.store import get_env_store
 from agent_env.providers.env_providers.constants import AGENT_ENV_WEBSITE_BACKEND_PORT, AGENT_ENV_WEBSITE_BACKEND_SUFFIX
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
+from agent_env.store.object_store.local.grant_server import grant_server
 from agent_env.store.object_store.local.tls import LocalCA, local_ca
 from agent_env.store.routing import namespace_routing
 from agent_env.task import Task
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.browser.connect_cdp import BrowserConnectCdpTaskStep
+from agent_env.task_step.task_steps.browser.recording import (RECORDINGS_KEY as BROWSER_RECORDINGS,
+                                                             EndBrowserRecordingTaskStep, StartBrowserRecordingTaskStep)
 from agent_env.task_step.task_steps.browser.sign_in import BrowserSignInTaskStep
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
@@ -617,21 +620,33 @@ async def test_its_log_has_an_entry_for_every_action_over_cdp_page_tools_and_pix
     assert not report.failed
 
 
-async def _cdp_agent_types(ws_url: str) -> list[tuple[str, str]]:
-    """A CDP agent, ada, that opens the form in a tab of its own, types a password and a search into it, sets a cookie,
-    reads the page, navigates and closes the tab: each command it sent, in order, and the tab, the same for all."""
-    async with connect(ws_url, max_size=None, open_timeout=60) as ws:
+@contextlib.asynccontextmanager
+async def _cdp_calls(ws_url: str, tls: ssl.SSLContext | None = None, reply_s: float = 60):
+    """A CDP connection to ``ws_url``, trusting ``tls`` for a wss address, as its ``call``: a command's whole reply,
+    within ``reply_s``, the events before it skipped."""
+    async with connect(ws_url, max_size=None, open_timeout=60, **({"ssl": tls} if tls else {})) as ws:
         ids = itertools.count(1)
-        sent: list[str] = []
 
         async def call(method: str, params: dict, session: str | None = None) -> dict:
             message_id = next(ids)
-            sent.append(method)
             await ws.send(json.dumps({"id": message_id, "method": method, "params": params,
                                       **({"sessionId": session} if session else {})}))
-            while (reply := json.loads(await asyncio.wait_for(ws.recv(), 60))).get("id") != message_id:
+            while (reply := json.loads(await asyncio.wait_for(ws.recv(), reply_s))).get("id") != message_id:
                 pass
             return reply
+
+        yield call
+
+
+async def _cdp_agent_types(ws_url: str) -> list[tuple[str, str]]:
+    """A CDP agent, ada, that opens the form in a tab of its own, types a password and a search into it, sets a cookie,
+    reads the page, navigates and closes the tab: each command it sent, in order, and the tab, the same for all."""
+    sent: list[str] = []
+    async with _cdp_calls(ws_url) as cdp:
+
+        async def call(method: str, params: dict, session: str | None = None) -> dict:
+            sent.append(method)
+            return await cdp(method, params, session)
 
         target = (await call("Target.createTarget", {"url": FORM}))["result"]["targetId"]
         session = (await call("Target.attachToTarget", {"targetId": target, "flatten": True}))["result"]["sessionId"]
@@ -772,17 +787,7 @@ PAGE_SEEN = ("JSON.stringify({ready: document.readyState, title: document.title,
 async def _cdp_agent_loads(ws_url: str, urls: list[str], tls: ssl.SSLContext | None = None) -> dict:
     """What a CDP agent at ``ws_url`` sees navigating a tab of its own to each of ``urls``, one after another:
     ``Page.navigate``'s error, if any, and the page once it has loaded; trusting ``tls`` for a wss address."""
-    async with connect(ws_url, max_size=None, open_timeout=60, **({"ssl": tls} if tls else {})) as ws:
-        ids = itertools.count(1)
-
-        async def call(method: str, params: dict, session: str | None = None) -> dict:
-            message_id = next(ids)
-            await ws.send(json.dumps({"id": message_id, "method": method, "params": params,
-                                      **({"sessionId": session} if session else {})}))
-            while (reply := json.loads(await asyncio.wait_for(ws.recv(), 90))).get("id") != message_id:
-                pass
-            return reply
-
+    async with _cdp_calls(ws_url, tls=tls, reply_s=90) as call:
         target = (await call("Target.createTarget", {"url": "about:blank"}))["result"]["targetId"]
         session = (await call("Target.attachToTarget", {"targetId": target, "flatten": True}))["result"]["sessionId"]
         seen = {}
@@ -1264,6 +1269,87 @@ async def test_playwright_mcps_tools_drive_its_page_hide_the_code_tools_and_come
     assert "Page URL" in after_its_kill and "Page URL" in after_driver_kill and count == "1"
     assert "playwright-mcp" in {connection["user"] for connection in record["cdp_connections"]}
     assert not report.failed
+
+
+@pytest.mark.asyncio
+async def test_a_browser_recording_frames_each_burst_of_an_agents_actions_keyed_to_its_log_and_ends_on_its_last_page(
+        browser_computer):
+    with namespace_routing():
+        deployed = await Env.get(browser_computer.id).deploy(
+            env_params={"app_settings": {"chromium": {"start_urls": [PAGE_URL]}}})
+        context = TaskStepContext(instance_id=f"run-{uuid.uuid4().hex[:8]}", deployed_envs=[deployed])
+        try:
+            context = await StartBrowserRecordingTaskStep(id="start", version=None, env_id=browser_computer.id,
+                                                          name="run").execute(context)
+            await _mcp(deployed, _type_hello)
+            await _mcp(deployed, lambda session: _called(session, "browser_navigate", {"url": DATA_PAGE}))
+            context = await EndBrowserRecordingTaskStep(id="end", version=None, name="run").execute(context)
+        finally:
+            report = await teardown_run(context)
+            grant_server(None, None).close()
+        entry = context.metadata[BROWSER_RECORDINGS]["run"]
+        universe = Artifact.get(entry["artifact"]["id"], version=entry["artifact"]["version"])
+        objects = get_config().get_object_store()
+        files = {name: objects.get(Artifact.get(artifact_id).object_url)
+                 for name, artifact_id in universe.file_artifact_ids.items()}
+
+    manifest = json.loads(files["manifest.json"])
+    log = [json.loads(line) for line in files["log.jsonl"].decode().splitlines()]
+    calls = {line["action"]["tool"]: line["seq"] for line in log if line.get("action", {}).get("via") == "mcp"}
+    frames = manifest["frames"]
+    followed = {seq for frame in frames for seq in frame["after"]}
+    assert not report.failed and (entry["state"], entry["missing_frames"]) == ("ended", 0), entry
+    assert frames[0]["kind"] == "first" and frames[-1]["kind"] == "last" and "action" in {f["kind"] for f in frames}
+    assert {calls["browser_type"], calls["browser_navigate"]} <= followed, (calls, frames)
+    assert frames[-1]["url"].startswith("data:text/html,") and "Home" in urllib.parse.unquote(frames[-1]["url"])
+    assert all(files[frame["path"].replace("/", "-")][:2] == b"\xff\xd8" for frame in frames)
+
+
+@pytest.mark.asyncio
+async def test_a_browser_recording_frames_a_cdp_agents_own_tab_behind_the_active_one(browser_computer):
+    with namespace_routing():
+        deployed = await Env.get(browser_computer.id).deploy(
+            env_params={"app_settings": {"chromium": {"start_urls": [PAGE_URL]}}})
+        context = TaskStepContext(instance_id=f"run-{uuid.uuid4().hex[:8]}", deployed_envs=[deployed])
+        try:
+            context = await StartBrowserRecordingTaskStep(id="start", version=None, env_id=browser_computer.id,
+                                                          name="behind").execute(context)
+            tab = await _cdp_agent_acts_behind((await _cdp(deployed, "pi"))["ws_url"])
+            active = [t for t in (await _browser_op(deployed, "tabs/list", {}))["tabs"] if t.get("active")]
+            context = await EndBrowserRecordingTaskStep(id="end", version=None, name="behind",
+                                                        fail_task_on_error=False).execute(context)
+        finally:
+            report = await teardown_run(context)
+            grant_server(None, None).close()
+        entry = context.metadata[BROWSER_RECORDINGS]["behind"]
+        universe = Artifact.get(entry["artifact"]["id"], version=entry["artifact"]["version"])
+        manifest = json.loads(get_config().get_object_store().get(
+            Artifact.get(universe.file_artifact_ids["manifest.json"]).object_url))
+
+    frames = manifest["frames"]
+    assert active and active[0]["id"] != tab, active
+    assert not report.failed and (entry["state"], entry["missing_frames"]) == ("ended", 0), frames
+    assert [f["tab"] for f in frames if f["kind"] == "action"] and frames[-1]["tab"] == tab, frames
+    assert "Own two" in urllib.parse.unquote(frames[-1]["url"]), frames[-1]
+
+
+#: The pages a CDP agent moves between in a tab of its own behind the active one.
+BEHIND = ("data:text/html,<title>Own one</title><h1>Own one</h1>", "data:text/html,<title>Own two</title><h1>Own two</h1>")
+
+
+async def _cdp_agent_acts_behind(ws_url: str) -> str:
+    """A CDP agent, pi, that opens a tab of its own behind the active one and never brings it to the front: it
+    navigates it, changes its page and navigates it again. The tab."""
+    async with _cdp_calls(ws_url) as call:
+        target = (await call("Target.createTarget", {"url": "about:blank", "background": True}))["result"]["targetId"]
+        session = (await call("Target.attachToTarget", {"targetId": target, "flatten": True}))["result"]["sessionId"]
+        await call("Page.navigate", {"url": BEHIND[0]}, session)
+        await asyncio.sleep(2)
+        await call("Runtime.evaluate", {"expression": "document.body.append('typed')"}, session)
+        await asyncio.sleep(2)
+        await call("Page.navigate", {"url": BEHIND[1]}, session)
+        await asyncio.sleep(2)
+    return target
 
 
 async def _mcp(deployed, work):

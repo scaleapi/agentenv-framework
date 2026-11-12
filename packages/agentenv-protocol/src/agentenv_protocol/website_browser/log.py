@@ -23,7 +23,7 @@ import time
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
 logger = logging.getLogger(__name__)
@@ -314,6 +314,8 @@ class BrowserLog:
         self._unwritable = False
         #: Per tab, the sequence number of the latest acting entry on it.
         self.last_acting: dict[str, int] = {}
+        #: Each told every action as it's written, its sequence number and its fields, as a recording follows them.
+        self.watchers: list[Callable[[int, dict], None]] = []
 
     @classmethod
     def for_app(cls, name: str, fallback: Path) -> BrowserLog:
@@ -381,6 +383,16 @@ class BrowserLog:
             self.note("outcome", {"entry": seq, **fields})
         else:
             self.write(seq, {"action": action}, at=begun["at"])
+        for watcher in self.watchers:
+            try:
+                watcher(seq, action)
+            except Exception:
+                logger.exception("a watcher of the browser's log failed")
+
+    @property
+    def next_seq(self) -> int:
+        """The sequence number the next line will take."""
+        return self._seq + 1
 
     def note(self, kind: str, body: dict) -> int:
         """A line of ``kind`` written now: a ``tab`` event, or a ``reset``."""

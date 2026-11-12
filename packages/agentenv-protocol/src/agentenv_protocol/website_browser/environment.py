@@ -34,6 +34,7 @@ from ..types import METHOD_ADD, RPC_PATH, EnvironmentExtension, IntakeDeclaratio
 from . import data
 from .control import AGENT, DOWNLOADS, EXIT, LIVE_START_TAB_TIMEOUT_S, LOADED, STOP, UPLOADS, BrowserControl, _now
 from .devtools import PIPE_IN, PIPE_OUT, DevToolsError, DevToolsPipe
+from .recording import BROWSER_RECORDING, MAX_DURATION_S, MAX_FRAMES, BrowserRecordings
 from .shapes import BrowserRecord, BrowserState, CookieToSet, OriginStorage, SiteNames, StateToLoad
 
 logger = logging.getLogger(__name__)
@@ -161,6 +162,8 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         self.cdp_tokens = Tokens(SOCKET.parent / "cdp-tokens.json")
         self.relay = Relay(self.devtools, dialogs_answered=self.settings.dialogs != AGENT, log=self.log,
                            control=self.control)
+        #: Its recordings: frames of the tab an agent last acted in, and its log, uploaded under each one's grant.
+        self.recordings = BrowserRecordings(self.log, self.control)
         self.devtools.on_close(self._pipe_closed)
 
     @classmethod
@@ -389,6 +392,25 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         if not self.relay.end_call(entry, ok, error):
             raise InvalidArgument(f"no tool call is open as entry {entry}")
         return {}
+
+    @extension(BROWSER_RECORDING, op="start")
+    async def browser_recording_start(self, request_id: str, upload: dict, frames: bool = True) -> dict:
+        """A recording of this browser, its frames and its log uploaded under the write namespace grant ``upload``:
+        with ``frames``, a frame of the tab an agent last acted in at the start, after each burst of its actions
+        settles and at the end. A start again with the same ``request_id`` answers the recording it began."""
+        return await self.recordings.start(request_id, upload, frames)
+
+    @extension(BROWSER_RECORDING, op="end")
+    async def browser_recording_end(self, recording_id: str, upload: Optional[dict] = None,
+                                    reason: str = "end") -> dict:
+        """The recording ``recording_id`` ended, under a fresh grant ``upload`` when one is given: its last frames,
+        its log's lines since its start and its manifest uploaded, and the manifest answered."""
+        return await self.recordings.end(recording_id, upload, reason)
+
+    @extension(BROWSER_RECORDING, op="end_all")
+    async def browser_recording_end_all(self, reason: str = "teardown") -> dict:
+        """Every open recording ended, under its start's grant, as the env closes or resets: their manifests."""
+        return {"recordings": await self.recordings.end_all(reason)}
 
     @extension(BROWSER, op="cdp")
     async def browser_cdp(self, user: str, request: Request, origin: Optional[str] = None) -> dict:
@@ -675,6 +697,8 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         return self.start_tab_launches[-1]["tabs"] if self.start_tab_launches else []
 
     def extension_params(self, uri: str) -> dict:
+        if uri == BROWSER_RECORDING:
+            return {"max_duration_s": MAX_DURATION_S, "max_frames": MAX_FRAMES, "frames": True}
         if uri == BROWSER:
             params: dict[str, Any] = {"chromium": self.version, "clock": "real", "mode": _mode()}
             if _alone():

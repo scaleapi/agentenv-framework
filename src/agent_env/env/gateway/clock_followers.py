@@ -32,6 +32,9 @@ class ClockFollowers:
     run on the loop that serves it, never one asyncio.run apiece."""
 
     WATCH_S = CLOCK_WATCH_HOLD_S
+    #: How long since a follower last watched before it has gone quiet: longer than a watch is held and a follower takes
+    #: to reconnect, so its connection is gone. A write doesn't wait for a quiet follower; it names it at once.
+    QUIET_S = CLOCK_WATCH_HOLD_S + 5
 
     def __init__(self, clock: Callable[[], Clock], tokens: Mapping[str, str]):
         self._clock = clock
@@ -50,6 +53,15 @@ class ClockFollowers:
         """``name`` when it's a declared follower and ``token`` its read token, else None."""
         expected = self._tokens.get(name or "")
         return name if expected and token and hmac.compare_digest(token.encode(), expected.encode()) else None
+
+    def _quiet_at(self, name: str) -> float | None:
+        """When ``name`` goes quiet (monotonic), if it has watched."""
+        seen = self._seen.get(name)
+        return None if seen is None else seen + self.QUIET_S
+
+    def _quiet(self, name: str) -> bool:
+        at = self._quiet_at(name)
+        return at is not None and time.monotonic() >= at
 
     async def watch(self, after: str, follower: str | None) -> None:
         """Take ``after`` as ``follower``'s acknowledgement (one ``follower_for`` named) when it's a version this clock
@@ -71,18 +83,23 @@ class ClockFollowers:
                 pass
 
     async def stale_after(self, version: str, wait_s: float) -> list[str]:
-        """The followers that haven't shown ``version`` (or a later one) once each has or ``wait_s`` has passed."""
+        """The followers that haven't shown ``version`` (or a later one) once each has, or has gone quiet (``QUIET_S``),
+        or ``wait_s`` has passed: woken by each acknowledgement and when the next follower waited for goes quiet. One
+        that hasn't watched yet is waited for: it may be starting."""
         target = self._clock().count_of(version)
+        deadline = time.monotonic() + wait_s
 
         def stale() -> list[str]:
             return sorted(name for name, shown in self._shown.items()
                           if shown is None or target is None or shown < target)
 
         async with self._acks:
-            try:
-                await asyncio.wait_for(self._acks.wait_for(lambda: not stale()), wait_s)
-            except asyncio.TimeoutError:
-                pass
+            while (waited_for := [name for name in stale() if not self._quiet(name)]) and time.monotonic() < deadline:
+                wake = min([deadline, *filter(None, map(self._quiet_at, waited_for))])
+                try:
+                    await asyncio.wait_for(self._acks.wait(), max(0.0, wake - time.monotonic()))
+                except asyncio.TimeoutError:
+                    pass
             return stale()
 
     def state(self) -> dict:

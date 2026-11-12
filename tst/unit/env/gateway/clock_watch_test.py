@@ -1,4 +1,5 @@
-"""The /clock/watch long poll computers follow the gateway's clock through, and clock writes that wait for them."""
+"""The /clock/watch long poll computers follow the gateway's clock through, and clock writes that wait for them, but not
+for one that has stopped watching."""
 from __future__ import annotations
 
 import asyncio
@@ -165,7 +166,8 @@ async def test_a_write_answers_504_naming_the_computers_still_behind_and_the_cha
     body = answer.json()
     assert answer.status_code == 504 and waited >= 0.4
     assert (body["ok"], body["stale"], body["version"]) == (False, ["laptop"], gw._clock.version)
-    assert "laptop didn't show it within 0.4 s" in body["error"]
+    assert "laptop didn't show it (waited up to 0.4 s;" in body["error"]
+    assert body["followers"]["laptop"] == {"version": None, "seen_s_ago": None}
     assert read == {"virtual_time": T0}
 
 
@@ -363,3 +365,56 @@ async def test_a_change_on_the_arm_wakes_the_triggers_and_a_re_arm_leaves_them_t
         advanced = (await client.put("/clock/advance", json={"virtual_time": "2026-02-01T00:00:00Z"})).json()
         cleared = (await client.post("/clock/clear")).json()
     assert ["due" in answer for answer in (armed, rated, advanced, cleared)] == [False, True, True, False]
+
+
+@pytest.mark.asyncio
+async def test_a_write_doesnt_wait_for_a_computer_that_has_stopped_watching(gateway, monkeypatch):
+    """A computer whose last watch is older than a hold and a reconnect (its connection gone) is named at once, with
+    when it last watched; the others are waited for as before."""
+    monkeypatch.setattr(ClockFollowers, "WATCH_S", SHORT_HOLD_S)
+    monkeypatch.setattr(ClockFollowers, "QUIET_S", SHORT_HOLD_S + 0.5)
+    gw = gateway()
+    async with _client(gw) as client:
+        await client.put("/clock/set-time", json={"virtual_time": T0})
+        follower = asyncio.create_task(_follow(client, "desktop", TOKENS["desktop"]))
+        try:
+            await _watch(client, gw._clock.version, "laptop", TOKENS["laptop"])  # shows it, then stops watching
+            await _until_shown(gw, "desktop", "laptop")
+            await asyncio.sleep(ClockFollowers.QUIET_S + 0.2)
+            started = time.monotonic()
+            answer = await client.put("/clock/advance", json={"virtual_time": "2026-01-02T00:00:00Z", "wait_followers_s": 10})
+            waited = time.monotonic() - started
+        finally:
+            follower.cancel()
+    body = answer.json()
+    assert answer.status_code == 504 and body["stale"] == ["laptop"] and waited < 3, (waited, body)
+    assert body["followers"]["laptop"]["seen_s_ago"] > ClockFollowers.QUIET_S
+    assert body["followers"]["desktop"]["version"] == gw._clock.version
+
+
+@pytest.mark.asyncio
+async def test_a_write_waits_for_a_computer_that_hasnt_watched_yet(gateway):
+    """One that hasn't watched may be starting: the write waits for it, all its wait_followers_s."""
+    gw = gateway({"laptop": TOKENS["laptop"]})
+    async with _client(gw) as client:
+        started = time.monotonic()
+        answer = await client.put("/clock/set-time", json={"virtual_time": T0, "wait_followers_s": 0.5})
+        waited = time.monotonic() - started
+    assert answer.status_code == 504 and answer.json()["stale"] == ["laptop"] and waited >= 0.5
+
+
+@pytest.mark.asyncio
+async def test_a_write_stops_waiting_for_a_computer_when_it_goes_quiet_during_the_wait(gateway, monkeypatch):
+    """One that watched shortly before the write is waited for until its quiet deadline, not for the whole wait."""
+    monkeypatch.setattr(ClockFollowers, "WATCH_S", SHORT_HOLD_S)
+    monkeypatch.setattr(ClockFollowers, "QUIET_S", 1.0)
+    gw = gateway({"laptop": TOKENS["laptop"]})
+    async with _client(gw) as client:
+        await client.put("/clock/set-time", json={"virtual_time": T0})
+        await _watch(client, "", "laptop", TOKENS["laptop"])  # answered at once: laptop watched, then stops
+        await asyncio.sleep(0.3)
+        started = time.monotonic()
+        answer = await client.put("/clock/advance", json={"virtual_time": "2026-01-02T00:00:00Z", "wait_followers_s": 10})
+        waited = time.monotonic() - started
+    assert answer.status_code == 504 and answer.json()["stale"] == ["laptop"], answer.text
+    assert 0.5 <= waited < 3, waited
