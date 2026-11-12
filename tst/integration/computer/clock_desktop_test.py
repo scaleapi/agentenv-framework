@@ -5,8 +5,8 @@ follower's user, as the follower writes it: curl and
 Python reach a live site, its certificate checked against real time by the TLS shim; a shell, Chrome's JavaScript and
 the driver read universe time through 30 forward jumps of 8 h, a day or a week, a rate change and a freeze; Chrome,
 Xvfb and the desktop's panel run on through them; and the driver's input reaches Chrome after every jump and, frozen,
-is drawn. Routing a site, a fresh Chrome loads it over HTTPS with the clock six years back and six years on, its
-certificate checked against the universe's time. Needs Docker and the local registry on localhost:5000."""
+is drawn. Routing a site, a fresh Chrome loads it over HTTPS with the clock six years back, six years on and past
+2099, its certificate checked against the universe's time. Needs Docker and the local registry on localhost:5000."""
 
 import ast
 import asyncio
@@ -129,7 +129,7 @@ async def test_the_desktop_follows_the_universe_through_jumps_a_rate_change_and_
 
 
 @pytest.mark.asyncio
-async def test_a_fresh_chrome_loads_a_routed_site_six_years_either_side_of_now(clock_desktop):
+async def test_a_fresh_chrome_loads_a_routed_site_six_years_either_side_of_now_and_past_2099(clock_desktop):
     with host_pages() as port, namespace_routing():
         params = {"site_routing": True, "sites": [{"name": "shop", "url": f"http://127.0.0.1:{port}/website/shop/",
                                                    "domains": ["shop.test"]}]}
@@ -137,7 +137,7 @@ async def test_a_fresh_chrome_loads_a_routed_site_six_years_either_side_of_now(c
         context = TaskStepContext(deployed_envs=[deployed])
         try:
             clock, loaded = _Clock(deployed), {}
-            for years in (-6, 6):
+            for years in (-6, 6, 80):
                 clock.set(time.time() + years * 365 * DAY, 1)
                 await asyncio.sleep(2)  # each program maps the page the next time it reads the clock, within a second
                 ran = await inside.run(deployed, ["sh", "-c", FRESH_CHROME, ROUTED], timeout_s=90)
@@ -148,7 +148,7 @@ async def test_a_fresh_chrome_loads_a_routed_site_six_years_either_side_of_now(c
             report = await teardown_run(context)
 
     assert all(shown["universe"] for shown in loaded.values()), loaded
-    assert {years: shown["landed"] for years, shown in loaded.items()} == {-6: True, 6: True}, loaded
+    assert {years: shown["landed"] for years, shown in loaded.items()} == {-6: True, 6: True, 80: True}, loaded
     assert not report.failed
 
 

@@ -8,8 +8,8 @@ a site's name winning over the allowlist; two sites claiming a name are refused.
 site's names (``issue``), and the site proxy (``site_proxy.py``) is installed through the sandbox's root channel and
 started (``route``), which a reset does again on its fresh computer. In the computer they live in
 ``/etc/agentenv/sites``, root's alone (0700) before the config and its keys are written into it, until the install has
-made the keys and the config private; the CA and certificates are valid over every date a computer's clock can show
-(``UNIVERSE_FROM`` to ``UNIVERSE_UNTIL``), since its programs check them against the universe's time. The CA also
+made the keys and the config private; the CA and certificates are valid from 1950 to the end of 9999 (``UNIVERSE_FROM``
+to ``UNIVERSE_UNTIL``), since its programs check them against the universe's time. The CA also
 joins the trust agentenv adds, two files at fixed paths for each OS site routing reaches (``TRUST_ENVIRONMENTS``),
 which on Linux are the local provider's (``LOCAL_TRUST_ENV``): ``/etc/agentenv/ca.pem``, every CA agentenv adds, for
 an app with a certificate list of its own, and ``/etc/agentenv/ca-bundle.pem``, the public roots and them. The
@@ -70,11 +70,12 @@ LOG = FOLDER / "site-proxy.log"
 NETWORK_LOG = FOLDER / "network.jsonl"
 SYNTHETIC, ALLOWLIST = "synthetic", "allowlist"
 RANKS = (SYNTHETIC, ALLOWLIST)
-#: The dates the sites' CA and certificates are valid between: every date a computer's clock can show, so a program
-#: on it, which checks a certificate against the universe's time, takes them however far the universe is from now. The
-#: CA is name-constrained and its key gone once they're signed, so the wide window vouches for nothing more.
-UNIVERSE_FROM = datetime(1971, 1, 1, tzinfo=UTC)
-UNIVERSE_UNTIL = datetime(2099, 12, 31, tzinfo=UTC)
+#: The dates the sites' CA and certificates are valid between, the widest a certificate carries: from 1950, the
+#: earliest X.509's UTCTime holds, to the end of 9999, RFC 5280's date for one with no expiry. A program on the computer
+#: checks them against the universe's time, so they hold however far the universe is from now. The CA is
+#: name-constrained and its key gone once they're signed, so the wide window vouches for nothing more.
+UNIVERSE_FROM = datetime(1950, 1, 1, tzinfo=UTC)
+UNIVERSE_UNTIL = datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)
 CARD_ATTEMPTS = 3
 CARD_RETRY_S = 1.0
 #: How long a computer's deploy waits for the run's websites it routes to say they're ready, as each said at its own

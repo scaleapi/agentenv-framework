@@ -121,12 +121,12 @@ def test_the_ca_and_certificates_hold_at_any_date_a_computers_clock_can_show():
     for cert in (issued.ca_pem, issued.leaves["notes"][0]):
         loaded = x509.load_pem_x509_certificate(cert.encode())
         assert (loaded.not_valid_before_utc, loaded.not_valid_after_utc) == (sites.UNIVERSE_FROM, sites.UNIVERSE_UNTIL)
-    for universe in (sites.UNIVERSE_FROM, now - timedelta(days=6 * 365), now, now + timedelta(days=6 * 365),
-                     sites.UNIVERSE_UNTIL):
+    for universe in (datetime(1950, 1, 1, tzinfo=UTC), now - timedelta(days=6 * 365), now,
+                     now + timedelta(days=6 * 365), datetime(2100, 1, 1, tzinfo=UTC),
+                     datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)):
         _verify(issued.ca_pem, issued.leaves["notes"][0], "notes.test", universe)
-    for outside in (sites.UNIVERSE_FROM - timedelta(seconds=1), sites.UNIVERSE_UNTIL + timedelta(seconds=1)):
-        with pytest.raises(VerificationError):
-            _verify(issued.ca_pem, issued.leaves["notes"][0], "notes.test", outside)
+    with pytest.raises(VerificationError):
+        _verify(issued.ca_pem, issued.leaves["notes"][0], "notes.test", sites.UNIVERSE_FROM - timedelta(seconds=1))
 
 
 def test_a_name_longer_than_a_common_name_takes_is_signed_by_its_alternative_names_alone():
