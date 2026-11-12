@@ -25,7 +25,7 @@ from agent_env.store.document_store import UnknownDocumentTypeError
 from agent_env.store.routing import run_scope
 from agent_env.task_step.preflight import pinned
 from agent_env.task.teardown import env_record_ids
-from agent_env.task_step.context import TaskStepContext, regraft_redacted_keys
+from agent_env.task_step.context import TaskStepContext, VerifierNotPassingError, regraft_redacted_keys
 from agent_env.task_step.context_ops import ContextUpdateOps, build_context_update_ops
 from agent_env.task_step.task_step import RetryConfig, TaskStep
 
@@ -731,7 +731,8 @@ class Task:
                             first_error, first_error_step_id = exc, step_id
                         continue
                     retry_cfg = getattr(step_obj, "retry_config", None)
-                    if retry_cfg is not None and retry_counts.get(step_id, 0) < retry_cfg.max_retries:
+                    if (retry_cfg is not None and retry_counts.get(step_id, 0) < retry_cfg.max_retries
+                            and not isinstance(exc, VerifierNotPassingError)):
                         retryable.append((step_obj, retry_cfg, exc))
                         continue
                     if not getattr(step_obj, "fail_task_on_error", True):

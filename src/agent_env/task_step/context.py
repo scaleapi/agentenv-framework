@@ -20,6 +20,11 @@ class StepContextError(RuntimeError):
     something it would create is already there. Running the step again on the same context fails the same
     way, so a runner should not retry it."""
 
+
+class VerifierNotPassingError(RuntimeError):
+    """A verifier set to fail its task when its verdict isn't passing recorded one that isn't. Grading the same run
+    again could pass it, so a runner should not retry it."""
+
 _REDACTED_KEYS = {
     "litellm_api_key", "judge_litellm_api_key", "usersim_api_key", "remote_tokens", "cf_access_client_secret",
     HEARTBEAT_KEY,
