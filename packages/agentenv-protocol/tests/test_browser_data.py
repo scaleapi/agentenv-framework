@@ -198,6 +198,18 @@ async def test_data_get_exports_the_network_log_as_har_and_data_add_passes_over_
 
 
 @pytest.mark.asyncio
+async def test_with_its_network_setting_off_data_get_exports_no_har_and_network_reads_nothing(browser, tmp_path):
+    (tmp_path / "network.jsonl").write_text(json.dumps({"seq": 1, "at": "t", "end": {"id": "1-1", "ended": "t"}})
+                                            + "\n")
+    browser.settings = browser.settings.model_copy(update={"network": False})
+
+    files = _files(await browser.browser_get_data())
+
+    assert "network.har" not in files and "browser-state.json" in files
+    assert await browser.browser_network(after=0) == {"lines": [], "last": 0, "more": False}
+
+
+@pytest.mark.asyncio
 async def test_data_get_reads_the_state_then_copies_the_profile_with_the_browser_paused(browser, monkeypatch):
     stage = website_browser.data.stage_profile
 

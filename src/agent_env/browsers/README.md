@@ -15,7 +15,8 @@ sees only its pages' requests, but for one Google account check at launch. It ru
 without Chromium's sandbox, which a container can't give it. Its env.toml spells out its settings and their defaults
 under `[settings]`: `start_urls`, opened at boot in order, the first tab active, each waited on to load; `window`,
 alone only; `locale`; `time_zone`; and
-`geolocation` and `notifications`, `deny` or `ask`; and `dialogs`, `agent`, `accept` or `dismiss`. A computer env sets its own beside it
+`geolocation` and `notifications`, `deny` or `ask`; `dialogs`, `agent`, `accept` or `dismiss`; and `network`, whether
+`data/get` exports its network log, on by default. A computer env sets its own beside it
 (`apps = [{ env = "chromium", settings = { start_urls = ["https://example.test/"] } }]`), and a deploy overrides any of
 them (`env_params.app_settings = {chromium = {start_urls = [...]}}`). Its data is its profile, `~/.config/chromium`, which
 the image has none of, so each deploy and each reset starts with a clean one. Name it from another bundle as `chromium`,
@@ -33,7 +34,9 @@ Its proxy keeps its network log (`agentenv_protocol.website_browser.network`), w
 `data/get` exports as HAR 1.2, `network.har`, the file a network grader such as WebArena-Verified's reads: routing
 sites, the shared site proxy's, `/etc/agentenv/sites/network.jsonl`, each exchange whole, a site's sign-in headers
 taken out; else the base's stand-in's, `/var/log/agentenv/network.jsonl`, each connection, since it decrypts none.
-Like its log, it lasts the computer's boot.
+Like its log, it lasts the computer's boot. It keeps cookies and form bodies as the site saw them, sign-in passwords
+among them, so a run that needs no network grader turns it off with `network = false`: its export then has no
+`network.har` and `network` returns no lines.
 
 A task changes a browser's state with the steps in `agent_env.task_step.task_steps.browser`, each a call to one
 `browser/v1` operation on the browser in the env `env_id`, the one `browser` names when the env has several:

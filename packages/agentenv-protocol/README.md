@@ -960,7 +960,8 @@ are the profile's template. The base class adds:
   `notifications`, `deny` (the default), which answers a page's prompt for it, or `ask`; and `dialogs`, who
   answers a page's JavaScript dialogs: `agent` (the default), or agentenv, accepting (`accept`, a `prompt()`
   with its default text) or dismissing (`dismiss`) each. Either way agentenv leaves a page that asks before
-  it's left (`beforeunload`), so none of its answers blocks a navigation.
+  it's left (`beforeunload`), so none of its answers blocks a navigation. And `network`, on by default, whether
+  `data/get` exports its network log and `browser/v1` `network` reads it.
 - **The flags agentenv owns**, after the subclass's command and before `about:blank`, the one tab its command line
   opens: its profile, its
   HTTP cache under `~/.cache` (`--disk-cache-dir`), `--remote-debugging-pipe`, `--no-first-run`,
@@ -1043,7 +1044,8 @@ are the profile's template. The base class adds:
   and, for text, JSON, forms, XML and scripts, its body up to 1 MB, as it came, in base64, any other type's size and
   sha256 alone; a WebSocket's messages and bytes each way; and each tunnel to a live host, refusal and failure. The
   stand-in, which decrypts nothing, keeps each connection: its host, port, address and bytes each way, and a plain
-  request's method and URL. `data/get` writes it as HAR 1.2, `network.har`, which `data/add` passes over: an entry
+  request's method and URL. Unless its `network` setting is off, `data/get` writes it as HAR 1.2, `network.har`,
+  which `data/add` passes over: an entry
   for each request and tunnel in the order they started, one still going marked `_open`, bodies decoded from gzip and
   deflate, and br and zstd with the `app` extra's `brotli` and `zstandard`, up to 1 MB, and agentenv's own fields
   named with `_`: `_tunnel`, `_websocket`, `_failed`, `_refused`, `_truncated`, `_sha256`.
