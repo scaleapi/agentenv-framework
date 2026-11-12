@@ -16,8 +16,7 @@ File-access modes:
 Artifact paths come from one of these sources (in priority order):
   1. Manifest (`manifest_step_id`): a prior prompt step's declared artifacts from
      that step's PromptResponse.structured_output["artifacts"] (logical name -> abs path);
-     collected files are keyed by logical name, its separators and dot segments dropped. The
-     agent writes the manifest, so an entry outside base_path is skipped.
+     collected files are keyed by logical name, its separators and dot segments dropped.
   2. Seed data: context.metadata["seed"][artifacts_key] — a comma-separated
      list of filenames (e.g., "Dockerfile,run.sh,codebase.patch")
   3. Static fallback: artifact_paths list in the step definition
@@ -26,7 +25,7 @@ Each entry may be relative (joined to base_path) OR absolute (a leading '/',
 read verbatim). Absolute entries let a task collect deliverables that aren't
 under a single base_path — outputs aren't guaranteed to live on the desktop /
 in /app — without assuming a common directory. base_path only applies to
-relative entries, to manifest entries and to the no-list enumeration fallback.
+relative entries and to the no-list enumeration fallback.
 
 Only regular files are read. A local sandbox's host is
 this machine, so there a file is read only where it resolves inside the
@@ -372,17 +371,12 @@ class CollectArtifactsTaskStep(TaskStep):
                     continue
                 if "*" in path:
                     continue  # unresolved glob (e.g. per-iteration debug logs) — can't fetch a literal *
-                # The agent writes the manifest, so only a file under base_path, once normalized, is read.
                 path = posixpath.normpath(path)
-                if not path.startswith(base):
-                    logger.warning(f"collect '{self.id}': manifest entry {name!r} names {path}, outside "
-                                   f"{self.base_path}; not collected")
-                    continue
                 if os.path.basename(path) in self.exclude_basenames:
                     continue
                 key = _unused(_manifest_key(name, path), keys)
                 keys.add(key)
-                items.append((key, path, path[len(base):]))
+                items.append((key, path, path[len(base):] if path.startswith(base) else posixpath.basename(path)))
             if skipped_nonfile:
                 logger.debug(
                     "collect(manifest=%s): skipped non-absolute manifest entries "

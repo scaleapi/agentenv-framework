@@ -619,19 +619,13 @@ class TestManifestResolution:
         assert items["gold_patch"] == ("/app/workspace/patches/gold_patch.diff", "patches/gold_patch.diff")
         assert items["dockerfile"] == ("/app/workspace/Dockerfile", "Dockerfile")
 
-    def test_manifest_entries_outside_base_path_are_not_read(self, caplog):
+    def test_manifest_entries_outside_base_path_are_named_by_their_file(self):
         step = CollectArtifactsTaskStep(id="collect", version=None, base_path="/app/workspace", manifest_step_id="m9")
-        ctx = _manifest_ctx({
-            "report": "/home/op/.ssh/id_rsa",
-            "climb": "/app/workspace/../../etc/passwd",
-            "sibling": "/app/workspace-other/notes.md",
-            "kept": "/app/workspace/out/./report.md",
-        })
-        with caplog.at_level("WARNING"):
-            items = step._resolve_items(ctx)
-        assert items == [("kept", "/app/workspace/out/report.md", "out/report.md")]
-        assert "names /home/op/.ssh/id_rsa, outside /app/workspace; not collected" in caplog.text
-        assert "names /etc/passwd, outside /app/workspace" in caplog.text
+        ctx = _manifest_ctx({"kept": "/app/workspace/out/./report.md", "note": "/app/handoff/REJECTED.md"})
+        assert step._resolve_items(ctx) == [
+            ("kept", "/app/workspace/out/report.md", "out/report.md"),
+            ("note", "/app/handoff/REJECTED.md", "REJECTED.md"),
+        ]
 
     def test_manifest_names_become_keys_with_no_separators_or_dot_segments(self):
         step = CollectArtifactsTaskStep(id="collect", version=None, base_path="/app/workspace", manifest_step_id="m9")

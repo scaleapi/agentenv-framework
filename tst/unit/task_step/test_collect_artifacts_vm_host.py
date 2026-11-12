@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox
-from agent_env.task_step.context import DeployedAgent, DeployedSandbox, TaskStepContext
+from agent_env.task_step.context import DeployedAgent, DeployedSandbox, PromptResponse, TaskStepContext
 from agent_env.task_step.task_steps.collect_artifacts import CollectArtifactsTaskStep
 from tst.util.capabilities import skip_without_gnu_stat
 
@@ -263,7 +263,7 @@ class TestOnThisMachine:
     or the step's base_path, so a link left there reaches nothing else on this machine."""
 
     @staticmethod
-    async def _collect(step, sandbox):
+    async def _collect(step, sandbox, ctx=None):
         uploaded = {}
         store = MagicMock()
 
@@ -275,7 +275,7 @@ class TestOnThisMachine:
         store.put_object_file.side_effect = put
         provider = MagicMock()
         provider.close = AsyncMock()
-        ctx = TaskStepContext()
+        ctx = ctx or TaskStepContext()
         collected, _, hard_failures = await step._collect_items(
             provider, sandbox, None, step._resolve_items(ctx), ctx, store, "aid", 1,
         )
@@ -326,4 +326,24 @@ class TestOnThisMachine:
         )
         collected, hard_failures, uploaded = await self._collect(step, LocalSandbox(work_dir=work))
         assert (collected, hard_failures, uploaded) == (set(), ["/app/artifact/.ssh/id_rsa"], {})
+
+    @pytest.mark.asyncio
+    async def test_a_manifest_naming_a_file_of_this_machine_is_refused(self, tmp_path):
+        work = tmp_path / "work"
+        (work / "artifact").mkdir(parents=True)
+        (work / "handoff").mkdir()
+        (tmp_path / "id_rsa").write_bytes(b"operator secret")
+        (work / "artifact" / "result.md").write_bytes(b"# result")
+        (work / "handoff" / "note.md").write_bytes(b"note")
+        ctx = TaskStepContext()
+        ctx.prompt_responses.append(PromptResponse(prompt_id="p", response="{}", step_id="m9", structured_output={
+            "artifacts": {"report": str(tmp_path / "id_rsa"), "result": "/app/artifact/result.md",
+                          "note": "/app/handoff/note.md"},
+        }))
+        step = CollectArtifactsTaskStep(
+            id="c", version=None, sandbox_name="box", base_path="/app/artifact", manifest_step_id="m9",
+        )
+        collected, hard_failures, uploaded = await self._collect(step, LocalSandbox(work_dir=work), ctx)
+        assert (collected, hard_failures) == ({"result", "note"}, [str(tmp_path / "id_rsa")])
+        assert b"operator secret" not in uploaded.values()
 
