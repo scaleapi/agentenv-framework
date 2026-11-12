@@ -233,8 +233,11 @@ def _index_named(prompt: Any, ids: list[str]) -> int:
 
 def _first_prompt(task: Task) -> str:
     """The user's first message to the agent under test: its step's prompt, else the opening of the user sim the step
-    names (an always_on step's ``user_sim``, a prompt_agent step's ``user_agent_name``), as it was written."""
-    step = next((each for each in task.steps if prompts_agent_under_test(each)), None)
+    names (an always_on step's ``user_sim``, a prompt_agent step's ``user_agent_name``), as it was written. A step that
+    prompts an agent a ``plays_user`` step deploys (the user sim, say a briefing) isn't the agent under test's."""
+    users = {getattr(each, "agent_name", None) for each in task.steps if plays_user(each)} - {None}
+    step = next((each for each in task.steps
+                 if prompts_agent_under_test(each) and getattr(each, "agent_name", None) not in users), None)
     if step is None:
         return ""
     if getattr(step, "prompt", None):
