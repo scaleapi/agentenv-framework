@@ -308,6 +308,23 @@ async def test_a_frame_refused_while_its_tab_is_between_documents_is_asked_again
 
 
 @pytest.mark.asyncio
+async def test_a_tab_that_closes_while_its_frame_is_asked_again_is_framed_as_the_active_tab_a_dialog_holds():
+    pipe = RefusingPipe(refusals=0)
+    control = BrowserControl(pipe, "agent", (1280, 800))
+    for tab in ("T1", "T2"):
+        pipe.emit("Target.targetCreated", {"targetInfo": {"targetId": tab, "type": "page", "url": "about:blank"}})
+        pipe.emit("Target.attachedToTarget", {"sessionId": f"s-{tab}", "targetInfo": {"targetId": tab, "type": "page"}})
+    held = await control.frame("T1", load_wait_s=0)
+    pipe.emit("Page.javascriptDialogOpening", {"type": "confirm", "message": "Leave?", "url": "https://a.test/"}, "s-T1")
+    pipe.refusals = 1
+    asyncio.get_running_loop().call_later(0.05, pipe.emit, "Target.detachedFromTarget", {"sessionId": "s-T2"})
+
+    framed = await control.frame("T2", load_wait_s=0)
+
+    assert framed[:3] == held[:3] and held[2] == "T1" and [s for s, _, _ in pipe.captured] == ["s-T1", "s-T2"]
+
+
+@pytest.mark.asyncio
 async def test_a_frame_the_browser_refuses_for_another_reason_is_missing_at_once():
     pipe = RefusingPipe(refusals=5, why="Page.captureScreenshot: Internal error")
 

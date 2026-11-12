@@ -15,6 +15,7 @@ from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_RECORDING, too
 from agentenv_protocol.computer.app import COMPUTER_APP
 from agentenv_protocol.computer.app_runtime import HOLD_BOOT_LAUNCH_ENV
 from agentenv_protocol.website_browser import BROWSER, BROWSER_RECORDING, LOADED, start_tab_why
+from agentenv_protocol.website_browser.recording import END_S as BROWSER_RECORDING_END_S
 
 from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.attribution import Attribution
@@ -350,7 +351,7 @@ async def end_recordings(record: DeployedSandboxEnv, reason: str) -> None:
             continue
         try:
             await record.invoke(BROWSER_RECORDING, "end_all", {"reason": reason}, environment_name=child.get("name"),
-                                timeout=_END_RECORDINGS_TIMEOUT_S)
+                                timeout=max(_END_RECORDINGS_TIMEOUT_S, BROWSER_RECORDING_END_S))
         except Exception as e:
             logger.warning(f"'{record.env_id}': {child.get('name')}'s browser recordings weren't ended before its "
                            f"computer went: {e}")

@@ -647,15 +647,11 @@ class BrowserControl:
         if session not in self._sessions:
             session = await self.active_session()
             target = self._sessions[session]
-        if session in self._open_dialogs:
-            if (earlier := self._frames.get(target)) is None and (shot := self._shots.get(target)) is not None:
-                earlier = shot, "png"
-            if earlier is None:
-                raise DeviceUnavailable("a dialog keeps the tab from painting and it had no capture before it")
-            return *earlier, target, self.url_of(target)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + FRAME_CAPTURE_S
         while True:
+            if session in self._open_dialogs:
+                return self._held_frame(target)
             try:
                 shot = await self._nudged_capture(session, deadline - loop.time())
                 break
@@ -672,6 +668,15 @@ class BrowserControl:
                 target = self._sessions[session]
         self._frames[target] = shot["data"], "jpg"
         return shot["data"], "jpg", target, self.url_of(target)
+
+    def _held_frame(self, target: str) -> tuple[str, str, Optional[str], Optional[str]]:
+        """The frame of a tab a dialog keeps from painting: the one it last took, else its last capture, a PNG;
+        DeviceUnavailable for a tab with neither."""
+        if (earlier := self._frames.get(target)) is None and (shot := self._shots.get(target)) is not None:
+            earlier = shot, "png"
+        if earlier is None:
+            raise DeviceUnavailable("a dialog keeps the tab from painting and it had no capture before it")
+        return *earlier, target, self.url_of(target)
 
     async def _nudged_capture(self, session: str, timeout_s: float) -> dict:
         """The tab's JPEG from the first of its captures to answer: a second follows one unanswered after ``NUDGE_S``,
