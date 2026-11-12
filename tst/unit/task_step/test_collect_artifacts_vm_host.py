@@ -321,7 +321,7 @@ class TestOnThisMachine:
         )
         collected, hard_failures, uploaded = await self._collect(step, LocalSandbox(work_dir=work))
         assert (collected, hard_failures) == ({"report.md", str(host / "bundle.zip")}, [])
-        assert uploaded == {"report.md": b"# report", "bundle.zip": b"PK bundle"}
+        assert uploaded == {"report.md": b"# report", str(host / "bundle.zip").lstrip("/"): b"PK bundle"}
 
     @pytest.mark.asyncio
     async def test_a_base_path_the_task_names_on_this_machine_is_read(self, tmp_path):
