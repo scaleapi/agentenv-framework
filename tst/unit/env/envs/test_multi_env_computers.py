@@ -854,6 +854,23 @@ def test_the_gateway_runs_an_mcp_server_browser_and_leaves_a_browser_computer_to
     assert getattr(browser, "id", None) == expected
 
 
+@pytest.mark.parametrize("browser_envs, runs, by_name", [
+    (None, _playwright, False),
+    (None, FakeBrowser, True),
+    ([], _playwright, False),
+    ("chromium", _playwright, True),
+    ("playwright", FakeBrowser, False),
+], ids=["runs-mcp-server", "runs-computer", "none", "named-computer", "named-mcp-server"])
+def test_the_gateway_lists_the_sites_by_name_only_for_a_browser_computer(browser_envs, runs, by_name):
+    named = {"chromium": [FakeBrowser()], "playwright": [_playwright()]}[browser_envs] \
+        if isinstance(browser_envs, str) else browser_envs
+    office = _browsing(browser_envs=named)
+    with patch("agent_env.env.env.Env.get", return_value=runs()), \
+            patch.object(env_gateway_provider, "website_config", return_value=MagicMock()) as config:
+        env_gateway_provider._gateway_topology(office)
+    assert config.call_args_list and {call.kwargs["listed_by_name"] for call in config.call_args_list} == {by_name}
+
+
 def test_a_lone_website_with_a_browser_computer_as_the_runs_browser_is_refused_naming_a_multi_env():
     with patch("agent_env.env.env.Env.get", return_value=FakeBrowser()), \
             pytest.raises(ValueError, match="'chromium-computer' is a computer env, which runs on a sandbox of its own "

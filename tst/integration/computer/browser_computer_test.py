@@ -82,6 +82,7 @@ from agent_env.env.envs.playwright_mcp import PLAYWRIGHT_MCP_ENVIRONMENT_NAME
 from agent_env.env.envs.website import WebsiteEnv
 from agent_env.env.envs.computer.utils import inside
 from agent_env.env.store import get_env_store
+from agent_env.providers.env_providers.constants import AGENT_ENV_WEBSITE_BACKEND_PORT, AGENT_ENV_WEBSITE_BACKEND_SUFFIX
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
 from agent_env.store.object_store.local.tls import LocalCA, local_ca
 from agent_env.store.routing import namespace_routing
@@ -1627,3 +1628,97 @@ async def test_a_multi_env_naming_no_browser_deploys_none(browser_computer, shop
 
     assert not report.failed and not deployed.child_envs
     assert "shop" in stated and PLAYWRIGHT_MCP_ENVIRONMENT_NAME not in stated and "chromium" not in stated, stated
+
+
+# --- a site reached by its names through a multi env's gateway ---
+
+HOST_START = "https://shop.test/api/host"
+HOST_CHROMIUM = {**MULTI_CHROMIUM,
+                 "env_params": {"form": "container", "app_settings": {"chromium": {"start_urls": [HOST_START]}}}}
+#: Where the gateway reaches the site, which is the site's Host when a client reaches it at any other name.
+SITE_INTERNAL = f"shop-{AGENT_ENV_WEBSITE_BACKEND_SUFFIX}:{AGENT_ENV_WEBSITE_BACKEND_PORT}"
+
+
+@pytest.fixture(scope="module")
+def host_shops(browser_computer):
+    """Two sites named shop.test that build their addresses from their Host, as many real apps do, under local ids:
+    one whose env stores the name and that serves no card, and one that stores none and whose card declares it."""
+    with namespace_routing():
+        _seed_bootstrap_envs()
+        uid = uuid.uuid4().hex[:8]
+        image = _image("host_website", f"host-shop-{uid}")
+        return {"stored": WebsiteEnv.put(id=f"@local/~/host-{uid}/stored/shop", environment_name="shop",
+                                         domains=["shop.test"], server_docker_image_artifact=image),
+                "card": WebsiteEnv.put(id=f"@local/~/host-{uid}/card/shop", environment_name="shop",
+                                       settings={"card_domains": "shop.test"}, server_docker_image_artifact=image)}
+
+
+async def _landed(deployed, browser: DeployedEnv, url: str) -> str:
+    """Where chromium lands, driven through the gateway's /mcp to ``url``: the first tab at the site's /home, else
+    every tab's URL."""
+    async with streamable_http_client(deployed.mcp_url) as (read, write, _):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            assert not (await session.call_tool("chromium_computer_navigate", {"url": url})).isError
+    deadline = asyncio.get_running_loop().time() + WAIT_S
+    while True:
+        urls = [tab.get("url", "") for tab in await tabs_of(browser)]
+        if (home := next((u for u in urls if u.endswith("/home")), None)) or \
+                asyncio.get_running_loop().time() > deadline:
+            return home or " ".join(urls)
+        await asyncio.sleep(POLL_S)
+
+
+async def _listed(deployed) -> list[str]:
+    async with streamable_http_client(deployed.mcp_url) as (read, write, _):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            result = await session.call_tool("list_website_urls", {})
+    assert not result.isError and result.structuredContent, result
+    return result.structuredContent["result"]
+
+
+async def _seen(deployed, root: str | None) -> dict:
+    """The Host and X-Forwarded-Host the site sees for a request straight to the gateway's site route naming ``root``
+    as the origin it was reached at, or naming none."""
+    async with httpx.AsyncClient(timeout=30) as http:
+        answer = await http.get(f"{deployed.gateway_url}/website/shop/api/host",
+                                headers={"AgentEnv-Site-Root": root} if root else {})
+    assert answer.status_code == 200, answer.text
+    return answer.json()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("names", ["stored", "card"])
+async def test_a_site_chromium_reaches_by_name_through_the_gateway_takes_that_name_as_its_host_and_no_forged_one(
+        browser_computer, host_shops, made, names):
+    with namespace_routing():
+        office = _office(host_shops[names], [Env.get(browser_computer.id)])
+        step = DeployEnvTaskStep(id="office", version=None, env_id=office.id, sandbox_type="local", ttl_seconds=900,
+                                 child_envs={"chromium": HOST_CHROMIUM})
+        context = TaskStepContext()
+        try:
+            [deployed] = (await step.execute(context)).deployed_envs
+            browser = DeployedEnv.from_dict(deployed.child_envs["chromium"])
+            landed, listed = await _landed(deployed, browser, "https://shop.test/login"), await _listed(deployed)
+            seen = [await _seen(deployed, root) for root in ("https://Shop.Test", "https://evil.example", None)]
+            subprocess.run(["docker", "restart", _gateway(deployed, made)], capture_output=True, check=True)
+            again = await _answers_again(deployed)
+            after_restart = (await _landed(deployed, browser, "https://shop.test/login"), await _listed(deployed),
+                             await _seen(deployed, "https://evil.example"))
+        finally:
+            report = await teardown_run(context)
+
+    assert not report.failed
+    # chromium follows the site's redirect, built from its Host, to the name it reached it at.
+    assert landed == "https://shop.test/home", landed
+    # An agent beside chromium is given the site at the name chromium opens it at.
+    assert listed == ["https://shop.test/"], listed
+    # A client naming any other origin, or none, leaves the site its internal Host; X-Forwarded-Host is as it was.
+    gateway_host = urllib.parse.urlsplit(deployed.gateway_url).netloc
+    assert seen == [{"host": "Shop.Test", "forwarded_host": "Shop.Test"},
+                    {"host": SITE_INTERNAL, "forwarded_host": "evil.example"},
+                    {"host": SITE_INTERNAL, "forwarded_host": gateway_host}], seen
+    # A restarted gateway, which reads a card's names again, keeps all of it.
+    assert again and after_restart == ("https://shop.test/home", ["https://shop.test/"],
+                                       {"host": SITE_INTERNAL, "forwarded_host": "evil.example"}), after_restart

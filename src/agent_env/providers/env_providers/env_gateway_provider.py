@@ -38,6 +38,8 @@ from agent_env.env.gateway.constants import (
     DEFAULT_MCP_SERVER_NAME,
     GATEWAY_PROVIDER_HEADERS_ENV,
     STATE_TOOL_NAME_CLASHES_KEY,
+    WEBSITE_LISTED_BY_NAME_ENV,
+    WEBSITE_NAMES_ENV,
     WELL_KNOWN_PATH,
     random_mcp_server_name,
     tool_name_clashes_text,
@@ -169,6 +171,10 @@ class WebsiteConfig:
     # a failure and the deploy waits, and its server's /dev/shm in MiB; None keeps the gateway's own and Docker's.
     ready_timeout_s: float | None = None
     shm_mb: int | None = None
+    # The names its env stores, one of which it takes as its Host when a client reaches it there (its card's stand in
+    # for none), and whether list_website_urls gives it at its first name, as a browser computer opens it.
+    domains: tuple[str, ...] = ()
+    listed_by_name: bool = False
 
 
 @dataclass
@@ -525,6 +531,11 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             )
             if website_urls:
                 gateway_env.append(f"      - WEBSITE_URLS={website_urls}")
+            if names := ",".join(f"{wc.environment_name}={'|'.join(wc.domains)}"
+                                 for wc in website_configs if wc.domains and not wc.live):
+                gateway_env.append(f"      - {WEBSITE_NAMES_ENV}={names}")
+            if listed := ",".join(wc.environment_name for wc in website_configs if wc.listed_by_name and not wc.live):
+                gateway_env.append(f"      - {WEBSITE_LISTED_BY_NAME_ENV}={listed}")
             for wc in website_configs:
                 rest_proxy_urls.append(
                     f"{wc.environment_name}=http://{wc.environment_name}-{AGENT_ENV_WEBSITE_BACKEND_SUFFIX}:{AGENT_ENV_WEBSITE_BACKEND_PORT}"
@@ -1584,14 +1595,15 @@ class _GatewayTopology:
     website_browser: "MCPServerEnv | None | object"  # the browser it runs among its MCP servers, or _THE_RUNS
 
 
-def website_config(env: WebsiteEnv) -> WebsiteConfig:
+def website_config(env: WebsiteEnv, *, listed_by_name: bool = False) -> WebsiteConfig:
     """A website env as the gateway runs it: its server image, any deprecated frontend image, its health path, how long
-    it may take to be ready and its shared memory."""
+    it may take to be ready, its shared memory and the names it stores, listed by its first when ``listed_by_name``."""
     frontend = env.frontend_docker_image_artifact
     return WebsiteConfig(backend_image=env.server_docker_image_artifact.image_name,
                          frontend_image=frontend.image_name if frontend else None,
                          environment_name=env.environment_name, health_path=env.health_path, live=env.live,
-                         settings=dict(env.settings), ready_timeout_s=env.ready_timeout_s, shm_mb=env.shm_mb)
+                         settings=dict(env.settings), ready_timeout_s=env.ready_timeout_s, shm_mb=env.shm_mb,
+                         domains=tuple(env.domains), listed_by_name=listed_by_name)
 
 
 def run_website_browser() -> "MCPServerEnv":
@@ -1622,16 +1634,18 @@ def _with_browser(mcp_servers: list[MCPServerConfig], images: list[DockerImageAr
 
 def _gateway_topology(env: Env) -> _GatewayTopology:
     """What a gateway fronts for env: a MultiEnv's MCP servers and websites (whatever their own env_provider_type) under its
-    name and the website browser it names or the run's, a WebsiteEnv's website and the run's browser, or else the env's
-    one MCP server."""
+    name and the website browser it names or the run's, its websites listed by name when that's a browser computer, a
+    WebsiteEnv's website and the run's browser, or else the env's one MCP server."""
     from agent_env.env.envs.multi_env import MultiEnv
     from agent_env.env.envs.website import WebsiteEnv
 
     is_multi = isinstance(env, MultiEnv)
+    by_name = False
     if is_multi:
         servers, websites, name = env.mcp_server_envs, env.website_envs, env.name
         placed = env.website_browser()
         browser = _THE_RUNS if placed.runs else placed.server
+        by_name = placed.computer is not None  # it opens the sites at their names, on a sandbox of its own
     elif isinstance(env, WebsiteEnv):
         servers, websites, name, browser = [], [env], None, _THE_RUNS
     else:
@@ -1639,7 +1653,7 @@ def _gateway_topology(env: Env) -> _GatewayTopology:
     return _GatewayTopology(
         mcp_servers=[MCPServerConfig(image=s.docker_image_artifact.image_name, environment_name=s.environment_name) for s in servers],
         mcp_server_images=[s.docker_image_artifact for s in servers],
-        website_configs=[website_config(w) for w in websites] or None,
+        website_configs=[website_config(w, listed_by_name=by_name) for w in websites] or None,
         website_images=[image for w in websites
                         for image in (w.server_docker_image_artifact, w.frontend_docker_image_artifact) if image] or None,
         mcp_server_name=name,
