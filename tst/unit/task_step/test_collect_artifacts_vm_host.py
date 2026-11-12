@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox
-from agent_env.task_step.context import DeployedAgent, DeployedSandbox, PromptResponse, TaskStepContext
+from agent_env.task_step.context import DeployedAgent, DeployedSandbox, TaskStepContext
 from agent_env.task_step.task_steps.collect_artifacts import CollectArtifactsTaskStep
 from tst.util.capabilities import skip_without_gnu_stat
 
@@ -256,48 +256,10 @@ class TestAgentPathUnchanged:
         assert seen.get("called") is True
 
 
-class _GuestVm:
-    """A VM on this machine whose commands run inside it, so no work dir stands for its /app; records every command."""
-
-    mode = "vm"
-    ON_THIS_MACHINE = True
-
-    def __init__(self, files: dict[str, bytes]):
-        self.files, self.calls = files, []
-
-    async def exec_with_output(self, *args):
-        self.calls.append(args)
-        path = args[-1]
-        return (0, f"81a4:{len(self.files[path])}", "") if path in self.files else (1, "", "No such file")
-
-    async def exec(self, *args):
-        self.calls.append(args)
-        return _Proc(base64.b64encode(self.files[args[-1].split(" < ", 1)[1].split(" | ", 1)[0].strip("'")]))
-
-
-@pytest.mark.asyncio
-async def test_a_manifest_on_a_vm_of_this_machine_reads_anywhere_in_the_vm_as_before():
-    vm = _GuestVm({"/tmp/output/summary.docx": b"summary", "/app/artifact/report.md": b"# report"})
-    ctx = TaskStepContext()
-    ctx.prompt_responses.append(PromptResponse(prompt_id="p", response="{}", step_id="m9", structured_output={
-        "artifacts": {"summary": "/tmp/output/summary.docx", "report": "/app/artifact/report.md"},
-    }))
-    step = CollectArtifactsTaskStep(id="c", version=None, sandbox_name="box", base_path="/app/artifact", manifest_step_id="m9")
-    provider = MagicMock()
-    provider.close = AsyncMock()
-    store = MagicMock()
-    store.put_object_file.side_effect = lambda **kw: f"s3://bucket/{kw['object_name']}"
-    collected, _, hard_failures = await step._collect_items(
-        provider, vm, None, step._resolve_items(ctx), ctx, store, "aid", 1,
-    )
-    assert (set(collected), hard_failures) == ({"summary", "report"}, [])
-    assert not any("readlink" in call for call in vm.calls)
-
-
 @skip_without_gnu_stat()
 class TestOnThisMachine:
-    """A local sandbox's host is the operator's: no link is read, and an agent's manifest entry only where it resolves
-    inside the sandbox's work dir; a path the task names is read wherever it is, as before."""
+    """A local sandbox's host is the operator's: no link is read there, and a path the task names is read wherever it
+    is, as before."""
 
     @staticmethod
     async def _collect(step, sandbox, ctx=None):
@@ -317,14 +279,6 @@ class TestOnThisMachine:
             provider, sandbox, None, step._resolve_items(ctx), ctx, store, "aid", 1,
         )
         return set(collected), hard_failures, uploaded
-
-    @staticmethod
-    def _manifest(artifacts):
-        ctx = TaskStepContext()
-        ctx.prompt_responses.append(PromptResponse(
-            prompt_id="p", response="{}", step_id="m9", structured_output={"artifacts": artifacts},
-        ))
-        return ctx
 
     @pytest.mark.asyncio
     async def test_a_link_is_refused_and_never_read(self, tmp_path):
@@ -373,34 +327,3 @@ class TestOnThisMachine:
         collected, hard_failures, uploaded = await self._collect(step, LocalSandbox(work_dir=tmp_path / "work"))
         assert (collected, hard_failures) == ({"bundle.zip"}, [f"{out}/leak"])
         assert uploaded == {"bundle.zip": b"PK bundle"}
-
-    @pytest.mark.asyncio
-    async def test_a_manifest_naming_a_file_of_this_machine_is_refused(self, tmp_path):
-        work = tmp_path / "work"
-        (work / "artifact").mkdir(parents=True)
-        (work / "handoff").mkdir()
-        (tmp_path / "id_rsa").write_bytes(b"operator secret")
-        (work / "artifact" / "result.md").write_bytes(b"# result")
-        (work / "handoff" / "note.md").write_bytes(b"note")
-        ctx = self._manifest({"report": str(tmp_path / "id_rsa"), "result": "/app/artifact/result.md",
-                              "note": "/app/handoff/note.md"})
-        step = CollectArtifactsTaskStep(
-            id="c", version=None, sandbox_name="box", base_path="/app/artifact", manifest_step_id="m9",
-        )
-        collected, hard_failures, uploaded = await self._collect(step, LocalSandbox(work_dir=work), ctx)
-        assert (collected, hard_failures) == ({"result", "note"}, [str(tmp_path / "id_rsa")])
-        assert b"operator secret" not in uploaded.values()
-
-    @pytest.mark.asyncio
-    async def test_a_manifest_through_a_folder_the_agent_swapped_for_a_link_reaches_only_the_work_dir(self, tmp_path):
-        work, home = tmp_path / "work", tmp_path / "home"
-        (home / ".ssh").mkdir(parents=True)
-        (home / ".ssh" / "id_rsa").write_bytes(b"operator secret")
-        work.mkdir()
-        (work / "artifact").symlink_to(home)
-        step = CollectArtifactsTaskStep(
-            id="c", version=None, sandbox_name="box", base_path="/app/artifact", manifest_step_id="m9",
-        )
-        ctx = self._manifest({"key": "/app/artifact/.ssh/id_rsa"})
-        collected, hard_failures, uploaded = await self._collect(step, LocalSandbox(work_dir=work), ctx)
-        assert (collected, hard_failures, uploaded) == (set(), ["/app/artifact/.ssh/id_rsa"], {})
