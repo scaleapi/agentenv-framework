@@ -69,9 +69,12 @@ records what it showed in `/run/agentenv-clock/status.json`. A failed round is r
 and a new config starts it over from no version.
 
 The session user can't write the page or the clock file, read the follower's config, or stop either process: each is
-another user's. Not covered yet: a computer reset (`reset_env`) boots it afresh with no follower until the next arm;
-agent-env's own servers run on universe time too, with no real-time marker; and routed sites' certificates, Chromium's
-time zone and an egress proxy for live sites at other dates are later work.
+another user's. A multi env's reset (`reset_env`) boots a computer afresh, follower and all; while the clock is armed,
+core starts the new follower as an arm does and the reset ends once the computer shows the clock.
+
+Not covered yet: agent-env's own servers run on universe time too, with no real-time marker; and certificates checked
+by TLS stacks the shim doesn't reach (Chromium's), Chromium's time zone and an egress proxy for live sites at other dates
+are later work.
 
 ## The clock page
 

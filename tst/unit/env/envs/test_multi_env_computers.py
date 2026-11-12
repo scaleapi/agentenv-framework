@@ -585,6 +585,45 @@ async def _stored(*computers) -> DeployedEnv:
     return DeployedEnv.from_dict({**dataclasses.asdict(deployed), "instance_id": "inst-1"})
 
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("armed", [True, False])
+async def test_a_computer_composing_the_clock_app_follows_an_armed_clock_again_once_it_resets(monkeypatch, armed):
+    taking = {"method": "POST", "request": {"properties": {"follower_config": {"type": "string"}}}}
+    clock_app = {"name": "clock", "url": "/svc/clock", "capabilities": {"extensions": [
+        {"uri": "urn:agentenv:clock/v1", "params": {"methods": {"sync_time": taking}}}]}}
+    record = dataclasses.replace(_record("desktop"), environment_card={"name": "desktop",
+                                                                       "children_environments": [clock_app]})
+    deployed = MagicMock(spec=DeployedGatewayEnv, gateway_url=GATEWAY, invoke=AsyncMock(return_value={"armed": armed}))
+    sandbox = SimpleNamespace(url_from_sandbox=lambda url: url.replace("gw.example", "gw.internal"))
+    started, waited = [], []
+
+    class Rebooted:
+        @classmethod
+        async def from_deployed_env(cls, deployed_env):
+            assert deployed_env is record
+            return SimpleNamespace(_sandbox=sandbox)
+
+    async def start_follower(sb, **options):
+        started.append((sb, options))
+        return "c1"
+
+    async def wait_shown(sb, config_id):
+        waited.append((sb, config_id))
+
+    monkeypatch.setattr(_multi_computers.clock, "start_follower", start_follower)
+    monkeypatch.setattr(_multi_computers.clock, "wait_shown", wait_shown)
+    await _multi_computers.follow_clock_again(deployed, "desktop", record, Rebooted())
+
+    if armed:
+        assert started == [(sandbox, {"watch_url": "https://gw.internal/clock/watch", "token": "token-desktop",
+                                      "follower": "desktop"})]
+        assert waited == [(sandbox, "c1")]
+    else:
+        assert started == waited == []
+    await _multi_computers.follow_clock_again(deployed, "laptop", _record("laptop"), Rebooted())
+    assert deployed.invoke.await_count == 1  # a computer running no follower never asks the gateway
+
 @pytest.mark.asyncio
 async def test_reset_resets_every_child_env_at_once_each_as_it_resets_alone_and_forgets_what_loads_put_in(
         gateway, providers, server_resets):

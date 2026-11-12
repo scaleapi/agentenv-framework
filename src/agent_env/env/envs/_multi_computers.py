@@ -13,9 +13,10 @@ from urllib.parse import urlsplit
 
 from agentenv_protocol.computer import tool_prefix_problem
 
-from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, Env
+from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, Env, gateway_url_of
 from agent_env.env.envs.computer.utils import clock, sites
 from agent_env.env.gateway import ExternalChild
+from agent_env.env.gateway.constants import EXT_CLOCK_URI
 from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider, get_env_sandbox_provider
 
 if TYPE_CHECKING:
@@ -100,6 +101,30 @@ def clock_read_token(record: DeployedEnv) -> str | None:
     return record.control_token if clock.follows_clock(record.environment_card) else None
 
 
+async def start_clock_follower(deployed: DeployedEnv, name: str, record: DeployedEnv, sandbox: Any) -> Optional[str]:
+    """Start the clock follower of ``deployed``'s computer ``name``, its record ``record`` and its sandbox ``sandbox``,
+    watching the gateway's clock as the sandbox reaches it (``clock.start_follower``): the config id it was given, or
+    None for a computer that runs none."""
+    if not clock.runs_follower(record.environment_card) or (token := clock_read_token(record)) is None:
+        return None
+    watch_url = sandbox.url_from_sandbox(f"{(gateway_url_of(deployed) or '').rstrip('/')}/clock/watch")
+    return await clock.start_follower(sandbox, watch_url=watch_url, token=token, follower=name)
+
+
+async def follow_clock_again(deployed: DeployedEnv, name: str, record: DeployedEnv, computer: ComputerEnv) -> None:
+    """After ``deployed``'s computer ``name`` reset, its clock follower, gone with its container, started again while
+    the gateway's clock is armed, and the reset done once the computer shows it; nothing for a computer that runs
+    none, or a clock not armed, which the next ``sync_env_clock`` starts it for."""
+    if not clock.runs_follower(record.environment_card) or not gateway_url_of(deployed):
+        return
+    if not (await deployed.invoke(EXT_CLOCK_URI, "state")).get("armed"):
+        return
+    sandbox = (await type(computer).from_deployed_env(record))._sandbox
+    if (config_id := await start_clock_follower(deployed, name, record, sandbox)) is not None:
+        await clock.wait_shown(sandbox, config_id)
+        logger.info(f"computer {name!r} follows the clock again after its reset")
+
+
 def refusal(computer: ComputerEnv, entry: dict, sandbox_type: str | None, websites: Mapping[str, str]) -> str | None:
     """Why ``computer`` wouldn't deploy in a multi env with ``entry``, its child_envs entry: why it wouldn't alone,
     ``site_routing`` naming none of the multi env's ``websites`` (their environment names by env id), or a sandbox
@@ -179,8 +204,13 @@ class Computers:
         record; none is awaited yet."""
         records = getattr(deployed, "child_envs", None) or {}
         browser = self.browser or self._recorded_browser(records)
-        return [(env.environment_name, env.reset(DeployedEnv.from_dict(records[env.environment_name])))
+        return [(env.environment_name, self._reset(deployed, env, DeployedEnv.from_dict(records[env.environment_name])))
                 for env in [*self.envs, *([browser] if browser else [])] if env.environment_name in records]
+
+    @staticmethod
+    async def _reset(deployed: DeployedEnv, env: ComputerEnv, record: DeployedEnv) -> None:
+        await env.reset(record)
+        await follow_clock_again(deployed, env.environment_name, record, env)
 
     def _recorded_browser(self, records: Mapping[str, dict]) -> Optional[ComputerEnv]:
         """The website browser ``records``, a multi env's computers' records, hold beside its own computers: the record

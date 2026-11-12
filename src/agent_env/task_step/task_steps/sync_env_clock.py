@@ -18,8 +18,8 @@ import httpx
 import tzdata  # noqa: F401
 from agentenv_protocol import client as protocol_v1
 
-from agent_env.env.env import DeployedEnv, gateway_url_of
-from agent_env.env.envs._multi_computers import clock_read_token
+from agent_env.env.env import DeployedEnv
+from agent_env.env.envs._multi_computers import start_clock_follower
 from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.env.envs.computer.utils import clock
 from agent_env.env.gateway.constants import EXT_CLOCK_URI
@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 #: How long the arm waits for the computers that follow the clock to show it; a computer still behind fails the step.
-FOLLOWER_WAIT_S = 10.0
+FOLLOWER_WAIT_S = clock.FOLLOWER_WAIT_S
 
 
 def resolve_virtual_time(virtual_time: str, timezone: Optional[str]) -> str:
@@ -173,17 +173,14 @@ class SyncEnvClockTaskStep(TaskStep):
         (``computer.utils.clock``): the config id each was given, by the computer's address, and why each that
         couldn't start didn't, which fails the step unless ``tolerate_missing_sync_time``."""
         started, unstarted = {}, {}
-        gateway = (gateway_url_of(deployed) or "").rstrip("/")
         for name, data in (getattr(deployed, "child_envs", None) or {}).items():
             record = DeployedEnv.from_dict(data)
-            if not clock.runs_follower(record.environment_card) or (token := clock_read_token(record)) is None:
+            if not clock.runs_follower(record.environment_card) or not record.control_token:
                 continue
             try:
                 sandbox = (await ComputerEnv.from_deployed_env(record))._sandbox
-                watch_url = sandbox.url_from_sandbox(f"{gateway}/clock/watch")
-                started[record.environment_url] = await clock.start_follower(sandbox, watch_url=watch_url, token=token,
-                                                                             follower=name)
-                logger.info(f"sync_env_clock env={self.env_id}: computer {name!r} follows the clock at {watch_url}")
+                started[record.environment_url] = await start_clock_follower(deployed, name, record, sandbox)
+                logger.info(f"sync_env_clock env={self.env_id}: computer {name!r} follows the clock")
             except Exception as e:
                 if not self.tolerate_missing_sync_time:
                     raise RuntimeError(f"computer {name!r} follows the clock, but its follower couldn't start: {e}") from e

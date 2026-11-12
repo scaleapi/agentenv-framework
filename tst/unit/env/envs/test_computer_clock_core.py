@@ -43,3 +43,25 @@ async def test_start_follower_writes_its_config_as_root_for_its_user_alone_then_
     assert runs[0][:4] == ["install", "-d", "-m", "0700"]
     assert runs[-2] == ["python3", "/opt/agentenv/clock/clockpage.py", "create", "agentenv-clock"]
     assert "setsid /opt/agentenv/clock/follow" in runs[-1][-1]
+
+
+@pytest.mark.asyncio
+async def test_wait_shown_reads_the_followers_status_as_root_until_it_shows_the_config(monkeypatch):
+    statuses = ["", json.dumps({"config_id": "c0", "version": "b.1"}), json.dumps({"config_id": "c1", "version": "b.2"})]
+
+    class Channel:
+        def __init__(self, sandbox):
+            pass
+
+        async def run(self, argv):
+            return statuses.pop(0) if len(statuses) > 1 else statuses[0]
+
+    monkeypatch.setattr(clock, "RootChannel", Channel)
+    monkeypatch.setattr(clock.asyncio, "sleep", lambda s: _done())
+    assert (await clock.wait_shown(SimpleNamespace(), "c1"))["version"] == "b.2"
+    with pytest.raises(TimeoutError, match="didn't show config 'c9'"):
+        await clock.wait_shown(SimpleNamespace(), "c9", timeout_s=0)
+
+
+async def _done():
+    return None

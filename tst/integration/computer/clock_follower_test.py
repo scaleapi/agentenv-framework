@@ -4,8 +4,9 @@ desktop (the ubuntu-24.04 base, the reference driver and the ``clock`` app) depl
 ``sync_env_clock`` arms the gateway about 6 months back: core starts the computer's follower as root, the arm waits for
 it, and the session's shell and Python then read the gateway's universe time. An advance of a day and a re-arm at 60x
 reach them too, each acknowledged before its write returns. The session user can't write the clock page, read the
-follower's config or stop the follower, and a follower killed as root is back for the next write. Needs Docker and the
-local registry on localhost:5000."""
+follower's config or stop the follower, and a follower killed as root is back for the next write. A reset replaces the
+computer's container, and the reset is done once its new follower shows the clock. Needs Docker and the local registry
+on localhost:5000."""
 
 import asyncio
 import subprocess
@@ -24,6 +25,7 @@ from agent_env.store.routing import namespace_routing
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
+from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
 from agent_env.task_step.task_steps.sync_env_clock import SyncEnvClockTaskStep
 from tst.integration.env.envs.server_env_local_test import _put_items_image
 from tst.integration.store.local_parallel_deploy_test import _seed_bootstrap_envs
@@ -98,7 +100,7 @@ def items(clock_follower_desktop):
 
 
 @pytest.mark.asyncio
-async def test_a_multi_envs_computer_follows_its_gateways_clock_through_an_arm_an_advance_and_a_rate(
+async def test_a_multi_envs_computer_follows_its_gateways_clock_through_an_arm_an_advance_a_rate_and_a_reset(
         clock_follower_desktop, items):
     with namespace_routing():
         office = MultiEnv.put(id=f"@local/~/clock-{uuid.uuid4().hex[:8]}/office", mcp_server_envs=[items],
@@ -146,6 +148,12 @@ async def test_a_multi_envs_computer_follows_its_gateways_clock_through_an_arm_a
             await deployed.invoke(EXT_CLOCK_URI, "advance", {"virtual_time": _iso(target + 3 * DAY),
                                                              "wait_followers_s": 10})
             after_kill = await _agreement(computer, deployed)
+
+            # A reset replaces the computer's container, follower and all; it's done once the new one shows the clock.
+            old_container = container
+            await ResetEnvTaskStep(id="reset", version=None, env_id=office.id, fail_task_on_error=True).execute(context)
+            after_reset = await _agreement(computer, deployed)
+            new_container = _container(computer)
         finally:
             report = await teardown_run(context)
 
@@ -153,7 +161,8 @@ async def test_a_multi_envs_computer_follows_its_gateways_clock_through_an_arm_a
     assert abs(before["shell"] - real_before) < 5, before  # real time before the arm
     assert [s["service"] for s in configuration["synced"] if s["service"] == "clock"] == ["clock"], configuration
     assert arm_s < 30, arm_s
-    assert [read for read in (armed, advanced, after_kill) if not _agrees(read)] == []
+    assert [read for read in (armed, advanced, after_kill, after_reset) if not _agrees(read)] == []
+    assert new_container != old_container, "the reset didn't replace the computer's container"
     assert abs(armed["gateway"][0] - universe) < 60, (armed, universe)
     assert advanced["gateway"][0] - armed["gateway"][1] >= DAY, (armed, advanced)
     assert after_kill["gateway"][0] >= target + 3 * DAY, after_kill

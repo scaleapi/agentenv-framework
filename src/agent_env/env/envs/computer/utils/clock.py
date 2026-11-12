@@ -8,8 +8,10 @@ read token for its watch. ``sync_env_clock`` then calls ``start_follower`` for e
 clock, and sets it waiting for their acknowledgements."""
 from __future__ import annotations
 
+import asyncio
 import json
 import secrets
+import time
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
@@ -27,11 +29,15 @@ CONFIG_FOLDER = PurePosixPath("/etc/agentenv/clock-follower")
 CONFIG = CONFIG_FOLDER / "follower.json"
 #: The clock file's folder, where the follower also keeps its status.
 RUN_FOLDER = PurePosixPath("/run/agentenv-clock")
+#: What the follower last showed, which anyone may read.
+STATUS = RUN_FOLDER / "status.json"
 CLOCK = PurePosixPath("/opt/agentenv/clock")
 LOG = PurePosixPath("/var/log/agentenv/clock-follower.log")
 #: The ``sync_time`` param that carries the id of the config core wrote, which the clock app waits for its follower
 #: to show.
 CONFIG_PARAM = "follower_config"
+#: How long a write of the clock, or a computer's follower started again, waits for the computer to show it.
+FOLLOWER_WAIT_S = 10.0
 
 
 def follows_clock(card: dict | None) -> bool:
@@ -74,3 +80,20 @@ async def start_follower(sandbox: Sandbox, *, watch_url: str, token: str, follow
     # Detached from the exec, which returns at once; ``follow`` replaces a follower an earlier arm started.
     await channel.run(["sh", "-c", f"setsid {CLOCK / 'follow'} </dev/null >>{LOG} 2>&1 &"])
     return config_id
+
+
+async def wait_shown(sandbox: Sandbox, config_id: str, timeout_s: float = FOLLOWER_WAIT_S) -> dict:
+    """What the computer's follower showed once it has shown a version of the clock for ``config_id``, read as root;
+    TimeoutError naming its last status when it hasn't within ``timeout_s``."""
+    channel, deadline, status = RootChannel(sandbox), time.monotonic() + timeout_s, None
+    while True:
+        try:
+            status = json.loads(await channel.run(["sh", "-c", f"cat {STATUS} 2>/dev/null || true"]))
+        except json.JSONDecodeError:
+            status = None
+        if status and status.get("config_id") == config_id and status.get("version") and not status.get("error"):
+            return status
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"the clock follower didn't show config {config_id!r} within {timeout_s:g} s; its "
+                               f"status: {status}")
+        await asyncio.sleep(0.2)
