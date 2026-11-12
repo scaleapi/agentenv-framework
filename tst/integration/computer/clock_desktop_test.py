@@ -115,10 +115,12 @@ class _Clock:
         self.page = None
 
     def set(self, universe: float, rate: float) -> dict:
+        """The page written to ``universe`` at ``rate``: the write's own answer, its rate, and when it started."""
+        started = time.time()
         out = subprocess.run(["docker", "exec", "-u", "0", self.container, "python3", PAGE_WRITER, "set",
                               repr(universe), repr(rate)], capture_output=True, text=True, check=True).stdout
         self.page = ast.literal_eval(out.strip())
-        self.page["rate"] = rate
+        self.page.update(rate=rate, started=started)
         return self.page
 
     def advance(self, seconds: float) -> dict:
@@ -175,8 +177,9 @@ async def _chrome_time(deployed) -> int | None:
 
 
 async def _chrome_shows(deployed, written: dict, seconds: float = 10) -> float | None:
-    """How long after the write Chrome's page shows a time at or past it, or None if it doesn't within ``seconds``."""
-    start = time.time()
+    """How long after the write started Chrome's page shows a time at or past it, or None if it doesn't within
+    ``seconds``."""
+    start = written.get("started", time.time())
     while time.time() - start < seconds:
         shown = await _title(deployed)
         if shown and shown[0] >= written["universe_ns"] // 1_000_000:
