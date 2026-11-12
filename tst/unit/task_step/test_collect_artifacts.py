@@ -82,11 +82,6 @@ class TestSerialization:
         })
         assert step.env_id is None
 
-    def test_max_bytes_round_trips_and_defaults(self):
-        step = CollectArtifactsTaskStep.from_dict({"id": "c", "type": "collect_artifacts", "max_bytes": 4096})
-        assert CollectArtifactsTaskStep.from_dict(step.to_dict()).max_bytes == 4096
-        assert CollectArtifactsTaskStep.from_dict({"id": "c", "type": "collect_artifacts"}).max_bytes == 16 << 30
-
     def test_explicit_agent_name_and_env_id_raises(self):
         try:
             CollectArtifactsTaskStep(
@@ -540,24 +535,6 @@ class TestAgentContainerPath:
         sandbox.mode = "container"
         sandbox.exec_with_output = AsyncMock(side_effect=[(0, "81a4:0\n", ""), (0, "8180:4096\n", "")])
         assert [_run(step._get_file_size(sandbox, None, "/x")) for _ in range(2)] == [0, 4096]
-
-    def test_a_file_over_max_bytes_is_a_hard_failure_and_is_not_read(self):
-        step = CollectArtifactsTaskStep(
-            id="c", version=None, base_path="/app/artifact", artifact_paths=["disk.img"], max_bytes=1024,
-        )
-        sandbox = MagicMock()
-        sandbox.mode = "container"
-        sandbox.app_dir_on_this_machine = None
-        sandbox.exec_with_output = AsyncMock(return_value=(0, f"81a4:{8 << 40}\n", ""))
-        sandbox.exec = AsyncMock()
-        provider = MagicMock()
-        provider.close = AsyncMock()
-        ctx = TaskStepContext()
-        collected, _, hard_failures = _run(step._collect_items(
-            provider, sandbox, None, step._resolve_items(ctx), ctx, MagicMock(), "aid", 1,
-        ))
-        assert (collected, hard_failures) == ({}, ["/app/artifact/disk.img"])
-        sandbox.exec.assert_not_awaited()
 
     def test_unreachable_sandbox_is_clear_error(self):
         """A re-run targeting an expired/unreachable sandbox fails with a clear message."""
@@ -1021,19 +998,6 @@ class TestControllerChunkedRead:
                 assert False, "expected RuntimeError on a short read"
             except RuntimeError as e:
                 assert "refusing to upload a partial artifact" in str(e)
-
-    def test_a_file_over_max_bytes_is_refused_before_any_read(self):
-        step = CollectArtifactsTaskStep(id="c", version=None, env_id="ubuntu-cua", max_bytes=1024)
-        calls = []
-
-        async def call(deployed_env, tool_name, arguments):
-            calls.append(tool_name)
-            return json.dumps({"output": f"{8 << 40}\n", "error": "", "returncode": 0})
-
-        with patch.object(step, "_controller_call", side_effect=call), \
-             pytest.raises(RuntimeError, match="over the step's max_bytes of 1024"):
-            _run(step._controller_get_file(_cua_record(), "/x/sparse.img"))
-        assert calls == ["cua_bash"]
 
     @pytest.mark.parametrize("make, size", [
         (lambda p, tmp: p.write_bytes(b"hello"), 5),

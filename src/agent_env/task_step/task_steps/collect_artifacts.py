@@ -28,7 +28,7 @@ under a single base_path — outputs aren't guaranteed to live on the desktop /
 in /app — without assuming a common directory. base_path only applies to
 relative entries, to manifest entries and to the no-list enumeration fallback.
 
-Only regular files are read, up to `max_bytes` each. A local sandbox's host is
+Only regular files are read. A local sandbox's host is
 this machine, so there a file is read only where it resolves inside the
 sandbox's work dir, or inside a base_path the task names outside /app.
 
@@ -107,8 +107,6 @@ _CUA_ENV_METADATA_MARKER = "cua_vm_sandbox_id"
 # or under this size take that single-shot path; larger ones stream in fixed byte ranges via
 # cua_bash so no single call has to move the whole file.
 _CUA_SINGLE_SHOT_MAX = 16 * 1024 * 1024  # 16 MB
-# The largest file a step collects unless it sets max_bytes.
-_DEFAULT_MAX_BYTES = 16 << 30
 # A read is abandoned past this floor plus a second for each _READ_RATE_FLOOR bytes of the file.
 _READ_DEADLINE_FLOOR_S = 300
 _READ_RATE_FLOOR = 1 << 20
@@ -253,7 +251,6 @@ class CollectArtifactsTaskStep(TaskStep):
         sandbox_name: Optional[str] = None,
         container_name: Optional[str] = None,
         universe_id_suffix: Optional[str] = None,
-        max_bytes: int = _DEFAULT_MAX_BYTES,
         depends_on: Optional[list[TaskStepDependency]] = None,
         fail_task_on_error: bool = True,
     ):
@@ -298,7 +295,6 @@ class CollectArtifactsTaskStep(TaskStep):
         self.exclude_basenames = set(exclude_basenames or [])
         self.sandbox_name = sandbox_name
         self.container_name = container_name
-        self.max_bytes = max_bytes
 
     def to_dict(self) -> dict:
         base = super().to_dict()
@@ -312,7 +308,6 @@ class CollectArtifactsTaskStep(TaskStep):
         base["sandbox_name"] = self.sandbox_name
         base["container_name"] = self.container_name
         base["universe_id_suffix"] = self.universe_id_suffix
-        base["max_bytes"] = self.max_bytes
         return base
 
     @classmethod
@@ -329,7 +324,6 @@ class CollectArtifactsTaskStep(TaskStep):
             sandbox_name=data.get("sandbox_name"),
             container_name=data.get("container_name"),
             universe_id_suffix=data.get("universe_id_suffix"),
-            max_bytes=data.get("max_bytes", _DEFAULT_MAX_BYTES),
         )
 
     def _resolve_filenames(self, context: TaskStepContext) -> list[str]:
@@ -592,8 +586,6 @@ class CollectArtifactsTaskStep(TaskStep):
         size = await self._controller_file_size(deployed_env, path)
         if size < 0:
             raise FileNotFoundError(f"file not found on CUA VM: {path}")
-        if size > self.max_bytes:
-            raise RuntimeError(f"{path} is {size} bytes, over the step's max_bytes of {self.max_bytes}")
         with tempfile.NamedTemporaryFile(delete=False, suffix=f"-{os.path.basename(path)}") as tmp:
             local_path = tmp.name
         try:
@@ -941,8 +933,6 @@ class CollectArtifactsTaskStep(TaskStep):
                 if file_size < 0:
                     logger.warning(f"File not found: {source_path}")
                     continue
-                if file_size > self.max_bytes:
-                    raise RuntimeError(f"{source_path} is {file_size} bytes, over the step's max_bytes of {self.max_bytes}")
 
                 ext = os.path.splitext(object_name)[1]
                 content_type = _CONTENT_TYPES.get(ext, "application/octet-stream")
