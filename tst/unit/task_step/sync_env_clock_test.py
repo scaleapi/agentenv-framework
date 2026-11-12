@@ -469,3 +469,82 @@ async def test_a_multi_envs_computer_is_synced_at_its_own_address_with_its_own_c
 def test_a_padded_zone_is_stored_and_sent_stripped():
     s = _zoned(timezone=" America/New_York ")
     assert s.timezone == "America/New_York" and s.to_dict()["timezone"] == "America/New_York"
+
+
+_CLOCK_APP_EXT = {"uri": EXT_CLOCK_URI, "params": {"endpoint": "/agentenv/ext/sync_time", "methods": {"sync_time": {
+    "method": "POST", "request": {"type": "object", "properties": {"env_get_time_url": {"type": "string"},
+                                                                    "follower_config": {"type": "string"}}}}}}}
+
+
+async def _clock_desktop(monkeypatch, start):
+    """A multi env whose computer, desktop, composes the clock app; ``start`` stands in for starting its follower."""
+    import dataclasses
+
+    from agent_env.env.env import DeployedSandboxEnv
+    from agent_env.env.envs.computer.utils import clock
+    from agent_env.env.gateway.constants import WELL_KNOWN_PATH
+
+    computer = DeployedSandboxEnv(env_id="desk", env_version=1, sandbox_id="sb-desk", control_token="desk-token",
+                                  environment_card_url=f"https://desk.example{WELL_KNOWN_PATH}",
+                                  environment_card={"name": "desktop", "url": "/agentenv",
+                                                    "capabilities": {"extensions": []},
+                                                    "children_environments": [{
+                                                        "name": "clock", "url": "/svc/clock/agentenv",
+                                                        "capabilities": {"extensions": [_CLOCK_APP_EXT]}}]})
+    record = dataclasses.replace(_carded(await _composed_card({"mcp-email": [_CLOCK_EXT]})),
+                                 control_token="gateway-token", child_envs={"desktop": dataclasses.asdict(computer)})
+    sandbox = SimpleNamespace(url_from_sandbox=lambda url: url.replace("http://gw", "http://host.docker.internal:7"))
+
+    async def reattach(deployed):
+        return SimpleNamespace(_sandbox=sandbox)
+
+    monkeypatch.setattr("agent_env.env.envs.computer.env.ComputerEnv.from_deployed_env", reattach)
+    monkeypatch.setattr(clock, "start_follower", start)
+    monkeypatch.setattr("agent_env.env.env.Env.get", lambda *a, **k: SimpleNamespace(
+        mcp_server_envs=[SimpleNamespace(environment_name="email")], website_envs=[]))
+    return record
+
+
+@pytest.mark.asyncio
+async def test_a_computer_with_the_clock_app_follows_before_the_arm_which_waits_for_it(monkeypatch):
+    events = []
+    sent = _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL})
+
+    async def start(sandbox, **config):
+        events.append(("start", config))
+        return "config-1"
+
+    record = await _clock_desktop(monkeypatch, start)
+    context = await _step().execute(TaskStepContext(deployed_envs=[record]))
+
+    arm = next(r for r in sent if r.url.path.endswith("/clock/set-time"))
+    assert events == [("start", {"watch_url": "http://host.docker.internal:7/clock/watch", "token": "desk-token",
+                                 "follower": "desktop"})]
+    assert json.loads(arm.content)["wait_followers_s"] == mod.FOLLOWER_WAIT_S
+    app_sync = next(r for r in sent if r.url.path.endswith("/sync_time") and "desk.example" in str(r.url))
+    assert json.loads(app_sync.content) == {"env_get_time_url": CLOCK_URL, "follower_config": "config-1"}
+    synced = {s["service"] for s in context.metadata["clock_configurations"][0]["synced"]}
+    assert synced == {"email", "clock"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tolerate", [True, False])
+async def test_a_follower_that_cannot_start_fails_the_step_or_is_reported_and_not_waited_for(monkeypatch, tolerate):
+    sent = _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL})
+
+    async def start(sandbox, **config):
+        raise RuntimeError("site routing installs as root, and the given sandbox runs the computer's commands as uid 1000")
+
+    record = await _clock_desktop(monkeypatch, start)
+    if not tolerate:
+        with pytest.raises(RuntimeError, match="computer 'desktop' follows the clock, but its follower couldn't start"):
+            await _step(tolerate_missing_sync_time=False).execute(TaskStepContext(deployed_envs=[record]))
+        assert not [r for r in sent if r.url.path.endswith("/clock/set-time")]
+        return
+    context = await _step().execute(TaskStepContext(deployed_envs=[record]))
+
+    arm = next(r for r in sent if r.url.path.endswith("/clock/set-time"))
+    assert "wait_followers_s" not in json.loads(arm.content)
+    assert not [r for r in sent if r.url.path.endswith("/sync_time") and "desk.example" in str(r.url)]
+    skipped = {s["service"]: s for s in context.metadata["clock_configurations"][0]["skipped"]}
+    assert skipped["clock"]["reason"] == "follower_not_started" and "uid 1000" in skipped["clock"]["detail"]

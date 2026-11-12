@@ -313,11 +313,25 @@ async def test_deploy_hands_the_gateway_each_computer_deployed_under_its_name_an
 
 
 def test_a_computer_whose_card_follows_a_clock_hands_the_gateway_its_control_token_as_its_read_token():
-    from agent_env.env.envs._multi_computers import _clock_read_token
+    from agent_env.env.envs._multi_computers import clock_read_token
 
     following = dataclasses.replace(_record("desktop"), environment_card={"name": "desktop", "capabilities": {"extensions": [
         {"uri": "urn:agentenv:clock/v1", "params": {"methods": {"sync_time": {"method": "POST", "endpoint": "/clock/sync"}}}}]}})
-    assert (_clock_read_token(following), _clock_read_token(_record("laptop"))) == ("token-desktop", None)
+    assert (clock_read_token(following), clock_read_token(_record("laptop"))) == ("token-desktop", None)
+
+
+def test_a_computer_composing_the_clock_app_follows_the_clock_through_its_apps_card():
+    from agent_env.env.envs._multi_computers import clock_read_token
+
+    clock_app = {"name": "clock", "url": "/svc/clock", "capabilities": {"extensions": [
+        {"uri": "urn:agentenv:clock/v1", "params": {"methods": {"sync_time": {"method": "POST", "endpoint": "/x"}}}}]}}
+    other_app = {"name": "chromium", "url": "/svc/chromium", "capabilities": {"extensions": []}}
+    card = {"name": "desktop", "capabilities": {"extensions": []}}
+    composing = dataclasses.replace(_record("desktop"), environment_card={
+        **card, "children_environments": [clock_app]})
+    without = dataclasses.replace(_record("desktop"), environment_card={
+        **card, "children_environments": [other_app]})
+    assert (clock_read_token(composing), clock_read_token(without)) == ("token-desktop", None)
 
 
 @pytest.mark.asyncio

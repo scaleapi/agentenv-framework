@@ -18,6 +18,10 @@ import httpx
 import tzdata  # noqa: F401
 from agentenv_protocol import client as protocol_v1
 
+from agent_env.env.env import DeployedEnv, gateway_url_of
+from agent_env.env.envs._multi_computers import clock_read_token
+from agent_env.env.envs.computer.env import ComputerEnv
+from agent_env.env.envs.computer.utils import clock
 from agent_env.env.gateway.constants import EXT_CLOCK_URI
 from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef
@@ -27,6 +31,9 @@ if TYPE_CHECKING:
     from agent_env.env.legacy_protocol import BackingServer
 
 logger = logging.getLogger(__name__)
+
+#: How long the arm waits for the computers that follow the clock to show it; a computer still behind fails the step.
+FOLLOWER_WAIT_S = 10.0
 
 
 def resolve_virtual_time(virtual_time: str, timezone: Optional[str]) -> str:
@@ -125,10 +132,13 @@ class SyncEnvClockTaskStep(TaskStep):
         deployed = next((d for d in context.deployed_envs if d.env_id == self.env_id), None)
         if deployed is None:
             raise StepContextError(f"Env '{self.env_id}' not found in context.deployed_envs")
+        followers, unstarted = await self._start_followers(deployed)
+        arm = {"virtual_time": self.armed_virtual_time, "virtual_seconds_per_real_second": self.virtual_seconds_per_real_second}
+        if followers and not unstarted:
+            arm["wait_followers_s"] = FOLLOWER_WAIT_S
         try:
-            await deployed.invoke(EXT_CLOCK_URI, "set_time",
-                                  {"virtual_time": self.armed_virtual_time, "virtual_seconds_per_real_second": self.virtual_seconds_per_real_second},
-                                  timeout=self.timeout_seconds)
+            await deployed.invoke(EXT_CLOCK_URI, "set_time", arm,
+                                  timeout=self.timeout_seconds + (FOLLOWER_WAIT_S if followers else 0))
         except httpx.HTTPStatusError as e:
             raise RuntimeError(f"clock arm failed (HTTP {e.response.status_code}): {e.response.text}") from e
         state = await deployed.invoke(EXT_CLOCK_URI, "state", timeout=self.timeout_seconds)
@@ -139,7 +149,7 @@ class SyncEnvClockTaskStep(TaskStep):
             service = server.environment_name
             outcome = await self._sync_one(server.owner(deployed), gateway_url_of(deployed), service, env_get_time_url,
                                            mcp=server.mcp, tolerate=self.tolerate_missing_sync_time or not server.mcp,
-                                           server=server)
+                                           server=server, followers=followers, unstarted=unstarted)
             entry = {"service": service, "environment": service, **({} if server.mcp else {"website": True}), **outcome}
             (synced if outcome.get("synced") else skipped).append(entry)
 
@@ -158,8 +168,33 @@ class SyncEnvClockTaskStep(TaskStep):
                            f"({[(s['service'], s.get('reason')) for s in skipped]}) — every tool still answers wall time")
         return context
 
+    async def _start_followers(self, deployed) -> tuple[dict[str, str], dict[str, str]]:
+        """Configure and start, as root, the clock follower of each of ``deployed``'s computers that follows the clock
+        (``computer.utils.clock``): the config id each was given, by the computer's address, and why each that
+        couldn't start didn't, which fails the step unless ``tolerate_missing_sync_time``."""
+        started, unstarted = {}, {}
+        gateway = (gateway_url_of(deployed) or "").rstrip("/")
+        for name, data in (getattr(deployed, "child_envs", None) or {}).items():
+            record = DeployedEnv.from_dict(data)
+            if not clock.runs_follower(record.environment_card) or (token := clock_read_token(record)) is None:
+                continue
+            try:
+                sandbox = (await ComputerEnv.from_deployed_env(record))._sandbox
+                watch_url = sandbox.url_from_sandbox(f"{gateway}/clock/watch")
+                started[record.environment_url] = await clock.start_follower(sandbox, watch_url=watch_url, token=token,
+                                                                             follower=name)
+                logger.info(f"sync_env_clock env={self.env_id}: computer {name!r} follows the clock at {watch_url}")
+            except Exception as e:
+                if not self.tolerate_missing_sync_time:
+                    raise RuntimeError(f"computer {name!r} follows the clock, but its follower couldn't start: {e}") from e
+                logger.warning(f"sync_env_clock env={self.env_id}: computer {name!r}'s clock follower couldn't start, "
+                               f"so the arm doesn't wait for computers: {e}")
+                unstarted[record.environment_url] = f"{type(e).__name__}: {e}"
+        return started, unstarted
+
     async def _sync_one(self, deployed, gateway_url: str, service: str, env_get_time_url: Optional[str], mcp: bool = True,
-                        tolerate: Optional[bool] = None, server: Optional[BackingServer] = None) -> dict:
+                        tolerate: Optional[bool] = None, server: Optional[BackingServer] = None,
+                        followers: Optional[dict[str, str]] = None, unstarted: Optional[dict[str, str]] = None) -> dict:
         """Invoke sync_time on one server, an MCP server or with ``mcp=False`` a website, if its card advertises
         clock/v1; skip a server with no card or no clock/v1 when ``tolerate`` (tolerate_missing_sync_time by default),
         else raise. ``execute`` tolerates every website, so one that doesn't follow the clock never fails the step; one
@@ -185,6 +220,14 @@ class SyncEnvClockTaskStep(TaskStep):
         if not env_get_time_url:
             raise RuntimeError(f"gateway did not expose env_get_time_url; cannot sync {service}")
         params = {"env_get_time_url": env_get_time_url}
+        record = getattr(server, "record", None)
+        if record is not None and clock.takes_config(card):
+            if (config_id := (followers or {}).get(record.environment_url)) is None:
+                why = (unstarted or {}).get(record.environment_url, "its computer isn't one the gateway counts as a follower")
+                if tolerate:
+                    return {"synced": False, "reason": "follower_not_started", "detail": why}
+                raise RuntimeError(f"{service} follows the clock, but its computer's follower didn't start: {why}")
+            params[clock.CONFIG_PARAM] = config_id
         if self.timezone is not None:
             method = protocol_v1.find_extension_method(card, EXT_CLOCK_URI, "sync_time") or {}
             if "timezone" not in ((method.get("request") or {}).get("properties") or {}):
