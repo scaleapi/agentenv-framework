@@ -149,8 +149,8 @@ async def _typed_and_saved(deployed, cls: str, text: str) -> None:
         async with ClientSession(read, write) as session:
             await session.initialize()
             await session.call_tool("computer_screenshot", {})
-            for call, args in (("computer_click", {"x": x, "y": y}), ("computer_key", {"keys": ["ctrl", "End"]}),
-                               ("computer_type", {"text": text}), ("computer_key", {"keys": ["ctrl", "s"]})):
+            for call, args in (("computer_click", {"x": x, "y": y}), ("computer_key", {"keys": ["Control", "End"]}),
+                               ("computer_type", {"text": text}), ("computer_key", {"keys": ["Control", "s"]})):
                 done = await session.call_tool(call, args)
                 assert not done.isError, done
                 await asyncio.sleep(0.5)
