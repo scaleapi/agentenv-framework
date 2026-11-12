@@ -4,12 +4,16 @@ test bundle's, the TLS clients test bundle's, the clock desktop test bundle's an
 composed once for a module's tests;
 ``state``, local stores for a test that runs a bundle; each of these stores starts with the packages the run has resolved
 (``tst.util.package_cache``); ``docker``, which runs the docker CLI for them; and
-``cdp_clients``, Playwright and Puppeteer installed to connect to a CDP address."""
+``cdp_clients``, Playwright and Puppeteer installed to connect to a CDP address. A compose's build of an image waits for
+another test worker's build of the same tag."""
 
+import fcntl
+import hashlib
 import logging
 import re
 import shutil
 import subprocess
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -24,6 +28,7 @@ from agent_env.bundle.plan import plan_bundle
 from agent_env.bundle.resolve import BuiltImage, resolve_bundle
 from agent_env.config import configure, reset_config
 from agent_env.env import Env
+from agent_env.env.envs.computer.utils import builder
 from agent_env.providers.sandbox_providers.host_images import host_platform
 from agent_env.store.object_store.local.grant_server import grant_server
 from agent_env.store.routing import namespace_routing
@@ -43,6 +48,23 @@ CLOCK_RECIPE = Path(agent_env.__file__).parent / "computers" / "clock"
 #: Playwright and Puppeteer, which connect to a cdp address from Node.
 CDP_CLIENTS = Path(__file__).parent / "cdp_clients"
 CHROMIUM_ALONE = "@local/agentenv-framework/browsers/chromium"
+
+
+@pytest.fixture(scope="session", autouse=True)
+def one_build_of_a_tag_at_a_time():
+    """Test workers share one Docker daemon, and two composes of the same computer in stores of their own build the
+    same tag, which fails with "image ... already exists" when both builds finish at once, so they take turns."""
+    built = builder.build_image
+
+    def build_image(dockerfile, context, tag, **kwargs):
+        lock = Path(tempfile.gettempdir()) / f"agentenv-test-build-{hashlib.sha256(tag.encode()).hexdigest()[:16]}.lock"
+        with open(lock, "w") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            return built(dockerfile, context, tag, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(builder, "build_image", build_image)
+        yield
 
 
 @pytest.fixture(scope="session")
