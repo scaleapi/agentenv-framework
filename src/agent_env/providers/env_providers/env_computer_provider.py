@@ -24,7 +24,7 @@ from agent_env.env.envs.computer.utils import composer
 from agent_env.env.envs.computer.utils import params as computer_params
 from agent_env.env.envs.computer.utils.install import platform_of
 from agent_env.env.envs.computer.utils.probing import probe_first_boot
-from agent_env.env.envs.computer.utils import sites
+from agent_env.env.envs.computer.utils import clock as computer_clock, sites
 from agent_env.env.envs.computer.utils.boot import (
     app_settings_environment,
     boot,
@@ -140,6 +140,12 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         if routed := await _finish_boot(env, record, sandbox, params, valid_for_s, computer.get("display")):
             computer["sites"] = routed
 
+    async def follow_clock(self, record: DeployedSandboxEnv, gateway_url: str, name: str) -> None:
+        """Have the computer ``record`` names follow the clock of the gateway at ``gateway_url`` as ``name``: its
+        follower's config written through the root channel; its record then keeps it, so a reset writes it again."""
+        sandbox = await build_sandbox_provider(record.sandbox_type).get_sandbox(record.sandbox_id)
+        await computer_clock.configure(sandbox, record, gateway_url, name)
+
     async def install_changelog_triggers(self, environment_name: str) -> None:
         """No state store, so no changelog to install."""
 
@@ -247,10 +253,12 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
 async def _finish_boot(env: ComputerEnv, record: DeployedSandboxEnv, sandbox: Sandbox,
                        params: computer_params.ComputerParams, valid_for_s: int,
                        resolution: Optional[str]) -> Optional[dict]:
-    """What a deploy and a reset do once the computer's driver answers, in order: with ``site_routing``, the sites
-    routed, each browser handed their names and the held boot apps launched, the computer then ready; then its display
-    checked; then each browser's start tabs read into the record, the boot failing on one on a site of the env's that
-    didn't load. What the record keeps of the routing, or None without it."""
+    """What a deploy and a reset do once the computer's driver answers, in order: the clock follower's config written
+    again when the record keeps one (a reset's); with ``site_routing``, the sites routed, each browser handed their
+    names and the held boot apps launched, the computer then ready; then its display checked; then each browser's start
+    tabs read into the record, the boot failing on one on a site of the env's that didn't load. What the record keeps of
+    the routing, or None without it."""
+    await computer_clock.reconfigure(sandbox, record)
     routed = None
     if params.site_routing:
         routed = await _route_sites(env, sandbox, params, valid_for_s,

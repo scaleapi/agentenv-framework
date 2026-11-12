@@ -15,9 +15,11 @@ import shutil
 import subprocess
 import tempfile
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
+
+from agentenv_protocol.computer.clock import FOLLOWER, FOLLOWER_USER
 
 import agent_env
 from agent_env.artifact.store import reset_artifact_store
@@ -28,11 +30,15 @@ from agent_env.bundle.plan import plan_bundle
 from agent_env.bundle.resolve import BuiltImage, resolve_bundle
 from agent_env.config import configure, reset_config
 from agent_env.env import Env
+from agent_env.env.envs.mcp_server import MCPServerEnv
+from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.envs.computer.utils import builder
 from agent_env.providers.sandbox_providers.host_images import host_platform
 from agent_env.store.object_store.local.grant_server import grant_server
 from agent_env.store.routing import namespace_routing
 from agent_env.task.store import get_task_instance_store
+from tst.integration.env.envs.server_env_local_test import _put_items_image
+from tst.integration.store.local_parallel_deploy_test import _seed_bootstrap_envs
 from tst.util import package_cache
 from tst.util.published_image import pull_published_else_build
 
@@ -43,8 +49,6 @@ WEBSITE_BROWSER = Path(__file__).parent / "website-browser"
 BROWSER_COMPUTER = Path(__file__).parent / "browser-computer"
 TLS = Path(__file__).parent / "tls"
 CLOCK_DESKTOP = Path(__file__).parent / "clock-desktop"
-#: agent-env's libfaketime recipe, which the clock desktop's universe-clock app builds.
-CLOCK_RECIPE = Path(agent_env.__file__).parent / "computers" / "clock"
 #: Playwright and Puppeteer, which connect to a cdp address from Node.
 CDP_CLIENTS = Path(__file__).parent / "cdp_clients"
 CHROMIUM_ALONE = "@local/agentenv-framework/browsers/chromium"
@@ -123,15 +127,9 @@ def tls_desktop(tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def clock_desktop(tmp_path_factory):
-    """The clock desktop test bundle's desktop, the ubuntu-24.04 base and the reference driver with agentenv's chromium
-    and the universe-clock app, which builds agent-env's libfaketime from a copy of its recipe and preloads it into every
-    process; composed as ``desktop`` is."""
-    root = tmp_path_factory.mktemp("clock-desktop")
-    bundle = root / "bundle"
-    shutil.copytree(CLOCK_DESKTOP, bundle)
-    shutil.copytree(CLOCK_RECIPE, bundle / "envs" / "universe-clock" / "clock",
-                    ignore=shutil.ignore_patterns("__pycache__"))
-    yield from _composed(root, parse_bundle(bundle))
+    """The clock desktop test bundle's desktop, the ubuntu-24.04 base, whose every process loads agent-env's
+    libfaketime, and the reference driver with agentenv's chromium and curl; composed as ``desktop`` is."""
+    yield from _composed(tmp_path_factory.mktemp("clock-desktop"), parse_bundle(CLOCK_DESKTOP))
 
 
 @pytest.fixture(scope="module")
@@ -203,3 +201,81 @@ def run_context(output: str) -> dict:
     """The context of the run whose ``agent-env run`` output ``output`` is."""
     with namespace_routing():
         return get_task_instance_store().get(re.search(r"instance (@local/.+)$", output, re.M).group(1)).context
+
+
+#: What root runs: tini, the init it started, which is root's supervisord, and the ps that lists them.
+ROOTS = ("/usr/bin/tini -- /usr/local/bin/start-desktop init",
+         "/usr/bin/python3 /usr/bin/supervisord -c /etc/supervisor/root.conf", "ps -eo user:32=,args=")
+#: The clock page's writer, which the base installs beside the follower.
+PAGE_WRITER = str(PurePosixPath(FOLLOWER).parent / "clockpage.py")
+
+
+def process_owners(name: str) -> dict[str, list[str]]:
+    """Each process's command line in the container ``name``, by the user that runs it."""
+    owners: dict[str, list[str]] = {}
+    for line in _exec_text(name, "ps", "-eo", "user:32=,args=").splitlines():
+        user, _, args = line.strip().partition(" ")
+        owners.setdefault(user, []).append(args.strip())
+    return owners
+
+
+def only_session_and_clock(owners: dict[str, list[str]]) -> bool:
+    """Whether root runs nothing but its init and supervisord, the clock's user nothing but the follower, and every
+    other process is the session user's."""
+    assert set(owners) == {"root", FOLLOWER_USER, "user"}, owners
+    assert all(args in ROOTS for args in owners["root"]), owners["root"]
+    assert owners[FOLLOWER_USER] == [f"/usr/bin/python3 -I {FOLLOWER}"], owners[FOLLOWER_USER]
+    return True
+
+
+def _exec_text(name: str, *argv: str) -> str:
+    return subprocess.run(["docker", "exec", name, *argv], check=True, capture_output=True, text=True).stdout
+
+
+#: Kills the follower and times it until another runs, inside the container, as root, polling every 20 ms: prints the
+#: pid killed, the pid back, and the seconds between.
+_KILL_FOLLOWER = """import os, signal, subprocess, sys, time
+def running():
+    return subprocess.run(["pgrep", "-u", sys.argv[2], "-f", sys.argv[1]], capture_output=True, text=True).stdout.strip()
+killed = running()
+os.kill(int(killed), signal.SIGKILL)
+start = time.monotonic()
+while (back := running()) in ("", killed) and time.monotonic() - start < 10:
+    time.sleep(0.02)
+print(killed, back or "-", time.monotonic() - start)
+"""
+
+
+#: How soon supervisord has a killed follower back: it notices the exit when it next wakes, up to a second later,
+#: and the follower starts Python; on a CI runner busy with other tests that has taken 2.03 s.
+FOLLOWER_BACK_S = 3
+
+
+def kill_follower(name: str) -> tuple[str, str, float]:
+    """The clock follower in the container ``name`` killed with SIGKILL: its pid, the pid of the one back ("-" if
+    none within 10 s), and how long that took, timed in the container."""
+    killed, back, took = subprocess.run(["docker", "exec", "-u", "0", name, "python3", "-c", _KILL_FOLLOWER, FOLLOWER,
+                                         FOLLOWER_USER],
+                                        check=True, capture_output=True, text=True).stdout.split()
+    return killed, back, float(took)
+
+
+#: A multi env's computer on the local backend in its container form, as its child_envs entry gives it.
+CONTAINER = {"sandbox_type": "local", "env_params": {"form": "container"}}
+
+
+@pytest.fixture(scope="module")
+def items(desktop):
+    """The gateway's and service-db's envs, and the items MCP server under a local id, since a multi env naming the
+    desktop's local id must be local too and a store's id can't reference a local one."""
+    with namespace_routing():
+        _seed_bootstrap_envs()
+        uid = uuid.uuid4().hex[:8]
+        return MCPServerEnv.put(id=f"@local/~/office-{uid}/items", environment_name="items",
+                                docker_image_artifact=_put_items_image(f"office-items-{uid}"))
+
+
+def multi_env(items, *computers, websites=()) -> MultiEnv:
+    """A multi env named office of the ``items`` MCP server, ``websites`` and ``computers``, under a local id."""
+    return MultiEnv.put(id=f"@local/~/office-{uuid.uuid4().hex[:8]}/office", mcp_server_envs=[items],
+                        website_envs=list(websites), computer_envs=list(computers), name="office")

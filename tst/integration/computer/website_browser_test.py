@@ -44,7 +44,8 @@ from agent_env.task_step.task_steps.browser.base import find_browser
 from agent_env.task_step.task_steps.browser.sign_in import BrowserSignInTaskStep
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
-from tst.integration.computer.multi_env_computers_test import CONTAINER, _image
+from tst.integration.computer.conftest import CONTAINER
+from tst.integration.computer.multi_env_computers_test import _image
 from tst.integration.store.local_parallel_deploy_test import _seed_bootstrap_envs
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]

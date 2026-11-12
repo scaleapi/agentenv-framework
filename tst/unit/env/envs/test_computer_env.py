@@ -121,9 +121,24 @@ def test_a_computer_env_is_composed_for_each_arch_and_written_with_the_computer_
     assert composed["arm64"]["lock"].startswith("sha256:") and composed["arm64"]["lock"] != composed["amd64"]["lock"]
     assert arm64["conf"] == (
         "[program:driver-desk-driver]\ncommand=/opt/agentenv/drivers/desk/venv/bin/python -m agentenv_protocol.computer.serve "
-        'driver.py:Desk\ndirectory=/opt/agentenv/drivers/desk\nenvironment=MCP_PORT="18765"\nautorestart=true\n'
+        'driver.py:Desk\ndirectory=/opt/agentenv/drivers/desk\nenvironment=MCP_PORT="18765",AGENTENV_REAL_TIME="1"\n'
+        'autorestart=true\n'
         "redirect_stderr=true\nstdout_logfile=/var/log/agentenv/driver-desk-driver.log\n")
     assert ComputerEnv.from_dict(stored.to_dict()).to_dict() == stored.to_dict()
+
+
+def test_a_base_whose_container_form_starts_as_root_composes_an_image_that_starts_as_root(base, driver, docker):
+    image = base.image()
+    rooted = _base(image, forms={"container": {"image": {"id": image.id, "version": image.version}, "init": "supervisord",
+                                               "input_channel": "env", "start_as": "root"}})
+
+    _put(rooted, driver)
+
+    composed = Env.get("@local/~/kit/desktop").metadata["computer"]
+    assert ComputerArtifact.get(rooted.id, rooted.version).forms.container.start_as == "root"
+    assert ComputerArtifact.get(composed["id"], composed["version"]).forms.container.start_as == "root"
+    assert all(build["dockerfile"].splitlines()[-2] == "USER root" for build in docker.builds)
+    assert "start_as" not in base.model_dump()["forms"]["container"]
 
 
 def test_a_key_covers_its_build_files_executable_bits_and_the_composers_format(base, driver, docker, tmp_path,

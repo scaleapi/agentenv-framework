@@ -2546,7 +2546,7 @@ Platform-specific native binaries that npm installs for the machine running the 
 
 ## libfaketime
 
-`src/agent_env/computers/clock/` holds agent-env's changes to [libfaketime](https://github.com/wolfcw/libfaketime)
+`src/agent_env/computers/artifacts/ubuntu-24.04/clock/` holds agent-env's changes to [libfaketime](https://github.com/wolfcw/libfaketime)
 0.9.12: `libfaketime.patch`, `agentenv_clock_page.c` and `agentenv_clock_waits.c`. Being derived from libfaketime,
 those three files are licensed as it is, under the GNU General Public License version 2 (`GPL-2.0-only`); the folder's
 `COPYING` is that license's text. libfaketime's own source is not in the repository: the folder's `build.sh` downloads
