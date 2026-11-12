@@ -50,6 +50,7 @@ def _builtin_registry() -> dict[str, type["TaskStep"]]:
     from agent_env.task_step.task_steps.deploy_human_agent import DeployHumanAgentTaskStep
     from agent_env.task_step.task_steps.deploy_sandbox import DeploySandboxTaskStep
     from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
+    from agent_env.task_step.task_steps.apply_sql import ApplySqlTaskStep
     from agent_env.task_step.task_steps.teardown_sandboxes import TeardownSandboxesTaskStep
     from agent_env.task_step.task_steps.verifiers.env_outcome_verifier import EnvOutcomeVerifierTaskStep
     from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
@@ -116,6 +117,7 @@ def _builtin_registry() -> dict[str, type["TaskStep"]]:
         _get_type(DeployHumanAgentTaskStep): DeployHumanAgentTaskStep,
         _get_type(DeploySandboxTaskStep): DeploySandboxTaskStep,
         _get_type(ResetEnvTaskStep): ResetEnvTaskStep,
+        _get_type(ApplySqlTaskStep): ApplySqlTaskStep,
         _get_type(TeardownSandboxesTaskStep): TeardownSandboxesTaskStep,
         _get_type(EnvOutcomeVerifierTaskStep): EnvOutcomeVerifierTaskStep,
         _get_type(LoadArtifactTaskStep): LoadArtifactTaskStep,
