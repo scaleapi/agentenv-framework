@@ -23,8 +23,9 @@ class FakeNow:
 class _GatewayEnv:
     """A deployed env whose clock/v1 calls reach a real gateway Clock, answering a refused write as the gateway does."""
 
-    def __init__(self, clock: Clock, env_id: str = "e1"):
+    def __init__(self, clock: Clock, env_id: str = "e1", deploy_step_id: str = "deploy-e1"):
         self.env_id = env_id
+        self.metadata = {"deploy_step_id": deploy_step_id}
         self.clock = clock
         self.calls: list[tuple[str, dict]] = []
 
@@ -40,6 +41,21 @@ class _GatewayEnv:
             request = httpx.Request("PUT", "http://gw/clock/set-rate")
             raise httpx.HTTPStatusError("400", request=request, response=httpx.Response(400, text=str(e), request=request))
         raise AssertionError(method)
+
+
+class _RefusingEnv:
+    """A deployed env whose gateway refuses every clock/v1 write with ``response``."""
+
+    env_id = "e1"
+    metadata = {"deploy_step_id": "deploy-e1"}
+
+    def __init__(self, response: httpx.Response):
+        self.response = response
+
+    async def invoke(self, uri, method, params=None, timeout=None):
+        request = httpx.Request("PUT", "http://gw/clock/set-rate")
+        self.response.request = request
+        raise httpx.HTTPStatusError("refused", request=request, response=self.response)
 
 
 def _step(rate, **kw):
@@ -99,3 +115,54 @@ async def test_an_env_not_deployed_fails_the_step():
 def test_a_negative_rate_is_refused_at_load():
     with pytest.raises(ValueError, match="non-negative"):
         _step(-1)
+
+
+@pytest.mark.asyncio
+async def test_env_step_id_stops_the_clock_of_the_deployment_it_names():
+    first, first_now = _armed(rate=1.0)
+    second, second_now = _armed(rate=1.0)
+    envs = [_GatewayEnv(first, deploy_step_id="deploy-a"), _GatewayEnv(second, deploy_step_id="deploy-b")]
+    await _step(0, env_step_id="deploy-b").execute(TaskStepContext(deployed_envs=envs))
+    first_now.t += 60
+    second_now.t += 60
+    assert first.read() == {"virtual_time": "2026-07-01T22:01:00Z"}
+    assert second.read() == {"virtual_time": T0}
+
+
+@pytest.mark.asyncio
+async def test_two_deployments_of_the_env_without_env_step_id_fail_the_step():
+    envs = [_GatewayEnv(_armed(1.0)[0], deploy_step_id="deploy-a"), _GatewayEnv(_armed(1.0)[0], deploy_step_id="deploy-b")]
+    with pytest.raises(RuntimeError, match="2 deployments of env 'e1'"):
+        await _step(0).execute(TaskStepContext(deployed_envs=envs))
+    assert all(env.calls == [] for env in envs)
+
+
+@pytest.mark.asyncio
+async def test_an_env_step_id_naming_no_deployment_fails_the_step():
+    env = _GatewayEnv(_armed(1.0)[0], deploy_step_id="deploy-a")
+    with pytest.raises(RuntimeError, match="names no deployment"):
+        await _step(0, env_step_id="deploy-z").execute(TaskStepContext(deployed_envs=[env]))
+    assert env.calls == []
+
+
+def test_env_step_id_round_trips():
+    assert SetEnvClockRateTaskStep.from_dict(_step(0, env_step_id="deploy-b").to_dict()).env_step_id == "deploy-b"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_rate_change_reports_the_gateway_error_bounded():
+    body = {"ok": False, "error": "clock is not armed " + "x" * 5000, "detail": "y" * 5000}
+    with pytest.raises(RuntimeError) as raised:
+        await _step(0).execute(TaskStepContext(deployed_envs=[_RefusingEnv(httpx.Response(400, json=body))]))
+    message = str(raised.value)
+    assert message.startswith("clock rate change failed (HTTP 400): clock is not armed")
+    assert "y" not in message and len(message) < 400
+
+
+@pytest.mark.asyncio
+async def test_a_non_json_refusal_is_reported_bounded():
+    with pytest.raises(RuntimeError) as raised:
+        await _step(0).execute(TaskStepContext(deployed_envs=[_RefusingEnv(httpx.Response(502, text="<html>" + "z" * 5000))]))
+    message = str(raised.value)
+    assert message.startswith("clock rate change failed (HTTP 502): <html>")
+    assert len(message) < 400
