@@ -18,6 +18,7 @@ from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Optional
 
 import httpx
+from agentenv_protocol.client import ExtensionCallError
 from agentenv_protocol.computer.clock import CONFIG, FOLLOWER_USER
 
 from agent_env.env.envs.computer.utils.sites import RootChannel
@@ -66,23 +67,12 @@ async def _following(record: DeployedEnv, watch_url: str) -> None:
     try:
         await record.invoke(EXT_CLOCK_URI, "sync_time",
                             {"env_get_time_url": watch_url.removesuffix(WATCH_PATH) + TIME_PATH}, timeout=30)
-    except httpx.HTTPStatusError as e:
+    except ExtensionCallError as e:
         logger.warning(f"{record.env_id}: its clock follower doesn't follow the gateway at {watch_url}, so its "
-                       f"session reads real time until it does: {_reason(e.response)}")
+                       f"session reads real time until it does: {str(e)[:600]}")
     except httpx.HTTPError as e:
         logger.warning(f"{record.env_id}: couldn't ask whether its clock follower follows the gateway at {watch_url}: "
                        f"{type(e).__name__}: {e}")
-
-
-def _reason(response: httpx.Response) -> str:
-    """The status of the computer's refusal and its error's code and message, as its SDK answers one."""
-    try:
-        error = response.json().get("error") or {}
-    except ValueError:
-        error = {}
-    if not isinstance(error, dict):
-        error = {}
-    return f"{response.status_code} {error.get('code', '')}: {str(error.get('message', ''))[:500]}"
 
 
 async def _write(sandbox: Sandbox, config: dict) -> None:

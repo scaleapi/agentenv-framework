@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
+from agentenv_protocol.client import ExtensionCallError
 from agentenv_protocol.computer.clock import CONFIG
 
 from agent_env.env.env import DeployedSandboxEnv
@@ -78,7 +79,7 @@ async def test_a_follower_that_cant_follow_is_logged_as_a_warning_naming_why_and
     answer = httpx.Response(503, json={"ok": False, "error": {"code": "target_unavailable", "message": (
         "this computer's clock follower isn't following the gateway: it can't reach the gateway: URLError: refused"),
         "retryable": False}}, request=httpx.Request("POST", "http://desktop/agentenv/ext/sync_time"))
-    synced.side_effect = httpx.HTTPStatusError("503", request=answer.request, response=answer)
+    synced.side_effect = ExtensionCallError(answer)
     written = {}
 
     with caplog.at_level("WARNING"):

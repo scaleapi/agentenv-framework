@@ -14,8 +14,10 @@ import random
 import re
 import subprocess
 import time
+from pathlib import PurePosixPath
 
 import pytest
+from agentenv_protocol.computer.clock import FOLLOWER, FOLLOWER_USER
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
@@ -25,6 +27,7 @@ from agent_env.store.routing import namespace_routing
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
 from tst.clock.bounds import LATE_S
+from tst.integration.computer.conftest import PAGE_WRITER
 from tst.integration.computer.website_browser_test import _window_center
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
@@ -41,13 +44,12 @@ WINDOWS = ('for w in $(xprop -root _NET_CLIENT_LIST | sed "s/.*# //; s/,//g"); d
            'xprop -id "$w" _NET_WM_NAME; done')
 #: The processes that must run on through the clock's changes: Xvfb, the desktop's panel and Chrome's browser process.
 PIDS = "pgrep -o -x Xvfb; pgrep -o -x xfce4-panel; pgrep -o -f -- --remote-debugging-pipe"
-PAGE_WRITER = "/usr/local/lib/agentenv-clock/clockpage.py"
 #: A live site reached from the session, the clock months back, with no proxy: each exits 0 once its certificate
 #: verifies.
 REACH = {"curl": "curl -sS -o /dev/null --noproxy '*' --max-time 30 https://example.com/",
          "python": ("python3 -c \"import urllib.request; urllib.request.build_opener(urllib.request.ProxyHandler({}))"
                     ".open('https://example.com/', timeout=30)\"")}
-LIBRARY = "/usr/local/lib/agentenv-clock/libfaketimeMT.so.1"
+LIBRARY = str(PurePosixPath(FOLLOWER).parent / "libfaketimeMT.so.1")
 
 
 def test_composed_with_the_library_in_every_process_the_computer_passes_the_probe_at_full(clock_desktop):
@@ -129,7 +131,7 @@ class _Clock:
     def set(self, universe: float, rate: float) -> dict:
         """The page written to ``universe`` at ``rate``: the write's own answer, its rate, and when it started."""
         started = time.time()
-        out = subprocess.run(["docker", "exec", "-u", "agentenv-clock", self.container, "python3", PAGE_WRITER, "set",
+        out = subprocess.run(["docker", "exec", "-u", FOLLOWER_USER, self.container, "python3", PAGE_WRITER, "set",
                               repr(universe), repr(rate)], capture_output=True, text=True, check=True).stdout
         self.page = ast.literal_eval(out.strip())
         self.page.update(rate=rate, started=started)

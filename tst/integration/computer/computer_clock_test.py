@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
 import pytest
+from agentenv_protocol.computer.clock import FOLLOWER, FOLLOWER_USER
 
 from agent_env.env import Env
 from agent_env.env.env import DeployedEnv
@@ -23,12 +24,10 @@ from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
 from agent_env.task_step.task_steps.sync_env_clock import SyncEnvClockTaskStep
-from tst.integration.computer.conftest import kill_follower
-from tst.integration.computer.multi_env_computers_test import CONTAINER, _multi, items  # noqa: F401 - items is a fixture
+from tst.integration.computer.conftest import CONTAINER, kill_follower, multi_env
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
-FOLLOWER = "/usr/local/lib/agentenv-clock/clock-follower"
 DAY = 86400
 
 
@@ -38,9 +37,9 @@ def _iso(moment: datetime) -> str:
 
 @pytest.mark.asyncio
 async def test_a_multi_envs_computer_follows_its_gateways_clock_through_arming_a_killed_follower_and_a_reset(
-        desktop, items):  # noqa: F811 - the fixture imported above
+        desktop, items):
     with namespace_routing():
-        office = _multi(items, Env.get(desktop.id))
+        office = multi_env(items, Env.get(desktop.id))
         step = DeployEnvTaskStep(id="office", version=None, env_id=office.id, sandbox_type="local", ttl_seconds=900,
                                  child_envs={"desktop": CONTAINER})
         context = TaskStepContext()
@@ -109,7 +108,7 @@ async def _session_offset(computer) -> float:
 
 
 def _follower(container: str) -> str:
-    return subprocess.run(["docker", "exec", container, "pgrep", "-u", "agentenv-clock", "-f", FOLLOWER],
+    return subprocess.run(["docker", "exec", container, "pgrep", "-u", FOLLOWER_USER, "-f", FOLLOWER],
                           capture_output=True, text=True).stdout.strip()
 
 
