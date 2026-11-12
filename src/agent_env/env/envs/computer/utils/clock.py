@@ -3,13 +3,15 @@ computer's name as the gateway knows it and its read token, written through the 
 through the driver, which runs as the session user, so whatever it could write the session user could too, and point
 the follower at a clock of its own. Only root and the follower can read it; it's written beside its place and renamed
 into it, so the follower, which reads it every quarter second, never reads half of one. Core then calls the computer's
-own clock/v1 ``sync_time``, which answers once the follower has answered from the gateway, so a deploy or a reset returns
-with the computer on the universe's clock, or fails saying why it can't follow. The deploy record keeps the URL and name
-(``metadata.computer.clock``) beside its control token, the read token for now, so a reset configures the fresh
-computer as the one it replaced."""
+own clock/v1 ``sync_time``, which answers once the follower shows the gateway's current version, so a deploy or a reset
+returns with the computer on the universe's clock. One that can't follow is logged as a warning naming why, and the
+deploy or reset goes on: a task that never arms the clock needn't care, and one that does is refused when it arms it,
+as ``sync_env_clock`` calls the same ``sync_time``. The deploy record keeps the URL and name (``metadata.computer.clock``)
+beside its control token, the read token for now, so a reset configures the fresh computer as the one it replaced."""
 from __future__ import annotations
 
 import json
+import logging
 import shlex
 import uuid
 from pathlib import PurePosixPath
@@ -24,6 +26,8 @@ from agent_env.env.gateway.constants import EXT_CLOCK_URI
 if TYPE_CHECKING:
     from agent_env.env.env import DeployedEnv
     from agent_env.providers.sandbox_providers.sandbox_provider import Sandbox
+
+logger = logging.getLogger(__name__)
 
 WATCH_PATH = "/clock/watch"
 TIME_PATH = "/clock/time"
@@ -57,14 +61,17 @@ async def reconfigure(sandbox: Sandbox, record: DeployedEnv) -> None:
 
 
 async def _following(record: DeployedEnv, watch_url: str) -> None:
-    """Once the computer's follower has taken its config and answered from the gateway at ``watch_url``: the
-    computer's own ``sync_time``, handed the gateway's time URL as the computer reaches it, says so, or why not."""
+    """Once the computer's follower shows the gateway's current version, as its own ``sync_time``, handed the gateway's
+    time URL as the computer reaches it, says; a warning naming why when it doesn't."""
     try:
         await record.invoke(EXT_CLOCK_URI, "sync_time",
                             {"env_get_time_url": watch_url.removesuffix(WATCH_PATH) + TIME_PATH}, timeout=30)
     except httpx.HTTPStatusError as e:
-        raise RuntimeError(f"{record.env_id}: its clock follower doesn't follow the gateway at {watch_url}: "
-                           f"{e.response.text[:500]}") from e
+        logger.warning(f"{record.env_id}: its clock follower doesn't follow the gateway at {watch_url}, so its "
+                       f"session reads real time until it does: {e.response.text[:500]}")
+    except httpx.HTTPError as e:
+        logger.warning(f"{record.env_id}: couldn't ask whether its clock follower follows the gateway at {watch_url}: "
+                       f"{type(e).__name__}: {e}")
 
 
 async def _write(sandbox: Sandbox, config: dict) -> None:

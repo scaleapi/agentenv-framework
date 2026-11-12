@@ -1,7 +1,7 @@
 """A computer's clock follower from core's side: its config written through the root channel, root's and the follower's
 alone and renamed into place, its URL as the computer's sandbox reaches the gateway, kept in the record without its
 token, and written again on the fresh computer a reset boots; each time core waits on the computer's own sync_time, and
-a follower that can't follow fails the deploy or reset naming why."""
+a follower that can't follow is logged as a warning naming why, the deploy or reset going on."""
 from __future__ import annotations
 
 import json
@@ -74,15 +74,19 @@ async def test_a_reset_writes_the_kept_config_again_with_the_records_token_and_o
 
 
 @pytest.mark.asyncio
-async def test_a_follower_that_cant_follow_fails_naming_why(synced):
+async def test_a_follower_that_cant_follow_is_logged_as_a_warning_naming_why_and_the_reset_goes_on(synced, caplog):
     answer = httpx.Response(503, text='{"error": "it can\'t reach the gateway: URLError: refused"}',
                             request=httpx.Request("POST", "http://desktop/agentenv/ext/sync_time"))
     synced.side_effect = httpx.HTTPStatusError("503", request=answer.request, response=answer)
+    written = {}
 
-    with pytest.raises(RuntimeError, match="its clock follower doesn't follow the gateway at "
-                                           "https://gw.example/clock/watch: .*URLError: refused"):
-        await clock.reconfigure(_sandbox([], {}), _record(clock={"watch_url": "https://gw.example/clock/watch",
-                                                                  "name": "desktop"}))
+    with caplog.at_level("WARNING"):
+        await clock.reconfigure(_sandbox([], written), _record(clock={"watch_url": "https://gw.example/clock/watch",
+                                                                       "name": "desktop"}))
+
+    assert len(written) == 1
+    assert ("desktop: its clock follower doesn't follow the gateway at https://gw.example/clock/watch, so its session "
+            "reads real time until it does") in caplog.text and "URLError: refused" in caplog.text
 
 
 def test_a_computer_follows_the_clock_when_its_card_serves_sync_time():
