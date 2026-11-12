@@ -29,8 +29,8 @@ from agent_env.task.teardown import TeardownReport, kind, teardown_run
 from agent_env.task_step.context import TaskStepContext, read_dual_keyed
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.context_ops import build_context_update_ops
-from agent_env.task_step.roles import prompts_agent_under_test
 from agent_env.task_step.task_steps.collect_artifacts import CollectArtifactsTaskStep
+from agent_env.task_step.task_steps.prompt_agent import is_prompt_step
 
 
 def _indent(text: str, prefix: str = "    ") -> str:
@@ -177,7 +177,7 @@ def _step_output_lines(step, context) -> list[str]:
         if match:
             lines.append(_format_loaded_snapshot(match))
         return lines
-    if prompts_agent_under_test(step):
+    if is_prompt_step(step):
         # This step's own response: a step running alongside it may have added a later one.
         match = next((r for r in reversed(context.prompt_responses) if r.step_id == step.id), None)
         if match:

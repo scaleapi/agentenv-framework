@@ -35,8 +35,9 @@ from agent_env.openenv.reward import reward_of
 from agent_env.task.task import Task, recorded_scores
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext, sandbox_overrides
-from agent_env.task_step.roles import plays_user, prompts_agent_under_test
+from agent_env.task_step.roles import plays_user
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
+from agent_env.task_step.task_steps.prompt_agent import is_prompt_step
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
 from agent_env.training._openenv import on_session_loop
 
@@ -237,7 +238,7 @@ def _first_prompt(task: Task) -> str:
     prompts an agent a ``plays_user`` step deploys (the user sim, say a briefing) isn't the agent under test's."""
     users = {getattr(each, "agent_name", None) for each in task.steps if plays_user(each)} - {None}
     step = next((each for each in task.steps
-                 if prompts_agent_under_test(each) and getattr(each, "agent_name", None) not in users), None)
+                 if is_prompt_step(each) and getattr(each, "agent_name", None) not in users), None)
     if step is None:
         return ""
     if getattr(step, "prompt", None):

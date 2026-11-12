@@ -29,8 +29,9 @@ from agent_env.plugins._requirements import unmet_problems
 from agent_env.store.ids import HF_PREFIX, derive_id, is_local_id, validate_local_id
 from agent_env.store.image_store.oci_registry_credentials import names_registry
 from agent_env.task_step.registry import get_task_step_registry
-from agent_env.task_step.roles import plays_user, prompts_agent_under_test
+from agent_env.task_step.roles import plays_user
 from agent_env.task_step.task_step import TaskStep, attach_retry_config, dependencies
+from agent_env.task_step.task_steps.prompt_agent import is_prompt_step
 
 from ._fs import fold, relative, show
 from .authoring import AuthoringContext, default_dockerfile
@@ -131,7 +132,7 @@ def played_deploys(entry: ResolvedEntry) -> frozenset[str]:
     task, or prompts no agent or several."""
     if entry.entry.kind is not BundleKind.TASK:
         return frozenset()
-    prompted = ({_agent_name(step) for step in entry.config if prompts_agent_under_test(step)}
+    prompted = ({_agent_name(step) for step in entry.config if is_prompt_step(step)}
                 - {_agent_name(step) for step in entry.config if plays_user(step)})
     if len(prompted) != 1:
         return frozenset()
