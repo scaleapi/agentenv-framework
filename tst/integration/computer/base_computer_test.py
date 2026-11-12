@@ -53,8 +53,8 @@ def test_the_desktop_runs_as_the_session_user_with_the_settings_a_deploy_passes(
         uid = _exec(name, "id", "-u", "user").strip()
         screen = _exec(name, "xdpyinfo")
         wm = _exec(name, "xprop", "-root", "_NET_SUPPORTING_WM_CHECK")
-        environment = _exec(name, "sh", "-c", 'for _ in $(seq 120); do w=$(pgrep -o -x xfwm4) && break; sleep 0.25; done; '
-                                              'tr "\\0" "\\n" < /proc/$w/environ')
+        # As the session user, whose process it is: root here lacks the ptrace capability to read another's.
+        environment = _exec_as(name, "user", "sh", "-c", 'tr "\\0" "\\n" < /proc/$(pgrep -o -x xfwm4)/environ')
         accessibility = _exec(name, "pgrep", "-c", "at-spi2-registr")
         folders = set(_exec(name, "ls", "/home/user").split())
     finally:
