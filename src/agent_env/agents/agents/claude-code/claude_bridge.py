@@ -189,6 +189,10 @@ def cli_env(environ: Mapping[str, str], *, model: str | None = None, project_id:
     if model and env.get("ANTHROPIC_BASE_URL"):
         for alias in _MODEL_ALIASES:
             env.setdefault(alias, model)
+        if "claude" not in model.lower():
+            # The CLI sends Anthropic's beta parameters, such as `context_management`, whatever the model; an endpoint
+            # serving another provider's model through the Messages API, as LiteLLM does, refuses them with a 400.
+            env.setdefault("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", "1")
     headers = _with_attribution(_model_headers(env.get(MODEL_HEADERS_ENV)), _attribution_headers(project_id, task_id))
     if headers:
         env["ANTHROPIC_CUSTOM_HEADERS"] = "\n".join(f"{name}: {value}" for name, value in headers.items())

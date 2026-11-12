@@ -46,6 +46,22 @@ def test_the_cli_offers_its_tools_up_front_unless_tool_search_is_asked_for():
     assert claude_bridge.cli_env({**GATEWAY, "ENABLE_TOOL_SEARCH": "auto"})["ENABLE_TOOL_SEARCH"] == "auto"
 
 
+@pytest.mark.parametrize("model, disabled", [
+    ("fireworks_ai/glm-5p3-flash", "1"),
+    ("claude-sonnet-5-5", None),
+    ("bedrock/us.anthropic.claude-opus-5-5", None),
+])
+def test_a_model_that_isnt_claude_is_sent_none_of_anthropics_beta_parameters(model, disabled):
+    """LiteLLM refuses `context_management`, which the CLI sends for any model, when the model isn't Anthropic's."""
+    assert claude_bridge.cli_env(GATEWAY, model=model).get("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS") == disabled
+
+
+def test_an_explicit_beta_setting_wins():
+    env = claude_bridge.cli_env({**GATEWAY, "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "0"}, model="fireworks_ai/x")
+
+    assert env["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"] == "0"
+
+
 def test_no_endpoint_leaves_the_cli_to_its_own_and_an_api_key_alone():
     env = claude_bridge.cli_env({"ANTHROPIC_API_KEY": "direct"}, model="claude-x")
 
