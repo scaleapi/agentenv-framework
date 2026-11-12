@@ -12,9 +12,9 @@ from typing import Any, ClassVar, Optional
 
 from agent_env.entity.refs import EntityRef
 from agent_env.osworld import controller, guest
-from agent_env.task_step.context import PromptResponse, TaskStepContext
+from agent_env.task_step.context import PromptResponse, StepContextError, TaskStepContext
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
-from agent_env.task_step.task_steps.osworld.initialize import run_setup
+from agent_env.task_step.task_steps.osworld.initialize import SETUP_ERROR_CHARS, run_setup
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
 
 logger = logging.getLogger(__name__)
@@ -89,7 +89,7 @@ class OSWorldEvaluateTaskStep(TaskStep):
         return self._record(context, {"results": [{"id": "prompt_error", "score": FAIL_SCORE, "result": False,
                                                    "message": message}], "score": FAIL_SCORE})
 
-    async def _stage_result_files(self, controller_url: str, context: TaskStepContext) -> None:
+    async def _stage_result_files(self, endpoint: controller.Endpoint, context: TaskStepContext) -> None:
         """A run's earlier outputs, ``step_overrides`` ``stage_files`` ``[{url, path}]``, downloaded onto the computer
         before anything reads it, to grade a finished run again on a fresh one. Raises on any failure: an unstaged
         computer would be graded on the task's own inputs."""
@@ -103,30 +103,31 @@ class OSWorldEvaluateTaskStep(TaskStep):
                              f"each url http(s) and fetchable from the computer; got {files!r}")
         entries = [{"url": f["url"], "path": f["path"]} for f in files]
         logger.info(f"osworld_evaluate '{self.verifier_id}': staging {[e['path'] for e in entries]} before grading")
-        await run_setup(controller_url, [{"type": "download", "parameters": {"files": entries}}],
+        await run_setup(endpoint, [{"type": "download", "parameters": {"files": entries}}],
                         what=f"osworld_evaluate '{self.verifier_id}' staging result files")
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         deployed = next((d for d in context.deployed_envs if d.env_id == self.env_id), None)
         if deployed is None:
-            raise RuntimeError(f"Env '{self.env_id}' not found in context.deployed_envs")
-        url = guest.controller_url(deployed, context)
-        await self._stage_result_files(url, context)
+            raise StepContextError(f"Env '{self.env_id}' not found in context.deployed_envs")
+        endpoint = guest.controller_endpoint(deployed, context)
+        await self._stage_result_files(endpoint, context)
         prompt_response = context.prompt_responses[-1] if context.prompt_responses else None
         if self.osworld_v2_task_path:
             if prompt_response is not None and prompt_response.error_type:
                 return self._skipped(context, prompt_response)
-            return self._record(context, await self._evaluate_v2(url))
+            return self._record(context, await self._evaluate_v2(endpoint))
 
         if postconfig := self.evaluator.get("postconfig"):
             try:
-                await run_setup(url, postconfig, what=f"osworld_evaluate '{self.verifier_id}' postconfig")
+                await run_setup(endpoint, postconfig, what=f"osworld_evaluate '{self.verifier_id}' postconfig")
             except Exception as e:
-                logger.warning(f"osworld_evaluate '{self.verifier_id}': postconfig failed, grading anyway: {e}")
+                logger.warning(f"osworld_evaluate '{self.verifier_id}': postconfig failed, grading anyway: "
+                               f"{type(e).__name__}: {str(e)[:SETUP_ERROR_CHARS]}")
         budget = budget_exhaustion(prompt_response)
         if prompt_response is not None and prompt_response.error_type and budget is None:
             return self._skipped(context, prompt_response)
-        verification = await self._evaluate_funcs(url, prompt_response)
+        verification = await self._evaluate_funcs(endpoint, prompt_response)
         if budget is not None:
             # The score is the end state's, earned after the agent ran out of room; the marker beside the verifications
             # keeps such runs separable, since score readers project only each verifier's score.
@@ -138,11 +139,11 @@ class OSWorldEvaluateTaskStep(TaskStep):
                                                   self.verifier_id: marker}
         return self._record(context, verification)
 
-    async def _evaluate_v2(self, controller_url: str) -> dict:
+    async def _evaluate_v2(self, endpoint: controller.Endpoint) -> dict:
         logger.info(f"OSWorld-V2 evaluate '{self.verifier_id}': task_ref={self.osworld_v2_task_path}")
         try:
             answer = await controller.evaluate(
-                controller_url, {"osworld_v2_task_url": controller.resolve_task_ref(self.osworld_v2_task_path)})
+                endpoint, {"osworld_v2_task_url": controller.resolve_task_ref(self.osworld_v2_task_path)})
         except controller.ControllerCallError as e:
             logger.warning(f"OSWorld-V2 evaluate '{self.verifier_id}': controller error: {e}")
             return {"results": [{"id": "osworld_v2", "score": FAIL_SCORE, "result": False, "message": str(e)[:500]}],
@@ -159,9 +160,20 @@ class OSWorldEvaluateTaskStep(TaskStep):
         if not isinstance(funcs, list):
             return [(funcs, self.evaluator.get("result"), self.evaluator.get("expected"),
                      self.evaluator.get("options") or {})]
-        n = len(funcs)
-        return list(zip(funcs, self.evaluator.get("result") or [None] * n, self.evaluator.get("expected") or [None] * n,
-                        [o or {} for o in self.evaluator.get("options") or [{}] * n]))
+        return list(zip(funcs, self._per_func("result", len(funcs), None), self._per_func("expected", len(funcs), None),
+                        [o or {} for o in self._per_func("options", len(funcs), {})], strict=True))
+
+    def _per_func(self, key: str, n: int, absent: Any) -> list:
+        """The evaluator's ``key``, one entry per func, or ``absent`` for each when it has none; a list of another
+        length is refused, since zipping it would grade on fewer checks than the task names."""
+        value = self.evaluator.get(key)
+        if not value:
+            return [absent] * n
+        if not isinstance(value, list) or len(value) != n:
+            got = f"a list of {len(value)}" if isinstance(value, list) else type(value).__name__
+            raise ValueError(f"osworld_evaluate '{self.verifier_id}': the evaluator's {key!r} must be a list of {n}, "
+                             f"one per func, got {got}")
+        return value
 
     def _payload(self, func: str, result: Any, expected: Any, options: dict, instruction: str | None) -> dict:
         options = dict(options)
@@ -181,7 +193,7 @@ class OSWorldEvaluateTaskStep(TaskStep):
             payload["instruction"] = instruction
         return payload
 
-    async def _evaluate_funcs(self, controller_url: str, prompt_response: PromptResponse | None) -> dict:
+    async def _evaluate_funcs(self, endpoint: controller.Endpoint, prompt_response: PromptResponse | None) -> dict:
         answer_text = prompt_response.response if prompt_response is not None else None
         instruction = self.evaluator.get("instruction") or (prompt_response.prompt_text if prompt_response else None)
         results, scores, metrics = [], [], []
@@ -197,13 +209,14 @@ class OSWorldEvaluateTaskStep(TaskStep):
                     sub = {"id": "infeasible_on_feasible", "score": FAIL_SCORE, "result": False,
                            "message": "Agent declared infeasible on a feasible task"}
                 else:
-                    answer = await controller.evaluate(controller_url,
+                    answer = await controller.evaluate(endpoint,
                                                        self._payload(func, result, expected, options, instruction))
                     sub = {"id": func, "score": controller.normalize_score(answer.get("score", FAIL_SCORE)),
                            "result": not answer.get("error", False), "message": answer.get("message", "")}
                 passed = True
             except Exception as e:
-                logger.warning(f"osworld_evaluate '{self.verifier_id}': {func} failed: {e}")
+                logger.warning(f"osworld_evaluate '{self.verifier_id}': {func} failed: {type(e).__name__}: "
+                               f"{str(e)[:SETUP_ERROR_CHARS]}")
                 sub = {"id": func, "score": FAIL_SCORE, "result": False, "message": f"Exception: {str(e)[:300]}"}
                 passed = False
             results.append({"func": func, "results": [sub]})

@@ -16,15 +16,18 @@ import pytest
 
 from agent_env.artifact import DockerImageArtifact
 from agent_env.osworld import controller, guest
-from agent_env.task_step.context import PromptResponse, TaskStepContext
+from agent_env.task_step.context import PromptResponse, StepContextError, TaskStepContext
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_steps.osworld import deploy_controller as deploy_module
 from agent_env.task_step.task_steps.osworld.deploy_controller import OSWorldDeployControllerTaskStep
 from agent_env.task_step.task_steps.osworld.evaluate import OSWorldEvaluateTaskStep
 from agent_env.task_step.task_steps.osworld.initialize import OSWorldInitializeTaskStep
-from tst.unit.osworld.helpers import CONTROLLER, ENV_URL, TOKEN, Controller, card, computer, route_httpx
+from tst.unit.osworld.helpers import (CONTROLLER, CONTROLLER_TOKEN, ENDPOINT, ENV_URL, TOKEN, Controller, card, computer,
+                                      route_httpx)
 
 LITELLM = "sk-model-key"
+#: The real check, which the deploy fixture stands in for.
+REQUIRE_AUTH = controller.require_auth
 
 
 def _context(env, *prompts: PromptResponse) -> TaskStepContext:
@@ -40,7 +43,7 @@ def _ready():
 
 @pytest.fixture
 def ctl(monkeypatch):
-    stand_in = Controller()
+    stand_in = Controller(token=CONTROLLER_TOKEN)
     route_httpx(monkeypatch, controller, stand_in)
     monkeypatch.setattr(controller.asyncio, "sleep", AsyncMock())
     return stand_in
@@ -85,12 +88,14 @@ def deploy(monkeypatch):
     config.get_litellm_api_key.return_value = LITELLM
     config.get_litellm_base_url.return_value = "https://model.example"
     ready = AsyncMock()
+    auth = AsyncMock()
     get = MagicMock(return_value=image)
     monkeypatch.setattr(deploy_module.Artifact, "get", get)
     monkeypatch.setattr(deploy_module, "get_config", lambda: config)
     monkeypatch.setattr(deploy_module, "get_sandbox_provider", lambda: provider)
     monkeypatch.setattr(deploy_module.controller, "wait_ready", ready)
-    return SimpleNamespace(provider=provider, ready=ready, get=get)
+    monkeypatch.setattr(deploy_module.controller, "require_auth", auth)
+    return SimpleNamespace(provider=provider, ready=ready, auth=auth, get=get)
 
 
 @pytest.mark.asyncio
@@ -108,8 +113,11 @@ async def test_deploy_runs_the_controller_against_the_card_endpoint_and_records_
     assert kwargs["env"] == {"JUDGE_MODEL": "m", "PROVIDER": "remote", "OS_TYPE": "Ubuntu",
                              "REMOTE_VM_IP": f"{ENV_URL}/apps/7/osworld",
                              "REMOTE_SERVER_HEADERS": json.dumps({"Authorization": f"Bearer {TOKEN}"}),
+                             "CONTROLLER_AUTH_TOKEN": CONTROLLER_TOKEN,
                              "LITELLM_API_KEY": LITELLM, "LITELLM_BASE_URL": "https://model.example"}
-    deploy.ready.assert_awaited_once_with(CONTROLLER)
+    # It's called with the token, and must refuse a call without it.
+    deploy.ready.assert_awaited_once_with(ENDPOINT)
+    deploy.auth.assert_awaited_once_with(ENDPOINT)
     assert env.metadata == {"existing": "kept", guest.CONTROLLER_URL_KEY: CONTROLLER,
                             guest.CONTROLLER_SANDBOX_ID_KEY: "sb-1", guest.GUEST_URL_KEY: f"{ENV_URL}/apps/7/osworld"}
     # The run's stored context keeps them too: the env's record is stored once, when it is deployed.
@@ -119,7 +127,7 @@ async def test_deploy_runs_the_controller_against_the_card_endpoint_and_records_
     [sandbox] = context.deployed_sandboxes
     assert (sandbox.sandbox_name, sandbox.sandbox_id, sandbox.tunnel_urls) == \
         ("osworld-controller-desk", "sb-1", {"8000": CONTROLLER})
-    assert TOKEN not in caplog.text and LITELLM not in caplog.text
+    assert TOKEN not in caplog.text and CONTROLLER_TOKEN not in caplog.text and LITELLM not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -133,6 +141,46 @@ async def test_deploy_gives_the_controller_the_guest_server_and_model_endpoint_a
     assert sent["LITELLM_BASE_URL"] == "https://from-sandbox.model.example"
     # Later steps call the guest server from this process, by the address it reaches.
     assert env.metadata[guest.GUEST_URL_KEY] == f"{ENV_URL}/apps/7/osworld"
+
+
+@pytest.mark.asyncio
+async def test_deploy_on_a_chain_gives_each_link_the_addresses_its_own_sandboxes_reach(deploy):
+    """A chain can't say how the link it ends up on reaches this machine, so each link tried is given its own."""
+    failing, local = _Provider(), _Provider()
+    failing.create_container.side_effect = RuntimeError("no capacity")
+    local.url_from_sandbox = lambda url: url.replace("https://", "https://from-local.")
+    deploy.provider.links = [failing, local]
+    env = computer(card("/apps/7/osworld"))
+    context = _context(env)
+    await OSWorldDeployControllerTaskStep(id="ctl", version=1, env_id="desk").execute(context)
+
+    assert failing.create_container.call_args.kwargs["env"]["REMOTE_VM_IP"] == f"{ENV_URL}/apps/7/osworld"
+    sent = local.create_container.call_args.kwargs["env"]
+    assert sent["REMOTE_VM_IP"] == f"{ENV_URL}/apps/7/osworld".replace("https://", "https://from-local.")
+    assert sent["LITELLM_BASE_URL"] == "https://from-local.model.example"
+    assert sent["CONTROLLER_AUTH_TOKEN"] == CONTROLLER_TOKEN
+    deploy.provider.create_container.assert_not_called()
+    assert [s.sandbox_id for s in context.deployed_sandboxes] == ["sb-1"]
+
+
+@pytest.mark.asyncio
+async def test_deploy_fails_naming_each_link_when_none_creates_the_sandbox(deploy):
+    deploy.provider.create_container.side_effect = RuntimeError("no capacity")
+    with pytest.raises(RuntimeError, match="_Provider: RuntimeError: no capacity"):
+        await OSWorldDeployControllerTaskStep(id="ctl", version=1, env_id="desk").execute(_context(computer()))
+
+
+@pytest.mark.asyncio
+async def test_deploy_refuses_a_controller_that_answers_without_its_token(deploy, monkeypatch):
+    stand_in = Controller(answers={"/configure": {}})
+    route_httpx(monkeypatch, controller, stand_in)
+    deploy.auth.side_effect = REQUIRE_AUTH
+    context = _context(computer())
+    with pytest.raises(controller.ControllerCallError, match="doesn't enforce CONTROLLER_AUTH_TOKEN"):
+        await OSWorldDeployControllerTaskStep(id="ctl", version=1, env_id="desk").execute(context)
+    # Its sandbox is in the context, for teardown, but nothing records it as the env's controller.
+    assert [s.sandbox_id for s in context.deployed_sandboxes] == ["sb-1"]
+    assert guest.CONTROLLERS_KEY not in context.metadata
 
 
 @pytest.mark.asyncio
@@ -150,7 +198,7 @@ async def test_deploy_refuses_a_computer_without_the_app_before_creating_a_sandb
 async def test_deploy_twice_for_one_env_is_refused(deploy):
     context = _context(computer())
     await OSWorldDeployControllerTaskStep(id="a", version=1, env_id="desk").execute(context)
-    with pytest.raises(RuntimeError, match="already deployed"):
+    with pytest.raises(StepContextError, match="already deployed"):
         await OSWorldDeployControllerTaskStep(id="b", version=1, env_id="desk").execute(context)
 
 
@@ -269,6 +317,18 @@ async def test_evaluate_classic_sends_each_func_and_combines_by_conj(ctl, conj, 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("key, value", [("options", [{}]), ("result", [{"type": "vm_file", "path": "/a"}] * 3),
+                                        ("expected", {"type": "cloud_file"})])
+async def test_evaluate_classic_refuses_per_func_lists_that_dont_match_its_funcs(ctl, key, value):
+    """Zipped, a shorter list would grade on fewer checks than the task names."""
+    evaluator = {"funcs": ["compare_table", "agent_judge"], key: value}
+    with pytest.raises(ValueError, match=f"'{key}' must be a list of 2, one per func"):
+        await OSWorldEvaluateTaskStep(id="e", version=1, env_id="desk", verifier_id="v",
+                                      evaluator=evaluator).execute(_context(_ready(), _prompt()))
+    assert "/evaluate_async" not in ctl.paths()
+
+
+@pytest.mark.asyncio
 async def test_evaluate_classic_one_func_keeps_its_partial_score(ctl):
     _scores(ctl, 0.4)
     context = _context(_ready(), _prompt())
@@ -326,6 +386,23 @@ async def test_evaluate_runs_postconfig_once_and_grades_when_it_fails(ctl):
     assert ctl.bodies("/setup") == [{"config": postconfig}]
     assert "postconfig" not in ctl.bodies("/evaluate")[0]
     assert context.metadata["verifications"]["v"]["score"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_a_failed_setup_is_reported_by_its_error_alone_bounded(ctl, caplog):
+    """The rest of a setup answer can be large and carry the task's content, so neither the step nor its log has it."""
+    _scores(ctl, 1)
+    ctl.answers["/setup"] = {"success": False, "echo": "TASK-CONTENT " * 100}
+    with caplog.at_level(logging.WARNING):
+        await OSWorldEvaluateTaskStep(id="e", version=1, env_id="desk", verifier_id="v", evaluator={
+            "funcs": "compare_table", "postconfig": [{"type": "sleep"}]}).execute(_context(_ready(), _prompt()))
+    assert "postconfig failed, grading anyway: RuntimeError" in caplog.text and "no error given" in caplog.text
+    assert "TASK-CONTENT" not in caplog.text
+    ctl.answers["/setup"] = {"success": False, "error": "x" * 5000}
+    with pytest.raises(RuntimeError) as raised:
+        await OSWorldInitializeTaskStep(id="init", version=1, env_id="desk",
+                                        init_config=[{"type": "sleep"}]).execute(_context(_ready()))
+    assert len(str(raised.value)) < 400
 
 
 def _regrade(context, files):

@@ -1,17 +1,20 @@
 """Where a computer serves the OSWorld guest server: the endpoint its card advertises for the ``osworld-guest/v1``
 extension, on the card itself or one of its ``children_environments``, resolved against the computer's address.
 ``osworld_deploy_controller`` resolves it once and records it on the env, with the controller's address, under the
-metadata keys here."""
+metadata keys here. The controller requires a bearer token derived from the env's control token
+(``controller_token``), so every step that calls it can rebuild it, and none is stored."""
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import logging
 from typing import Any
 
 import httpx
 from agentenv_protocol import client as protocol_v1
 
-from agent_env.osworld import GUEST_EXTENSION
+from agent_env.osworld import GUEST_EXTENSION, controller
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +29,8 @@ CONTROLLERS_KEY = "osworld_controllers"
 #: the guest extension, and how often it reads the card again.
 CARD_WAIT_S = 120.0
 CARD_POLL_S = 5.0
+#: What the controller's token is derived for, so it is never the control token itself.
+CONTROLLER_TOKEN_PURPOSE = b"osworld-controller"
 
 
 def guest_endpoint(card: dict | None) -> str | None:
@@ -76,3 +81,17 @@ def controller_url(deployed: Any, context: Any = None) -> str:
     if url := recorded.get(CONTROLLER_URL_KEY) or (deployed.metadata or {}).get(CONTROLLER_URL_KEY):
         return str(url)
     raise RuntimeError(f"env '{deployed.env_id}' has no {CONTROLLER_URL_KEY}: run osworld_deploy_controller on it first")
+
+
+def controller_token(deployed: Any) -> str:
+    """The bearer token the controller beside ``deployed`` requires: an HMAC of the env's control token, which only
+    the framework holds. Raises RuntimeError for an env with none, whose controller would be open to anyone."""
+    if not deployed.control_token:
+        raise RuntimeError(f"env '{deployed.env_id}' has no control token to derive its OSWorld controller's from")
+    return hmac.new(deployed.control_token.encode(), CONTROLLER_TOKEN_PURPOSE + b":" + deployed.env_id.encode(),
+                    hashlib.sha256).hexdigest()
+
+
+def controller_endpoint(deployed: Any, context: Any = None) -> controller.Endpoint:
+    """The controller recorded for ``deployed`` (``controller_url``), with its token on every call."""
+    return controller.Endpoint(controller_url(deployed, context), controller.bearer_headers(controller_token(deployed)))

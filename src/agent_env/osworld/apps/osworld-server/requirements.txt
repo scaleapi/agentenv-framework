@@ -3,7 +3,7 @@
 httpx>=0.27.0
 python3-xlib==0.15
 PyAutoGUI==0.9.54
-Pillow==10.1.0
+Pillow==13.0.0
 requests
 flask
 numpy

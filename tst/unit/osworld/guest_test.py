@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 from agent_env.osworld import guest
-from tst.unit.osworld.helpers import ENV_URL, card, computer
+from tst.unit.osworld.helpers import ENV_URL, TOKEN, card, computer
 
 
 def test_the_endpoint_is_the_one_an_app_advertises_for_the_guest_extension():
@@ -56,3 +56,15 @@ def test_the_controller_url_is_the_one_recorded():
     assert guest.controller_url(computer(osworld_controller_url="https://c")) == "https://c"
     with pytest.raises(RuntimeError, match="run osworld_deploy_controller"):
         guest.controller_url(computer())
+
+
+def test_the_controllers_token_is_derived_from_the_envs_control_token_and_is_not_it():
+    token = guest.controller_token(computer())
+    assert token == guest.controller_token(computer()) and len(token) == 64
+    assert TOKEN not in token
+    other = computer()
+    other.control_token = "another-instance"
+    assert guest.controller_token(other) != token
+    other.control_token = None
+    with pytest.raises(RuntimeError, match="no control token"):
+        guest.controller_token(other)

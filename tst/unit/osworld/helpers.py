@@ -8,7 +8,7 @@ import httpx
 from agentenv_protocol.types import WELL_KNOWN_PATH
 
 from agent_env.env.env import DeployedEnv
-from agent_env.osworld import GUEST_EXTENSION
+from agent_env.osworld import GUEST_EXTENSION, controller, guest
 
 ENV_URL = "https://computer.example"
 TOKEN = "s3cret-control-token"
@@ -31,13 +31,17 @@ def computer(card_: dict | None = None, **metadata) -> DeployedEnv:
 
 @dataclass
 class Controller:
-    """The controller's routes, answered from ``answers`` by path (a list is answered in turn), and the requests made."""
+    """The controller's routes, answered from ``answers`` by path (a list is answered in turn), and the requests made;
+    with a ``token``, a request without it as its bearer token is answered 401, as the controller's inbound auth does."""
 
     answers: dict[str, object] = field(default_factory=dict)
     seen: list[httpx.Request] = field(default_factory=list)
+    token: str | None = None
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.seen.append(request)
+        if self.token is not None and request.headers.get("authorization") != f"Bearer {self.token}":
+            return httpx.Response(401, json={"detail": "unauthorized"})
         answer = self.answers.get(request.url.path, httpx.Response(404, text="no route"))
         if isinstance(answer, list):
             answer = answer.pop(0)
@@ -60,3 +64,8 @@ def route_httpx(monkeypatch, module, controller: Controller) -> None:
         return real(*args, transport=httpx.MockTransport(controller.handler), **kwargs)
 
     monkeypatch.setattr(module.httpx, "AsyncClient", client)
+
+
+#: The token the controller beside ``computer()`` requires, and that controller as a step calls it.
+CONTROLLER_TOKEN = guest.controller_token(computer())
+ENDPOINT = controller.Endpoint(CONTROLLER, controller.bearer_headers(CONTROLLER_TOKEN))

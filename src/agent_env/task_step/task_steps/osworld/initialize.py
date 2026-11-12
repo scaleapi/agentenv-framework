@@ -9,10 +9,13 @@ from typing import ClassVar, Optional
 
 from agent_env.entity.refs import EntityRef
 from agent_env.osworld import controller, guest
-from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)
+
+#: How much of a controller's setup error an exception or a log line carries.
+SETUP_ERROR_CHARS = 300
 
 
 class OSWorldInitializeTaskStep(TaskStep):
@@ -44,31 +47,32 @@ class OSWorldInitializeTaskStep(TaskStep):
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         deployed = next((d for d in context.deployed_envs if d.env_id == self.env_id), None)
         if deployed is None:
-            raise RuntimeError(f"Env '{self.env_id}' not found in context.deployed_envs")
-        url = guest.controller_url(deployed, context)
+            raise StepContextError(f"Env '{self.env_id}' not found in context.deployed_envs")
+        endpoint = guest.controller_endpoint(deployed, context)
         if self.osworld_v2_task_path:
             logger.info(f"OSWorld-V2 initialize '{self.id}': task_ref={self.osworld_v2_task_path}")
             # /initialize_task refuses to run before a reset.
-            await controller.post(url, "/reset", {}, expect_json=False)
-            answer = await controller.post(url, "/initialize_task", {
+            await controller.post(endpoint, "/reset", {}, expect_json=False)
+            answer = await controller.post(endpoint, "/initialize_task", {
                 "id": self.id, "osworld_v2_task_url": controller.resolve_task_ref(self.osworld_v2_task_path)})
             if answer.get("success") is False or answer.get("error"):
                 raise RuntimeError(f"OSWorld-V2 initialize failed: {answer.get('error') or answer.get('message')}")
             return context
         if self.init_config:
-            answer = await run_setup(url, self.init_config, what=f"osworld_initialize '{self.id}'")
+            answer = await run_setup(endpoint, self.init_config, what=f"osworld_initialize '{self.id}'")
             if sites := answer.get("results"):
                 context.metadata.setdefault("osworld_seeded_sites", []).extend(sites)
         return context
 
 
-async def run_setup(controller_url: str, config: list[dict], *, what: str) -> dict:
+async def run_setup(endpoint: controller.Endpoint, config: list[dict], *, what: str) -> dict:
     """``config`` through the controller's ``/setup``; raises when it reports failure or a site it seeded failed, since
     a seed that answers 200 with every site failed leaves the apps on their own fixtures."""
-    answer = await controller.post(controller_url, "/setup", {"config": config})
+    answer = await controller.post(endpoint, "/setup", {"config": config})
     if not answer.get("success", True):
-        raise RuntimeError(f"{what}: setup failed: {answer.get('error') or answer}")
+        # The error alone, bounded: the rest of the answer can be large and carry the task's content.
+        raise RuntimeError(f"{what}: setup failed: {str(answer.get('error') or 'no error given')[:SETUP_ERROR_CHARS]}")
     if failed := [site for site in answer.get("results") or [] if isinstance(site, dict) and not site.get("ok", True)]:
-        detail = "; ".join(f"{site.get('app')}: {site.get('error')}" for site in failed)
+        detail = "; ".join(f"{site.get('app')}: {str(site.get('error'))[:SETUP_ERROR_CHARS]}" for site in failed)
         raise RuntimeError(f"{what}: setup failed for {len(failed)} site(s): {detail}")
     return answer

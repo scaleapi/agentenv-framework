@@ -10,12 +10,12 @@ import httpx
 import pytest
 
 from agent_env.osworld import controller
-from tst.unit.osworld.helpers import CONTROLLER, Controller, route_httpx
+from tst.unit.osworld.helpers import CONTROLLER, CONTROLLER_TOKEN, ENDPOINT, Controller, route_httpx
 
 
 @pytest.fixture
 def ctl(monkeypatch):
-    stand_in = Controller()
+    stand_in = Controller(token=CONTROLLER_TOKEN)
     route_httpx(monkeypatch, controller, stand_in)
     monkeypatch.setattr(controller.asyncio, "sleep", AsyncMock())
     return stand_in
@@ -24,26 +24,26 @@ def ctl(monkeypatch):
 @pytest.mark.asyncio
 async def test_a_call_returns_its_answer_and_an_http_error_raises_with_its_status(ctl):
     ctl.answers["/setup"] = {"success": True}
-    assert await controller.post(CONTROLLER, "/setup", {"config": []}) == {"success": True}
+    assert await controller.post(ENDPOINT, "/setup", {"config": []}) == {"success": True}
     ctl.answers["/setup"] = httpx.Response(500, text="boom")
     with pytest.raises(controller.ControllerCallError) as raised:
-        await controller.post(CONTROLLER, "/setup", {})
+        await controller.post(ENDPOINT, "/setup", {})
     assert raised.value.status == 500 and raised.value.body == "boom"
 
 
 @pytest.mark.asyncio
 async def test_a_bare_answer_is_empty_when_json_isnt_expected(ctl):
     ctl.answers["/reset"] = httpx.Response(200, text="ok")
-    assert await controller.post(CONTROLLER, "/reset", {}, expect_json=False) == {}
+    assert await controller.post(ENDPOINT, "/reset", {}, expect_json=False) == {}
     with pytest.raises(controller.ControllerCallError, match="non-JSON"):
-        await controller.post(CONTROLLER, "/reset", {})
+        await controller.post(ENDPOINT, "/reset", {})
 
 
 @pytest.mark.asyncio
 async def test_a_transport_failure_raises(ctl):
     ctl.answers["/setup"] = httpx.ConnectError("refused")
     with pytest.raises(controller.ControllerCallError, match="transport failure"):
-        await controller.post(CONTROLLER, "/setup", {})
+        await controller.post(ENDPOINT, "/setup", {})
 
 
 @pytest.mark.asyncio
@@ -51,7 +51,7 @@ async def test_evaluate_is_started_and_polled_until_done(ctl):
     ctl.answers["/evaluate_async"] = {"job_id": "j1"}
     ctl.answers["/evaluate_result"] = [httpx.ConnectError("blip"), {"status": "running"},
                                        httpx.Response(200, text="<html>"), {"status": "done", "result": {"score": 1}}]
-    assert await controller.evaluate(CONTROLLER, {"func": "compare_table"}) == {"score": 1}
+    assert await controller.evaluate(ENDPOINT, {"func": "compare_table"}) == {"score": 1}
     assert ctl.bodies("/evaluate_async") == [{"func": "compare_table"}]
     assert {r.url.params["job_id"] for r in ctl.seen if r.url.path == "/evaluate_result"} == {"j1"}
 
@@ -60,7 +60,7 @@ async def test_evaluate_is_started_and_polled_until_done(ctl):
 async def test_evaluate_falls_back_to_the_blocking_route(ctl):
     ctl.answers["/evaluate_async"] = httpx.Response(404)
     ctl.answers["/evaluate"] = {"score": 0.5}
-    assert await controller.evaluate(CONTROLLER, {"func": "x"}) == {"score": 0.5}
+    assert await controller.evaluate(ENDPOINT, {"func": "x"}) == {"score": 0.5}
     assert ctl.paths() == ["/evaluate_async", "/evaluate"]
 
 
@@ -69,7 +69,35 @@ async def test_a_failed_job_raises(ctl):
     ctl.answers["/evaluate_async"] = {"job_id": "j1"}
     ctl.answers["/evaluate_result"] = {"status": "error", "message": "judge died"}
     with pytest.raises(controller.ControllerCallError, match="judge died"):
-        await controller.evaluate(CONTROLLER, {})
+        await controller.evaluate(ENDPOINT, {})
+
+
+@pytest.mark.asyncio
+async def test_every_call_carries_the_controllers_token(ctl):
+    ctl.answers.update({"/setup": {"success": True}, "/configure": {}, "/evaluate_async": {"job_id": "j1"},
+                        "/evaluate_result": {"status": "done", "result": {"score": 1}}})
+    await controller.post(ENDPOINT, "/setup", {})
+    await controller.wait_ready(ENDPOINT)
+    await controller.evaluate(ENDPOINT, {})
+    assert {r.headers["authorization"] for r in ctl.seen} == {f"Bearer {CONTROLLER_TOKEN}"}
+    with pytest.raises(controller.ControllerCallError) as raised:
+        await controller.post(controller.Endpoint(CONTROLLER), "/setup", {})
+    assert raised.value.status == 401
+
+
+@pytest.mark.asyncio
+async def test_a_controller_that_answers_without_its_token_is_refused(ctl):
+    ctl.answers["/configure"] = {}
+    await controller.require_auth(ENDPOINT)
+    ctl.token = None
+    with pytest.raises(controller.ControllerCallError, match="doesn't enforce CONTROLLER_AUTH_TOKEN") as raised:
+        await controller.require_auth(ENDPOINT)
+    assert raised.value.status == 200
+    assert all("authorization" not in r.headers for r in ctl.seen)
+
+
+def test_the_token_is_kept_out_of_an_endpoints_repr():
+    assert CONTROLLER_TOKEN not in repr(ENDPOINT)
 
 
 def test_scores_normalize_to_floats():

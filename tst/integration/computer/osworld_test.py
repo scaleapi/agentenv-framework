@@ -7,8 +7,8 @@ check_include_exclude over a vm_command_line getter, 1.0 for a rule it meets and
 
 Needs Docker, the local registry on localhost:5000, the guest server's source (scale-cua's
 ``environments/linux/src/vm/setup/osworld_server``) at ``OSWORLD_SERVER_SOURCE``, and a controller image that takes a
-remote base URL and headers (scale-cua #360) at ``OSWORLD_CONTROLLER_IMAGE``; skipped without them, as the
-``osworld_sources`` capability."""
+remote base URL and headers and requires ``CONTROLLER_AUTH_TOKEN`` (scale-cua #360) at ``OSWORLD_CONTROLLER_IMAGE``;
+skipped without them, as the ``osworld_sources`` capability."""
 
 import os
 import shutil
