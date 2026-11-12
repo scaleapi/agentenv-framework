@@ -26,7 +26,8 @@ CONNECT_TIMEOUT_S = 30
 IDLE_S = 300
 HOP = {"connection", "keep-alive", "proxy-connection", "proxy-authorization"}
 NETWORK_LOG_ENV, NETWORK_LOG = "AGENTENV_NETWORK_LOG", "/var/log/agentenv/network.jsonl"
-NUMBERED = re.compile(rb'^\{"seq":(\d+),')
+NUMBERED = re.compile(rb'^\{"seq":(\d+),"at":"[^"]*","(open|end)":\{"id":"([^"]*)"')
+RESTARTED = {"reason": "the proxy restarted", "error": "it was in flight when the proxy that carried it stopped"}
 
 
 def log(**fields) -> None:
@@ -43,30 +44,39 @@ def _stamp() -> str:
 
 class NetworkLog:
     """The network log in ``path``, each line numbered after the last the file holds, so a proxy started again
-    carries on, and written whole by one thread at a time."""
+    carries on, ending each entry the one before left open as ``RESTARTED``, and written whole by one thread at a
+    time."""
 
     def __init__(self, path: str):
-        seq, partial = 0, False
+        seq, partial, left = 0, False, {}
         try:
             with open(path, "rb") as existing:
                 for raw in existing:
                     partial = not raw.endswith(b"\n")
                     if not partial and (numbered := NUMBERED.match(raw)):
                         seq = max(seq, int(numbered.group(1)))
+                        if numbered.group(2) == b"open":
+                            left[numbered.group(3).decode()] = True
+                        else:
+                            left.pop(numbered.group(3).decode(), None)
         except FileNotFoundError:
             pass
         self.file = open(path, "ab")
         if partial:
             self.file.write(b"\n")
         self.seq, self.lock, self.ids = seq, threading.Lock(), itertools.count(1)
+        self.run = f"{os.getpid()}-{seq}"
+        for key in left:
+            self.write("end", {"id": key, "ended": _stamp(), "failed": RESTARTED})
 
     def key(self) -> str:
-        return f"{os.getpid()}-{next(self.ids)}"
+        return f"{self.run}-{next(self.ids)}"
 
     def write(self, kind: str, record: dict) -> None:
         with self.lock:
             self.seq += 1
-            line = json.dumps({"seq": self.seq, "at": _stamp(), kind: record}, separators=(",", ":")) + "\n"
+            line = json.dumps({"seq": self.seq, "at": _stamp(), kind: {"id": record["id"], **record}},
+                              separators=(",", ":")) + "\n"
             try:
                 self.file.write(line.encode())
                 self.file.flush()

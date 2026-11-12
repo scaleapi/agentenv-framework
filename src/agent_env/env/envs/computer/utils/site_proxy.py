@@ -94,8 +94,11 @@ KEPT_ANSWERS = re.compile(
     r"^\s*(text/|application/(json|x-www-form-urlencoded|xml|javascript|ecmascript)\b|[^;]*\+(json|xml)\b)", re.I)
 #: What the network log keeps of a header a site names as its sign-in header.
 REMOVED = "<removed>"
-#: How a network log line begins, so a proxy started again finds its last number without reading every body.
-NUMBERED = re.compile(rb'^\{"seq":(\d+),')
+#: How a network log line begins, its number, its kind and its entry's id, so a proxy started again finds its last
+#: number and the entries left open without reading every body.
+NUMBERED = re.compile(rb'^\{"seq":(\d+),"at":"[^"]*","(open|end)":\{"id":"([^"]*)"')
+#: Why an entry a proxy left open ended: it was carrying it when it stopped.
+RESTARTED = {"reason": "the proxy restarted", "error": "it was in flight when the proxy that carried it stopped"}
 
 
 class BadRequest(Exception):
@@ -214,16 +217,24 @@ class NetworkLog:
 
     def __init__(self, file, seq: int):
         self.file, self.seq, self.ids = file, seq, itertools.count(1)
+        self.run = f"{os.getpid()}-{seq}"
 
     @classmethod
     def open(cls, path: str) -> NetworkLog:
-        seq, partial = 0, False
+        """The log, numbered on from the file's last line, a line a crash cut ended first and every entry the proxy
+        before left open ended as ``RESTARTED``."""
+        seq, partial, left = 0, False, {}
         try:
             with open(path, "rb") as existing:
                 for raw in existing:
                     partial = not raw.endswith(b"\n")
                     if not partial and (numbered := NUMBERED.match(raw)):
                         seq = max(seq, int(numbered.group(1)))
+                        kind, key = numbered.group(2), numbered.group(3).decode()
+                        if kind == b"open":
+                            left[key] = True
+                        else:
+                            left.pop(key, None)
         except FileNotFoundError:
             pass
         descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o644)
@@ -231,17 +242,21 @@ class NetworkLog:
         file = os.fdopen(descriptor, "ab")
         if partial:
             file.write(b"\n")
-        return cls(file, seq)
+        log = cls(file, seq)
+        for key in left:
+            log.write("end", {"id": key, "ended": stamp(), "failed": RESTARTED})
+        return log
 
     def key(self) -> str:
-        """An id for a request or tunnel, which its ``open`` and ``end`` lines both name: unique to this process's
-        log, and, by its pid, to a proxy started again."""
-        return f"{os.getpid()}-{next(self.ids)}"
+        """An id for a request or tunnel, which its ``open`` and ``end`` lines both name: unique to this run of the
+        proxy, by its pid and the number the log stood at when it started, so a proxy started again never reuses one."""
+        return f"{self.run}-{next(self.ids)}"
 
     def write(self, kind: str, record: dict) -> None:
-        """A line of ``kind``, ``open`` or ``end``, holding ``record``."""
+        """A line of ``kind``, ``open`` or ``end``, holding ``record``, its ``id`` first."""
         self.seq += 1
-        line = json.dumps({"seq": self.seq, "at": stamp(), kind: record}, separators=(",", ":")) + "\n"
+        line = json.dumps({"seq": self.seq, "at": stamp(), kind: {"id": record["id"], **record}},
+                          separators=(",", ":")) + "\n"
         try:
             self.file.write(line.encode())
             self.file.flush()

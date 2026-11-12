@@ -476,3 +476,33 @@ def test_the_stand_in_turns_down_a_bad_content_length_before_it_connects(monkeyp
 
     assert answer.startswith(b"HTTP/1.1 400 ") and proxy.opened == []
     assert NetworkReader(path).every_line() == []
+
+
+LEFT_OPEN = (b'{"seq":1,"at":"2026-11-12T10:00:00.000Z","open":{"id":"9-0-1","kind":"exchange",'
+             b'"started":"2026-11-12T10:00:00.000Z","request":{"method":"GET","url":"https://notes.test/a"}}}\n'
+             b'{"seq":2,"at":"2026-11-12T10:00:00.100Z","open":{"id":"9-0-2","kind":"tunnel","host":"cdn.test",'
+             b'"port":443,"started":"2026-11-12T10:00:00.100Z"}}\n'
+             b'{"seq":3,"at":"2026-11-12T10:00:00.200Z","end":{"id":"9-0-2","ended":"2026-11-12T10:00:00.200Z"}}\n')
+
+
+def test_the_site_proxy_started_again_ends_what_the_one_before_left_open_and_never_reuses_an_id(tmp_path):
+    path = tmp_path / "network.jsonl"
+    path.write_bytes(LEFT_OPEN)
+    log = NetworkLog.open(str(path))
+    again = NetworkLog.open(str(path))
+
+    first, second = _entries(path)
+    assert first["_failed"] == site_proxy.RESTARTED and first["request"]["url"] == "https://notes.test/a"
+    assert "_failed" not in second and not any("_open" in entry for entry in (first, second))
+    assert [line["seq"] for line in NetworkReader(path).every_line()] == [1, 2, 3, 4]
+    assert log.key() != again.key() and log.key().startswith(f"{os.getpid()}-3-")
+
+
+def test_the_stand_in_started_again_ends_what_the_one_before_left_open(tmp_path):
+    path = tmp_path / "network.jsonl"
+    path.write_bytes(LEFT_OPEN)
+    module = _stand_in()
+    module.NetworkLog(str(path))
+
+    first, second = _entries(path)
+    assert first["_failed"] == module.RESTARTED and "_failed" not in second
