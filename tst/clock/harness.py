@@ -616,11 +616,22 @@ def _tls(client: str, host: str, port: int = 443, cafile: str = "") -> str:
     return answer
 
 
+def _copies(work: str, mode: str) -> dict:
+    """tlscopies' answers in ``mode`` for the two local certificates by copy ({"3.0"|"1.1": {"version", "now", "past"}}),
+    or how it failed."""
+    r = subprocess.run(user_cmd(["tlscopies", mode, "now.pem", "past.pem"]), cwd=work, capture_output=True, text=True,
+                       timeout=60)
+    if r.returncode:
+        return {"failed": {"exit": r.returncode, "stderr": r.stderr[-300:]}}
+    return {copy: {k.removesuffix(".pem"): v for k, v in answers.items()} for copy, answers in json.loads(r.stdout).items()}
+
+
 def tls():
     """The TLS shim, with the clock 182 days back and no proxy, through curl, Python and openssl s_client. Two local
     servers check it uses real time: one's certificate is valid only from now (not yet valid at the universe date),
     the other's was valid at the universe date but has expired. With the clock library alone each client answers by
-    the universe date; with the shim by real time, and live sites verify while badssl's bad ones still don't."""
+    the universe date; with the shim by real time, and live sites verify while badssl's bad ones still don't. The same
+    two certificates are verified through two copies of OpenSSL in one process (tlscopies.c), each with its own."""
     clients = ("curl", "python", "s_client")
     work = "/tmp/tlsgate"
     os.makedirs(work, exist_ok=True)
@@ -646,7 +657,8 @@ def tls():
             preload(shim=shim)
             local = {name: {c: _tls(c, "localhost", port, f"{work}/{name}.pem") for c in clients}
                      for name, port in (("now", 8443), ("past", 8444))}
-            out["with_shim" if shim else "without_shim"] = {"local": local}
+            copies = {mode: _copies(work, mode) for mode in ("global", "private")}
+            out["with_shim" if shim else "without_shim"] = {"local": local, "copies": copies}
         out["with_shim"]["live"] = {host: {c: _tls(c, host) for c in clients} for host in TLS_LIVE}
         out["with_shim"]["bad"] = {host: {c: _tls(c, host) for c in clients} for host in TLS_REFUSED}
     finally:
