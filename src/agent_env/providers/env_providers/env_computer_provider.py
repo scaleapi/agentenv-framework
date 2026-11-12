@@ -236,7 +236,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         except NotImplementedError as e:  # a reset the env supports, which this provider can't carry out
             raise RuntimeError(f"'{env.id}' can't be reset on {type(sandbox_provider).__name__}: {e}") from None
         card = await ready(deployed.environment_url, ready_timeout(env.composed_apps(), platform_of(env.computer.os)),
-                           deployed.control_token, answering=bool(params.site_routing))
+                           deployed.control_token, answering=bool(params.site_routing), sandbox=sandbox)
         _require_name(env, card)
         valid_for_s = (record.get("sites") or {}).get("valid_for_s", 0)
         if routed := await _finish_boot(env, deployed, sandbox, params, valid_for_s, values.get("resolution")):

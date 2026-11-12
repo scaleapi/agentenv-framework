@@ -245,7 +245,7 @@ def vms(monkeypatch):
     monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "create_vm", create_vm)
     monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "reset_vm", reset_vm)
     monkeypatch.setattr(local_sandbox, "kvm_platforms", lambda: frozenset({"linux/arm64"}))
-    monkeypatch.setattr(boot, "ready", AsyncMock(side_effect=lambda url, timeout, token, answering=False: {
+    monkeypatch.setattr(boot, "ready", AsyncMock(side_effect=lambda url, timeout, token, answering=False, sandbox=None: {
         **DRIVER_CARD, "name": "desktop"}))
     monkeypatch.setattr(env_computer_provider, "ready", boot.ready)
     monkeypatch.setattr(env_computer_provider, "_require_display", AsyncMock())
