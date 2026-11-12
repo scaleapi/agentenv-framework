@@ -43,6 +43,8 @@ WEBSITE_BROWSER = Path(__file__).parent / "website-browser"
 BROWSER_COMPUTER = Path(__file__).parent / "browser-computer"
 TLS = Path(__file__).parent / "tls"
 CLOCK_DESKTOP = Path(__file__).parent / "clock-desktop"
+#: A desktop composing agent-env's clock app, whose follower keeps it on its multi env's gateway clock.
+CLOCK_FOLLOWER = Path(__file__).parent / "clock-follower"
 #: agent-env's libfaketime recipe, which the clock desktop's universe-clock app builds.
 CLOCK_RECIPE = Path(agent_env.__file__).parent / "computers" / "clock"
 #: Playwright and Puppeteer, which connect to a cdp address from Node.
@@ -132,6 +134,13 @@ def clock_desktop(tmp_path_factory):
     shutil.copytree(CLOCK_RECIPE, bundle / "envs" / "universe-clock" / "clock",
                     ignore=shutil.ignore_patterns("__pycache__"))
     yield from _composed(root, parse_bundle(bundle))
+
+
+@pytest.fixture(scope="module")
+def clock_follower_desktop(tmp_path_factory):
+    """The clock follower test bundle's desktop, the ubuntu-24.04 base and the reference driver with agent-env's
+    ``clock`` app, composed as ``desktop`` is."""
+    yield from _composed(tmp_path_factory.mktemp("clock-follower"), parse_bundle(CLOCK_FOLLOWER))
 
 
 @pytest.fixture(scope="module")
