@@ -244,15 +244,18 @@ class _Recording:
         return wire
 
     async def _log_lines(self) -> list[dict]:
-        """The log's lines from the recording's start to its end, once every one of them is written, or what's
-        written of them after ``LOG_WAIT_S``."""
+        """The log's lines from the recording's start to its end, once every one of them is written; after
+        ``LOG_WAIT_S``, an action still going is written as unfinished, as it was at the end, and what's written of
+        them is what there is."""
         manifest, log = self.manifest, self.recordings.log
         deadline = asyncio.get_running_loop().time() + LOG_WAIT_S
         wanted = manifest.log_last - manifest.log_after
         while True:
-            lines = [line for line in (await log.read_async(manifest.log_after, limit=wanted))["lines"]
-                     if line.get("seq", 0) <= manifest.log_last]
-            if len(lines) >= wanted or asyncio.get_running_loop().time() >= deadline:
+            late = asyncio.get_running_loop().time() >= deadline
+            read = await log.read_async(manifest.log_after, limit=wanted,
+                                        settle_through=manifest.log_last if late else None)
+            lines = [line for line in read["lines"] if line.get("seq", 0) <= manifest.log_last]
+            if len(lines) >= wanted or late:
                 return lines
             await asyncio.sleep(LOG_POLL_S)
 

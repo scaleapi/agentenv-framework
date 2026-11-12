@@ -178,6 +178,19 @@ def test_an_action_still_going_after_the_limit_is_written_unfinished_and_its_out
     assert [line["seq"] for line in log.read()["lines"]] == [1, 2, 3]
 
 
+def test_a_read_settling_through_an_entry_writes_the_actions_still_going_up_to_it_unfinished_now(tmp_path):
+    log = BrowserLog(tmp_path / "browser-chromium.jsonl")
+    early = log.begin({"via": "mcp", "tool": "browser_navigate", "acts": True, "tab": "T1"})
+    late = log.begin({"via": "cdp", "method": "Runtime.evaluate", "acts": True, "tab": "T1"})
+
+    read = log.read(settle_through=early["seq"])
+
+    assert [(line["seq"], line["action"]["unfinished"]) for line in read["lines"]] == [(early["seq"], True)]
+    assert read["last"] == early["seq"] and log.read(after=early["seq"])["lines"] == []
+    log.finish(late, ok=True)
+    assert [line["seq"] for line in log.read(after=early["seq"])["lines"]] == [late["seq"]]
+
+
 def test_a_restarted_server_carries_on_the_sequence_on_a_new_line_after_a_partial_one(tmp_path):
     path = tmp_path / "browser-chromium.jsonl"
     path.write_text('{"seq": 1, "at": "t", "reset": {}}\n{"seq": 2, "at": "t", "tab": {}}\n{"seq": 3, "at"')

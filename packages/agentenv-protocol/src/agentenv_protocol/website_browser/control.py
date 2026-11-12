@@ -51,11 +51,12 @@ FRAME_QUALITY = 80
 NUDGE_S = 0.5
 #: How long a frame may take to capture, longer than a screenshot an agent waits on, since a frame is taken in the
 #: background: a page too busy to paint, or between documents mid-navigation, gets this long to show, a capture the
-#: browser refused for being between documents asked again every ``FRAME_RETRY_S``.
+#: browser refused for the moment asked again every ``FRAME_RETRY_S``.
 FRAME_CAPTURE_S = 10.0
 FRAME_RETRY_S = 0.25
-#: What the browser says of a capture refused for the moment, as while a navigation swaps the tab's document.
-BETWEEN_DOCUMENTS = ("Not attached to an active page", "Unable to capture screenshot")
+#: What the browser says of a capture refused for the moment: while a navigation swaps the tab's document, or once the
+#: session it was asked on is gone, as when the tab closes or the browser attaches it anew.
+FOR_THE_MOMENT = ("Not attached to an active page", "Unable to capture screenshot", "Session with given id not found")
 #: How often a wait for a tab to load looks again.
 LOAD_POLL_S = 0.1
 #: Where an agent's files to upload are, and where downloads land, under the session user's home.
@@ -747,14 +748,20 @@ class BrowserControl:
             except asyncio.TimeoutError:
                 raise DeviceUnavailable(f"the tab painted nothing within {FRAME_CAPTURE_S:g} s") from None
             except DevToolsError as e:
-                if not any(why in str(e) for why in BETWEEN_DOCUMENTS) or loop.time() + FRAME_RETRY_S >= deadline:
+                if not any(why in str(e) for why in FOR_THE_MOMENT) or loop.time() + FRAME_RETRY_S >= deadline:
                     raise DeviceUnavailable(f"the tab couldn't be captured: {e}") from None
             except ConnectionError as e:
                 raise DeviceUnavailable(f"the tab couldn't be captured: {e}") from None
             await asyncio.sleep(FRAME_RETRY_S)
-            if session not in self._sessions:
-                session = await self.active_session()
-                target = self._sessions[session]
+            while session not in self._sessions:
+                try:
+                    session = next((s for s, t in self._sessions.items() if t == target), None) or (
+                        await self.active_session())
+                except DeviceUnavailable:
+                    if loop.time() + FRAME_RETRY_S >= deadline:
+                        raise
+                    await asyncio.sleep(FRAME_RETRY_S)
+            target = self._sessions[session]
         self._frames[target] = shot["data"], "jpg"
         return shot["data"], "jpg", target, self.url_of(target)
 

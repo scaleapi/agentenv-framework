@@ -112,7 +112,8 @@ async def test_a_burst_still_settling_at_the_end_gets_its_frame_before_the_last(
 
 
 @pytest.mark.asyncio
-async def test_an_end_waits_for_entries_in_flight_and_lists_any_still_unwritten_as_missing(recorded, monkeypatch):
+async def test_an_end_waits_for_entries_in_flight_writes_an_action_still_going_as_unfinished_and_lists_the_rest(
+        recorded, monkeypatch):
     log, control, uploads, recordings = recorded
     monkeypatch.setattr(browser_recording, "LOG_WAIT_S", 0.3)
     started = await recordings.start("run-1:record", _grant(), frames=False)
@@ -120,11 +121,16 @@ async def test_an_end_waits_for_entries_in_flight_and_lists_any_still_unwritten_
     asyncio.get_running_loop().call_later(0.1, lambda: log.finish(finishing, ok=True))
     complete = await recordings.end(started["recording_id"])
     started = await recordings.start("run-2:record", _grant(), frames=False)
-    stuck = log.begin({"via": "cdp", "who": "ada", "method": "Page.navigate", "acts": True, "tab": "T1"})
-    incomplete = await recordings.end(started["recording_id"])
+    going = log.begin({"via": "mcp", "who": "default", "tool": "browser_navigate", "acts": True, "tab": "T1"})
+    after = _acted(log, "cdp", "Input.insertText", "T1")
+    held = log.reserve()
+    ended = await recordings.end(started["recording_id"])
+    lines = [json.loads(line) for line in uploads.by_path[
+        f"agentenv-browser-recordings/r1/{ended['recording_id']}/log.jsonl"].decode().splitlines()]
 
     assert complete["log_missing"] == [] and complete["log_last"] == finishing["seq"]
-    assert incomplete["log_missing"] == [stuck["seq"]]
+    assert ended["log_missing"] == [held] and [line["seq"] for line in lines] == [going["seq"], after]
+    assert lines[0]["action"]["unfinished"] is True
 
 
 @pytest.mark.asyncio
@@ -322,6 +328,35 @@ async def test_a_tab_that_closes_while_its_frame_is_asked_again_is_framed_as_the
     framed = await control.frame("T2", load_wait_s=0)
 
     assert framed[:3] == held[:3] and held[2] == "T1" and [s for s, _, _ in pipe.captured] == ["s-T1", "s-T2"]
+
+
+@pytest.mark.asyncio
+async def test_a_frame_whose_session_is_gone_is_taken_on_the_session_its_tab_was_attached_on_anew():
+    pipe = RefusingPipe(refusals=1, why="Page.captureScreenshot: Session with given id not found")
+    control = _one_tab(pipe)
+
+    def reattach() -> None:
+        pipe.emit("Target.detachedFromTarget", {"sessionId": "s-T1"})
+        pipe.emit("Target.attachedToTarget", {"sessionId": "s-T1b", "targetInfo": {"targetId": "T1", "type": "page"}})
+    asyncio.get_running_loop().call_later(0.05, reattach)
+
+    _, _, tab, _ = await control.frame("T1", load_wait_s=0)
+
+    assert tab == "T1" and [s for s, _, _ in pipe.captured] == ["s-T1", "s-T1b"]
+
+
+@pytest.mark.asyncio
+async def test_a_frame_whose_only_tab_is_attached_anew_only_after_a_retry_waits_for_it_within_its_budget():
+    pipe = RefusingPipe(refusals=1, why="Page.captureScreenshot: Session with given id not found")
+    control = _one_tab(pipe)
+    loop = asyncio.get_running_loop()
+    loop.call_later(0.05, pipe.emit, "Target.detachedFromTarget", {"sessionId": "s-T1"})
+    loop.call_later(0.6, pipe.emit, "Target.attachedToTarget",
+                    {"sessionId": "s-T1b", "targetInfo": {"targetId": "T1", "type": "page"}})
+
+    _, _, tab, _ = await control.frame("T1", load_wait_s=0)
+
+    assert tab == "T1" and [s for s, _, _ in pipe.captured] == ["s-T1", "s-T1b"]
 
 
 @pytest.mark.asyncio
