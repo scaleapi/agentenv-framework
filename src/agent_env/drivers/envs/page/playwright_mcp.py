@@ -46,9 +46,9 @@ CALL_TIMEOUT_S = 300.0
 #: before it's killed.
 POLL_S = 0.1
 STOP_S = 10.0
-#: How long one call may take at most, its start and its session's together with its own bound: as long as the browser
-#: credits Playwright MCP's commands to it unless told it ended sooner.
-CALL_BOUND_S = 2 * START_S + CALL_TIMEOUT_S
+#: How long one call may take at most, from when it asks for its session to its answer, however long it waits for
+#: another's start: a stop, a start and a session's opening, then its own bound.
+CALL_BOUND_S = STOP_S + 2 * START_S + CALL_TIMEOUT_S
 #: How long a caller's session on Playwright MCP is kept with no call: a caller's own MCP session ends with no word to
 #: the driver, and each holds a connection to the browser.
 SESSION_IDLE_S = 3600.0
@@ -89,8 +89,17 @@ class PlaywrightMcp:
         self._sessions: dict[Optional[str], _Session] = {}
 
     async def call(self, tool: str, /, **arguments: Any) -> CallToolResult:
-        """``tool`` called on Playwright MCP as it answers, or refused saying why it couldn't be. A call Playwright MCP
-        or its session ends under fails then, and isn't sent again, since it may have acted."""
+        """``tool`` called on Playwright MCP as it answers, or refused saying why it couldn't be, within CALL_BOUND_S
+        of asking for its session. A call Playwright MCP or its session ends under, or that runs past its bound, fails
+        then, and isn't sent again, since it may have acted."""
+        try:
+            async with asyncio.timeout(CALL_BOUND_S):
+                return await self._answer(tool, **arguments)
+        except TimeoutError:
+            return _refused(f"Playwright MCP didn't answer {tool} within {CALL_BOUND_S:g} s of its asking for a "
+                            "session, which may have acted")
+
+    async def _answer(self, tool: str, /, **arguments: Any) -> CallToolResult:
         try:
             held, process = await self._session(ToolContext.current().caller.session)
         except DeviceUnavailable as e:
@@ -189,16 +198,19 @@ class _Session:
 
     @classmethod
     async def open(cls, url: str) -> _Session:
-        """A session on Playwright MCP at ``url``; DeviceUnavailable when it doesn't open one in time, wedged."""
+        """A session on Playwright MCP at ``url``; DeviceUnavailable when it doesn't open one in time, wedged. One whose
+        opening is given up on is closed, not left half open."""
         held = cls(url)
         ready: asyncio.Future = asyncio.get_running_loop().create_future()
         held.owner = asyncio.create_task(held._own(ready))
         try:
             held.session = await asyncio.wait_for(ready, START_S)
-        except asyncio.TimeoutError:
+        except BaseException as e:
             held.close.set()
             held.owner.cancel()
-            raise DeviceUnavailable(f"Playwright MCP didn't open a session within {START_S:.0f} s")
+            if isinstance(e, TimeoutError):
+                raise DeviceUnavailable(f"Playwright MCP didn't open a session within {START_S:.0f} s") from None
+            raise
         return held
 
     async def _own(self, ready: asyncio.Future) -> None:

@@ -328,9 +328,9 @@ async def test_each_playwright_mcp_call_is_an_entry_in_the_browsers_log_begun_as
     with bound(ToolContext(tool="browser_snapshot", call_id="c2", mcp=True)):
         failed = await page._playwright_call("browser_snapshot")
 
-    assert page.sent == [("calls/begin", {"user": "playwright-mcp", "acts": True, "within_s": 360.0}),
+    assert page.sent == [("calls/begin", {"user": "playwright-mcp", "acts": True, "within_s": 400.0}),
                          ("calls/end", {"entry": 7, "ok": True}),
-                         ("calls/begin", {"user": "playwright-mcp", "acts": False, "within_s": 360.0}),
+                         ("calls/begin", {"user": "playwright-mcp", "acts": False, "within_s": 400.0}),
                          ("calls/end", {"entry": 7, "ok": False, "error": "no such element"})]
     assert TOOL_CALL_HEADER in page.headers[0] and TOOL_CALL_HEADER not in page.headers[1]
     assert clicked.content[0].text == "clicked" and failed.isError
@@ -535,6 +535,24 @@ async def test_a_call_slower_than_its_bound_is_refused_and_its_session_opened_af
 
     assert slow.isError and "didn't answer browser_wait_for" in slow.content[0].text
     assert first.close.is_set() and not after.isError
+
+
+@pytest.mark.asyncio
+async def test_a_call_is_bounded_from_when_it_asks_for_its_session_and_leaves_no_session_half_open(stand_in, monkeypatch):
+    module, playwright, endpoints, called = stand_in
+    monkeypatch.setattr(module, "CALL_BOUND_S", 1.0)
+    try:
+        async with playwright._lock:
+            waited = await asyncio.wait_for(called("ada"), 10)
+        endpoints.append("ws://127.0.0.1:18765/svc/chromium/cdp/wedged-once")
+        opening = await asyncio.wait_for(called("bo"), 10)
+        await asyncio.sleep(0.1)
+        owners = [task for task in asyncio.all_tasks() if task.get_coro().__name__ == "_own"]
+    finally:
+        await playwright._stop()
+
+    assert waited.isError and "didn't answer browser_snapshot within 1 s" in waited.content[0].text
+    assert opening.isError and "within 1 s" in opening.content[0].text and owners == []
 
 
 @pytest.mark.asyncio

@@ -89,6 +89,9 @@ DRAG_STEP_PX = 20
 BLANK = b"\xff\xff\xff"
 #: How long one call to the browser's server may take.
 CALL_TIMEOUT_S = 30.0
+#: How long the browser waits for a browser_* call's end before writing it as never said to have ended: the call's own
+#: bound, then its closing request's.
+CALL_ENDS_WITHIN_S = playwright_mcp.CALL_BOUND_S + CALL_TIMEOUT_S
 
 
 @computer_driver(name="page", supports=[{"os": {"type": "linux", "display": ["none"]}, "arch": ["amd64", "arm64"]}])
@@ -133,7 +136,7 @@ class PageDriver(ComputerDriverEnvironment):
 
     async def _call_begun(self, tool: str) -> Optional[int]:
         params = {"user": playwright_mcp.CDP_USER, "acts": playwright_mcp.acts(tool),
-                  "within_s": playwright_mcp.CALL_BOUND_S}
+                  "within_s": CALL_ENDS_WITHIN_S}
         try:
             return (await self._call("calls/begin", params))["entry"]
         except (DeviceUnavailable, InvalidArgument, Unsupported) as e:
