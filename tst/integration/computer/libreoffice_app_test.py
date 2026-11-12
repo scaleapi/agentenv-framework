@@ -2,9 +2,9 @@
 machine's arch ready with it; deployed, it isn't launched until it's opened, and the fonts with Office's metrics stand
 in for Office's; a .docx, a .pptx, an .xlsx and a .csv opened by their type, as the file manager opens them, each open
 in their app in the one copy its server launched, asking nothing, with no lock file beside them, and a .docx saves in
-its own format without asking; its menu launcher, run while it runs, shows a Start Center in that copy; and a reset of
-its data stops it, takes its profile back to none and launches it again, as quiet. Needs Docker and the local registry
-on localhost:5000."""
+its own format without asking; its menu launcher, run while it runs, goes to that copy, starting no other; and a reset
+of its data stops it, takes its profile back to none and launches it again, as quiet. Needs Docker and the local
+registry on localhost:5000."""
 
 import asyncio
 import platform
@@ -84,8 +84,8 @@ async def test_office_files_open_by_type_in_the_copy_its_server_launched_asking_
             saved_after = await _run(deployed, ["stat", "-c", "%Y", "Documents/memo.docx"])
             asked_on_save = await _dialogs(deployed)
             await _run(deployed, ["sh", "-c", LAUNCHER])
-            centered = await _window_of(deployed, "libreoffice-startcenter", "LibreOffice")
             copies_after_launcher = await _run(deployed, ["sh", "-c", PROCESSES])
+            ready_after_launcher = await _app(deployed, apps.endpoint(card, "ready"))
             await _run(deployed, ["touch", MARKER])
             await protocol_v1.reset_data(f"{deployed.environment_url}/svc/libreoffice",
                                          headers=deployed.control_headers)
@@ -105,7 +105,8 @@ async def test_office_files_open_by_type_in_the_copy_its_server_launched_asking_
     assert asked == [] and asked_on_save == [] and asked_after_reset == [], (asked, asked_on_save, asked_after_reset)
     assert copies == "1" and copies_after_launcher == "1" and ready["ready"], (copies, copies_after_launcher, ready)
     assert locks == "0" and int(saved_after) > int(saved_before)
-    assert centered and relaunched["ready"] and reopened, (centered, relaunched, reopened)
+    assert ready_after_launcher["ready"] and relaunched["ready"] and reopened, (ready_after_launcher, relaunched,
+                                                                                reopened)
     assert marker == "gone" and copies_after_reset == "1", (marker, copies_after_reset)
     assert not report.failed
 

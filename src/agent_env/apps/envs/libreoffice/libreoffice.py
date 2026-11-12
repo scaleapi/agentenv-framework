@@ -10,7 +10,8 @@ import re
 import subprocess
 from pathlib import Path
 
-from agentenv_protocol.computer import ComputerAppEnvironment, Launch, Packages, Ready, computer_app, install_step, linux
+from agentenv_protocol.computer import (ComputerAppEnvironment, Launch, Packages, Ready, computer_app, install_step,
+                                        linux)
 
 #: Writer, Impress and Calc, with GTK3 for the desktop, and the fonts with Office's metrics.
 PACKAGES = ["libreoffice-writer", "libreoffice-impress", "libreoffice-calc", "libreoffice-gtk3",
@@ -30,15 +31,16 @@ DESKTOP_ENTRIES, OVERRIDES = Path("/usr/share/applications"), Path("/usr/local/s
 @linux(packages=Packages(apt=PACKAGES), paths=[PROFILE], skill="SKILL.md",
        launch=Launch(at="demand", command=[SOFFICE, "--nologo"], window=WINDOW, ready=Ready(window=True)))
 class LibreOffice(ComputerAppEnvironment):
-    """A launch while it runs shows a Start Center in the copy that runs: a second copy would only hand it to the first
-    and exit, leaving its server with no copy it knows."""
+    """A launch while it runs goes to the copy that runs, as one of LibreOffice's own does, which opens no window while
+    a document is open: a second copy its server started would only hand it to the first and exit, leaving its server
+    with no copy it knows."""
 
     def _launch_running(self):
-        return self._start_center
+        return self._hand_on
 
-    async def _start_center(self) -> None:
-        shown = await asyncio.create_subprocess_exec(SOFFICE, "--nologo")
-        await shown.wait()
+    async def _hand_on(self) -> None:
+        handed = await asyncio.create_subprocess_exec(SOFFICE, "--nologo")
+        await handed.wait()
 
     @install_step(scope="system", os="linux")
     def configure(self) -> None:

@@ -17,8 +17,8 @@ files keep their layout.
   running, `open.py` has the server launch one and waits until it's ready, then hands the files to it, as LibreOffice
   runs one copy per user, so the server starts every copy and a load or a reset can stop it. A file the file manager or
   `exo-open` opens goes there by its type: a .docx, .doc, .odt or .rtf to Writer, a .pptx, .ppt or .odp to Impress, an
-  .xlsx, .xls, .ods or .csv to Calc, a CSV comma-separated in UTF-8 with no import dialog. A launch while it runs shows a
-  Start Center in the copy that runs.
+  .xlsx, .xls, .ods or .csv to Calc, a CSV comma-separated in UTF-8 with no import dialog. A launch while it runs goes
+  to the copy that runs, as one of LibreOffice's own does, starting no other.
 - **Data:** its profile, `~/.config/libreoffice`, which the image has none of, so each deploy and each reset starts with
   a clean one, under the same defaults. Documents are the computer's own, in Documents and Downloads.
 - **Skill:** `SKILL.md`, for an agent working through its windows: opening each app, saving in Office formats, slides,
