@@ -259,8 +259,8 @@ class TestAgentPathUnchanged:
 
 @skip_without_gnu_stat()
 class TestOnThisMachine:
-    """A local sandbox's host is the operator's: a file is read only where it resolves inside the sandbox's work dir
-    or the step's base_path, so a link left there reaches nothing else on this machine."""
+    """A local sandbox's host is the operator's: no link is read, and an agent's manifest entry only where it resolves
+    inside the sandbox's work dir; a path the task names is read wherever it is, as before."""
 
     @staticmethod
     async def _collect(step, sandbox, ctx=None):
@@ -281,8 +281,16 @@ class TestOnThisMachine:
         )
         return set(collected), hard_failures, uploaded
 
+    @staticmethod
+    def _manifest(artifacts):
+        ctx = TaskStepContext()
+        ctx.prompt_responses.append(PromptResponse(
+            prompt_id="p", response="{}", step_id="m9", structured_output={"artifacts": artifacts},
+        ))
+        return ctx
+
     @pytest.mark.asyncio
-    async def test_a_link_out_of_the_work_dir_is_refused(self, tmp_path):
+    async def test_a_link_is_refused_and_never_read(self, tmp_path):
         work = tmp_path / "work"
         (work / "artifact").mkdir(parents=True)
         (work / "other").mkdir()
@@ -293,12 +301,27 @@ class TestOnThisMachine:
         (work / "artifact" / "notes").symlink_to(work / "other" / "notes.md")
         step = CollectArtifactsTaskStep(
             id="c", version=None, sandbox_name="box", base_path="/app/artifact",
-            artifact_paths=["report.md", "leak", "notes", "/app/../id_rsa"],
+            artifact_paths=["report.md", "leak", "notes"],
         )
         collected, hard_failures, uploaded = await self._collect(step, LocalSandbox(work_dir=work))
-        assert collected == {"report.md", "notes"}
-        assert set(hard_failures) == {"/app/artifact/leak", "/app/../id_rsa"}
+        assert collected == {"report.md"}
+        assert set(hard_failures) == {"/app/artifact/leak", "/app/artifact/notes"}
         assert b"operator secret" not in uploaded.values()
+
+    @pytest.mark.asyncio
+    async def test_a_path_the_task_names_is_read_wherever_it_is(self, tmp_path):
+        work, host = tmp_path / "work", tmp_path / "host"
+        (work / "artifact").mkdir(parents=True)
+        host.mkdir()
+        (work / "artifact" / "report.md").write_bytes(b"# report")
+        (host / "bundle.zip").write_bytes(b"PK bundle")
+        step = CollectArtifactsTaskStep(
+            id="c", version=None, sandbox_name="box", base_path="/app/artifact",
+            artifact_paths=["report.md", str(host / "bundle.zip")],
+        )
+        collected, hard_failures, uploaded = await self._collect(step, LocalSandbox(work_dir=work))
+        assert (collected, hard_failures) == ({"report.md", str(host / "bundle.zip")}, [])
+        assert uploaded == {"report.md": b"# report", "bundle.zip": b"PK bundle"}
 
     @pytest.mark.asyncio
     async def test_a_base_path_the_task_names_on_this_machine_is_read(self, tmp_path):
@@ -315,19 +338,6 @@ class TestOnThisMachine:
         assert uploaded == {"bundle.zip": b"PK bundle"}
 
     @pytest.mark.asyncio
-    async def test_a_base_path_the_agent_swapped_for_a_link_reaches_only_the_work_dir(self, tmp_path):
-        work, home = tmp_path / "work", tmp_path / "home"
-        (home / ".ssh").mkdir(parents=True)
-        (home / ".ssh" / "id_rsa").write_bytes(b"operator secret")
-        work.mkdir()
-        (work / "artifact").symlink_to(home)
-        step = CollectArtifactsTaskStep(
-            id="c", version=None, sandbox_name="box", base_path="/app/artifact", artifact_paths=[".ssh/id_rsa"],
-        )
-        collected, hard_failures, uploaded = await self._collect(step, LocalSandbox(work_dir=work))
-        assert (collected, hard_failures, uploaded) == (set(), ["/app/artifact/.ssh/id_rsa"], {})
-
-    @pytest.mark.asyncio
     async def test_a_manifest_naming_a_file_of_this_machine_is_refused(self, tmp_path):
         work = tmp_path / "work"
         (work / "artifact").mkdir(parents=True)
@@ -335,11 +345,8 @@ class TestOnThisMachine:
         (tmp_path / "id_rsa").write_bytes(b"operator secret")
         (work / "artifact" / "result.md").write_bytes(b"# result")
         (work / "handoff" / "note.md").write_bytes(b"note")
-        ctx = TaskStepContext()
-        ctx.prompt_responses.append(PromptResponse(prompt_id="p", response="{}", step_id="m9", structured_output={
-            "artifacts": {"report": str(tmp_path / "id_rsa"), "result": "/app/artifact/result.md",
-                          "note": "/app/handoff/note.md"},
-        }))
+        ctx = self._manifest({"report": str(tmp_path / "id_rsa"), "result": "/app/artifact/result.md",
+                              "note": "/app/handoff/note.md"})
         step = CollectArtifactsTaskStep(
             id="c", version=None, sandbox_name="box", base_path="/app/artifact", manifest_step_id="m9",
         )
@@ -347,3 +354,16 @@ class TestOnThisMachine:
         assert (collected, hard_failures) == ({"result", "note"}, [str(tmp_path / "id_rsa")])
         assert b"operator secret" not in uploaded.values()
 
+    @pytest.mark.asyncio
+    async def test_a_manifest_through_a_folder_the_agent_swapped_for_a_link_reaches_only_the_work_dir(self, tmp_path):
+        work, home = tmp_path / "work", tmp_path / "home"
+        (home / ".ssh").mkdir(parents=True)
+        (home / ".ssh" / "id_rsa").write_bytes(b"operator secret")
+        work.mkdir()
+        (work / "artifact").symlink_to(home)
+        step = CollectArtifactsTaskStep(
+            id="c", version=None, sandbox_name="box", base_path="/app/artifact", manifest_step_id="m9",
+        )
+        ctx = self._manifest({"key": "/app/artifact/.ssh/id_rsa"})
+        collected, hard_failures, uploaded = await self._collect(step, LocalSandbox(work_dir=work), ctx)
+        assert (collected, hard_failures, uploaded) == (set(), ["/app/artifact/.ssh/id_rsa"], {})

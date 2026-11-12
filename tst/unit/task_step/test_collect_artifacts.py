@@ -517,8 +517,9 @@ class TestAgentContainerPath:
         except RuntimeError as e:
             assert "could not size" in str(e)
 
-    @pytest.mark.parametrize("mode, shown", [("21b6", "crw-rw-rw-"), ("11a4", "prw-r--r--"), ("41ed", "drwxr-xr-x"),
-                                             ("c1ed", "srwxr-xr-x")], ids=["device", "fifo", "directory", "socket"])
+    @pytest.mark.parametrize("mode, shown", [("a1ff", "lrwxrwxrwx"), ("21b6", "crw-rw-rw-"), ("11a4", "prw-r--r--"),
+                                             ("41ed", "drwxr-xr-x"), ("c1ed", "srwxr-xr-x")],
+                             ids=["link", "device", "fifo", "directory", "socket"])
     def test_get_file_size_refuses_anything_but_a_regular_file(self, mode, shown):
         """By the raw mode bits stat prints, which no locale translates, as it does a file type's name."""
         step = CollectArtifactsTaskStep(id="c", version=None, agent_name="solver")
@@ -527,7 +528,7 @@ class TestAgentContainerPath:
         sandbox.exec_with_output = AsyncMock(return_value=(0, f"{mode}:0\n", ""))
         with pytest.raises(RuntimeError, match=f"not a regular file \\({shown}\\)"):
             _run(step._get_file_size(sandbox, None, "/app/artifact/report.pdf"))
-        assert sandbox.exec_with_output.await_args.args[:4] == ("stat", "-L", "-c", "%f:%s")
+        assert sandbox.exec_with_output.await_args.args[:3] == ("stat", "-c", "%f:%s")
 
     def test_get_file_size_sizes_a_regular_file_even_when_empty(self):
         step = CollectArtifactsTaskStep(id="c", version=None, agent_name="solver")

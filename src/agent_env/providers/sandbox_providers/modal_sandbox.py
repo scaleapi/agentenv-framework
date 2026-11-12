@@ -133,9 +133,6 @@ class _ModalStreamAdapter:
     async def read(self) -> bytes:
         return await self._stream.read.aio()
 
-    def __aiter__(self):
-        return self._stream.__aiter__()
-
 
 class _ModalProcessAdapter:
     def __init__(self, process):

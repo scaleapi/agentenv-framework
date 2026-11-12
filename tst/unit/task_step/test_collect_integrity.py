@@ -6,7 +6,6 @@ import tempfile
 import threading
 
 import pytest
-from agent_env.task_step.task_steps import collect_artifacts
 from agent_env.task_step.task_steps.collect_artifacts import CollectArtifactsTaskStep
 from tst.unit.event_loop_probe import on_event_loop
 
@@ -128,14 +127,6 @@ async def test_a_cancel_mid_upload_leaves_the_file_to_the_upload(caplog, monkeyp
     assert list(tmp_path.iterdir()) == []
 
 
-class _HangingStdout:
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        await asyncio.Event().wait()
-
-
 class _RecordingSandbox(_Sandbox):
     def __init__(self, *args, stdout=None):
         super().__init__(*args)
@@ -177,32 +168,3 @@ async def test_a_stream_longer_than_the_reported_size_is_refused(tmp_path, monke
         await step._collect_file(sb, None, "/app/artifact/zero", len(src), "zero", _RefusingStore(), "uid", 1,
                                  "application/octet-stream")
     assert list(tmp_path.iterdir()) == []
-
-
-@pytest.mark.asyncio
-async def test_a_read_past_its_deadline_is_abandoned(tmp_path, monkeypatch):
-    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
-    monkeypatch.setattr(collect_artifacts, "_READ_DEADLINE_FLOOR_S", 0.05)
-    sb = _RecordingSandbox(b"", 0, 10, stdout=_HangingStdout())
-    step = CollectArtifactsTaskStep(id="collect", version=None)
-    with pytest.raises(RuntimeError, match="took more than 0s; abandoned it"):
-        await step._collect_file(sb, None, "/app/artifact/slow", 10, "slow", _RefusingStore(), "uid", 1,
-                                 "application/octet-stream")
-    assert list(tmp_path.iterdir()) == []
-
-
-@pytest.mark.asyncio
-async def test_a_provider_whose_exec_runs_the_whole_read_is_held_to_the_deadline(tmp_path, monkeypatch):
-    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
-    monkeypatch.setattr(collect_artifacts, "_READ_DEADLINE_FLOOR_S", 0.05)
-
-    class _StallingExec(_Sandbox):
-        async def exec(self, *args):
-            await asyncio.Event().wait()
-
-    step = CollectArtifactsTaskStep(id="collect", version=None)
-    with pytest.raises(RuntimeError, match="took more than 0s; abandoned it"):
-        await step._collect_file(_StallingExec(b"", 0, 10), None, "/app/artifact/slow", 10, "slow", _RefusingStore(),
-                                 "uid", 1, "application/octet-stream")
-    assert list(tmp_path.iterdir()) == []
-

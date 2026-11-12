@@ -27,9 +27,9 @@ under a single base_path — outputs aren't guaranteed to live on the desktop /
 in /app — without assuming a common directory. base_path only applies to
 relative entries and to the no-list enumeration fallback.
 
-Only regular files are read. A local sandbox's host is
-this machine, so there a file is read only where it resolves inside the
-sandbox's work dir, or inside a base_path the task names outside /app.
+Only regular files are read, and a link is not one. A local sandbox's host is
+this machine, so there a manifest entry is read only where it resolves inside
+the sandbox's work dir, or inside a base_path the task names outside /app.
 
 This allows the same step definition to collect different artifacts per seed.
 
@@ -106,9 +106,6 @@ _CUA_ENV_METADATA_MARKER = "cua_vm_sandbox_id"
 # or under this size take that single-shot path; larger ones stream in fixed byte ranges via
 # cua_bash so no single call has to move the whole file.
 _CUA_SINGLE_SHOT_MAX = 16 * 1024 * 1024  # 16 MB
-# A read is abandoned past this floor plus a second for each _READ_RATE_FLOOR bytes of the file.
-_READ_DEADLINE_FLOOR_S = 300
-_READ_RATE_FLOOR = 1 << 20
 _CUA_CHUNK_BYTES = 8 * 1024 * 1024       # 8 MB per ranged read
 
 # artifact_paths entries with a URL scheme are not VM files — they're gold/source
@@ -456,12 +453,12 @@ class CollectArtifactsTaskStep(TaskStep):
         ) from err
 
     async def _get_file_size(self, sandbox, container: Optional[str], source_path: str) -> int:
-        """Size of the regular file at ``source_path`` on the agent's filesystem, links followed. Returns -1 only if the
-        file is genuinely absent; a `stat` that fails for any other reason RAISES so a failed size check is a hard
-        failure rather than a silent 'missing' skip that drops an existing deliverable, and so does anything but a
-        regular file (a device, a FIFO, a directory, or a link to one), which could stream without end.
+        """Size of the regular file at ``source_path`` on the agent's filesystem. Returns -1 only if the file is
+        genuinely absent; a `stat` that fails for any other reason RAISES so a failed size check is a hard failure
+        rather than a silent 'missing' skip that drops an existing deliverable, and so does anything but a regular
+        file (a link, a device, a FIFO or a directory), which could stream without end.
         VM-mode wraps in `docker exec <container>`; container-mode runs `stat` directly."""
-        args = _exec_args(sandbox, container, ("stat", "-L", "-c", "%f:%s", source_path))
+        args = _exec_args(sandbox, container, ("stat", "-c", "%f:%s", source_path))
         exit_code, stdout, stderr = await sandbox.exec_with_output(*args)
         if exit_code != 0:
             if _looks_absent(stderr):
@@ -482,7 +479,7 @@ class CollectArtifactsTaskStep(TaskStep):
         silently dropped; ASCII survives), stream stdout + decode incrementally to
         a temp file (bounds memory), then multipart-upload. stderr is drained in
         parallel so the shared output pump can't backpressure-stall. The sandbox reads
-        no more than ``size`` bytes, and a read that outlasts its deadline is abandoned."""
+        no more than ``size`` bytes."""
         bash_cmd = f"head -c {size} < {shlex.quote(source_path)} | base64"
         args = _exec_args(sandbox, container, ("bash", "-c", bash_cmd))
 
@@ -492,11 +489,7 @@ class CollectArtifactsTaskStep(TaskStep):
             with tempfile.NamedTemporaryFile(delete=False, suffix=f"-{object_name.replace('/', '_')}") as tmp:
                 local_path = tmp.name
 
-            deadline = _READ_DEADLINE_FLOOR_S + size / _READ_RATE_FLOOR
-            try:
-                exit_code = await asyncio.wait_for(_read_to_file(sandbox, args, local_path, size), timeout=deadline)
-            except TimeoutError:
-                raise RuntimeError(f"reading {source_path} took more than {deadline:.0f}s; abandoned it") from None
+            exit_code = await _read_to_file(sandbox, args, local_path, size)
             if exit_code != 0:
                 raise RuntimeError(f"base64 read failed for {source_path} (exit {exit_code})")
 
@@ -912,8 +905,10 @@ class CollectArtifactsTaskStep(TaskStep):
         else:
             logger.info(f"Collecting {len(items)} artifacts from {self.base_path}")
 
-        # A local sandbox's host is this machine: only what resolves inside its work dir, or a base_path outside /app.
-        roots = await self._local_roots(sandbox) if container is None and sandbox.app_dir_on_this_machine else None
+        # A local sandbox's host is this machine: the agent's manifest reaches only its work dir, or a base_path
+        # outside /app.
+        on_this_machine = self.manifest_step_id and container is None and sandbox.app_dir_on_this_machine
+        roots = await self._local_roots(sandbox) if on_this_machine else None
         collected: dict[str, str] = {}
         file_artifacts: dict[str, FileArtifact] = {}
         hard_failures: list[str] = []
@@ -1074,7 +1069,7 @@ def _unused(key: str, keys: set[str]) -> str:
 
 async def _read_to_file(sandbox, args: tuple, local_path: str, size: int) -> int:
     """Run ``args`` and decode its base64 stdout into ``local_path``, draining stderr beside it so the shared output
-    pump can't backpressure-stall; return its exit status. Some providers run the whole command inside ``exec``."""
+    pump can't backpressure-stall; return its exit status."""
     process = await sandbox.exec(*args)
     stderr = asyncio.create_task(process.stderr.read())
     try:
@@ -1112,7 +1107,7 @@ async def _decode_to_file(process, local_path: str, size: int) -> int:
             if pending:
                 write(fh, base64.b64decode(pending))
         else:
-            # A provider whose exec hands back its output whole: decode it once. The sandbox reads at most `size` bytes.
+            # Modal stdout has read() but no __aiter__: read all, decode once. The sandbox reads at most `size` bytes.
             write(fh, base64.b64decode((await stdout.read()).translate(None, b"\r\n")))
     return await process.wait()
 
