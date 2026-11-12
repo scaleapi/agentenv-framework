@@ -65,7 +65,7 @@ class NetworkLog:
     def read(self, after: int = 0, limit: int = READ_LIMIT) -> dict:
         """The lines numbered after ``after``, up to ``limit`` of them and ``READ_BYTES`` of their text: ``lines``,
         ``last``, the number of the last one, and ``more`` when a limit left some. A line still being written is left
-        for the next read."""
+        for the next read, and one that isn't JSON or isn't numbered is passed over."""
         mark_seq, mark_offset = self._mark
         lines: list[dict] = []
         size, more = 0, False
@@ -78,7 +78,9 @@ class NetworkLog:
                         line = json.loads(raw)
                     except ValueError:
                         continue
-                    seq = line.get("seq", 0) if isinstance(line, dict) else 0
+                    seq = line.get("seq") if isinstance(line, dict) else None
+                    if not isinstance(seq, int) or isinstance(seq, bool):
+                        continue
                     if seq > after:
                         if len(lines) >= limit or (lines and size + len(raw) > READ_BYTES):
                             more = True
@@ -210,8 +212,8 @@ def _request(request: dict) -> dict:
                                    for name, value in parse_qsl(urlsplit(url).query, keep_blank_values=True)],
                    "headersSize": -1, "bodySize": body["size"] if body else 0}
     if body and body.get("size"):
-        text, extra = _text(body, _header(headers, "content-encoding"), _header(headers, "content-type"),
-                            REQUEST_DECODED_LIMIT)
+        text, extra, _ = _text(body, _header(headers, "content-encoding"), _header(headers, "content-type"),
+                               REQUEST_DECODED_LIMIT)
         har_request["postData"] = {"mimeType": _header(headers, "content-type") or "", "text": text, **extra}
     return har_request
 
@@ -225,7 +227,7 @@ def _response(response: Optional[dict]) -> dict:
     body = response.get("body")
     content: dict[str, Any] = {"size": body["size"] if body else 0, "mimeType": mime}
     if body and "base64" in body:
-        text, extra = _text(body, _header(headers, "content-encoding"), mime, DECODED_LIMIT)
+        text, extra, content["size"] = _text(body, _header(headers, "content-encoding"), mime, DECODED_LIMIT)
         content.update(text=text, **extra)
     elif body:
         content["_sha256"] = body.get("sha256")
@@ -236,27 +238,30 @@ def _response(response: Optional[dict]) -> dict:
             "headersSize": -1, "bodySize": body["size"] if body else 0}
 
 
-def _text(body: dict, coding: Optional[str], mime: Optional[str], limit: int) -> tuple[str, dict]:
-    """A body's text, decoded from ``coding`` and its charset, up to ``limit``, and what a HAR says beside it: that the
+def _text(body: dict, coding: Optional[str], mime: Optional[str], limit: int) -> tuple[str, dict, int]:
+    """A body's text, decoded from ``coding`` and its charset, up to ``limit``; what a HAR says beside it: that the
     proxy or the limit cut it, how much compression saved, or, for a coding that can't be undone here, the raw body as
-    base64 with the coding named."""
+    base64 with the coding named; and its size as HAR's ``content.size`` has it, decoded, which is as far as decoding
+    went when a cut stopped it (with ``_truncated``), and the size sent when nothing was undone."""
     raw = base64.b64decode(body.get("base64") or "")
+    size = body.get("size", len(raw))
     extra: dict[str, Any] = {}
     if body.get("truncated"):
         extra["_truncated"] = True
     if coding and coding.strip().lower() not in ("", "identity"):
         decoded = _decompressed(raw, coding, limit)
         if decoded is None:
-            return base64.b64encode(raw).decode(), {**extra, "encoding": "base64", "_undecoded": coding}
-        extra["compression"] = max(0, len(decoded) - len(raw))
-        raw = decoded
+            return base64.b64encode(raw).decode(), {**extra, "encoding": "base64", "_undecoded": coding}, size
+        if len(decoded) <= limit and not body.get("truncated"):
+            extra["compression"] = max(0, len(decoded) - size)
+        raw, size = decoded, len(decoded)
     if len(raw) > limit:
         raw, extra["_truncated"] = raw[:limit], True
     charset = (CHARSET.search(mime or "") or [None, "utf-8"])[1]
     try:
-        return raw.decode(charset, errors="replace"), extra
+        return raw.decode(charset, errors="replace"), extra, size
     except LookupError:
-        return raw.decode("utf-8", errors="replace"), extra
+        return raw.decode("utf-8", errors="replace"), extra, size
 
 
 def _decompressed(raw: bytes, coding: str, limit: int) -> Optional[bytes]:

@@ -88,6 +88,15 @@ def test_a_log_begun_again_shorter_is_read_from_its_start(tmp_path):
     assert [line["seq"] for line in log.read(after=3)["lines"]] == [4]
 
 
+def test_a_line_that_isnt_numbered_is_passed_over_and_the_rest_read(tmp_path):
+    path = tmp_path / "network.jsonl"
+    _write(path, [_line(1, "end", {"id": "1", "ended": T0}), {"seq": None, "end": {"id": "2"}},
+                  {"seq": "3", "end": {"id": "3"}}, {"seq": True}, [4], _line(5, "end", {"id": "5", "ended": T0})])
+
+    assert [line["seq"] for line in NetworkLog(path).read()["lines"]] == [1, 5]
+    assert [line["seq"] for line in NetworkLog(path).read(after=1)["lines"]] == [5]
+
+
 def test_a_missing_log_reads_as_empty_and_exports_as_har_with_no_entries(tmp_path):
     log = NetworkLog(tmp_path / "none.jsonl")
 
@@ -160,7 +169,8 @@ def test_an_answer_body_is_decoded_from_its_coding(coding, encode):
 
     content = entry["response"]["content"]
     assert json.loads(content["text"]) == {"items": list(range(200))}
-    assert content["size"] == len(wire) and content["compression"] == len(text) - len(wire)
+    assert (content["size"], entry["response"]["bodySize"]) == (len(text), len(wire))
+    assert content["compression"] == len(text) - len(wire)
 
 
 @pytest.mark.parametrize("coding, wire", [("compress", b"\x1f\x9d..."), ("gzip", b"not gzip at all")],
@@ -194,7 +204,8 @@ def test_a_body_the_proxy_cut_says_so_and_decodes_as_far_as_it_goes():
     [entry] = har(_exchange("1-1", _get(), response))["log"]["entries"]
 
     content = entry["response"]["content"]
-    assert content["_truncated"] is True and content["size"] == len(wire)
+    assert content["_truncated"] is True and entry["response"]["bodySize"] == len(wire)
+    assert "compression" not in content
 
 
 def test_a_body_is_decoded_in_its_charset():
