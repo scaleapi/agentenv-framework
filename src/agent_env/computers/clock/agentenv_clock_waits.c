@@ -901,11 +901,13 @@ static inline bool ft_tfd_known(int fd)
 }
 /* the process whose descriptors these tables describe: set at load and in the child of each glibc fork. A child that
    shares this memory without fork (vfork, as Python's subprocess uses, or a CLONE_VM clone) has a descriptor table of
-   its own, so what it closes or duplicates before exec changes nothing here. */
+   its own, so what it closes or duplicates before exec changes nothing here. A fork's child also takes the tables'
+   lock free: another thread may have held it at the fork, and no thread of the child would ever release it. */
 static volatile pid_t ft_fd_owner = 0;
 static void ft_fd_forked(void)
 {
   ft_fd_owner = getpid();
+  ft_tab_lock_word = 0;
 }
 static inline bool ft_fd_mine(void)
 {

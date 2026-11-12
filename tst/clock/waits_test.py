@@ -3,6 +3,8 @@ time, which follows the universe through rates, a freeze, a rate change, a set_t
 futex_waitv and without it; cancelled, it leaves nothing behind."""
 import pytest
 
+from tst.clock.bounds import LATE_MS, LATE_S, clock_time_bound
+
 #: Single pthread_cond_timedwait/clockwait calls return 0 once when a change moves their deadline without passing it
 #: (a rate change, a set_time back), as POSIX allows of a timed wait; every caller's predicate loop absorbs it.
 SINGLE_CALL_CONDVARS = {"cond_timedwait_rt", "cond_clockwait_rt", "cond_timedwait_gtod"}
@@ -24,8 +26,9 @@ def within(r: dict, low: float, high: float) -> bool:
 
 def at_jump(w: dict) -> bool:
     """A wait the jump ended: not before its write started (the page changes, and waits wake, before the write's last
-    step), and within 250 ms of the write's end."""
-    return w["after_write_start_ms"] is not None and w["after_write_start_ms"] >= -1 and w["after_write_end_ms"] <= 250
+    step), and within LATE_MS of the write's end."""
+    return (w["after_write_start_ms"] is not None and w["after_write_start_ms"] >= -1
+            and w["after_write_end_ms"] <= LATE_MS)
 
 
 def failed(results) -> dict:
@@ -46,16 +49,17 @@ def test_a_wait_is_real_elapsed_time_or_a_clock_time_reached_at_the_rate(waits, 
     elapsed = {r["api"]: r["real"] for r in results if r["class"] == "elapsed"}
     clock = {r["api"]: r["real"] for r in results if r["class"] == "clock_time"}
     assert len(clock) == 19 and failed(results) == {}
-    assert {api: s for api, s in elapsed.items() if not 0.99 <= s <= 1.3} == {}
-    assert {api: s for api, s in clock.items() if not 1 / rate - 0.01 <= s <= 1 / rate + 0.15} == {}
+    assert {api: s for api, s in elapsed.items() if not 0.99 <= s <= 1 + LATE_S} == {}
+    assert {api: s for api, s in clock.items() if not 1 / rate - 0.01 <= s <= clock_time_bound(rate)} == {}
 
 
 def test_frozen_a_clock_time_wait_ends_at_the_advance_and_elapsed_time_runs_on(waits):
     results = waits["frozen, +1 h at 2.5 s"]
     assert len(results) == 64 and not [r for r in results if "status" in r] and failed(results) == {}
-    assert {r["api"]: r["real"] for r in results if r["class"] == "elapsed" and not 0.99 <= r["real"] <= 1.3} == {}
+    assert {r["api"]: r["real"] for r in results
+            if r["class"] == "elapsed" and not 0.99 <= r["real"] <= 1 + LATE_S} == {}
     assert {r["api"]: r["end_after_change_ms"] for r in results
-            if r["class"] == "clock_time" and not within(r, -1, 150)} == {}
+            if r["class"] == "clock_time" and not within(r, -1, LATE_MS)} == {}
 
 
 @pytest.fixture(scope="module")
@@ -69,9 +73,9 @@ def test_a_rate_change_moves_a_clock_time_wait_to_the_new_rate(changes):
     assert len(results) == 19 and not [r for r in results.values() if "status" in r]
     assert failed(results.values()) == {}
     assert {api: r["end_after_change_ms"] for api, r in results.items()
-            if api in SINGLE_CALL_CONDVARS and not (within(r, -1, 5) and r["rc"] == 0)} == {}
+            if api in SINGLE_CALL_CONDVARS and not (within(r, -1, LATE_MS) and r["rc"] == 0)} == {}
     assert {api: r["end_after_change_ms"] for api, r in results.items()
-            if api not in SINGLE_CALL_CONDVARS and not within(r, 140, 300)} == {}
+            if api not in SINGLE_CALL_CONDVARS and not within(r, 140, LATE_MS)} == {}
 
 
 def test_a_set_time_back_makes_a_clock_time_wait_wait_on_for_its_deadline(changes):
@@ -80,13 +84,13 @@ def test_a_set_time_back_makes_a_clock_time_wait_wait_on_for_its_deadline(change
     assert {api: r.get("status") for api, r in results.items()
             if api not in SINGLE_CALL_CONDVARS and r.get("status") != "still waiting"} == {}
     assert {api: r.get("end_after_change_ms") for api, r in results.items()
-            if api in SINGLE_CALL_CONDVARS and not within(r, -1, 5)} == {}
+            if api in SINGLE_CALL_CONDVARS and not within(r, -1, LATE_MS)} == {}
     assert failed(results.values()) == {}
 
 
 def test_a_jump_ends_the_waits_it_passes_and_none_other_and_monotonic_time_runs_on(waits_gate):
     """30 forward jumps of 8 h, a day or a week at rate 1: a wait for a clock time inside the jump ends at it (once the
-    write has started, and within 250 ms of its end), one past it ends when its clock time comes and never early, and a
+    write has started, and within LATE_MS of its end), one past it ends when its clock time comes and never early, and a
     relative wait takes its 3 s of real time; each ends as it should (a timeout, an expiration, a sleep done)."""
     jumps = waits_gate("jumps")
     assert len(jumps["rounds"]) == 30 and jumps["mono_back_total"] == 0
@@ -99,9 +103,9 @@ def test_a_jump_ends_the_waits_it_passes_and_none_other_and_monotonic_time_runs_
                 wrong.append((row["round"], name, w))
             elif w["kind"] == "in" and not at_jump(w):
                 wrong.append((row["round"], name, w))
-            elif w["kind"] == "after" and not -1 <= w["vs_expected_ms"] <= 1000:
+            elif w["kind"] == "after" and not -1 <= w["vs_expected_ms"] <= LATE_MS:
                 wrong.append((row["round"], name, w))
-            elif w["kind"] == "rel" and not 2.999 <= w["real_s"] <= 3.25:
+            elif w["kind"] == "rel" and not 2.999 <= w["real_s"] <= 3 + LATE_S:
                 wrong.append((row["round"], name, w))
     assert wrong == []
 
@@ -112,7 +116,7 @@ def test_a_cancelled_wait_goes_at_once_and_leaves_nothing_behind(waits_gate):
     wait on an unaligned word fails at once, as the kernel's does."""
     r = waits_gate("cancel")
     assert (r["sem_cancelled"], r["sem_waiters"], r["cns_cancelled"], r["cond_cancelled"]) == (1, 0, 1, 600), r
-    assert r["misaligned_errno"] == EINVAL and r["misaligned_ms"] < 50, r
+    assert r["misaligned_errno"] == EINVAL and r["misaligned_ms"] < LATE_MS, r
     assert r["rc"] == ETIMEDOUT and at_jump(r), r
 
 

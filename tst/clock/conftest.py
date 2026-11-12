@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 import urllib.request
 from pathlib import Path
 
@@ -20,6 +21,8 @@ REPO = HERE.parents[1]
 RECIPE = REPO / "src" / "agent_env" / "computers" / "clock"
 CHROMIUM_APP = REPO / "src" / "agent_env" / "browsers" / "envs" / "chromium" / "chromium.py"
 IMAGE = "agentenv-clock-gates:test"
+#: Tries at the downloads and the image build (its apt-get), which fail now and then on a network's hiccup.
+TRIES = 3
 CACHE = Path(os.environ.get("AGENTENV_TEST_CLOCK_CACHE") or Path.home() / ".cache" / "agentenv-clock")
 
 
@@ -31,6 +34,17 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _tried(attempt):
+    """``attempt()``'s result, tried up to TRIES times, 10 s apart, while it raises."""
+    for n in range(1, TRIES + 1):
+        try:
+            return attempt()
+        except Exception:
+            if n == TRIES:
+                raise
+            time.sleep(10)
+
+
 def _fetched(url: str, sha256: str, name: str) -> Path:
     """``url`` in the cache as ``name``, downloaded once and checked against ``sha256``."""
     path = CACHE / name
@@ -38,10 +52,23 @@ def _fetched(url: str, sha256: str, name: str) -> Path:
         return path
     CACHE.mkdir(parents=True, exist_ok=True)
     part = path.with_name(name + ".part")
-    urllib.request.urlretrieve(url, part)
+    _tried(lambda: urllib.request.urlretrieve(url, part))
     assert _sha256(part) == sha256, f"{url} doesn't have the pinned sha256 {sha256}"
     part.replace(path)
     return path
+
+
+def _built(context: Path, build_args: dict[str, str]) -> None:
+    """The gate image built from ``context``."""
+    args = [a for k, v in build_args.items() for a in ("--build-arg", f"{k}={v}")]
+
+    def build():
+        built = subprocess.run(["docker", "build", "-q", "-t", IMAGE, *args, str(context)], capture_output=True,
+                               text=True)
+        if built.returncode:
+            raise RuntimeError(f"the gate image didn't build:\n{built.stderr[-4000:]}")
+
+    _tried(build)
 
 
 def _libfaketime_pin() -> tuple[str, str]:
@@ -74,9 +101,7 @@ def gate(tmp_path_factory):
     shutil.copy(_fetched(*_libfaketime_pin(), "libfaketime-0.9.12.tar.gz"), context / "downloads" / "libfaketime.tar.gz")
     for name in ("Dockerfile", "harness.py"):
         shutil.copy(HERE / name, context / name)
-    built = subprocess.run(["docker", "build", "-q", "-t", IMAGE, "--build-arg", f"CHROME_SHA256={sha256}",
-                            "--build-arg", f"CHROME_PACKAGES={packages}", str(context)], capture_output=True, text=True)
-    assert built.returncode == 0, f"the gate image didn't build:\n{built.stderr[-4000:]}"
+    _built(context, {"CHROME_SHA256": sha256, "CHROME_PACKAGES": packages})
 
     def run(name: str, *args, timeout: float = 600, docker_args=()):
         r = subprocess.run(["docker", "run", "--rm", "--shm-size=1g", *docker_args, IMAGE, "python3",

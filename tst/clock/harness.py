@@ -3,7 +3,7 @@ processes real, so this driver is on real time while it writes the clock page as
 under test runs as the session user, whom the library fakes. Each gate prints one JSON document on stdout.
 
   harness.py waits | ratechange | jumps [ROUNDS] | cancel | timerfds | condstress [SECONDS] | semstress [SECONDS]
-             | stall | torn [SECONDS] | deadwriter | marker | identity | envrace [SECONDS]
+             | stall | torn [SECONDS] | deadwriter | marker | identity | envrace [SECONDS] | forklock [FORKS]
              | chromium [agentenv|stock LAUNCHES PARALLEL LIMIT] | probe
 """
 import ctypes
@@ -556,6 +556,15 @@ def chromium(variant="agentenv", launches=40, parallel=8, limit=20.0):
             "failures": [r for r in results if not r["ok"]][:5]}
 
 
+def forklock(forks=1000):
+    """fork while another thread duplicates and closes a timerfd (forklock.c): no child may be left stuck."""
+    preload()
+    fresh_page()
+    r = subprocess.run(user_cmd(["forklock", str(forks)]), capture_output=True, text=True, timeout=forks * 2.5 + 60)
+    preload(None)
+    return json.loads(r.stdout)
+
+
 def probe():
     """This container's answer to futex_waitv: the errno of an empty call (EINVAL where the kernel has it)."""
     libc = ctypes.CDLL(None, use_errno=True)
@@ -564,7 +573,7 @@ def probe():
 
 
 GATES = {f.__name__: f for f in (waits, ratechange, jumps, cancel, timerfds, condstress, semstress, stall, torn,
-                                 deadwriter, marker, identity, envrace, chromium, probe)}
+                                 deadwriter, marker, identity, envrace, forklock, chromium, probe)}
 
 if __name__ == "__main__":
     gate = GATES[sys.argv[1]]

@@ -1,7 +1,7 @@
 """The ubuntu-24.04 base computer, built from its folder once for the tests here and tagged for the local registry; the
 shipped desktop example's computer env, the cua-driver test bundle's, the chromium test bundle's, the website-browser
-test bundle's, the TLS clients test bundle's and agentenv's chromium deployed alone, each composed once for a module's
-tests;
+test bundle's, the TLS clients test bundle's, the clock desktop test bundle's and agentenv's chromium deployed alone, each
+composed once for a module's tests;
 ``state``, local stores for a test that runs a bundle; each of these stores starts with the packages the run has resolved
 (``tst.util.package_cache``); ``docker``, which runs the docker CLI for them; and
 ``cdp_clients``, Playwright and Puppeteer installed to connect to a CDP address."""
@@ -37,6 +37,9 @@ CHROMIUM = Path(__file__).parent / "chromium"
 WEBSITE_BROWSER = Path(__file__).parent / "website-browser"
 BROWSER_COMPUTER = Path(__file__).parent / "browser-computer"
 TLS = Path(__file__).parent / "tls"
+CLOCK_DESKTOP = Path(__file__).parent / "clock-desktop"
+#: agent-env's libfaketime recipe, which the clock desktop's universe-clock app builds.
+CLOCK_RECIPE = Path(agent_env.__file__).parent / "computers" / "clock"
 #: Playwright and Puppeteer, which connect to a cdp address from Node.
 CDP_CLIENTS = Path(__file__).parent / "cdp_clients"
 CHROMIUM_ALONE = "@local/agentenv-framework/browsers/chromium"
@@ -94,6 +97,19 @@ def tls_desktop(tmp_path_factory):
     """The TLS clients test bundle's desktop, the ubuntu-24.04 base and the reference driver with Node, an apt JDK, a
     copy of it under /opt and curl, composed as ``desktop`` is."""
     yield from _composed(tmp_path_factory.mktemp("tls-desktop"), parse_bundle(TLS))
+
+
+@pytest.fixture(scope="module")
+def clock_desktop(tmp_path_factory):
+    """The clock desktop test bundle's desktop, the ubuntu-24.04 base and the reference driver with agentenv's chromium
+    and the universe-clock app, which builds agent-env's libfaketime from a copy of its recipe and preloads it into every
+    process; composed as ``desktop`` is."""
+    root = tmp_path_factory.mktemp("clock-desktop")
+    bundle = root / "bundle"
+    shutil.copytree(CLOCK_DESKTOP, bundle)
+    shutil.copytree(CLOCK_RECIPE, bundle / "envs" / "universe-clock" / "clock",
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    yield from _composed(root, parse_bundle(bundle))
 
 
 @pytest.fixture(scope="module")

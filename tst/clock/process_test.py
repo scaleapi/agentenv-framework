@@ -1,4 +1,4 @@
-"""Who is faked, the marker that keeps a program real, and the environment read once at load."""
+"""Who is faked, the marker that keeps a program real, the environment read once at load, and fork."""
 
 
 def test_only_the_session_users_processes_follow_an_armed_page(gate):
@@ -16,3 +16,9 @@ def test_a_marked_program_stays_real_and_loses_the_marker_so_its_children_are_fa
 
 def test_setenv_racing_clock_reads_and_timed_waits_never_crashes_it(gate):
     assert gate("envrace", 10.0) == [{"rc": 0, "out": "survived"}] * 3
+
+
+def test_a_fork_while_another_thread_closes_a_timerfd_never_leaves_the_child_stuck(gate):
+    """1,000 forks while another thread duplicates and closes a timerfd, each child closing its descriptors before it
+    exits: the library's lock, which that thread may hold at the fork, is free in every child."""
+    assert gate("forklock", 1000) == {"forks": 1000, "stuck": 0}
