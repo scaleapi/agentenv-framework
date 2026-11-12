@@ -2,8 +2,9 @@
 and the page driver, whose screen is chromium's active tab, headful on the X server only the browser uses. Gate 3 makes this machine's arch ready with it,
 its input checks and page tools verified on the HTML desk; deployed through the computer provider like any computer,
 its computer_* tools see and drive the page, Playwright MCP's browser_* tools beside them type into it and answer its
-dialog, the two that run code hidden until tool access names one, as the installed Playwright MCP lists them, and
-back after Playwright MCP or the driver is killed, and its page tools navigate, move in history, answer a dialog, use tabs
+dialog, each call an entry in the browser's log that its CDP commands and the navigation they cause point at, the two
+that run code hidden until tool access names one, as the installed Playwright MCP lists them, and back after Playwright
+MCP or the driver is killed, and its page tools navigate, move in history, answer a dialog, use tabs
 and upload; the browser's X server runs but no desktop, and nothing listens but the driver and the site proxy; a
 killed app server or driver is started again by supervisord and the computer is ready again; chromium killed fails it
 for good, computer-ready/v1 saying why and the tools answering with it, and so does its X server killed, which takes
@@ -1027,6 +1028,7 @@ async def test_playwright_mcps_tools_drive_its_page_hide_the_code_tools_and_come
             serving = asyncio.ensure_future(inside.run(deployed, ["python3", "-c", SERVE_SITE, "900"], timeout_s=960))
             await asyncio.sleep(SERVE_START_S)
             confirmed = await _mcp(deployed, _confirm_ask)
+            logged = (await _browser_log(deployed))["lines"]
             await deployed.invoke(ENABLE_TOOL_EXTENSION_URI, ENABLE, {"role": "default", "tools": ["browser_evaluate"]})
             shown, evaluated = await _tool_names(deployed), await _mcp(deployed, _evaluate_title)
             running = (await inside.run(deployed, ["sh", "-c", "ps -eo args | grep -m1 '[@]playwright/mcp/cli.js'"],
@@ -1051,6 +1053,19 @@ async def test_playwright_mcps_tools_drive_its_page_hide_the_code_tools_and_come
     assert not {"browser_evaluate", "browser_run_code_unsafe"} & set(listed) and "computer_screenshot" in listed
     assert "hello" in typed and state["v"] == "hello" and after_typing == viewport
     assert "confirmed true" in confirmed, confirmed
+    entries = [line for line in logged if "action" in line]
+    calls = {line["action"]["tool"]: line["seq"] for line in entries
+             if line["action"]["via"] == "mcp" and line["action"]["tool"].startswith("browser_")}
+    typing = next(line["action"] for line in entries if line["action"].get("tool") == "browser_type")
+    sent = {line["action"]["method"]: line["action"].get("for") for line in entries
+            if line["action"]["via"] == "cdp" and line["action"]["method"] in ("Page.navigate", "Page.handleJavaScriptDialog")}
+    clicks = {line["action"].get("for") for line in entries if line["action"].get("method") == "Input.dispatchMouseEvent"}
+    navigated = next(line["tab"] for line in logged if line.get("tab", {}).get("url") == SITE)
+    assert {"browser_snapshot", "browser_type", "browser_navigate", "browser_click", "browser_handle_dialog"} <= set(calls)
+    assert (typing["who"], typing["ok"], typing["args"]["text"]) == ("default", True, "hello")
+    assert sent == {"Page.navigate": calls["browser_navigate"], "Page.handleJavaScriptDialog": calls["browser_handle_dialog"]}
+    assert clicks == {calls["browser_click"]}, clicks
+    assert (navigated["who"], navigated["for"]) == ("playwright-mcp", calls["browser_navigate"]), navigated
     assert "browser_evaluate" in shown and "browser_run_code_unsafe" not in shown and "confirmed true" in evaluated
     assert installed == json.loads(PLAYWRIGHT_MCP_TOOLS.read_text())["tools"]
     assert "Page URL" in after_its_kill and "Page URL" in after_driver_kill and count == "1"

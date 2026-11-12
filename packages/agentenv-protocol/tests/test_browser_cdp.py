@@ -282,18 +282,19 @@ async def test_a_client_that_falls_too_far_behind_is_closed_and_what_waited_for_
 
 
 class Control:
-    """agentenv's control as the relay asks it: the URL of tab T1, a password field focused wherever it's asked, and
-    the causes of tab events; each check made with how many commands ``pipe`` had been sent by then."""
+    """agentenv's control as the relay asks it: the URL of tab T1, a password field focused wherever it's asked unless
+    ``focused`` says not, and the causes of tab events; each check made with how many commands ``pipe`` had been sent
+    by then."""
 
     def __init__(self, pipe=None) -> None:
-        self.causes, self.asked, self.pipe = Causes(), [], pipe
+        self.causes, self.asked, self.pipe, self.focused = Causes(), [], pipe, True
 
     def url_of(self, target):
         return "https://a.test/page" if target == "T1" else None
 
     async def password_focused(self, target) -> bool:
         self.asked.append((target, len(self.pipe.sent) if self.pipe is not None else None))
-        return True
+        return self.focused
 
 
 @pytest.mark.asyncio
@@ -330,6 +331,90 @@ async def test_every_relayed_command_is_an_entry_on_its_sessions_tab_an_acting_o
          "error": NO_SESSION["message"], "params": {"url": "https://a.test/"}},
     ]
     assert [target for target, _ in control.asked] == ["T1"]
+
+
+async def _attached(socket) -> str:
+    return (await _ask(socket, {"id": 0, "method": "Target.attachToTarget",
+                                "params": {"targetId": "T1", "flatten": True}}))["result"]["sessionId"]
+
+
+def _call(tool: str, call: str, args: dict) -> dict:
+    return {"tool": tool, "call": call, "args": args}
+
+
+@pytest.mark.asyncio
+async def test_a_users_commands_are_credited_to_its_open_tool_call_or_to_every_one_open_when_calls_overlap(tmp_path):
+    log, control = BrowserLog(tmp_path / "browser-chromium.jsonl"), Control()
+    async with _relay(log=log, control=control) as (pipe, relay, base):
+        async with connect(f"{base}/playwright-mcp") as mcp, connect(f"{base}/ada") as ada:
+            child = await _attached(mcp)
+            click = relay.begin_call("playwright-mcp", "agent", _call("browser_click", "c1", {"target": "e3"}),
+                                     acts=True, within_s=60)
+            await _ask(mcp, {"id": 1, "method": "Input.dispatchMouseEvent", "params": {"type": "mousePressed"},
+                             "sessionId": child})
+            await _ask(ada, {"id": 1, "method": "Browser.getVersion"})
+            snapshot = relay.begin_call("playwright-mcp", "agent", _call("browser_snapshot", "c2", {}), acts=False,
+                                        within_s=60)
+            await _ask(mcp, {"id": 2, "method": "DOM.getDocument", "sessionId": child})
+            ended = relay.end_call(click, True), relay.end_call(snapshot, False, "Playwright MCP ended during it")
+            await _ask(mcp, {"id": 3, "method": "DOM.getDocument", "sessionId": child})
+            again = relay.end_call(click, True)
+        await asyncio.sleep(0.05)
+
+    mine = {"via": "cdp", "who": "playwright-mcp", "connection": 1, "tab": "T1", "url": "https://a.test/page"}
+    assert [line["action"] for line in log.read()["lines"]] == [
+        {**mine, "method": "Target.attachToTarget", "acts": False, "ok": True},
+        {"via": "mcp", "who": "agent", "tool": "browser_click", "call": "c1", "acts": True, "tab": "T1",
+         "url": "https://a.test/page", "ok": True, "args": {"target": "e3"}},
+        {**mine, "method": "Input.dispatchMouseEvent", "acts": True, "for": click, "ok": True,
+         "params": {"type": "mousePressed"}},
+        {"via": "cdp", "who": "ada", "connection": 2, "method": "Browser.getVersion", "acts": False, "tab": None,
+         "url": None, "ok": True},
+        {"via": "mcp", "who": "agent", "tool": "browser_snapshot", "call": "c2", "acts": False, "tab": None,
+         "url": None, "ok": False, "error": "Playwright MCP ended during it"},
+        {**mine, "method": "DOM.getDocument", "acts": False, "for": [click, snapshot], "ok": True},
+        {**mine, "method": "DOM.getDocument", "acts": False, "ok": True},
+    ]
+    assert ended == (True, True) and again is False and not relay.calls
+
+
+@pytest.mark.asyncio
+async def test_a_tool_calls_typed_text_is_kept_only_once_its_own_typing_found_no_password_field(tmp_path):
+    log, control = BrowserLog(tmp_path / "browser-chromium.jsonl"), Control()
+    async with _relay(log=log, control=control) as (pipe, relay, base):
+        async with connect(f"{base}/playwright-mcp") as mcp:
+            child = await _attached(mcp)
+            for n, (focused, types) in enumerate([(False, True), (True, True), (False, False)], start=1):
+                control.focused = focused
+                entry = relay.begin_call("playwright-mcp", "agent",
+                                         _call("browser_type", f"c{n}", {"target": "e3", "text": "hunter2"}),
+                                         acts=True, within_s=60)
+                if types:
+                    await _ask(mcp, {"id": n, "method": "Input.insertText", "params": {"text": "hunter2"},
+                                     "sessionId": child})
+                relay.end_call(entry, True)
+        await asyncio.sleep(0.05)
+
+    typed = {line["action"]["call"]: line["action"]["args"]["text"] for line in log.read()["lines"]
+             if line["action"]["via"] == "mcp"}
+    assert typed == {"c1": "hunter2", "c2": {"length": 7}, "c3": {"length": 7}}
+
+
+@pytest.mark.asyncio
+async def test_a_tool_call_never_said_to_end_is_written_so_once_its_bound_passes_and_is_credited_no_more(tmp_path):
+    log = BrowserLog(tmp_path / "browser-chromium.jsonl")
+    async with _relay(log=log) as (pipe, relay, base):
+        async with connect(f"{base}/playwright-mcp") as mcp:
+            entry = relay.begin_call("playwright-mcp", "agent", _call("browser_click", "c1", {}), acts=True,
+                                     within_s=0.05)
+            await asyncio.sleep(0.1)
+            await _ask(mcp, {"id": 1, "method": "Browser.getVersion"})
+            ended = relay.end_call(entry, True)
+        await asyncio.sleep(0.05)
+
+    call, command = [line["action"] for line in log.read()["lines"]]
+    assert (call["ok"], call["error"]) == (False, "its driver didn't say it ended within 0.05 s")
+    assert "for" not in command and ended is False
 
 
 @pytest.mark.asyncio
@@ -415,6 +500,29 @@ async def test_an_op_for_an_agents_tool_call_and_agentenvs_own_acting_ops_are_en
          "params": {"tab": "nope"}, "args": {"action": "close", "tab": "nope"}},
     ]
     assert read["last"] == 4 and not read["more"]
+
+
+@pytest.mark.asyncio
+async def test_calls_begin_and_end_write_a_tool_calls_entry_from_its_header_and_are_no_entries_themselves(
+        monkeypatch, tmp_path):
+    (tmp_path / "logs").mkdir()
+    browser = _browser(monkeypatch, tmp_path)
+    asgi = browser.served_asgi(browser.create_app().streamable_http_app())
+    url = "https://a.test/?token=t"
+    called = {TOOL_CALL_HEADER: tool_call_header("browser_navigate", "c1", {"url": url}), "AgentEnv-Role": "ada"}
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=asgi), base_url="http://app") as http:
+        begun = await http.post("/agentenv/ext/browser/calls/begin", json={"user": "playwright-mcp"}, headers=called)
+        ended = await http.post("/agentenv/ext/browser/calls/end", json={"entry": begun.json()["entry"], "ok": True})
+        headerless = await http.post("/agentenv/ext/browser/calls/begin", json={"user": "playwright-mcp"})
+        unknown = await http.post("/agentenv/ext/browser/calls/end", json={"entry": 99, "ok": True})
+        read = (await http.get("/agentenv/ext/browser/log", params={"after": 0})).json()
+
+    assert [line["action"] for line in read["lines"]] == [
+        {"via": "mcp", "who": "ada", "tool": "browser_navigate", "call": "c1", "acts": True, "tab": None, "url": None,
+         "ok": True, "args": {"url": f"https://a.test/?token={REDACTED}"}}]
+    assert ended.status_code == 200 and headerless.status_code == 400 and unknown.status_code == 400
+    assert "AgentEnv-Tool-Call" in headerless.json()["error"]["message"]
 
 
 @pytest.mark.asyncio

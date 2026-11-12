@@ -21,6 +21,7 @@ from pathlib import Path
 from unittest import mock
 
 import httpx
+from mcp.types import CallToolResult, TextContent
 import pytest
 from pytest_socket import enable_socket
 
@@ -48,7 +49,8 @@ REVIEWED_TOOLS = {
 }
 NO_DISPLAY = Platform(os="linux", distribution="ubuntu", version="24.04", arch="amd64", display="none")
 PAGE_OPS = ("page/viewport", "page/capture", "page/input", "page/state", "navigate", "history", "tabs/list",
-            "tabs/open", "tabs/activate", "tabs/close", "dialog/answer", "files/choose", "cdp")
+            "tabs/open", "tabs/activate", "tabs/close", "dialog/answer", "files/choose", "cdp", "calls/begin",
+            "calls/end")
 GETS = ("page/viewport", "page/capture", "page/state", "tabs/list")
 CARD = {"name": "chromium", "capabilities": {"extensions": [{"uri": BROWSER, "params": {"methods": {
     op: {"method": "GET" if op in GETS else "POST", "endpoint": f"/agentenv/ext/browser/{op}"}
@@ -308,6 +310,55 @@ def test_its_manifest_is_of_the_playwright_mcp_its_install_downloads():
     versions = [m.group(1) for d in downloads if (m := re.search(r"/@playwright/mcp/-/mcp-(.+)\.tgz$", d["url"]))]
 
     assert versions == [manifest["version"]]
+
+
+@pytest.mark.asyncio
+async def test_each_playwright_mcp_call_is_an_entry_in_the_browsers_log_begun_as_the_agents_call_ended_with_how_it_went(
+        page, monkeypatch):
+    page.served["calls/begin"] = {"entry": 7}
+    results = iter([CallToolResult(content=[TextContent(type="text", text="clicked")]),
+                    CallToolResult(isError=True, content=[TextContent(type="text", text="no such element")])])
+
+    async def call(tool, **arguments):
+        return next(results)
+
+    monkeypatch.setattr(page._playwright, "call", call)
+    with bound(ToolContext(tool="browser_click", call_id="c1", mcp=True)):
+        clicked = await page._playwright_call("browser_click", target="e3")
+    with bound(ToolContext(tool="browser_snapshot", call_id="c2", mcp=True)):
+        failed = await page._playwright_call("browser_snapshot")
+
+    assert page.sent == [("calls/begin", {"user": "playwright-mcp", "acts": True, "within_s": 360.0}),
+                         ("calls/end", {"entry": 7, "ok": True}),
+                         ("calls/begin", {"user": "playwright-mcp", "acts": False, "within_s": 360.0}),
+                         ("calls/end", {"entry": 7, "ok": False, "error": "no such element"})]
+    assert TOOL_CALL_HEADER in page.headers[0] and TOOL_CALL_HEADER not in page.headers[1]
+    assert clicked.content[0].text == "clicked" and failed.isError
+
+
+@pytest.mark.asyncio
+async def test_a_call_the_browser_cant_log_still_goes_and_a_cancelled_one_is_ended_as_cancelled(page, monkeypatch):
+    page.served["calls/begin"] = httpx.Response(500, text="the browser is restarting")
+    calls = []
+
+    async def call(tool, **arguments):
+        calls.append(tool)
+        if tool == "browser_wait_for":
+            await asyncio.Event().wait()
+        return CallToolResult(content=[TextContent(type="text", text="ok")])
+
+    monkeypatch.setattr(page._playwright, "call", call)
+    unlogged = await page._playwright_call("browser_snapshot")
+    page.served["calls/begin"] = {"entry": 8}
+    waiting = asyncio.ensure_future(page._playwright_call("browser_wait_for", time=60))
+    await asyncio.sleep(0.05)
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+
+    assert calls == ["browser_snapshot", "browser_wait_for"] and unlogged.content[0].text == "ok"
+    assert [op for op, _ in page.sent] == ["calls/begin", "calls/begin", "calls/end"]
+    assert page.sent[-1] == ("calls/end", {"entry": 8, "ok": False, "error": "cancelled"})
 
 
 @pytest.mark.asyncio

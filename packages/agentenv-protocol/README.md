@@ -1013,7 +1013,12 @@ are the profile's template. The base class adds:
   that needs the one before takes it first, with `snapshot_env`.
   - **An action** is a CDP command through the relay (`via: "cdp"`, `who` the connection's user, its `connection`
     number, `method`, and the tab its session is on), an op a driver makes for an agent's MCP tool call (`via: "mcp"`,
-    `who` the caller's role, `tool`, `call`, `op`), or an acting op agentenv makes itself (`via: "agentenv"`). Each
+    `who` the caller's role, `tool`, `call`, `op`), an agent's MCP tool call a driver serves through a CDP user's
+    connections, such as Playwright MCP's (`via: "mcp"`, `who`, `tool`, `call`, with no `op`, between `calls/begin`
+    and `calls/end`), or an acting op agentenv makes itself (`via: "agentenv"`). A CDP command of a user with such a
+    call open names it, `for` its entry, or `for` a list of entries when several are open; the call's entry takes
+    the tab its commands acted on, and keeps what it typed only once each typing command of its own found no
+    password field focused. Each
     carries `tab`, `url`, `ok` and, failed, `error`, and is marked `acts` or not by its method or op
     (`log.acts`, `ACTING_OPS`): input, navigation, tab commands, `Runtime.evaluate` and `callFunctionOn`, DOM
     writes, faked responses, and viewport and cookie changes act; the rest read. An acting entry keeps its `params`
@@ -1021,14 +1026,17 @@ are the profile's template. The base class adds:
     as its length; cookie and header values; the values of URL query keys that name a credential; a request's body;
     and each string past 2 KB cut, with its length and sha256. A reading entry keeps none.
   - **A tab event** (`opened`, `navigated`, `closed`) says what caused it: `by: "command"` with the `entry`, `via` and
-    `who` of the command that asked for it, matched exactly by the target a new tab's command answers with and the
+    `who` of the command that asked for it, and its `for`, matched exactly by the target a new tab's command answers with and the
     loader a navigation's does; `by: "agentenv"`; `exit` or `stop`; or `by: "page"`, with the `after` of the latest
     acting entry on its tab (its opener's, for a popup), for a click that follows a link, a redirect or a page script.
   - A driver passes an agent's tool call to the browser in the `AgentEnv-Tool-Call` header (`tool_call_header`), with
     the caller's `AgentEnv-Role`; the page driver sends it on every call it makes for a tool. `data/get` writes the log
     beside `browser-state.json` as `browser-log.jsonl`, which `data/add` passes over.
 - **`browser/v1`** on its card: `chromium` (its `version`), `clock: "real"` and, alone, `window`; `log {after}`
-  (GET), framework-only, its log's lines after `after`; and
+  (GET), framework-only, its log's lines after `after`; `calls/begin {user, acts?, within_s?}`, framework-only,
+  sent with the tool-call header, which begins the entry of an agent's tool call that `user`'s CDP connections
+  serve and answers its `entry`, and `calls/end {entry, ok, error?}`, which ends it, a call not ended within
+  `within_s` (600 s by default) written as never said to have ended; and
   `record` (GET), framework-only, which returns that record with `launches`, the app server's log of each
   launch (with its cause: `boot`, `server_restart`, `launch`, `data/add` or `data/reset`), each stop it made
   and each exit it didn't, with its exit `code` or the `signal` that ended it, since the computer booted.

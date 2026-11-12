@@ -18,7 +18,8 @@ from typing import TYPE_CHECKING, Any, Literal, Optional
 from starlette.requests import Request
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from .log import ERROR_CHARS, KEY_FIELDS, TYPING_METHODS, BrowserLog, acts, redact_text, redacted_params
+from .log import (ERROR_CHARS, KEY_FIELDS, TYPING_METHODS, BrowserLog, acts, redact_text, redacted_args,
+                  redacted_params)
 
 if TYPE_CHECKING:
     from .control import BrowserControl
@@ -213,13 +214,35 @@ class _Connection:
         self.closing = False
 
 
+class _Call:
+    """An agent's tool call a driver serves through one CDP user's connections, open from its ``calls/begin`` to its
+    ``calls/end``: its entry; the tab its commands last acted on, else the one they last read; whether a password field
+    had focus for its typing, None until a typing command of its own is checked; and when it's given up on."""
+
+    def __init__(self, begun: dict, user: str, call: dict) -> None:
+        self.begun, self.user, self.tool, self.args = begun, user, call["tool"], call["args"]
+        self.tab: Optional[str] = None
+        self.acted = False
+        self.password: Optional[bool] = None
+        self.expiry: Optional[asyncio.TimerHandle] = None
+
+    def credit(self, target: Optional[str], acting: bool, typed: bool, password: bool, alone: bool) -> None:
+        """One of its user's commands credited to it, ``alone`` or with other calls open: the tab it was on, and for
+        one that typed, whether a password field had focus there, taken as so when other calls shared it."""
+        if target and alone and (acting or not self.acted):
+            self.tab, self.acted = target, self.acted or acting
+        if typed:
+            self.password = True if password or not alone else bool(self.password)
+
+
 class Relay:
     """Each WebSocket connection given its own browser-level session over ``devtools``, its commands sent on it past the
     guard and the answers and events of its sessions sent back, so several clients share one browser; and a record of
     who connected when, and what the guard did to their commands. ``dialogs_answered`` says agentenv answers the
     browser's dialogs itself. With a ``log``, each command is an entry in it, on the tab its session is on, and
     ``control``, agentenv's own connection, tells its tab's URL, whether a password field has focus there, and what
-    causes the tab events a command brings."""
+    causes the tab events a command brings. An agent's tool call a driver serves through a CDP user's connections,
+    such as Playwright MCP's, is an entry too, which that user's commands are credited to while it's open."""
 
     def __init__(self, devtools: DevToolsPipe, *, dialogs_answered: bool = False, log: Optional[BrowserLog] = None,
                  control: Optional[BrowserControl] = None) -> None:
@@ -227,7 +250,36 @@ class Relay:
         self.connections: list[dict] = []
         self._by_session: dict[str, _Connection] = {}
         self._open: set[_Connection] = set()
+        #: The tool calls open now, by their entry's sequence number.
+        self.calls: dict[int, _Call] = {}
         devtools.listen(self._event)
+
+    def begin_call(self, user: str, who: str, call: dict, *, acts: bool, within_s: float) -> int:
+        """``who``'s tool ``call``, which a driver serves through ``user``'s connections, begun as an entry in the log:
+        each of ``user``'s commands is credited to it until ``end_call`` ends it, or ``within_s`` passes and it's
+        written as never said to have ended. Its entry's sequence number."""
+        begun = self.log.begin({"via": "mcp", "who": who, "tool": call["tool"], "call": call["call"], "acts": acts})
+        opened = self.calls[begun["seq"]] = _Call(begun, user, call)
+        opened.expiry = asyncio.get_running_loop().call_later(
+            within_s, self.end_call, begun["seq"], False, f"its driver didn't say it ended within {within_s:g} s")
+        return begun["seq"]
+
+    def end_call(self, seq: int, ok: bool, error: Optional[str] = None) -> bool:
+        """The call begun as entry ``seq`` ended: its entry written with whether it worked and why not, the tab its
+        commands acted on and that tab's URL, and, acting, its arguments, what it typed kept only once every command of
+        its own that typed found no password field focused. False when no such call is open."""
+        call = self.calls.pop(seq, None)
+        if call is None:
+            return False
+        call.expiry.cancel()
+        fields: dict[str, Any] = {"tab": call.tab, "url": self.control.url_of(call.tab)
+                                  if self.control is not None and call.tab else None, "ok": ok}
+        if error:
+            fields["error"] = redact_text(error)[:ERROR_CHARS]
+        if call.begun["action"]["acts"]:
+            fields["args"] = redacted_args(call.tool, call.args, password=call.password is not False)
+        self.log.finish(call.begun, **fields)
+        return True
 
     async def serve(self, websocket: WebSocket, user: str) -> None:
         """``websocket``, a client of ``user``'s, relayed over a browser-level session of its own until either ends."""
@@ -317,7 +369,8 @@ class Relay:
 
     def _begin(self, connection: _Connection, session: str, method: str, params: dict) -> Optional[_Logged]:
         """``connection``'s command, begun in the log, if there is one, on the tab ``session`` is on, or for a browser
-        command the tab it names; what it causes made known to the control."""
+        command the tab it names, ``for`` the tool calls of its user's open now; what it causes made known to the
+        control."""
         if self.log is None:
             return None
         target = connection.targets.get(session) if session != connection.session else None
@@ -325,9 +378,12 @@ class Relay:
             target = params["targetId"]
         acting = acts(method)
         url = self.control.url_of(target) if self.control is not None and target else None
-        begun = self.log.begin({"via": "cdp", "who": connection.user, "connection": connection.number,
-                                "method": method, "acts": acting, "tab": target, "url": url})
-        return _Logged(self, begun, method, params, target, acting)
+        crediting = [call for call in self.calls.values() if call.user == connection.user]
+        action = {"via": "cdp", "who": connection.user, "connection": connection.number, "method": method,
+                  "acts": acting, "tab": target, "url": url}
+        if crediting:
+            action["for"] = crediting[0].begun["seq"] if len(crediting) == 1 else [c.begun["seq"] for c in crediting]
+        return _Logged(self, self.log.begin(action), method, params, target, acting, crediting)
 
     @staticmethod
     def _guarded(connection: _Connection, method: str, verdict: Verdict) -> None:
@@ -398,11 +454,12 @@ class _Logged:
     and its answer."""
 
     def __init__(self, relay: Relay, begun: dict, method: str, params: dict, target: Optional[str],
-                 acting: bool) -> None:
-        self.relay, self.begun, self.method, self.params, self.target, self.acting = \
-            relay, begun, method, params, target, acting
+                 acting: bool, calls: list[_Call]) -> None:
+        self.relay, self.begun, self.method, self.params, self.target, self.acting, self.calls = \
+            relay, begun, method, params, target, acting, calls
         control = relay.control
-        self._cause = cause = {"seq": begun["seq"], "via": "cdp", "who": begun["action"]["who"]}
+        self._cause = cause = {"seq": begun["seq"], "via": "cdp", "who": begun["action"]["who"],
+                               **({"for": begun["action"]["for"]} if "for" in begun["action"] else {})}
         self._landed: Optional[asyncio.Future] = None
         self._checks_password = self.password = False
         if control is None or not acting:
@@ -453,6 +510,8 @@ class _Logged:
             fields["tab"] = self.target = opened
         if self.target and self.relay.control is not None and self.begun["action"].get("url") is None:
             fields["url"] = self.relay.control.url_of(self.target)
+        for call in self.calls:
+            call.credit(self.target, self.acting, self._checks_password, self.password, alone=len(self.calls) == 1)
         self.relay.log.finish(self.begun, **fields)
 
 

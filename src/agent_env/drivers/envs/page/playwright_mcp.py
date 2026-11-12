@@ -46,6 +46,9 @@ CALL_TIMEOUT_S = 300.0
 #: before it's killed.
 POLL_S = 0.1
 STOP_S = 10.0
+#: How long one call may take at most, its start and its session's together with its own bound: as long as the browser
+#: credits Playwright MCP's commands to it unless told it ended sooner.
+CALL_BOUND_S = 2 * START_S + CALL_TIMEOUT_S
 #: How long a caller's session on Playwright MCP is kept with no call: a caller's own MCP session ends with no word to
 #: the driver, and each holds a connection to the browser.
 SESSION_IDLE_S = 3600.0
@@ -57,7 +60,17 @@ def tools(call: Callable[..., Awaitable[CallToolResult]]) -> list[ForwardedTool]
     """Playwright MCP's tools, as its manifest lists them, each called through ``call`` with its name first; those that
     run the agent's own code hidden until a task's tool access names them."""
     return [ForwardedTool.listed(t, functools.partial(call, t["name"]), hidden_by_default=t["name"] in HIDDEN_TOOLS)
-            for t in json.loads(TOOLS.read_text(encoding="utf-8"))["tools"]]
+            for t in _manifest()]
+
+
+def acts(tool: str) -> bool:
+    """Whether ``tool`` can change the browser or a page: any its manifest doesn't mark read-only."""
+    return not next(t for t in _manifest() if t["name"] == tool)["annotations"].get("readOnlyHint", False)
+
+
+@functools.cache
+def _manifest() -> list[dict]:
+    return json.loads(TOOLS.read_text(encoding="utf-8"))["tools"]
 
 
 class PlaywrightMcp:

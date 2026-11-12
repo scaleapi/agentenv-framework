@@ -352,6 +352,26 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         written.replace(SITES)
         return {}
 
+    @extension(BROWSER, op="calls/begin")
+    async def browser_calls_begin(self, user: str, request: Request, acts: bool = True, within_s: float = 600.0) -> dict:
+        """An agent's tool call, from the tool-call header this is sent with, which a driver serves through ``user``'s
+        CDP connections, begun as an entry in the log, by the caller's role: ``user``'s commands are credited to it
+        until ``calls/end`` ends it, or ``within_s`` passes and it's written as never said to have ended. Its entry's
+        sequence number, ``entry``."""
+        call = read_tool_call(request.headers.get(TOOL_CALL_HEADER))
+        if call is None:
+            raise InvalidArgument(f"calls/begin is sent with the tool call it begins, in its {TOOL_CALL_HEADER} header")
+        who = normalize_role(request.headers.get(ROLE_HEADER)) or DEFAULT_ROLE
+        return {"entry": self.relay.begin_call(user, who, call, acts=acts, within_s=within_s)}
+
+    @extension(BROWSER, op="calls/end")
+    async def browser_calls_end(self, entry: int, ok: bool, error: Optional[str] = None) -> dict:
+        """The tool call ``calls/begin`` began as ``entry`` ended, with whether it worked and, if not, why: its entry
+        written, with the tab its commands acted on."""
+        if not self.relay.end_call(entry, ok, error):
+            raise InvalidArgument(f"no tool call is open as entry {entry}")
+        return {}
+
     @extension(BROWSER, op="cdp")
     async def browser_cdp(self, user: str, request: Request, origin: Optional[str] = None) -> dict:
         """``user``'s CDP address once the browser's ready, the same one each time it's asked for, as the server that

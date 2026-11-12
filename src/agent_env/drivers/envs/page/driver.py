@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import math
 import string
 from pathlib import Path
@@ -58,6 +59,8 @@ from agentenv_protocol.tool_context import ROLE_HEADER, ToolContext
 from agentenv_protocol.website_browser import BROWSER
 
 import playwright_mcp
+
+logger = logging.getLogger(__name__)
 
 BUTTONS = {"left": 1, "right": 2, "middle": 4, "back": 8, "forward": 16}
 MODIFIERS = {"Alt": 1, "Control": 2, "Meta": 4, "Shift": 8}
@@ -117,7 +120,35 @@ class PageDriver(ComputerDriverEnvironment):
         return playwright_mcp.tools(self._playwright_call)
 
     async def _playwright_call(self, tool: str, /, **arguments: Any) -> CallToolResult:
-        return await self._playwright.call(tool, **arguments)
+        """Playwright MCP's ``tool``, an entry in the browser's log from start to end, which Playwright MCP's commands
+        meanwhile are credited to; a call the browser can't log still goes."""
+        entry = await self._call_begun(tool)
+        result: Optional[CallToolResult] = None
+        try:
+            result = await self._playwright.call(tool, **arguments)
+            return result
+        finally:
+            if entry is not None:
+                await self._call_ended(entry, result)
+
+    async def _call_begun(self, tool: str) -> Optional[int]:
+        params = {"user": playwright_mcp.CDP_USER, "acts": playwright_mcp.acts(tool),
+                  "within_s": playwright_mcp.CALL_BOUND_S}
+        try:
+            return (await self._call("calls/begin", params))["entry"]
+        except (DeviceUnavailable, InvalidArgument, Unsupported) as e:
+            logger.warning(f"the browser didn't begin an entry for {tool}: {e}")
+            return None
+
+    async def _call_ended(self, entry: int, result: Optional[CallToolResult]) -> None:
+        ok = result is not None and not result.isError
+        error = None if ok else "cancelled" if result is None else \
+            " ".join(part.text for part in result.content if part.type == "text")
+        try:
+            await self._call("calls/end", {"entry": entry, "ok": ok, **({"error": error} if error else {})},
+                             credited=False)
+        except (DeviceUnavailable, InvalidArgument, Unsupported) as e:
+            logger.warning(f"the browser didn't end entry {entry}: {e}")
 
     async def _playwright_endpoint(self) -> str:
         """The CDP address the browser issues Playwright MCP, at this driver's own loopback address, where its relay is
