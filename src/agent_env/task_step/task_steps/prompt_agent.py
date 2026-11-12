@@ -1120,7 +1120,9 @@ class _UserSide:
                 return answer
             # no trigger fired -> fall through to the LLM user-sim for this turn (hybrid)
         if self._built_in is not None:
-            answer = await self._built_in.ask(number, solver_message, self._ask_built_in)
+            # Every text part the agent sent, not only the last one solver_message keeps.
+            said = "\n".join(p["text"] for p in agent_parts or [] if p.get("kind") == "text" and p.get("text"))
+            answer = await self._built_in.ask(number, said or solver_message, self._ask_built_in)
             self._end_after = answer.get("end_after")
             return answer
         return await self._ask_peer(number, agent_parts)

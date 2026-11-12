@@ -375,3 +375,15 @@ async def test_a_hook_that_asks_the_user_on_the_last_turn_gets_the_end_without_a
     assert [r[1] for r in peers.requests(ctx)].count(f"{USER}/a2a") == 2  # asked once
     assert len(_reads(ctx)) == 1
     assert _stored(ctx, peers)["status"] == "closed"
+
+
+@pytest.mark.asyncio
+async def test_the_user_reads_every_text_part_of_the_agents_reply(monkeypatch):
+    Peers(monkeypatch, {AGENT: [text("Blue house, $280 a night.") + text("Book it?")], USER: [said("done")]})
+    ctx = await _context(monkeypatch)
+
+    await _step().execute(ctx)
+
+    [entry] = _reads(ctx)
+    stored = _full(entry)
+    assert "Blue house, $280 a night." in stored["input"] and "Book it?" in stored["input"]
