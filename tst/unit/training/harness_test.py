@@ -257,6 +257,22 @@ def test_a_rows_prompt_is_an_always_on_steps_as_it_is_a_prompt_agent_steps():
     assert harness._first_prompt(task) == "Watch Tess's shop this month."
 
 
+def test_a_rows_prompt_with_no_step_prompt_is_the_named_user_sims_opening():
+    def user_sim(name, opening):
+        return SimpleNamespace(type="deploy_user_sim_agent", plays_user=True, agent_name=name, opening_prompt=opening)
+
+    always_on = SimpleNamespace(type="always_on", prompt=None, user_sim="nora")
+    task = SimpleNamespace(steps=[user_sim("other", "Not this one."), user_sim("nora", "Find me a sofa."), always_on])
+    assert harness._first_prompt(task) == "Find me a sofa."
+
+    prompt_agent = SimpleNamespace(type="prompt_agent", prompt="", user_agent_name="nora")
+    assert harness._first_prompt(SimpleNamespace(steps=[user_sim("nora", "Find me a sofa."), prompt_agent])) \
+        == "Find me a sofa."
+
+    unnamed = SimpleNamespace(type="always_on", prompt=None, user_sim=None)
+    assert harness._first_prompt(SimpleNamespace(steps=[user_sim("nora", "Find me a sofa."), unnamed])) == ""
+
+
 @pytest.mark.usefixtures("plays_user_registered")
 def test_a_task_whose_user_sim_step_deploys_the_user_trains_only_its_solver():
     config = [{"id": "solver", "type": "deploy_agent", "a2a_agent_id": "theirs"},

@@ -35,7 +35,7 @@ from agent_env.openenv.reward import reward_of
 from agent_env.task.task import Task, recorded_scores
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext, sandbox_overrides
-from agent_env.task_step.roles import prompts_agent_under_test
+from agent_env.task_step.roles import plays_user, prompts_agent_under_test
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
 from agent_env.training._openenv import on_session_loop
@@ -232,7 +232,17 @@ def _index_named(prompt: Any, ids: list[str]) -> int:
 
 
 def _first_prompt(task: Task) -> str:
-    return next((step.prompt for step in task.steps if prompts_agent_under_test(step)), "")
+    """The user's first message to the agent under test: its step's prompt, else the opening of the user sim the step
+    names (an always_on step's ``user_sim``, a prompt_agent step's ``user_agent_name``), as it was written."""
+    step = next((each for each in task.steps if prompts_agent_under_test(each)), None)
+    if step is None:
+        return ""
+    if getattr(step, "prompt", None):
+        return step.prompt
+    user = getattr(step, "user_sim", None) or getattr(step, "user_agent_name", None)
+    sim = next((each for each in task.steps if plays_user(each) and user and getattr(each, "agent_name", None) == user),
+               None)
+    return getattr(sim, "opening_prompt", None) or ""
 
 
 def _free_port() -> int:
