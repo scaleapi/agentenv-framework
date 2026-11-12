@@ -17,27 +17,30 @@ from agentenv_protocol.computer.manifest import ManifestSegment, RecordingManife
 from agentenv_protocol.computer.recording import MANIFEST
 from agentenv_protocol.client import find_extension
 
-from agent_env.a2a_agent.object_transfer import ObjectLimits, namespace_grant
 from agent_env.artifact import FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
 from agent_env.artifact.store import get_artifact_store
 from agent_env.config import get_config
 from agent_env.entity.refs import EntityRef
 from agent_env.env.env import EnvCapabilityUnsupported
-from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
-from agent_env.store.base import GrantUnavailableError
 from agent_env.store.ids import derive_id, is_local_id, validate_local_id
-from agent_env.store.object_store.object_store import issues_grants_to
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_steps.recordings import (
+    ERROR_CHARS,
+    end_open,
+    recording_grant,
+    recording_namespace,
+    refuse_no_network,
+    register_open,
+    why,
+)
 
 logger = logging.getLogger(__name__)
 
 #: ``context.metadata[RECORDINGS_KEY][name]``: each recording a run started, open or ended.
 RECORDINGS_KEY = "computer_recordings"
 _KEY_PREFIX = "agentenv-recordings"
-#: How much longer than the env's ``max_duration_s`` a recording's grant lasts.
-GRANT_MARGIN_S = 600
 _MAX_SEGMENT_BYTES = 5 << 30
 #: The segments a grant takes: a recording also rolls over early, on a size change or after a gap.
 MAX_SEGMENTS = 10_000
@@ -88,14 +91,14 @@ class StartComputerRecordingTaskStep(TaskStep):
         request_id = f"{context.instance_id}:{self.id}" if context.instance_id else uuid.uuid4().hex
         try:
             deployed = _deployed(context, self.env_id)
-            _refuse_no_network(deployed)
-            namespace = _namespace(request_id)
+            refuse_no_network(deployed)
+            namespace = recording_namespace(request_id, _KEY_PREFIX)
             grant = _grant(deployed, namespace, self.environment_name)
             started = await deployed.invoke(COMPUTER_RECORDING, "start", {
                 "request_id": request_id, "fps": self.fps, "max_edge": self.max_edge, "cursor": self.cursor,
                 "upload": grant}, environment_name=self.environment_name)
         except Exception as e:
-            recordings[self.name] = {"env_id": self.env_id, "state": "failed", "error": f"{type(e).__name__}: {e}"[:500]}
+            recordings[self.name] = {"env_id": self.env_id, "state": "failed", "error": why(e)}
             logger.warning("start_computer_recording %s on %s: %s", self.name, self.env_id, e)
             if self.fail_task_on_error:
                 raise
@@ -148,9 +151,7 @@ class EndComputerRecordingTaskStep(TaskStep):
 async def end_open_recordings(context: TaskStepContext, env_ids: Optional[list[str]] = None) -> None:
     """End and register every recording still open in ``context`` (of ``env_ids`` only, when given), each with a fresh
     grant, before its computer is torn down, whatever env serves it; ``end_recording`` says what happened to each."""
-    for name, entry in list((context.metadata.get(RECORDINGS_KEY) or {}).items()):
-        if entry.get("state") == "open" and (env_ids is None or entry["env_id"] in env_ids):
-            await end_recording(context, name, "teardown")
+    await end_open(context, RECORDINGS_KEY, env_ids, end_recording)
 
 
 def register_open_recordings(context: TaskStepContext, env_ids: Optional[list[str]] = None) -> None:
@@ -158,15 +159,7 @@ def register_open_recordings(context: TaskStepContext, env_ids: Optional[list[st
     holds: the manifest its driver uploaded when its env ended it, or else the segments alone. Teardown calls it once
     the envs have closed, for one ``end_open_recordings`` didn't end in time. Never raises: each entry says what
     happened."""
-    for name, entry in list((context.metadata.get(RECORDINGS_KEY) or {}).items()):
-        if entry.get("state") == "open" and (env_ids is None or entry["env_id"] in env_ids):
-            try:
-                manifest = _from_namespace(entry)
-            except Exception as e:
-                logger.warning("recording %s: listing its namespace failed: %s", name, e)
-                entry["state"], entry["error"] = "failed", f"{type(e).__name__}: {e}"[:500]
-                continue
-            _registered(context, name, entry, manifest)
+    register_open(context, RECORDINGS_KEY, env_ids, _from_namespace, _registered, "recording")
 
 
 async def end_recording(context: TaskStepContext, name: str, reason: str) -> None:
@@ -183,12 +176,12 @@ async def end_recording(context: TaskStepContext, name: str, reason: str) -> Non
             "reason": reason}, environment_name=environment_name))
     except Exception as e:
         logger.warning("end_computer_recording %s: %s; registering what its namespace holds", name, e)
-        entry["error"] = f"{type(e).__name__}: {e}"[:500]
+        entry["error"] = why(e)
         try:
             manifest = _from_namespace(entry)
         except Exception as listing:
             logger.warning("end_computer_recording %s: listing its namespace failed: %s", name, listing)
-            entry["state"], entry["error"] = "failed", f"{entry['error']}; then {type(listing).__name__}: {listing}"[:500]
+            entry["state"], entry["error"] = "failed", f"{entry['error']}; then {why(listing)}"[:ERROR_CHARS]
             return
     _registered(context, name, entry, manifest)
 
@@ -199,7 +192,7 @@ def _registered(context: TaskStepContext, name: str, entry: dict, manifest: Reco
         entry["artifact"] = _register(context, name, entry["namespace"], manifest)
     except Exception as e:
         logger.warning("recording %s: registering it failed: %s", name, e)
-        entry["state"], entry["error"] = "failed", f"{type(e).__name__}: {e}"[:500]
+        entry["state"], entry["error"] = "failed", why(e)
         return
     uploaded = [s for s in manifest.segments if s.uploaded]
     entry.update(state="ended", ended_by=manifest.ended_by, segments=len(uploaded),
@@ -214,43 +207,16 @@ def _deployed(context: TaskStepContext, env_id: str):
     return deployed
 
 
-def _refuse_no_network(deployed) -> None:
-    """A computer deployed with no network can't reach the store its recording's segments upload to."""
-    network = ((deployed.metadata or {}).get("computer") or {}).get("network")
-    if network and NetworkPolicy.from_dict(network).closed:
-        raise RuntimeError(f"env {deployed.env_id!r} was deployed with no network, so its computer can't upload a "
-                           "recording's segments")
-
-
-def _namespace(request_id: str) -> str:
-    """Where a recording's segments go: named by its start's request id, so a retried start uploads alongside."""
-    config = get_config()
-    key = uuid.uuid5(uuid.NAMESPACE_URL, request_id).hex
-    return config.get_object_store().object_url(f"{config.get_artifact_key_prefix()}{_KEY_PREFIX}/{key}")
-
-
 def _grant(deployed, namespace: str, environment_name: Optional[str] = None, method: str = "start") -> dict:
-    """A grant that uploads under ``namespace``, lasting the recorded env's ``max_duration_s`` and a margin, or the
-    longest the store issues. EnvCapabilityUnsupported when the env's card, or its child's, declares no recording."""
+    """A grant for a computer recording's segments and manifest. EnvCapabilityUnsupported when the env's card, or its
+    child's, declares no recording."""
     card = deployed.environment_card if environment_name is None else deployed.get_child_env_card(environment_name)
     extension = find_extension(card or {}, COMPUTER_RECORDING)
     if extension is None:
         raise EnvCapabilityUnsupported(COMPUTER_RECORDING, method, deployed.env_id,
                                        getattr(deployed, "instance_id", None), environment_name)
-    params = extension.get("params") or {}
-    store = get_config().get_object_store()
-    sandbox_type = getattr(deployed, "sandbox_type", None)
-    if not issues_grants_to(store, sandbox_type):
-        raise RuntimeError(f"the object store issues no upload grant that reaches env {deployed.env_id}'s sandbox "
-                           f"({sandbox_type or 'unknown'}), so its recording couldn't upload")
-    duration = params["max_duration_s"]
-    cap = min(store.max_single_upload_bytes or _MAX_SEGMENT_BYTES, _MAX_SEGMENT_BYTES)
-    limits = ObjectLimits(max_objects=MAX_SEGMENTS + 1, max_object_bytes=cap, max_total_bytes=MAX_RECORDING_BYTES)
-    try:
-        grant = namespace_grant(store, namespace, limits=limits, expires_in=duration + GRANT_MARGIN_S)
-    except GrantUnavailableError:
-        grant = namespace_grant(store, namespace, limits=limits, expires_in=store.grant_lifetime_seconds)
-    return grant.model_dump(mode="json")
+    return recording_grant(deployed, extension.get("params") or {}, namespace, MAX_SEGMENTS + 1, _MAX_SEGMENT_BYTES,
+                           MAX_RECORDING_BYTES)
 
 
 def _from_namespace(entry: dict) -> RecordingManifest:
