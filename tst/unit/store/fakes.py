@@ -249,7 +249,6 @@ class CollectingVm:
 
     mode = "vm"
     type = None
-    app_dir_on_this_machine = None
 
     def scoped_name(self, name):
         return name

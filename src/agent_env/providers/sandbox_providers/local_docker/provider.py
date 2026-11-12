@@ -312,10 +312,6 @@ class LocalSandbox(VmSandbox):
     def work_dir(self) -> Path:
         return self._work_dir
 
-    @property
-    def app_dir_on_this_machine(self) -> Path:
-        return self._work_dir
-
     def _rewrite_app_arg(self, arg: str) -> str:
         if arg == "/app" or arg.startswith(("/app/", "/app:")):
             return str(self._work_dir) + arg[4:]

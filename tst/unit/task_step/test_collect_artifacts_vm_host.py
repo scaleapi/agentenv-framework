@@ -36,7 +36,6 @@ class _VmSandbox:
     """A VM-mode sandbox that serves the fake tree, recording every command."""
 
     mode = "vm"
-    app_dir_on_this_machine = None
 
     def __init__(self):
         self.calls: list[tuple] = []

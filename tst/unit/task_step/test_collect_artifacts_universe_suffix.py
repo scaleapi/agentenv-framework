@@ -38,7 +38,6 @@ class _Proc:
 
 class _VmSandbox:
     mode = "vm"
-    app_dir_on_this_machine = None
 
     async def exec_with_output(self, *args):
         if "find" in args:

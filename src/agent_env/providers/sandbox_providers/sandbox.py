@@ -173,9 +173,6 @@ class Sandbox(ABC):
     platform: str | None = DEFAULT_BUILD_PLATFORM
     # The host other containers on its provider's private network reach it at, ready for a URL; None when it's on none.
     private_host: str | None = None
-    # The folder of this machine its host commands see as /app, when they run on this machine as a local sandbox's do;
-    # None when they run on a host of their own.
-    app_dir_on_this_machine: Path | None = None
 
     def url_from_sandbox(self, url: str) -> str:
         """``url``, of a service this process reaches, as this sandbox reaches it."""

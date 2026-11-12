@@ -299,17 +299,6 @@ def test_a_local_sandbox_runs_any_platform_unchecked_since_its_docker_emulates_o
     assert LocalSandbox.platform is None
 
 
-@pytest.mark.parametrize("sandbox", [Sandbox, ModalSandbox, ModalVmSandbox, E2BSandbox, SailVmSandbox, TensorlakeSandbox,
-                                     TenkiSandbox, BoxdSandbox, CoreWeaveSandbox, DaytonaSandbox, BoatSandbox,
-                                     Agent37Sandbox])
-def test_a_sandbox_runs_its_host_commands_on_a_host_of_its_own(sandbox):
-    assert sandbox.app_dir_on_this_machine is None
-
-
-def test_a_local_sandbox_runs_its_host_commands_on_this_machine_in_its_work_dir(tmp_path):
-    assert LocalSandbox(work_dir=tmp_path).app_dir_on_this_machine == tmp_path
-
-
 def _concrete_classes() -> set[str]:
     """The sandbox and sandbox provider classes the providers define, but the base classes everything else may name."""
     names = set()
