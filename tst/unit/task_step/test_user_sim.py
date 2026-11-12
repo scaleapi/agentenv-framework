@@ -41,3 +41,10 @@ def test_ours_renders_one_labelled_read():
     for label in ("NEW ON YOUR PHONE", "YOU SENT YOUR AI ASSISTANT", "NEW FROM YOUR AI ASSISTANT"):
         assert label in text
     assert text.index("house?") < text.index("and dinner?")
+
+
+def test_response_times_without_a_schedule_is_refused():
+    for schedule in (None, {}):
+        with pytest.raises(ValueError, match="response_times needs a schedule"):
+            UserSimTaskStep("u", None, name="linda", model="m", schedule=schedule, response_times={"free": 30})
+    UserSimTaskStep("u", None, name="linda", model="m", schedule={"wake": "07:30"}, response_times={"free": 30})

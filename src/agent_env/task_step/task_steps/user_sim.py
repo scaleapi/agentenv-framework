@@ -79,6 +79,9 @@ class UserSimTaskStep(TaskStep):
             raise ValueError("user_sim.model is required")
         if time_zone is not None:
             ZoneInfo(time_zone)
+        if response_times and not schedule:
+            raise ValueError("user_sim.response_times needs a schedule (an empty one counts as none); without one, "
+                             "replies are never held")
         self.name = name
         self.model = model
         self.agent_name = agent_name or name

@@ -1012,6 +1012,12 @@ class _Run:
         # read, after the final check-in)
         if self.read_at is not None and self.read_at <= now and self.unread \
                 and (self.end is None or self.read_at < self.end):
+            if self.read_at < now:  # her time to read passed during the agent's turn: she reads now if she's free
+                at, self.read_mode = self._available(now)
+                if at > now:  # asleep or busy by now: she reads when she's next free
+                    self.read_at = at
+                    self.log("user_read_scheduled", read_at=_iso(at), mode=self.read_mode, unread=len(self.unread))
+                    return True
             await self.read(now)
             return True
         # past end_time (the clock runs during the agent's turns, so one can end past it): the final check-in next, with
