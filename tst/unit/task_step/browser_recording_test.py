@@ -10,6 +10,7 @@ import json
 import pytest
 from agentenv_protocol.computer import COMPUTER_RECORDING
 from agentenv_protocol.website_browser import BROWSER, BROWSER_RECORDING
+from agentenv_protocol.website_browser.recording import END_S, START_S
 
 from agent_env.artifact import Artifact
 from agent_env.config import set_object_store
@@ -43,10 +44,12 @@ class _BrowserComputer:
         self.environment_card = {"name": "browser", "children_environments": children}
         self.store, self.misses, self.forgets, self.gaps = store, misses, forgets, gaps
         self.calls: list[tuple[str, dict, str]] = []
+        self.timeouts: list[float] = []
 
-    async def invoke(self, uri, method, params=None, environment_name=None, **_):
+    async def invoke(self, uri, method, params=None, environment_name=None, timeout=None, **_):
         assert uri == BROWSER_RECORDING
         self.calls.append((method, params, environment_name))
+        self.timeouts.append(timeout)
         if method == "start":
             self.root = params["upload"]["root_path"]
             self.store.put(f"{self.root}/rec-1/frames/0000.jpg", b"jpeg-0", content_type="image/jpeg")
@@ -99,6 +102,7 @@ async def test_a_browser_recording_is_started_through_its_browsers_card_and_regi
     (_, start, browser), (_, end, _) = computer.calls
     assert (start["request_id"], start["frames"], browser) == ("run-1:start-run", True, "chromium")
     assert start["upload"]["max_objects"] == 102 and "/agentenv-browser-recordings/" in started["namespace"]
+    assert computer.timeouts == [START_S, END_S]
     assert end["upload"]["root_path"] == start["upload"]["root_path"] and end["reason"] == "end"
     assert (entry["state"], entry["frames_taken"], entry["missing_frames"], entry["log_uploaded"]) == \
         ("ended", 2, 0, True)

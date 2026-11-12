@@ -15,7 +15,9 @@ import pytest
 from agentenv_protocol.computer.errors import DeviceUnavailable, InvalidArgument
 from agentenv_protocol.transfers import HttpPostPolicyGrant, WriteNamespaceGrant
 from agentenv_protocol.website_browser import recording as browser_recording
+from agentenv_protocol.website_browser import control as browser_control
 from agentenv_protocol.website_browser.control import NUDGE_S, BrowserControl
+from agentenv_protocol.website_browser.devtools import DevToolsError
 from agentenv_protocol.website_browser.log import BrowserLog
 from agentenv_protocol.website_browser.recording import BrowserRecordingManifest, BrowserRecordings
 
@@ -258,6 +260,71 @@ class BehindPipe(Pipe):
                     waiting.set_result({"data": base64.b64encode(b"behind").decode()})
             self.waiting = []
         return await asyncio.wait_for(answer, timeout_s)
+
+
+class RefusingPipe(Pipe):
+    """A pipe whose browser refuses its first ``refusals`` captures with ``why``, as it does a tab between documents
+    while a navigation swaps them, and answers the rest."""
+
+    def __init__(self, refusals: int, why: str = "Page.captureScreenshot: Not attached to an active page") -> None:
+        super().__init__()
+        self.refusals, self.why = refusals, why
+
+    async def call(self, method, params=None, *, session_id=None, timeout_s=None):
+        if method == "Page.captureScreenshot" and self.refusals:
+            self.refusals -= 1
+            self.captured.append((session_id, params, asyncio.get_running_loop().time()))
+            raise DevToolsError(self.why)
+        return await super().call(method, params, session_id=session_id, timeout_s=timeout_s)
+
+
+class BusyPipe(Pipe):
+    """A pipe whose page is too busy to paint for ``busy_s``, every capture answering only after it."""
+
+    def __init__(self, busy_s: float) -> None:
+        super().__init__()
+        self.busy_s = busy_s
+
+    async def call(self, method, params=None, *, session_id=None, timeout_s=None):
+        if method == "Page.captureScreenshot":
+            await asyncio.wait_for(asyncio.sleep(self.busy_s), timeout_s)
+        return await super().call(method, params, session_id=session_id, timeout_s=timeout_s)
+
+
+def _one_tab(pipe: Pipe) -> BrowserControl:
+    control = BrowserControl(pipe, "agent", (1280, 800))
+    pipe.emit("Target.targetCreated", {"targetInfo": {"targetId": "T1", "type": "page", "url": "about:blank"}})
+    pipe.emit("Target.attachedToTarget", {"sessionId": "s-T1", "targetInfo": {"targetId": "T1", "type": "page"}})
+    return control
+
+
+@pytest.mark.asyncio
+async def test_a_frame_refused_while_its_tab_is_between_documents_is_asked_again_until_it_shows():
+    pipe = RefusingPipe(refusals=2)
+
+    data, _, tab, _ = await _one_tab(pipe).frame("T1", load_wait_s=0)
+
+    assert (base64.b64decode(data), tab, len(pipe.captured)) == (b"jpeg", "T1", 3)
+
+
+@pytest.mark.asyncio
+async def test_a_frame_the_browser_refuses_for_another_reason_is_missing_at_once():
+    pipe = RefusingPipe(refusals=5, why="Page.captureScreenshot: Internal error")
+
+    with pytest.raises(DeviceUnavailable, match="Internal error"):
+        await _one_tab(pipe).frame("T1", load_wait_s=0)
+    assert len(pipe.captured) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_page_too_busy_to_paint_has_the_frame_budget_to_show_and_no_longer(monkeypatch):
+    monkeypatch.setattr(browser_control, "FRAME_CAPTURE_S", 0.6)
+    monkeypatch.setattr(browser_control, "NUDGE_S", 0.1)
+
+    data, _, _, _ = await _one_tab(BusyPipe(busy_s=0.3)).frame("T1", load_wait_s=0)
+    assert base64.b64decode(data) == b"jpeg"
+    with pytest.raises(DeviceUnavailable, match="painted nothing within 0.6 s"):
+        await _one_tab(BusyPipe(busy_s=1.0)).frame("T1", load_wait_s=0)
 
 
 @pytest.mark.asyncio

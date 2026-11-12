@@ -17,6 +17,7 @@ from pydantic import BaseModel, ValidationError
 
 from ..computer.errors import InvalidArgument
 from ..transfers import NamespaceUploader, WriteNamespaceGrant
+from .control import FRAME_CAPTURE_S
 from .log import ERROR_CHARS, BrowserLog
 
 if TYPE_CHECKING:
@@ -45,6 +46,11 @@ KEEP_ENDED = 64
 #: looks again.
 LOG_WAIT_S = 10.0
 LOG_POLL_S = 0.2
+#: The longest a start takes, its first frame taken and uploaded, and an end, a frame still being taken, its last two
+#: and the wait for its log: what a client of the extension waits on each, a frame's upload given ``UPLOAD_S``.
+UPLOAD_S = 30.0
+START_S = LOAD_WAIT_S + FRAME_CAPTURE_S + UPLOAD_S
+END_S = 3 * (LOAD_WAIT_S + FRAME_CAPTURE_S + UPLOAD_S) + LOG_WAIT_S
 
 
 class RecordedFrame(BaseModel):
