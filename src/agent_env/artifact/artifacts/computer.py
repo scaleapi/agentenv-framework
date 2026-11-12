@@ -142,6 +142,14 @@ class ContainerForm(BaseModel):
         "Who its init starts as: the session user, or root, which sets up what the session must not touch (the clock "
         "follower, as its own user) before it starts the session as its user"))
 
+    @model_serializer(mode="wrap")
+    def _start_as_when_root(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """``start_as`` only when it's root, so a form that starts as the session user is stored as it was before."""
+        data = handler(self)
+        if data.get("start_as") == "session":
+            del data["start_as"]
+        return data
+
 
 class DiskSource(BaseModel):
     """The VM image a disk's base is built from: a distribution's own, fetched by ``url`` and checked by ``sha256``."""

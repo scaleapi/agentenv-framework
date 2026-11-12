@@ -1,9 +1,9 @@
-"""The ubuntu-24.04 computer on its multi env's gateway clock, on the local backend: the deploy has its follower follow the
-gateway, as the computer's sandbox reaches it, under the computer's name and control token, which the record keeps but
-the token; sync_env_clock arms the clock as a task does, calling the computer's sync_time with the task's zone; the
-session reads universe time, and each change is acknowledged in time for a write that waits for it; a follower killed
-comes back within 2 s and acknowledges the next advance; and a reset brings the page and the follower back on the
-clock's current version. Needs Docker and the local registry on localhost:5000."""
+"""The ubuntu-24.04 computer on its multi env's gateway clock, on the local backend: the deploy has its follower follow
+the gateway, as the computer's sandbox reaches it, under the computer's name and control token, which the record
+keeps but the token; sync_env_clock arms the clock as a task does, calling the computer's sync_time; the session
+reads universe time, and each change is acknowledged in time for a write that waits for it; a follower killed comes
+back within 2 s and acknowledges the next advance; and a reset brings the page and the follower back on the clock's
+current version. Needs Docker and the local registry on localhost:5000."""
 
 import asyncio
 import subprocess
@@ -50,8 +50,8 @@ async def test_a_multi_envs_computer_follows_its_gateways_clock_through_arming_a
             container = _container(own.sandbox_id)
 
             universe = datetime.now(timezone.utc) - timedelta(days=182)
-            await SyncEnvClockTaskStep(id="clock", version=None, env_id=office.id, virtual_time=_iso(universe),
-                                       timezone="UTC").execute(context)
+            await SyncEnvClockTaskStep(id="clock", version=None, env_id=office.id,
+                                       virtual_time=_iso(universe)).execute(context)
             synced = context.metadata["clock_configurations"][-1]["synced"]
             armed = await _session_offset(own) - (universe.timestamp() - time.time())
 

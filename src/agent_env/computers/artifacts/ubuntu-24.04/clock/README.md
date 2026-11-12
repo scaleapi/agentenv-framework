@@ -5,6 +5,19 @@ server does. Instead each session program loads agent-env's build of [libfaketim
 (through `/etc/ld.so.preload`), which answers clock reads with universe time from a page a follower process keeps in
 step with the gateway.
 
+It is part of the ubuntu-24.04 base, which builds the library and the shim from this folder in a stage of its
+Dockerfile, since an image builds only from its own folder. The base starts as root: init sets the zone, makes the clock page and file for the follower's user,
+`agentenv-clock`, and starts root's supervisord (`../root.conf`), which runs the follower (`clock-follower`) as that user
+and the session's supervisord as the session user. The session user can read the clock but neither write, replace nor
+stop it.
+
+The follower long-polls the gateway's `/clock/watch`, writes each state it answers to the page and acknowledges it with
+its next watch. Core writes its config, the gateway's watch URL as the computer reaches it, the computer's name and its
+read token (for now its control token), through the sandbox's root channel when a multi env deploys the computer, and
+again after a reset; root and the follower alone can read it. The follower reads it every quarter second and reports in
+a status file that holds no token, which the driver's `clock/v1` `sync_time` reads: the computer's card serving
+`sync_time` is what tells core and the gateway that it follows the clock (`agentenv_protocol.computer.clock`).
+
 What follows the universe, and what doesn't:
 
 - **Universe time:** clock reads (`CLOCK_REALTIME`, `_COARSE`, `_ALARM`, `CLOCK_TAI`, `gettimeofday`, `time`) and waits
@@ -37,6 +50,7 @@ What follows the universe, and what doesn't:
 | `build.sh` | builds `libfaketimeMT.so.1` from upstream's sha256-pinned tarball and the files above, and the shim's `libtls_realtime.so` | Apache-2.0 |
 | `tls_realtime.c` | the TLS shim: OpenSSL's certificate checks on real time, preloaded after the library | Apache-2.0 |
 | `clockpage.py` | the clock page's writer, which the follower uses | Apache-2.0 |
+| `clock-follower` | the follower: the gateway's watch, the page written, the status reported | Apache-2.0 |
 | `clock.conf` | the library's default settings | Apache-2.0 |
 
 Build it on x86_64 or aarch64 Linux with a C toolchain, make, patch and curl:

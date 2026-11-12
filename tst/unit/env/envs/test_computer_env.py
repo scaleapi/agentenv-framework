@@ -127,6 +127,18 @@ def test_a_computer_env_is_composed_for_each_arch_and_written_with_the_computer_
     assert ComputerEnv.from_dict(stored.to_dict()).to_dict() == stored.to_dict()
 
 
+def test_a_base_whose_container_form_starts_as_root_composes_an_image_that_starts_as_root(base, driver, docker):
+    image = base.image()
+    rooted = _base(image, forms={"container": {"image": {"id": image.id, "version": image.version}, "init": "supervisord",
+                                               "input_channel": "env", "start_as": "root"}})
+
+    _put(rooted, driver)
+
+    assert ComputerArtifact.get(rooted.id, rooted.version).forms.container.start_as == "root"
+    assert all(build["dockerfile"].splitlines()[-2] == "USER root" for build in docker.builds)
+    assert "start_as" not in base.model_dump()["forms"]["container"]
+
+
 def test_a_key_covers_its_build_files_executable_bits_and_the_composers_format(base, driver, docker, tmp_path,
                                                                             monkeypatch):
     folder = tmp_path / "ctx"

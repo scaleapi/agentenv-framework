@@ -53,7 +53,8 @@ def test_the_desktop_runs_as_the_session_user_with_the_settings_a_deploy_passes(
         uid = _exec(name, "id", "-u", "user").strip()
         screen = _exec(name, "xdpyinfo")
         wm = _exec(name, "xprop", "-root", "_NET_SUPPORTING_WM_CHECK")
-        environment = _exec(name, "sh", "-c", 'tr "\\0" "\\n" < /proc/$(pgrep -x xfwm4)/environ')
+        environment = _exec(name, "sh", "-c", 'for _ in $(seq 120); do w=$(pgrep -o -x xfwm4) && break; sleep 0.25; done; '
+                                              'tr "\\0" "\\n" < /proc/$w/environ')
         accessibility = _exec(name, "pgrep", "-c", "at-spi2-registr")
         folders = set(_exec(name, "ls", "/home/user").split())
     finally:
@@ -97,7 +98,9 @@ def test_the_desktop_comes_back_from_a_restart_that_killed_x_with_its_lock_namin
     docker("run", "-d", "--name", name, base)
     try:
         _all_running(name)
-        _exec(name, "sh", "-c", 'printf "%10d\\n" 1 > /tmp/lock && chmod 444 /tmp/lock && mv -f /tmp/lock /tmp/.X99-lock')
+        # As X leaves it, X running as the session user.
+        _exec_as(name, "user", "sh", "-c",
+                 'printf "%10d\\n" 1 > /tmp/lock && chmod 444 /tmp/lock && mv -f /tmp/lock /tmp/.X99-lock')
         docker("restart", "-t", "0", name)
         running = _all_running(name)
     finally:
