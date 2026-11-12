@@ -139,6 +139,11 @@ class TaskStep(ABC):
         ``preflight`` is, and also for a step whose preflight a dry run skips."""
         return []
 
+    def task_problems(self, steps: list["TaskStep"]) -> list[str]:
+        """Problems this step has with the task's other steps (``steps``: all of them, this one included, in order),
+        found without reading a store; empty when fine. A task with any is refused when it loads."""
+        return []
+
     def step_param_overrides(self, context: TaskStepContext) -> dict[str, Any]:
         """Per-run overrides for this step's params, from a run's ``step_overrides``.
 
