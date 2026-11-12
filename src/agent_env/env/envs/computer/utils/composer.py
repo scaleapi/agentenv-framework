@@ -1092,8 +1092,8 @@ def _computer(env: ComputerEnv, base: ComputerArtifact, built: dict[str, str], d
         return None
     arches = [arch for arch in base.arch if arch in built]
     image = _joined(env, "computer_image", "composed computer", built, arches)
-    forms = {"container": {"image": {"id": image.id, "version": image.version}, "init": base.forms.container.init,
-                           "input_channel": base.forms.container.input_channel}}
+    forms = {"container": {**base.forms.container.model_dump(exclude={"image"}),
+                           "image": {"id": image.id, "version": image.version}}}
     if base.forms.disk is not None and all(arch in disks for arch in arches):
         disk = _joined(env, "computer_disk", "composed computer's disk", disks, arches)
         forms["disk"] = {**base.forms.disk.model_dump(exclude={"image"}), "image": {"id": disk.id, "version": disk.version}}

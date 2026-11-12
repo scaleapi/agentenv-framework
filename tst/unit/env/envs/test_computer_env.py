@@ -134,7 +134,9 @@ def test_a_base_whose_container_form_starts_as_root_composes_an_image_that_start
 
     _put(rooted, driver)
 
+    composed = Env.get("@local/~/kit/desktop").metadata["computer"]
     assert ComputerArtifact.get(rooted.id, rooted.version).forms.container.start_as == "root"
+    assert ComputerArtifact.get(composed["id"], composed["version"]).forms.container.start_as == "root"
     assert all(build["dockerfile"].splitlines()[-2] == "USER root" for build in docker.builds)
     assert "start_as" not in base.model_dump()["forms"]["container"]
 

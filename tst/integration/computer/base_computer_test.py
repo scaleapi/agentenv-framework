@@ -19,7 +19,7 @@ from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import reset_artifact_store
 from agent_env.config import configure, reset_config
-from tst.integration.computer.conftest import BASE, docker, only_session_and_clock, process_owners
+from tst.integration.computer.conftest import BASE, docker, kill_follower, only_session_and_clock, process_owners
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
@@ -194,15 +194,10 @@ def test_a_follower_killed_comes_back_within_2_s(base):
     docker("run", "-d", "--name", name, base)
     try:
         _all_running(name)
-        killed = _follower(name)
-        _exec(name, "kill", "-9", killed)
-        start = time.monotonic()
-        while (back := _follower(name)) in ("", killed) and time.monotonic() - start < 10:
-            time.sleep(0.05)
-        took = time.monotonic() - start
+        killed, back, took = kill_follower(name)
     finally:
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
-    assert back not in ("", killed) and took < 2, took
+    assert back not in ("-", killed) and took < 2, took
 
 
 def _follower(name: str) -> str:

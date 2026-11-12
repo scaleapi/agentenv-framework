@@ -192,3 +192,14 @@ def test_a_config_that_isnt_one_is_named_and_a_good_one_then_followed(follower):
         follower.until(lambda: follower.status().get("connected"))
     finally:
         gateway.close()
+
+
+def test_the_drivers_read_of_the_gateways_version_names_no_follower_so_it_acknowledges_nothing():
+    gateway = Gateway()
+    try:
+        gateway.set("boot:7", datetime(2020, 1, 1, tzinfo=timezone.utc), 1.0)
+
+        assert protocol_clock.gateway_version(gateway.url) == "boot:7"
+        assert gateway.watches == [("", None, None)]
+    finally:
+        gateway.close()

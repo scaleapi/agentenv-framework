@@ -23,6 +23,7 @@ from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
 from agent_env.task_step.task_steps.sync_env_clock import SyncEnvClockTaskStep
+from tst.integration.computer.conftest import kill_follower
 from tst.integration.computer.multi_env_computers_test import CONTAINER, _multi, items  # noqa: F401 - items is a fixture
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
@@ -59,12 +60,7 @@ async def test_a_multi_envs_computer_follows_its_gateways_clock_through_arming_a
             await _advance(deployed, day_on)
             advanced = await _session_offset(own) - (day_on.timestamp() - time.time())
 
-            killed = _follower(container)
-            subprocess.run(["docker", "exec", "-u", "0", container, "kill", "-9", killed], check=True)
-            start = time.monotonic()
-            while (back := _follower(container)) in ("", killed) and time.monotonic() - start < 10:
-                await asyncio.sleep(0.05)
-            came_back = time.monotonic() - start
+            killed, back, came_back = kill_follower(container)
             later = day_on + timedelta(hours=8)
             await _advance(deployed, later)
             after_kill = await _session_offset(own) - (later.timestamp() - time.time())
@@ -81,7 +77,7 @@ async def test_a_multi_envs_computer_follows_its_gateways_clock_through_arming_a
     assert [entry["service"] for entry in synced if entry.get("service") == "desktop"] == ["desktop"]
     assert abs(armed) < 5 and abs(advanced) < 5 and abs(after_kill) < 5 and abs(after_reset) < 5, (
         armed, advanced, after_kill, after_reset)
-    assert back not in ("", killed) and came_back < 2, came_back
+    assert back not in ("-", killed) and came_back < 2, came_back
     assert state_after_reset["followers"]["desktop"]["version"] == state_after_reset["version"], state_after_reset
     assert not report.failed
 

@@ -223,3 +223,25 @@ def only_session_and_clock(owners: dict[str, list[str]]) -> bool:
 
 def _exec_text(name: str, *argv: str) -> str:
     return subprocess.run(["docker", "exec", name, *argv], check=True, capture_output=True, text=True).stdout
+
+
+#: Kills the follower and times it until another runs, inside the container, as root, polling every 20 ms: prints the
+#: pid killed, the pid back, and the seconds between.
+_KILL_FOLLOWER = """import os, signal, subprocess, sys, time
+def running():
+    return subprocess.run(["pgrep", "-u", "agentenv-clock", "-f", sys.argv[1]], capture_output=True, text=True).stdout.strip()
+killed = running()
+os.kill(int(killed), signal.SIGKILL)
+start = time.monotonic()
+while (back := running()) in ("", killed) and time.monotonic() - start < 10:
+    time.sleep(0.02)
+print(killed, back or "-", time.monotonic() - start)
+"""
+
+
+def kill_follower(name: str) -> tuple[str, str, float]:
+    """The clock follower in the container ``name`` killed with SIGKILL: its pid, the pid of the one back ("-" if
+    none within 10 s), and how long that took, timed in the container."""
+    killed, back, took = subprocess.run(["docker", "exec", "-u", "0", name, "python3", "-c", _KILL_FOLLOWER, FOLLOWER],
+                                        check=True, capture_output=True, text=True).stdout.split()
+    return killed, back, float(took)

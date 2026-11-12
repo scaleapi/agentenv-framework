@@ -39,6 +39,12 @@ CONFIG_POLL_S = 0.25
 #: A re-anchoring (the offset moved) is written only past this much, so the page doesn't churn on noise.
 ADJUST_S = 0.001
 SAMPLES = 8
+#: After a failed watch it waits before asking again: RETRY_FIRST_S at first, doubled after each failure up to
+#: RETRY_MAX_S, each wait a random fraction (RETRY_JITTER) of that, so computers that lost a gateway don't all return at
+#: once.
+RETRY_FIRST_S = 0.05
+RETRY_MAX_S = 2.0
+RETRY_JITTER = (0.5, 1.0)
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
@@ -111,7 +117,7 @@ class Follower:
     def __init__(self, raw: bytes, config: dict):
         self.raw, self.url, self.name, self.token = raw, config["watch_url"], config["name"], config["token"]
         self.after, self.samples, self.written = "", [], None
-        self.errors, self.backoff = 0, 0.05
+        self.errors, self.backoff = 0, RETRY_FIRST_S
         self.status = {"url": self.url, "name": self.name, "connected": False, "version": None, "armed": False,
                        "error": None}
 
@@ -150,15 +156,15 @@ class Follower:
                     error_at=time.time())
         if self.errors <= 20 or self.errors % 100 == 0:
             log("error", errors=self.errors, status=code, error=repr(error)[:200], backoff=self.backoff)
-        deadline = time.monotonic() + self.backoff * random.uniform(0.5, 1.0)
+        deadline = time.monotonic() + self.backoff * random.uniform(*RETRY_JITTER)
         while time.monotonic() < deadline and read_config()[0] == self.raw:
             time.sleep(min(CONFIG_POLL_S, max(0.0, deadline - time.monotonic())))
-        self.backoff = min(self.backoff * 2, 2.0)
+        self.backoff = min(self.backoff * 2, RETRY_MAX_S)
 
     def apply(self, t1: float, t4: float, body: dict) -> None:
         if self.errors:
             log("reconnected", after_errors=self.errors)
-        self.errors, self.backoff = 0, 0.05
+        self.errors, self.backoff = 0, RETRY_FIRST_S
         held = body["sent"] - body["received"]
         self.samples = (self.samples + [{"delay": max(0.0, (t4 - t1) - held),
                                          "theta": ((body["received"] - t1) + (body["sent"] - t4)) / 2}])[-SAMPLES:]

@@ -1,6 +1,6 @@
 """A computer's side of clock/v1: the driver serves sync_time where the base runs the clock follower and it isn't a disk
 guest, the method every server that follows the clock serves; it checks the task's zone against the one the computer
-booted with and answers once the follower is connected, or says why it isn't."""
+booted with and answers once the follower shows the gateway's current version, or says why it doesn't."""
 from __future__ import annotations
 
 import json
@@ -28,6 +28,7 @@ def base(tmp_path, monkeypatch):
     monkeypatch.setattr(clock, "STATUS", str(tmp_path / "status.json"))
     monkeypatch.setattr(clock, "CONNECT_WAIT_S", 0.3)
     monkeypatch.setenv("TZ", "Europe/Paris")
+    monkeypatch.setattr(clock, "gateway_version", lambda url: "b:3")
     return tmp_path
 
 
@@ -50,7 +51,7 @@ async def test_the_card_serves_sync_time_where_the_base_runs_the_follower_and_it
 
 
 @pytest.mark.asyncio
-async def test_sync_time_answers_once_the_follower_is_connected(base):
+async def test_sync_time_answers_once_the_follower_shows_the_gateways_current_version(base):
     (base / "status.json").write_text(json.dumps({"connected": True, "url": "http://gw/clock/watch", "name": "desktop",
                                                   "version": "b:3", "armed": True, "token": "never read"}))
 
@@ -58,6 +59,26 @@ async def test_sync_time_answers_once_the_follower_is_connected(base):
 
     assert synced == {"synced": True, "timezone": "Europe/Paris", "env_get_time_url": "http://gw/clock/time",
                       "follower": {"name": "desktop", "url": "http://gw/clock/watch", "version": "b:3", "armed": True}}
+
+
+@pytest.mark.parametrize("version, why", [
+    ("b:3", "it shows the gateway's version 'b:2', and the gateway is at 'b:3'"),
+    (OSError("refused"), "this computer can't read the gateway's version at http://gw/clock/watch: OSError: refused"),
+])
+@pytest.mark.asyncio
+async def test_a_follower_behind_the_gateways_version_or_a_gateway_it_cant_read_is_named(base, monkeypatch, version,
+                                                                                        why):
+    def answer(url):
+        assert url == "http://gw/clock/watch"
+        if isinstance(version, Exception):
+            raise version
+        return version
+
+    monkeypatch.setattr(clock, "gateway_version", answer)
+    (base / "status.json").write_text(json.dumps({"connected": True, "url": "http://gw/clock/watch", "version": "b:2"}))
+
+    with pytest.raises(TargetUnavailable, match="isn't following the gateway: " + why.replace("(", r"\(")):
+        await clock.sync_time("http://gw/clock/time")
 
 
 @pytest.mark.asyncio

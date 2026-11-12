@@ -3,13 +3,16 @@ which core configures through the sandbox's root channel (``CONFIG``, root's and
 computer's read token) and which says how it's doing in ``STATUS``, holding no token. The driver serves clock/v1's
 ``sync_time``, the method every server that follows the clock serves, so the computer's card is what tells core and the
 gateway that it follows: called when the clock is armed, it checks the task's zone against the one the computer booted
-with and answers once the follower is connected, or says why it isn't."""
+with and answers once the follower shows the gateway's current version, or says why it doesn't. That version it reads
+from the gateway's watch, as any reader may: a watch naming no follower is answered at once and acknowledges nothing."""
 from __future__ import annotations
 
 import asyncio
 import json
 import os
 import time
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Optional
 
@@ -24,8 +27,10 @@ STATUS = "/run/agentenv-clock/status.json"
 #: What a disk form's guest has, made from the computer's container image: core's root channel reaches its launcher,
 #: not the guest, so it can't configure a follower there, and a disk computer stays on real time for now.
 DISK_GUEST = "/etc/agentenv/vm/image.env"
-#: How long ``sync_time`` waits for the follower to be connected, as after a gateway restart it reconnects.
+#: How long ``sync_time`` waits for the follower to show the gateway's current version, as after a gateway restart
+#: or a clock change it catches up.
 CONNECT_WAIT_S = 10.0
+_DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 def follows() -> bool:
@@ -49,12 +54,22 @@ def follower_status() -> dict:
     return status if isinstance(status, dict) else {}
 
 
-def _why(status: dict) -> str:
+def gateway_version(watch_url: str) -> str:
+    """The version the gateway's clock has now, read from its watch naming no version and no follower."""
+    with _DIRECT.open(f"{watch_url}?{urllib.parse.urlencode({'after': ''})}", timeout=5) as answer:
+        return json.loads(answer.read())["version"]
+
+
+def _why(status: dict, current: Optional[str], unread: Optional[str]) -> str:
     if status.get("error"):
         return f"it can't reach the gateway at {status.get('url')}: {status['error']}"
     if not status.get("url"):
         return "core hasn't written its config, which it does when a multi env deploys this computer"
-    return f"it hasn't heard from the gateway at {status['url']} yet"
+    if not status.get("connected"):
+        return f"it hasn't heard from the gateway at {status['url']} yet"
+    if unread is not None:
+        return f"this computer can't read the gateway's version at {status['url']}: {unread}"
+    return f"it shows the gateway's version {status.get('version')!r}, and the gateway is at {current!r}"
 
 
 async def sync_time(env_get_time_url: str, timezone: Optional[str] = None) -> dict:
@@ -69,10 +84,17 @@ async def sync_time(env_get_time_url: str, timezone: Optional[str] = None) -> di
                               f"deploy it with computer_settings.timezone = {timezone.strip()!r}")
     deadline = time.monotonic() + CONNECT_WAIT_S
     while True:
-        status = follower_status()
-        if status.get("connected"):
-            return {"synced": True, "timezone": zone, "env_get_time_url": env_get_time_url,
-                    "follower": {key: status.get(key) for key in ("name", "url", "version", "armed")}}
+        status, current, unread = follower_status(), None, None
+        if status.get("connected") and status.get("url"):
+            try:
+                current = await asyncio.to_thread(gateway_version, status["url"])
+            except Exception as e:  # noqa: BLE001 - away or answering something else: said as why, tried again
+                unread = f"{type(e).__name__}: {e}"[:300]
+            status = follower_status()
+            if current is not None and status.get("connected") and status.get("version") == current:
+                return {"synced": True, "timezone": zone, "env_get_time_url": env_get_time_url,
+                        "follower": {key: status.get(key) for key in ("name", "url", "version", "armed")}}
         if time.monotonic() >= deadline:
-            raise TargetUnavailable(f"this computer's clock follower isn't following the gateway: {_why(status)}")
+            raise TargetUnavailable("this computer's clock follower isn't following the gateway: "
+                                    + _why(status, current, unread))
         await asyncio.sleep(0.1)
