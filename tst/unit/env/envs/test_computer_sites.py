@@ -663,7 +663,8 @@ def test_the_trust_a_routing_linux_computer_boots_with_is_the_local_providers_so
 
 
 def test_a_browser_alone_routing_sites_is_named_the_forward_port_and_a_computer_with_a_display_is_named_none():
-    assert sites.browser_environment("none") == {"AGENTENV_SITE_PROXY": "http://127.0.0.1:3129"}
+    assert sites.browser_environment("none") == {"AGENTENV_SITE_PROXY": "http://127.0.0.1:3129",
+                                                 "AGENTENV_NETWORK_LOG": "/etc/agentenv/sites/network.jsonl"}
     assert sites.browser_environment("x11") == {}
 
 
