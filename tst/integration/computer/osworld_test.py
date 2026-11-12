@@ -7,7 +7,8 @@ check_include_exclude over a vm_command_line getter, 1.0 for a rule it meets and
 
 Needs Docker, the local registry on localhost:5000, the guest server's source (scale-cua's
 ``environments/linux/src/vm/setup/osworld_server``) at ``OSWORLD_SERVER_SOURCE``, and a controller image that takes a
-remote base URL and headers (scale-cua #360) at ``OSWORLD_CONTROLLER_IMAGE``; skipped without the last two."""
+remote base URL and headers (scale-cua #360) at ``OSWORLD_CONTROLLER_IMAGE``; skipped without them, as the
+``osworld_sources`` capability."""
 
 import os
 import shutil
@@ -19,8 +20,9 @@ from click.testing import CliRunner
 from agent_env.cli import cli
 from agent_env.osworld import stage_server
 from tst.integration.computer.conftest import run_context
+from tst.util.capabilities import skip_without_osworld_sources
 
-pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
+pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow, skip_without_osworld_sources()]
 
 OSWORLD = Path(__file__).parent / "osworld"
 SOURCE = os.environ.get("OSWORLD_SERVER_SOURCE")
@@ -30,8 +32,6 @@ CONTROLLER_IMAGE = os.environ.get("OSWORLD_CONTROLLER_IMAGE")
 @pytest.fixture
 def bundle(tmp_path) -> Path:
     """The osworld bundle with the app staged from the guest server's source and the controller image named."""
-    if not SOURCE or not CONTROLLER_IMAGE:
-        pytest.skip("needs OSWORLD_SERVER_SOURCE and OSWORLD_CONTROLLER_IMAGE")
     root = shutil.copytree(OSWORLD, tmp_path / "osworld")
     stage_server(Path(SOURCE), root / "envs" / "osworld-server")
     (root / "artifacts" / "controller").mkdir(parents=True)

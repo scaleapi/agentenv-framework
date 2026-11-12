@@ -35,6 +35,11 @@ DEFAULT_A2A_AGENT = "default_a2a_agent"
 #: found through ``AGENT_ENV_TEST_MCP_SERVERS_DIR`` (one ``<server>/Dockerfile`` per server).
 MCP_SERVER_SOURCES = "mcp_server_sources"
 
+#: The OSWorld end-to-end test (``tst/integration/computer/osworld_test.py``) stages the osworld-server app from the
+#: OSWorld guest server's source at ``OSWORLD_SERVER_SOURCE`` and runs the controller image ``OSWORLD_CONTROLLER_IMAGE``,
+#: both from scale-cua, which this repository doesn't carry.
+OSWORLD_SOURCES = "osworld_sources"
+
 #: The TRL contract tier (``tst/trl``) trains with TRL on CPU; trl and torch aren't in the dev extra, and only that
 #: tier's CI job installs them.
 TRL = "trl_installed"
@@ -254,3 +259,14 @@ def skip_without_windows_media() -> pytest.MarkDecorator:
 def skip_without_kvm() -> pytest.MarkDecorator:
     """Collection-time ``skipif`` for tests that boot a computer's disk form on local Docker."""
     return pytest.mark.skipif(not kvm_is_available(), reason=missing_capability_reason(KVM))
+
+
+def osworld_sources_are_available() -> bool:
+    """Whether the OSWorld guest server's source and a controller image are named for the OSWorld end-to-end test."""
+    source = os.environ.get("OSWORLD_SERVER_SOURCE")
+    return bool(source and (Path(source) / "main.py").is_file() and os.environ.get("OSWORLD_CONTROLLER_IMAGE"))
+
+
+def skip_without_osworld_sources() -> pytest.MarkDecorator:
+    """Collection-time ``skipif`` for the OSWorld end-to-end test."""
+    return pytest.mark.skipif(not osworld_sources_are_available(), reason=missing_capability_reason(OSWORLD_SOURCES))
