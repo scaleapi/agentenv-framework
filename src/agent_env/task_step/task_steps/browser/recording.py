@@ -13,7 +13,7 @@ from typing import ClassVar, Optional
 
 from agentenv_protocol.client import find_extension
 from agentenv_protocol.website_browser import BROWSER_RECORDING, BrowserRecordingManifest, RecordedFrame
-from agentenv_protocol.website_browser.recording import LOG, MANIFEST, MAX_FRAMES, frame_of
+from agentenv_protocol.website_browser.recording import END_S, LOG, MANIFEST, MAX_FRAMES, START_S, frame_of
 
 from agent_env.artifact import FileArtifact
 from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniverse
@@ -83,7 +83,7 @@ class StartBrowserRecordingTaskStep(BrowserStep):
             namespace = recording_namespace(request_id, _KEY_PREFIX)
             started = await record.invoke(BROWSER_RECORDING, "start", {
                 "request_id": request_id, "frames": self.frames, "upload": _grant(record, card, namespace)},
-                environment_name=browser)
+                environment_name=browser, timeout=START_S)
         except Exception as e:
             recordings[self.name] = {"env_id": self.env_id, "browser": self.browser, "frames": self.frames,
                                      "state": "failed", "error": why(e)}
@@ -166,7 +166,7 @@ async def end_browser_recording(context: TaskStepContext, name: str, reason: str
         record, browser, card = find_browser(deployed_env(context, entry["env_id"]), entry["browser"])
         manifest = BrowserRecordingManifest.model_validate(await record.invoke(BROWSER_RECORDING, "end", {
             "recording_id": entry["recording_id"], "upload": _grant(record, card, entry["namespace"], "end"),
-            "reason": reason}, environment_name=browser))
+            "reason": reason}, environment_name=browser, timeout=END_S))
     except Exception as e:
         logger.warning("end_browser_recording %s: %s; registering what its namespace holds", name, e)
         entry["error"] = why(e)

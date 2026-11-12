@@ -49,6 +49,13 @@ FRAME_QUALITY = 80
 #: How long a frame's capture may go unanswered before a second capture is sent: Chrome answers a capture of a tab
 #: behind the active one only once another capture of it arrives, and then answers both.
 NUDGE_S = 0.5
+#: How long a frame may take to capture, longer than a screenshot an agent waits on, since a frame is taken in the
+#: background: a page too busy to paint, or between documents mid-navigation, gets this long to show, a capture the
+#: browser refused for being between documents asked again every ``FRAME_RETRY_S``.
+FRAME_CAPTURE_S = 10.0
+FRAME_RETRY_S = 0.25
+#: What the browser says of a capture refused for the moment, as while a navigation swaps the tab's document.
+BETWEEN_DOCUMENTS = ("Not attached to an active page", "Unable to capture screenshot")
 #: How often a wait for a tab to load looks again.
 LOAD_POLL_S = 0.1
 #: Where an agent's files to upload are, and where downloads land, under the session user's home.
@@ -626,10 +633,10 @@ class BrowserControl:
 
     async def frame(self, target: Optional[str], load_wait_s: float) -> tuple[str, str, Optional[str], Optional[str]]:
         """A frame of the tab ``target``, else, for none or one that's gone, of the active tab: once its page has loaded,
-        waiting up to ``load_wait_s``, a JPEG of it as it shows, or, with a dialog keeping it from painting, the frame it
-        last took, else its last capture, a PNG; a tab that closes while its page loads is the active tab's. The image
-        base64, its format and the tab and its URL; DeviceUnavailable with no tab open, or for one that paints nothing
-        in time."""
+        waiting up to ``load_wait_s``, a JPEG of it as it shows, within ``FRAME_CAPTURE_S``, or, with a dialog keeping
+        it from painting, the frame it last took, else its last capture, a PNG; a tab that closes while its page loads
+        is the active tab's. The image base64, its format and the tab and its URL; DeviceUnavailable with no tab open,
+        or for one that paints nothing in time."""
         session = next((s for s, t in self._sessions.items() if t == target), None) if target else None
         if session is None:
             session = await self.active_session()
@@ -640,26 +647,42 @@ class BrowserControl:
         if session not in self._sessions:
             session = await self.active_session()
             target = self._sessions[session]
-        if session in self._open_dialogs:
-            if (earlier := self._frames.get(target)) is None and (shot := self._shots.get(target)) is not None:
-                earlier = shot, "png"
-            if earlier is None:
-                raise DeviceUnavailable("a dialog keeps the tab from painting and it had no capture before it")
-            return *earlier, target, self.url_of(target)
-        try:
-            shot = await self._nudged_capture(session)
-        except asyncio.TimeoutError:
-            raise DeviceUnavailable(f"the tab painted nothing within {CAPTURE_TIMEOUT_S:g} s") from None
-        except (ConnectionError, DevToolsError) as e:
-            raise DeviceUnavailable(f"the tab couldn't be captured: {e}") from None
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + FRAME_CAPTURE_S
+        while True:
+            if session in self._open_dialogs:
+                return self._held_frame(target)
+            try:
+                shot = await self._nudged_capture(session, deadline - loop.time())
+                break
+            except asyncio.TimeoutError:
+                raise DeviceUnavailable(f"the tab painted nothing within {FRAME_CAPTURE_S:g} s") from None
+            except DevToolsError as e:
+                if not any(why in str(e) for why in BETWEEN_DOCUMENTS) or loop.time() + FRAME_RETRY_S >= deadline:
+                    raise DeviceUnavailable(f"the tab couldn't be captured: {e}") from None
+            except ConnectionError as e:
+                raise DeviceUnavailable(f"the tab couldn't be captured: {e}") from None
+            await asyncio.sleep(FRAME_RETRY_S)
+            if session not in self._sessions:
+                session = await self.active_session()
+                target = self._sessions[session]
         self._frames[target] = shot["data"], "jpg"
         return shot["data"], "jpg", target, self.url_of(target)
 
-    async def _nudged_capture(self, session: str) -> dict:
+    def _held_frame(self, target: str) -> tuple[str, str, Optional[str], Optional[str]]:
+        """The frame of a tab a dialog keeps from painting: the one it last took, else its last capture, a PNG;
+        DeviceUnavailable for a tab with neither."""
+        if (earlier := self._frames.get(target)) is None and (shot := self._shots.get(target)) is not None:
+            earlier = shot, "png"
+        if earlier is None:
+            raise DeviceUnavailable("a dialog keeps the tab from painting and it had no capture before it")
+        return *earlier, target, self.url_of(target)
+
+    async def _nudged_capture(self, session: str, timeout_s: float) -> dict:
         """The tab's JPEG from the first of its captures to answer: a second follows one unanswered after ``NUDGE_S``,
-        since a tab behind the active one answers only then, all within ``CAPTURE_TIMEOUT_S``."""
+        since a tab behind the active one answers only then, all within ``timeout_s``."""
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + CAPTURE_TIMEOUT_S
+        deadline = loop.time() + timeout_s
 
         def capture() -> asyncio.Future:
             return asyncio.ensure_future(self.devtools.call("Page.captureScreenshot", {
