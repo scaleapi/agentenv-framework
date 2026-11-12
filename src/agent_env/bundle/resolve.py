@@ -90,6 +90,7 @@ class Output:
     step: int  # the writing step's index in the task
     step_id: Any
     artifact_type: str | None
+    name: str  # as the step names it
 
 
 @dataclass(frozen=True)
@@ -101,6 +102,14 @@ class ResolvedEntry:
     config: Any
     references: tuple[Reference, ...]
     outputs: tuple[Output, ...]
+
+    @property
+    def entity_ids(self) -> dict[str, str]:
+        """Each id the entry's config names that resolving rewrote, as written, to the id it names now
+        (``Task.entity_ids``): one of the bundle's entities by its name, an output a step writes by the name it gave."""
+        renamed = {output.name: output.id for output in self.outputs}
+        renamed.update((ref.local.name, ref.id) for ref in self.references if isinstance(ref.local, BundleEntry))
+        return {name: id for name, id in renamed.items() if name != id}
 
 
 @dataclass(frozen=True)
@@ -392,7 +401,7 @@ class _Resolver:
                                   "root, which only a bundle run from the Hugging Face Hub writes under its own")
                     continue
                 site.rewrite(output_id)
-                outputs[kind, name] = Output(kind, output_id, index, step.get("id"), site.ref.artifact_type)
+                outputs[kind, name] = Output(kind, output_id, index, step.get("id"), site.ref.artifact_type, name)
         return outputs
 
     def _depends_on(self, entry: BundleEntry, steps: list[dict]) -> list[list[str] | None]:

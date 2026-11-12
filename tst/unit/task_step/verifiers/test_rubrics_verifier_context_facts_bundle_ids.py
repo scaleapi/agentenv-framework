@@ -1,5 +1,5 @@
-"""context_facts_for_judge in a bundle run: a path naming an env as the task wrote it also finds the key the bundle
-namespaced, ``<bundle id root>/<id>``, within the bundle the run's task came from."""
+"""context_facts_for_judge in a bundle run: a path naming an entity as the task wrote it also finds the key under the
+id the run's task gave it (``entity_ids``), as a bundle-written task's run records."""
 from __future__ import annotations
 
 import pytest
@@ -11,38 +11,37 @@ from agent_env.task_step.task_steps.verifiers.rubrics_verifier import (
     resolve_context_facts,
 )
 
+ENV = "@local/~/runs/pn/world"
 FACTS = {"wf-1 status": "env_trigger_state.world.statuses.wf-1"}
 
 
-def _resolved(metadata: dict) -> str:
-    return dict(resolve_context_facts(FACTS, metadata))["wf-1 status"]
+def _resolved(metadata: dict, facts: dict = FACTS) -> str:
+    return next(iter(dict(resolve_context_facts(facts, metadata)).values()))
 
 
 def _state(key: str, status: str) -> dict:
     return {key: {"statuses": {"wf-1": status}}}
 
 
-@pytest.mark.parametrize("task_id, key", [
-    ("@local/~/runs/pn/task-a", "@local/~/runs/pn/world"),
-    ("@hf/org/repo/pn/task-a", "@hf/org/repo/pn/world"),
-])
-def test_a_bundle_run_finds_the_key_its_bundle_namespaced(task_id, key):
-    assert _resolved({"task_id": task_id, "env_trigger_state": _state(key, "armed")}) == '"armed"'
+def test_a_renamed_env_is_found_by_the_id_the_task_names_it_by():
+    assert _resolved({"entity_ids": {"world": ENV}, "env_trigger_state": _state(ENV, "armed")}) == '"armed"'
+
+
+def test_a_renamed_step_output_is_found_too():
+    snapshot = "@local/~/runs/pn/task-a/snap"
+    metadata = {"entity_ids": {"snap": snapshot}, "env_changes": {snapshot: {"rows": 3}}}
+    assert _resolved(metadata, {"rows": "env_changes.snap.rows"}) == "3"
 
 
 def test_a_key_as_written_still_wins():
-    state = {**_state("world", "fired"), **_state("@local/b/world", "armed")}
-    assert _resolved({"task_id": "@local/b/task-a", "env_trigger_state": state}) == '"fired"'
+    state = {**_state("world", "fired"), **_state(ENV, "armed")}
+    assert _resolved({"entity_ids": {"world": ENV}, "env_trigger_state": state}) == '"fired"'
 
 
-def test_another_bundles_key_is_not_found():
-    assert _resolved({"task_id": "@local/b/task-a", "env_trigger_state": _state("@local/other/world", "fired")}) \
-        == CONTEXT_FACT_NOT_AVAILABLE
-
-
-@pytest.mark.parametrize("metadata", [{"task_id": "task-a"}, {}], ids=["store task", "no task id"])
-def test_a_task_from_the_store_resolves_only_keys_as_written(metadata):
-    assert _resolved({**metadata, "env_trigger_state": _state("@local/b/world", "fired")}) == CONTEXT_FACT_NOT_AVAILABLE
+@pytest.mark.parametrize("entity_ids", [None, {}, {"other": ENV}], ids=["no map", "empty map", "not in the map"])
+def test_without_a_rename_a_key_resolves_only_as_written(entity_ids):
+    metadata = {"env_trigger_state": _state(ENV, "fired"), **({"entity_ids": entity_ids} if entity_ids is not None else {})}
+    assert _resolved(metadata) == CONTEXT_FACT_NOT_AVAILABLE
 
 
 @pytest.mark.asyncio
@@ -62,7 +61,7 @@ async def test_the_judge_sees_the_fact_in_a_bundle_run(monkeypatch):
     ctx = TaskStepContext(
         prompt_responses=[PromptResponse(prompt_id="p1", response="done", prompt_text="do it",
                                          agent_trajectory_object_url="s3://t/1.json")],
-        metadata={"task_id": "@local/~/runs/pn/task-a", "env_trigger_state": _state("@local/~/runs/pn/world", "armed")},
+        metadata={"entity_ids": {"world": ENV}, "env_trigger_state": _state(ENV, "armed")},
     )
 
     await v.execute(ctx)

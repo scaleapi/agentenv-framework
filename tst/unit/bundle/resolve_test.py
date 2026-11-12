@@ -145,8 +145,17 @@ def test_an_output_is_named_under_its_task_and_later_steps_find_it(make):
     output = f"{ROOT}/t/tickets-cli"
     assert [entry.config[0]["cli_artifact_id"], entry.config[1]["artifact_id"],
             entry.config[2]["cli_artifact_ids"][0]] == [output] * 3
-    assert entry.outputs == (Output(EntityKind.ARTIFACT, output, 0, "cli", "cli"),)
+    assert entry.outputs == (Output(EntityKind.ARTIFACT, output, 0, "cli", "cli", "tickets-cli"),)
     assert refs(entry) == [(EntityKind.ENV, f"{ROOT}/tickets", None, "tickets")]
+
+
+def test_a_task_records_each_id_it_rewrote_as_written(make):
+    entry = resolved(make(tasks={"t": [
+        {"id": "deploy", "type": "deploy_env", "env_id": "tickets"},
+        {"id": "seed", "type": "load_artifact", "env_id": "tickets", "artifact_id": "shared-artifact"},
+        {"id": "cli", "type": "build_mcp_cli", "env_id": "tickets", "cli_artifact_id": "tickets-cli"},
+    ]}), "t")
+    assert entry.entity_ids == {"tickets": f"{ROOT}/tickets", "tickets-cli": f"{ROOT}/t/tickets-cli"}
 
 
 def test_an_output_id_a_step_derives_is_named_under_its_task_too(make):
