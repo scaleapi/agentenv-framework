@@ -21,8 +21,8 @@ from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import reset_artifact_store
 from agent_env.config import configure, reset_config
-from tst.integration.computer.conftest import (BASE, FOLLOWER_BACK_S, PAGE_WRITER, docker, kill_follower, only_session_and_clock,
-                                               process_owners)
+from tst.integration.computer.conftest import (BASE, FOLLOWER_BACK_S, PAGE_WRITER, docker, kill_follower,
+                                               only_session_and_clock, process_owners)
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
