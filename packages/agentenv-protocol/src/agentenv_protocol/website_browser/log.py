@@ -400,24 +400,27 @@ class BrowserLog:
         self.write(seq, {kind: body})
         return seq
 
-    def read(self, after: int = 0, limit: int = READ_LIMIT) -> dict:
+    def read(self, after: int = 0, limit: int = READ_LIMIT, settle_through: Optional[int] = None) -> dict:
         """The lines after sequence number ``after``, in order, up to ``limit`` of them and to the last whose every
         earlier line is written or stalled: ``lines``, ``last``, the sequence number of that last one, and ``more``
-        when the limit left some."""
-        complete, picked, more = self._picked(after, limit)
+        when the limit left some. An action begun at or before ``settle_through`` and still going counts as stalled
+        now, as a recording that ends while an action is in flight needs."""
+        complete, picked, more = self._picked(after, limit, settle_through)
         return self._loaded(after, complete, picked, more)
 
-    async def read_async(self, after: int = 0, limit: int = READ_LIMIT) -> dict:
+    async def read_async(self, after: int = 0, limit: int = READ_LIMIT, settle_through: Optional[int] = None) -> dict:
         """``read``, its file read in a thread."""
-        complete, picked, more = self._picked(after, limit)
+        complete, picked, more = self._picked(after, limit, settle_through)
         return await asyncio.to_thread(self._loaded, after, complete, picked, more)
 
-    def _picked(self, after: int, limit: int) -> tuple[int, list[tuple[int, int, int]], bool]:
+    def _picked(self, after: int, limit: int, settle_through: Optional[int] = None
+                ) -> tuple[int, list[tuple[int, int, int]], bool]:
         """Where the lines a read returns are: the last sequence number it may return, and each line's number, offset
         and length, in order."""
         now = time.monotonic()
         for seq, began in list(self._pending.items()):
-            if now - began >= STALLED_S and (begun := self._begun.get(seq)) is not None:
+            settled = settle_through is not None and seq <= settle_through
+            if (settled or now - began >= STALLED_S) and (begun := self._begun.get(seq)) is not None:
                 self._stood_in.add(seq)
                 self.write(seq, {"action": {**begun["action"], "unfinished": True}}, at=begun["at"])
         complete = min(self._pending) - 1 if self._pending else self._seq
