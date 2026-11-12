@@ -359,6 +359,37 @@ async def test_a_frame_whose_only_tab_is_attached_anew_only_after_a_retry_waits_
     assert tab == "T1" and [s for s, _, _ in pipe.captured] == ["s-T1", "s-T1b"]
 
 
+class HangingPipe(Pipe):
+    """A pipe whose captures of the sessions in ``hanging`` never answer, as a tab's that closes mid-capture."""
+
+    def __init__(self, *hanging: str) -> None:
+        super().__init__()
+        self.hanging = set(hanging)
+
+    async def call(self, method, params=None, *, session_id=None, timeout_s=None):
+        if method == "Page.captureScreenshot" and session_id in self.hanging:
+            self.captured.append((session_id, params, asyncio.get_running_loop().time()))
+            await asyncio.sleep(timeout_s)
+            raise asyncio.TimeoutError()
+        return await super().call(method, params, session_id=session_id, timeout_s=timeout_s)
+
+
+@pytest.mark.asyncio
+async def test_a_frame_whose_tab_closes_while_its_capture_waits_is_taken_of_the_tab_left_at_once():
+    pipe = HangingPipe("s-T2")
+    control = BrowserControl(pipe, "agent", (1280, 800))
+    for tab in ("T1", "T2"):
+        pipe.emit("Target.targetCreated", {"targetInfo": {"targetId": tab, "type": "page", "url": "about:blank"}})
+        pipe.emit("Target.attachedToTarget", {"sessionId": f"s-{tab}", "targetInfo": {"targetId": tab, "type": "page"}})
+    loop = asyncio.get_running_loop()
+    loop.call_later(0.1, pipe.emit, "Target.detachedFromTarget", {"sessionId": "s-T2"})
+    started = loop.time()
+
+    _, _, tab, _ = await control.frame("T2", load_wait_s=0)
+
+    assert tab == "T1" and pipe.captured[-1][0] == "s-T1" and loop.time() - started < 2
+
+
 @pytest.mark.asyncio
 async def test_a_frame_the_browser_refuses_for_another_reason_is_missing_at_once():
     pipe = RefusingPipe(refusals=5, why="Page.captureScreenshot: Internal error")
