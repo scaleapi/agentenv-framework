@@ -118,7 +118,7 @@ async def test_other_roles_the_task_gave_checks_keep_them(monkeypatch, tmp_path)
 
 
 def test_the_settings_survive_a_round_trip():
-    step = ao.AlwaysOnTaskStep("week", None, user_sim="linda", prompt="hi", prompt_id="p", agent_name="a",
+    step = ao.AlwaysOnTaskStep("week", None, user_sim="linda", prompt_id="p", agent_name="a",
                                scheduled_checks=False, scheduled_check_min_interval="PT6H")
     again = ao.AlwaysOnTaskStep.from_dict(step.to_dict())
     assert (again.scheduled_checks, again.scheduled_check_min_interval) == (False, "PT6H")

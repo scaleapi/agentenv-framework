@@ -115,11 +115,13 @@ def _latest_version(collection, id):
 
 
 def _written(write):
-    """Stands in for the materializer's write: the next version of the entity, in the @local namespace's store."""
+    """Stands in for the materializer's write: the next version of the entity, in the @local namespace's store, a
+    task's with the ids its bundle gave what it names, as Task.put stores them."""
     collection = _COLLECTIONS[write.kind.store]
     latest = local_store().find_one(collection, Filter.of(id=write.id), sort=Sort.by("version"))
     version = latest["version"] + 1 if latest else 1
-    local_store().insert(collection, {"id": write.id, "version": version})
+    renamed = write.source.entity_ids if write.kind.store == "task" else {}
+    local_store().insert(collection, {"id": write.id, "version": version, **({"entity_ids": renamed} if renamed else {})})
     return version
 
 
@@ -291,6 +293,18 @@ def test_a_file_changed_during_its_write_is_written_again_even_once_changed_back
     hello.write_text("hello\n")
 
     assert ledger.check(write, {}).reasons == ("the ledger doesn't know what its last version was made from",)
+
+
+def test_a_task_written_before_it_recorded_its_renamed_ids_is_written_again_with_them(bundle_dir, monkeypatch):
+    with monkeypatch.context() as earlier:
+        earlier.setattr(resolve_module.ResolvedEntry, "entity_ids", property(lambda self: {}))
+        _run(bundle_dir)
+
+    checks = _run(bundle_dir)
+
+    assert checks[f"{ROOT}/t"].reasons == ("its stored version doesn't record the ids the bundle gave what it names",)
+    assert [id for id, check in checks.items() if not check.unchanged] == [f"{ROOT}/t"]
+    assert all(check.unchanged for check in _run(bundle_dir).values())
 
 
 def test_a_new_digest_scheme_rewrites_everything_and_says_only_that(bundle_dir, monkeypatch):
@@ -522,6 +536,19 @@ def test_a_version_an_interrupted_run_wrote_is_kept_and_recorded_not_written_aga
     after = _record_changed(Ledger.for_plan(plan), plan.writes)[GREETING]
     assert (after.version, after.adopted, after.reasons) == (1, False, ())
     assert [row["status"] for row in local_store().query(LEDGER_COLLECTION, Filter.of(id=GREETING))] == ["done"]
+
+
+def test_a_task_an_interrupted_earlier_run_wrote_without_its_renamed_ids_is_written_again(bundle_dir, monkeypatch):
+    plan = plan_of(bundle_dir)
+    task = next(w for w in plan.writes if w.id == f"{ROOT}/t")
+    with monkeypatch.context() as earlier:
+        earlier.setattr(resolve_module.ResolvedEntry, "entity_ids", property(lambda self: {}))
+        _interrupted_after_its_write(Ledger.for_plan(plan), task, earlier)
+
+    check = Ledger.for_plan(plan).check(task, {})
+
+    assert not check.unchanged and not check.adopted
+    assert check.reasons == ("the store's latest, v1, wasn't recorded by this bundle",)
 
 
 @pytest.mark.parametrize("since", ["another-write", "an-edit"])

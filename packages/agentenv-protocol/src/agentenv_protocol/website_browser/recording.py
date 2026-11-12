@@ -16,7 +16,8 @@ from typing import TYPE_CHECKING, Literal, Optional
 from pydantic import BaseModel, ValidationError
 
 from ..computer.errors import InvalidArgument
-from ..transfers import NamespaceUploader, WriteNamespaceGrant
+from ..transfers import TRANSFER_STALL_BUDGET_SECONDS, NamespaceUploader, WriteNamespaceGrant
+from .control import FRAME_CAPTURE_S
 from .log import ERROR_CHARS, BrowserLog
 
 if TYPE_CHECKING:
@@ -45,6 +46,13 @@ KEEP_ENDED = 64
 #: looks again.
 LOG_WAIT_S = 10.0
 LOG_POLL_S = 0.2
+#: The longest a start takes, its first frame taken and uploaded, and an end, a frame still being taken, its last two,
+#: the wait for its log and the log's and the manifest's uploads, with each upload as long as the transfer helpers
+#: allow one that stalls and a reply's margin: what a client of the extension waits on each.
+_FRAME_S = LOAD_WAIT_S + FRAME_CAPTURE_S + TRANSFER_STALL_BUDGET_SECONDS
+_REPLY_S = 30.0
+START_S = _FRAME_S + _REPLY_S
+END_S = 3 * _FRAME_S + LOG_WAIT_S + 2 * TRANSFER_STALL_BUDGET_SECONDS + _REPLY_S
 
 
 class RecordedFrame(BaseModel):

@@ -41,6 +41,8 @@ from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import RetryConfig, TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.notification_delivery import delivered_parts, next_message, take_due
 from agent_env.task_step.task_steps.post_turn_hooks import PostTurnHooks, run_post_turn_hooks, validate_hook_specs
+from agent_env.task_step.task_steps.agent import user_sim_versions
+from agent_env.task_step.task_steps.agent.user_sim_common import iso, person_of, task_zone, utc
 from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import (
     agent_error_text,
     fetch_container_logs,
@@ -395,12 +397,54 @@ class PromptAgentTaskStep(TaskStep):
                 or context.metadata.get("user_overrides", {}).get("user_model") or self.user_model
                 or get_config().get_model_for_role("user", or_default=False))
 
+    def _built_in_user_sim(self, context: TaskStepContext) -> Optional[tuple[dict, str]]:
+        """The user deploy_user_sim_agent deployed, when it is this step's user, and their time zone; None for any other
+        user. Refuses one this step can't run as deployed, before anything starts."""
+        from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import USER_SIMS_KEY
+        if self.user_a2a_url is not None or not any(a.agent_name == self.user_agent_name
+                                                    for a in context.deployed_agents):
+            return None
+        record = (context.metadata.get(USER_SIMS_KEY) or {}).get(self.user_agent_name)
+        if record is None:
+            return None
+        where = f"prompt_agent '{self.id}': its user '{self.user_agent_name}' was deployed by deploy_user_sim_agent"
+        if record.get("multi_day") is not False:
+            raise ValueError(f"{where} with multi_day {record.get('multi_day')!r}, so its prompt says the week goes "
+                             "on after done; prompt_agent is one sitting, so set multi_day false on that step")
+        if self.user_output_format is not None:
+            raise ValueError(f"{where}, which set its answer format; drop user_output_format from this step")
+        if self.user_model is not None:
+            raise ValueError(f"{where}, which set its model; drop user_model from this step and set model there")
+        if self.step_param_overrides(context).get("user_model"):
+            raise ValueError(f"{where}, which set its model; drop user_model from this step's step_params and set "
+                             "model there")
+        if any(r.get("agent_name") == self.user_agent_name for r in context.metadata.get("agent_trigger_registrations", [])):
+            # TODO(FD-5702): a trigger's line would reach the agent as the user's, and the user sim would never see it.
+            raise ValueError(f"{where}, and agent triggers are registered for it; scripted user lines with the "
+                             "built-in user sim aren't supported yet (FD-5702), so drop that register_agent_triggers step")
+        timed = [k for k in ("schedule", "response_times") if record.get(k)]
+        if timed:
+            raise ValueError(f"{where} with persona {' and '.join(timed)}, which one sitting ignores (the user reads "
+                             "each reply at once); drop them from that step's persona")
+        seed = context.metadata.get("seed", {})
+        parts = self._apply_seed(self._effective_parts(), seed)
+        deployed_with = self._apply_seed([{"kind": "text", "text": record.get("opening") or ""}], seed)[0]["text"]
+        # TODO(FD-5495): the first message is written twice, here and as the user sim's opening_prompt; write it once.
+        if (_joined_text(parts) or "").strip() != deployed_with.strip():
+            # Its prompt quotes the opening it was deployed with as what the user sent; another one would contradict it.
+            raise ValueError(f"prompt_agent '{self.id}': its prompt isn't the opening_prompt its user "
+                             f"'{self.user_agent_name}' was deployed with; give both the same text")
+        clocks = context.metadata.get("clock_configurations") or []
+        return record, task_zone(record, clocks, f"prompt_agent '{self.id}'")
+
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         # A changelog staged on the agent moves into the store while it works, and the rest when it is done.
         async with draining(staged_changelogs(context.metadata, agent_name=self.agent_name)):
             return await self._execute(context)
 
     async def _execute(self, context: TaskStepContext) -> TaskStepContext:
+        # Refused here (always_on has its own), so a bad setting leaves no conversation, capture or model call.
+        self._built_in_user_sim(context)
         # Minted here, not in `_execute_conversation`, so the series can address the
         # same session before the first turn.
         a2a_context_id = self.context_id or uuid.uuid4().hex
@@ -455,6 +499,8 @@ class PromptAgentTaskStep(TaskStep):
             raise StepContextError(f"Agent with name '{self.agent_name}' not found in context.deployed_agents")
         target_url = agent.a2a_url or agent.api_url
         user_sim = next((a for a in context.deployed_agents if a.agent_name == self.user_agent_name), None)
+        # A user deployed by deploy_user_sim_agent answers always_on's reads, so the user side reads it that way.
+        built_in = self._built_in_user_sim(context)
         user_url = self.user_a2a_url or (
             (user_sim.a2a_url or user_sim.api_url) if user_sim else None
         )
@@ -500,7 +546,9 @@ class PromptAgentTaskStep(TaskStep):
         context.record_model("solver", self.id, negotiated.fields.get("model") if negotiated else None)
 
         is_user_sim = user_sim is not None and self.user_a2a_url is None
-        if is_user_sim:
+        if built_in is not None:  # deploy_user_sim_agent set its model and answer format
+            context.record_model("user simulator", self.id, built_in[0].get("model"))
+        elif is_user_sim:
             user_output_format = self.user_output_format or _DEFAULT_USER_SIM_OUTPUT_FORMAT
             user_model = self._resolve_user_model(context)
             user_config = {k: v for k, v in {"output_format": user_output_format, "model": user_model}.items() if v is not None}
@@ -570,11 +618,15 @@ class PromptAgentTaskStep(TaskStep):
         # What the target has been sent: of the files its replies name, the only ones a user-sim is made able
         # to read, so a reply naming any other object a store owns can't read it out through the user-sim.
         sent_to_target: set[str] = set()
+        sim = await _BuiltInUserSim.start(self, context, *built_in, initial_parts, clock_envs) if built_in else None
         user_side = _UserSide(
             self, context, url=user_url, user_sim=user_sim, is_user_sim=is_user_sim, conversation_id=conversation_id,
             decide_url=decide_url, shareable=sent_to_target,
             decides_quietly=card_request_accepts(decide_method.get("request") or {}, _QUIET_DECIDE),
+            built_in=sim,
         )
+        # Set by a user's done with a message: the agent answers it, then the conversation ends for this reason.
+        end_after: Optional[str] = None
 
         try:
             for turn in range(self.max_conversation_turns):
@@ -647,7 +699,10 @@ class PromptAgentTaskStep(TaskStep):
                 if target_state == TaskState.failed:
                     conversation_store.mark_closed(conversation_id)
                     break
-                last = turn == self.max_conversation_turns - 1
+                if end_after is not None:
+                    # The hooks still see this turn, as the last one; the user isn't asked again.
+                    logger.info(f"Turn {turn+1}: the agent answered the user's last message; ending multi-turn ({end_after})")
+                last = turn == self.max_conversation_turns - 1 or end_after is not None
                 if last and hooks is None:
                     break
 
@@ -685,6 +740,7 @@ class PromptAgentTaskStep(TaskStep):
                 # An answer that ended it, or the last turn, takes nothing, so what is due stays queued on the env.
                 due = await take_due(notification_envs, recipient) if notification_envs else []
                 current_user_parts = next_message(delivered_parts(due), answer["message"])
+                end_after = answer.get("end_after")
                 if not current_user_parts:  # a hook said nothing ([]) and nothing came due
                     logger.info(f"Turn {turn+1}: nothing to send the agent; ending multi-turn (nothing_to_send)")
                     conversation_store.mark_closed(conversation_id)
@@ -744,6 +800,11 @@ class PromptAgentTaskStep(TaskStep):
             else _parse_structured_output(final_terminal.response_text)
         )
 
+        error_type = final_terminal.error_type
+        if not error_type and sim is not None and sim.error:
+            # As always_on marks it: verifiers skip the run instead of grading the agent's latest draft as its answer.
+            error_type = "user_sim_error"
+            final_error_for_response = final_error_for_response or f"The user simulator failed: {sim.error}"
         context.prompt_responses.append(PromptResponse(
             prompt_id=self.prompt_id,
             response=final_terminal.response_text,
@@ -754,7 +815,7 @@ class PromptAgentTaskStep(TaskStep):
             source_agent_per_turn_prompt_parts=source_agent_per_turn_prompt_parts or None,
             tool_call_count=conversation_tool_call_count,
             model=model,
-            error_type=final_terminal.error_type,
+            error_type=error_type,
             error_code=final_terminal.error_code,
             error_message=final_error_for_response,
             agent_session_id=final_task_id,
@@ -1031,8 +1092,10 @@ class _UserSide:
 
     def __init__(self, step: PromptAgentTaskStep, context: TaskStepContext, *, url: Optional[str],
                  user_sim: Optional[DeployedAgent], is_user_sim: bool, conversation_id: str,
-                 decide_url: Optional[str], decides_quietly: bool, shareable: set[str]) -> None:
+                 decide_url: Optional[str], decides_quietly: bool, shareable: set[str],
+                 built_in: Optional[_BuiltInUserSim] = None) -> None:
         self._step = step
+        self._built_in = built_in
         self._context = context
         self._url = url
         self._user_sim = user_sim
@@ -1041,9 +1104,14 @@ class _UserSide:
         self._decide_url = decide_url
         self._decides_quietly = decides_quietly
         self._shareable = shareable
+        self._end_after: Optional[str] = None
 
     async def ask(self, number: int, solver_message: str, agent_parts: list[dict]) -> dict:
-        """The user side's answer: ``{"message": parts}``, or ``{"end": reason}`` with any closing message to record."""
+        """The user side's answer: ``{"message": parts}``, or ``{"end": reason}`` with any closing message to record. A
+        user deployed by deploy_user_sim_agent may add ``end_after``: the agent answers the message, then the
+        conversation ends for that reason, and every later ask gets that end without asking anyone."""
+        if self._end_after is not None:
+            return {"end": self._end_after}
         if self._decide_url is not None:
             env_triggers = await self._step._read_env_triggers(self._context)
             self._record("env_trigger_snapshots", {"turn": number, "envs": env_triggers})
@@ -1055,7 +1123,50 @@ class _UserSide:
             if answer is not None:
                 return answer
             # no trigger fired -> fall through to the LLM user-sim for this turn (hybrid)
+        if self._built_in is not None:
+            answer = await self._built_in.ask(number, _agent_text(solver_message, agent_parts), self._ask_built_in)
+            self._end_after = answer.get("end_after")
+            return answer
         return await self._ask_peer(number, agent_parts)
+
+    async def _ask_built_in(self, text: str) -> dict:
+        """One turn of the user sim deploy_user_sim_agent deployed, in this conversation's session: ``{"text",
+        "structured", "trajectory_url"}``, or ``{"text": None, "error"}``."""
+        step = self._step
+        message_id = uuid.uuid4().hex
+        try:
+            task_id, result = await send_and_wait(
+                self._url, [{"kind": "text", "text": text}],
+                agent=self._user_sim if self._user_sim.sandbox_id else None,
+                message_id=message_id, context_id=self._conversation_id,
+                timeout_seconds=step.user_agent_timeout_seconds, poll_interval_seconds=step.poll_interval_seconds,
+            )
+        except TimeoutError as e:
+            return {"text": None, "error": f"timeout: {e}"}
+        status = result.get("status") or {}
+        if status.get("state") != TaskState.completed:
+            return {"text": None, "error": f"state {status.get('state')}"}
+        msg = status.get("message") or {}
+        term = protocol.TerminalResponse.from_message(msg)
+        raw = next((p["text"] for p in msg.get("parts") or [] if p.get("kind") == "text"), term.response_text)
+        return {"text": raw, "structured": term.structured_output if isinstance(term.structured_output, dict) else None,
+                "trajectory_url": await self._user_sim_trajectory(task_id, message_id)}
+
+    async def _user_sim_trajectory(self, task_id: str, message_id: str) -> Optional[str]:
+        """The user sim's trajectory for one turn, stored where always_on stores it; None when its card offers none."""
+        card = self._user_sim.a2a_card or {}
+        ext = A2AAgent.find_extension(card, A2AAgent.EXT_TRAJECTORY)
+        if not ext:
+            return None
+        step = self._step
+        try:
+            return await asyncio.wait_for(
+                step._fetch_trajectory(self._url, ext, task_id, step._trajectory_prefix() + "user_sim/", message_id,
+                                       card=card, sandbox_type=self._user_sim.sandbox_type),
+                _USER_SIM_TRAJECTORY_FETCH_SECONDS)
+        except Exception as e:
+            logger.warning(f"user sim trajectory fetch failed (continuing): {e}")
+            return None
 
     async def triggers(self, number: int, solver_message: str) -> Optional[dict]:
         """Agent triggers alone: their answer, recorded as ``ask`` records it, or None, recording nothing."""
@@ -1125,6 +1236,111 @@ class _UserSide:
 
     def _record(self, key: str, entry: dict) -> None:
         self._context.metadata.setdefault(key, {}).setdefault(self._step.id, []).append(entry)
+
+
+class _BuiltInUserSim:
+    """The user deployed by deploy_user_sim_agent, read as always_on reads it, in one sitting: each agent reply is one
+    read, done ends the conversation, and there is no phone."""
+
+    def __init__(self, step: PromptAgentTaskStep, context: TaskStepContext, person: dict, opening: Optional[dict],
+                 clock_envs: list) -> None:
+        self._step = step
+        self._context = context
+        self.person = person
+        self._you_sent = [opening] if opening else []
+        self._clock_envs = clock_envs
+        self.history: list[dict] = []
+        self._max_replies = person.get("max_replies")
+        self.replies = 0
+        self.error: Optional[str] = None  # the user sim's error, once a read ended on one
+
+    @classmethod
+    async def start(cls, step: PromptAgentTaskStep, context: TaskStepContext, record: dict, zone: str,
+                    initial_parts: list[dict], clock_envs: list) -> _BuiltInUserSim:
+        """The user ``record`` describes, already checked by ``_built_in_user_sim``, in time zone ``zone``."""
+        text = _joined_text(initial_parts)
+        opening = {"at": await _clock_now(step, clock_envs), "text": text} if text else None
+        person = {**person_of(record), "max_replies": record.get("max_replies"), "time_zone": zone,
+                  "opening": opening, "done_ends_run": True}
+        return cls(step, context, person, opening, clock_envs)
+
+    async def ask(self, number: int, reply: str, ask_user_sim) -> dict:
+        """The user's answer to the agent's ``reply``: ``{"message": parts}``, with ``end_after`` when the agent's answer
+        to it ends the conversation, or ``{"end": reason}``."""
+        now = await _clock_now(self._step, self._clock_envs)
+        read = {"time": now, "assistant_messages": [{"at": now, "text": reply}], "phone": [],
+                "you_sent": self._you_sent, "done_ends_run": True}
+        self._you_sent = []
+        calls: list[dict] = []
+
+        async def ask(text: str) -> dict:
+            got = await ask_user_sim(text)
+            calls.append(got)
+            return got
+
+        ans = await user_sim_versions.answer(user_sim_versions.VERSION, self.person, self.history, read, ask)
+        self.history.append({"read": read, "answer": ans})
+        error = calls[-1].get("error") if calls else None
+        await self._record(number, read, ans, calls, error)
+        outcome, said = ans.get("outcome"), (ans.get("message") or "").strip()
+        logger.info(f"Turn {number} user sim: outcome={outcome} error={error}")
+        if error:
+            self.error = error
+            return {"end": "user_sim_error"}
+        if outcome == "reply" and said:
+            self.replies += 1
+            if self._max_replies and self.replies >= int(self._max_replies):
+                # As in always_on: this last reply is delivered, then the user stops reading.
+                logger.info(f"Turn {number} user sim: reply {self.replies} of max_replies {self._max_replies}")
+                return {"message": [{"kind": "text", "text": ans["message"]}], "end_after": "user_gave_up"}
+            return {"message": [{"kind": "text", "text": ans["message"]}]}
+        if outcome == "done" and said:
+            return {"message": [{"kind": "text", "text": ans["message"]}], "end_after": "user_done"}
+        return {"end": "user_done" if outcome == "done" else "user_no_reply"}
+
+    async def _record(self, number: int, read: dict, ans: dict, calls: list[dict], error: Optional[str]) -> None:
+        """Record the read as always_on does: a summary in ``metadata["user_sim_reads"][step_id]``, the whole read (what
+        the user sim was shown, and its raw answers) in the object store at the summary's ``object_url``."""
+        full = {"turn": number, "read": read, "user_sim_error": error,
+                **{k: ans.get(k) for k in ("outcome", "message", "used", "score", "schema_errors", "raw", "input",
+                                           "retried", "first_answer")},
+                "user_sim_turns": ans.get("turns", len(calls)),
+                "user_sim_trajectory_urls": [c.get("trajectory_url") for c in calls]}
+        summary = {k: v for k, v in full.items() if k not in ("read", "raw", "input", "first_answer")}
+        if ans.get("first_answer"):  # its raw answer is in the stored read
+            summary["first_answer"] = {"schema_errors": ans["first_answer"].get("schema_errors")}
+        try:
+            config = get_config()
+            key = (f"{config.get_artifact_key_prefix()}prompt_agent_user_sim_reads/"
+                   f"instance_id={self._context.instance_id or 'adhoc'}/"
+                   f"{self._step.id}-{number}-{uuid.uuid4().hex[:8]}.json")
+            summary["object_url"] = await asyncio.to_thread(
+                config.get_object_store().put, key, json.dumps(full, indent=1, default=str).encode(),
+                content_type="application/json")
+        except Exception as e:
+            logger.warning(f"prompt_agent '{self._step.id}': could not store user sim read {number}: {e}")
+            summary["store_error"] = f"{type(e).__name__}: {str(e)[:300]}"
+        self._context.metadata.setdefault("user_sim_reads", {}).setdefault(self._step.id, []).append(summary)
+
+
+# How long one user sim trajectory fetch may take, as in always_on.
+_USER_SIM_TRAJECTORY_FETCH_SECONDS = 120.0
+
+
+def _agent_text(solver_message: str, agent_parts: Optional[list[dict]]) -> str:
+    """Every text part the agent sent, joined, not only the last one solver_message keeps."""
+    return _joined_text(agent_parts or []) or solver_message
+
+
+def _joined_text(parts: list[dict]) -> Optional[str]:
+    """The prompt's text parts joined, as always_on reads them; None when there are none."""
+    return "\n".join(p.get("text", "") for p in parts if p.get("kind") == "text") or None
+
+
+async def _clock_now(step: PromptAgentTaskStep, clock_envs: list) -> str:
+    """The task clock's time when one is armed (the earliest, as always_on reads it), else now; RFC 3339 UTC."""
+    clocks = (await step._env_clock(clock_envs)).get("env_clock") or []
+    return iso(min((utc(c["virtual_time"]) for c in clocks), default=datetime.now(timezone.utc)))
 
 
 def _trigger_answer(resp: dict) -> Optional[dict]:

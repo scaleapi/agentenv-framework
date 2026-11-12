@@ -13,6 +13,13 @@ from agent_env.providers.sandbox_providers.local_docker.provider import LocalSan
 from agent_env.providers.sandbox_providers.sandbox_provider import reachable_url
 
 HEARTBEAT_KEY = "_heartbeat_fn"
+# context.metadata[ENTITY_IDS_KEY]: the run's task's Task.entity_ids, set by Task.run.
+ENTITY_IDS_KEY = "entity_ids"
+
+
+def run_entity_id(metadata: dict, entity_id: str) -> str:
+    """The id the run's task gave the entity it names as ``entity_id`` (``Task.entity_ids``), else ``entity_id``."""
+    return (metadata.get(ENTITY_IDS_KEY) or {}).get(entity_id, entity_id)
 
 
 class StepContextError(RuntimeError):

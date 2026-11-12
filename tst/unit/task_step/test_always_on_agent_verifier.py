@@ -170,7 +170,7 @@ def test_a_stored_verifier_needs_no_use_trajectory_and_survives_a_round_trip():
 
 
 def _always_on() -> ao.AlwaysOnTaskStep:
-    return ao.AlwaysOnTaskStep("week", None, user_sim="linda", prompt="sort the weekend", prompt_id="ask",
+    return ao.AlwaysOnTaskStep("week", None, user_sim="linda", prompt_id="ask",
                                agent_name="solver")
 
 

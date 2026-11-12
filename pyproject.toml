@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentenv-framework"
-version = "0.9.1517"
+version = "0.9.1519"
 description = "SDK and CLI for building, deploying and running agent environments and the tasks that grade agents in them."
 readme = "README.md"
 license = "Apache-2.0"
@@ -156,6 +156,8 @@ dev = [
     "fastmcp>=3.4,<4",  # the standalone-fastmcp mount path of the protocol; <4 keeps mcp 1.x
     "Pillow>=10.4",  # the protocol's computer extra, whose tests the unit tier runs
     "av>=17",  # the protocol's computer extra, whose tests the unit tier runs and which the recording tests decode with
+    "brotli>=1.2",  # the protocol's app extra, which decodes a website browser's network log; its tests import it
+    "zstandard>=0.23",
     "griffelib==2.3.0",  # the plugin API check; exact, since what it reports as a break changes between releases
     "tomli-w==1.2.0",  # the Codex agent's config writer, which only its image installs; its tests import it
     "hypothesis>=6.100",  # the property tests of the judge score parse

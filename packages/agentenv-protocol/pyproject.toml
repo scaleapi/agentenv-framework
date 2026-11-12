@@ -1,6 +1,6 @@
 [project]
 name = "agentenv-framework-protocol"
-version = "0.1.532"
+version = "0.1.534"
 description = "Open data-plane protocol and server SDK for agent environments."
 readme = "README.md"
 license = "Apache-2.0"
@@ -38,9 +38,11 @@ agent = [
 # A computer app's own server: ComputerAppEnvironment serves its card and computer-app/v1 over mcp's FastMCP, on a Unix
 # socket through uvicorn, and a website browser's CDP relay over WebSockets.
 app = [
+    "brotli>=1.2",  # a website browser's network log: br answer bodies, decoded for network.har
     "mcp>=1.25,<2",
     "uvicorn>=0.30",
     "websockets>=13",
+    "zstandard>=0.23",  # and zstd ones
 ]
 # A computer driver: ComputerDriverEnvironment serves its tools over mcp's FastMCP, crops and encodes frames, records
 # the display as H.264 with PyAV (computer-recording/v1), and relays WebSockets to its apps on /svc/<app>/.
@@ -76,6 +78,8 @@ dev = [
     "Pillow>=10.4",  # the computer extra's frame crops and encodings
     "av>=17",  # the computer extra's encoder, and the tests' decoder
     "websockets>=13",  # the computer extra's /svc/<app>/ relay
+    "brotli>=1.2",  # the app extra's network.har decoding
+    "zstandard>=0.23",
 ]
 [project.urls]
 Homepage = "https://www.agentenvframework.com"
