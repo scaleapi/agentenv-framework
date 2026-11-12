@@ -292,7 +292,7 @@ def test_clear_full_reset(engine):
     engine.clear()
     st = engine.state()
     assert st["triggers"] == [] and st["events"] == []
-    assert st["config"] == {"watch_roles": [], "executor_configured": False, "executors": []}
+    assert st["config"] == {"watch_roles": [], "executor_configured": False, "executors": [], "executor_timeouts": []}
     # after clear, config is settable fresh (different watch_roles allowed)
     engine.register({"watch_roles": ["solver"], "triggers": []})
     assert engine.state()["config"]["watch_roles"] == ["solver"]
@@ -1050,7 +1050,8 @@ async def test_sensor_trigger_and_state_shape(engine):
     assert engine._triggers["sensor"]["status"] == "fired"
     state = engine.state()
     assert "sensor" in {t["id"] for t in state["triggers"]}
-    assert state["config"] == {"watch_roles": ["default"], "executor_configured": False, "executors": []}
+    assert state["config"] == {"watch_roles": ["default"], "executor_configured": False, "executors": [],
+                               "executor_timeouts": []}
     assert state["events"][0]["kind"] == "added"
     assert all("seq" in e and "ts" in e for e in state["events"])
 

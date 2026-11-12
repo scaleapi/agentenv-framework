@@ -28,9 +28,10 @@ metadata under its ``agent_name``. The ``always_on`` step names it with ``user_s
   (clock/v1 set_rate), so settles and reads don't move it, and puts the task's rate back at the end. When nothing is
   due, the step advances it to the earliest of: the next trigger event, the next notification, a held reply, a
   pending read, or end_time, never past one; then waits for the world to settle. A contact's reply (an AI-played contact, a trigger's executor) counts as in
-  progress until it ends or its time limit passes; other trigger work gets ``settle_timeout_seconds``. Contacts whose
-  task sets no time limit get ``contact_timeout_seconds``, and one trigger's replies run side by side
-  (``contact_replies_in_parallel``). What comes due in the same minute wakes the agent once.
+  progress until it ends or its time limit passes; other trigger work gets ``settle_timeout_seconds``. A contact's
+  time limit is the one it was registered with (register_env_triggers' ``executor_timeout_seconds``), and one
+  trigger's replies run side by side (``contact_replies_in_parallel``). What comes due in the same minute wakes the
+  agent once.
 - The agent can schedule its own wake-ups (scheduled checks) when the run is multi-day, at least
   ``scheduled_check_min_interval`` apart; ``scheduled_checks`` turns them on or off whatever the run's length. A
   check's wake counts toward ``max_wakes``.
@@ -66,8 +67,8 @@ metadata under its ``agent_name``. The ``always_on`` step names it with ``user_s
 - The agent: the message_user rules go in its system prompt when the step sets one and the agent's card takes it,
   else on its first wake; its session is the step's ``context_id`` when set, as prompt_agent's is, else the run's own.
 - When the step ends it puts back the gateway settings it changed for the run (the user chat's roles and stay_quiet,
-  the triggers' concurrent_fires and executor time limit, the roles with scheduled checks, the clock's rate), so the
-  task's later steps see them as they were.
+  the triggers' concurrent_fires, the roles with scheduled checks, the clock's rate), so the task's later steps see
+  them as they were.
 """
 from __future__ import annotations
 
@@ -136,8 +137,10 @@ EMPTY_REPLIES = frozenset({"(The assistant's reply was empty.)"})  # a harness's
 JOB_LIMIT_SECONDS = 8 * 3600
 JOB_HEADROOM_SECONDS = 600
 DEFAULT_TIME_BUDGET_SECONDS = 7 * 3600
-# The time limit of a contact (a trigger's executor) whose task sets none; the gateway's own default is 120 s.
-CONTACT_TIMEOUT_SECONDS = 300.0
+# The time limit of a contact (a trigger's executor) is the one it was registered with, read from each env's triggers
+# state when the run starts. Until then (a step's settings are checked when the task loads), and for a gateway that
+# doesn't report it, the step takes the gateway's default for an executor registered without one.
+CONTACT_TIMEOUT_DEFAULT_SECONDS = 120.0
 # Past a contact's time limit, how long the settle wait still gives its call to come back.
 CONTACT_GRACE_SECONDS = 30.0
 # The hard caps that bound one turn of the loop (wake_reserve_seconds adds them up): past an agent's or user sim's turn
@@ -210,7 +213,6 @@ class AlwaysOnTaskStep(PromptAgentTaskStep):
                  stay_quiet: bool = True, nudge: bool = True, nudge_text: str = NUDGE_TEXT,
                  wake_reminder: bool = False, wake_reminder_text: str = WAKE_REMINDER_TEXT,
                  scheduled_checks: Optional[bool] = None, scheduled_check_min_interval: str = CHECK_MIN_INTERVAL,
-                 contact_timeout_seconds: Optional[float] = CONTACT_TIMEOUT_SECONDS,
                  contact_replies_in_parallel: bool = True, time_budget_seconds: Optional[float] = None,
                  model: Optional[str] = None, model_params: Optional[dict] = None, effort: Optional[str] = None,
                  max_thinking_tokens: Optional[int] = None, harness: Optional[str] = None,
@@ -247,43 +249,41 @@ class AlwaysOnTaskStep(PromptAgentTaskStep):
         self.wake_reminder_text = wake_reminder_text
         self.scheduled_checks = scheduled_checks
         self.scheduled_check_min_interval = scheduled_check_min_interval
-        if contact_timeout_seconds is not None and not float(contact_timeout_seconds) > 0:
-            raise ValueError(f"contact_timeout_seconds must be positive (got {contact_timeout_seconds!r})")
-        self.contact_timeout_seconds = None if contact_timeout_seconds is None else float(contact_timeout_seconds)
         self.contact_replies_in_parallel = bool(contact_replies_in_parallel)
         self.time_budget_seconds = None if time_budget_seconds is None else float(time_budget_seconds)
         self.effective_time_budget()  # validates
 
     _OWN = ("user_sim", "end_time", "final", "max_wakes", "settle_timeout_seconds", "user_timeout_seconds",
             "final_reminder", "stay_quiet", "nudge", "nudge_text", "wake_reminder", "wake_reminder_text",
-            "scheduled_checks", "scheduled_check_min_interval", "contact_timeout_seconds", "contact_replies_in_parallel",
-            "time_budget_seconds")
+            "scheduled_checks", "scheduled_check_min_interval", "contact_replies_in_parallel", "time_budget_seconds")
     _PROMPT_FIELDS = ("prompt", "parts", "prompt_id", "agent_name", "timeout_seconds", "trajectory_output_prefix",
                       "model", "model_params", "system_prompt", "max_turns", "output_format", "max_thinking_tokens",
                       "effort", "harness", "agentenv_tools", "poll_interval_seconds", "context_id")
 
-    def settle_cap_seconds(self) -> float:
-        """The longest one settle waits, whatever is still at work (queued fires, nl actions in a row, a contact whose
-        own time limit is longer): a contact's time limit and grace, then settle_timeout_seconds."""
-        contact = self.contact_timeout_seconds or CONTACT_TIMEOUT_SECONDS
-        return contact + CONTACT_GRACE_SECONDS + self.settle_timeout_seconds
+    def settle_cap_seconds(self, contact_seconds: float = CONTACT_TIMEOUT_DEFAULT_SECONDS) -> float:
+        """The longest one settle waits, whatever is still at work (queued fires, nl actions in a row): the longest
+        contact time limit (``contact_seconds``: the run's, read when it starts, else the gateway's default) and its
+        grace, then settle_timeout_seconds."""
+        return contact_seconds + CONTACT_GRACE_SECONDS + self.settle_timeout_seconds
 
     def read_cap_seconds(self) -> float:
         """The longest one read's answer may take: READ_ASKS user sim turns, each with its grace and trajectory
         fetch; an ask past it is refused, and an answer past it ends the read as a user sim error."""
         return READ_ASKS * (self.user_timeout_seconds + TURN_GRACE_SECONDS + TRAJECTORY_FETCH_SECONDS)
 
-    def wake_reserve_seconds(self) -> float:
+    def wake_reserve_seconds(self, contact_seconds: float = CONTACT_TIMEOUT_DEFAULT_SECONDS) -> float:
         """The longest one turn of the loop, or the run's closing, can take, each part hard-capped: a clock jump's
         settle (settle_cap_seconds), then a wake (the agent's turn and, with nudges on, its nudge turn, each at most
         timeout_seconds + TURN_GRACE_SECONDS plus a trajectory fetch; one settle; GATEWAY_ALLOWANCE_SECONDS of the
         step's own calls), then a read (read_cap_seconds and GATEWAY_ALLOWANCE_SECONDS). The loop cuts off a turn of
-        its own that runs past this (a step error), so it is a real bound."""
+        its own that runs past this (a step error), so it is a real bound. ``contact_seconds`` is the longest contact
+        time limit, as for settle_cap_seconds."""
         turn = self.timeout_seconds + TURN_GRACE_SECONDS + TRAJECTORY_FETCH_SECONDS
-        wake = turn * (2 if self.nudge else 1) + self.settle_cap_seconds() + GATEWAY_ALLOWANCE_SECONDS
-        return self.settle_cap_seconds() + wake + self.read_cap_seconds() + GATEWAY_ALLOWANCE_SECONDS
+        settle = self.settle_cap_seconds(contact_seconds)
+        wake = turn * (2 if self.nudge else 1) + settle + GATEWAY_ALLOWANCE_SECONDS
+        return settle + wake + self.read_cap_seconds() + GATEWAY_ALLOWANCE_SECONDS
 
-    def effective_time_budget(self) -> float:
+    def effective_time_budget(self, contact_seconds: float = CONTACT_TIMEOUT_DEFAULT_SECONDS) -> float:
         """The real time after which the run closes: ``time_budget_seconds``, else 7 h, lowered so the closing still
         fits the hub's job. The rule:
 
@@ -294,8 +294,11 @@ class AlwaysOnTaskStep(PromptAgentTaskStep):
         step's wrap-up line and the last-turn notice), lets the user sim read the wrap-up, and ends with end reason
         ``time_budget``. A run therefore ends by the budget plus one wake's worst case, and that must fit the job
         with ``JOB_HEADROOM_SECONDS`` to spare: the default budget is lowered to make it fit, and a budget a task sets
-        that can't is refused, as is a wake whose worst case leaves no room for a budget at all."""
-        reserve = self.wake_reserve_seconds()
+        that can't is refused, as is a wake whose worst case leaves no room for a budget at all.
+
+        ``contact_seconds`` is the longest contact time limit: the gateway's default when the task loads, the
+        contacts' own once the run has read them (``_configure_contacts``), which checks the budget again."""
+        reserve = self.wake_reserve_seconds(contact_seconds)
         room = JOB_LIMIT_SECONDS - JOB_HEADROOM_SECONDS - reserve
         if room <= reserve:
             raise ValueError(f"always_on: one wake can take up to {reserve:.0f}s (wake_reserve_seconds: a settle, the "
@@ -377,6 +380,7 @@ class _Run:
         self.checks: dict = {"on": False}
         self.signed_off = False  # a one-sitting run's user said done: no more reads
         self.contacts: dict = {}
+        self.contact_seconds = CONTACT_TIMEOUT_DEFAULT_SECONDS  # the longest contact time limit, read at the start
         self.last_settle: dict = {}
         self.pending: dict = {}
         self.end_note = ""
@@ -393,9 +397,8 @@ class _Run:
 
     async def restore(self) -> None:
         """Put back what the step changed on the gateways, latest first, so later steps of the task see the settings
-        they had before it: the user chat's roles, user name and stay_quiet; the triggers' concurrent_fires and
-        executor time limit; the roles with scheduled checks; the clock's rate. Each is tried on its own; one that
-        fails is logged."""
+        they had before it: the user chat's roles, user name and stay_quiet; the triggers' concurrent_fires; the roles
+        with scheduled checks; the clock's rate. Each is tried on its own; one that fails is logged."""
         while self.undo:
             what, put_back = self.undo.pop()
             try:
@@ -646,28 +649,32 @@ class _Run:
             await self._clock_runs(False)
 
     async def _configure_contacts(self) -> None:
-        """On each env with triggers, let one trigger's replies run side by side (``contact_replies_in_parallel``) and
-        give contacts that set no time limit ``contact_timeout_seconds``; a gateway too old for it keeps its ways."""
+        """On each env with triggers, let one trigger's replies run side by side (``contact_replies_in_parallel``; a
+        gateway too old for it keeps its ways), and read its contacts' time limits: each executor's own, as the task
+        registered it (register_env_triggers' ``executor_timeout_seconds``). The longest (``contact_seconds``; the
+        gateway's default for a gateway that doesn't report them) caps every settle, and with it one wake's worst case,
+        so the run's time budget is worked out again from it, and refused when that can't fit the hub's job."""
         step = self.step
-        body = {"concurrent_fires": step.contact_replies_in_parallel}
-        if step.contact_timeout_seconds is not None:
-            body["executor_timeout_seconds"] = step.contact_timeout_seconds
-        applied = []
+        applied, limits = [], []
         for env in self.ctx.deployed_envs:
             if not env.supports(EXT_TRIGGERS_URI, "state"):
                 continue
+            state = await _call(env, EXT_TRIGGERS_URI, "state")
+            timeouts = (state.get("config") or {}).get("executor_timeouts")
+            limits += [CONTACT_TIMEOUT_DEFAULT_SECONDS] if timeouts is None else [t["timeout_seconds"] for t in timeouts]
+            entry = {"env_id": env.env_id, "contact_timeouts": timeouts}  # None: the gateway doesn't report them
             if not env.supports(EXT_TRIGGERS_URI, "config"):
-                applied.append({"env_id": env.env_id, "applied": False, "why": "the gateway has no triggers config"})
+                applied.append({**entry, "applied": False, "why": "the gateway has no triggers config"})
                 continue
-            before = (await _call(env, EXT_TRIGGERS_URI, "state")).get("settings") or {}
+            before = state.get("settings") or {}
             self._undo_config(env, EXT_TRIGGERS_URI, "the triggers' settings",
-                              {k: v for k, v in before.items()
-                               if k in ("concurrent_fires", "executor_timeout_seconds") and v is not None})
-            got = await _call(env, EXT_TRIGGERS_URI, "config", body)
-            applied.append({"env_id": env.env_id, "applied": True, "concurrent_fires": got.get("concurrent_fires"),
-                            "executor_timeout_seconds": got.get("executor_timeout_seconds")})
+                              {k: v for k, v in before.items() if k == "concurrent_fires" and v is not None})
+            got = await _call(env, EXT_TRIGGERS_URI, "config", {"concurrent_fires": step.contact_replies_in_parallel})
+            applied.append({**entry, "applied": True, "concurrent_fires": got.get("concurrent_fires")})
+        self.contact_seconds = float(max(limits, default=0.0))
+        self.time_budget = step.effective_time_budget(self.contact_seconds)
         self.contacts = {"replies_in_parallel": step.contact_replies_in_parallel,
-                         "timeout_seconds": step.contact_timeout_seconds, "envs": applied}
+                         "longest_timeout_seconds": self.contact_seconds, "envs": applied}
 
     def rules(self) -> str:
         """What the agent is told about reaching the user, and about waking itself when it can."""
@@ -783,11 +790,11 @@ class _Run:
         ``CONTACT_GRACE_SECONDS``); any other work, an event due that an advance to now doesn't set going among it,
         gets ``settle_timeout_seconds``, from the start or from the last contact call seen. A gateway that reports no
         executor calls gets ``settle_timeout_seconds`` in all. However much is still at work (queued fires, nl
-        actions in a row, a contact whose own limit is longer), the wait never runs past ``settle_cap_seconds``.
+        actions in a row), the wait never runs past ``settle_cap_seconds`` of the longest contact time limit.
         Returns, by env, the triggers still at work when it gave up (empty when the world settled); ``last_settle``
         says how long it waited and how many contact calls it saw."""
         started = time.monotonic()
-        cap = started + self.step.settle_cap_seconds()  # however much is still at work, never past this
+        cap = started + self.step.settle_cap_seconds(self.contact_seconds)  # however much is at work, never past this
         envs = [e for e in await self._armed() if e.supports(EXT_TRIGGERS_URI, "state")]
         waiting = {i: {"live_call_seen": started, "contact_until": started} for i in range(len(envs))}
         stuck: list[dict] = []
@@ -965,7 +972,7 @@ class _Run:
         """``work``, cut off past ``seconds`` (one turn of the loop's worst case, ``wake_reserve_seconds``): every part
         is capped on its own, so only calls hanging past their allowance get here, and the run ends on a step error
         rather than run past the hub's job."""
-        seconds = self.step.wake_reserve_seconds() if seconds is None else seconds
+        seconds = self.step.wake_reserve_seconds(self.contact_seconds) if seconds is None else seconds
         timer = asyncio.timeout(seconds)
         try:
             async with timer:
@@ -993,9 +1000,10 @@ class _Run:
         step = self.step
         now = await self.now()
         spent = self.spent()
-        if spent + step.wake_reserve_seconds() >= self.time_budget:
+        reserve = step.wake_reserve_seconds(self.contact_seconds)
+        if spent + reserve >= self.time_budget:
             self.log("time_budget_reached", virtual_time=_iso(now), real_seconds=round(spent, 1),
-                     time_budget_seconds=self.time_budget, wake_reserve_seconds=step.wake_reserve_seconds())
+                     time_budget_seconds=self.time_budget, wake_reserve_seconds=reserve)
             await self._final(now, reason="time_budget")
             return False
         # 1. a read that is due: the user sim reads what the agent sent (one due only at or past end_time is the last
@@ -1664,7 +1672,7 @@ class _Run:
                               "rules_via": "system_prompt" if self.rules_in_system_prompt else "first_wake",
                               "scheduled_checks": self.checks, "contacts": self.contacts,
                               "time_budget_seconds": self.time_budget,
-                              "wake_reserve_seconds": step.wake_reserve_seconds()}
+                              "wake_reserve_seconds": step.wake_reserve_seconds(self.contact_seconds)}
         await self._store_timeline(record)
         ctx.metadata.setdefault(ALWAYS_ON_KEY, {})[step.id] = record
         # The graded response is the user's whole chat from the agent, each message with its pretend time; never its
