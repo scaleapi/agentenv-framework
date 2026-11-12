@@ -115,11 +115,13 @@ def _latest_version(collection, id):
 
 
 def _written(write):
-    """Stands in for the materializer's write: the next version of the entity, in the @local namespace's store."""
+    """Stands in for the materializer's write: the next version of the entity, in the @local namespace's store, a
+    task's with the ids its bundle gave what it names, as Task.put stores them."""
     collection = _COLLECTIONS[write.kind.store]
     latest = local_store().find_one(collection, Filter.of(id=write.id), sort=Sort.by("version"))
     version = latest["version"] + 1 if latest else 1
-    local_store().insert(collection, {"id": write.id, "version": version})
+    renamed = write.source.entity_ids if write.kind.store == "task" else {}
+    local_store().insert(collection, {"id": write.id, "version": version, **({"entity_ids": renamed} if renamed else {})})
     return version
 
 
@@ -291,6 +293,18 @@ def test_a_file_changed_during_its_write_is_written_again_even_once_changed_back
     hello.write_text("hello\n")
 
     assert ledger.check(write, {}).reasons == ("the ledger doesn't know what its last version was made from",)
+
+
+def test_a_task_written_before_it_recorded_its_renamed_ids_is_written_again_with_them(bundle_dir, monkeypatch):
+    with monkeypatch.context() as earlier:
+        earlier.setattr(resolve_module.ResolvedEntry, "entity_ids", property(lambda self: {}))
+        _run(bundle_dir)
+
+    checks = _run(bundle_dir)
+
+    assert checks[f"{ROOT}/t"].reasons == ("its stored version doesn't record the ids the bundle gave what it names",)
+    assert [id for id, check in checks.items() if not check.unchanged] == [f"{ROOT}/t"]
+    assert all(check.unchanged for check in _run(bundle_dir).values())
 
 
 def test_a_new_digest_scheme_rewrites_everything_and_says_only_that(bundle_dir, monkeypatch):
