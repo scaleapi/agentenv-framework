@@ -72,11 +72,16 @@ class _Provider:
 
     def __init__(self):
         self.links = [self]
+        self.problem = None
+        self.prepare_image = AsyncMock()
         self.create_container = AsyncMock(return_value=SimpleNamespace(
-            sandbox_id="sb-1", mode="container", type="docker", tunnel_urls={8000: CONTROLLER}))
+            sandbox_id="sb-1", mode="container", type="docker", tunnel_urls={8000: CONTROLLER}, terminate=AsyncMock()))
 
     def url_from_sandbox(self, url):
         return url
+
+    def sandbox_problem(self, sandbox, image):
+        return self.problem
 
 
 @pytest.fixture
@@ -161,6 +166,29 @@ async def test_deploy_on_a_chain_gives_each_link_the_addresses_its_own_sandboxes
     assert sent["CONTROLLER_AUTH_TOKEN"] == CONTROLLER_TOKEN
     deploy.provider.create_container.assert_not_called()
     assert [s.sandbox_id for s in context.deployed_sandboxes] == ["sb-1"]
+
+
+@pytest.mark.asyncio
+async def test_deploy_prepares_the_image_on_each_link_before_creating_its_sandbox(deploy):
+    """An image stored as its build context alone is built by the link's prepare_image, never pulled."""
+    calls = []
+    deploy.provider.prepare_image.side_effect = lambda image, **_: calls.append(("prepare", image.id))
+    deploy.provider.create_container.side_effect = lambda **_: calls.append(("create", None)) or SimpleNamespace(
+        sandbox_id="sb-1", mode="container", type="docker", tunnel_urls={8000: CONTROLLER})
+    await OSWorldDeployControllerTaskStep(id="ctl", version=1, env_id="desk").execute(_context(computer()))
+    assert calls == [("prepare", "cua-controller"), ("create", None)]
+
+
+@pytest.mark.asyncio
+async def test_deploy_lets_go_a_sandbox_that_cant_run_the_image_for_the_next_links(deploy):
+    refusing, running = _Provider(), _Provider()
+    refusing.problem = "the VM can't load the image"
+    deploy.provider.links = [refusing, running]
+    context = _context(computer())
+    await OSWorldDeployControllerTaskStep(id="ctl", version=1, env_id="desk").execute(context)
+    refusing.create_container.return_value.terminate.assert_awaited_once()
+    running.create_container.assert_awaited_once()
+    assert len(context.deployed_sandboxes) == 1
 
 
 @pytest.mark.asyncio
@@ -363,10 +391,15 @@ async def test_evaluate_infeasible_is_graded_on_the_agents_answer(ctl):
 
 
 @pytest.mark.asyncio
-async def test_evaluate_grades_a_run_that_ran_out_of_turns_and_marks_it(ctl):
+@pytest.mark.parametrize("message", [
+    "Max turns (50) reached without completion.", "agent timed out after 1800s",
+    "Reached maximum number of turns (50)", "codex CLI timed out after 600s", "claude CLI timed out after 900s",
+    "gemini CLI timed out after 600s", "Letta Code timed out after 600s", "hermes timed out after 600s",
+    "opencode timed out after 600s"])
+async def test_evaluate_grades_a_run_that_ran_out_of_turns_and_marks_it(ctl, message):
+    """Each shipped agent's own words for running out of turns or time."""
     _scores(ctl, 1)
-    context = _context(_ready(), _prompt(error_type="AGENT_ERROR",
-                                         error_message="Max turns (50) reached without completion."))
+    context = _context(_ready(), _prompt(error_type="AGENT_ERROR", error_message=message))
     await OSWorldEvaluateTaskStep(id="e", version=1, env_id="desk", verifier_id="v",
                                   evaluator={"funcs": "compare_table"}).execute(context)
     verification = context.metadata["verifications"]["v"]
@@ -443,3 +476,10 @@ def test_the_controller_is_found_in_the_runs_context_when_the_env_record_was_sto
     assert guest.controller_url(env, context) == CONTROLLER
     with pytest.raises(RuntimeError, match="run osworld_deploy_controller"):
         guest.controller_url(env, _context(computer(card("/apps/7/osworld"))))
+
+
+@pytest.mark.parametrize("message", ["codex CLI produced no output for 300s (stalled)", "command timed out after 30s",
+                                     "Tool 'click' timed out after 60s", "model returned 500"])
+def test_a_stop_that_isnt_the_agents_budget_isnt_read_as_one(message):
+    from agent_env.task_step.task_steps.osworld.evaluate import budget_exhaustion
+    assert budget_exhaustion(_prompt(error_type="AGENT_ERROR", error_message=message)) is None

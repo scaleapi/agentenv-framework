@@ -127,13 +127,28 @@ class OSWorldDeployControllerTaskStep(TaskStep):
                 env["LITELLM_BASE_URL"] = link.url_from_sandbox(env["LITELLM_BASE_URL"])
             logger.info(f"Deploying the OSWorld controller for env '{self.env_id}' on {type(link).__name__} "
                         f"(image={image.id} v{image.version}, env={sorted(env)})")
+            attribution = deploy_attribution(self, context)
             try:
-                return await link.create_container(image_name=image.pinned_name, port=CONTROLLER_PORT, env=env,
-                                                   cpu=self.cpu, memory=self.memory_mb, disk_size_gb=CONTROLLER_DISK_GB,
-                                                   timeout=self.ttl_seconds,
-                                                   attribution=deploy_attribution(self, context))
+                # An image stored as its build context alone is built here, where the link's sandboxes get it.
+                await link.prepare_image(image, attribution=attribution)
+                sandbox = await link.create_container(image_name=image.pinned_name, port=CONTROLLER_PORT, env=env,
+                                                      cpu=self.cpu, memory=self.memory_mb,
+                                                      disk_size_gb=CONTROLLER_DISK_GB, timeout=self.ttl_seconds,
+                                                      attribution=attribution)
             except Exception as e:
                 logger.warning(f"{type(link).__name__}: the OSWorld controller's sandbox failed: "
                                f"{type(e).__name__}: {str(e)[:300]}; trying the next provider")
                 errors.append(f"{type(link).__name__}: {type(e).__name__}: {str(e)[:300]}")
+                continue
+            # A sandbox that can't run the image, a VM that can't load it say, is let go for the next link's.
+            if problem := link.sandbox_problem(sandbox, image):
+                logger.warning(f"{type(link).__name__}: {problem}; trying the next provider")
+                errors.append(f"{type(link).__name__}: {problem}")
+                try:
+                    await sandbox.terminate()
+                except Exception as e:
+                    logger.warning(f"{type(link).__name__}: terminating sandbox {sandbox.sandbox_id} failed: "
+                                   f"{type(e).__name__}")
+                continue
+            return sandbox
         raise RuntimeError(f"no provider created the OSWorld controller's sandbox: {'; '.join(errors)}")

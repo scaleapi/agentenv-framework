@@ -31,8 +31,12 @@ JUDGE_FUNCS = frozenset({"agent_judge", "agent_judge_multi", "agent_judge_docx",
 CONTEXT_FUNCS = JUDGE_FUNCS | {"compare_pdfs", "compare_csv", "compare_images", "compare_python_pure_text",
                                "diff_text_file", "website_verifier"}
 # An agent that ran out of turns or time leaves a desktop worth grading; every other stop leaves none. Matched on the
-# harness's own sentence, since its error types name both kinds.
-_BUDGET_EXHAUSTED = re.compile(r"Max turns \(\d+\) reached|agent timed out after \d+", re.I)
+# sentences the harness and the shipped agents stop with, since their error types name both kinds: the harness's
+# "Max turns (N) reached" and "agent timed out after N"; Claude Code's and Codex's "Reached maximum number of turns
+# (N)"; each CLI's "<name> timed out after Ns" (claude CLI, codex CLI, gemini CLI, Letta Code, hermes, opencode).
+_BUDGET_EXHAUSTED = re.compile(
+    r"Max turns \(\d+\) reached|Reached maximum number of turns \(\d+\)"
+    r"|\b(?:agent|CLI|Letta Code|hermes|opencode) timed out after \d+", re.I)
 
 
 def budget_exhaustion(prompt_response: PromptResponse | None) -> str | None:
