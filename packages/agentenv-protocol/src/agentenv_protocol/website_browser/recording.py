@@ -226,10 +226,11 @@ class _Recording:
         written of them after ``LOG_WAIT_S``."""
         manifest, log = self.manifest, self.recordings.log
         deadline = asyncio.get_running_loop().time() + LOG_WAIT_S
+        wanted = manifest.log_last - manifest.log_after
         while True:
-            lines = [line for line in (await log.read_async(manifest.log_after, limit=1 << 30))["lines"]
+            lines = [line for line in (await log.read_async(manifest.log_after, limit=wanted))["lines"]
                      if line.get("seq", 0) <= manifest.log_last]
-            if len(lines) >= manifest.log_last - manifest.log_after or asyncio.get_running_loop().time() >= deadline:
+            if len(lines) >= wanted or asyncio.get_running_loop().time() >= deadline:
                 return lines
             await asyncio.sleep(LOG_POLL_S)
 
