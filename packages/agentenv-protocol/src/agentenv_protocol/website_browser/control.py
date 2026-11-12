@@ -101,6 +101,10 @@ class BrowserControl:
         #: front.
         self._choosers: dict[str, dict] = {}
         self._front: Optional[str] = None
+        #: The tab agentenv last brought to the front in any context, which the page's operations follow.
+        self._page_front: Optional[str] = None
+        #: The tab each frame its pages navigated is in, by the frame's id, as a download names the frame it began in.
+        self._frame_tabs: dict[str, str] = {}
         #: Each tab's latest capture, which shows while a dialog keeps its page from painting; and, by session, what
         #: input sent there waits on to learn a dialog opened.
         self._shots: dict[str, str] = {}
@@ -155,6 +159,7 @@ class BrowserControl:
                 self.log.note("tab", {"event": "closed", "id": tab["id"], "url": redact_url(tab["url"]), "by": how})
         self.tabs.clear()
         self._sessions.clear()
+        self._frame_tabs.clear()
         self._open_dialogs.clear()
         self._choosers.clear()
         self._shots.clear()
@@ -436,7 +441,7 @@ class BrowserControl:
 
     async def answer_dialog(self, accept: bool, text: Optional[str] = None) -> None:
         """The dialog open on the active tab answered, as the agent's answer; InvalidArgument with none open."""
-        active = await self.active_tab()
+        active = await self.page_tab()
         self._acted_on(active)
         session = next((s for s, dialog in self._open_dialogs.items() if dialog["tab"] == active), None)
         if session is None:
@@ -447,7 +452,7 @@ class BrowserControl:
     async def choose_files(self, paths: list[str]) -> None:
         """The file chooser open on the active tab given ``paths``, files in the session user's ``~/Uploads``;
         InvalidArgument for one outside it or missing, for several where it takes one, or with no chooser open."""
-        active = await self.active_tab()
+        active = await self.page_tab()
         self._acted_on(active)
         session = next((s for s in self._choosers if self._sessions.get(s) == active), None)
         if session is None:
@@ -471,7 +476,7 @@ class BrowserControl:
     async def state(self) -> dict:
         """The active tab's id, URL and title now, and the dialog and file chooser open on it."""
         await self._refresh()
-        active = await self.active_tab()
+        active = await self.page_tab()
         if active is None:
             raise DeviceUnavailable("the browser has no tab open")
         self._acted_on(active)
@@ -501,6 +506,7 @@ class BrowserControl:
             self._context_fronts[context] = target
         else:
             self._front = target
+        self._page_front = target
 
     @contextlib.asynccontextmanager
     async def hidden_page(self, url: str = "about:blank", context: Optional[str] = None) -> AsyncIterator[str]:
@@ -518,11 +524,18 @@ class BrowserControl:
                 await self.devtools.call("Target.closeTarget", {"targetId": target})
 
     async def active_tab(self, context: Optional[str] = None) -> Optional[str]:
-        """The active tab of the context ``context``, else of the default one: the tab a dialog is open on, whose page
+        """The active tab of the context ``context``, else of the default one, as ``page_tab`` picks among its tabs."""
+        ours = {target for target, tab in self.tabs.items() if self.in_context(tab.get("context_id"), context)}
+        return await self._active_among(ours, self._context_fronts.get(context) if context else self._front)
+
+    async def page_tab(self) -> Optional[str]:
+        """The tab the page's operations act on, in whichever context it is: the tab a dialog is open on, whose page
         it blocks from saying; else the visible tab whose page has focus, as a hidden tab's page that had input still
         says it has; else the one agentenv last brought to the front, else the first visible one: CDP has no event for
         a tab made active."""
-        ours = {target for target, tab in self.tabs.items() if self.in_context(tab.get("context_id"), context)}
+        return await self._active_among(set(self.tabs), self._page_front)
+
+    async def _active_among(self, ours: set[str], front: Optional[str]) -> Optional[str]:
         if dialogs := [dialog["tab"] for dialog in self._open_dialogs.values() if dialog["tab"] in ours]:
             return dialogs[-1]
         visible = None
@@ -540,7 +553,6 @@ class BrowserControl:
                 return target
             if state[0] == "visible" and visible is None:
                 visible = target
-        front = self._context_fronts.get(context) if context else self._front
         return front if front in ours else visible
 
     async def record(self) -> dict:
@@ -679,8 +691,7 @@ class BrowserControl:
 
     async def active_session(self) -> str:
         """The session of the active tab, else of the first open one; DeviceUnavailable with no tab open."""
-        active = await self.active_tab() or next((target for target, tab in self.tabs.items()
-                                                  if self.in_context(tab.get("context_id"), None)), None)
+        active = await self.page_tab() or next(iter(self.tabs), None)
         session = next((session for session, target in self._sessions.items() if target == active), None)
         if session is None:
             raise DeviceUnavailable("the browser has no tab open")
@@ -873,6 +884,8 @@ class BrowserControl:
         if session in self._sessions:
             self._saw(params.get("frame", {}).get("url", ""),
                       self.tabs.get(self._sessions[session], {}).get("context_id"))
+            if isinstance(frame_id := params.get("frame", {}).get("id"), str):
+                self._frame_tabs[frame_id] = self._sessions[session]
         frame = params.get("frame", {})
         if not frame.get("parentId") and (target := self._sessions.get(session)) is not None:
             self._page_loading.add(target)
@@ -914,8 +927,13 @@ class BrowserControl:
                 session_id=session))
 
     def _saw(self, url: str, context: Optional[str] = None) -> None:
+        """An origin a page loaded, kept by its context's id, so a context recorded after it has it too, and for the
+        default context unless it's another's."""
         if (origin := origin_of(url)) is not None:
-            self.origins_of(context if context in self.other_contexts else None).add(origin)
+            if context:
+                self.context_origins.setdefault(context, set()).add(origin)
+            if context not in self.other_contexts:
+                self.origins.add(origin)
 
     def _on_Target_targetDestroyed(self, params: dict, session: Optional[str]) -> None:
         target = params["targetId"]
@@ -957,6 +975,7 @@ class BrowserControl:
         if (target := self._sessions.pop(params["sessionId"], None)) is not None:
             self._shots.pop(target, None)
             self._frames.pop(target, None)
+            self._frame_tabs = {frame: tab for frame, tab in self._frame_tabs.items() if tab != target}
             self._pinned.pop(target, None)
             self._page_loading.discard(target)
         self._choosers.pop(params["sessionId"], None)
@@ -999,10 +1018,10 @@ class BrowserControl:
         self._answering.discard(session)
 
     def _on_Browser_downloadWillBegin(self, params: dict, session: Optional[str]) -> None:
+        tab = self._frame_tabs.get(params.get("frameId"), params.get("frameId"))
         self.downloads[params["guid"]] = {"guid": params["guid"], "url": params.get("url", ""),
                                           "filename": params.get("suggestedFilename", ""), "state": "inProgress",
-                                          "started_at": _now(),
-                                          "context_id": self.tabs.get(params.get("frameId"), {}).get("context_id")}
+                                          "started_at": _now(), "context_id": self.tabs.get(tab, {}).get("context_id")}
 
     def _on_Browser_downloadProgress(self, params: dict, session: Optional[str]) -> None:
         if (download := self.downloads.get(params["guid"])) is None:

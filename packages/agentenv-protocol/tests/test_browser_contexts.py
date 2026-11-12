@@ -226,6 +226,77 @@ async def test_a_label_released_and_leased_again_at_once_keeps_the_new_leases_fo
     assert released is True and again.id == "C2" and again.downloads(browser_home).is_dir()
 
 
+def _attached(devtools, target, session):
+    devtools.send("Target.attachedToTarget", {"sessionId": session, "targetInfo": {"targetId": target, "type": "page"}})
+
+
+@pytest.mark.asyncio
+async def test_the_pages_operations_follow_a_leased_tab_brought_to_the_front_and_one_left_alone(browser_home):
+    devtools, control, contexts = _contexts(browser_home)
+    await contexts.lease("buyer")
+    _tab(devtools, "D1", "DEFAULT")
+    _tab(devtools, "L1", "C1")
+    _attached(devtools, "D1", "s-d1")
+    _attached(devtools, "L1", "s-l1")
+
+    await control.activate("L1", "C1")
+    page, default = await control.page_tab(), await control.active_tab()
+    await control.close("D1")
+    devtools.send("Target.targetDestroyed", {"targetId": "D1"})
+    devtools.send("Target.detachedFromTarget", {"sessionId": "s-d1"})
+
+    assert (page, default) == ("L1", None) and await control.active_session() == "s-l1"
+
+
+@pytest.mark.asyncio
+async def test_a_label_an_agent_disposed_and_a_load_leases_again_at_once_keeps_the_new_folder(browser_home):
+    _, _, contexts = _contexts(browser_home)
+    old = contexts.made_by_agent("ada", "X1")
+    (old.downloads(browser_home) / "old.txt").write_text("old")
+
+    contexts.disposed("X1")
+    again = await contexts.lease("agent-ada-1", made_by="ada")
+    (again.downloads(browser_home) / "new.txt").write_text("new")
+    await asyncio.gather(*contexts._tasks)
+
+    assert again.id == "C1" and [path.name for path in again.downloads(browser_home).iterdir()] == ["new.txt"]
+    assert sorted(path.name for path in (browser_home / "Contexts").iterdir()) == ["agent-ada-1"]
+
+
+@pytest.mark.asyncio
+async def test_a_load_into_an_agents_lease_finds_it_though_a_task_couldnt_lease_its_label(browser_home):
+    _, _, contexts = _contexts(browser_home)
+    made = contexts.made_by_agent("ada", "X1")
+
+    assert await contexts.lease("agent-ada-1") is made and made.made_by == "ada"
+
+
+@pytest.mark.asyncio
+async def test_a_context_made_unseen_keeps_the_origins_its_pages_loaded_before_it_was_found(browser_home):
+    devtools, control, contexts = _contexts(browser_home, {
+        "Target.getBrowserContexts": {"browserContextIds": ["X9"]}})
+    _tab(devtools, "U1", "X9", "https://cart.test/")
+
+    [unseen] = await contexts.find_unseen()
+
+    assert control.origins_of(unseen.id) == {"https://cart.test"}
+
+
+@pytest.mark.asyncio
+async def test_a_download_an_iframe_began_is_its_tabs_contexts(browser_home):
+    devtools, control, contexts = _contexts(browser_home)
+    await contexts.lease("buyer")
+    _tab(devtools, "L1", "C1")
+    _attached(devtools, "L1", "s-l1")
+    devtools.send("Page.frameNavigated", {"frame": {"id": "F1", "parentId": "L1", "url": "https://pay.test/"}},
+                  "s-l1")
+
+    devtools.send("Browser.downloadWillBegin", {"guid": "g1", "url": "https://pay.test/r", "frameId": "F1",
+                                                "suggestedFilename": "receipt.pdf"})
+
+    assert control.download_list() == [] and [d["guid"] for d in control.download_list("C1")] == ["g1"]
+
+
 @pytest.mark.asyncio
 async def test_the_browser_ending_ends_every_lease_and_deletes_their_folders(browser_home):
     _, _, contexts = _contexts(browser_home)

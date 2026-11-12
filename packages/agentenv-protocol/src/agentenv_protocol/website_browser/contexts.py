@@ -106,7 +106,7 @@ class Contexts:
         """The lease ``label``: the one leased under it before, as a retried step finds it, else a new context, its
         downloads going to its own folder. A task's label is checked; one ``made_by`` an agent may start ``agent-``,
         as a load of a snapshot restores such leases."""
-        if problem := label_problem(label, by_task=made_by == TASK):
+        if label not in self.leases and (problem := label_problem(label, by_task=made_by == TASK)):
             raise InvalidArgument(problem)
         async with self._lock:
             if (lease := self.leases.get(label)) is None:
@@ -173,10 +173,14 @@ class Contexts:
                 f"the context {lease.label!r} is another agent's")
 
     def disposed(self, context_id: Optional[str]) -> None:
-        """The context ``context_id`` an agent disposed: its lease ended and its folder deleted."""
+        """The context ``context_id`` an agent disposed: its lease ended and its folder moved aside at once, then
+        deleted, so a lease of its label after has a folder of its own."""
         if (lease := self.of(context_id)) is not None:
             self.leases.pop(lease.label, None)
-            self._spawn(asyncio.to_thread(shutil.rmtree, lease.folder(self.home()), True))
+            folder, gone = lease.folder(self.home()), self.home() / CONTEXTS / f".gone-{lease.id}"
+            with contextlib.suppress(OSError):
+                folder.rename(gone)
+                self._spawn(asyncio.to_thread(shutil.rmtree, gone, True))
 
     def download_path(self, context_id: Optional[str]) -> Optional[str]:
         """Where the lease of the context ``context_id`` saves downloads, None for the default context or one that
