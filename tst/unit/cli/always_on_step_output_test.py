@@ -18,3 +18,13 @@ def test_an_always_on_steps_response_is_shown():
 
 def test_an_always_on_step_without_a_response_shows_nothing():
     assert _step_output_lines(SimpleNamespace(type="always_on", id="loop"), TaskStepContext()) == []
+
+
+def test_an_always_on_step_shows_its_own_response_when_a_parallel_step_added_a_later_one():
+    context = TaskStepContext(prompt_responses=[
+        PromptResponse(prompt_id="loop", response="Recap sent.", step_id="loop"),
+        PromptResponse(prompt_id="side", response="Side answer.", step_id="side")])
+
+    [lines] = _step_output_lines(SimpleNamespace(type="always_on", id="loop"), context)
+
+    assert "Recap sent." in lines and "Side answer." not in lines

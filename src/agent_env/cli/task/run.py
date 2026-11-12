@@ -173,8 +173,11 @@ def _step_output_lines(step, context) -> list[str]:
         if match:
             lines.append(_format_loaded_snapshot(match))
         return lines
-    if prompts_agent_under_test(step) and context.prompt_responses:
-        return [_format_prompt_response(context.prompt_responses[-1])]
+    if prompts_agent_under_test(step):
+        # This step's own response: a step running alongside it may have added a later one.
+        match = next((r for r in reversed(context.prompt_responses) if r.step_id == step.id), None)
+        if match:
+            return [_format_prompt_response(match)]
     if step.type == "snapshot_agent_state":
         snapshots = context.metadata.get("agent_snapshots") or []
         match = next((s for s in reversed(snapshots) if s.get("capture_step_id") == step.id), None)
