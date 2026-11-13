@@ -87,6 +87,8 @@ class Browser:
 
     def __init__(self) -> None:
         self.listeners, self.colors, self.casting, self.silent, self.still = [], {}, set(), set(), set()
+        #: Tabs whose next screencast frame is bytes that aren't a JPEG.
+        self.garbled: set[str] = set()
         self.focused, self.contexts, self.calls = None, 0, []
 
     def listen(self, listener) -> None:
@@ -131,8 +133,10 @@ class Browser:
         while True:
             for session in list(self.casting):
                 if session[2:] not in self.silent | self.still and session[2:] in self.colors:
-                    self.emit("Page.screencastFrame", {"data": base64.b64encode(_jpeg(self.colors[session[2:]]))
-                                                       .decode(), "sessionId": 1, "metadata": {}}, session)
+                    data = b"not a jpeg" if session[2:] in self.garbled else _jpeg(self.colors[session[2:]])
+                    self.garbled.discard(session[2:])
+                    self.emit("Page.screencastFrame", {"data": base64.b64encode(data).decode(), "sessionId": 1,
+                                                       "metadata": {}}, session)
             await asyncio.sleep(0.05)
 
 
@@ -376,6 +380,36 @@ async def test_a_context_an_agent_makes_over_its_contexts_address_is_recorded_wi
     assert (child.made_by, child.ended_by, child.missing) == ("bob", "context_ended", None)
     assert kept.context == made.label and set(uploads.colors(folder)) <= {"white", "yellow"}
     assert "yellow" in uploads.colors(folder) and set(uploads.colors(f"{ROOT}/{manifest.recording_id}")) == {"blue"}
+
+
+@pytest.mark.asyncio
+async def test_a_frame_that_doesnt_decode_shows_the_tabs_last_that_did(browser):
+    pipe, control, contexts, network, recordings, uploads = browser
+    pipe.open("T1", RED)
+    started = await recordings.start("run:a", _grant(), network=False)
+    await asyncio.sleep(0.3)
+    pipe.garbled = {"T1"}
+    await asyncio.sleep(0.3)
+    manifest = BrowserRecordingManifest.model_validate(await recordings.end(started["recording_id"]))
+
+    assert not pipe.garbled and set(uploads.colors(f"{ROOT}/{manifest.recording_id}")) == {"red"}
+
+
+@pytest.mark.asyncio
+async def test_a_child_ended_by_its_context_and_its_parent_at_once_ends_once(browser):
+    pipe, control, contexts, network, recordings, uploads = browser
+    seller = await contexts.lease("seller")
+    pipe.open("T2", BLUE, seller.id)
+    started = await recordings.start("run:a", _grant(), context="seller", network=False)
+    made = contexts.made_by_agent("bob", "ctx-bob", scope=seller.id)
+    pipe.open("T7", YELLOW, "ctx-bob")
+    await asyncio.sleep(0.3)
+    child = recordings.every()[0].children[made.label]
+    contexts.disposed("ctx-bob")
+    manifest = BrowserRecordingManifest.model_validate(await recordings.end(started["recording_id"]))
+
+    assert manifest.children[0].ended_by in ("context_ended", "end") and manifest.children[0].missing is None
+    assert child.video.task.done() and child._ended.done()
 
 
 @pytest.mark.asyncio

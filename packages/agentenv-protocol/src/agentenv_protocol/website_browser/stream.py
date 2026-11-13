@@ -46,6 +46,8 @@ class TabStream:
         self._history: list[str] = []
         self._jpeg: Optional[bytes] = None
         self._image: Optional[Image.Image] = None
+        #: The last frame of the followed tab that decoded, which a frame that doesn't shows in its place.
+        self._shown: Optional[Image.Image] = None
         self._loop = asyncio.get_running_loop()
         self._heard_at = 0.0
         #: The screencast it runs: the tab, its session and what hears that tab's frames.
@@ -116,7 +118,7 @@ class TabStream:
         """Following ``target`` from now: what showed of the tab before it goes, and a capture of it is asked for at
         once, so the video never shows one tab while ``followed`` names another."""
         if target != self.tab:
-            self._jpeg, self._image = None, None
+            self._jpeg, self._image, self._shown = None, None, None
             if self._seeding is not None:
                 self._seeding.cancel()
             self._seeding = asyncio.ensure_future(self._seed(target)) if target is not None else None
@@ -190,18 +192,18 @@ class TabStream:
             self._capturing = None
 
     async def _latest(self) -> Image.Image:
-        """The latest frame decoded, in a thread, as each recorded context's frames would hold up the event loop; or
-        blank at the window's size while there's none."""
+        """The latest frame decoded, in a thread, as each recorded context's frames would hold up the event loop; one
+        that doesn't decode shows the tab's last that did; blank at the window's size while there's none."""
         if self._image is not None:
             return self._image
-        jpeg = self._jpeg
+        jpeg, tab = self._jpeg, self.tab
         image = await asyncio.to_thread(_decoded, jpeg) if jpeg else None
-        if image is None:
-            if jpeg is not None and self._jpeg is jpeg:
-                logger.warning(f"a frame of tab {self.tab} didn't decode")
-                self._jpeg = None
-            image = Image.new("RGB", self.blank_size, "white")
-        if self._jpeg is jpeg:
+        if image is None and jpeg is not None:
+            logger.warning(f"a frame of tab {tab} didn't decode")
+        if image is not None and self.tab == tab:
+            self._shown = image
+        image = image or self._shown or Image.new("RGB", self.blank_size, "white")
+        if self._jpeg is jpeg and self.tab == tab:
             self._image = image
         return image
 

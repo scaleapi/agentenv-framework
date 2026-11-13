@@ -155,8 +155,10 @@ async def check_recorded_contexts(deployed, env_id: str, op_url: Callable[[str],
     print("recorded", {name: {color: colors[name].count(color) for color in set(colors[name])} for name in colors},
           {"followed": len(manifests["buyer"]["video"]["followed"]), "screencast_frames_heard": heard,
            "har_entries": len(har["log"]["entries"]), "child": [c["context"] for c in child]})
-    assert set(colors["buyer"]) == {"red", "orange"} and colors["buyer"][-1] == "red", colors["buyer"]
-    assert set(colors["seller"]) == {"blue"} and set(colors["default"]) == {"green"}, colors
+    # A tab switch is blank until the new tab's first frame arrives: a few white frames, never another context's colour.
+    assert set(colors["buyer"]) - {"white"} == {"red", "orange"} and colors["buyer"][-1] == "red", colors["buyer"]
+    assert set(colors["seller"]) - {"white"} == {"blue"} and set(colors["default"]) - {"white"} == {"green"}, colors
+    assert all(colors[name].count("white") <= 3 for name in colors), colors
     tabs = [seen["tab"] for seen in manifests["buyer"]["video"]["followed"]]
     followed = [tab for n, tab in enumerate(tabs) if n == 0 or tab != tabs[n - 1]]
     assert len(followed) == 3 and followed[0] == followed[2] != followed[1], manifests["buyer"]["video"]["followed"]

@@ -383,6 +383,7 @@ class _Recording:
         self._timer: Optional[asyncio.TimerHandle] = None
         self._taking: set[asyncio.Future] = set()
         self._beginning: Optional[asyncio.Future] = None
+        self._ended: Optional[asyncio.Future] = None
         self._lock = asyncio.Lock()
 
     async def begin(self) -> None:
@@ -471,9 +472,13 @@ class _Recording:
 
     async def end(self, grant: Optional[WriteNamespaceGrant], reason: str) -> dict:
         """Ended for ``reason``, its children with it: its last frames, its video sealed, its log, HAR and manifest
-        uploaded, under ``grant`` when one is given; its manifest."""
-        if self.manifest.ended_at is not None:
-            return self.manifest.model_dump(mode="json")
+        uploaded, under ``grant`` when one is given; its manifest. It ends once: an end while it's ending, as its
+        context's and its parent's can come at once, waits for that one."""
+        if self._ended is None:
+            self._ended = asyncio.ensure_future(self._end(grant, reason))
+        return await asyncio.shield(self._ended)
+
+    async def _end(self, grant: Optional[WriteNamespaceGrant], reason: str) -> dict:
         self.ending = True
         if self._beginning is not None:
             await asyncio.gather(self._beginning, return_exceptions=True)
