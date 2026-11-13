@@ -79,6 +79,36 @@ user sim names in `used` when it relies on that line.
 | `dont_mention` | M | One "don't mention X unless asked" line per tempting fact |
 | `phone` | F | What they do with what reaches their phone |
 | `when_done` | | When they'd say they're done |
+| `satisfaction` | S | How they'd rate the job once it's over (optional; see below) |
+
+### The rating at the end
+
+With a `satisfaction` section, the user sim rates the job once the run is over: 1 to 5, with a one-line reason. Write
+what each end of the scale means for this task, and what moves the score for this person (the intake's User Sim
+Questions 6 and 7):
+
+```json
+"satisfaction": ["5, perfect: flights, a step-free place a walk from you, and both dinners booked, with nothing you had to chase.",
+                 "3, fine: all booked, but you had to answer a question your rules already settled.",
+                 "1, you'd have done it yourself: a dinner or the place is still not booked at the end.",
+                 "Being asked for things that are in Mom's email bothers you."]
+```
+
+The lines go last in the prompt, under "HOW YOU'D RATE THE JOB (only when asked, once it's over)". The rating is
+asked once: in always-on after the user sim's read of the wrap-up, in `prompt_agent` once the chat has ended, with
+any of the assistant's messages it never read; never after a run that ended on an error. The ask says 5 is perfect,
+3 fine, 1 "you'd have done it yourself", 2 and 4 in between, and that something it was never told was done doesn't
+count as done. The answer uses the usual format, with `score` and the reason in `message`.
+
+The rating goes to `metadata["user_sim_satisfaction"][<step id>]`: `score` (None when it failed), `reason`, `used`,
+`at`, `unread_shown`, `schema_errors`, `retried`, `user_sim_error`, and `skipped` when the run ended on an error. The
+whole ask and raw answer are in always-on's timeline (`user_sim_rating`) or, for `prompt_agent`, at the summary's
+`object_url`. It never reaches the assistant or the graded conversation, isn't a reply (so it doesn't count toward
+`max_replies`), and a rating that fails doesn't fail the run. A user sim rates more kindly than people do, so treat it
+as a signal next to the graders, not the score.
+
+Without a `satisfaction` section, the prompt and the reads are unchanged and nothing is asked. In always-on, a rating
+also adds its worst case (one read's) to the run's closing, so the default time budget is that much lower.
 
 Don't write the opening request into the description. Put it in `opening_prompt`: the prompt shows it right
 after the first `who_you_are` line ("Earlier you texted the assistant: …").
