@@ -86,6 +86,8 @@ from .rest_proxy import (
     called_tools,
     fetch_child_card,
     forward,
+    is_child_mcp_path,
+    reaches,
     listed_url,
     lowered,
     operations,
@@ -178,7 +180,8 @@ class Gateway:
         self.rest_proxy_urls = rest_proxy_urls or {}
         self._site_names = {site: lowered(names) for site, names in (site_names or {}).items()}
         self._listed_by_name = frozenset(listed_by_name)
-        self._site_mcp_endpoints = site_mcp_endpoints(internal_mcp_servers, self.website_urls, self.rest_proxy_urls)
+        self._mcp_endpoints = mcp_endpoints(internal_mcp_servers, self.website_urls, self.rest_proxy_urls)
+        self._token_paths = token_paths(internal_mcp_servers, self.website_urls, self.rest_proxy_urls)
         self._site_cards: dict[str, SiteCard] = {}
         self._withheld = frozenset(name.strip().lower().encode() for name in provider_headers if name.strip())
         self._browsers = BrowserRoutes(self.rest_proxy_urls, self.REST_PROXY_TIMEOUT, self._log_event,
@@ -545,8 +548,9 @@ class Gateway:
         async def app(scope, receive, send):
             if self._control_bearer and scope["type"] in ("http", "websocket"):
                 headers = scope.get("headers", ())
-                if scope["type"] == "http" and scope["path"] in CONTROL_ROUTES and not hmac.compare_digest(
+                if scope["type"] == "http" and self._takes_control_token(scope) and not hmac.compare_digest(
                         dict(headers).get(b"authorization", b""), self._control_bearer):
+                    logger.warning("refused %s %s: it takes the env's control token", scope["method"], scope["path"])
                     response = self._json_response({"ok": False, "error": "this route takes the env's control token"}, 401)
                     await response(scope, receive, send)
                     return
@@ -568,6 +572,19 @@ class Gateway:
                 Caller.reset(token)
 
         return app
+
+    def _takes_control_token(self, scope: dict) -> bool:
+        """Whether a request takes the deploy's control token: a control route, the env's data plane, or one of
+        ``token_paths`` behind /svc, by the path as routed or by the one the backing server receives (``reaches``),
+        after dot-segment normalisation. A site's /website route never reaches its data plane."""
+        path = scope["path"]
+        if path in CONTROL_ROUTES or is_child_mcp_path(path, RPC_PATH):
+            return True
+        prefix, _, rest = path.lstrip("/").partition("/")
+        service, _, rest = rest.partition("/")
+        guarded = self._token_paths.get(service, ()) if prefix == "svc" else ()
+        raw, base = scope.get("raw_path") or path.encode(), self.rest_proxy_urls.get(service, "")
+        return any(reaches(base, raw, path, rest, endpoint) for endpoint in guarded)
 
     @asynccontextmanager
     async def _session_lifespan(self, mcp: FastMCP):
@@ -784,12 +801,12 @@ class Gateway:
         if base_url is None:
             return self._json_response({"error": f"Unknown service: {service_name}"}, 404)
         role = self._request_role(request)
-        site_mcp = self._site_mcp_endpoints.get(service_name) if url_map is self.rest_proxy_urls else None
-        mcp_server = url_map is self.rest_proxy_urls and (service_name.startswith("mcp-") or site_mcp is not None)
-        mcp_endpoint = site_mcp or "mcp"
+        mcp_endpoint = self._mcp_endpoints.get(service_name) if url_map is self.rest_proxy_urls else None
+        mcp_server = mcp_endpoint is not None
+        mcp_endpoint = mcp_endpoint or "mcp"
         if url_map is self.rest_proxy_urls and (cdp := await self._browsers.cdp_answer(request, base_url, role)) is not None:
             return cdp
-        if mcp_server and request.method == "POST" and reaches_child_mcp(request, mcp_endpoint):
+        if mcp_server and request.method == "POST" and reaches_child_mcp(request, base_url, mcp_endpoint):
             if (refusal := await self._refuse_disabled_calls(await request.body(), role)) is not None:
                 return refusal
         if request.method in _SAFE_METHODS:
@@ -1739,6 +1756,36 @@ def site_mcp_endpoints(servers: list[InternalMCPServer], website_urls: dict[str,
         if resolved is not None and resolved.own_server and resolved.route_path is not None:
             endpoints[server.name] = resolved.route_path
     return endpoints
+
+
+def mcp_endpoints(servers: list[InternalMCPServer], website_urls: dict[str, str],
+                  rest_proxy_urls: dict[str, str]) -> dict[str, str]:
+    """The MCP endpoint, as a path under its /svc/<key>/ route, of each backing route that is an MCP server's: a site
+    that is an internal MCP server too (``site_mcp_endpoints``), and each ``mcp-`` route at the path its server's
+    ``mcp_url`` gives, ``/mcp`` when none is under the route's address. Where the proxy stamps the role and applies the
+    tool rules, and where the control token is taken."""
+    endpoints = site_mcp_endpoints(servers, website_urls, rest_proxy_urls)
+    for key, base in rest_proxy_urls.items():
+        if key in endpoints or not key.startswith("mcp-"):
+            continue
+        name = route_environment_name(key, base, servers, website=False)
+        found = [resolved.route_path for server in servers if server.name == name
+                 if (resolved := card_url(base, server.mcp_url)) is not None and resolved.own_server
+                 and resolved.route_path is not None]
+        endpoints[key] = found[0] if found else "/mcp"
+    return endpoints
+
+
+def token_paths(servers: list[InternalMCPServer], website_urls: dict[str, str],
+                rest_proxy_urls: dict[str, str]) -> dict[str, tuple[str, ...]]:
+    """The paths under /svc/<key>/ that take the gateway's control token, by key: every backing server's data plane,
+    extensions included, and an MCP server's own endpoint (``mcp_endpoints``), which skips the gateway's trajectory and
+    triggers. A child env registered under its own name, a computer, takes its own token, so none of its paths are here."""
+    endpoints = mcp_endpoints(servers, website_urls, rest_proxy_urls)
+    return {key: (RPC_PATH, *((endpoints[key],) if key in endpoints else ()))
+            for key, base in rest_proxy_urls.items()
+            if key in website_urls or route_environment_name(key, base, servers, website=False) != key
+            or not any(server.name == key for server in servers)}
 
 
 class CardURL(NamedTuple):

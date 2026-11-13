@@ -18,8 +18,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 from agentenv_protocol import DATA_OBJECTS_EXTENSION_URI
+from agentenv_protocol import client as protocol_v1
 
 from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, DeployedSandboxEnv
+from agent_env.env.envs import _deployment
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.envs.website import WebsiteEnv
@@ -54,6 +56,33 @@ async def test_a_child_env_on_the_card_loads_through_its_v1_data_plane_with_no_c
     assert [(r.method, str(r.url)) for r in sent] == [("POST", f"{_CARD}/svc/mcp-email/agentenv")] * 2
     assert [json.loads(r.content)["method"] for r in sent] == ["data/reset", "data/add"]
     assert json.loads(sent[1].content)["params"]["parts"][0]["file"]["uri"] == "file:///data/email.json"
+
+
+@pytest.mark.asyncio
+async def test_a_load_sends_its_records_control_token_with_no_run_to_grant_it(sent):
+    deployed = _record(await _card("mcp-email", "shop"))
+    deployed.control_token = "s3cret"
+    web = _website()
+    web._sandbox, web._gateway_url, web._deployed = MagicMock(), _GW, deployed
+    web._copy_artifact_into_container = AsyncMock(return_value="/tmp/data/shop.json")
+    web._env_provider = MagicMock(spec=EnvironmentGatewayProvider, install_changelog_triggers=AsyncMock())
+
+    await _mcp(deployed).load_environment_artifact(_artifact("email"))
+    await web.load_environment_artifact(_artifact("shop"))
+
+    assert [(str(r.url), r.headers.get("authorization")) for r in sent] == [
+        *[(f"{_CARD}/svc/mcp-email/agentenv", "Bearer s3cret")] * 2, *[(f"{_CARD}/svc/shop/agentenv", "Bearer s3cret")] * 2]
+
+
+def test_a_record_with_no_token_for_an_address_leaves_a_call_there_to_a_grant():
+    env = _mcp(_record(None))
+    env._deployed.control_token = "s3cret"
+    at_gateway, at_card = f"{_GW}/svc/mcp-email", f"{_CARD}/svc/mcp-email"
+    with protocol_v1.authorized({_GW: {"Authorization": "Bearer granted"}}):
+        sent = protocol_v1.request_headers(at_gateway, _deployment.data_plane_headers(env, at_gateway))
+    assert sent == {"Authorization": "Bearer granted"}
+    assert _deployment.data_plane_headers(env, at_card) == {"Authorization": "Bearer s3cret"}
+    assert _deployment.data_plane_headers(_mcp(None), at_card) is None
 
 
 @pytest.mark.asyncio
@@ -231,6 +260,27 @@ async def test_multi_env_withholds_the_record_from_a_name_an_mcp_server_and_a_we
         await MultiEnv.from_deployed_env(deployed)
 
     assert [email._deployed, slack._deployed, slack_web._deployed] == [deployed, None, None]
+
+
+@pytest.mark.asyncio
+async def test_a_name_an_mcp_server_and_a_website_share_loads_and_resets_with_the_records_token(sent):
+    deployed = _record(await _card("mcp-email", "slack"))
+    deployed.control_token = "s3cret"
+    provider = MagicMock(get_sandbox=AsyncMock(return_value=MagicMock(mode="vm")))
+    with patch("agent_env.env.env.Env.get", side_effect=lambda *_: MultiEnv(
+            id="multi", version=1, mcp_server_envs=[_mcp_env(), _mcp_env("slack")], website_envs=[_website("slack")])), \
+         patch("agent_env.providers.get_env_sandbox_provider", return_value=provider), \
+         patch.object(EnvironmentGatewayProvider, "install_changelog_triggers", AsyncMock()):
+        env = await MultiEnv.from_deployed_env(deployed)
+        slack = env.mcp_server_envs[1]
+        slack._copy_artifact_into_container = AsyncMock(return_value="/data/slack.json")
+        slack._staged_artifact_size = AsyncMock(return_value=None)
+        await env.load_environment_artifact(_artifact("slack"))
+        await env.reset(deployed)
+
+    assert sorted((r.url.path, r.headers.get("authorization")) for r in sent if r.url.path.endswith("/agentenv")) == [
+        ("/sandbox/sb-1-18765/svc/mcp-email/agentenv", "Bearer s3cret"),
+        *[("/svc/mcp-slack/agentenv", "Bearer s3cret")] * 3, ("/svc/slack/agentenv", "Bearer s3cret")]
 
 
 async def _card(*keys: str) -> dict:

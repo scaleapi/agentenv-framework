@@ -141,8 +141,15 @@ async def load_by_signed_url(env: MCPServerEnv | WebsiteEnv, environment_artifac
         if urls[path] is None:
             raise RuntimeError(f"{deployed_by}, so its server fetches {file.object_url} itself, and {type(stores[path]).__name__} "
                                "can't sign a URL for it; loading into such an env needs an object store that signs URLs (S3, Cloud Storage)")
-    await protocol_v1.reset_data(base_url, timeout=timeout)
-    await protocol_v1.add_data(base_url, file_parts(environment_artifact, files, urls), timeout=timeout)
+    headers = data_plane_headers(env, base_url)
+    await protocol_v1.reset_data(base_url, timeout=timeout, headers=headers)
+    await protocol_v1.add_data(base_url, file_parts(environment_artifact, files, urls), timeout=timeout, headers=headers)
+
+
+def data_plane_headers(env: MCPServerEnv | WebsiteEnv, url: str) -> dict[str, str] | None:
+    """The headers a call to ``url`` sends of ``env``'s record's control token; None, which leaves the call to a run's
+    or a multi env's grant, when the record gives it none: no record, no token, or an address outside the record's."""
+    return (env._deployed.control_headers_for(url) or None) if env._deployed is not None else None
 
 
 async def reset_server_data(env: MCPServerEnv | WebsiteEnv, *, mcp: bool) -> bool:
@@ -161,7 +168,8 @@ async def reset_server_data(env: MCPServerEnv | WebsiteEnv, *, mcp: bool) -> boo
         child = env._deployed.child_env(name, mcp=mcp) if env._deployed is not None and env._deployed.environment_card else None
         if child is not None and child.serves(METHOD_RESET) is False:
             return False
-        await protocol_v1.reset_data(base_url, timeout=DATA_PLANE_LOAD_TIMEOUT_S)
+        await protocol_v1.reset_data(base_url, timeout=DATA_PLANE_LOAD_TIMEOUT_S,
+                                     headers=data_plane_headers(env, base_url))
     elif builtin is None:
         return False
     else:
