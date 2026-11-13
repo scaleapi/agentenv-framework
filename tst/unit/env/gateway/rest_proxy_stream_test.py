@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import doctest
+import gzip
 import json
 from types import SimpleNamespace
 from urllib.parse import unquote, urlsplit
@@ -475,7 +476,6 @@ async def test_bodies_that_are_not_a_child_mcp_request_are_forwarded_untouched(m
                  rest_proxy_urls={"mcp-svc": UPSTREAM, "backend": UPSTREAM})
     rpc = json.dumps(_rpc(name="t", arguments={}, _meta={AGENT_ENV_ROLE_META_KEY: "x"})).encode()
     cases = [
-        ("/svc/mcp-svc/mcp", "POST", b"not json"),  # unparsable: as it came
         ("/svc/mcp-svc/mcp", "GET", b""),  # not a POST
         ("/svc/mcp-svc/mcpx", "POST", rpc),  # not the MCP endpoint
         ("/svc/mcp-svc/agentenv", "POST", rpc),  # the data plane keeps its body
@@ -573,6 +573,20 @@ async def test_a_batch_with_a_disabled_call_is_refused_whole(monkeypatch):
     batch = [_rpc(name="list", arguments={}), {**_rpc(name="read", arguments={}), "id": 2}]
     status, body = await _post_rpc(gw, batch, "alice@example.com")
     assert status == 400 and body["error"]["message"] == "Tool 'read' is disabled for role 'alice@example.com'"
+    assert up.requests == []
+
+
+@pytest.mark.asyncio
+async def test_a_body_the_gateway_cannot_read_is_refused_not_forwarded(monkeypatch):
+    up = _Upstream([b"{}"])
+    up.install(monkeypatch)
+    gw = _gated(_tool("read"))
+    gw._apply_rule("alice@example.com", "read", True)
+    for body, headers in [(b"not json", {}),
+                          (gzip.compress(json.dumps(_rpc(name="read", arguments={})).encode()), {"content-encoding": "gzip"})]:
+        status, _, chunks = await _call(gw, "/svc/mcp-svc/mcp", method="POST", body=body,
+                                        headers={"AgentEnv-Role": "alice@example.com", **headers})
+        assert status == 400 and json.loads(b"".join(chunks))["error"]["message"] == "The request body is not JSON"
     assert up.requests == []
 
 

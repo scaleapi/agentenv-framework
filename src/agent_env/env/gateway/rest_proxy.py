@@ -299,28 +299,31 @@ def stamp_jsonrpc_role(body: bytes, role: str) -> bytes:
     return json.dumps(parsed).encode() if stamped else body
 
 
-def called_tools(body: bytes) -> list[str]:
-    """The tool each JSON-RPC ``tools/call`` request in `body` (one request or a batch) names; none for a body that is
-    not JSON-RPC.
+def called_tools(body: bytes) -> list[str] | None:
+    """The tool each JSON-RPC ``tools/call`` request in `body` (one request or a batch) names; None for a body that is
+    not JSON.
 
     >>> called_tools(b'[{"method": "tools/call", "params": {"name": "a"}}, {"method": "tools/list", "params": {}}]')
     ['a']
-    >>> called_tools(b"not json")
-    []
+    >>> called_tools(b"not json") is None
+    True
     """
     try:
         parsed = json.loads(body)
     except ValueError:
-        return []
+        return None
     return [item["params"]["name"] for item in (parsed if isinstance(parsed, list) else [parsed])
             if isinstance(item, dict) and item.get("method") == "tools/call" and isinstance(item.get("params"), dict)
             and isinstance(item["params"].get("name"), str)]
 
 
 def tool_call_refusal(body: bytes, message: str) -> Response:
-    """The gateway's answer to a child MCP POST that calls a tool its caller may not call: one request gets the tool
-    error the gateway's own ``/mcp`` gives, and a batch is refused whole as an invalid request."""
-    parsed = json.loads(body)
+    """The gateway's answer to a child MCP POST it won't forward: one request gets the tool error the gateway's own
+    ``/mcp`` gives, and a batch, or a body that is not JSON, is refused whole as an invalid request."""
+    try:
+        parsed = json.loads(body)
+    except ValueError:
+        parsed = None
     if isinstance(parsed, dict):
         return _json_response({"jsonrpc": "2.0", "id": parsed.get("id"),
                                "result": {"content": [{"type": "text", "text": message}], "isError": True}}, 200)

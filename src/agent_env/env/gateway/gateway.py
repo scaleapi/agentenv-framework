@@ -1629,7 +1629,9 @@ class Gateway:
 
     async def _refuse_disabled_calls(self, body: bytes, role: str) -> Response | None:
         """The refusal for a child MCP POST through ``/svc`` calling a tool `role` may not call; None to forward it."""
-        if not (names := called_tools(body)):
+        if (names := called_tools(body)) is None:  # unread, it could carry a call a lenient server parses (gzip)
+            return tool_call_refusal(body, "The request body is not JSON")
+        if not names:
             return None
         if (unavailable := await self._discovery_unavailable()) is not None:
             return unavailable  # a tool hidden by default is known only once discovery has listed it
