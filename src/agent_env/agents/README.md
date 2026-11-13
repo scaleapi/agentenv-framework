@@ -21,7 +21,12 @@ the folder changes. A run that deploys the agent registers that image when it's 
 pulls it by its digest and builds it from this folder only when it can't, and a provider that runs images by name can
 run it. The CLI's version is the Dockerfile's
 `CLAUDE_CODE_VERSION`. The image gives the scripts the model runs
-`node`, without npm or npx, and the Python packages `model-requirements.txt` pins. A `deploy_agent` `builtin_tools`
+`node`, without npm or npx, and the Python packages `model-requirements.txt` pins: boto3, and openpyxl, pypdf,
+python-docx and python-pptx, which read the .xlsx, .pdf, .docx and .pptx files tasks often give the model. Without them
+a script that opens such a file stops at `ModuleNotFoundError`, and the model spends turns working around it or fails
+the task for a reason that isn't the model's; a sandbox with no network can't install them either. They add about 50 MB,
+mostly the lxml and Pillow they depend on, and their pins match the Codex and Gemini images' and Harbor bundles', so a
+task's documents read the same way in each. A `deploy_agent` `builtin_tools`
 selection picks the CLI's own tools: `{"disable": "*"}` and `{"only": [...]}` become its `--tools` list, a list to
 turn off becomes `--disallowedTools`, which keeps the CLI's defaults for the rest, and any selection adds
 `--strict-mcp-config`, so its MCP servers are only the task env's. Tool search is off unless the agent's environment sets
