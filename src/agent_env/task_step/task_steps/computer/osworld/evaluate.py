@@ -149,7 +149,7 @@ class OSWorldEvaluateTaskStep(TaskStep):
         if any(is_judge(func) for func, *_ in self._funcs()):
             context.record_model("judge", self.id, run_judge_model or self.judge_model)
         verification = await self._evaluate_funcs(endpoint, prompt_response, run_judge_model)
-        if budget is not None:
+        if budget is not None and prompt_response is not None:
             # The score is the end state's, earned after the agent ran out of room; the marker beside the verifications
             # keeps such runs separable, since score readers project only each verifier's score.
             marker = {"reason": "budget_exhausted", "error_type": str(prompt_response.error_type),
@@ -228,7 +228,7 @@ class OSWorldEvaluateTaskStep(TaskStep):
         for func, result, expected, options in funcs:
             try:
                 if func == INFEASIBLE:
-                    found = bool(answer_text) and INFEASIBLE_TAG in answer_text
+                    found = answer_text is not None and INFEASIBLE_TAG in answer_text
                     sub = {"id": INFEASIBLE, "score": PASS_SCORE if found else FAIL_SCORE, "result": found,
                            "message": "Correctly identified infeasible task" if found
                            else "Did not identify infeasible task"}
