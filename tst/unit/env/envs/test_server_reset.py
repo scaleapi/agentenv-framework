@@ -67,6 +67,15 @@ async def test_a_server_serving_data_reset_is_emptied_through_it_and_its_changel
 
 
 @pytest.mark.asyncio
+async def test_a_reset_sends_its_records_control_token_with_no_run_to_grant_it(server):
+    env = _server(_card("data/reset", "data/add", "data/get"))
+    env._deployed.control_token = "s3cret"
+
+    assert await _deployment.reset_server_data(env, mcp=True) is True
+    assert [request.headers.get("authorization") for request in server.requests] == ["Bearer s3cret"]
+
+
+@pytest.mark.asyncio
 async def test_a_server_whose_card_declares_no_data_reset_takes_no_load_and_is_left_as_it_is(server):
     assert await _deployment.reset_server_data(_server(_card()), mcp=True) is False
     assert server.requests == [] and not server.triggers.await_count

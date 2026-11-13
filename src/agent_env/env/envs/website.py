@@ -321,9 +321,10 @@ class WebsiteEnv(Env):
             try:
                 staged = {path: f"file://{await self._copy_artifact_into_container(file, paths[path])}"
                           for path, file in files.items()}
-                await protocol_v1.reset_data(base_url)
+                headers = self._deployed.control_headers_for(base_url) if self._deployed is not None else None
+                await protocol_v1.reset_data(base_url, headers=headers)
                 await protocol_v1.add_data(base_url, file_parts(environment_artifact, files, staged),
-                                           timeout=DATA_PLANE_LOAD_TIMEOUT_S)
+                                           timeout=DATA_PLANE_LOAD_TIMEOUT_S, headers=headers)
             finally:
                 if folder is not None:
                     await self._remove_from_container(folder)

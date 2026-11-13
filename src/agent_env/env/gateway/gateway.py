@@ -85,6 +85,7 @@ from .rest_proxy import (
     declared_site_names,
     fetch_child_card,
     forward,
+    is_child_mcp_path,
     listed_url,
     lowered,
     operations,
@@ -542,7 +543,7 @@ class Gateway:
         async def app(scope, receive, send):
             if self._control_bearer and scope["type"] in ("http", "websocket"):
                 headers = scope.get("headers", ())
-                if scope["type"] == "http" and scope["path"] in CONTROL_ROUTES and not hmac.compare_digest(
+                if scope["type"] == "http" and self._takes_control_token(scope["path"]) and not hmac.compare_digest(
                         dict(headers).get(b"authorization", b""), self._control_bearer):
                     response = self._json_response({"ok": False, "error": "this route takes the env's control token"}, 401)
                     await response(scope, receive, send)
@@ -565,6 +566,20 @@ class Gateway:
                 Caller.reset(token)
 
         return app
+
+    def _takes_control_token(self, path: str) -> bool:
+        """Whether a request to ``path`` takes the deploy's control token: a control route; the data plane, its
+        extensions included, the env's own or a service's behind /svc; or an MCP server's own endpoint behind /svc,
+        which skips the gateway's tool rules, trajectory and triggers. Judged as the proxy forwards a path, after
+        dot-segment normalisation. A site's /website route never reaches its data plane."""
+        if path in CONTROL_ROUTES or is_child_mcp_path(path, RPC_PATH):
+            return True
+        prefix, _, rest = path.lstrip("/").partition("/")
+        service, _, rest = rest.partition("/")
+        if prefix != "svc" or not service:
+            return False
+        endpoint = self._site_mcp_endpoints.get(service) or ("mcp" if service.startswith("mcp-") else None)
+        return is_child_mcp_path(rest, RPC_PATH) or (endpoint is not None and is_child_mcp_path(rest, endpoint))
 
     @asynccontextmanager
     async def _session_lifespan(self, mcp: FastMCP):

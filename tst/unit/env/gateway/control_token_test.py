@@ -1,10 +1,15 @@
-"""The gateway's control routes take the deploy's control token when it has one; every other route stays open."""
+"""The gateway's control routes, the data plane and an MCP server's own endpoint behind its proxy take the deploy's
+control token when it has one; every other route stays open."""
 from __future__ import annotations
+
+import asyncio
+from urllib.parse import unquote, urlsplit
 
 import httpx
 import pytest
 from starlette.responses import JSONResponse
 
+from agent_env.env.gateway import rest_proxy as rest_proxy_module
 from agent_env.env.gateway.constants import CONTROL_ROUTES
 from agent_env.env.gateway.gateway import Gateway
 
@@ -17,6 +22,18 @@ CONTROL = {
 OPEN = {"/state": "GET", "/step": "POST", "/clock/time": "GET", "/clock/state": "GET", "/triggers/state": "GET",
         "/notifications/state": "GET", "/trajectory": "GET", "/changes": "GET", "/.well-known/agent-env.json": "GET",
         "/clock/set-time": "PUT", "/clock/advance": "PUT", "/clock/clear": "POST"}
+
+
+# Behind the proxy: the data plane, its extensions, each service's included, and an MCP server's own endpoint, however
+# the path is spelt on its way to the gateway.
+GUARDED = [("POST", "/agentenv"), ("POST", "/svc/mcp-svc/agentenv"), ("POST", "/svc/mcp-svc/agentenv/ext/grant"),
+           ("POST", "/svc/mcp-svc/x/../agentenv"), ("POST", "/svc/mcp-svc/%61gentenv"), ("POST", "/svc/shop/agentenv"),
+           ("POST", "/svc/mcp-svc/mcp"), ("GET", "/svc/mcp-svc/mcp/"),
+           ("DELETE", "/svc/mcp-svc/./mcp"), ("POST", "/svc/mcp-svc//mcp")]
+PROXIED_OPEN = [("GET", "/svc/mcp-svc/.well-known/agent-env.json"), ("GET", "/svc/mcp-svc/openapi.yaml"),
+                ("GET", "/svc/mcp-svc/export-state"), ("POST", "/svc/shop/api/orders"), ("POST", "/svc/shop/mcp"),
+                ("GET", "/website/shop/index.html")]
+_RealAsyncClient = httpx.AsyncClient
 
 
 def _client(token: str | None) -> httpx.AsyncClient:
@@ -88,3 +105,84 @@ async def test_a_gateway_started_without_a_token_checks_none(path):
     async with _client(None) as client:
         response = await client.request(CONTROL[path], path, json={})
     assert response.status_code != 401
+
+
+class _Backing:
+    """The services behind the gateway's proxy: each answers every request, and the paths reaching them are kept."""
+
+    def __init__(self, monkeypatch):
+        self.paths: list[str] = []
+        transport = httpx.MockTransport(self._answer)
+        monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient", lambda **kw: _RealAsyncClient(transport=transport, **kw))
+
+    def _answer(self, request: httpx.Request) -> httpx.Response:
+        self.paths.append(request.url.path)
+
+        async def body():
+            yield b'{"jsonrpc": "2.0", "id": 1, "result": {}}'
+
+        return httpx.Response(200, headers={"content-type": "application/json"}, content=body())
+
+
+async def _proxied(token: str | None, method: str, path: str, headers: dict[str, str]) -> int:
+    """The status of one request through the gateway's served app, its path as uvicorn hands it: percent-decoded, its
+    dot segments and doubled slashes kept."""
+    gw = Gateway(host="127.0.0.1", port=0, server_name="unit", internal_mcp_servers=[], control_token=token,
+                 rest_proxy_urls={"mcp-svc": "http://svc", "shop": "http://shop-backend"},
+                 website_urls={"shop": "http://shop-backend"})
+    url = urlsplit(path)
+    scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"}, "http_version": "1.1", "method": method,
+             "scheme": "http", "path": unquote(url.path), "raw_path": url.path.encode(), "query_string": b"",
+             "root_path": "", "server": ("gateway", 80), "client": ("agent", 1),
+             "headers": [(b"content-type", b"application/json"),
+                         *((name.lower().encode(), value.encode()) for name, value in headers.items())]}
+    received, started = False, []
+
+    async def receive():
+        nonlocal received
+        if not received:
+            received = True
+            return {"type": "http.request", "body": b'{"jsonrpc": "2.0", "id": 1, "method": "data/reset"}',
+                    "more_body": False}
+        await asyncio.Event().wait()
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            started.append(message["status"])
+
+    await gw._asgi_app()(scope, receive, send)
+    return started[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method, path", GUARDED)
+@pytest.mark.parametrize("headers", [{}, {"Authorization": "Bearer wrong"}], ids=["none", "wrong"])
+async def test_the_data_plane_and_a_servers_own_endpoint_behind_the_proxy_refuse_a_call_without_the_token(
+        monkeypatch, method, path, headers):
+    backing = _Backing(monkeypatch)
+    assert await _proxied(TOKEN, method, path, headers) == 401
+    assert backing.paths == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method, path", GUARDED)
+async def test_the_data_plane_and_a_servers_own_endpoint_behind_the_proxy_answer_a_call_with_the_token(
+        monkeypatch, method, path):
+    _Backing(monkeypatch)
+    assert await _proxied(TOKEN, method, path, {"Authorization": f"Bearer {TOKEN}"}) != 401
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method, path", PROXIED_OPEN)
+async def test_the_rest_of_the_proxy_stays_open(monkeypatch, method, path):
+    backing = _Backing(monkeypatch)
+    assert await _proxied(TOKEN, method, path, {}) != 401
+    assert backing.paths
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method, path", GUARDED)
+async def test_a_gateway_started_without_a_token_guards_nothing_behind_its_proxy(monkeypatch, method, path):
+    _Backing(monkeypatch)
+    assert await _proxied(None, method, path, {}) != 401
+

@@ -57,6 +57,22 @@ async def test_a_child_env_on_the_card_loads_through_its_v1_data_plane_with_no_c
 
 
 @pytest.mark.asyncio
+async def test_a_load_sends_its_records_control_token_with_no_run_to_grant_it(sent):
+    deployed = _record(await _card("mcp-email", "shop"))
+    deployed.control_token = "s3cret"
+    web = _website()
+    web._sandbox, web._gateway_url, web._deployed = MagicMock(), _GW, deployed
+    web._copy_artifact_into_container = AsyncMock(return_value="/tmp/data/shop.json")
+    web._env_provider = MagicMock(spec=EnvironmentGatewayProvider, install_changelog_triggers=AsyncMock())
+
+    await _mcp(deployed).load_environment_artifact(_artifact("email"))
+    await web.load_environment_artifact(_artifact("shop"))
+
+    assert [(str(r.url), r.headers.get("authorization")) for r in sent] == [
+        *[(f"{_CARD}/svc/mcp-email/agentenv", "Bearer s3cret")] * 2, *[(f"{_CARD}/svc/shop/agentenv", "Bearer s3cret")] * 2]
+
+
+@pytest.mark.asyncio
 async def test_a_child_env_missing_from_the_card_takes_the_legacy_path(sent):
     # email serves no card, so the gateway leaves it out of the composed card.
     await _mcp(_record(await _card("mcp-slack"))).load_environment_artifact(_artifact("email"))

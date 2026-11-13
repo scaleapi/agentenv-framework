@@ -176,8 +176,9 @@ WILDCARD = "*"
 TOOL_DISABLE_ACTION = "disable"
 TOOL_ENABLE_ACTION = "enable"
 # The harness's routes that take the deploy's control token: the ones that change tool access, triggers and
-# notifications. Every other route stays open for now, the clock's writes included: callers outside agent-env set the
-# clock over plain HTTP and don't send the token yet.
+# notifications. The gateway also takes it for the data plane and for an MCP server's own endpoint behind its proxy
+# (Gateway._takes_control_token). Every other route stays open for now, the clock's writes included: callers outside
+# agent-env set the clock over plain HTTP and don't send the token yet.
 CONTROL_ROUTES = frozenset({
     f"/tools/{TOOL_DISABLE_ACTION}", f"/tools/{TOOL_ENABLE_ACTION}",
     "/triggers/register", "/triggers/remove", "/triggers/clear",
