@@ -1731,23 +1731,22 @@ def site_mcp_endpoints(servers: list[InternalMCPServer], website_urls: dict[str,
 
 def token_paths(servers: list[InternalMCPServer], website_urls: dict[str, str],
                 rest_proxy_urls: dict[str, str]) -> dict[str, tuple[str, ...]]:
-    """The paths under /svc/<key>/ that take the gateway's control token, by key, for each MCP server and website the
-    gateway fronts: its data plane, extensions included, and an MCP server's own MCP endpoint, at the path its
-    ``mcp_url`` gives (``/mcp`` when none is under the route's address), which skips the gateway's tool rules,
-    trajectory and triggers. A child env of its own, a computer, takes its own token, so none of its paths are here."""
+    """The paths under /svc/<key>/ that take the gateway's control token, by key: every backing server's data plane,
+    extensions included, and an MCP server's own MCP endpoint, at the path its ``mcp_url`` gives (``/mcp`` when none is
+    under the route's address), which skips the gateway's tool rules, trajectory and triggers. A child env registered
+    under its own name, a computer, takes its own token, so none of its paths are here."""
     sites = site_mcp_endpoints(servers, website_urls, rest_proxy_urls)
     paths = {}
     for key, base in rest_proxy_urls.items():
         if key in website_urls:
             paths[key] = (RPC_PATH, *((sites[key],) if key in sites else ()))
-            continue
-        name = route_environment_name(key, base, servers, website=False)
-        if name == key:
-            continue
-        endpoints = [resolved.route_path for server in servers if server.name == name
-                     if (resolved := card_url(base, server.mcp_url)) is not None and resolved.own_server
-                     and resolved.route_path is not None]
-        paths[key] = (RPC_PATH, *(endpoints or ["/mcp"]))
+        elif (name := route_environment_name(key, base, servers, website=False)) != key:
+            endpoints = [resolved.route_path for server in servers if server.name == name
+                         if (resolved := card_url(base, server.mcp_url)) is not None and resolved.own_server
+                         and resolved.route_path is not None]
+            paths[key] = (RPC_PATH, *(endpoints or ["/mcp"]))
+        elif not any(server.name == key for server in servers):
+            paths[key] = (RPC_PATH,)
     return paths
 
 

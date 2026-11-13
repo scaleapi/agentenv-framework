@@ -210,3 +210,12 @@ async def test_a_child_env_of_its_own_takes_its_own_token_through_the_proxy(monk
     assert await _proxied(TOKEN, "POST", path, {"Authorization": "Bearer the-computers"}, **computer) != 401
     forwarded = [(at, sent) for at, sent in zip(backing.paths, backing.authorization) if at != WELL_KNOWN_PATH]
     assert forwarded == [(path.removeprefix("/svc/desk"), "Bearer the-computers")]
+
+
+@pytest.mark.asyncio
+async def test_a_live_websites_data_plane_is_guarded_though_it_has_no_website_route(monkeypatch):
+    backing = _Backing(monkeypatch)
+    live = {"rest_proxy_urls": {"github": "http://github-website-backend:8000"}, "website_urls": {}}
+    assert await _proxied(TOKEN, "POST", "/svc/github/agentenv", {}, **live) == 401
+    assert await _proxied(TOKEN, "POST", "/svc/github/agentenv", {"Authorization": f"Bearer {TOKEN}"}, **live) != 401
+    assert backing.paths == ["/agentenv"]
