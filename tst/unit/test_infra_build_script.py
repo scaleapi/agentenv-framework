@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ast
 import base64
+import configparser
 import json
 import subprocess
 import sys
@@ -323,8 +324,9 @@ def test_the_service_db_smoke_waits_for_its_health_check_and_removes_the_contain
                                                (True, "x86_64", "under TCG")], ids=["kvm", "no-kvm", "another-arch"])
 def test_a_disk_forms_smoke_boots_it_in_the_launcher_until_its_desktop_runs(script, monkeypatch, capsys, kvm, machine,
                                                                            how):
-    calls, logs = [], iter(["agentenv-init: starting", "success: xvfb entered RUNNING\nsuccess: dbus entered RUNNING\n"
-                                                      "success: desktop entered RUNNING"])
+    console = "".join(f"success: {program} entered RUNNING\n"
+                      for program in ("clock", "egress", "session", "xvfb", "dbus", "desktop"))
+    calls, logs = [], iter(["agentenv-init: starting", console])
 
     def run(command, **kw):
         calls.append((command, kw.get("input")))
@@ -347,21 +349,36 @@ def test_a_disk_forms_smoke_boots_it_in_the_launcher_until_its_desktop_runs(scri
     assert f"booted to its desktop {how}" in capsys.readouterr().out
 
 
-def test_a_disk_forms_smoke_waits_for_every_program_its_bases_supervisord_conf_declares(script, monkeypatch, capsys,
-                                                                                      tmp_path):
-    conf = tmp_path / Path(script.IMAGES["agentenv-ubuntu-24.04"]).with_name("supervisord.conf")
-    conf.parent.mkdir(parents=True)
-    conf.write_text("[supervisord]\nnodaemon=true\n\n[program:xvfb]\ncommand=Xvfb\n\n[program:recorder]\ncommand=rec\n")
+@pytest.mark.parametrize("missing", ["recorder", "session"])
+def test_a_disk_forms_smoke_waits_for_every_program_its_bases_root_and_session_supervisords_declare(
+        script, monkeypatch, capsys, tmp_path, missing):
+    base = tmp_path / Path(script.IMAGES["agentenv-ubuntu-24.04"])
+    base.parent.mkdir(parents=True)
+    base.with_name("root.conf").write_text("[supervisord]\nnodaemon=true\n\n[program:session]\ncommand=supervisord\n")
+    base.with_name("supervisord.conf").write_text("[supervisord]\nnodaemon=true\n\n[program:xvfb]\ncommand=Xvfb\n\n"
+                                                  "[program:recorder]\ncommand=rec\n")
     monkeypatch.setattr(script, "REPO", tmp_path)
     monkeypatch.setattr(script, "_BOOTED_WITHIN_SECONDS", 0.01)
     monkeypatch.setattr(script.time, "sleep", lambda seconds: None)
-    console = "success: xvfb entered RUNNING\nsuccess: dbus entered RUNNING\nsuccess: desktop entered RUNNING\n"
+    console = "".join(f"success: {program} entered RUNNING\n" for program in ("session", "xvfb", "recorder")
+                      if program != missing)
     monkeypatch.setattr(script.subprocess, "run", lambda command, **kw: subprocess.CompletedProcess(
         command, 0, {"image": "amd64\n", "run": "c1\n", "logs": console}.get(command[1], ""), ""))
 
     assert _run(script, monkeypatch, "smoke", "agentenv-ubuntu-24.04-disk", "disk:1", "--launcher", "launcher:1") == 1
 
     assert "::error::disk:1 didn't boot to its desktop within 0.01s" in capsys.readouterr().out
+
+
+def test_the_sessions_supervisord_logs_to_the_console_where_a_disk_forms_smoke_reads_its_programs_start(script):
+    root = configparser.ConfigParser(interpolation=None)
+    root.read_string((script.REPO / Path(script.IMAGES["agentenv-ubuntu-24.04"]).with_name("root.conf")).read_text())
+
+    assert (root["program:session"]["stdout_logfile"], root["program:session"]["stdout_logfile_maxbytes"]) == (
+        "/dev/stdout", "0")
+    assert root["supervisord"]["nodaemon"] == "true"
+    init = (script.REPO / Path(script.IMAGES["agentenv-ubuntu-24.04-disk"]).with_name("init")).read_text()
+    assert "ln -sf /proc/self/fd/1 /newroot/dev/stdout\n" in init
 
 
 def test_a_disk_forms_smoke_needs_the_launcher_to_boot_it_in(script, monkeypatch, capsys):

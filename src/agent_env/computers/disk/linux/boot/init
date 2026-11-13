@@ -64,6 +64,12 @@ mount -t devpts -o gid=5,mode=620,ptmxmode=666 devpts /newroot/dev/pts
 case "$AGENTENV_SHM_MB" in ''|0|*[!0-9]*) shm_mb=512 ;; *) shm_mb=$AGENTENV_SHM_MB ;; esac
 unset AGENTENV_SHM_MB
 mount -t tmpfs -o mode=1777,size="${shm_mb}m" shm /newroot/dev/shm
+# The links udev or a container runtime makes, which programs name their standard streams by: the computer's root
+# supervisord sends the session's output to the console through /dev/stdout, and a shell's <(...) reads /dev/fd.
+ln -sf /proc/self/fd /newroot/dev/fd
+ln -sf /proc/self/fd/0 /newroot/dev/stdin
+ln -sf /proc/self/fd/1 /newroot/dev/stdout
+ln -sf /proc/self/fd/2 /newroot/dev/stderr
 log "starting $* as $user ($uid:$gid) in $workdir"
 # Last, as busybox runs its applets through /proc/self/exe.
 mount --move /proc /newroot/proc

@@ -25,6 +25,7 @@ from agent_env.task_step.context import (
     PromptResponse,
     StepContextError,
     TaskStepContext,
+    VerifierNotPassingError,
     context_path_segments,
     dual_keyed,
 )
@@ -464,8 +465,16 @@ class RubricsVerifierTaskStep(TaskStep):
         judge_batch_concurrency: Optional[int] = None,
         depends_on: Optional[list[TaskStepDependency]] = None,
         fail_task_on_error: bool = True,
+        fail_task_when_not_passing: bool = False,
     ):
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
+        if fail_task_when_not_passing and not fail_task_on_error:
+            raise ValueError(
+                "fail_task_when_not_passing needs fail_task_on_error: a tolerated failure lets the steps after it "
+                "run and score the run."
+            )
+        # A verdict below 1.0 fails the step with VerifierNotPassingError once the verdict is recorded.
+        self.fail_task_when_not_passing = fail_task_when_not_passing
         # RUN_CONTEXT_PARTS the judge also sees, cut at grade_up_to_turn like the trajectory.
         self.run_context_for_judge = _validated_run_context_parts(run_context_for_judge)
         # Split the criteria into batches of this many, each graded by its own judge call (up to
@@ -599,6 +608,8 @@ class RubricsVerifierTaskStep(TaskStep):
             base["judge_batch_size"] = self.judge_batch_size
         if self.judge_batch_concurrency is not None:
             base["judge_batch_concurrency"] = self.judge_batch_concurrency
+        if self.fail_task_when_not_passing:
+            base["fail_task_when_not_passing"] = True
         return base
 
     @classmethod
@@ -629,6 +640,7 @@ class RubricsVerifierTaskStep(TaskStep):
             run_context_for_judge=data.get("run_context_for_judge"),
             judge_batch_size=data.get("judge_batch_size"),
             judge_batch_concurrency=data.get("judge_batch_concurrency"),
+            fail_task_when_not_passing=data.get("fail_task_when_not_passing", False),
         )
 
     async def judge_prompt_sections(self, context: TaskStepContext, prompt_response: PromptResponse) -> list[str]:
@@ -647,6 +659,12 @@ class RubricsVerifierTaskStep(TaskStep):
         return list(step_overrides["criteria"]) if "criteria" in step_overrides else self.criteria
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
+        context = await self._grade(context)
+        if self.fail_task_when_not_passing:
+            _raise_unless_passing(self.verifier_id, context.metadata["verifications"][self.verifier_id])
+        return context
+
+    async def _grade(self, context: TaskStepContext) -> TaskStepContext:
         prompt_response = next((pr for pr in context.prompt_responses if pr.prompt_id == self.prompt_id), None)
         if prompt_response is None:
             raise StepContextError(f"PromptResponse with prompt_id='{self.prompt_id}' not found in context")
@@ -1621,3 +1639,13 @@ def is_rubrics_verifier(step_or_config: TaskStep | dict[str, Any]) -> bool:
     else:
         cls = type(step_or_config)
     return isinstance(cls, type) and issubclass(cls, RubricsVerifierTaskStep)
+
+
+def _raise_unless_passing(verifier_id: str, entry: dict) -> None:
+    """Raise VerifierNotPassingError when the recorded verdict scores below 1.0, naming the rows that weren't met."""
+    if entry["score"] >= 1:
+        return
+    unmet = [str(row.get("id")) for row in entry["results"] if row.get("score", 1.0 if row.get("result") else 0.0) < 1]
+    raise VerifierNotPassingError(
+        f"Verifier '{verifier_id}' isn't passing (score {entry['score']}); rows not met: {unmet}"
+    )
