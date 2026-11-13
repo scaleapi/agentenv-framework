@@ -108,3 +108,34 @@ async def test_a_write_the_clock_refuses_is_the_gateways_error_and_a_read_isnt_a
         await office.write_clock("state")
 
     assert refused.value.response.status_code == 400 and "not armed" in refused.value.response.text
+
+
+def _answering(monkeypatch, response: httpx.Response) -> DeployedGatewayEnv:
+    """A deployed env whose gateway answers every clock write with ``response``."""
+    real = httpx.AsyncClient
+    transport = httpx.MockTransport(lambda request: response)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real(*a, **{**k, "transport": transport}))
+    card = {"capabilities": {"extensions": list(GATEWAY_EXTENSIONS)}}
+    return DeployedGatewayEnv(env_id="office", env_version=1, gateway_url=GATEWAY, mcp_url="", sandbox_id="sb",
+                              environment_card_url=f"{GATEWAY}{WELL_KNOWN_PATH}", environment_card=card)
+
+
+@pytest.mark.asyncio
+async def test_an_older_gateways_504_naming_computers_behind_counts_the_same(monkeypatch):
+    message = "the clock is at version b.2, but laptop didn't show it (waited up to 2 s): their clocks are behind"
+    office = _answering(monkeypatch, httpx.Response(504, json={"ok": False, "stale": ["laptop"], "error": message}))
+
+    with pytest.raises(ClockFollowersBehind) as behind:
+        await office.write_clock("advance", {"virtual_time": LATER})
+
+    assert (behind.value.stale, str(behind.value)) == (["laptop"], f"env 'office': clock advance: {message}")
+
+
+@pytest.mark.asyncio
+async def test_a_proxys_own_504_stays_the_error_it_is(monkeypatch):
+    office = _answering(monkeypatch, httpx.Response(504, text="<html>Gateway Timeout</html>"))
+
+    with pytest.raises(ExtensionCallError) as failed:
+        await office.write_clock("advance", {"virtual_time": LATER})
+
+    assert failed.value.response.status_code == 504 and not isinstance(failed.value, ClockFollowersBehind)

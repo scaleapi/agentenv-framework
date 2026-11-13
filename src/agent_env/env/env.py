@@ -8,6 +8,7 @@ from abc import ABC
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, Optional, Self
 
+import httpx
 from agentenv_protocol import client as protocol_v1
 from agentenv_protocol.website import READY_TIMEOUT_S, WEBSITE_EXTENSION_URI, WEBSITE_READY_OP, WebsiteReadiness, env_readiness
 
@@ -58,6 +59,19 @@ class ClockFollowersBehind(RuntimeError):
         self.method = method
         self.stale = stale
         super().__init__(f"env '{env_id}': clock {method}: {detail}")
+
+
+def _followers_behind(response: httpx.Response) -> list[str] | None:
+    """The computers a clock write's 504 names as behind (``stale``), or None for any other answer, a proxy's own 504
+    page among them."""
+    if response.status_code != 504:
+        return None
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    stale = body.get("stale") if isinstance(body, dict) else None
+    return stale if isinstance(stale, list) else None
 
 
 class EnvNeedsGateway(RuntimeError):
@@ -189,16 +203,18 @@ class DeployedEnv:
                           timeout: int = _EXTENSION_CALL_TIMEOUT_S) -> Any:
         """A clock/v1 write (``CLOCK_WRITES``) that waits up to ``CLOCK_WAIT_FOLLOWERS_S`` for every computer following
         the clock to show it, unless ``params`` sets its own ``wait_followers_s``. Raises ``ClockFollowersBehind``
-        naming those that didn't; the write itself has applied. A clock no computer follows answers at once."""
+        naming those that didn't; the write itself has applied. A clock no computer follows answers at once. A gateway
+        from before the error's code answers the same 504 with its message as ``error``, which counts the same."""
         if method not in CLOCK_WRITES:
             raise ValueError(f"{method!r} isn't a clock write; one of {list(CLOCK_WRITES)}")
         params = {"wait_followers_s": CLOCK_WAIT_FOLLOWERS_S, **(params or {})}
         try:
             return await self.invoke(EXT_CLOCK_URI, method, params, timeout=timeout)
         except protocol_v1.ExtensionCallError as e:
-            if e.code != CLOCK_FOLLOWERS_BEHIND:
+            if (stale := _followers_behind(e.response)) is None:
                 raise
-            raise ClockFollowersBehind(self.env_id, method, e.response.json()["stale"], e.detail) from e
+            detail = e.detail if e.code == CLOCK_FOLLOWERS_BEHIND else e.response.json()["error"]
+            raise ClockFollowersBehind(self.env_id, method, stale, detail) from e
 
     async def readiness(self, timeout: float = READY_TIMEOUT_S) -> WebsiteReadiness:
         """Whether the env is ready, as the protocol determines a website env's health (``env_readiness``): every site
