@@ -15,10 +15,10 @@ else sees the registry's first. While a local task runs, a write that would reac
 store is refused (the write fence), and a bare entity may never name a local id (references
 point outward only).
 
-A configured namespace (``[namespaces.<name>]``) is routed whether or not local routing is on: its ids, what a run
-of its tasks records and every entity and object that run writes go to that namespace's own document and object
-stores. A read no id places sees the configured store and the running task's namespace, plus only the namespaces
-``reading_namespaces`` opens, so a service decides who reads which. Nothing outside a namespace may name its ids.
+A configured namespace (``[namespaces.<name>]``) is routed whether or not local routing is on: the ids the
+``[namespace_resolver]`` places in it, what a run of its tasks records and every entity and object that run writes go
+to that namespace's own document and object stores. A read no id places sees the configured store and the running
+task's namespace, plus only the namespaces ``reading_namespaces`` opens, so a service decides who reads which.
 """
 
 from __future__ import annotations
@@ -53,7 +53,6 @@ from agent_env.store.ids import (
     namespace_prefix,
     parse_namespace,
     validate_local_id,
-    validate_namespaced_id,
 )
 from agent_env.store.image_store import ImageStore, OciRegistryImageStore
 from agent_env.store.image_store.oci_registry_credentials import (
@@ -82,6 +81,7 @@ _enabled = False
 _scopes = 0
 _scopes_lock = threading.Lock()
 _run_namespace: ContextVar[Optional[str]] = ContextVar("agent_env_run_namespace", default=None)
+_run_owner: ContextVar[Optional["_RunOwner"]] = ContextVar("agent_env_run_owner", default=None)
 _readable: ContextVar[frozenset[str]] = ContextVar("agent_env_readable_namespaces", default=frozenset())
 
 
@@ -130,15 +130,43 @@ def namespace_routing() -> Iterator[None]:
 @contextmanager
 def run_scope(owner_id: str) -> Iterator[None]:
     """The run in progress, a task's or a deployment the CLI makes: what it records follows its owner id's
-    namespace. A run started inside a run in a namespace stays in that run's namespace unless its own id is local,
-    so a nested registry task can't reopen the configured stores."""
+    namespace. A run started inside a local run stays in that run's namespace unless its own id is local, so a
+    nested registry task can't reopen the configured stores; one started inside a run in a configured namespace
+    stays in that namespace (``resolved_run_namespace``)."""
     outer = _run_namespace.get()
-    inherited = outer or parse_namespace(owner_id) or ""
+    inherited = outer if outer in LOCAL_NAMESPACES else parse_namespace(owner_id) or ""
     token = _run_namespace.set(local_namespace(owner_id) or inherited)
+    owner = _run_owner.set(_RunOwner(owner_id, _run_owner.get()))
     try:
         yield
     finally:
+        _run_owner.reset(owner)
         _run_namespace.reset(token)
+
+
+class _RunOwner:
+    """A run's owner id and the run it was started in, with the configured namespace each resolver placed it in."""
+
+    def __init__(self, owner_id: str, outer: Optional[_RunOwner]) -> None:
+        self.owner_id = owner_id
+        self.outer = outer
+        self.placed: dict[Any, Optional[str]] = {}
+
+
+def resolved_run_namespace(resolver: Any) -> Optional[str]:
+    """The configured namespace of the task running, as ``resolver`` places it: the enclosing run's when that is in
+    one, else its own owner's, asked once per run and fresh. None outside a run, or for a local run."""
+    return _owner_namespace(_run_owner.get(), resolver)
+
+
+def _owner_namespace(owner: Optional[_RunOwner], resolver: Any) -> Optional[str]:
+    if owner is None:
+        return None
+    if resolver not in owner.placed:
+        outer = _owner_namespace(owner.outer, resolver)
+        owner.placed[resolver] = outer or (None if is_local_id(owner.owner_id)
+                                           else resolver.namespace_of(owner.owner_id, fresh=True))
+    return owner.placed[resolver]
 
 
 def local_run_namespace() -> Optional[str]:
@@ -149,11 +177,6 @@ def local_run_namespace() -> Optional[str]:
 
 def in_local_run() -> bool:
     return local_run_namespace() is not None
-
-
-def run_namespace() -> Optional[str]:
-    """The namespace of the task running, local or configured; None outside a run or in a run of a bare id."""
-    return _run_namespace.get() or None
 
 
 @contextmanager
@@ -181,24 +204,23 @@ def refuse_in_local_run(what: str) -> None:
 def refuse_local_references(entity_id: object, value: Any) -> None:
     """Refuse a bare entity naming a local id anywhere in ``value``: a shared store must
     never point into one person's local stores."""
-    path = _reference(value, "", is_local_id)
+    path = _local_reference(value, "")
     if path is not None:
         raise OutwardReferenceError(
             f"{entity_id!r} is not a local id, so it can't reference one: {path or 'its value'} names a local id"
         )
 
 
-def _reference(value: Any, path: str, matches: Callable[[str], bool]) -> Optional[str]:
-    """The path in ``value`` of the first string ``matches`` accepts, ``""`` for ``value`` itself; None when none does."""
+def _local_reference(value: Any, path: str) -> Optional[str]:
     if isinstance(value, str):
-        return path if matches(value) else None
+        return path if is_local_id(value) else None
     if isinstance(value, Mapping):
         items = ((f"{path}.{key}" if path else str(key), item) for key, item in value.items())
     elif isinstance(value, (list, tuple, set)):
         items = ((f"{path}[{index}]", item) for index, item in enumerate(value))
     else:
         return None
-    return next((found for item_path, item in items if (found := _reference(item, item_path, matches)) is not None), None)
+    return next((found for item_path, item in items if (found := _local_reference(item, item_path)) is not None), None)
 
 
 def _update_values(update: UpdateSpec) -> dict:
@@ -606,14 +628,16 @@ class RoutingDocumentStore(DocumentStore):
 
 class NamespaceDocumentStore(RoutingDocumentStore):
     """The configured document store with each configured namespace's documents in that namespace's own store,
-    ``namespaces`` by name: an entity by its id; a run record by the running task's namespace, else by an owner field;
-    and every entity a run in a namespace writes. A read no id places sees the running task's namespace, the configured
-    store and the namespaces ``reading_namespaces`` opens. A run in a namespace never writes a new version of a
+    ``namespaces`` by name: an entity where ``resolver`` places its id; a run record by the running task's
+    namespace, else by an owner field; and every entity a run in a namespace writes. A read no id places sees the
+    running task's namespace, the configured store and the namespaces ``reading_namespaces`` opens. A write asks
+    the resolver fresh, and is refused when it can't answer. A run in a namespace never writes a new version of a
     configured entity, so no entity id is in two stores."""
 
-    def __init__(self, configured: DocumentStore, namespaces: Mapping[str, DocumentStore]) -> None:
+    def __init__(self, configured: DocumentStore, namespaces: Mapping[str, DocumentStore], resolver: Any) -> None:
         self.configured = configured
         self.namespaces = dict(namespaces)
+        self.resolver = resolver
         self._lock = threading.Lock()
 
     def ensure_index(
@@ -627,26 +651,23 @@ class NamespaceDocumentStore(RoutingDocumentStore):
             store.ensure_index(collection, fields, unique, ttl_seconds)
 
     def check_id(self, entity_id: str) -> None:
-        namespace = self._namespace_of(entity_id)
-        if namespace is not None:
-            validate_namespaced_id(entity_id, namespace)
-            return
-        if (inside := next((name for name in self.namespaces if namespace_prefix(name) in entity_id), None)):
-            raise ValueError(
-                f"id {entity_id!r} contains an @{inside} id but isn't one: an id derived from an @{inside} id "
-                f"has to keep the @{inside} namespace"
-            )
         self.configured.check_id(entity_id)
 
-    def _namespace_of(self, value: object) -> Optional[str]:
-        namespace = parse_namespace(value) if isinstance(value, str) else None
-        return namespace if namespace in self.namespaces else None
+    def _namespace_of(self, value: object, *, fresh: bool = False) -> Optional[str]:
+        if not isinstance(value, str) or not value or is_local_id(value):
+            return None
+        namespace = self.resolver.namespace_of(value, fresh=fresh)
+        if namespace is not None and namespace not in self.namespaces:
+            raise ConfigError(f"the namespace resolver placed {value!r} in {namespace!r}, which no [namespaces] table configures")
+        return namespace
 
     def _run(self) -> Optional[str]:
-        namespace = run_namespace()
-        return namespace if namespace in self.namespaces else None
+        namespace = resolved_run_namespace(self.resolver)
+        if namespace is not None and namespace not in self.namespaces:
+            raise ConfigError(f"the namespace resolver placed this run in {namespace!r}, which no [namespaces] table configures")
+        return namespace
 
-    def _pinned(self, collection: str, filter: Filter) -> Optional[str]:
+    def _pinned(self, collection: str, filter: Filter, *, fresh: bool = False) -> Optional[str]:
         """The one namespace every id the filter pins is in: by ``id`` for an entity, by an owner field for a record."""
         fields = ("id",) if is_entity_collection(collection) else _NAMESPACE_OWNER_FIELDS
         for field in fields:
@@ -656,7 +677,7 @@ class NamespaceDocumentStore(RoutingDocumentStore):
                     values.append(pred.value)
                 elif isinstance(pred, In):
                     values.extend(pred.values)
-            namespaces = {self._namespace_of(value) for value in values}
+            namespaces = {self._namespace_of(value, fresh=fresh) for value in values}
             if values and len(namespaces) == 1 and (namespace := namespaces.pop()) is not None:
                 return namespace
         return None
@@ -680,51 +701,36 @@ class NamespaceDocumentStore(RoutingDocumentStore):
         if is_entity_collection(collection):
             if isinstance(entity_id, str):
                 self.check_id(entity_id)
-            namespace = self._namespace_of(entity_id) or run
+            placed = self._namespace_of(entity_id, fresh=True)
+            namespace = placed or run
             if run is not None and namespace != run:
-                raise NamespaceWriteError(f"a run in @{run} can't write {entity_id!r}, an @{namespace} entity")
-            if (run is not None and self._namespace_of(entity_id) is None and isinstance(entity_id, str)
+                raise NamespaceWriteError(f"a run in {run!r} can't write {entity_id!r}, which is in {namespace!r}")
+            if (run is not None and placed is None and isinstance(entity_id, str)
                     and self.configured.find_one(collection, Filter.of(id=entity_id)) is not None):
                 raise NamespaceWriteError(
-                    f"a run in @{run} can't write a new version of {entity_id!r}: it is in the configured store, "
-                    f"which a run in @{run} writes no new entities to"
+                    f"a run in {run!r} can't write a new version of {entity_id!r}: it is in the configured store, "
+                    f"which a run in {run!r} writes no new entities to"
                 )
-            self._refuse_references(entity_id, payload, namespace)
         else:
             namespace = run or next(
-                (found for field in _NAMESPACE_OWNER_FIELDS if (found := self._namespace_of(owner.get(field))) is not None), None)
+                (found for field in _NAMESPACE_OWNER_FIELDS
+                 if (found := self._namespace_of(owner.get(field), fresh=True)) is not None), None)
         return self.namespaces[namespace] if namespace is not None else self.configured
 
     def _updaters(self, collection: str, filter: Filter, payload: Any) -> Iterator[DocumentStore]:
-        pinned = self._pinned(collection, filter)
+        pinned = self._pinned(collection, filter, fresh=True)
         run = self._run()
         if pinned is not None:
             if run is not None and pinned != run:
-                raise NamespaceWriteError(f"a run in @{run} can't write @{pinned} records")
+                raise NamespaceWriteError(f"a run in {run!r} can't write records of {pinned!r}")
             yield self.namespaces[pinned]
             return
         if run is not None and not is_entity_collection(collection):
             yield self.namespaces[run]
             if self.configured.find_one(collection, filter) is not None:
-                raise NamespaceWriteError(f"a run in @{run} can't update {collection!r}: its record is in the configured store")
+                raise NamespaceWriteError(f"a run in {run!r} can't update {collection!r}: its record is in the configured store")
             return
-        for store in self._visible():
-            if store is self.configured and is_entity_collection(collection):
-                self._refuse_references(_filter_owner(filter).get("id"), payload, None)
-            yield store
-
-    def _refuse_references(self, entity_id: object, payload: Any, namespace: Optional[str]) -> None:
-        """Refuse a document naming an id in a namespace other than ``namespace``, its own (None for the configured
-        store): a namespace's ids never leave it."""
-        if payload is None:
-            return
-        others = tuple(namespace_prefix(name) for name in self.namespaces if name != namespace)
-        path = _reference(payload, "", lambda value: value.startswith(others)) if others else None
-        if path is not None:
-            where = f"@{namespace}" if namespace else "the configured store"
-            raise NamespaceWriteError(
-                f"{entity_id!r} is in {where}, so it can't reference another namespace's id: {path or 'its value'} does"
-            )
+        yield from self._visible()
 
 
 def object_store_holding(object_url: str, configured: ObjectStore, local: ObjectStore) -> ObjectStore:
@@ -993,11 +999,11 @@ class NamespaceRunObjectStore(LocalRunObjectStore):
         if self.local.owns(object_url):
             return self.local
         if (other := next((name for name, store in self.others.items() if store.owns(object_url)), None)):
-            raise NamespaceWriteError(f"a run in @{self.namespace} can't reach {object_url!r}, an @{other} object")
+            raise NamespaceWriteError(f"a run in {self.namespace!r} can't reach {object_url!r}, an object of {other!r}")
         return self.configured
 
     def _writing(self, object_url: str) -> ObjectStore:
         store = self._at(object_url)
         if store is not self.local:
-            raise NamespaceWriteError(f"a run in @{self.namespace} writes objects only to its own store, not {object_url!r}")
+            raise NamespaceWriteError(f"a run in {self.namespace!r} writes objects only to its own store, not {object_url!r}")
         return store

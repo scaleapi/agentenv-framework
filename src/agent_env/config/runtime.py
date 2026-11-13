@@ -534,12 +534,41 @@ class Config:
         """The configured ``namespace``'s own object store: its table's, with every key under ``<namespace>/``."""
         return self._namespace_store(namespace)[1]
 
-    def namespace_of(self, entity_id: str) -> Optional[str]:
-        """The configured namespace ``entity_id`` is in, or None."""
-        from agent_env.store.ids import parse_namespace
+    def namespace_of(self, entity_id: str, *, fresh: bool = False) -> Optional[str]:
+        """The configured namespace ``[namespace_resolver]`` places ``entity_id`` in, or None. ``fresh`` asks for an
+        answer read now, as before a write."""
+        from agent_env.store.ids import is_local_id
 
-        namespace = parse_namespace(entity_id)
-        return namespace if namespace is not None and namespace in self.configured_namespaces() else None
+        if not self.configured_namespaces() or not entity_id or is_local_id(entity_id):
+            return None
+        return self._checked(self.namespace_resolver().namespace_of(entity_id, fresh=fresh), entity_id)
+
+    def run_namespace(self) -> Optional[str]:
+        """The configured namespace of the task running (``run_scope``), or None."""
+        from agent_env.store import routing
+
+        if not self.configured_namespaces():
+            return None
+        return self._checked(routing.resolved_run_namespace(self.namespace_resolver()), "this run")
+
+    def namespace_resolver(self) -> Any:
+        """The ``[namespace_resolver]`` that places ids in configured namespaces (cached); required with any."""
+        from agent_env.store.namespace_resolver import NamespaceResolver
+
+        with self._routing_lock:
+            if "resolver" not in self._namespaced:
+                section = self.section("namespace_resolver")
+                if not section.get("impl"):
+                    raise ConfigError("[namespaces] needs a [namespace_resolver] table with an impl, which says which ids "
+                                      "are in which namespace")
+                self._namespaced["resolver"] = (None, config_loader.build_store(
+                    dict(section), NamespaceResolver, secret_resolver=self._resolve_secret))
+            return self._namespaced["resolver"][1]
+
+    def _checked(self, namespace: Optional[str], what: str) -> Optional[str]:
+        if namespace is not None and namespace not in self.configured_namespaces():
+            raise ConfigError(f"the namespace resolver placed {what!r} in {namespace!r}, which no [namespaces] table configures")
+        return namespace
 
     def _namespace_store(self, namespace: str) -> tuple[Any, Any]:
         from agent_env.store.document_store import DocumentStore
@@ -568,15 +597,9 @@ class Config:
             held = self._namespaced.get("document")
             if held is None or held[0] is not configured:
                 held = (configured, routing.NamespaceDocumentStore(
-                    configured, {name: self.namespace_document_store(name) for name in names}))
+                    configured, {name: self.namespace_document_store(name) for name in names}, self.namespace_resolver()))
                 self._namespaced["document"] = held
             return held[1]
-
-    def _run_namespace(self) -> Optional[str]:
-        from agent_env.store import routing
-
-        namespace = routing.run_namespace()
-        return namespace if namespace is not None and namespace in self.configured_namespaces() else None
 
     def _namespace_owning(self, object_url: str) -> Optional[str]:
         return next((name for name in self.configured_namespaces() if self.namespace_object_store(name).owns(object_url)), None)
@@ -747,7 +770,7 @@ class Config:
         from agent_env.store import routing
 
         configured = self._configured_object_store()
-        if (namespace := self._run_namespace()) is not None:
+        if (namespace := self.run_namespace()) is not None:
             return self._namespace_run_object_store(namespace, configured)
         if not routing.in_local_run():
             return configured
@@ -772,7 +795,7 @@ class Config:
         from agent_env.store import routing
         from agent_env.store.ids import is_local_id
 
-        if (namespace := self.namespace_of(entity_id) or self._run_namespace()) is not None:
+        if (namespace := self.namespace_of(entity_id, fresh=True) or self.run_namespace()) is not None:
             return self.namespace_object_store(namespace)
         configured, local = self._namespace_stores("object")
         if local is None:
@@ -805,12 +828,12 @@ class Config:
         from agent_env.store import routing
         from agent_env.store.ids import is_local_id
 
-        namespace = self.namespace_of(entity_id) or self._run_namespace()
+        namespace = self.namespace_of(entity_id, fresh=True) or self.run_namespace()
         owner = self._namespace_owning(object_url)
         if namespace != owner and namespace is not None:
-            raise ValueError(f"{entity_id!r} keeps its objects in the @{namespace} namespace's store, not {object_url!r}")
+            raise ValueError(f"{entity_id!r} keeps its objects in the {namespace!r} namespace's store, not {object_url!r}")
         if namespace != owner:
-            raise ValueError(f"{entity_id!r} is in no configured namespace, so it can't record {object_url!r}, an @{owner} object")
+            raise ValueError(f"{entity_id!r} is in no configured namespace, so it can't record {object_url!r}, an object of {owner!r}")
         if namespace is not None:
             return
         configured, local = self._namespace_stores("object")

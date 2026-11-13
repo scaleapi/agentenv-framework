@@ -309,6 +309,10 @@ config = { path = "/tmp/team-a.db" }
 impl = "agent_env.store.object_store:LocalFilesystemObjectStore"
 config = { root = "/tmp/team-a" }
 
+[namespace_resolver]
+impl = "agent_env.store.namespace_resolver:TableNamespaceResolver"
+config = { ids = { team-a = ["team-task"] } }
+
 [explorer]
 port = 9999
 
@@ -324,7 +328,7 @@ timeout = 30
 
 _ALIASED = ("document", "object", "image", "secret", "runner")
 _EVERY_TABLE = ("document", "object", "image", "secret", "runner", "model", "conversations",
-                "agents", "sandbox", "state", "envs", "artifacts", "task_steps", "namespaces", "explorer")
+                "agents", "sandbox", "state", "envs", "artifacts", "task_steps", "namespaces", "resolver", "explorer")
 
 
 @pytest.mark.parametrize("toml", [None, MONGO_TOML, FULL_SURFACE_TOML])

@@ -1,11 +1,10 @@
 """Namespaced entity ids, and the object keys, image repositories and filenames derived from them.
 
 An id opening ``@<namespace>/`` names the store it lives in. The local namespaces, ``@local/…`` and ``@hf/…``
-(a bundle ``agent-env run hf://`` downloaded from the Hugging Face Hub), are this machine's local stores; a
-configured namespace (``[namespaces.<name>]``) has stores of its own beside the configured ones. Documents keep an
-id verbatim. Everything derived from a local id uses one bounded segment, ``local/<slug>-<sha256(id)[:12]>``, and
-from another namespace's id ``<namespace>/<slug>-<sha256(id)[:12]>``; an object key or image repository takes a
-bare id over 200 bytes as ``<slug>-<sha256(id)[:12]>``; every other id passes through byte-identical.
+(a bundle ``agent-env run hf://`` downloaded from the Hugging Face Hub), are this machine's local stores; no other
+exists today. Documents keep an id verbatim. Everything derived from a local id uses one bounded
+segment, ``local/<slug>-<sha256(id)[:12]>``; an object key or image repository takes a bare id over
+200 bytes as ``<slug>-<sha256(id)[:12]>``; every other id passes through byte-identical.
 The encoders never raise: they expect ids that ``validate_local_id`` accepts, and still return a
 safe segment for any other input. An id may contain spaces, ``&`` and parentheses, so quote one
 before it reaches a shell or a URL, and derive object keys, image repositories and filenames with
@@ -75,7 +74,23 @@ def validate_local_id(entity_id: str) -> None:
     namespace = local_namespace(entity_id)
     if namespace is None:
         raise ValueError(f"local id {entity_id!r} must start with {LOCAL_PREFIX!r} or {HF_PREFIX!r}")
-    _validate_in(entity_id, namespace, "local id")
+    prefix = namespace_prefix(namespace)
+    size = len(entity_id.encode("utf-8", "surrogatepass"))
+    if size > MAX_LOCAL_ID_BYTES:
+        raise ValueError(f"local id is {size} bytes; the limit is {MAX_LOCAL_ID_BYTES}: {entity_id[:64]!r}…")
+    disallowed = sorted({c for c in entity_id[len(prefix):] if not _allowed_in_id(c)})
+    if disallowed:
+        raise ValueError(
+            f"local id {entity_id!r} contains {ascii(''.join(disallowed))}; "
+            "a local id may contain only letters, digits, spaces and . _ - ~ / @ ( ) + , &"
+        )
+    segments = entity_id[len(prefix):].split("/")
+    if any(segment in ("", ".", "..") for segment in segments):
+        raise ValueError(f"local id {entity_id!r} has an empty, '.' or '..' path segment")
+    if any(segment != segment.strip(" ") for segment in segments):
+        raise ValueError(f"local id {entity_id!r} has a path segment that opens or closes with a space")
+    if any(_detached_mark(segment) for segment in segments):
+        raise ValueError(f"local id {entity_id!r} has a combining mark that does not follow a letter or digit")
 
 
 def validate_namespace_name(namespace: str) -> None:
@@ -85,33 +100,6 @@ def validate_namespace_name(namespace: str) -> None:
         raise ValueError(f"@{namespace} is a local namespace, so it can't be configured")
     if not isinstance(namespace, str) or not _NAMESPACE_NAME.fullmatch(namespace):
         raise ValueError(f"namespace {namespace!r} must be 1 to 64 lowercase letters, digits and inner '-'")
-
-
-def validate_namespaced_id(entity_id: str, namespace: str) -> None:
-    """``validate_local_id``'s rules for an id in the configured ``namespace``."""
-    if not entity_id.startswith(namespace_prefix(namespace)):
-        raise ValueError(f"id {entity_id!r} must start with {namespace_prefix(namespace)!r}")
-    _validate_in(entity_id, namespace, f"@{namespace} id")
-
-
-def _validate_in(entity_id: str, namespace: str, what: str) -> None:
-    prefix = namespace_prefix(namespace)
-    size = len(entity_id.encode("utf-8", "surrogatepass"))
-    if size > MAX_LOCAL_ID_BYTES:
-        raise ValueError(f"{what} is {size} bytes; the limit is {MAX_LOCAL_ID_BYTES}: {entity_id[:64]!r}…")
-    disallowed = sorted({c for c in entity_id[len(prefix):] if not _allowed_in_id(c)})
-    if disallowed:
-        raise ValueError(
-            f"{what} {entity_id!r} contains {ascii(''.join(disallowed))}; "
-            f"a {what} may contain only letters, digits, spaces and . _ - ~ / @ ( ) + , &"
-        )
-    segments = entity_id[len(prefix):].split("/")
-    if any(segment in ("", ".", "..") for segment in segments):
-        raise ValueError(f"{what} {entity_id!r} has an empty, '.' or '..' path segment")
-    if any(segment != segment.strip(" ") for segment in segments):
-        raise ValueError(f"{what} {entity_id!r} has a path segment that opens or closes with a space")
-    if any(_detached_mark(segment) for segment in segments):
-        raise ValueError(f"{what} {entity_id!r} has a combining mark that does not follow a letter or digit")
 
 
 def _allowed_in_id(character: str) -> bool:
@@ -125,12 +113,12 @@ def _detached_mark(segment: str) -> bool:
     return any(this == "M" and before not in _ID_CATEGORIES for before, this in zip(["Z", *categories], categories))
 
 
-def _local_segment(entity_id: str, namespace: str = LOCAL_NAMESPACE) -> str:
+def _local_segment(entity_id: str) -> str:
     digest = hashlib.sha256(entity_id.encode("utf-8", "surrogatepass")).hexdigest()[:_HASH_LENGTH]
-    decomposed = unicodedata.normalize("NFKD", entity_id.removeprefix(namespace_prefix(namespace)))
+    decomposed = unicodedata.normalize("NFKD", entity_id.removeprefix(LOCAL_PREFIX))
     folded = "".join(c for c in decomposed if not unicodedata.combining(c)).casefold().replace("~", "")
     slug = _NON_SLUG_RUN.sub("-", folded).strip("-")[:_SLUG_LENGTH].rstrip("-")
-    return f"{namespace}/{slug}-{digest}" if slug else f"{namespace}/{digest}"
+    return f"{LOCAL_NAMESPACE}/{slug}-{digest}" if slug else f"{LOCAL_NAMESPACE}/{digest}"
 
 
 def aliases_local_encoding(entity_id: str) -> bool:
@@ -139,19 +127,10 @@ def aliases_local_encoding(entity_id: str) -> bool:
     return _ENCODED_LOCAL_ID.match(entity_id) is not None
 
 
-def _namespaced(entity_id: str) -> bool:
-    """Whether ``entity_id`` is ``@<namespace>/…`` for a name a namespace could be configured under."""
-    namespace = parse_namespace(entity_id)
-    return (namespace is not None and namespace not in LOCAL_NAMESPACES and "/" in entity_id
-            and _NAMESPACE_NAME.fullmatch(namespace) is not None)
-
-
 def key_segment(entity_id: str) -> str:
     """The object-key segment for ``entity_id`` (``artifacts/<type>/<segment>/<version>/…``)."""
     if is_local_id(entity_id):
         return _local_segment(entity_id)
-    if _namespaced(entity_id):
-        return _local_segment(entity_id, parse_namespace(entity_id))
     if len(entity_id.encode("utf-8", "surrogatepass")) > MAX_BARE_SEGMENT_BYTES:
         return _local_segment(entity_id).removeprefix(f"{LOCAL_NAMESPACE}/")
     return entity_id
@@ -190,3 +169,10 @@ def derive_path_id(base: str, path: str) -> str:
     """The id of the file at ``path`` written with ``base``, as a file universe's files are: ``<base>__<16 hex of the
     path's sha256>``, which any path fits in."""
     return derive_id(base, hashlib.sha256(path.encode("utf-8")).hexdigest()[:16])
+
+
+def id_bases(entity_id: str) -> list[str]:
+    """``entity_id`` and every id it was derived from by ``derive_id``, longest first: ``a__b__c`` gives
+    ``a__b__c``, ``a__b`` and ``a``."""
+    parts = entity_id.split("__")
+    return ["__".join(parts[:end]) for end in range(len(parts), 0, -1) if parts[:end] != [""]]

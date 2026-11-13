@@ -113,7 +113,7 @@ class EnvSnapshot:
         universe_id = environment_universe["id"]
         universe_version = environment_universe["version"]
         if is_local_id(env_id) != is_local_id(universe_id) or (
-                get_config().namespace_of(env_id) != get_config().namespace_of(universe_id)):
+                get_config().namespace_of(env_id, fresh=True) != get_config().namespace_of(universe_id, fresh=True)):
             raise ValueError(
                 f"env {env_id!r} and universe {universe_id!r} are in different namespaces; a snapshot is recorded "
                 "under both, so both have to be in the same one"
