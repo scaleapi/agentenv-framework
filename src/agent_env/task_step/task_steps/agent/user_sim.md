@@ -31,11 +31,36 @@ Its own fields:
 | `agent_name` | required | The agent's name, and the key always-on's `user_sim` names |
 | `persona` | required | Who the user is: `display_name` (their full name), `first_name` (else the display name's first word), `time_zone` (their IANA zone; else the task clock's, else UTC; a clock that sets a different zone is refused), `description`, `permissions`, `keep_private`, `schedule`, `response_times`, `max_replies` (after that many replies the user stops reading) |
 | `model` | required | The user sim's model. This step's `step_params` `model` wins, then the run's `user_model` (`--user-model`), then this |
-| `opening_prompt` | required | The user's first message. The always-on step sends it and has no prompt of its own |
+| `opening_prompt` | required | The user's first message: text, or text and file parts (below). The always-on step sends it and has no prompt of its own |
 | `multi_day` | required, for now | Whether the run goes past the day it starts on (always-on's `end_time` falls on a later day). It picks the prompt's done line; always-on refuses a run of the other kind |
 
 `multi_day` is a stopgap: the prompt is written before the run, so the step has to be told which done line to use.
 It goes away once the step can learn it from the task.
+
+**A first message with files.** `opening_prompt` can be a list of parts in `prompt_agent`'s `parts` format, text and
+file parts, for a first message that attaches a photo, a PDF, a spreadsheet or any other file:
+
+```json
+"opening_prompt": [
+  {"kind": "text", "text": "ok mom and dad are officially coming thu–mon (nov 19–23), can you handle it?"},
+  {"kind": "file", "file": {"uri": "s3://<bucket>/<trip>/itinerary.pdf", "name": "itinerary.pdf", "mimeType": "application/pdf"},
+   "metadata": {"description": "Mom and Dad's flight itinerary"}}
+]
+```
+
+The agent gets the parts on its first wake, in order: the text, joined, as the user's one labelled line where the
+first text part was, and each file in its place. The files are in the user's first message of the graded
+conversation too. A file goes through the same sharing as any prompt's file part (an object a configured store owns is
+sent as a URL the agent can read), and the seed fills `<placeholder>`s in its `uri` and `name`. Whether the agent can
+open a file is up to its harness.
+
+The user sim can't open files, so its prompt and its first read say what it attached, after its message: `"ok mom
+and dad…" (you attached itinerary.pdf: Mom and Dad's flight itinerary)`. `metadata.description` is that one line; the
+agent is sent the file without it. With no description, the user sim gets the file's name only (its `name`, else the
+last part of its `uri`). The step refuses, when the task loads, an opening with no text, a part that isn't a valid
+text or file part, or a description that isn't one line. The run records the opening's text in
+`metadata["user_sims"][<agent_name>]["opening"]`, as for a text-only opening, and the parts, as written, in
+`opening_parts`.
 
 `system_prompt` is written from the persona and `opening_prompt`, so the step refuses one set directly. Each read shows times
 in the persona's `time_zone`. A run-wide `a2a_agent_id` never changes the user
@@ -44,7 +69,9 @@ whose card takes no system prompt or no model fails the step, since without them
 
 **Used with prompt_agent.** A `prompt_agent` step whose `user_agent_name` is this step's `agent_name` (and sets no
 `user_a2a_url`) talks to the same user in one sitting: each reply of the agent is one read, with no phone. Its prompt
-must be this step's `opening_prompt`, which the user's prompt quotes as what they sent (FD-5495 is to write it once).
+must be this step's `opening_prompt`, which the user's prompt quotes as what they sent (FD-5495 is to write it once):
+the same text, and the same files in the same order, once the seed is filled in. The check compares each file part's
+`file` (`uri`, `name`, `mimeType`), not its `metadata`, so the description can stay on this step alone.
 `reply` is the agent's next prompt; `done` with a message reaches the agent and ends
 the conversation after its answer; `done` without one, or `no_reply`, ends it at once. After `max_replies` replies,
 the last one reaches the agent and the conversation ends after its answer; the user isn't asked again, not even by a
