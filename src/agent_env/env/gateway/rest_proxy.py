@@ -42,6 +42,7 @@ from typing import Any, NamedTuple
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 import httpx
+from mcp.types import INVALID_REQUEST
 from starlette.requests import HTTPConnection, Request
 from starlette.responses import Response, StreamingResponse
 from starlette.types import Receive, Scope, Send
@@ -296,6 +297,34 @@ def stamp_jsonrpc_role(body: bytes, role: str) -> bytes:
             params["_meta"] = meta
             stamped = True
     return json.dumps(parsed).encode() if stamped else body
+
+
+def called_tools(body: bytes) -> list[str]:
+    """The tool each JSON-RPC ``tools/call`` request in `body` (one request or a batch) names; none for a body that is
+    not JSON-RPC.
+
+    >>> called_tools(b'[{"method": "tools/call", "params": {"name": "a"}}, {"method": "tools/list", "params": {}}]')
+    ['a']
+    >>> called_tools(b"not json")
+    []
+    """
+    try:
+        parsed = json.loads(body)
+    except ValueError:
+        return []
+    return [item["params"]["name"] for item in (parsed if isinstance(parsed, list) else [parsed])
+            if isinstance(item, dict) and item.get("method") == "tools/call" and isinstance(item.get("params"), dict)
+            and isinstance(item["params"].get("name"), str)]
+
+
+def tool_call_refusal(body: bytes, message: str) -> Response:
+    """The gateway's answer to a child MCP POST that calls a tool its caller may not call: one request gets the tool
+    error the gateway's own ``/mcp`` gives, and a batch is refused whole as an invalid request."""
+    parsed = json.loads(body)
+    if isinstance(parsed, dict):
+        return _json_response({"jsonrpc": "2.0", "id": parsed.get("id"),
+                               "result": {"content": [{"type": "text", "text": message}], "isError": True}}, 200)
+    return _json_response({"jsonrpc": "2.0", "id": None, "error": {"code": INVALID_REQUEST, "message": message}}, 400)
 
 
 def raw_remainder(raw_path: bytes, decoded_path: str, decoded_rest: str) -> bytes:

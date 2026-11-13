@@ -9,15 +9,20 @@ from __future__ import annotations
 import asyncio
 import doctest
 import json
+from types import SimpleNamespace
 from urllib.parse import unquote, urlsplit
 
 import httpx
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
+from mcp.types import Tool as MCPTool
 from starlette.testclient import TestClient
 from agentenv_protocol.website import ApiContext, WebsiteEnvironment, api, website
 
-from agent_env.env.gateway import AGENT_ENV_ROLE_META_KEY, AGENT_ENV_SESSION_META_KEY
+from agent_env.env.gateway import (AGENT_ENV_HIDDEN_BY_DEFAULT_META_KEY, AGENT_ENV_ROLE_META_KEY,
+                                   AGENT_ENV_SESSION_META_KEY, InternalMCPServer)
 from agent_env.env.gateway import gateway as gateway_module
+from agent_env.env.gateway.caller import Caller
 from agent_env.env.gateway import rest_proxy as rest_proxy_module
 from agent_env.env.gateway.gateway import Gateway
 
@@ -477,10 +482,123 @@ async def test_bodies_that_are_not_a_child_mcp_request_are_forwarded_untouched(m
         ("/svc/backend/mcp", "POST", rpc),  # not an mcp-* service
         ("/svc/mcp-svc/mcp", "POST", b'{"jsonrpc": "2.0", "id": 1, "result": {}}'),  # no params: nothing to stamp
     ]
+    gw._apply_rule("alice@example.com", "t", True)  # the tool gate reads only a child's MCP endpoint
     for path, method, body in cases:
         status, _, _ = await _call(gw, path, method=method, body=body, headers={"AgentEnv-Role": "alice@example.com"})
         assert status == 200, path
     assert [r.content for r in up.requests] == [body for _, _, body in cases]
+
+
+# --- A call to a child's MCP endpoint through /svc meets the tool rules /mcp applies ---
+
+
+class _Listing:
+    """A child session as discovery reads it: the tools the child lists."""
+
+    def __init__(self, tools: list[MCPTool]):
+        self.tools = tools
+
+    async def list_tools(self):
+        return SimpleNamespace(tools=self.tools)
+
+
+def _tool(name: str, meta: dict | None = None) -> MCPTool:
+    return MCPTool(name=name, description="", inputSchema={"type": "object", "properties": {}}, _meta=meta)
+
+
+def _gated(*tools: MCPTool, servers=None, **kw) -> Gateway:
+    kw.setdefault("rest_proxy_urls", {"mcp-svc": UPSTREAM})
+    gw = Gateway(host="127.0.0.1", port=0, server_name="t",
+                 internal_mcp_servers=servers or [InternalMCPServer("svc", f"{UPSTREAM}/mcp")], **kw)
+
+    async def open_session(server, stack, report):
+        return _Listing(list(tools))
+
+    gw._sessions.open_session = open_session  # type: ignore[method-assign]
+    return gw
+
+
+async def _post_rpc(gw: Gateway, payload, role: str, path: str = "/svc/mcp-svc/mcp") -> tuple[int, dict]:
+    body = json.dumps(payload).encode()
+    try:
+        status, _, chunks = await _call(gw, path, method="POST", body=body, headers={
+            "AgentEnv-Role": role, "content-type": "application/json", "content-length": str(len(body))})
+    finally:
+        await gw._close_child_sessions()
+    return status, json.loads(b"".join(chunks))
+
+
+@pytest.mark.asyncio
+async def test_a_tool_disabled_for_the_caller_is_refused_as_mcp_refuses_it_and_never_reaches_the_child(monkeypatch):
+    up = _Upstream([b"{}"])
+    up.install(monkeypatch)
+    gw = _gated(_tool("read"), _tool("list"))
+    gw._apply_rule("alice@example.com", "read", True)
+    refused = await _post_rpc(gw, _rpc(name="read", arguments={}), "alice@example.com")
+    allowed = [await _post_rpc(gw, _rpc(name="list", arguments={}), "alice@example.com"),
+               await _post_rpc(gw, _rpc(name="read", arguments={}), "carol@example.com")]
+    token = Caller(role="alice@example.com").bind()
+    try:
+        with pytest.raises(ToolError) as on_mcp:
+            await gw._mcp._tool_manager.call_tool("read", {})
+    finally:
+        Caller.reset(token)
+    assert refused == (200, {"jsonrpc": "2.0", "id": 1, "result": {
+        "content": [{"type": "text", "text": str(on_mcp.value)}], "isError": True}})
+    assert allowed == [(200, {}), (200, {})]
+    assert [json.loads(r.content)["params"]["name"] for r in up.requests] == ["list", "read"]
+
+
+@pytest.mark.asyncio
+async def test_a_tool_hidden_by_default_is_refused_until_a_rule_names_it(monkeypatch):
+    up = _Upstream([b"{}"])
+    up.install(monkeypatch)
+    gw = _gated(_tool("insert", {AGENT_ENV_HIDDEN_BY_DEFAULT_META_KEY: True}))
+    call = _rpc(name="insert", arguments={})
+    unnamed = await _post_rpc(gw, call, "default")  # the first call discovers what is hidden
+    gw._apply_rule("*", "*", False)  # a rule for every tool never reaches a hidden one
+    wildcard = await _post_rpc(gw, call, "default")
+    gw._apply_rule("*", "insert", False)
+    named = await _post_rpc(gw, call, "default")
+    assert unnamed[1]["result"]["isError"] and wildcard[1]["result"]["isError"]
+    assert named == (200, {}) and len(up.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_batch_with_a_disabled_call_is_refused_whole(monkeypatch):
+    up = _Upstream([b"{}"])
+    up.install(monkeypatch)
+    gw = _gated(_tool("read"), _tool("list"))
+    gw._apply_rule("alice@example.com", "read", True)
+    batch = [_rpc(name="list", arguments={}), {**_rpc(name="read", arguments={}), "id": 2}]
+    status, body = await _post_rpc(gw, batch, "alice@example.com")
+    assert status == 400 and body["error"]["message"] == "Tool 'read' is disabled for role 'alice@example.com'"
+    assert up.requests == []
+
+
+@pytest.mark.asyncio
+async def test_a_site_s_own_mcp_endpoint_is_gated_the_same_way(monkeypatch):
+    up = _Upstream([b"{}"])
+    up.install(monkeypatch)
+    gw = _gated(_tool("checkout"), servers=[InternalMCPServer("shop", f"{UPSTREAM}/tools/mcp")],
+                rest_proxy_urls={"shop": UPSTREAM}, website_urls={"shop": UPSTREAM})
+    gw._apply_rule("default", "checkout", True)
+    status, body = await _post_rpc(gw, _rpc(name="checkout", arguments={}), "default", path="/svc/shop/tools/mcp")
+    assert status == 200 and body["result"]["isError"] and up.forwarded == []
+
+
+@pytest.mark.asyncio
+async def test_a_call_is_refused_while_discovery_cannot_complete(monkeypatch):
+    up = _Upstream([b"{}"])
+    up.install(monkeypatch)
+    gw = _gated()
+
+    async def unreachable(server, stack, report):
+        raise httpx.ConnectError("down")
+
+    gw._sessions.open_session = unreachable  # type: ignore[method-assign]
+    status, body = await _post_rpc(gw, _rpc(name="read", arguments={}), "default")
+    assert status == 503 and "discovery" in body["error"] and up.requests == []
 
 
 def _forwarded(request: httpx.Request) -> tuple[list[str], list[str], list[str]]:
