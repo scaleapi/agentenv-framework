@@ -386,7 +386,7 @@ func (p *Proxy) tunnel(conn net.Conn, br *bufio.Reader, host string, port int, d
 	// Each address in turn, by its own probe: one that doesn't answer is passed over, so the connection goes to a
 	// server whose own certificate decided it.
 	var unreachable []string
-	for _, dst := range dsts {
+	for _, dst := range p.preferChecked(dsts, sni) {
 		delete(row, "probe_error")
 		delete(row, "upstream_valid")
 		seen, probed := p.probeAt(dst, sni, verifyName, hello)
@@ -427,6 +427,22 @@ func (p *Proxy) tunnel(conn net.Conn, br *bufio.Reader, host string, port int, d
 	}
 	row["error"] = truncate("upstream: no address answered: "+strings.Join(unreachable, "; "), 300)
 	p.log(row)
+}
+
+// preferChecked is dsts with those whose fresh probe answered first, each group in its own order, so an address
+// already found working isn't kept waiting behind one whose probe has to be made again.
+func (p *Proxy) preferChecked(dsts []string, sni string) []string {
+	p.probes.mu.Lock()
+	defer p.probes.mu.Unlock()
+	var checked, rest []string
+	for _, dst := range dsts {
+		if hit, ok := p.probes.cache[dst+"|"+sni]; ok && hit.fresh() && !hit.unreachable {
+			checked = append(checked, dst)
+		} else {
+			rest = append(rest, dst)
+		}
+	}
+	return append(checked, rest...)
 }
 
 // splice relays the connection to the first of dsts that answers, untouched; false, with the error in row, when none

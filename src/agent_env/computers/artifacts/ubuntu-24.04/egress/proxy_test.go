@@ -548,3 +548,17 @@ func TestAProbeThatPanicsLeavesNoOneWaitingOnIt(t *testing.T) {
 		t.Fatal("a second probe waited on the one that panicked")
 	}
 }
+
+func TestAnAddressAlreadyFoundWorkingIsTriedBeforeOnesNotYetProbed(t *testing.T) {
+	p := &Proxy{}
+	p.probes.cache = map[string]probe{
+		"[2001:db8::1]:443|x": {verified: true, at: time.Now()},
+		"192.0.2.1:443|x":     {unreachable: true, at: time.Now().Add(-2 * ProbeFailedTTL)},
+		"192.0.2.3:443|x":     {unreachable: true, at: time.Now()},
+	}
+	got := p.preferChecked([]string{"192.0.2.1:443", "192.0.2.2:443", "192.0.2.3:443", "[2001:db8::1]:443"}, "x")
+	want := []string{"[2001:db8::1]:443", "192.0.2.1:443", "192.0.2.2:443", "192.0.2.3:443"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("%v", got)
+	}
+}

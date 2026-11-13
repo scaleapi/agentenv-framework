@@ -1146,14 +1146,28 @@ def test_the_sdk_server_reaches_its_staging_on_the_port_it_took_the_request_on(
 
 
 @pytest.mark.asyncio
-async def test_a_process_made_direct_takes_no_proxy_from_the_environment_for_its_transfers(
+async def test_a_process_made_direct_takes_no_proxy_from_the_environment_but_still_its_certificates(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    trusted = []
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "local grant server CA")])
+    ca = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key())
+          .serial_number(1).not_valid_before(datetime(2020, 1, 1, tzinfo=_UTC))
+          .not_valid_after(datetime(2040, 1, 1, tzinfo=_UTC))
+          .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+          .sign(key, hashes.SHA256()))
+    (tmp_path / "ca.pem").write_bytes(ca.public_bytes(serialization.Encoding.PEM))
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "ca.pem"))
+    made = []
 
     def recording(real):
         def make(**kwargs):
-            trusted.append(kwargs.get("trust_env", True))
+            made.append(kwargs)
             return real(transport=httpx.MockTransport(lambda request: httpx.Response(200)), **kwargs)
 
         return make
@@ -1164,7 +1178,9 @@ async def test_a_process_made_direct_takes_no_proxy_from_the_environment_for_its
     transfers.direct()
     await upload(_write_object(), _write(tmp_path / "after.json", b"{}"))
 
-    assert trusted == [True, False]
+    assert "trust_env" not in made[0] and made[1]["trust_env"] is False
+    trusted = {dict(item[0] for item in cert["subject"])["commonName"] for cert in made[1]["verify"].get_ca_certs()}
+    assert "local grant server CA" in trusted
 
 
 def test_a_computers_own_servers_make_their_transfers_direct(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1174,13 +1190,13 @@ def test_a_computers_own_servers_make_their_transfers_direct(monkeypatch: pytest
 
     class Driver:
         def serve(self) -> None:
-            seen.append(transfers.proxy_from_environment())
+            seen.append(transfers.client_options().get("trust_env", True))
 
     monkeypatch.setattr(transfers, "_proxy_from_environment", True)
     monkeypatch.setattr(serve, "driver_class", lambda file, name: Driver)
     serve.main(["driver.py:Driver"])
     monkeypatch.setattr(transfers, "_proxy_from_environment", True)
-    monkeypatch.setattr(serve_app, "_serve", lambda argv: seen.append(transfers.proxy_from_environment()))
+    monkeypatch.setattr(serve_app, "_serve", lambda argv: seen.append(transfers.client_options().get("trust_env", True)))
     serve_app.main(["app.py:App"])
 
     assert seen == [False, False]
