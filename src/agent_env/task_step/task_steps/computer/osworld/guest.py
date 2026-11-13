@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 from agentenv_protocol import client as protocol_v1
 
-from agent_env.osworld import GUEST_EXTENSION, controller
+from agent_env.task_step.task_steps.computer.osworld import GUEST_EXTENSION, controller
 
 logger = logging.getLogger(__name__)
 

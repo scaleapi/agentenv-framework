@@ -1,5 +1,5 @@
 """The ``osworld-server`` computer app: the OSWorld guest server, which a CUA VM runs on port 5000, run on a computer
-as the session user from the source staged under ``payload/`` (``agent_env.osworld.stage_server``), so the
+as the session user from the source staged under ``payload/`` (``agent_env.task_step.task_steps.computer.osworld.stage_server``), so the
 ``osworld_*`` steps set up and grade OSWorld tasks there. Its own server forwards ``/osworld/<route>`` to the guest
 server, and its card advertises that prefix as the endpoint of the ``osworld-guest/v1`` extension, which the computer
 roots where it serves the app and guards with the env's control token. The OSWorld controller, deployed beside the

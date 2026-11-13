@@ -8,8 +8,8 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from agent_env.osworld import guest
-from tst.unit.osworld.helpers import ENV_URL, TOKEN, card, computer
+from agent_env.task_step.task_steps.computer.osworld import guest
+from tst.unit.task_step.osworld.helpers import ENV_URL, TOKEN, card, computer
 
 
 def test_the_endpoint_is_the_one_an_app_advertises_for_the_guest_extension():

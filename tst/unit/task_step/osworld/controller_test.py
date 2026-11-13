@@ -9,8 +9,8 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from agent_env.osworld import controller
-from tst.unit.osworld.helpers import CONTROLLER, CONTROLLER_TOKEN, ENDPOINT, Controller, route_httpx
+from agent_env.task_step.task_steps.computer.osworld import controller
+from tst.unit.task_step.osworld.helpers import CONTROLLER, CONTROLLER_TOKEN, ENDPOINT, Controller, route_httpx
 
 
 @pytest.fixture

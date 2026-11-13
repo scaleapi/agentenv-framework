@@ -2,7 +2,7 @@
 
 The controller holds the grader, a task's checks and the judge's key, and a computer's apps run as its session user,
 the agent's, so it runs apart from the computer, in remote mode against the guest server at the endpoint the
-computer's card advertises (``agent_env.osworld.guest``), with the env's control token on every call. Its own port may be
+computer's card advertises (``agent_env.task_step.task_steps.computer.osworld.guest``), with the env's control token on every call. Its own port may be
 reachable from the computer, so it requires a bearer token derived from that control token (``CONTROLLER_AUTH_TOKEN``)
 and the step refuses a controller that answers without it. Once it answers, the step records the controller's and the guest server's addresses on the env for ``osworld_initialize`` and
 ``osworld_evaluate``, and the sandbox in ``context.deployed_sandboxes`` for teardown."""
@@ -17,7 +17,7 @@ from agent_env.artifact.artifacts.docker_image import pull_problem
 from agent_env.attribution import deploy_attribution
 from agent_env.config import ConfigError, get_config
 from agent_env.entity.refs import EntityRef
-from agent_env.osworld import controller, guest
+from agent_env.task_step.task_steps.computer.osworld import controller, guest
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import skip_refusing
 from agent_env.providers.sandbox_providers.sandbox import Sandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider, get_sandbox_provider

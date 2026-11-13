@@ -8,7 +8,7 @@ import httpx
 from agentenv_protocol.types import WELL_KNOWN_PATH
 
 from agent_env.env.env import DeployedEnv
-from agent_env.osworld import GUEST_EXTENSION, controller, guest
+from agent_env.task_step.task_steps.computer.osworld import GUEST_EXTENSION, controller, guest
 
 ENV_URL = "https://computer.example"
 TOKEN = "s3cret-control-token"

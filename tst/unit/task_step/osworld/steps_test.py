@@ -15,14 +15,14 @@ import httpx
 import pytest
 
 from agent_env.artifact import DockerImageArtifact
-from agent_env.osworld import controller, guest
+from agent_env.task_step.task_steps.computer.osworld import controller, guest
 from agent_env.task_step.context import PromptResponse, StepContextError, TaskStepContext
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_steps.computer.osworld import deploy_controller as deploy_module
 from agent_env.task_step.task_steps.computer.osworld.deploy_controller import OSWorldDeployControllerTaskStep
 from agent_env.task_step.task_steps.computer.osworld.evaluate import OSWorldEvaluateTaskStep
 from agent_env.task_step.task_steps.computer.osworld.initialize import OSWorldInitializeTaskStep
-from tst.unit.osworld.helpers import (CONTROLLER, CONTROLLER_TOKEN, ENDPOINT, ENV_URL, TOKEN, Controller, card, computer,
+from tst.unit.task_step.osworld.helpers import (CONTROLLER, CONTROLLER_TOKEN, ENDPOINT, ENV_URL, TOKEN, Controller, card, computer,
                                       route_httpx)
 
 LITELLM = "sk-model-key"

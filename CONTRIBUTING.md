@@ -55,7 +55,7 @@ from sources outside this repository, found through `AGENT_ENV_TEST_MCP_SERVERS_
 clock, run `make int-test-slow` with it set, and say so in the pull request. The OSWorld end-to-end test
 (`tst/integration/computer/osworld_test.py`) needs scale-cua's OSWorld guest server source at `OSWORLD_SERVER_SOURCE`
 and a controller image at `OSWORLD_CONTROLLER_IMAGE`, and skips without them; when your change touches
-`src/agent_env/osworld` or the `osworld_*` steps, run it with them set, and say so in the pull request. A test may skip only when a capability is genuinely unavailable, and the skip reason
+`src/agent_env/task_step/task_steps/computer/osworld`, run it with them set, and say so in the pull request. A test may skip only when a capability is genuinely unavailable, and the skip reason
 must name it (`agentenv-capability-missing: <name>`, see `tst/util/capabilities.py`); the
 `check_skip_policy` step fails the run otherwise. The `clean-install` job runs the same script as
 `make clean-install-test` on every pull request, and must pass too, as must the `ui` job, which

@@ -15,8 +15,8 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from agent_env import osworld
-from agent_env.osworld.__main__ import main
+from agent_env.task_step.task_steps.computer import osworld
+from agent_env.task_step.task_steps.computer.osworld.__main__ import main
 
 
 @pytest.fixture(scope="module")

@@ -18,7 +18,7 @@ import pytest
 from click.testing import CliRunner
 
 from agent_env.cli import cli
-from agent_env.osworld import stage_server
+from agent_env.task_step.task_steps.computer.osworld import stage_server
 from tst.integration.computer.conftest import run_context
 from tst.util.capabilities import skip_without_osworld_sources
 
