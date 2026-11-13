@@ -64,6 +64,9 @@ FIXTURE_START_S = 30.0
 NORM = 1000
 #: How long the probe records, and the frame rate it asks for.
 RECORD_S = 2.0
+#: How many times a check whose effect a busy desk can miss is tried before it fails: a desk starved through a drag
+#: sees its motion as one event, and keys sent while the click that focuses a box waits go wherever focus was.
+BUSY_DESK_ATTEMPTS = 2
 RECORD_FPS = 5
 #: Prints a file's size and SHA-256 as JSON, run with ``python3 -c`` on the computer.
 READ_DIGEST = ("import hashlib,json,sys;d=open(sys.argv[1],'rb').read();"
@@ -165,15 +168,22 @@ class Probe:
 
     # Recording
 
-    async def check(self, check: str, name: str, test: Test, *extensions: str) -> bool:
-        try:
-            problem = await test()
-        except NotApplicable as e:
-            self._record(check, name, "not_applicable", str(e), extensions)
-            return True
-        except Exception as e:
-            problem = f"{type(e).__name__}: {e}"
-        self._record(check, name, "failed" if problem else "passed", problem or "", extensions)
+    async def check(self, check: str, name: str, test: Test, *extensions: str, attempts: int = 1) -> bool:
+        """Run ``test`` up to ``attempts`` times until it passes; a pass after a failed try says what that try found."""
+        tried: list[str] = []
+        while True:
+            try:
+                problem = await test()
+            except NotApplicable as e:
+                self._record(check, name, "not_applicable", str(e), extensions)
+                return True
+            except Exception as e:
+                problem = f"{type(e).__name__}: {e}"
+            if problem is None or len(tried) + 1 == attempts:
+                break
+            tried.append(problem)
+        detail = problem or (f"passed on try {len(tried) + 1} of {attempts}; before: {'; '.join(tried)}" if tried else "")
+        self._record(check, name, "failed" if problem else "passed", detail, extensions)
         return problem is None
 
     async def _guarded(self, check: str, section: Callable[[], Awaitable[None]]) -> None:
@@ -837,7 +847,7 @@ class Probe:
 
         await self.check("P6", "Unicode and mixed-case text arrives whole", unicode)
         await self.check("P6", "typed text arrives as key events", events)
-        await self.check("P6", "a chord selects all, and Backspace clears it", chord)
+        await self.check("P6", "a chord selects all, and Backspace clears it", chord, attempts=BUSY_DESK_ATTEMPTS)
         await self.check("P6", "a repeated key presses that many times", repeat)
         await self.check("P6", "tabs and newlines arrive as typed", whitespace)
         await self.check("P6", "typing leaves the clipboard as it was", clipboard)
@@ -878,7 +888,8 @@ class Probe:
 
         await self.check("P7", "a scroll moves a list", scroll_list)
         await self.check("P7", "scrolls up, down, left and right each arrive that many times", directions)
-        await self.check("P7", "a drag starts and ends where it says, through its waypoints", drag)
+        await self.check("P7", "a drag starts and ends where it says, through its waypoints", drag,
+                         attempts=BUSY_DESK_ATTEMPTS)
 
     async def _pointer_input(self) -> None:
         if not self.driver.declares(COMPUTER_POINTER):
