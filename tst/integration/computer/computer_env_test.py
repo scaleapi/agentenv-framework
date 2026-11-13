@@ -49,7 +49,7 @@ from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
 from agent_env.task_step.task_steps.run_code import RunCodeTaskStep
 from agent_env.task_step.task_steps.computer.snapshot_computer_env import SnapshotComputerEnvTaskStep
-from tst.integration.computer.conftest import docker, only_session_and_clock, process_owners
+from tst.integration.computer.conftest import docker, only_session_clock_and_egress, process_owners
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
@@ -94,7 +94,7 @@ async def test_the_image_of_this_machines_arch_boots_as_the_session_user_and_pas
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
     for report in reports:
         assert report.passed, [f"{c.check} {c.name}: {c.detail}" for c in report.checks if c.status == "failed"]
-    assert only_session_and_clock(owners)
+    assert only_session_clock_and_egress(owners)
 
 
 def test_an_env_that_changes_only_its_display_and_name_reuses_the_image(desktop):

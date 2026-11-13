@@ -48,6 +48,7 @@ CHROMIUM = Path(__file__).parent / "chromium"
 WEBSITE_BROWSER = Path(__file__).parent / "website-browser"
 BROWSER_COMPUTER = Path(__file__).parent / "browser-computer"
 TLS = Path(__file__).parent / "tls"
+EGRESS_CLIENTS = Path(__file__).parent / "egress"
 CLOCK_DESKTOP = Path(__file__).parent / "clock-desktop"
 #: Playwright and Puppeteer, which connect to a cdp address from Node.
 CDP_CLIENTS = Path(__file__).parent / "cdp_clients"
@@ -116,6 +117,13 @@ def browser_computer(tmp_path_factory):
     page driver, whose screen is the browser's page; composed, through the browser-computer test bundle's task that
     deploys it, as ``desktop`` is."""
     yield from _composed(tmp_path_factory.mktemp("browser-computer"), parse_bundle(BROWSER_COMPUTER), CHROMIUM_ALONE)
+
+
+@pytest.fixture(scope="module")
+def egress_desktop(tmp_path_factory):
+    """The egress clients test bundle's desktop, the ubuntu-24.04 base and the reference driver with an apt JDK, an
+    official Node build and curl, composed as ``desktop`` is."""
+    yield from _composed(tmp_path_factory.mktemp("egress-desktop"), parse_bundle(EGRESS_CLIENTS))
 
 
 @pytest.fixture(scope="module")
@@ -208,6 +216,8 @@ ROOTS = ("/usr/bin/tini -- /usr/local/bin/start-desktop init",
          "/usr/bin/python3 /usr/bin/supervisord -c /etc/supervisor/root.conf", "ps -eo user:32=,args=")
 #: The clock page's writer, which the base installs beside the follower.
 PAGE_WRITER = str(PurePosixPath(FOLLOWER).parent / "clockpage.py")
+#: The base's egress proxy, the user it runs as, and its address.
+EGRESS, EGRESS_USER, EGRESS_PROXY = "/usr/local/lib/agentenv-egress/egress", "agentenv-egress", "http://127.0.0.1:3128"
 
 
 def process_owners(name: str) -> dict[str, list[str]]:
@@ -219,12 +229,13 @@ def process_owners(name: str) -> dict[str, list[str]]:
     return owners
 
 
-def only_session_and_clock(owners: dict[str, list[str]]) -> bool:
-    """Whether root runs nothing but its init and supervisord, the clock's user nothing but the follower, and every
-    other process is the session user's."""
-    assert set(owners) == {"root", FOLLOWER_USER, "user"}, owners
+def only_session_clock_and_egress(owners: dict[str, list[str]]) -> bool:
+    """Whether root runs nothing but its init and supervisord, the clock's user nothing but the follower, the egress
+    user nothing but the egress proxy, and every other process is the session user's."""
+    assert set(owners) == {"root", FOLLOWER_USER, EGRESS_USER, "user"}, owners
     assert all(args in ROOTS for args in owners["root"]), owners["root"]
     assert owners[FOLLOWER_USER] == [f"/usr/bin/python3 -I {FOLLOWER}"], owners[FOLLOWER_USER]
+    assert owners[EGRESS_USER] == [f"{EGRESS} serve"], owners[EGRESS_USER]
     return True
 
 
@@ -232,9 +243,9 @@ def _exec_text(name: str, *argv: str) -> str:
     return subprocess.run(["docker", "exec", name, *argv], check=True, capture_output=True, text=True).stdout
 
 
-#: Kills the follower and times it until another runs, inside the container, as root, polling every 20 ms: prints the
-#: pid killed, the pid back, and the seconds between.
-_KILL_FOLLOWER = """import os, signal, subprocess, sys, time
+#: Kills a program of root's supervisord (by its command and user) and times it until another runs, inside the
+#: container, as root, polling every 20 ms: prints the pid killed, the pid back, and the seconds between.
+_KILL_PROGRAM = """import os, signal, subprocess, sys, time
 def running():
     return subprocess.run(["pgrep", "-u", sys.argv[2], "-f", sys.argv[1]], capture_output=True, text=True).stdout.strip()
 killed = running()
@@ -246,18 +257,21 @@ print(killed, back or "-", time.monotonic() - start)
 """
 
 
-#: How soon supervisord has a killed follower back: it notices the exit when it next wakes, up to a second later,
-#: and the follower starts Python; on a CI runner busy with other tests that has taken 2.03 s.
+#: How soon supervisord has a killed program of its own back: it notices the exit when it next wakes, up to a second
+#: later, and the program starts; on a CI runner busy with other tests a follower took 2.03 s.
 FOLLOWER_BACK_S = 3
 
 
-def kill_follower(name: str) -> tuple[str, str, float]:
-    """The clock follower in the container ``name`` killed with SIGKILL: its pid, the pid of the one back ("-" if
-    none within 10 s), and how long that took, timed in the container."""
-    killed, back, took = subprocess.run(["docker", "exec", "-u", "0", name, "python3", "-c", _KILL_FOLLOWER, FOLLOWER,
-                                         FOLLOWER_USER],
-                                        check=True, capture_output=True, text=True).stdout.split()
+def kill_program(name: str, command: str, user: str) -> tuple[str, str, float]:
+    """The program running ``command`` as ``user`` in the container ``name`` killed with SIGKILL: its pid, the pid of
+    the one back ("-" if none within 10 s), and how long that took, timed in the container."""
+    killed, back, took = subprocess.run(["docker", "exec", "-u", "0", name, "python3", "-c", _KILL_PROGRAM, command,
+                                         user], check=True, capture_output=True, text=True).stdout.split()
     return killed, back, float(took)
+
+
+def kill_follower(name: str) -> tuple[str, str, float]:
+    return kill_program(name, FOLLOWER, FOLLOWER_USER)
 
 
 #: A multi env's computer on the local backend in its container form, as its child_envs entry gives it.
