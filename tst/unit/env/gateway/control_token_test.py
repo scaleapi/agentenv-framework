@@ -227,10 +227,12 @@ async def test_a_live_websites_data_plane_is_guarded_though_it_has_no_website_ro
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("path", ["/svc/mcp-x/../prefix/mcp", "/svc/mcp-x/../prefix/agentenv", "/svc/mcp-x/mcp"])
-async def test_a_server_behind_a_base_path_is_guarded_however_a_path_climbs_into_it(monkeypatch, path):
+@pytest.mark.parametrize("base", ["http://x:8000/prefix", "http://x:8000/%70refix"], ids=["plain", "encoded"])
+@pytest.mark.parametrize("path", ["/svc/mcp-x/../prefix/mcp", "/svc/mcp-x/../prefix/agentenv", "/svc/mcp-x/mcp",
+                                  "/svc/mcp-x/public%2Fx/../agentenv"])
+async def test_a_server_behind_a_base_path_is_guarded_however_a_path_climbs_into_it(monkeypatch, base, path):
     backing = _Backing(monkeypatch)
-    prefixed = {"internal_mcp_servers": [InternalMCPServer(name="x", mcp_url="http://x:8000/prefix/mcp")],
-                "rest_proxy_urls": {"mcp-x": "http://x:8000/prefix"}, "website_urls": {}}
+    prefixed = {"internal_mcp_servers": [InternalMCPServer(name="x", mcp_url=f"{base}/mcp")],
+                "rest_proxy_urls": {"mcp-x": base}, "website_urls": {}}
     assert await _proxied(TOKEN, "POST", path, {}, **prefixed) == 401
     assert backing.paths == []

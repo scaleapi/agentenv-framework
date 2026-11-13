@@ -290,9 +290,10 @@ def reaches(base_url: str, raw_path: bytes, decoded_path: str, decoded_rest: str
     try:
         raw_rest = raw_remainder(raw_path, decoded_path, decoded_rest) if decoded_rest else b""
         sent = httpx.URL(f"{base_url.rstrip('/')}/{raw_rest.decode('latin-1')}").path
+        base = httpx.URL(base_url).path.rstrip("/")
     except (ValueError, httpx.InvalidURL):
         return False
-    return is_child_mcp_path(sent, f"{urlsplit(base_url).path.rstrip('/')}/{endpoint.lstrip('/')}")
+    return is_child_mcp_path(sent, f"{base}/{endpoint.lstrip('/')}")
 
 
 def stamp_jsonrpc_role(body: bytes, role: str) -> bytes:
