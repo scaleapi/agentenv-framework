@@ -56,11 +56,16 @@ def test_a_turn_returns_the_answer_and_a_context_keeps_one_conversation(client: 
     task = _send(client, "top story?")
     text, data = _reply(task)
     assert (task["status"]["state"], text) == ("completed", "The top story.")
-    assert data["usage"]["tool_call_count"] == 1 and data["usage"]["total_tokens"] == 120
+    usage = data["usage"]
+    assert (usage["tool_call_count"], usage["input_tokens"], usage["output_tokens"], usage["total_tokens"]) == (2, 100, 20, 120)
+    assert usage["provider_details"]["cache_read_tokens"] == 60 and usage["provider_details"]["requests"] == 3
     turn = json.loads(record.read_text())
     assert (turn["prompt"], turn["model"], turn["effort"], turn["systemPrompt"]) == ("top story?", "gpt-test", "low", "Be brief.")
-    events = client.post("/ext/trajectory", json={"task_id": task["id"], "after": 0}).json()["events"]
-    assert [e["type"] for e in events] == ["agent_start", "tool_execution_end", "agent_end"]
+    # Unset, browser-use's own step budget and mode; its run ends before the turn's deadline, leaving it to deliver.
+    assert (turn["max_steps"], turn["mode"], turn["timeout"]) == (None, None, 1800 - a2a_server.DELIVERY_SECONDS)
+    assert turn["env"] == {"ANONYMIZED_TELEMETRY": "false", "BH_TELEMETRY": "0"}
+    trajectory = client.post("/ext/trajectory", json={"task_id": task["id"]}).json()["trajectory"]
+    assert [message["kind"] for message in trajectory] == ["request", "response", "response"]
 
     _send(client, "and the second?")
     assert json.loads(record.read_text())["historyFile"] == turn["historyFile"]
@@ -117,6 +122,10 @@ def test_a_run_that_stops_early_fails_with_its_reason(client: TestClient, monkey
     task = _send(client, "too long")
     assert task["status"]["state"] == "failed"
     assert _reply(task)[1]["error_code"] == "browser_use.max_steps"
+
+
+def test_effort_outside_browser_uses_is_refused_with_the_config(client: TestClient) -> None:
+    assert client.post("/ext/agent-config", json={"effort": "xhigh"}).status_code == 400
 
 
 def test_a_crash_is_an_infra_error_with_its_stderr(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
