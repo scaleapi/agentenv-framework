@@ -4,7 +4,8 @@ Arms the clock (set_time) and reads the gateway's server-reachable env_get_time_
 stored env card declares clock/v1, then invokes sync_time on each backing server, MCP server or website, the
 env card lists (``legacy_protocol.backing_servers``) whose own card advertises it, at the route that card gives.
 Non-advertisers are skipped when tolerate_missing_sync_time (default True), and websites always. Place right
-before prompt_agent so the virtual timeline starts at agent-start.
+before prompt_agent so the virtual timeline starts at agent-start; when setup needs the clock armed, arm it at rate 0
+and start it with set_env_clock_rate right before prompt_agent.
 """
 
 from __future__ import annotations
