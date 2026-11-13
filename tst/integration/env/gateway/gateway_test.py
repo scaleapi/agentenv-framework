@@ -1953,7 +1953,7 @@ async def test_a_tool_disabled_for_a_role_is_refused_through_svc_as_on_the_gatew
             after_id = seen[-1]["id"] if seen else 0
         answers = {}
         for role in ("carol@example.com", "dana@example.com"):
-            async with httpx.AsyncClient(headers={AGENT_ENV_ROLE_HEADER: role}, timeout=60) as as_role:
+            async with httpx.AsyncClient(headers={AGENT_ENV_ROLE_HEADER: role, **result.control_headers}, timeout=60) as as_role:
                 for path in ("/mcp", "/svc/mcp-email/mcp"):
                     async with streamable_http_client(f"{gw}{path}", http_client=as_role) as (read, write, _):
                         async with ClientSession(read, write) as session:

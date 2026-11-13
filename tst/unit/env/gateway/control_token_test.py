@@ -31,7 +31,9 @@ OPEN = {"/state": "GET", "/step": "POST", "/clock/time": "GET", "/clock/state": 
 GUARDED = [("POST", "/agentenv"), ("POST", "/svc/mcp-svc/agentenv"), ("POST", "/svc/mcp-svc/agentenv/ext/grant"),
            ("POST", "/svc/mcp-svc/x/../agentenv"), ("POST", "/svc/mcp-svc/%61gentenv"), ("POST", "/svc/shop/agentenv"),
            ("POST", "/svc/mcp-svc/mcp"), ("GET", "/svc/mcp-svc/mcp/"),
-           ("DELETE", "/svc/mcp-svc/./mcp"), ("POST", "/svc/mcp-svc//mcp")]
+           ("DELETE", "/svc/mcp-svc/./mcp"), ("POST", "/svc/mcp-svc//mcp"), ("POST", "/svc/mcp-svc/public%2Fx/../agentenv"),
+           ("POST", "/svc/mcp-svc/public%2Fx/../mcp"), ("POST", "/svc/mcp-svc/public%2Fx/../agentenv/ext/set_acting_user"),
+           ("POST", "/svc/mcp-svc/AgentEnv"), ("POST", "/svc/mcp-svc/MCP")]
 PROXIED_OPEN = [("GET", "/svc/mcp-svc/.well-known/agent-env.json"), ("GET", "/svc/mcp-svc/openapi.yaml"),
                 ("GET", "/svc/mcp-svc/export-state"), ("POST", "/svc/shop/api/orders"), ("POST", "/svc/shop/mcp"),
                 ("GET", "/website/shop/index.html")]

@@ -21,7 +21,8 @@ from agent_env.store.ids import derive_id
 from agent_env.env import legacy_protocol
 from agent_env.env.envs._deployment import (
     as_builtin, builtin_provider_for, close_deployed, close_replaced, deploy_refusal, deploy_through_provider, host_staging_refusal,
-    file_parts, legacy_load_file, load_by_signed_url, plugin_provider_like_a_builtin, provider_or_class, reset_server_data,
+    data_plane_headers, file_parts, legacy_load_file, load_by_signed_url, plugin_provider_like_a_builtin, provider_or_class,
+    reset_server_data,
     staged_paths,
 )
 from agent_env.env.gateway import GatewayMode
@@ -186,7 +187,7 @@ class MCPServerEnv(Env):
                 # reset_data previously took the client default (30s), tighter than the load it
                 # precedes -- dropping and recreating a large service's schemas can plausibly
                 # exceed that. Give it the same budget as the load it belongs to.
-                headers = self._deployed.control_headers_for(base_url) if self._deployed is not None else None
+                headers = data_plane_headers(self, base_url)
                 await protocol_v1.reset_data(base_url, timeout=timeout, headers=headers)
                 await protocol_v1.add_data(base_url, file_parts(environment_artifact, files, staged), timeout=timeout,
                                            headers=headers)

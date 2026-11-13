@@ -276,15 +276,23 @@ def is_child_mcp_path(decoded_rest: str, endpoint: str = "mcp") -> bool:
 
 def reaches_child_mcp(request: HTTPConnection, endpoint: str = "mcp") -> bool:
     """Whether a /svc request reaches the backing server's MCP endpoint (:func:`is_child_mcp_path`), by the path as
-    routed here or by the one the server receives: the raw path forwarded, its dot segments removed by httpx and then
-    decoded, which differ when an encoded slash sits beside a dot segment (``public%2Fx/../mcp`` reaches ``/mcp``)."""
-    if is_child_mcp_path(request.path_params.get("path", ""), endpoint):
-        return True
+    routed here or by the one the server receives (:func:`sent_path`)."""
+    rest = request.path_params.get("path", "")
+    return any(is_child_mcp_path(at, endpoint) for at in (rest, sent_path(request.scope["raw_path"], request.scope["path"], rest))
+               if at is not None)
+
+
+def sent_path(raw_path: bytes, decoded_path: str, decoded_rest: str) -> str | None:
+    """The path the backing server receives for a /svc request whose routed remainder is ``decoded_rest``: the raw
+    remainder forwarded, its dot segments removed by httpx and then decoded, which differs from ``decoded_rest`` when an
+    encoded slash sits beside a dot segment (``public%2Fx/../mcp`` reaches ``/mcp``); None for a request-target
+    forward() refuses."""
+    if not decoded_rest:
+        return ""
     try:
-        sent = httpx.URL(upstream_url("http://child", request)).path
+        return httpx.URL("http://child/" + raw_remainder(raw_path, decoded_path, decoded_rest).decode("latin-1")).path
     except (ValueError, httpx.InvalidURL):
-        return False  # forward() refuses a request-target it can't build a URL for
-    return is_child_mcp_path(sent, endpoint)
+        return None
 
 
 def stamp_jsonrpc_role(body: bytes, role: str) -> bytes:

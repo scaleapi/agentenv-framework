@@ -18,8 +18,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 from agentenv_protocol import DATA_OBJECTS_EXTENSION_URI
+from agentenv_protocol import client as protocol_v1
 
 from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, DeployedSandboxEnv
+from agent_env.env.envs import _deployment
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.envs.website import WebsiteEnv
@@ -70,6 +72,17 @@ async def test_a_load_sends_its_records_control_token_with_no_run_to_grant_it(se
 
     assert [(str(r.url), r.headers.get("authorization")) for r in sent] == [
         *[(f"{_CARD}/svc/mcp-email/agentenv", "Bearer s3cret")] * 2, *[(f"{_CARD}/svc/shop/agentenv", "Bearer s3cret")] * 2]
+
+
+def test_a_record_with_no_token_for_an_address_leaves_a_call_there_to_a_grant():
+    env = _mcp(_record(None))
+    env._deployed.control_token = "s3cret"
+    at_gateway, at_card = f"{_GW}/svc/mcp-email", f"{_CARD}/svc/mcp-email"
+    with protocol_v1.authorized({_GW: {"Authorization": "Bearer granted"}}):
+        sent = protocol_v1.request_headers(at_gateway, _deployment.data_plane_headers(env, at_gateway))
+    assert sent == {"Authorization": "Bearer granted"}
+    assert _deployment.data_plane_headers(env, at_card) == {"Authorization": "Bearer s3cret"}
+    assert _deployment.data_plane_headers(_mcp(None), at_card) is None
 
 
 @pytest.mark.asyncio
