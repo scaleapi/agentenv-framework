@@ -5,7 +5,8 @@ follower's user, as the follower writes it: curl and
 Python reach a live site, its certificate checked against real time by the TLS shim; a shell, Chrome's JavaScript and
 the driver read universe time through 30 forward jumps of 8 h, a day or a week, a rate change and a freeze; Chrome,
 Xvfb and the desktop's panel run on through them; and the driver's input reaches Chrome after every jump and, frozen,
-is drawn. Needs Docker and the local registry on localhost:5000."""
+is drawn. Routing a site, a fresh Chrome loads it over HTTPS with the clock six years back, six years on and past
+2099, its certificate checked against the universe's time. Needs Docker and the local registry on localhost:5000."""
 
 import ast
 import asyncio
@@ -28,6 +29,7 @@ from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
 from tst.clock.bounds import LATE_S
 from tst.integration.computer.conftest import PAGE_WRITER
+from tst.integration.computer.start_tabs import host_pages
 from tst.integration.computer.website_browser_test import _window_center
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
@@ -50,6 +52,12 @@ REACH = {"curl": "curl -sS -o /dev/null --noproxy '*' --max-time 30 https://exam
          "python": ("python3 -c \"import urllib.request; urllib.request.build_opener(urllib.request.ProxyHandler({}))"
                     ".open('https://example.com/', timeout=30)\"")}
 LIBRARY = str(PurePosixPath(FOLLOWER).parent / "libfaketimeMT.so.1")
+#: A fresh Chrome, as the session user, its own profile beside the desktop's, printing the DOM of the page it's given:
+#: each run makes a TLS handshake of its own, which checks the site's certificate against the universe's time (Chrome's
+#: TLS isn't OpenSSL, so the TLS shim doesn't reach it).
+FRESH_CHROME = ('profile=$(mktemp -d) && /opt/agentenv/apps/chromium/chromium/chrome/chrome --headless=new '
+                '--no-sandbox --user-data-dir="$profile" --dump-dom "$0"; rm -rf "$profile"')
+ROUTED = "https://shop.test/landed"
 
 
 def test_composed_with_the_library_in_every_process_the_computer_passes_the_probe_at_full(clock_desktop):
@@ -117,6 +125,30 @@ async def test_the_desktop_follows_the_universe_through_jumps_a_rate_change_and_
     assert chrome_frozen == frozen["universe_ns"] // 1_000_000, (frozen, chrome_frozen)
     assert resumed is not False and resumed > frozen["universe_ns"] / 1e9, (frozen, resumed)
     assert pids_after == pids, (pids, pids_after)
+    assert not report.failed
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_chrome_loads_a_routed_site_six_years_either_side_of_now_and_past_2099(clock_desktop):
+    with host_pages() as port, namespace_routing():
+        params = {"site_routing": True, "sites": [{"name": "shop", "url": f"http://127.0.0.1:{port}/website/shop/",
+                                                   "domains": ["shop.test"]}]}
+        deployed = await Env.get(clock_desktop.id).deploy(env_params=params)
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            clock, loaded = _Clock(deployed), {}
+            for years in (-6, 6, 80):
+                clock.set(time.time() + years * 365 * DAY, 1)
+                await asyncio.sleep(2)  # each program maps the page the next time it reads the clock, within a second
+                ran = await inside.run(deployed, ["sh", "-c", FRESH_CHROME, ROUTED], timeout_s=90)
+                loaded[years] = {"universe": await clock.read(deployed),
+                                 "landed": "<title>landed</title>" in ran["stdout"],
+                                 "output": (ran["stdout"] + ran.get("stderr", ""))[-600:]}
+        finally:
+            report = await teardown_run(context)
+
+    assert all(shown["universe"] for shown in loaded.values()), loaded
+    assert {years: shown["landed"] for years, shown in loaded.items()} == {-6: True, 6: True, 80: True}, loaded
     assert not report.failed
 
 

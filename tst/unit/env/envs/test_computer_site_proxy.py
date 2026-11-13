@@ -18,7 +18,6 @@ import subprocess
 import sys
 import time
 import urllib.error
-from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -121,7 +120,7 @@ async def _exchange(port, request: bytes, *, server_hostname=None, cadata=None, 
 
 
 def _issued(tmp_path, routes):
-    issued = sites.issue(routes, valid_for=timedelta(hours=1), label="test")
+    issued = sites.issue(routes, label="test")
     files = {}
     for name, (cert, key) in issued.leaves.items():
         (tmp_path / f"{name}.crt").write_text(cert)
@@ -875,7 +874,7 @@ def test_install_writes_the_sites_files_names_and_trust_then_starts_the_proxy_on
     table = sites.site_table([SiteParams(name="notes", url="http://gw/website/notes/", domains=["notes.test"]),
                               SiteParams(name="chat", url="http://gw/website/chat/", domains=["*.chat.test"]),
                               SiteParams(name="bare", url="http://gw/website/bare/")])
-    issued = sites.issue(table.routes, valid_for=timedelta(hours=1), label="t")
+    issued = sites.issue(table.routes, label="t")
     (folder / "config.json").write_text(json.dumps(sites.proxy_config(table, issued, user=None, os_type="linux",
                                                                       forward_port=True, direct=["github.com"])))
     started = []
@@ -922,7 +921,7 @@ def test_install_keeps_the_upstream_headers_in_a_file_root_alone_reads_and_serve
     folder.mkdir()
     folder.chmod(0o700)
     table = sites.site_table([SiteParams(name="notes", url="http://gw/website/notes/", domains=["notes.test"])])
-    issued = sites.issue(table.routes, valid_for=timedelta(hours=1), label="t")
+    issued = sites.issue(table.routes, label="t")
     given = sites.proxy_config(table, issued, user=None, os_type="linux", forward_port=False,
                                upstream_headers={"notes": {"CF-Access-Client-Secret": "s3cret"}})
     (folder / "config.json").write_text(json.dumps(given))
@@ -1061,8 +1060,7 @@ def _calls(store: Path) -> list[str]:
 
 def test_every_jdk_trusts_the_ca_an_apt_one_through_the_system_hook_the_rest_by_keytool(tmp_path, monkeypatch):
     issued = sites.issue(sites.site_table([SiteParams(name="notes", url="http://gw/website/notes/",
-                                                      domains=["notes.test"])]).routes, valid_for=timedelta(hours=1),
-                         label="t")
+                                                      domains=["notes.test"])]).routes, label="t")
     fingerprint = site_proxy.sha256_fingerprint(issued.ca_pem)
     ca = tmp_path / "ca.pem"
     ca.write_text(issued.ca_pem)
@@ -1101,8 +1099,7 @@ def test_a_jdk_store_the_ca_isnt_listed_in_after_routing_is_named(tmp_path, monk
     apt.unlink()
     apt.symlink_to(hook)
     issued = sites.issue(sites.site_table([SiteParams(name="notes", url="http://gw/website/notes/",
-                                                      domains=["notes.test"])]).routes, valid_for=timedelta(hours=1),
-                         label="t")
+                                                      domains=["notes.test"])]).routes, label="t")
 
     trusted = site_proxy.trust_java(site_proxy.Paths(root), str(tmp_path / "ca.pem"), issued.ca_pem)
 
@@ -1120,8 +1117,7 @@ def test_each_runtime_loads_the_first_https_site_through_its_own_trust_and_says_
     monkeypatch.delenv("SSL_CERT_FILE", raising=False)
     unset = site_proxy.check_runtimes("https://notes.test/")
     issued = sites.issue(sites.site_table([SiteParams(name="notes", url="http://gw/website/notes/",
-                                                      domains=["notes.test"])]).routes, valid_for=timedelta(hours=1),
-                         label="t")
+                                                      domains=["notes.test"])]).routes, label="t")
     (tmp_path / "bundle.pem").write_text(issued.ca_pem)
     monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "bundle.pem"))
     opened = []
@@ -1153,7 +1149,7 @@ def test_a_wildcard_name_starts_dns_even_when_resolv_conf_names_no_other_nameser
     if resolv is not None:
         (root / "etc/resolv.conf").write_text(resolv)
     table = sites.site_table([SiteParams(name="chat", url="http://gw/website/chat/", domains=["*.chat.test"])])
-    issued = sites.issue(table.routes, valid_for=timedelta(hours=1), label="t")
+    issued = sites.issue(table.routes, label="t")
     (folder / "config.json").write_text(json.dumps(sites.proxy_config(table, issued, user=None, os_type="linux",
                                                                       forward_port=False)))
     started = []

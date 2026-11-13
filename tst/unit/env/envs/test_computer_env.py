@@ -15,7 +15,6 @@ import re
 import shutil
 import subprocess
 import urllib.parse
-from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -1144,11 +1143,11 @@ async def test_a_computer_with_site_routing_reaches_the_websites_the_run_deploye
     assert sandbox is boots.sandboxes[0]
     assert [site.model_dump() for site in sites] == [{"name": "notes", "url": "http://localhost:8080/website/notes/",
                                                       "domains": ["notes.test"]}]
-    assert options == {"user": "user", "network": None, "valid_for": timedelta(seconds=3600), "label": "desktop",
-                       "os_type": "linux", "display": "x11", "live_hosts": ()}
+    assert options == {"user": "user", "network": None, "label": "desktop", "os_type": "linux", "display": "x11",
+                       "live_hosts": ()}
     assert boots.boots[0]["environment"][HOLD_BOOT_LAUNCH_ENV] == "1"
     record = context.deployed_envs[-1].metadata["computer"]
-    assert record["sites"] == {"names": {"routes": {"notes": ["notes.test"]}}, "ca": "CA PEM", "valid_for_s": 3600}
+    assert record["sites"] == {"names": {"routes": {"notes": ["notes.test"]}}, "ca": "CA PEM"}
     assert record["env_params"]["site_routing"] is True and record["env_params"]["sites"][0]["name"] == "notes"
 
 
@@ -1166,9 +1165,8 @@ async def test_a_computer_deployed_to_route_its_sites_later_boots_held_and_route
     assert boots.boots[0]["environment"].items() >= computer_sites.TRUST_ENVIRONMENTS["linux"].items()
     ((sandbox, sites, options),) = routes
     assert sandbox is boots.sandboxes[0] and [site.name for site in sites] == ["notes"]
-    assert options["valid_for"] == timedelta(seconds=3600)
     record = deployed.metadata["computer"]
-    assert record["env_params"]["sites"][0]["name"] == "notes" and record["sites"]["valid_for_s"] == 3600
+    assert record["env_params"]["sites"][0]["name"] == "notes" and record["sites"]["ca"] == "CA PEM"
 
 
 @pytest.mark.asyncio
@@ -1390,7 +1388,7 @@ async def test_a_start_tab_on_one_of_the_env_sites_that_didnt_load_fails_the_boo
 
     with pytest.raises(RuntimeError) as failed:
         await env_computer_provider._finish_boot(SimpleNamespace(), record, None,
-                                                 SimpleNamespace(site_routing=False), 0, None)
+                                                 SimpleNamespace(site_routing=False), None)
 
     assert record.metadata["computer"]["start_tabs"] == {"chromium": tabs}
     assert str(failed.value) == (
@@ -1435,8 +1433,8 @@ async def test_a_reset_routes_the_fresh_computer_to_the_same_sites_under_a_ca_of
     await ResetEnvTaskStep(id="reset", version=None, env_id=env.id, fail_task_on_error=True).execute(context)
 
     first, again = routes
-    assert again[0] is sandbox and again[1] == first[1] and again[2]["valid_for"] == timedelta(seconds=3600)
-    assert context.deployed_envs[-1].metadata["computer"]["sites"]["valid_for_s"] == 3600
+    assert again[0] is sandbox and again[1] == first[1] and again[2] == first[2]
+    assert context.deployed_envs[-1].metadata["computer"]["sites"]["ca"] == "CA PEM"
 
 
 @pytest.mark.asyncio
