@@ -1,14 +1,16 @@
 """An app whose server sees it end, a website browser's, launched again when a signal or a failing code ended it, up to
-``CRASH_RELAUNCHES`` times a boot; not when it exited cleanly, when its server stopped it, or when it doesn't ask."""
+``CRASH_RELAUNCHES`` times a boot; not when it exited cleanly, when its server stopped it, or when it doesn't ask. Its
+launch log says so, and what reads it (``apps.ended_on_its_own``) takes it for gone only once nothing will launch it."""
 from __future__ import annotations
 
 import asyncio
 import signal
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from agentenv_protocol.computer import Launch, app_runtime, session
+from agentenv_protocol.computer import Launch, app_runtime, apps, session
 from agentenv_protocol.computer.app_runtime import CRASH_RELAUNCHES, AppRuntime
 
 
@@ -116,7 +118,8 @@ async def test_it_is_launched_again_at_most_crash_relaunches_times_a_boot(deskto
         await _ended(runtime, desktop, -signal.SIGSEGV)
 
     assert len(desktop.launched) == 1 + CRASH_RELAUNCHES and not runtime.running()
-    assert runtime.launches()[-1]["event"] == "crash_relaunches_spent"
+    assert runtime.launches()[-1]["event"] == "exit" and "relaunching" not in runtime.launches()[-1]
+    assert "nothing launches it again" in apps.ended_on_its_own(Path.cwd())
 
 
 @pytest.mark.asyncio
@@ -150,3 +153,40 @@ async def test_one_launched_again_since_its_crash_isnt_launched_once_more_for_it
     await asyncio.gather(*runtime.exits)
 
     assert (desktop.launched, desktop.stopped) == ([100, 101], [])
+
+
+@pytest.mark.asyncio
+async def test_a_crash_its_server_launches_it_again_after_isnt_the_app_gone_while_or_after(desktop):
+    runtime = _runtime()
+    await runtime.launch_app("boot")
+    await runtime.turn.acquire()
+    desktop.running.discard(100)
+    desktop.codes[100] = -signal.SIGKILL
+
+    assert runtime.exited()
+    await asyncio.sleep(0.05)
+    while_relaunching = apps.ended_on_its_own(Path.cwd())
+    runtime.turn.release()
+    await asyncio.gather(*runtime.exits)
+
+    assert while_relaunching is None and apps.ended_on_its_own(Path.cwd()) is None
+    assert runtime.launches()[1]["relaunching"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_clean_exit_or_a_relaunch_that_fails_is_the_app_gone(desktop, monkeypatch):
+    closed, failing = _runtime(), _runtime()
+    await closed.launch_app("boot")
+    await _ended(closed, desktop, 0)
+    gone = apps.ended_on_its_own(Path.cwd())
+
+    async def refused(argv, cwd, env, fds=None):
+        raise OSError("no such file: chrome")
+
+    await failing.launch_app("boot")
+    monkeypatch.setattr(session, "launch", refused)
+    await _ended(failing, desktop, -signal.SIGTRAP)
+
+    assert "with code 0, and nothing launches it again" in gone
+    assert apps.ended_on_its_own(Path.cwd()) == (
+        "it crashed, and its launch after the crash failed: OSError: no such file: chrome: an infrastructure failure")

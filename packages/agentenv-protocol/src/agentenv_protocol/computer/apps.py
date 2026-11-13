@@ -125,15 +125,22 @@ async def served_card(folder: Path) -> Optional[dict]:
 
 
 def ended_on_its_own(folder: Path) -> Optional[str]:
-    """Why the app in ``folder`` can't be ready again where nothing launches it but its server: its launch log says it
-    ended on its own, an infrastructure failure; None while it hasn't."""
+    """Why the app in ``folder`` can't be ready again where nothing launches it but its server: its launch log says
+    its last launch ended on its own, an infrastructure failure, and its server isn't launching it again after a crash
+    (an exit marked ``relaunching``), or failed to; None while it hasn't."""
+    ended = None
     for entry in launch_log(folder):
-        if entry.get("event") == "exit":
-            how = (f"by signal {entry['signal']}" if "signal" in entry else
-                   f"with code {entry['code']}" if "code" in entry else "in a way that wasn't recorded")
-            return (f"it ended on its own at {entry.get('at')}, {how}, and nothing launches it again: an "
-                    "infrastructure failure")
-    return None
+        if entry.get("event") == "launch":
+            ended = None
+        elif entry.get("event") in ("exit", "relaunch_failed"):
+            ended = entry
+    if ended is None or ended.get("relaunching"):
+        return None
+    if ended["event"] == "relaunch_failed":
+        return f"it crashed, and its launch after the crash failed: {ended.get('error')}: an infrastructure failure"
+    how = (f"by signal {ended['signal']}" if "signal" in ended else
+           f"with code {ended['code']}" if "code" in ended else "in a way that wasn't recorded")
+    return f"it ended on its own at {ended.get('at')}, {how}, and nothing launches it again: an infrastructure failure"
 
 
 def launch_log(folder: Path) -> list[dict]:
