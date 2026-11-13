@@ -565,11 +565,11 @@ class Store(ForwardingSite):
 
 - **Forwarding:** a request goes to the app as it came: its method, the site's own path with its encoding intact (an
   escaped `/` stays escaped, and a forwarded prefix is taken off), its query, the `Host` the browser named and its
-  body, streamed, with no header of the forwarder's own. The hop-by-hop headers and `dropped_headers` stay behind. The
-  answer comes back as the app gave it, streamed and still encoded, a redirect unfollowed, but a cookie the app ties
-  to one of the site's names (`Domain`) comes back the host's alone, as agentenv sets a sign-in's cookies, so a
-  sign-in replaces the app's session cookie rather than setting a second one beside it. An app not answering is a
-  502 (`upstream_unavailable`). It forwards HTTP alone, and refuses a WebSocket with close code 1011.
+  body, streamed, with no header or cookie of the forwarder's own. The hop-by-hop headers and `dropped_headers` stay
+  behind. The answer comes back as the app gave it, streamed and still encoded, a redirect unfollowed, but a cookie
+  the app ties to one of the site's names (`Domain`) comes back the host's alone, as agentenv sets a sign-in's
+  cookies, so a sign-in replaces the app's session cookie rather than setting a second one beside it. An app not
+  answering is a 502 (`upstream_unavailable`). It forwards HTTP alone, and refuses a WebSocket with close code 1011.
 - **`builtin_routes=False`** serves none of agentenv's own site routes, so `/api/session` reaches the app too, and the
   card names no `session_path` or `session_cookie`. Any `WebsiteEnvironment` may set it.
 - **`clock="real"`** declares a site that keeps real time, as an app that reads the system clock does: its card serves

@@ -14,6 +14,7 @@ It forwards HTTP alone: a WebSocket is refused (close code 1011)."""
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterable
+from http.cookiejar import DefaultCookiePolicy
 from typing import Any, ClassVar, Optional
 from urllib.parse import quote
 
@@ -36,6 +37,8 @@ READY_ANSWER_S = 8.0
 PATH_SAFE = "/:@!$&'()*+,;="
 #: The close code a WebSocket gets: the forwarder relays HTTP alone.
 WEBSOCKET_REFUSED = 1011
+#: The forwarder's client keeps no cookie, so each request carries the cookies its own browser sent and no others.
+KEEPS_NO_COOKIES = DefaultCookiePolicy(allowed_domains=[])
 
 
 class ForwardingSite(WebsiteEnvironment):
@@ -83,11 +86,13 @@ class Forwarder:
     @property
     def client(self) -> httpx.AsyncClient:
         """The client requests go on with: straight to the app, whatever proxy the environment names, following no
-        redirect, so the browser gets each one, and with no headers of its own, so the app gets only the request's."""
+        redirect, so the browser gets each one, and with no headers or cookies of its own, so the app gets only the
+        request's: a cookie one browser was answered with never goes on with another's request."""
         if self._client is None:
             self._client = httpx.AsyncClient(timeout=httpx.Timeout(None, connect=CONNECT_TIMEOUT_S), trust_env=False,
                                              follow_redirects=False)
             self._client.headers.clear()
+            self._client.cookies.jar.set_policy(KEEPS_NO_COOKIES)
         return self._client
 
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:

@@ -148,38 +148,60 @@ def test_a_request_goes_to_the_app_as_it_came_without_hop_by_hop_or_dropped_head
     assert not {"x-per-hop", "keep-alive", "x-auto-login"} & set(headers), headers
 
 
-def test_the_app_gets_only_the_headers_the_request_had_and_none_of_the_forwarders_own(app):
-    """A request with no Accept-Encoding, User-Agent or Accept reaches the app with none, so the app never encodes
-    an answer for a client that didn't ask."""
+async def _forwarded(forwarder: Forwarder, path: str, headers: list[tuple[bytes, bytes]]) -> list[dict]:
+    """The ASGI messages ``forwarder`` sends for a GET of ``path`` with ``headers`` alone, as a browser's request."""
     sent: list[dict] = []
+    requested, answered = asyncio.Event(), asyncio.Event()
 
-    async def forward() -> None:
-        requested, answered = asyncio.Event(), asyncio.Event()
+    async def receive() -> dict:
+        if not requested.is_set():
+            requested.set()
+            return {"type": "http.request", "body": b"", "more_body": False}
+        await answered.wait()
+        return {"type": "http.disconnect"}
 
-        async def receive() -> dict:
-            if not requested.is_set():
-                requested.set()
-                return {"type": "http.request", "body": b"", "more_body": False}
-            await answered.wait()
-            return {"type": "http.disconnect"}
+    async def send(message: dict) -> None:
+        sent.append(message)
+        if message["type"] == "http.response.body" and not message.get("more_body"):
+            answered.set()
 
-        async def send(message: dict) -> None:
-            sent.append(message)
-            if message["type"] == "http.response.body" and not message.get("more_body"):
-                answered.set()
+    await forwarder({"type": "http", "method": "GET", "path": path, "raw_path": path.encode(), "root_path": "",
+                     "query_string": b"", "headers": headers}, receive, send)
+    return sent
 
-        forwarder = Forwarder(app.url)
+
+def _each_forwarded(forwarder: Forwarder, *requests: tuple[str, list[tuple[bytes, bytes]]]) -> list[list[dict]]:
+    """What ``forwarder`` sends for each of ``requests`` in turn, on one event loop, its client closed after."""
+    async def forward() -> list[list[dict]]:
         try:
-            await forwarder({"type": "http", "method": "GET", "path": "/admin", "raw_path": b"/admin",
-                             "root_path": "", "query_string": b"", "headers": [(b"host", HOST.encode())]},
-                            receive, send)
+            return [await _forwarded(forwarder, path, headers) for path, headers in requests]
         finally:
             await forwarder.client.aclose()
 
-    asyncio.run(forward())
+    return asyncio.run(forward())
+
+
+def test_the_app_gets_only_the_headers_the_request_had_and_none_of_the_forwarders_own(app):
+    """A request with no Accept-Encoding, User-Agent or Accept reaches the app with none, so the app never encodes
+    an answer for a client that didn't ask."""
+    [sent] = _each_forwarded(Forwarder(app.url), ("/admin", [(b"host", HOST.encode())]))
 
     assert sent[0]["status"] == 200
     assert app.last()["headers"] == [("host", HOST)], app.last()["headers"]
+
+
+def test_a_cookie_one_browser_was_answered_with_never_goes_on_with_anothers_request(app):
+    """The app sets cookies on one browser's answer, host-only ones among them; another browser's request, with no
+    cookie of its own, reaches the app with none, and one with its own cookie with that alone."""
+    host = [(b"host", HOST.encode())]
+    answered, bare, own = _each_forwarded(Forwarder(app.url, names=[HOST]), ("/cookies", host), ("/admin", host),
+                                          ("/admin", [*host, (b"cookie", b"admin=other")]))
+    bare_seen = app.seen[-2]["headers"]
+
+    set_cookies = [value for name, value in answered[0]["headers"] if name.lower() == b"set-cookie"]
+    assert b"a=1; Path=/" in set_cookies and (bare[0]["status"], own[0]["status"]) == (200, 200)
+    assert bare_seen == [("host", HOST)], bare_seen
+    assert app.last()["headers"] == [("host", HOST), ("cookie", "admin=other")], app.last()["headers"]
 
 
 def test_a_body_goes_to_the_app_whole_sent_at_once_or_chunked(app, client):
