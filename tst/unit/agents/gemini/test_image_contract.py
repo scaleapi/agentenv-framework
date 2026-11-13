@@ -14,6 +14,10 @@ DOCKERFILE = (AGENT_DIR / "Dockerfile").read_text()
 INSTALL_SH = (AGENT_DIR / "install.sh").read_text()
 
 
+# Harbor bundles pin the same versions (agentenvhub-sdk's _DOC_TOOL_PACKAGES), so a task's documents read alike in both.
+DOC_LIBS = ["openpyxl==3.1.5", "pypdf==6.21.3", "python-docx==1.2.0", "python-pptx==1.0.2"]
+
+
 def _copied() -> list[str]:
     return [name for line in re.findall(r"^COPY (?!--from=)(.+) \S+$", DOCKERFILE, re.MULTILINE)
             for name in line.split()]
@@ -51,6 +55,15 @@ def test_the_image_installs_the_protocol_alone_from_its_requirements():
                     if line and not line.startswith("#")]
 
     assert requirements == ["agentenv-framework-protocol[agent]>=0.1.351"]
+
+
+def test_the_image_gives_the_models_python_the_document_libraries():
+    packages = [line for line in (AGENT_DIR / "model-requirements.txt").read_text().splitlines()
+                if line and not line.startswith("#")]
+
+    assert packages == DOC_LIBS
+    assert "COPY requirements.txt model-requirements.txt ./" in DOCKERFILE
+    assert "RUN pip install --no-cache-dir -r requirements.txt -r model-requirements.txt" in DOCKERFILE
 
 
 def test_node_is_pinned_by_version_and_checksum_for_the_image_and_an_install():
