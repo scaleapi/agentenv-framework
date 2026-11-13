@@ -1,3 +1,8 @@
 # What the image gives the Python the model runs, beside the agent's own requirements; an installed agent's model
 # uses the task container's Python instead.
 boto3==1.43.115
+# The readers for the .xlsx, .pdf, .docx and .pptx files a task gives the model, at the versions Harbor bundles pin.
+openpyxl==3.1.5
+pypdf==6.21.3
+python-docx==1.2.0
+python-pptx==1.0.2

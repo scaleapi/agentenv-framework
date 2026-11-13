@@ -36,7 +36,8 @@ Codex reads its settings from `$CODEX_HOME/config.toml`, which the agent writes:
 | `install/v1` | `install.sh`, into a task container (as root, the CLI working in `/app`) or onto a `vm` sandbox's Linux host: Node and uv checked against their checksums, the CLIs from `package-lock.json` and the agent's requirements in a Python of its own, which the target's own Node and Python are never replaced by; the model's commands get the agent's where the target has none. Node's builds need glibc |
 | `triggers/v1` | SDK default |
 
-The image is `python:3.11-slim` with Node, the CLIs and the agent, running as the `agent` user; Codex's state is in
+The image is `python:3.11-slim` with Node, the CLIs, the agent and the Python packages `model-requirements.txt` pins for
+the model's scripts, running as the `agent` user; Codex's state is in
 `/home/agent/.codex` whatever the uid.
 
 A `deploy_agent` `builtin_tools` selection turns the CLI's own tools off with `-c` overrides on the task's CLI alone;

@@ -9,6 +9,9 @@ from tst.unit.agents.claude_code.agent import AGENT_DIR
 
 DOCKERFILE = (AGENT_DIR / "Dockerfile").read_text()
 
+# Harbor bundles pin the same versions (agentenvhub-sdk's _DOC_TOOL_PACKAGES), so a task's documents read alike in both.
+DOC_LIBS = ["openpyxl==3.1.5", "pypdf==6.21.3", "python-docx==1.2.0", "python-pptx==1.0.2"]
+
 
 def test_every_file_the_image_copies_is_in_the_folder():
     copied = [name for line in re.findall(r"^COPY (?!--from=)(.+) \S+$", DOCKERFILE, re.MULTILINE)
@@ -39,6 +42,7 @@ def test_the_packages_the_image_gives_the_models_python_are_pinned():
 
     assert packages and all(re.fullmatch(r"[A-Za-z0-9_.-]+==[0-9][0-9A-Za-z.]*", line) for line in packages), packages
     assert any(line.startswith("boto3==") for line in packages)
+    assert set(DOC_LIBS) <= set(packages), packages
     assert "-r requirements.txt -r model-requirements.txt" in DOCKERFILE
 
 
