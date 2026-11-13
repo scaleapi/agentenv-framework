@@ -6,7 +6,8 @@ browser named and its body, streamed. The answer comes back as the app gave it, 
 cookie the app ties to one of the site's own names (``Domain``), which comes back the host's alone, as agentenv sets
 its own, so the cookie a sign-in sets is the app's cookie, not one beside it. Such a site
 usually declares ``@website(builtin_routes=False, clock="real")``, so every path but agentenv's own reaches the app and
-nothing expects the app to follow the universe's clock; it signs a browser in through a ``@session_state`` of its own.
+nothing expects the app to follow the universe's clock; it signs a browser in through a ``@session_state`` of its own,
+which asks the app with ``ask_app`` as its ready checks do.
 Its app keeps its own data, so its data plane serves ``data/get`` alone, which exports nothing: it takes no load and
 can't reset, which agentenv reads off its card, as it reads any site's that serves no ``data/reset``.
 
@@ -14,6 +15,7 @@ It forwards HTTP alone: a WebSocket is refused (close code 1011)."""
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterable
+from functools import cached_property
 from http.cookiejar import DefaultCookiePolicy
 from typing import Any, ClassVar, Optional
 from urllib.parse import quote
@@ -25,7 +27,7 @@ from starlette.responses import StreamingResponse
 
 from ..agent_env_environment import get_data
 from ..passthrough import passed_on
-from .environment import SITE_RAW_PATH, WebsiteEnvironment, _route_path, ready_check
+from .environment import SITE_RAW_PATH, WebsiteEnvironment, ready_check, route_path
 from .errors import ApiError
 from .routes import error_response
 
@@ -33,6 +35,8 @@ from .routes import error_response
 CONNECT_TIMEOUT_S = 10.0
 #: How long the ready check waits for the app's answer, inside the ready check's own bound.
 READY_ANSWER_S = 8.0
+#: How long ``ask_app`` waits for the app's answer unless told otherwise.
+ASK_TIMEOUT_S = 60.0
 #: What a path's segments may hold unescaped, besides letters, digits and ``_.-~``.
 PATH_SAFE = "/:@!$&'()*+,;="
 #: The close code a WebSocket gets: the forwarder relays HTTP alone.
@@ -44,17 +48,34 @@ KEEPS_NO_COOKIES = DefaultCookiePolicy(allowed_domains=[])
 class ForwardingSite(WebsiteEnvironment):
     """A site whose pages ``upstream`` serves: set ``upstream`` to the app's address in the container, ``ready_path``
     to a path it answers once it's up (the site is ready when that answers below 500), and ``dropped_headers`` to any
-    request header only the site's own calls may send the app, such as a sign-in header its ``@session_state`` uses."""
+    request header only the site's own calls may send the app, such as a sign-in header its ``@session_state`` uses.
+    A site's own calls go through ``ask_app``."""
 
     upstream: ClassVar[str] = "http://127.0.0.1:80"
     ready_path: ClassVar[str] = "/"
     dropped_headers: ClassVar[tuple[str, ...]] = ()
 
     def fallback_app(self) -> Any:
-        if not hasattr(self, "_forwarder"):
-            names = [name for name in self.declaration().domains if not name.startswith("*.")]
-            self._forwarder = Forwarder(self.upstream, self.dropped_headers, names)
         return self._forwarder
+
+    async def ask_app(self, path: str, *, method: str = "GET", headers: Optional[dict[str, str]] = None,
+                      content: Optional[bytes] = None, timeout: float = ASK_TIMEOUT_S) -> httpx.Response:
+        """The app's answer to ``method`` ``path`` asked as the site: under its first name as ``Host``, with
+        ``headers``, such as a sign-in header in ``dropped_headers`` that only the site's own calls send, and
+        ``content``; through the forwarder's client, so with no cookie but those in ``headers`` and no redirect
+        followed."""
+        names = self._own_names()
+        return await self._forwarder.client.request(
+            method, self.upstream.rstrip("/") + "/" + path.lstrip("/"), content=content, timeout=timeout,
+            headers={**({"host": names[0]} if names else {}), **(headers or {})})
+
+    @cached_property
+    def _forwarder(self) -> Forwarder:
+        return Forwarder(self.upstream, self.dropped_headers, self._own_names())
+
+    def _own_names(self) -> list[str]:
+        """The site's exact names, the first the one its own calls ask the app under."""
+        return [name for name in self.declaration().domains if not name.startswith("*.")]
 
     @get_data
     async def exported(self) -> list:
@@ -64,12 +85,9 @@ class ForwardingSite(WebsiteEnvironment):
     @ready_check
     async def upstream_answers(self) -> bool:
         """The app answers ``ready_path``, for the site's first name, below 500."""
-        url = self.upstream.rstrip("/") + "/" + self.ready_path.lstrip("/")
-        names = [name for name in self.declaration().domains if not name.startswith("*.")]
-        answer = await self.fallback_app().client.get(url, headers={"host": names[0]} if names else None,
-                                                      timeout=READY_ANSWER_S)
+        answer = await self.ask_app(self.ready_path, timeout=READY_ANSWER_S)
         if answer.status_code >= 500:
-            raise RuntimeError(f"{url} answered {answer.status_code}")
+            raise RuntimeError(f"{self.ready_path} answered {answer.status_code}")
         return True
 
 
@@ -130,7 +148,7 @@ def target(scope: dict) -> str:
     """The path and query a request asks the app for: the site's own path as it reached the server, still
     percent-encoded, so an escaped ``/`` stays one, before any forwarded prefix was put before it."""
     raw = scope.get(SITE_RAW_PATH)
-    path = raw.decode("latin-1") if raw else quote(_route_path(scope), safe=PATH_SAFE)
+    path = raw.decode("latin-1") if raw else quote(route_path(scope), safe=PATH_SAFE)
     query = scope.get("query_string", b"").decode("latin-1")
     return path + (f"?{query}" if query else "")
 

@@ -56,16 +56,13 @@ from ..agent_env_environment import (
 from ..types import EnvironmentExtension
 from .clock import CLOCK_EXTENSION_URI, UNIVERSE_NOW_HEADER, ClockUnavailable, UniverseClock, clock_patch_script, iso
 from .errors import ApiError, NotFound
-from .readiness import (SITE_READY_TIMEOUT_S, WEBSITE_ALLOW_HOSTS_PARAM, WEBSITE_CLOCK_PARAM, WEBSITE_EXTENSION_URI,
-                        WEBSITE_LIVE_PARAM, WEBSITE_READY_OP, WebsiteReadiness)
+from .readiness import (REAL_CLOCK, SITE_READY_TIMEOUT_S, UNIVERSE_CLOCK, WEBSITE_ALLOW_HOSTS_PARAM, WEBSITE_CLOCK_PARAM,
+                        WEBSITE_EXTENSION_URI, WEBSITE_LIVE_PARAM, WEBSITE_READY_OP, WebsiteReadiness)
 from .routes import (ApiContext, ApiRoute, endpoint, error_response, forwarded_prefix, openapi, openapi_path, request_role,
                      reserved_path, routes_of)
 from .session import SessionSigner, session_cookie_name
 
 SESSION_PATH = "/api/session"
-#: A site's clocks: the universe's, which ``clock/v1`` can tie to the gateway's, and real time, which a third-party app
-#: keeps and nothing moves.
-UNIVERSE_CLOCK, REAL_CLOCK = "universe", "real"
 #: The variable a deploy hands a site its settings in, a JSON object of each by its name.
 WEBSITE_SETTINGS_ENV = "AGENTENV_WEBSITE_SETTINGS"
 CHECK_TIMEOUT_S = 10.0
@@ -441,7 +438,7 @@ class _Universe:
         try:
             now: Any = await clock.read()
         except ClockUnavailable as e:
-            if not reserved_path(_route_path(scope)):
+            if not reserved_path(route_path(scope)):
                 return await error_response(ApiError(str(e), code="clock_unavailable", status=503))(scope, receive, send)
             now = None
         token = clock.answering_at(now)
@@ -489,7 +486,7 @@ def _with_script(html: bytes, script: bytes) -> bytes:
     return html[:at] + script + html[at:]
 
 
-def _route_path(scope: dict) -> str:
+def route_path(scope: dict) -> str:
     """The site's own path of a request, as routing reads it: its path without the ``root_path`` a forwarded prefix put
     before it (``_Forwarded``)."""
     root, path = scope.get("root_path", ""), scope["path"]
@@ -500,7 +497,7 @@ def _unreserved(handler: Any) -> Any:
     """``handler``, an ``@api`` route's endpoint, answering 404 at the data plane's and card's paths, so a broad route
     (``/{rest:path}``) never serves a page there; the routes agentenv registers at those paths answer before it."""
     async def answer(request: Request) -> Response:
-        if reserved_path(_route_path(request.scope)):
+        if reserved_path(route_path(request.scope)):
             return error_response(NotFound("not found"))
         return await handler(request)
     return answer
@@ -519,7 +516,7 @@ class _Fallback:
             if self.app is not None:
                 await self.app(scope, receive, send)
             return
-        path, reading = _route_path(scope), scope["method"] in ("GET", "HEAD")
+        path, reading = route_path(scope), scope["method"] in ("GET", "HEAD")
         if reserved_path(path):
             return await error_response(NotFound("not found"))(scope, receive, send)
         if reading and (file := self._file(path)) is not None:

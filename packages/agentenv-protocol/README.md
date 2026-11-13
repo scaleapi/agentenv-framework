@@ -560,7 +560,8 @@ class Store(ForwardingSite):
 
     @session_state
     async def signed_in(self, user: str | None) -> dict:
-        ...                               # sign in server-side, return the app's cookies
+        answer = await self.ask_app("/admin", headers={"X-Auto-Login": "..."})
+        ...                               # return the cookies the app answered with
 ```
 
 - **Forwarding:** a request goes to the app as it came: its method, the site's own path with its encoding intact (an
@@ -581,6 +582,9 @@ class Store(ForwardingSite):
   passes a card serving `data/get` alone once `data/get` answers.
 - **Its session:** `@session_state` signs the browser in with whatever cookies the app sets, for example from one
   server-side request carrying a sign-in header, which `dropped_headers` then keeps the browser from sending.
+- **Its own calls:** `ask_app(path, method=..., headers=..., content=...)` asks the app as the site does, under its
+  first name as `Host`, through the forwarder's client, which keeps no cookie and follows no redirect. Its session
+  and ready checks use it, as `ForwardingSite`'s own ready check does.
 - **Its names:** an app with a fixed base URL answers any other `Host` with a redirect to its own name. A browser
   reaches it by that name alone, the site proxy naming it, and the conformance check's `any_host` passes `/` redirecting
   to one of the card's `domains` as it does `/` serving HTML.

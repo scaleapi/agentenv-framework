@@ -3,19 +3,19 @@ agentenv_protocol.website.conformance <url>`` prints each check and exits 1 when
 ``--strict``, when a recommended one warned), 2 when the server couldn't be reached. Everything goes over HTTP.
 
 The required checks are the contract, what agentenv, the gateway and a browser rely on of a website env's server: a
-card declaring the site's domains, readiness and routes; ``/`` serving HTML under a made-up host, or redirecting to one of the site's own names; the site ready, by
-the card's ``website/v1`` ``ready``, whose answer must be a ``WebsiteReadiness`` (by the declared health path,
-deprecated, for a card without it); the data plane's and card's paths not the site's pages; and the data plane the
-card advertises, whose round trip at the card's ``url`` (data/get, data/reset, data/get, which no longer returns the
-exported data, data/add of what the first data/get returned, data/get again) returns what it was given, or, for a card
-serving ``data/get`` alone, a site whose app keeps its own data and so takes no load and can't reset, which answers
-it; and, for a
-card declaring an ``mcp`` interface, a site that is an MCP server too, that endpoint answering ``initialize`` and
-listing, every page of ``tools/list`` read, no tool its card doesn't (streamable HTTP, ``MCP_PROTOCOL_VERSION``); a
-card's tool it doesn't list is warned, since a hidden-by-default tool is listed to no caller until one enables it.
-A failed one is ``failed``. The recommended checks are what an SDK site does and the gateway uses when a server offers it:
-``X-Universe-Now`` on every answer the other checks got, ``clock/v1``'s ``sync_time`` against a clock the checker serves (both
-skipped for a site whose ``website/v1`` params declare ``clock: "real"``, a third-party app that keeps real time), the forwarded headers
+card declaring the site's domains, readiness and routes; ``/`` serving HTML under a made-up host, or redirecting to
+one of the site's own names; the site ready, by the card's ``website/v1`` ``ready``, whose answer must be a
+``WebsiteReadiness`` (by the declared health path, deprecated, for a card without it); the data plane's and card's
+paths not the site's pages; and the data plane the card advertises, whose round trip at the card's ``url`` (data/get,
+data/reset, data/get, which no longer returns the exported data, data/add of what the first data/get returned,
+data/get again) returns what it was given, or, for a card serving ``data/get`` alone, a site whose app keeps its own
+data and so takes no load and can't reset, which answers it; and, for a card declaring an ``mcp`` interface, a site
+that is an MCP server too, that endpoint answering ``initialize`` and listing, every page of ``tools/list`` read, no
+tool its card doesn't (streamable HTTP, ``MCP_PROTOCOL_VERSION``); a card's tool it doesn't list is warned, since a
+hidden-by-default tool is listed to no caller until one enables it. A failed one is ``failed``. The recommended checks
+are what an SDK site does and the gateway uses when a server offers it: ``X-Universe-Now`` on every answer the other
+checks got, ``clock/v1``'s ``sync_time`` against a clock the checker serves (both skipped for a site whose
+``website/v1`` params declare ``clock: "real"``, a third-party app that keeps real time), the forwarded headers
 wherever an answer shows them (on ``/`` and on a GET route with its trailing slash toggled, which a server may
 redirect), and the cookies those answers set: none tied to a domain, the session path's the one the card names, and
 none whose lifetime is an absolute ``Expires`` with no ``Max-Age``. A failed one is ``warned``.
@@ -47,10 +47,12 @@ from pydantic import ValidationError
 from ..client import find_extension, find_extension_method
 from ..types import MCP_TRANSPORT, METHOD_ADD, METHOD_GET, METHOD_RESET, RPC_PATH, WELL_KNOWN_PATH
 from .clock import CLOCK_EXTENSION_URI, UNIVERSE_NOW_HEADER, iso, parse_time
-from .readiness import (DEFAULT_HEALTH_PATH, WEBSITE_CLOCK_PARAM, WEBSITE_EXTENSION_URI, WEBSITE_READY_OP,
+from .readiness import (DEFAULT_HEALTH_PATH, REAL_CLOCK, WEBSITE_CLOCK_PARAM, WEBSITE_EXTENSION_URI, WEBSITE_READY_OP,
                         WebsiteReadiness, names_host)
 
 Status = Literal["passed", "failed", "skipped", "warned"]
+#: The checks of a site's clock, which a card declaring a real clock skips.
+CLOCK_CHECKS = ("universe_now", "clock")
 CLOCK_START = datetime.datetime(2031, 5, 6, 7, 8, 9, tzinfo=datetime.timezone.utc)
 CLOCK_SLACK_S = 120
 MCP_PROTOCOL_VERSION = "2025-06-18"
@@ -125,12 +127,15 @@ class _Checker:
                  ("mcp", True, lambda: self._mcp(card)),
                  ("clock", False, lambda: self._clock(card)), ("forwarded", False, lambda: self._forwarded(site)),
                  ("cookies", False, lambda: self._cookies(site)))
-        skipped = {"universe_now", "clock"} if site.get(WEBSITE_CLOCK_PARAM) == "real" else set()
-        outcomes = {name: ("skipped", "the card declares a real clock, which nothing moves") for name in skipped}
-        outcomes.update({name: _outcome(step) for name, _required, step in steps
-                         if name not in skipped and name != "universe_now"})
-        if "universe_now" not in skipped:
-            outcomes["universe_now"] = _outcome(self._universe_now)
+        real_clock = site.get(WEBSITE_CLOCK_PARAM) == REAL_CLOCK
+
+        def outcome(name: str, step: Callable[[], tuple[Status, str]]) -> tuple[Status, str]:
+            if real_clock and name in CLOCK_CHECKS:
+                return "skipped", "the card declares a real clock, which nothing moves"
+            return _outcome(step)
+
+        outcomes = {name: outcome(name, step) for name, _required, step in steps if name != "universe_now"}
+        outcomes["universe_now"] = outcome("universe_now", self._universe_now)
         results = []
         for name, required, _step in steps:
             status, detail = outcomes[name]
@@ -224,17 +229,15 @@ class _Checker:
         operations = (card.get("capabilities") or {}).get("operations")
         operations = operations if isinstance(operations, list) else []
         missing = [m for m in (METHOD_GET, METHOD_RESET, METHOD_ADD) if m not in operations]
-        if missing == [METHOD_RESET, METHOD_ADD]:
-            url = card.get("url")
-            self.rpc_url = self._url(url if isinstance(url, str) and url else RPC_PATH)
-            exported = self._rpc(METHOD_GET).get("parts")
-            return "passed", (f"the card serves {METHOD_GET} alone, which answered with {len(exported or [])} part(s): a "
-                              "site whose app keeps its own data, which takes no load and can't reset")
-        if missing:
+        get_alone = set(missing) == {METHOD_RESET, METHOD_ADD}
+        if missing and not get_alone:
             return "failed", f"the card's operations lack {', '.join(missing)}"
         url = card.get("url")
         self.rpc_url = self._url(url if isinstance(url, str) and url else RPC_PATH)
         exported = self._rpc(METHOD_GET).get("parts") or []
+        if get_alone:
+            return "passed", (f"the card serves {METHOD_GET} alone, which answered with {len(exported)} part(s): a site "
+                              "whose app keeps its own data, which takes no load and can't reset")
         self._rpc(METHOD_RESET)
         added_back = False
         try:

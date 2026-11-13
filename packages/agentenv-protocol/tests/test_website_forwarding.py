@@ -204,6 +204,28 @@ def test_a_cookie_one_browser_was_answered_with_never_goes_on_with_anothers_requ
     assert app.last()["headers"] == [("host", HOST), ("cookie", "admin=other")], app.last()["headers"]
 
 
+def test_ask_app_asks_as_the_site_under_its_name_with_a_header_only_its_own_calls_send(app):
+    """The site's own call reaches the app under the site's name, with the headers it gives, a dropped one among them,
+    and its method and body; a cookie the app answered one call with goes on with no later one."""
+    site = _site(app.url)()
+
+    async def ask() -> tuple:
+        try:
+            return (await site.ask_app("/cookies", headers={"X-Auto-Login": "admin:test"}),
+                    await site.ask_app("admin/form", method="POST", content=b"user=amy"))
+        finally:
+            await site.fallback_app().client.aclose()
+
+    signed, posted = asyncio.run(ask())
+    first, second = (dict(seen["headers"]) for seen in app.seen[-2:])
+
+    assert (signed.status_code, first["host"], first["x-auto-login"]) == (200, HOST, "admin:test")
+    assert signed.headers.get_list("set-cookie")[0] == "a=1; Path=/"
+    assert (posted.status_code, app.seen[-1]["method"], app.seen[-1]["path"], app.seen[-1]["body"]) == (
+        200, "POST", "/admin/form", b"user=amy")
+    assert "cookie" not in second and second["host"] == HOST, second
+
+
 def test_a_body_goes_to_the_app_whole_sent_at_once_or_chunked(app, client):
     client.post("/admin/form", content=b"user=amy&next=%2F", headers={"Content-Type": "application/x-www-form-urlencoded"})
     sent = app.last()

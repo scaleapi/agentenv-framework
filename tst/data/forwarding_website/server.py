@@ -66,8 +66,7 @@ class Shop(ForwardingSite):
 
     @session_state
     async def signed_in(self, user):
-        answer = await self.fallback_app().client.get(f"{self.upstream}/admin/home",
-                                                      headers={"host": NAME, AUTO_LOGIN: user or "admin"})
+        answer = await self.ask_app("/admin/home", headers={AUTO_LOGIN: user or "admin"})
         sid = SimpleCookie(answer.headers["set-cookie"])["sid"]
         return {"cookies": [{"name": "sid", "value": sid.value, "path": "/admin", "max_age": 3600, "httpOnly": True}],
                 "local_storage": []}
