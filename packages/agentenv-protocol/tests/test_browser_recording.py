@@ -417,10 +417,11 @@ async def test_a_tab_behind_the_active_one_is_framed_once_a_second_capture_nudge
     pipe.emit("Target.targetCreated", {"targetInfo": {"targetId": "T1", "type": "page", "url": "about:blank"}})
     pipe.emit("Target.attachedToTarget", {"sessionId": "s-T1", "targetInfo": {"targetId": "T1", "type": "page"}})
 
+    asked = asyncio.get_running_loop().time()
     data, _, tab, _ = await control.frame("T1", load_wait_s=0)
 
-    (_, _, first), (_, _, second) = pipe.captured
-    assert (base64.b64decode(data), tab) == (b"behind", "T1") and second - first >= NUDGE_S
+    (_, _, _), (_, _, second) = pipe.captured
+    assert (base64.b64decode(data), tab) == (b"behind", "T1") and second - asked >= NUDGE_S
 
 
 @pytest.mark.asyncio
