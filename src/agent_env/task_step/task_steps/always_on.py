@@ -1008,7 +1008,7 @@ class _Run:
                 break
         await self._capped(self._last_read(), "the last read", step.read_cap_seconds() + GATEWAY_ALLOWANCE_SECONDS)
         if self.rates:
-            await self._rate()
+            await self._rating()
 
     async def _capped(self, work, what: str, seconds: Optional[float] = None):
         """``work``, cut off past ``seconds`` (one turn of the loop's worst case, ``wake_reserve_seconds``): every part
@@ -1147,7 +1147,7 @@ class _Run:
             at, self.read_mode = self._available(now)
         await self.read(at, last=True)
 
-    async def _rate(self) -> None:
+    async def _rating(self) -> None:
         """Once the run is over, the user sim rates it (``user_sim_versions.rate``): at her last read's time, or the
         world's when that's later, with the agent's messages she never read. Recorded in
         ``metadata[SATISFACTION_KEY][step_id]``, the whole ask in the timeline; never delivered, never in the graded
