@@ -158,8 +158,8 @@ jobs:
   # The slow tier: builds the env images and the echo A2A agent (tst/data/a2a_agent) and deploys
   # them on the runner's Docker. The tests that need a real model, a remote sandbox, a registered
   # default A2A agent or MCP server sources from outside this repository skip with the capability reason.
-  # Its tests run serially, since they share image tags and artifact ids, so it is split across runners
-  # instead: AGENTENV_TEST_SHARD picks each runner's share, balanced by tst/integration/slow_durations.json
+  # Each runner runs its files on two workers, a file's tests on one, and AGENTENV_TEST_SHARD picks
+  # each runner's share of the files, balanced by tst/integration/slow_durations.json
   # (tst/util/shards.py). The gateway tests are a check of their own, split the same way. Each check passes
   # when all of its shards do (the integration-local-slow and integration-local-gateway jobs below).
   integration-local-slow-shard:
