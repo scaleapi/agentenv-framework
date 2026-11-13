@@ -1212,8 +1212,8 @@ async def test_its_control_says_the_tab_whose_page_has_focus_is_active_else_the_
 
 
 @pytest.mark.asyncio
-async def test_its_connection_hears_events_its_server_logs_each_launch_and_an_exit_it_didnt_ask_for(monkeypatch,
-                                                                                                    tmp_path):
+async def test_its_connection_hears_events_its_server_logs_each_launch_and_a_crash_it_launches_it_again_after(
+        monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(app_runtime, "LAUNCHED", tmp_path / "launched")
     browser = FakeBrowser()
@@ -1227,15 +1227,19 @@ async def test_its_connection_hears_events_its_server_logs_each_launch_and_an_ex
     await _answering(browser)
     os.killpg(second, signal.SIGKILL)
     for _ in range(int(WAIT_S / POLL_S)):
-        if any(entry["event"] == "exit" for entry in runtime.launches()):
+        if any(entry.get("cause") == "crash" for entry in runtime.launches()):
             break
         await asyncio.sleep(POLL_S)
-    after_exit = await browser.browser_record()
+    relaunched = await _answering(browser)
+    after_crash = await browser.browser_record()
+    launches = runtime.launches()
+    await runtime.stop_app()
     browser.devtools.close()
 
     assert [tab["id"] for tab in record["tabs"]] == ["start"]
-    assert after_exit["tabs"] == [] and [(tab["id"], tab["closed_by"]) for tab in after_exit["closed_tabs"]] == [
-        ("start", "stop"), ("start", "exit")]
-    assert [(entry["event"], entry.get("cause"), entry["pid"]) for entry in runtime.launches()] == [
+    closed = [(tab["id"], tab["closed_by"]) for tab in after_crash["closed_tabs"]]
+    assert closed[:2] == [("start", "stop"), ("start", "exit")]
+    assert [(entry["event"], entry.get("cause"), entry["pid"]) for entry in launches[:4]] == [
         ("launch", "boot", first), ("stop", None, first), ("launch", "data/reset", second), ("exit", None, second)]
-    assert runtime.launches()[-1]["signal"] == "SIGKILL"
+    assert launches[3]["signal"] == "SIGKILL" and relaunched
+    assert (launches[4]["event"], launches[4]["cause"]) == ("launch", "crash") and launches[4]["pid"] != second

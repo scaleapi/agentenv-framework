@@ -40,6 +40,9 @@ PID = Path(".agentenv/app.pid")
 LAUNCHES = Path(".agentenv/launches")
 #: How long an app that ended on its own may take to be reaped, for its exit code.
 EXIT_WAIT_S = 5.0
+#: How many times in a boot an app that relaunches after a crash is launched again, so one that can't start doesn't
+#: loop.
+CRASH_RELAUNCHES = 5
 #: How long a stopped app may take to exit before it's killed.
 STOP_TIMEOUT_S = 10.0
 HOLD_BOOT_LAUNCH_ENV = "AGENTENV_HOLD_BOOT_LAUNCH"
@@ -65,7 +68,7 @@ class AppRuntime:
 
     def __init__(self, launch: Optional[Launch], ready_checks: dict[str, Callable[[], Any]], timeout_s: float, *,
                  desktop: bool = True, launch_fds: Optional[Callable[[], Awaitable[dict[int, int]]]] = None,
-                 relaunch_on_start: bool = False,
+                 relaunch_on_start: bool = False, relaunch_on_crash: bool = False,
                  launch_running: Optional[Callable[[], Awaitable[None]]] = None) -> None:
         self.launch = launch
         self.ready_checks = ready_checks
@@ -73,6 +76,7 @@ class AppRuntime:
         self.desktop = desktop
         self.launch_fds = launch_fds
         self.relaunch_on_start = relaunch_on_start
+        self.relaunch_on_crash = relaunch_on_crash
         self.launch_running = launch_running
         self.exits: set[asyncio.Future] = set()
         self.started = time.time()
@@ -147,7 +151,9 @@ class AppRuntime:
 
     def exited(self) -> bool:
         """Log that the app this server launched last ended on its own, with its exit code or the signal that ended
-        it, unless the server stopped it; whether it did."""
+        it, unless the server stopped it; whether it did. With ``relaunch_on_crash``, one a signal or a failing code
+        ended is launched again, up to ``CRASH_RELAUNCHES`` times a boot; one that exited cleanly was closed, and stays
+        so."""
         if (pid := _recorded_pid()) is None:
             return False
         noting = asyncio.ensure_future(self._log_exit(pid))
@@ -159,6 +165,15 @@ class AppRuntime:
         code = await session.returncode(pid, EXIT_WAIT_S)
         self.log("exit", pid, **({} if code is None else
                                  {"signal": signal.Signals(-code).name} if code < 0 else {"code": code}))
+        if not (self.relaunch_on_crash and code and _recorded_pid() == pid):
+            return
+        if (relaunched := sum(entry.get("cause") == "crash" for entry in self.launches())) >= CRASH_RELAUNCHES:
+            self.log("crash_relaunches_spent", pid, relaunched=relaunched)
+            return
+        try:
+            await self.launch_app("crash")
+        except Exception as e:
+            self.launch_failed = f"{type(e).__name__}: {e}"
 
     def log(self, event: str, pid: int, **fields: Any) -> None:
         """Append ``event`` for the app's ``pid`` to its launch log, which outlives its server for the boot."""

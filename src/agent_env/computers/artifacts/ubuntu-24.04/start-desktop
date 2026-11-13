@@ -26,7 +26,8 @@ case "${1:-}" in
         # supervisord runs one X at a time, so a lock here is one a killed X left, and X refuses to start while the pid
         # it names is taken, which after a restart it often is.
         rm -f "/tmp/.X${DISPLAY#:}-lock"
-        exec Xvfb "$DISPLAY" -screen 0 "${resolution}x24" -nolisten tcp -ac
+        # No screensaver and no DPMS: their timeouts run on real time, and would blank an unattended screen.
+        exec Xvfb "$DISPLAY" -screen 0 "${resolution}x24" -nolisten tcp -ac -s 0 -dpms
         ;;
     with-x)
         shift
