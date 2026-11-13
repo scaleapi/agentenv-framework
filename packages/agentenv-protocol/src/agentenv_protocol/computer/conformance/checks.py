@@ -875,8 +875,9 @@ class Probe:
             start, end, waypoint = (50, 50), (300, 250), (200, 100)
             points = [start, waypoint, end] if int(self.features.get("max_drag_points", 2)) >= 3 else [start, end]
             path = [list(self._at("pad", scale, x, y)) for x, y in points]
+            before = (await self.state())["drags"]
             await self.act("computer_drag", {"path": path, "duration_ms": 400, "frame_id": frame})
-            ok, state = await self.until(lambda s: bool(s["drags"]))
+            ok, state = await self.until(lambda s: s["drags"] != before)
             if not ok:
                 return "no drag reached the pad"
             stroke = state["drags"][-1]
