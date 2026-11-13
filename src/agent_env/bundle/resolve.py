@@ -538,9 +538,10 @@ def _registry_problem(key: str, name: Any) -> str | None:
 
 def sync_context_paths(written: list[dict], steps: list[dict]) -> None:
     """Point each path into the run's context a step of ``steps`` declares (``TaskStep.context_paths``) at the env its
-    task's env fields name now, rebuilt from the path ``written``, the task as written, gives it. Only a segment that
-    names an env changes, so a key that just shares an entity's name, such as a verifier id, is kept. Each place that
-    rewrites a task's env fields calls it after, and calling it again changes nothing."""
+    task's env fields name now, rebuilt from the path ``written``, the task as written, gives it. Only a path whose env
+    is renamed is written, and only its env segment changes, so a key that just shares an entity's name, such as a
+    verifier id, is kept. Each place that rewrites a task's env fields calls it after, and calling it again changes
+    nothing."""
     renamed = _rewritten_ids(written, steps, EntityKind.ENV)
     registry = get_task_step_registry()
     authored = {step.get("id"): step for step in written}
@@ -551,7 +552,7 @@ def sync_context_paths(written: list[dict], steps: list[dict]) -> None:
         for path in cls.context_paths:
             was = {where: holder[key] for where, holder, key in field_sites(before, path)}
             for where, holder, key in field_sites(step, path):
-                if isinstance(was.get(where), str):
+                if _named_env(was.get(where)) in renamed:
                     holder[key] = _env_renamed(was[where], renamed)
 
 
@@ -627,15 +628,21 @@ def _rewritten_ids(written: list[dict], resolved: list[dict], kind: EntityKind |
     return renamed
 
 
-def _named_env(path: Any) -> str | None:
-    """The env a path into a run's context names: the segment after a key whose entries are keyed by env id."""
+def _env_segment(path: Any) -> tuple[list[str], int] | None:
+    """A path into a run's context that names an env, and the index of its segment that does (``ENV_KEYED_METADATA``)."""
     segments = context_path_segments(path) or []
-    return segments[1] if len(segments) > 1 and segments[0] in ENV_KEYED_METADATA else None
+    index = ENV_KEYED_METADATA.get(segments[0]) if segments else None
+    return (segments, index) if index is not None and index < len(segments) else None
+
+
+def _named_env(path: Any) -> str | None:
+    found = _env_segment(path)
+    return found[0][found[1]] if found else None
 
 
 def _env_renamed(path: str, renamed: dict[str, str]) -> str:
     """``path`` naming the env ``renamed`` gives its env segment's id for by that id."""
     if (env := _named_env(path)) not in renamed:
         return path
-    segments = context_path_segments(path)
-    return context_path([segments[0], renamed[env], *segments[2:]])
+    segments, index = _env_segment(path)
+    return context_path([*segments[:index], renamed[env], *segments[index + 1:]])

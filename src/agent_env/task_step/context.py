@@ -17,8 +17,10 @@ from agent_env.providers.sandbox_providers.sandbox_provider import reachable_url
 HEARTBEAT_KEY = "_heartbeat_fn"
 # context.metadata[ENTITY_IDS_KEY]: the run's task's Task.entity_ids, set by Task.run.
 ENTITY_IDS_KEY = "entity_ids"
-# The context.metadata keys whose entries are keyed by a deployed env's id, so a path into one names an env next.
-ENV_KEYED_METADATA = frozenset({"env_trigger_state", "env_changes", "env_trajectory", "live_websites"})
+# The context.metadata keys whose entries name a deployed env by its id, each with the index of the path segment that
+# names it: env_skills is keyed by agent name, then env id.
+ENV_KEYED_METADATA = {"env_trigger_state": 1, "env_changes": 1, "env_trajectory": 1, "live_websites": 1,
+                      "env_skills": 2}
 
 
 def run_entity_id(metadata: dict, entity_id: str) -> str:

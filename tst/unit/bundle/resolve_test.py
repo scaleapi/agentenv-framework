@@ -171,7 +171,8 @@ def test_a_reference_added_without_rewriting_a_field_is_not_a_renamed_id(make):
 
 def test_a_context_fact_naming_a_bundle_env_names_it_by_its_new_id_and_keeps_any_other_key(make):
     facts = {"wf-1": "env_trigger_state.tickets.statuses.wf-1", "store env": "env_trigger_state.elsewhere.statuses.wf-1",
-             "verifier named as the agent": "verifications.solver.score", "an output": "env_changes.tickets-cli.rows"}
+             "verifier named as the agent": "verifications.solver.score", "an output": "env_changes.tickets-cli.rows",
+             "skill": "env_skills.default-agent.tickets.crm", "agent named as the env": "env_skills.tickets.other.crm"}
     steps = [{"id": "deploy", "type": "deploy_env", "env_id": "tickets"},
              {"id": "agent", "type": "deploy_agent", "env_ids": ["tickets"], "a2a_agent_id": "solver"},
              {"id": "cli", "type": "build_mcp_cli", "env_id": "tickets", "cli_artifact_id": "tickets-cli"},
@@ -179,7 +180,8 @@ def test_a_context_fact_naming_a_bundle_env_names_it_by_its_new_id_and_keeps_any
     entry = resolved(make(tasks={"t": steps}), "t")
 
     assert entry.config[3]["context_facts_for_judge"] == {
-        **facts, "wf-1": f"env_trigger_state[{ROOT}/tickets].statuses.wf-1"}
+        **facts, "wf-1": f"env_trigger_state[{ROOT}/tickets].statuses.wf-1",
+        "skill": f"env_skills.default-agent[{ROOT}/tickets].crm"}
     again = json.loads(json.dumps(entry.config))
     resolve_module.sync_context_paths(steps, again)
     assert again == entry.config
