@@ -26,6 +26,12 @@ _BROWSER = {"uri": "urn:agentenv:browser/v1", "params": {
 _BROWSER_TAKING_ORIGIN = {**_BROWSER, "params": {**_BROWSER["params"], "methods": {"cdp": {
     **_BROWSER["params"]["methods"]["cdp"], "request": {"type": "object", "required": ["user"], "properties": {
         "user": {"type": "string"}, "origin": {"type": "string", "default": None}}}}}}}
+#: The browser's extension as one that scopes an address to a lease serves it.
+_BROWSER_SCOPING = {**_BROWSER, "params": {**_BROWSER["params"], "methods": {"cdp": {
+    **_BROWSER["params"]["methods"]["cdp"], "request": {"type": "object", "required": ["user"], "properties": {
+        "user": {"type": "string"}, "origin": {"type": "string", "default": None},
+        "context": {"type": "string", "default": None}}}},
+    "contexts/lease": {"endpoint": "/svc/chromium/agentenv/ext/browser/contexts/lease"}}}}
 _TOOL_ACCESS = {"uri": "urn:agentenv:disable-tool/v1", "params": {"endpoint": "/tools/disable",
                                                                   "methods": {"disable": {"method": "POST"}}}}
 _CDP_CONFIG = {"uri": "urn:agentenv:cdp-config/v1", "params": {"endpoint": "/ext/cdp-config"}}
@@ -189,11 +195,34 @@ async def test_a_connection_under_a_name_already_connected_replaces_its_record(m
         ("other", "chromium")]
 
 
+@pytest.mark.asyncio
+async def test_a_step_naming_a_lease_asks_for_an_address_scoped_to_it_and_one_that_scopes_none_is_refused(
+        monkeypatch):
+    sent = _mock(monkeypatch, tokens=["t1"])
+    scoping = _env([_app("chromium", _BROWSER_SCOPING)])
+    context = TaskStepContext(deployed_envs=[scoping], deployed_agents=[_agent()], metadata={})
+    step = BrowserConnectCdpTaskStep(id="connect", version=None, env_id="computer", agent_name="solver",
+                                     context="buyer")
+
+    await step.execute(context)
+    with pytest.raises(RuntimeError, match="scopes no CDP address to a lease"):
+        await step.execute(TaskStepContext(deployed_envs=[_env([_app("chromium", _BROWSER_TAKING_ORIGIN)])],
+                                           deployed_agents=[_agent()], metadata={}))
+
+    asked = sent[0]
+    assert json.loads(asked.content) == {"user": "solver", "origin": "http://host.docker.internal:41000",
+                                         "context": "buyer"}
+    assert context.metadata["browser_connections"][0]["context"] == "buyer" and len(sent) == 3
+
+
 def test_it_round_trips_and_a_blank_name_is_a_config_problem():
     step = BrowserConnectCdpTaskStep(id="connect", version=None, env_id="computer", agent_name="solver",
                                      browser="chromium", name="shop", keep_tools=True)
+    scoped = BrowserConnectCdpTaskStep(id="connect", version=None, env_id="computer", context="buyer")
 
     assert BrowserConnectCdpTaskStep.from_dict(step.to_dict()).to_dict() == step.to_dict()
+    assert BrowserConnectCdpTaskStep.from_dict(scoped.to_dict()).context_label == "buyer"
+    assert "context" not in step.to_dict()
     assert BrowserConnectCdpTaskStep(id="c", version=None, env_id="computer", name="").config_problems() == [
         "step 'c': name must be a non-empty string"]
 

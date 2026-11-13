@@ -188,13 +188,17 @@ def _utf8(value: str) -> str:
 
 
 async def _both_ways(client: WebSocket, app: ClientConnection) -> None:
-    """Each message from either side sent to the other until one side closes, then the other closed with its code."""
+    """Each message from either side sent to the other until one side closes, then the other closed with its code and
+    reason."""
     async def inbound() -> None:
         while True:
             message = await client.receive()
             if message["type"] == "websocket.disconnect":
                 code = message.get("code") or 1000
-                await app.close(1000 if code in UNSENDABLE_CLOSES else code)
+                if code in UNSENDABLE_CLOSES:
+                    await app.close(1000)
+                else:
+                    await app.close(code, message.get("reason") or "")
                 return
             await app.send(message["text"] if message.get("text") is not None else message["bytes"])
 
@@ -207,7 +211,10 @@ async def _both_ways(client: WebSocket, app: ClientConnection) -> None:
                     await client.send_bytes(message)
         code = app.close_code or 1000
         with contextlib.suppress(RuntimeError, WebSocketDisconnect):
-            await client.close(1000 if code in UNSENDABLE_CLOSES else code)
+            if code in UNSENDABLE_CLOSES:
+                await client.close(1000)
+            else:
+                await client.close(code, app.close_reason or "")
 
     tasks = [asyncio.ensure_future(inbound()), asyncio.ensure_future(outbound())]
     try:

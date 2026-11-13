@@ -8,10 +8,11 @@ import asyncio
 from pathlib import PurePosixPath
 
 import pytest
+from starlette.requests import Request
 
 from agentenv_protocol import website_browser
 from agentenv_protocol.computer import Launch, Ready, app, linux
-from agentenv_protocol.computer.errors import InvalidArgument, TargetUnavailable
+from agentenv_protocol.computer.errors import InvalidArgument, PermissionDenied, TargetUnavailable
 from agentenv_protocol.computer.platform import Platform
 from agentenv_protocol.website_browser import BrowserControl, CookieToSet, WebsiteBrowserEnvironment, data
 from agentenv_protocol.website_browser.contexts import Contexts, label_problem
@@ -269,6 +270,20 @@ async def test_every_contexts_tabs_list_together_each_naming_its_context_the_pag
 
 
 @pytest.mark.asyncio
+async def test_a_frame_attached_to_a_leases_page_is_its_tab_s_though_it_navigates_in_a_process_of_its_own(
+        browser_home):
+    devtools, control, contexts = _contexts(browser_home)
+    await contexts.lease("buyer")
+    _tab(devtools, "L1", "C1")
+    _attached(devtools, "L1", "s-l1")
+
+    devtools.send("Page.frameAttached", {"frameId": "OOPIF", "parentFrameId": "L1"}, "s-l1")
+
+    assert control.context_of_frame("OOPIF") == "C1" and control.context_of_frame("L1") == "C1"
+    assert control.context_of_frame("elsewhere") is None
+
+
+@pytest.mark.asyncio
 async def test_a_label_an_agent_disposed_and_a_load_leases_again_at_once_keeps_the_new_folder(browser_home):
     _, _, contexts = _contexts(browser_home)
     old = contexts.made_by_agent("ada", "X1")
@@ -385,3 +400,35 @@ async def test_the_ops_lease_grant_list_and_release_and_name_a_context_by_its_la
     with pytest.raises(TargetUnavailable):
         await browser.browser_cookies_get(context="seller")
     assert await browser.browser_contexts_release("seller") == {"released": False}
+
+
+@pytest.mark.asyncio
+async def test_a_scoped_cdp_address_is_only_for_a_user_its_lease_is_granted_to_and_ends_with_the_lease(
+        browser_home, monkeypatch):
+    browser = Browser()
+    devtools = StubDevTools()
+    devtools.listen(browser.control._event)
+    browser.devtools = browser.contexts.devtools = browser.control.devtools = devtools
+    monkeypatch.setattr(browser.contexts, "home", lambda: browser_home)
+
+    async def ready():
+        return None
+
+    monkeypatch.setattr(browser, "_until_ready", ready)
+    request = Request({"type": "http", "method": "POST", "scheme": "http", "path": "/", "query_string": b"",
+                       "server": ("computer.test", 80), "headers": [(b"host", b"computer.test")]})
+    await browser.browser_contexts_lease("buyer")
+    await browser.browser_contexts_grant("buyer", "ada")
+
+    with pytest.raises(PermissionDenied, match="isn't granted to 'bob'"):
+        await browser.browser_cdp("bob", request, context="buyer")
+    with pytest.raises(TargetUnavailable, match="no context 'seller' is leased"):
+        await browser.browser_cdp("ada", request, context="seller")
+    scoped = await browser.browser_cdp("ada", request, context="buyer")
+    token = scoped["ws_url"].split("/cdp/")[1].split("/")[0]
+    found = browser.cdp_tokens.address(token)
+    await browser.browser_contexts_release("buyer")
+
+    assert (found.user, found.context) == ("ada", "buyer")
+    assert browser.cdp_tokens.address(token) is None
+

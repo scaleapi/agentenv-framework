@@ -79,6 +79,8 @@ class Contexts:
                  home: Callable[[], Path] = Path.home) -> None:
         self.devtools, self.control, self.home = devtools, control, home
         self.leases: dict[str, Lease] = {}
+        #: What hears of each lease's end, whatever ends it: its release, its disposal or the browser's.
+        self.on_end: list[Callable[[Lease], None]] = []
         self._made: dict[str, int] = {}
         self._tasks: set[asyncio.Future] = set()
         self._lock = asyncio.Lock()
@@ -135,6 +137,7 @@ class Contexts:
             if (lease := self.leases.pop(label, None)) is None:
                 return False
             self.control.closing_context(lease.id)
+            self._ended(lease)
             with contextlib.suppress(DevToolsError):
                 await self.devtools.call("Target.disposeBrowserContext", {"browserContextId": lease.id})
             await asyncio.to_thread(shutil.rmtree, lease.folder(self.home()), True)
@@ -177,6 +180,7 @@ class Contexts:
         deleted, so a lease of its label after has a folder of its own."""
         if (lease := self.of(context_id)) is not None:
             self.leases.pop(lease.label, None)
+            self._ended(lease)
             folder, gone = lease.folder(self.home()), self.home() / CONTEXTS / f".gone-{lease.id}"
             with contextlib.suppress(OSError):
                 folder.rename(gone)
@@ -202,9 +206,18 @@ class Contexts:
 
     def ended(self) -> None:
         """The browser has gone, and every context with it: no lease is left, and their folders are deleted."""
+        for lease in list(self.leases.values()):
+            self._ended(lease)
         self.leases.clear()
         self._made.clear()
         shutil.rmtree(self.home() / CONTEXTS, ignore_errors=True)
+
+    def _ended(self, lease: Lease) -> None:
+        for hook in self.on_end:
+            try:
+                hook(lease)
+            except Exception as e:
+                logger.warning(f"the end of the lease {lease.label!r}: {type(e).__name__}: {e}")
 
     def _record(self, lease: Lease) -> Lease:
         self.leases[lease.label] = lease

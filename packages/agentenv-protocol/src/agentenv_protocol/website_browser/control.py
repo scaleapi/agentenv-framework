@@ -260,6 +260,12 @@ class BrowserControl:
         return [OpenTab(**tab, active=tab["id"] == active, context=self.label_of(tab)).model_dump()
                 for tab in self.tabs.values() if self.in_context(tab.get("context_id"), context)]
 
+    def context_of_frame(self, frame: object) -> Optional[str]:
+        """The context of the tab the frame ``frame`` is in, a tab's own frame among them; None for one it hasn't
+        seen."""
+        tab = self._frame_tabs.get(frame, frame) if isinstance(frame, str) else None
+        return self.tabs.get(tab, {}).get("context_id") if tab is not None else None
+
     def label_of(self, entry: dict) -> Optional[str]:
         """The label of the lease a tab or download was in, None for the default context."""
         return self.other_contexts.get(entry.get("context_id"))
@@ -936,6 +942,12 @@ class BrowserControl:
         if (load := self._loading.get(session)) is not None and not frame.get("parentId") and frame.get("loaderId"):
             load.commits.append(frame["loaderId"])
             load.check()
+
+    def _on_Page_frameAttached(self, params: dict, session: Optional[str]) -> None:
+        """A frame attached to a page of one of its tabs, kept as that tab's: a cross-origin one goes on in a process
+        of its own, whose navigations its tab's page doesn't hear of."""
+        if session in self._sessions and isinstance(frame := params.get("frameId"), str):
+            self._frame_tabs[frame] = self._sessions[session]
 
     def _on_Page_navigatedWithinDocument(self, params: dict, session: Optional[str]) -> None:
         """A tab's page moving to another URL of its document, a fragment or its history API: a command's, when one
