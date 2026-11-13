@@ -39,6 +39,8 @@ PLAYWRIGHT_MCP = DRIVER.parent / "playwright_mcp.py"
 #: How long the gateway's session owners may take to end once a call gives up on them; a fixed short wait failed on
 #: a busy runner.
 OWNERS_END_WITHIN_S = 5.0
+#: How often the test looks for them meanwhile.
+OWNERS_POLL_S = 0.05
 #: Playwright MCP's tools, each looked at for whether it runs the agent's own code and so is hidden by default: an
 #: upgrade that adds a tool fails here until it's been looked at too.
 REVIEWED_TOOLS = {
@@ -568,7 +570,7 @@ async def _owners_left(within: float) -> list[asyncio.Task]:
     deadline = asyncio.get_running_loop().time() + within
     while (owners := [task for task in asyncio.all_tasks() if task.get_coro().__name__ == "_own"]) and (
             asyncio.get_running_loop().time() < deadline):
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(OWNERS_POLL_S)
     return owners
 
 
