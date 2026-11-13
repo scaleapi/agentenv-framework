@@ -1,0 +1,532 @@
+[
+ {
+  "name": "mcp_tools",
+  "context": {
+   "trace_id": "0xfbac5ce7d96e4740ab742da149702d66",
+   "span_id": "0x206d6636cff3bc3d",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x06eb52e71351bce7",
+  "start_time": "2026-11-13T17:26:47.862841Z",
+  "end_time": "2026-11-13T17:26:47.951671Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "output.value": "[\"gmail_archive_thread\", \"gmail_create_draft\", \"gmail_create_label\", \"gmail_delete_draft\", \"gmail_get_attachment\", \"gmail_get_draft\", \"gmail_get_label\", \"gmail_get_message\", \"gmail_get_messages_batch\", \"gmail_get_profile\", \"gmail_get_thread\", \"gmail_list_drafts\", \"gmail_list_labels\", \"gmail_list_messages\", \"gmail_list_threads\", \"gmail_modify_message_labels\", \"gmail_modify_thread_labels\", \"gmail_reply_to_message\", \"gmail_search_messages\", \"gmail_send_draft\", \"gmail_send_message\", \"gmail_trash_message\", \"gmail_trash_thread\", \"gmail_untrash_message\", \"gmail_untrash_thread\", \"gmail_update_draft\", \"gcal_create_event\", \"gcal_delete_event\", \"gcal_freebusy_query\", \"gcal_get_calendar\", \"gcal_get_colors\", \"gcal_get_event\", \"gcal_get_setting\", \"gcal_list_calendars\", \"gcal_list_events\", \"gcal_list_instances\", \"gcal_patch_event\", \"gcal_respond_to_event\", \"gcal_search_events\", \"gcal_update_event\", \"contacts_add_new_contact\", \"contacts_edit_contact\", \"contacts_get_contact\", \"contacts_get_contacts\", \"contacts_get_current_user_details\", \"contacts_get_group\", \"contacts_list_groups\", \"contacts_list_other_contacts\", \"contacts_search_contacts\", \"messaging_add_user_to_conversation\", \"messaging_create_conversation\", \"messaging_get_conversation\", \"messaging_list_conversations\", \"messaging_search_conversations\", \"messaging_send_message\", \"messaging_send_message_to_conversation\", \"porchbite_add_address\", \"porchbite_add_payment_method\", \"porchbite_add_to_cart\", \"porchbite_answer_substitution\", \"porchbi…",
+   "output.mime_type": "application/json",
+   "openinference.span.kind": "CHAIN"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "generation",
+  "context": {
+   "trace_id": "0xfbac5ce7d96e4740ab742da149702d66",
+   "span_id": "0x179a9dc14a79052e",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x65b2a2891d48d5e3",
+  "start_time": "2026-11-13T17:26:47.956116Z",
+  "end_time": "2026-11-13T17:26:50.053466Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.input_messages.34.message.tool_calls.20.tool_call.function.arguments": "{\"conversation_id\": \"conv-tess\"}",
+   "llm.input_messages.34.message.tool_calls.21.tool_call.id": "toolu_01UvpLiHPmUAUT2muouztuA7",
+   "llm.input_messages.34.message.tool_calls.21.tool_call.function.name": "messaging_get_conversation",
+   "llm.input_messages.34.message.tool_calls.21.tool_call.function.arguments": "{\"conversation_id\": \"conv-jordan\"}",
+   "llm.input_messages.34.message.tool_calls.22.tool_call.id": "toolu_01FEzuNEeedzcdxdguR4LaEx",
+   "llm.input_messages.34.message.tool_calls.22.tool_call.function.name": "messaging_get_conversation",
+   "llm.input_messages.34.message.tool_calls.22.tool_call.function.arguments": "{\"conversation_id\": \"conv-reyes\"}",
+   "llm.input_messages.35.message.contents.0.message_content.text": "{\"conversation_id\": \"conv-tess\", \"title\": \"Tess\", \"participant_ids\": [\"+15125550301\", \"+15125550303\"], \"last_updated\": \"2026-11-06T21:00:00Z\", \"messages\": [{\"message_id\": \"conv-tess-1\", \"sender_id\": \"+15125550303\", \"timestamp\": \"2026-10-25T03:40:00Z\", \"content\": \"ok you HAVE to try Ember & Saffron, the new peruvian place on east 6th. we got the anniversary tasting for two and I'm still thinking about the ceviche\", \"attachment_name\": null}, {\"message_id\": \"conv-tess-2\", \"sender_id\": \"+15125550301\", \"timestamp\": \"2026-10-25T03:45:00Z\", \"content\": \"ooh saving that\", \"attachment_name\": null}, {\"message_id\": \"conv-tess-3\", \"sender_id\": \"+15125550303\", \"timestamp\": \"2026-11-05T18:00:00Z\", \"content\": \"happy early anniversary to you two!! 5 years \\ud83e\\udd42\", \"attachment_name\": null}, {\"message_id\": \"conv-tess-4\", \"sender_id\": \"+15125550301\", \"timestamp\": \"2026-11-05T18:03:00Z\", \"content\": \"thank you!! planning a surprise dinner, jordan has no idea\", \"attachment_name\": null}, {\"message_id\": \"c181c35f12a345f68c4066c04f62cf0d\", \"sender_id\": \"+15125550303\", \"timestamp\": \"2026-11-06T21:00:00Z\", \"content\": \"did you end up trying ember & saffron?? \\ud83d\\udc40\", \"attachment_name\": null}], \"next_cursor\": null}",
+   "output.value": "[{\"content\": \"\", \"refusal\": null, \"role\": \"assistant\", \"annotations\": null, \"audio\": null, \"function_call\": null, \"tool_calls\": [{\"id\": \"toolu_01Rj2yYFkpMiHZ8AQjbFUtrE\", \"function\": {\"arguments\": \"{\\\"order_key\\\": \\\"PB-C2SHSLHX\\\"}\", \"name\": \"porchbite_get_order\"}, \"type\": \"function\"}, {\"id\": \"toolu_018xdfryZpAk5SPw7A17UVLe\", \"function\": {\"arguments\": \"{}\", \"name\": \"porchbite_list_conversations\"}, \"type\": \"function\"}]}]",
+   "output.mime_type": "application/json",
+   "llm.output_messages.0.message.role": "assistant",
+   "llm.output_messages.0.message.tool_calls.0.tool_call.id": "toolu_01Rj2yYFkpMiHZ8AQjbFUtrE",
+   "llm.output_messages.0.message.tool_calls.0.tool_call.function.name": "porchbite_get_order",
+   "llm.output_messages.0.message.tool_calls.0.tool_call.function.arguments": "{\"order_key\": \"PB-C2SHSLHX\"}",
+   "llm.output_messages.0.message.tool_calls.1.tool_call.id": "toolu_018xdfryZpAk5SPw7A17UVLe",
+   "llm.output_messages.0.message.tool_calls.1.tool_call.function.name": "porchbite_list_conversations",
+   "llm.token_count.prompt": 4,
+   "llm.token_count.completion": 94,
+   "openinference.span.kind": "LLM"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "porchbite_get_order",
+  "context": {
+   "trace_id": "0xfbac5ce7d96e4740ab742da149702d66",
+   "span_id": "0x88ce5cba3d994264",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x65b2a2891d48d5e3",
+  "start_time": "2026-11-13T17:26:50.055865Z",
+  "end_time": "2026-11-13T17:26:50.108492Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "tool.name": "porchbite_get_order",
+   "input.value": "{\"order_key\": \"PB-C2SHSLHX\"}",
+   "input.mime_type": "application/json",
+   "output.value": "{\"type\": \"text\", \"text\": \"{\\\"order\\\": {\\\"ordered_by_member\\\": null, \\\"order_key\\\": \\\"PB-C2SHSLHX\\\", \\\"store_id\\\": \\\"pb-atx-9201\\\", \\\"store_name\\\": \\\"Ember & Saffron\\\", \\\"store_image\\\": \\\"img/food/store-italian-1.jpg\\\", \\\"store_cuisine\\\": \\\"Peruvian\\\", \\\"order_date\\\": \\\"2026-11-06\\\", \\\"placed_at\\\": \\\"2026-11-06T14:00:00-06:00\\\", \\\"scheduled_for\\\": \\\"2026-11-06T18:30:00-06:00\\\", \\\"fulfillment\\\": \\\"delivery\\\", \\\"status\\\": \\\"cancelled\\\", \\\"item_summary\\\": \\\"Lomo Saltado, Aji de Gallina +2 more\\\", \\\"items\\\": [{\\\"item_id\\\": \\\"pb-atx-9201-lomo-saltado\\\", \\\"name\\\": \\\"Lomo Saltado\\\", \\\"quantity\\\": 1, \\\"price\\\": 29.0, \\\"options\\\": [], \\\"note\\\": \\\"Shellfish allergy - please keep free of shellfish\\\"}, {\\\"item_id\\\": \\\"pb-atx-9201-aji-de-gallina\\\", \\\"name\\\": \\\"Aji de Gallina\\\", \\\"quantity\\\": 1, \\\"price\\\": 23.0, \\\"options\\\": [], \\\"note\\\": \\\"Shellfish allergy - please keep free of shellfish\\\"}, {\\\"item_id\\\": \\\"pb-atx-9201-ceviche-clasico\\\", \\\"name\\\": \\\"Ceviche Clasico\\\", \\\"quantity\\\": 1, \\\"price\\\": 18.0, \\\"options\\\": [], \\\"note\\\": \\\"Shellfish allergy - fish only, please avoid any shellfish cross-contact\\\"}, {\\\"item_id\\\": \\\"pb-atx-9201-alfajores\\\", \\\"name\\\": \\\"Alfajores (4)\\\", \\\"quantity\\\": 1, \\\"price\\\": 9.0, \\\"options\\\": []}], \\\"item_count\\\": 4, \\\"total\\\": 102.7, \\\"credits_applied\\\": 0.0, \\\"amount_charged\\\": 102.7, \\\"currency\\\": \\\"USD\\\", \\\"active\\\": false, \\\"refunded_amount\\\": 0.0, \\\"rated\\\": false, \\\"store_type\\\": \\\"restaurant\\\", \\\"subtotal\\\": 79.0, \\\"fees\\\": 9.48, \\\"tip\\\": 14.22, \\\"delivery_city\\\": \\\"Austin\\\", \\\"delivery_fee\\\": 0.0, \\\"service_fee\\\": 9.48, \\\"small_order_fee\\\": 0.0, \\\"discount\\\": 0.0, \\\"promo_code\\\": null, \\\"tip_kind\\\": \\\"percent\\\", \\\"address_label\\\": \\\"Home\\\", \\\"card_brand\\\": \\\"Visa\\\", \\\"card_last4\\\": \\\"5517\\\", \\\"membership_applied\\\": true, \\\"eta_at\\\": \\\"2026-11-06T19:00:00-06:00\\\", \\\"cancelled_at\\\": \\\"2026-11-06T15:00:00-06:00\\\", \\\"delivered_at\\\": null, \\\"steps\\\": [], \\\"can_cancel\\\": false, \\\"can_get_help\\\": false, \\\"refunds\\\": [], \\\"rating\\\": null, \\\"store_address\\\": \\\"\\\", \\\"credits_returned\\\": false}}\"}",
+   "openinference.span.kind": "TOOL",
+   "gen_ai.operation.name": "execute_tool",
+   "gen_ai.tool.name": "porchbite_get_order",
+   "gen_ai.prompt": "{\"input\": {\"order_key\": \"PB-C2SHSLHX\"}}",
+   "gen_ai.completion": "{\"output\": \"{\\\"type\\\": \\\"text\\\", \\\"text\\\": \\\"{\\\\\\\"order\\\\\\\": {\\\\\\\"ordered_by_member\\\\\\\": null, \\\\\\\"order_key\\\\\\\": \\\\\\\"PB-C2SHSLHX\\\\\\\", \\\\\\\"store_id\\\\\\\": \\\\\\\"pb-atx-9201\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Ember & Saffron\\\\\\\", \\\\\\\"store_image\\\\\\\": \\\\\\\"img/food/store-italian-1.jpg\\\\\\\", \\\\\\\"store_cuisine\\\\\\\": \\\\\\\"Peruvian\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-11-06\\\\\\\", \\\\\\\"placed_at\\\\\\\": \\\\\\\"2026-11-06T14:00:00-06:00\\\\\\\", \\\\\\\"scheduled_for\\\\\\\": \\\\\\\"2026-11-06T18:30:00-06:00\\\\\\\", \\\\\\\"fulfillment\\\\\\\": \\\\\\\"delivery\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"cancelled\\\\\\\", \\\\\\\"item_summary\\\\\\\": \\\\\\\"Lomo Saltado, Aji de Gallina +2 more\\\\\\\", \\\\\\\"items\\\\\\\": [{\\\\\\\"item_id\\\\\\\": \\\\\\\"pb-atx-9201-lomo-saltado\\\\\\\", \\\\\\\"name\\\\\\\": \\\\\\\"Lomo Saltado\\\\\\\", \\\\\\\"quantity\\\\\\\": 1, \\\\\\\"price\\\\\\\": 29.0, \\\\\\\"options\\\\\\\": [], \\\\\\\"note\\\\\\\": \\\\\\\"Shellfish allergy - please keep free of shellfish\\\\\\\"}, {\\\\\\\"item_id\\\\\\\": \\\\\\\"pb-atx-9201-aji-de-gallina\\\\\\\", \\\\\\\"name\\\\\\\": \\\\\\\"Aji de Gallina\\\\\\\", \\\\\\\"quantity\\\\\\\": 1, \\\\\\\"price\\\\\\\": 23.0, \\\\\\\"options\\\\\\\": [], \\\\\\\"note\\\\\\\": \\\\\\\"Shellfish allergy - please keep free of shellfish\\\\\\\"}, {\\\\\\\"item_id\\\\\\\": \\\\\\\"pb-atx-9201-ceviche-clasico\\\\\\\", \\\\\\\"name\\\\\\\": \\\\\\\"Ceviche Clasico\\\\\\\", \\\\\\\"quantity\\\\\\\": 1, \\\\\\\"price\\\\\\\": 18.0, \\\\\\\"options\\\\\\\": [], \\\\\\\"note\\\\\\\": \\\\\\\"Shellfish allergy - fish only, please avoid any shellfish cross-contact\\\\\\\"}, {\\\\\\\"item_id\\\\\\\": \\\\\\\"pb-atx-9201-alfajores\\\\\\\", \\\\\\\"name\\\\\\\": \\\\\\\"Alfajores (4)\\\\\\\", \\\\\\\"quantity\\\\\\\": 1, \\\\\\\"price\\\\\\\": 9.0, \\\\\\\"options\\\\\\\": []}], \\\\\\\"item_count\\\\\\\": 4, \\\\\\\"total\\\\\\\": 102.7, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"amount_charged\\\\\\\": 102.7, \\\\\\\"currency\\\\\\\": \\\\\\\"USD\\\\\\\", \\\\\\\"active\\\\\\\": false, \\\\\\\"refunded_amount\\\\\\\": 0.0, \\\\\\\"rated\\\\\\\": false, \\\\\\\"store_type\\\\\\\": \\\\\\\"restaurant\\\\\\\", \\\\\\\"subtotal\\\\\\\": 79.0, \\\\\\\"fees\\\\\\\": 9.48, \\\\\\\"tip\\\\\\\": 14.22, \\\\\\\"delivery_city\\\\\\\": \\\\\\\"Austin\\\\\\\", \\\\\\\"delivery_fee\\\\\\\": 0.0, \\\\\\\"service_fee\\\\\\\": 9.48, \\\\\\\"small_order_fee\\\\\\\": 0.0, \\\\\\\"discount\\\\\\\": 0.0, \\\\\\\"promo_code\\\\\\\": null, \\\\\\\"tip_kind\\\\\\\": \\\\\\\"percent\\\\\\\", \\\\\\\"address_label\\\\\\\": \\\\\\\"Home\\\\\\\", \\\\\\\"card_brand\\\\\\\": \\\\\\\"Visa\\\\\\\", \\\\\\\"card_last4\\\\\\\": \\\\\\\"5517\\\\\\\", \\\\\\\"membership_applied\\\\\\\": true, \\\\\\\"eta_at\\\\\\\": \\\\\\\"2026-11-06T19:00:00-06:00\\\\\\\", \\\\\\\"cancelled_at\\\\\\\": \\\\\\\"2026-11-06T15:00:00-06:00\\\\\\\", \\\\\\\"delivered_at\\\\\\\": null, \\\\\\\"steps\\\\\\\": [], \\\\\\\"can_cancel\\\\\\\": false, \\\\\\\"can_get_help\\\\\\\": false, \\\\\\\"refunds\\\\\\\": [], \\\\\\\"rating\\\\\\\": null, \\\\\\\"store_address\\\\\\\": \\\\\\\"\\\\\\\", \\\\\\\"credits_returned\\\\\\\": false}}\\\"}\"}"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "porchbite_list_conversations",
+  "context": {
+   "trace_id": "0xfbac5ce7d96e4740ab742da149702d66",
+   "span_id": "0xb7b9abdc79247c91",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x65b2a2891d48d5e3",
+  "start_time": "2026-11-13T17:26:50.056099Z",
+  "end_time": "2026-11-13T17:26:50.145458Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "tool.name": "porchbite_list_conversations",
+   "input.value": "{}",
+   "input.mime_type": "application/json",
+   "output.value": "{\"type\": \"text\", \"text\": \"{\\\"conversations\\\": [], \\\"unread\\\": 0, \\\"open\\\": 0}\"}",
+   "openinference.span.kind": "TOOL",
+   "gen_ai.operation.name": "execute_tool",
+   "gen_ai.tool.name": "porchbite_list_conversations",
+   "gen_ai.prompt": "{\"input\": {}}",
+   "gen_ai.completion": "{\"output\": \"{\\\"type\\\": \\\"text\\\", \\\"text\\\": \\\"{\\\\\\\"conversations\\\\\\\": [], \\\\\\\"unread\\\\\\\": 0, \\\\\\\"open\\\\\\\": 0}\\\"}\"}"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "turn",
+  "context": {
+   "trace_id": "0xfbac5ce7d96e4740ab742da149702d66",
+   "span_id": "0x65b2a2891d48d5e3",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x03f07749d91563c1",
+  "start_time": "2026-11-13T17:26:47.954651Z",
+  "end_time": "2026-11-13T17:26:50.146009Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "openinference.span.kind": "CHAIN"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "mcp_tools",
+  "context": {
+   "trace_id": "0xfbac5ce7d96e4740ab742da149702d66",
+   "span_id": "0x323abdcc17718f1a",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x03f07749d91563c1",
+  "start_time": "2026-11-13T17:26:50.146215Z",
+  "end_time": "2026-11-13T17:26:50.146437Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "output.value": "[\"gmail_archive_thread\", \"gmail_create_draft\", \"gmail_create_label\", \"gmail_delete_draft\", \"gmail_get_attachment\", \"gmail_get_draft\", \"gmail_get_label\", \"gmail_get_message\", \"gmail_get_messages_batch\", \"gmail_get_profile\", \"gmail_get_thread\", \"gmail_list_drafts\", \"gmail_list_labels\", \"gmail_list_messages\", \"gmail_list_threads\", \"gmail_modify_message_labels\", \"gmail_modify_thread_labels\", \"gmail_reply_to_message\", \"gmail_search_messages\", \"gmail_send_draft\", \"gmail_send_message\", \"gmail_trash_message\", \"gmail_trash_thread\", \"gmail_untrash_message\", \"gmail_untrash_thread\", \"gmail_update_draft\", \"gcal_create_event\", \"gcal_delete_event\", \"gcal_freebusy_query\", \"gcal_get_calendar\", \"gcal_get_colors\", \"gcal_get_event\", \"gcal_get_setting\", \"gcal_list_calendars\", \"gcal_list_events\", \"gcal_list_instances\", \"gcal_patch_event\", \"gcal_respond_to_event\", \"gcal_search_events\", \"gcal_update_event\", \"contacts_add_new_contact\", \"contacts_edit_contact\", \"contacts_get_contact\", \"contacts_get_contacts\", \"contacts_get_current_user_details\", \"contacts_get_group\", \"contacts_list_groups\", \"contacts_list_other_contacts\", \"contacts_search_contacts\", \"messaging_add_user_to_conversation\", \"messaging_create_conversation\", \"messaging_get_conversation\", \"messaging_list_conversations\", \"messaging_search_conversations\", \"messaging_send_message\", \"messaging_send_message_to_conversation\", \"porchbite_add_address\", \"porchbite_add_payment_method\", \"porchbite_add_to_cart\", \"porchbite_answer_substitution\", \"porchbi…",
+   "output.mime_type": "application/json",
+   "openinference.span.kind": "CHAIN"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "generation",
+  "context": {
+   "trace_id": "0xfbac5ce7d96e4740ab742da149702d66",
+   "span_id": "0x2929dcff6dbc2f5a",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0xf9b0ab51ca035384",
+  "start_time": "2026-11-13T17:26:50.152005Z",
+  "end_time": "2026-11-13T17:26:52.784683Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.input_messages.36.message.role": "tool",
+   "llm.input_messages.36.message.contents.0.message_content.type": "text",
+   "llm.input_messages.36.message.contents.0.message_content.text": "{\"conversation_id\": \"conv-jordan\", \"title\": \"Jordan \\u2764\\ufe0f\", \"participant_ids\": [\"+15125550301\", \"+15125550302\"], \"last_updated\": \"2026-11-05T03:02:00Z\", \"messages\": [{\"message_id\": \"conv-jordan-1\", \"sender_id\": \"+15125550302\", \"timestamp\": \"2025-08-10T14:15:00Z\", \"content\": \"still thinking about that korean bbq last night \\ud83e\\udd24 best birthday dinner ever. houston was so worth it\", \"attachment_name\": null}, {\"message_id\": \"conv-jordan-2\", \"sender_id\": \"+15125550301\", \"timestamp\": \"2025-08-10T14:20:00Z\", \"content\": \"the galbi!!! happy birthday again \\u2764\\ufe0f\", \"attachment_name\": null}, {\"message_id\": \"conv-jordan-3\", \"sender_id\": \"+15125550302\", \"timestamp\": \"2026-02-15T00:10:00Z\", \"content\": \"luigi's tiramisu again tonight?? it's basically our tradition at this point \\ud83d\\ude02\", \"attachment_name\": null}, {\"message_id\": \"conv-jordan-4\", \"sender_id\": \"+15125550301\", \"timestamp\": \"2026-02-15T00:12:00Z\", \"content\": \"always \\ud83c\\udf70\", \"attachment_name\": null}, {\"message_id\": \"conv-jordan-5\", \"sender_id\": \"+15125550302\", \"timestamp\": \"2026-04-03T13:05:00Z\", \"content\": \"fyi whoever made the pad thai last night put shrimp in it even tho we said no. throat itchy all night \\ud83d\\ude29 the shellfish allergy is not a joke, gotta check the protein every time\", \"attachment_name\": null}, {\"message_id\": \"conv-jordan-6\", \"sender_id\": \"+15125550301\", \"timestamp\": \"2026-04-03T13:20:00Z\", \"content\": \"omg I'm so sorry!! I'll always check, no more shrimp anything\", \"attachm…",
+   "llm.input_messages.36.message.tool_call_id": "toolu_01UvpLiHPmUAUT2muouztuA7",
+   "llm.input_messages.37.message.role": "tool",
+   "llm.input_messages.37.message.contents.0.message_content.type": "text",
+   "llm.input_messages.37.message.contents.0.message_content.text": "{\"conversation_id\": \"conv-reyes\", \"title\": \"Reyes fam \\ud83c\\udf2e\", \"participant_ids\": [\"+15125550301\", \"+15125550302\", \"+15125550305\"], \"last_updated\": \"2026-11-01T15:30:00Z\", \"messages\": [{\"message_id\": \"conv-reyes-1\", \"sender_id\": \"+15125550305\", \"timestamp\": \"2026-10-29T00:00:00Z\", \"content\": \"ok it's official: no-meat november. starts sunday. no meat no fish, all month. loser buys thanksgiving pies\", \"attachment_name\": null}, {\"message_id\": \"conv-reyes-2\", \"sender_id\": \"+15125550302\", \"timestamp\": \"2026-10-29T00:04:00Z\", \"content\": \"I'm in \\ud83d\\udcaa\\ud83c\\udf31\", \"attachment_name\": null}, {\"message_id\": \"conv-reyes-3\", \"sender_id\": \"+15125550301\", \"timestamp\": \"2026-10-29T00:10:00Z\", \"content\": \"I'll cheer from the sidelines with a burger \\ud83d\\ude02\", \"attachment_name\": null}, {\"message_id\": \"conv-reyes-4\", \"sender_id\": \"+15125550305\", \"timestamp\": \"2026-11-01T15:00:00Z\", \"content\": \"day 1!! jordan you still in?\", \"attachment_name\": null}, {\"message_id\": \"conv-reyes-5\", \"sender_id\": \"+15125550302\", \"timestamp\": \"2026-11-01T15:30:00Z\", \"content\": \"100%. tofu scramble era\", \"attachment_name\": null}], \"next_cursor\": null}",
+   "llm.input_messages.37.message.tool_call_id": "toolu_01FEzuNEeedzcdxdguR4LaEx",
+   "output.value": "[{\"content\": \"\", \"refusal\": null, \"role\": \"assistant\", \"annotations\": null, \"audio\": null, \"function_call\": null, \"tool_calls\": [{\"id\": \"toolu_01REeJFKdzrzEhTGrJrSyP9J\", \"function\": {\"arguments\": \"{}\", \"name\": \"porchbite_spending_by_month\"}, \"type\": \"function\"}], \"thinking_blocks\": [{\"type\": \"thinking\", \"thinking\": \"The charge figure shows 102.7, which conflicts with the cancellation tool saying nothing was billed. I'll check the spending records to see whether the charge actually counts as zero.\\n\\n\", \"signature\": \"CAQSlAYKEggTEAIYAjgBQgh0aGlua2luZxIMV+KVEZuVjVtbNnsKGgwuJua6/mZHFZt0vnsiMLz0I76BTZOWBuRZ4ZMY8jSagHMiyMXRggiJRCceGI5qqzjeA5m8nPv7vJPEzJwk9iqvBQWgg9AcIfCtTpml+PzH8r8o2ZWHdoUDPb6iNOzGysqTYwZ5WeFtusjPl4MxULI129+9/ybg8ulRGWkTdBEJOoOMLNrV1bTwfMvmY9FtTG/JNsao2ubFUkd7ijNSrE3EZdhl2AoHa8iXB3j9cYaSnLBmJ3+EqWY/m7MgvW+5azrC56HkWR6LtljDlkMm+X6LjrIoDBowa2xUk+ut5Mx7CvMCKi66PDIA7+RBY4jqQ5b2RiIyOTMbEzlLjEltNVJdRw6ZKH3Abz/UJYoRgFThJiF8gIlX5Tk/D4VyRaBga/uLa3iIariHG6zGxC78A5I++JACdVxbHHjXfzBlXdFIDw/hFDERLH3x0KK0e1c0FWlIUu6qtOLX7YC+ng3we1LaRJhhWHR74SoooNGuy6P+CNztXB39NfWKXwomWV2tjVV1I/cYGcyleEVdDpb92CUUTo5khVpEiea0DkIkcCmzTaxjIAxMsRAhABQ6E7QQOzOAr5uLheOqQGPLv03d7c7DkdcjuvjvHsdbX1uL6kHlonQ97xauXgxT8Bg13RlsNHLF6zDihTigsbpJ8GIAl8QNmeO05GmVQTyY4VibjTN87X4daVOLrGRtMBjm3UIJgQRl/qvcf67suMlqWA/MjapW8JUvPgNPHASKJmDFGFQ/ry9OHe+cq24fLR1COI9DozCNsBCX89y/4ugMrqLpuJdhIDOLOjKTooMLOlXKfuTdzswwn4Hpl53CZ7leme/dYyz1FVln4R2/cpqkSZdZ/OYye1sUGfw2Q58PuFQQql9016t7YrE7y3SwCEz2qzcim3wbnSc7G4A4FBHxxSmuRm3wg…",
+   "output.mime_type": "application/json",
+   "llm.output_messages.0.message.role": "assistant",
+   "llm.output_messages.0.message.tool_calls.0.tool_call.id": "toolu_01REeJFKdzrzEhTGrJrSyP9J",
+   "llm.output_messages.0.message.tool_calls.0.tool_call.function.name": "porchbite_spending_by_month",
+   "llm.token_count.prompt": 2,
+   "llm.token_count.completion": 86,
+   "openinference.span.kind": "LLM"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "porchbite_spending_by_month",
+  "context": {
+   "trace_id": "0xfbac5ce7d96e4740ab742da149702d66",
+   "span_id": "0x7ce1c2b6e5372616",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0xf9b0ab51ca035384",
+  "start_time": "2026-11-13T17:26:52.787254Z",
+  "end_time": "2026-11-13T17:26:52.848023Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "tool.name": "porchbite_spending_by_month",
+   "input.value": "{}",
+   "input.mime_type": "application/json",
+   "output.value": "{\"type\": \"text\", \"text\": \"{\\\"months\\\": [{\\\"month\\\": \\\"2026-11\\\", \\\"label\\\": \\\"November 2026\\\", \\\"order_count\\\": 1, \\\"total\\\": 89.7, \\\"refunded\\\": 0.0, \\\"cancelled_count\\\": 1, \\\"credits_used\\\": 0.0, \\\"order_keys\\\": [\\\"PB-B9SQ90ZE\\\"], \\\"orders\\\": [{\\\"order_key\\\": \\\"PB-B9SQ90ZE\\\", \\\"order_date\\\": \\\"2026-11-06\\\", \\\"store_name\\\": \\\"Lalibela Ethiopian Kitchen\\\", \\\"status\\\": \\\"scheduled\\\", \\\"total\\\": 89.7, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 89.7}, {\\\"order_key\\\": \\\"PB-C2SHSLHX\\\", \\\"order_date\\\": \\\"2026-11-06\\\", \\\"store_name\\\": \\\"Ember & Saffron\\\", \\\"status\\\": \\\"cancelled\\\", \\\"total\\\": 102.7, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": false, \\\"net\\\": 0.0, \\\"why\\\": \\\"cancelled: not charged\\\"}], \\\"members\\\": []}, {\\\"month\\\": \\\"2026-10\\\", \\\"label\\\": \\\"October 2026\\\", \\\"order_count\\\": 4, \\\"total\\\": 227.2, \\\"refunded\\\": 0.0, \\\"cancelled_count\\\": 0, \\\"credits_used\\\": 0.0, \\\"order_keys\\\": [\\\"PB-NP0051\\\", \\\"PB-NP0050\\\", \\\"PB-NP0049\\\", \\\"PB-NP0048\\\"], \\\"orders\\\": [{\\\"order_key\\\": \\\"PB-NP0051\\\", \\\"order_date\\\": \\\"2026-10-30\\\", \\\"store_name\\\": \\\"Sparrow Slice House\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 32.91, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 32.91}, {\\\"order_key\\\": \\\"PB-NP0050\\\", \\\"order_date\\\": \\\"2026-10-23\\\", \\\"store_name\\\": \\\"Bamboo Gate Noodle House\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 32.91, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 32.91}, {\\\"order_key\\\": \\\"PB-NP0049\\\", \\\"order_date\\\": \\\"2026-10-16\\\", \\\"store_name\\\": \\\"Teddy's Japanese Kitchen\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 46.89, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 46.89}, {\\\"order_key\\\": \\\"PB-NP0048\\\", \\\"order_date\\\": \\\"2026-10-09\\\", \\\"store_name\\\": \\\"Luigi's Trattoria\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 114.49, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 114.49}], \\\"members\\\": []}, {\\\"month\\\": \\\"2026-09\\\", \\\"label\\\": \\\"September 2026\\\", \\\"order_count\\\": 4, \\\"total\\\": 376.38, \\\"refunded\\\": 0.0, \\\"cancelled_count\\\": 0, \\\"credits_used\\\": 0.0, \\\"order_keys\\\": [\\\"PB-NP0047\\\", \\\"PB-NP0046\\\", \\\"PB-NP0045\\\", \\\"PB-NP0044\\\"], \\\"orders\\\": [{\\\"order_key\\\": \\\"PB-NP0047\\\", \\\"order_date\\\": \\\"2026-09-25\\\", \\\"store_name\\\": \\\"Bamboo Gate Noodle House\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 32.91, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 32.91}, {\\\"order_key\\\": \\\"PB-NP0046\\\", \\\"order_date\\\": \\\"2026-09-18\\\", \\\"store_name\\\": \\\"Luigi's Trattoria\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 114.49, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 114.49}, {\\\"order_key\\\": \\\"PB-NP0045\\\", \\\"order_date\\\": \\\"2026-09-11\\\", \\\"store_name\\\": \\\"Luigi's Trattoria\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 114.49, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 114.49}, {\\\"order_key\\\": \\\"PB-NP0044\\\", \\\"order_date\\\": \\\"2026-09-04\\\", \\\"store_name\\\": \\\"Luigi's Trattoria\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 114.49, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 114.49}], \\\"members\\\": []}, {\\\"month\\\": \\\"2026-08\\\", \\\"label\\\": \\\"August 2026\\\", \\\"order_count\\\": 5, \\\"total\\\": 244.19, \\\"refunded\\\": 0.0, \\\"cancelled_count\\\": 0, \\\"credits_used\\\": 0.0, \\\"order_keys\\\": [\\\"PB-NP0043\\\", \\\"PB-NP0042\\\", \\\"PB-NP0041\\\", \\\"PB-NP0040\\\", \\\"PB-NP0039\\\"], \\\"orders\\\": [{\\\"order_key\\\": \\\"PB-NP0043\\\", \\\"order_date\\\": \\\"2026-08-28\\\", \\\"store_name\\\": \\\"Teddy's Japanese Kitchen\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 46.89, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 46.89}, {\\\"order_key\\\": \\\"PB-NP0042\\\", \\\"order_date\\\": \\\"2026-08-21\\\", \\\"store_name\\\": \\\"Sparrow Slice House\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 32.91, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 32.91}, {\\\"order_key\\\": \\\"PB-NP0041\\\", \\\"order_date\\\": \\\"2026-08-14\\\", \\\"store_name\\\": \\\"Luigi's Trattoria\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 114.49, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 114.49}, {\\\"order_key\\\": \\\"PB-NP0040\\\", \\\"order_date\\\": \\\"2026-08-07\\\", \\\"store_name\\\": \\\"Bamboo Gate Noodle House\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 32.91, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 32.91}, {\\\"order_key\\\": \\\"PB-NP0039\\\", \\\"order_date\\\": \\\"2026-08-05\\\", \\\"store_name\\\": \\\"Driftwood Brunch House\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 16.99, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 16.99}], \\\"members\\\": []}, {\\\"month\\\": \\\"2026-07\\\", \\\"label\\\": \\\"July 2026\\\", \\\"order_count\\\": 3, \\\"total\\\": 275.87, \\\"refunded\\\": 0.0, \\\"cancelled_count\\\": 0, \\\"credits_used\\\": 0.0, \\\"order_keys\\\": [\\\"PB-NP0038\\\", \\\"PB-NP0037\\\", \\\"PB-NP0036\\\"], \\\"orders\\\": [{\\\"order_key\\\": \\\"PB-NP0038\\\", \\\"order_date\\\": \\\"2026-07-31\\\", \\\"store_name\\\": \\\"Teddy's Japanese Kitchen\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 46.89, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 46.89}, {\\\"order_key\\\": \\\"PB-NP0037\\\", \\\"order_date\\\": \\\"2026-07-24\\\", \\\"store_name\\\": \\\"Luigi's Trattoria\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 114.49, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 114.49}, {\\\"order_key\\\": \\\"PB-NP0036\\\", \\\"order_date\\\": \\\"2026-07-03\\\", \\\"store_name\\\": \\\"Luigi's Trattoria\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 114.49, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 114.49}], \\\"members\\\": []}, {\\\"month\\\": \\\"2026-06\\\", \\\"label\\\": \\\"June 2026\\\", \\\"order_count\\\": 4, \\\"total\\\": 227.2, \\\"refunded\\\": 0.0, \\\"cancelled_count\\\": 0, \\\"credits_used\\\": 0.0, \\\"order_keys\\\": [\\\"PB-NP0035\\\", \\\"PB-NP0034\\\", \\\"PB-NP0033\\\", \\\"PB-NP0032\\\"], \\\"orders\\\": [{\\\"order_key\\\": \\\"PB-NP0035\\\", \\\"order_date\\\": \\\"2026-06-26\\\", \\\"store_name\\\": \\\"Bamboo Gate Noodle House\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 32.91, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 32.91}, {\\\"order_key\\\": \\\"PB-NP0034\\\", \\\"order_date\\\": \\\"2026-06-19\\\", \\\"store_name\\\": \\\"Teddy's Japanese Kitchen\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 46.89, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 46.89}, {\\\"order_key\\\": \\\"PB-NP0033\\\", \\\"order_date\\\": \\\"2026-06-12\\\", \\\"store_name\\\": \\\"Luigi's Trattoria\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 114.49, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 114.49}, {\\\"order_key\\\": \\\"PB-NP0032\\\", \\\"order_date\\\": \\\"2026-06-05\\\", \\\"store_name\\\": \\\"Sparrow Slice House\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 32.91, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 32.91}], \\\"members\\\": []}, {\\\"month\\\": \\\"2026-05\\\", \\\"label\\\": \\\"May 2026\\\", \\\"order_count\\\": 5, \\\"total\\\": 327.0, \\\"refunded\\\": 0.0, \\\"cancelled_count\\\": 0, \\\"credits_used\\\": 0.0, \\\"order_keys\\\": [\\\"PB-NP0031\\\", \\\"PB-NP0030\\\", \\\"PB-NP0029\\\", \\\"PB-NP0028\\\", \\\"PB-NP0027\\\"], \\\"orders\\\": [{\\\"order_key\\\": \\\"PB-NP0031\\\", \\\"order_date\\\": \\\"2026-05-22\\\", \\\"store_name\\\": \\\"Luigi's Trattoria\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 114.49, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 114.49}, {\\\"order_key\\\": \\\"PB-NP0030\\\", \\\"order_date\\\": \\\"2026-05-20\\\", \\\"store_name\\\": \\\"Firefly Hoagie House\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 18.22, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 18.22}, {\\\"order_key\\\": \\\"PB-NP0029\\\", \\\"order_date\\\": \\\"2026-05-15\\\", \\\"store_name\\\": \\\"Bamboo Gate Noodle House\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 32.91, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 32.91}, {\\\"order_key\\\": \\\"PB-NP0028\\\", \\\"order_date\\\": \\\"2026-05-08\\\", \\\"store_name\\\": \\\"Teddy's Japanese Kitchen\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 46.89, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 46.89}, {\\\"order_key\\\": \\\"PB-NP0027\\\", \\\"order_date\\\": \\\"2026-05-01\\\", \\\"store_name\\\": \\\"Luigi's Trattoria\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 114.49, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 114.49}], \\\"members\\\": []}, {\\\"month\\\": \\\"2026-04\\\", \\\"label\\\": \\\"April 2026\\\", \\\"order_count\\\": 3, \\\"total\\\": 180.31, \\\"refunded\\\": 0.0, \\\"cancelled_count\\\": 0, \\\"credits_used\\\": 0.0, \\\"order_keys\\\": [\\\"PB-NP0026\\\", \\\"PB-NP0025\\\", \\\"PB-NP0024\\\"], \\\"orders\\\": [{\\\"order_key\\\": \\\"PB-NP0026\\\", \\\"order_date\\\": \\\"2026-04-24\\\", \\\"store_name\\\": \\\"Bamboo Gate Noodle House\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 32.91, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 32.91}, {\\\"order_key\\\": \\\"PB-NP0025\\\", \\\"order_date\\\": \\\"2026-04-10\\\", \\\"store_name\\\": \\\"Luigi's Trattoria\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 114.49, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 114.49}, {\\\"order_key\\\": \\\"PB-NP0024\\\", \\\"order_date\\\": \\\"2026-04-02\\\", \\\"store_name\\\": \\\"Bamboo Gate Noodle House\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 32.91, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 32.91}], \\\"members\\\": []}, {\\\"month\\\": \\\"2026-03\\\", \\\"label\\\": \\\"March 2026\\\", \\\"order_count\\\": 6, \\\"total\\\": 290.76, \\\"refunded\\\": 0.0, \\\"cancelled_count\\\": 0, \\\"credits_used\\\": 0.0, \\\"order_keys\\\": [\\\"PB-NP0023\\\", \\\"PB-NP0022\\\", \\\"PB-NP0021\\\", \\\"PB-NP0020\\\", \\\"PB-NP0019\\\", \\\"PB-NP0018\\\"], \\\"orders\\\": [{\\\"order_key\\\": \\\"PB-NP0023\\\", \\\"order_date\\\": \\\"2026-03-27\\\", \\\"store_name\\\": \\\"Teddy's Japanese Kitchen\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 46.89, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 46.89}, {\\\"order_key\\\": \\\"PB-NP0022\\\", \\\"order_date\\\": \\\"2026-03-20\\\", \\\"store_name\\\": \\\"Juniper Vietnamese Kitchen\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 35.19, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 35.19}, {\\\"order_key\\\": \\\"PB-NP0021\\\", \\\"order_date\\\": \\\"2026-03-13\\\", \\\"store_name\\\": \\\"Luigi's Trattoria\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 114.49, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 114.49}, {\\\"order_key\\\": \\\"PB-NP0020\\\", \\\"order_date\\\": \\\"2026-03-11\\\", \\\"store_name\\\": \\\"Bluebird Leaf\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 26.09, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 26.09}, {\\\"order_key\\\": \\\"PB-NP0019\\\", \\\"order_date\\\": \\\"2026-03-06\\\", \\\"store_name\\\": \\\"Juniper Vietnamese Kitchen\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 35.19, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 35.19}, {\\\"order_key\\\": \\\"PB-NP0018\\\", \\\"order_date\\\": \\\"2026-03-01\\\", \\\"store_name\\\": \\\"Sparrow Slice House\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 32.91, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 32.91}], \\\"members\\\": []}, {\\\"month\\\": \\\"2026-02\\\", \\\"label\\\": \\\"February 2026\\\", \\\"order_count\\\": 4, \\\"total\\\": 308.78, \\\"refunded\\\": 0.0, \\\"cancelled_count\\\": 0, \\\"credits_used\\\": 0.0, \\\"order_keys\\\": [\\\"PB-NP0017\\\", \\\"PB-NP0016\\\", \\\"PB-NP0015\\\", \\\"PB-NP0014\\\"], \\\"orders\\\": [{\\\"order_key\\\": \\\"PB-NP0017\\\", \\\"order_date\\\": \\\"2026-02-27\\\", \\\"store_name\\\": \\\"Luigi's Trattoria\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 114.49, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 114.49}, {\\\"order_key\\\": \\\"PB-NP0016\\\", \\\"order_date\\\": \\\"2026-02-20\\\", \\\"store_name\\\": \\\"Bamboo Gate Noodle House\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 32.91, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 32.91}, {\\\"order_key\\\": \\\"PB-NP0015\\\", \\\"order_date\\\": \\\"2026-02-14\\\", \\\"store_name\\\": \\\"Luigi's Trattoria\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 114.49, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 114.49}, {\\\"order_key\\\": \\\"PB-NP0014\\\", \\\"order_date\\\": \\\"2026-02-06\\\", \\\"store_name\\\": \\\"Teddy's Japanese Kitchen\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 46.89, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 46.89}], \\\"members\\\": []}, {\\\"month\\\": \\\"2026-01\\\", \\\"label\\\": \\\"January 2026\\\", \\\"order_count\\\": 5, \\\"total\\\": 327.72, \\\"refunded\\\": 0.0, \\\"cancelled_count\\\": 0, \\\"credits_used\\\": 0.0, \\\"order_keys\\\": [\\\"PB-NP0013\\\", \\\"PB-NP0012\\\", \\\"PB-NP0011\\\", \\\"PB-NP0010\\\", \\\"PB-NP0009\\\"], \\\"orders\\\": [{\\\"order_key\\\": \\\"PB-NP0013\\\", \\\"order_date\\\": \\\"2026-01-30\\\", \\\"store_name\\\": \\\"Luigi's Trattoria\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 114.49, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 114.49}, {\\\"order_key\\\": \\\"PB-NP0012\\\", \\\"order_date\\\": \\\"2026-01-23\\\", \\\"store_name\\\": \\\"Bamboo Gate Noodle House\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 32.91, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 32.91}, {\\\"order_key\\\": \\\"PB-NP0011\\\", \\\"order_date\\\": \\\"2026-01-21\\\", \\\"store_name\\\": \\\"Pomegranate Garden Bar\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 22.84, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 22.84}, {\\\"order_key\\\": \\\"PB-NP0010\\\", \\\"order_date\\\": \\\"2026-01-16\\\", \\\"store_name\\\": \\\"Luigi's Trattoria\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 114.49, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 114.49}, {\\\"order_key\\\": \\\"PB-NP0009\\\", \\\"order_date\\\": \\\"2026-01-09\\\", \\\"store_name\\\": \\\"Tomas' Shawarma\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 42.99, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 42.99}], \\\"members\\\": []}, {\\\"month\\\": \\\"2025-10\\\", \\\"label\\\": \\\"October 2025\\\", \\\"order_count\\\": 1, \\\"total\\\": 32.59, \\\"refunded\\\": 0.0, \\\"cancelled_count\\\": 0, \\\"credits_used\\\": 0.0, \\\"order_keys\\\": [\\\"PB-NP0008\\\"], \\\"orders\\\": [{\\\"order_key\\\": \\\"PB-NP0008\\\", \\\"order_date\\\": \\\"2025-10-17\\\", \\\"store_name\\\": \\\"Firefly Burrito Co.\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 32.59, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 32.59}], \\\"members\\\": []}, {\\\"month\\\": \\\"2025-09\\\", \\\"label\\\": \\\"September 2025\\\", \\\"order_count\\\": 1, \\\"total\\\": 26.09, \\\"refunded\\\": 0.0, \\\"cancelled_count\\\": 0, \\\"credits_used\\\": 0.0, \\\"order_keys\\\": [\\\"PB-NP0007\\\"], \\\"orders\\\": [{\\\"order_key\\\": \\\"PB-NP0007\\\", \\\"order_date\\\": \\\"2025-09-12\\\", \\\"store_name\\\": \\\"Kenji's Poke\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 26.09, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 26.09}], \\\"members\\\": []}, {\\\"month\\\": \\\"2025-08\\\", \\\"label\\\": \\\"August 2025\\\", \\\"order_count\\\": 1, \\\"total\\\": 50.66, \\\"refunded\\\": 0.0, \\\"cancelled_count\\\": 0, \\\"credits_used\\\": 0.0, \\\"order_keys\\\": [\\\"PB-NP0006\\\"], \\\"orders\\\": [{\\\"order_key\\\": \\\"PB-NP0006\\\", \\\"order_date\\\": \\\"2025-08-22\\\", \\\"store_name\\\": \\\"Lantern Curry House\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 50.66, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 50.66}], \\\"members\\\": []}, {\\\"month\\\": \\\"2025-07\\\", \\\"label\\\": \\\"July 2025\\\", \\\"order_count\\\": 1, \\\"total\\\": 31.22, \\\"refunded\\\": 0.0, \\\"cancelled_count\\\": 0, \\\"credits_used\\\": 0.0, \\\"order_keys\\\": [\\\"PB-NP0005\\\"], \\\"orders\\\": [{\\\"order_key\\\": \\\"PB-NP0005\\\", \\\"order_date\\\": \\\"2025-07-18\\\", \\\"store_name\\\": \\\"Lupe's Smokehouse\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 31.22, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 31.22}], \\\"members\\\": []}, {\\\"month\\\": \\\"2025-06\\\", \\\"label\\\": \\\"June 2025\\\", \\\"order_count\\\": 1, \\\"total\\\": 44.94, \\\"refunded\\\": 0.0, \\\"cancelled_count\\\": 0, \\\"credits_used\\\": 0.0, \\\"order_keys\\\": [\\\"PB-NP0004\\\"], \\\"orders\\\": [{\\\"order_key\\\": \\\"PB-NP0004\\\", \\\"order_date\\\": \\\"2025-06-13\\\", \\\"store_name\\\": \\\"Driftwood Jerk Shack\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 44.94, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 44.94}], \\\"members\\\": []}, {\\\"month\\\": \\\"2025-05\\\", \\\"label\\\": \\\"May 2025\\\", \\\"order_count\\\": 1, \\\"total\\\": 16.34, \\\"refunded\\\": 0.0, \\\"cancelled_count\\\": 0, \\\"credits_used\\\": 0.0, \\\"order_keys\\\": [\\\"PB-NP0003\\\"], \\\"orders\\\": [{\\\"order_key\\\": \\\"PB-NP0003\\\", \\\"order_date\\\": \\\"2025-05-02\\\", \\\"store_name\\\": \\\"Big Earl's Chicken Shack\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 16.34, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 16.34}], \\\"members\\\": []}, {\\\"month\\\": \\\"2025-04\\\", \\\"label\\\": \\\"April 2025\\\", \\\"order_count\\\": 1, \\\"total\\\": 35.84, \\\"refunded\\\": 0.0, \\\"cancelled_count\\\": 0, \\\"credits_used\\\": 0.0, \\\"order_keys\\\": [\\\"PB-NP0002\\\"], \\\"orders\\\": [{\\\"order_key\\\": \\\"PB-NP0002\\\", \\\"order_date\\\": \\\"2025-04-11\\\", \\\"store_name\\\": \\\"Paper Crane Szechuan House\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 35.84, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 35.84}], \\\"members\\\": []}, {\\\"month\\\": \\\"2025-02\\\", \\\"label\\\": \\\"February 2025\\\", \\\"order_count\\\": 1, \\\"total\\\": 22.19, \\\"refunded\\\": 0.0, \\\"cancelled_count\\\": 0, \\\"credits_used\\\": 0.0, \\\"order_keys\\\": [\\\"PB-NP0001\\\"], \\\"orders\\\": [{\\\"order_key\\\": \\\"PB-NP0001\\\", \\\"order_date\\\": \\\"2025-02-07\\\", \\\"store_name\\\": \\\"Pinecone Patty Shop\\\", \\\"status\\\": \\\"delivered\\\", \\\"total\\\": 22.19, \\\"refunded\\\": 0.0, \\\"credits_applied\\\": 0.0, \\\"counted\\\": true, \\\"net\\\": 22.19}], \\\"members\\\": []}], \\\"rule\\\": \\\"total = your own order totals minus approved refunds; cancelled and fully refunded orders count 0. Credits spent are part of an order's total. Orders a household member placed are listed under members, never in your total.\\\"}\"}",
+   "openinference.span.kind": "TOOL",
+   "gen_ai.operation.name": "execute_tool",
+   "gen_ai.tool.name": "porchbite_spending_by_month",
+   "gen_ai.prompt": "{\"input\": {}}",
+   "gen_ai.completion": "{\"output\": \"{\\\"type\\\": \\\"text\\\", \\\"text\\\": \\\"{\\\\\\\"months\\\\\\\": [{\\\\\\\"month\\\\\\\": \\\\\\\"2026-11\\\\\\\", \\\\\\\"label\\\\\\\": \\\\\\\"November 2026\\\\\\\", \\\\\\\"order_count\\\\\\\": 1, \\\\\\\"total\\\\\\\": 89.7, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"cancelled_count\\\\\\\": 1, \\\\\\\"credits_used\\\\\\\": 0.0, \\\\\\\"order_keys\\\\\\\": [\\\\\\\"PB-B9SQ90ZE\\\\\\\"], \\\\\\\"orders\\\\\\\": [{\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-B9SQ90ZE\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-11-06\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Lalibela Ethiopian Kitchen\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"scheduled\\\\\\\", \\\\\\\"total\\\\\\\": 89.7, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 89.7}, {\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-C2SHSLHX\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-11-06\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Ember & Saffron\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"cancelled\\\\\\\", \\\\\\\"total\\\\\\\": 102.7, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": false, \\\\\\\"net\\\\\\\": 0.0, \\\\\\\"why\\\\\\\": \\\\\\\"cancelled: not charged\\\\\\\"}], \\\\\\\"members\\\\\\\": []}, {\\\\\\\"month\\\\\\\": \\\\\\\"2026-10\\\\\\\", \\\\\\\"label\\\\\\\": \\\\\\\"October 2026\\\\\\\", \\\\\\\"order_count\\\\\\\": 4, \\\\\\\"total\\\\\\\": 227.2, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"cancelled_count\\\\\\\": 0, \\\\\\\"credits_used\\\\\\\": 0.0, \\\\\\\"order_keys\\\\\\\": [\\\\\\\"PB-NP0051\\\\\\\", \\\\\\\"PB-NP0050\\\\\\\", \\\\\\\"PB-NP0049\\\\\\\", \\\\\\\"PB-NP0048\\\\\\\"], \\\\\\\"orders\\\\\\\": [{\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0051\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-10-30\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Sparrow Slice House\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 32.91, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 32.91}, {\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0050\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-10-23\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Bamboo Gate Noodle House\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 32.91, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 32.91}, {\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0049\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-10-16\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Teddy's Japanese Kitchen\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 46.89, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 46.89}, {\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0048\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-10-09\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Luigi's Trattoria\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 114.49, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 114.49}], \\\\\\\"members\\\\\\\": []}, {\\\\\\\"month\\\\\\\": \\\\\\\"2026-09\\\\\\\", \\\\\\\"label\\\\\\\": \\\\\\\"September 2026\\\\\\\", \\\\\\\"order_count\\\\\\\": 4, \\\\\\\"total\\\\\\\": 376.38, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"cancelled_count\\\\\\\": 0, \\\\\\\"credits_used\\\\\\\": 0.0, \\\\\\\"order_keys\\\\\\\": [\\\\\\\"PB-NP0047\\\\\\\", \\\\\\\"PB-NP0046\\\\\\\", \\\\\\\"PB-NP0045\\\\\\\", \\\\\\\"PB-NP0044\\\\\\\"], \\\\\\\"orders\\\\\\\": [{\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0047\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-09-25\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Bamboo Gate Noodle House\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 32.91, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 32.91}, {\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0046\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-09-18\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Luigi's Trattoria\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 114.49, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 114.49}, {\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0045\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-09-11\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Luigi's Trattoria\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 114.49, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 114.49}, {\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0044\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-09-04\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Luigi's Trattoria\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 114.49, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 114.49}], \\\\\\\"members\\\\\\\": []}, {\\\\\\\"month\\\\\\\": \\\\\\\"2026-08\\\\\\\", \\\\\\\"label\\\\\\\": \\\\\\\"August 2026\\\\\\\", \\\\\\\"order_count\\\\\\\": 5, \\\\\\\"total\\\\\\\": 244.19, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"cancelled_count\\\\\\\": 0, \\\\\\\"credits_used\\\\\\\": 0.0, \\\\\\\"order_keys\\\\\\\": [\\\\\\\"PB-NP0043\\\\\\\", \\\\\\\"PB-NP0042\\\\\\\", \\\\\\\"PB-NP0041\\\\\\\", \\\\\\\"PB-NP0040\\\\\\\", \\\\\\\"PB-NP0039\\\\\\\"], \\\\\\\"orders\\\\\\\": [{\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0043\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-08-28\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Teddy's Japanese Kitchen\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 46.89, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 46.89}, {\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0042\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-08-21\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Sparrow Slice House\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 32.91, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 32.91}, {\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0041\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-08-14\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Luigi's Trattoria\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 114.49, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 114.49}, {\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0040\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-08-07\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Bamboo Gate Noodle House\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 32.91, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 32.91}, {\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0039\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-08-05\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Driftwood Brunch House\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 16.99, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 16.99}], \\\\\\\"members\\\\\\\": []}, {\\\\\\\"month\\\\\\\": \\\\\\\"2026-07\\\\\\\", \\\\\\\"label\\\\\\\": \\\\\\\"July 2026\\\\\\\", \\\\\\\"order_count\\\\\\\": 3, \\\\\\\"total\\\\\\\": 275.87, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"cancelled_count\\\\\\\": 0, \\\\\\\"credits_used\\\\\\\": 0.0, \\\\\\\"order_keys\\\\\\\": [\\\\\\\"PB-NP0038\\\\\\\", \\\\\\\"PB-NP0037\\\\\\\", \\\\\\\"PB-NP0036\\\\\\\"], \\\\\\\"orders\\\\\\\": [{\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0038\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-07-31\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Teddy's Japanese Kitchen\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 46.89, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 46.89}, {\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0037\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-07-24\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Luigi's Trattoria\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 114.49, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 114.49}, {\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0036\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-07-03\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Luigi's Trattoria\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 114.49, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 114.49}], \\\\\\\"members\\\\\\\": []}, {\\\\\\\"month\\\\\\\": \\\\\\\"2026-06\\\\\\\", \\\\\\\"label\\\\\\\": \\\\\\\"June 2026\\\\\\\", \\\\\\\"order_count\\\\\\\": 4, \\\\\\\"total\\\\\\\": 227.2, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"cancelled_count\\\\\\\": 0, \\\\\\\"credits_used\\\\\\\": 0.0, \\\\\\\"order_keys\\\\\\\": [\\\\\\\"PB-NP0035\\\\\\\", \\\\\\\"PB-NP0034\\\\\\\", \\\\\\\"PB-NP0033\\\\\\\", \\\\\\\"PB-NP0032\\\\\\\"], \\\\\\\"orders\\\\\\\": [{\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0035\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-06-26\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Bamboo Gate Noodle House\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 32.91, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 32.91}, {\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0034\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-06-19\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Teddy's Japanese Kitchen\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 46.89, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 46.89}, {\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0033\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-06-12\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Luigi's Trattoria\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 114.49, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 114.49}, {\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0032\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-06-05\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Sparrow Slice House\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 32.91, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 32.91}], \\\\\\\"members\\\\\\\": []}, {\\\\\\\"month\\\\\\\": \\\\\\\"2026-05\\\\\\\", \\\\\\\"label\\\\\\\": \\\\\\\"May 2026\\\\\\\", \\\\\\\"order_count\\\\\\\": 5, \\\\\\\"total\\\\\\\": 327.0, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"cancelled_count\\\\\\\": 0, \\\\\\\"credits_used\\\\\\\": 0.0, \\\\\\\"order_keys\\\\\\\": [\\\\\\\"PB-NP0031\\\\\\\", \\\\\\\"PB-NP0030\\\\\\\", \\\\\\\"PB-NP0029\\\\\\\", \\\\\\\"PB-NP0028\\\\\\\", \\\\\\\"PB-NP0027\\\\\\\"], \\\\\\\"orders\\\\\\\": [{\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0031\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-05-22\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Luigi's Trattoria\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 114.49, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 114.49}, {\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0030\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-05-20\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Firefly Hoagie House\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 18.22, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 18.22}, {\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0029\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-05-15\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Bamboo Gate Noodle House\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 32.91, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 32.91}, {\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0028\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-05-08\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Teddy's Japanese Kitchen\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 46.89, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 46.89}, {\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0027\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-05-01\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Luigi's Trattoria\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 114.49, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 114.49}], \\\\\\\"members\\\\\\\": []}, {\\\\\\\"month\\\\\\\": \\\\\\\"2026-04\\\\\\\", \\\\\\\"label\\\\\\\": \\\\\\\"April 2026\\\\\\\", \\\\\\\"order_count\\\\\\\": 3, \\\\\\\"total\\\\\\\": 180.31, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"cancelled_count\\\\\\\": 0, \\\\\\\"credits_used\\\\\\\": 0.0, \\\\\\\"order_keys\\\\\\\": [\\\\\\\"PB-NP0026\\\\\\\", \\\\\\\"PB-NP0025\\\\\\\", \\\\\\\"PB-NP0024\\\\\\\"], \\\\\\\"orders\\\\\\\": [{\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0026\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-04-24\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Bamboo Gate Noodle House\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 32.91, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 32.91}, {\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0025\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-04-10\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Luigi's Trattoria\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 114.49, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 114.49}, {\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0024\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-04-02\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Bamboo Gate Noodle House\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 32.91, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 32.91}], \\\\\\\"members\\\\\\\": []}, {\\\\\\\"month\\\\\\\": \\\\\\\"2026-03\\\\\\\", \\\\\\\"label\\\\\\\": \\\\\\\"March 2026\\\\\\\", \\\\\\\"order_count\\\\\\\": 6, \\\\\\\"total\\\\\\\": 290.76, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"cancelled_count\\\\\\\": 0, \\\\\\\"credits_used\\\\\\\": 0.0, \\\\\\\"order_keys\\\\\\\": [\\\\\\\"PB-NP0023\\\\\\\", \\\\\\\"PB-NP0022\\\\\\\", \\\\\\\"PB-NP0021\\\\\\\", \\\\\\\"PB-NP0020\\\\\\\", \\\\\\\"PB-NP0019\\\\\\\", \\\\\\\"PB-NP0018\\\\\\\"], \\\\\\\"orders\\\\\\\": [{\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0023\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-03-27\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Teddy's Japanese Kitchen\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 46.89, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 46.89}, {\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0022\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-03-20\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Juniper Vietnamese Kitchen\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 35.19, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 35.19}, {\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0021\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-03-13\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Luigi's Trattoria\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 114.49, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 114.49}, {\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0020\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-03-11\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Bluebird Leaf\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 26.09, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 26.09}, {\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0019\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-03-06\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Juniper Vietnamese Kitchen\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 35.19, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 35.19}, {\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0018\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-03-01\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Sparrow Slice House\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 32.91, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 32.91}], \\\\\\\"members\\\\\\\": []}, {\\\\\\\"month\\\\\\\": \\\\\\\"2026-02\\\\\\\", \\\\\\\"label\\\\\\\": \\\\\\\"February 2026\\\\\\\", \\\\\\\"order_count\\\\\\\": 4, \\\\\\\"total\\\\\\\": 308.78, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"cancelled_count\\\\\\\": 0, \\\\\\\"credits_used\\\\\\\": 0.0, \\\\\\\"order_keys\\\\\\\": [\\\\\\\"PB-NP0017\\\\\\\", \\\\\\\"PB-NP0016\\\\\\\", \\\\\\\"PB-NP0015\\\\\\\", \\\\\\\"PB-NP0014\\\\\\\"], \\\\\\\"orders\\\\\\\": [{\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0017\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-02-27\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Luigi's Trattoria\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 114.49, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 114.49}, {\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0016\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-02-20\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Bamboo Gate Noodle House\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 32.91, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 32.91}, {\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0015\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-02-14\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Luigi's Trattoria\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 114.49, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 114.49}, {\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0014\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-02-06\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Teddy's Japanese Kitchen\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 46.89, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 46.89}], \\\\\\\"members\\\\\\\": []}, {\\\\\\\"month\\\\\\\": \\\\\\\"2026-01\\\\\\\", \\\\\\\"label\\\\\\\": \\\\\\\"January 2026\\\\\\\", \\\\\\\"order_count\\\\\\\": 5, \\\\\\\"total\\\\\\\": 327.72, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"cancelled_count\\\\\\\": 0, \\\\\\\"credits_used\\\\\\\": 0.0, \\\\\\\"order_keys\\\\\\\": [\\\\\\\"PB-NP0013\\\\\\\", \\\\\\\"PB-NP0012\\\\\\\", \\\\\\\"PB-NP0011\\\\\\\", \\\\\\\"PB-NP0010\\\\\\\", \\\\\\\"PB-NP0009\\\\\\\"], \\\\\\\"orders\\\\\\\": [{\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0013\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-01-30\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Luigi's Trattoria\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 114.49, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 114.49}, {\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0012\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-01-23\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Bamboo Gate Noodle House\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 32.91, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 32.91}, {\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0011\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-01-21\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Pomegranate Garden Bar\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 22.84, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 22.84}, {\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0010\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-01-16\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Luigi's Trattoria\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 114.49, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 114.49}, {\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0009\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2026-01-09\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Tomas' Shawarma\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 42.99, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 42.99}], \\\\\\\"members\\\\\\\": []}, {\\\\\\\"month\\\\\\\": \\\\\\\"2025-10\\\\\\\", \\\\\\\"label\\\\\\\": \\\\\\\"October 2025\\\\\\\", \\\\\\\"order_count\\\\\\\": 1, \\\\\\\"total\\\\\\\": 32.59, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"cancelled_count\\\\\\\": 0, \\\\\\\"credits_used\\\\\\\": 0.0, \\\\\\\"order_keys\\\\\\\": [\\\\\\\"PB-NP0008\\\\\\\"], \\\\\\\"orders\\\\\\\": [{\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0008\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2025-10-17\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Firefly Burrito Co.\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 32.59, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 32.59}], \\\\\\\"members\\\\\\\": []}, {\\\\\\\"month\\\\\\\": \\\\\\\"2025-09\\\\\\\", \\\\\\\"label\\\\\\\": \\\\\\\"September 2025\\\\\\\", \\\\\\\"order_count\\\\\\\": 1, \\\\\\\"total\\\\\\\": 26.09, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"cancelled_count\\\\\\\": 0, \\\\\\\"credits_used\\\\\\\": 0.0, \\\\\\\"order_keys\\\\\\\": [\\\\\\\"PB-NP0007\\\\\\\"], \\\\\\\"orders\\\\\\\": [{\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0007\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2025-09-12\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Kenji's Poke\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 26.09, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 26.09}], \\\\\\\"members\\\\\\\": []}, {\\\\\\\"month\\\\\\\": \\\\\\\"2025-08\\\\\\\", \\\\\\\"label\\\\\\\": \\\\\\\"August 2025\\\\\\\", \\\\\\\"order_count\\\\\\\": 1, \\\\\\\"total\\\\\\\": 50.66, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"cancelled_count\\\\\\\": 0, \\\\\\\"credits_used\\\\\\\": 0.0, \\\\\\\"order_keys\\\\\\\": [\\\\\\\"PB-NP0006\\\\\\\"], \\\\\\\"orders\\\\\\\": [{\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0006\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2025-08-22\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Lantern Curry House\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 50.66, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 50.66}], \\\\\\\"members\\\\\\\": []}, {\\\\\\\"month\\\\\\\": \\\\\\\"2025-07\\\\\\\", \\\\\\\"label\\\\\\\": \\\\\\\"July 2025\\\\\\\", \\\\\\\"order_count\\\\\\\": 1, \\\\\\\"total\\\\\\\": 31.22, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"cancelled_count\\\\\\\": 0, \\\\\\\"credits_used\\\\\\\": 0.0, \\\\\\\"order_keys\\\\\\\": [\\\\\\\"PB-NP0005\\\\\\\"], \\\\\\\"orders\\\\\\\": [{\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0005\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2025-07-18\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Lupe's Smokehouse\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 31.22, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 31.22}], \\\\\\\"members\\\\\\\": []}, {\\\\\\\"month\\\\\\\": \\\\\\\"2025-06\\\\\\\", \\\\\\\"label\\\\\\\": \\\\\\\"June 2025\\\\\\\", \\\\\\\"order_count\\\\\\\": 1, \\\\\\\"total\\\\\\\": 44.94, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"cancelled_count\\\\\\\": 0, \\\\\\\"credits_used\\\\\\\": 0.0, \\\\\\\"order_keys\\\\\\\": [\\\\\\\"PB-NP0004\\\\\\\"], \\\\\\\"orders\\\\\\\": [{\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0004\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2025-06-13\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Driftwood Jerk Shack\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 44.94, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 44.94}], \\\\\\\"members\\\\\\\": []}, {\\\\\\\"month\\\\\\\": \\\\\\\"2025-05\\\\\\\", \\\\\\\"label\\\\\\\": \\\\\\\"May 2025\\\\\\\", \\\\\\\"order_count\\\\\\\": 1, \\\\\\\"total\\\\\\\": 16.34, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"cancelled_count\\\\\\\": 0, \\\\\\\"credits_used\\\\\\\": 0.0, \\\\\\\"order_keys\\\\\\\": [\\\\\\\"PB-NP0003\\\\\\\"], \\\\\\\"orders\\\\\\\": [{\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0003\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2025-05-02\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Big Earl's Chicken Shack\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 16.34, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 16.34}], \\\\\\\"members\\\\\\\": []}, {\\\\\\\"month\\\\\\\": \\\\\\\"2025-04\\\\\\\", \\\\\\\"label\\\\\\\": \\\\\\\"April 2025\\\\\\\", \\\\\\\"order_count\\\\\\\": 1, \\\\\\\"total\\\\\\\": 35.84, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"cancelled_count\\\\\\\": 0, \\\\\\\"credits_used\\\\\\\": 0.0, \\\\\\\"order_keys\\\\\\\": [\\\\\\\"PB-NP0002\\\\\\\"], \\\\\\\"orders\\\\\\\": [{\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0002\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2025-04-11\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Paper Crane Szechuan House\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 35.84, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 35.84}], \\\\\\\"members\\\\\\\": []}, {\\\\\\\"month\\\\\\\": \\\\\\\"2025-02\\\\\\\", \\\\\\\"label\\\\\\\": \\\\\\\"February 2025\\\\\\\", \\\\\\\"order_count\\\\\\\": 1, \\\\\\\"total\\\\\\\": 22.19, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"cancelled_count\\\\\\\": 0, \\\\\\\"credits_used\\\\\\\": 0.0, \\\\\\\"order_keys\\\\\\\": [\\\\\\\"PB-NP0001\\\\\\\"], \\\\\\\"orders\\\\\\\": [{\\\\\\\"order_key\\\\\\\": \\\\\\\"PB-NP0001\\\\\\\", \\\\\\\"order_date\\\\\\\": \\\\\\\"2025-02-07\\\\\\\", \\\\\\\"store_name\\\\\\\": \\\\\\\"Pinecone Patty Shop\\\\\\\", \\\\\\\"status\\\\\\\": \\\\\\\"delivered\\\\\\\", \\\\\\\"total\\\\\\\": 22.19, \\\\\\\"refunded\\\\\\\": 0.0, \\\\\\\"credits_applied\\\\\\\": 0.0, \\\\\\\"counted\\\\\\\": true, \\\\\\\"net\\\\\\\": 22.19}], \\\\\\\"members\\\\\\\": []}], \\\\\\\"rule\\\\\\\": \\\\\\\"total = your own order totals minus approved refunds; cancelled and fully refunded orders count 0. Credits spent are part of an order's total. Orders a household member placed are listed under members, never in your total.\\\\\\\"}\\\"}\"}"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "turn",
+  "context": {
+   "trace_id": "0xfbac5ce7d96e4740ab742da149702d66",
+   "span_id": "0xf9b0ab51ca035384",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x03f07749d91563c1",
+  "start_time": "2026-11-13T17:26:50.150130Z",
+  "end_time": "2026-11-13T17:26:52.848524Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "openinference.span.kind": "CHAIN"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "mcp_tools",
+  "context": {
+   "trace_id": "0xfbac5ce7d96e4740ab742da149702d66",
+   "span_id": "0x32d8f73ae5fb17b3",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x03f07749d91563c1",
+  "start_time": "2026-11-13T17:26:52.848675Z",
+  "end_time": "2026-11-13T17:26:52.848862Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "output.value": "[\"gmail_archive_thread\", \"gmail_create_draft\", \"gmail_create_label\", \"gmail_delete_draft\", \"gmail_get_attachment\", \"gmail_get_draft\", \"gmail_get_label\", \"gmail_get_message\", \"gmail_get_messages_batch\", \"gmail_get_profile\", \"gmail_get_thread\", \"gmail_list_drafts\", \"gmail_list_labels\", \"gmail_list_messages\", \"gmail_list_threads\", \"gmail_modify_message_labels\", \"gmail_modify_thread_labels\", \"gmail_reply_to_message\", \"gmail_search_messages\", \"gmail_send_draft\", \"gmail_send_message\", \"gmail_trash_message\", \"gmail_trash_thread\", \"gmail_untrash_message\", \"gmail_untrash_thread\", \"gmail_update_draft\", \"gcal_create_event\", \"gcal_delete_event\", \"gcal_freebusy_query\", \"gcal_get_calendar\", \"gcal_get_colors\", \"gcal_get_event\", \"gcal_get_setting\", \"gcal_list_calendars\", \"gcal_list_events\", \"gcal_list_instances\", \"gcal_patch_event\", \"gcal_respond_to_event\", \"gcal_search_events\", \"gcal_update_event\", \"contacts_add_new_contact\", \"contacts_edit_contact\", \"contacts_get_contact\", \"contacts_get_contacts\", \"contacts_get_current_user_details\", \"contacts_get_group\", \"contacts_list_groups\", \"contacts_list_other_contacts\", \"contacts_search_contacts\", \"messaging_add_user_to_conversation\", \"messaging_create_conversation\", \"messaging_get_conversation\", \"messaging_list_conversations\", \"messaging_search_conversations\", \"messaging_send_message\", \"messaging_send_message_to_conversation\", \"porchbite_add_address\", \"porchbite_add_payment_method\", \"porchbite_add_to_cart\", \"porchbite_answer_substitution\", \"porchbi…",
+   "output.mime_type": "application/json",
+   "openinference.span.kind": "CHAIN"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "generation",
+  "context": {
+   "trace_id": "0xfbac5ce7d96e4740ab742da149702d66",
+   "span_id": "0x27a9ff8797fcc0da",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x18dae81cbccca73d",
+  "start_time": "2026-11-13T17:26:52.853914Z",
+  "end_time": "2026-11-13T17:26:54.936828Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.input_messages.38.message.role": "assistant",
+   "llm.input_messages.38.message.tool_calls.23.tool_call.id": "toolu_01CQ8GGHBXK3sqvHMqaVa5zJ",
+   "llm.input_messages.38.message.tool_calls.23.tool_call.function.name": "porchbite_get_menu",
+   "llm.input_messages.38.message.tool_calls.23.tool_call.function.arguments": "{\"store_id\": \"pb-atx-9301\"}",
+   "llm.input_messages.38.message.tool_calls.24.tool_call.id": "toolu_01EX1zwdpqVE8CdXnNCuBEyB",
+   "llm.input_messages.38.message.tool_calls.24.tool_call.function.name": "porchbite_get_store",
+   "llm.input_messages.38.message.tool_calls.24.tool_call.function.arguments": "{\"store_id\": \"pb-atx-9301\"}",
+   "llm.input_messages.39.message.contents.0.message_content.text": "{\"store_id\": \"pb-atx-9301\", \"query\": \"\", \"sections\": [{\"name\": \"For two\", \"items\": [{\"item_id\": \"pb-atx-9301-feast-for-two\", \"store_id\": \"pb-atx-9301\", \"name\": \"Lalibela Feast for Two\", \"description\": \"Our date-night platter: doro wat (chicken) and yebeg tibs (lamb) on injera, with salad. Serves two.\", \"section\": \"For two\", \"sort\": 0, \"price\": 68.0, \"image\": \"img/food/dish-roast.jpg\", \"sold_out\": false, \"popular\": true, \"options\": [], \"discontinued\": false, \"discontinued_reason\": null}, {\"item_id\": \"pb-atx-9301-veggie-feast-for-two\", \"store_id\": \"pb-atx-9301\", \"name\": \"Veggie Feast for Two\", \"description\": \"Misir wot, shiro, gomen, kik alicha and atakilt on injera. Vegan. Serves two.\", \"section\": \"For two\", \"sort\": 1, \"price\": 54.0, \"image\": \"img/food/dish-roast.jpg\", \"sold_out\": false, \"popular\": false, \"options\": [], \"discontinued\": false, \"discontinued_reason\": null}]}, {\"name\": \"Mains\", \"items\": [{\"item_id\": \"pb-atx-9301-doro-wat\", \"store_id\": \"pb-atx-9301\", \"name\": \"Doro Wat\", \"description\": \"Chicken slow-simmered in berbere, boiled egg, injera.\", \"section\": \"Mains\", \"sort\": 2, \"price\": 22.0, \"image\": \"img/food/dish-roast.jpg\", \"sold_out\": false, \"popular\": false, \"options\": [], \"discontinued\": false, \"discontinued_reason\": null}, {\"item_id\": \"pb-atx-9301-yebeg-tibs\", \"store_id\": \"pb-atx-9301\", \"name\": \"Yebeg Tibs\", \"description\": \"Sauteed lamb, rosemary, jalapeno, injera.\", \"section\": \"Mains\", \"sort\": 3, \"price\": 24.0, \"image\": \"img/food/dish-roast.jpg\", \"sold_out\": fal…",
+   "output.value": "[{\"content\": \"Nothing changed. The Ember & Saffron order is still cancelled and wasn't charged, and the Ethiopian order is still scheduled.\", \"refusal\": null, \"role\": \"assistant\", \"annotations\": null, \"audio\": null, \"function_call\": null, \"tool_calls\": [{\"id\": \"toolu_017Do5yxuX7wSmV5VKHtescs\", \"function\": {\"arguments\": \"{}\", \"name\": \"stay_quiet\"}, \"type\": \"function\"}]}]",
+   "output.mime_type": "application/json",
+   "llm.output_messages.0.message.role": "assistant",
+   "llm.output_messages.0.message.content": "Nothing changed. The Ember & Saffron order is still cancelled and wasn't charged, and the Ethiopian order is still scheduled.",
+   "llm.output_messages.0.message.tool_calls.0.tool_call.id": "toolu_017Do5yxuX7wSmV5VKHtescs",
+   "llm.output_messages.0.message.tool_calls.0.tool_call.function.name": "stay_quiet",
+   "llm.token_count.prompt": 2,
+   "llm.token_count.completion": 77,
+   "openinference.span.kind": "LLM"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "stay_quiet",
+  "context": {
+   "trace_id": "0xfbac5ce7d96e4740ab742da149702d66",
+   "span_id": "0x0b90cf881adc845c",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x18dae81cbccca73d",
+  "start_time": "2026-11-13T17:26:54.939381Z",
+  "end_time": "2026-11-13T17:26:54.974138Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "tool.name": "stay_quiet",
+   "input.value": "{}",
+   "input.mime_type": "application/json",
+   "output.value": "{\"type\": \"text\", \"text\": \"{\\n  \\\"ok\\\": true,\\n  \\\"sent_to_user\\\": false\\n}\"}",
+   "openinference.span.kind": "TOOL",
+   "gen_ai.operation.name": "execute_tool",
+   "gen_ai.tool.name": "stay_quiet",
+   "gen_ai.prompt": "{\"input\": {}}",
+   "gen_ai.completion": "{\"output\": \"{\\\"type\\\": \\\"text\\\", \\\"text\\\": \\\"{\\\\n  \\\\\\\"ok\\\\\\\": true,\\\\n  \\\\\\\"sent_to_user\\\\\\\": false\\\\n}\\\"}\"}"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "turn",
+  "context": {
+   "trace_id": "0xfbac5ce7d96e4740ab742da149702d66",
+   "span_id": "0x18dae81cbccca73d",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x03f07749d91563c1",
+  "start_time": "2026-11-13T17:26:52.852315Z",
+  "end_time": "2026-11-13T17:26:54.974611Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "openinference.span.kind": "CHAIN"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "mcp_tools",
+  "context": {
+   "trace_id": "0xfbac5ce7d96e4740ab742da149702d66",
+   "span_id": "0x29a20f1d1bd17971",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x03f07749d91563c1",
+  "start_time": "2026-11-13T17:26:54.974752Z",
+  "end_time": "2026-11-13T17:26:54.974957Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "output.value": "[\"gmail_archive_thread\", \"gmail_create_draft\", \"gmail_create_label\", \"gmail_delete_draft\", \"gmail_get_attachment\", \"gmail_get_draft\", \"gmail_get_label\", \"gmail_get_message\", \"gmail_get_messages_batch\", \"gmail_get_profile\", \"gmail_get_thread\", \"gmail_list_drafts\", \"gmail_list_labels\", \"gmail_list_messages\", \"gmail_list_threads\", \"gmail_modify_message_labels\", \"gmail_modify_thread_labels\", \"gmail_reply_to_message\", \"gmail_search_messages\", \"gmail_send_draft\", \"gmail_send_message\", \"gmail_trash_message\", \"gmail_trash_thread\", \"gmail_untrash_message\", \"gmail_untrash_thread\", \"gmail_update_draft\", \"gcal_create_event\", \"gcal_delete_event\", \"gcal_freebusy_query\", \"gcal_get_calendar\", \"gcal_get_colors\", \"gcal_get_event\", \"gcal_get_setting\", \"gcal_list_calendars\", \"gcal_list_events\", \"gcal_list_instances\", \"gcal_patch_event\", \"gcal_respond_to_event\", \"gcal_search_events\", \"gcal_update_event\", \"contacts_add_new_contact\", \"contacts_edit_contact\", \"contacts_get_contact\", \"contacts_get_contacts\", \"contacts_get_current_user_details\", \"contacts_get_group\", \"contacts_list_groups\", \"contacts_list_other_contacts\", \"contacts_search_contacts\", \"messaging_add_user_to_conversation\", \"messaging_create_conversation\", \"messaging_get_conversation\", \"messaging_list_conversations\", \"messaging_search_conversations\", \"messaging_send_message\", \"messaging_send_message_to_conversation\", \"porchbite_add_address\", \"porchbite_add_payment_method\", \"porchbite_add_to_cart\", \"porchbite_answer_substitution\", \"porchbi…",
+   "output.mime_type": "application/json",
+   "openinference.span.kind": "CHAIN"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "generation",
+  "context": {
+   "trace_id": "0xfbac5ce7d96e4740ab742da149702d66",
+   "span_id": "0x95f42e40b4dd6514",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x31fe08bfbae00f05",
+  "start_time": "2026-11-13T17:26:54.979726Z",
+  "end_time": "2026-11-13T17:26:57.741510Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.input_messages.38.message.tool_calls.24.tool_call.function.arguments": "{\"store_id\": \"pb-atx-9301\"}",
+   "llm.input_messages.39.message.role": "tool",
+   "llm.input_messages.39.message.contents.0.message_content.type": "text",
+   "llm.input_messages.39.message.contents.0.message_content.text": "{\"store_id\": \"pb-atx-9301\", \"query\": \"\", \"sections\": [{\"name\": \"For two\", \"items\": [{\"item_id\": \"pb-atx-9301-feast-for-two\", \"store_id\": \"pb-atx-9301\", \"name\": \"Lalibela Feast for Two\", \"description\": \"Our date-night platter: doro wat (chicken) and yebeg tibs (lamb) on injera, with salad. Serves two.\", \"section\": \"For two\", \"sort\": 0, \"price\": 68.0, \"image\": \"img/food/dish-roast.jpg\", \"sold_out\": false, \"popular\": true, \"options\": [], \"discontinued\": false, \"discontinued_reason\": null}, {\"item_id\": \"pb-atx-9301-veggie-feast-for-two\", \"store_id\": \"pb-atx-9301\", \"name\": \"Veggie Feast for Two\", \"description\": \"Misir wot, shiro, gomen, kik alicha and atakilt on injera. Vegan. Serves two.\", \"section\": \"For two\", \"sort\": 1, \"price\": 54.0, \"image\": \"img/food/dish-roast.jpg\", \"sold_out\": false, \"popular\": false, \"options\": [], \"discontinued\": false, \"discontinued_reason\": null}]}, {\"name\": \"Mains\", \"items\": [{\"item_id\": \"pb-atx-9301-doro-wat\", \"store_id\": \"pb-atx-9301\", \"name\": \"Doro Wat\", \"description\": \"Chicken slow-simmered in berbere, boiled egg, injera.\", \"section\": \"Mains\", \"sort\": 2, \"price\": 22.0, \"image\": \"img/food/dish-roast.jpg\", \"sold_out\": false, \"popular\": false, \"options\": [], \"discontinued\": false, \"discontinued_reason\": null}, {\"item_id\": \"pb-atx-9301-yebeg-tibs\", \"store_id\": \"pb-atx-9301\", \"name\": \"Yebeg Tibs\", \"description\": \"Sauteed lamb, rosemary, jalapeno, injera.\", \"section\": \"Mains\", \"sort\": 3, \"price\": 24.0, \"image\": \"img/food/dish-roast.jpg\", \"sold_out\": fal…",
+   "llm.input_messages.39.message.tool_call_id": "toolu_01CQ8GGHBXK3sqvHMqaVa5zJ",
+   "llm.input_messages.40.message.role": "tool",
+   "llm.input_messages.40.message.contents.0.message_content.type": "text",
+   "llm.input_messages.40.message.contents.0.message_content.text": "{\"store_id\": \"pb-atx-9301\", \"name\": \"Lalibela Ethiopian Kitchen\", \"city\": \"Austin\", \"cuisine\": \"Ethiopian\", \"tags\": [\"ethiopian\", \"african\", \"injera\"], \"rating\": 4.6, \"review_count\": 41, \"price_level\": 2, \"delivery_fee\": 3.99, \"service_fee_pct\": 12.0, \"min_subtotal\": 20.0, \"eta_min\": 35, \"eta_max\": 55, \"pickup\": true, \"porchpass\": true, \"image\": \"img/food/store-italian-1.jpg\", \"is_open\": false, \"hours_today\": \"Today 7:30 PM\\u201310:00 PM\", \"saved\": false, \"matched_items\": [], \"discontinued\": false, \"discontinued_reason\": null, \"store_type\": \"restaurant\", \"address_line\": \"\", \"delivers_to\": [\"Austin\"], \"hours\": [{\"day\": 0, \"open\": \"11:00\", \"close\": \"22:00\"}, {\"day\": 1, \"open\": \"11:00\", \"close\": \"22:00\"}, {\"day\": 2, \"open\": \"11:00\", \"close\": \"22:00\"}, {\"day\": 3, \"open\": \"11:00\", \"close\": \"22:00\"}, {\"day\": 4, \"open\": \"19:30\", \"close\": \"22:00\"}, {\"day\": 5, \"open\": \"11:00\", \"close\": \"22:00\"}, {\"day\": 6, \"open\": \"11:00\", \"close\": \"22:00\"}], \"description\": \"Family Ethiopian cooking on Airport Blvd. Fridays the kitchen opens at 7:30 PM.\", \"source\": \"synthetic\"}",
+   "output.value": "[{\"content\": \"Nothing has changed since Nina's last update, so I didn't message her. The Porchbite notice was about the Ember & Saffron order, which is still cancelled, and her November spending shows it wasn't charged. The vegan Ethiopian order (PB-B9SQ90ZE) is still scheduled to arrive between 7:30 and 8:00 PM for $89.70, and there are no support messages waiting.\\n\\nRESULT: DONE: vegan Ethiopian dinner is still set for 7:30–8:00 PM, and the cancelled Peruvian order wasn't charged.\", \"refusal\": null, \"role\": \"assistant\", \"annotations\": null, \"audio\": null, \"function_call\": null, \"tool_calls\": null}]",
+   "output.mime_type": "application/json",
+   "llm.output_messages.0.message.role": "assistant",
+   "llm.output_messages.0.message.content": "Nothing has changed since Nina's last update, so I didn't message her. The Porchbite notice was about the Ember & Saffron order, which is still cancelled, and her November spending shows it wasn't charged. The vegan Ethiopian order (PB-B9SQ90ZE) is still scheduled to arrive between 7:30 and 8:00 PM for $89.70, and there are no support messages waiting.\n\nRESULT: DONE: vegan Ethiopian dinner is still set for 7:30–8:00 PM, and the cancelled Peruvian order wasn't charged.",
+   "llm.token_count.prompt": 2,
+   "llm.token_count.completion": 192,
+   "openinference.span.kind": "LLM"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "turn",
+  "context": {
+   "trace_id": "0xfbac5ce7d96e4740ab742da149702d66",
+   "span_id": "0x31fe08bfbae00f05",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x03f07749d91563c1",
+  "start_time": "2026-11-13T17:26:54.978212Z",
+  "end_time": "2026-11-13T17:26:57.744360Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "openinference.span.kind": "CHAIN"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "Orchestrator",
+  "context": {
+   "trace_id": "0xfbac5ce7d96e4740ab742da149702d66",
+   "span_id": "0x03f07749d91563c1",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x06eb52e71351bce7",
+  "start_time": "2026-11-13T17:26:47.954448Z",
+  "end_time": "2026-11-13T17:26:57.744643Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "graph.node.id": "Orchestrator",
+   "openinference.span.kind": "AGENT"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "Agent workflow",
+  "context": {
+   "trace_id": "0xfbac5ce7d96e4740ab742da149702d66",
+   "span_id": "0x06eb52e71351bce7",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0xbe46ed8175f40929",
+  "start_time": "2026-11-13T17:26:47.862411Z",
+  "end_time": "2026-11-13T17:26:57.744696Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "openinference.span.kind": "CHAIN"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "Agent workflow",
+  "context": {
+   "trace_id": "0xfbac5ce7d96e4740ab742da149702d66",
+   "span_id": "0xbe46ed8175f40929",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": null,
+  "start_time": "2026-11-13T17:26:47.861677Z",
+  "end_time": "2026-11-13T17:26:57.744743Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "openinference.span.kind": "AGENT"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "harness.usage",
+  "context": {
+   "trace_id": "0xfbac5ce7d96e4740ab742da149702d66",
+   "span_id": "0x816f55b482ce03f2",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": null,
+  "start_time": "2026-11-13T17:26:57.744743Z",
+  "end_time": "2026-11-13T17:26:57.744743Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "gen_ai.operation.name": "harness.usage",
+   "harness.usage.calls": 4,
+   "harness.usage.prompt": 10,
+   "harness.usage.completion": 449,
+   "harness.usage.cache_read": 523981,
+   "harness.usage.cache_write": 9161,
+   "harness.usage.reasoning": 0,
+   "harness.usage.thinking_resets": 0,
+   "harness.config.model": "claude-opus-5-5",
+   "harness.config.effort": "high",
+   "harness.config.reasoning": "claude:high",
+   "harness.config.role": "assistant",
+   "harness.config.mcp_tool_timeout_s": 60.0
+  },
+  "events": [],
+  "links": []
+ }
+]
