@@ -19,6 +19,16 @@ def test_every_file_the_image_copies_is_in_the_folder():
     assert {"a2a_server.py", "claude_bridge.py", "kit.py", "tar_changelog.py", "entrypoint.sh", "install.sh", "run.sh"} <= set(copied)
 
 
+def test_the_image_and_an_install_carry_every_module_of_the_folder():
+    modules = {path.name for path in AGENT_DIR.glob("*.py")}
+    copied = {name for line in re.findall(r"^COPY (?!--from=)(.+) \S+$", DOCKERFILE, re.MULTILINE)
+              for name in line.split()}
+    installed = set(re.search(r'^AGENT_FILES="([^"]+)"$', (AGENT_DIR / "install.sh").read_text(),
+                              re.MULTILINE).group(1).split())
+
+    assert modules - copied == set() and modules - installed == set()
+
+
 def test_the_image_installs_the_protocol_alone_from_its_requirements():
     requirements = [line for line in (AGENT_DIR / "requirements.txt").read_text().splitlines()
                     if line and not line.startswith("#")]

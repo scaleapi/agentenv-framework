@@ -30,6 +30,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ._trajectory_log import MAX_TRAJECTORY_READ_BYTES, TaskTrajectories
 from ._triggers import TriggerEngine, TriggerError
+from .env_clock import clock_servers, find_env_clock, prompt_note
 from .extensions import (
     AGENT_CONFIG_V1,
     CDP_CONFIG_V1,
@@ -215,6 +216,10 @@ class _BoundedContextLocks:
 
 class AgentEnvAgent:
     """Typed base class for AgentEnv-compatible A2A agents."""
+
+    #: While the task env's clock is armed, each turn's request ends with the env's time (``env_clock``). An agent
+    #: that places it in its prompt itself sets this False; ``TaskRequest.env_clock`` is set either way.
+    env_clock_prompt_note: bool = True
 
     def run(self, request: TaskRequest[Any]) -> AgentRunResult:
         """Execute one normalized A2A task."""
@@ -1047,6 +1052,7 @@ class A2AAgentApplication:
             self.services,
             workspace=definition.workspace,
             streaming=self.streaming,
+            env_clock_prompt_note=bool(getattr(agent, "env_clock_prompt_note", True)),
         )
 
         routes = [Route("/health", self._health, methods=["GET"])]
@@ -1230,11 +1236,13 @@ class _StandardExecutor:
         *,
         workspace: Path | None,
         streaming: bool,
+        env_clock_prompt_note: bool = True,
     ) -> None:
         self._handler = handler
         self._services = services
         self._workspace = workspace
         self._streaming = streaming
+        self._env_clock_prompt_note = env_clock_prompt_note
         self._context_locks = _BoundedContextLocks()
 
     async def execute(self, context: Any, event_queue: Any) -> None:
@@ -1264,12 +1272,19 @@ class _StandardExecutor:
             }
             async with self._context_locks.acquire(task.context_id):
                 trajectories.start(task.id)
+                request_parts = tuple(
+                    _from_a2a_part(part) for part in (context.message.parts or [])
+                )
+                # The env servers agent-env registered, never the SDK's peer-agents server, which has no clock.
+                env_clock = await find_env_clock(
+                    clock_servers(self._services.mcp_servers, task_config.role)
+                ) if self._services.mcp_servers else None
+                if env_clock is not None and self._env_clock_prompt_note:
+                    request_parts = (*request_parts, TaskTextPart(text=prompt_note(env_clock.time)))
                 request = TaskRequest(
                     task_id=task.id,
                     context_id=task.context_id,
-                    parts=tuple(
-                        _from_a2a_part(part) for part in (context.message.parts or [])
-                    ),
+                    parts=request_parts,
                     config=task_config,
                     mcp_servers=self._services.task_mcp_servers(),
                     cdp_endpoints=self._services.cdp_endpoints,
@@ -1278,6 +1293,7 @@ class _StandardExecutor:
                     session_ref=self._services.session_ref_for_context(task.context_id),
                     workspace=self._workspace,
                     trajectory=trajectory,
+                    env_clock=env_clock,
                 )
                 try:
                     if self._streaming:

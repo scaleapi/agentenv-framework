@@ -493,6 +493,9 @@ class ClaudeCodeAgent(DurableSessionRefs, AgentEnvAgent):
                 max_thinking_tokens=cfg.max_thinking_tokens,
                 builtin_tools=cfg.builtin_tools,
                 event_callback=request.trajectory.append,
+                # The framework ended the prompt with the env's time; the CLI's own date is this machine's. A protocol
+                # older than its env clock gives none.
+                env_clock=getattr(request, "env_clock", None),
             )
         except Exception as e:
             logger.error(f"claude CLI invocation raised: {e}", exc_info=True)

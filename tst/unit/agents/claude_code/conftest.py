@@ -27,6 +27,17 @@ def agent_dirs(monkeypatch, tmp_path):
     return state
 
 
+@pytest.fixture(autouse=True)
+def no_env_clock(monkeypatch):
+    """No env clock unless a test gives one: the framework otherwise asks each registered MCP server for get_time."""
+    from agentenv_protocol.a2a_agent import framework
+
+    async def _none(servers, timeout_s=None):
+        return None
+
+    monkeypatch.setattr(framework, "find_env_clock", _none)
+
+
 @pytest.fixture
 def app():
     return a2a_server.build_app(a2a_server.ClaudeCodeAgent())

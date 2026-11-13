@@ -1355,6 +1355,24 @@ request fields are additive and have framework defaults. Agent code returns a `T
 its factories or builder so additions to the result contract do not break
 existing handlers.
 
+While the task env's clock is armed, the gateway lists `get_time` on the env's
+MCP server, and the agent's machine clock, and any date its harness states from
+it, isn't the env's. So before each turn the executor asks the MCP servers
+agent-env registered (never the SDK's peer-agents server) for `get_time`, with
+the task's role. When one lists it, the request's `parts` end with the env's
+time in an `<ENV_CLOCK>` note, and `TaskRequest.env_clock` (an `EnvClock`)
+names that server and the time read. An agent that places the note in its
+prompt itself sets `env_clock_prompt_note = False` and still gets
+`env_clock`. A harness that runs many steps in one turn reads the clock again
+between them, so a clock moved during the turn, or running faster than real
+time, never leaves its model on a stale date: `await request.env_clock.read()`
+and `turn_note(...)`, or, from a subprocess such as a CLI's hook,
+`ClockServer.from_env(os.environ[ENV_CLOCK_SERVER_ENV])` and `read_env_clock`
+(set the variable to `request.env_clock.server.to_env()` for it). Unarmed, no
+server lists `get_time` and the request is unchanged: the env runs on real
+time. A failed or slow read (`agentenv_protocol.a2a_agent.env_clock`) is
+logged, leaves the note out, and never fails the turn.
+
 Expected execution failures are returned as `TaskResult.failure(code, message)`
 and become failed A2A tasks with `error_type`, `error_code`, and `error_message`
 in the terminal message. `error_type` is the platform classification

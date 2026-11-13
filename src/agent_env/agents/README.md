@@ -29,6 +29,13 @@ turn off becomes `--disallowedTools`, which keeps the CLI's defaults for the res
 `claude_bridge.py`: every tool the pinned CLI has, though which it offers by default depends on the model. A test fails
 when the Dockerfile's `CLAUDE_CODE_VERSION` moves, until `ClaudeCodeTool` and `TOOLS_CLI_VERSION` move with it.
 
+The CLI states the date from its machine's clock, which isn't the task env's while the env's clock is armed. The
+protocol's framework ends each prompt with the env's time then (`TaskRequest.env_clock`), and this agent has the CLI
+run a `PostToolUse` and `PostToolUseFailure` hook, given on its command line (`--settings`), that ends each tool
+call's result, failed or not, with a fresh reading (`env_clock_hook.py`); a resume after an API failure reads the clock
+again too. A failed read leaves the note out and never fails the turn. Unarmed, nothing is added: the env runs on real
+time, which is the CLI's date.
+
 `install_agent` installs it too, into a container a task already runs or onto a `vm` sandbox's Linux host, with
 `install.sh` from its folder: Claude Code's native build for the target's CPU and libc, uv, and the agent's requirements
 in a Python of its own, so the target's Python is left alone. The CLI runs its commands in bash or zsh, so a target with
