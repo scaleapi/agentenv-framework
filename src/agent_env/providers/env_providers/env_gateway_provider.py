@@ -596,8 +596,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 "      - PYTHONUNBUFFERED=1",
                 *_settings_lines(wc.settings),
                 "    healthcheck:",
-                f'      test: ["CMD-SHELL", "curl -sf -o /dev/null http://localhost:{AGENT_ENV_WEBSITE_BACKEND_PORT}{WELL_KNOWN_PATH}'
-                f' || curl -sf -o /dev/null http://localhost:{AGENT_ENV_WEBSITE_BACKEND_PORT}{wc.health_path}"]',
+                f'      test: ["CMD-SHELL", {json.dumps(_http_probe(AGENT_ENV_WEBSITE_BACKEND_PORT, WELL_KNOWN_PATH, wc.health_path))}]',
                 "      interval: 10s",
                 "      timeout: 5s",
                 f"      start_period: {_seconds(wc.ready_timeout_s) if wc.ready_timeout_s else '30s'}",
@@ -1726,6 +1725,20 @@ def _why_down(row: dict) -> str | None:
     if health == "unhealthy":
         return "failed its health check"
     return None
+
+
+def _http_probe(port: int, *paths: str) -> str:
+    """A shell check that passes once any of ``paths`` answers on ``port`` with a success, fetched with whichever of
+    curl, wget, python3 or node the image has: a site's image is the author's, and many leave curl out. ``$$`` is
+    compose's escape for a ``$`` the shell reads."""
+    fetchers = [
+        'curl -sf --max-time 2 -o /dev/null "$$u"',
+        'wget -q -T 2 -O /dev/null "$$u"',
+        "python3 -c 'import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=2)' \"$$u\"",
+        "node -e 'fetch(process.argv[1]).then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))' \"$$u\"",
+    ]
+    urls = " ".join(f"http://localhost:{port}{path}" for path in paths)
+    return f"for u in {urls}; do {{ {' || '.join(fetchers)}; }} 2>/dev/null && exit 0; done; exit 1"
 
 
 def _network_lines(*networks: str) -> list[str]:
