@@ -1214,7 +1214,7 @@ async def test_a_computer_with_site_routing_reaches_the_websites_the_run_deploye
     ((sandbox, sites, options),) = routes
     assert sandbox is boots.sandboxes[0]
     assert [site.model_dump() for site in sites] == [{"name": "notes", "url": "http://localhost:8080/website/notes/",
-                                                      "domains": ["notes.test"]}]
+                                                      "domains": ["notes.test"], "sign_in_headers": []}]
     assert options == {"user": "user", "network": None, "label": "desktop", "os_type": "linux", "display": "x11",
                        "live_hosts": ()}
     assert boots.boots[0]["environment"][HOLD_BOOT_LAUNCH_ENV] == "1"

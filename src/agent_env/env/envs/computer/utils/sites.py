@@ -35,7 +35,7 @@ from urllib.parse import urlsplit
 import httpx
 from agentenv_protocol import client as protocol_client
 from agentenv_protocol.website import WEBSITE_EXTENSION_URI as WEBSITE
-from agentenv_protocol.website import WEBSITE_LIVE_PARAM
+from agentenv_protocol.website import WEBSITE_LIVE_PARAM, WEBSITE_SIGN_IN_HEADERS_PARAM
 from agentenv_protocol.website_browser import NETWORK_LOG_ENV, SITE_PROXY_ENV
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -313,12 +313,15 @@ def browser_environment(display: str) -> dict[str, str]:
 
 
 def proxy_config(table: SiteTable, issued: Issued, *, user: Optional[str], os_type: str, forward_port: bool,
-                 upstream_headers: Optional[dict[str, dict[str, str]]] = None, direct: Iterable[str] = ()) -> dict:
+                 upstream_headers: Optional[dict[str, dict[str, str]]] = None, direct: Iterable[str] = (),
+                 sign_in_headers: Optional[dict[str, list[str]]] = None) -> dict:
     """What ``site_proxy.py install`` reads: the session user, the CA, the trust files on an ``os_type`` computer and
     the variables naming them, which its profile script sets as the computer's boot environment does, each route with
-    its certificate and key, and the headers its gateway's sandbox provider asks requests to it to carry
-    (``upstream_headers``, by site), which the proxy sends upstream alone, and with ``forward_port``, for a browser
-    alone, the forward port, the live sites' hosts it takes straight to them (``direct``) and its network log."""
+    its certificate and key, the headers its gateway's sandbox provider asks requests to it to carry
+    (``upstream_headers``, by site), which the proxy sends upstream alone, and those its site names as its sign-in
+    headers (``sign_in_headers``, by site), whose values its network log takes out, and with ``forward_port``, for a
+    browser alone, the forward port, the live sites' hosts it takes straight to them (``direct``) and its network
+    log."""
     sites = []
     for route in table.routes:
         site = {"name": route.site, "upstream": route.url, "domains": list(route.domains)}
@@ -326,6 +329,8 @@ def proxy_config(table: SiteTable, issued: Issued, *, user: Optional[str], os_ty
             site["cert_pem"], site["key_pem"] = issued.leaves[route.site]
         if (upstream_headers or {}).get(route.site):
             site["upstream_headers"] = dict(upstream_headers[route.site])
+        if (sign_in_headers or {}).get(route.site):
+            site["sign_in_headers"] = list(sign_in_headers[route.site])
         sites.append(site)
     return {"user": user, "ca_pem": issued.ca_pem, "sites": sites, "log": str(LOG),
             "trust_files": trust_files(os_type), "trust_environment": dict(TRUST_ENVIRONMENTS[os_type]),
@@ -456,9 +461,10 @@ async def route(sandbox: Sandbox, sites: list[Site], *, user: Optional[str], net
     channel = RootChannel(sandbox)
     await channel.private_folder(FOLDER)
     await channel.write(PROXY, _PROXY_SOURCE.read_text())
-    await channel.write_secret(CONFIG, json.dumps(proxy_config(table, issued, user=user, os_type=os_type,
-                                                               forward_port=display == ALONE_DISPLAY,
-                                                               upstream_headers=upstream_headers, direct=direct)))
+    await channel.write_secret(CONFIG, json.dumps(proxy_config(
+        table, issued, user=user, os_type=os_type, forward_port=display == ALONE_DISPLAY,
+        upstream_headers=upstream_headers, direct=direct,
+        sign_in_headers={site.name: site.sign_in_headers for site in sites if site.sign_in_headers})))
     await channel.run(["chmod", "0600", str(CONFIG)])
     output = await channel.run(["python3", str(PROXY), "install", str(CONFIG)])
     report = json.loads(output.strip().splitlines()[-1])
@@ -624,7 +630,11 @@ def _stored_domains(record: DeployedEnv) -> dict[str, list[str]]:
 
 
 def _found(name: str, url: str, params: dict, stored: Optional[list[str]] = None) -> dict:
-    return {"name": name, "url": url, "domains": list(stored or params.get("domains") or [])}
+    """A site found, with its card's sign-in headers when it names any."""
+    sign_in = params.get(WEBSITE_SIGN_IN_HEADERS_PARAM)
+    named = [header for header in sign_in if isinstance(header, str) and header] if isinstance(sign_in, list) else []
+    return {"name": name, "url": url, "domains": list(stored or params.get("domains") or []),
+            **({"sign_in_headers": named} if named else {})}
 
 
 def _joined(address: str, url: str) -> str:
