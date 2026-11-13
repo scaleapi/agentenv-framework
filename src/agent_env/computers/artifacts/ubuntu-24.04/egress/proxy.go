@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -102,47 +103,48 @@ func (p *Proxy) handle(conn net.Conn) {
 	}()
 	br := bufio.NewReaderSize(conn, 64<<10)
 	conn.SetReadDeadline(start.Add(15 * time.Second))
-	req, err := http.ReadRequest(br)
+	method, target, version, headers, err := readHead(br)
 	if err != nil {
 		row["error"] = truncate("request: "+err.Error(), 300)
 		p.log(row)
 		return
 	}
-	row["method"] = req.Method
-	if req.Method == http.MethodConnect {
-		host, port := splitAuthority(req.Host, 443)
+	row["method"] = method
+	if method == http.MethodConnect {
+		host, port := splitAuthority(target, 443)
 		row["host"], row["port"] = host, port
-		dst, why, err := p.destination(host, port)
+		dsts, why, err := p.destination(host, port)
 		if err != nil {
 			row["mode"], row["error"] = "refused", err.Error()
 			reply(conn, "403 Forbidden", "egress: "+err.Error()+"\n")
 			p.log(row)
 			return
 		}
-		row["dst"], row["allowed"] = dst, why
+		row["allowed"] = why
 		if _, err := io.WriteString(conn, "HTTP/1.1 200 Connection established\r\n\r\n"); err != nil {
 			return
 		}
-		p.tunnel(conn, br, host, port, dst, why, row, start)
+		p.tunnel(conn, br, host, port, dsts, why, row, start)
 		return
 	}
-	if req.URL == nil || req.URL.Scheme != "http" || req.URL.Host == "" {
+	u, err := url.Parse(target)
+	if err != nil || u.Scheme != "http" || u.Host == "" {
 		row["mode"], row["error"] = "refused", "not an absolute http URL"
 		reply(conn, "400 Bad Request", "egress: CONNECT, or an absolute http:// URL\n")
 		p.log(row)
 		return
 	}
-	host, port := splitAuthority(req.URL.Host, 80)
+	host, port := splitAuthority(u.Host, 80)
 	row["host"], row["port"], row["mode"] = host, port, "http"
-	dst, why, err := p.destination(host, port)
+	dsts, why, err := p.destination(host, port)
 	if err != nil {
 		row["mode"], row["error"] = "refused", err.Error()
 		reply(conn, "403 Forbidden", "egress: "+err.Error()+"\n")
 		p.log(row)
 		return
 	}
-	row["dst"], row["allowed"] = dst, why
-	up, err := p.dial(dst)
+	row["allowed"] = why
+	up, dst, err := p.dialAny(dsts)
 	if err != nil {
 		row["error"] = truncate(err.Error(), 300)
 		reply(conn, "502 Bad Gateway", "egress: "+err.Error()+"\n")
@@ -150,35 +152,94 @@ func (p *Proxy) handle(conn net.Conn) {
 		return
 	}
 	defer up.Close()
-	for _, h := range []string{"Proxy-Connection", "Proxy-Authorization", "Connection", "Keep-Alive"} {
-		req.Header.Del(h)
+	row["dst"] = dst
+	upgrade := false
+	for _, h := range headers {
+		if headerName(h) == "upgrade" {
+			upgrade = true
+		}
 	}
-	if _, ok := req.Header["User-Agent"]; !ok {
-		req.Header["User-Agent"] = []string{""} // net/http adds its own unless the header is there
+	// The client's own head, but for its request line, which names the path alone, and the headers meant for this
+	// proxy; a request that isn't an upgrade closes once answered, so its connection can't carry one for another site.
+	var head strings.Builder
+	head.WriteString(method + " " + u.RequestURI() + " " + version + "\r\n")
+	for _, h := range headers {
+		switch headerName(h) {
+		case "proxy-connection", "proxy-authorization":
+			continue
+		case "connection", "keep-alive":
+			if !upgrade {
+				continue
+			}
+		}
+		head.WriteString(h + "\r\n")
 	}
-	req.Close = true
-	req.RequestURI = ""
+	if upgrade {
+		row["mode"] = "upgrade"
+	} else {
+		head.WriteString("Connection: close\r\n")
+	}
+	head.WriteString("\r\n")
 	conn.SetReadDeadline(time.Time{})
-	if err := req.Write(up); err != nil {
+	if _, err := io.WriteString(up, head.String()); err != nil {
 		row["error"] = truncate("upstream: "+err.Error(), 300)
 		p.log(row)
 		return
 	}
 	p.log(row)
+	// Both ways at once: a body the client sends once told to continue, or an upgraded connection's frames.
+	go func() {
+		io.Copy(up, br)
+		closeWrite(up)
+	}()
 	io.Copy(conn, up)
 }
 
-// destination is the address to dial for host:port and why it's allowed: "routed" for a name the hosts file's
-// agentenv sites block maps (the site proxy, as a client that bypasses this proxy reaches it), "global" for a name
-// whose every address is global. Anything else is refused.
-func (p *Proxy) destination(host string, port int) (string, string, error) {
+// readHead is a request's head, read through its blank line: its request line's parts and its header lines.
+func readHead(r *bufio.Reader) (string, string, string, []string, error) {
+	var lines []string
+	size := 0
+	for {
+		line, err := r.ReadString('\n')
+		size += len(line)
+		if size > 64<<10 {
+			return "", "", "", nil, errors.New("request head too long")
+		}
+		if err != nil {
+			return "", "", "", nil, err
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if line == "" {
+			if len(lines) == 0 {
+				continue
+			}
+			break
+		}
+		lines = append(lines, line)
+	}
+	parts := strings.SplitN(lines[0], " ", 3)
+	if len(parts) != 3 {
+		return "", "", "", nil, fmt.Errorf("malformed request line %q", truncate(lines[0], 100))
+	}
+	return parts[0], parts[1], parts[2], lines[1:], nil
+}
+
+func headerName(line string) string {
+	name, _, _ := strings.Cut(line, ":")
+	return strings.ToLower(strings.TrimSpace(name))
+}
+
+// destination is the addresses to dial for host:port, in the order to try them, and why they're allowed: "routed" for
+// a name the hosts file's agentenv sites block maps (the site proxy, as a client that bypasses this proxy reaches it),
+// "global" for a name whose every address is global, IPv4 first. Anything else is refused.
+func (p *Proxy) destination(host string, port int) ([]string, string, error) {
 	host = strings.TrimSuffix(strings.ToLower(strings.Trim(host, "[]")), ".")
 	routed := p.Routed
 	if routed == nil {
 		routed = routedSites
 	}
 	if address, ok := routed()[host]; ok {
-		return net.JoinHostPort(address, strconv.Itoa(port)), "routed", nil
+		return []string{net.JoinHostPort(address, strconv.Itoa(port))}, "routed", nil
 	}
 	resolve := p.Resolve
 	if resolve == nil {
@@ -194,28 +255,29 @@ func (p *Proxy) destination(host string, port int) (string, string, error) {
 	defer cancel()
 	addresses, err := resolve(ctx, host)
 	if err != nil {
-		return "", "", fmt.Errorf("%s doesn't resolve: %w", host, err)
+		return nil, "", fmt.Errorf("%s doesn't resolve: %w", host, err)
 	}
 	if len(addresses) == 0 {
-		return "", "", fmt.Errorf("%s has no address", host)
+		return nil, "", fmt.Errorf("%s has no address", host)
 	}
 	var private []string
-	var v4, v6 []netip.Addr
+	var v4, v6 []string
 	for _, a := range addresses {
 		a = a.Unmap()
-		if !allowed(a) {
+		dst := netip.AddrPortFrom(a, uint16(port)).String()
+		switch {
+		case !allowed(a):
 			private = append(private, a.String())
-		} else if a.Is4() {
-			v4 = append(v4, a)
-		} else {
-			v6 = append(v6, a)
+		case a.Is4():
+			v4 = append(v4, dst)
+		default:
+			v6 = append(v6, dst)
 		}
 	}
 	if len(private) > 0 {
-		return "", "", fmt.Errorf("%s:%d isn't public (%s)", host, port, strings.Join(private, ", "))
+		return nil, "", fmt.Errorf("%s:%d isn't public (%s)", host, port, strings.Join(private, ", "))
 	}
-	chosen := append(v4, v6...)[0]
-	return netip.AddrPortFrom(chosen, uint16(port)).String(), "global", nil
+	return append(v4, v6...), "global", nil
 }
 
 // notGlobal are the special-purpose blocks (IANA's registries) no global address is in.
@@ -271,8 +333,8 @@ func routedSites() map[string]string {
 	return out
 }
 
-func (p *Proxy) tunnel(conn net.Conn, br *bufio.Reader, host string, port int, dst, why string, row map[string]any,
-	start time.Time) {
+func (p *Proxy) tunnel(conn net.Conn, br *bufio.Reader, host string, port int, dsts []string, why string,
+	row map[string]any, start time.Time) {
 	wait := FirstBytes
 	if port == 443 {
 		wait = HelloTimeout
@@ -289,7 +351,7 @@ func (p *Proxy) tunnel(conn net.Conn, br *bufio.Reader, host string, port int, d
 		if len(first) > 0 && first[0] == 22 {
 			row["mode"], row["decision"] = "splice", "routed"
 		}
-		p.splice(conn, br, dst, row, start)
+		p.splice(conn, br, dsts, row, start)
 		return
 	}
 	conn.SetReadDeadline(time.Now().Add(HelloTimeout))
@@ -313,9 +375,12 @@ func (p *Proxy) tunnel(conn net.Conn, br *bufio.Reader, host string, port int, d
 	armed, universes := p.Universe.View(time.Now())
 	decision := "real"
 	if armed {
-		seen, probed := p.validity(dst, sni, verifyName, hello)
+		seen, probed := p.validity(dsts, sni, verifyName, hello)
 		row["probed"], row["universes"] = probed, rounded(universes)
 		switch {
+		case seen.failed:
+			// a handshake only the client can finish, as one asking for its certificate: the client decides
+			decision, row["probe_error"] = "probe_failed", seen.problem
 		case !seen.verified:
 			decision, row["probe_error"] = "unverified", seen.problem
 		case inside(seen.from, seen.until, universes):
@@ -328,23 +393,24 @@ func (p *Proxy) tunnel(conn net.Conn, br *bufio.Reader, host string, port int, d
 		}
 	}
 	row["decision"] = decision
-	if decision == "real" || decision == "inside" {
+	if decision == "real" || decision == "inside" || decision == "probe_failed" {
 		row["mode"] = "splice"
-		p.splice(conn, br, dst, row, start)
+		p.splice(conn, br, dsts, row, start)
 		return
 	}
 	row["mode"] = "intercept"
-	p.intercept(conn, br, dst, sni, verifyName, hello, row, start)
+	p.intercept(conn, br, dsts, sni, verifyName, hello, row, start)
 }
 
-func (p *Proxy) splice(conn net.Conn, br *bufio.Reader, dst string, row map[string]any, start time.Time) {
-	up, err := p.dial(dst)
+func (p *Proxy) splice(conn net.Conn, br *bufio.Reader, dsts []string, row map[string]any, start time.Time) {
+	up, dst, err := p.dialAny(dsts)
 	if err != nil {
 		row["error"] = truncate("upstream: "+err.Error(), 300)
 		p.log(row)
 		return
 	}
 	defer up.Close()
+	row["dst"] = dst
 	conn.SetReadDeadline(time.Time{})
 	row["upstream_ms"] = time.Since(start).Milliseconds()
 	p.log(row)
@@ -360,15 +426,17 @@ func (p *Proxy) splice(conn net.Conn, br *bufio.Reader, dst string, row map[stri
 	wg.Wait()
 }
 
-func (p *Proxy) intercept(conn net.Conn, br *bufio.Reader, dst, sni, verifyName string, hello []byte,
+func (p *Proxy) intercept(conn net.Conn, br *bufio.Reader, dsts []string, sni, verifyName string, hello []byte,
 	row map[string]any, start time.Time) {
-	uc, found, err := p.handshake(dst, sni, verifyName, hello)
+	uc, found, err := p.handshake(dsts, sni, verifyName, hello)
 	if err != nil {
 		row["error"] = truncate("upstream: "+err.Error(), 300)
 		p.log(row)
 		return
 	}
 	defer uc.NetConn().Close()
+	dst := uc.NetConn().RemoteAddr().String()
+	row["dst"] = dst
 	row["alpn"], row["verified"], row["upstream_tls"] = found.ALPN, found.Verified, []string{found.Version, found.Cipher}
 	row["upstream_ms"] = time.Since(start).Milliseconds()
 	if len(found.Dropped) > 0 {

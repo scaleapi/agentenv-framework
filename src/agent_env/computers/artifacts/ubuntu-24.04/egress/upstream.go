@@ -2,8 +2,10 @@ package main
 
 import (
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,7 +29,7 @@ type upstream struct {
 // handshake is uTLS's handshake with the site at dst, built from the client's own ClientHello, so the site sees the
 // client's fingerprint and ALPN offer. Records go full-size from the start and the connection closes without a
 // close_notify, as Chromium's BoringSSL does.
-func (p *Proxy) handshake(dst, sni, verifyName string, hello []byte) (*utls.UConn, upstream, error) {
+func (p *Proxy) handshake(dsts []string, sni, verifyName string, hello []byte) (*utls.UConn, upstream, error) {
 	var found upstream
 	record, gone, err := helloRecord(hello)
 	if err != nil {
@@ -38,7 +40,7 @@ func (p *Proxy) handshake(dst, sni, verifyName string, hello []byte) (*utls.UCon
 	if err != nil {
 		return nil, found, fmt.Errorf("fingerprint: %w", err)
 	}
-	raw, err := p.dial(dst)
+	raw, _, err := p.dialAny(dsts)
 	if err != nil {
 		return nil, found, err
 	}
@@ -73,21 +75,42 @@ func (p *Proxy) handshake(dst, sni, verifyName string, hello []byte) (*utls.UCon
 	for _, c := range st.PeerCertificates[1:] {
 		intermediates.AddCert(c)
 	}
-	if _, err := leaf.Verify(x509.VerifyOptions{Roots: p.Roots, Intermediates: intermediates, DNSName: verifyName,
-		CurrentTime: time.Now()}); err != nil {
+	chains, err := leaf.Verify(x509.VerifyOptions{Roots: p.Roots, Intermediates: intermediates, DNSName: verifyName,
+		CurrentTime: time.Now()})
+	if err != nil {
 		found.VerifyErr = err.Error()
 	} else {
 		found.Verified = true
+		found.NotBefore, found.NotAfter = chainWindow(chains)
 	}
 	return uc, found, nil
+}
+
+// chainWindow is the dates every certificate of every verified chain is valid between: a client building any of
+// those chains takes the site only then, so passing it through is safe only inside them.
+func chainWindow(chains [][]*x509.Certificate) (time.Time, time.Time) {
+	var from, until time.Time
+	for _, chain := range chains {
+		for _, cert := range chain {
+			if from.IsZero() || cert.NotBefore.After(from) {
+				from = cert.NotBefore
+			}
+			if until.IsZero() || cert.NotAfter.Before(until) {
+				until = cert.NotAfter
+			}
+		}
+	}
+	return from, until
 }
 
 // probe is a site's leaf validity, from a handshake of its own, cached per (address, SNI) for ProbeTTL.
 type probe struct {
 	from, until time.Time
 	verified    bool
-	at          time.Time
-	problem     string
+	// failed is a handshake that didn't finish, kept only for ProbeFailedTTL, since it may be a moment's trouble.
+	failed  bool
+	at      time.Time
+	problem string
 }
 
 type probes struct {
@@ -96,8 +119,8 @@ type probes struct {
 	cache map[string]probe
 }
 
-func (p *Proxy) validity(dst, sni, verifyName string, hello []byte) (probe, bool) {
-	key := dst + "|" + sni
+func (p *Proxy) validity(dsts []string, sni, verifyName string, hello []byte) (probe, bool) {
+	key := strings.Join(dsts, ",") + "|" + sni
 	p.probes.mu.Lock()
 	if p.probes.locks == nil {
 		p.probes.locks, p.probes.cache = map[string]*sync.Mutex{}, map[string]probe{}
@@ -113,14 +136,14 @@ func (p *Proxy) validity(dst, sni, verifyName string, hello []byte) (probe, bool
 	p.probes.mu.Lock()
 	hit, ok := p.probes.cache[key]
 	p.probes.mu.Unlock()
-	if ok && time.Since(hit.at) < ProbeTTL {
+	if ok && (time.Since(hit.at) < ProbeTTL && !hit.failed || time.Since(hit.at) < ProbeFailedTTL) {
 		return hit, false
 	}
 	hit = probe{at: time.Now()}
-	uc, found, err := p.handshake(dst, sni, verifyName, hello)
+	uc, found, err := p.handshake(dsts, sni, verifyName, hello)
 	switch {
 	case err != nil:
-		hit.problem = truncate(err.Error(), 200)
+		hit.failed, hit.problem = true, truncate(err.Error(), 200)
 	case !found.Verified:
 		hit.problem = truncate(found.VerifyErr, 200)
 	default:
@@ -145,6 +168,22 @@ func inside(from, until time.Time, universes []float64) bool {
 		}
 	}
 	return true
+}
+
+// dialAny dials each address in turn until one answers: which, or every one's error.
+func (p *Proxy) dialAny(dsts []string) (net.Conn, string, error) {
+	var problems []string
+	for _, dst := range dsts {
+		conn, err := p.dial(dst)
+		if err == nil {
+			return conn, dst, nil
+		}
+		problems = append(problems, err.Error())
+	}
+	if len(problems) == 0 {
+		return nil, "", errors.New("no address to dial")
+	}
+	return nil, "", errors.New(strings.Join(problems, "; "))
 }
 
 func (p *Proxy) dial(dst string) (net.Conn, error) {

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -44,8 +46,9 @@ func TestOnlyDestinationsWhoseEveryAddressIsGlobalAreDialled(t *testing.T) {
 	p.Resolve = func(context.Context, string) ([]netip.Addr, error) {
 		return []netip.Addr{netip.MustParseAddr("2606:4700::1111"), netip.MustParseAddr("1.1.1.1")}, nil
 	}
-	if dst, why, err := p.destination("one.one.one.one", 443); err != nil || dst != "1.1.1.1:443" || why != "global" {
-		t.Fatalf("a public name: %q %q %v", dst, why, err)
+	dst, why, err := p.destination("one.one.one.one", 443)
+	if err != nil || strings.Join(dst, " ") != "1.1.1.1:443 [2606:4700::1111]:443" || why != "global" {
+		t.Fatalf("a public name, IPv4 first: %q %q %v", dst, why, err)
 	}
 	p.Resolve = func(context.Context, string) ([]netip.Addr, error) {
 		return []netip.Addr{netip.MustParseAddr("1.1.1.1"), netip.MustParseAddr("10.0.0.1")}, nil
@@ -54,7 +57,8 @@ func TestOnlyDestinationsWhoseEveryAddressIsGlobalAreDialled(t *testing.T) {
 		t.Fatalf("a name with one private address: %v", err)
 	}
 	p.Routed = func() map[string]string { return map[string]string{"notes.test": "127.0.0.1"} }
-	if dst, why, err := p.destination("Notes.Test.", 443); err != nil || dst != "127.0.0.1:443" || why != "routed" {
+	if dst, why, err := p.destination("Notes.Test.", 443); err != nil || strings.Join(dst, " ") != "127.0.0.1:443" ||
+		why != "routed" {
 		t.Fatalf("a routed site: %q %q %v", dst, why, err)
 	}
 }
@@ -62,13 +66,14 @@ func TestOnlyDestinationsWhoseEveryAddressIsGlobalAreDialled(t *testing.T) {
 // harness is a proxy in front of the site server, which it reaches as example.com, and a client whose clock is at
 // clientTime.
 type harness struct {
-	t      *testing.T
-	site   *httptest.Server
-	proxy  *Proxy
-	url    *url.URL
-	ca     signer
-	rows   []map[string]any
-	rowsMu sync.Mutex
+	t          *testing.T
+	site       *httptest.Server
+	proxy      *Proxy
+	url        *url.URL
+	ca         signer
+	clientCert *tls.Certificate
+	rows       []map[string]any
+	rowsMu     sync.Mutex
 }
 
 func newHarness(t *testing.T, site *httptest.Server, universe fixedUniverse, trustSite bool) *harness {
@@ -115,8 +120,11 @@ func (h *harness) get(scheme string, clientTime time.Time, http2 bool) (*http.Re
 		roots.AddCert(h.site.Certificate())
 	}
 	roots.AddCert(h.ca.cert)
-	transport := &http.Transport{Proxy: http.ProxyURL(h.url), ForceAttemptHTTP2: http2,
-		TLSClientConfig: &tls.Config{RootCAs: roots, Time: func() time.Time { return clientTime }}}
+	config := &tls.Config{RootCAs: roots, Time: func() time.Time { return clientTime }}
+	if h.clientCert != nil {
+		config.Certificates = []tls.Certificate{*h.clientCert}
+	}
+	transport := &http.Transport{Proxy: http.ProxyURL(h.url), ForceAttemptHTTP2: http2, TLSClientConfig: config}
 	defer transport.CloseIdleConnections()
 	_, port, _ := net.SplitHostPort(h.site.Listener.Addr().String())
 	resp, err := (&http.Client{Transport: transport, Timeout: 10 * time.Second}).Get(
@@ -237,6 +245,118 @@ func TestARefusedDestinationIsAnswered403(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 	if row := h.lastRow(); row["mode"] != "refused" {
+		t.Fatalf("%v", row)
+	}
+}
+
+func TestEveryCheckedAddressIsTriedInTurn(t *testing.T) {
+	s := site(t, false)
+	h := newHarness(t, s, fixedUniverse{}, true)
+	h.proxy.Resolve = func(context.Context, string) ([]netip.Addr, error) {
+		return []netip.Addr{netip.MustParseAddr("127.0.0.2"), netip.MustParseAddr("127.0.0.1")}, nil
+	}
+	_, body, err := h.get("https", time.Now(), false)
+	if err != nil || body != "hello over HTTP/1.1" {
+		t.Fatalf("%q %v", body, err)
+	}
+	if row := h.lastRow(); !strings.HasPrefix(fmt.Sprint(row["dst"]), "127.0.0.1:") {
+		t.Fatalf("%v", row)
+	}
+}
+
+func TestAnUpgradeOverPlainHTTPRelaysBothWays(t *testing.T) {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Upgrade") != "echo" || !strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade") {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		conn, rw, _ := w.(http.Hijacker).Hijack()
+		defer conn.Close()
+		rw.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: echo\r\n\r\n")
+		rw.Flush()
+		line, _ := rw.ReadString('\n')
+		rw.WriteString(line)
+		rw.Flush()
+	}))
+	t.Cleanup(s.Close)
+	h := newHarness(t, s, fixedUniverse{}, false)
+	_, port, _ := net.SplitHostPort(s.Listener.Addr().String())
+	conn, err := net.Dial("tcp", h.url.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+	fmt.Fprintf(conn, "GET http://example.com:%s/ws HTTP/1.1\r\nHost: example.com:%s\r\nConnection: Upgrade\r\n"+
+		"Upgrade: echo\r\n\r\n", port, port)
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil || resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("%v %v", resp, err)
+	}
+	fmt.Fprint(conn, "ping\n")
+	if line, err := br.ReadString('\n'); err != nil || line != "ping\n" {
+		t.Fatalf("%q %v", line, err)
+	}
+}
+
+func TestAnUploadThatWaitsFor100ContinueGoesThroughAtOnce(t *testing.T) {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		fmt.Fprint(w, len(body))
+	}))
+	t.Cleanup(s.Close)
+	h := newHarness(t, s, fixedUniverse{}, false)
+	_, port, _ := net.SplitHostPort(s.Listener.Addr().String())
+	req, _ := http.NewRequest("POST", "http://example.com:"+port+"/up", bytes.NewReader(make([]byte, 100000)))
+	req.Header.Set("Expect", "100-continue")
+	transport := &http.Transport{Proxy: http.ProxyURL(h.url), ExpectContinueTimeout: 10 * time.Second}
+	defer transport.CloseIdleConnections()
+	started := time.Now()
+	resp, err := (&http.Client{Transport: transport, Timeout: 20 * time.Second}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != "100000" || time.Since(started) > 5*time.Second {
+		t.Fatalf("%q after %s", body, time.Since(started))
+	}
+}
+
+func TestEveryCertificateOfTheVerifiedChainBoundsPassingThrough(t *testing.T) {
+	year := func(y int) time.Time { return time.Date(y, 1, 1, 0, 0, 0, 0, time.UTC) }
+	leaf := &x509.Certificate{NotBefore: year(2020), NotAfter: year(2030)}
+	intermediate := &x509.Certificate{NotBefore: year(2019), NotAfter: year(2025)}
+	root := &x509.Certificate{NotBefore: year(2000), NotAfter: year(2040)}
+	from, until := chainWindow([][]*x509.Certificate{{leaf, intermediate, root}})
+	if !from.Equal(year(2020)) || !until.Equal(year(2025)) {
+		t.Fatalf("%s to %s", from, until)
+	}
+	if inside(from, until, []float64{float64(year(2027).Unix())}) {
+		t.Fatal("a universe past the intermediate's end passed through")
+	}
+}
+
+func TestASiteAskingForTheClientsCertificateIsPassedThroughForTheClientToAnswer(t *testing.T) {
+	s := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "hello %d certificate", len(r.TLS.PeerCertificates))
+	}))
+	s.TLS = &tls.Config{ClientAuth: tls.RequireAnyClientCert, MaxVersion: tls.VersionTLS12}
+	s.StartTLS()
+	t.Cleanup(s.Close)
+	u := float64(time.Date(2090, 6, 1, 0, 0, 0, 0, time.UTC).Unix())
+	h := newHarness(t, s, fixedUniverse{armed: true, universes: []float64{u}}, true)
+	client, err := mintCA("client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.clientCert = &tls.Certificate{Certificate: [][]byte{client.cert.Raw}, PrivateKey: client.key}
+	_, body, err := h.get("https", time.Now(), false)
+	if err != nil || body != "hello 1 certificate" {
+		t.Fatalf("%q %v", body, err)
+	}
+	if row := h.lastRow(); row["mode"] != "splice" || row["decision"] != "probe_failed" {
 		t.Fatalf("%v", row)
 	}
 }

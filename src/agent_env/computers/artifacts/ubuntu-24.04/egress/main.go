@@ -22,24 +22,25 @@ import (
 )
 
 const (
-	Listen       = "127.0.0.1:3128"
-	EgressUser   = "agentenv-egress"
-	SessionUser  = "user"
-	Folder       = "/etc/agentenv/egress"
-	PublicCA     = "/etc/agentenv/egress-ca.pem"
-	PublicRoots  = "/usr/local/lib/agentenv-egress/roots.pem"
-	ClockPage    = "/dev/shm/agentenv-clock"
-	Hosts        = "/etc/hosts"
-	HostsBegin   = "# agentenv sites"
-	HostsEnd     = "# end agentenv sites"
-	CAName       = "agentenv egress CA"
-	NSSNickname  = "agentenv egress"
-	Hold         = 30 * time.Second
-	Margin       = 8 * 24 * time.Hour
-	ProbeTTL     = time.Hour
-	FirstBytes   = 300 * time.Millisecond
-	HelloTimeout = 10 * time.Second
-	DialTimeout  = 10 * time.Second
+	Listen         = "127.0.0.1:3128"
+	EgressUser     = "agentenv-egress"
+	SessionUser    = "user"
+	Folder         = "/etc/agentenv/egress"
+	PublicCA       = "/etc/agentenv/egress-ca.pem"
+	PublicRoots    = "/usr/local/lib/agentenv-egress/roots.pem"
+	ClockPage      = "/dev/shm/agentenv-clock"
+	Hosts          = "/etc/hosts"
+	HostsBegin     = "# agentenv sites"
+	HostsEnd       = "# end agentenv sites"
+	CAName         = "agentenv egress CA"
+	NSSNickname    = "agentenv egress"
+	Hold           = 30 * time.Second
+	Margin         = 8 * 24 * time.Hour
+	ProbeTTL       = time.Hour
+	ProbeFailedTTL = time.Minute
+	FirstBytes     = 300 * time.Millisecond
+	HelloTimeout   = 10 * time.Second
+	DialTimeout    = 10 * time.Second
 )
 
 // The dates the CA and every leaf it signs are valid between: the widest a certificate carries, as routed sites'
