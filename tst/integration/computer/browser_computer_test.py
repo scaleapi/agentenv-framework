@@ -8,7 +8,8 @@ MCP or the driver is killed, and its page tools navigate, move in history, answe
 and upload; the browser's X server runs but no desktop, and nothing listens but the driver and the site proxy; a
 killed app server or driver is started again by supervisord, and chromium killed by its app server, and the computer is
 ready again; chromium killed once more than its app server relaunches it fails it for good, computer-ready/v1 saying why
-and the tools answering with it; its X server killed takes chromium with it, and both come back. Through its cdp address, Playwright and Puppeteer drive it two at once,
+and the tools answering with it, and so does its X server killed, though supervisord starts X again: chromium exits
+cleanly without it, as a closed browser does, so nothing launches it again. Through its cdp address, Playwright and Puppeteer drive it two at once,
 each on its own session, by http_url and by ws_url; a wrong token is refused, and so is code in the computer without
 one; one client's close leaves the browser up for the other, which can't open file: URLs; the address outlives a
 relaunch by its app server's restart, and the browser's reset and the computer's end it. Behind a front that ends TLS, as a remote provider's tunnel does,
@@ -297,7 +298,8 @@ async def test_a_killed_app_server_driver_or_browser_comes_back_and_a_browser_ki
 
 
 @pytest.mark.asyncio
-async def test_a_killed_x_server_comes_back_and_so_does_the_browser_it_took_with_it(browser_computer):
+async def test_a_killed_x_server_comes_back_but_takes_the_browser_with_it_which_fails_the_computer_for_good(
+        browser_computer):
     with namespace_routing():
         deployed = await Env.get(browser_computer.id).deploy(
             env_params={"app_settings": {"chromium": {"start_urls": [PAGE_URL]}}})
@@ -305,16 +307,15 @@ async def test_a_killed_x_server_comes_back_and_so_does_the_browser_it_took_with
         try:
             before = await _screenshot(deployed)
             await _kill(deployed, "^Xvfb :99", oldest=True)
+            failed = await _until(deployed, lambda status: "failed" in status)
             x_back = await _until_x(deployed)
-            launches = await _crash_launches(deployed, 1)
-            back = await _ready(deployed)
-            after = await _screenshot(deployed)
         finally:
             report = await teardown_run(context)
 
-    assert before.size == after.size == (1280, 800)
-    assert x_back and back["ready"], back
-    assert [entry.get("cause") for entry in launches if entry["event"] == "launch"][:2] == ["boot", "crash"], launches
+    assert before.size == (1280, 800)
+    browser = next(check for check in failed["checks"] if check["name"] == "browser")
+    assert failed["ready"] is False and browser["final"] is True and "infrastructure failure" in browser["detail"]
+    assert x_back
     assert not report.failed
 
 
