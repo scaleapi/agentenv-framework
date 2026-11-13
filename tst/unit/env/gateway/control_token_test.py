@@ -3,6 +3,7 @@ control token when it has one; every other route stays open."""
 from __future__ import annotations
 
 import asyncio
+import logging
 from urllib.parse import unquote, urlsplit
 
 import httpx
@@ -161,10 +162,12 @@ async def _proxied(token: str | None, method: str, path: str, headers: dict[str,
 @pytest.mark.parametrize("method, path", GUARDED)
 @pytest.mark.parametrize("headers", [{}, {"Authorization": "Bearer wrong"}], ids=["none", "wrong"])
 async def test_the_data_plane_and_a_servers_own_endpoint_behind_the_proxy_refuse_a_call_without_the_token(
-        monkeypatch, method, path, headers):
+        monkeypatch, caplog, method, path, headers):
     backing = _Backing(monkeypatch)
+    caplog.set_level(logging.WARNING, logger="agent_env.env.gateway.gateway")
     assert await _proxied(TOKEN, method, path, headers) == 401
     assert backing.paths == []
+    assert [r.getMessage() for r in caplog.records] == [f"refused {method} {unquote(path)}: it takes the env's control token"]
 
 
 @pytest.mark.asyncio

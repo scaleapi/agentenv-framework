@@ -546,6 +546,7 @@ class Gateway:
                 headers = scope.get("headers", ())
                 if scope["type"] == "http" and self._takes_control_token(scope["path"]) and not hmac.compare_digest(
                         dict(headers).get(b"authorization", b""), self._control_bearer):
+                    logger.warning("refused %s %s: it takes the env's control token", scope["method"], scope["path"])
                     response = self._json_response({"ok": False, "error": "this route takes the env's control token"}, 401)
                     await response(scope, receive, send)
                     return
