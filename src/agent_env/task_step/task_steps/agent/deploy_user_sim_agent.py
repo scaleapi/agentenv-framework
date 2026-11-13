@@ -25,8 +25,7 @@ What always_on reads from the record (``metadata["user_sims"][agent_name]``):
   a reply is held; ``max_replies``: after that many replies the user stops reading. ``schedule`` and
   ``response_times`` need the task's clock (``sync_env_clock``): always_on refuses to start a run that sets either
   with no clock armed. The user's time zone is the task clock's.
-- ``description``, ``permissions``, ``keep_private``: in ``person``, for the reads. A description with
-  ``satisfaction`` lines also gets the rating after the run (below).
+- ``description``, ``permissions``, ``keep_private``: in ``person``, for the reads.
 - ``opening`` (the opening's text parts, joined) and, for an ``opening_prompt`` given as parts, ``opening_parts``
   (those parts, descriptions included): both as written, the seed not yet filled in. The user's first message, which
   always_on sends, its text as one labelled line where its first text part was and each file in its place; always_on
@@ -35,11 +34,12 @@ What always_on reads from the record (``metadata["user_sims"][agent_name]``):
   the prompt was written with, which always_on refuses to run against a run of the other kind.
 - ``model``, ``model_source``, ``prompt_sha256``, ``user_version``, ``setup``: for the run's record.
 
-The built-in user sim (``user_sim_versions``) is used directly; its interface, internal to the two steps:
+The built-in user sim (``user_sim_versions``) is used directly; its interface, internal to the two steps and
+rate_user_satisfaction:
 
     setup(version: str, person: dict) -> {"system_prompt": str | None, "output_format": dict | None}
     async answer(version: str, person: dict, history: list[dict], read: dict, ask) -> dict
-    async rate(version: str, person: dict, read: dict, ask) -> dict | None
+    async rate(version: str, person: dict, satisfaction: list[str], read: dict, ask) -> dict
 
 ``person`` is ``{"key": name, "name", "first", "time_zone", "description", "permissions", "keep_private", "opening",
 "done_ends_run"}``, with ``time_zone`` the run's zone (the persona's, else the task clock's, else UTC) and ``opening`` the user's opening
@@ -73,15 +73,14 @@ wrap-up once more, if it sent one: one more ``answer``, its ``read`` shaped like
 line, when it sets one, in ``you_sent``. Its answer is recorded and never delivered; a ``done`` or an error on it
 changes nothing.
 
-``rate`` runs once the run is over, only for a user whose description has ``satisfaction`` lines (None, asking
-nothing, otherwise): in always_on after that last read, in prompt_agent once the chat has ended; not after a run that
-ended on an error. ``read`` is ``{"time": RFC 3339 UTC, "assistant_messages": [{"at", "text"}]}``, the agent's
-messages the user never read (often none). It asks the user sim, in the run's session, to rate the outcome 1-5 by its
-``satisfaction`` lines with a one-line reason, the answer in the same format as a read's, and returns ``{"score": 1-5
-| None, "reason", "used", "schema_errors", "input", "raw", "retried", "turns"}`` (``first_answer`` after a retry). The
-rating is no reply and doesn't count toward ``max_replies``; it is recorded in
-``metadata["user_sim_satisfaction"][step_id]`` and never reaches the agent or the graded conversation. A rating that
-fails is recorded with its error and doesn't fail the run.
+``rate`` is the rate_user_satisfaction step's (rate_user_satisfaction.py), once an always_on or prompt_agent run is
+over, never the run step's: ``satisfaction`` is that step's lines, which are never in the persona, so the system
+prompt ``setup`` writes never has them. ``read`` is ``{"time": RFC 3339 UTC, "assistant_messages": [{"at", "text"}]}``,
+the agent's messages the user never read (often none). It asks the user sim, in the run's session (``ask`` as above),
+to rate the outcome 1-5 by those lines with a one-line reason, the answer in the same format as a read's, and returns
+``{"score": 1-5 | None, "reason", "used", "schema_errors", "input", "raw", "retried", "turns"}`` (``first_answer``
+after a retry). The step records it in ``metadata["user_sim_satisfaction"][run step id]``; it never reaches the agent
+or the graded conversation.
 
 prompt_agent with ``user_agent_name`` set to the agent this step deployed reads it with the same ``answer``, in one
 sitting: one read per agent reply, ``phone`` empty, ``done_ends_run`` true, its prompt this step's opening: the same
