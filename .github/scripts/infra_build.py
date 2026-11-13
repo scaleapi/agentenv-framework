@@ -91,7 +91,7 @@ _RETRY_WAITS_SECONDS = (30, 60, 120)
 # Each image's check, beyond its build: the gateway imports its server, Postgres turns healthy, the sidecars and the
 # browser answer their own commands, Claude Code's, Codex's, Gemini's, Hermes', OpenCode's and pi's agents run their
 # CLIs and import their servers, OpenHands' imports its server, which loads the OpenHands SDK, Pydantic AI's imports its
-# server, which loads Pydantic AI, Browser Use's loads Browser Use Pi and imports its server, the proxy imports its
+# server, which loads Pydantic AI, Browser Use's loads browser-use in its own environment and imports its server, the proxy imports its
 # server, the mail example's env imports its server, and the base computer's desktop comes up, every program running.
 _SMOKES = {
     "agentenv-gateway": ["docker", "run", "--rm", "--entrypoint", "python", "{image}", "-c", "import gateway.entrypoint"],
@@ -103,7 +103,7 @@ _SMOKES = {
     "agentenv-claude-code": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
                              'claude --version && python -c "import a2a_server"'],
     "agentenv-browser-use": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
-                             'node -e "import(\'@browser_use/pi\')" && python -c "import a2a_server"'],
+                             '/opt/browser-use/bin/python -c "import agent" && python -c "import a2a_server"'],
     "agentenv-codex": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
                        'codex --version && mcp-remote --help >/dev/null && python -c "import a2a_server"'],
     "agentenv-gemini": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
