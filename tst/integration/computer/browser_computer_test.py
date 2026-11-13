@@ -1780,7 +1780,7 @@ async def _answers_again(deployed) -> bool:
 
 
 async def _cdp_at_gateway(deployed, browser: DeployedEnv, *, at: str | None = None, user: str = "ada",
-                          origin: str | None = None, ca: LocalCA | None = None) -> dict:
+                          origin: str | None = None, ca: LocalCA | None = None, context: str | None = None) -> dict:
     """The CDP address the browser gives ``user``, asked through the gateway's ``/svc/chromium/`` route, at ``at``, a
     front before it, else its own address, with the browser's own control token, as agentenv asks a computer child,
     naming ``origin`` or not."""
@@ -1788,7 +1788,8 @@ async def _cdp_at_gateway(deployed, browser: DeployedEnv, *, at: str | None = No
     path = protocol_v1.find_extension_method(app, BROWSER, "cdp")["endpoint"]
     async with httpx.AsyncClient(timeout=180, verify=_trusting(ca) if ca else True) as http:
         answer = await http.post(f"{at or deployed.gateway_url}/svc/chromium{path}",
-                                 json={"user": user, **({"origin": origin} if origin else {})},
+                                 json={"user": user, **({"origin": origin} if origin else {}),
+                                       **({"context": context} if context else {})},
                                  headers=browser.control_headers)
     assert answer.status_code == 200, answer.text
     return answer.json()
@@ -1907,11 +1908,11 @@ async def test_two_leases_in_a_multi_envs_browser_each_sign_in_to_its_site_by_na
             ).execute(context)).deployed_envs
             browser = DeployedEnv.from_dict(deployed.child_envs["chromium"])
             for label, user in (("buyer", "alex"), ("seller", "bo")):
-                context = await step("browser_lease_context", label=label).execute(context)
+                context = await step("browser_lease_context", label=label, grants=["ada"]).execute(context)
                 context = await step("browser_sign_in", site=session_shop.id, user=user, context=label).execute(context)
                 context = await step("browser_open_tab", url=SESSION_PAGE, context=label).execute(context)
-            address = await _cdp_at_gateway(deployed, browser)
-            seen = {label: await _lease_page_text(browser, address["ws_url"], label) for label in ("buyer", "seller")}
+            seen = {label: await _lease_page_text(browser, (await _cdp_at_gateway(deployed, browser, context=label))[
+                "ws_url"], label) for label in ("buyer", "seller")}
             default_cookies = (await _browser_op(browser, "cookies/get", {"urls": ["https://shop.test/"]}))["cookies"]
         finally:
             report = await teardown_run(context)
