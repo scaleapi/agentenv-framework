@@ -914,6 +914,32 @@ def test_install_writes_the_sites_files_names_and_trust_then_starts_the_proxy_on
         f"export {name}={value}\n" for name, value in sites.TRUST_ENVIRONMENTS["linux"].items())
 
 
+def test_install_keeps_a_sites_sign_in_headers_for_the_proxy_it_starts_whose_network_log_takes_their_values_out(
+        tmp_path, monkeypatch):
+    root, folder = tmp_path / "root", tmp_path / "sites"
+    (root / "etc/ssl/certs").mkdir(parents=True)
+    (root / "etc/ssl/certs/ca-certificates.crt").write_text("PUBLIC ROOTS\n")
+    folder.mkdir()
+    folder.chmod(0o700)
+    table = sites.site_table([SiteParams(name="shop", url="http://gw/website/shop/", domains=["shop.localhost"]),
+                              SiteParams(name="notes", url="http://gw/website/notes/", domains=["notes.test"])])
+    given = sites.proxy_config(table, sites.issue(table.routes, label="t"), user=None, os_type="linux",
+                               forward_port=True, sign_in_headers={"shop": ["X-Auto-Login"]})
+    (folder / "config.json").write_text(json.dumps(given))
+    started = []
+    monkeypatch.setattr(site_proxy, "start", lambda path, log: started.append(Config.load(path)))
+    monkeypatch.setattr(site_proxy, "checks_as", lambda user, path: {"sites": {}, "runtimes": {}})
+    monkeypatch.setattr(site_proxy.shutil, "which", lambda tool: None)
+
+    site_proxy.install(str(folder / "config.json"), site_proxy.Paths(root))
+
+    (config,) = started
+    served = {site.name: site for site in config.sites}
+    assert (served["shop"].sign_in_headers, served["notes"].sign_in_headers) == (["X-Auto-Login"], [])
+    assert site_proxy.logged_headers([("x-auto-login", "admin:test")], served["shop"].sign_in_headers) == [
+        ["x-auto-login", site_proxy.REMOVED]]
+
+
 def test_install_keeps_the_upstream_headers_in_a_file_root_alone_reads_and_serve_json_names_it(tmp_path, monkeypatch):
     root, folder = tmp_path / "root", tmp_path / "sites"
     (root / "etc/ssl/certs").mkdir(parents=True)

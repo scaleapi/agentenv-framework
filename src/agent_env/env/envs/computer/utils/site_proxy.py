@@ -1404,6 +1404,8 @@ def install(config_path: str, paths: Paths = Paths()) -> dict:
     sites = []
     for site in given["sites"]:
         served = {"name": site["name"], "upstream": site["upstream"], "domains": site["domains"]}
+        if site.get("sign_in_headers"):
+            served["sign_in_headers"] = list(site["sign_in_headers"])
         if site.get("cert_pem"):
             cert, key = folder / f"{site['name']}.crt", folder / f"{site['name']}.key"
             cert.write_text(site["cert_pem"])
