@@ -5,7 +5,7 @@ import copy
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-# Where a run's rating by its user sim (user_sim_versions.rate) is recorded: metadata[SATISFACTION_KEY][step_id].
+# Where rate_user_satisfaction records a run's rating by its user sim: metadata[SATISFACTION_KEY][run step id].
 SATISFACTION_KEY = "user_sim_satisfaction"
 
 

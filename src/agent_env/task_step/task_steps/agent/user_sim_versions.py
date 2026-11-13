@@ -10,8 +10,9 @@ gets one retry in the same session. What earlier reads showed, and when the user
 keys of ``read`` it doesn't know are ignored. A line the user sent with files (the opening's ``files``,
 ``{"name", "description"}``) shows each after its text, "(you attached itinerary.pdf: Mom and Dad's flight
 itinerary)", or by name alone with no description: the user sim can't open them.
-``rate`` asks the user sim, once the run is over, to rate the outcome 1-5 by its description's ``satisfaction``
-lines, with a one-line reason; None when the description has none, so a user without them is never asked.
+``rate`` asks the user sim, once the run is over, to rate the outcome 1-5 by the ``satisfaction`` lines it is given
+(the rate_user_satisfaction step's, never the persona's, so the system prompt never has them), with a one-line
+reason.
 ``problems`` is the load check for the settings."""
 
 from __future__ import annotations
@@ -35,10 +36,8 @@ SECTIONS: tuple[tuple[str, str, str], ...] = (
     ("dont_mention", "DON'T MENTION THESE UNLESS THE ASSISTANT ASKS", "M"),
     ("phone", "WHAT YOU DO WITH YOUR EMAILS, TEXTS AND NOTIFICATIONS", "F"),
     ("when_done", "WHEN YOU'RE DONE", ""),
-    ("satisfaction", "HOW YOU'D RATE THE JOB (only when asked, once it's over)", "S"),
 )
 SECTION_KEYS = tuple(key for key, _, _ in SECTIONS)
-SATISFACTION = "satisfaction"  # the section the rating after the run goes by; without it there's no rating
 RULES_TITLE = "YOUR RULES FOR THE ASSISTANT (it has them in its notes)"
 PRIVATE_TITLE = "PRIVATE"
 RULES_AFTER = "decisions"
@@ -84,9 +83,11 @@ EARLIER_DAYS = 7
 EARLIER_MAX = 20
 EARLIER_CUT = "  (older messages not shown)"
 
-# The rating after the run (``rate``): asked only of a user whose description has ``satisfaction`` lines. Its answer
-# fits OUTPUT_FORMAT, which the agent was given at deploy, so the format is the same with or without a rating.
+# The rating after the run (``rate``), asked by the rate_user_satisfaction step with that step's ``satisfaction`` lines,
+# shown in the ask under RATING_TITLE, tagged S1... Its answer fits OUTPUT_FORMAT, which the agent was given at deploy.
 SCORES = (1, 2, 3, 4, 5)
+RATING_TITLE = "HOW YOU'D RATE THE JOB"
+RATING_TAG = "S"
 RATING_LINE = '{"outcome": "done", "score": 1 | 2 | 3 | 4 | 5, "message": "...", "used": "..."}'
 RATING_OVER = "The job is over: your AI assistant won't see this, or anything you write from now on."
 RATING_UNREAD = "\nNEW FROM YOUR AI ASSISTANT (you haven't read this yet):"
@@ -210,11 +211,12 @@ def problems(person: Any) -> list[str]:
     else:
         unknown = sorted(set(description) - set(SECTION_KEYS))
         if unknown:
-            out.append(f"description has unknown sections {unknown}; the sections are {list(SECTION_KEYS)}")
+            out.append(f"description has unknown sections {unknown}; the sections are {list(SECTION_KEYS)}"
+                       + ("; satisfaction goes on the rate_user_satisfaction step, so the user sim's prompt never has "
+                          "it" if "satisfaction" in unknown else ""))
         out += [f"description.{key} must be a list of non-empty lines" for key in SECTION_KEYS
                 if key in description and not _lines(description[key])]
-        if not any(_lines(description.get(key)) and description[key] for key in SECTION_KEYS
-                   if key != SATISFACTION):
+        if not any(_lines(description.get(key)) and description[key] for key in SECTION_KEYS):
             out.append("description is empty: write at least who they are")
     permissions = person.get("permissions")
     if permissions is not None and not isinstance(permissions, dict):
@@ -430,15 +432,16 @@ def _parsed(got: dict) -> dict:
 
 
 # ---- the rating after the run -------------------------------------------------------------------------------------
-def rates(person: dict) -> bool:
-    """Whether the user is asked to rate the run once it's over: when the description has ``satisfaction`` lines."""
-    description = person.get("description")
-    return isinstance(description, dict) and bool(description.get(SATISFACTION))
+def satisfaction_problems(lines: Any) -> list[str]:
+    """What's wrong with the lines a rating goes by: one message, or none."""
+    if not (_lines(lines) and lines):
+        return ["satisfaction must be a list of non-empty lines: what each end of the scale means for this job"]
+    return []
 
 
-def render_rating(person: dict, read: dict) -> str:
-    """The message that asks for the rating at ``read["time"]``, with the assistant's messages the user hasn't read
-    (``read["assistant_messages"]``, maybe none) before the ask."""
+def render_rating(person: dict, satisfaction: list[str], read: dict) -> str:
+    """The message that asks for the rating at ``read["time"]``: the assistant's messages the user hasn't read
+    (``read["assistant_messages"]``, maybe none), the ``satisfaction`` lines tagged S1..., then the ask."""
     zone = ZoneInfo(person.get("time_zone") or "UTC")
     now = _local(read["time"], zone)
     out = [f"It's {now.strftime('%a, %b')} {now.day}, {_hm(now)}. {RATING_OVER}"]
@@ -446,6 +449,7 @@ def render_rating(person: dict, read: dict) -> str:
     if messages:
         out.append(RATING_UNREAD)
         out += [_message(m, _stamp(_local(m.get("at") or read["time"], zone), now)) for m in messages]
+    _section(out, RATING_TITLE, RATING_TAG, list(satisfaction))
     out.append("\n" + RATING_ASK.format(first=_first(person)))
     out.append(RATING_ANSWER)
     return "\n".join(out)
@@ -474,16 +478,18 @@ def parse_rating(raw: Any) -> dict:
     return {"score": obj["score"], "reason": obj["message"].strip(), "used": obj.get("used"), "schema_errors": []}
 
 
-async def rate(version: str, person: dict, read: dict, ask: Callable[[str], Awaitable[dict]]) -> Optional[dict]:
-    """The user's rating of the run once it's over, by their ``satisfaction`` lines: one ask, in the run's session,
-    with one retry when the answer is malformed; None, asking nothing, when the description has no such lines.
-    ``read`` is ``{"time": RFC 3339 UTC, "assistant_messages": [{"at", "text"}]}``, the messages the user hasn't read.
-    Returns ``score``, ``reason``, ``used``, ``schema_errors``, ``input``, ``raw``, ``retried``, ``turns`` and, after a
-    retry, ``first_answer``. The rating is never a reply: the caller records it and sends it nowhere."""
+async def rate(version: str, person: dict, satisfaction: list[str], read: dict,
+               ask: Callable[[str], Awaitable[dict]]) -> dict:
+    """The user's rating of the run once it's over, by the ``satisfaction`` lines: one ask, in the run's session, with
+    one retry when the answer is malformed. ``read`` is ``{"time": RFC 3339 UTC, "assistant_messages": [{"at",
+    "text"}]}``, the messages the user hasn't read. Returns ``score``, ``reason``, ``used``, ``schema_errors``,
+    ``input``, ``raw``, ``retried``, ``turns`` and, after a retry, ``first_answer``. The rating is never a reply: the
+    caller records it and sends it nowhere."""
     _check(version)
-    if not rates(person):
-        return None
-    text = render_rating(person, read)
+    found = satisfaction_problems(satisfaction)
+    if found:
+        raise ValueError("; ".join(found))
+    text = render_rating(person, satisfaction, read)
     got = await ask(text)
     first = _parsed_rating(got)
     if not first["schema_errors"] or got.get("error"):

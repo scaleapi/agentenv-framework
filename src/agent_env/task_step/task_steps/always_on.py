@@ -42,12 +42,6 @@ metadata under its ``agent_name``. The ``always_on`` step names it with ``user_s
   ``max_wakes`` makes the last, carries the last-turn notice (``final_reminder``). After it the user sim reads what
   the agent sent (its wrap-up), no earlier than the task's time when the run ended, and the user's reaction, and any
   reply still held, are recorded; then the run ends.
-- A user sim whose description has ``satisfaction`` lines then rates the run once, 1-5 with a one-line reason
-  (``user_sim_versions.rate``), after that last read; the messages it never read come with the ask. The rating is
-  recorded in ``metadata["user_sim_satisfaction"][step_id]`` (the whole ask in the timeline's ``user_sim_rating``
-  event) and goes nowhere else: not to the agent, the graded conversation or the reads' history, and it is no reply,
-  so it doesn't count toward ``max_replies``. A rating that fails is recorded with its error and changes nothing. A run
-  that ended on an error is not rated. Without ``satisfaction`` lines nothing is asked.
 - A real-time budget keeps the run inside the hub's 8-hour job (``effective_time_budget`` gives the rule): once one
   more wake might end past ``time_budget_seconds`` (7 h, lowered to fit the task's own timeouts), the agent gets its
   closing wake, with the step's wrap-up line and the last-turn notice, and the run ends with end reason time_budget.
@@ -70,7 +64,8 @@ metadata under its ``agent_name``. The ``always_on`` step names it with ``user_s
   reply that never reached it (her last read's, or one still held at the end) has ``delivered`` false and no
   ``user_reads_at``.
 - The run's metadata keeps a summary in ``metadata["always_on"][step_id]`` (small enough for a running job to report
-  back); the full timeline goes to the object store, at the summary's ``object_url``.
+  back); the full timeline goes to the object store, at the summary's ``object_url``. Its ``user_sim`` names the user
+  sim's session (``context_id``), which rate_user_satisfaction asks in once the run is over.
 - An always_on_agent_verifier (``verifiers/always_on_agent_verifier.py``) grades the step's prompt from the user's chat
   and the run's context, the run wake by wake among it (``render_for_judge``); a plain rubrics_verifier on it is
   refused when the task loads.
@@ -118,12 +113,11 @@ from agent_env.store import DuplicateKeyError, get_config
 from agent_env.task_step.context import PromptResponse, StepContextError, TaskStepContext
 from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.agent import user_sim_versions
-from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import USER_SIMS_KEY, DeployUserSimAgentTaskStep
+from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import USER_SIMS_KEY
 from agent_env.task_step.task_steps.notification_delivery import delivered_parts, label_time, take_due
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
-from agent_env.task_step.task_steps.agent.user_sim_common import SATISFACTION_KEY, person_of, task_zone
+from agent_env.task_step.task_steps.agent.user_sim_common import iso as _iso, person_of, task_zone, utc as _utc
 from agent_env.task_step.task_steps.agent.user_sim_common import attached, for_agent, recorded_opening
-from agent_env.task_step.task_steps.agent.user_sim_common import iso as _iso, utc as _utc
 
 logger = logging.getLogger(__name__)
 
@@ -283,10 +277,6 @@ class AlwaysOnTaskStep(PromptAgentTaskStep):
         fetch; an ask past it is refused, and an answer past it ends the read as a user sim error."""
         return READ_ASKS * (self.user_timeout_seconds + TURN_GRACE_SECONDS + TRAJECTORY_FETCH_SECONDS)
 
-    def rating_cap_seconds(self) -> float:
-        """The longest the rating after the run may take: as long as a read."""
-        return self.read_cap_seconds()
-
     def wake_reserve_seconds(self, contact_seconds: float = CONTACT_TIMEOUT_DEFAULT_SECONDS) -> float:
         """The longest one turn of the loop, or the run's closing, can take, each part hard-capped: a clock jump's
         settle (settle_cap_seconds), then a wake (the agent's turn and, with nudges on, its nudge turn, each at most
@@ -299,8 +289,7 @@ class AlwaysOnTaskStep(PromptAgentTaskStep):
         wake = turn * (2 if self.nudge else 1) + settle + GATEWAY_ALLOWANCE_SECONDS
         return settle + wake + self.read_cap_seconds() + GATEWAY_ALLOWANCE_SECONDS
 
-    def effective_time_budget(self, contact_seconds: float = CONTACT_TIMEOUT_DEFAULT_SECONDS,
-                              rating: bool = False) -> float:
+    def effective_time_budget(self, contact_seconds: float = CONTACT_TIMEOUT_DEFAULT_SECONDS) -> float:
         """The real time after which the run closes: ``time_budget_seconds``, else 7 h, lowered so the closing still
         fits the hub's job. The rule:
 
@@ -314,9 +303,8 @@ class AlwaysOnTaskStep(PromptAgentTaskStep):
         that can't is refused, as is a wake whose worst case leaves no room for a budget at all.
 
         ``contact_seconds`` is the longest contact time limit: the gateway's default when the task loads, the
-        contacts' own once the run has read them (``_configure_contacts``), which checks the budget again.
-        ``rating``: the user sim rates the run after its closing, so the reserve also covers rating_cap_seconds."""
-        reserve = self.wake_reserve_seconds(contact_seconds) + (self.rating_cap_seconds() if rating else 0)
+        contacts' own once the run has read them (``_configure_contacts``), which checks the budget again."""
+        reserve = self.wake_reserve_seconds(contact_seconds)
         room = JOB_LIMIT_SECONDS - JOB_HEADROOM_SECONDS - reserve
         if room <= reserve:
             raise ValueError(f"always_on: one wake can take up to {reserve:.0f}s (wake_reserve_seconds: a settle, the "
@@ -351,19 +339,11 @@ class AlwaysOnTaskStep(PromptAgentTaskStep):
         from agent_env.task_step.task_steps.verifiers.always_on_agent_verifier import AlwaysOnAgentVerifier
         from agent_env.task_step.task_steps.verifiers.rubrics_verifier import is_rubrics_verifier
 
-        out = [f"step '{s.id}' ({s.type}) grades the prompt '{self.prompt_id}' of always_on step '{self.id}', which "
-               f"is graded from the user's chat and the run's context, not its wakes' trajectories: use type "
-               f"{AlwaysOnAgentVerifier.type}"
-               for s in steps if is_rubrics_verifier(s) and s.prompt_id == self.prompt_id
-               and not isinstance(s, AlwaysOnAgentVerifier)]
-        # A user sim that rates the run adds the rating to the closing, which the time budget must still fit.
-        if any(isinstance(s, DeployUserSimAgentTaskStep) and s.agent_name == self.user_sim
-               and user_sim_versions.rates({"description": (s.persona or {}).get("description")}) for s in steps):
-            try:
-                self.effective_time_budget(rating=True)
-            except ValueError as e:
-                out.append(f"{e} (with the user sim's rating after the run)")
-        return out
+        return [f"step '{s.id}' ({s.type}) grades the prompt '{self.prompt_id}' of always_on step '{self.id}', which "
+                f"is graded from the user's chat and the run's context, not its wakes' trajectories: use type "
+                f"{AlwaysOnAgentVerifier.type}"
+                for s in steps if is_rubrics_verifier(s) and s.prompt_id == self.prompt_id
+                and not isinstance(s, AlwaysOnAgentVerifier)]
 
     async def _execute(self, context: TaskStepContext) -> TaskStepContext:
         run = _Run(self, context)
@@ -433,8 +413,6 @@ class _Run:
         self.clock_rates: list[tuple[Any, float]] = []  # (env, the task's rate) for each clock the step freezes
         self.undo: list[tuple[str, Any]] = []  # (what, coroutine function): the gateway settings to put back at the end
         self.rules_in_system_prompt = False   # whether the agent took the rules in its system prompt
-        self.rates = False                    # whether the user sim rates the run once it's over
-        self.last_read_time: Optional[datetime] = None  # when she last read, for the rating after it
 
     async def restore(self) -> None:
         """Put back what the step changed on the gateways, latest first, so later steps of the task see the settings
@@ -494,7 +472,6 @@ class _Run:
             raise StepContextError(f"always_on: the user sim agent '{us['agent_name']}' is not deployed")
         self.user_url = self.user_agent.a2a_url or self.user_agent.api_url
         self.plugin = await self._load_plugin(us.get("plugin"))
-        self.rates = hasattr(self.plugin, "rate") and user_sim_versions.rates(self.person)
         self.tz = ZoneInfo(self.zone)
 
         self.clock_envs = [d for d in ctx.deployed_envs if d.supports(EXT_CLOCK_URI, "state")]
@@ -715,7 +692,7 @@ class _Run:
             got = await _call(env, EXT_TRIGGERS_URI, "config", {"concurrent_fires": step.contact_replies_in_parallel})
             applied.append({**entry, "applied": True, "concurrent_fires": got.get("concurrent_fires")})
         self.contact_seconds = float(max(limits, default=0.0))
-        self.time_budget = step.effective_time_budget(self.contact_seconds, self.rates)
+        self.time_budget = step.effective_time_budget(self.contact_seconds)
         self.contacts = {"replies_in_parallel": step.contact_replies_in_parallel,
                          "longest_timeout_seconds": self.contact_seconds, "envs": applied}
 
@@ -1010,8 +987,6 @@ class _Run:
             if not await self._capped(self._next(), "a turn of the loop"):
                 break
         await self._capped(self._last_read(), "the last read", step.read_cap_seconds() + GATEWAY_ALLOWANCE_SECONDS)
-        if self.rates:
-            await self._rating()
 
     async def _capped(self, work, what: str, seconds: Optional[float] = None):
         """``work``, cut off past ``seconds`` (one turn of the loop's worst case, ``wake_reserve_seconds``): every part
@@ -1045,8 +1020,7 @@ class _Run:
         step = self.step
         now = await self.now()
         spent = self.spent()
-        # With a rating after the run, the closing has it too.
-        reserve = step.wake_reserve_seconds(self.contact_seconds) + (step.rating_cap_seconds() if self.rates else 0)
+        reserve = step.wake_reserve_seconds(self.contact_seconds)
         if spent + reserve >= self.time_budget:
             self.log("time_budget_reached", virtual_time=_iso(now), real_seconds=round(spent, 1),
                      time_budget_seconds=self.time_budget, wake_reserve_seconds=reserve)
@@ -1149,47 +1123,6 @@ class _Run:
         if at < now:  # she'd have looked during the last turn, which went on sending: she reads it all, from now
             at, self.read_mode = self._available(now)
         await self.read(at, last=True)
-
-    async def _rating(self) -> None:
-        """Once the run is over, the user sim rates it (``user_sim_versions.rate``): at her last read's time, or the
-        world's when that's later, with the agent's messages she never read. Recorded in
-        ``metadata[SATISFACTION_KEY][step_id]``, the whole ask in the timeline; never delivered, never in the graded
-        conversation, never a reply. A rating that fails, or runs past rating_cap_seconds, is recorded with its error
-        and doesn't change how the run ends. Not after a run that ended on an error."""
-        step = self.step
-        summary: dict = {"user_sim": step.user_sim, "score": None, "reason": None}
-        self.ctx.metadata.setdefault(SATISFACTION_KEY, {})[step.id] = summary
-        if self.end_reason in ERROR_ENDS:
-            summary["skipped"] = f"the run ended on {self.end_reason}"
-            self.log("user_sim_rating", skipped=summary["skipped"])
-            return
-        calls: list[dict] = []
-        cap = step.rating_cap_seconds()
-        deadline = time.monotonic() + cap
-
-        async def ask(text: str) -> dict:
-            got = await self._ask_user_sim(text, deadline)
-            calls.append(got)
-            return got
-
-        t = time.time()
-        read: dict = {"time": None, "assistant_messages": [{"at": m.get("at"), "text": m["text"]} for m in self.unread]}
-        got: dict = {}
-        error = None
-        try:
-            now = await self.now()
-            read["time"] = _iso(max(now, self.last_read_time) if self.last_read_time else now)
-            got = await asyncio.wait_for(self.plugin.rate(self.version, self.person, read, ask), cap) or {}
-        except Exception as e:  # TimeoutError included: the rating is recorded, the run goes on to its end
-            error = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
-        error = error or (calls[-1].get("error") if calls else None)
-        summary.update({k: got.get(k) for k in ("score", "reason", "used", "schema_errors", "retried")},
-                       at=read["time"], unread_shown=len(read["assistant_messages"]),
-                       user_sim_error=error, user_sim_turns=got.get("turns", len(calls)),
-                       user_sim_trajectory_urls=[c.get("trajectory_url") for c in calls])
-        self.log("user_sim_rating", virtual_time=summary["at"], read=read, input=got.get("input"),
-                 raw=got.get("raw"), first_answer=got.get("first_answer"), real_seconds=round(time.time() - t, 1),
-                 **{k: v for k, v in summary.items() if k not in ("user_sim", "at")})
 
     def _prompt_parts(self) -> list[dict]:
         """The user's first message, the user sim's opening, as A2A parts, its seed applied."""
@@ -1560,7 +1493,6 @@ class _Run:
             ans = {"outcome": "no_reply", "message": ""}
             calls.append({"text": None, "structured": None, "error": f"the read ran past its cap ({cap:.0f}s)"})
         self.history.append({"read": read, "answer": ans})
-        self.last_read_time = now
         mode = self.read_mode
         latency = self._latency(mode)
         flagged = (len(ans.get("message") or "") > ASSISTANT_LIKE_MESSAGE_CHARS
@@ -1757,7 +1689,8 @@ class _Run:
         record = {"step_id": step.id, "end_reason": self.end_reason, "end_note": self.end_note, "error": self.error,
                   "error_type": self.error_type, "counts": counts,
                   "user_sim": {"name": step.user_sim, "version": self.version,
-                               "agent_name": self.us.get("agent_name"), **self.user_setup},
+                               "agent_name": self.us.get("agent_name"), "context_id": self.user_context_id,
+                               **self.user_setup},
                   "end_time": _iso(self.end) if self.end else None, "time_zone": self.zone,
                   "multi_day": self.multi_day, "real_seconds": round(time.time() - self.t0_real, 1),
                   "timeline_events": len(self.timeline), "pending_at_end": _bounded(self.pending)}
@@ -1767,8 +1700,6 @@ class _Run:
                               "scheduled_checks": self.checks, "contacts": self.contacts,
                               "time_budget_seconds": self.time_budget,
                               "wake_reserve_seconds": step.wake_reserve_seconds(self.contact_seconds)}
-        if self.rates:
-            record["settings"]["rating_cap_seconds"] = step.rating_cap_seconds()
         await self._store_timeline(record)
         ctx.metadata.setdefault(ALWAYS_ON_KEY, {})[step.id] = record
         # The graded response is the user's whole chat from the agent, each message with its pretend time; never its

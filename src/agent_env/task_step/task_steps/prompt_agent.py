@@ -42,7 +42,7 @@ from agent_env.task_step.task_step import RetryConfig, TaskStep, TaskStepDepende
 from agent_env.task_step.task_steps.notification_delivery import delivered_parts, next_message, take_due
 from agent_env.task_step.task_steps.post_turn_hooks import PostTurnHooks, run_post_turn_hooks, validate_hook_specs
 from agent_env.task_step.task_steps.agent import user_sim_versions
-from agent_env.task_step.task_steps.agent.user_sim_common import SATISFACTION_KEY, iso, person_of, task_zone, utc
+from agent_env.task_step.task_steps.agent.user_sim_common import iso, person_of, task_zone, utc
 from agent_env.task_step.task_steps.agent.user_sim_common import attached, opening_text, recorded_opening
 from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import (
     agent_error_text,
@@ -625,7 +625,6 @@ class PromptAgentTaskStep(TaskStep):
             LiveTurns(*live, poll_interval_seconds=self.poll_interval_seconds) if live is not None else None
         )
         final_state: str = TaskState.completed.value
-        last_reply: tuple[int, str] = (0, "")  # the agent's last turn and its text, for the rating after the chat
         trajectory_url: Optional[str] = None
         # What the target has been sent: of the files its replies name, the only ones a user-sim is made able
         # to read, so a reply naming any other object a store owns can't read it out through the user-sim.
@@ -706,7 +705,6 @@ class PromptAgentTaskStep(TaskStep):
 
                 final_task_id = sent_task_id
                 final_state = target_state
-                last_reply = (turn + 1, _agent_text(final_terminal.response_text, agent_response_parts))
                 logger.info(f"Turn {turn+1}/{self.max_conversation_turns} agent response ({target_state}): {final_terminal.response_text[:120]}...")
 
                 if target_state == TaskState.failed:
@@ -768,10 +766,6 @@ class PromptAgentTaskStep(TaskStep):
         final_conv = conversation_store.get_conversation(conversation_id)
         if final_conv and final_conv.get("status") == "active":
             conversation_store.mark_closed(conversation_id)
-        if sim is not None:  # once the chat has ended, a user with satisfaction lines rates it
-            skipped = ("the agent's turn failed" if final_state == TaskState.failed
-                       else f"the user sim failed: {sim.error}" if sim.error else None)
-            await sim.rate(*last_reply, user_side._ask_built_in, skipped=skipped)
 
         if trig_ext and triggers_registered:  # best-effort firing-log readback (provenance only; never fails the run)
             try:
@@ -1270,7 +1264,6 @@ class _BuiltInUserSim:
         self._max_replies = person.get("max_replies")
         self.replies = 0
         self.error: Optional[str] = None  # the user sim's error, once a read ended on one
-        self.read_turn = 0  # the agent's last turn the user read
 
     @classmethod
     async def start(cls, step: PromptAgentTaskStep, context: TaskStepContext, record: dict, zone: str,
@@ -1293,7 +1286,6 @@ class _BuiltInUserSim:
         read = {"time": now, "assistant_messages": [{"at": now, "text": reply}], "phone": [],
                 "you_sent": self._you_sent, "done_ends_run": True}
         self._you_sent = []
-        self.read_turn = number
         calls: list[dict] = []
 
         async def ask(text: str) -> dict:
@@ -1320,57 +1312,6 @@ class _BuiltInUserSim:
         if outcome == "done" and said:
             return {"message": [{"kind": "text", "text": ans["message"]}], "end_after": "user_done"}
         return {"end": "user_done" if outcome == "done" else "user_no_reply"}
-
-    async def rate(self, turn: int, reply: str, ask_user_sim, skipped: Optional[str] = None) -> None:
-        """Once the chat has ended, the user's rating of it (``user_sim_versions.rate``), when their description has
-        ``satisfaction`` lines: with the agent's last reply when they never read it (``turn`` is past the last one
-        read), at the task clock's time. Recorded as always_on records it, in ``metadata[SATISFACTION_KEY][step_id]``,
-        the whole ask in the object store at its ``object_url``; never sent to the agent, never in the conversation,
-        never a reply. ``skipped`` names why it isn't asked (the chat ended on an error); a rating that fails is
-        recorded with its error and changes nothing."""
-        if not user_sim_versions.rates(self.person):
-            return
-        step = self._step
-        summary: dict = {"user_sim": step.user_agent_name, "score": None, "reason": None}
-        self._context.metadata.setdefault(SATISFACTION_KEY, {})[step.id] = summary
-        if skipped:
-            summary["skipped"] = skipped
-            return
-        calls: list[dict] = []
-
-        async def ask(text: str) -> dict:
-            got = await ask_user_sim(text)
-            calls.append(got)
-            return got
-
-        read: dict = {"time": None, "assistant_messages": []}
-        got: dict = {}
-        error = None
-        try:
-            read["time"] = await _clock_now(step, self._clock_envs)
-            if turn > self.read_turn and reply.strip():
-                read["assistant_messages"] = [{"at": read["time"], "text": reply}]
-            got = await user_sim_versions.rate(user_sim_versions.VERSION, self.person, read, ask) or {}
-        except Exception as e:  # recorded; the step goes on to its response
-            error = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
-        error = error or (calls[-1].get("error") if calls else None)
-        summary.update({k: got.get(k) for k in ("score", "reason", "used", "schema_errors", "retried")},
-                       at=read["time"], unread_shown=len(read["assistant_messages"]), user_sim_error=error,
-                       user_sim_turns=got.get("turns", len(calls)),
-                       user_sim_trajectory_urls=[c.get("trajectory_url") for c in calls])
-        logger.info(f"prompt_agent '{step.id}' user sim rating: score={summary['score']} error={error}")
-        full = {**summary, "read": read, **{k: got.get(k) for k in ("input", "raw", "first_answer")}}
-        try:
-            config = get_config()
-            key = (f"{config.get_artifact_key_prefix()}prompt_agent_user_sim_reads/"
-                   f"instance_id={self._context.instance_id or 'adhoc'}/"
-                   f"{step.id}-rating-{uuid.uuid4().hex[:8]}.json")
-            summary["object_url"] = await asyncio.to_thread(
-                config.get_object_store().put, key, json.dumps(full, indent=1, default=str).encode(),
-                content_type="application/json")
-        except Exception as e:
-            logger.warning(f"prompt_agent '{step.id}': could not store the user sim's rating: {e}")
-            summary["store_error"] = f"{type(e).__name__}: {str(e)[:300]}"
 
     async def _record(self, number: int, read: dict, ans: dict, calls: list[dict], error: Optional[str]) -> None:
         """Record the read as always_on does: a summary in ``metadata["user_sim_reads"][step_id]``, the whole read (what
