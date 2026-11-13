@@ -1,10 +1,10 @@
-"""What a slow-tier runner shares into the CI computer image mirror."""
-
 from __future__ import annotations
 
 import io
 import json
 import sys
+
+import pytest
 
 from tst.util.scripts import load_script
 
@@ -48,3 +48,19 @@ def test_a_mirror_the_composer_cant_read_anonymously_warns_to_make_it_public(mon
 
     assert share.main() == 0
     assert "make the package public" in capsys.readouterr().out
+
+
+def test_a_runner_that_composed_no_image_shares_nothing_and_passes(monkeypatch, capsys):
+    share = load_script("share_computer_images.py")
+
+    def no_repository(url):
+        raise share.urllib.error.HTTPError(url, 404, "Not Found", {}, io.BytesIO(b""))
+
+    monkeypatch.setattr(share.urllib.request, "urlopen", no_repository)
+    monkeypatch.setattr(share, "copy_image", lambda *args: pytest.fail("copied with no image to share"))
+    monkeypatch.setenv("GITHUB_ACTOR", "bot")
+    monkeypatch.setenv("GITHUB_TOKEN", "t")
+    monkeypatch.setattr(sys, "argv", ["share_computer_images.py", "ghcr.io/org/agentenv-ci-computers"])
+
+    assert share.main() == 0
+    assert "0 images" in capsys.readouterr().out

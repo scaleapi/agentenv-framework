@@ -1,10 +1,5 @@
-"""Copy every composed computer image a slow-tier runner's registry holds to the CI computer image mirror, the one
-``AGENT_ENV_COMPUTER_IMAGE_MIRROR`` names, so later runs copy them back rather than build them.
-
-Each image goes under its mirror tag (``composed.mirror_tag``: the composer's digest, then the key). No blob the mirror
-already holds is sent again. The mirror is written as ``GITHUB_ACTOR`` with ``GITHUB_TOKEN``; one the composer can't
-read anonymously, as GHCR makes a new package, warns.
-"""
+"""Copy every composed computer image a slow-tier runner's registry holds to the CI computer image mirror, so later runs
+copy them back rather than build them."""
 
 from __future__ import annotations
 
@@ -13,6 +8,7 @@ import json
 import os
 import re
 import sys
+import urllib.error
 import urllib.request
 
 from agent_env.env.envs.computer.utils.composed import REPOSITORY, mirror_tag
@@ -28,8 +24,13 @@ def main() -> int:
     parser.add_argument("--registry", default="localhost:5000", help="the runner's registry")
     args = parser.parse_args()
 
-    with urllib.request.urlopen(f"http://{args.registry}/v2/{REPOSITORY}/tags/list") as response:
-        keys = sorted(tag for tag in json.load(response).get("tags") or [] if KEY.match(tag))
+    try:
+        with urllib.request.urlopen(f"http://{args.registry}/v2/{REPOSITORY}/tags/list") as response:
+            keys = sorted(tag for tag in json.load(response).get("tags") or [] if KEY.match(tag))
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            raise
+        keys = []
     auth = RegistryAuth(args.mirror.partition("/")[0], os.environ["GITHUB_ACTOR"], os.environ["GITHUB_TOKEN"])
     for key in keys:
         source = pin_digest(f"{args.registry}/{REPOSITORY}:{key}", None)

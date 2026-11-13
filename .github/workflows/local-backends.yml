@@ -22,7 +22,6 @@ concurrency:
 
 env:
   AGENT_ENV_ENVIRONMENT: dev
-  # The slow tier's composed computer images, shared between its runners.
   COMPUTER_IMAGE_MIRROR: ghcr.io/scaleapi/agentenv-ci-computers
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
@@ -196,8 +195,6 @@ jobs:
       # x64 hosted runners have /dev/kvm; the disk form's tests boot under it, and skip without it, which fails below.
       - name: Let the local provider boot disks with KVM
         run: sudo chmod 666 /dev/kvm
-      # A computer image or disk is tagged with a key of everything it is built from. A compose that finds no image of
-      # its key in the local registry copies the one the mirror holds, which main's runs share, rather than build it.
       - name: Slow integration tier on the local defaults
         id: tests
         env:
@@ -227,7 +224,6 @@ jobs:
         with:
           path: ${{ runner.temp }}/packages
           key: ${{ steps.lockkey.outputs.key }}
-      # Once main's tests pass, every image this runner built or copied goes to the mirror under its key.
       - name: Share the computer images
         continue-on-error: true
         if: >-
