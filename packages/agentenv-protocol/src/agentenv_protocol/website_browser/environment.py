@@ -33,7 +33,7 @@ from ..transfers import WriteNamespaceGrant
 from ..types import METHOD_ADD, RPC_PATH, EnvironmentExtension, IntakeDeclaration, IntakeFormat, intake_extension
 from . import data
 from .contexts import CONTEXTS, TASK, Contexts, label_problem
-from .scope import sees
+from .scope import Scope
 from .control import AGENT, DOWNLOADS, EXIT, LIVE_START_TAB_TIMEOUT_S, LOADED, STOP, UPLOADS, BrowserControl, _now
 from .devtools import PIPE_IN, PIPE_OUT, DevToolsError, DevToolsPipe
 from .recording import BROWSER_RECORDING, MAX_DURATION_S, MAX_FRAMES, BrowserRecordings
@@ -503,7 +503,8 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         lease = self.contexts.get(address.context) if address.context is not None else None
         if address.context is not None and lease is None:
             return False
-        return sees(self.contexts, lease.id if lease else None, address.user, context_id)
+        return Scope(self.contexts, self.relay.target_contexts, address.user, lease.id if lease else None).sees(
+            context_id)
 
     async def _until_ready(self) -> None:
         """Back once it's ready, as ``computer-app/v1``'s ``ready`` says, or DeviceUnavailable after its ready
