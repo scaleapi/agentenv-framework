@@ -581,7 +581,9 @@ class Store(ForwardingSite):
   no load and can't reset: agentenv's reset passes over a card serving no `data/reset`, and the conformance check
   passes a card serving `data/get` alone once `data/get` answers.
 - **Its session:** `@session_state` signs the browser in with whatever cookies the app sets, for example from one
-  server-side request carrying a sign-in header, which `dropped_headers` then keeps the browser from sending.
+  server-side request carrying a sign-in header, which `dropped_headers` then keeps the browser from sending. The
+  card names `dropped_headers` as the site's `sign_in_headers` (`WEBSITE_SIGN_IN_HEADERS_PARAM`), so should a
+  browser's request carry one, the browser's network log, and so `network.har`, keeps it with its value taken out.
 - **Its own calls:** `ask_app(path, method=..., headers=..., content=...)` asks the app as the site does, under its
   first name as `Host`, through the forwarder's client, which keeps no cookie and follows no redirect. Its session
   and ready checks use it, as `ForwardingSite`'s own ready check does.

@@ -391,6 +391,41 @@ async def test_a_site_naming_the_gateway_its_routes_are_on_is_refused_before_any
 
 
 @pytest.mark.asyncio
+async def test_a_sites_sign_in_headers_go_from_its_card_to_its_proxy_whose_network_log_takes_their_values_out(
+        monkeypatch):
+    from agentenv_protocol import client as protocol_v1
+
+    from agent_env.env.env import DeployedGatewayEnv
+    from agent_env.env.envs.computer.utils import site_proxy
+
+    cards = {"https://gw.example/svc/shop": {"capabilities": {"extensions": [{"uri": "urn:agentenv:website/v1", "params": {
+                 "domains": ["shop.localhost"], "sign_in_headers": ["X-Auto-Login", 7, ""]}}]}},
+             "https://gw.example/svc/notes": {"capabilities": {"extensions": [
+                 {"uri": "urn:agentenv:website/v1", "params": {"domains": ["notes.test"]}}]}}}
+
+    async def get_card(url, timeout=10, verify=True):
+        return cards[url]
+
+    monkeypatch.setattr(protocol_v1, "get_card", get_card)
+    gateway = DeployedGatewayEnv(env_id="sites", env_version=1, sandbox_id="s", gateway_url="https://gw.example",
+                                 website_frontend_urls={name: f"https://gw.example/website/{name}/"
+                                                        for name in ("shop", "notes")})
+    shop, notes = [Site(**found) for found in await sites.deployed_sites([gateway])]
+    sandbox = FakeVm({**_REPORT, "names": ["shop.localhost", "notes.test"], "checks": {
+        "shop.localhost": {"url": "http://shop.localhost/", "status": 200}, **_REPORT["checks"]}})
+
+    await sites.route(sandbox, [shop, notes], user="user", network=None, label="desktop", os_type="linux",
+                      display="none")
+
+    entries = {entry["name"]: entry for entry in json.loads(sandbox.written["/etc/agentenv/sites/config.json"])["sites"]}
+    assert (shop.sign_in_headers, notes.sign_in_headers) == (["X-Auto-Login"], [])
+    assert entries["shop"]["sign_in_headers"] == ["X-Auto-Login"] and "sign_in_headers" not in entries["notes"]
+    assert site_proxy.logged_headers([("x-auto-login", "admin:test"), ("Accept", "*/*")],
+                                     entries["shop"]["sign_in_headers"]) == [["x-auto-login", site_proxy.REMOVED],
+                                                                             ["Accept", "*/*"]]
+
+
+@pytest.mark.asyncio
 async def test_the_sites_a_run_deployed_are_read_from_each_gateways_records_and_their_cards(monkeypatch):
     from agentenv_protocol import client as protocol_v1
 

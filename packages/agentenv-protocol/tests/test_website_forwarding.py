@@ -22,6 +22,7 @@ from agentenv_protocol.website import (
     CLOCK_EXTENSION_URI,
     UNIVERSE_NOW_HEADER,
     WEBSITE_EXTENSION_URI,
+    WEBSITE_SIGN_IN_HEADERS_PARAM,
     ForwardingSite,
     WebsiteEnvironment,
     conformance,
@@ -260,6 +261,20 @@ def test_every_method_reaches_the_app_head_and_options_included(app, client):
 
     assert [seen["method"] for seen in app.seen] == ["HEAD", "OPTIONS", "DELETE"]
     assert (head.status_code, head.content, options.status_code, deleted.status_code) == (200, b"", 200, 200)
+
+
+def test_the_card_names_the_dropped_headers_as_the_sites_sign_in_headers_and_a_plain_site_names_none(client):
+    card = client.get("/.well-known/agent-env.json").json()
+    params = next(ext for ext in card["capabilities"]["extensions"] if ext["uri"] == WEBSITE_EXTENSION_URI)["params"]
+
+    @website(domains=[HOST], builtin_routes=False, clock="real")
+    class Bare(ForwardingSite):
+        pass
+
+    bare = Bare().extension_params(WEBSITE_EXTENSION_URI)
+
+    assert params[WEBSITE_SIGN_IN_HEADERS_PARAM] == ["X-Auto-Login"]
+    assert WEBSITE_SIGN_IN_HEADERS_PARAM not in bare
 
 
 def test_the_card_and_a_data_plane_of_data_get_alone_stay_the_sites_and_api_session_reaches_the_app(app, client):

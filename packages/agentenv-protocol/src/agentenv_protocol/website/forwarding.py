@@ -9,7 +9,8 @@ usually declares ``@website(builtin_routes=False, clock="real")``, so every path
 nothing expects the app to follow the universe's clock; it signs a browser in through a ``@session_state`` of its own,
 which asks the app with ``ask_app`` as its ready checks do.
 Its app keeps its own data, so its data plane serves ``data/get`` alone, which exports nothing: it takes no load and
-can't reset, which agentenv reads off its card, as it reads any site's that serves no ``data/reset``.
+can't reset, which agentenv reads off its card, as it reads any site's that serves no ``data/reset``. Its card names
+its ``dropped_headers`` as its sign-in headers, whose values the browser's network log takes out.
 
 It forwards HTTP alone: a WebSocket is refused (close code 1011)."""
 from __future__ import annotations
@@ -29,6 +30,7 @@ from ..agent_env_environment import get_data
 from ..passthrough import passed_on
 from .environment import SITE_RAW_PATH, WebsiteEnvironment, ready_check, route_path
 from .errors import ApiError
+from .readiness import WEBSITE_EXTENSION_URI, WEBSITE_SIGN_IN_HEADERS_PARAM
 from .routes import error_response
 
 #: How long the forwarder waits to connect to the app; once connected, it waits as long as the app takes to answer.
@@ -57,6 +59,12 @@ class ForwardingSite(WebsiteEnvironment):
 
     def fallback_app(self) -> Any:
         return self._forwarder
+
+    def extension_params(self, uri: str) -> dict:
+        params = super().extension_params(uri)
+        if uri == WEBSITE_EXTENSION_URI and self.dropped_headers:
+            return {**params, WEBSITE_SIGN_IN_HEADERS_PARAM: list(self.dropped_headers)}
+        return params
 
     async def ask_app(self, path: str, *, method: str = "GET", headers: Optional[dict[str, str]] = None,
                       content: Optional[bytes] = None, timeout: float = ASK_TIMEOUT_S) -> httpx.Response:

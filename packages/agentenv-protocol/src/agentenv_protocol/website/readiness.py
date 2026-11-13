@@ -25,6 +25,9 @@ WEBSITE_LIVE_PARAM = "live"
 WEBSITE_ALLOW_HOSTS_PARAM = "allow_hosts"
 #: A site's ``website/v1`` param naming its clock when it keeps real time, which the conformance check reads.
 WEBSITE_CLOCK_PARAM = "clock"
+#: A site's ``website/v1`` param naming the request headers only its own calls send, a sign-in header among them, whose
+#: values the browser's network log takes out.
+WEBSITE_SIGN_IN_HEADERS_PARAM = "sign_in_headers"
 #: A site's clocks: the universe's, which ``clock/v1`` can tie to the gateway's, and real time, which a third-party app
 #: keeps and nothing moves.
 UNIVERSE_CLOCK, REAL_CLOCK = "universe", "real"
