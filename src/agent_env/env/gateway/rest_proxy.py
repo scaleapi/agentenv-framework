@@ -262,15 +262,15 @@ def route_prefix(request: HTTPConnection) -> str:
 def is_child_mcp_path(decoded_rest: str, endpoint: str = "mcp") -> bool:
     """Whether a /svc/{service}/{path} remainder reaches the backing server's MCP endpoint (`endpoint`, `mcp` unless
     its card declares another, or anything under it), judged after dot-segment normalisation, since httpx collapses
-    `x/../mcp` to `/mcp` on the way upstream.
+    `x/../mcp` to `/mcp` on the way upstream, and ignoring case, as some servers' routing does.
 
-    >>> [is_child_mcp_path(p) for p in ("mcp", "mcp/", "mcp/x", "x/../mcp", "./mcp", "/mcp", "mcpx", "agentenv", "")]
-    [True, True, True, True, True, True, False, False, False]
-    >>> [is_child_mcp_path(p, "/tools/mcp/") for p in ("tools/mcp", "tools/x/../mcp", "mcp")]
-    [True, True, False]
+    >>> [is_child_mcp_path(p) for p in ("mcp", "mcp/", "mcp/x", "x/../mcp", "./mcp", "/mcp", "MCP", "mcpx", "agentenv", "")]
+    [True, True, True, True, True, True, True, False, False, False]
+    >>> [is_child_mcp_path(p, "/tools/mcp/") for p in ("tools/mcp", "tools/x/../mcp", "Tools/Mcp", "mcp")]
+    [True, True, True, False]
     """
-    normalized = posixpath.normpath("/" + decoded_rest.lstrip("/"))
-    at = posixpath.normpath("/" + endpoint.strip("/"))
+    normalized = posixpath.normpath("/" + decoded_rest.lstrip("/")).lower()
+    at = posixpath.normpath("/" + endpoint.strip("/")).lower()
     return normalized == at or normalized.startswith(at + "/")
 
 

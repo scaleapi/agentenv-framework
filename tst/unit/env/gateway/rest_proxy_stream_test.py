@@ -535,6 +535,7 @@ async def test_a_tool_disabled_for_the_caller_is_refused_as_mcp_refuses_it_and_n
     gw = _gated(_tool("read"), _tool("list"))
     gw._apply_rule("alice@example.com", "read", True)
     refused = await _post_rpc(gw, _rpc(name="read", arguments={}), "alice@example.com")
+    respelled = await _post_rpc(gw, _rpc(name="read", arguments={}), "alice@example.com", path="/svc/mcp-svc/MCP/")
     allowed = [await _post_rpc(gw, _rpc(name="list", arguments={}), "alice@example.com"),
                await _post_rpc(gw, _rpc(name="read", arguments={}), "carol@example.com")]
     token = Caller(role="alice@example.com").bind()
@@ -543,7 +544,7 @@ async def test_a_tool_disabled_for_the_caller_is_refused_as_mcp_refuses_it_and_n
             await gw._mcp._tool_manager.call_tool("read", {})
     finally:
         Caller.reset(token)
-    assert refused == (200, {"jsonrpc": "2.0", "id": 1, "result": {
+    assert refused == respelled == (200, {"jsonrpc": "2.0", "id": 1, "result": {
         "content": [{"type": "text", "text": str(on_mcp.value)}], "isError": True}})
     assert allowed == [(200, {}), (200, {})]
     assert [json.loads(r.content)["params"]["name"] for r in up.requests] == ["list", "read"]
