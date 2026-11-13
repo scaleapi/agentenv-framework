@@ -221,6 +221,25 @@ async def test_the_video_follows_an_agents_tab_a_popup_it_opens_and_goes_back_wh
 
 
 @pytest.mark.asyncio
+async def test_a_clients_setup_on_every_page_it_attaches_to_doesnt_move_the_video_and_its_input_does(browser):
+    pipe, control, contexts, network, recordings, uploads = browser
+    pipe.open("T0", GREEN)
+    pipe.open("T3", YELLOW)
+    pipe.focused = "T0"
+    started = await recordings.start("run:a", _grant(), network=False)
+    for method in ("Page.addScriptToEvaluateOnNewDocument", "Runtime.addBinding", "Emulation.setFocusEmulationEnabled",
+                   "Network.setExtraHTTPHeaders", "Runtime.evaluate"):
+        _acted(recordings.log, "T3", method=method)
+    await asyncio.sleep(0.3)
+    set_up = [seen["tab"] for seen in recordings.every()[0].stream.followed]
+    _acted(recordings.log, "T3", method="Input.dispatchKeyEvent")
+    await asyncio.sleep(0.3)
+    manifest = BrowserRecordingManifest.model_validate(await recordings.end(started["recording_id"]))
+
+    assert set_up == ["T0"] and [seen.tab for seen in manifest.video.followed] == ["T0", "T3"]
+
+
+@pytest.mark.asyncio
 async def test_a_tab_that_sends_no_screencast_frame_is_captured_until_it_does(browser, monkeypatch):
     pipe, control, contexts, network, recordings, uploads = browser
     monkeypatch.setattr(browser_stream, "SILENT_S", 0.2)

@@ -67,6 +67,10 @@ MAX_SEGMENTS = 2 * MAX_DURATION_S // SEGMENT_S
 MAX_OBJECTS = (1 + MAX_CHILDREN) * (MAX_FRAMES + MAX_SEGMENTS + 3)
 #: The ways in whose actions are an agent's: CDP commands and MCP tool calls, not agentenv's own.
 AGENTS = ("cdp", "mcp")
+#: The CDP commands that move a video to the tab they're on, besides every ``Input`` one: those that show an agent at
+#: work there, not the setup a client sends every page it attaches to, its scripts, bindings and emulation.
+FOLLOWED = frozenset({"Page.navigate", "Page.reload", "Page.navigateToHistoryEntry", "Page.bringToFront",
+                      "Page.handleJavaScriptDialog", "Target.activateTarget", "DOM.setFileInputFiles"})
 CONTENT_TYPES = {"jpg": "image/jpeg", "png": "image/png"}
 #: How long the recordings a server ended are kept for an end that comes again.
 KEEP_ENDED = 64
@@ -288,11 +292,14 @@ class BrowserRecordings:
         return found
 
     def acted(self, seq: int, action: dict) -> None:
-        """An action written to the log: an agent's acting one on a tab moves the video of that tab's context there,
-        and starts, or holds back, the frame of its burst."""
+        """An action written to the log: an agent's acting one on a tab starts, or holds back, the frame of its burst,
+        and one that shows it at work there, an MCP tool call or such a command, moves the video of that tab's context
+        there."""
         if action.get("acts") and action.get("via") in AGENTS:
+            method = action.get("method") or ""
+            moves = action.get("via") == "mcp" or method.startswith("Input.") or method in FOLLOWED
             for recording in self.every():
-                recording.acted(seq, action.get("tab"))
+                recording.acted(seq, action.get("tab"), moves)
 
     def tab_event(self, event: str, tab: dict) -> None:
         """A tab opened or closed: its context kept, and every recording told."""
@@ -388,10 +395,11 @@ class _Recording:
         with contextlib.suppress(Exception):
             await self.video.end("end", None)
 
-    def acted(self, seq: int, tab: Optional[str]) -> None:
+    def acted(self, seq: int, tab: Optional[str], moves: bool = True) -> None:
         if self.ending or not self.stream.sees(tab):
             return
-        self.stream.follow(tab)
+        if moves:
+            self.stream.follow(tab)
         if not self.frames_on:
             return
         self.pending.append(seq)
