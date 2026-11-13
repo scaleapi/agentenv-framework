@@ -308,7 +308,7 @@ async def test_its_record_and_tab_list_have_the_shapes_and_name_each_tabs_opener
     devtools.send("Target.targetDestroyed", {"targetId": "popup"})
 
     record = await control.record()
-    assert set(record["tabs"][0]) == {"id", "url", "title", "opened_at", "opener", "active"}
+    assert set(record["tabs"][0]) == {"id", "url", "title", "opened_at", "opener", "active", "context"}
     assert record["tabs"][0]["opener"] is None
     assert (record["closed_tabs"][0]["opener"], record["closed_tabs"][0]["closed_by"]) == ("a", "unknown")
     assert (await control.tab_list())[0]["id"] == "a"

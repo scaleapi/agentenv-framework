@@ -7,8 +7,9 @@ import json
 import logging
 import re
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
-from typing import ClassVar, Optional
+from typing import Any, ClassVar, Optional
 
 from agent_env.a2a_agent.object_transfer import (
     TrajectoryUpload,
@@ -25,6 +26,7 @@ from agent_env.task_step.context import (
     StepContextError,
     TaskStepContext,
     VerifierNotPassingError,
+    context_path_segments,
     dual_keyed,
 )
 from agent_env.task_step.task_steps.verifiers.judge_utils.judge_output_format import (
@@ -131,9 +133,6 @@ def trajectory_mistakes_key(verifier_id: str) -> str:
     return f"{verifier_id}{TRAJECTORY_MISTAKES_SUFFIX}"
 
 
-# A context_facts_for_judge path: dotted segments of letters, digits, `_` and `-` (dict keys, or a list index).
-_CONTEXT_FACT_PATH = re.compile(r"^[\w-]+(\.[\w-]+)*$")
-
 # A graded batch is a bulk verdict when this many of its rows share one justification (at least
 # _BULK_MIN_SHARED of them), or when this share of justifications is shorter than _BULK_SHORT_CHARS.
 _BULK_SHARED_FRACTION = 0.25
@@ -194,9 +193,11 @@ CONTEXT_FACT_NOT_AVAILABLE = "(not available)"  # rendered for a path that does 
 _MISSING = object()
 
 
-def _lookup_dotted_path(root: object, path: str) -> object:
-    node = root
-    for segment in path.split("."):
+def _lookup_dotted_path(metadata: dict, path: str) -> object:
+    node, segments = metadata, context_path_segments(path)
+    if segments is None:
+        return _MISSING
+    for segment in segments:
         if isinstance(node, dict):
             if segment not in node:
                 return _MISSING
@@ -223,7 +224,8 @@ def _render_fact(value: object) -> str:
 def resolve_context_facts(facts: dict[str, str], metadata: dict) -> list[tuple[str, str]]:
     """Resolve ``{label: dotted path}`` against ``metadata`` into ``[(label, rendered value)]``, in order.
     A path walks dicts by key and lists by index; one that does not resolve renders as
-    ``CONTEXT_FACT_NOT_AVAILABLE`` so the judge sees the fact was requested. Never raises."""
+    ``CONTEXT_FACT_NOT_AVAILABLE`` so the judge sees the fact was requested. Never raises.
+    A bundle rewrites an id a path names to the one it gives that entity (``TaskStep.context_paths``)."""
     rendered: list[tuple[str, str]] = []
     for label, path in facts.items():
         value = _lookup_dotted_path(metadata, path)
@@ -402,6 +404,7 @@ def _as_of_turn(prompt_response: PromptResponse, turn: Optional[int]) -> PromptR
 class RubricsVerifierTaskStep(TaskStep):
     type: ClassVar[str] = "rubrics_verifier"
     entity_refs = (EntityRef.agent("judge_a2a_agent_id"),)
+    context_paths = ("context_facts_for_judge{}",)
     field_scopes = {**TaskStep.field_scopes, **dict.fromkeys(
         ("judge_a2a_agent_id", "default_model", "default_model_api_base", "effort", "max_thinking_tokens",
          "judge_sandbox_type", "judge_batch_size", "judge_batch_concurrency"), FieldScope.USER)}
@@ -488,12 +491,12 @@ class RubricsVerifierTaskStep(TaskStep):
         # and shown as a "## Context facts" section the judge trusts over the pixels.
         if context_facts_for_judge is not None:
             if not isinstance(context_facts_for_judge, dict) or not all(
-                isinstance(label, str) and label and isinstance(path, str) and _CONTEXT_FACT_PATH.match(path)
+                isinstance(label, str) and label and context_path_segments(path) is not None
                 for label, path in context_facts_for_judge.items()
             ):
                 raise ValueError(
                     "context_facts_for_judge must map non-empty labels to dotted paths of identifiers "
-                    "(letters, digits, '_' and '-' per segment), e.g. "
+                    "(letters, digits, '_' and '-' per segment, or any id in brackets), e.g. "
                     '{"items in cart": "verifications.cart-check.count"}.'
                 )
         self.context_facts_for_judge = context_facts_for_judge
@@ -640,6 +643,11 @@ class RubricsVerifierTaskStep(TaskStep):
             fail_task_when_not_passing=data.get("fail_task_when_not_passing", False),
         )
 
+    async def judge_prompt_sections(self, context: TaskStepContext, prompt_response: PromptResponse) -> list[str]:
+        """Sections a subclass adds to this run's judge prompt, after the run context: an override point, called once
+        per run (never for one skipped) with the prompt's stored response. None here."""
+        return []
+
     def _resolved_criteria(self, context: TaskStepContext) -> list[dict]:
         """Criteria for this run: a per-run ``step_params`` override replaces the stored list.
 
@@ -685,6 +693,7 @@ class RubricsVerifierTaskStep(TaskStep):
             run_context = await load_run_context(context, stored_response)
             if grade_up_to_turn is not None:
                 run_context = run_context.as_of(grade_up_to_turn)
+        extra_sections = await self.judge_prompt_sections(context, stored_response)
 
         per_turn_uris = [u for u in (prompt_response.target_agent_per_turn_trajectory_object_urls or []) if u]
         if self.use_trajectory and not (per_turn_uris or prompt_response.agent_trajectory_object_url):
@@ -879,6 +888,7 @@ class RubricsVerifierTaskStep(TaskStep):
                         loaded_artifacts=loaded_for_judge,
                         context_facts=context_facts,
                         run_context=run_context,
+                        extra_sections=extra_sections,
                     )
                     if self.use_trajectory and multiturn:
                         prompt += self._MULTITURN_DIR_NOTE.format(n=len(per_turn_uris))
@@ -892,6 +902,7 @@ class RubricsVerifierTaskStep(TaskStep):
                         per_criterion_frames=compacted.per_criterion,
                         context_facts=context_facts,
                         run_context=run_context,
+                        extra_sections=extra_sections,
                     )
                     if image_blocks:
                         logger.info(
@@ -1533,9 +1544,11 @@ class RubricsVerifierTaskStep(TaskStep):
         per_criterion_frames: bool = False,
         context_facts: Optional[list[tuple[str, str]]] = None,
         run_context: Optional[Run] = None,
+        extra_sections: Sequence[str] = (),
     ) -> str:
         """``context_facts`` are rendered ``(label, value)`` pairs (``resolve_context_facts``); ``image_blocks``
-        are the blocks attached to the judge message, labels included when ``per_criterion_frames``."""
+        are the blocks attached to the judge message, labels included when ``per_criterion_frames``;
+        ``extra_sections`` are ``judge_prompt_sections``', after the run context."""
         spec = self._spec()
         # Only the rubric_evidence templates have this placeholder; the others ignore the argument.
         checks_instruction = evidence_checks_instruction(has_policy=bool(self.grading_policy_prompt))
@@ -1568,6 +1581,8 @@ class RubricsVerifierTaskStep(TaskStep):
             base += "\n\n" + render_run_context(run_context, self.run_context_for_judge,
                                                  message_max_chars=self.RUN_CONTEXT_MESSAGE_MAX_CHARS,
                                                  firings_max=self.RUN_CONTEXT_FIRINGS_MAX)
+        for section in extra_sections:
+            base += "\n\n" + section
         if context_facts:
             # Facts before the policy: they are inputs, the policy is how to read them.
             base += "\n\n## Context facts\n" + self._CONTEXT_FACTS_LEAD + "\n" + "\n".join(
@@ -1611,6 +1626,19 @@ class RubricsVerifierTaskStep(TaskStep):
             "Do not rely solely on the agent's response text — verify against the actual files when possible.",
         ]
         return "\n".join(lines)
+
+
+def is_rubrics_verifier(step_or_config: TaskStep | dict[str, Any]) -> bool:
+    """Whether a step, or a stored step (its dict, its ``type`` looked up in the step registry), is a rubrics_verifier
+    or a subclass of one, such as always_on_agent_verifier: what code that would check the type string asks instead,
+    so the subclasses count. A dict of an unknown type is not one."""
+    if isinstance(step_or_config, dict):
+        from agent_env.task_step.registry import get_task_step_registry  # its built-ins import this module
+
+        cls = get_task_step_registry().get(step_or_config.get("type"))
+    else:
+        cls = type(step_or_config)
+    return isinstance(cls, type) and issubclass(cls, RubricsVerifierTaskStep)
 
 
 def _raise_unless_passing(verifier_id: str, entry: dict) -> None:

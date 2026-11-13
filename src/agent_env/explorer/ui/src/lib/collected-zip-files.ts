@@ -18,11 +18,19 @@ export function collectedZipFiles(
   return Object.entries(artifacts)
     .filter(([, uri]) => typeof uri === 'string' && uri !== '')
     .map(([key, uri]) => ({
-      path: !isAbsoluteArtifactPath(key)
-        ? key
-        : key.startsWith(`${base}/`)
-        ? key.slice(base.length + 1)
-        : key.replace(/^[/\\]+/, ''),
+      path: archiveName(
+        !isAbsoluteArtifactPath(key) ? key : key.startsWith(`${base}/`) ? key.slice(base.length + 1) : key,
+      ),
       objectUrl: uri,
     }));
+}
+
+/** A key as a member name that stays inside the archive when extracted: an agent names its manifest's entries. */
+export function archiveName(key: string): string {
+  const parts: string[] = [];
+  for (const part of key.replace(/^[A-Za-z]:/, '').split(/[\\/]+/)) {
+    if (part === '..') parts.pop();
+    else if (part !== '' && part !== '.') parts.push(part);
+  }
+  return parts.join('/') || 'artifact';
 }

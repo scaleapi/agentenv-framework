@@ -135,10 +135,14 @@ CHECKS: dict[str, Callable[..., list[str]]] = {
     "register_agent_triggers": _needs_the_agent,
     "browser_connect_cdp": _needs_the_agent,
     "snapshot_agent_state": _needs_the_agent,
+    # An outside agent can't yet be woken by always_on's loop, nor play its user sim (the agent user_sim names).
+    "always_on": _needs_the_agent,
+    "deploy_user_sim_agent": _deploys_an_agent,
     "collect_artifacts": _collect_artifacts,
     "register_env_triggers": _register_env_triggers,
     "peer_agents": _peer_agents,
     "rubrics_verifier": _rubrics_verifier,
+    "always_on_agent_verifier": _rubrics_verifier,
     **dict.fromkeys((
         "verify_a2a_agent_card", "verify_a2a_agent_config_identity", "verify_a2a_agent_mcp", "verify_a2a_builtin_tools",
         "verify_a2a_core_protocol", "verify_a2a_install", "verify_a2a_modalities", "verify_a2a_peer_agents",
@@ -150,9 +154,10 @@ CHECKS: dict[str, Callable[..., list[str]]] = {
 UNAFFECTED = frozenset({
     # They name no agent.
     "aggregate_verifiers", "apply_server_config", "browser_activate_tab", "browser_clear_local_storage",
-    "browser_close_tab", "browser_delete_cookies", "browser_open_tab", "browser_set_cookies", "browser_sign_in",
-    "browser_set_local_storage", "build_mcp_cli", "combine_universe_verdicts", "configure_scheduled_checks",
-    "deploy_env", "deploy_sandbox", "end_computer_recording", "start_computer_recording", "env_outcome_verifier",
+    "browser_close_tab", "browser_delete_cookies", "browser_lease_context", "browser_open_tab",
+    "browser_release_context", "browser_set_cookies", "browser_sign_in", "browser_set_local_storage", "build_mcp_cli",
+    "combine_universe_verdicts", "configure_scheduled_checks", "deploy_env", "deploy_sandbox", "end_browser_recording",
+    "end_computer_recording", "start_browser_recording", "start_computer_recording", "env_outcome_verifier",
     "modify_env_tool_access", "reset_env", "review",
     "run_container_unit_tests_verifier", "run_docker_container", "snapshot_env", "snapshot_computer_env", "sync_env_clock",
     "validation_gate_aggregator", "verify_env_card", "verify_env_core_protocol", "verify_mcp_tool_schema",

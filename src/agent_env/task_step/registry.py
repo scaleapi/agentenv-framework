@@ -28,6 +28,10 @@ def get_task_step_registry() -> dict[str, type["TaskStep"]]:
 
 def _builtin_registry() -> dict[str, type["TaskStep"]]:
     from agent_env.task_step.task_steps.browser.connect_cdp import BrowserConnectCdpTaskStep
+    from agent_env.task_step.task_steps.browser.contexts import (
+        BrowserLeaseContextTaskStep,
+        BrowserReleaseContextTaskStep,
+    )
     from agent_env.task_step.task_steps.browser.cookies import BrowserDeleteCookiesTaskStep, BrowserSetCookiesTaskStep
     from agent_env.task_step.task_steps.browser.sign_in import BrowserSignInTaskStep
     from agent_env.task_step.task_steps.browser.local_storage import (
@@ -44,6 +48,10 @@ def _builtin_registry() -> dict[str, type["TaskStep"]]:
         EndComputerRecordingTaskStep,
         StartComputerRecordingTaskStep,
     )
+    from agent_env.task_step.task_steps.browser.recording import (
+        EndBrowserRecordingTaskStep,
+        StartBrowserRecordingTaskStep,
+    )
     from agent_env.task_step.task_steps.mcp_cli_builder.build_mcp_cli import BuildMcpCliTaskStep
     from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
     from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
@@ -55,12 +63,15 @@ def _builtin_registry() -> dict[str, type["TaskStep"]]:
     from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
     from agent_env.task_step.task_steps.modify_env_tool_access import ModifyEnvToolAccessStep
     from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
+    from agent_env.task_step.task_steps.always_on import AlwaysOnTaskStep
+    from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import DeployUserSimAgentTaskStep
     from agent_env.task_step.task_steps.register_env_triggers import RegisterEnvTriggersStep
     from agent_env.task_step.task_steps.register_agent_triggers import RegisterAgentTriggersStep
     from agent_env.task_step.task_steps.sync_env_clock import SyncEnvClockTaskStep
     from agent_env.task_step.task_steps.configure_scheduled_checks import ConfigureScheduledChecksTaskStep
     from agent_env.task_step.task_steps.install_agent import InstallAgentTaskStep
     from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
+    from agent_env.task_step.task_steps.verifiers.always_on_agent_verifier import AlwaysOnAgentVerifier
     from agent_env.task_step.task_steps.verifiers.run_container_unit_tests_verifier import RunContainerUnitTestsVerifierTaskStep
     from agent_env.task_step.task_steps.run_docker_container import RunDockerContainerTaskStep
     from agent_env.task_step.task_steps.mcp_env_validator.verify_mcp_tool_schema import VerifyMCPToolSchemaTaskStep
@@ -108,9 +119,13 @@ def _builtin_registry() -> dict[str, type["TaskStep"]]:
         _get_type(BrowserOpenTabTaskStep): BrowserOpenTabTaskStep,
         _get_type(BrowserCloseTabTaskStep): BrowserCloseTabTaskStep,
         _get_type(BrowserActivateTabTaskStep): BrowserActivateTabTaskStep,
+        _get_type(BrowserLeaseContextTaskStep): BrowserLeaseContextTaskStep,
+        _get_type(BrowserReleaseContextTaskStep): BrowserReleaseContextTaskStep,
         _get_type(CollectArtifactsTaskStep): CollectArtifactsTaskStep,
         _get_type(StartComputerRecordingTaskStep): StartComputerRecordingTaskStep,
         _get_type(EndComputerRecordingTaskStep): EndComputerRecordingTaskStep,
+        _get_type(StartBrowserRecordingTaskStep): StartBrowserRecordingTaskStep,
+        _get_type(EndBrowserRecordingTaskStep): EndBrowserRecordingTaskStep,
         _get_type(DeployAgentTaskStep): DeployAgentTaskStep,
         _get_type(DeployEnvTaskStep): DeployEnvTaskStep,
         _get_type(DeployHumanAgentTaskStep): DeployHumanAgentTaskStep,
@@ -121,12 +136,15 @@ def _builtin_registry() -> dict[str, type["TaskStep"]]:
         _get_type(LoadArtifactTaskStep): LoadArtifactTaskStep,
         _get_type(ModifyEnvToolAccessStep): ModifyEnvToolAccessStep,
         _get_type(PromptAgentTaskStep): PromptAgentTaskStep,
+        _get_type(AlwaysOnTaskStep): AlwaysOnTaskStep,
+        _get_type(DeployUserSimAgentTaskStep): DeployUserSimAgentTaskStep,
         _get_type(RegisterEnvTriggersStep): RegisterEnvTriggersStep,
         _get_type(RegisterAgentTriggersStep): RegisterAgentTriggersStep,
         _get_type(SyncEnvClockTaskStep): SyncEnvClockTaskStep,
         _get_type(ConfigureScheduledChecksTaskStep): ConfigureScheduledChecksTaskStep,
         _get_type(InstallAgentTaskStep): InstallAgentTaskStep,
         _get_type(RubricsVerifierTaskStep): RubricsVerifierTaskStep,
+        _get_type(AlwaysOnAgentVerifier): AlwaysOnAgentVerifier,
         _get_type(RunContainerUnitTestsVerifierTaskStep): RunContainerUnitTestsVerifierTaskStep,
         _get_type(RunDockerContainerTaskStep): RunDockerContainerTaskStep,
         _get_type(VerifyMCPToolSchemaTaskStep): VerifyMCPToolSchemaTaskStep,

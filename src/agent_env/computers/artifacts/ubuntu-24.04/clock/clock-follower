@@ -1,0 +1,204 @@
+#!/usr/bin/python3 -I
+"""The computer's clock follower: holds a long poll on the gateway's ``/clock/watch`` and writes each state it learns
+to the clock page (``clockpage.py``), which agent-env's libfaketime reads in every session program, so the session reads
+the universe's time. It runs as its own user, under root's supervisord, so the session user can read the clock but
+neither write it nor stop it.
+
+Core writes its config, the gateway's watch URL as this computer reaches it, the computer's name and its read token,
+through the sandbox's root channel (``CONFIG``, readable by root and this user alone); never through the driver, which
+runs as the session user. It reads the config every quarter second, during a watch too, and follows a changed one at
+once. Until there is one, the clock stays as root made it at boot: real time. It reports how it's doing in ``STATUS``,
+which anyone may read and which holds no token: the gateway it follows, whether it's connected, the version it shows,
+or its last error.
+
+The gateway's clock is read against this machine's: its offset is four-stamp, ``((received - t1) + (sent - t4)) / 2``,
+from the newest of the last 8 answers whose round trip, less the time the gateway held the watch, isn't an outlier. A
+state is written anchored, universe V at this machine's real time A (the gateway's ``sent``) at rate R, so every reader
+computes V + (now - A) * R. Each watch names the version it shows, which is its acknowledgement of that version."""
+import json
+import os
+import queue
+import random
+import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import clockpage  # noqa: E402
+
+CONFIG = os.environ.get("AGENTENV_CLOCK_CONFIG", "/etc/agentenv/clock/follower.json")
+STATUS = os.environ.get("AGENTENV_CLOCK_STATUS", "/run/agentenv-clock/status.json")
+#: How long a watch may take: the gateway holds one up to 25 s (its card's ``hold_s``), plus a margin.
+WATCH_TIMEOUT_S = 35.0
+#: How often the config is read, during a watch too.
+CONFIG_POLL_S = 0.25
+#: A re-anchoring (the offset moved) is written only past this much, so the page doesn't churn on noise.
+ADJUST_S = 0.001
+SAMPLES = 8
+#: After a failed watch it waits before asking again: RETRY_FIRST_S at first, doubled after each failure up to
+#: RETRY_MAX_S, each wait a random fraction (RETRY_JITTER) of that, so computers that lost a gateway don't all return at
+#: once.
+RETRY_FIRST_S = 0.05
+RETRY_MAX_S = 2.0
+RETRY_JITTER = (0.5, 1.0)
+OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def log(event: str, **fields) -> None:
+    sys.stdout.write(json.dumps({"event": event, "real": time.time(), **fields}) + "\n")
+    sys.stdout.flush()
+
+
+def atomic_write(path: str, text: str) -> None:
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w") as f:
+        f.write(text)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+
+
+def read_config() -> tuple[bytes | None, dict | None]:
+    """The config's bytes and what they say, (None, None) when there is none, (bytes, None) when it isn't one."""
+    try:
+        with open(CONFIG, "rb") as f:
+            raw = f.read()
+    except OSError:
+        return None, None
+    try:
+        config = json.loads(raw)
+        return raw, config if isinstance(config, dict) and all(
+            isinstance(config.get(key), str) and config[key] for key in ("watch_url", "name", "token")) else None
+    except ValueError:
+        return raw, None
+
+
+def parse_time(text: str) -> float:
+    return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+
+
+def offset(samples: list[dict]) -> tuple[float, int]:
+    """The offset from the newest sample whose delay isn't an outlier (over twice the median and 2 ms), and how many
+    were dropped."""
+    delays = sorted(sample["delay"] for sample in samples)
+    median = delays[len(delays) // 2]
+    kept = [sample for sample in samples if sample["delay"] <= max(2 * median, median + 0.002)]
+    return (kept or samples)[-1]["theta"], len(samples) - len(kept)
+
+
+def state_of(body: dict, theta: float) -> tuple[int, float, float, float]:
+    """(armed, universe at the anchor, rate, anchor on this machine's clock) for a watch's answer ``body``."""
+    if not body.get("armed"):
+        return 0, 0.0, 1.0, time.time()
+    return (1, parse_time(body["virtual_time"]), float(body["virtual_seconds_per_real_second"]),
+            body["sent"] - theta)
+
+
+def watch(url: str, name: str, token: str, after: str, out: queue.Queue) -> None:
+    """One watch, its answer (or what failed) put on ``out`` with the stamps around it."""
+    t1 = time.time()
+    try:
+        request = urllib.request.Request(
+            f"{url}?{urllib.parse.urlencode({'after': after, 'follower': name})}",
+            headers={"Authorization": f"Bearer {token}"})
+        with OPENER.open(request, timeout=WATCH_TIMEOUT_S) as answer:
+            body = json.loads(answer.read())
+        out.put((t1, time.time(), body, None))
+    except Exception as e:  # noqa: BLE001 - away, restarting or refusing: the follower says so and asks again
+        out.put((t1, time.time(), None, e))
+
+
+class Follower:
+    """Follows one config until it changes."""
+
+    def __init__(self, raw: bytes, config: dict):
+        self.raw, self.url, self.name, self.token = raw, config["watch_url"], config["name"], config["token"]
+        self.after, self.samples, self.written = "", [], None
+        self.errors, self.backoff = 0, RETRY_FIRST_S
+        self.status = {"url": self.url, "name": self.name, "connected": False, "version": None, "armed": False,
+                       "error": None}
+
+    def report(self, **fields) -> None:
+        self.status.update(fields)
+        atomic_write(STATUS, json.dumps(self.status))
+
+    def run(self) -> None:
+        log("following", url=self.url, name=self.name)
+        self.report()
+        while True:
+            answers: queue.Queue = queue.Queue()
+            threading.Thread(target=watch, args=(self.url, self.name, self.token, self.after, answers),
+                             daemon=True).start()
+            while True:
+                try:
+                    t1, t4, body, error = answers.get(timeout=CONFIG_POLL_S)
+                    break
+                except queue.Empty:
+                    if read_config()[0] != self.raw:
+                        return  # its watch is left to end on its own; nothing it answers is applied
+            if error is not None:
+                self.failed(error)
+                continue
+            if read_config()[0] != self.raw:
+                return
+            try:
+                self.apply(t1, t4, body)
+            except (KeyError, TypeError, ValueError, AttributeError) as e:
+                self.failed(ValueError(f"not a clock watch's answer ({type(e).__name__}: {e})"))
+
+    def failed(self, error: Exception) -> None:
+        self.errors += 1
+        code = error.code if isinstance(error, urllib.error.HTTPError) else None
+        self.report(connected=False, error=f"{type(error).__name__}: {error}"[:300], status=code, errors=self.errors,
+                    error_at=time.time())
+        if self.errors <= 20 or self.errors % 100 == 0:
+            log("error", errors=self.errors, status=code, error=repr(error)[:200], backoff=self.backoff)
+        deadline = time.monotonic() + self.backoff * random.uniform(*RETRY_JITTER)
+        while time.monotonic() < deadline and read_config()[0] == self.raw:
+            time.sleep(min(CONFIG_POLL_S, max(0.0, deadline - time.monotonic())))
+        self.backoff = min(self.backoff * 2, RETRY_MAX_S)
+
+    def apply(self, t1: float, t4: float, body: dict) -> None:
+        if self.errors:
+            log("reconnected", after_errors=self.errors)
+        self.errors, self.backoff = 0, RETRY_FIRST_S
+        held = body["sent"] - body["received"]
+        self.samples = (self.samples + [{"delay": max(0.0, (t4 - t1) - held),
+                                         "theta": ((body["received"] - t1) + (body["sent"] - t4)) / 2}])[-SAMPLES:]
+        theta, dropped = offset(self.samples)
+        armed, universe, rate, anchor = state_of(body, theta)
+        meaning = (armed, rate, universe - rate * anchor if armed else 0.0)
+        changed = body["version"] != self.after
+        moved = (self.written is None or meaning[:2] != self.written[:2]
+                 or abs(meaning[2] - self.written[2]) > ADJUST_S)
+        if changed or moved:
+            written = clockpage.write(armed, universe, rate, anchor)
+            self.written = meaning
+            log("applied" if changed else "adjusted", version=body["version"], armed=bool(armed),
+                virtual_time=body.get("virtual_time"), spec=written["spec"], theta=theta, held=held, dropped=dropped)
+        self.after = body["version"]
+        self.report(connected=True, version=self.after, armed=bool(armed), virtual_time=body.get("virtual_time"),
+                    rate=body.get("virtual_seconds_per_real_second"), theta=theta, applied_at=time.time(), error=None,
+                    status=None, errors=0)
+
+
+def main() -> None:
+    log("start", pid=os.getpid(), uid=os.getuid())
+    atomic_write(STATUS, json.dumps({"connected": False, "error": None, "waiting": "no config yet"}))
+    while True:
+        raw, config = read_config()
+        if config is None:
+            if raw is not None:
+                atomic_write(STATUS, json.dumps({"connected": False, "error": "its config isn't one: it needs "
+                                                 "watch_url, name and token"}))
+            while read_config()[0] == raw:
+                time.sleep(CONFIG_POLL_S)
+            continue
+        Follower(raw, config).run()
+
+
+if __name__ == "__main__":
+    main()

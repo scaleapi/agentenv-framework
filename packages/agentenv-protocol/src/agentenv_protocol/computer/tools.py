@@ -405,7 +405,8 @@ class Tools:
                 "switch": f"Switched to tab {tab}", "close": f"Closed tab {tab}"}[action]
 
         def listed(result: InputResult, tabs: Any) -> TabsResult:
-            rows = [TabData(tab=t.id, url=t.url, title=t.title, active=t.active) for t in tabs or []]
+            rows = [TabData(tab=t.id, url=t.url, title=t.title, active=t.active, context=t.context)
+                    for t in tabs or []]
             active = next((row for row in rows if row.active), None)
             shown = f', the active one "{active.title}" ({active.url})' if active is not None else ""
             return TabsResult(**{**result.model_dump(), "summary": f"{verb}; {len(rows)} open{shown}"

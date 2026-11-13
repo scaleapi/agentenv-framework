@@ -11,7 +11,7 @@ from agent_env.task.store import new_instance_id
 from agent_env.task.task import Task, substitute_seed_in_steps
 from agent_env.task_step.context import TaskStepContext, sandbox_overrides
 from agent_env.task_step.task_step import TaskStep
-from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
+from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep, is_prompt_step
 
 
 class EpisodeSpec:
@@ -74,7 +74,7 @@ class EpisodeSpec:
 
 
 def _trainer_agents(task: Task, steps: list[TaskStep], named: Sequence[str] | None) -> list[str]:
-    prompted = list(dict.fromkeys(step.agent_name for step in steps if step.type == "prompt_agent"))
+    prompted = list(dict.fromkeys(step.agent_name for step in steps if is_prompt_step(step)))
     if named is None:
         if len(prompted) != 1:
             raise EpisodeError(

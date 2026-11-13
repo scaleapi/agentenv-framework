@@ -306,6 +306,13 @@ class ComputerEnv(Env):
         if self._deployed.instance_id:
             update_env_instance_metadata(self._deployed.instance_id, {"computer": self._deployed.metadata["computer"]})
 
+    async def follow_clock(self, gateway_url: str) -> None:
+        """Have this computer, deployed in a multi env whose gateway is at ``gateway_url``, follow that gateway's clock;
+        its record, and the instance store's, then keep the follower's config."""
+        await as_builtin(self._env_provider).follow_clock(self._deployed, gateway_url, self.environment_name)
+        if self._deployed.instance_id:
+            update_env_instance_metadata(self._deployed.instance_id, {"computer": self._deployed.metadata["computer"]})
+
     async def run_env_params(self, env_params: Optional[dict], deployed_envs: list[DeployedEnv]) -> Optional[dict]:
         """With ``site_routing`` and no ``sites``, ``env_params`` naming as its sites the websites the run deployed
         before the computer, all of them or those of the env ids ``site_routing`` lists, once each says it's ready."""

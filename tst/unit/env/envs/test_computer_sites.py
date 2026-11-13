@@ -101,13 +101,12 @@ def test_a_deploys_ca_signs_each_sites_names_and_is_constrained_to_them():
     table = sites.site_table([_site("notes", "notes.test"), _site("slack", "slack.com", "*.slack.com"),
                               _site("bare")])
 
-    issued = sites.issue(table.routes, valid_for=timedelta(hours=3), label="desktop", now=now)
+    issued = sites.issue(table.routes, label="desktop")
 
     assert set(issued.leaves) == {"notes", "slack"}
     ca = x509.load_pem_x509_certificate(issued.ca_pem.encode())
     constraints = ca.extensions.get_extension_for_class(x509.NameConstraints).value
     assert [n.value for n in constraints.permitted_subtrees] == ["notes.test", "slack.com"]
-    assert ca.not_valid_after_utc == now + timedelta(hours=3) + sites.VALID_MARGIN
     for site, name in (("notes", "notes.test"), ("slack", "slack.com"), ("slack", "eu.slack.com")):
         _verify(issued.ca_pem, issued.leaves[site][0], name, now)
     with pytest.raises(VerificationError):
@@ -115,19 +114,32 @@ def test_a_deploys_ca_signs_each_sites_names_and_is_constrained_to_them():
     assert "PRIVATE KEY" in issued.leaves["notes"][1] and "PRIVATE KEY" not in issued.ca_pem
 
 
-def test_a_name_longer_than_a_common_name_takes_is_signed_by_its_alternative_names_alone():
+def test_the_ca_and_certificates_hold_at_any_date_a_computers_clock_can_show():
+    issued = sites.issue(sites.site_table([_site("notes", "notes.test")]).routes, label="desktop")
     now = datetime.now(UTC).replace(microsecond=0)
+
+    for cert in (issued.ca_pem, issued.leaves["notes"][0]):
+        loaded = x509.load_pem_x509_certificate(cert.encode())
+        assert (loaded.not_valid_before_utc, loaded.not_valid_after_utc) == (sites.UNIVERSE_FROM, sites.UNIVERSE_UNTIL)
+    for universe in (datetime(1950, 1, 1, tzinfo=UTC), now - timedelta(days=6 * 365), now,
+                     now + timedelta(days=6 * 365), datetime(2100, 1, 1, tzinfo=UTC),
+                     datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)):
+        _verify(issued.ca_pem, issued.leaves["notes"][0], "notes.test", universe)
+    with pytest.raises(VerificationError):
+        _verify(issued.ca_pem, issued.leaves["notes"][0], "notes.test", sites.UNIVERSE_FROM - timedelta(seconds=1))
+
+
+def test_a_name_longer_than_a_common_name_takes_is_signed_by_its_alternative_names_alone():
     name = f"{'a' * 63}.test"
-    issued = sites.issue(sites.site_table([_site("long", name)]).routes, valid_for=timedelta(hours=1), label="x",
-                         now=now)
+    issued = sites.issue(sites.site_table([_site("long", name)]).routes, label="x")
 
     leaf = x509.load_pem_x509_certificate(issued.leaves["long"][0].encode())
     assert len(leaf.subject) == 0 and leaf.extensions.get_extension_for_class(x509.SubjectAlternativeName).critical
-    _verify(issued.ca_pem, issued.leaves["long"][0], name, now)
+    _verify(issued.ca_pem, issued.leaves["long"][0], name, datetime.now(UTC))
 
 
 def test_no_ca_is_made_when_no_name_is_served_over_https():
-    assert sites.issue(sites.site_table([_site("bare")]).routes, valid_for=timedelta(hours=1), label="x") == \
+    assert sites.issue(sites.site_table([_site("bare")]).routes, label="x") == \
         sites.Issued(None, {})
 
 
@@ -185,7 +197,7 @@ async def test_route_installs_the_proxy_as_root_with_each_sites_route_as_the_com
     sandbox = FakeVm(_REPORT)
 
     routed = await sites.route(sandbox, [_site("notes", "notes.test")], user="user", network=None,
-                               valid_for=timedelta(hours=1), label="desktop", os_type="linux", display="x11")
+                               label="desktop", os_type="linux", display="x11")
 
     assert set(sandbox.written) == {"/etc/agentenv/sites/site_proxy.py", "/etc/agentenv/sites/config.json"}
     config = json.loads(sandbox.written["/etc/agentenv/sites/config.json"])
@@ -210,7 +222,7 @@ async def test_route_gives_a_browser_alone_the_forward_port_and_a_computer_with_
 
     for sandbox, display in ((alone, "none"), (desktop, "x11")):
         await sites.route(sandbox, [_site("notes", "notes.test")], user="user", network=None,
-                          valid_for=timedelta(hours=1), label="desktop", os_type="linux", display=display)
+                          label="desktop", os_type="linux", display=display)
 
     configs = [json.loads(sandbox.written["/etc/agentenv/sites/config.json"]) for sandbox in (alone, desktop)]
     assert [config.get("proxy_port") for config in configs] == [3129, None]
@@ -221,10 +233,10 @@ async def test_a_browser_alones_forward_port_takes_the_live_sites_hosts_straight
     routed, alone, desktop = FakeVm(_REPORT), FakeVm(_REPORT), FakeVm(_REPORT)
     live = ("github.com", "*.githubassets.com")
 
-    await sites.route(routed, [_site("notes", "notes.test")], user="user", network=None, valid_for=timedelta(hours=1),
-                      label="browser", os_type="linux", display="none", live_hosts=live)
+    await sites.route(routed, [_site("notes", "notes.test")], user="user", network=None, label="browser",
+                      os_type="linux", display="none", live_hosts=live)
     for sandbox, display in ((alone, "none"), (desktop, "x11")):
-        await sites.route(sandbox, [], user="user", network=None, valid_for=timedelta(hours=1), label="browser",
+        await sites.route(sandbox, [], user="user", network=None, label="browser",
                           os_type="linux", display=display, live_hosts=live)
 
     beside = json.loads(routed.written["/etc/agentenv/sites/config.json"])
@@ -239,7 +251,7 @@ async def test_the_config_holding_the_keys_is_written_over_stdin_into_a_private_
     sandbox = FakeVm(_REPORT)
 
     await sites.route(sandbox, [_site("notes", "notes.test")], user="user", network=None,
-                      valid_for=timedelta(hours=1), label="desktop", os_type="linux", display="x11")
+                      label="desktop", os_type="linux", display="x11")
 
     assert ("write", "/etc/agentenv/sites/config.json") not in sandbox.events
     secret = sandbox.events.index(("secret", "/tmp/secret-1/config.json"))
@@ -257,7 +269,7 @@ async def test_the_headers_the_gateways_provider_asks_for_go_in_the_private_conf
         "CF-Access-Client-Secret": "s3cret"} if url.startswith("http://host.docker.internal:8080/") else {})
 
     routed = await sites.route(sandbox, [_site("notes", "notes.test")], user="user", network=None,
-                               valid_for=timedelta(hours=1), label="desktop", os_type="linux", display="x11")
+                               label="desktop", os_type="linux", display="x11")
 
     (site,) = json.loads(sandbox.written["/etc/agentenv/sites/config.json"])["sites"]
     assert site["upstream_headers"] == {"CF-Access-Client-Secret": "s3cret"}
@@ -272,7 +284,7 @@ async def test_the_sites_keys_land_in_a_folder_root_alone_can_enter():
     sandbox = FakeVm(_REPORT)
 
     await sites.route(sandbox, [_site("notes", "notes.test")], user="user", network=None,
-                      valid_for=timedelta(hours=1), label="desktop", os_type="linux", display="x11")
+                      label="desktop", os_type="linux", display="x11")
 
     private = sandbox.events.index("docker exec -u 0 computer-1 chmod 0700 /etc/agentenv/sites")
     assert private < sandbox.events.index(("cp", "/tmp/secret-1/config.json", "computer-1:/etc/agentenv/sites/config.json"))
@@ -285,7 +297,7 @@ async def test_a_name_that_doesnt_load_in_the_computer_fails_the_route():
 
     with pytest.raises(RuntimeError, match="https://notes.test/ didn't load in the computer: certificate verify"):
         await sites.route(FakeVm(report), [_site("notes", "notes.test")], user="user", network=None,
-                          valid_for=timedelta(hours=1), label="desktop", os_type="linux", display="x11")
+                          label="desktop", os_type="linux", display="x11")
 
 
 @pytest.mark.asyncio
@@ -295,8 +307,8 @@ async def test_a_network_that_keeps_the_computer_from_the_gateway_is_refused_bef
     with pytest.raises(RuntimeError, match="allows only api.example, so it can't reach the gateway at "
                                            "host.docker.internal"):
         await sites.route(sandbox, [_site("notes", "notes.test")], user="user",
-                          network={"mode": "allowlist", "allow_hosts": ["api.example"]}, valid_for=timedelta(hours=1),
-                          label="desktop", os_type="linux", display="x11")
+                          network={"mode": "allowlist", "allow_hosts": ["api.example"]}, label="desktop",
+                          os_type="linux", display="x11")
 
     assert sandbox.scripts == [] and sandbox.written == {}
 
@@ -310,7 +322,7 @@ async def test_a_gateway_the_sandboxs_applied_network_allows_by_its_address_rang
 
     routed = await sites.route(sandbox, [_site("notes", "notes.test")], user="user",
                                network={"mode": "allowlist", "allow_hosts": ["api.example"]},
-                               valid_for=timedelta(hours=1), label="desktop", os_type="linux", display="x11")
+                               label="desktop", os_type="linux", display="x11")
 
     assert routed["checks"] == _REPORT["checks"]
     routes = [sites.Route("notes", "http://10.0.0.7:8080/website/notes/", ("notes.test",))]
@@ -335,7 +347,7 @@ async def test_a_sandbox_that_is_the_container_is_reached_as_root_through_its_ow
                               write_file_from_text=write_file_from_text)
 
     await sites.route(sandbox, [_site("notes", "notes.test")], user="user", network=None,
-                      valid_for=timedelta(hours=1), label="desktop", os_type="linux", display="x11")
+                      label="desktop", os_type="linux", display="x11")
 
     assert calls == [("id", "-u"), ("mkdir", "-p", "/etc/agentenv/sites"), ("chmod", "0700", "/etc/agentenv/sites"),
                      ("mkdir", "-p", "/etc/agentenv/sites"), ("write", "/etc/agentenv/sites/site_proxy.py"),
@@ -360,7 +372,7 @@ async def test_a_container_sandbox_that_runs_the_computer_as_its_user_is_refused
 
     with pytest.raises(RuntimeError, match="the coreweave sandbox runs the computer's commands as uid 1000"):
         await sites.route(sandbox, [_site("notes", "notes.test")], user="user", network=None,
-                          valid_for=timedelta(hours=1), label="desktop", os_type="linux", display="x11")
+                          label="desktop", os_type="linux", display="x11")
 
     assert calls == [("id", "-u")]
 
@@ -373,7 +385,7 @@ async def test_a_site_naming_the_gateway_its_routes_are_on_is_refused_before_any
 
     with pytest.raises(RuntimeError, match=r"the gateway at gw.sites.test \(named by notes's .*sites.test\) would"):
         await sites.route(sandbox, [_site("notes", *domains)], user="user", network=None,
-                          valid_for=timedelta(hours=1), label="desktop", os_type="linux", display="x11")
+                          label="desktop", os_type="linux", display="x11")
 
     assert sandbox.scripts == [] and sandbox.written == {}
 
@@ -430,7 +442,7 @@ async def test_two_envs_each_serving_a_site_of_one_name_are_routed_apart_and_one
     table = sites.site_table([Site(**s) for s in found])
     assert {route.site: route.domains for route in table.routes} == {"team-a-notes": ("notes.test",),
                                                                       "team-b-notes": ("notes.example",)}
-    assert set(sites.issue(table.routes, valid_for=timedelta(hours=1), label="x").leaves) == {"team-a-notes",
+    assert set(sites.issue(table.routes, label="x").leaves) == {"team-a-notes",
                                                                                               "team-b-notes"}
     clash = await sites.deployed_sites([gateway("team-a", "notes.test"), gateway("team-b", "notes.test")])
     with pytest.raises(sites.SiteConflict, match="'notes.test' \\(team-b-notes\\) overlaps 'notes.test' \\(team-a-notes\\)"):
@@ -663,7 +675,8 @@ def test_the_trust_a_routing_linux_computer_boots_with_is_the_local_providers_so
 
 
 def test_a_browser_alone_routing_sites_is_named_the_forward_port_and_a_computer_with_a_display_is_named_none():
-    assert sites.browser_environment("none") == {"AGENTENV_SITE_PROXY": "http://127.0.0.1:3129"}
+    assert sites.browser_environment("none") == {"AGENTENV_SITE_PROXY": "http://127.0.0.1:3129",
+                                                 "AGENTENV_NETWORK_LOG": "/etc/agentenv/sites/network.jsonl"}
     assert sites.browser_environment("x11") == {}
 
 

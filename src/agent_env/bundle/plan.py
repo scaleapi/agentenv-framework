@@ -63,14 +63,14 @@ from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.install_agent import InstallAgentTaskStep
 from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
-from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
+from agent_env.task_step.task_steps.prompt_agent import is_prompt_step, user_sim_agents
 
 from ._fs import fold, relative, with_article
 from .authoring import AuthoringContext, entry_files, staged_build_context
 from .parse import NAMED_BY, Bundle, BundleEntry, BundleError, BundleKind, parse_bundle
 from .variants import Varied
 from .resolve import (BuiltImage, BundleImage, Reference, ResolvedBundle, ResolvedEntry, build_step, entity_class,
-                      resolve_bundle)
+                      resolve_bundle, sync_context_paths)
 
 if TYPE_CHECKING:
     from .installed import InstalledBundle
@@ -1219,11 +1219,10 @@ _UNREAD: Any = object()  # the configured default agent, before a task needs it
 
 
 def solver_steps(steps: Any) -> tuple[str, ...]:
-    """The ids of the steps in ``steps``, a task's config, that deploy or install an agent a ``prompt_agent`` step
-    prompts, and not as its user simulator: the solver's."""
-    prompts = [step for step in steps if isinstance(step, dict) and step.get("type") == PromptAgentTaskStep.type]
-    prompted = {step.get("agent_name") or TaskStep.DEFAULT_AGENT_NAME for step in prompts}
-    prompted -= {step.get("user_agent_name") or PromptAgentTaskStep.DEFAULT_USER_AGENT_NAME for step in prompts}
+    """The ids of the steps in ``steps``, a task's config, that deploy or install an agent a step prompts as the agent
+    under test (``is_prompt_step``), and not as its user simulator: the solver's."""
+    prompts = [step for step in steps if isinstance(step, dict) and is_prompt_step(step)]
+    prompted = {step.get("agent_name") or TaskStep.DEFAULT_AGENT_NAME for step in prompts} - user_sim_agents(steps)
     return tuple(step["id"] for step in steps if isinstance(step, dict) and isinstance(step.get("id"), str)
                  and step.get("type") in (DeployAgentTaskStep.type, InstallAgentTaskStep.type)
                  and (step.get("agent_name") or TaskStep.DEFAULT_AGENT_NAME) in prompted)
@@ -1255,6 +1254,8 @@ def _renamed(entry: ResolvedEntry, ids: Mapping[tuple[EntityKind, str], str]) ->
     for site in sites:
         if site.ref.role is RefRole.INPUT and (site.ref.kind, site.value) in ids:
             site.rewrite(ids[site.ref.kind, site.value])
+    if entry.entry.kind is BundleKind.TASK:
+        sync_context_paths(entry.entry.config, config)
     return config
 
 

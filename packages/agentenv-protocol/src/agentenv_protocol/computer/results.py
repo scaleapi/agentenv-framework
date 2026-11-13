@@ -78,6 +78,8 @@ class TabData(BaseModel):
     url: str
     title: str
     active: bool
+    #: The label of the lease it's in, None for the browser's default context.
+    context: Optional[str] = None
 
 
 class TabsResult(InputResult):

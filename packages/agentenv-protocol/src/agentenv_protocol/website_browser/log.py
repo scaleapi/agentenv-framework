@@ -23,7 +23,7 @@ import time
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
 logger = logging.getLogger(__name__)
@@ -74,10 +74,10 @@ ACTING_METHODS: dict[str, tuple[str, ...]] = {
 #: The ``browser/v1`` ops that act; any other reads.
 ACTING_OPS = frozenset({"page/input", "navigate", "history", "tabs/open", "tabs/activate", "tabs/close",
                         "dialog/answer", "files/choose", "cookies/set", "cookies/delete", "local_storage/set",
-                        "local_storage/clear", "sites/set"})
-#: The ``browser/v1`` ops an agent's calls are never logged for: the log itself, and agentenv's own bookkeeping, a
-#: driver's calls that begin and end a tool call's own entry among them.
-UNLOGGED_OPS = frozenset({"log", "record", "calls/begin", "calls/end"})
+                        "local_storage/clear", "sites/set", "contexts/lease", "contexts/grant", "contexts/release"})
+#: The ``browser/v1`` ops an agent's calls are never logged for: the logs themselves, and agentenv's own bookkeeping,
+#: a driver's calls that begin and end a tool call's own entry among them.
+UNLOGGED_OPS = frozenset({"log", "network", "record", "calls/begin", "calls/end"})
 #: The CDP methods and ops whose text is typed into the page.
 TYPING_METHODS = frozenset({"Input.insertText", "Input.dispatchKeyEvent", "Input.imeSetComposition"})
 #: What a key event says of the key it types, all of it dropped when a password field has focus.
@@ -314,6 +314,8 @@ class BrowserLog:
         self._unwritable = False
         #: Per tab, the sequence number of the latest acting entry on it.
         self.last_acting: dict[str, int] = {}
+        #: Each told every action as it's written, its sequence number and its fields, as a recording follows them.
+        self.watchers: list[Callable[[int, dict], None]] = []
 
     @classmethod
     def for_app(cls, name: str, fallback: Path) -> BrowserLog:
@@ -381,6 +383,16 @@ class BrowserLog:
             self.note("outcome", {"entry": seq, **fields})
         else:
             self.write(seq, {"action": action}, at=begun["at"])
+        for watcher in self.watchers:
+            try:
+                watcher(seq, action)
+            except Exception:
+                logger.exception("a watcher of the browser's log failed")
+
+    @property
+    def next_seq(self) -> int:
+        """The sequence number the next line will take."""
+        return self._seq + 1
 
     def note(self, kind: str, body: dict) -> int:
         """A line of ``kind`` written now: a ``tab`` event, or a ``reset``."""
@@ -388,24 +400,27 @@ class BrowserLog:
         self.write(seq, {kind: body})
         return seq
 
-    def read(self, after: int = 0, limit: int = READ_LIMIT) -> dict:
+    def read(self, after: int = 0, limit: int = READ_LIMIT, settle_through: Optional[int] = None) -> dict:
         """The lines after sequence number ``after``, in order, up to ``limit`` of them and to the last whose every
         earlier line is written or stalled: ``lines``, ``last``, the sequence number of that last one, and ``more``
-        when the limit left some."""
-        complete, picked, more = self._picked(after, limit)
+        when the limit left some. An action begun at or before ``settle_through`` and still going counts as stalled
+        now, as a recording that ends while an action is in flight needs."""
+        complete, picked, more = self._picked(after, limit, settle_through)
         return self._loaded(after, complete, picked, more)
 
-    async def read_async(self, after: int = 0, limit: int = READ_LIMIT) -> dict:
+    async def read_async(self, after: int = 0, limit: int = READ_LIMIT, settle_through: Optional[int] = None) -> dict:
         """``read``, its file read in a thread."""
-        complete, picked, more = self._picked(after, limit)
+        complete, picked, more = self._picked(after, limit, settle_through)
         return await asyncio.to_thread(self._loaded, after, complete, picked, more)
 
-    def _picked(self, after: int, limit: int) -> tuple[int, list[tuple[int, int, int]], bool]:
+    def _picked(self, after: int, limit: int, settle_through: Optional[int] = None
+                ) -> tuple[int, list[tuple[int, int, int]], bool]:
         """Where the lines a read returns are: the last sequence number it may return, and each line's number, offset
         and length, in order."""
         now = time.monotonic()
         for seq, began in list(self._pending.items()):
-            if now - began >= STALLED_S and (begun := self._begun.get(seq)) is not None:
+            settled = settle_through is not None and seq <= settle_through
+            if (settled or now - began >= STALLED_S) and (begun := self._begun.get(seq)) is not None:
                 self._stood_in.add(seq)
                 self.write(seq, {"action": {**begun["action"], "unfinished": True}}, at=begun["at"])
         complete = min(self._pending) - 1 if self._pending else self._seq

@@ -16,7 +16,7 @@ File-access modes:
 Artifact paths come from one of these sources (in priority order):
   1. Manifest (`manifest_step_id`): a prior prompt step's declared artifacts from
      that step's PromptResponse.structured_output["artifacts"] (logical name -> abs path);
-     collected files are keyed by logical name.
+     collected files are keyed by logical name, its separators and dot segments dropped.
   2. Seed data: context.metadata["seed"][artifacts_key] — a comma-separated
      list of filenames (e.g., "Dockerfile,run.sh,codebase.patch")
   3. Static fallback: artifact_paths list in the step definition
@@ -26,6 +26,8 @@ read verbatim). Absolute entries let a task collect deliverables that aren't
 under a single base_path — outputs aren't guaranteed to live on the desktop /
 in /app — without assuming a common directory. base_path only applies to
 relative entries and to the no-list enumeration fallback.
+
+Only regular files are read, and a link is not one.
 
 This allows the same step definition to collect different artifacts per seed.
 
@@ -71,8 +73,10 @@ import functools
 import logging
 import os
 import json
+import posixpath
 import re
 import shlex
+import stat
 import tempfile
 import time
 from typing import ClassVar, Optional
@@ -352,20 +356,20 @@ class CollectArtifactsTaskStep(TaskStep):
             manifest = (structured.get("artifacts") if isinstance(structured, dict) else None) or {}
             items: list[tuple[str, str, str]] = []
             skipped_nonfile: list[str] = []
+            base = posixpath.join(posixpath.normpath(self.base_path or "/"), "")
+            keys: set[str] = set()
             for name, path in manifest.items():
                 if not (isinstance(path, str) and path.startswith("/")):
                     skipped_nonfile.append(name)  # literal value (e.g. coverage_state) or relative path
                     continue
                 if "*" in path:
                     continue  # unresolved glob (e.g. per-iteration debug logs) — can't fetch a literal *
+                path = posixpath.normpath(path)
                 if os.path.basename(path) in self.exclude_basenames:
                     continue
-                rel = (
-                    path[len(self.base_path) + 1:]
-                    if path.startswith(self.base_path + "/")
-                    else os.path.basename(path)
-                )
-                items.append((name, path, rel))
+                key = _unused(_manifest_key(name, path), keys)
+                keys.add(key)
+                items.append((key, path, path[len(base):] if path.startswith(base) else posixpath.basename(path)))
             if skipped_nonfile:
                 logger.debug(
                     "collect(manifest=%s): skipped non-absolute manifest entries "
@@ -445,17 +449,21 @@ class CollectArtifactsTaskStep(TaskStep):
         ) from err
 
     async def _get_file_size(self, sandbox, container: Optional[str], source_path: str) -> int:
-        """Get file size on the agent's filesystem. Returns -1 only if the file is genuinely
-        absent; a `stat` that fails for any other reason RAISES so a failed size check is a
-        hard failure rather than a silent 'missing' skip that drops an existing deliverable.
+        """Size of the regular file at ``source_path`` on the agent's filesystem. Returns -1 only if the file is
+        genuinely absent; a `stat` that fails for any other reason RAISES so a failed size check is a hard failure
+        rather than a silent 'missing' skip that drops an existing deliverable, and so does anything but a regular
+        file (a link, a device, a FIFO or a directory), which could stream without end.
         VM-mode wraps in `docker exec <container>`; container-mode runs `stat` directly."""
-        args = _exec_args(sandbox, container, ("stat", "-c", "%s", source_path))
+        args = _exec_args(sandbox, container, ("stat", "-c", "%f:%s", source_path))
         exit_code, stdout, stderr = await sandbox.exec_with_output(*args)
         if exit_code != 0:
             if _looks_absent(stderr):
                 return -1
             raise RuntimeError(f"could not size {source_path} (stat exit {exit_code}): {stderr[:200]}")
-        return int(stdout.strip())
+        mode, _, size = stdout.strip().rpartition(":")
+        if not stat.S_ISREG(int(mode, 16)):
+            raise RuntimeError(f"{source_path} is not a regular file ({stat.filemode(int(mode, 16))}); refusing to read it")
+        return int(size)
 
     async def _collect_file(
         self, sandbox, container: Optional[str], source_path: str, object_name: str, store, artifact_id: str,
@@ -558,9 +566,9 @@ class CollectArtifactsTaskStep(TaskStep):
         as a missing file and silently dropping an existing deliverable. ``wc -c`` is
         portable across the Ubuntu and macOS desktop VMs; ``stat``'s flags are not. A
         transport exception from ``_controller_call`` propagates unchanged."""
-        out = await self._controller_call(
-            deployed_env, "cua_bash", {"script": f"wc -c < {shlex.quote(path)}"}
-        )
+        quoted = shlex.quote(path)
+        script = f'[ ! -e {quoted} ] || [ -f {quoted} ] || {{ echo "not a regular file" >&2; exit 1; }}; wc -c < {quoted}'
+        out = await self._controller_call(deployed_env, "cua_bash", {"script": script})
         # A present file (even 0 bytes) prints its size to stdout; empty stdout means wc failed.
         text = _cua_bash_stdout(out).strip()
         if text:
@@ -1050,3 +1058,20 @@ class CollectArtifactsTaskStep(TaskStep):
             )
 
         return context
+
+
+def _manifest_key(name: str, path: str) -> str:
+    """The agent's name for a manifest entry as a key no reader takes for a path: its separators and dot segments
+    dropped, else the file's own name. Consumers write files under these keys, a zip of them among them."""
+    parts = [part for part in re.split(r"[\\/]+", name) if part not in ("", ".", "..")]
+    return "_".join(parts) or posixpath.basename(path)
+
+
+def _unused(key: str, keys: set[str]) -> str:
+    """``key``, or the first ``key (n)`` not in ``keys``: two manifest names can clean to the same key."""
+    n = 1
+    unused = key
+    while unused in keys:
+        n += 1
+        unused = f"{key} ({n})"
+    return unused

@@ -27,7 +27,10 @@ import {
   type RubricCriterion,
   type VerificationResults,
 } from './rubric-grading-results';
-import { selectFinalScore } from '../lib/verifier-classification';
+import {
+  isRubricsVerifierStep,
+  selectFinalScore,
+} from '../lib/verifier-classification';
 import { TaskInstanceViewer, type TaskStepRef } from './task-instance-viewer';
 import { RunGroupStepFunnel } from './run-group-step-funnel';
 import { StepsPipeline } from './steps-pipeline';
@@ -947,7 +950,7 @@ export function TaskDetailPage({
   }, [versionFilter, runGroupsPageSize]);
 
   const steps = (task?.steps ?? []) as Record<string, unknown>[];
-  const rubricsStep = steps.find(s => s.type === 'rubrics_verifier') as
+  const rubricsStep = steps.find(isRubricsVerifierStep) as
     | Record<string, unknown>
     | undefined;
   const rubricsCriteria = rubricsStep?.criteria as

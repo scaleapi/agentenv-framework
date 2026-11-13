@@ -35,7 +35,8 @@ MAGIC, VERSION = 0x4B434541, 2
 LAYOUT = struct.Struct("<IIQqqdIIQQqq")
 MASK = 0xFFFFFFFFFFFFFFFF
 CONTINUITY_NS = 1_000_000_000
-_SYS_FUTEX = {"x86_64": 202, "aarch64": 98, "arm64": 98}.get(platform.machine())
+_SYS_FUTEX = ({"x86_64": 202, "aarch64": 98, "arm64": 98}.get(platform.machine())
+              if platform.system() == "Linux" else None)
 _FUTEX_WAKE = 1
 _libc = ctypes.CDLL(None, use_errno=True)
 

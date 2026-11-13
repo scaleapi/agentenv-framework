@@ -44,7 +44,8 @@ from agent_env.task_step.task_steps.browser.base import find_browser
 from agent_env.task_step.task_steps.browser.sign_in import BrowserSignInTaskStep
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
-from tst.integration.computer.multi_env_computers_test import CONTAINER, _image
+from tst.integration.computer.conftest import CONTAINER
+from tst.integration.computer.multi_env_computers_test import _image
 from tst.integration.store.local_parallel_deploy_test import _seed_bootstrap_envs
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
@@ -155,10 +156,11 @@ async def test_chromium_runs_with_agentenvs_flags_on_its_pipe_and_a_reset_relaun
         policies["stdout"]).items()
     params = protocol_v1.extension_params(card, BROWSER)
     assert (params["chromium"], params["clock"], sorted(params["methods"])) == (
-        "156.0.8078.4", "real", ["calls/begin", "calls/end", "cdp", "cookies/delete", "cookies/get", "cookies/set",
+        "156.0.8078.4", "real", ["calls/begin", "calls/end", "cdp", "contexts/grant", "contexts/lease",
+                                 "contexts/list", "contexts/release", "cookies/delete", "cookies/get", "cookies/set",
                                  "dialog/answer", "downloads/get", "downloads/list", "files/choose", "history",
                                  "local_storage/clear", "local_storage/get", "local_storage/set", "log", "navigate",
-                                 "page/capture", "page/input", "page/state", "page/viewport", "record", "sites/set",
+                                 "network", "page/capture", "page/input", "page/state", "page/viewport", "record", "sites/set",
                                  "tabs/activate", "tabs/close", "tabs/list", "tabs/open"])
     assert readiness["ready"] is True, readiness
     assert relaunched["pid"] != browser["pid"] and relaunched["listening"] == 0

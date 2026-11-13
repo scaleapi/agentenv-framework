@@ -180,6 +180,8 @@ class DeployAgentTaskStep(TaskStep):
     # and nothing left in the task says so.
     field_scopes = {**TaskStep.field_scopes, "a2a_agent_id": FieldScope.USER, "a2a_agent_version": FieldScope.USER,
                     "env_vars": FieldScope.USER, "sandbox_type": FieldScope.USER, "litellm_base_url": FieldScope.USER}
+    # Whether a card that can't take the step's system prompt fails the step; off, it is skipped with a warning.
+    system_prompt_required: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -330,6 +332,22 @@ class DeployAgentTaskStep(TaskStep):
             return agent_id, user_overrides["a2a_agent_version"]
         return agent_id, self.a2a_agent_version
 
+    def _run_system_prompt(self, context: TaskStepContext) -> Optional[str]:
+        """The system prompt this run sets on the agent: ``system_prompt`` with the run's ``<seed>`` placeholders
+        filled in; None for none."""
+        system_prompt = self.system_prompt
+        seed = context.metadata.get("seed", {})
+        if system_prompt is not None and seed:
+            for key, value in seed.items():
+                system_prompt = system_prompt.replace(f"<{key}>", str(value))
+        return system_prompt
+
+    def _system_prompt_refused(self, why: str, skipping: str) -> None:
+        """The agent's card can't take the system prompt: fail the step when ``system_prompt_required``, else warn."""
+        if self.system_prompt_required:
+            raise RuntimeError(f"{why}, so {self.type} '{self.id}' can't set its system prompt")
+        logger.warning(why + skipping)
+
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         # An agent is recorded in the context only once it is configured, so one that fails on the way there
         # (a snapshot or changelog that can't be loaded, say) is closed here, or no teardown would find it.
@@ -479,19 +497,18 @@ class DeployAgentTaskStep(TaskStep):
                 result = await A2AAgent.register_skill(deployed, **_skill_fields(skill))
                 logger.info(f"Registered skill: {result}")
 
-        if self.system_prompt is not None:
+        system_prompt = self._run_system_prompt(context)
+        if system_prompt is not None:
             config_ext = A2AAgent.find_extension(card, A2AAgent.EXT_AGENT_CONFIG)
             if config_ext is None:
-                logger.warning(f"Agent '{self.agent_name}' does not advertise {A2AAgent.EXT_AGENT_CONFIG} — skipping system_prompt")
+                self._system_prompt_refused(
+                    f"Agent '{self.agent_name}' does not advertise {A2AAgent.EXT_AGENT_CONFIG}", " — skipping system_prompt")
             else:
-                system_prompt = self.system_prompt
-                seed = context.metadata.get("seed", {})
-                if seed:
-                    for key, value in seed.items():
-                        system_prompt = system_prompt.replace(f"<{key}>", str(value))
                 supported = (config_ext.get("params") or {}).get("methods", {}).get("set", {}).get("request", {}).get("supported", [])
                 if "system_prompt" not in supported:
-                    logger.warning(f"Agent '{self.agent_name}' does not list 'system_prompt' in supported agent-config fields — skipping")
+                    self._system_prompt_refused(
+                        f"Agent '{self.agent_name}' does not list 'system_prompt' in supported agent-config fields",
+                        " — skipping")
                 else:
                     endpoint = a2a_url + (config_ext.get("params") or {}).get("endpoint", "/ext/agent-config")
                     await protocol.post_agent_config(endpoint, {"system_prompt": system_prompt})

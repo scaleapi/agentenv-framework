@@ -21,6 +21,9 @@ VERIFY = {"id": "verify", "type": "env_outcome_verifier", "env_id": "portsim", "
           "verifier_id": "berth"}
 BOB = {"id": "bob", "type": "deploy_agent", "agent_name": "bob", "a2a_agent_id": "echo"}
 ASK_BOB = {"id": "ask-bob", "type": "prompt_agent", "agent_name": "bob", "prompt": "Check the plan."}
+USER_SIM = {"id": "user", "type": "deploy_user_sim_agent", "agent_name": "linda", "model": "sim-model",
+            "multi_day": False, "opening_prompt": "Plan week <week>.",
+            "persona": {"display_name": "Linda Murphy", "description": {"who_you_are": ["Runs the port's berths."]}}}
 SEED = {"week": "3", "port": "Valencia"}
 
 
@@ -265,11 +268,39 @@ def test_steps_that_need_only_what_an_outside_player_leaves_are_allowed(replace)
     EpisodeSpec.from_task(_portsim(**replace))
 
 def test_every_built_in_step_type_is_checked_or_unaffected():
-    registered, checked = set(_builtin_registry()), set(CHECKS)
+    registry = _builtin_registry()
+    registered, checked = set(registry), set(CHECKS)
 
     assert sorted(registered - checked - UNAFFECTED) == []
     assert sorted((checked | UNAFFECTED) - registered) == []
     assert sorted(checked & UNAFFECTED) == []
+
+
+class _AlwaysOn(PromptAgentTaskStep):
+    """An always_on step as these rules read one: the agent it wakes, by name."""
+
+    type = "always_on"
+
+
+def test_the_agent_an_always_on_step_wakes_is_the_one_played_and_is_refused_for_now():
+    loop = _AlwaysOn.from_dict({**PLAY, "id": "loop"})
+    task = Task(id="dock", version=4, steps=[*_portsim(play=None).steps, loop])
+
+    assert ("step 'loop': always_on needs 'default-agent' as a real agent, and it is played from outside"
+            in _refusal(task))
+
+
+def test_the_user_sims_deploy_is_refused_when_its_agent_is_played_from_outside():
+    task = _portsim({**USER_SIM, "agent_name": "default-agent"})
+
+    assert ("step 'user': deploy_user_sim_agent deploys 'default-agent', which is played from outside"
+            in _refusal(task))
+
+
+def test_the_user_sims_deploy_with_its_own_agent_is_allowed():
+    task = _portsim(USER_SIM)
+
+    assert EpisodeSpec.from_task(task, seed=SEED).trainer_agents == ("default-agent",)
 
 
 def test_the_seed_pass_rebuilds_each_step_as_its_own_class():

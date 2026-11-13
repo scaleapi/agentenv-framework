@@ -8,6 +8,7 @@ import json
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -246,3 +247,46 @@ def test_an_engine_without_token_ids_is_refused_before_any_rollout(bundle, monke
 
     with pytest.raises(RuntimeError, match="eval-only"):
         AgentEnvSessionFactory(bundle, llm_url="http://127.0.0.1:9", model=MODEL)
+
+
+def test_a_rows_prompt_is_an_always_on_steps_as_it_is_a_prompt_agent_steps():
+    task = SimpleNamespace(steps=[SimpleNamespace(type="deploy_agent"),
+                                  SimpleNamespace(type="always_on", prompt="Watch Tess's shop this month.")])
+
+    assert harness._first_prompt(task) == "Watch Tess's shop this month."
+
+
+def test_a_rows_prompt_with_no_step_prompt_is_the_named_user_sims_opening():
+    def user_sim(name, opening):
+        return SimpleNamespace(type="deploy_user_sim_agent", agent_name=name, opening_prompt=opening)
+
+    always_on = SimpleNamespace(type="always_on", prompt=None, user_sim="nora")
+    task = SimpleNamespace(steps=[user_sim("other", "Not this one."), user_sim("nora", "Find me a sofa."), always_on])
+    assert harness._first_prompt(task) == "Find me a sofa."
+
+    prompt_agent = SimpleNamespace(type="prompt_agent", prompt="", user_agent_name="nora")
+    assert harness._first_prompt(SimpleNamespace(steps=[user_sim("nora", "Find me a sofa."), prompt_agent])) \
+        == "Find me a sofa."
+
+    unnamed = SimpleNamespace(type="always_on", prompt=None, user_sim=None)
+    assert harness._first_prompt(SimpleNamespace(steps=[user_sim("nora", "Find me a sofa."), unnamed])) == ""
+
+
+def test_a_rows_prompt_skips_a_briefing_sent_to_the_user_sim():
+    sim = SimpleNamespace(type="deploy_user_sim_agent", agent_name="nora", opening_prompt="Find a sofa.")
+    briefing = SimpleNamespace(type="prompt_agent", agent_name="nora", prompt="You are Nora; stay in character.")
+    always_on = SimpleNamespace(type="always_on", agent_name="solver", prompt=None, user_sim="nora")
+
+    assert harness._first_prompt(SimpleNamespace(steps=[sim, briefing, always_on])) == "Find a sofa."
+
+
+def test_a_task_whose_user_sim_step_deploys_the_user_trains_only_its_solver():
+    user = {"id": "user", "type": "deploy_user_sim_agent", "agent_name": "linda", "a2a_agent_id": "sim",
+            "model": "sim-model", "multi_day": False, "opening_prompt": "Help Linda.",
+            "persona": {"display_name": "Linda Murphy", "description": {"who_you_are": ["Plans her family's week."]}}}
+    config = [{"id": "solver", "type": "deploy_agent", "a2a_agent_id": "theirs"}, user,
+              {"id": "brief", "type": "prompt_agent", "agent_name": "linda", "prompt": "You are Linda."},
+              {"id": "ask", "type": "prompt_agent", "prompt": "Help Linda.", "user_agent_name": "linda"}]
+
+    assert harness._untrainable(config) is None
+    assert harness.solver_steps(config) == ("solver",)

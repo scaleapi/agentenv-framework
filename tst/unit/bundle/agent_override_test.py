@@ -17,6 +17,7 @@ from agent_env.plugins._bundles import ALIASES_FILE
 from agent_env.task.task import Task
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.install_agent import InstallAgentTaskStep
+from agent_env.task_step.task_steps.prompt_agent import user_sim_agents
 from tst.unit.bundle._support import layout, store_agent
 
 ROOT = "@local/~/triage"
@@ -117,6 +118,41 @@ def test_only_the_steps_deploying_or_installing_the_agent_a_step_prompts_are_the
     ]
 
     assert solver_steps(steps) == ("solver", "installed")
+
+
+def test_the_agent_an_always_on_step_wakes_is_the_solver():
+    steps = [
+        {"id": "solver", "type": "deploy_agent"},
+        {"id": "user", "type": "deploy_user_sim_agent", "agent_name": "linda"},
+        {"id": "loop", "type": "always_on", "user_sim": "linda"},
+    ]
+
+    assert solver_steps(steps) == ("solver",)
+
+
+def test_the_agent_an_always_on_step_talks_to_as_its_user_is_never_the_solvers():
+    """Even when a step prompts it, as a briefing would, and another step installs it."""
+    steps = [
+        {"id": "solver", "type": "deploy_agent"},
+        {"id": "user", "type": "deploy_user_sim_agent", "agent_name": "linda"},
+        {"id": "installed", "type": "install_agent", "agent_name": "linda", "sandbox_name": "box"},
+        {"id": "brief", "type": "prompt_agent", "agent_name": "linda"},
+        {"id": "loop", "type": "always_on", "user_sim": "linda"},
+    ]
+
+    assert solver_steps(steps) == ("solver",)
+    assert user_sim_agents(steps) == {"linda", "human_agent"}
+
+
+def test_a_prompt_agent_tasks_solver_and_user_agents_are_as_on_main():
+    steps = [
+        {"id": "solver", "type": "deploy_agent"},
+        {"id": "user", "type": "deploy_agent", "agent_name": "human_agent"},
+        {"id": "ask", "type": "prompt_agent", "max_conversation_turns": 3},
+    ]
+
+    assert solver_steps(steps) == ("solver",)
+    assert user_sim_agents(steps) == {"human_agent"}
 
 
 def test_preflight_checks_the_agent_the_solver_deploys(bundle_dir, monkeypatch):

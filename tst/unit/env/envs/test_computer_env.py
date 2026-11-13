@@ -15,7 +15,6 @@ import re
 import shutil
 import subprocess
 import urllib.parse
-from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -121,9 +120,24 @@ def test_a_computer_env_is_composed_for_each_arch_and_written_with_the_computer_
     assert composed["arm64"]["lock"].startswith("sha256:") and composed["arm64"]["lock"] != composed["amd64"]["lock"]
     assert arm64["conf"] == (
         "[program:driver-desk-driver]\ncommand=/opt/agentenv/drivers/desk/venv/bin/python -m agentenv_protocol.computer.serve "
-        'driver.py:Desk\ndirectory=/opt/agentenv/drivers/desk\nenvironment=MCP_PORT="18765"\nautorestart=true\n'
+        'driver.py:Desk\ndirectory=/opt/agentenv/drivers/desk\nenvironment=MCP_PORT="18765",AGENTENV_REAL_TIME="1"\n'
+        'autorestart=true\n'
         "redirect_stderr=true\nstdout_logfile=/var/log/agentenv/driver-desk-driver.log\n")
     assert ComputerEnv.from_dict(stored.to_dict()).to_dict() == stored.to_dict()
+
+
+def test_a_base_whose_container_form_starts_as_root_composes_an_image_that_starts_as_root(base, driver, docker):
+    image = base.image()
+    rooted = _base(image, forms={"container": {"image": {"id": image.id, "version": image.version}, "init": "supervisord",
+                                               "input_channel": "env", "start_as": "root"}})
+
+    _put(rooted, driver)
+
+    composed = Env.get("@local/~/kit/desktop").metadata["computer"]
+    assert ComputerArtifact.get(rooted.id, rooted.version).forms.container.start_as == "root"
+    assert ComputerArtifact.get(composed["id"], composed["version"]).forms.container.start_as == "root"
+    assert all(build["dockerfile"].splitlines()[-2] == "USER root" for build in docker.builds)
+    assert "start_as" not in base.model_dump()["forms"]["container"]
 
 
 def test_a_key_covers_its_build_files_executable_bits_and_the_composers_format(base, driver, docker, tmp_path,
@@ -1129,11 +1143,11 @@ async def test_a_computer_with_site_routing_reaches_the_websites_the_run_deploye
     assert sandbox is boots.sandboxes[0]
     assert [site.model_dump() for site in sites] == [{"name": "notes", "url": "http://localhost:8080/website/notes/",
                                                       "domains": ["notes.test"]}]
-    assert options == {"user": "user", "network": None, "valid_for": timedelta(seconds=3600), "label": "desktop",
-                       "os_type": "linux", "display": "x11", "live_hosts": ()}
+    assert options == {"user": "user", "network": None, "label": "desktop", "os_type": "linux", "display": "x11",
+                       "live_hosts": ()}
     assert boots.boots[0]["environment"][HOLD_BOOT_LAUNCH_ENV] == "1"
     record = context.deployed_envs[-1].metadata["computer"]
-    assert record["sites"] == {"names": {"routes": {"notes": ["notes.test"]}}, "ca": "CA PEM", "valid_for_s": 3600}
+    assert record["sites"] == {"names": {"routes": {"notes": ["notes.test"]}}, "ca": "CA PEM"}
     assert record["env_params"]["site_routing"] is True and record["env_params"]["sites"][0]["name"] == "notes"
 
 
@@ -1151,9 +1165,8 @@ async def test_a_computer_deployed_to_route_its_sites_later_boots_held_and_route
     assert boots.boots[0]["environment"].items() >= computer_sites.TRUST_ENVIRONMENTS["linux"].items()
     ((sandbox, sites, options),) = routes
     assert sandbox is boots.sandboxes[0] and [site.name for site in sites] == ["notes"]
-    assert options["valid_for"] == timedelta(seconds=3600)
     record = deployed.metadata["computer"]
-    assert record["env_params"]["sites"][0]["name"] == "notes" and record["sites"]["valid_for_s"] == 3600
+    assert record["env_params"]["sites"][0]["name"] == "notes" and record["sites"]["ca"] == "CA PEM"
 
 
 @pytest.mark.asyncio
@@ -1375,7 +1388,7 @@ async def test_a_start_tab_on_one_of_the_env_sites_that_didnt_load_fails_the_boo
 
     with pytest.raises(RuntimeError) as failed:
         await env_computer_provider._finish_boot(SimpleNamespace(), record, None,
-                                                 SimpleNamespace(site_routing=False), 0, None)
+                                                 SimpleNamespace(site_routing=False), None)
 
     assert record.metadata["computer"]["start_tabs"] == {"chromium": tabs}
     assert str(failed.value) == (
@@ -1420,8 +1433,8 @@ async def test_a_reset_routes_the_fresh_computer_to_the_same_sites_under_a_ca_of
     await ResetEnvTaskStep(id="reset", version=None, env_id=env.id, fail_task_on_error=True).execute(context)
 
     first, again = routes
-    assert again[0] is sandbox and again[1] == first[1] and again[2]["valid_for"] == timedelta(seconds=3600)
-    assert context.deployed_envs[-1].metadata["computer"]["sites"]["valid_for_s"] == 3600
+    assert again[0] is sandbox and again[1] == first[1] and again[2] == first[2]
+    assert context.deployed_envs[-1].metadata["computer"]["sites"]["ca"] == "CA PEM"
 
 
 @pytest.mark.asyncio

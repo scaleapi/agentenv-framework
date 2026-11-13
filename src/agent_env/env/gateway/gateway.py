@@ -97,6 +97,8 @@ from .rest_proxy import (
 )
 from .triggers import TriggerEngine, TriggerError
 from .notifications import CHECK_TOOL_NAMES, NotificationError, Notifications, build_check_tools
+from .user_chat import MESSAGE_USER_TOOL_NAME, UserChat, UserChatError, build_user_chat_tool
+from .user_chat import STAY_QUIET_TOOL_NAME, build_stay_quiet_tool
 
 logger = logging.getLogger(__name__)
 
@@ -228,6 +230,7 @@ class Gateway:
         self._clock = Clock()
         self._clock_followers = ClockFollowers(lambda: self._clock, clock_followers or {})
         self._notifications = Notifications(lambda: self._clock)
+        self._user_chat = UserChat(lambda: self._clock)
         self._env_get_time_url_cache: str | None = None
         self._install_role_filters()
 
@@ -321,6 +324,10 @@ class Gateway:
         @self._mcp.custom_route("/triggers/remove", methods=["POST"])
         async def triggers_remove(request: Request) -> Response:
             return await _trigger_write(request, self._trigger_engine.remove)
+
+        @self._mcp.custom_route("/triggers/config", methods=["POST"])
+        async def triggers_config(request: Request) -> Response:
+            return await _trigger_write(request, self._trigger_engine.config)
 
         @self._mcp.custom_route("/triggers/clear", methods=["POST"])
         async def triggers_clear(request: Request) -> Response:
@@ -436,6 +443,51 @@ class Gateway:
         async def notifications_clear(request: Request) -> Response:
             self._unregister_check_tools()
             return self._json_response(self._notifications.clear(), 200)
+
+        @self._mcp.custom_route("/user_chat/config", methods=["POST"])
+        async def user_chat_config(request: Request) -> Response:
+            try:
+                body = await request.json()
+            except Exception:
+                return self._json_response({"ok": False, "error": "Invalid JSON body"}, 400)
+            if isinstance(body, dict) and body.get("roles"):
+                try:
+                    await self._ensure_tools_discovered()
+                except Exception as e:
+                    return self._json_response(
+                        {"ok": False, "error": f"tool discovery has not completed ({type(e).__name__}); retry"}, 503)
+                if MESSAGE_USER_TOOL_NAME in self._tool_server_urls:
+                    return self._json_response(
+                        {"ok": False, "error": f"'{MESSAGE_USER_TOOL_NAME}' already registered by a backing server"}, 409)
+            try:
+                state = self._user_chat.configure(body)
+            except UserChatError as e:
+                return self._json_response({"ok": False, "error": str(e)}, 400)
+            if self._user_chat.enabled:
+                self._register_user_chat_tool()
+            else:
+                self._unregister_user_chat_tool()
+            return self._json_response(state, 200)
+
+        @self._mcp.custom_route("/user_chat/state", methods=["GET"])
+        async def user_chat_state(request: Request) -> Response:
+            return self._json_response(self._user_chat.state(), 200)
+
+        @self._mcp.custom_route("/user_chat/take", methods=["POST"])
+        async def user_chat_take(request: Request) -> Response:
+            try:
+                body = await request.json()
+            except Exception:
+                body = {}
+            try:
+                return self._json_response(self._user_chat.take(body), 200)
+            except UserChatError as e:
+                return self._json_response({"ok": False, "error": str(e)}, 400)
+
+        @self._mcp.custom_route("/user_chat/clear", methods=["POST"])
+        async def user_chat_clear(request: Request) -> Response:
+            self._unregister_user_chat_tool()
+            return self._json_response(self._user_chat.clear(), 200)
 
         @self._mcp.custom_route("/trajectory", methods=["GET"])
         async def env_trajectory(request: Request) -> Response:
@@ -563,9 +615,18 @@ class Gateway:
     def _is_disabled(self, role: str, name: str) -> bool:
         """Walk the rule chain (role first, then WILDCARD) returning the first concrete True/False; default False.
         A tool listed hidden by default skips "*"-tool rules: only rules naming it apply, and with none it is hidden.
-        The scheduled-check tools exist only for the roles the notifications config names, whatever the rules say."""
+        The scheduled-check tools exist only for the roles the notifications config names, whatever the rules say.
+        A role the user-chat config names always has message_user, get_time and the scheduled-check tools the
+        notifications config gives it, whatever the rules say."""
         if name in CHECK_TOOL_NAMES and name not in self._tool_server_urls and role not in self._notifications.roles:
             return True
+        if name == MESSAGE_USER_TOOL_NAME and name not in self._tool_server_urls:
+            return role not in self._user_chat.roles  # built in: role rules don't hide it from a configured role
+        if (name == GET_TIME_TOOL_NAME or name in CHECK_TOOL_NAMES) and name not in self._tool_server_urls \
+                and role in self._user_chat.roles:
+            return False
+        if name == STAY_QUIET_TOOL_NAME and name not in self._tool_server_urls:
+            return not (self._user_chat.stay_quiet and role in self._user_chat.roles)  # opt-in, like message_user
         hidden = name in self._hidden_by_default
         for r in (role, WILDCARD):
             rules = self._role_rules.get(r, {})
@@ -654,12 +715,15 @@ class Gateway:
         """Every change of the clock goes through here. ``change`` applied, then: the time triggers re-evaluated when it
         moved time on the current arm (it kept the clock's generation, as an advance or a rate change does; a re-arm or
         clear re-anchors them by its new one), every held watch answered, and, given ``wait_s``, a wait for each declared
-        follower to show the new version. The state ``change`` left, with the triggers it made ``due``, and the
+        follower to show the new version. Either way, the fires waiting out virtual time are woken to read the clock
+        again (clock_advanced does it too). The state ``change`` left, with the triggers it made ``due``, and the
         followers still behind."""
         generation = self._clock.generation
         state = change()
         if self._clock.generation == generation:
             state = {**state, "due": self._trigger_engine.clock_advanced()}
+        else:
+            self._trigger_engine.clock_changed()
         self._clock_followers.changed()
         return state, await self._clock_followers.stale_after(state["version"], wait_s) if wait_s else []
 
@@ -1036,7 +1100,8 @@ class Gateway:
         # clock and the checks refuse to turn on over it
         sources: dict[str, list[str]] = {
             tool.name: ["gateway"] for tool in self._server_tools.get("gateway", [])
-            if tool.name != GET_TIME_TOOL_NAME and tool.name not in CHECK_TOOL_NAMES}
+            if tool.name != GET_TIME_TOOL_NAME and tool.name not in CHECK_TOOL_NAMES
+            and tool.name != MESSAGE_USER_TOOL_NAME and tool.name != STAY_QUIET_TOOL_NAME}
         for server, tools in listed:
             for tool in tools:
                 sources.setdefault(tool.name, []).append(server.name)
@@ -1324,6 +1389,54 @@ class Gateway:
                 tools.pop(name, None)
         remaining = [t for t in self._server_tools.get("gateway", []) if t.name not in CHECK_TOOL_NAMES
                      or t.name in self._tool_server_urls]
+        if remaining:
+            self._server_tools["gateway"] = remaining
+        else:
+            self._server_tools.pop("gateway", None)
+        self._trigger_engine.invalidate_readonly_cache()
+
+    def _register_user_chat_tool(self) -> None:
+        """Expose message_user to the roles the user-chat config names (rebuilt so it names the user)."""
+        tools = self._mcp._tool_manager._tools
+        if MESSAGE_USER_TOOL_NAME in self._tool_server_urls:
+            return
+        tool = build_user_chat_tool(self._user_chat, self._create_arg_model_from_schema)
+        tools[MESSAGE_USER_TOOL_NAME] = tool
+        mirrored = [t for t in self._server_tools.get("gateway", []) if t.name != MESSAGE_USER_TOOL_NAME]
+        mirrored.append(MCPTool(name=tool.name, description=tool.description, inputSchema=tool.parameters,
+                                annotations=tool.annotations))
+        self._server_tools["gateway"] = mirrored
+        self._sync_stay_quiet_tool()
+        self._trigger_engine.invalidate_readonly_cache()
+
+    def _sync_stay_quiet_tool(self) -> None:
+        """stay_quiet exists only while the user-chat config turns it on (opt-in); otherwise it is absent."""
+        tools = self._mcp._tool_manager._tools
+        if STAY_QUIET_TOOL_NAME in self._tool_server_urls:
+            return
+        mirrored = [t for t in self._server_tools.get("gateway", []) if t.name != STAY_QUIET_TOOL_NAME]
+        if self._user_chat.stay_quiet:
+            tool = build_stay_quiet_tool(self._user_chat, self._create_arg_model_from_schema)
+            tools[STAY_QUIET_TOOL_NAME] = tool
+            mirrored.append(MCPTool(name=tool.name, description=tool.description, inputSchema=tool.parameters,
+                                    annotations=tool.annotations))
+        else:
+            tools.pop(STAY_QUIET_TOOL_NAME, None)
+        if mirrored:
+            self._server_tools["gateway"] = mirrored
+        else:
+            self._server_tools.pop("gateway", None)
+
+    def _unregister_user_chat_tool(self) -> None:
+        """Remove message_user and stay_quiet when the chat is turned off or cleared; a backing server's are left."""
+        tools = self._mcp._tool_manager._tools
+        if MESSAGE_USER_TOOL_NAME in self._tool_server_urls:
+            return
+        tools.pop(MESSAGE_USER_TOOL_NAME, None)
+        if STAY_QUIET_TOOL_NAME not in self._tool_server_urls:
+            tools.pop(STAY_QUIET_TOOL_NAME, None)
+        remaining = [t for t in self._server_tools.get("gateway", [])
+                     if t.name not in (MESSAGE_USER_TOOL_NAME, STAY_QUIET_TOOL_NAME)]
         if remaining:
             self._server_tools["gateway"] = remaining
         else:

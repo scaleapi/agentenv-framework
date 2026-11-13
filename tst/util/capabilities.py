@@ -63,7 +63,7 @@ MILES = "miles_installed"
 #: SGLang and Megatron-LM and CPU torch aren't in the dev extra, and only that tier's CI job installs them.
 SLIME = "slime_installed"
 
-#: ``collect_artifacts`` sizes a file with ``stat -c %s``, which only GNU stat takes (macOS ships BSD stat),
+#: ``collect_artifacts`` sizes a file with ``stat -c %f:%s``, which only GNU stat takes (macOS ships BSD stat),
 #: so collecting off a local sandbox needs GNU stat first on PATH.
 GNU_STAT = "gnu_stat"
 
