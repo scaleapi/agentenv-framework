@@ -79,8 +79,8 @@ async def check_scoped_addresses(deployed, env_id: str, op_url: Callable[[str], 
     call = _caller(deployed, op_url)
     context = TaskStepContext(deployed_envs=[deployed])
 
-    def step(type: str, label: str, **fields):
-        return get_task_step_registry()[type].from_dict({"id": f"{type}-{label}", "version": None, "type": type,
+    def step(type: str, suffix: str, **fields):
+        return get_task_step_registry()[type].from_dict({"id": f"{type}-{suffix}", "version": None, "type": type,
                                                           "env_id": env_id, **fields})
 
     async def cdp(user: str, label: str | None, status: int = 200) -> dict:
