@@ -64,7 +64,8 @@ the browser apps of its computers, each through the computer's own record and co
 `browser_connect_cdp {context?}` with a `context`, a lease granted to the agent, hands it an address scoped to
 that lease: the agent sees the lease as the browser's default context, its pages, cross-origin iframes and workers
 alone, with the contexts it made itself, and what it opens, sets or downloads lands there; it can't see or attach to
-another context's targets, and the address ends with the lease. An address with no context sees the default context
+another context's targets, nor send on its browser session the commands that act on every context (`Fetch`,
+`Tracing`, `Security`, `Storage` beyond cookies, or another context's windows), and the address ends with the lease. An address with no context sees the default context
 and the agent's own, not the leases.
 `browser_connect_cdp` hands an agent a CDP address to the same browser, under the origin where the agent reaches the
 env, so through a tunnel that ends TLS it's https and wss; on a multi env, one at its gateway, asked through the

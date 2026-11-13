@@ -15,7 +15,15 @@ ACTS_IN_CONTEXT = frozenset({"Target.createTarget", "Storage.getCookies", "Stora
                              "Browser.grantPermissions", "Browser.resetPermissions", "Browser.setPermission",
                              "Browser.setDownloadBehavior"})
 #: The commands on a target, which name it as ``targetId``.
-ON_TARGET = frozenset({"Target.attachToTarget", "Target.activateTarget", "Target.closeTarget", "Target.getTargetInfo"})
+ON_TARGET = frozenset({"Target.attachToTarget", "Target.activateTarget", "Target.closeTarget", "Target.getTargetInfo",
+                       "Target.autoAttachRelated", "Browser.getWindowForTarget"})
+#: The domains whose commands on a browser session act across every context, intercepting, tracing or trusting for all
+#: of them, which a scoped connection may send only on its own pages' sessions.
+BROWSER_WIDE = ("Fetch.", "Tracing.", "Security.")
+#: The ``Storage`` commands a scoped connection may send on its browser session: the cookie ones, which get its lease.
+COOKIES = frozenset({"Storage.getCookies", "Storage.setCookies", "Storage.clearCookies"})
+#: The ``Browser`` commands on a window, which name it as ``windowId``.
+ON_WINDOW = frozenset({"Browser.setWindowBounds", "Browser.getWindowBounds", "Browser.setContentsSize"})
 #: The ``Target`` events about a target, which carry its ``targetInfo``, and those that carry only its ``targetId``.
 WITH_INFO = frozenset({"Target.targetCreated", "Target.targetInfoChanged", "Target.attachedToTarget"})
 WITH_ID = frozenset({"Target.targetDestroyed", "Target.targetCrashed"})
@@ -51,6 +59,14 @@ def sees(contexts: Contexts, scope: Optional[str], user: str, context: Optional[
     if context is not None and (lease := contexts.of(context)) is not None and lease.made_by == user:
         return True
     return scope is None and (context is None or context not in contexts.control.other_contexts)
+
+
+def browser_wide(method: str) -> Optional[str]:
+    """Why a scoped connection may not send ``method`` on its browser session, which would act on every context, or
+    None."""
+    if method.startswith(BROWSER_WIDE) or (method.startswith("Storage.") and method not in COOKIES):
+        return "on an address scoped to a lease it would act on every context; a page's own session takes it"
+    return None
 
 
 def in_scope(contexts: Contexts, scope: Optional[str], user: str, method: str,

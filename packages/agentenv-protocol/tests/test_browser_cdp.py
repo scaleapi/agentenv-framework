@@ -142,6 +142,9 @@ class ScopePipe(ContextPipe):
             return {"result": {}}
         if method == "Target.getTargets":
             return {"result": {"targetInfos": list(self.infos)}}
+        if method == "Browser.getWindowForTarget":
+            self.sent.append((method, session_id))
+            return {"result": {"windowId": {"PB": 7, "PS": 9}.get((params or {}).get("targetId"), 1), "bounds": {}}}
         if method == "Target.getBrowserContexts":
             ids = sorted({info["browserContextId"] for info in self.infos} - {"DEF"})
             return {"result": {"browserContextIds": ids, "defaultBrowserContextId": "DEF"}}
@@ -541,6 +544,37 @@ async def test_a_download_a_cross_origin_iframe_began_is_heard_on_its_leases_con
 
     assert heard["method"] == "Browser.downloadWillBegin" and heard["params"]["guid"] == "g1"
     assert nothing["id"] == 2
+
+
+@pytest.mark.asyncio
+async def test_a_scoped_connection_reaches_no_further_than_its_lease_on_its_browser_session(tmp_path):
+    pipe, contexts = await _scoped(tmp_path)
+    wide = ["Fetch.enable", "Tracing.start", "Security.setIgnoreCertificateErrors", "Storage.clearDataForOrigin"]
+    async with _relay(pipe=pipe, contexts=contexts) as (_, relay, base):
+        async with connect(f"{base}/ada/buyer") as ada, connect(f"{base}/carol") as carol:
+            refused = [await _ask(ada, {"id": n, "method": method, "params": {}}) for n, method in enumerate(wide, 1)]
+            cookies = await _ask(ada, {"id": 10, "method": "Storage.getCookies"})
+            await _ask(ada, {"id": 11, "method": "Target.getTargets"})
+            window = await _ask(ada, {"id": 12, "method": "Browser.getWindowForTarget", "params": {"targetId": "PB"}})
+            theirs = await _ask(ada, {"id": 13, "method": "Browser.getWindowForTarget", "params": {"targetId": "PS"}})
+            own_window = await _ask(ada, {"id": 14, "method": "Browser.setWindowBounds",
+                                          "params": {"windowId": 7, "bounds": {}}})
+            other_window = await _ask(ada, {"id": 15, "method": "Browser.setWindowBounds",
+                                            "params": {"windowId": 9, "bounds": {}}})
+            await ada.send(json.dumps({"id": 16, "method": "Target.attachToTarget",
+                                       "params": {"targetId": "PB", "flatten": True}}))
+            while json.loads(await ada.recv()).get("id") != 16:
+                pass
+            on_page = await _ask(ada, {"id": 17, "method": "Fetch.enable", "sessionId": "b1-c"})
+            on_default = await _ask(carol, {"id": 1, "method": "Fetch.enable"})
+
+    assert all("act on every context" in answer["error"]["message"] for answer in refused), refused
+    assert "result" in cookies and pipe.params["Storage.getCookies"] == {"browserContextId": "L1"}
+    assert window["result"]["windowId"] == 7 and theirs["error"]["message"] == "No target with given id found"
+    assert "result" in own_window and "isn't one of this address's tabs'" in other_window["error"]["message"]
+    assert "result" in on_page and "result" in on_default
+    assert ("Fetch.enable", "b1-c") in pipe.sent and ("Fetch.enable", "b2") in pipe.sent
+    assert not any(method in wide and session == "b1" for method, session in pipe.sent)
 
 
 def test_a_scoped_token_is_one_per_user_and_lease_kept_in_memory_and_revoked_with_its_lease(tmp_path):

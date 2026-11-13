@@ -21,7 +21,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from .devtools import DevToolsError
 from .log import (ERROR_CHARS, KEY_FIELDS, TYPING_METHODS, BrowserLog, acts, redact_text, redacted_args,
                   redacted_params)
-from .scope import NO_TARGET, ON_TARGET, WITH_ID, WITH_INFO, Targets, answered, in_scope, sees
+from .scope import NO_TARGET, ON_TARGET, ON_WINDOW, WITH_ID, WITH_INFO, Targets, answered, browser_wide, in_scope, sees
 
 if TYPE_CHECKING:
     from .contexts import Contexts
@@ -250,8 +250,9 @@ class _Connection:
         #: Whether it set how downloads are saved, and the contexts it made that end as it detaches.
         self.set_downloads = False
         self.ends_on_detach: set[str] = set()
-        #: The downloads it doesn't hear of, begun in contexts it doesn't see.
+        #: The downloads it doesn't hear of, begun in contexts it doesn't see, and the windows of the tabs it does.
         self.unseen_downloads: set[str] = set()
+        self.windows: set[int] = set()
 
 
 class _Call:
@@ -461,6 +462,11 @@ class Relay:
                 self.contexts, connection.scope, connection.user,
                 self.targets.context_of(params.get("targetId")) if params.get("targetId") else connection.scope):
             return Verdict("refuse", params, "the target isn't one this address sees", error=NO_TARGET)
+        if connection.scope is not None and session == connection.session:
+            if reason := browser_wide(method):
+                return Verdict("refuse", params, reason)
+            if method in ON_WINDOW and params.get("windowId") not in connection.windows:
+                return Verdict("refuse", params, "the window isn't one of this address's tabs'")
         params, refused = in_scope(self.contexts, connection.scope, connection.user, method, params)
         if refused:
             return Verdict("refuse", params, refused)
@@ -479,6 +485,8 @@ class Relay:
         """A context ``connection`` made leased to its user before it hears the answer, and one it disposed ended."""
         if self.contexts is None:
             return
+        if method == "Browser.getWindowForTarget" and isinstance(window := result.get("windowId"), int):
+            connection.windows.add(window)
         if method == MAKES_CONTEXT and isinstance(made := result.get("browserContextId"), str):
             self.contexts.made_by_agent(connection.user, made)
             if params.get("disposeOnDetach"):
