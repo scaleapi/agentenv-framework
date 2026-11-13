@@ -377,6 +377,8 @@ def test_the_sessions_supervisord_logs_to_the_console_where_a_disk_forms_smoke_r
     assert (root["program:session"]["stdout_logfile"], root["program:session"]["stdout_logfile_maxbytes"]) == (
         "/dev/stdout", "0")
     assert root["supervisord"]["nodaemon"] == "true"
+    init = (script.REPO / Path(script.IMAGES["agentenv-ubuntu-24.04-disk"]).with_name("init")).read_text()
+    assert "ln -sf /proc/self/fd/1 /newroot/dev/stdout\n" in init
 
 
 def test_a_disk_forms_smoke_needs_the_launcher_to_boot_it_in(script, monkeypatch, capsys):
