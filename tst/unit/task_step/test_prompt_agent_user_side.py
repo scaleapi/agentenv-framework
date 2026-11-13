@@ -479,3 +479,177 @@ async def test_with_no_user_agent_the_configured_human_peer_answers(monkeypatch)
         *exchange(HUMAN, text("one"), "<id2>", "<ctx>", "task-2"),
         *exchange(AGENT, text("go on"), "<id3>", "<ctx>", "task-3"),
     ]
+
+
+# ---- the user-sim gate ----------------------------------------------------------------------------------------------
+
+_SWAP = ("Done. Here's what I found when I checked the figures against the records:\n\n"
+         "| Metric | Reported | Actual |\n|---|---|---|\n| Installs | 1,400 | 901 |\n| Retention | 43% | 25% |\n\n"
+         "None of the three reported numbers hold up, and I've updated the summary page to say so. " * 2)
+
+
+_TAKEOVER = "I'll handle the rest of it from here, so there's no need for you to keep going on this. " * 4
+
+
+def _gated(turns: int = 2, **gate) -> PromptAgentTaskStep:
+    return _step(turns=turns, user_agent_name="human_agent", user_sim_gate={"patterns": True, **gate})
+
+
+@pytest.mark.asyncio
+async def test_the_gate_lets_a_user_message_through_and_records_its_verdict(monkeypatch):
+    peers = Peers(monkeypatch, {AGENT: [text("draft one"), text("draft two")], USER: [sim("make it shorter")]})
+    ctx = _context(user_card=_USER_SIM_CARD)
+
+    await _gated().execute(ctx)
+
+    assert peers.requests(ctx)[-2] == send(AGENT, text("make it shorter"), "<id3>", "<ctx>")
+    assert ctx.metadata["user_sim_gate"] == {"talk": [{"turn": 1, "attempt": 0, "chars": 15, "passed": True}]}
+    assert "user_sim_invalid" not in ctx.metadata
+
+
+@pytest.mark.asyncio
+async def test_a_message_that_reads_as_the_assistants_is_held_back_and_rewritten(monkeypatch):
+    peers = Peers(monkeypatch, {AGENT: [text("draft one"), text("draft two")],
+                                USER: [sim(_SWAP), sim("do those numbers hold up?")]})
+    ctx = _context(user_card=_USER_SIM_CARD)
+
+    await _gated().execute(ctx)
+
+    sent = [r for r in peers.requests(ctx) if r[2] and r[2].get("method") == "message/send"]
+    to_user = [r[2]["params"]["message"]["parts"][0]["text"] for r in sent if r[1].startswith(USER)]
+    to_agent = [r[2]["params"]["message"]["parts"] for r in sent if r[1].startswith(AGENT)]
+    assert to_user[0] == "draft one"
+    assert to_user[1].startswith("[Conversation system note, not from the assistant.] Your last message was not sent")
+    assert to_agent == [text("plan my week"), text("do those numbers hold up?")]   # the swap never reached it
+    verdicts = ctx.metadata["user_sim_gate"]["talk"]
+    assert [(v["attempt"], v["passed"]) for v in verdicts] == [(0, False), (1, True)]
+    assert "it opens like a report of work done" in verdicts[0]["pattern_reasons"]
+
+
+@pytest.mark.asyncio
+async def test_a_message_that_still_fails_after_its_rewrites_ends_the_run_and_fails_the_step(monkeypatch):
+    peers = Peers(monkeypatch, {AGENT: [text("draft one")], USER: [sim(_SWAP), sim(_SWAP), sim(_SWAP)]})
+    ctx = _context(user_card=_USER_SIM_CARD)
+
+    with pytest.raises(RuntimeError, match=r"user_sim_gate: user-sim message at turn 1 still reads as the assistant's"):
+        await _gated(turns=3).execute(ctx)
+
+    assert [v["passed"] for v in ctx.metadata["user_sim_gate"]["talk"]] == [False, False, False]
+    assert ctx.metadata["user_sim_invalid"]["talk"]["turn"] == 1
+    assert _stored(ctx, peers)["status"] == "closed"
+    assert [m["role"] for m in _stored(ctx, peers)["messages"]] == ["user", "agent"]   # nothing more was sent
+    assert ctx.prompt_responses[-1].response == "draft one"                            # the run kept its record
+
+
+@pytest.mark.asyncio
+async def test_on_fail_end_closes_the_conversation_without_failing_the_step(monkeypatch):
+    Peers(monkeypatch, {AGENT: [text("draft one")], USER: [sim(_SWAP), sim(_SWAP)]})
+    ctx = _context(user_card=_USER_SIM_CARD)
+
+    await _gated(turns=3, max_rewrites=1, on_fail="end").execute(ctx)
+
+    assert ctx.metadata["user_sim_invalid"]["talk"]["turn"] == 1
+    assert len(ctx.metadata["user_sim_gate"]["talk"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_the_judge_fails_a_message_the_patterns_pass_and_sees_the_conversation(monkeypatch):
+    from agent_env.task_step.task_steps import user_sim_gate
+
+    seen = []
+
+    async def judge(self, candidate, history, call_config):
+        seen.append((candidate, list(history)))
+        return {"in_role": candidate != _TAKEOVER, "reason": "it offers to do the work"}
+
+    monkeypatch.setattr(user_sim_gate.UserSimGate, "_judge", judge)
+    Peers(monkeypatch, {AGENT: [text("draft one"), text("draft two")],
+                        USER: [sim(_TAKEOVER), sim("shorter, please")]})
+    ctx = _context(user_card=_USER_SIM_CARD)
+    monkeypatch.setattr("agent_env.config.Config.resolve_model_call", lambda self, model, **kw: None, raising=False)
+
+    await _gated(judge_model="judge-model").execute(ctx)
+
+    verdicts = ctx.metadata["user_sim_gate"]["talk"]
+    assert [(v["passed"], v.get("judge_in_role")) for v in verdicts] == [(False, False), (True, True)]
+    assert verdicts[0]["judge_reason"] == "it offers to do the work"
+    assert seen[0][1] == [("user", "plan my week"), ("assistant", "draft one")]
+
+
+@pytest.mark.asyncio
+async def test_a_judge_that_errors_leaves_the_patterns_verdict(monkeypatch):
+    from agent_env.task_step.task_steps import user_sim_gate
+
+    async def judge(self, candidate, history, call_config):
+        raise TimeoutError("judge timed out")
+
+    monkeypatch.setattr(user_sim_gate.UserSimGate, "_judge", judge)
+    Peers(monkeypatch, {AGENT: [text("draft one"), text("draft two")], USER: [sim("shorter, please")]})
+    ctx = _context(user_card=_USER_SIM_CARD)
+    monkeypatch.setattr("agent_env.config.Config.resolve_model_call", lambda self, model, **kw: None, raising=False)
+
+    await _gated(judge_model="judge-model").execute(ctx)
+
+    (verdict,) = ctx.metadata["user_sim_gate"]["talk"]
+    assert verdict["passed"] is True
+    assert verdict["judge_error"] == "TimeoutError: judge timed out"
+
+
+def test_the_gate_round_trips_through_the_step_dict_and_rejects_bad_settings():
+    step = _gated(judge_model="judge-model", max_rewrites=1)
+    again = PromptAgentTaskStep.from_dict(step.to_dict())
+    assert again.user_sim_gate == step.user_sim_gate
+    assert again.user_sim_gate.max_rewrites == 1
+    assert "user_sim_gate" not in _step().to_dict()
+    defaults = _step(user_sim_gate={}).user_sim_gate      # empty settings turn the gate on with its defaults
+    assert defaults is not None and defaults.patterns and defaults.judge_model is None and defaults.max_rewrites == 2
+    with pytest.raises(ValueError, match="unknown keys"):
+        _step(user_sim_gate={"judge": "x"})
+    with pytest.raises(ValueError, match="on_fail"):
+        _step(user_sim_gate={"on_fail": "retry"})
+    with pytest.raises(ValueError, match="needs patterns"):
+        _step(user_sim_gate={"patterns": False})
+
+
+@pytest.mark.asyncio
+async def test_a_judge_whose_setup_fails_leaves_the_patterns_verdict_and_is_not_called(monkeypatch):
+    from agent_env.task_step.task_steps import user_sim_gate
+
+    called = []
+
+    async def judge(self, candidate, history, call_config):
+        called.append(candidate)
+        return {"in_role": True}
+
+    def no_endpoint(self, model, **kw):
+        raise KeyError("no endpoint configured for judge-model")
+
+    monkeypatch.setattr(user_sim_gate.UserSimGate, "_judge", judge)
+    monkeypatch.setattr("agent_env.config.Config.resolve_model_call", no_endpoint, raising=False)
+    peers = Peers(monkeypatch, {AGENT: [text("draft one"), text("draft two")],
+                                USER: [sim(_SWAP), sim("shorter, please")]})
+    ctx = _context(user_card=_USER_SIM_CARD)
+
+    await _gated(judge_model="judge-model").execute(ctx)
+
+    verdicts = ctx.metadata["user_sim_gate"]["talk"]
+    assert [v["passed"] for v in verdicts] == [False, True]        # the patterns still held the swap back
+    assert all(v["judge_error"].startswith("judge setup: KeyError") for v in verdicts)
+    assert called == []
+    assert peers.requests(ctx)[-2] == send(AGENT, text("shorter, please"), "<id4>", "<ctx>")
+
+
+@pytest.mark.asyncio
+async def test_a_judge_only_gate_whose_setup_fails_sends_the_message_on_with_the_error_recorded(monkeypatch):
+    def no_endpoint(self, model, **kw):
+        raise KeyError("no endpoint configured for judge-model")
+
+    monkeypatch.setattr("agent_env.config.Config.resolve_model_call", no_endpoint, raising=False)
+    peers = Peers(monkeypatch, {AGENT: [text("draft one"), text("draft two")], USER: [sim("shorter, please")]})
+    ctx = _context(user_card=_USER_SIM_CARD)
+
+    await _gated(patterns=False, judge_model="judge-model").execute(ctx)
+
+    (verdict,) = ctx.metadata["user_sim_gate"]["talk"]
+    assert verdict["passed"] is True and verdict["judge_error"].startswith("judge setup: KeyError")
+    assert peers.requests(ctx)[-2] == send(AGENT, text("shorter, please"), "<id3>", "<ctx>")

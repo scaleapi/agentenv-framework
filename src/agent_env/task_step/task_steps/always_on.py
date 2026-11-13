@@ -327,6 +327,9 @@ class AlwaysOnTaskStep(PromptAgentTaskStep):
     def from_dict(cls, data: dict) -> AlwaysOnTaskStep:
         fields = {k: data[k] for k in cls._PROMPT_FIELDS if k in data and data[k] is not None}
         own = {k: data[k] for k in cls._OWN if k in data and data[k] is not None}
+        # Passed on so the constructor refuses it, as it does a step built in code, rather than dropping it unread.
+        if data.get("user_sim_gate") is not None:
+            fields["user_sim_gate"] = data["user_sim_gate"]
         return cls(**cls._base_from_dict(data), retry_config=data.get("retry_config"), **fields, **own)
 
     def task_problems(self, steps: list[TaskStep]) -> list[str]:
