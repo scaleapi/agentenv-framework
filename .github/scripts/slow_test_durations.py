@@ -4,9 +4,9 @@
     python .github/scripts/slow_test_durations.py junit-*/junit-*.xml
 
 Use a green ``main`` run: it has a ``junit-*`` artifact for every shard of the slow tier, the gateway tests, the unit
-tier and the installer tier, which ``gh run download`` puts in a folder each. Pass them all, since the table is
-rewritten whole. Each test's time counts toward its file, or toward the test itself for a file the table names in
-``split_by_test``; that list is kept as it is.
+tier and the installer tier, which ``gh run download`` puts in a folder each. Each test's time counts toward its file,
+or toward the test itself for a file the table names in ``split_by_test``; that list is kept as it is. A file the
+reports have no test of, such as one of a tier the run skipped, keeps the times the table had for it while it exists.
 """
 
 from __future__ import annotations
@@ -43,9 +43,13 @@ def main() -> int:
     if not seconds:
         print("slow test durations: the reports have no test cases; the table is unchanged")
         return 1
-    table["seconds"] = {unit: round(value, 1) for unit, value in sorted(seconds.items())}
+    reported = {unit.split("::", 1)[0] for unit in seconds}
+    kept = {unit: value for unit, value in table.get("seconds", {}).items()
+            if unit.split("::", 1)[0] not in reported and (args.root / unit.split("::", 1)[0]).is_file()}
+    table["seconds"] = {unit: round(value, 1) for unit, value in sorted({**kept, **seconds}.items())}
     args.table.write_text(json.dumps(table, indent=1) + "\n")
-    print(f"slow test durations: {len(seconds)} units, {sum(seconds.values()) / 60:.1f} min, written to {args.table}")
+    print(f"slow test durations: {len(seconds)} units, {sum(seconds.values()) / 60:.1f} min, and {len(kept)} kept "
+          f"from files the reports have no test of, written to {args.table}")
     return 0
 
 

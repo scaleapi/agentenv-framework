@@ -1934,6 +1934,44 @@ async def test_gateway_changes_name_the_request_behind_a_write_through_the_rest_
 
 @pytest.mark.asyncio
 @pytest.mark.integration
+async def test_a_tool_disabled_for_a_role_is_refused_through_svc_as_on_the_gateway_s_mcp(mcp_server_envs,
+                                                                                         email_service_artifact):
+    """A tool disabled for a role is refused on the child's own MCP endpoint through /svc as on /mcp, before it
+    reaches the server, while another role still calls it there."""
+    email_ref = mcp_server_envs["email"]
+    email_env = Env.get(email_ref.id, version=email_ref.version)
+    try:
+        result = await email_env.deploy()
+        await email_env.load_environment_artifact(email_service_artifact)
+        gw = result.gateway_url
+        async with httpx.AsyncClient(headers=result.control_headers) as client:
+            resp = await client.post(f"{gw}/tools/{TOOL_DISABLE_ACTION}", timeout=30,
+                                     json={"role": "carol@example.com", "tools": ["send_email"]})
+            assert resp.status_code == 200, resp.text
+            seen = (await client.get(f"{gw}/changes", params={"limit": 10000}, timeout=30)).json()["changes"]
+            after_id = seen[-1]["id"] if seen else 0
+        answers = {}
+        for role in ("carol@example.com", "dana@example.com"):
+            async with httpx.AsyncClient(headers={AGENT_ENV_ROLE_HEADER: role}, timeout=60) as as_role:
+                for path in ("/mcp", "/svc/mcp-email/mcp"):
+                    async with streamable_http_client(f"{gw}{path}", http_client=as_role) as (read, write, _):
+                        async with ClientSession(read, write) as session:
+                            await session.initialize()
+                            answers[role, path] = await session.call_tool("send_email", {
+                                "recipients": ["erin@example.com"], "subject": f"via {path}", "content": "noon"})
+        refused = [answers["carol@example.com", path] for path in ("/mcp", "/svc/mcp-email/mcp")]
+        assert all(a.isError for a in refused) and refused[0].content[0].text == refused[1].content[0].text, refused
+        assert "disabled for role 'carol@example.com'" in refused[1].content[0].text, refused
+        assert not any(answers["dana@example.com", path].isError for path in ("/mcp", "/svc/mcp-email/mcp")), answers
+        async with httpx.AsyncClient() as client:
+            changes = (await client.get(f"{gw}/changes", params={"after_id": after_id}, timeout=30)).json()["changes"]
+        assert {a["role"] for c in changes for a in c["actors"]} == {"dana@example.com"}, changes  # carol wrote nothing
+    finally:
+        await email_env.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
 @skip_without_model_endpoint()
 @skip_without_default_a2a_agent()
 async def test_env_validator_task(mcp_server_envs):
