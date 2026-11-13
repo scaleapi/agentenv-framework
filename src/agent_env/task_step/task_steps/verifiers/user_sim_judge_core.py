@@ -17,9 +17,8 @@ and the always_on step's own ending cover them. A task's own rubric items may na
 call of the check that owns its family, and an item whose family no running check owns gets one call of its own
 (``TASK_ITEMS``).
 
-Each judge model answers each check in its own call. Where the judges disagree, the check's result is ``split``: a
-range, never settled by a tie-breaker. ``judge_run`` does all of it for one run, given a ``complete`` function that
-makes one model call; the step and the calibration harness both use it.
+One judge model answers each check in its own call. ``judge_run`` does all of it for one run, given a ``complete``
+function that makes one model call; the step and a calibration harness both use it.
 """
 from __future__ import annotations
 
@@ -200,8 +199,8 @@ CHECKS: dict[str, Check] = {c.name: c for c in (
 )}
 CHECK_NAMES = tuple(CHECKS)
 FAMILY_OWNER: dict[str, str] = {f: c.name for c in CHECKS.values() for f in c.families}
-# The checks that may mark a run user_sim_error unless the task says otherwise. Style is judged, not graded: it is
-# recorded and never ends a run's grading on its own.
+# The checks that may make a run a user sim error unless the task says otherwise. Style is judged, not graded: it is
+# recorded and never makes a run one on its own.
 DEFAULT_ERROR_CHECKS = ("guidance", "oversharing", "delegation", "rogue", "made_up")
 
 INSTRUCTIONS = """You check a user simulator: an AI playing a real person who messages their personal AI assistant. \
@@ -432,59 +431,32 @@ def _json_object(text: Any) -> Any:
             return None
 
 
-# ---- the judges together ------------------------------------------------------------------------------------------
-def combine(per_judge: dict[str, Optional[dict]]) -> dict:
-    """One check across judges. ``per_judge`` maps a model to its parsed answer, or None when its call failed.
-    ``verdict``: the judges' shared verdict, ``split`` where they differ, ``error`` when none answered.
-    ``grade_changing``: yes when every judge that answered failed it as able to change the grade, no when none did,
-    else split."""
-    answered = {m: a for m, a in per_judge.items() if a is not None}
-    if not answered:
-        return {"verdict": "error", "grade_changing": "error", "judges_missing": sorted(per_judge)}
-    verdicts = {a["verdict"] for a in answered.values()}
-    changing = [a["could_change_grade"] for a in answered.values()]
-    out = {"verdict": verdicts.pop() if len(verdicts) == 1 else "split",
-           "grade_changing": "yes" if all(changing) else "no" if not any(changing) else "split",
-           "turns": sorted({t for a in answered.values() for t in a["turns"]})}
-    if len(answered) < len(per_judge):
-        out["judges_missing"] = sorted(set(per_judge) - set(answered))
-    return out
-
-
-def combine_items(per_judge: dict[str, Optional[dict]], item_ids: list[str]) -> dict[str, dict]:
-    answered = {m: a for m, a in per_judge.items() if a is not None}
-    out = {}
-    for item_id in item_ids:
-        verdicts = {a["items"][item_id]["verdict"] for a in answered.values()}
-        out[item_id] = {"verdict": "error" if not verdicts else verdicts.pop() if len(verdicts) == 1 else "split",
-                        "judges": {m: a["items"][item_id] for m, a in answered.items()}}
-    return out
-
-
-def user_sim_error(results: dict[str, dict], error_checks: list[str], items: dict[str, dict],
-                   item_can_error: dict[str, bool], error_on_split: bool = False) -> dict:
-    """Whether the run is a user sim error: a check that may mark it (``error_checks``) failed in a way that could
-    change the grade, or a task item that may mark it failed. ``value``: yes, no, or split (the judges disagree on
-    whether it is one); a split counts as yes only with ``error_on_split``."""
-    yes, split = [], []
+# ---- the run's verdict --------------------------------------------------------------------------------------------
+def user_sim_error(checks: dict[str, dict], error_checks: list[str], items: dict[str, dict],
+                   item_can_error: dict[str, bool]) -> dict:
+    """Whether the run is a user sim error. ``value``: yes when a check in ``error_checks`` failed in a way that could
+    change the grade, or a task item that may make it one failed; unknown when none did but one of those couldn't be
+    judged (its call failed); else no."""
+    because, unknown = [], []
     for name in error_checks:
-        r = results.get(name)
+        r = checks.get(name)
         if not r:
             continue
-        if r["verdict"] == "fail" and r["grade_changing"] == "yes":
-            yes.append(name)
-        elif r["verdict"] in ("fail", "split") and r["grade_changing"] in ("yes", "split"):
-            split.append(name)
+        if r["verdict"] == "fail" and r.get("could_change_grade"):
+            because.append(name)
+        elif r["verdict"] == "error":
+            unknown.append(name)
     for item_id, r in items.items():
         if not item_can_error.get(item_id):
             continue
         if r["verdict"] == "fail":
-            yes.append(f"item:{item_id}")
-        elif r["verdict"] == "split":
-            split.append(f"item:{item_id}")
-    value = "yes" if yes else "split" if split else "no"
-    return {"value": value, "marked": value == "yes" or (value == "split" and error_on_split),
-            "because": yes, "split_on": split}
+            because.append(f"item:{item_id}")
+        elif r["verdict"] == "error":
+            unknown.append(f"item:{item_id}")
+    return {"value": "yes" if because else "unknown" if unknown else "no", "because": because, "unknown": unknown}
+
+
+NOT_JUDGED = {"value": "no", "because": [], "unknown": []}
 
 
 # ---- one run ------------------------------------------------------------------------------------------------------
@@ -495,22 +467,21 @@ Complete = Callable[[str, str, list[str], dict], Awaitable[dict]]
 RETRY_NOTE = "\n\nYour last answer could not be used ({error}). Return only the JSON object."
 
 
-async def judge_run(run: UserSimRun, *, models: list[str], checks: list[str], complete: Complete,
+async def judge_run(run: UserSimRun, *, model: str, checks: list[str], complete: Complete,
                     items: tuple[RubricItem, ...] | list[RubricItem] = (),
-                    error_checks: tuple[str, ...] | list[str] = DEFAULT_ERROR_CHECKS, error_on_split: bool = False,
+                    error_checks: tuple[str, ...] | list[str] = DEFAULT_ERROR_CHECKS,
                     answer_retries: int = 1, concurrency: int = 6) -> dict:
-    """Every check (and task item) on ``run``, by every model in ``models``. Each model's first call runs alone so
-    the rest can read its prompt cache. A call that fails or answers badly ``answer_retries`` more times leaves that
-    model out of that check (``judges_missing``)."""
+    """Every check (and task item) on ``run``, each in its own call to ``model``. The first call runs alone so the
+    rest can read its prompt cache. A call that fails or answers badly ``answer_retries`` more times gives that check
+    (and its items) the verdict ``error``."""
     graded = {t.n for t in run.turns if t.graded}
     if not graded:
-        return {"skipped": "no graded turns", "checks": {}, "items": {},
-                "user_sim_error": {"value": "no", "marked": False, "because": [], "split_on": []}}
+        return {"skipped": "no graded turns", "checks": {}, "items": {}, "user_sim_error": dict(NOT_JUDGED)}
     calls = plan_calls(list(checks), list(items))
     head, tail = render_run(run)
     gate = asyncio.Semaphore(max(1, concurrency))
 
-    async def one(model: str, call: str) -> dict:
+    async def one(call: str) -> dict:
         ids = [i.id for i in calls[call]]
         question = question_text(call, calls[call])
         errors: list[str] = []
@@ -536,45 +507,32 @@ async def judge_run(run: UserSimRun, *, models: list[str], checks: list[str], co
                 "usage": usage, "cost": cost, "errors": errors}
 
     order = list(calls)
+    first = await one(order[0])
+    answers = dict(zip(order, [first, *await asyncio.gather(*(one(c) for c in order[1:]))]))
 
-    async def by_model(model: str) -> dict[str, dict]:
-        first = {order[0]: await one(model, order[0])}
-        rest = await asyncio.gather(*(one(model, c) for c in order[1:]))
-        return {**first, **dict(zip(order[1:], rest))}
-
-    answers = dict(zip(models, await asyncio.gather(*(by_model(m) for m in models))))
-    results: dict[str, dict] = {}
-    for call in order:
-        if call == TASK_ITEMS:
-            continue
-        per_judge = {m: (None if "error" in answers[m][call] else answers[m][call]) for m in models}
-        results[call] = {**combine(per_judge), "families": list(CHECKS[call].families),
-                         "judges": {m: _judge_view(answers[m][call]) for m in models}}
+    results = {call: {**_check_view(answers[call]), "families": list(CHECKS[call].families)}
+               for call in order if call != TASK_ITEMS}
     item_results: dict[str, dict] = {}
     for call in order:
-        its = calls[call]
-        if not its:
-            continue
-        per_judge = {m: (None if "error" in answers[m][call] else answers[m][call]) for m in models}
-        for item_id, r in combine_items(per_judge, [i.id for i in its]).items():
-            item = next(i for i in its if i.id == item_id)
-            item_results[item_id] = {**r, "family": item.family, "asked_with": call}
+        for item in calls[call]:
+            answer = answers[call]
+            got = {"verdict": "error", "error": answer["error"]} if "error" in answer else answer["items"][item.id]
+            item_results[item.id] = {**got, "family": item.family, "asked_with": call}
     can_error = {i.id: (i.can_error if i.can_error is not None else FAMILY_OWNER.get(i.family) in error_checks)
                  for i in items}
-    error = user_sim_error(results, [c for c in error_checks if c in results], item_results, can_error,
-                           error_on_split)
-    usage = {m: _usage_total([u for c in order for u in answers[m][c]["usage"]]) for m in models}
-    cost = {m: round(sum(answers[m][c]["cost"] for c in order), 6) for m in models}
-    errors = [f"{m} · {c}: {answers[m][c]['error']}" for m in models for c in order if "error" in answers[m][c]]
-    return {"checks": results, "items": item_results, "user_sim_error": error, "graded_turns": sorted(graded),
-            "turns": len(run.turns), "models": list(models), "calls": sum(answers[m][c]["attempts"] for m in models
-                                                                        for c in order),
-            "usage": usage, "cost": cost, "errors": errors, "notes": list(run.notes)}
+    error = user_sim_error(results, [c for c in error_checks if c in results], item_results, can_error)
+    return {"model": model, "checks": results, "items": item_results, "user_sim_error": error,
+            "graded_turns": sorted(graded), "turns": len(run.turns),
+            "calls": sum(a["attempts"] for a in answers.values()),
+            "usage": _usage_total([u for a in answers.values() for u in a["usage"]]),
+            "cost": round(sum(a["cost"] for a in answers.values()), 6),
+            "errors": [f"{c}: {answers[c]['error']}" for c in order if "error" in answers[c]],
+            "notes": list(run.notes)}
 
 
-def _judge_view(answer: dict) -> dict:
+def _check_view(answer: dict) -> dict:
     if "error" in answer:
-        return {"error": answer["error"], "attempts": answer["attempts"]}
+        return {"verdict": "error", "error": answer["error"], "attempts": answer["attempts"]}
     out = {k: answer[k] for k in ("verdict", "could_change_grade", "reason", "turns")}
     if answer.get("turns_outside_graded"):
         out["turns_outside_graded"] = answer["turns_outside_graded"]
