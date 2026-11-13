@@ -9,7 +9,7 @@ Docker 28 resolves a digest-pinned FROM only from an image under that exact name
 are also named in containerd, whose images Docker reads only on the containerd image store. Switching dockerd to it
 restarts dockerd, which stops the containers it runs, so this runs before any start.
 
-``mirror_base_images.py PATH...`` does this for the Dockerfiles at or under each PATH.
+``mirror_base_images.py PATH...`` does this for the Dockerfiles at or under each PATH, pulling their bases at once.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ import re
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 ECR = "public.ecr.aws/docker/library/"
@@ -33,8 +34,8 @@ def main(argv: list[str]) -> int:
     bases = _bases([Path(arg) for arg in argv])
     if any("@" in base for base in bases):
         _use_containerd_store()
-    for base in bases:
-        _pull(base)
+    with ThreadPoolExecutor(max_workers=max(len(bases), 1)) as pool:
+        list(pool.map(_pull, bases))
     return 0
 
 
