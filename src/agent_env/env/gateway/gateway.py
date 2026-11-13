@@ -87,7 +87,7 @@ from .rest_proxy import (
     fetch_child_card,
     forward,
     is_child_mcp_path,
-    sent_path,
+    reaches,
     listed_url,
     lowered,
     operations,
@@ -575,7 +575,7 @@ class Gateway:
 
     def _takes_control_token(self, scope: dict) -> bool:
         """Whether a request takes the deploy's control token: a control route, the env's data plane, or one of
-        ``token_paths`` behind /svc, by the path as routed or by the one the backing server receives (``sent_path``),
+        ``token_paths`` behind /svc, by the path as routed or by the one the backing server receives (``reaches``),
         after dot-segment normalisation. A site's /website route never reaches its data plane."""
         path = scope["path"]
         if path in CONTROL_ROUTES or is_child_mcp_path(path, RPC_PATH):
@@ -583,8 +583,8 @@ class Gateway:
         prefix, _, rest = path.lstrip("/").partition("/")
         service, _, rest = rest.partition("/")
         guarded = self._token_paths.get(service, ()) if prefix == "svc" else ()
-        reached = (rest, sent_path(scope.get("raw_path") or path.encode(), path, rest))
-        return any(is_child_mcp_path(at, endpoint) for at in reached if at is not None for endpoint in guarded)
+        raw, base = scope.get("raw_path") or path.encode(), self.rest_proxy_urls.get(service, "")
+        return any(reaches(base, raw, path, rest, endpoint) for endpoint in guarded)
 
     @asynccontextmanager
     async def _session_lifespan(self, mcp: FastMCP):
@@ -806,7 +806,7 @@ class Gateway:
         mcp_endpoint = mcp_endpoint or "mcp"
         if url_map is self.rest_proxy_urls and (cdp := await self._browsers.cdp_answer(request, base_url, role)) is not None:
             return cdp
-        if mcp_server and request.method == "POST" and reaches_child_mcp(request, mcp_endpoint):
+        if mcp_server and request.method == "POST" and reaches_child_mcp(request, base_url, mcp_endpoint):
             if (refusal := await self._refuse_disabled_calls(await request.body(), role)) is not None:
                 return refusal
         if request.method in _SAFE_METHODS:

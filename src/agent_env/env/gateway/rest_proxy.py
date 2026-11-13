@@ -105,7 +105,7 @@ async def forward(request: Request, base_url: str, *, role: str, timeout: httpx.
         return await _done(_json_response({"error": str(e)}, 400), on_done)
     content = await request.body()  # /svc and /website request bodies are small (JSON-RPC, forms)
     headers = upstream_headers(request, role, withheld=withheld, site_names=site_names)
-    if mcp_server and request.method == "POST" and reaches_child_mcp(request, mcp_endpoint):
+    if mcp_server and request.method == "POST" and reaches_child_mcp(request, base_url, mcp_endpoint):
         # The gateway is the trust boundary for identity: a child's proxied MCP endpoint stays reachable, but the
         # role in its JSON-RPC `_meta` is the gateway's to write, like the header above.
         content = stamp_jsonrpc_role(content, role)
@@ -274,25 +274,25 @@ def is_child_mcp_path(decoded_rest: str, endpoint: str = "mcp") -> bool:
     return normalized == at or normalized.startswith(at + "/")
 
 
-def reaches_child_mcp(request: HTTPConnection, endpoint: str = "mcp") -> bool:
-    """Whether a /svc request reaches the backing server's MCP endpoint (:func:`is_child_mcp_path`), by the path as
-    routed here or by the one the server receives (:func:`sent_path`)."""
-    rest = request.path_params.get("path", "")
-    return any(is_child_mcp_path(at, endpoint) for at in (rest, sent_path(request.scope["raw_path"], request.scope["path"], rest))
-               if at is not None)
+def reaches_child_mcp(request: HTTPConnection, base_url: str, endpoint: str = "mcp") -> bool:
+    """Whether a /svc request reaches the MCP endpoint of the backing server at ``base_url`` (:func:`reaches`)."""
+    return reaches(base_url, request.scope["raw_path"], request.scope["path"], request.path_params.get("path", ""), endpoint)
 
 
-def sent_path(raw_path: bytes, decoded_path: str, decoded_rest: str) -> str | None:
-    """The path the backing server receives for a /svc request whose routed remainder is ``decoded_rest``: the raw
-    remainder forwarded, its dot segments removed by httpx and then decoded, which differs from ``decoded_rest`` when an
-    encoded slash sits beside a dot segment (``public%2Fx/../mcp`` reaches ``/mcp``); None for a request-target
-    forward() refuses."""
-    if not decoded_rest:
-        return ""
+def reaches(base_url: str, raw_path: bytes, decoded_path: str, decoded_rest: str, endpoint: str) -> bool:
+    """Whether a /svc request whose routed remainder is ``decoded_rest`` reaches ``endpoint`` of the backing server at
+    ``base_url`` (:func:`is_child_mcp_path`): by that remainder, or by the path the server receives, the base's path and
+    the raw remainder forwarded, its dot segments removed by httpx and then decoded. They differ when an encoded slash
+    sits beside a dot segment (``public%2Fx/../mcp`` reaches ``/mcp``) or a dot segment climbs into a base's path
+    (``../prefix/mcp`` reaches base ``/prefix``'s ``/mcp``). False for a request-target forward() refuses."""
+    if is_child_mcp_path(decoded_rest, endpoint):
+        return True
     try:
-        return httpx.URL("http://child/" + raw_remainder(raw_path, decoded_path, decoded_rest).decode("latin-1")).path
+        raw_rest = raw_remainder(raw_path, decoded_path, decoded_rest) if decoded_rest else b""
+        sent = httpx.URL(f"{base_url.rstrip('/')}/{raw_rest.decode('latin-1')}").path
     except (ValueError, httpx.InvalidURL):
-        return None
+        return False
+    return is_child_mcp_path(sent, f"{urlsplit(base_url).path.rstrip('/')}/{endpoint.lstrip('/')}")
 
 
 def stamp_jsonrpc_role(body: bytes, role: str) -> bytes:
