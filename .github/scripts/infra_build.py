@@ -72,7 +72,7 @@ _HEALTH_POLL_SECONDS = 2
 _LOG_TAIL_LINES = 30  # of a container that never turned healthy, in the error
 # How long a disk form may take to boot to its desktop: seconds with KVM, minutes under TCG.
 _BOOTED_WITHIN_SECONDS = 900
-# What supervisord prints on a disk form's console as each program starts.
+# What supervisord prints on a disk form's console as each program starts, root's and the session's.
 _RUNNING = re.compile(r"success: (\S+) entered RUNNING")
 _PROGRAM = re.compile(r"^\[program:([^\]]+)\]", re.MULTILINE)
 _PRINTED_CHARS = 200  # of what docker printed in place of a manifest, in the error
@@ -415,9 +415,11 @@ def _smoke(name: str, image: str, launcher: str | None) -> int:
 
 def _boots(name: str, image: str, launcher: str) -> int:
     """Boot ``image``, a build of the disk form ``name``, in ``launcher``, with KVM where it can, and wait for every
-    program its base computer's supervisord.conf declares to run, which its console shows."""
-    programs = set(_PROGRAM.findall((REPO / Path(IMAGES[DISK_ARGS[name]["ROOTFS"]]).with_name("supervisord.conf"))
-                                    .read_text()))
+    program its base computer declares to run, which its console shows: root's supervisord's (root.conf) and the
+    session's it starts (supervisord.conf)."""
+    base = REPO / Path(IMAGES[DISK_ARGS[name]["ROOTFS"]])
+    programs = {program for conf in ("root.conf", "supervisord.conf")
+                for program in _PROGRAM.findall(base.with_name(conf).read_text())}
     arch = subprocess.run(["docker", "image", "inspect", "--format", "{{.Architecture}}", image], capture_output=True,
                           text=True, check=True).stdout.strip()
     machine = f"{image}-machine"
