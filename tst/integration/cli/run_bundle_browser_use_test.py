@@ -37,14 +37,12 @@ BROWSER: Final[str] = "@local/agentenv-framework/browsers/chromium"
 MODEL: Final[str] = "fake-model-1"
 # The page names itself only once it runs, so its title in an answer came from the browser, not the prompt.
 PAGE: Final[str] = "data:text/html," + urllib.parse.quote("<script>document.title = 'Lantern ' + (3 + 4)</script>")
-# The browser opens PAGE at boot in its own tab, and browser-use drives a tab of its own, so the title is read from the
-# tabs of the browser the task gave it, which only that browser has.
+# The browser opens PAGE at boot, so the title is read only when the tab the agent drives is the browser's own.
 OPEN: Final[str] = ("import time\n"
                     "for _ in range(50):\n"
-                    "    titles = [t['title'] for t in list_tabs() if t['title'].startswith('Lantern')]\n"
-                    "    if titles: break\n"
+                    "    if js('document.title').startswith('Lantern'): break\n"
                     "    time.sleep(0.2)\n"
-                    "titles[0]")
+                    "js('document.title')")
 ON_PAGE: Final[dict] = {"app_settings": {"chromium": {"start_urls": [PAGE]}}}
 PROMPT: Final[str] = "Open the page and reply with its title."
 AGAIN: Final[str] = "Open it once more and reply with its title."
@@ -161,7 +159,8 @@ def test_it_connects_by_http_url_too_refuses_a_wrong_credential_and_without_an_a
     assert outcomes["http"]["state"] == "completed" and "Lantern 7" in outcomes["http"]["text"], seen
     # The context's second turn continues its conversation, through a connection of its own.
     assert outcomes["again"]["state"] == "completed" and "Lantern 7" in outcomes["again"]["text"], seen
-    assert PROMPT in outcomes["again_carried"] and "'Lantern 7'" in outcomes["again_carried"], seen
+    # browser-use's REPL hands back what a cell printed as a list of its lines.
+    assert PROMPT in outcomes["again_carried"] and '\\"Lantern 7' in outcomes["again_carried"], seen
     # The relay refuses the forged token's WebSocket upgrade, and its discovery with a 403.
     for connect_by in ("ws", "http"):
         assert outcomes[f"forged_{connect_by}"]["state"] == "failed", seen

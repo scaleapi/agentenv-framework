@@ -5,8 +5,9 @@ The model is the turn's, on agent-env's endpoint. A Claude model goes through th
 as browser-use runs Claude (its reasoning as adaptive thinking at the turn's effort, its prompt cached), with the
 profile of its bare name, since a provider prefix hides the model's thinking and effort from it. Any other model goes
 through the OpenAI-compatible route, with the turn's effort as ``reasoning_effort``. The browser is the turn's CDP
-address, and each env's MCP tools are the agent's tools beside its REPL, named ``<server>__<tool>``. A context's turns
-continue one conversation through the turn's history file."""
+address: when it has one tab open, as a browser computer does, the agent drives that tab, which is the computer's
+screen, else a tab of its own. Each env's MCP tools are the agent's tools beside its REPL, named ``<server>__<tool>``.
+A context's turns continue one conversation through the turn's history file."""
 
 import asyncio
 import contextlib
@@ -19,6 +20,7 @@ from pathlib import Path
 import httpx2
 from anthropic import AsyncAnthropic
 from browser_use import Agent, Browser, Tools
+from browser_use.browser.browser import _daemon_request
 from browser_use.tools import TOOL_RETRIES
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
@@ -86,6 +88,23 @@ def _caller(session: ClientSession, tool: str):
     return call
 
 
+async def drive_its_tab(browser: Browser) -> None:
+    """Attach browser-use to the browser's one open tab, as it attaches a kept-alive run's tab, closing the blank one
+    its daemon opened for itself. The daemon closes that tab of its own when it stops, so a run in it would leave the
+    screen blank, and its last page out of reach, when the turn ends."""
+    await browser.start()
+
+    def attach() -> None:
+        own = _daemon_request(browser.name, {"meta": "current_tab"}, timeout=5)["targetId"]
+        pages = [t for t in browser._cdp()("Target.getTargets")["targetInfos"]
+                 if t["type"] == "page" and t["targetId"] != own]
+        if len(pages) == 1:
+            browser._agent_tab = pages[0]["targetId"]
+            browser._attach_agent_tab()
+
+    await asyncio.to_thread(attach)
+
+
 def restore(agent: Agent, history: Path) -> None:
     """Continue the conversation a context's earlier turns saved, as ``add_new_task`` continues one in process."""
     saved = json.loads(history.read_text())
@@ -105,8 +124,11 @@ async def main() -> None:
     turn = json.loads(sys.stdin.read())
     history = Path(turn["historyFile"])
     async with contextlib.AsyncExitStack() as stack:
+        browser = Browser(cdp_url=turn["cdpUrl"])
+        with contextlib.suppress(Exception):  # a browser it can't reach: run() says why, as its result
+            await drive_its_tab(browser)
         agent = Agent(
-            turn["prompt"], model(turn), browser=Browser(cdp_url=turn["cdpUrl"]),
+            turn["prompt"], model(turn), browser=browser,
             tools=await mcp_tools(stack, turn["mcpServers"]), extend_system_message=turn["systemPrompt"],
             reasoning=turn["effort"] if "claude" in turn["model"].lower() else None, mode=turn["mode"],
             workspace=turn["workspace"])

@@ -16,8 +16,10 @@ Each turn runs `agent.py` once in that environment.
 - **The browser** is the one the task gives it through `cdp-config/v1`, as the `browser_connect_cdp` step does: the
   endpoint `browser` names, else the turn's only one. It connects by the endpoint's `ws_url`, or by `http_url` with
   `connect_by = "http"`.
-- **Its tab:** browser-use opens a tab of its own and brings it to the front, so on a browser computer its work shows
-  on the screen and in a recording. When its run ends it leaves the browser running.
+- **Its tab:** when the browser has one tab open, as a browser computer does, the agent drives that tab, which is the
+  computer's screen, so its work shows there and in a recording, and stays there when the turn ends. With several,
+  browser-use opens a tab of its own. browser-use closes a tab of its own when it stops, so its last page would be out
+  of reach after the turn. Either way the browser keeps running.
 - **With no endpoint,** or several and none named, the turn fails with `cdp.no_endpoint` or `cdp.ambiguous`, an
   `infra_error`. It never drives a browser of its own.
 - **An endpoint with headers** fails the turn with `browser_use.cdp_headers`, an `infra_error`, since browser-use
