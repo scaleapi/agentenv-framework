@@ -269,7 +269,7 @@ class FileSection:
     name: str
     toml_path: tuple[str, ...]
     owner: str
-    keys: Mapping[str, Shape]
+    keys: Shape
     check: Optional[Callable[[Mapping[str, Any]], Any]] = None
 
 
@@ -283,6 +283,8 @@ _FILE_SECTIONS: tuple[FileSection, ...] = (
     FileSection("envs", ("envs",), "env.registry", {"impls": None, **_resolved_keys("envs")}),
     FileSection("artifacts", ("artifacts",), "artifact.registry", {"impls": None, "type_aliases": None}),
     FileSection("task_steps", ("task_steps",), "task_step.registry", {"impls": None}),
+    FileSection("namespaces", ("namespaces",), "config.runtime", Named({"document": _SEAM, "object": _SEAM})),
+    FileSection("resolver", ("namespace_resolver",), "config.runtime", _SEAM),
     FileSection("explorer", ("explorer",), "explorer.app",
                 {**dict.fromkeys(("port", "cors_origins", "allowed_hosts", "static_dir")),
                  "plugins": {"impls": None}}),

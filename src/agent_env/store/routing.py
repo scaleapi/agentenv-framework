@@ -14,6 +14,11 @@ reader's own namespace first: a local run sees its records before the registry's
 else sees the registry's first. While a local task runs, a write that would reach a configured
 store is refused (the write fence), and a bare entity may never name a local id (references
 point outward only).
+
+A configured namespace (``[namespaces.<name>]``) is routed whether or not local routing is on: the ids the
+``[namespace_resolver]`` places in it, what a run of its tasks records and every entity and object that run writes go
+to that namespace's own document and object stores. A read no id places sees the configured store and the running
+task's namespace, plus only the namespaces ``reading_namespaces`` opens, so a service decides who reads which.
 """
 
 from __future__ import annotations
@@ -66,6 +71,8 @@ from agent_env.store.object_store.object_store import (
 
 # The fields a run-time document names its owner by: one holding a local id places it in that id's namespace.
 _OWNER_FIELDS = ("id", "instance_id", "task_id", "task_instance_id", "env_id", "agent_id")
+# A record about a universe, a snapshot's say, is a namespace's when its universe is.
+_NAMESPACE_OWNER_FIELDS = (*_OWNER_FIELDS, "service_universe_id", "environment_universe_id", "universe_id")
 _LOCAL_REPOSITORY_PREFIX = f"{LOCAL_NAMESPACE}/"
 _TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}")
 _T = TypeVar("_T")
@@ -74,6 +81,8 @@ _enabled = False
 _scopes = 0
 _scopes_lock = threading.Lock()
 _run_namespace: ContextVar[Optional[str]] = ContextVar("agent_env_run_namespace", default=None)
+_run_owner: ContextVar[Optional["_RunOwner"]] = ContextVar("agent_env_run_owner", default=None)
+_readable: ContextVar[frozenset[str]] = ContextVar("agent_env_readable_namespaces", default=frozenset())
 
 
 class LocalRunWriteError(ValueError):
@@ -82,6 +91,10 @@ class LocalRunWriteError(ValueError):
 
 class OutwardReferenceError(ValueError):
     """A write that would point outside the local namespaces' stores at a local id."""
+
+
+class NamespaceWriteError(ValueError):
+    """A write that would carry a configured namespace's data outside its stores."""
 
 
 def enable_namespace_routing() -> None:
@@ -118,14 +131,42 @@ def namespace_routing() -> Iterator[None]:
 def run_scope(owner_id: str) -> Iterator[None]:
     """The run in progress, a task's or a deployment the CLI makes: what it records follows its owner id's
     namespace. A run started inside a local run stays in that run's namespace unless its own id is local, so a
-    nested registry task can't reopen the configured stores."""
+    nested registry task can't reopen the configured stores; one started inside a run in a configured namespace
+    stays in that namespace (``resolved_run_namespace``)."""
     outer = _run_namespace.get()
     inherited = outer if outer in LOCAL_NAMESPACES else parse_namespace(owner_id) or ""
     token = _run_namespace.set(local_namespace(owner_id) or inherited)
+    owner = _run_owner.set(_RunOwner(owner_id, _run_owner.get()))
     try:
         yield
     finally:
+        _run_owner.reset(owner)
         _run_namespace.reset(token)
+
+
+class _RunOwner:
+    """A run's owner id and the run it was started in, with the configured namespace each resolver placed it in."""
+
+    def __init__(self, owner_id: str, outer: Optional[_RunOwner]) -> None:
+        self.owner_id = owner_id
+        self.outer = outer
+        self.placed: dict[Any, Optional[str]] = {}
+
+
+def resolved_run_namespace(resolver: Any) -> Optional[str]:
+    """The configured namespace of the task running, as ``resolver`` places it: the enclosing run's when that is in
+    one, else its own owner's, asked once per run and fresh. None outside a run, or for a local run."""
+    return _owner_namespace(_run_owner.get(), resolver)
+
+
+def _owner_namespace(owner: Optional[_RunOwner], resolver: Any) -> Optional[str]:
+    if owner is None:
+        return None
+    if resolver not in owner.placed:
+        outer = _owner_namespace(owner.outer, resolver)
+        owner.placed[resolver] = outer or (None if is_local_id(owner.owner_id)
+                                           else resolver.namespace_of(owner.owner_id, fresh=True))
+    return owner.placed[resolver]
 
 
 def local_run_namespace() -> Optional[str]:
@@ -136,6 +177,21 @@ def local_run_namespace() -> Optional[str]:
 
 def in_local_run() -> bool:
     return local_run_namespace() is not None
+
+
+@contextmanager
+def reading_namespaces(*namespaces: str) -> Iterator[None]:
+    """Let reads no id places also see these configured namespaces' stores for the length of the block, as a service
+    does for a caller it has checked may read them. A run always sees its own namespace's."""
+    token = _readable.set(_readable.get() | frozenset(namespaces))
+    try:
+        yield
+    finally:
+        _readable.reset(token)
+
+
+def readable_namespaces() -> frozenset[str]:
+    return _readable.get()
 
 
 def refuse_in_local_run(what: str) -> None:
@@ -342,7 +398,7 @@ class RoutingDocumentStore(DocumentStore):
         readers = self._readers(collection, filter)
         if len(readers) == 1:
             return self._read(readers[0], lambda: latest(readers[0], limit=limit, offset=offset))
-        if _ids_split_by_namespace(collection, id_field):
+        if self._ids_split(collection, id_field):
             window = (offset or 0) + limit if limit else None
             merged = [doc for store in readers for doc in self._read(store, lambda: latest(store, limit=window))]
         else:
@@ -369,7 +425,7 @@ class RoutingDocumentStore(DocumentStore):
                     sort=sort, limit=limit, offset=offset,
                 )
             )
-        if _ids_split_by_namespace(collection, id_field):
+        if self._ids_split(collection, id_field):
             window = (offset or 0) + limit if limit else None
             pages_and_totals = [
                 self._read(store, lambda: store.latest_per_id_page(
@@ -389,7 +445,7 @@ class RoutingDocumentStore(DocumentStore):
 
     def count_distinct(self, collection: str, filter: Filter, *, id_field: str = "id") -> int:
         readers = self._readers(collection, filter)
-        if len(readers) == 1 or _ids_split_by_namespace(collection, id_field):
+        if len(readers) == 1 or self._ids_split(collection, id_field):
             return sum(
                 self._read(store, lambda: store.count_distinct(collection, filter, id_field=id_field)) for store in readers
             )
@@ -485,6 +541,9 @@ class RoutingDocumentStore(DocumentStore):
             )
         self.configured.check_id(entity_id)
 
+    def _ids_split(self, collection: str, id_field: str) -> bool:
+        return _ids_split_by_namespace(collection, id_field)
+
     def _placed(self, collection: str, filter: Filter) -> Optional[str]:
         """The local namespace whose store holds ``filter``'s match, ``""`` for the configured store; None when it
         can be in any."""
@@ -567,6 +626,127 @@ class RoutingDocumentStore(DocumentStore):
         return store
 
 
+class NamespaceDocumentStore(RoutingDocumentStore):
+    """The configured document store with each configured namespace's documents in that namespace's own store,
+    ``namespaces`` by name: an entity where ``resolver`` places its id; a run record by the running task's
+    namespace, else by an owner field; and every entity a run in a namespace writes. A read no id places sees the
+    running task's namespace, the configured store and the namespaces ``reading_namespaces`` opens. A write asks
+    the resolver fresh, and is refused when it can't answer. A run in a namespace never writes a new version of a
+    configured entity, so no entity id is in two stores."""
+
+    def __init__(self, configured: DocumentStore, namespaces: Mapping[str, DocumentStore], resolver: Any) -> None:
+        self.configured = configured
+        self.namespaces = dict(namespaces)
+        self.resolver = resolver
+        self._lock = threading.Lock()
+
+    def ensure_index(
+        self,
+        collection: str,
+        fields: list[str],
+        unique: bool = False,
+        ttl_seconds: Optional[int] = None,
+    ) -> None:
+        for store in (self.configured, *self.namespaces.values()):
+            store.ensure_index(collection, fields, unique, ttl_seconds)
+
+    def check_id(self, entity_id: str) -> None:
+        self.configured.check_id(entity_id)
+
+    def _namespace_of(self, value: object, *, fresh: bool = False) -> Optional[str]:
+        if not isinstance(value, str) or not value or is_local_id(value):
+            return None
+        namespace = self.resolver.namespace_of(value, fresh=fresh)
+        if namespace is not None and namespace not in self.namespaces:
+            raise ConfigError(f"the namespace resolver placed {value!r} in {namespace!r}, which no [namespaces] table configures")
+        return namespace
+
+    def _run(self) -> Optional[str]:
+        namespace = resolved_run_namespace(self.resolver)
+        if namespace is not None and namespace not in self.namespaces:
+            raise ConfigError(f"the namespace resolver placed this run in {namespace!r}, which no [namespaces] table configures")
+        return namespace
+
+    def _pinned_namespaces(self, collection: str, filter: Filter, *, fresh: bool = False) -> Optional[list[Optional[str]]]:
+        """The namespaces of the ids the filter pins, None for an id the resolver places in none: by ``id`` for an
+        entity, by the first owner field pinning one for a record. None when it pins no id."""
+        fields = ("id",) if is_entity_collection(collection) else _NAMESPACE_OWNER_FIELDS
+        for field in fields:
+            values: list[Any] = []
+            for pred in filter.conditions.get(field, ()):
+                if isinstance(pred, Eq):
+                    values.append(pred.value)
+                elif isinstance(pred, In):
+                    values.extend(pred.values)
+            namespaces = list(dict.fromkeys(self._namespace_of(value, fresh=fresh) for value in values))
+            if values and namespaces != [None]:
+                return namespaces
+        return None
+
+    def _pinned(self, collection: str, filter: Filter, *, fresh: bool = False) -> Optional[str]:
+        """The one namespace every id the filter pins is in, or None."""
+        namespaces = self._pinned_namespaces(collection, filter, fresh=fresh)
+        return namespaces[0] if namespaces is not None and len(namespaces) == 1 else None
+
+    def _visible(self) -> list[DocumentStore]:
+        """The stores an unplaced read sees, the running task's namespace first."""
+        run = self._run()
+        opened = sorted(name for name in readable_namespaces() if name in self.namespaces and name != run)
+        return [*([self.namespaces[run]] if run else []), self.configured, *(self.namespaces[name] for name in opened)]
+
+    def _readers(self, collection: str, filter: Filter) -> list[DocumentStore]:
+        """The stores of the namespaces the filter's ids are in, an unplaced id's being those an unplaced read sees."""
+        namespaces = self._pinned_namespaces(collection, filter)
+        if namespaces is None:
+            return self._visible()
+        stores: list[DocumentStore] = []
+        for namespace in namespaces:
+            for store in ([self.namespaces[namespace]] if namespace is not None else self._visible()):
+                if all(store is not held for held in stores):
+                    stores.append(store)
+        return stores
+
+    def _read(self, store: DocumentStore, read: Callable[[], _T]) -> _T:
+        return read()
+
+    def _writer(self, collection: str, owner: Mapping, payload: Any) -> DocumentStore:
+        run = self._run()
+        entity_id = owner.get("id")
+        if is_entity_collection(collection):
+            if isinstance(entity_id, str):
+                self.check_id(entity_id)
+            placed = self._namespace_of(entity_id, fresh=True)
+            namespace = placed or run
+            if run is not None and namespace != run:
+                raise NamespaceWriteError(f"a run in {run!r} can't write {entity_id!r}, which is in {namespace!r}")
+            if (run is not None and placed is None and isinstance(entity_id, str)
+                    and self.configured.find_one(collection, Filter.of(id=entity_id)) is not None):
+                raise NamespaceWriteError(
+                    f"a run in {run!r} can't write a new version of {entity_id!r}: it is in the configured store, "
+                    f"which a run in {run!r} writes no new entities to"
+                )
+        else:
+            namespace = run or next(
+                (found for field in _NAMESPACE_OWNER_FIELDS
+                 if (found := self._namespace_of(owner.get(field), fresh=True)) is not None), None)
+        return self.namespaces[namespace] if namespace is not None else self.configured
+
+    def _updaters(self, collection: str, filter: Filter, payload: Any) -> Iterator[DocumentStore]:
+        pinned = self._pinned(collection, filter, fresh=True)
+        run = self._run()
+        if pinned is not None:
+            if run is not None and pinned != run:
+                raise NamespaceWriteError(f"a run in {run!r} can't write records of {pinned!r}")
+            yield self.namespaces[pinned]
+            return
+        if run is not None and not is_entity_collection(collection):
+            yield self.namespaces[run]
+            if self.configured.find_one(collection, filter) is not None:
+                raise NamespaceWriteError(f"a run in {run!r} can't update {collection!r}: its record is in the configured store")
+            return
+        yield from self._visible()
+
+
 def object_store_holding(object_url: str, configured: ObjectStore, local: ObjectStore) -> ObjectStore:
     """The store an object_url addresses: the local store's own urls are local unless the configured
     store owns them too, and any other url is the configured store's, as it was before routing."""
@@ -576,7 +756,9 @@ def object_store_holding(object_url: str, configured: ObjectStore, local: Object
 def configured_store(store: Any) -> Any:
     """The configured store behind ``store``: a routing store's or view's configured side, else
     ``store`` itself. For reports that name the backend a user configured."""
-    return store.configured if isinstance(store, (RoutingDocumentStore, LocalRunObjectStore, LocalRunImageStore)) else store
+    while isinstance(store, (RoutingDocumentStore, LocalRunObjectStore, LocalRunImageStore)):
+        store = store.configured
+    return store
 
 
 def image_store_holding(ref: str, configured: ImageStore, local: ImageStore) -> ImageStore:
@@ -716,3 +898,126 @@ def _lifetime(expires_in: int | None) -> dict[str, int]:
     """``expires_in`` as a keyword only when the caller named one, so the owning store applies its own default,
     whatever it is."""
     return {} if expires_in is None else {"expires_in": expires_in}
+
+
+class PrefixedObjectStore(ObjectStore):
+    """``inner`` with every key this store makes under ``prefix``: a configured namespace's objects keep to its own
+    prefix even when namespaces share a bucket, and ``owns`` a url only under it. Explicit-url reads reach as far as
+    ``inner``'s do."""
+
+    def __init__(self, inner: ObjectStore, prefix: str) -> None:
+        if not prefix.endswith("/"):
+            raise ValueError(f"an object key prefix ends with '/': {prefix!r}")
+        self.inner = inner
+        self.prefix = prefix
+
+    @property
+    def supports_transfer_grants(self) -> bool:
+        return self.inner.supports_transfer_grants
+
+    def grants_reach(self, sandbox_type: str | None) -> bool:
+        return self.inner.grants_reach(sandbox_type)
+
+    @property
+    def max_single_upload_bytes(self) -> int | None:
+        return self.inner.max_single_upload_bytes
+
+    def put(self, key: str, data: bytes, content_type: str = DEFAULT_CONTENT_TYPE, allow_overwrite: bool = False) -> str:
+        return self.inner.put(self.prefix + key, data, content_type, allow_overwrite)
+
+    def put_file(self, key: str, file_path: str, content_type: str = DEFAULT_CONTENT_TYPE) -> str:
+        return self.inner.put_file(self.prefix + key, file_path, content_type)
+
+    def put_file_at(self, object_url: str, file_path: str, content_type: str = DEFAULT_CONTENT_TYPE) -> str:
+        self.get_object_key(object_url)
+        return self.inner.put_file_at(object_url, file_path, content_type)
+
+    def get(self, object_url: str) -> bytes:
+        return self.inner.get(object_url)
+
+    def exists(self, key: str) -> bool:
+        return self.inner.exists(self.prefix + key)
+
+    def get_object_metadata(self, key: str) -> ObjectMetadata | None:
+        return self.inner.get_object_metadata(self.prefix + key)
+
+    def get_object_metadata_at(self, object_url: str) -> ObjectMetadata | None:
+        return self.inner.get_object_metadata_at(object_url)
+
+    def list(self, prefix: str) -> list[str]:
+        return [key.removeprefix(self.prefix) for key in self.inner.list(self.prefix + prefix)]
+
+    def list_at(self, url_prefix: str) -> list[str]:
+        return self.inner.list_at(url_prefix)
+
+    def object_url(self, key: str) -> str:
+        return self.inner.object_url(self.prefix + key)
+
+    def get_object_key(self, object_url: str) -> str:
+        key = self.inner.get_object_key(object_url)
+        if not key.startswith(self.prefix):
+            raise ValueError(f"{object_url!r} is not under this store's prefix {self.prefix!r}")
+        return key.removeprefix(self.prefix)
+
+    def owns(self, object_url: str) -> bool:
+        return self.inner.owns(object_url) and self.inner.get_object_key(object_url).startswith(self.prefix)
+
+    def download_to_file(self, object_url: str, dest_path: str) -> None:
+        self.inner.download_to_file(object_url, dest_path)
+
+    def open(self, object_url: str) -> BinaryIO:
+        return self.inner.open(object_url)
+
+    def read(self, key: str) -> bytes:
+        return self.inner.read(self.prefix + key)
+
+    def signed_get_url(self, object_url: str, expires_in: int = 3600) -> str | None:
+        return self.inner.signed_get_url(object_url, expires_in)
+
+    def signed_put_url(self, object_url: str, expires_in: int = 3600) -> str | None:
+        self.get_object_key(object_url)
+        return self.inner.signed_put_url(object_url, expires_in)
+
+    def shared_credentials_env(self) -> dict[str, str]:
+        """None: credentials would reach every prefix of the bucket, not this store's alone."""
+        return {}
+
+    def issue_read_grant(self, object_url: str, *, expires_in: int | None = None) -> HttpGetGrant:
+        return self.inner.issue_read_grant(object_url, **_lifetime(expires_in))
+
+    def issue_write_grant(
+        self, object_url: str, *, media_type: str, max_bytes: int, expires_in: int | None = None
+    ) -> HttpPutGrant:
+        self.get_object_key(object_url)
+        return self.inner.issue_write_grant(object_url, media_type=media_type, max_bytes=max_bytes, **_lifetime(expires_in))
+
+    def issue_upload_policy(self, prefix_url: str, *, max_object_bytes: int, expires_in: int) -> UploadPolicy:
+        self.get_object_key(prefix_url)
+        return self.inner.issue_upload_policy(prefix_url, max_object_bytes=max_object_bytes, expires_in=expires_in)
+
+
+class NamespaceRunObjectStore(LocalRunObjectStore):
+    """The object store a run in a configured namespace sees: keys go to the namespace's store, an object_url to the
+    store it addresses, and a write anywhere but the namespace's store, or a read of another namespace's, is refused."""
+
+    def __init__(self, configured: ObjectStore, own: ObjectStore, namespace: str,
+                 others: Mapping[str, ObjectStore]) -> None:
+        super().__init__(configured, own)
+        self.namespace = namespace
+        self.others = dict(others)
+
+    def shared_credentials_env(self) -> dict[str, str]:
+        return self.local.shared_credentials_env()
+
+    def _at(self, object_url: str) -> ObjectStore:
+        if self.local.owns(object_url):
+            return self.local
+        if (other := next((name for name, store in self.others.items() if store.owns(object_url)), None)):
+            raise NamespaceWriteError(f"a run in {self.namespace!r} can't reach {object_url!r}, an object of {other!r}")
+        return self.configured
+
+    def _writing(self, object_url: str) -> ObjectStore:
+        store = self._at(object_url)
+        if store is not self.local:
+            raise NamespaceWriteError(f"a run in {self.namespace!r} writes objects only to its own store, not {object_url!r}")
+        return store

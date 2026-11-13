@@ -33,6 +33,7 @@ _NON_SLUG_RUN = re.compile(r"[^a-z0-9]+")
 _ENCODED_LOCAL_ID = re.compile(
     rf"{LOCAL_NAMESPACE}(?:/|-(?:[a-z0-9]+(?:-[a-z0-9]+)*-)?[0-9a-f]{{{_HASH_LENGTH}}}(?:/|$))"
 )
+_NAMESPACE_NAME = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?")
 _ID_PUNCTUATION = frozenset(" ._-~/@()+,&")
 _ID_CATEGORIES = frozenset("LNM")
 _INVISIBLE = re.compile(
@@ -90,6 +91,15 @@ def validate_local_id(entity_id: str) -> None:
         raise ValueError(f"local id {entity_id!r} has a path segment that opens or closes with a space")
     if any(_detached_mark(segment) for segment in segments):
         raise ValueError(f"local id {entity_id!r} has a combining mark that does not follow a letter or digit")
+
+
+def validate_namespace_name(namespace: str) -> None:
+    """Raise ValueError unless ``namespace`` can name a configured namespace: 1 to 64 lowercase letters, digits and
+    inner ``-``, and not a local namespace."""
+    if namespace in LOCAL_NAMESPACES:
+        raise ValueError(f"@{namespace} is a local namespace, so it can't be configured")
+    if not isinstance(namespace, str) or not _NAMESPACE_NAME.fullmatch(namespace):
+        raise ValueError(f"namespace {namespace!r} must be 1 to 64 lowercase letters, digits and inner '-'")
 
 
 def _allowed_in_id(character: str) -> bool:
@@ -159,3 +169,10 @@ def derive_path_id(base: str, path: str) -> str:
     """The id of the file at ``path`` written with ``base``, as a file universe's files are: ``<base>__<16 hex of the
     path's sha256>``, which any path fits in."""
     return derive_id(base, hashlib.sha256(path.encode("utf-8")).hexdigest()[:16])
+
+
+def id_bases(entity_id: str) -> list[str]:
+    """``entity_id`` and every id it was derived from by ``derive_id``, longest first: ``a__b__c`` gives
+    ``a__b__c``, ``a__b`` and ``a``."""
+    parts = entity_id.split("__")
+    return ["__".join(parts[:end]) for end in range(len(parts), 0, -1) if parts[:end] != [""]]
