@@ -8,17 +8,15 @@ Xvfb and the desktop's panel run on through them; and the driver's input reaches
 is drawn. Routing a site, a fresh Chrome loads it over HTTPS with the clock six years back, six years on and past
 2099, its certificate checked against the universe's time. Needs Docker and the local registry on localhost:5000."""
 
-import ast
 import asyncio
 import platform
 import random
 import re
-import subprocess
 import time
 from pathlib import PurePosixPath
 
 import pytest
-from agentenv_protocol.computer.clock import FOLLOWER, FOLLOWER_USER
+from agentenv_protocol.computer.clock import FOLLOWER
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
@@ -28,7 +26,7 @@ from agent_env.store.routing import namespace_routing
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
 from tst.clock.bounds import LATE_S
-from tst.integration.computer.conftest import PAGE_WRITER
+from tst.integration.computer.conftest import UniverseClock, session_run
 from tst.integration.computer.start_tabs import host_pages
 from tst.integration.computer.website_browser_test import _window_center
 
@@ -75,11 +73,11 @@ async def test_the_desktop_follows_the_universe_through_jumps_a_rate_change_and_
             env_params={"app_settings": {"chromium": {"start_urls": [PAGE]}}})
         context = TaskStepContext(deployed_envs=[deployed])
         try:
-            clock = _Clock(deployed)
+            clock = UniverseClock(deployed)
             opened = await _chrome_shows(deployed, {"universe_ns": 0}, seconds=90)
             assert opened is not None, "Chrome's page never opened"
             pids = await _pids(deployed)
-            loaded = await _run(deployed, f"grep -c {LIBRARY} /proc/{pids[2]}/maps")
+            loaded = await session_run(deployed, f"grep -c {LIBRARY} /proc/{pids[2]}/maps")
             clock.set(time.time() - 182 * DAY, 1)
             await asyncio.sleep(2)  # each program maps the page the next time it reads the clock, within a second
             reached = {client: await inside.run(deployed, ["sh", "-c", command], timeout_s=60)
@@ -136,7 +134,7 @@ async def test_a_fresh_chrome_loads_a_routed_site_six_years_either_side_of_now_a
         deployed = await Env.get(clock_desktop.id).deploy(env_params=params)
         context = TaskStepContext(deployed_envs=[deployed])
         try:
-            clock, loaded = _Clock(deployed), {}
+            clock, loaded = UniverseClock(deployed), {}
             for years in (-6, 6, 80):
                 clock.set(time.time() + years * 365 * DAY, 1)
                 await asyncio.sleep(2)  # each program maps the page the next time it reads the clock, within a second
@@ -152,68 +150,13 @@ async def test_a_fresh_chrome_loads_a_routed_site_six_years_either_side_of_now_a
     assert not report.failed
 
 
-class _Clock:
-    """The computer's clock page, written as its follower's user, as its follower writes it, and what the session
-    reads of it."""
-
-    def __init__(self, deployed):
-        self.container = _container(deployed)
-        self.page = None
-
-    def set(self, universe: float, rate: float) -> dict:
-        """The page written to ``universe`` at ``rate``: the write's own answer, its rate, and when it started."""
-        started = time.time()
-        out = subprocess.run(["docker", "exec", "-u", FOLLOWER_USER, self.container, "python3", PAGE_WRITER, "set",
-                              repr(universe), repr(rate)], capture_output=True, text=True, check=True).stdout
-        self.page = ast.literal_eval(out.strip())
-        self.page.update(rate=rate, started=started)
-        return self.page
-
-    def advance(self, seconds: float) -> dict:
-        return self.set(self.now() + seconds, self.page["rate"])
-
-    def rate(self, rate: float) -> dict:
-        return self.set(self.now(), rate)
-
-    def now(self, real: float | None = None) -> float:
-        """The universe at real time ``real`` (now by default), as the page has it."""
-        real_ns = (time.time() if real is None else real) * 1e9
-        return (self.page["universe_ns"] + max(0.0, real_ns - self.page["anchor_ns"]) * self.page["rate"]) / 1e9
-
-    async def read(self, deployed) -> float | bool:
-        """The session's ``date``, when it's the universe between the moments before and after it ran (a few ms either
-        side for the two machines' reads of the clock); False otherwise."""
-        start = time.time()
-        value = float(await _run(deployed, "date +%s.%N"))
-        end = time.time()
-        rate = self.page["rate"]
-        return value if self.now(start) - 0.01 * max(rate, 1) <= value <= self.now(end) + 0.01 * max(rate, 1) else False
-
-
-def _container(deployed) -> str:
-    """The deployed computer's container, the one of its sandbox's (each named for the sandbox) holding the page's
-    writer."""
-    listed = subprocess.run(["docker", "ps", "-q", "--filter", f"name={deployed.sandbox_id}"],
-                            capture_output=True, text=True, check=True).stdout.split()
-    for container in listed:
-        if subprocess.run(["docker", "exec", container, "test", "-e", PAGE_WRITER]).returncode == 0:
-            return container
-    raise AssertionError(f"no container of sandbox {deployed.sandbox_id} has {PAGE_WRITER}: {listed}")
-
-
-async def _run(deployed, command: str) -> str:
-    ran = await inside.run(deployed, ["sh", "-c", command], timeout_s=30)
-    assert ran["exit_code"] == 0, ran
-    return ran["stdout"].strip()
-
-
 async def _pids(deployed) -> list[str]:
-    return (await _run(deployed, PIDS)).split()
+    return (await session_run(deployed, PIDS)).split()
 
 
 async def _title(deployed) -> tuple[int, str] | None:
     """Chrome's page's time (ms) and what was typed, from its window's title."""
-    match = TITLE.search(await _run(deployed, WINDOWS))
+    match = TITLE.search(await session_run(deployed, WINDOWS))
     return (int(match.group(1)), match.group(2)) if match else None
 
 

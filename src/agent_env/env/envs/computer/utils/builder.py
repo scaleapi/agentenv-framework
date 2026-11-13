@@ -262,8 +262,9 @@ def _platform_check(base: DockerImageArtifact) -> str:
 
 @functools.cache
 def _shipped_base_from() -> str:
-    """The image the shipped Linux base computer's Dockerfile builds ``FROM``, pinned by its digest there."""
-    return re.search(r"^FROM\s+(\S+)", COMPUTER_IMAGES[0].dockerfile.read_text(), re.MULTILINE).group(1)
+    """The image the shipped Linux base computer's Dockerfile builds ``FROM``, pinned by its digest there: its last
+    stage's, since the stages before it only build what it copies in."""
+    return re.findall(r"^FROM\s+(\S+)", COMPUTER_IMAGES[0].dockerfile.read_text(), re.MULTILINE)[-1]
 
 
 def _resolver(source: str, arch: str, context: str, out: str) -> list[str]:

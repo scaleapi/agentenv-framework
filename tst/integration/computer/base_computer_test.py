@@ -22,7 +22,7 @@ from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import reset_artifact_store
 from agent_env.config import configure, reset_config
 from tst.integration.computer.conftest import (BASE, FOLLOWER_BACK_S, PAGE_WRITER, docker, kill_follower,
-                                               only_session_and_clock, process_owners)
+                                               only_session_clock_and_egress, process_owners)
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
@@ -62,7 +62,7 @@ def test_the_desktop_runs_as_the_session_user_with_the_settings_a_deploy_passes(
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
     assert {line.split()[0] for line in running.splitlines()} == {"dbus", "desktop", "xvfb"}
     assert all(" RUNNING " in line for line in running.splitlines()), running
-    assert uid == "1000" and only_session_and_clock(owners)
+    assert uid == "1000" and only_session_clock_and_egress(owners)
     assert zone == "/usr/share/zoneinfo/Europe/Paris"
     assert "dimensions:    1600x900 pixels" in screen and "window id #" in wm
     assert "TZ=Europe/Paris" in environment.splitlines() and "DISPLAY=:99" in environment.splitlines()

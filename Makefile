@@ -1,4 +1,4 @@
-.PHONY: help install lint unit-test int-test int-test-fast int-test-slow installer-test clock-test trl-test nemo-gym-test verl-test skyrl-test miles-test slime-test clean-install-test test clean
+.PHONY: help install lint unit-test int-test int-test-fast int-test-slow installer-test clock-test egress-test trl-test nemo-gym-test verl-test skyrl-test miles-test slime-test clean-install-test test clean
 
 VENV := .venv
 VENV_BIN := $(abspath $(VENV))/bin
@@ -71,6 +71,14 @@ installer-test: ## Run plugin add/remove through the real pip, uv and pipx, and 
 # .github/workflows/clock.yml runs it on x86_64 and arm64.
 clock-test: ## Build agent-env's libfaketime and run its gates in Docker (tst/clock)
 	$(PYTHON) -m pytest tst/clock --timeout=2400 $(PYTEST_ARGS)
+
+# The base computer's egress proxy, in the Go image its Dockerfile builds it with, so it needs Docker, not Go.
+EGRESS := src/agent_env/computers/artifacts/ubuntu-24.04/egress
+EGRESS_GO_IMAGE = $(shell awk '/^FROM .*golang/ {print $$2; exit}' $(EGRESS)/../Dockerfile)
+
+egress-test: ## gofmt, go vet and go test -race for the base computer's egress proxy, in Docker
+	docker run --rm -v "$(CURDIR)/$(EGRESS):/src" -w /src $(EGRESS_GO_IMAGE) \
+		sh -c 'test -z "$$(gofmt -l .)" || { gofmt -l .; exit 1; }; go vet ./... && go test -race -count=1 ./...'
 
 trl-test: ## Run one GRPOTrainer step on CPU through the TRL helper (needs trl and CPU torch, and the Hub)
 	$(PYTHON) -m pytest tst/trl --timeout=900 $(PYTEST_ARGS)
