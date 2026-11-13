@@ -1743,7 +1743,7 @@ def _http_probe(port: int, *paths: str) -> str:
         "node": (f"node -e 'fetch(process.argv[1], {{signal: AbortSignal.timeout({t * 1000})}})"
                  f".then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))' \"$$1\""),
     }
-    pick = " el".join(f"if command -v {name} >/dev/null 2>&1; then get() {{ {fetch}; }}; "
+    pick = "el".join(f"if command -v {name} >/dev/null 2>&1; then get() {{ {fetch}; }}; "
                       for name, fetch in fetchers.items())
     urls = " ".join(f"http://localhost:{port}{path}" for path in paths)
     return f"{pick}else exit 1; fi; for u in {urls}; do get \"$$u\" 2>/dev/null && exit 0; done; exit 1"
