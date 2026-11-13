@@ -62,7 +62,7 @@ class App(BaseHTTPRequestHandler):
 class Shop(ForwardingSite):
     upstream = f"http://{APP[0]}:{APP[1]}"
     ready_path = "/admin/home"
-    dropped_headers = (AUTO_LOGIN,)
+    sign_in_headers = (AUTO_LOGIN,)
 
     @session_state
     async def signed_in(self, user):

@@ -1,16 +1,16 @@
 """A site whose pages an app beside it serves: ``ForwardingSite``, a ``WebsiteEnvironment`` that answers its card, its
 data plane and ``website/v1`` itself and sends every other request on to ``upstream``, an app in the same container
 such as a third-party web app it wraps. The request goes on as it came: its method, the site's own path with its
-encoding intact and its query, its headers but the hop-by-hop ones and the site's ``dropped_headers``, the ``Host`` the
-browser named and its body, streamed. The answer comes back as the app gave it, streamed and still encoded, but for a
-cookie the app ties to one of the site's own names (``Domain``), which comes back the host's alone, as agentenv sets
-its own, so the cookie a sign-in sets is the app's cookie, not one beside it. Such a site
-usually declares ``@website(builtin_routes=False, clock="real")``, so every path but agentenv's own reaches the app and
-nothing expects the app to follow the universe's clock; it signs a browser in through a ``@session_state`` of its own,
-which asks the app with ``ask_app`` as its ready checks do.
-Its app keeps its own data, so its data plane serves ``data/get`` alone, which exports nothing: it takes no load and
-can't reset, which agentenv reads off its card, as it reads any site's that serves no ``data/reset``. Its card names
-its ``dropped_headers`` as its sign-in headers, whose values the browser's network log takes out.
+encoding intact and its query, its headers but the hop-by-hop ones and the site's ``sign_in_headers``, the ``Host``
+the browser named and its body, streamed. The answer comes back as the app gave it, streamed and still encoded, but
+for a cookie the app ties to one of the site's own names (``Domain``), which comes back the host's alone, as agentenv
+sets its own, so the cookie a sign-in sets is the app's cookie, not one beside it. Such a site usually declares
+``@website(builtin_routes=False, clock="real")``, so every path but agentenv's own reaches the app and nothing
+expects the app to follow the universe's clock; it signs a browser in through a ``@session_state`` of its own, which
+asks the app with ``ask_app`` as its ready checks do. Its app keeps its own data, so its data plane serves
+``data/get`` alone, which exports nothing: it takes no load and can't reset, which agentenv reads off its card, as it
+reads any site's that serves no ``data/reset``. Its card names its ``sign_in_headers``, whose values the browser's
+network log takes out.
 
 It forwards HTTP alone: a WebSocket is refused (close code 1011)."""
 from __future__ import annotations
@@ -49,37 +49,38 @@ KEEPS_NO_COOKIES = DefaultCookiePolicy(allowed_domains=[])
 
 class ForwardingSite(WebsiteEnvironment):
     """A site whose pages ``upstream`` serves: set ``upstream`` to the app's address in the container, ``ready_path``
-    to a path it answers once it's up (the site is ready when that answers below 500), and ``dropped_headers`` to any
-    request header only the site's own calls may send the app, such as a sign-in header its ``@session_state`` uses.
+    to a path it answers once it's up (the site is ready when that answers below 500), and ``sign_in_headers`` to
+    the request headers only the site's own calls may send the app, such as the sign-in header its ``@session_state``
+    uses: the forwarder drops them from every browser's request, and the browser's network log takes their values out.
     A site's own calls go through ``ask_app``."""
 
     upstream: ClassVar[str] = "http://127.0.0.1:80"
     ready_path: ClassVar[str] = "/"
-    dropped_headers: ClassVar[tuple[str, ...]] = ()
+    sign_in_headers: ClassVar[tuple[str, ...]] = ()
 
     def fallback_app(self) -> Any:
         return self._forwarder
 
     def extension_params(self, uri: str) -> dict:
         params = super().extension_params(uri)
-        if uri == WEBSITE_EXTENSION_URI and self.dropped_headers:
-            return {**params, WEBSITE_SIGN_IN_HEADERS_PARAM: list(self.dropped_headers)}
+        if uri == WEBSITE_EXTENSION_URI and self.sign_in_headers:
+            return {**params, WEBSITE_SIGN_IN_HEADERS_PARAM: list(self.sign_in_headers)}
         return params
 
     async def ask_app(self, path: str, *, method: str = "GET", headers: Optional[dict[str, str]] = None,
                       content: Optional[bytes] = None, timeout: float = ASK_TIMEOUT_S) -> httpx.Response:
         """The app's answer to ``method`` ``path`` asked as the site: under its first name as ``Host``, with
-        ``headers``, such as a sign-in header in ``dropped_headers`` that only the site's own calls send, and
+        ``headers``, such as one of its ``sign_in_headers``, which only the site's own calls send, and
         ``content``; through the forwarder's client, so with no cookie but those in ``headers`` and no redirect
         followed."""
         names = self._own_names()
         return await self._forwarder.client.request(
-            method, self.upstream.rstrip("/") + "/" + path.lstrip("/"), content=content, timeout=timeout,
+            method, self._forwarder.url(path), content=content, timeout=timeout,
             headers={**({"host": names[0]} if names else {}), **(headers or {})})
 
     @cached_property
     def _forwarder(self) -> Forwarder:
-        return Forwarder(self.upstream, self.dropped_headers, self._own_names())
+        return Forwarder(self.upstream, self.sign_in_headers, self._own_names())
 
     def _own_names(self) -> list[str]:
         """The site's exact names, the first the one its own calls ask the app under."""
@@ -121,6 +122,10 @@ class Forwarder:
             self._client.cookies.jar.set_policy(KEEPS_NO_COOKIES)
         return self._client
 
+    def url(self, path: str) -> str:
+        """Where ``path`` is on the app: a path as a request names it, ``/`` first, or one given without it."""
+        return self.upstream + (path if path.startswith("/") else f"/{path}")
+
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
         if scope["type"] == "websocket":
             await send({"type": "websocket.close", "code": WEBSOCKET_REFUSED, "reason": "the site forwards HTTP alone"})
@@ -132,7 +137,7 @@ class Forwarder:
         has_body = request.headers.get("content-length", "0") != "0" or "transfer-encoding" in request.headers
         try:
             answer = await self.client.send(self.client.build_request(
-                scope["method"], self.upstream + target(scope), headers=_bytes(headers),
+                scope["method"], self.url(target(scope)), headers=_bytes(headers),
                 content=request.stream() if has_body else None), stream=True)
         except httpx.HTTPError as e:
             await error_response(ApiError(f"the app at {self.upstream} isn't answering: {type(e).__name__}: {e}",

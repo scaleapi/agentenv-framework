@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import dataclasses
 import email.message
 import io
 import json
@@ -912,6 +913,21 @@ def test_install_writes_the_sites_files_names_and_trust_then_starts_the_proxy_on
     assert report["trust"]["added"] == [str(root / "etc/agentenv/ca.pem"), str(root / "etc/agentenv/ca-bundle.pem")]
     assert (root / "etc/profile.d/agentenv-sites.sh").read_text() == "".join(
         f"export {name}={value}\n" for name, value in sites.TRUST_ENVIRONMENTS["linux"].items())
+
+
+def test_every_field_of_a_sites_config_is_served_as_given_or_kept_private_and_the_proxy_loads_each():
+    """A site's config entry, with every field proxy_config writes, holds only fields install serves as given or keeps
+    out of what the session user reads; and the proxy's Site takes each served field, and the files and headers made
+    of the private ones, so a field added to one and not the others fails here, not silently."""
+    table = sites.site_table([SiteParams(name="notes", url="http://gw/website/notes/", domains=["notes.test"])])
+    given = sites.proxy_config(table, sites.issue(table.routes, label="t"), user=None, os_type="linux",
+                               forward_port=True, upstream_headers={"notes": {"X-Gateway": "g"}},
+                               sign_in_headers={"notes": ["X-Auto-Login"]})
+    (entry,) = given["sites"]
+    loaded = {f.name for f in dataclasses.fields(site_proxy.Site) if f.init}
+
+    assert set(entry) == set(site_proxy.SERVED_SITE_FIELDS) | set(site_proxy.PRIVATE_SITE_FIELDS), sorted(entry)
+    assert loaded == set(site_proxy.SERVED_SITE_FIELDS) | {"cert", "key", "upstream_headers"}, sorted(loaded)
 
 
 def test_install_keeps_a_sites_sign_in_headers_for_the_proxy_it_starts_whose_network_log_takes_their_values_out(

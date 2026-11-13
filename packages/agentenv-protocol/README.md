@@ -556,7 +556,7 @@ from agentenv_protocol.website import ForwardingSite, session_state, website
 class Store(ForwardingSite):
     upstream = "http://127.0.0.1:80"      # the app, in the same container
     ready_path = "/admin"                 # ready once the app answers this below 500
-    dropped_headers = ("X-Auto-Login",)   # only the site's own calls may send the app these
+    sign_in_headers = ("X-Auto-Login",)   # only the site's own calls send these; logged with values removed
 
     @session_state
     async def signed_in(self, user: str | None) -> dict:
@@ -566,7 +566,7 @@ class Store(ForwardingSite):
 
 - **Forwarding:** a request goes to the app as it came: its method, the site's own path with its encoding intact (an
   escaped `/` stays escaped, and a forwarded prefix is taken off), its query, the `Host` the browser named and its
-  body, streamed, with no header or cookie of the forwarder's own. The hop-by-hop headers and `dropped_headers` stay
+  body, streamed, with no header or cookie of the forwarder's own. The hop-by-hop headers and `sign_in_headers` stay
   behind. The answer comes back as the app gave it, streamed and still encoded, a redirect unfollowed, but a cookie
   the app ties to one of the site's names (`Domain`) comes back the host's alone, as agentenv sets a sign-in's
   cookies, so a sign-in replaces the app's session cookie rather than setting a second one beside it. An app not
@@ -581,9 +581,9 @@ class Store(ForwardingSite):
   no load and can't reset: agentenv's reset passes over a card serving no `data/reset`, and the conformance check
   passes a card serving `data/get` alone once `data/get` answers.
 - **Its session:** `@session_state` signs the browser in with whatever cookies the app sets, for example from one
-  server-side request carrying a sign-in header, which `dropped_headers` then keeps the browser from sending. The
-  card names `dropped_headers` as the site's `sign_in_headers` (`WEBSITE_SIGN_IN_HEADERS_PARAM`), so should a
-  browser's request carry one, the browser's network log, and so `network.har`, keeps it with its value taken out.
+  server-side request carrying a sign-in header, which `sign_in_headers` then keeps the browser from sending. The
+  card names them too (`WEBSITE_SIGN_IN_HEADERS_PARAM`), so should a browser's request carry one, the browser's
+  network log, and so `network.har`, keeps it with its value taken out.
 - **Its own calls:** `ask_app(path, method=..., headers=..., content=...)` asks the app as the site does, under its
   first name as `Host`, through the forwarder's client, which keeps no cookie and follows no redirect. Its session
   and ready checks use it, as `ForwardingSite`'s own ready check does.

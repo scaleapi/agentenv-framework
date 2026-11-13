@@ -118,7 +118,7 @@ def app() -> Iterator[App]:
 def _site(upstream: str, **declared) -> type[ForwardingSite]:
     @website(domains=[HOST], builtin_routes=False, clock="real", **declared)
     class Shop(ForwardingSite):
-        dropped_headers = ("X-Auto-Login",)
+        sign_in_headers = ("X-Auto-Login",)
         ready_path = "/admin"
 
         @session_state
@@ -136,7 +136,7 @@ def client(app: App) -> Iterator[TestClient]:
         yield forwarded
 
 
-def test_a_request_goes_to_the_app_as_it_came_without_hop_by_hop_or_dropped_headers(app, client):
+def test_a_request_goes_to_the_app_as_it_came_without_hop_by_hop_or_sign_in_headers(app, client):
     answer = client.get("/admin/a%2Fb/c?x=1&y=%20z", headers={
         "X-Custom": "kept", "Cookie": "admin=s1", "Connection": "keep-alive, X-Per-Hop", "X-Per-Hop": "gone",
         "Keep-Alive": "timeout=5", "x-auto-login": "admin:admin1234"})
@@ -263,7 +263,7 @@ def test_every_method_reaches_the_app_head_and_options_included(app, client):
     assert (head.status_code, head.content, options.status_code, deleted.status_code) == (200, b"", 200, 200)
 
 
-def test_the_card_names_the_dropped_headers_as_the_sites_sign_in_headers_and_a_plain_site_names_none(client):
+def test_the_card_names_the_sites_sign_in_headers_and_a_site_with_none_names_none(client):
     card = client.get("/.well-known/agent-env.json").json()
     params = next(ext for ext in card["capabilities"]["extensions"] if ext["uri"] == WEBSITE_EXTENSION_URI)["params"]
 
