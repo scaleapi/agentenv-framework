@@ -53,7 +53,7 @@ func (p *Proxy) handshake(dsts []string, sni, verifyName string, hello []byte) (
 		raw.Close()
 		return nil, found, fmt.Errorf("apply: %w", err)
 	}
-	raw.SetDeadline(time.Now().Add(15 * time.Second))
+	raw.SetDeadline(time.Now().Add(HandshakeTimeout))
 	if err := uc.Handshake(); err != nil {
 		raw.Close()
 		return nil, found, fmt.Errorf("handshake: %w", err)

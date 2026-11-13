@@ -69,7 +69,7 @@ func readPage(b []byte) (state, bool) {
 	return state{Armed: true, V: float64(u) / 1e9, Anchor: float64(a) / 1e9, Rate: rate}, true
 }
 
-// Universe follows the clock page, polled every 20 ms, so a change is seen and the universe it left is held for Hold.
+// Universe follows the clock page, read every PagePoll, so a change is seen and the universe it left is held for Hold.
 type Universe struct {
 	path     string
 	mu       sync.Mutex
@@ -88,7 +88,7 @@ func NewUniverse(path string) *Universe {
 
 func (u *Universe) Poll() {
 	for {
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(PagePoll)
 		u.refresh(time.Now())
 	}
 }
@@ -106,7 +106,7 @@ func (u *Universe) read() state {
 		}
 		u.page = mapped
 	}
-	for i := 0; i < 1000; i++ {
+	for i := 0; i < PageReads; i++ {
 		if s, ok := readPage(u.page); ok {
 			return s
 		}

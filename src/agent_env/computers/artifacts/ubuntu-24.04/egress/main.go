@@ -41,6 +41,22 @@ const (
 	FirstBytes     = 300 * time.Millisecond
 	HelloTimeout   = 10 * time.Second
 	DialTimeout    = 10 * time.Second
+
+	// How long a client has to send its request's head, and how long either handshake of an interception, the
+	// client's with the proxy and the proxy's with the site, has to finish.
+	HeadTimeout      = 15 * time.Second
+	HandshakeTimeout = 15 * time.Second
+
+	// The longest request head a client may send, and the most of an error a log row keeps, in bytes.
+	HeadLimit  = 64 << 10
+	ErrorLimit = 300
+
+	// How far inside the CA's dates each leaf it signs is, so no leaf outlasts its CA.
+	LeafInset = 2 * time.Hour
+
+	// How often the clock page is read, and how many reads may find it mid-write before the last universe stands.
+	PagePoll  = 20 * time.Millisecond
+	PageReads = 1000
 )
 
 // The dates the CA and every leaf it signs are valid between: the widest a certificate carries, as routed sites'

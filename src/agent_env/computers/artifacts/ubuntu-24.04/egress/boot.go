@@ -85,7 +85,7 @@ func boot(p bootPaths) (map[string]any, error) {
 	}
 	if len(p.UpdateTrust) > 0 {
 		if out, err := exec.Command(p.UpdateTrust[0], p.UpdateTrust[1:]...).CombinedOutput(); err != nil {
-			return report, fmt.Errorf("%s: %w: %s", strings.Join(p.UpdateTrust, " "), err, truncate(string(out), 300))
+			return report, fmt.Errorf("%s: %w: %s", strings.Join(p.UpdateTrust, " "), err, truncate(string(out), ErrorLimit))
 		}
 	}
 	appended := map[string]bool{}
@@ -255,7 +255,7 @@ func trustJava(store, ca string) error {
 	out, err := exec.Command(keytool, append([]string{"-importcert", "-noprompt", "-trustcacerts", "-alias",
 		"agentenv-egress", "-file", ca}, opened...)...).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("keytool: %w: %s", err, truncate(string(out), 300))
+		return fmt.Errorf("keytool: %w: %s", err, truncate(string(out), ErrorLimit))
 	}
 	return nil
 }
@@ -278,7 +278,7 @@ func sessionNSS(p bootPaths) error {
 	for _, step := range steps {
 		argv := append(append([]string{}, as...), step...)
 		if out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput(); err != nil {
-			return fmt.Errorf("%s: %w: %s", strings.Join(step[:2], " "), err, truncate(string(out), 300))
+			return fmt.Errorf("%s: %w: %s", strings.Join(step[:2], " "), err, truncate(string(out), ErrorLimit))
 		}
 	}
 	return nil

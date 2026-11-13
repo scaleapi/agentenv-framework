@@ -17,8 +17,10 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 )
+
+// The longest common name X.509 allows (ub-common-name).
+const commonNameLimit = 64
 
 // Leaves signs the leaves an intercepted client is handed: by this computer's CA when the site verified, else by a CA
 // trusted nowhere, so the client refuses it as it would the site. Each is valid over all of its CA's window, so it
@@ -82,9 +84,9 @@ func (l *Leaves) For(host string, sans []string, trusted bool) (*tls.Certificate
 	}
 	template := &x509.Certificate{
 		SerialNumber:          serial(),
-		Subject:               pkix.Name{CommonName: truncate(host, 64)},
-		NotBefore:             by.cert.NotBefore.Add(2 * time.Hour),
-		NotAfter:              by.cert.NotAfter.Add(-2 * time.Hour),
+		Subject:               pkix.Name{CommonName: truncate(host, commonNameLimit)},
+		NotBefore:             by.cert.NotBefore.Add(LeafInset),
+		NotAfter:              by.cert.NotAfter.Add(-LeafInset),
 		KeyUsage:              x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,

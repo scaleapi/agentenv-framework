@@ -8,6 +8,14 @@ import (
 	"time"
 )
 
+// A TLS record's content type for handshake messages, a ClientHello's handshake type, and the most plaintext one
+// record carries.
+const (
+	recordHandshake = 22
+	clientHelloType = 1
+	maxRecord       = 16384
+)
+
 // clientHello is the ClientHello handshake message the client has sent, peeked from r so the handshake stays
 // untouched for whoever reads it next; it may span several records.
 func clientHello(r *bufio.Reader, deadline time.Time) ([]byte, error) {
@@ -23,7 +31,7 @@ func clientHello(r *bufio.Reader, deadline time.Time) ([]byte, error) {
 			}
 			return nil, err
 		}
-		if data[0] != 22 {
+		if data[0] != recordHandshake {
 			return nil, errors.New("not TLS")
 		}
 		var body []byte
@@ -32,7 +40,7 @@ func clientHello(r *bufio.Reader, deadline time.Time) ([]byte, error) {
 				need = p + 5
 				break
 			}
-			if data[p] != 22 {
+			if data[p] != recordHandshake {
 				return nil, errors.New("ClientHello interrupted by another record")
 			}
 			size := int(binary.BigEndian.Uint16(data[p+3:]))
@@ -125,17 +133,17 @@ func helloRecord(hello []byte) ([]byte, []uint16, error) {
 		body = binary.BigEndian.AppendUint16(body, uint16(len(exts)))
 		body = append(body, exts...)
 	}
-	if len(body)+4 > 16384 {
+	if len(body)+4 > maxRecord {
 		return nil, nil, errors.New("ClientHello longer than one record")
 	}
-	msg := append([]byte{1, byte(len(body) >> 16), byte(len(body) >> 8), byte(len(body))}, body...)
-	return append([]byte{22, 3, 1, byte(len(msg) >> 8), byte(len(msg))}, msg...), gone, nil
+	msg := append([]byte{clientHelloType, byte(len(body) >> 16), byte(len(body) >> 8), byte(len(body))}, body...)
+	return append([]byte{recordHandshake, 3, 1, byte(len(msg) >> 8), byte(len(msg))}, msg...), gone, nil
 }
 
 // helloExtensions is where a ClientHello message's extensions start, past its version, random, session id, cipher
 // suites and compression methods, each length checked against the message.
 func helloExtensions(hello []byte) (int, error) {
-	if len(hello) < 4 || hello[0] != 1 {
+	if len(hello) < 4 || hello[0] != clientHelloType {
 		return 0, errors.New("not a ClientHello")
 	}
 	p := 4 + 2 + 32

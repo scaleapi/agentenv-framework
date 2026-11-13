@@ -34,6 +34,9 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # ECR Public's anonymous pulls fail here for hours at a time.
+      - name: Pull the Go image from mirror.gcr.io
+        run: python3 .github/scripts/mirror_base_images.py src/agent_env/computers/artifacts/ubuntu-24.04/Dockerfile
       - name: gofmt, go vet and go test -race
         run: make egress-test
 

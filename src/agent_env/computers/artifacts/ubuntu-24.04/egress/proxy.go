@@ -101,11 +101,11 @@ func (p *Proxy) handle(conn net.Conn) {
 		}
 		conn.Close()
 	}()
-	br := bufio.NewReaderSize(conn, 64<<10)
-	conn.SetReadDeadline(start.Add(15 * time.Second))
+	br := bufio.NewReaderSize(conn, HeadLimit)
+	conn.SetReadDeadline(start.Add(HeadTimeout))
 	method, target, version, headers, err := readHead(br)
 	if err != nil {
-		row["error"] = truncate("request: "+err.Error(), 300)
+		row["error"] = truncate("request: "+err.Error(), ErrorLimit)
 		p.log(row)
 		return
 	}
@@ -146,7 +146,7 @@ func (p *Proxy) handle(conn net.Conn) {
 	row["allowed"] = why
 	up, dst, err := p.dialAny(dsts)
 	if err != nil {
-		row["error"] = truncate(err.Error(), 300)
+		row["error"] = truncate(err.Error(), ErrorLimit)
 		reply(conn, "502 Bad Gateway", "egress: "+err.Error()+"\n")
 		p.log(row)
 		return
@@ -182,7 +182,7 @@ func (p *Proxy) handle(conn net.Conn) {
 	head.WriteString("\r\n")
 	conn.SetReadDeadline(time.Time{})
 	if _, err := io.WriteString(up, head.String()); err != nil {
-		row["error"] = truncate("upstream: "+err.Error(), 300)
+		row["error"] = truncate("upstream: "+err.Error(), ErrorLimit)
 		p.log(row)
 		return
 	}
@@ -202,7 +202,7 @@ func readHead(r *bufio.Reader) (string, string, string, []string, error) {
 	for {
 		line, err := r.ReadString('\n')
 		size += len(line)
-		if size > 64<<10 {
+		if size > HeadLimit {
 			return "", "", "", nil, errors.New("request head too long")
 		}
 		if err != nil {
@@ -346,9 +346,9 @@ func (p *Proxy) tunnel(conn net.Conn, br *bufio.Reader, host string, port int, d
 		p.log(row)
 		return
 	}
-	if len(first) == 0 || first[0] != 22 || why == "routed" {
+	if len(first) == 0 || first[0] != recordHandshake || why == "routed" {
 		row["mode"], row["decision"] = "pass", "not TLS"
-		if len(first) > 0 && first[0] == 22 {
+		if len(first) > 0 && first[0] == recordHandshake {
 			row["mode"], row["decision"] = "splice", "routed"
 		}
 		if !p.splice(conn, br, dsts, row, start) {
@@ -359,13 +359,13 @@ func (p *Proxy) tunnel(conn net.Conn, br *bufio.Reader, host string, port int, d
 	conn.SetReadDeadline(time.Now().Add(HelloTimeout))
 	hello, err := clientHello(br, time.Now().Add(HelloTimeout))
 	if err != nil {
-		row["error"] = truncate("ClientHello: "+err.Error(), 300)
+		row["error"] = truncate("ClientHello: "+err.Error(), ErrorLimit)
 		p.log(row)
 		return
 	}
 	sni, offered, err := parseHello(hello)
 	if err != nil {
-		row["error"] = truncate("ClientHello: "+err.Error(), 300)
+		row["error"] = truncate("ClientHello: "+err.Error(), ErrorLimit)
 		p.log(row)
 		return
 	}
@@ -425,7 +425,7 @@ func (p *Proxy) tunnel(conn net.Conn, br *bufio.Reader, host string, port int, d
 		unreachable = append(unreachable, fmt.Sprint(row["error"]))
 		delete(row, "error")
 	}
-	row["error"] = truncate("upstream: no address answered: "+strings.Join(unreachable, "; "), 300)
+	row["error"] = truncate("upstream: no address answered: "+strings.Join(unreachable, "; "), ErrorLimit)
 	p.log(row)
 }
 
@@ -450,7 +450,7 @@ func (p *Proxy) preferChecked(dsts []string, sni string) []string {
 func (p *Proxy) splice(conn net.Conn, br *bufio.Reader, dsts []string, row map[string]any, start time.Time) bool {
 	up, dst, err := p.dialAny(dsts)
 	if err != nil {
-		row["error"] = truncate("upstream: "+err.Error(), 300)
+		row["error"] = truncate("upstream: "+err.Error(), ErrorLimit)
 		return false
 	}
 	defer up.Close()
@@ -478,11 +478,11 @@ func (p *Proxy) intercept(conn net.Conn, br *bufio.Reader, dst, sni, verifyName 
 	uc, found, err := p.handshake([]string{dst}, sni, verifyName, hello)
 	var unanswered dialError
 	if errors.As(err, &unanswered) {
-		row["error"] = truncate("upstream: "+err.Error(), 300)
+		row["error"] = truncate("upstream: "+err.Error(), ErrorLimit)
 		return false
 	}
 	if err != nil {
-		row["error"] = truncate("upstream: "+err.Error(), 300)
+		row["error"] = truncate("upstream: "+err.Error(), ErrorLimit)
 		p.log(row)
 		return true
 	}
@@ -510,7 +510,7 @@ func (p *Proxy) intercept(conn net.Conn, br *bufio.Reader, dst, sni, verifyName 
 	}
 	cert, minted, err := p.Leaves.For(verifyName, sans, found.Verified)
 	if err != nil {
-		row["error"] = truncate("leaf: "+err.Error(), 300)
+		row["error"] = truncate("leaf: "+err.Error(), ErrorLimit)
 		p.log(row)
 		return true
 	}
@@ -520,9 +520,9 @@ func (p *Proxy) intercept(conn net.Conn, br *bufio.Reader, dst, sni, verifyName 
 		config.NextProtos = []string{found.ALPN}
 	}
 	client := tls.Server(&peeked{Conn: conn, r: br}, config)
-	conn.SetDeadline(time.Now().Add(15 * time.Second))
+	conn.SetDeadline(time.Now().Add(HandshakeTimeout))
 	if err := client.Handshake(); err != nil {
-		row["error"] = truncate("client handshake: "+err.Error(), 300)
+		row["error"] = truncate("client handshake: "+err.Error(), ErrorLimit)
 		p.log(row)
 		return true
 	}
