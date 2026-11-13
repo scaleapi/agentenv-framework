@@ -1,16 +1,14 @@
 """Copy every composed computer image a slow-tier runner's registry holds to the CI computer image mirror, the one
 ``AGENT_ENV_COMPUTER_IMAGE_MIRROR`` names, so later runs copy them back rather than build them.
 
-Each image goes under its mirror tag (``composed.mirror_tag``: the composer's digest, then the key), and again with
-today's date, ``<tag>-seen-YYYYMMDD``, which is how ``prune_computer_images.py`` tells an image a recent run used from one
-none has. An image already in the mirror is only tagged again: no blob it holds is sent twice. The mirror is written as
-``GITHUB_ACTOR`` with ``GITHUB_TOKEN``; one the composer can't read anonymously, as GHCR makes a new package, warns.
+Each image goes under its mirror tag (``composed.mirror_tag``: the composer's digest, then the key). No blob the mirror
+already holds is sent again. The mirror is written as ``GITHUB_ACTOR`` with ``GITHUB_TOKEN``; one the composer can't
+read anonymously, as GHCR makes a new package, warns.
 """
 
 from __future__ import annotations
 
 import argparse
-import datetime
 import json
 import os
 import re
@@ -33,13 +31,11 @@ def main() -> int:
     with urllib.request.urlopen(f"http://{args.registry}/v2/{REPOSITORY}/tags/list") as response:
         keys = sorted(tag for tag in json.load(response).get("tags") or [] if KEY.match(tag))
     auth = RegistryAuth(args.mirror.partition("/")[0], os.environ["GITHUB_ACTOR"], os.environ["GITHUB_TOKEN"])
-    seen = f"seen-{datetime.datetime.now(datetime.timezone.utc):%Y%m%d}"
     for key in keys:
         source = pin_digest(f"{args.registry}/{REPOSITORY}:{key}", None)
-        for tag in (mirror_tag(key), f"{mirror_tag(key)}-{seen}"):
-            copy_image(source, f"{args.mirror}:{tag}", None, auth)
+        copy_image(source, f"{args.mirror}:{mirror_tag(key)}", None, auth)
         print(f"shared {key}")
-    print(f"share computer images: {len(keys)} images in {args.mirror}, each tagged {seen}")
+    print(f"share computer images: {len(keys)} images in {args.mirror}")
     if keys:
         try:
             pin_if_served(f"{args.mirror}:{mirror_tag(keys[0])}", None)

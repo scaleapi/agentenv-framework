@@ -22,7 +22,7 @@ concurrency:
 
 env:
   AGENT_ENV_ENVIRONMENT: dev
-  # The slow tier's composed computer images, shared between its runners (computer-image-mirror.yml prunes it).
+  # The slow tier's composed computer images, shared between its runners.
   COMPUTER_IMAGE_MIRROR: ghcr.io/scaleapi/agentenv-ci-computers
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
@@ -227,8 +227,7 @@ jobs:
         with:
           path: ${{ runner.temp }}/packages
           key: ${{ steps.lockkey.outputs.key }}
-      # Once main's tests pass, every image this runner built or copied goes to the mirror under its key and a
-      # <key>-seen-<date> tag, which computer-image-mirror.yml's prune keeps an image by.
+      # Once main's tests pass, every image this runner built or copied goes to the mirror under its key.
       - name: Share the computer images
         continue-on-error: true
         if: >-
