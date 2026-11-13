@@ -77,13 +77,11 @@ from claude_bridge import (
     SESSION_JSONL_DIR,
     WORKSPACE_DIR,
     kill_running_clis,
-    mcp_server_entries,
     read_partial_session_trajectory,
     redact_session_records,
     run_claude,
     session_jsonl_path,
 )
-from env_clock import find_env_clock, prompt_note
 from kit import (
     DurableSessionRefs,
     FilePartMaterializeError,
@@ -474,11 +472,6 @@ class ClaudeCodeAgent(DurableSessionRefs, AgentEnvAgent):
             paths_block = "\n".join(attachment_paths)
             user_text = f"{user_text}\n\n{paths_block}" if user_text else paths_block
 
-        # The env's time, when its clock is armed: the date the CLI states is this machine's, not the env's.
-        env_clock = await find_env_clock(mcp_server_entries(request.mcp_servers, cfg.role))
-        if env_clock is not None:
-            user_text = f"{user_text}\n\n{prompt_note(env_clock[1])}" if user_text else prompt_note(env_clock[1])
-
         # A turn that failed before the CLI wrote its transcript left no session to resume.
         resume = session_jsonl_path(session_id).exists()
         try:
@@ -500,7 +493,9 @@ class ClaudeCodeAgent(DurableSessionRefs, AgentEnvAgent):
                 max_thinking_tokens=cfg.max_thinking_tokens,
                 builtin_tools=cfg.builtin_tools,
                 event_callback=request.trajectory.append,
-                env_clock=env_clock[0] if env_clock is not None else None,
+                # The framework ended the prompt with the env's time; the CLI's own date is this machine's. A protocol
+                # older than its env clock gives none.
+                env_clock=getattr(request, "env_clock", None),
             )
         except Exception as e:
             logger.error(f"claude CLI invocation raised: {e}", exc_info=True)

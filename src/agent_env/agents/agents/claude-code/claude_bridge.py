@@ -16,12 +16,15 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
-from env_clock import ENV_CLOCK_SERVER_ENV, ClockServer, failure_reason, hook_settings, prompt_note, read_env_clock
+from env_clock_hook import hook_settings
 from kit import in_thread_to_its_end
+
+if TYPE_CHECKING:
+    from agentenv_protocol.a2a_agent.env_clock import EnvClock
 
 logger = logging.getLogger(__name__)
 
@@ -422,13 +425,13 @@ async def run_claude(
     max_thinking_tokens: int | None = None,
     builtin_tools: ClaudeCodeTools | None = None,
     event_callback: Callable[[dict], None] | None = None,
-    env_clock: ClockServer | None = None,
+    env_clock: EnvClock | None = None,
 ) -> ClaudeResult:
     """Run one turn, resuming the CLI session when a transient upstream failure cuts it short; a resume spends what
     is left of ``timeout_s``, so the turn never outlives its caller's deadline. ``CLAUDE_API_ERROR_RETRIES=0`` turns
     resumes off. ``event_callback`` gets each stdout event as the CLI prints it; an attempt's trailing `result` is
-    held until it's known not to be resumed. ``env_clock``, the server of an armed env clock's get_time, has the CLI
-    add the env's time after each tool call (``env_clock``)."""
+    held until it's known not to be resumed. ``env_clock``, the task env's armed clock (``TaskRequest.env_clock``),
+    has the CLI add the env's time after each tool call (``env_clock_hook``), and a resume carry it too."""
     deadline = time.monotonic() + timeout_s
     retries_left = _configured_api_error_retries()
     spawn = partial(
@@ -486,11 +489,13 @@ async def run_claude(
             attempt_prompt = await _with_env_clock_note(_RESUME_PROMPT, env_clock)
 
 
-async def _with_env_clock_note(prompt: str, server: ClockServer) -> str:
+async def _with_env_clock_note(prompt: str, env_clock: EnvClock) -> str:
     """``prompt`` with the env's time now: a resume after an API failure and its backoff mustn't carry on from the
     time the turn's prompt gave. A failed read leaves it as it is."""
+    from agentenv_protocol.a2a_agent.env_clock import failure_reason, prompt_note
+
     try:
-        return f"{prompt}\n\n{prompt_note(await read_env_clock(server))}"
+        return f"{prompt}\n\n{prompt_note(await env_clock.read())}"
     except Exception as e:
         logger.warning(f"env clock: no reading for the resume: {failure_reason(e)}")
         return prompt
@@ -656,22 +661,18 @@ def _command(session_id: str, resume: bool, *, model: str | None, allowed_tools:
             cmd += ["--disallowedTools", ",".join(builtin_tools.disable)]
         cmd.append("--strict-mcp-config")
     if mcp_servers:
-        def entry(server: ClockServer) -> dict:
-            return {"type": "http", "url": server.url, **({"headers": server.headers} if server.headers else {})}
+        def entry(info: dict) -> dict:
+            server: dict = {"type": "http", "url": info["url"]}
+            # The gateway filters an env's tools by the role header, which wins over a stored one.
+            headers = {**(info.get("headers") or {}), **({"AgentEnv-Role": role} if role else {})}
+            if headers:
+                server["headers"] = headers
+            return server
 
-        servers = mcp_server_entries(mcp_servers, role)
-        cmd += ["--mcp-config", json.dumps({"mcpServers": {name: entry(s) for name, s in servers.items()}})]
+        cmd += ["--mcp-config", json.dumps({"mcpServers": {name: entry(info) for name, info in mcp_servers.items()}})]
     if env_clock:
         cmd += ["--settings", hook_settings()]
     return cmd
-
-
-def mcp_server_entries(mcp_servers: Mapping[str, dict], role: str | None) -> dict[str, ClockServer]:
-    """Each MCP server's url and the headers the CLI sends it."""
-    # The gateway filters an env's tools by the role header, which wins over a stored one.
-    return {name: ClockServer(url=info["url"],
-                              headers={**(info.get("headers") or {}), **({"AgentEnv-Role": role} if role else {})})
-            for name, info in mcp_servers.items()}
 
 
 async def _spawn_claude(
@@ -692,7 +693,7 @@ async def _spawn_claude(
     max_thinking_tokens: int | None = None,
     builtin_tools: ClaudeCodeTools | None = None,
     event_callback: Callable[[dict], None] | None = None,
-    env_clock: ClockServer | None = None,
+    env_clock: EnvClock | None = None,
 ) -> ClaudeResult:
     cmd = _command(session_id, resume, model=model, allowed_tools=allowed_tools, mcp_servers=mcp_servers,
                    system_prompt=system_prompt, output_format=output_format, role=role, effort=effort,
@@ -700,7 +701,9 @@ async def _spawn_claude(
     env = cli_env(os.environ, model=model, project_id=project_id, task_id=task_id,
                   max_thinking_tokens=max_thinking_tokens)
     if env_clock is not None:
-        env[ENV_CLOCK_SERVER_ENV] = env_clock.to_env()
+        from agentenv_protocol.a2a_agent.env_clock import ENV_CLOCK_SERVER_ENV
+
+        env[ENV_CLOCK_SERVER_ENV] = env_clock.server.to_env()
     logger.info(f"Running claude CLI (resume={resume}, session_id={session_id}, model={model})")
     WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
     proc = await _started(asyncio.create_subprocess_exec(
