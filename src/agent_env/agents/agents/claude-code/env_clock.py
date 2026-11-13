@@ -31,6 +31,8 @@ PROMPT_READ_TIMEOUT_S = 10.0
 HOOK_READ_TIMEOUT_S = 5.0
 HOOK_TIMEOUT_S = 10
 HOOK_SCRIPT = Path(__file__).with_name("env_clock_hook.py")
+# How much of a bad get_time answer an error quotes.
+_ERROR_TEXT_LIMIT = 200
 # After every tool call, whether it succeeded or failed: a long command that fails takes as much of the clock as one
 # that succeeds.
 HOOK_EVENTS = ("PostToolUse", "PostToolUseFailure")
@@ -67,13 +69,13 @@ async def _read(server: ClockServer, *, find: bool) -> str | None:
                     return None
             result = await session.call_tool(ENV_CLOCK_TOOL_NAME, {})
     if result.isError:
-        raise ValueError(f"{ENV_CLOCK_TOOL_NAME} failed: {_text(result)[:200]!r}")
+        raise ValueError(f"{ENV_CLOCK_TOOL_NAME} failed: {_text(result)[:_ERROR_TEXT_LIMIT]!r}")
     if isinstance(result.structuredContent, dict) and result.structuredContent.get("current_time"):
         return str(result.structuredContent["current_time"])
     text = _text(result)
     current = json.loads(text).get("current_time")
     if not current:
-        raise ValueError(f"no current_time in {text[:200]!r}")
+        raise ValueError(f"no current_time in {text[:_ERROR_TEXT_LIMIT]!r}")
     return str(current)
 
 
