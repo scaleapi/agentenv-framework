@@ -260,6 +260,12 @@ class BrowserControl:
         return [OpenTab(**tab, active=tab["id"] == active, context=self.label_of(tab)).model_dump()
                 for tab in self.tabs.values() if self.in_context(tab.get("context_id"), context)]
 
+    def context_of_frame(self, frame: object) -> Optional[str]:
+        """The context of the tab the frame ``frame`` is in, a tab's own frame among them; None for one it hasn't
+        seen."""
+        tab = self._frame_tabs.get(frame, frame) if isinstance(frame, str) else None
+        return self.tabs.get(tab, {}).get("context_id") if tab is not None else None
+
     def label_of(self, entry: dict) -> Optional[str]:
         """The label of the lease a tab or download was in, None for the default context."""
         return self.other_contexts.get(entry.get("context_id"))

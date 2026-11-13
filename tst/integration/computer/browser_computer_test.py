@@ -111,6 +111,7 @@ from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
 from tst.integration.computer.browser_contexts import check_browser_contexts
+from tst.integration.computer.browser_scoped import check_scoped_addresses
 from tst.integration.computer.browser_data import SITE as DATA_SITE, check_browser_data, check_browser_data_under_chaos
 from tst.integration.computer.browser_steps import check_browser_steps
 from tst.integration.computer.browser_state import check_browser_state, check_browser_state_under_chaos
@@ -489,6 +490,26 @@ async def test_its_contexts_are_leased_by_steps_and_by_agents_each_with_its_own_
                 deployed, browser_computer.id,
                 lambda op: deployed.environment_url + protocol_v1.find_extension_method(app, BROWSER, op)["endpoint"],
                 f"{deployed.environment_url}/svc/chromium", lambda user: _cdp(deployed, user))
+        finally:
+            report = await teardown_run(context)
+
+    assert not report.failed
+
+
+@pytest.mark.asyncio
+async def test_an_address_scoped_to_a_lease_sees_it_alone_as_the_default_and_ends_with_it(browser_computer,
+                                                                                          cdp_clients):
+    with namespace_routing():
+        deployed = await Env.get(browser_computer.id).deploy()
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            await _ready(deployed)
+            card = (await _get(deployed, "/.well-known/agent-env.json")).json()
+            app = next(child for child in card["children_environments"] if child["name"] == "chromium")
+            await check_scoped_addresses(
+                deployed, browser_computer.id,
+                lambda op: deployed.environment_url + protocol_v1.find_extension_method(app, BROWSER, op)["endpoint"],
+                cdp_clients)
         finally:
             report = await teardown_run(context)
 

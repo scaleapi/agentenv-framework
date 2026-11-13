@@ -112,6 +112,64 @@ class ContextPipe(Pipe):
         return await super().request(method, params, session_id=session_id, answered=answered)
 
 
+class ScopePipe(ContextPipe):
+    """A browser whose default context ``DEF`` has the page ``P0``, and whose task leases ``L1`` and ``L2`` have the
+    pages ``PB`` and ``PS`` and ``L1`` the worker ``WB``: a connection's setDiscoverTargets announces them, getTargets
+    and getBrowserContexts answer with them, and an agent's own contexts' pages come as it makes them. Each command
+    agentenv itself sends is kept in ``called`` with its params."""
+
+    INFOS = [{"targetId": "P0", "type": "page", "browserContextId": "DEF"},
+             {"targetId": "PB", "type": "page", "browserContextId": "L1"},
+             {"targetId": "WB", "type": "service_worker", "browserContextId": "L1"},
+             {"targetId": "PS", "type": "page", "browserContextId": "L2"}]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.leased, self.called, self.infos = 0, [], list(self.INFOS)
+
+    async def call(self, method, params=None, *, session_id=None, timeout_s=None):
+        self.called.append((method, params, session_id))
+        if method == "Target.createBrowserContext":
+            self.leased += 1
+            return {"browserContextId": f"L{self.leased}"}
+        return await super().call(method, params, session_id=session_id, timeout_s=timeout_s)
+
+    async def request(self, method, params=None, *, session_id=None, answered=None):
+        if method == "Target.setDiscoverTargets":
+            self.sent.append((method, session_id))
+            for info in self.infos:
+                self.emit({"method": "Target.targetCreated", "sessionId": session_id, "params": {"targetInfo": info}})
+            return {"result": {}}
+        if method == "Target.getTargets":
+            return {"result": {"targetInfos": list(self.infos)}}
+        if method == "Target.getBrowserContexts":
+            ids = sorted({info["browserContextId"] for info in self.infos} - {"DEF"})
+            return {"result": {"browserContextIds": ids, "defaultBrowserContextId": "DEF"}}
+        answer = await super().request(method, params, session_id=session_id, answered=answered)
+        if method == "Target.createBrowserContext":
+            self.infos.append({"targetId": f"P{answer['result']['browserContextId']}", "type": "page",
+                               "browserContextId": answer["result"]["browserContextId"]})
+        return answer
+
+
+async def _hear(socket, message: dict) -> tuple[list[dict], dict]:
+    """The events ``socket`` hears from sending ``message`` until its answer, and the answer."""
+    await socket.send(json.dumps(message))
+    heard = []
+    while (answer := json.loads(await socket.recv())).get("id") != message["id"]:
+        heard.append(answer)
+    return heard, answer
+
+
+async def _scoped(tmp_path):
+    """A ScopePipe, its contexts with the task's leases buyer for ada and seller for bob, and the relay over both."""
+    pipe = ScopePipe()
+    contexts = Contexts(pipe, BrowserControl(pipe, "agent"), home=lambda: tmp_path)
+    await contexts.lease("buyer", grants=("ada",))
+    await contexts.lease("seller", grants=("bob",))
+    return pipe, contexts
+
+
 class SlowClient:
     """A client's WebSocket that takes in nothing sent to it until ``reading`` is set, and records what it got and how
     it was closed."""
@@ -143,12 +201,12 @@ async def _relay(dialogs_answered: bool = False, pipe=None, **logging):
     relay = Relay(pipe, dialogs_answered=dialogs_answered, **logging)
 
     async def endpoint(websocket):
-        await relay.serve(websocket, websocket.path_params["user"])
+        await relay.serve(websocket, websocket.path_params["user"], websocket.path_params.get("context"))
 
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
-    server = uvicorn.Server(uvicorn.Config(Starlette(routes=[WebSocketRoute("/{user}", endpoint)]), log_level="warning",
-                                           lifespan="off"))
+    routes = [WebSocketRoute("/{user}", endpoint), WebSocketRoute("/{user}/{context}", endpoint)]
+    server = uvicorn.Server(uvicorn.Config(Starlette(routes=routes), log_level="warning", lifespan="off"))
     serving = asyncio.create_task(server.serve(sockets=[sock]))
     while not server.started:
         await asyncio.sleep(0.01)
@@ -335,6 +393,121 @@ async def test_a_context_an_agent_makes_is_its_lease_keeping_downloads_in_its_fo
     assert "the context 'buyer' is the task's" in tasks["error"]["message"] and "result" in ended
     assert while_bob == ["buyer", "agent-bob-1"] and [lease.label for lease in contexts] == ["buyer"]
     assert [entry["did"] for entry in relay.connections[0]["guarded"]] == ["changed", "refused"]
+
+
+@pytest.mark.asyncio
+async def test_a_scoped_address_sees_its_lease_as_the_default_and_nothing_of_another_context(tmp_path):
+    pipe, contexts = await _scoped(tmp_path)
+    async with _relay(pipe=pipe, contexts=contexts) as (_, relay, base):
+        async with connect(f"{base}/ada/buyer") as ada, connect(f"{base}/carol") as carol:
+            heard, _ = await _hear(ada, {"id": 1, "method": "Target.setDiscoverTargets", "params": {"discover": True}})
+            listed = await _ask(ada, {"id": 2, "method": "Target.getTargets"})
+            contexts_listed = await _ask(ada, {"id": 3, "method": "Target.getBrowserContexts"})
+            theirs = await _ask(ada, {"id": 4, "method": "Target.attachToTarget", "params": {"targetId": "PS"}})
+            elsewhere = await _ask(ada, {"id": 5, "method": "Target.activateTarget", "params": {"targetId": "P0"}})
+            mine = await _ask(ada, {"id": 6, "method": "Target.attachToTarget", "params": {"targetId": "PB"}})
+            await _ask(ada, {"id": 7, "method": "Target.createTarget", "params": {"url": "https://shop.test/"}})
+            opened_in = pipe.params["Target.createTarget"]
+            await _ask(ada, {"id": 8, "method": "Storage.getCookies", "params": {}})
+            cookies_of = pipe.params["Storage.getCookies"]
+            reached = await _ask(ada, {"id": 9, "method": "Storage.getCookies", "params": {"browserContextId": "L2"}})
+            browser = await _ask(ada, {"id": 10, "method": "Target.attachToBrowserTarget"})
+            default_heard, _ = await _hear(carol, {"id": 1, "method": "Target.setDiscoverTargets",
+                                                   "params": {"discover": True}})
+            default_contexts = await _ask(carol, {"id": 2, "method": "Target.getBrowserContexts"})
+            default_cookies = await _ask(carol, {"id": 3, "method": "Storage.getCookies",
+                                                 "params": {"browserContextId": "L1"}})
+
+    assert [event["params"]["targetInfo"]["targetId"] for event in heard] == ["PB", "WB"]
+    assert [info["targetId"] for info in listed["result"]["targetInfos"]] == ["PB", "WB"]
+    assert contexts_listed["result"] == {"browserContextIds": [], "defaultBrowserContextId": "L1"}
+    assert theirs["error"] == elsewhere["error"] == {"code": -32602, "message": "No target with given id found"}
+    assert "result" in mine and opened_in["browserContextId"] == "L1" and cookies_of == {"browserContextId": "L1"}
+    assert "isn't one this address sees" in reached["error"]["message"]
+    assert "each connection has its browser session" in browser["error"]["message"]
+    assert [event["params"]["targetInfo"]["targetId"] for event in default_heard] == ["P0"]
+    assert default_contexts["result"]["browserContextIds"] == [] and "error" in default_cookies
+    assert relay.connections[0]["context"] == "buyer" and "context" not in relay.connections[1]
+
+
+@pytest.mark.asyncio
+async def test_an_address_sees_the_contexts_its_user_made_and_no_one_elses(tmp_path):
+    pipe, contexts = await _scoped(tmp_path)
+    async with _relay(pipe=pipe, contexts=contexts) as (_, relay, base):
+        async with connect(f"{base}/ada") as ada, connect(f"{base}/ada/buyer") as scoped, \
+                connect(f"{base}/bob") as bob:
+            made = (await _ask(ada, {"id": 1, "method": "Target.createBrowserContext", "params": {}}))["result"]
+            own = made["browserContextId"]
+            from_scoped, _ = await _hear(scoped, {"id": 1, "method": "Target.setDiscoverTargets",
+                                                  "params": {"discover": True}})
+            listed = await _ask(scoped, {"id": 2, "method": "Target.getBrowserContexts"})
+            opened = await _ask(scoped, {"id": 3, "method": "Target.createTarget",
+                                         "params": {"url": "about:blank", "browserContextId": own}})
+            from_bob, _ = await _hear(bob, {"id": 1, "method": "Target.setDiscoverTargets",
+                                            "params": {"discover": True}})
+
+    assert sorted(event["params"]["targetInfo"]["targetId"] for event in from_scoped) == sorted(["PB", f"P{own}", "WB"])
+    assert listed["result"]["browserContextIds"] == [own] and "result" in opened
+    assert [event["params"]["targetInfo"]["targetId"] for event in from_bob] == ["P0"]
+
+
+@pytest.mark.asyncio
+async def test_a_target_of_another_context_auto_attached_to_a_scoped_connection_runs_and_detaches_unheard(tmp_path):
+    pipe, contexts = await _scoped(tmp_path)
+    async with _relay(pipe=pipe, contexts=contexts) as (_, relay, base):
+        async with connect(f"{base}/ada/buyer") as ada:
+            await _ask(ada, {"id": 1, "method": "Browser.getVersion"})
+            session = relay.connections[0] and next(iter(relay._open)).session
+            pipe.emit({"method": "Target.attachedToTarget", "sessionId": session, "params": {
+                "sessionId": "PS-s", "targetInfo": {"targetId": "PS2", "type": "page", "browserContextId": "L2"},
+                "waitingForDebugger": True}})
+            pipe.emit({"method": "Target.attachedToTarget", "sessionId": session, "params": {
+                "sessionId": "PB-s", "targetInfo": {"targetId": "PB2", "type": "page", "browserContextId": "L1"},
+                "waitingForDebugger": True}})
+            heard = json.loads(await asyncio.wait_for(ada.recv(), 5))
+            for _ in range(100):
+                if ("Target.detachFromTarget", {"sessionId": "PS-s"}, session) in pipe.called:
+                    break
+                await asyncio.sleep(0.01)
+
+    assert heard["method"] == "Target.attachedToTarget" and heard["params"]["sessionId"] == "PB-s"
+    assert ("Runtime.runIfWaitingForDebugger", None, "PS-s") in pipe.called
+    assert ("Target.detachFromTarget", {"sessionId": "PS-s"}, session) in pipe.called
+    assert not any(session_id == "PB-s" for _, _, session_id in pipe.called)
+
+
+@pytest.mark.asyncio
+async def test_a_leases_end_closes_the_connections_scoped_to_it_and_one_to_an_ended_lease_is_refused(tmp_path):
+    pipe, contexts = await _scoped(tmp_path)
+    async with _relay(pipe=pipe, contexts=contexts) as (_, relay, base):
+        async with connect(f"{base}/ada/buyer") as ada, connect(f"{base}/carol") as carol:
+            await _ask(ada, {"id": 1, "method": "Browser.getVersion"})
+            relay.lease_ended(contexts.get("buyer").id)
+            with pytest.raises(ConnectionClosedOK) as ended:
+                await asyncio.wait_for(ada.recv(), 5)
+            still = await _ask(carol, {"id": 1, "method": "Browser.getVersion"})
+        async with connect(f"{base}/ada/nobody") as late:
+            with pytest.raises(ConnectionClosedOK) as refused:
+                await asyncio.wait_for(late.recv(), 5)
+
+    assert (ended.value.rcvd.code, ended.value.rcvd.reason) == browser_cdp.LEASE_ENDED
+    assert (refused.value.rcvd.code, refused.value.rcvd.reason) == browser_cdp.LEASE_ENDED and "result" in still
+
+
+def test_a_scoped_token_is_one_per_user_and_lease_kept_in_memory_and_revoked_with_its_lease(tmp_path):
+    tokens = Tokens(tmp_path / "cdp-tokens.json")
+    plain = tokens.mint("ada", "https://computer.test")
+    scoped = tokens.mint("ada", "https://computer.test", context="buyer")
+    again = tokens.mint("ada", "https://computer.test", context="buyer")
+    other = tokens.mint("bob", "https://computer.test", context="buyer")
+    token = scoped.ws_url.split("/cdp/")[1].split("/")[0]
+
+    assert again == scoped and scoped.context == "buyer" and other != scoped and plain.context is None
+    assert tokens.address(token).context == "buyer"
+    assert Tokens(tmp_path / "cdp-tokens.json").address(token) is None
+    tokens.revoke("buyer")
+    assert tokens.address(token) is None and tokens.address(plain.ws_url.split("/cdp/")[1].split("/")[0]) is not None
+    assert tokens.mint("ada", "https://computer.test", context="buyer") != scoped
 
 
 @pytest.mark.asyncio
@@ -762,7 +935,8 @@ async def test_the_cdp_operation_and_discovery_answer_at_the_address_reached_and
                            if e["uri"] == "urn:agentenv:browser/v1")
     assert computer_app_params["agent_routes"] == ["/cdp/"]
     assert browser_methods["cdp"]["request"]["properties"] == {"user": {"type": "string"},
-                                                               "origin": {"type": "string", "default": None}}
+                                                               "origin": {"type": "string", "default": None},
+                                                               "context": {"type": "string", "default": None}}
 
 
 @pytest.mark.asyncio

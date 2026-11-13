@@ -61,6 +61,11 @@ and the browser's `data/add` loads them, which opens the start tabs again while 
 after the load that seeds the site and again after `reset_env`, which starts the browser afresh. Preflight refuses a
 step on an env with no browser, none of the name given, or several and none named. On a multi env, the steps reach
 the browser apps of its computers, each through the computer's own record and control token.
+`browser_connect_cdp {context?}` with a `context`, a lease granted to the agent, hands it an address scoped to
+that lease: the agent sees the lease as the browser's default context, its pages, cross-origin iframes and workers
+alone, with the contexts it made itself, and what it opens, sets or downloads lands there; it can't see or attach to
+another context's targets, and the address ends with the lease. An address with no context sees the default context
+and the agent's own, not the leases.
 `browser_connect_cdp` hands an agent a CDP address to the same browser, under the origin where the agent reaches the
 env, so through a tunnel that ends TLS it's https and wss; on a multi env, one at its gateway, asked through the
 gateway's `/svc/<computer>/` route, so the agent reaches the browser through the gateway's CDP relay as it reaches the
