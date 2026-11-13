@@ -374,8 +374,12 @@ func (p *Proxy) tunnel(conn net.Conn, br *bufio.Reader, host string, port int, d
 	}
 	armed, universes := p.Universe.View(time.Now())
 	decision := "real"
+	through := dsts
 	if armed {
 		seen, probed := p.validity(dsts, sni, verifyName, hello)
+		if seen.dst != "" {
+			through = []string{seen.dst} // the server the probe judged, not another of the name's
+		}
 		row["probed"], row["universes"] = probed, rounded(universes)
 		switch {
 		case seen.failed:
@@ -395,7 +399,7 @@ func (p *Proxy) tunnel(conn net.Conn, br *bufio.Reader, host string, port int, d
 	row["decision"] = decision
 	if decision == "real" || decision == "inside" || decision == "probe_failed" {
 		row["mode"] = "splice"
-		p.splice(conn, br, dsts, row, start)
+		p.splice(conn, br, through, row, start)
 		return
 	}
 	row["mode"] = "intercept"

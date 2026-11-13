@@ -377,9 +377,58 @@ func TestTheProbeAndLeafCachesStayWithinTheirLimit(t *testing.T) {
 	}
 	p := &Proxy{Dial: func(string) (net.Conn, error) { return nil, fmt.Errorf("unreachable") }}
 	for i := 0; i < 10; i++ {
-		p.validity([]string{fmt.Sprintf("192.0.2.%d:443", i)}, "", "x", nil)
+		p.validity([]string{fmt.Sprintf("192.0.2.%d:443", i)}, "", "x", goHello(t, "x", nil))
 	}
 	if len(p.probes.cache) != 3 {
 		t.Fatalf("%d probes kept", len(p.probes.cache))
 	}
+}
+
+func TestAConnectionTheProbeLetsThroughGoesToTheServerItProbed(t *testing.T) {
+	s := site(t, false)
+	now := float64(time.Now().Unix())
+	h := newHarness(t, s, fixedUniverse{armed: true, universes: []float64{now}}, true)
+	h.proxy.Resolve = func(context.Context, string) ([]netip.Addr, error) {
+		return []netip.Addr{netip.MustParseAddr("127.0.0.2"), netip.MustParseAddr("127.0.0.1")}, nil
+	}
+	var mu sync.Mutex
+	var dialled []string
+	h.proxy.Dial = func(dst string) (net.Conn, error) {
+		mu.Lock()
+		dialled = append(dialled, dst)
+		mu.Unlock()
+		return net.DialTimeout("tcp", dst, DialTimeout)
+	}
+	if _, _, err := h.get("https", time.Now(), false); err != nil {
+		t.Fatal(err)
+	}
+	row := h.lastRow()
+	mu.Lock()
+	defer mu.Unlock()
+	// the probe tried 127.0.0.2, then reached 127.0.0.1; the connection went straight to 127.0.0.1
+	if row["decision"] != "inside" || len(dialled) != 3 || !strings.HasPrefix(dialled[2], "127.0.0.1:") {
+		t.Fatalf("%v %v", row, dialled)
+	}
+	if _, ok := h.proxy.probes.cache[dialled[0]+"|example.com"]; ok {
+		t.Fatal("the address that didn't answer was cached as the site's")
+	}
+}
+
+func TestASlowProbeHoldsUpNoOtherSite(t *testing.T) {
+	release := make(chan struct{})
+	p := &Proxy{Dial: func(dst string) (net.Conn, error) {
+		if strings.HasPrefix(dst, "192.0.2.1:") {
+			<-release
+		}
+		return nil, fmt.Errorf("unreachable")
+	}}
+	hello := goHello(t, "x", nil)
+	p.validity([]string{"192.0.2.2:443"}, "", "x", hello)
+	go p.validity([]string{"192.0.2.1:443"}, "", "x", hello)
+	time.Sleep(50 * time.Millisecond)
+	started := time.Now()
+	if _, probed := p.validity([]string{"192.0.2.2:443"}, "", "x", hello); probed || time.Since(started) > 100*time.Millisecond {
+		t.Fatalf("a cached site waited %s behind a slow one (probed again: %v)", time.Since(started), probed)
+	}
+	close(release)
 }
