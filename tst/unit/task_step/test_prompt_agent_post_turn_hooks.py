@@ -17,9 +17,9 @@ from agent_env.bundle.installed import CORE, installed_bundles
 from agent_env.bundle.plan import plan_bundle
 from agent_env.bundle.resolve import resolve_bundle
 from agent_env.entity.refs import ref_sites
-from agent_env.env.env import DeployedGatewayEnv
+from agent_env.env.env import CLOCK_WAIT_FOLLOWERS_S, ClockFollowersBehind, DeployedGatewayEnv
 from agent_env.env.gateway.constants import (
-    EXT_CLOCK_URI, EXT_STEP_URI, EXT_TRIGGERS_URI, GATEWAY_EXTENSIONS, WELL_KNOWN_PATH,
+    CLOCK_FOLLOWERS_BEHIND, EXT_CLOCK_URI, EXT_STEP_URI, EXT_TRIGGERS_URI, GATEWAY_EXTENSIONS, WELL_KNOWN_PATH,
 )
 from agent_env.task_step.context import HEARTBEAT_KEY
 from agent_env.task_step.task_steps.post_turn_hooks import PostTurnHooks
@@ -502,6 +502,45 @@ async def test_a_tool_call_on_a_gateway_that_cannot_tag_it_as_the_hooks_is_refus
     with pytest.raises(RuntimeError, match="rebuild its gateway image"):
         await _step(hook, turns=1).execute(ctx)
     assert peers.steps == []
+
+
+class BehindPeers(EnvPeers):
+    """``EnvPeers`` whose gateway applies each clock advance that a computer on its clock, ``laptop``, doesn't show."""
+
+    def __init__(self, monkeypatch, replies, **kw):
+        super().__init__(monkeypatch, replies, **kw)
+        self.advances: list[dict] = []
+
+    def _answer(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/clock/advance":
+            self.advances.append(json.loads(request.content))
+            message = "the clock is at version b.3, but laptop didn't show it (waited up to 2 s): it's behind"
+            return httpx.Response(504, json={"ok": False, "stale": ["laptop"], "error": {
+                "code": CLOCK_FOLLOWERS_BEHIND, "message": message, "retryable": False, "applied": "yes"}})
+        return super()._answer(request)
+
+
+@pytest.mark.asyncio
+async def test_a_clock_jump_a_computer_didnt_show_fails_the_step_though_the_hook_caught_it(monkeypatch):
+    peers = BehindPeers(monkeypatch, {AGENT: [text("one"), text("two")]})
+    ctx = _context()
+    ctx.deployed_envs.append(_env(EXT_CLOCK_URI))
+    hook = _hook("jumper", """
+        async def post_turn(turn, params):
+            [env] = turn.envs
+            try:
+                await env.invoke("urn:agentenv:clock/v1", "advance", {"virtual_time": "2026-03-03T10:00:00Z"})
+            except Exception:
+                pass
+            return {"message": "an hour later"}
+    """)
+
+    with pytest.raises(ClockFollowersBehind, match="laptop didn't show it") as behind:
+        await _step(hook, turns=2).execute(ctx)
+
+    assert behind.value.stale == ["laptop"]
+    assert peers.advances == [{"virtual_time": "2026-03-03T10:00:00Z", "wait_followers_s": CLOCK_WAIT_FOLLOWERS_S}]
+    assert len(peers.tasks) == 1  # the agent wasn't sent the hook's message
 
 
 # ---- the env clock on stored messages -------------------------------------------------------------------------------

@@ -18,13 +18,16 @@ from agent_env.store.routing import namespace_routing_enabled
 from agent_env.utils.paths import validate_relative_filename
 
 from .gateway import GatewayMode
-from .gateway.constants import WELL_KNOWN_PATH
+from .gateway.constants import CLOCK_FOLLOWERS_BEHIND, CLOCK_WRITES, EXT_CLOCK_URI, WELL_KNOWN_PATH
 from .store import get_env_store
 
 logger = logging.getLogger(__name__)
 
 # Default timeout for one invoke() call; above the class because a default argument needs it.
 _EXTENSION_CALL_TIMEOUT_S = 30
+#: How long each clock write core makes waits for the computers following the clock to show it, so no step hands an
+#: agent a computer still showing the old time.
+CLOCK_WAIT_FOLLOWERS_S = 2.0
 
 if TYPE_CHECKING:
     from agent_env.bundle.authoring import AuthoringContext
@@ -44,6 +47,17 @@ class EnvCapabilityUnsupported(RuntimeError):
         self.environment_name = environment_name
         child = f" child env '{environment_name}'" if environment_name else ""
         super().__init__(f"env '{env_id}'{child} does not offer '{method}' on {capability}.")
+
+
+class ClockFollowersBehind(RuntimeError):
+    """A clock write the env applied that some of its followers, the computers on its clock, didn't show in time: they
+    still show the old time. ``stale`` names them."""
+
+    def __init__(self, env_id: str, method: str, stale: list[str], detail: str) -> None:
+        self.env_id = env_id
+        self.method = method
+        self.stale = stale
+        super().__init__(f"env '{env_id}': clock {method}: {detail}")
 
 
 class EnvNeedsGateway(RuntimeError):
@@ -170,6 +184,21 @@ class DeployedEnv:
             raise EnvCapabilityUnsupported(uri, method, self.env_id, self.instance_id, environment_name)
         return await protocol_v1.invoke_extension(self.environment_url, card, uri, params, timeout, method=method,
                                                   headers=self.control_headers)
+
+    async def write_clock(self, method: str, params: Optional[dict] = None, *,
+                          timeout: int = _EXTENSION_CALL_TIMEOUT_S) -> Any:
+        """A clock/v1 write (``CLOCK_WRITES``) that waits up to ``CLOCK_WAIT_FOLLOWERS_S`` for every computer following
+        the clock to show it, unless ``params`` sets its own ``wait_followers_s``. Raises ``ClockFollowersBehind``
+        naming those that didn't; the write itself has applied. A clock no computer follows answers at once."""
+        if method not in CLOCK_WRITES:
+            raise ValueError(f"{method!r} isn't a clock write; one of {list(CLOCK_WRITES)}")
+        params = {"wait_followers_s": CLOCK_WAIT_FOLLOWERS_S, **(params or {})}
+        try:
+            return await self.invoke(EXT_CLOCK_URI, method, params, timeout=timeout)
+        except protocol_v1.ExtensionCallError as e:
+            if e.code != CLOCK_FOLLOWERS_BEHIND:
+                raise
+            raise ClockFollowersBehind(self.env_id, method, e.response.json()["stale"], e.detail) from e
 
     async def readiness(self, timeout: float = READY_TIMEOUT_S) -> WebsiteReadiness:
         """Whether the env is ready, as the protocol determines a website env's health (``env_readiness``): every site

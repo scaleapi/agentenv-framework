@@ -64,6 +64,9 @@ class _ClockEnv:
         return {"armed": True, "t0": "2027-03-01T15:00:00Z", "virtual_time": ao._iso(self.at),
                 "virtual_seconds_per_real_second": 0}
 
+    async def write_clock(self, method, params=None, **kw):
+        return await self.invoke(EXT_CLOCK_URI, method, params)
+
 
 @pytest.mark.asyncio
 async def test_a_message_the_chat_env_couldn_t_time_is_read_on_the_task_s_clock(monkeypatch, tmp_path):

@@ -12,8 +12,8 @@ import pytest
 from agent_env.env.gateway import gateway as gw_mod
 from agent_env.env.gateway.clock import Clock
 from agent_env.env.gateway.clock_followers import ClockFollowers
-from agent_env.env.gateway.constants import (CLOCK_MAX_WAIT_FOLLOWERS_S, CLOCK_WATCH_HOLD_S, EXT_CLOCK_URI,
-                                             GATEWAY_EXTENSIONS)
+from agent_env.env.gateway.constants import (CLOCK_FOLLOWERS_BEHIND, CLOCK_MAX_WAIT_FOLLOWERS_S, CLOCK_WATCH_HOLD_S,
+                                             EXT_CLOCK_URI, GATEWAY_EXTENSIONS)
 from agent_env.env.gateway.entrypoint import parse_clock_followers
 from agent_env.env.gateway.gateway import Gateway
 
@@ -166,7 +166,8 @@ async def test_a_write_answers_504_naming_the_computers_still_behind_and_the_cha
     body = answer.json()
     assert answer.status_code == 504 and waited >= 0.4
     assert (body["ok"], body["stale"], body["version"]) == (False, ["laptop"], gw._clock.version)
-    assert "laptop didn't show it (waited up to 0.4 s;" in body["error"]
+    assert (body["error"]["code"], body["error"]["applied"]) == (CLOCK_FOLLOWERS_BEHIND, "yes")
+    assert "laptop didn't show it (waited up to 0.4 s;" in body["error"]["message"]
     assert body["followers"]["laptop"] == {"version": None, "seen_s_ago": None}
     assert read == {"virtual_time": T0}
 

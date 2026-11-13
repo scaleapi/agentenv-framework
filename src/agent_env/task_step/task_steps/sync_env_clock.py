@@ -1,8 +1,10 @@
 """Arm a deployed env gateway's virtual clock, then sync its backing servers to it.
 
 Arms the clock (set_time) and reads the gateway's server-reachable env_get_time_url (state), both as the
-stored env card declares clock/v1, then invokes sync_time on each backing server, MCP server or website, the
-env card lists (``legacy_protocol.backing_servers``) whose own card advertises it, at the route that card gives.
+stored env card declares clock/v1. The arm waits for the computers that follow the clock to show it, and fails the
+step naming any that don't (``DeployedEnv.write_clock``). It then invokes sync_time on each backing server, MCP server
+or website, the env card lists (``legacy_protocol.backing_servers``) whose own card advertises it, at the route that
+card gives.
 Non-advertisers are skipped when tolerate_missing_sync_time (default True), and websites always. Place right
 before prompt_agent so the virtual timeline starts at agent-start.
 """
@@ -126,9 +128,9 @@ class SyncEnvClockTaskStep(TaskStep):
         if deployed is None:
             raise StepContextError(f"Env '{self.env_id}' not found in context.deployed_envs")
         try:
-            await deployed.invoke(EXT_CLOCK_URI, "set_time",
-                                  {"virtual_time": self.armed_virtual_time, "virtual_seconds_per_real_second": self.virtual_seconds_per_real_second},
-                                  timeout=self.timeout_seconds)
+            arm = {"virtual_time": self.armed_virtual_time,
+                   "virtual_seconds_per_real_second": self.virtual_seconds_per_real_second}
+            await deployed.write_clock("set_time", arm, timeout=self.timeout_seconds)
         except httpx.HTTPStatusError as e:
             raise RuntimeError(f"clock arm failed (HTTP {e.response.status_code}): {e.response.text}") from e
         state = await deployed.invoke(EXT_CLOCK_URI, "state", timeout=self.timeout_seconds)

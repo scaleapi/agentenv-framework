@@ -77,6 +77,11 @@ CLOCK_FOLLOWERS_ENV = "CLOCK_FOLLOWER_TOKENS"
 CLOCK_WATCH_HOLD_S = 25.0
 # The longest a clock write's wait_followers_s may ask it to wait for the followers.
 CLOCK_MAX_WAIT_FOLLOWERS_S = 30.0
+# The clock/v1 methods that change the clock, each taking wait_followers_s.
+CLOCK_WRITES = ("set_time", "set_rate", "advance", "clear")
+# The error code a clock write answers 504 with when a declared follower didn't show it within its wait_followers_s:
+# the write applied, and the followers named in its stale are behind.
+CLOCK_FOLLOWERS_BEHIND = "clock_followers_behind"
 
 # Env/gateway-level extensions the gateway itself owns (tool gating + triggers).
 EXT_DISABLE_TOOL_URI = "urn:agentenv:disable-tool/v1"
@@ -244,7 +249,7 @@ GATEWAY_EXTENSIONS = [
     },
     {
         "uri": EXT_CLOCK_URI,
-        "description": "Virtual clock (urn:agentenv:clock/v1): read the gateway's virtual time (wall-clock-derived, rate-scaled) via get_time; set_time/set_rate/advance/clear are the harness control path, each changing the clock's opaque version and, given wait_followers_s, answering 504 naming the followers that don't show it in time (set_rate keeps t0, as advance does, so time triggers keep their marks; rate 0 freezes the clock); a follower follows it through watch, a long poll naming the version it shows and held up to hold_s; state's followers block is diagnostic, not part of the contract.",
+        "description": "Virtual clock (urn:agentenv:clock/v1): read the gateway's virtual time (wall-clock-derived, rate-scaled) via get_time; set_time/set_rate/advance/clear are the harness control path, each changing the clock's opaque version and, given wait_followers_s, answering 504, error code clock_followers_behind, with stale naming the followers that don't show it in time (set_rate keeps t0, as advance does, so time triggers keep their marks; rate 0 freezes the clock); a follower follows it through watch, a long poll naming the version it shows and held up to hold_s; state's followers block is diagnostic, not part of the contract.",
         "params": {"endpoint": "/clock/time", "methods": {
             "get_time": {"method": "GET", "endpoint": "/clock/time"},
             "set_time": {"method": "PUT", "endpoint": "/clock/set-time", "request": {"type": "object", "properties": {"virtual_time": {"type": "string"}, "virtual_seconds_per_real_second": {"type": "number"}, **_WAIT_FOLLOWERS}, "required": ["virtual_time"]}},

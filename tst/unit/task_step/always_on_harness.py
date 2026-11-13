@@ -54,12 +54,15 @@ class Rig:
     user sim got in ``reads``. A ``plugin`` replaces the scripted one; what it sends the user sim agent with ``ask`` is
     in ``user_calls``, answered in turn by ``user_texts`` (then no_reply). ``during`` has, for each of the agent's
     turns, the gateway's settings and the agent's tools as the agent saw them. With ``takes_config`` the agent's card
-    takes its config (``CONFIG_CARD``), whose posts land in ``configs``."""
+    takes its config (``CONFIG_CARD``), whose posts land in ``configs``. ``followers`` declares computers that follow
+    the gateway's clock, by name and token, as a multi env's do."""
 
     def __init__(self, monkeypatch, tmp_path, *, agent: Optional[Turn] = None, answers: tuple = (), rate: float = 0,
-                 t0: str = T0, plugin: Any = None, user_texts: tuple = (), takes_config: bool = False):
+                 t0: str = T0, plugin: Any = None, user_texts: tuple = (), takes_config: bool = False,
+                 followers: Optional[dict] = None):
         monkeypatch.setattr(gw_mod, "GATEWAY_TRAJECTORY_FILE", str(tmp_path / "trajectory.jsonl"))
-        self.gw = Gateway(host="127.0.0.1", port=0, server_name="AgentEnvGateway", internal_mcp_servers=[])
+        self.gw = Gateway(host="127.0.0.1", port=0, server_name="AgentEnvGateway", internal_mcp_servers=[],
+                          clock_followers=followers)
         self.gw._tools_discovered = True
         real_client = httpx.AsyncClient
         transport = httpx.ASGITransport(app=self.gw._mcp.streamable_http_app())

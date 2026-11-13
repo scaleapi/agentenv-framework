@@ -4,8 +4,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, EnvCapabilityUnsupported
-from agent_env.env.gateway.constants import EXT_CLOCK_URI
+from agent_env.env.env import (CLOCK_WAIT_FOLLOWERS_S, ClockFollowersBehind, DeployedEnv, DeployedGatewayEnv,
+                               EnvCapabilityUnsupported)
+from agent_env.env.gateway.constants import CLOCK_FOLLOWERS_BEHIND, EXT_CLOCK_URI
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps import sync_env_clock as mod
 from agent_env.task_step.task_steps.sync_env_clock import SyncEnvClockTaskStep, resolve_virtual_time
@@ -104,7 +105,8 @@ async def test_execute_syncs_each_child_env_through_the_stored_card(monkeypatch)
         ("PUT", f"{_CARD}/clock/set-time"), ("GET", f"{_CARD}/clock/state"),
         ("POST", f"{_CARD}/svc/mcp-email/agentenv/ext/sync_time"),
     ]
-    assert json.loads(sent[0].content) == {"virtual_time": T0, "virtual_seconds_per_real_second": 1.0}
+    assert json.loads(sent[0].content) == {"virtual_time": T0, "virtual_seconds_per_real_second": 1.0,
+                                           "wait_followers_s": CLOCK_WAIT_FOLLOWERS_S}
     assert [s["service"] for s in context.metadata["clock_configurations"][0]["synced"]] == ["email"]
 
 
@@ -115,6 +117,22 @@ async def test_execute_raises_before_any_request_when_the_card_lacks_set_time(mo
     with pytest.raises(EnvCapabilityUnsupported, match="does not offer 'set_time' on urn:agentenv:clock/v1"):
         await _step().execute(TaskStepContext(deployed_envs=[record]))
     assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_an_arm_a_computer_didnt_show_fails_the_step_naming_it_before_any_server_is_synced(monkeypatch):
+    message = "the clock is at version b.2, but laptop didn't show it (waited up to 2 s; ...): their clocks are behind"
+    behind = {"ok": False, "stale": ["laptop"], "error": {"code": CLOCK_FOLLOWERS_BEHIND, "message": message,
+                                                          "retryable": False, "applied": "yes"}}
+    sent = _mock_http(monkeypatch, set_time_status=504, set_time_body=behind)
+    context = TaskStepContext(deployed_envs=[_carded(await _composed_card({"mcp-email": [_CLOCK_EXT]}))])
+
+    with pytest.raises(ClockFollowersBehind) as failed:
+        await _step().execute(context)
+
+    assert failed.value.stale == ["laptop"] and str(failed.value) == f"env 'e1': clock set_time: {message}"
+    assert [(r.method, str(r.url)) for r in sent] == [("PUT", f"{_CARD}/clock/set-time")]
+    assert "clock_configurations" not in context.metadata
 
 
 @pytest.mark.asyncio
@@ -295,8 +313,9 @@ def _carded(card: dict) -> DeployedEnv:
                        sandbox_id="sb-1", environment_card_url=f"{_CARD}{WELL_KNOWN_PATH}", environment_card=card)
 
 
-def _mock_http(monkeypatch, state: dict | None = None, set_time_status: int = 200):
-    """Record every request: `/clock/state` answers `state`, `/clock/set-time` `set_time_status`, anything else an empty object."""
+def _mock_http(monkeypatch, state: dict | None = None, set_time_status: int = 200, set_time_body: dict | None = None):
+    """Record every request: `/clock/state` answers `state`, `/clock/set-time` `set_time_status` with `set_time_body`,
+    anything else an empty object."""
     import httpx
 
     sent, real = [], httpx.AsyncClient
@@ -304,7 +323,7 @@ def _mock_http(monkeypatch, state: dict | None = None, set_time_status: int = 20
     def handle(request: httpx.Request) -> httpx.Response:
         sent.append(request)
         if request.url.path.endswith("/clock/set-time"):
-            return httpx.Response(set_time_status, json={})
+            return httpx.Response(set_time_status, json=set_time_body or {})
         return httpx.Response(200, json=state if request.url.path.endswith("/clock/state") else {})
 
     monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real(transport=httpx.MockTransport(handle)))

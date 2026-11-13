@@ -95,10 +95,11 @@ from a2a.types import TaskState
 from agent_env.a2a_agent import A2AAgent, conversation_store, protocol
 from agent_env.a2a_agent.object_transfer import send_and_wait
 from agent_env.artifact import FileArtifact
-from agent_env.env.env import EnvCapabilityUnsupported
+from agent_env.env.env import ClockFollowersBehind, EnvCapabilityUnsupported
 from agent_env.env.gateway.notifications import DEFAULT_MAX_ACTIVE
 from agent_env.env.gateway.constants import (
     CHANGES_PAGE_MAX,
+    CLOCK_WRITES,
     DEFAULT_ROLE,
     EXT_CHANGES_URI,
     EXT_CLOCK_URI,
@@ -776,6 +777,8 @@ class _Run:
         for env in armed:
             try:
                 await _call(env, EXT_CLOCK_URI, "advance", {"virtual_time": _iso(target)}, attempts=2)
+            except ClockFollowersBehind:
+                raise
             except Exception:
                 state = await _call(env, EXT_CLOCK_URI, "state")
                 if not (state.get("armed") and _utc(state["virtual_time"]) >= target):
@@ -841,6 +844,8 @@ class _Run:
                 elif due:  # an event already due: an advance to now sets it going
                     try:
                         await _call(env, EXT_CLOCK_URI, "advance", {"virtual_time": _iso(now)}, attempts=1)
+                    except ClockFollowersBehind:
+                        raise
                     except Exception:
                         pass
             if waiting:
@@ -1817,12 +1822,15 @@ async def _call(env, uri: str, method: str, params: Optional[dict] = None, *, at
                 timeout: int = 60) -> Any:
     """A gateway control call, retried on a transient failure (a busy gateway can take seconds to answer).
     Every call the step retries is safe to repeat: reads, config, advance (checked against the clock after) and takes
-    with a take_id."""
+    with a take_id. A clock write waits for the computers following the clock, and one they didn't show isn't retried:
+    it applied, and the step fails naming them."""
     last: Optional[Exception] = None
     for attempt in range(attempts):
         try:
+            if uri == EXT_CLOCK_URI and method in CLOCK_WRITES:
+                return await env.write_clock(method, params, timeout=timeout)
             return await env.invoke(uri, method, params, timeout=timeout)
-        except EnvCapabilityUnsupported:
+        except (EnvCapabilityUnsupported, ClockFollowersBehind):
             raise
         except Exception as e:
             last = e

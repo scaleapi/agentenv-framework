@@ -20,9 +20,10 @@ from a2a.types import Part
 from agentenv_protocol import client as protocol_v1
 
 from agent_env.artifact import FileArtifact
-from agent_env.env.env import DeployedEnv, EnvCapabilityUnsupported
+from agent_env.env.env import ClockFollowersBehind, DeployedEnv, EnvCapabilityUnsupported
 from agent_env.env.gateway.constants import (
     AGENT_ENV_ROLE_HEADER,
+    CLOCK_WRITES,
     EXT_CLOCK_URI,
     EXT_NOTIFICATIONS_URI,
     EXT_STEP_URI,
@@ -120,12 +121,14 @@ class PostTurnHooks:
 
 class HookEnv:
     """A deployed env as a hook reaches it: clock, triggers and notifications calls, and tool calls recorded as the
-    hook's."""
+    hook's. A clock write waits for the computers following the clock (``DeployedEnv.write_clock``); one they didn't
+    show is kept in ``behind`` too, so the step fails on it even when the hook catches it."""
 
     def __init__(self, deployed: DeployedEnv, hook_artifact_id: str) -> None:
         self.env_id = deployed.env_id
         self.env_step_id = (deployed.metadata or {}).get("deploy_step_id")
         self.instance_id = deployed.instance_id
+        self.behind: Optional[ClockFollowersBehind] = None
         self._deployed = deployed
         self._hook_artifact_id = hook_artifact_id
 
@@ -135,6 +138,12 @@ class HookEnv:
     async def invoke(self, extension: str, method: str, params: Optional[dict] = None) -> Any:
         if extension not in _INVOKABLE:
             raise ValueError(f"a post-turn hook invokes {list(_INVOKABLE)} only; call tools with call_tool")
+        if extension == EXT_CLOCK_URI and method in CLOCK_WRITES:
+            try:
+                return await self._deployed.write_clock(method, params)
+            except ClockFollowersBehind as e:
+                self.behind = self.behind or e
+                raise
         return await self._deployed.invoke(extension, method, params)
 
     async def call_tool(self, tool: str, args: Optional[dict], role: str) -> dict:
@@ -265,12 +274,17 @@ async def run_post_turn_hooks(hooks: PostTurnHooks, *, context: TaskStepContext,
                               agent_reply: str, agent_parts: list[dict],
                               ask_user: Callable[[], Awaitable[Answer]],
                               user_triggers: Callable[[], Awaitable[Optional[Answer]]]) -> Optional[Answer]:
-    """Run the hooks in order; the first to return a message or an end decides, and one that asked returns that."""
+    """Run the hooks in order; the first to return a message or an end decides, and one that asked returns that. A
+    clock write a hook made that the computers following the clock didn't show fails the step, caught by the hook or
+    not, so the agent never acts on a computer still showing the old time."""
     answer = _Answer(ask_user, user_triggers)
     for hook in hooks.hooks:
         turn = Turn(context=context, step_id=step_id, hook=hook, answer=answer, number=number, last=last,
                     agent_reply=agent_reply, agent_parts=agent_parts)
         returned = await hook.post_turn(turn, copy.deepcopy(hook.params))
+        behind = next((env.behind for env in turn.envs if env.behind), None)
+        if behind is not None:
+            raise behind
         if answer.value is not None:
             if returned != answer.value:
                 raise RuntimeError(f"post-turn hook '{hook.artifact_id}' asked the user side at turn {number} and "
