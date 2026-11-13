@@ -4,11 +4,10 @@ ones' place; snapshot_env keeps its state as browser-state.json, a tab closed du
 files; once an agent has acted, a load can't change its tabs but sets its cookies; data/reset puts it back signed out at
 its start tab with its addresses ended; the snapshot taken mid-run loads back whole, its cookies, local storage,
 tabs and history; and reset_env, a reboot, brings back its start tab with no cookies or local storage. Under chaos: data calls at once each get their answer, its server killed and back takes a load, and
-with chromium killed a snapshot answers at once rather than wait, and works again once chromium is launched again."""
+with chromium killed a snapshot fails at once rather than wait."""
 
 import asyncio
 import base64
-import contextlib
 import json
 import time
 import uuid
@@ -229,16 +228,16 @@ async def check_browser_data_under_chaos(deployed, kill: Callable[[str], Awaitab
     after = await protocol_v1.get_data(base, timeout=120, headers=headers)
     await kill("[-]-remote-debugging-pipe")
     started = time.monotonic()
-    with contextlib.suppress(Exception):
+    try:
         await protocol_v1.get_data(base, timeout=120, headers=headers)
-    answered_s = time.monotonic() - started
-    await ready()
-    relaunched = await protocol_v1.get_data(base, timeout=120, headers=headers)
+        failed = None
+    except Exception as e:
+        failed = type(e).__name__
+    failed_s = time.monotonic() - started
 
     for answer in (at_once[0], at_once[2], after):
         assert "browser-state.json" in [uploaded_object_path(part) for part in answer.parts]
     state = next(json.loads(base64.b64decode(part.file.bytes)) for part in after.parts
                  if uploaded_object_path(part) == "browser-state.json")
     assert [c["value"] for c in state["cookies"] if c["name"] == "c"] == ["3"], state["cookies"]
-    assert answered_s < 60, answered_s
-    assert "browser-state.json" in [uploaded_object_path(part) for part in relaunched.parts]
+    assert failed is not None and failed_s < 60, (failed, failed_s)

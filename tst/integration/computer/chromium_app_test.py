@@ -293,7 +293,8 @@ async def test_its_control_records_tabs_a_download_a_dialog_and_each_launch_with
             await serving
             browser = await _browser_process(deployed)
             await inside.run(deployed, ["kill", "-9", str(browser["pid"])], timeout_s=30)
-            crashed = await _record(deployed, card, lambda r: r["launches"][-1].get("cause") == "crash")
+            exited = await _record(deployed, card, lambda r: r["launches"][-1]["event"] == "exit")
+            await inside.run(deployed, ["sh", "-c", LAUNCHER], timeout_s=60)
             relaunched = await _ready(deployed, card, "chromium")
             await inside.run(deployed, ["pkill", "-f", "computer.serve_app chromium.py"], timeout_s=30)
             restarted = await _record(deployed, card, lambda r: r["launches"][-1].get("cause") == "server_restart")
@@ -314,11 +315,11 @@ async def test_its_control_records_tabs_a_download_a_dialog_and_each_launch_with
         hashlib.sha256(_report(n)).hexdigest() for n in range(1, len(downloads) + 1)), recorded
     assert [tab["closed_by"] for tab in recorded["closed_tabs"]] == ["unknown"], recorded
     assert [(tab["url"], tab["active"]) for tab in recorded["tabs"]] == [(RECORDED, True)], recorded
-    assert [(entry["event"], entry.get("cause") or entry.get("signal")) for entry in crashed["launches"]] == [
-        ("launch", "boot"), ("exit", "SIGKILL"), ("launch", "crash")], crashed
-    assert recorded["since"] and relaunched["ready"] is True, relaunched
+    assert [entry["event"] for entry in exited["launches"]] == ["launch", "exit"], exited
+    assert exited["launches"][1]["signal"] == "SIGKILL" and recorded["since"], exited
+    assert exited["launches"][0]["cause"] == "boot" and relaunched["ready"] is True, relaunched
     events = [(entry["event"], entry.get("cause")) for entry in restarted["launches"]]
-    assert events[:3] == [("launch", "boot"), ("exit", None), ("launch", "crash")]
+    assert events[:3] == [("launch", "boot"), ("exit", None), ("launch", "launch")]
     assert events[3:] in ([("stop", None), ("launch", "server_restart")], [("launch", "server_restart")]), events
     assert not report.failed
 

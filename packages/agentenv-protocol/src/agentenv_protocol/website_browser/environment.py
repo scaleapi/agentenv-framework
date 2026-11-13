@@ -296,11 +296,6 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
     def _relaunch_on_start(self) -> bool:
         return True
 
-    def _relaunch_on_crash(self) -> bool:
-        """A browser that crashes is launched again, as the agent's main window onto sites: one a page or a disposed
-        context crashes would otherwise stay gone until someone launched it."""
-        return True
-
     def _launch_running(self) -> Callable[[], Awaitable[None]]:
         return self._open_window
 

@@ -4,8 +4,7 @@ local storage written through a page agentenv serves, so the site sees no reques
 a partitioned cookie read with its key and deleted beside an unpartitioned one of its name; a site's service worker, which answers its pages, kept from agentenv's;
 a download with its file; and an operation refused without the control token. Under chaos: calls at once each get
 their answer; the pages agentenv serves itself never show in the record; with the browser's server killed and back,
-the operations work again; and with the browser killed, they answer at once rather than wait, failing while it's
-gone, and work again once it's launched again."""
+the operations work again; and with the browser killed, they fail at once rather than wait."""
 
 import asyncio
 import base64
@@ -208,8 +207,6 @@ async def check_browser_state_under_chaos(deployed, endpoint: Callable[[str], st
         started = time.monotonic()
         down = [await call("cookies/get", {"urls": [SITE]}), await call("local_storage/get", {"origins": [ORIGIN]})]
         down_s = time.monotonic() - started
-        await ready()
-        relaunched = await ok("cookies/get", {"urls": [SITE]})
     finally:
         serving.cancel()
 
@@ -219,6 +216,5 @@ async def check_browser_state_under_chaos(deployed, endpoint: Callable[[str], st
     assert {"name": "k2", "value": "2"} in after[0]["localStorage"], after
     for record in (recorded, recorded_back):
         assert [tab["url"] for tab in record["tabs"]] == ["about:blank"] and record["closed_tabs"] == [], record
-    assert down_s < 30, ([a.text for a in down], down_s)
-    assert "cookies" in relaunched, relaunched
+    assert all(answer.status_code >= 400 for answer in down) and down_s < 30, ([a.text for a in down], down_s)
     return {"cookie_kept": "kept" in cookies_back, "item_kept": {"name": "k", "value": "1"} in storage_back}

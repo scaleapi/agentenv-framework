@@ -40,9 +40,6 @@ PID = Path(".agentenv/app.pid")
 LAUNCHES = Path(".agentenv/launches")
 #: How long an app that ended on its own may take to be reaped, for its exit code.
 EXIT_WAIT_S = 5.0
-#: How many times in a boot an app that relaunches after a crash is launched again, so one that can't start doesn't
-#: loop.
-CRASH_RELAUNCHES = 5
 #: How long a stopped app may take to exit before it's killed.
 STOP_TIMEOUT_S = 10.0
 HOLD_BOOT_LAUNCH_ENV = "AGENTENV_HOLD_BOOT_LAUNCH"
@@ -68,7 +65,7 @@ class AppRuntime:
 
     def __init__(self, launch: Optional[Launch], ready_checks: dict[str, Callable[[], Any]], timeout_s: float, *,
                  desktop: bool = True, launch_fds: Optional[Callable[[], Awaitable[dict[int, int]]]] = None,
-                 relaunch_on_start: bool = False, relaunch_on_crash: bool = False,
+                 relaunch_on_start: bool = False,
                  launch_running: Optional[Callable[[], Awaitable[None]]] = None) -> None:
         self.launch = launch
         self.ready_checks = ready_checks
@@ -76,12 +73,8 @@ class AppRuntime:
         self.desktop = desktop
         self.launch_fds = launch_fds
         self.relaunch_on_start = relaunch_on_start
-        self.relaunch_on_crash = relaunch_on_crash
         self.launch_running = launch_running
         self.exits: set[asyncio.Future] = set()
-        #: Held by each launch or change of the app's data that must not overlap another (its data plane's ``turn``),
-        #: and by a relaunch after a crash.
-        self.turn = asyncio.Lock()
         self.started = time.time()
         self.launch_failed: Optional[str] = None
         self.checking: dict[str, asyncio.Future] = {}
@@ -154,11 +147,7 @@ class AppRuntime:
 
     def exited(self) -> bool:
         """Log that the app this server launched last ended on its own, with its exit code or the signal that ended
-        it, unless the server stopped it; whether it did. With ``relaunch_on_crash``, one a signal or a failing code
-        ended is launched again, up to ``CRASH_RELAUNCHES`` times a boot (``_log_exit``): holding the ``turn``, so no
-        data call changes its files meanwhile, unless something launched it since, and once what's left of it is
-        stopped, as a browser's helpers outlive it for a moment and while they run its session counts as the app
-        running. One that exited cleanly was closed, and stays so."""
+        it, unless the server stopped it; whether it did."""
         if (pid := _recorded_pid()) is None:
             return False
         noting = asyncio.ensure_future(self._log_exit(pid))
@@ -167,25 +156,9 @@ class AppRuntime:
         return True
 
     async def _log_exit(self, pid: int) -> None:
-        """The exit logged, marked ``relaunching`` when it's a crash its server launches it again after, which those
-        reading the log (``apps.ended_on_its_own``) don't take for the app gone; and that relaunch, or why it failed."""
         code = await session.returncode(pid, EXIT_WAIT_S)
-        relaunching = bool(self.relaunch_on_crash and code and sum(
-            entry.get("cause") == "crash" for entry in self.launches()) < CRASH_RELAUNCHES)
         self.log("exit", pid, **({} if code is None else
-                                 {"signal": signal.Signals(-code).name} if code < 0 else {"code": code}),
-                 **({"relaunching": True} if relaunching else {}))
-        if not relaunching:
-            return
-        async with self.turn:
-            if next((entry["pid"] for entry in reversed(self.launches()) if entry["event"] == "launch"), None) != pid:
-                return
-            try:
-                await session.stop(pid, STOP_TIMEOUT_S)
-                await self.launch_app("crash")
-            except Exception as e:
-                self.launch_failed = f"{type(e).__name__}: {e}"
-                self.log("relaunch_failed", pid, error=self.launch_failed)
+                                 {"signal": signal.Signals(-code).name} if code < 0 else {"code": code}))
 
     def log(self, event: str, pid: int, **fields: Any) -> None:
         """Append ``event`` for the app's ``pid`` to its launch log, which outlives its server for the boot."""

@@ -1,7 +1,7 @@
 """agentenv's chromium on the ubuntu-24.04 desktop, on the universe clock: its boot browser, never launched again, goes
 out through the computer's egress proxy by the base's policy and loads live sites it hasn't visited with the universe
-182 days back, 730 days on and six years on, and right after a jump back; killed, it comes back by itself; and X runs
-no screensaver. Needs Docker, the local registry on localhost:5000, and the internet."""
+182 days back, 730 days on and six years on, and right after a jump back; and X runs no screensaver. Needs Docker, the
+local registry on localhost:5000, and the internet."""
 
 import asyncio
 import json
@@ -21,7 +21,7 @@ from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
 from tst.integration.computer.browser_state import _client
 from tst.integration.computer.conftest import UniverseClock, computer_container
-from tst.integration.computer.website_browser_test import _app, _browser_process, _ready
+from tst.integration.computer.website_browser_test import _app, _browser_process
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
@@ -32,7 +32,6 @@ STOPS = [(-182, "https://example.com/", "Example Domain"), (730, "https://exampl
          (6 * 365, "https://example.net/", "Example Domain"), (-182, "https://www.wikipedia.org/", "Wikipedia")]
 #: How long a page may take to load before its tab counts as not loaded.
 LOAD_S = 45
-LAUNCHES = "/opt/agentenv/apps/chromium/.agentenv/launches"
 POLICY = "/etc/opt/chrome_for_testing/policies/managed/agentenv-egress.json"
 
 
@@ -48,18 +47,6 @@ async def _loaded(ok, url: str, title: str) -> str:
     return json.dumps(tabs)
 
 
-async def _launches_until_relaunched(deployed) -> list[dict]:
-    """The chromium app's launch log once it records a launch after a crash, or as it last was within a minute."""
-    launches: list[dict] = []
-    for _ in range(60):
-        out = await inside.run(deployed, ["cat", LAUNCHES], timeout_s=30)
-        launches = [json.loads(line) for line in out["stdout"].splitlines() if line]
-        if any(entry.get("cause") == "crash" for entry in launches):
-            break
-        await asyncio.sleep(1)
-    return launches
-
-
 def _egress_rows(deployed) -> list[dict]:
     log = subprocess.run(["docker", "exec", computer_container(deployed.sandbox_id), "cat",
                           "/var/log/agentenv-root/egress.log"], capture_output=True, text=True).stdout
@@ -67,7 +54,7 @@ def _egress_rows(deployed) -> list[dict]:
 
 
 @pytest.mark.asyncio
-async def test_its_boot_browser_loads_live_sites_at_any_universe_date_comes_back_when_killed_and_x_never_blanks(
+async def test_its_boot_browser_loads_live_sites_at_any_universe_date_and_x_never_blanks(
         chromium_desktop):
     with namespace_routing():
         deployed = await Env.get(chromium_desktop.id).deploy()
@@ -84,11 +71,6 @@ async def test_its_boot_browser_loads_live_sites_at_any_universe_date_comes_back
                 loaded.append(await _loaded(ok, url, title))
             still = await _browser_process(deployed)
             rows = _egress_rows(deployed)
-
-            await inside.run(deployed, ["kill", "-9", str(booted["pid"])], timeout_s=30)
-            launches = await _launches_until_relaunched(deployed)
-            back = await _browser_process(deployed, other_than=booted["pid"])
-            ready = await _ready(deployed, card, "chromium")
             xset = (await inside.run(deployed, ["xset", "q"], timeout_s=30))["stdout"]
             policy = json.loads((await inside.run(deployed, ["cat", POLICY], timeout_s=30))["stdout"])
         finally:
@@ -99,9 +81,6 @@ async def test_its_boot_browser_loads_live_sites_at_any_universe_date_comes_back
     hosts = {url.split("/")[2] for _, url, _ in STOPS}
     intercepted = {row["host"] for row in rows if row.get("host") in hosts and row.get("mode") == "intercept"}
     assert intercepted == hosts, [row for row in rows if row.get("host") in hosts][-8:]
-    assert back["pid"] != booted["pid"] and ready["ready"], ready
-    assert [(entry["event"], entry.get("cause") or entry.get("signal")) for entry in launches[-2:]] == [
-        ("exit", "SIGKILL"), ("launch", "crash")], launches
     assert re.search(r"Screen Saver:.*?timeout:\s+0\b", xset, re.S), xset
     assert "DPMS is Disabled" in xset or "does not have the DPMS Extension" in xset, xset
     assert policy["ProxySettings"]["ProxyServer"] == "http://127.0.0.1:3128"

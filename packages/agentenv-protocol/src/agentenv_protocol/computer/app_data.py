@@ -63,7 +63,7 @@ class AppDataPlane:
         self.live, self.keeps_paths, self.resets_failed_add = live, keeps_paths, resets_failed_add
         #: What a call that stopped the app awaits once it has launched it again, whose error fails the call.
         self.relaunched = relaunched
-        self.turn = runtime.turn
+        self.turn = asyncio.Lock()
         self.changing: set[asyncio.Task] = set()
 
     def keep_initial(self) -> None:

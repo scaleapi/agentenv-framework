@@ -480,7 +480,6 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
                           if hasattr(fn, _READY_CHECK_ATTR) and applies(getattr(fn, _READY_CHECK_ATTR), on)},
             ready.timeout_s if ready is not None else DEFAULT_TIMEOUT_S, desktop=self._on_desktop(),
             launch_fds=self._launch_fds, relaunch_on_start=self._relaunch_on_start(),
-            relaunch_on_crash=self._relaunch_on_crash(),
             launch_running=self._launch_running())
         self._computer_app_data = AppDataPlane(
             self._computer_app, {op: getattr(self, name) for op, name in cls._data_hooks.items()}, self.paths,
@@ -502,11 +501,6 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
 
     def _relaunch_on_start(self) -> bool:
         """Whether only the server that launched it can talk to it, so a server that restarts launches it again."""
-        return False
-
-    def _relaunch_on_crash(self) -> bool:
-        """Whether a crash of the app its server launched, which its server sees end (``AppRuntime.exited``), launches
-        it again: no."""
         return False
 
     def _launch_running(self) -> Optional[Callable[[], Awaitable[None]]]:
