@@ -138,3 +138,23 @@ def test_a_store_that_cant_sign_is_refused(monkeypatch):
     _config(monkeypatch, _Store(signs=False))
     with pytest.raises(ValueError, match="can't sign"):
         controller.resolve_task_ref("s3://bucket/pre/artifacts/t.py")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", [[1, 2], "ok", 3])
+async def test_an_answer_that_isnt_an_object_raises_or_is_empty_when_json_isnt_expected(ctl, answer):
+    ctl.answers["/setup"] = httpx.Response(200, json=answer)
+    with pytest.raises(controller.ControllerCallError, match="not a JSON object"):
+        await controller.post(ENDPOINT, "/setup", {})
+    ctl.answers["/reset"] = httpx.Response(200, json=answer)
+    assert await controller.post(ENDPOINT, "/reset", {}, expect_json=False) == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("poll", [[{"status": "done"}], "done", {"status": "done", "result": [1]}])
+async def test_a_poll_or_result_that_isnt_an_object_raises_a_controller_error(ctl, poll):
+    """A ControllerCallError, which the steps score 0, not an AttributeError that fails the step."""
+    ctl.answers["/evaluate_async"] = {"job_id": "j1"}
+    ctl.answers["/evaluate_result"] = httpx.Response(200, json=poll)
+    with pytest.raises(controller.ControllerCallError, match="not a JSON object"):
+        await controller.evaluate(ENDPOINT, {})

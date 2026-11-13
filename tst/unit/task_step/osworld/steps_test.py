@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -321,8 +322,10 @@ def _scores(ctl, *scores):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("conj, scores, expected", [("and", (1, 1), 1.0), ("and", (1, 0), 0.0), ("or", (0, 1), 1.0),
-                                                    ("or", (0, 0), 0.0)])
+@pytest.mark.parametrize("conj, scores, expected", [
+    # OSWorld's DesktopEnv.evaluate: ``and`` 0 when any func scores 0, else their mean; ``or`` their max.
+    ("and", (1, 1), 1.0), ("and", (1, 0), 0.0), ("and", (1, 0.5), 0.75), ("or", (0, 1), 1.0), ("or", (0, 0), 0.0),
+    ("or", (0.5, 0.3), 0.5)])
 async def test_evaluate_classic_sends_each_func_and_combines_by_conj(ctl, conj, scores, expected):
     _scores(ctl, *scores)
     evaluator = {"funcs": ["compare_table", "agent_judge"], "conj": conj,
@@ -483,3 +486,84 @@ def test_the_controller_is_found_in_the_runs_context_when_the_env_record_was_sto
 def test_a_stop_that_isnt_the_agents_budget_isnt_read_as_one(message):
     from agent_env.task_step.task_steps.computer.osworld.evaluate import budget_exhaustion
     assert budget_exhaustion(_prompt(error_type="AGENT_ERROR", error_message=message)) is None
+
+
+@pytest.mark.asyncio
+async def test_deploy_gives_the_judge_the_runs_key_and_endpoint_ahead_of_the_configured_ones(deploy):
+    """As rubrics_verifier does: user_overrides' judge key (or the run's model key) and base URL win over [model]'s."""
+    config = deploy_module.get_config()
+    config.resolve_reference = MagicMock(side_effect=lambda ref: f"resolved:{ref}")
+    context = _context(computer(card("/apps/7/osworld")))
+    context.metadata["user_overrides"] = {"judge_litellm_api_key": "secret://judge", "litellm_api_key": "secret://run",
+                                          "judge_litellm_base_url": "https://judge.example"}
+    await OSWorldDeployControllerTaskStep(id="ctl", version=1, env_id="desk").execute(context)
+    sent = deploy.provider.create_container.call_args.kwargs["env"]
+    assert sent["LITELLM_API_KEY"] == "resolved:secret://judge"
+    assert sent["LITELLM_BASE_URL"] == "https://judge.example"
+
+
+@pytest.mark.asyncio
+async def test_deploy_falls_back_to_the_runs_model_key_then_the_configured_one(deploy):
+    config = deploy_module.get_config()
+    config.resolve_reference = MagicMock(side_effect=lambda ref: f"resolved:{ref}")
+    context = _context(computer(card("/apps/7/osworld")))
+    context.metadata["user_overrides"] = {"litellm_api_key": "secret://run"}
+    await OSWorldDeployControllerTaskStep(id="ctl", version=1, env_id="desk").execute(context)
+    assert deploy.provider.create_container.call_args.kwargs["env"]["LITELLM_API_KEY"] == "resolved:secret://run"
+
+    config.resolve_reference.side_effect = lambda ref: None  # a reference that resolves to nothing
+    deploy.provider.create_container.reset_mock()
+    context = _context(computer(card("/apps/7/osworld")))
+    context.metadata["user_overrides"] = {"litellm_api_key": "secret://gone"}
+    await OSWorldDeployControllerTaskStep(id="ctl", version=1, env_id="desk").execute(context)
+    assert deploy.provider.create_container.call_args.kwargs["env"]["LITELLM_API_KEY"] == LITELLM
+
+
+@pytest.mark.asyncio
+async def test_evaluate_gives_the_judge_funcs_the_runs_judge_model_ahead_of_theirs_and_the_steps(ctl):
+    _scores(ctl, 1, 1, 1)
+    evaluator = {"funcs": ["agent_judge", "agent_judge_zip", "compare_table"],
+                 "options": [{"model": "task-m"}, {}, {"model": "copied-by-mistake"}], "rubric": [{"criterion": "x"}]}
+    context = _context(_ready(), _prompt())
+    context.metadata["user_overrides"] = {"judge_model": "run-m"}
+    await OSWorldEvaluateTaskStep(id="e", version=1, env_id="desk", verifier_id="v", evaluator=evaluator,
+                                  judge_model="step-m").execute(context)
+    judge, zipped, table = ctl.bodies("/evaluate")
+    assert judge["options"] == {"model": "run-m"} and zipped["options"] == {"model": "run-m"}
+    assert table["options"] == {}
+    assert context.metadata["models"]["judge"] == {"e": "run-m"}
+
+
+@pytest.mark.asyncio
+async def test_every_agent_judge_variant_is_sent_as_a_judge(ctl):
+    """The controller's per-format judges (agent_judge_zip, _blend, _godot, _log, _gz, _fcstd, ...) take the judge's
+    model and the task's rubric as agent_judge does."""
+    funcs = ["agent_judge_zip", "agent_judge_blend", "agent_judge_godot", "agent_judge_log", "agent_judge_gz",
+             "agent_judge_fcstd"]
+    _scores(ctl, *[1] * len(funcs))
+    context = _context(_ready(), _prompt())
+    await OSWorldEvaluateTaskStep(id="e", version=1, env_id="desk", verifier_id="v", judge_model="step-m",
+                                  evaluator={"funcs": funcs, "rubric": [{"criterion": "x"}]}).execute(context)
+    for body in ctl.bodies("/evaluate"):
+        assert body["options"] == {"model": "step-m"} and body["rubric"] == [{"criterion": "x"}]
+
+
+# Each agent's own sentence for running out of turns or time, as its source writes it, and that sentence as it reads at
+# a stop: a reworded message fails here instead of quietly turning partial credit into a skip.
+_AGENTS = Path(__file__).parents[4] / "src" / "agent_env" / "agents" / "agents"
+_BUDGET_STOPS = [
+    ("codex/codex_bridge.py", 'f"Reached maximum number of turns ({max_turns})"', "Reached maximum number of turns (50)"),
+    ("codex/codex_bridge.py", 'f"codex CLI timed out after {timeout_s:.0f}s"', "codex CLI timed out after 600s"),
+    ("claude-code/claude_bridge.py", 'f"claude CLI timed out after {timeout_s}s"', "claude CLI timed out after 900s"),
+    ("gemini/gemini_bridge.py", 'f"gemini CLI timed out after {timeout_s}s"', "gemini CLI timed out after 600s"),
+    ("hermes/hermes_bridge.py", 'f"hermes timed out after {timeout_s}s"', "hermes timed out after 600s"),
+    ("letta-code/letta_code_bridge.py", 'f"Letta Code timed out after {timeout_s}s"', "Letta Code timed out after 600s"),
+    ("opencode/opencode_bridge.py", 'f"opencode timed out after {timeout_s}s"', "opencode timed out after 600s"),
+]
+
+
+@pytest.mark.parametrize("bridge, written, at_a_stop", _BUDGET_STOPS)
+def test_each_agents_budget_stop_is_read_as_its_source_writes_it(bridge, written, at_a_stop):
+    from agent_env.task_step.task_steps.computer.osworld.evaluate import budget_exhaustion
+    assert written in (_AGENTS / bridge).read_text(), f"{bridge} no longer stops with {written}"
+    assert budget_exhaustion(_prompt(error_type="AGENT_ERROR", error_message=at_a_stop)) == at_a_stop

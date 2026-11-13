@@ -22,6 +22,10 @@ DEFAULT_TIMEOUT_S = 1800
 READY_PATH = "/configure"
 _POLL_INTERVAL_S = 15
 _POLL_READ_TIMEOUT_S = 30
+#: ``/evaluate_async`` answers with a job id at once; the grading runs after.
+START_TIMEOUT_S = 60
+#: One ``GET`` of ``READY_PATH``, while waiting for the controller and checking it requires its token.
+READY_CALL_TIMEOUT_S = 15
 #: A task ref the controller fetches is signed for this long, covering one step's download window.
 TASK_REF_TTL_S = 6 * 60 * 60
 
@@ -51,16 +55,24 @@ class ControllerCallError(RuntimeError):
 
 
 def _parsed(path: str, response: httpx.Response, *, expect_json: bool) -> dict:
+    """A 2xx answer's JSON object. Raises ControllerCallError on an HTTP error, and, with ``expect_json``, on an answer
+    that isn't a JSON object, since every caller reads it as one; without it such an answer is ``{}``."""
     if response.status_code >= 400:
         raise ControllerCallError(f"controller {path} returned HTTP {response.status_code}: {response.text[:500]}",
                                   status=response.status_code, body=response.text)
     try:
-        return json.loads(response.text)
+        answer = json.loads(response.text)
     except json.JSONDecodeError as e:
         if not expect_json:
             return {}
         raise ControllerCallError(f"controller {path} returned non-JSON: {e}: {response.text[:300]}",
                                   status=response.status_code, body=response.text) from e
+    if isinstance(answer, dict):
+        return answer
+    if not expect_json:
+        return {}
+    raise ControllerCallError(f"controller {path} returned {type(answer).__name__}, not a JSON object: "
+                              f"{response.text[:300]}", status=response.status_code, body=response.text)
 
 
 async def post(endpoint: Endpoint, path: str, payload: dict, *, timeout: float = DEFAULT_TIMEOUT_S,
@@ -81,7 +93,7 @@ async def evaluate(endpoint: Endpoint, payload: dict, *, timeout: float = DEFAUL
     try:
         async with httpx.AsyncClient() as client:
             start = await client.post(endpoint.at("/evaluate_async"), json=payload, headers=endpoint.headers,
-                                      timeout=60)
+                                      timeout=START_TIMEOUT_S)
     except httpx.HTTPError as e:
         raise ControllerCallError(f"controller /evaluate_async transport failure: {type(e).__name__}: {e}",
                                   body=str(e)) from e
@@ -112,9 +124,16 @@ async def evaluate(endpoint: Endpoint, payload: dict, *, timeout: float = DEFAUL
         except json.JSONDecodeError:
             logger.warning(f"controller /evaluate_result returned non-JSON, polling again: {poll.text[:200]}")
             continue
+        if not isinstance(data, dict):
+            raise ControllerCallError(f"controller /evaluate_result returned {type(data).__name__}, not a JSON object: "
+                                      f"{poll.text[:300]}", status=poll.status_code, body=poll.text)
         status = data.get("status")
         if status == "done":
-            return data.get("result") or {}
+            result = data.get("result") or {}
+            if not isinstance(result, dict):
+                raise ControllerCallError(f"controller /evaluate job {job_id} result is {type(result).__name__}, not a "
+                                          f"JSON object: {poll.text[:300]}", status=poll.status_code, body=poll.text)
+            return result
         if status in ("error", "unknown"):
             raise ControllerCallError(f"controller /evaluate job {job_id} {status}: {str(data.get('message', ''))[:300]}",
                                       body=json.dumps(data)[:500])
@@ -128,7 +147,8 @@ async def wait_ready(endpoint: Endpoint, *, timeout: float = 300.0, interval: fl
     while loop.time() < deadline:
         try:
             async with httpx.AsyncClient() as client:
-                response = await client.get(endpoint.at(READY_PATH), headers=endpoint.headers, timeout=15)
+                response = await client.get(endpoint.at(READY_PATH), headers=endpoint.headers,
+                                            timeout=READY_CALL_TIMEOUT_S)
             if response.status_code == 200:
                 return
             last = f"HTTP {response.status_code}"
@@ -143,7 +163,7 @@ async def require_auth(endpoint: Endpoint) -> None:
     ``CONTROLLER_AUTH_TOKEN`` doesn't: its port may be reachable from the computer, and so by the agent."""
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.get(endpoint.at(READY_PATH), timeout=15)
+            response = await client.get(endpoint.at(READY_PATH), timeout=READY_CALL_TIMEOUT_S)
     except httpx.HTTPError as e:
         raise ControllerCallError(f"controller {READY_PATH} transport failure: {type(e).__name__}: {e}") from e
     if response.status_code != 401:

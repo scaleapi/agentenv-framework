@@ -26,7 +26,8 @@ class OSWorldInitializeTaskStep(TaskStep):
                  osworld_v2_task_path: Optional[str] = None, osworld_v2_task_url: Optional[str] = None,
                  depends_on: Optional[list[TaskStepDependency]] = None, fail_task_on_error: bool = True):
         """``osworld_v2_task_path`` is an http(s) URL or an object of the object store under its artifacts, which the
-        step signs for the controller to fetch; ``osworld_v2_task_url`` is its older name, which it wins over."""
+        step signs for the controller to fetch. ``osworld_v2_task_url`` is the field the hub's CUA importer
+        writes a task's http(s) URL to, as it does for ``cua_initialize``; the path wins when both are set."""
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
         self.env_id = env_id
         self.init_config = init_config or []

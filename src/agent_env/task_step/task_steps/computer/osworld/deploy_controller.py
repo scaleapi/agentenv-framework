@@ -2,10 +2,13 @@
 
 The controller holds the grader, a task's checks and the judge's key, and a computer's apps run as its session user,
 the agent's, so it runs apart from the computer, in remote mode against the guest server at the endpoint the
-computer's card advertises (``agent_env.task_step.task_steps.computer.osworld.guest``), with the env's control token on every call. Its own port may be
-reachable from the computer, so it requires a bearer token derived from that control token (``CONTROLLER_AUTH_TOKEN``)
-and the step refuses a controller that answers without it. Once it answers, the step records the controller's and the guest server's addresses on the env for ``osworld_initialize`` and
-``osworld_evaluate``, and the sandbox in ``context.deployed_sandboxes`` for teardown."""
+computer's card advertises (:mod:`.guest`), with the env's control token on every call. Its own port may be reachable
+from the computer, so it requires a bearer token derived from that control token (``CONTROLLER_AUTH_TOKEN``) and the
+step refuses a controller that answers without it. The judge's key and endpoint are the run's
+(``user_overrides.judge_litellm_api_key`` / ``litellm_api_key``, ``judge_litellm_base_url`` / ``litellm_base_url``),
+else the configured ``[model]``'s, as ``rubrics_verifier``'s are. Once it answers, the step records the controller's and
+the guest server's addresses on the env for ``osworld_initialize`` and ``osworld_evaluate``, and the sandbox in
+``context.deployed_sandboxes`` for teardown."""
 from __future__ import annotations
 
 import json
@@ -68,21 +71,31 @@ class OSWorldDeployControllerTaskStep(TaskStep):
                    ttl_seconds=data.get("ttl_seconds", TaskStep.DEFAULT_TTL_SECONDS), cpu=data.get("cpu", 2.0),
                    memory_mb=data.get("memory_mb", 4096), env_vars=data.get("env_vars"))
 
-    def controller_env(self, deployed, guest_url: str) -> dict[str, str]:
+    def controller_env(self, deployed, guest_url: str, overrides: Optional[dict] = None) -> dict[str, str]:
         """Remote mode against the guest server, with the env's control token on every call, the token every call to
-        the controller must carry, and the model endpoint's key for the judge."""
+        the controller must carry, and the judge's model endpoint: the run's ``overrides``', else ``[model]``'s."""
+        overrides = overrides or {}
         env = {**(self.env_vars or {}), "PROVIDER": "remote", "OS_TYPE": "Ubuntu", "REMOTE_VM_IP": guest_url,
                "REMOTE_SERVER_HEADERS": json.dumps(deployed.control_headers),
                CONTROLLER_TOKEN_ENV: guest.controller_token(deployed)}
         config = get_config()
-        try:
-            env["LITELLM_API_KEY"] = config.get_litellm_api_key()
-        except (KeyError, ConfigError):
-            logger.warning("no model endpoint key configured; the OSWorld controller's judge will have none")
-        try:
-            env["LITELLM_BASE_URL"] = config.get_litellm_base_url()
-        except ConfigError:
-            pass
+        key_ref = overrides.get("judge_litellm_api_key") or overrides.get("litellm_api_key")
+        api_key = config.resolve_reference(key_ref) if key_ref else None
+        if not api_key:
+            try:
+                api_key = config.get_litellm_api_key()
+            except (KeyError, ConfigError):
+                logger.warning("no model endpoint key configured; the OSWorld controller's judge will have none")
+        if api_key:
+            env["LITELLM_API_KEY"] = api_key
+        base_url = overrides.get("judge_litellm_base_url") or overrides.get("litellm_base_url")
+        if not base_url:
+            try:
+                base_url = config.get_litellm_base_url()
+            except ConfigError:
+                pass
+        if base_url:
+            env["LITELLM_BASE_URL"] = base_url
         return env
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
@@ -122,7 +135,8 @@ class OSWorldDeployControllerTaskStep(TaskStep):
         another name, which a chain of providers can't say for the link it ends up on."""
         errors = []
         for link in provider.links:
-            env = self.controller_env(deployed, link.url_from_sandbox(guest_url))
+            env = self.controller_env(deployed, link.url_from_sandbox(guest_url),
+                                      context.metadata.get("user_overrides") or {})
             if "LITELLM_BASE_URL" in env:
                 env["LITELLM_BASE_URL"] = link.url_from_sandbox(env["LITELLM_BASE_URL"])
             logger.info(f"Deploying the OSWorld controller for env '{self.env_id}' on {type(link).__name__} "

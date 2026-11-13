@@ -1,8 +1,9 @@
 """``osworld_evaluate``: an OSWorld task graded on a computer by the controller ``osworld_deploy_controller`` deployed
 beside it, so no grading runs where the agent can reach it. An OSWorld-V2 task is graded by its ``TASK_CLASS.evaluate()``
 on the controller; a classic one by each of its ``evaluator``'s funcs, sent to the controller's ``/evaluate`` one at a
-time with its ``result`` and ``expected`` getters and its ``options``, and combined by its ``conj``. The verdict goes
-to ``context.metadata["verifications"][verifier_id]`` as ``{"results", "score"}``."""
+time with its ``result`` and ``expected`` getters and its ``options``, and combined by its ``conj`` as OSWorld's
+``DesktopEnv.evaluate`` combines them: ``and`` is 0 when any func scores 0, else their mean; ``or`` is their max. The
+verdict goes to ``context.metadata["verifications"][verifier_id]`` as ``{"results", "score"}``."""
 from __future__ import annotations
 
 import logging
@@ -15,7 +16,6 @@ from agent_env.task_step.task_steps.computer.osworld import controller, guest
 from agent_env.task_step.context import PromptResponse, StepContextError, TaskStepContext
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.computer.osworld.initialize import SETUP_ERROR_CHARS, run_setup
-from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
 
 logger = logging.getLogger(__name__)
 
@@ -24,12 +24,25 @@ PASS_SCORE, FAIL_SCORE = 1.0, 0.0
 #: What an agent answers a task it finds infeasible with.
 INFEASIBLE_TAG = "[INFEASIBLE]"
 INFEASIBLE = "infeasible"
-#: The LLM-judge funcs, which take a ``model`` option, a task's ``rubric`` and ``parameters``. A deterministic func is
-#: called as ``metric(result, expected, **options)``, which a ``model`` it doesn't take fails.
-JUDGE_FUNCS = frozenset({"agent_judge", "agent_judge_multi", "agent_judge_docx", "agent_judge_pptx", "agent_judge_pdf"})
+#: The LLM-judge funcs (``agent_judge`` and its per-format ``agent_judge_<format>`` variants) take a ``model`` option, a
+#: task's ``rubric`` and ``parameters``. A deterministic func is called as ``metric(result, expected, **options)``, which
+#: a ``model`` it doesn't take fails.
+JUDGE_FUNC_PREFIX = "agent_judge"
 #: The deterministic funcs that also take a task's ``rubric`` and ``parameters``.
-CONTEXT_FUNCS = JUDGE_FUNCS | {"compare_pdfs", "compare_csv", "compare_images", "compare_python_pure_text",
-                               "diff_text_file", "website_verifier"}
+CONTEXT_FUNCS = frozenset({"compare_pdfs", "compare_csv", "compare_images", "compare_python_pure_text",
+                           "diff_text_file", "website_verifier"})
+
+
+def is_judge(func: str) -> bool:
+    return func == JUDGE_FUNC_PREFIX or func.startswith(f"{JUDGE_FUNC_PREFIX}_")
+
+
+def combined(scores: list[float], conj: str) -> float:
+    """``scores`` combined as OSWorld's ``DesktopEnv.evaluate`` does: ``or`` their max; ``and`` 0 when any is 0, else
+    their mean."""
+    if conj == "or":
+        return max(scores)
+    return FAIL_SCORE if any(s == FAIL_SCORE for s in scores) else sum(scores) / len(scores)
 # An agent that ran out of turns or time leaves a desktop worth grading; every other stop leaves none. Matched on the
 # sentences the harness and the shipped agents stop with, since their error types name both kinds: the harness's
 # "Max turns (N) reached" and "agent timed out after N"; Claude Code's and Codex's "Reached maximum number of turns
@@ -59,8 +72,9 @@ class OSWorldEvaluateTaskStep(TaskStep):
                  depends_on: Optional[list[TaskStepDependency]] = None, fail_task_on_error: bool = True):
         """``evaluator`` is OSWorld's: ``funcs``, a name or a list, with ``result``, ``expected`` and ``options`` of
         each, in parallel lists for several, ``conj`` (``and`` or ``or``), ``postconfig``, ``rubric`` and
-        ``instruction``. ``judge_model`` is the ``model`` option the judge funcs get when theirs set none; without it the
-        controller's own default applies."""
+        ``instruction``. A judge func's ``model`` is the run's ``user_overrides.judge_model``, else its own option's, else
+        ``judge_model``; with none the controller's own default applies. ``osworld_v2_task_url`` is the field the hub's
+        CUA importer writes a task's http(s) URL to; ``osworld_v2_task_path`` wins when both are set."""
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
         self.env_id = env_id
         self.evaluator = evaluator or {}
@@ -131,7 +145,10 @@ class OSWorldEvaluateTaskStep(TaskStep):
         budget = budget_exhaustion(prompt_response)
         if prompt_response is not None and prompt_response.error_type and budget is None:
             return self._skipped(context, prompt_response)
-        verification = await self._evaluate_funcs(endpoint, prompt_response)
+        run_judge_model = (context.metadata.get("user_overrides") or {}).get("judge_model")
+        if any(is_judge(func) for func, *_ in self._funcs()):
+            context.record_model("judge", self.id, run_judge_model or self.judge_model)
+        verification = await self._evaluate_funcs(endpoint, prompt_response, run_judge_model)
         if budget is not None:
             # The score is the end state's, earned after the agent ran out of room; the marker beside the verifications
             # keeps such runs separable, since score readers project only each verifier's score.
@@ -179,10 +196,15 @@ class OSWorldEvaluateTaskStep(TaskStep):
                              f"one per func, got {got}")
         return value
 
-    def _payload(self, func: str, result: Any, expected: Any, options: dict, instruction: str | None) -> dict:
+    def _payload(self, func: str, result: Any, expected: Any, options: dict, instruction: str | None,
+                 run_judge_model: str | None) -> dict:
+        """The controller's ``/evaluate`` body for one func. A judge func's ``model`` is the run's
+        (``user_overrides.judge_model``), else its own option's, else the step's ``judge_model``."""
         options = dict(options)
-        if func in JUDGE_FUNCS:
-            if self.judge_model:
+        if is_judge(func):
+            if run_judge_model:
+                options["model"] = run_judge_model
+            elif self.judge_model:
                 options.setdefault("model", self.judge_model)
         else:
             options.pop("model", None)
@@ -191,13 +213,14 @@ class OSWorldEvaluateTaskStep(TaskStep):
             payload["result"] = result
         if expected is not None:
             payload["expected"] = expected
-        if func in CONTEXT_FUNCS:
+        if is_judge(func) or func in CONTEXT_FUNCS:
             payload.update({key: self.evaluator[key] for key in ("parameters", "rubric") if key in self.evaluator})
         if instruction:
             payload["instruction"] = instruction
         return payload
 
-    async def _evaluate_funcs(self, endpoint: controller.Endpoint, prompt_response: PromptResponse | None) -> dict:
+    async def _evaluate_funcs(self, endpoint: controller.Endpoint, prompt_response: PromptResponse | None,
+                              run_judge_model: str | None) -> dict:
         answer_text = prompt_response.response if prompt_response is not None else None
         instruction = self.evaluator.get("instruction") or (prompt_response.prompt_text if prompt_response else None)
         results, scores, metrics = [], [], []
@@ -214,7 +237,8 @@ class OSWorldEvaluateTaskStep(TaskStep):
                            "message": "Agent declared infeasible on a feasible task"}
                 else:
                     answer = await controller.evaluate(endpoint,
-                                                       self._payload(func, result, expected, options, instruction))
+                                                       self._payload(func, result, expected, options, instruction,
+                                                                     run_judge_model))
                     sub = {"id": func, "score": controller.normalize_score(answer.get("score", FAIL_SCORE)),
                            "result": not answer.get("error", False), "message": answer.get("message", "")}
                 passed = True
@@ -227,11 +251,7 @@ class OSWorldEvaluateTaskStep(TaskStep):
             scores.append(float(sub["score"]))
             metrics.append({"func": func, "passed": passed, "score": float(sub["score"]), "message": sub["message"]})
         conj = self.evaluator.get("conj", "and")
-        if len(scores) == 1:
-            score = scores[0]
-        else:
-            score = aggregate_score([{"score": s, "result": s == PASS_SCORE} for s in scores],
-                                    ScoreAggregator.ANY_PASS if conj == "or" else ScoreAggregator.ALL_PASS)
+        score = combined(scores, conj)
         errored = any(not m["passed"] for m in metrics)
         return {"results": results, "score": score,
                 "debug": {"overall_score": score, "conjunction": conj if len(funcs) > 1 else None, "metrics": metrics,
