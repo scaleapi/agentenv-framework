@@ -31,9 +31,10 @@ when the Dockerfile's `CLAUDE_CODE_VERSION` moves, until `ClaudeCodeTool` and `T
 
 The CLI states the date from its machine's clock, which isn't the task env's while the env's clock is armed. So while
 an MCP server lists the gateway's `get_time`, which it does only then, each prompt ends with the env's time in an
-`<ENV_CLOCK>` note, and a `PostToolUse` hook, given on the CLI's command line (`--settings`), ends each tool call's
-result with a fresh reading (`env_clock.py`). A failed read leaves the note out and never fails the turn. Unarmed,
-nothing is added: the env runs on real time, which is the CLI's date.
+`<ENV_CLOCK>` note, a resume after an API failure too, and a `PostToolUse` and `PostToolUseFailure` hook, given on the
+CLI's command line (`--settings`), ends each tool call's result, failed or not, with a fresh reading (`env_clock.py`).
+A failed read leaves the note out and never fails the turn. Unarmed, nothing is added: the env runs on real time, which
+is the CLI's date.
 
 `install_agent` installs it too, into a container a task already runs or onto a `vm` sandbox's Linux host, with
 `install.sh` from its folder: Claude Code's native build for the target's CPU and libc, uv, and the agent's requirements

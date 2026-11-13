@@ -151,9 +151,42 @@ def _command(env_clock_on: bool) -> list[str]:
 def test_the_hook_is_on_the_command_line_only_while_armed():
     assert "--settings" not in _command(False)
     command = _command(True)
-    [hook] = json.loads(command[command.index("--settings") + 1])["hooks"]["PostToolUse"][0]["hooks"]
+    hooks = json.loads(command[command.index("--settings") + 1])["hooks"]
 
-    assert hook["command"].endswith("env_clock_hook.py") and hook["timeout"] == env_clock.HOOK_TIMEOUT_S
+    # After a tool call that failed too: a long command that fails takes as much of the clock.
+    assert set(hooks) == {"PostToolUse", "PostToolUseFailure"}
+    for entries in hooks.values():
+        [hook] = entries[0]["hooks"]
+        assert hook["command"].endswith("env_clock_hook.py") and hook["timeout"] == env_clock.HOOK_TIMEOUT_S
+
+
+def test_a_resume_after_an_api_failure_carries_the_envs_time_now(monkeypatch, tmp_path):
+    procs: list[FakeCLI] = []
+    answers = [
+        {"type": "result", "subtype": "success", "is_error": True, "result": "API Error: The operation timed out.",
+         "session_id": "s"},
+        {"type": "result", "subtype": "success", "result": "done", "session_id": "s"},
+    ]
+
+    async def _exec(*cmd, **kwargs):
+        procs.append(FakeCLI((json.dumps(answers.pop(0)) + "\n").encode(), 1 if answers else 0))
+        return procs[-1]
+
+    async def _read(server, timeout_s=env_clock.HOOK_READ_TIMEOUT_S):
+        return "2026-05-02T10:00:00Z"
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _exec)
+    monkeypatch.setattr(claude_bridge, "SESSION_JSONL_DIR", tmp_path)
+    (tmp_path / "s.jsonl").write_text('{"type":"assistant"}\n')
+    monkeypatch.setattr(claude_bridge, "_RETRY_BACKOFF_S", (0, 0))
+    monkeypatch.setattr(claude_bridge, "read_env_clock", _read)
+    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="s", resume=False,
+                                                  env_clock=env_clock.ClockServer(url="http://gw/mcp")))
+
+    prompts = [proc.stdin.data.decode() for proc in procs]
+    assert result.attempts == 2 and prompts[0] == "p"
+    assert prompts[1].startswith(claude_bridge._RESUME_PROMPT)
+    assert prompts[1].endswith(env_clock.prompt_note("2026-05-02T10:00:00Z"))
 
 
 def test_the_cli_gets_the_clocks_server_in_its_environment_only_while_armed(monkeypatch):
@@ -180,13 +213,14 @@ def _hook(stdin: dict, environ: dict) -> subprocess.CompletedProcess:
                           env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path), **environ})
 
 
-def test_the_hook_ends_a_tool_calls_result_with_the_envs_time(socket_enabled, servers):
-    ran = _hook({"hook_event_name": "PostToolUse", "tool_name": "Bash"},
+@pytest.mark.parametrize("event", ["PostToolUse", "PostToolUseFailure"])
+def test_the_hook_ends_a_tool_calls_result_with_the_envs_time(socket_enabled, servers, event):
+    ran = _hook({"hook_event_name": event, "tool_name": "Bash"},
                 {env_clock.ENV_CLOCK_SERVER_ENV: env_clock.ClockServer(url=servers["env"]).to_env()})
 
     assert ran.returncode == 0, ran.stderr
     output = json.loads(ran.stdout)["hookSpecificOutput"]
-    assert output == {"hookEventName": "PostToolUse", "additionalContext": env_clock.turn_note(NOW)}
+    assert output == {"hookEventName": event, "additionalContext": env_clock.turn_note(NOW)}
 
 
 @pytest.mark.parametrize("stdin, environ", [

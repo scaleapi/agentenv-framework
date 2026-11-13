@@ -20,7 +20,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
-from env_clock import ENV_CLOCK_SERVER_ENV, ClockServer, hook_settings
+from env_clock import ENV_CLOCK_SERVER_ENV, ClockServer, failure_reason, hook_settings, prompt_note, read_env_clock
 from kit import in_thread_to_its_end
 
 logger = logging.getLogger(__name__)
@@ -482,6 +482,18 @@ async def run_claude(
         logger.warning(f"claude CLI turn cut short ({_redact(failure)!r}); resuming session {attempt_session} "
                        f"in {backoff}s with {int(budget_left)}s of the original {timeout_s}s budget left")
         await asyncio.sleep(backoff)
+        if env_clock is not None:
+            attempt_prompt = await _with_env_clock_note(_RESUME_PROMPT, env_clock)
+
+
+async def _with_env_clock_note(prompt: str, server: ClockServer) -> str:
+    """``prompt`` with the env's time now: a resume after an API failure and its backoff mustn't carry on from the
+    time the turn's prompt gave. A failed read leaves it as it is."""
+    try:
+        return f"{prompt}\n\n{prompt_note(await read_env_clock(server))}"
+    except Exception as e:
+        logger.warning(f"env clock: no reading for the resume: {failure_reason(e)}")
+        return prompt
 
 
 _PROCESS_CLEANUP_TIMEOUT_S = 5

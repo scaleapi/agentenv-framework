@@ -1,9 +1,9 @@
 """The env's clock, read for the model. While agent-env's gateway runs an env's clock (urn:agentenv:clock/v1), it lists
 ``get_time`` on the env's MCP server, and the date the CLI states on its own ("Today's date is ...", from this
-machine's clock) isn't the env's. So each prompt carries the env's time, and a PostToolUse hook (``env_clock_hook.py``)
-adds a fresh reading after each tool call: a clock moved between prompts, or running faster than real time, never
-leaves the model on a stale date. Unarmed, no server lists ``get_time`` and nothing is added: the env runs on real
-time, which is the CLI's date."""
+machine's clock) isn't the env's. So each prompt, a resume's too, carries the env's time, and a hook
+(``env_clock_hook.py``) adds a fresh reading after each tool call, failed ones too: a clock moved between prompts, or
+running faster than real time, never leaves the model on a stale date. Unarmed, no server lists ``get_time`` and
+nothing is added: the env runs on real time, which is the CLI's date."""
 
 from __future__ import annotations
 
@@ -31,6 +31,9 @@ PROMPT_READ_TIMEOUT_S = 10.0
 HOOK_READ_TIMEOUT_S = 5.0
 HOOK_TIMEOUT_S = 10
 HOOK_SCRIPT = Path(__file__).with_name("env_clock_hook.py")
+# After every tool call, whether it succeeded or failed: a long command that fails takes as much of the clock as one
+# that succeeds.
+HOOK_EVENTS = ("PostToolUse", "PostToolUseFailure")
 
 
 @dataclass(frozen=True)
@@ -124,8 +127,8 @@ def turn_note(current: str) -> str:
 
 
 def hook_settings() -> str:
-    """The CLI's --settings for an armed clock: the hook after each tool call. On the command line rather than in the
+    """The CLI's --settings for an armed clock: the hook after each tool call, succeeded or failed. On the command line rather than in the
     user settings, so a snapshot of the CLI's state never carries it to an agent with no clock or no such script."""
     command = f"{shlex.quote(sys.executable)} {shlex.quote(str(HOOK_SCRIPT))}"
-    return json.dumps({"hooks": {"PostToolUse": [
-        {"matcher": "", "hooks": [{"type": "command", "command": command, "timeout": HOOK_TIMEOUT_S}]}]}})
+    entry = {"matcher": "", "hooks": [{"type": "command", "command": command, "timeout": HOOK_TIMEOUT_S}]}
+    return json.dumps({"hooks": {event: [entry] for event in HOOK_EVENTS}})
