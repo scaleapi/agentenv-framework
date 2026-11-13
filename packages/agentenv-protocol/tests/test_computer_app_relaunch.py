@@ -1,5 +1,5 @@
 """An app whose server sees it end, a website browser's, launched again when a signal or a failing code ended it, up to
-``CRASH_RELAUNCHES`` times a boot; not when it exited cleanly, when its server stopped it, or when it doesn't ask. Its
+``CRASH_RELAUNCHES`` times a boot, each a wait that doubles after the last; not when it exited cleanly, when its server stopped it, or when it doesn't ask. Its
 launch log says so, and what reads it (``apps.ended_on_its_own``) takes it for gone only once nothing will launch it."""
 from __future__ import annotations
 
@@ -13,12 +13,15 @@ import pytest
 from agentenv_protocol.computer import Launch, app_runtime, apps, session
 from agentenv_protocol.computer.app_runtime import CRASH_RELAUNCHES, AppRuntime
 
+REAL_SLEEP = asyncio.sleep
+
 
 @pytest.fixture
 def desktop(tmp_path, monkeypatch):
-    """The app's folder as the current directory, and a session whose launches each get a new pid that runs until
-    ``ended`` gives it its code; the pids launched, in order."""
+    """The app's folder as the current directory, a session whose launches each get a new pid that runs until
+    ``ended`` gives it its code, and no wait before a relaunch; the pids launched, in order."""
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(app_runtime, "CRASH_RELAUNCH_BACKOFF_S", 0)
     monkeypatch.setenv("ENVIRONMENT_NAME", "browser")
     monkeypatch.setattr(app_runtime, "LAUNCHED", tmp_path / "launched")
     state = SimpleNamespace(launched=[], running=set(), codes={}, stopped=[])
@@ -110,14 +113,22 @@ async def test_one_its_server_stopped_or_that_doesnt_ask_stays_down(desktop):
 
 
 @pytest.mark.asyncio
-async def test_it_is_launched_again_at_most_crash_relaunches_times_a_boot(desktop):
-    runtime = _runtime()
+async def test_it_is_launched_again_at_most_crash_relaunches_times_a_boot_each_wait_twice_the_last(desktop, monkeypatch):
+    runtime, waits = _runtime(), []
+
+    async def sleep(seconds):
+        waits.append(seconds)
+        await REAL_SLEEP(0)
+
+    monkeypatch.setattr(app_runtime, "CRASH_RELAUNCH_BACKOFF_S", 1.5)
+    monkeypatch.setattr(app_runtime.asyncio, "sleep", sleep)
     await runtime.launch_app("boot")
 
     for _ in range(CRASH_RELAUNCHES + 2):
         await _ended(runtime, desktop, -signal.SIGSEGV)
 
     assert len(desktop.launched) == 1 + CRASH_RELAUNCHES and not runtime.running()
+    assert waits == [1.5 * 2 ** crash for crash in range(CRASH_RELAUNCHES)]
     assert runtime.launches()[-1]["event"] == "exit" and "relaunching" not in runtime.launches()[-1]
     assert "nothing launches it again" in apps.ended_on_its_own(Path.cwd())
 

@@ -43,6 +43,9 @@ EXIT_WAIT_S = 5.0
 #: How many times in a boot an app that relaunches after a crash is launched again, so one that can't start doesn't
 #: loop.
 CRASH_RELAUNCHES = 5
+#: How long after its first crash such an app is launched again, doubling with each crash after, so one that crashed for
+#: want of something its supervisor brings back, as a browser whose X server is restarting, finds it there.
+CRASH_RELAUNCH_BACKOFF_S = 1.0
 #: How long a stopped app may take to exit before it's killed.
 STOP_TIMEOUT_S = 10.0
 HOLD_BOOT_LAUNCH_ENV = "AGENTENV_HOLD_BOOT_LAUNCH"
@@ -155,10 +158,11 @@ class AppRuntime:
     def exited(self) -> bool:
         """Log that the app this server launched last ended on its own, with its exit code or the signal that ended
         it, unless the server stopped it; whether it did. With ``relaunch_on_crash``, one a signal or a failing code
-        ended is launched again, up to ``CRASH_RELAUNCHES`` times a boot (``_log_exit``): holding the ``turn``, so no
-        data call changes its files meanwhile, unless something launched it since, and once what's left of it is
-        stopped, as a browser's helpers outlive it for a moment and while they run its session counts as the app
-        running. One that exited cleanly was closed, and stays so."""
+        ended is launched again, up to ``CRASH_RELAUNCHES`` times a boot, after a wait that doubles with each crash
+        (``CRASH_RELAUNCH_BACKOFF_S``, ``_log_exit``): holding the ``turn``, so no data call changes its files
+        meanwhile, unless something launched it since, and once what's left of it is stopped, as a browser's helpers
+        outlive it for a moment and while they run its session counts as the app running. One that exited cleanly was
+        closed, and stays so."""
         if (pid := _recorded_pid()) is None:
             return False
         noting = asyncio.ensure_future(self._log_exit(pid))
@@ -170,13 +174,14 @@ class AppRuntime:
         """The exit logged, marked ``relaunching`` when it's a crash its server launches it again after, which those
         reading the log (``apps.ended_on_its_own``) don't take for the app gone; and that relaunch, or why it failed."""
         code = await session.returncode(pid, EXIT_WAIT_S)
-        relaunching = bool(self.relaunch_on_crash and code and sum(
-            entry.get("cause") == "crash" for entry in self.launches()) < CRASH_RELAUNCHES)
+        crashes = sum(entry.get("cause") == "crash" for entry in self.launches())
+        relaunching = bool(self.relaunch_on_crash and code and crashes < CRASH_RELAUNCHES)
         self.log("exit", pid, **({} if code is None else
                                  {"signal": signal.Signals(-code).name} if code < 0 else {"code": code}),
                  **({"relaunching": True} if relaunching else {}))
         if not relaunching:
             return
+        await asyncio.sleep(CRASH_RELAUNCH_BACKOFF_S * 2 ** crashes)
         async with self.turn:
             if next((entry["pid"] for entry in reversed(self.launches()) if entry["event"] == "launch"), None) != pid:
                 return

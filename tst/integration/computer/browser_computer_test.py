@@ -6,9 +6,9 @@ dialog, each call an entry in the browser's log that its CDP commands and the na
 that run code hidden until tool access names one, as the installed Playwright MCP lists them, and back after Playwright
 MCP or the driver is killed, and its page tools navigate, move in history, answer a dialog, use tabs
 and upload; the browser's X server runs but no desktop, and nothing listens but the driver and the site proxy; a
-killed app server or driver is started again by supervisord and the computer is ready again; chromium killed fails it
-for good, computer-ready/v1 saying why and the tools answering with it, and so does its X server killed, which takes
-chromium with it though supervisord starts X again. Through its cdp address, Playwright and Puppeteer drive it two at once,
+killed app server or driver is started again by supervisord, and chromium killed by its app server, and the computer is
+ready again; chromium killed once more than its app server relaunches it fails it for good, computer-ready/v1 saying why
+and the tools answering with it; its X server killed takes chromium with it, and both come back. Through its cdp address, Playwright and Puppeteer drive it two at once,
 each on its own session, by http_url and by ws_url; a wrong token is refused, and so is code in the computer without
 one; one client's close leaves the browser up for the other, which can't open file: URLs; the address outlives a
 relaunch by its app server's restart, and the browser's reset and the computer's end it. Behind a front that ends TLS, as a remote provider's tunnel does,
@@ -64,6 +64,7 @@ from websockets.asyncio.client import connect
 from agentenv_protocol import client as protocol_v1
 from agentenv_protocol.client import find_extension_method, invoke_extension
 from agentenv_protocol.computer import COMPUTER_PAGE, COMPUTER_READY
+from agentenv_protocol.computer.app_runtime import CRASH_RELAUNCHES
 from agentenv_protocol.computer.conformance.client import image
 from agentenv_protocol.tool_access import ENABLE, ENABLE_TOOL_EXTENSION_URI
 from agentenv_protocol.tool_context import ROLE_HEADER
@@ -257,7 +258,8 @@ async def test_its_tools_see_and_drive_the_page_that_is_its_screen(browser_compu
 
 
 @pytest.mark.asyncio
-async def test_a_killed_app_server_or_driver_comes_back_and_a_killed_browser_fails_it_for_good(browser_computer):
+async def test_a_killed_app_server_driver_or_browser_comes_back_and_a_browser_killed_past_its_relaunches_fails_it_for_good(
+        browser_computer):
     with namespace_routing():
         deployed = await Env.get(browser_computer.id).deploy(
             env_params={"app_settings": {"chromium": {"start_urls": [PAGE_URL]}}})
@@ -265,12 +267,17 @@ async def test_a_killed_app_server_or_driver_comes_back_and_a_killed_browser_fai
         try:
             await _kill(deployed, "[s]erve_app")
             server_back = await _ready(deployed)
-            launches = (await _record(deployed))["launches"]
             await _kill(deployed, "[c]omputer.serve driver.py:PageDriver")
             driver_back = await _ready(deployed)
-            shot = await _screenshot(deployed)
             await _kill(deployed, "[-]-remote-debugging-pipe", oldest=True)
+            await _crash_launches(deployed, 1)
+            browser_back = await _ready(deployed)
+            shot = await _screenshot(deployed)
+            for crashes in range(1, CRASH_RELAUNCHES + 1):
+                await _crash_launches(deployed, crashes)
+                await _kill(deployed, "[-]-remote-debugging-pipe", oldest=True)
             failed = await _until(deployed, lambda status: "failed" in status)
+            launches = (await _record(deployed))["launches"]
             async with streamablehttp_client(deployed.mcp_url) as (read, write, _):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
@@ -278,18 +285,19 @@ async def test_a_killed_app_server_or_driver_comes_back_and_a_killed_browser_fai
         finally:
             report = await teardown_run(context)
 
-    assert server_back["ready"] and driver_back["ready"] and shot.size == (1280, 800)
-    assert [entry.get("cause") for entry in launches if entry["event"] == "launch"] == ["boot", "server_restart"]
+    assert server_back["ready"] and driver_back["ready"] and browser_back["ready"] and shot.size == (1280, 800)
+    assert [entry.get("cause") for entry in launches if entry["event"] == "launch"] == [
+        "boot", "server_restart", *["crash"] * CRASH_RELAUNCHES]
     browser = next(check for check in failed["checks"] if check["name"] == "browser")
     assert failed["ready"] is False and browser["final"] is True and failed["failed"] == f"browser: {browser['detail']}"
-    assert "by signal SIGKILL" in browser["detail"] and "infrastructure failure" in browser["detail"]
+    assert "by signal SIGKILL" in browser["detail"] and "nothing launches it again" in browser["detail"]
+    assert "infrastructure failure" in browser["detail"]
     assert refused.isError and "has failed" in refused.content[0].text and "SIGKILL" in refused.content[0].text
     assert not report.failed
 
 
 @pytest.mark.asyncio
-async def test_a_killed_x_server_comes_back_but_takes_the_browser_with_it_which_fails_the_computer_for_good(
-        browser_computer):
+async def test_a_killed_x_server_comes_back_and_so_does_the_browser_it_took_with_it(browser_computer):
     with namespace_routing():
         deployed = await Env.get(browser_computer.id).deploy(
             env_params={"app_settings": {"chromium": {"start_urls": [PAGE_URL]}}})
@@ -297,15 +305,16 @@ async def test_a_killed_x_server_comes_back_but_takes_the_browser_with_it_which_
         try:
             before = await _screenshot(deployed)
             await _kill(deployed, "^Xvfb :99", oldest=True)
-            failed = await _until(deployed, lambda status: "failed" in status)
             x_back = await _until_x(deployed)
+            launches = await _crash_launches(deployed, 1)
+            back = await _ready(deployed)
+            after = await _screenshot(deployed)
         finally:
             report = await teardown_run(context)
 
-    assert before.size == (1280, 800)
-    browser = next(check for check in failed["checks"] if check["name"] == "browser")
-    assert failed["ready"] is False and browser["final"] is True and "infrastructure failure" in browser["detail"]
-    assert x_back
+    assert before.size == after.size == (1280, 800)
+    assert x_back and back["ready"], back
+    assert [entry.get("cause") for entry in launches if entry["event"] == "launch"][:2] == ["boot", "crash"], launches
     assert not report.failed
 
 
@@ -746,6 +755,18 @@ async def _state(deployed, holds) -> dict:
             pass
         await asyncio.sleep(POLL_S)
     raise AssertionError(f"the page didn't get there within {WAIT_S:g} s; it last said {last!r}")
+
+
+async def _crash_launches(deployed, count: int) -> list[dict]:
+    """The browser's launch log once ``count`` of its launches were after a crash, within ``WAIT_S``."""
+    launches, deadline = [], time.monotonic() + WAIT_S
+    while time.monotonic() < deadline:
+        with contextlib.suppress(httpx.HTTPError, ValueError, KeyError):
+            launches = (await _record(deployed))["launches"]
+            if sum(entry.get("cause") == "crash" for entry in launches) >= count:
+                return launches
+        await asyncio.sleep(POLL_S)
+    raise AssertionError(f"the browser wasn't launched after crash {count} within {WAIT_S:g} s; its log: {launches!r}")
 
 
 async def _status(deployed) -> dict:
