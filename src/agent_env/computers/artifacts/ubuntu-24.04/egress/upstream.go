@@ -44,7 +44,7 @@ func (p *Proxy) handshake(dsts []string, sni, verifyName string, hello []byte) (
 	}
 	raw, dst, err := p.dialAny(dsts)
 	if err != nil {
-		return nil, found, err
+		return nil, found, dialError{err}
 	}
 	found.Dst = dst
 	uc := utls.UClient(raw, &utls.Config{ServerName: sni, InsecureSkipVerify: true, OmitEmptyPsk: true,
@@ -106,25 +106,27 @@ func chainWindow(chains [][]*x509.Certificate) (time.Time, time.Time) {
 	return from, until
 }
 
-// probe is what a handshake of the proxy's own found of a site: the dates its verified chain shares, and the address
-// it reached, which a connection the probe lets through is passed through to. It's cached per (address, SNI) for
-// ProbeTTL.
+// probe is what a handshake of the proxy's own found of one address of a site: the dates its verified chain shares,
+// or that it didn't answer, or that its handshake didn't finish. It's cached per (address, SNI): a finished one for
+// ProbeTTL, the others for ProbeFailedTTL, since they may be a moment's trouble.
 type probe struct {
 	from, until time.Time
 	verified    bool
-	// failed is a handshake that didn't finish, kept only for ProbeFailedTTL, since it may be a moment's trouble.
-	failed  bool
-	dst     string
-	at      time.Time
-	problem string
+	// failed is a handshake that didn't finish; unreachable, an address that didn't answer.
+	failed, unreachable bool
+	at                  time.Time
+	problem             string
 }
 
 func (hit probe) fresh() bool {
-	return time.Since(hit.at) < ProbeFailedTTL || !hit.failed && time.Since(hit.at) < ProbeTTL
+	if hit.failed || hit.unreachable {
+		return time.Since(hit.at) < ProbeFailedTTL
+	}
+	return time.Since(hit.at) < ProbeTTL
 }
 
-// probes caches what each site's probe found, up to cacheLimit entries, the expired ones dropped first once it's
-// full. A site's concurrent probes wait on the one already under way; no lock is held while one is.
+// probes caches each address's probe, up to cacheLimit entries, the stale ones dropped first once it's full. An
+// address's concurrent probes wait on the one under way; no lock is held while one is.
 type probes struct {
 	mu       sync.Mutex
 	cache    map[string]probe
@@ -134,37 +136,53 @@ type probes struct {
 type underway struct {
 	done chan struct{}
 	hit  probe
+	ok   bool
 }
 
 // cacheLimit bounds the probe and leaf caches, so a computer that visits many sites keeps a bounded memory.
 var cacheLimit = 4096
 
-// validity is the first of dsts' fresh probe results, else a new probe's, and whether it probed now.
-func (p *Proxy) validity(dsts []string, sni, verifyName string, hello []byte) (probe, bool) {
+// dialError is a handshake's that never reached the site.
+type dialError struct{ error }
+
+// probeAt is the probe of dst for sni, cached or new, and whether it probed now.
+func (p *Proxy) probeAt(dst, sni, verifyName string, hello []byte) (probe, bool) {
+	key := dst + "|" + sni
 	p.probes.mu.Lock()
 	if p.probes.cache == nil {
 		p.probes.cache, p.probes.underway = map[string]probe{}, map[string]*underway{}
 	}
-	for _, dst := range dsts {
-		if hit, ok := p.probes.cache[dst+"|"+sni]; ok && hit.fresh() {
-			p.probes.mu.Unlock()
-			return hit, false
-		}
+	if hit, ok := p.probes.cache[key]; ok && hit.fresh() {
+		p.probes.mu.Unlock()
+		return hit, false
 	}
-	site := strings.Join(dsts, ",") + "|" + sni
-	if running, ok := p.probes.underway[site]; ok {
+	if running, ok := p.probes.underway[key]; ok {
 		p.probes.mu.Unlock()
 		<-running.done
+		if !running.ok {
+			return probe{at: time.Now(), failed: true, problem: "the probe it waited on failed"}, false
+		}
 		return running.hit, false
 	}
 	running := &underway{done: make(chan struct{})}
-	p.probes.underway[site] = running
+	p.probes.underway[key] = running
 	p.probes.mu.Unlock()
+	defer func() {
+		p.probes.mu.Lock()
+		if running.ok {
+			p.store(key, running.hit)
+		}
+		delete(p.probes.underway, key)
+		p.probes.mu.Unlock()
+		close(running.done)
+	}()
 
 	hit := probe{at: time.Now()}
-	uc, found, err := p.handshake(dsts, sni, verifyName, hello)
-	hit.dst = found.Dst
+	uc, found, err := p.handshake([]string{dst}, sni, verifyName, hello)
+	var unanswered dialError
 	switch {
+	case errors.As(err, &unanswered):
+		hit.unreachable, hit.problem = true, truncate(err.Error(), 200)
 	case err != nil:
 		hit.failed, hit.problem = true, truncate(err.Error(), 200)
 	case !found.Verified:
@@ -175,38 +193,36 @@ func (p *Proxy) validity(dsts []string, sni, verifyName string, hello []byte) (p
 	if uc != nil {
 		uc.NetConn().Close()
 	}
-
-	p.probes.mu.Lock()
-	keys := []string{hit.dst + "|" + sni}
-	if hit.dst == "" { // no address answered: each of them failed
-		keys = keys[:0]
-		for _, dst := range dsts {
-			keys = append(keys, dst+"|"+sni)
-		}
-	}
-	for _, key := range keys {
-		p.probes.cache[key] = hit
-	}
-	if len(p.probes.cache) > cacheLimit {
-		for k, v := range p.probes.cache {
-			if !v.fresh() {
-				delete(p.probes.cache, k)
-			}
-		}
-		for k := range p.probes.cache {
-			if len(p.probes.cache) <= cacheLimit {
-				break
-			}
-			if k != keys[0] {
-				delete(p.probes.cache, k)
-			}
-		}
-	}
-	delete(p.probes.underway, site)
-	p.probes.mu.Unlock()
-	running.hit = hit
-	close(running.done)
+	running.hit, running.ok = hit, true
 	return hit, true
+}
+
+// store keeps hit for key, dropping the stale entries, then any others, once the cache is past cacheLimit.
+func (p *Proxy) store(key string, hit probe) {
+	p.probes.cache[key] = hit
+	if len(p.probes.cache) <= cacheLimit {
+		return
+	}
+	for k, v := range p.probes.cache {
+		if !v.fresh() {
+			delete(p.probes.cache, k)
+		}
+	}
+	for k := range p.probes.cache {
+		if len(p.probes.cache) <= cacheLimit {
+			break
+		}
+		if k != key {
+			delete(p.probes.cache, k)
+		}
+	}
+}
+
+// forget drops dst's probe for sni, for an address that stopped answering since.
+func (p *Proxy) forget(dst, sni string) {
+	p.probes.mu.Lock()
+	delete(p.probes.cache, dst+"|"+sni)
+	p.probes.mu.Unlock()
 }
 
 // inside is whether every universe lies inside [from + Margin, until - Margin].

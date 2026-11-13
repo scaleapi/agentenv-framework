@@ -53,22 +53,10 @@ func clientHello(r *bufio.Reader, deadline time.Time) ([]byte, error) {
 
 // parseHello is the server name and the ALPN protocols a ClientHello message offers.
 func parseHello(hello []byte) (string, []string, error) {
-	if len(hello) < 4 || hello[0] != 1 {
-		return "", nil, errors.New("not a ClientHello")
+	p, err := helloExtensions(hello)
+	if err != nil {
+		return "", nil, err
 	}
-	p := 4 + 2 + 32
-	if len(hello) < p+1 {
-		return "", nil, errors.New("short ClientHello")
-	}
-	p += 1 + int(hello[p])
-	if len(hello) < p+2 {
-		return "", nil, errors.New("short ClientHello")
-	}
-	p += 2 + int(binary.BigEndian.Uint16(hello[p:]))
-	if len(hello) < p+1 {
-		return "", nil, errors.New("short ClientHello")
-	}
-	p += 1 + int(hello[p])
 	if len(hello) < p+2 {
 		return "", nil, nil
 	}
@@ -109,22 +97,10 @@ var dropped = map[uint16]bool{41: true, 42: true}
 // helloRecord is the ClientHello as one handshake record, without the extensions only a resumption with the proxy put
 // there, and the extensions it left out.
 func helloRecord(hello []byte) ([]byte, []uint16, error) {
-	if len(hello) < 4 || hello[0] != 1 {
-		return nil, nil, errors.New("not a ClientHello")
+	p, err := helloExtensions(hello)
+	if err != nil {
+		return nil, nil, err
 	}
-	p := 4 + 2 + 32
-	if len(hello) < p+1 {
-		return nil, nil, errors.New("short ClientHello")
-	}
-	p += 1 + int(hello[p])
-	if len(hello) < p+2 {
-		return nil, nil, errors.New("short ClientHello")
-	}
-	p += 2 + int(binary.BigEndian.Uint16(hello[p:]))
-	if len(hello) < p+1 {
-		return nil, nil, errors.New("short ClientHello")
-	}
-	p += 1 + int(hello[p])
 	body := append([]byte{}, hello[4:p]...)
 	var gone []uint16
 	if len(hello) >= p+2 {
@@ -154,4 +130,27 @@ func helloRecord(hello []byte) ([]byte, []uint16, error) {
 	}
 	msg := append([]byte{1, byte(len(body) >> 16), byte(len(body) >> 8), byte(len(body))}, body...)
 	return append([]byte{22, 3, 1, byte(len(msg) >> 8), byte(len(msg))}, msg...), gone, nil
+}
+
+// helloExtensions is where a ClientHello message's extensions start, past its version, random, session id, cipher
+// suites and compression methods, each length checked against the message.
+func helloExtensions(hello []byte) (int, error) {
+	if len(hello) < 4 || hello[0] != 1 {
+		return 0, errors.New("not a ClientHello")
+	}
+	p := 4 + 2 + 32
+	for _, width := range []int{1, 2, 1} { // session id, cipher suites, compression methods
+		if len(hello) < p+width {
+			return 0, errors.New("short ClientHello")
+		}
+		n := int(hello[p])
+		if width == 2 {
+			n = int(binary.BigEndian.Uint16(hello[p:]))
+		}
+		p += width + n
+		if p > len(hello) {
+			return 0, errors.New("a ClientHello field overruns the message")
+		}
+	}
+	return p, nil
 }

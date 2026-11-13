@@ -351,7 +351,9 @@ func (p *Proxy) tunnel(conn net.Conn, br *bufio.Reader, host string, port int, d
 		if len(first) > 0 && first[0] == 22 {
 			row["mode"], row["decision"] = "splice", "routed"
 		}
-		p.splice(conn, br, dsts, row, start)
+		if !p.splice(conn, br, dsts, row, start) {
+			p.log(row)
+		}
 		return
 	}
 	conn.SetReadDeadline(time.Now().Add(HelloTimeout))
@@ -373,14 +375,27 @@ func (p *Proxy) tunnel(conn net.Conn, br *bufio.Reader, host string, port int, d
 		verifyName = strings.Trim(host, "[]")
 	}
 	armed, universes := p.Universe.View(time.Now())
-	decision := "real"
-	through := dsts
-	if armed {
-		seen, probed := p.validity(dsts, sni, verifyName, hello)
-		if seen.dst != "" {
-			through = []string{seen.dst} // the server the probe judged, not another of the name's
+	if !armed {
+		row["decision"], row["mode"] = "real", "splice"
+		if !p.splice(conn, br, dsts, row, start) {
+			p.log(row)
 		}
-		row["probed"], row["universes"] = probed, rounded(universes)
+		return
+	}
+	row["universes"] = rounded(universes)
+	// Each address in turn, by its own probe: one that doesn't answer is passed over, so the connection goes to a
+	// server whose own certificate decided it.
+	var unreachable []string
+	for _, dst := range dsts {
+		delete(row, "probe_error")
+		delete(row, "upstream_valid")
+		seen, probed := p.probeAt(dst, sni, verifyName, hello)
+		if seen.unreachable {
+			unreachable = append(unreachable, seen.problem)
+			continue
+		}
+		row["probed"] = probed
+		decision := "outside"
 		switch {
 		case seen.failed:
 			// a handshake only the client can finish, as one asking for its certificate: the client decides
@@ -389,29 +404,38 @@ func (p *Proxy) tunnel(conn net.Conn, br *bufio.Reader, host string, port int, d
 			decision, row["probe_error"] = "unverified", seen.problem
 		case inside(seen.from, seen.until, universes):
 			decision = "inside"
-		default:
-			decision = "outside"
 		}
 		if seen.verified {
 			row["upstream_valid"] = []int64{seen.from.Unix(), seen.until.Unix()}
 		}
+		row["decision"] = decision
+		var dialled bool
+		if decision == "inside" || decision == "probe_failed" {
+			row["mode"] = "splice"
+			dialled = p.splice(conn, br, []string{dst}, row, start)
+		} else {
+			row["mode"] = "intercept"
+			dialled = p.intercept(conn, br, dst, sni, verifyName, hello, row, start)
+		}
+		if dialled {
+			return
+		}
+		// it stopped answering since its probe: forget it, and go on to the next
+		p.forget(dst, sni)
+		unreachable = append(unreachable, fmt.Sprint(row["error"]))
+		delete(row, "error")
 	}
-	row["decision"] = decision
-	if decision == "real" || decision == "inside" || decision == "probe_failed" {
-		row["mode"] = "splice"
-		p.splice(conn, br, through, row, start)
-		return
-	}
-	row["mode"] = "intercept"
-	p.intercept(conn, br, dsts, sni, verifyName, hello, row, start)
+	row["error"] = truncate("upstream: no address answered: "+strings.Join(unreachable, "; "), 300)
+	p.log(row)
 }
 
-func (p *Proxy) splice(conn net.Conn, br *bufio.Reader, dsts []string, row map[string]any, start time.Time) {
+// splice relays the connection to the first of dsts that answers, untouched; false, with the error in row, when none
+// does.
+func (p *Proxy) splice(conn net.Conn, br *bufio.Reader, dsts []string, row map[string]any, start time.Time) bool {
 	up, dst, err := p.dialAny(dsts)
 	if err != nil {
 		row["error"] = truncate("upstream: "+err.Error(), 300)
-		p.log(row)
-		return
+		return false
 	}
 	defer up.Close()
 	row["dst"] = dst
@@ -428,18 +452,25 @@ func (p *Proxy) splice(conn net.Conn, br *bufio.Reader, dsts []string, row map[s
 	io.Copy(conn, up)
 	closeWrite(conn)
 	wg.Wait()
+	return true
 }
 
-func (p *Proxy) intercept(conn net.Conn, br *bufio.Reader, dsts []string, sni, verifyName string, hello []byte,
-	row map[string]any, start time.Time) {
-	uc, found, err := p.handshake(dsts, sni, verifyName, hello)
+// intercept hands the client a leaf of this computer's CA and relays the plaintext to dst over a handshake of the
+// proxy's own; false, with the error in row, when dst doesn't answer.
+func (p *Proxy) intercept(conn net.Conn, br *bufio.Reader, dst, sni, verifyName string, hello []byte,
+	row map[string]any, start time.Time) bool {
+	uc, found, err := p.handshake([]string{dst}, sni, verifyName, hello)
+	var unanswered dialError
+	if errors.As(err, &unanswered) {
+		row["error"] = truncate("upstream: "+err.Error(), 300)
+		return false
+	}
 	if err != nil {
 		row["error"] = truncate("upstream: "+err.Error(), 300)
 		p.log(row)
-		return
+		return true
 	}
 	defer uc.NetConn().Close()
-	dst := uc.NetConn().RemoteAddr().String()
 	row["dst"] = dst
 	row["alpn"], row["verified"], row["upstream_tls"] = found.ALPN, found.Verified, []string{found.Version, found.Cipher}
 	row["upstream_ms"] = time.Since(start).Milliseconds()
@@ -465,7 +496,7 @@ func (p *Proxy) intercept(conn net.Conn, br *bufio.Reader, dsts []string, sni, v
 	if err != nil {
 		row["error"] = truncate("leaf: "+err.Error(), 300)
 		p.log(row)
-		return
+		return true
 	}
 	row["minted"] = minted
 	config := &tls.Config{Certificates: []tls.Certificate{*cert}, SessionTicketsDisabled: true}
@@ -477,7 +508,7 @@ func (p *Proxy) intercept(conn net.Conn, br *bufio.Reader, dsts []string, sni, v
 	if err := client.Handshake(); err != nil {
 		row["error"] = truncate("client handshake: "+err.Error(), 300)
 		p.log(row)
-		return
+		return true
 	}
 	conn.SetDeadline(time.Time{})
 	row["handshake_ms"] = time.Since(start).Milliseconds()
@@ -495,6 +526,7 @@ func (p *Proxy) intercept(conn net.Conn, br *bufio.Reader, dsts []string, sni, v
 	client.Close()
 	uc.NetConn().Close()
 	<-done
+	return true
 }
 
 // peeked is a connection whose reads come through the reader that peeked its first bytes.

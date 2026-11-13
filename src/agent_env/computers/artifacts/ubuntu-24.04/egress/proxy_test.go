@@ -377,7 +377,7 @@ func TestTheProbeAndLeafCachesStayWithinTheirLimit(t *testing.T) {
 	}
 	p := &Proxy{Dial: func(string) (net.Conn, error) { return nil, fmt.Errorf("unreachable") }}
 	for i := 0; i < 10; i++ {
-		p.validity([]string{fmt.Sprintf("192.0.2.%d:443", i)}, "", "x", goHello(t, "x", nil))
+		p.probeAt(fmt.Sprintf("192.0.2.%d:443", i), "", "x", goHello(t, "x", nil))
 	}
 	if len(p.probes.cache) != 3 {
 		t.Fatalf("%d probes kept", len(p.probes.cache))
@@ -409,8 +409,8 @@ func TestAConnectionTheProbeLetsThroughGoesToTheServerItProbed(t *testing.T) {
 	if row["decision"] != "inside" || len(dialled) != 3 || !strings.HasPrefix(dialled[2], "127.0.0.1:") {
 		t.Fatalf("%v %v", row, dialled)
 	}
-	if _, ok := h.proxy.probes.cache[dialled[0]+"|example.com"]; ok {
-		t.Fatal("the address that didn't answer was cached as the site's")
+	if hit := h.proxy.probes.cache[dialled[0]+"|example.com"]; !hit.unreachable || hit.verified {
+		t.Fatalf("the address that didn't answer is cached as %+v", hit)
 	}
 }
 
@@ -423,12 +423,128 @@ func TestASlowProbeHoldsUpNoOtherSite(t *testing.T) {
 		return nil, fmt.Errorf("unreachable")
 	}}
 	hello := goHello(t, "x", nil)
-	p.validity([]string{"192.0.2.2:443"}, "", "x", hello)
-	go p.validity([]string{"192.0.2.1:443"}, "", "x", hello)
+	p.probeAt("192.0.2.2:443", "", "x", hello)
+	go p.probeAt("192.0.2.1:443", "", "x", hello)
 	time.Sleep(50 * time.Millisecond)
 	started := time.Now()
-	if _, probed := p.validity([]string{"192.0.2.2:443"}, "", "x", hello); probed || time.Since(started) > 100*time.Millisecond {
+	if _, probed := p.probeAt("192.0.2.2:443", "", "x", hello); probed || time.Since(started) > 100*time.Millisecond {
 		t.Fatalf("a cached site waited %s behind a slow one (probed again: %v)", time.Since(started), probed)
 	}
 	close(release)
+}
+
+// standIns resolves example.com to its addresses and dials each to the site unless it's down; both may change
+// between requests.
+type standIns struct {
+	mu        sync.Mutex
+	addresses []string
+	down      map[string]bool
+}
+
+func (s *standIns) set(down []string, addresses ...string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.addresses, s.down = addresses, map[string]bool{}
+	for _, a := range down {
+		s.down[a] = true
+	}
+}
+
+func newStandIns(h *harness, addresses ...string) *standIns {
+	s := &standIns{addresses: addresses, down: map[string]bool{}}
+	h.proxy.Resolve = func(context.Context, string) ([]netip.Addr, error) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		var out []netip.Addr
+		for _, a := range s.addresses {
+			out = append(out, netip.MustParseAddr(a))
+		}
+		return out, nil
+	}
+	h.proxy.Dial = func(dst string) (net.Conn, error) {
+		host, _, _ := net.SplitHostPort(dst)
+		s.mu.Lock()
+		down := s.down[host]
+		s.mu.Unlock()
+		if down {
+			return nil, fmt.Errorf("%s is down", host)
+		}
+		return net.DialTimeout("tcp", h.site.Listener.Addr().String(), DialTimeout)
+	}
+	return s
+}
+
+func TestAnAddressThatStopsAnsweringAfterItsProbeGivesWayToTheNext(t *testing.T) {
+	s := site(t, false)
+	now := float64(time.Now().Unix())
+	h := newHarness(t, s, fixedUniverse{armed: true, universes: []float64{now}}, true)
+	addresses := newStandIns(h, "198.51.100.1", "198.51.100.2")
+	if _, _, err := h.get("https", time.Now(), false); err != nil {
+		t.Fatal(err)
+	}
+	if row := h.lastRow(); !strings.HasPrefix(fmt.Sprint(row["dst"]), "198.51.100.1:") {
+		t.Fatalf("%v", row)
+	}
+	addresses.set([]string{"198.51.100.1"}, "198.51.100.1", "198.51.100.2")
+	if _, _, err := h.get("https", time.Now(), false); err != nil {
+		t.Fatal(err)
+	}
+	if row := h.lastRow(); !strings.HasPrefix(fmt.Sprint(row["dst"]), "198.51.100.2:") || row["decision"] != "inside" {
+		t.Fatalf("%v", row)
+	}
+}
+
+func TestAnAddressThatDidntAnswerLeavesANewAddressToItsOwnProbe(t *testing.T) {
+	s := site(t, false)
+	u := float64(time.Date(2090, 6, 1, 0, 0, 0, 0, time.UTC).Unix())
+	h := newHarness(t, s, fixedUniverse{armed: true, universes: []float64{u}}, true)
+	addresses := newStandIns(h)
+	addresses.set([]string{"198.51.100.1"}, "198.51.100.1")
+	if _, _, err := h.get("https", time.Date(2090, 6, 1, 0, 0, 0, 0, time.UTC), false); err == nil {
+		t.Fatal("reached a site none of whose addresses answer")
+	}
+	addresses.set([]string{"198.51.100.1"}, "198.51.100.1", "198.51.100.2")
+	if _, _, err := h.get("https", time.Date(2090, 6, 1, 0, 0, 0, 0, time.UTC), false); err != nil {
+		t.Fatal(err)
+	}
+	row := h.lastRow()
+	if !strings.HasPrefix(fmt.Sprint(row["dst"]), "198.51.100.2:") || row["mode"] != "intercept" || row["decision"] != "outside" {
+		t.Fatalf("the new address wasn't judged by its own certificate: %v", row)
+	}
+}
+
+func TestAClientHelloWhoseFieldsOverrunItIsRefusedNotPanickedOn(t *testing.T) {
+	hello := goHello(t, "example.com", nil)
+	p := 4 + 2 + 32
+	p += 1 + int(hello[p])
+	p += 2 + int(hello[p])<<8 | int(hello[p+1])
+	bad := append([]byte{}, hello...)
+	bad[p] = 0xff // compression methods' length, past the message's end
+	bad = bad[:p+3]
+	if _, _, err := parseHello(bad); err == nil {
+		t.Fatal("parseHello took it")
+	}
+	if _, _, err := helloRecord(bad); err == nil {
+		t.Fatal("helloRecord took it")
+	}
+}
+
+func TestAProbeThatPanicsLeavesNoOneWaitingOnIt(t *testing.T) {
+	p := &Proxy{Dial: func(string) (net.Conn, error) { panic("dial") }}
+	hello := goHello(t, "x", nil)
+	probe := func() (panicked bool) {
+		defer func() { panicked = recover() != nil }()
+		p.probeAt("192.0.2.9:443", "", "x", hello)
+		return false
+	}
+	if !probe() {
+		t.Fatal("the probe didn't panic")
+	}
+	done := make(chan bool)
+	go func() { done <- probe() }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a second probe waited on the one that panicked")
+	}
 }
