@@ -667,8 +667,9 @@ class NamespaceDocumentStore(RoutingDocumentStore):
             raise ConfigError(f"the namespace resolver placed this run in {namespace!r}, which no [namespaces] table configures")
         return namespace
 
-    def _pinned(self, collection: str, filter: Filter, *, fresh: bool = False) -> Optional[str]:
-        """The one namespace every id the filter pins is in: by ``id`` for an entity, by an owner field for a record."""
+    def _pinned_namespaces(self, collection: str, filter: Filter, *, fresh: bool = False) -> Optional[list[Optional[str]]]:
+        """The namespaces of the ids the filter pins, None for an id the resolver places in none: by ``id`` for an
+        entity, by the first owner field pinning one for a record. None when it pins no id."""
         fields = ("id",) if is_entity_collection(collection) else _NAMESPACE_OWNER_FIELDS
         for field in fields:
             values: list[Any] = []
@@ -677,10 +678,15 @@ class NamespaceDocumentStore(RoutingDocumentStore):
                     values.append(pred.value)
                 elif isinstance(pred, In):
                     values.extend(pred.values)
-            namespaces = {self._namespace_of(value, fresh=fresh) for value in values}
-            if values and len(namespaces) == 1 and (namespace := namespaces.pop()) is not None:
-                return namespace
+            namespaces = list(dict.fromkeys(self._namespace_of(value, fresh=fresh) for value in values))
+            if values and namespaces != [None]:
+                return namespaces
         return None
+
+    def _pinned(self, collection: str, filter: Filter, *, fresh: bool = False) -> Optional[str]:
+        """The one namespace every id the filter pins is in, or None."""
+        namespaces = self._pinned_namespaces(collection, filter, fresh=fresh)
+        return namespaces[0] if namespaces is not None and len(namespaces) == 1 else None
 
     def _visible(self) -> list[DocumentStore]:
         """The stores an unplaced read sees, the running task's namespace first."""
@@ -689,8 +695,16 @@ class NamespaceDocumentStore(RoutingDocumentStore):
         return [*([self.namespaces[run]] if run else []), self.configured, *(self.namespaces[name] for name in opened)]
 
     def _readers(self, collection: str, filter: Filter) -> list[DocumentStore]:
-        pinned = self._pinned(collection, filter)
-        return [self.namespaces[pinned]] if pinned is not None else self._visible()
+        """The stores of the namespaces the filter's ids are in, an unplaced id's being those an unplaced read sees."""
+        namespaces = self._pinned_namespaces(collection, filter)
+        if namespaces is None:
+            return self._visible()
+        stores: list[DocumentStore] = []
+        for namespace in namespaces:
+            for store in ([self.namespaces[namespace]] if namespace is not None else self._visible()):
+                if all(store is not held for held in stores):
+                    stores.append(store)
+        return stores
 
     def _read(self, store: DocumentStore, read: Callable[[], _T]) -> _T:
         return read()

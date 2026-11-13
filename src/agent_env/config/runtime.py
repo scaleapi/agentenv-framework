@@ -565,6 +565,16 @@ class Config:
                     dict(section), NamespaceResolver, secret_resolver=self._resolve_secret))
             return self._namespaced["resolver"][1]
 
+    def _writing_namespace(self, entity_id: str) -> Optional[str]:
+        """The namespace ``entity_id``'s objects are written to: its own, else the running task's. A run in one
+        namespace may not write another's, so this refuses before any bytes are uploaded."""
+        from agent_env.store import routing
+
+        placed, run = self.namespace_of(entity_id, fresh=True), self.run_namespace()
+        if placed is not None and run is not None and placed != run:
+            raise routing.NamespaceWriteError(f"a run in {run!r} can't write {entity_id!r}, which is in {placed!r}")
+        return placed or run
+
     def _checked(self, namespace: Optional[str], what: str) -> Optional[str]:
         if namespace is not None and namespace not in self.configured_namespaces():
             raise ConfigError(f"the namespace resolver placed {what!r} in {namespace!r}, which no [namespaces] table configures")
@@ -795,7 +805,7 @@ class Config:
         from agent_env.store import routing
         from agent_env.store.ids import is_local_id
 
-        if (namespace := self.namespace_of(entity_id, fresh=True) or self.run_namespace()) is not None:
+        if (namespace := self._writing_namespace(entity_id)) is not None:
             return self.namespace_object_store(namespace)
         configured, local = self._namespace_stores("object")
         if local is None:
@@ -828,7 +838,7 @@ class Config:
         from agent_env.store import routing
         from agent_env.store.ids import is_local_id
 
-        namespace = self.namespace_of(entity_id, fresh=True) or self.run_namespace()
+        namespace = self._writing_namespace(entity_id)
         owner = self._namespace_owning(object_url)
         if namespace != owner and namespace is not None:
             raise ValueError(f"{entity_id!r} keeps its objects in the {namespace!r} namespace's store, not {object_url!r}")

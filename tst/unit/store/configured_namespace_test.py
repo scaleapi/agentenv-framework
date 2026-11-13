@@ -10,7 +10,7 @@ from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.store import get_artifact_store
 from agent_env.config import get_config, reset_config
 from agent_env.config.errors import ConfigError
-from agent_env.store import Filter, LocalSqliteDocumentStore, UpdateSpec
+from agent_env.store import Filter, In, LocalSqliteDocumentStore, UpdateSpec
 from agent_env.store.ids import id_bases, validate_namespace_name
 from agent_env.store.namespace_resolver import NamespaceResolver, TableNamespaceResolver
 from agent_env.store.object_store import LocalFilesystemObjectStore, ObjectStore
@@ -258,6 +258,27 @@ def test_a_run_writes_new_bare_entities_to_its_namespace_but_no_new_version_of_a
 
     assert _ids(team, "artifacts") == {"ti_1__recording"}
     assert _ids(shared, "artifacts") == {"shared-file"}
+
+
+def test_a_read_of_ids_in_several_stores_finds_each(stores):
+    router, _, _ = stores
+    router.insert("artifacts", {"id": "shared-file", "version": 1, "type": "file"})
+    router.insert("artifacts", {"id": TEAM_ENV, "version": 1, "type": "file"})
+    router.insert("artifacts", {"id": OTHER_ENV, "version": 1, "type": "file"})
+
+    found = router.query("artifacts", Filter().where("id", In(["shared-file", TEAM_ENV, OTHER_ENV])))
+    assert {doc["id"] for doc in found} == {"shared-file", TEAM_ENV, OTHER_ENV}
+    found = router.latest_per_id("artifacts", Filter().where("id", In([TEAM_ENV, "shared-file"])))
+    assert {doc["id"] for doc in found} == {TEAM_ENV, "shared-file"}
+
+
+def test_a_run_uploads_no_bytes_for_another_namespaces_entity(configured, tmp_path):
+    with run_scope(TEAM_TASK):
+        with pytest.raises(NamespaceWriteError, match="which is in 'team-b'"):
+            FileArtifact.put_bytes(OTHER_ENV + "__f", description="d", filename="f.txt", content=b"x")
+        with pytest.raises(NamespaceWriteError, match="which is in 'team-b'"):
+            configured.check_object_url(OTHER_ENV, configured.namespace_object_store("team-b").object_url("y"))
+    assert list((tmp_path / "restricted").rglob("f.txt")) == []
 
 
 def test_a_run_may_update_a_shared_entity(stores):
