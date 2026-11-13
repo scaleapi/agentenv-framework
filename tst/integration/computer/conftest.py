@@ -7,6 +7,7 @@ composed once for a module's tests;
 ``cdp_clients``, Playwright and Puppeteer installed to connect to a CDP address. A compose's build of an image waits for
 another test worker's build of the same tag."""
 
+import ast
 import fcntl
 import hashlib
 import logging
@@ -14,6 +15,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import uuid
 from pathlib import Path, PurePosixPath
 
@@ -32,7 +34,7 @@ from agent_env.config import configure, reset_config
 from agent_env.env import Env
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
-from agent_env.env.envs.computer.utils import builder
+from agent_env.env.envs.computer.utils import builder, inside
 from agent_env.providers.sandbox_providers.host_images import host_platform
 from agent_env.store.object_store.local.grant_server import grant_server
 from agent_env.store.routing import namespace_routing
@@ -293,3 +295,59 @@ def multi_env(items, *computers, websites=()) -> MultiEnv:
     """A multi env named office of the ``items`` MCP server, ``websites`` and ``computers``, under a local id."""
     return MultiEnv.put(id=f"@local/~/office-{uuid.uuid4().hex[:8]}/office", mcp_server_envs=[items],
                         website_envs=list(websites), computer_envs=list(computers), name="office")
+
+
+class UniverseClock:
+    """A deployed computer's clock page, written as its follower's user, as its follower writes it, and what the
+    session reads of it."""
+
+    def __init__(self, deployed):
+        self.container = computer_container(deployed.sandbox_id)
+        self.page = None
+
+    def set(self, universe: float, rate: float) -> dict:
+        """The page written to ``universe`` at ``rate``: the write's own answer, its rate, and when it started."""
+        started = time.time()
+        out = subprocess.run(["docker", "exec", "-u", FOLLOWER_USER, self.container, "python3", PAGE_WRITER, "set",
+                              repr(universe), repr(rate)], capture_output=True, text=True, check=True).stdout
+        self.page = ast.literal_eval(out.strip())
+        self.page.update(rate=rate, started=started)
+        return self.page
+
+    def advance(self, seconds: float) -> dict:
+        return self.set(self.now() + seconds, self.page["rate"])
+
+    def rate(self, rate: float) -> dict:
+        return self.set(self.now(), rate)
+
+    def now(self, real: float | None = None) -> float:
+        """The universe at real time ``real`` (now by default), as the page has it."""
+        real_ns = (time.time() if real is None else real) * 1e9
+        return (self.page["universe_ns"] + max(0.0, real_ns - self.page["anchor_ns"]) * self.page["rate"]) / 1e9
+
+    async def read(self, deployed) -> float | bool:
+        """The session's ``date``, when it's the universe between the moments before and after it ran (a few ms either
+        side for the two machines' reads of the clock); False otherwise."""
+        start = time.time()
+        value = float(await session_run(deployed, "date +%s.%N"))
+        end = time.time()
+        rate = self.page["rate"]
+        return value if self.now(start) - 0.01 * max(rate, 1) <= value <= self.now(end) + 0.01 * max(rate, 1) else False
+
+
+def computer_container(sandbox_id: str) -> str:
+    """A deployed computer's container, the one of its sandbox's (each named for the sandbox) holding the clock
+    page's writer."""
+    listed = subprocess.run(["docker", "ps", "-q", "--filter", f"name={sandbox_id}"],
+                            capture_output=True, text=True, check=True).stdout.split()
+    for container in listed:
+        if subprocess.run(["docker", "exec", container, "test", "-e", PAGE_WRITER]).returncode == 0:
+            return container
+    raise AssertionError(f"no container of sandbox {sandbox_id} has {PAGE_WRITER}: {listed}")
+
+
+async def session_run(deployed, command: str) -> str:
+    """What ``command`` prints, run in the deployed computer's session through its driver; it must succeed."""
+    ran = await inside.run(deployed, ["sh", "-c", command], timeout_s=30)
+    assert ran["exit_code"] == 0, ran
+    return ran["stdout"].strip()

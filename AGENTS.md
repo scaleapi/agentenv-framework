@@ -45,6 +45,7 @@ or one of them only where it is used.
 | `make int-test-slow` | the `int_test_slow` tests, serially (they build the same Docker tags from module fixtures and race under xdist) |
 | `make installer-test` | `tst/installer`: `plugin add` / `remove` through the real pip, uv and pipx, offline against wheels built from the checkout, and the container user journey (`python:3.12-slim`, `--network none`) with the PEP 668 refusal; needs uv, pipx and Docker |
 | `make clock-test` | `tst/clock`: agent-env's libfaketime (`src/agent_env/computers/artifacts/ubuntu-24.04/clock`) and stock 0.9.12 built in an Ubuntu 24.04 image for this machine's Docker, and its gates run there: every wait API in C, Python, Java and Node at several rates, jumps, cancelled waits, timerfd duplicates, condvar and semaphore stress, the waits again with `futex_waitv` refused (as before Linux 5.16 and under gVisor), a stalled writer, a dead one, torn reads, the marker, the environment race, forks while another thread closes a timerfd, the TLS shim's certificate checks on real time (curl, Python and `openssl s_client` at 182 days back: live sites verify, expired and untrusted certificates don't; and two copies of OpenSSL in one process, the system's 3.0 and a 1.1, each checking with its own), and Chromium launched 40 times with it and 10 with stock, side by side, lateness held to `tst/clock/bounds.py`; needs Docker, and fetches Chrome's archive, upstream's tarball and OpenSSL 1.1.1w's once into `AGENTENV_TEST_CLOCK_CACHE` |
+| `make egress-test` | the base computer's egress proxy (`src/agent_env/computers/artifacts/ubuntu-24.04/egress`, Go): `gofmt`, `go vet` and `go test -race` in the Go image its Dockerfile builds with; needs Docker, not Go |
 | `make trl-test` | `tst/trl`: one `GRPOTrainer` step on CPU through `agent_env.training.trl`, with a tiny model from the Hub; needs trl and CPU torch, which the `dev` extra leaves out |
 | `make nemo-gym-test` | `tst/nemo_gym`: rollouts through `agent_env.training.nemo_gym`'s resources server in-process; needs the `nemo-gym` extra, on Python 3.13.14 or later, which the `dev` extra leaves out (`uv sync --extra dev --extra nemo-gym`) |
 | `make verl-test` | `tst/verl`: rows played through `agent_env.training.verl`'s agent loop on verl itself, with Qwen3's tokenizer from the Hub and a stand-in rollout server; needs verl and CPU torch, which the `dev` extra leaves out |
@@ -419,8 +420,8 @@ A merge into `main` needs an approving review from a code owner (`CODEOWNERS`), 
 resolved, and the checks the `main` ruleset requires: `unit`, `integration-local` and
 `integration-local-slow`. The other checks below run on every pull request too and are expected to
 pass, but a failing one does not block the merge.
-`.github/workflows/local-backends.yml` runs `unit`, `ui`, `integration-local`, `integration-local-slow`,
-`integration-local-gateway` (the slow tier's `gateway_test.py`, run beside the rest of it) and
+`.github/workflows/local-backends.yml` runs `unit`, `ui`, `egress` (`make egress-test`), `integration-local`,
+`integration-local-slow`, `integration-local-gateway` (the slow tier's `gateway_test.py`, run beside the rest of it) and
 `installer`. The slow tier runs on twelve runners (`integration-local-slow (1/12)` to `(12/12)`), the
 gateway tests on five, and the unit and installer tiers on two each; `unit`, `integration-local-slow`,
 `integration-local-gateway` and `installer` each pass when all of their shards do. The Python jobs install from `uv.lock` (public PyPI only), with the uv that

@@ -2,9 +2,11 @@ package main
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -83,5 +85,28 @@ func TestAClientMayCheckAgainstTheUniverseItLeftForHoldAfterAChange(t *testing.T
 	}
 	if armed, _ := view(unarmed, past, now.Add(-2*Hold), now); armed {
 		t.Fatal("past Hold, the universe left still counts")
+	}
+}
+
+// golden is a page the follower's writer wrote (clockpage.encode), as testdata keeps it.
+func golden(t *testing.T, name string) []byte {
+	text, err := os.ReadFile(filepath.Join("testdata", "page-"+name+".hex"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := hex.DecodeString(strings.TrimSpace(string(text)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func TestThePagesTheFollowersWriterWritesReadAsTheUniverseTheyHold(t *testing.T) {
+	s, ok := readPage(golden(t, "armed"))
+	if !ok || !s.Armed || s.V != 1577836800 || s.Rate != 2 || math.Abs(s.Anchor-1794000000.123456789) > 1e-6 {
+		t.Fatalf("armed: %+v %v", s, ok)
+	}
+	if s, ok := readPage(golden(t, "unarmed")); !ok || s != unarmed {
+		t.Fatalf("unarmed: %+v %v", s, ok)
 	}
 }

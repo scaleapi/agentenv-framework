@@ -1,14 +1,17 @@
 """The ubuntu-24.04 base's egress proxy agrees with the rest of the base and with site routing: its certificates span
 the window routed sites' do, root's supervisord runs it as its own user, init boots it before that supervisord starts,
-every session program trusts its CA through agentenv's trust files as the local provider names them, and a login
-shell gets the session's settings."""
+every session program trusts its CA through agentenv's trust files as the local provider names them, the session's
+proxy is the address it listens on, a login shell gets the session's settings, and the clock pages its Go reader is
+tested on are the bytes the follower's writer writes."""
 from __future__ import annotations
 
 import configparser
+import importlib.util
 import re
 import shlex
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import agent_env
 from agent_env.env.envs.computer.utils import sites
@@ -66,3 +69,21 @@ def test_a_login_shell_gets_the_proxy_settings_every_session_program_gets():
     assert "-Dhttps.proxyPort=3128" in session["JAVA_TOOL_OPTIONS"]
     assert session["NO_PROXY"].split(",") == session["JAVA_TOOL_OPTIONS"].split("nonProxyHosts=")[1].split("|")
     assert {key: session[key] for key in LOCAL_TRUST_ENV} == LOCAL_TRUST_ENV
+
+
+def test_the_session_goes_out_through_the_address_the_proxy_listens_on():
+    listen = re.search(r'Listen\s*=\s*"([^"]+)"', (EGRESS / "main.go").read_text()).group(1)
+
+    assert urlsplit(_session_environment()["HTTPS_PROXY"]).netloc == listen
+
+
+def test_the_pages_the_proxy_is_tested_on_are_the_ones_the_followers_writer_writes():
+    spec = importlib.util.spec_from_file_location("clockpage_written", BASE / "clock" / "clockpage.py")
+    page = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(page)
+    golden = {name: bytes.fromhex((EGRESS / "testdata" / f"page-{name}.hex").read_text().strip())
+              for name in ("armed", "unarmed")}
+
+    assert golden == {
+        "armed": page.encode(4, 1577836800_000000000, 1794000000_123456789, 2.0, 1, 7, 5_000_000_000, 5_000_000_000),
+        "unarmed": page.encode(2, 0, 0, 1.0, 0, 3, 0, 0)}

@@ -19,8 +19,8 @@ from agent_env.env.envs.computer.utils import inside
 from agent_env.store.routing import namespace_routing
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
-from tst.integration.computer.clock_desktop_test import _Clock, _container
-from tst.integration.computer.conftest import EGRESS, EGRESS_USER, FOLLOWER_BACK_S, docker, kill_program
+from tst.integration.computer.conftest import (EGRESS, EGRESS_USER, FOLLOWER_BACK_S, UniverseClock, computer_container,
+                                               docker, kill_program)
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
@@ -116,8 +116,8 @@ async def _status(deployed, command: str) -> str:
 
 
 def _egress_rows(deployed) -> list[dict]:
-    log = subprocess.run(["docker", "exec", _container(deployed), "cat", "/var/log/agentenv-root/egress.log"],
-                         capture_output=True, text=True).stdout
+    log = subprocess.run(["docker", "exec", computer_container(deployed.sandbox_id), "cat",
+                          "/var/log/agentenv-root/egress.log"], capture_output=True, text=True).stdout
     return [json.loads(line) for line in log.splitlines() if line.startswith("{")]
 
 
@@ -127,7 +127,7 @@ async def test_java_node_and_curl_reach_a_live_site_through_it_with_the_universe
         deployed = await Env.get(egress_desktop.id).deploy()
         context = TaskStepContext(deployed_envs=[deployed])
         try:
-            _Clock(deployed).set(time.time() - 182 * DAY, 1)
+            UniverseClock(deployed).set(time.time() - 182 * DAY, 1)
             await asyncio.sleep(2)  # each program maps the page the next time it reads the clock, within a second
             through = {client: await _status(deployed, command) for client, command in CLIENTS.items()}
             direct = {client: await _status(deployed, f"{NO_PROXY} {command}") for client, command in CLIENTS.items()
@@ -161,7 +161,7 @@ async def test_fresh_handshakes_through_week_jumps_with_the_universe_a_month_on_
         deployed = await Env.get(egress_desktop.id).deploy()
         context = TaskStepContext(deployed_envs=[deployed])
         try:
-            clock = _Clock(deployed)
+            clock = UniverseClock(deployed)
             clock.set(time.time() + 30 * DAY, 1)
             await asyncio.sleep(2)
             await inside.run(deployed, ["sh", "-c", f"setsid sh -c '{FETCH_LOOP}' loop {' '.join(sites)} "

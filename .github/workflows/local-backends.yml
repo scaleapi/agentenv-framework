@@ -25,6 +25,18 @@ env:
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
 jobs:
+  # The base computer's egress proxy (src/agent_env/computers/artifacts/ubuntu-24.04/egress/): gofmt, go vet and its
+  # tests under the race detector, in the Go image its Dockerfile builds with, so a failing Go test fails here rather
+  # than as a broken base image in the slow tier.
+  egress:
+    name: egress
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: gofmt, go vet and go test -race
+        run: make egress-test
+
   # The unit tier on two runners, AGENTENV_TEST_SHARD picking each one's share by the times in
   # tst/integration/slow_durations.json (tst/util/shards.py); unit passes when both shards do. The
   # lockfile and lint checks run on the first shard only.
