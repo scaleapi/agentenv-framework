@@ -101,9 +101,9 @@ def _builtin_registry() -> dict[str, type["TaskStep"]]:
     from agent_env.task_step.task_steps.snapshot_agent_state import SnapshotAgentStateTaskStep
     from agent_env.task_step.task_steps.snapshot_env import SnapshotEnvTaskStep
     from agent_env.task_step.task_steps.computer.snapshot_computer_env import SnapshotComputerEnvTaskStep
-    from agent_env.task_step.task_steps.osworld.deploy_controller import OSWorldDeployControllerTaskStep
-    from agent_env.task_step.task_steps.osworld.evaluate import OSWorldEvaluateTaskStep
-    from agent_env.task_step.task_steps.osworld.initialize import OSWorldInitializeTaskStep
+    from agent_env.task_step.task_steps.computer.osworld.deploy_controller import OSWorldDeployControllerTaskStep
+    from agent_env.task_step.task_steps.computer.osworld.evaluate import OSWorldEvaluateTaskStep
+    from agent_env.task_step.task_steps.computer.osworld.initialize import OSWorldInitializeTaskStep
     from agent_env.task_step.task_steps.peer_agents import PeerAgentsTaskStep
     from agent_env.task_step.task_steps.verifiers.verify_sandbox import VerifySandboxTaskStep
     from agent_env.task_step.task_steps.verifiers.aggregate_verifiers import AggregateVerifiersTaskStep

@@ -18,10 +18,10 @@ from agent_env.artifact import DockerImageArtifact
 from agent_env.osworld import controller, guest
 from agent_env.task_step.context import PromptResponse, StepContextError, TaskStepContext
 from agent_env.task_step.registry import get_task_step_registry
-from agent_env.task_step.task_steps.osworld import deploy_controller as deploy_module
-from agent_env.task_step.task_steps.osworld.deploy_controller import OSWorldDeployControllerTaskStep
-from agent_env.task_step.task_steps.osworld.evaluate import OSWorldEvaluateTaskStep
-from agent_env.task_step.task_steps.osworld.initialize import OSWorldInitializeTaskStep
+from agent_env.task_step.task_steps.computer.osworld import deploy_controller as deploy_module
+from agent_env.task_step.task_steps.computer.osworld.deploy_controller import OSWorldDeployControllerTaskStep
+from agent_env.task_step.task_steps.computer.osworld.evaluate import OSWorldEvaluateTaskStep
+from agent_env.task_step.task_steps.computer.osworld.initialize import OSWorldInitializeTaskStep
 from tst.unit.osworld.helpers import (CONTROLLER, CONTROLLER_TOKEN, ENDPOINT, ENV_URL, TOKEN, Controller, card, computer,
                                       route_httpx)
 
@@ -481,5 +481,5 @@ def test_the_controller_is_found_in_the_runs_context_when_the_env_record_was_sto
 @pytest.mark.parametrize("message", ["codex CLI produced no output for 300s (stalled)", "command timed out after 30s",
                                      "Tool 'click' timed out after 60s", "model returned 500"])
 def test_a_stop_that_isnt_the_agents_budget_isnt_read_as_one(message):
-    from agent_env.task_step.task_steps.osworld.evaluate import budget_exhaustion
+    from agent_env.task_step.task_steps.computer.osworld.evaluate import budget_exhaustion
     assert budget_exhaustion(_prompt(error_type="AGENT_ERROR", error_message=message)) is None

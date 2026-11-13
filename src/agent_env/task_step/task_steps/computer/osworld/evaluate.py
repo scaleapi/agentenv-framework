@@ -14,7 +14,7 @@ from agent_env.entity.refs import EntityRef
 from agent_env.osworld import controller, guest
 from agent_env.task_step.context import PromptResponse, StepContextError, TaskStepContext
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
-from agent_env.task_step.task_steps.osworld.initialize import SETUP_ERROR_CHARS, run_setup
+from agent_env.task_step.task_steps.computer.osworld.initialize import SETUP_ERROR_CHARS, run_setup
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
 
 logger = logging.getLogger(__name__)
