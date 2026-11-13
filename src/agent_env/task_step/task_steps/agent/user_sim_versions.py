@@ -7,7 +7,9 @@ as tagged sections (with the opening request), the user's rules from ``permissio
 answer format. Its done line follows ``person["done_ends_run"]``, the multi-day wording when that's absent.
 ``answer`` renders one read as one labelled message, asks the user sim, and parses its answer; a malformed answer
 gets one retry in the same session. What earlier reads showed, and when the user last wrote, come from ``history``;
-keys of ``read`` it doesn't know are ignored.
+keys of ``read`` it doesn't know are ignored. A line the user sent with files (the opening's ``files``,
+``{"name", "description"}``) shows each after its text, "(you attached itinerary.pdf: Mom and Dad's flight
+itinerary)", or by name alone with no description: the user sim can't open them.
 ``rate`` asks the user sim, once the run is over, to rate the outcome 1-5 by its description's ``satisfaction``
 lines, with a one-line reason; None when the description has none, so a user without them is never asked.
 ``problems`` is the load check for the settings."""
@@ -50,6 +52,9 @@ PERMISSION_KINDS: dict[str, str] = {
 BROKEN_RULE_LINE = ('If it does an "ask first" or a "never" without asking and tells you, say once, briefly, that '
                     "you're not happy about it.")
 OPENING_LINE = 'Earlier you texted the assistant:\n"{text}"'
+# A file the user sent with a line, after its text: the user sim can't open it, so it's told what it attached.
+ATTACHED = "(you attached {name}: {description})"
+ATTACHED_NAME_ONLY = "(you attached {name})"
 
 OUTCOMES = ("reply", "no_reply", "done")
 ANSWER_LINE = '{"outcome": "reply" | "no_reply" | "done", "message": "...", "used": "..."}'
@@ -153,12 +158,19 @@ def rule_lines(permissions: dict) -> list[str]:
     return lines
 
 
+def attached_note(files: Optional[list[dict]]) -> str:
+    """What a line's ``files`` (``{"name", "description"}``) add after its text: nothing, when it has none."""
+    return "".join(" " + (ATTACHED.format(**f) if f.get("description") else ATTACHED_NAME_ONLY.format(name=f["name"]))
+                   for f in files or [])
+
+
 def _who(person: dict) -> list[str]:
     """Who they are, with the opening request right after the first line."""
     lines = list(person["description"].get("who_you_are") or [])
-    opening = (person.get("opening") or {}).get("text")
-    if opening:
-        lines.insert(min(1, len(lines)), OPENING_LINE.format(text=opening))
+    opening = person.get("opening") or {}
+    if opening.get("text"):
+        line = OPENING_LINE.format(text=opening["text"]) + attached_note(opening.get("files"))
+        lines.insert(min(1, len(lines)), line)
     return lines
 
 
@@ -319,7 +331,7 @@ def render(person: dict, history: list[dict], read: dict) -> Optional[str]:
             out.append(EARLIER_CUT)
     if own:
         out.append("\nYOU SENT YOUR AI ASSISTANT:")
-        out += [f"  [{_stamp(at(s), now)}] {s['text']}" for s in own]
+        out += [f"  [{_stamp(at(s), now)}] {s['text']}{attached_note(s.get('files'))}" for s in own]
     out.append("\nNEW FROM YOUR AI ASSISTANT (this is what you're answering):")
     out += [_message(m, _stamp(at(m), now)) for m in messages]
     out.append("\n" + CLOSING.format(first=_first(person)))

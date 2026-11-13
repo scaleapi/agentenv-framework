@@ -43,6 +43,7 @@ from agent_env.task_step.task_steps.notification_delivery import delivered_parts
 from agent_env.task_step.task_steps.post_turn_hooks import PostTurnHooks, run_post_turn_hooks, validate_hook_specs
 from agent_env.task_step.task_steps.agent import user_sim_versions
 from agent_env.task_step.task_steps.agent.user_sim_common import SATISFACTION_KEY, iso, person_of, task_zone, utc
+from agent_env.task_step.task_steps.agent.user_sim_common import attached, opening_text, recorded_opening
 from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import (
     agent_error_text,
     fetch_container_logs,
@@ -107,6 +108,28 @@ def _duplicates_prompt_text(parts: list[dict], prompt_text: Optional[str]) -> bo
     if prompt_text is None:
         return False
     return parts == [{"kind": "text", "text": prompt_text}]
+
+
+def apply_seed(parts: list[dict], seed: dict) -> list[dict]:
+    """Return a deep-copied parts list with seed substitutions applied.
+    `<key>` placeholders are replaced inside text parts' `text` and inside
+    file parts' `uri`/`name` (so tasks-as-templates with an object URL
+    ending `seeds/<seed_id>/x.png` resolve per-run)."""
+    if not seed:
+        return parts
+    out = copy.deepcopy(parts)
+    for p in out:
+        kind = p.get("kind")
+        if kind == "text":
+            for k, v in seed.items():
+                p["text"] = p["text"].replace(f"<{k}>", str(v))
+        elif kind == "file":
+            f = p.get("file") or {}
+            for field in ("uri", "name"):
+                if field in f and isinstance(f[field], str):
+                    for k, v in seed.items():
+                        f[field] = f[field].replace(f"<{k}>", str(v))
+    return out
 
 
 def _file_uris(parts: list[dict]) -> list[str]:
@@ -251,25 +274,7 @@ class PromptAgentTaskStep(TaskStep):
         return [{"kind": "text", "text": self.prompt}]
 
     def _apply_seed(self, parts: list[dict], seed: dict) -> list[dict]:
-        """Return a deep-copied parts list with seed substitutions applied.
-        `<key>` placeholders are replaced inside text parts' `text` and inside
-        file parts' `uri`/`name` (so tasks-as-templates with an object URL
-        ending `seeds/<seed_id>/x.png` resolve per-run)."""
-        if not seed:
-            return parts
-        out = copy.deepcopy(parts)
-        for p in out:
-            kind = p.get("kind")
-            if kind == "text":
-                for k, v in seed.items():
-                    p["text"] = p["text"].replace(f"<{k}>", str(v))
-            elif kind == "file":
-                f = p.get("file") or {}
-                for field in ("uri", "name"):
-                    if field in f and isinstance(f[field], str):
-                        for k, v in seed.items():
-                            f[field] = f[field].replace(f"<{k}>", str(v))
-        return out
+        return apply_seed(parts, seed)
 
     def to_dict(self) -> dict:
         base = super().to_dict()
@@ -428,12 +433,18 @@ class PromptAgentTaskStep(TaskStep):
                              "each reply at once); drop them from that step's persona")
         seed = context.metadata.get("seed", {})
         parts = self._apply_seed(self._effective_parts(), seed)
-        deployed_with = self._apply_seed([{"kind": "text", "text": record.get("opening") or ""}], seed)[0]["text"]
+        deployed_with = self._apply_seed(recorded_opening(record), seed)
         # TODO(FD-5495): the first message is written twice, here and as the user sim's opening_prompt; write it once.
-        if (_joined_text(parts) or "").strip() != deployed_with.strip():
+        if (_joined_text(parts) or "").strip() != opening_text(deployed_with).strip():
             # Its prompt quotes the opening it was deployed with as what the user sent; another one would contradict it.
             raise ValueError(f"prompt_agent '{self.id}': its prompt isn't the opening_prompt its user "
                              f"'{self.user_agent_name}' was deployed with; give both the same text")
+        mine, theirs = _files(parts), _files(deployed_with)
+        if mine != theirs:
+            # The user's prompt says what they attached; the agent must be sent those files, in that order.
+            raise ValueError(f"prompt_agent '{self.id}': its prompt's files ({_described(mine)}) aren't the files of "
+                             f"the opening_prompt its user '{self.user_agent_name}' was deployed with "
+                             f"({_described(theirs)}); give both the same files in the same order")
         clocks = context.metadata.get("clock_configurations") or []
         return record, task_zone(record, clocks, f"prompt_agent '{self.id}'")
 
@@ -1266,7 +1277,11 @@ class _BuiltInUserSim:
                     initial_parts: list[dict], clock_envs: list) -> _BuiltInUserSim:
         """The user ``record`` describes, already checked by ``_built_in_user_sim``, in time zone ``zone``."""
         text = _joined_text(initial_parts)
-        opening = {"at": await _clock_now(step, clock_envs), "text": text} if text else None
+        # What the user attached, as their prompt says: the opening's files, with their descriptions, which
+        # _built_in_user_sim checked are the ones this step sends.
+        files = attached(step._apply_seed(recorded_opening(record), context.metadata.get("seed", {})))
+        opening = ({"at": await _clock_now(step, clock_envs), "text": text, **({"files": files} if files else {})}
+                   if text else None)
         person = {**person_of(record), "max_replies": record.get("max_replies"), "time_zone": zone,
                   "opening": opening, "done_ends_run": True}
         return cls(step, context, person, opening, clock_envs)
@@ -1389,6 +1404,19 @@ _USER_SIM_TRAJECTORY_FETCH_SECONDS = 120.0
 def _agent_text(solver_message: str, agent_parts: Optional[list[dict]]) -> str:
     """Every text part the agent sent, joined, not only the last one solver_message keeps."""
     return _joined_text(agent_parts or []) or solver_message
+
+
+def _files(parts: list[dict]) -> list[dict]:
+    """The file parts' files, in order, as the match check on the user's opening compares them."""
+    return [p.get("file") or {} for p in parts if p.get("kind") == "file"]
+
+
+def _described(files: list[dict]) -> str:
+    """Files named for an error: each one's name, address and type, or its size when it is sent inline."""
+    def one(f: dict) -> str:
+        where = f.get("uri") or (f"{len(f['bytes'])} bytes inline" if isinstance(f.get("bytes"), str) else "?")
+        return " ".join(x for x in (f.get("name"), f"<{where}>", f.get("mimeType") or f.get("mime_type")) if x)
+    return "; ".join(map(one, files)) or "none"
 
 
 def _joined_text(parts: list[dict]) -> Optional[str]:

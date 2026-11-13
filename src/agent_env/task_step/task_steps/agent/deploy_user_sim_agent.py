@@ -10,6 +10,12 @@ The model is this step's ``step_params`` ``model``, else the run's ``user_model`
 --user-model``, a bundle's ``user_model``), else the step's ``model``. A run-wide ``a2a_agent_id`` is ignored, so the
 agent under test never plays the user; this step's own ``step_params`` can still change it.
 
+``opening_prompt`` is text, or a list of A2A text and file parts in ``prompt_agent``'s ``parts`` format, for a first
+message that attaches files (any type). A file part may carry a one-line ``metadata.description`` of what it is, for
+the user sim, which can't open files; the agent is sent the file without it. The parts are checked when the task loads:
+at least one text part with text, each part a valid text or file part, each description one line. The seed fills
+``<placeholder>``s in text and in a file's ``uri`` and ``name``, as in any prompt's parts.
+
 What always_on reads from the record (``metadata["user_sims"][agent_name]``):
 
 - ``name`` (the agent name), ``display_name`` and ``first_name`` (else the display name's first word): how the agent's
@@ -21,7 +27,10 @@ What always_on reads from the record (``metadata["user_sims"][agent_name]``):
   with no clock armed. The user's time zone is the task clock's.
 - ``description``, ``permissions``, ``keep_private``: in ``person``, for the reads. A description with
   ``satisfaction`` lines also gets the rating after the run (below).
-- ``opening_prompt``: the user's first message, which always_on sends; always_on has no prompt of its own.
+- ``opening`` (the opening's text parts, joined) and, for an ``opening_prompt`` given as parts, ``opening_parts``
+  (those parts, descriptions included): both as written, the seed not yet filled in. The user's first message, which
+  always_on sends, its text as one labelled line where its first text part was and each file in its place; always_on
+  has no prompt of its own.
 - ``prompt_set``: the system prompt and model are on the agent, so always_on sets neither; ``multi_day``: the done line
   the prompt was written with, which always_on refuses to run against a run of the other kind.
 - ``model``, ``model_source``, ``prompt_sha256``, ``user_version``, ``setup``: for the run's record.
@@ -34,20 +43,21 @@ The built-in user sim (``user_sim_versions``) is used directly; its interface, i
 
 ``person`` is ``{"key": name, "name", "first", "time_zone", "description", "permissions", "keep_private", "opening",
 "done_ends_run"}``, with ``time_zone`` the run's zone (the persona's, else the task clock's, else UTC) and ``opening`` the user's opening
-request, ``{"at": RFC 3339 UTC, "text"}``, so ``setup`` can write it into the system prompt (this step's has no
-``at``). The opening is also the first line of the first read's ``you_sent``. ``done_ends_run`` is set before
-``setup``, as each read has it, since the done line is in the system prompt; the built-in user sim uses the multi-day
-wording when it's missing.
+request, ``{"at": RFC 3339 UTC, "text"}``, with ``"files": [{"name", "description"}]`` when it attaches files (the
+description only when the part has one, the name its file's ``name``, else the last segment of its ``uri``), so
+``setup`` can write it into the system prompt (this step's has no ``at``). The opening is also the first line of the
+first read's ``you_sent``. ``done_ends_run`` is set before ``setup``, as each read has it, since the done line is in
+the system prompt; the built-in user sim uses the multi-day wording when it's missing.
 
 ``answer`` runs once per read, at the time the user would read. ``read`` is ``{"time": RFC 3339 UTC,
 "assistant_messages": [{"at", "text"}], "phone": [{"at", "channel", "text"}], "you_sent": [{"at", "text"}],
 "done_ends_run": bool}``: the agent's message_user texts since the last read, oldest first; what triggers sent
 ``user_phone`` since the last read, its sender in ``channel`` (``"Gmail · Carol Reyes (Mom)"``) as in the agent's
-alerts; the user's own lines (the opening request, ``user_says`` lines, ``final``) each at the time it was sent; never
-anything meant for the agent; and whether done ends the run (one-sitting) or is only recorded (multi-day). The user
-sim reads only after the agent has used message_user. ``history`` is every earlier ``{"read", "answer"}``, oldest
-first. ``ask(text)`` sends one turn to the user sim agent (one session per run) and returns ``{"text", "structured",
-"trajectory_url"}``, or ``{"text": None, "structured": None, "error"}``.
+alerts; the user's own lines (the opening request, with its ``files``, ``user_says`` lines, ``final``) each at the time
+it was sent; never anything meant for the agent; and whether done ends the run (one-sitting) or is only recorded
+(multi-day). The user sim reads only after the agent has used message_user. ``history`` is every earlier
+``{"read", "answer"}``, oldest first. ``ask(text)`` sends one turn to the user sim agent (one session per run) and
+returns ``{"text", "structured", "trajectory_url"}``, or ``{"text": None, "structured": None, "error"}``.
 
 ``answer`` returns ``{"outcome": "reply" | "no_reply" | "done", "message": str, "used": str | None}``, and may add
 ``input``, ``raw``, ``score``, ``schema_errors``, ``turns``, ``retried``, ``first_answer``, ``shown`` and
@@ -74,7 +84,8 @@ rating is no reply and doesn't count toward ``max_replies``; it is recorded in
 fails is recorded with its error and doesn't fail the run.
 
 prompt_agent with ``user_agent_name`` set to the agent this step deployed reads it with the same ``answer``, in one
-sitting: one read per agent reply, ``phone`` empty, ``done_ends_run`` true, its prompt this step's opening (user_sim.md).
+sitting: one read per agent reply, ``phone`` empty, ``done_ends_run`` true, its prompt this step's opening: the same
+text, and the same files in the same order once the seed is filled in (user_sim.md).
 """
 from __future__ import annotations
 
@@ -90,6 +101,7 @@ from agent_env.config import get_config
 from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.agent import user_sim_versions
+from agent_env.task_step.task_steps.agent.user_sim_common import attached, opening_parts, opening_problems, opening_text
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 
 logger = logging.getLogger(__name__)
@@ -187,7 +199,7 @@ class DeployUserSimAgentTaskStep(DeployAgentTaskStep):
                     "a2a_agent_version": FieldScope.TASK}
 
     def __init__(self, id: str, version: Optional[int], *, persona: Optional[dict] = None, model: Optional[str] = None,
-                 multi_day: Optional[bool] = None, opening_prompt: Optional[str] = None, **deploy: Any):
+                 multi_day: Optional[bool] = None, opening_prompt: Optional[str | list[dict]] = None, **deploy: Any):
         if deploy.get("system_prompt") is not None:
             raise ValueError(f"{self.type} '{id}': system_prompt is written from the persona and opening_prompt; don't set it")
         deploy.pop("system_prompt", None)
@@ -203,8 +215,7 @@ class DeployUserSimAgentTaskStep(DeployAgentTaskStep):
         if not isinstance(multi_day, bool):
             found.append("multi_day must be true or false: whether the run goes past the day it starts on")
         # Required: always_on starts the run from it, and refuses a user sim without one only after the deploy.
-        if not isinstance(opening_prompt, str) or not opening_prompt.strip():
-            found.append("opening_prompt is required: the user's first message, which always_on starts the run with")
+        found += opening_problems(opening_prompt)
         found += persona_problems(persona)
         if found:
             raise ValueError(f"{self.type} '{self.agent_name}': " + "; ".join(found))
@@ -239,19 +250,19 @@ class DeployUserSimAgentTaskStep(DeployAgentTaskStep):
     def person(self, context: TaskStepContext) -> dict:
         """The user as the built-in user sim's ``setup`` takes them, as always_on hands them over."""
         name = self.persona["display_name"]
-        opening = self._opening(context)
+        parts = self._opening(context)
+        text, files = opening_text(parts), attached(parts)
         return {"key": self.agent_name, "name": name, "first": self.persona.get("first_name") or name.split()[0],
                 "description": self.persona.get("description"), "permissions": self.persona.get("permissions"),
                 "keep_private": self.persona.get("keep_private"),
-                "opening": {"text": opening} if opening else None, "done_ends_run": not self.multi_day}
+                "opening": {"text": text, **({"files": files} if files else {})} if text else None,
+                "done_ends_run": not self.multi_day}
 
-    def _opening(self, context: TaskStepContext) -> Optional[str]:
-        """``opening_prompt`` with the run's ``<seed>`` placeholders filled in, as always_on fills its prompt's."""
-        text = self.opening_prompt
-        if text:
-            for key, value in (context.metadata.get("seed") or {}).items():
-                text = text.replace(f"<{key}>", str(value))
-        return text
+    def _opening(self, context: TaskStepContext) -> list[dict]:
+        """``opening_prompt`` as parts with the run's ``<seed>`` placeholders filled in, as always_on fills them."""
+        from agent_env.task_step.task_steps.prompt_agent import apply_seed
+
+        return apply_seed(opening_parts(self.opening_prompt), context.metadata.get("seed") or {})
 
     def _setup(self, context: TaskStepContext) -> dict:
         return user_sim_versions.setup(user_sim_versions.VERSION, self.person(context))
@@ -302,7 +313,9 @@ class DeployUserSimAgentTaskStep(DeployAgentTaskStep):
             "description": persona.get("description"), "permissions": persona.get("permissions"),
             "keep_private": persona.get("keep_private"), "schedule": persona.get("schedule"),
             "response_times": persona.get("response_times"), "max_replies": persona.get("max_replies"),
-            "opening": self.opening_prompt,
+            # The opening's text, as written; an opening with files also has its parts, as written.
+            "opening": opening_text(opening_parts(self.opening_prompt)),
+            **({"opening_parts": opening_parts(self.opening_prompt)} if isinstance(self.opening_prompt, list) else {}),
             "user_version": user_sim_versions.VERSION, "model": model, "model_source": source,
             "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(), "prompt_set": True,
             "multi_day": self.multi_day,

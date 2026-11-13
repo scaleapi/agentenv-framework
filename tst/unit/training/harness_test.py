@@ -272,6 +272,16 @@ def test_a_rows_prompt_with_no_step_prompt_is_the_named_user_sims_opening():
     assert harness._first_prompt(SimpleNamespace(steps=[user_sim("nora", "Find me a sofa."), unnamed])) == ""
 
 
+def test_a_rows_prompt_from_an_opening_with_files_is_its_text():
+    opening = [{"kind": "text", "text": "Find me a sofa."},
+               {"kind": "file", "file": {"uri": "s3://nora/room.jpg", "name": "room.jpg"}},
+               {"kind": "text", "text": "Something that fits this corner."}]
+    sim = SimpleNamespace(type="deploy_user_sim_agent", agent_name="nora", opening_prompt=opening)
+    always_on = SimpleNamespace(type="always_on", prompt=None, user_sim="nora")
+    assert harness._first_prompt(SimpleNamespace(steps=[sim, always_on])) == \
+        "Find me a sofa.\nSomething that fits this corner."
+
+
 def test_a_rows_prompt_skips_a_briefing_sent_to_the_user_sim():
     sim = SimpleNamespace(type="deploy_user_sim_agent", agent_name="nora", opening_prompt="Find a sofa.")
     briefing = SimpleNamespace(type="prompt_agent", agent_name="nora", prompt="You are Nora; stay in character.")
