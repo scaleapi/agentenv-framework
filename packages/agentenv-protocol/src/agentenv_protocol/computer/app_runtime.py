@@ -79,6 +79,9 @@ class AppRuntime:
         self.relaunch_on_crash = relaunch_on_crash
         self.launch_running = launch_running
         self.exits: set[asyncio.Future] = set()
+        #: Held by each launch or change of the app's data that must not overlap another (its data plane's ``turn``),
+        #: and by a relaunch after a crash.
+        self.turn = asyncio.Lock()
         self.started = time.time()
         self.launch_failed: Optional[str] = None
         self.checking: dict[str, asyncio.Future] = {}
@@ -152,8 +155,9 @@ class AppRuntime:
     def exited(self) -> bool:
         """Log that the app this server launched last ended on its own, with its exit code or the signal that ended
         it, unless the server stopped it; whether it did. With ``relaunch_on_crash``, one a signal or a failing code
-        ended is launched again, up to ``CRASH_RELAUNCHES`` times a boot, once what's left of it is stopped: a browser's
-        helpers outlive it for a moment, and while they run its session counts as the app running. One that exited
+        ended is launched again, up to ``CRASH_RELAUNCHES`` times a boot: holding the ``turn``, so no data call changes
+        its files meanwhile, unless something launched it since, and once what's left of it is stopped, as a browser's
+        helpers outlive it for a moment and while they run its session counts as the app running. One that exited
         cleanly was closed, and stays so."""
         if (pid := _recorded_pid()) is None:
             return False
@@ -166,16 +170,20 @@ class AppRuntime:
         code = await session.returncode(pid, EXIT_WAIT_S)
         self.log("exit", pid, **({} if code is None else
                                  {"signal": signal.Signals(-code).name} if code < 0 else {"code": code}))
-        if not (self.relaunch_on_crash and code and _recorded_pid() == pid):
+        if not (self.relaunch_on_crash and code):
             return
-        if (relaunched := sum(entry.get("cause") == "crash" for entry in self.launches())) >= CRASH_RELAUNCHES:
-            self.log("crash_relaunches_spent", pid, relaunched=relaunched)
-            return
-        try:
-            await session.stop(pid, STOP_TIMEOUT_S)
-            await self.launch_app("crash")
-        except Exception as e:
-            self.launch_failed = f"{type(e).__name__}: {e}"
+        async with self.turn:
+            launches = self.launches()
+            if next((entry["pid"] for entry in reversed(launches) if entry["event"] == "launch"), None) != pid:
+                return
+            if (relaunched := sum(entry.get("cause") == "crash" for entry in launches)) >= CRASH_RELAUNCHES:
+                self.log("crash_relaunches_spent", pid, relaunched=relaunched)
+                return
+            try:
+                await session.stop(pid, STOP_TIMEOUT_S)
+                await self.launch_app("crash")
+            except Exception as e:
+                self.launch_failed = f"{type(e).__name__}: {e}"
 
     def log(self, event: str, pid: int, **fields: Any) -> None:
         """Append ``event`` for the app's ``pid`` to its launch log, which outlives its server for the boot."""

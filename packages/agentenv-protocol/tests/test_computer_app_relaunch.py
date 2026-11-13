@@ -117,3 +117,36 @@ async def test_it_is_launched_again_at_most_crash_relaunches_times_a_boot(deskto
 
     assert len(desktop.launched) == 1 + CRASH_RELAUNCHES and not runtime.running()
     assert runtime.launches()[-1]["event"] == "crash_relaunches_spent"
+
+
+@pytest.mark.asyncio
+async def test_a_relaunch_after_a_crash_waits_for_the_data_call_that_holds_the_turn(desktop):
+    runtime = _runtime()
+    await runtime.launch_app("boot")
+    await runtime.turn.acquire()
+    desktop.running.discard(100)
+    desktop.codes[100] = -signal.SIGKILL
+
+    assert runtime.exited()
+    await asyncio.sleep(0.05)
+    during = list(desktop.launched)
+    runtime.turn.release()
+    await asyncio.gather(*runtime.exits)
+
+    assert (during, desktop.launched) == ([100], [100, 101])
+
+
+@pytest.mark.asyncio
+async def test_one_launched_again_since_its_crash_isnt_launched_once_more_for_it(desktop):
+    runtime = _runtime()
+    await runtime.launch_app("boot")
+    await runtime.turn.acquire()
+    desktop.running.discard(100)
+    desktop.codes[100] = -signal.SIGKILL
+
+    assert runtime.exited()
+    await runtime.launch_app("data/reset")
+    runtime.turn.release()
+    await asyncio.gather(*runtime.exits)
+
+    assert (desktop.launched, desktop.stopped) == ([100, 101], [])
