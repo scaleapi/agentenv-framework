@@ -8,6 +8,8 @@ answer format. Its done line follows ``person["done_ends_run"]``, the multi-day 
 ``answer`` renders one read as one labelled message, asks the user sim, and parses its answer; a malformed answer
 gets one retry in the same session. What earlier reads showed, and when the user last wrote, come from ``history``;
 keys of ``read`` it doesn't know are ignored.
+``rate`` asks the user sim, once the run is over, to rate the outcome 1-5 by its description's ``satisfaction``
+lines, with a one-line reason; None when the description has none, so a user without them is never asked.
 ``problems`` is the load check for the settings."""
 
 from __future__ import annotations
@@ -31,8 +33,10 @@ SECTIONS: tuple[tuple[str, str, str], ...] = (
     ("dont_mention", "DON'T MENTION THESE UNLESS THE ASSISTANT ASKS", "M"),
     ("phone", "WHAT YOU DO WITH YOUR EMAILS, TEXTS AND NOTIFICATIONS", "F"),
     ("when_done", "WHEN YOU'RE DONE", ""),
+    ("satisfaction", "HOW YOU'D RATE THE JOB (only when asked, once it's over)", "S"),
 )
 SECTION_KEYS = tuple(key for key, _, _ in SECTIONS)
+SATISFACTION = "satisfaction"  # the section the rating after the run goes by; without it there's no rating
 RULES_TITLE = "YOUR RULES FOR THE ASSISTANT (it has them in its notes)"
 PRIVATE_TITLE = "PRIVATE"
 RULES_AFTER = "decisions"
@@ -74,6 +78,20 @@ RETRY = "Your last answer wasn't in the required format. Answer again, only as J
 EARLIER_DAYS = 7
 EARLIER_MAX = 20
 EARLIER_CUT = "  (older messages not shown)"
+
+# The rating after the run (``rate``): asked only of a user whose description has ``satisfaction`` lines. Its answer
+# fits OUTPUT_FORMAT, which the agent was given at deploy, so the format is the same with or without a rating.
+SCORES = (1, 2, 3, 4, 5)
+RATING_LINE = '{"outcome": "done", "score": 1 | 2 | 3 | 4 | 5, "message": "...", "used": "..."}'
+RATING_OVER = "The job is over: your AI assistant won't see this, or anything you write from now on."
+RATING_UNREAD = "\nNEW FROM YOUR AI ASSISTANT (you haven't read this yet):"
+RATING_ASK = ("As {first}, rate how the job went, from everything you've seen: 5 if it was done perfectly, 3 if it "
+              "wasn't perfect but was fine, 1 if you'd have done it yourself; 2 and 4 are in between. HOW YOU'D RATE "
+              "THE JOB says what those mean for this job. Something you were never told was done doesn't count as "
+              "done.")
+RATING_ANSWER = ('In "message", give your reason in one line. In "used", write the tag of the line it rests on, or '
+                 '"none". Answer in JSON: ' + RATING_LINE)
+RATING_RETRY = "Your last answer wasn't in the required format. Answer again, only as JSON: " + RATING_LINE
 
 # The kinds of line the user sent; a you_sent item of any other kind (an alert, a nudge) is never shown as theirs.
 OWN_LINE_KINDS = frozenset({"opening", "user_says", "final"})
@@ -183,7 +201,8 @@ def problems(person: Any) -> list[str]:
             out.append(f"description has unknown sections {unknown}; the sections are {list(SECTION_KEYS)}")
         out += [f"description.{key} must be a list of non-empty lines" for key in SECTION_KEYS
                 if key in description and not _lines(description[key])]
-        if not any(_lines(description.get(key)) and description[key] for key in SECTION_KEYS):
+        if not any(_lines(description.get(key)) and description[key] for key in SECTION_KEYS
+                   if key != SATISFACTION):
             out.append("description is empty: write at least who they are")
     permissions = person.get("permissions")
     if permissions is not None and not isinstance(permissions, dict):
@@ -250,6 +269,11 @@ def _stamp(t: datetime, now: datetime) -> str:
     return f"{t.strftime('%a %b')} {t.day}, {_hm(t)}"
 
 
+def _message(m: dict, stamp: str) -> str:
+    """One of the assistant's messages: its time, then its text indented under it."""
+    return f"  [{stamp}]\n" + "\n".join("    " + line if line.strip() else "" for line in m["text"].strip().splitlines())
+
+
 def render(person: dict, history: list[dict], read: dict) -> Optional[str]:
     """The message the user sim gets for ``read``, or None when the assistant sent nothing. An item without ``at``
     shows at the time of the read it came in."""
@@ -297,8 +321,7 @@ def render(person: dict, history: list[dict], read: dict) -> Optional[str]:
         out.append("\nYOU SENT YOUR AI ASSISTANT:")
         out += [f"  [{_stamp(at(s), now)}] {s['text']}" for s in own]
     out.append("\nNEW FROM YOUR AI ASSISTANT (this is what you're answering):")
-    out += [f"  [{_stamp(at(m), now)}]\n" + "\n".join("    " + line if line.strip() else ""
-                                                      for line in m["text"].strip().splitlines()) for m in messages]
+    out += [_message(m, _stamp(at(m), now)) for m in messages]
     out.append("\n" + CLOSING.format(first=_first(person)))
     out.append("Answer in JSON: " + ANSWER_LINE)
     return "\n".join(out)
@@ -392,3 +415,76 @@ async def answer(version: str, person: dict, history: list[dict], read: dict,
 def _parsed(got: dict) -> dict:
     structured = got.get("structured")
     return parse(structured if isinstance(structured, dict) else got.get("text"))
+
+
+# ---- the rating after the run -------------------------------------------------------------------------------------
+def rates(person: dict) -> bool:
+    """Whether the user is asked to rate the run once it's over: when the description has ``satisfaction`` lines."""
+    description = person.get("description")
+    return isinstance(description, dict) and bool(description.get(SATISFACTION))
+
+
+def render_rating(person: dict, read: dict) -> str:
+    """The message that asks for the rating at ``read["time"]``, with the assistant's messages the user hasn't read
+    (``read["assistant_messages"]``, maybe none) before the ask."""
+    zone = ZoneInfo(person.get("time_zone") or "UTC")
+    now = _local(read["time"], zone)
+    out = [f"It's {now.strftime('%a, %b')} {now.day}, {_hm(now)}. {RATING_OVER}"]
+    messages = [m for m in read.get("assistant_messages") or [] if (m.get("text") or "").strip()]
+    if messages:
+        out.append(RATING_UNREAD)
+        out += [_message(m, _stamp(_local(m.get("at") or read["time"], zone), now)) for m in messages]
+    out.append("\n" + RATING_ASK.format(first=_first(person)))
+    out.append(RATING_ANSWER)
+    return "\n".join(out)
+
+
+def rating_problems(obj: Any) -> list[str]:
+    out = answer_problems(obj)
+    if out:
+        return out
+    if "score" not in obj:
+        return ["missing score"]
+    if obj["score"] not in SCORES:
+        out.append(f"score {obj['score']!r} is not one of {list(SCORES)}")
+    if not obj["message"].strip():
+        out.append("message must give the reason")
+    return out
+
+
+def parse_rating(raw: Any) -> dict:
+    """The rating as the step records it: ``score`` (1-5, None when malformed), ``reason``, ``used`` and
+    ``schema_errors``."""
+    obj = _object(raw)
+    errors = rating_problems(obj)
+    if errors:
+        return {"score": None, "reason": None, "used": None, "schema_errors": errors}
+    return {"score": obj["score"], "reason": obj["message"].strip(), "used": obj.get("used"), "schema_errors": []}
+
+
+async def rate(version: str, person: dict, read: dict, ask: Callable[[str], Awaitable[dict]]) -> Optional[dict]:
+    """The user's rating of the run once it's over, by their ``satisfaction`` lines: one ask, in the run's session,
+    with one retry when the answer is malformed; None, asking nothing, when the description has no such lines.
+    ``read`` is ``{"time": RFC 3339 UTC, "assistant_messages": [{"at", "text"}]}``, the messages the user hasn't read.
+    Returns ``score``, ``reason``, ``used``, ``schema_errors``, ``input``, ``raw``, ``retried``, ``turns`` and, after a
+    retry, ``first_answer``. The rating is never a reply: the caller records it and sends it nowhere."""
+    _check(version)
+    if not rates(person):
+        return None
+    text = render_rating(person, read)
+    got = await ask(text)
+    first = _parsed_rating(got)
+    if not first["schema_errors"] or got.get("error"):
+        return {**first, "input": text, "raw": got.get("text"), "retried": False, "turns": 1}
+    again = await ask(RATING_RETRY)
+    second = _parsed_rating(again)
+    if second["schema_errors"]:
+        second["schema_errors"] = ([f"first answer: {e}" for e in first["schema_errors"]]
+                                   + [f"answer after the retry: {e}" for e in second["schema_errors"]])
+    return {**second, "input": text, "raw": again.get("text"), "retried": True, "turns": 2,
+            "first_answer": {"raw": got.get("text"), "schema_errors": first["schema_errors"]}}
+
+
+def _parsed_rating(got: dict) -> dict:
+    structured = got.get("structured")
+    return parse_rating(structured if isinstance(structured, dict) else got.get("text"))
