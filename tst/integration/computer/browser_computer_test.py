@@ -389,7 +389,7 @@ async def test_its_cookies_local_storage_and_downloads_are_read_and_set_through_
 
 
 @pytest.mark.asyncio
-async def test_its_state_operations_hold_up_at_once_through_a_server_restart_and_fail_at_once_with_the_browser_gone(
+async def test_its_state_operations_hold_up_at_once_through_a_server_restart_and_answer_at_once_with_the_browser_killed(
         browser_computer):
     with namespace_routing():
         deployed = await Env.get(browser_computer.id).deploy()
@@ -555,7 +555,7 @@ async def test_each_start_tabs_page_sees_the_windows_size_from_its_first_script_
 
 
 @pytest.mark.asyncio
-async def test_its_data_calls_take_turns_a_server_restart_takes_a_load_and_with_the_browser_gone_they_fail_at_once(
+async def test_its_data_calls_take_turns_a_server_restart_takes_a_load_and_with_the_browser_killed_they_answer_at_once(
         browser_computer):
     with namespace_routing():
         deployed = await Env.get(browser_computer.id).deploy()
