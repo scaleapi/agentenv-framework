@@ -1,10 +1,10 @@
 """CDP addresses scoped to leases on a deployed chromium: steps lease buyer for ada and seller for bob, each signed in
-by its own cookie with a tab open; ada's address scoped to buyer sees only buyer's targets, the cross-origin iframe of
-a page there among them as its own target, and can't attach to seller's; bob isn't given an address to buyer; through
-the real clients, Playwright on buyer's address finds the lease as its default context, its cookie and tabs, and clicks
-inside the iframe, Puppeteer on seller's finds seller alone, and Playwright on the default address none of the leases'
-tabs; both leases' agents click in their iframes at once, both getting there; and the lease released closes its
-connections, saying so, and refuses its address after."""
+by its own cookie with a tab open; ada's address scoped to buyer sees only buyer's targets, the cross-origin iframe
+of a page there among them as its own target, and can't attach to seller's; bob isn't given an address to buyer;
+through the real clients, Playwright on buyer's address finds the lease as its default context, its cookie and tabs,
+and clicks inside the iframe and downloads a file from it, which the lease lists, Puppeteer on seller's finds seller
+alone, and Playwright on the default address none of the leases' tabs; both leases' agents click in their iframes at
+once, both getting there; and the lease released closes its connections, saying so, and refuses its address after."""
 
 import asyncio
 import itertools
@@ -27,13 +27,22 @@ SITE = "http://127.0.0.1:8791/"
 FRAME = "http://127.0.0.2:8792/frame"
 SERVE_S, WAIT_S, POLL_S = 900, 90.0, 0.5
 # Serves, on two loopback addresses for the seconds it's given, a page titled "frames" whose iframe is the other
-# address's /frame: a button that counts its presses in its body's data-clicked.
+# address's /frame: a button that counts its presses in its body's data-clicked, and a link to /file, a download.
 SERVE_FRAMES = r"""import http.server, sys, threading, time
 PAGE = b"<title>frames</title><iframe src='http://127.0.0.2:8792/frame' width='400' height='200'></iframe>"
 FRAME = (b"<title>frame</title><body data-clicked='0'><button id='press' onclick=\"document.body.dataset.clicked = "
-         b"String(Number(document.body.dataset.clicked) + 1)\">press</button></body>")
+         b"String(Number(document.body.dataset.clicked) + 1)\">press</button><a id='get' href='/file'>get</a></body>")
 class Page(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path.startswith("/file"):
+            body = b"a receipt from the iframe\n"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Disposition", "attachment; filename=receipt.txt")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         body = FRAME if self.path.startswith("/frame") else PAGE
         self.send_response(200)
         self.send_header("Content-Type", "text/html")
@@ -112,6 +121,9 @@ async def check_scoped_addresses(deployed, env_id: str, op_url: Callable[[str], 
                              cwd=clients, capture_output=True, text=True, timeout=600)
         assert ran.returncode == 0, ran.stderr[-2000:]
         clients_saw = json.loads(ran.stdout.strip().splitlines()[-1])
+        buyer_downloads = await _until(lambda: call("downloads/list", {"context": "buyer"}, method="GET"),
+                                       lambda found: any(d["filename"] == "receipt.txt" and d["state"] == "completed"
+                                                         for d in found["downloads"]), "the iframe's download")
 
         async with connect(buyer["ws_url"], max_size=None, open_timeout=60) as held:
             await call("contexts/release", {"context": "buyer"})
@@ -129,6 +141,8 @@ async def check_scoped_addresses(deployed, env_id: str, op_url: Callable[[str], 
     assert by_buyer and by_seller and by_default, clients_saw
     assert by_buyer["contexts"] == 1 and by_buyer["cookies"] == ["sid=buyer"], by_buyer
     assert set(by_buyer["pages"]) == {SITE} and by_buyer["clicked"] == "1" and by_buyer["frame_url"] == FRAME
+    assert by_buyer["download"] == "receipt.txt", by_buyer
+    assert all(d["context"] == "buyer" for d in buyer_downloads["downloads"]), buyer_downloads
     assert by_seller["contexts"] == 1 and by_seller["pages"] == [SITE] and by_seller["cookies"] == ["sid=seller"]
     assert SITE not in by_default["pages"], by_default
     at_once = clients_saw["at_once"]

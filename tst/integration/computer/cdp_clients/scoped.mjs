@@ -1,9 +1,9 @@
 // Drives a website browser through CDP addresses scoped to leases and prints, as JSON, what each client saw.
 // Usage: node scoped.mjs <buyer ws_url> <seller ws_url> <default ws_url> <frame page url>:
-//   Playwright on the buyer's address: its default context's cookies and pages, then a new page at the frame page and
-//   a click inside its cross-origin iframe; Puppeteer on the seller's: its pages, its contexts and a new page's
-//   cookies; Playwright on the default address: its pages; then Playwright on the buyer's and the seller's addresses
-//   at once, each clicking inside the iframe ten times.
+//   Playwright on the buyer's address: its default context's cookies and pages, then a new page at the frame page, a
+//   click inside its cross-origin iframe and a download from it; Puppeteer on the seller's: its pages, its contexts
+//   and a new page's cookies; Playwright on the default address: its pages; then Playwright on the buyer's and the
+//   seller's addresses at once, each clicking inside the iframe ten times.
 import { chromium } from "playwright-core";
 import puppeteer from "puppeteer-core";
 
@@ -38,6 +38,9 @@ async function onBuyer() {
   await frame.locator("#press").click({ timeout: TIMEOUT_MS });
   seen.clicked = await frame.locator("body").getAttribute("data-clicked");
   seen.frame_url = page.frames()[1]?.url();
+  const [download] = await Promise.all([page.waitForEvent("download", { timeout: TIMEOUT_MS }),
+                                        frame.locator("#get").click({ timeout: TIMEOUT_MS })]);
+  seen.download = download.suggestedFilename();
   await page.close();
   return seen;
 }

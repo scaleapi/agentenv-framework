@@ -270,6 +270,20 @@ async def test_every_contexts_tabs_list_together_each_naming_its_context_the_pag
 
 
 @pytest.mark.asyncio
+async def test_a_frame_attached_to_a_leases_page_is_its_tab_s_though_it_navigates_in_a_process_of_its_own(
+        browser_home):
+    devtools, control, contexts = _contexts(browser_home)
+    await contexts.lease("buyer")
+    _tab(devtools, "L1", "C1")
+    _attached(devtools, "L1", "s-l1")
+
+    devtools.send("Page.frameAttached", {"frameId": "OOPIF", "parentFrameId": "L1"}, "s-l1")
+
+    assert control.context_of_frame("OOPIF") == "C1" and control.context_of_frame("L1") == "C1"
+    assert control.context_of_frame("elsewhere") is None
+
+
+@pytest.mark.asyncio
 async def test_a_label_an_agent_disposed_and_a_load_leases_again_at_once_keeps_the_new_folder(browser_home):
     _, _, contexts = _contexts(browser_home)
     old = contexts.made_by_agent("ada", "X1")

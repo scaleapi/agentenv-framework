@@ -344,6 +344,12 @@ class Relay:
         except Exception as e:
             await websocket.close(code=1013, reason=f"the browser isn't answering: {type(e).__name__}")
             return
+        if context is not None and ((lease := self.contexts.get(context)) is None or lease.id != scope):
+            with contextlib.suppress(Exception):
+                await self.devtools.call("Target.detachFromTarget", {"sessionId": session})
+            await websocket.accept()
+            await websocket.close(code=LEASE_ENDED[0], reason=LEASE_ENDED[1])
+            return
         record = {"user": user, "opened_at": _now(), "guarded": [], **({"context": context} if context else {})}
         connection = _Connection(websocket, user, session, record, len(self.connections) + 1, scope)
         self._by_session[session] = connection
@@ -553,7 +559,9 @@ class Relay:
         if method == "Target.detachedFromTarget":
             return params.get("sessionId") in connection.sessions
         if method == "Browser.downloadWillBegin":
-            context = self.control.context_of_frame(params.get("frameId")) if self.control is not None else None
+            frame = params.get("frameId")
+            context = (self.control.context_of_frame(frame) if self.control is not None else None) or \
+                self.targets.context_of(frame)
             if sees(self.contexts, connection.scope, connection.user, context):
                 return True
             connection.unseen_downloads.add(params.get("guid"))

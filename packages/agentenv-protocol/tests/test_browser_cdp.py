@@ -494,6 +494,55 @@ async def test_a_leases_end_closes_the_connections_scoped_to_it_and_one_to_an_en
     assert (refused.value.rcvd.code, refused.value.rcvd.reason) == browser_cdp.LEASE_ENDED and "result" in still
 
 
+@pytest.mark.asyncio
+async def test_a_lease_that_ends_while_a_connection_to_it_attaches_closes_it_saying_so(tmp_path):
+    pipe, contexts = await _scoped(tmp_path)
+    gate, attaching = asyncio.Event(), asyncio.Event()
+    real = pipe.call
+
+    async def call(method, params=None, *, session_id=None, timeout_s=None):
+        if method == "Target.attachToBrowserTarget":
+            attaching.set()
+            await gate.wait()
+        return await real(method, params, session_id=session_id, timeout_s=timeout_s)
+
+    pipe.call = call
+    async with _relay(pipe=pipe, contexts=contexts) as (_, relay, base):
+        opening = asyncio.ensure_future(connect(f"{base}/ada/buyer"))
+        await asyncio.wait_for(attaching.wait(), 5)
+        await contexts.release("buyer")
+        gate.set()
+        ada = await asyncio.wait_for(opening, 5)
+        with pytest.raises(ConnectionClosedOK) as ended:
+            await asyncio.wait_for(ada.recv(), 5)
+
+    assert (ended.value.rcvd.code, ended.value.rcvd.reason) == browser_cdp.LEASE_ENDED
+    assert ("Target.detachFromTarget", {"sessionId": "b1"}, None) in pipe.called and relay.connections == []
+
+
+@pytest.mark.asyncio
+async def test_a_download_a_cross_origin_iframe_began_is_heard_on_its_leases_connection_only(tmp_path):
+    pipe, contexts = await _scoped(tmp_path)
+    async with _relay(pipe=pipe, contexts=contexts) as (_, relay, base):
+        async with connect(f"{base}/ada/buyer") as ada, connect(f"{base}/carol") as carol:
+            await _ask(ada, {"id": 1, "method": "Browser.getVersion"})
+            await _ask(carol, {"id": 1, "method": "Browser.getVersion"})
+            sessions = {connection.user: connection.session for connection in relay._open}
+            pipe.emit({"method": "Target.attachedToTarget", "sessionId": sessions["ada"], "params": {
+                "sessionId": "IF-s", "targetInfo": {"targetId": "IF1", "type": "iframe", "browserContextId": "L1"},
+                "waitingForDebugger": False}})
+            await ada.recv()
+            for user in ("ada", "carol"):
+                pipe.emit({"method": "Browser.downloadWillBegin", "sessionId": sessions[user],
+                           "params": {"guid": "g1", "frameId": "IF1", "url": "http://x.test/f",
+                                      "suggestedFilename": "f"}})
+            heard = json.loads(await asyncio.wait_for(ada.recv(), 5))
+            nothing = await _ask(carol, {"id": 2, "method": "Browser.getVersion"})
+
+    assert heard["method"] == "Browser.downloadWillBegin" and heard["params"]["guid"] == "g1"
+    assert nothing["id"] == 2
+
+
 def test_a_scoped_token_is_one_per_user_and_lease_kept_in_memory_and_revoked_with_its_lease(tmp_path):
     tokens = Tokens(tmp_path / "cdp-tokens.json")
     plain = tokens.mint("ada", "https://computer.test")

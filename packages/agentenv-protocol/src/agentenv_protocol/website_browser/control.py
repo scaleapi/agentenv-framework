@@ -943,6 +943,12 @@ class BrowserControl:
             load.commits.append(frame["loaderId"])
             load.check()
 
+    def _on_Page_frameAttached(self, params: dict, session: Optional[str]) -> None:
+        """A frame attached to a page of one of its tabs, kept as that tab's: a cross-origin one goes on in a process
+        of its own, whose navigations its tab's page doesn't hear of."""
+        if session in self._sessions and isinstance(frame := params.get("frameId"), str):
+            self._frame_tabs[frame] = self._sessions[session]
+
     def _on_Page_navigatedWithinDocument(self, params: dict, session: Optional[str]) -> None:
         """A tab's page moving to another URL of its document, a fragment or its history API: a command's, when one
         asked for it, else its page's."""
