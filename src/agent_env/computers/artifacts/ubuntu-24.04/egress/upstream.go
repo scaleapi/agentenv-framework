@@ -4,6 +4,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"net"
 	"strings"
 	"sync"
@@ -113,27 +114,28 @@ type probe struct {
 	problem string
 }
 
+// probes caches what each site's probe found, up to cacheLimit entries, the expired ones dropped first once it's
+// full; a site's probes are one at a time, by one of a fixed set of locks.
 type probes struct {
 	mu    sync.Mutex
-	locks map[string]*sync.Mutex
+	locks [64]sync.Mutex
 	cache map[string]probe
 }
 
+// cacheLimit bounds the probe and leaf caches, so a computer that visits many sites keeps a bounded memory.
+var cacheLimit = 4096
+
 func (p *Proxy) validity(dsts []string, sni, verifyName string, hello []byte) (probe, bool) {
 	key := strings.Join(dsts, ",") + "|" + sni
-	p.probes.mu.Lock()
-	if p.probes.locks == nil {
-		p.probes.locks, p.probes.cache = map[string]*sync.Mutex{}, map[string]probe{}
-	}
-	lock, ok := p.probes.locks[key]
-	if !ok {
-		lock = &sync.Mutex{}
-		p.probes.locks[key] = lock
-	}
-	p.probes.mu.Unlock()
+	h := fnv.New32a()
+	h.Write([]byte(key))
+	lock := &p.probes.locks[h.Sum32()%uint32(len(p.probes.locks))]
 	lock.Lock()
 	defer lock.Unlock()
 	p.probes.mu.Lock()
+	if p.probes.cache == nil {
+		p.probes.cache = map[string]probe{}
+	}
 	hit, ok := p.probes.cache[key]
 	p.probes.mu.Unlock()
 	if ok && (time.Since(hit.at) < ProbeTTL && !hit.failed || time.Since(hit.at) < ProbeFailedTTL) {
@@ -154,6 +156,21 @@ func (p *Proxy) validity(dsts []string, sni, verifyName string, hello []byte) (p
 	}
 	p.probes.mu.Lock()
 	p.probes.cache[key] = hit
+	if len(p.probes.cache) > cacheLimit {
+		for k, v := range p.probes.cache {
+			if time.Since(v.at) >= ProbeTTL {
+				delete(p.probes.cache, k)
+			}
+		}
+		for k := range p.probes.cache {
+			if len(p.probes.cache) <= cacheLimit {
+				break
+			}
+			if k != key {
+				delete(p.probes.cache, k)
+			}
+		}
+	}
 	p.probes.mu.Unlock()
 	return hit, true
 }

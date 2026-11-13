@@ -28,6 +28,8 @@ type Leaves struct {
 	key           *ecdsa.PrivateKey
 	mu            sync.Mutex
 	cache         map[string]*tls.Certificate
+	// order is the cache's keys, oldest first, so it drops the oldest past cacheLimit; a connection keeps its own.
+	order []string
 }
 
 type signer struct {
@@ -101,6 +103,11 @@ func (l *Leaves) For(host string, sans []string, trusted bool) (*tls.Certificate
 	}
 	cert := &tls.Certificate{Certificate: [][]byte{der, by.cert.Raw}, PrivateKey: l.key}
 	l.cache[key] = cert
+	l.order = append(l.order, key)
+	for len(l.order) > cacheLimit {
+		delete(l.cache, l.order[0])
+		l.order = l.order[1:]
+	}
 	return cert, true, nil
 }
 

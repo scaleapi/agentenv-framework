@@ -360,3 +360,26 @@ func TestASiteAskingForTheClientsCertificateIsPassedThroughForTheClientToAnswer(
 		t.Fatalf("%v", row)
 	}
 }
+
+func TestTheProbeAndLeafCachesStayWithinTheirLimit(t *testing.T) {
+	limit := cacheLimit
+	cacheLimit = 3
+	defer func() { cacheLimit = limit }()
+	ca, _ := mintCA(CAName)
+	leaves, _ := NewLeaves(ca)
+	for i := 0; i < 10; i++ {
+		if _, _, err := leaves.For(fmt.Sprintf("site%d.test", i), nil, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(leaves.cache) != 3 || leaves.cache["site9.test|"] == nil {
+		t.Fatalf("%d leaves kept", len(leaves.cache))
+	}
+	p := &Proxy{Dial: func(string) (net.Conn, error) { return nil, fmt.Errorf("unreachable") }}
+	for i := 0; i < 10; i++ {
+		p.validity([]string{fmt.Sprintf("192.0.2.%d:443", i)}, "", "x", nil)
+	}
+	if len(p.probes.cache) != 3 {
+		t.Fatalf("%d probes kept", len(p.probes.cache))
+	}
+}
