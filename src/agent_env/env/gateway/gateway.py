@@ -86,10 +86,10 @@ from .rest_proxy import (
     called_tools,
     fetch_child_card,
     forward,
-    is_child_mcp_path,
     listed_url,
     lowered,
     operations,
+    reaches_child_mcp,
     refuse_websocket,
     relay_websocket,
     rewrite_child_card,
@@ -789,7 +789,7 @@ class Gateway:
         mcp_endpoint = site_mcp or "mcp"
         if url_map is self.rest_proxy_urls and (cdp := await self._browsers.cdp_answer(request, base_url, role)) is not None:
             return cdp
-        if mcp_server and request.method == "POST" and is_child_mcp_path(request.path_params.get("path", ""), mcp_endpoint):
+        if mcp_server and request.method == "POST" and reaches_child_mcp(request, mcp_endpoint):
             if (refusal := await self._refuse_disabled_calls(await request.body(), role)) is not None:
                 return refusal
         if request.method in _SAFE_METHODS:

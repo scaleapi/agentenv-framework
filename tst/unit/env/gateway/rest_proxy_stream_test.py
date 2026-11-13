@@ -455,7 +455,8 @@ async def test_a_proxied_child_mcp_post_carries_the_gateway_s_role_in_every_requ
     forged = {AGENT_ENV_ROLE_META_KEY: "victim@example.com", AGENT_ENV_SESSION_META_KEY: "forged"}
     one = json.dumps(_rpc(name="t", arguments={}, _meta=forged)).encode()
     batch = json.dumps([_rpc(name="t", arguments={}), {"jsonrpc": "2.0", "method": "notifications/initialized"}]).encode()
-    for path, body in [("/svc/mcp-svc/mcp", one), ("/svc/mcp-svc/mcp/", batch), ("/svc/mcp-svc/x/../mcp", one)]:
+    for path, body in [("/svc/mcp-svc/mcp", one), ("/svc/mcp-svc/mcp/", batch), ("/svc/mcp-svc/x/../mcp", one),
+                       ("/svc/mcp-svc/public%2Fx/../mcp", one)]:
         status, _, _ = await _call(gw, path, method="POST", body=body, headers={
             "AgentEnv-Role": "alice@example.com", "content-type": "application/json", "content-length": str(len(body))})
         assert status == 200
@@ -464,6 +465,7 @@ async def test_a_proxied_child_mcp_post_carries_the_gateway_s_role_in_every_requ
     assert sent[0]["params"]["_meta"] == stamp  # the forged role and session key are gone
     assert sent[1][0]["params"]["_meta"] == stamp and "params" not in sent[1][1]  # each request of a batch
     assert sent[2]["params"]["_meta"] == stamp and up.requests[2].url.path == "/mcp"  # dot segments collapse upstream
+    assert sent[3]["params"]["_meta"] == stamp and up.requests[3].url.path == "/mcp"  # routed as /public/mcp, sent to /mcp
     assert all(r.headers["content-length"] == str(len(r.content)) for r in up.requests)  # re-serialised, re-measured
     assert all(r.headers.get_list("agentenv-role") == ["alice@example.com"] for r in up.requests)
 
@@ -535,7 +537,8 @@ async def test_a_tool_disabled_for_the_caller_is_refused_as_mcp_refuses_it_and_n
     gw = _gated(_tool("read"), _tool("list"))
     gw._apply_rule("alice@example.com", "read", True)
     refused = await _post_rpc(gw, _rpc(name="read", arguments={}), "alice@example.com")
-    respelled = await _post_rpc(gw, _rpc(name="read", arguments={}), "alice@example.com", path="/svc/mcp-svc/MCP/")
+    respelled = [await _post_rpc(gw, _rpc(name="read", arguments={}), "alice@example.com", path=path)
+                 for path in ("/svc/mcp-svc/MCP/", "/svc/mcp-svc/public%2Fx/../mcp")]
     allowed = [await _post_rpc(gw, _rpc(name="list", arguments={}), "alice@example.com"),
                await _post_rpc(gw, _rpc(name="read", arguments={}), "carol@example.com")]
     token = Caller(role="alice@example.com").bind()
@@ -544,8 +547,8 @@ async def test_a_tool_disabled_for_the_caller_is_refused_as_mcp_refuses_it_and_n
             await gw._mcp._tool_manager.call_tool("read", {})
     finally:
         Caller.reset(token)
-    assert refused == respelled == (200, {"jsonrpc": "2.0", "id": 1, "result": {
-        "content": [{"type": "text", "text": str(on_mcp.value)}], "isError": True}})
+    assert [refused, *respelled] == [(200, {"jsonrpc": "2.0", "id": 1, "result": {
+        "content": [{"type": "text", "text": str(on_mcp.value)}], "isError": True}})] * 3
     assert allowed == [(200, {}), (200, {})]
     assert [json.loads(r.content)["params"]["name"] for r in up.requests] == ["list", "read"]
 
