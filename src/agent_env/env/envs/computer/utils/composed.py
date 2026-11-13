@@ -117,10 +117,13 @@ def composition() -> str:
     return "sha256:" + digest.hexdigest()
 
 
+MIRROR_PREFIX_LENGTH = 16
+
+
 def mirror_tag(key: str) -> str:
     """The tag of the image of ``key`` in a computer image mirror: the key, under the start of ``composition()``, so a
     change to the code that composes an image builds it again rather than reuse one the old code built."""
-    return f"{composition().removeprefix('sha256:')[:16]}-{key.removeprefix('sha256:')}"
+    return f"{composition().removeprefix('sha256:')[:MIRROR_PREFIX_LENGTH]}-{key.removeprefix('sha256:')}"
 
 
 def _rank(result: dict) -> int:
