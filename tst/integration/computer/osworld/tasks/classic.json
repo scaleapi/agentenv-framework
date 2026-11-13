@@ -1,0 +1,18 @@
+[
+  {"id": "env", "type": "deploy_env", "env_id": "osworld-desk"},
+  {"id": "controller", "type": "osworld_deploy_controller", "env_id": "osworld-desk", "controller_image_artifact_id": "controller",
+   "depends_on": ["env"]},
+  {"id": "init", "type": "osworld_initialize", "env_id": "osworld-desk", "depends_on": ["controller"],
+   "init_config": [{"type": "execute",
+                    "parameters": {"command": ["bash", "-c", "echo osworld-e2e > /tmp/osworld-e2e.txt"]}}]},
+  {"id": "pass", "type": "osworld_evaluate", "env_id": "osworld-desk", "verifier_id": "pass",
+   "depends_on": ["init"],
+   "evaluator": {"funcs": "check_include_exclude",
+                 "result": {"type": "vm_command_line", "command": ["cat", "/tmp/osworld-e2e.txt"]},
+                 "expected": {"type": "rule", "rules": {"include": ["osworld-e2e"], "exclude": []}}}},
+  {"id": "fail", "type": "osworld_evaluate", "env_id": "osworld-desk", "verifier_id": "fail",
+   "depends_on": ["pass"],
+   "evaluator": {"funcs": "check_include_exclude",
+                 "result": {"type": "vm_command_line", "command": ["cat", "/tmp/osworld-e2e.txt"]},
+                 "expected": {"type": "rule", "rules": {"include": ["not-there"], "exclude": []}}}}
+]
