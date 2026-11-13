@@ -1727,18 +1727,26 @@ def _why_down(row: dict) -> str | None:
     return None
 
 
+_PROBE_REQUEST_TIMEOUT_S = 2
+"""Each request of a site's health probe; two paths at most stay inside compose's 5 s check timeout."""
+
+
 def _http_probe(port: int, *paths: str) -> str:
-    """A shell check that passes once any of ``paths`` answers on ``port`` with a success, fetched with whichever of
-    curl, wget, python3 or node the image has: a site's image is the author's, and many leave curl out. ``$$`` is
-    compose's escape for a ``$`` the shell reads."""
-    fetchers = [
-        'curl -sf --max-time 2 -o /dev/null "$$u"',
-        'wget -q -T 2 -O /dev/null "$$u"',
-        "python3 -c 'import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=2)' \"$$u\"",
-        "node -e 'fetch(process.argv[1]).then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))' \"$$u\"",
-    ]
+    """A shell check that passes once any of ``paths`` answers on ``port`` with a success. It fetches each path once,
+    with the first of curl, wget, python3 or node the image has: a site's image is the author's, and many leave curl
+    out. ``$$`` is compose's escape for a ``$`` the shell reads."""
+    t = _PROBE_REQUEST_TIMEOUT_S
+    fetchers = {
+        "curl": f'curl -sf --max-time {t} -o /dev/null "$$1"',
+        "wget": f'wget -q -T {t} -O /dev/null "$$1"',
+        "python3": f"python3 -c 'import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout={t})' \"$$1\"",
+        "node": (f"node -e 'fetch(process.argv[1], {{signal: AbortSignal.timeout({t * 1000})}})"
+                 f".then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))' \"$$1\""),
+    }
+    pick = " el".join(f"if command -v {name} >/dev/null 2>&1; then get() {{ {fetch}; }}; "
+                      for name, fetch in fetchers.items())
     urls = " ".join(f"http://localhost:{port}{path}" for path in paths)
-    return f"for u in {urls}; do {{ {' || '.join(fetchers)}; }} 2>/dev/null && exit 0; done; exit 1"
+    return f"{pick}else exit 1; fi; for u in {urls}; do get \"$$u\" 2>/dev/null && exit 0; done; exit 1"
 
 
 def _network_lines(*networks: str) -> list[str]:
