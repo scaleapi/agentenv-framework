@@ -19,7 +19,7 @@ def desktop(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("ENVIRONMENT_NAME", "browser")
     monkeypatch.setattr(app_runtime, "LAUNCHED", tmp_path / "launched")
-    state = SimpleNamespace(launched=[], running=set(), codes={})
+    state = SimpleNamespace(launched=[], running=set(), codes={}, stopped=[])
 
     async def launch(argv, cwd, env, fds=None):
         pid = 100 + len(state.launched)
@@ -31,6 +31,7 @@ def desktop(tmp_path, monkeypatch):
         return state.codes.get(pid)
 
     async def stop(pid, timeout_s):
+        state.stopped.append(pid)
         state.running.discard(pid)
 
     monkeypatch.setattr(session, "launch", launch)
@@ -61,9 +62,25 @@ async def test_a_browser_a_signal_ends_is_launched_again_and_says_why(desktop):
 
     assert await _ended(runtime, desktop, -signal.SIGKILL)
 
-    assert desktop.launched == [100, 101] and runtime.running()
+    assert desktop.launched == [100, 101] and desktop.stopped == [100] and runtime.running()
     assert [(entry["event"], entry["pid"], entry.get("cause") or entry.get("signal")) for entry in runtime.launches()] == [
         ("launch", 100, "boot"), ("exit", 100, "SIGKILL"), ("launch", 101, "crash")]
+
+
+@pytest.mark.asyncio
+async def test_what_a_crash_left_running_is_stopped_so_the_app_is_launched_afresh_not_reached_through_it(desktop):
+    runtime, reached = _runtime(), []
+
+    async def open_window():
+        reached.append("window")
+
+    runtime.launch_running = open_window
+    await runtime.launch_app("boot")
+    desktop.codes[100] = -signal.SIGKILL
+    assert runtime.exited()
+    await asyncio.gather(*runtime.exits)
+
+    assert (desktop.stopped, desktop.launched, reached) == ([100], [100, 101], [])
 
 
 @pytest.mark.asyncio

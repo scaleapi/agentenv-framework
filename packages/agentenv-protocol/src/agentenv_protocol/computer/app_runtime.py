@@ -152,8 +152,9 @@ class AppRuntime:
     def exited(self) -> bool:
         """Log that the app this server launched last ended on its own, with its exit code or the signal that ended
         it, unless the server stopped it; whether it did. With ``relaunch_on_crash``, one a signal or a failing code
-        ended is launched again, up to ``CRASH_RELAUNCHES`` times a boot; one that exited cleanly was closed, and stays
-        so."""
+        ended is launched again, up to ``CRASH_RELAUNCHES`` times a boot, once what's left of it is stopped: a browser's
+        helpers outlive it for a moment, and while they run its session counts as the app running. One that exited
+        cleanly was closed, and stays so."""
         if (pid := _recorded_pid()) is None:
             return False
         noting = asyncio.ensure_future(self._log_exit(pid))
@@ -171,6 +172,7 @@ class AppRuntime:
             self.log("crash_relaunches_spent", pid, relaunched=relaunched)
             return
         try:
+            await session.stop(pid, STOP_TIMEOUT_S)
             await self.launch_app("crash")
         except Exception as e:
             self.launch_failed = f"{type(e).__name__}: {e}"

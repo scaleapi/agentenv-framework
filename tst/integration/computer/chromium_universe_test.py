@@ -48,6 +48,18 @@ async def _loaded(ok, url: str, title: str) -> str:
     return json.dumps(tabs)
 
 
+async def _launches_until_relaunched(deployed) -> list[dict]:
+    """The chromium app's launch log once it records a launch after a crash, or as it last was within a minute."""
+    launches: list[dict] = []
+    for _ in range(60):
+        out = await inside.run(deployed, ["cat", LAUNCHES], timeout_s=30)
+        launches = [json.loads(line) for line in out["stdout"].splitlines() if line]
+        if any(entry.get("cause") == "crash" for entry in launches):
+            break
+        await asyncio.sleep(1)
+    return launches
+
+
 def _egress_rows(deployed) -> list[dict]:
     log = subprocess.run(["docker", "exec", computer_container(deployed.sandbox_id), "cat",
                           "/var/log/agentenv-root/egress.log"], capture_output=True, text=True).stdout
@@ -74,10 +86,9 @@ async def test_its_boot_browser_loads_live_sites_at_any_universe_date_comes_back
             rows = _egress_rows(deployed)
 
             await inside.run(deployed, ["kill", "-9", str(booted["pid"])], timeout_s=30)
+            launches = await _launches_until_relaunched(deployed)
             back = await _browser_process(deployed, other_than=booted["pid"])
             ready = await _ready(deployed, card, "chromium")
-            launches = [json.loads(line) for line in (await inside.run(deployed, ["cat", LAUNCHES], timeout_s=30))[
-                "stdout"].splitlines() if line]
             xset = (await inside.run(deployed, ["xset", "q"], timeout_s=30))["stdout"]
             policy = json.loads((await inside.run(deployed, ["cat", POLICY], timeout_s=30))["stdout"])
         finally:
