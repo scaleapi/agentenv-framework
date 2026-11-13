@@ -95,6 +95,11 @@ class NetworkLog:
     async def read_async(self, after: int = 0, limit: int = READ_LIMIT) -> dict:
         return await asyncio.to_thread(self.read, after, limit)
 
+    def last_seq(self) -> int:
+        """The number of the last line written so far, 0 before any: read on from where the last read ended."""
+        self.read(after=1 << 62, limit=1)
+        return self._mark[0]
+
     def every_line(self) -> list[dict]:
         lines, after = [], 0
         while (page := self.read(after, limit=1 << 30))["lines"]:

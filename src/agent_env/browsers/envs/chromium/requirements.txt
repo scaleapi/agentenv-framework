@@ -1,0 +1,4 @@
+# What a composed computer installs into the browser app's venv beside agentenv-framework-protocol[app], which the
+# composer adds: PyAV and Pillow, with which the browser's server encodes each context's recording as H.264.
+av>=17
+Pillow>=10.4

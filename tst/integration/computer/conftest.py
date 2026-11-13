@@ -150,7 +150,7 @@ def cdp_clients(tmp_path_factory) -> Path:
     if not npm or not (match := re.match(r"v(\d+)", version)) or int(match.group(1)) < 20:
         pytest.skip("the CDP clients need Node 20 or later and npm")
     folder = tmp_path_factory.mktemp("cdp-clients")
-    for name in ("package.json", "connect.mjs", "scoped.mjs"):
+    for name in ("package.json", "connect.mjs", "scoped.mjs", "recorded.mjs"):
         shutil.copy(CDP_CLIENTS / name, folder / name)
     installed = subprocess.run([npm, "install", "--no-audit", "--no-fund", "--loglevel=error"], cwd=folder,
                                capture_output=True, text=True, timeout=600)

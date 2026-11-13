@@ -93,6 +93,7 @@ from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
 from tst.integration.computer.browser_contexts import check_browser_contexts
+from tst.integration.computer.browser_recorded import check_recorded_contexts
 from tst.integration.computer.browser_scoped import check_scoped_addresses
 from tst.integration.computer.browser_data import SITE as DATA_SITE, check_browser_data, check_browser_data_under_chaos
 from tst.integration.computer.browser_steps import check_browser_steps
@@ -490,6 +491,27 @@ async def test_an_address_scoped_to_a_lease_sees_it_alone_as_the_default_and_end
                 cdp_clients)
         finally:
             report = await teardown_run(context)
+
+    assert not report.failed
+
+
+@pytest.mark.asyncio
+async def test_each_context_is_recorded_alone_its_video_following_its_agent_while_agents_act_on_all_at_once(
+        browser_computer, cdp_clients):
+    with namespace_routing():
+        deployed = await Env.get(browser_computer.id).deploy()
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            await _ready(deployed)
+            card = (await _get(deployed, "/.well-known/agent-env.json")).json()
+            app = next(child for child in card["children_environments"] if child["name"] == "chromium")
+            await check_recorded_contexts(
+                deployed, browser_computer.id,
+                lambda op: deployed.environment_url + protocol_v1.find_extension_method(app, BROWSER, op)["endpoint"],
+                cdp_clients)
+        finally:
+            report = await teardown_run(context)
+            grant_server(None, None).close()
 
     assert not report.failed
 
@@ -1302,7 +1324,7 @@ async def test_a_browser_recording_frames_each_burst_of_an_agents_actions_keyed_
         context = TaskStepContext(instance_id=f"run-{uuid.uuid4().hex[:8]}", deployed_envs=[deployed])
         try:
             context = await StartBrowserRecordingTaskStep(id="start", version=None, env_id=browser_computer.id,
-                                                          name="run").execute(context)
+                                                          name="run", frames=True).execute(context)
             await _mcp(deployed, _type_hello)
             await _mcp(deployed, lambda session: _called(session, "browser_navigate", {"url": DATA_PAGE}))
             context = await EndBrowserRecordingTaskStep(id="end", version=None, name="run").execute(context)
@@ -1335,7 +1357,7 @@ async def test_a_browser_recording_frames_a_cdp_agents_own_tab_behind_the_active
         context = TaskStepContext(instance_id=f"run-{uuid.uuid4().hex[:8]}", deployed_envs=[deployed])
         try:
             context = await StartBrowserRecordingTaskStep(id="start", version=None, env_id=browser_computer.id,
-                                                          name="behind").execute(context)
+                                                          name="behind", frames=True).execute(context)
             tab = await _cdp_agent_acts_behind((await _cdp(deployed, "pi"))["ws_url"])
             active = [t for t in (await _browser_op(deployed, "tabs/list", {}))["tabs"] if t.get("active")]
             context = await EndBrowserRecordingTaskStep(id="end", version=None, name="behind",
@@ -1382,7 +1404,7 @@ async def test_a_browser_recording_that_ends_while_an_agents_command_is_in_fligh
         context = TaskStepContext(instance_id=f"run-{uuid.uuid4().hex[:8]}", deployed_envs=[deployed])
         try:
             context = await StartBrowserRecordingTaskStep(id="start", version=None, env_id=browser_computer.id,
-                                                          name="flight").execute(context)
+                                                          name="flight", frames=True).execute(context)
             ws_url = (await _cdp(deployed, "pi"))["ws_url"]
             async with _cdp_calls(ws_url, reply_s=300) as waiting, _cdp_calls(ws_url) as call:
                 target = await _page_target(call)
@@ -1416,7 +1438,7 @@ async def test_a_browser_recording_frames_the_active_tab_when_the_agents_tab_clo
         context = TaskStepContext(instance_id=f"run-{uuid.uuid4().hex[:8]}", deployed_envs=[deployed])
         try:
             context = await StartBrowserRecordingTaskStep(id="start", version=None, env_id=browser_computer.id,
-                                                          name="closing").execute(context)
+                                                          name="closing", frames=True).execute(context)
             async with _cdp_calls((await _cdp(deployed, "pi"))["ws_url"]) as call:
                 tab = (await call("Target.createTarget", {"url": BEHIND[0]}))["result"]["targetId"]
                 session = (await call("Target.attachToTarget", {"targetId": tab, "flatten": True}))["result"]["sessionId"]

@@ -1,34 +1,53 @@
-"""A website browser's recording, browser-recording/v1: a first frame, one after each burst of an agent's acting
-actions once it settles, of the tab the burst last acted in, keyed to its entries, and a last frame, each uploaded as
-it's taken; at the end its log's lines since the start and its manifest; a frame it couldn't take kept with why; a
-start again joining its recording and an end again answering the same; and a frame waiting for its tab's page to
-load, of the active tab once the agent's has closed."""
+"""A website browser's recording, browser-recording/v1, one per context: a video of the tab the context's agent is on,
+following it to a tab it acts on, to a popup that tab opens, and back once one closes, by screencast, by screenshots
+while the tab sends none, blank while the context has none, with nothing of another context in it; its context's log
+lines; the browser's whole network log as HAR; frames after each burst of an agent's actions, keyed to its entries;
+a context an agent makes over an address scoped to the recorded one recorded with it; and a recording that ends with
+its lease. Then the browser's control, as recordings ask it: a frame waiting for its tab's page to load, of the active
+tab once the agent's has closed, and screencasts each heard by everything that follows its tab."""
 from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import json
 from datetime import datetime, timedelta, timezone
 
+import av
 import pytest
+import pytest_asyncio
+from PIL import Image
 
-from agentenv_protocol.computer.errors import DeviceUnavailable, InvalidArgument
+from agentenv_protocol.computer import recording as computer_recording
+from agentenv_protocol.computer.errors import DeviceUnavailable, InvalidArgument, TargetUnavailable, Unsupported
 from agentenv_protocol.transfers import HttpPostPolicyGrant, WriteNamespaceGrant
-from agentenv_protocol.website_browser import recording as browser_recording
 from agentenv_protocol.website_browser import control as browser_control
+from agentenv_protocol.website_browser import recording as browser_recording
+from agentenv_protocol.website_browser import stream as browser_stream
+from agentenv_protocol.website_browser.contexts import Contexts
 from agentenv_protocol.website_browser.control import NUDGE_S, BrowserControl
 from agentenv_protocol.website_browser.devtools import DevToolsError
 from agentenv_protocol.website_browser.log import BrowserLog
+from agentenv_protocol.website_browser.network import NetworkLog
 from agentenv_protocol.website_browser.recording import BrowserRecordingManifest, BrowserRecordings
+
+RED, BLUE, GREEN, YELLOW = (255, 0, 0), (0, 0, 255), (0, 255, 0), (255, 255, 0)
+ROOT = "agentenv-browser-recordings/r1"
 
 
 def _grant() -> dict:
     return WriteNamespaceGrant(
-        root_path="agentenv-browser-recordings/r1", expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
-        max_objects=100, max_object_bytes=1 << 20, max_total_bytes=1 << 24,
+        root_path=ROOT, expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+        max_objects=1000, max_object_bytes=1 << 22, max_total_bytes=1 << 26,
         write=HttpPostPolicyGrant(kind="http-post-policy", url="https://objects.example.test/upload",
                                   fields={"policy": "p"}, path_field="key", file_field="file"),
     ).model_dump(mode="json")
+
+
+def _jpeg(color: tuple[int, int, int]) -> bytes:
+    out = io.BytesIO()
+    Image.new("RGB", (64, 48), color).save(out, "JPEG")
+    return out.getvalue()
 
 
 class Uploads:
@@ -42,126 +61,358 @@ class Uploads:
 
         class Uploader:
             async def upload(self, path, source):
-                uploads.by_path[f"{grant.root_path}/{path}"] = source
+                data = source if isinstance(source, bytes) else source.read_bytes()
+                uploads.by_path[f"{grant.root_path}/{path}"] = data
         return Uploader()
 
+    def colors(self, folder: str) -> list[str]:
+        """The colour of every frame of the video under ``folder``, in order, by its strongest channel."""
+        names = {RED: "red", BLUE: "blue", GREEN: "green", YELLOW: "yellow", (255, 255, 255): "white"}
+        found = []
+        for path in sorted(p for p in self.by_path if p.startswith(f"{folder}/video/") and p.endswith(".mp4")):
+            with av.open(io.BytesIO(self.by_path[path])) as container:
+                for frame in container.decode(video=0):
+                    pixel = frame.to_image().getpixel((frame.width // 2, frame.height // 2))
+                    found.append(names[min(names, key=lambda c: sum((a - b) ** 2 for a, b in zip(c, pixel)))])
+        return found
 
-class Control:
-    """The browser's control as a recording asks it: each frame the tab asked for, else T0, or why there's none."""
+
+class Browser:
+    """A browser's pipe, as recordings ask it: each tab attached on its own session, which a screencast paints in the
+    tab's colour unless it's ``silent``, as a tab behind another is, hidden, and a capture answers in it; every other
+    tab is visible, as each in front of its window is, and the one ``focused`` names has focus."""
 
     def __init__(self) -> None:
-        self.asked, self.fail = [], None
+        self.listeners, self.colors, self.casting, self.silent, self.still = [], {}, set(), set(), set()
+        self.focused, self.contexts, self.calls = None, 0, []
 
-    async def frame(self, target, load_wait_s):
-        self.asked.append(target)
-        if self.fail:
-            raise DeviceUnavailable(self.fail)
-        tab = target or "T0"
-        return base64.b64encode(f"jpeg of {tab}".encode()).decode(), "jpg", tab, f"https://a.test/{tab}"
+    def listen(self, listener) -> None:
+        self.listeners.append(listener)
+
+    def emit(self, method: str, params: dict, session=None) -> None:
+        for listener in list(self.listeners):
+            listener({"method": method, "params": params, **({"sessionId": session} if session else {})})
+
+    def open(self, tab: str, color, context=None, opener=None) -> None:
+        self.colors[tab] = color
+        info = {"targetId": tab, "type": "page", "url": f"https://{tab.lower()}.test/",
+                **({"browserContextId": context} if context else {}), **({"openerId": opener} if opener else {})}
+        self.emit("Target.targetCreated", {"targetInfo": info})
+        self.emit("Target.attachedToTarget", {"sessionId": f"s-{tab}", "targetInfo": info})
+
+    def close(self, tab: str) -> None:
+        self.emit("Target.detachedFromTarget", {"sessionId": f"s-{tab}"})
+        self.emit("Target.targetDestroyed", {"targetId": tab})
+
+    async def call(self, method, params=None, *, session_id=None, timeout_s=None):
+        self.calls.append((method, session_id))
+        tab = session_id[2:] if session_id else None
+        if method == "Target.createBrowserContext":
+            self.contexts += 1
+            return {"browserContextId": f"ctx-{self.contexts}"}
+        if method == "Page.startScreencast":
+            self.casting.add(session_id)
+        elif method == "Page.stopScreencast":
+            self.casting.discard(session_id)
+        elif method == "Page.captureScreenshot":
+            return {"data": base64.b64encode(_jpeg(self.colors[tab])).decode()}
+        elif method == "Runtime.evaluate":
+            shown = "hidden" if tab in self.silent else "visible"
+            if params.get("expression") == "document.visibilityState":
+                return {"result": {"value": shown}}
+            return {"result": {"value": [shown, tab == self.focused]}}
+        return {}
+
+    async def paint(self) -> None:
+        """Every screencast not silent painted, every 50 ms, until cancelled."""
+        while True:
+            for session in list(self.casting):
+                if session[2:] not in self.silent | self.still and session[2:] in self.colors:
+                    self.emit("Page.screencastFrame", {"data": base64.b64encode(_jpeg(self.colors[session[2:]]))
+                                                       .decode(), "sessionId": 1, "metadata": {}}, session)
+            await asyncio.sleep(0.05)
 
 
-@pytest.fixture
-def recorded(monkeypatch, tmp_path):
-    uploads, control = Uploads(), Control()
+@pytest_asyncio.fixture
+async def browser(monkeypatch, tmp_path):
+    """A browser with its control, log, contexts, network log and recordings, its screencasts painting; and the
+    uploads its recordings make."""
+    uploads = Uploads()
+    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(browser_recording, "NamespaceUploader", uploads.uploader)
+    monkeypatch.setattr(computer_recording, "NamespaceUploader", uploads.uploader)
     monkeypatch.setattr(browser_recording, "SETTLE_S", 0.05)
-    log = BrowserLog(tmp_path / "browser-chromium.jsonl")
-    return log, control, uploads, BrowserRecordings(log, control)
+    monkeypatch.setattr(browser_recording, "LOG_WAIT_S", 0.3)
+    pipe = Browser()
+    control = BrowserControl(pipe, "agent")
+    control.log = log = BrowserLog(tmp_path / "browser-chromium.jsonl")
+    contexts = Contexts(pipe, control, home=lambda: tmp_path)
+    network = NetworkLog(tmp_path / "network.jsonl")
+    recordings = BrowserRecordings(log, control, contexts, network, (64, 48))
+    painting = asyncio.ensure_future(pipe.paint())
+    yield pipe, control, contexts, network, recordings, uploads
+    painting.cancel()
 
 
-def _acted(log: BrowserLog, via: str, method: str, tab: str, acts: bool = True) -> int:
-    begun = log.begin({"via": via, "who": "ada", "method": method, "acts": acts, "tab": tab})
+def _acted(log: BrowserLog, tab, via: str = "cdp", method: str = "Input.dispatchMouseEvent", acts: bool = True,
+           **fields) -> int:
+    begun = log.begin({"via": via, "who": "ada", "method": method, "acts": acts, "tab": tab, **fields})
     log.finish(begun, ok=True)
     return begun["seq"]
 
 
+def _network_lines(path, *keys: str, after: int = 0) -> None:
+    with path.open("a") as file:
+        for n, key in enumerate(keys, start=after + 1):
+            file.write(json.dumps({"seq": 2 * n - 1, "at": "2026-11-13T10:00:00.000Z", "open": {
+                "id": key, "kind": "exchange", "started": "2026-11-13T10:00:00.000Z",
+                "request": {"method": "GET", "url": f"http://{key}.localhost/", "http_version": "HTTP/1.1",
+                            "headers": []}}}) + "\n")
+            file.write(json.dumps({"seq": 2 * n, "at": "2026-11-13T10:00:00.100Z", "end": {
+                "id": key, "ended": "2026-11-13T10:00:00.100Z", "answered": "2026-11-13T10:00:00.050Z",
+                "response": {"status": 200, "reason": "OK", "http_version": "HTTP/1.1", "headers": []}}}) + "\n")
+
+
 @pytest.mark.asyncio
-async def test_a_frame_follows_each_settled_burst_of_an_agents_actions_on_its_tab_keyed_to_its_entries(recorded):
-    log, control, uploads, recordings = recorded
-    started = await recordings.start("run-1:record", _grant())
-    typed = [_acted(log, "cdp", "Input.insertText", "T1") for _ in range(3)]
-    _acted(log, "cdp", "DOM.getDocument", "T1", acts=False)
-    _acted(log, "agentenv", "navigate", "T1")
-    await asyncio.sleep(0.2)
-    clicked = _acted(log, "mcp", "browser_click", "T2")
-    await asyncio.sleep(0.2)
+async def test_two_leases_recorded_at_once_each_film_only_their_own_tabs(browser):
+    pipe, control, contexts, network, recordings, uploads = browser
+    buyer, seller = await contexts.lease("buyer"), await contexts.lease("seller")
+    pipe.open("T0", GREEN)
+    pipe.open("T1", RED, buyer.id)
+    pipe.open("T2", BLUE, seller.id)
+    pipe.focused = "T0"
+    _network_lines(network.path, "start-tab")
+    a = await recordings.start("run:a", _grant(), context="buyer", fps=10)
+    b = await recordings.start("run:b", _grant(), context="seller", fps=10)
+    await asyncio.sleep(0.4)
+    _acted(recordings.log, "T2")
+    _acted(recordings.log, "T0")
+    await asyncio.sleep(0.4)
+    first = BrowserRecordingManifest.model_validate(await recordings.end(a["recording_id"]))
+    second = BrowserRecordingManifest.model_validate(await recordings.end(b["recording_id"]))
+
+    assert set(uploads.colors(f"{ROOT}/{first.recording_id}")) == {"red"}
+    assert set(uploads.colors(f"{ROOT}/{second.recording_id}")) == {"blue"}
+    assert (first.context, second.context) == ("buyer", "seller") and a["format"].startswith("video/mp4")
+    assert [(seen.tab, seen.via) for seen in first.video.followed] == [("T1", "screencast")]
+    assert all(segment.uploaded and segment.path.startswith("video/") for segment in first.video.segments)
+    assert first.ended_by == "end" and first.network.scope == "browser" and first.network.entries == 1
+
+
+@pytest.mark.asyncio
+async def test_the_video_follows_an_agents_tab_a_popup_it_opens_and_goes_back_when_that_closes(browser):
+    pipe, control, contexts, network, recordings, uploads = browser
+    pipe.open("T0", GREEN)
+    pipe.open("T3", YELLOW)
+    pipe.focused = "T0"
+    started = await recordings.start("run:a", _grant(), network=False)
+    await asyncio.sleep(0.3)
+    _acted(recordings.log, "T3")
+    await asyncio.sleep(0.3)
+    pipe.open("T4", RED, opener="T3")
+    await asyncio.sleep(0.3)
+    pipe.close("T4")
+    await asyncio.sleep(0.3)
     manifest = BrowserRecordingManifest.model_validate(await recordings.end(started["recording_id"]))
 
-    frames = [(f.kind, f.after, f.tab, f.path) for f in manifest.frames]
-    assert frames == [("first", [], "T0", "frames/0000.jpg"), ("action", typed, "T1", "frames/0001.jpg"),
-                      ("action", [clicked], "T2", "frames/0002.jpg"), ("last", [], "T2", "frames/0003.jpg")]
-    assert all(f.uploaded and f.content_type == "image/jpeg" and f.url == f"https://a.test/{f.tab}"
-               for f in manifest.frames)
-    root = f"agentenv-browser-recordings/r1/{started['recording_id']}"
-    assert uploads.by_path[f"{root}/frames/0001.jpg"] == b"jpeg of T1"
-    logged = [json.loads(line)["seq"] for line in uploads.by_path[f"{root}/log.jsonl"].decode().splitlines()]
-    assert logged == list(range(manifest.log_after + 1, manifest.log_last + 1)) and len(logged) == 6
-    assert json.loads(uploads.by_path[f"{root}/manifest.json"]) == manifest.model_dump(mode="json")
-    assert (manifest.ended_by, manifest.log_uploaded, manifest.missing_frames) == ("end", True, 0)
+    assert [seen.tab for seen in manifest.video.followed] == ["T0", "T3", "T4", "T3"]
+    colors = uploads.colors(f"{ROOT}/{manifest.recording_id}")
+    assert colors[0] == "green" and "yellow" in colors and "red" in colors and colors[-1] == "yellow"
 
 
 @pytest.mark.asyncio
-async def test_a_burst_still_settling_at_the_end_gets_its_frame_before_the_last(recorded):
-    log, control, uploads, recordings = recorded
-    started = await recordings.start("run-1:record", _grant())
-    seq = _acted(log, "cdp", "Input.dispatchMouseEvent", "T1")
-    manifest = await recordings.end(started["recording_id"], _grant(), "teardown")
+async def test_a_tab_that_sends_no_screencast_frame_is_captured_until_it_does(browser, monkeypatch):
+    pipe, control, contexts, network, recordings, uploads = browser
+    monkeypatch.setattr(browser_stream, "SILENT_S", 0.2)
+    monkeypatch.setattr(browser_stream, "FALLBACK_FPS", 20)
+    pipe.open("T1", RED)
+    pipe.focused, pipe.silent = "T1", {"T1"}
+    started = await recordings.start("run:a", _grant(), network=False)
+    await asyncio.sleep(0.6)
+    pipe.silent = set()
+    await asyncio.sleep(0.4)
+    manifest = BrowserRecordingManifest.model_validate(await recordings.end(started["recording_id"]))
 
-    assert [(f["kind"], f["after"]) for f in manifest["frames"]] == [("first", []), ("action", [seq]), ("last", [])]
-    assert manifest["ended_by"] == "teardown"
+    assert [seen.via for seen in manifest.video.followed] == ["screencast", "screenshots", "screencast"]
+    assert ("Page.captureScreenshot", "s-T1") in pipe.calls
+    assert set(uploads.colors(f"{ROOT}/{manifest.recording_id}")[3:]) == {"red"}
 
 
 @pytest.mark.asyncio
-async def test_an_end_waits_for_entries_in_flight_writes_an_action_still_going_as_unfinished_and_lists_the_rest(
-        recorded, monkeypatch):
-    log, control, uploads, recordings = recorded
-    monkeypatch.setattr(browser_recording, "LOG_WAIT_S", 0.3)
-    started = await recordings.start("run-1:record", _grant(), frames=False)
-    finishing = log.begin({"via": "cdp", "who": "ada", "method": "Page.navigate", "acts": True, "tab": "T1"})
-    asyncio.get_running_loop().call_later(0.1, lambda: log.finish(finishing, ok=True))
-    complete = await recordings.end(started["recording_id"])
-    started = await recordings.start("run-2:record", _grant(), frames=False)
-    going = log.begin({"via": "mcp", "who": "default", "tool": "browser_navigate", "acts": True, "tab": "T1"})
-    after = _acted(log, "cdp", "Input.insertText", "T1")
-    held = log.reserve()
-    ended = await recordings.end(started["recording_id"])
+async def test_a_visible_tab_that_paints_nothing_is_a_still_page_its_last_frame_shows_uncaptured(browser,
+                                                                                              monkeypatch):
+    pipe, control, contexts, network, recordings, uploads = browser
+    monkeypatch.setattr(browser_stream, "SILENT_S", 0.2)
+    monkeypatch.setattr(browser_stream, "FALLBACK_FPS", 20)
+    pipe.open("T1", RED)
+    pipe.focused, pipe.still = "T1", {"T1"}
+    started = await recordings.start("run:a", _grant(), network=False)
+    await asyncio.sleep(0.8)
+    manifest = BrowserRecordingManifest.model_validate(await recordings.end(started["recording_id"]))
+
+    assert [seen.via for seen in manifest.video.followed] == ["screencast"]
+    assert pipe.calls.count(("Page.captureScreenshot", "s-T1")) == 1
+    assert set(uploads.colors(f"{ROOT}/{manifest.recording_id}")) == {"red"}
+
+
+@pytest.mark.asyncio
+async def test_a_context_with_no_tab_is_blank_until_one_opens_there(browser):
+    pipe, control, contexts, network, recordings, uploads = browser
+    buyer = await contexts.lease("buyer")
+    started = await recordings.start("run:a", _grant(), context="buyer", network=False)
+    await asyncio.sleep(0.3)
+    pipe.open("T1", RED, buyer.id)
+    await asyncio.sleep(0.4)
+    manifest = BrowserRecordingManifest.model_validate(await recordings.end(started["recording_id"]))
+
+    assert [(seen.tab, seen.via) for seen in manifest.video.followed] == [(None, "blank"), ("T1", "screencast")]
+    colors = uploads.colors(f"{ROOT}/{manifest.recording_id}")
+    assert colors[0] == "white" and colors[-1] == "red"
+
+
+@pytest.mark.asyncio
+async def test_its_log_has_its_contexts_lines_and_none_of_anothers(browser):
+    pipe, control, contexts, network, recordings, uploads = browser
+    buyer, seller = await contexts.lease("buyer"), await contexts.lease("seller")
+    pipe.open("T1", RED, buyer.id)
+    pipe.open("T2", BLUE, seller.id)
+    started = await recordings.start("run:a", _grant(), context="buyer", network=False)
+    mine = [_acted(recordings.log, "T1"), _acted(recordings.log, None, method="Target.getTargets", acts=False,
+                                                 context="buyer")]
+    _acted(recordings.log, "T2")
+    _acted(recordings.log, None, method="Target.getTargets", acts=False, context="seller")
+    _acted(recordings.log, None, via="agentenv", method="cookies/set")
+    pipe.open("T5", YELLOW, buyer.id)
+    pipe.open("T6", GREEN, seller.id)
+    reset = recordings.log.note("reset", {})
+    await asyncio.sleep(0.2)
+    manifest = await recordings.end(started["recording_id"])
     lines = [json.loads(line) for line in uploads.by_path[
-        f"agentenv-browser-recordings/r1/{ended['recording_id']}/log.jsonl"].decode().splitlines()]
+        f"{ROOT}/{manifest['recording_id']}/log.jsonl"].decode().splitlines()]
 
-    assert complete["log_missing"] == [] and complete["log_last"] == finishing["seq"]
-    assert ended["log_missing"] == [held] and [line["seq"] for line in lines] == [going["seq"], after]
-    assert lines[0]["action"]["unfinished"] is True
+    actions = [line["seq"] for line in lines if "action" in line]
+    opened = [line["tab"]["id"] for line in lines if "tab" in line]
+    assert actions == mine and opened == ["T5"] and reset in [line["seq"] for line in lines]
 
 
 @pytest.mark.asyncio
-async def test_a_frame_the_browser_cant_take_is_kept_with_why_and_counts_as_missing(recorded):
-    log, control, uploads, recordings = recorded
-    started = await recordings.start("run-1:record", _grant())
-    control.fail = "the tab painted nothing within 3 s"
-    _acted(log, "cdp", "Input.dispatchMouseEvent", "T1")
+async def test_its_network_log_is_the_browsers_whole_log_as_har_marking_what_it_wrote_meanwhile(browser):
+    pipe, control, contexts, network, recordings, uploads = browser
+    await contexts.lease("buyer")
+    pipe.open("T0", GREEN)
+    _network_lines(network.path, "start-tab")
+    started = await recordings.start("run:a", _grant())
+    _network_lines(network.path, "during", after=1)
+    await contexts.lease("later")
+    manifest = BrowserRecordingManifest.model_validate(await recordings.end(started["recording_id"]))
+    document = json.loads(uploads.by_path[f"{ROOT}/{manifest.recording_id}/network.har"])
+
+    assert [entry["request"]["url"] for entry in document["log"]["entries"]] == [
+        "http://start-tab.localhost/", "http://during.localhost/"]
+    assert manifest.network.model_dump() == {"file": "network.har", "scope": "browser", "uploaded": True,
+                                             "entries": 2, "during": [3, 4], "contexts_open": ["buyer", "later"],
+                                             "error": None}
+
+
+@pytest.mark.asyncio
+async def test_a_start_is_refused_with_no_network_log_an_unleased_context_a_bad_fps_or_no_encoder(browser,
+                                                                                                    monkeypatch):
+    pipe, control, contexts, network, recordings, uploads = browser
+    alone = BrowserRecordings(recordings.log, control, contexts, None)
+
+    with pytest.raises(Unsupported, match="no network log"):
+        await alone.start("run:a", _grant())
+    with pytest.raises(TargetUnavailable, match="'nope'"):
+        await recordings.start("run:b", _grant(), context="nope")
+    with pytest.raises(InvalidArgument, match="fps is an integer from 1 to 15"):
+        await recordings.start("run:c", _grant(), fps=60)
+    monkeypatch.setattr(browser_recording, "Video", None)
+    with pytest.raises(Unsupported, match="av and Pillow"):
+        await recordings.start("run:d", _grant())
+
+
+@pytest.mark.asyncio
+async def test_a_context_an_agent_makes_over_its_contexts_address_is_recorded_with_it_and_ends_with_its_context(
+        browser):
+    pipe, control, contexts, network, recordings, uploads = browser
+    seller = await contexts.lease("seller")
+    pipe.open("T2", BLUE, seller.id)
+    started = await recordings.start("run:a", _grant(), context="seller", network=False)
+    made = contexts.made_by_agent("bob", "ctx-bob", scope=seller.id)
+    contexts.made_by_agent("ada", "ctx-ada", scope=None)
+    pipe.open("T7", YELLOW, "ctx-bob")
+    await asyncio.sleep(0.4)
+    contexts.disposed("ctx-bob")
+    await asyncio.sleep(0.4)
+    manifest = BrowserRecordingManifest.model_validate(await recordings.end(started["recording_id"]))
+    child = manifest.children[0]
+    folder = f"{ROOT}/{manifest.recording_id}/contexts/{made.label}"
+    kept = BrowserRecordingManifest.model_validate_json(uploads.by_path[f"{folder}/manifest.json"])
+
+    assert [c.context for c in manifest.children] == [made.label] and child.folder == f"contexts/{made.label}/"
+    assert (child.made_by, child.ended_by, child.missing) == ("bob", "context_ended", None)
+    assert kept.context == made.label and set(uploads.colors(folder)) <= {"white", "yellow"}
+    assert "yellow" in uploads.colors(folder) and set(uploads.colors(f"{ROOT}/{manifest.recording_id}")) == {"blue"}
+
+
+@pytest.mark.asyncio
+async def test_a_lease_released_ends_its_recording_saying_so_and_an_end_after_answers_the_same(browser):
+    pipe, control, contexts, network, recordings, uploads = browser
+    buyer = await contexts.lease("buyer")
+    pipe.open("T1", RED, buyer.id)
+    started = await recordings.start("run:a", _grant(), context="buyer", frames=True, network=False)
+    await asyncio.sleep(0.2)
+    await contexts.release("buyer")
+    await asyncio.sleep(0.3)
+    ended = BrowserRecordingManifest.model_validate(await recordings.end(started["recording_id"], _grant()))
+
+    assert ended.ended_by == "context_ended" and ended.missing_frames == 0 and ended.video.segments
+    assert ended.model_dump(mode="json") == await recordings.end(started["recording_id"])
+
+
+@pytest.mark.asyncio
+async def test_a_frame_follows_each_settled_burst_of_an_agents_actions_on_its_contexts_tab_keyed_to_its_entries(
+        browser):
+    pipe, control, contexts, network, recordings, uploads = browser
+    buyer = await contexts.lease("buyer")
+    pipe.open("T1", RED, buyer.id)
+    pipe.open("T2", BLUE, buyer.id)
+    pipe.open("T9", GREEN)
+    started = await recordings.start("run:a", _grant(), frames=True, context="buyer", network=False)
+    typed = [_acted(recordings.log, "T1", method="Input.insertText") for _ in range(3)]
+    _acted(recordings.log, "T1", method="DOM.getDocument", acts=False)
+    _acted(recordings.log, "T9")
+    await asyncio.sleep(0.2)
+    clicked = _acted(recordings.log, "T2", via="mcp", method="browser_click")
     await asyncio.sleep(0.2)
     manifest = BrowserRecordingManifest.model_validate(await recordings.end(started["recording_id"]))
 
-    assert [f.uploaded for f in manifest.frames] == [True, False, False] and manifest.missing_frames == 2
-    assert manifest.frames[1].error == "DeviceUnavailable: the tab painted nothing within 3 s"
+    assert [(f.kind, f.after, f.tab) for f in manifest.frames][1:] == [
+        ("action", typed, "T1"), ("action", [clicked], "T2"), ("last", [], "T2")]
+    assert all(f.uploaded and f.content_type == "image/jpeg" for f in manifest.frames)
+    assert uploads.by_path[f"{ROOT}/{manifest.recording_id}/frames/0001.jpg"] == _jpeg(RED)
+    assert manifest.missing_frames == 0 and manifest.frames_on
 
 
 @pytest.mark.asyncio
-async def test_without_frames_a_recording_takes_none_and_still_uploads_its_log(recorded):
-    log, control, uploads, recordings = recorded
-    started = await recordings.start("run-1:record", _grant(), frames=False)
-    _acted(log, "cdp", "Input.dispatchMouseEvent", "T1")
+async def test_without_frames_a_recording_takes_none_and_still_uploads_its_log(browser):
+    pipe, control, contexts, network, recordings, uploads = browser
+    pipe.open("T1", RED)
+    started = await recordings.start("run:a", _grant(), network=False)
+    _acted(recordings.log, "T1")
     await asyncio.sleep(0.2)
     manifest = await recordings.end(started["recording_id"])
 
-    assert manifest["frames"] == [] and manifest["log_uploaded"] and control.asked == []
+    assert manifest["frames"] == [] and manifest["log_uploaded"] and manifest["frames_on"] is False
 
 
 @pytest.mark.asyncio
-async def test_a_start_again_joins_its_recording_an_end_again_answers_the_same_and_an_unknown_one_is_refused(recorded):
-    log, control, uploads, recordings = recorded
-    first = await recordings.start("run-1:record", _grant())
-    again = await recordings.start("run-1:record", _grant())
+async def test_a_start_again_joins_its_recording_an_end_again_answers_the_same_and_an_unknown_one_is_refused(
+        browser):
+    pipe, control, contexts, network, recordings, uploads = browser
+    pipe.open("T1", RED)
+    first = await recordings.start("run:a", _grant(), network=False)
+    again = await recordings.start("run:a", _grant(), network=False)
     ended = await recordings.end(first["recording_id"])
 
     assert again == first and await recordings.end(first["recording_id"]) == ended
@@ -170,18 +421,40 @@ async def test_a_start_again_joins_its_recording_an_end_again_answers_the_same_a
     with pytest.raises(InvalidArgument, match="reason is one of"):
         await recordings.end(first["recording_id"], reason="later")
     with pytest.raises(InvalidArgument, match="write namespace grant"):
-        await recordings.start("run-2:record", {"root_path": "x"})
+        await recordings.start("run:b", {"root_path": "x"}, network=False)
 
 
 @pytest.mark.asyncio
-async def test_every_open_recording_ends_as_its_env_closes(recorded):
-    log, control, uploads, recordings = recorded
-    await recordings.start("run-1:a", _grant())
-    await recordings.start("run-1:b", _grant(), frames=False)
+async def test_every_open_recording_ends_as_its_env_closes(browser):
+    pipe, control, contexts, network, recordings, uploads = browser
+    pipe.open("T1", RED)
+    await recordings.start("run:a", _grant(), network=False)
+    await recordings.start("run:b", _grant(), frames=True, network=False)
 
     ended = await recordings.end_all("reset")
 
     assert [m["ended_by"] for m in ended] == ["reset", "reset"] and await recordings.end_all() == []
+
+
+@pytest.mark.asyncio
+async def test_one_screencast_serves_everything_following_its_tab_and_stops_once_nothing_does():
+    pipe = Browser()
+    control = BrowserControl(pipe, "agent")
+    pipe.open("T1", RED)
+    heard_a, heard_b = [], []
+
+    session = await control.screencast("T1", heard_a.append)
+    await control.screencast("T1", heard_b.append)
+    pipe.emit("Page.screencastFrame", {"data": base64.b64encode(b"x").decode(), "sessionId": 7}, "s-T1")
+    await asyncio.sleep(0)
+    await control.unscreencast(session, heard_a.append)
+    stopped_early = ("Page.stopScreencast", "s-T1") in pipe.calls
+    await control.unscreencast(session, heard_b.append)
+
+    assert heard_a == heard_b == [b"x"] and ("Page.screencastFrameAck", "s-T1") in pipe.calls
+    assert [call for call in pipe.calls if call[0] == "Page.startScreencast"] == [("Page.startScreencast", "s-T1")]
+    assert not stopped_early and ("Page.stopScreencast", "s-T1") in pipe.calls
+    assert await control.screencast("nope", heard_a.append) is None
 
 
 class Pipe:

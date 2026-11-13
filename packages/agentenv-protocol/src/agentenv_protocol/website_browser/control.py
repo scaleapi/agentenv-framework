@@ -59,6 +59,8 @@ FRAME_RETRY_S = 0.25
 FOR_THE_MOMENT = ("Not attached to an active page", "Unable to capture screenshot", "Session with given id not found")
 #: How often a wait for a tab to load looks again.
 LOAD_POLL_S = 0.1
+#: A screencast's frames: JPEG at this quality, every frame the tab paints.
+SCREENCAST = {"format": "jpeg", "quality": FRAME_QUALITY, "everyNthFrame": 1}
 #: Where an agent's files to upload are, and where downloads land, under the session user's home.
 UPLOADS = "Uploads"
 DOWNLOADS = "Downloads"
@@ -139,6 +141,10 @@ class BrowserControl:
         self.other_contexts: dict[str, str] = {}
         self.context_origins: dict[str, set[str]] = {}
         self._context_fronts: dict[str, str] = {}
+        #: Each screencast agentenv runs, by its session, and what hears its frames, each JPEG's bytes.
+        self._screencasts: dict[str, list[Callable[[bytes], None]]] = {}
+        #: What hears of each tab opening and closing: the event and the tab's record.
+        self.on_tab: list[Callable[[str, dict], None]] = []
         #: The browser's log, where its tab events go, and the commands in flight that cause them.
         self.log: Optional[BrowserLog] = None
         self.causes = Causes()
@@ -169,8 +175,12 @@ class BrowserControl:
         if self.log is not None:
             for tab in self.tabs.values():
                 self.log.note("tab", {"event": "closed", "id": tab["id"], "url": redact_url(tab["url"]), "by": how})
+        ended = list(self.tabs.values())
         self.tabs.clear()
         self._sessions.clear()
+        self._screencasts.clear()
+        for tab in ended:
+            self._heard("closed", tab)
         self._frame_tabs.clear()
         self._open_dialogs.clear()
         self._choosers.clear()
@@ -265,6 +275,17 @@ class BrowserControl:
         seen."""
         tab = self._frame_tabs.get(frame, frame) if isinstance(frame, str) else None
         return self.tabs.get(tab, {}).get("context_id") if tab is not None else None
+
+    def context_of_tab(self, target: object) -> Optional[str]:
+        """The context of the tab ``target``, open or closed since the record started; None for the default context's,
+        or one it hasn't seen."""
+        if (tab := self.tabs.get(target) if isinstance(target, str) else None) is not None:
+            return tab.get("context_id")
+        return next((tab.get("context_id") for tab in reversed(self.closed_tabs) if tab["id"] == target), None)
+
+    def session_of(self, target: Optional[str]) -> Optional[str]:
+        """The session of agentenv's own on the tab ``target``, None for one it isn't attached to."""
+        return next((session for session, tab in self._sessions.items() if tab == target), None) if target else None
 
     def label_of(self, entry: dict) -> Optional[str]:
         """The label of the lease a tab or download was in, None for the default context."""
@@ -731,21 +752,31 @@ class BrowserControl:
         await self._refresh(target)
         return {**({"png": png} if png is not None else {"blank": True}), "page": self._state_of(target)}
 
-    async def frame(self, target: Optional[str], load_wait_s: float) -> tuple[str, str, Optional[str], Optional[str]]:
-        """A frame of the tab ``target``, else, for none or one that's gone, of the active tab: once its page has loaded,
-        waiting up to ``load_wait_s``, a JPEG of it as it shows, within ``FRAME_CAPTURE_S``, or, with a dialog keeping
-        it from painting, the frame it last took, else its last capture, a PNG; a tab that closes while its page loads
-        is the active tab's. The image base64, its format and the tab and its URL; DeviceUnavailable with no tab open,
-        or for one that paints nothing in time."""
-        session = next((s for s, t in self._sessions.items() if t == target), None) if target else None
+    async def frame(self, target: Optional[str], load_wait_s: float, context: Optional[str] = None,
+                    within: bool = False) -> tuple[str, str, Optional[str], Optional[str]]:
+        """A frame of the tab ``target``, else, for none or one that's gone, of the active tab, with ``within`` the
+        active tab of the context ``context``, else of the default one: once its page has loaded, waiting up to
+        ``load_wait_s``, a JPEG of it as it shows, within ``FRAME_CAPTURE_S``, or, with a dialog keeping it from
+        painting, the frame it last took, else its last capture, a PNG; a tab that closes while its page loads is the
+        active tab's. The image base64, its format and the tab and its URL; DeviceUnavailable with no tab open, or for
+        one that paints nothing in time."""
+
+        async def active_session() -> str:
+            if not within:
+                return await self.active_session()
+            if (found := self.session_of(await self.active_tab(context))) is None:
+                raise DeviceUnavailable("the context has no tab open")
+            return found
+
+        session = self.session_of(target)
         if session is None:
-            session = await self.active_session()
+            session = await active_session()
         target = self._sessions[session]
         deadline = asyncio.get_running_loop().time() + load_wait_s
         while target in self._page_loading and asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(LOAD_POLL_S)
         if session not in self._sessions:
-            session = await self.active_session()
+            session = await active_session()
             target = self._sessions[session]
         loop = asyncio.get_running_loop()
         deadline = loop.time() + FRAME_CAPTURE_S
@@ -769,8 +800,7 @@ class BrowserControl:
             await asyncio.sleep(FRAME_RETRY_S)
             while session not in self._sessions:
                 try:
-                    session = next((s for s, t in self._sessions.items() if t == target), None) or (
-                        await self.active_session())
+                    session = self.session_of(target) or await active_session()
                 except DeviceUnavailable:
                     if loop.time() + FRAME_RETRY_S >= deadline:
                         raise
@@ -778,6 +808,74 @@ class BrowserControl:
             target = self._sessions[session]
         self._frames[target] = shot["data"], "jpg"
         return shot["data"], "jpg", target, self.url_of(target)
+
+    async def capture_tab(self, target: str) -> Optional[bytes]:
+        """The tab ``target`` as it shows now, a JPEG's bytes, or with a dialog keeping it from painting the frame it
+        last took; None when it can't be had within ``FRAME_CAPTURE_S``, as for a tab that's gone or never painted. Of
+        that tab alone, as a recording of its context wants it."""
+        if (session := self.session_of(target)) is None:
+            return None
+        if session in self._open_dialogs:
+            held = self._frames.get(target)
+            return base64.b64decode(held[0]) if held is not None and held[1] == "jpg" else None
+        try:
+            shot = await self._nudged_capture(session, FRAME_CAPTURE_S)
+        except (asyncio.TimeoutError, ConnectionError, DevToolsError, _TabGone):
+            return None
+        self._frames[target] = shot["data"], "jpg"
+        return base64.b64decode(shot["data"])
+
+    async def visible(self, target: str) -> bool:
+        """Whether the tab ``target`` shows in its window, as a tab behind another doesn't; False when it can't be told.
+        A visible tab's screencast sends a frame each time it paints, so one that sends none is still."""
+        if (session := self.session_of(target)) is None:
+            return False
+        try:
+            answer = await self.devtools.call("Runtime.evaluate", {"expression": "document.visibilityState",
+                                                                   "returnByValue": True}, session_id=session,
+                                              timeout_s=ACTIVE_CHECK_TIMEOUT_S)
+            return answer["result"]["value"] == "visible"
+        except (ConnectionError, DevToolsError, asyncio.TimeoutError, KeyError, TypeError):
+            return False
+
+    async def screencast(self, target: str, heard: Callable[[bytes], None], max_edge: Optional[int] = None
+                         ) -> Optional[str]:
+        """``heard`` told each frame the tab ``target`` paints, a JPEG's bytes, on a screencast of agentenv's own
+        session on it, which one screencast serves for everything that follows the tab; its session, None for a tab it
+        isn't attached to or that won't screencast."""
+        if (session := self.session_of(target)) is None:
+            return None
+        hearing = self._screencasts.setdefault(session, [])
+        hearing.append(heard)
+        if len(hearing) == 1:
+            options = {**SCREENCAST, **({"maxWidth": max_edge, "maxHeight": max_edge} if max_edge else {})}
+            try:
+                await self.devtools.call("Page.startScreencast", options, session_id=session)
+            except (ConnectionError, DevToolsError, asyncio.TimeoutError):
+                self._screencasts.pop(session, None)
+                return None
+        return session
+
+    async def unscreencast(self, session: str, heard: Callable[[bytes], None]) -> None:
+        """``heard`` no longer told the frames of the screencast on ``session``, which stops once nothing hears it."""
+        hearing = self._screencasts.get(session)
+        if hearing is None or heard not in hearing:
+            return
+        hearing.remove(heard)
+        if not hearing:
+            self._screencasts.pop(session, None)
+            with contextlib.suppress(ConnectionError, DevToolsError, asyncio.TimeoutError):
+                await self.devtools.call("Page.stopScreencast", session_id=session)
+
+    def _on_Page_screencastFrame(self, params: dict, session: Optional[str]) -> None:
+        if isinstance(ack := params.get("sessionId"), int):
+            self._spawn(self.devtools.call("Page.screencastFrameAck", {"sessionId": ack}, session_id=session))
+        try:
+            data = base64.b64decode(params.get("data") or "")
+        except ValueError:
+            return
+        for heard in list(self._screencasts.get(session, ())):
+            heard(data)
 
     def _held_frame(self, target: str) -> tuple[str, str, Optional[str], Optional[str]]:
         """The frame of a tab a dialog keeps from painting: the one it last took, else its last capture, a PNG;
@@ -895,6 +993,7 @@ class BrowserControl:
             if self.log is not None:
                 self._spawn(self._log_opened(self.log.reserve(), log_time(), info["targetId"], info.get("url", ""),
                                              info.get("openerId"), self._launching))
+            self._heard("opened", self.tabs[info["targetId"]])
 
     async def _log_opened(self, seq: int, at: str, target: str, url: str, opener: Optional[str],
                           launching: bool) -> None:
@@ -996,6 +1095,7 @@ class BrowserControl:
             if self.log is not None:
                 self.log.note("tab", {"event": "closed", "id": target, "url": redact_url(tab["url"]),
                                       **caused(self.causes.closed(target), self.log, target)})
+            self._heard("closed", tab)
         else:
             self.causes.closed(target)
         self._closing.discard(target)
@@ -1025,6 +1125,7 @@ class BrowserControl:
                     self._pinned.setdefault(target, asyncio.Event()).set()
 
     def _on_Target_detachedFromTarget(self, params: dict, session: Optional[str]) -> None:
+        self._screencasts.pop(params["sessionId"], None)
         if (target := self._sessions.pop(params["sessionId"], None)) is not None:
             self._shots.pop(target, None)
             self._frames.pop(target, None)
@@ -1102,6 +1203,13 @@ class BrowserControl:
             download.update(size=size, sha256=sha256)
         finally:
             download["ended_at"] = _now()
+
+    def _heard(self, event: str, tab: dict) -> None:
+        for hook in self.on_tab:
+            try:
+                hook(event, tab)
+            except Exception as e:
+                logger.warning(f"what hears of the browser's tabs: {type(e).__name__}: {e}")
 
     def _spawn(self, work: Awaitable) -> None:
         task = asyncio.ensure_future(work)
