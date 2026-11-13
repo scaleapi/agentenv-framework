@@ -30,6 +30,7 @@ from agent_env.task_step.context import TaskStepContext, read_dual_keyed
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.context_ops import build_context_update_ops
 from agent_env.task_step.task_steps.collect_artifacts import CollectArtifactsTaskStep
+from agent_env.task_step.task_steps.prompt_agent import is_prompt_step
 
 
 def _indent(text: str, prefix: str = "    ") -> str:
@@ -176,8 +177,11 @@ def _step_output_lines(step, context) -> list[str]:
         if match:
             lines.append(_format_loaded_snapshot(match))
         return lines
-    if step.type == "prompt_agent" and context.prompt_responses:
-        return [_format_prompt_response(context.prompt_responses[-1])]
+    if is_prompt_step(step):
+        # This step's own response: a step running alongside it may have added a later one.
+        match = next((r for r in reversed(context.prompt_responses) if r.step_id == step.id), None)
+        if match:
+            return [_format_prompt_response(match)]
     if step.type == "snapshot_agent_state":
         snapshots = context.metadata.get("agent_snapshots") or []
         match = next((s for s in reversed(snapshots) if s.get("capture_step_id") == step.id), None)
@@ -359,7 +363,8 @@ def _stored(task, context: TaskStepContext) -> str:
 @click.option("--litellm-api-key", default=None, type=str, help="Override LITELLM_API_KEY for this run; a secret:KEY or env:NAME reference is resolved where it is used")
 @click.option("--judge-litellm-api-key", default=None, type=str, help="Override LITELLM_API_KEY used by rubrics_verifier judge agents (falls back to --litellm-api-key, then to config secret); a secret:KEY or env:NAME reference is resolved where it is used")
 @click.option("--apply-trajectory-filter/--no-trajectory-filter", "apply_trajectory_filter", default=None, help="Force trajectory filtering on/off for rubrics_verifier (overrides the step's trajectory_filter setting)")
-@click.option("--a2a-agent-id", default=None, type=str, help="Override A2A agent id for deploy_agent steps")
+@click.option("--a2a-agent-id", default=None, type=str,
+              help="Override A2A agent id for deploy_agent steps; a user sim's agent keeps its own")
 @click.option("--agent-sandbox", default=None,
               help="Override agent sandbox backend(s) for deploy_agent steps; comma-separated for fallback chain (e.g. 'modal,local')")
 @click.option("--env-sandbox", default=None,
