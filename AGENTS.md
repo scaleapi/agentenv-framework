@@ -489,9 +489,10 @@ image's digest. Run by hand on `main`, the workflow publishes the images alone.
 Its jobs that run agent-env (`.github/scripts/infra_images.py`) hold no token that writes; the jobs that push
 images or publish to PyPI install nothing and check what they're handed (`.github/scripts/infra_build.py`,
 standard library and the docker CLI only).
-Actions are pinned to commit SHAs; Dependabot updates them, the pinned uv, `uv.lock`, the UI's npm packages and
-the infra images' base images, each pinned by digest so that a bump rebuilds and republishes the image; Dependabot
-proposes only a base's digest and patch updates, and a major or minor upgrade is made by hand.
+Actions are pinned to commit SHAs; Dependabot updates them, the pinned uv, `uv.lock`, the UI's npm packages, the
+base computer's egress proxy's Go modules (`go.sum`), and the infra images' base images, each pinned by digest so
+that a bump rebuilds and republishes the image; Dependabot proposes only a base's digest and patch updates, and a
+major or minor upgrade is made by hand.
 
 ## Conventions
 

@@ -1143,3 +1143,44 @@ def test_the_sdk_server_reaches_its_staging_on_the_port_it_took_the_request_on(
 
     assert sent == [f"http://127.0.0.1:8456{_STAGED}"]
     assert transfers.loopback_url(write.write.url, write.write.headers) == f"http://127.0.0.1:9999{_STAGED}"
+
+
+@pytest.mark.asyncio
+async def test_a_process_made_direct_takes_no_proxy_from_the_environment_for_its_transfers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    trusted = []
+
+    def recording(real):
+        def make(**kwargs):
+            trusted.append(kwargs.get("trust_env", True))
+            return real(transport=httpx.MockTransport(lambda request: httpx.Response(200)), **kwargs)
+
+        return make
+
+    monkeypatch.setattr(transfers.httpx, "AsyncClient", recording(httpx.AsyncClient))
+    monkeypatch.setattr(transfers, "_proxy_from_environment", True)
+    await upload(_write_object(), _write(tmp_path / "before.json", b"{}"))
+    transfers.direct()
+    await upload(_write_object(), _write(tmp_path / "after.json", b"{}"))
+
+    assert trusted == [True, False]
+
+
+def test_a_computers_own_servers_make_their_transfers_direct(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentenv_protocol.computer import serve, serve_app
+
+    seen = []
+
+    class Driver:
+        def serve(self) -> None:
+            seen.append(transfers.proxy_from_environment())
+
+    monkeypatch.setattr(transfers, "_proxy_from_environment", True)
+    monkeypatch.setattr(serve, "driver_class", lambda file, name: Driver)
+    serve.main(["driver.py:Driver"])
+    monkeypatch.setattr(transfers, "_proxy_from_environment", True)
+    monkeypatch.setattr(serve_app, "_serve", lambda argv: seen.append(transfers.proxy_from_environment()))
+    serve_app.main(["app.py:App"])
+
+    assert seen == [False, False]

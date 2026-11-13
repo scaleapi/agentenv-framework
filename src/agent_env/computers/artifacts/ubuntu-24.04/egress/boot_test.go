@@ -60,3 +60,29 @@ func TestBootMintsTheCAOnceItsKeyPrivateAndTrustsItInEveryBundleOnce(t *testing.
 		t.Fatalf("%v", err)
 	}
 }
+
+func TestAnAppsStoreThatCantTakeTheCAIsNamedAndTheBootGoesOn(t *testing.T) {
+	dir := t.TempDir()
+	me, _ := user.Current()
+	broken := filepath.Join(dir, "opt", "venv", "lib", "certifi")
+	os.MkdirAll(filepath.Join(broken, "elsewhere"), 0o755)
+	os.Symlink(filepath.Join(broken, "elsewhere"), filepath.Join(broken, "cacert.pem")) // a folder, not a bundle
+	jdk := filepath.Join(dir, "jdk", "lib", "security")
+	os.MkdirAll(jdk, 0o755)
+	os.WriteFile(filepath.Join(jdk, "cacerts"), []byte("not a keystore"), 0o644)
+	t.Setenv("PATH", dir) // and no keytool to add the CA with
+	p := bootPaths{
+		Folder: filepath.Join(dir, "egress"), PublicCA: filepath.Join(dir, "egress-ca.pem"),
+		Anchor:       filepath.Join(dir, "anchors", "agentenv-egress.crt"),
+		CertifiRoots: []string{filepath.Join(dir, "opt")}, JavaRoots: []string{filepath.Join(dir, "jdk")},
+		EgressUser: me.Username,
+	}
+	report, err := boot(p)
+	if err != nil {
+		t.Fatalf("the boot failed: %v", err)
+	}
+	warnings, _ := report["warnings"].([]string)
+	if len(warnings) != 2 || !strings.Contains(strings.Join(warnings, " "), "keytool") {
+		t.Fatalf("%v", report)
+	}
+}

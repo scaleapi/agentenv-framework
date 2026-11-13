@@ -45,7 +45,8 @@ func defaultBootPaths() bootPaths {
 
 // boot, as root before the session starts: the CA, minted once per computer, its key the egress user's alone, and
 // trusted in the system store, agent-env's trust files, every certifi bundle, every JDK's store and the session
-// user's NSS database. Any step that fails fails the boot, naming it.
+// user's NSS database. A step that fails fails the boot, naming it, but for a certifi bundle or a JDK's store, which
+// an app brings: those are named among the report's warnings.
 func boot(p bootPaths) (map[string]any, error) {
 	start := time.Now()
 	report := map[string]any{}
@@ -88,9 +89,7 @@ func boot(p bootPaths) (map[string]any, error) {
 		}
 	}
 	appended := map[string]bool{}
-	bundles := append([]string{}, p.Bundles...)
-	bundles = append(bundles, certifiBundles(p.CertifiRoots)...)
-	for _, path := range bundles {
+	for _, path := range p.Bundles {
 		added, err := appendOnce(path, caPEM)
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
@@ -100,15 +99,30 @@ func boot(p bootPaths) (map[string]any, error) {
 		}
 		appended[path] = added
 	}
+	// An app's own stores, certifi's and JDKs': one that can't take the CA is named, and the computer boots, its
+	// app then refusing intercepted sites as it would on a store of its own.
+	var warnings []string
+	for _, path := range certifiBundles(p.CertifiRoots) {
+		added, err := appendOnce(path, caPEM)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("trusting the CA in %s: %v", path, err))
+			continue
+		}
+		appended[path] = added
+	}
 	report["bundles"] = appended
 	java := map[string]string{}
 	for _, store := range javaStores(p.JavaRoots) {
 		if err := trustJava(store, p.PublicCA); err != nil {
-			return report, fmt.Errorf("trusting the CA in %s: %w", store, err)
+			warnings = append(warnings, fmt.Sprintf("trusting the CA in %s: %v", store, err))
+			continue
 		}
 		java[store] = "trusted"
 	}
 	report["java"] = java
+	if len(warnings) > 0 {
+		report["warnings"] = warnings
+	}
 	if p.NSS != nil {
 		if err := p.NSS(p); err != nil {
 			return report, fmt.Errorf("the session's NSS database: %w", err)

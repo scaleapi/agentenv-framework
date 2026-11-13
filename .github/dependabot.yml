@@ -70,6 +70,16 @@ updates:
     groups:
       infra-base-images:
         patterns: ["*"]
+  # The base computer's egress proxy, a Go program its Dockerfile builds: its modules' fixes, uTLS's and
+  # golang.org/x/crypto's among them. A bump changes the base's sources, so the next release rebuilds and publishes it.
+  - package-ecosystem: "gomod"
+    directory: "/src/agent_env/computers/artifacts/ubuntu-24.04/egress"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      egress-go-modules:
+        patterns: ["*"]
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
