@@ -31,6 +31,7 @@ from ..computer.errors import DeviceUnavailable, InvalidArgument
 from ..tool_context import DEFAULT_ROLE, ROLE_HEADER, normalize_role
 from ..transfers import WriteNamespaceGrant
 from ..types import METHOD_ADD, RPC_PATH, EnvironmentExtension, IntakeDeclaration, IntakeFormat, intake_extension
+from ..website.readiness import names_host
 from . import data
 from .contexts import CONTEXTS, TASK, Contexts, label_problem
 from .control import AGENT, DOWNLOADS, EXIT, LIVE_START_TAB_TIMEOUT_S, LOADED, STOP, UPLOADS, BrowserControl, _now
@@ -898,15 +899,7 @@ def _read_sites() -> list[SiteNames]:
 def _site_of(url: str, sites: list[SiteNames]) -> Optional[str]:
     """The name of the env's site among ``sites`` that serves ``url``'s host, None for any other."""
     host = (urlsplit(url).hostname or "").rstrip(".")
-    return next((site.name for site in sites if any(_matches(domain.lower(), host) for domain in site.domains)), None)
-
-
-def _matches(pattern: str, host: str) -> bool:
-    """Whether ``host`` is the name ``pattern`` names: itself, or for ``*.example.com`` one label more."""
-    if pattern.startswith("*."):
-        head, dot, rest = host.partition(".")
-        return bool(head) and bool(dot) and rest == pattern[2:]
-    return host == pattern
+    return next((site.name for site in sites if any(names_host(domain.lower(), host) for domain in site.domains)), None)
 
 
 def _refuse_failed(tabs: list[dict]) -> None:

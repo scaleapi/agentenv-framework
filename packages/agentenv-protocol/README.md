@@ -544,6 +544,47 @@ class GitHub(WebsiteEnvironment):
 - **The run:** a run that deploys a live site is marked live. The deploy record says `live`, and the run's metadata lists
   its live sites with `reproducible: false`, because the real site may change between runs.
 
+A third-party site is an app someone else wrote, such as a web store, that serves its own pages, wrapped so agentenv
+deploys it like any site. `ForwardingSite` runs in the app's container beside it: it answers the card, the data plane
+and `website/v1` itself, and forwards every other request to the app.
+
+```python
+from agentenv_protocol.website import ForwardingSite, session_state, website
+
+
+@website(domains=["store.localhost"], builtin_routes=False, clock="real", ready_timeout_s=600)
+class Store(ForwardingSite):
+    upstream = "http://127.0.0.1:80"      # the app, in the same container
+    ready_path = "/admin"                 # ready once the app answers this below 500
+    dropped_headers = ("X-Auto-Login",)   # only the site's own calls may send the app these
+
+    @session_state
+    async def signed_in(self, user: str | None) -> dict:
+        ...                               # sign in server-side, return the app's cookies
+```
+
+- **Forwarding:** a request goes to the app as it came: its method, the site's own path with its encoding intact (an
+  escaped `/` stays escaped, and a forwarded prefix is taken off), its query, the `Host` the browser named and its
+  body, streamed, with no header of the forwarder's own. The hop-by-hop headers and `dropped_headers` stay behind. The
+  answer comes back as the app gave it, streamed and still encoded, a redirect unfollowed, but a cookie the app ties
+  to one of the site's names (`Domain`) comes back the host's alone, as agentenv sets a sign-in's cookies, so a
+  sign-in replaces the app's session cookie rather than setting a second one beside it. An app not answering is a
+  502 (`upstream_unavailable`). It forwards HTTP alone, and refuses a WebSocket with close code 1011.
+- **`builtin_routes=False`** serves none of agentenv's own site routes, so `/api/session` reaches the app too, and the
+  card names no `session_path` or `session_cookie`. Any `WebsiteEnvironment` may set it.
+- **`clock="real"`** declares a site that keeps real time, as an app that reads the system clock does: its card serves
+  no `clock/v1`, its `website/v1` params say `clock: "real"` (`WEBSITE_CLOCK_PARAM`), its answers carry no
+  `X-Universe-Now`, and `sync_env_clock` passes it over. The conformance check skips its two clock checks.
+  `@website` refuses `clock_patch` with it, since there's no universe time to put in a page.
+- **Its data plane:** the app keeps its own data, so the site serves `data/get` alone, which exports nothing. It takes
+  no load and can't reset: agentenv's reset passes over a card serving no `data/reset`, and the conformance check
+  passes a card serving `data/get` alone once `data/get` answers.
+- **Its session:** `@session_state` signs the browser in with whatever cookies the app sets, for example from one
+  server-side request carrying a sign-in header, which `dropped_headers` then keeps the browser from sending.
+- **Its names:** an app with a fixed base URL answers any other `Host` with a redirect to its own name. A browser
+  reaches it by that name alone, the site proxy naming it, and the conformance check's `any_host` passes `/` redirecting
+  to one of the card's `domains` as it does `/` serving HTML.
+
 ## Computer drivers
 
 A computer driver is what runs inside a computer an agent uses through screenshots and input. Write

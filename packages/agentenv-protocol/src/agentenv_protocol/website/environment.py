@@ -53,15 +53,19 @@ from ..agent_env_environment import (
     create_fastmcp_app,
     extension,
 )
+from ..types import EnvironmentExtension
 from .clock import CLOCK_EXTENSION_URI, UNIVERSE_NOW_HEADER, ClockUnavailable, UniverseClock, clock_patch_script, iso
 from .errors import ApiError, NotFound
-from .readiness import (SITE_READY_TIMEOUT_S, WEBSITE_ALLOW_HOSTS_PARAM, WEBSITE_EXTENSION_URI, WEBSITE_LIVE_PARAM,
-                        WEBSITE_READY_OP, WebsiteReadiness)
+from .readiness import (SITE_READY_TIMEOUT_S, WEBSITE_ALLOW_HOSTS_PARAM, WEBSITE_CLOCK_PARAM, WEBSITE_EXTENSION_URI,
+                        WEBSITE_LIVE_PARAM, WEBSITE_READY_OP, WebsiteReadiness)
 from .routes import (ApiContext, ApiRoute, endpoint, error_response, forwarded_prefix, openapi, openapi_path, request_role,
                      reserved_path, routes_of)
 from .session import SessionSigner, session_cookie_name
 
 SESSION_PATH = "/api/session"
+#: A site's clocks: the universe's, which ``clock/v1`` can tie to the gateway's, and real time, which a third-party app
+#: keeps and nothing moves.
+UNIVERSE_CLOCK, REAL_CLOCK = "universe", "real"
 #: The variable a deploy hands a site its settings in, a JSON object of each by its name.
 WEBSITE_SETTINGS_ENV = "AGENTENV_WEBSITE_SETTINGS"
 CHECK_TIMEOUT_S = 10.0
@@ -75,8 +79,9 @@ _HOST = re.compile(r"(\*\.)?[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]
 
 class WebsiteDeclaration(NamedTuple):
     """What ``@website`` declares: the site's domains, its static folder (relative to the class's file), how long it
-    may take to be ready after its server starts, whether its HTML pages read the universe's time, and, for a live
-    site, that it is one and the other hosts its pages reach."""
+    may take to be ready after its server starts, whether its HTML pages read the universe's time, for a live site
+    that it is one and the other hosts its pages reach, whether it serves agentenv's built-in site routes, and its
+    clock: the universe's, which a deploy can move, or real time, for an app that can't follow another."""
 
     domains: tuple[str, ...] = ()
     static: Optional[str] = None
@@ -84,13 +89,19 @@ class WebsiteDeclaration(NamedTuple):
     clock_patch: bool = False
     live: bool = False
     allow_hosts: tuple[str, ...] = ()
+    builtin_routes: bool = True
+    clock: str = UNIVERSE_CLOCK
 
 
 def website(_cls: type | None = None, *, domains: list[str] | tuple[str, ...] = (), static: str | None = None,
             ready_timeout_s: float = SITE_READY_TIMEOUT_S, clock_patch: bool = False, live: bool = False,
-            allow_hosts: list[str] | tuple[str, ...] = ()) -> Any:
+            allow_hosts: list[str] | tuple[str, ...] = (), builtin_routes: bool = True,
+            clock: str = UNIVERSE_CLOCK) -> Any:
     """Declare a WebsiteEnvironment's site; ``live=True`` a real one, at its ``domains``, whose pages reach the
-    ``allow_hosts`` too."""
+    ``allow_hosts`` too. ``builtin_routes=False`` serves none of agentenv's own site routes (``/api/session``), so a
+    mounted app answers every path but the card's and the data plane's, as a third-party app wrapped by its site does;
+    ``clock="real"`` declares a site that keeps real time, whose card serves no ``clock/v1`` and whose answers carry no
+    ``X-Universe-Now``."""
     if _cls is not None:
         raise TypeError("use @website(...) with parentheses")
     for field, hosts in (("domains", domains), ("allow_hosts", allow_hosts)):
@@ -106,6 +117,12 @@ def website(_cls: type | None = None, *, domains: list[str] | tuple[str, ...] = 
         raise ValueError("a live site serves no pages, the real site does, so it takes no static folder")
     if allow_hosts and not live:
         raise ValueError("allow_hosts are the other hosts a live site's pages reach; declare live=True")
+    if not isinstance(builtin_routes, bool):
+        raise ValueError(f"builtin_routes is True or False, not {builtin_routes!r}")
+    if clock not in (UNIVERSE_CLOCK, REAL_CLOCK):
+        raise ValueError(f"clock is {UNIVERSE_CLOCK!r} or {REAL_CLOCK!r}, not {clock!r}")
+    if clock_patch and clock == REAL_CLOCK:
+        raise ValueError("clock_patch puts the universe's time in a site's pages; a site with a real clock has none to put")
     if isinstance(ready_timeout_s, bool) or not isinstance(ready_timeout_s, (int, float)) or not (
             0 < ready_timeout_s < math.inf):
         raise ValueError(f"ready_timeout_s is a number of seconds above 0, not {ready_timeout_s!r}")
@@ -114,7 +131,7 @@ def website(_cls: type | None = None, *, domains: list[str] | tuple[str, ...] = 
         if not (isinstance(cls, type) and issubclass(cls, WebsiteEnvironment)):
             raise TypeError(f"@website declares a WebsiteEnvironment subclass, not {cls!r}")
         setattr(cls, _WEBSITE_ATTR, WebsiteDeclaration(tuple(domains), static, float(ready_timeout_s), clock_patch, live,
-                                                       tuple(allow_hosts)))
+                                                       tuple(allow_hosts), builtin_routes, clock))
         return cls
 
     return deco
@@ -223,14 +240,19 @@ class WebsiteEnvironment(AgentEnvEnvironment):
         else:
             asgi = Starlette(middleware=middleware)
             AgentEnvStarletteApplication(self._build_card(), self).add_routes_to_app(asgi)
-        if SESSION_PATH not in taken and not declaration.live:
+        if SESSION_PATH not in taken and not declaration.live and declaration.builtin_routes:
             asgi.router.routes.append(Route(SESSION_PATH, self._session, methods=["GET", "DELETE"]))
         asgi.router.routes.extend(Route(r.path, _unreserved(endpoint(getattr(self, r.fn.__name__), r, self.context)),
                                         methods=[r.method]) for r in api_routes)
-        asgi.router.default = _Fallback(root, type(self).app)
+        asgi.router.default = _Fallback(root, self.fallback_app())
         self.asgi = asgi
         self._mounted = True
         return asgi
+
+    def fallback_app(self) -> Any:
+        """The app that answers what the site's routes and static folder don't: ``app``, unless a subclass builds its
+        own, as one that forwards to an app beside it does."""
+        return type(self).app
 
     def serves_mcp(self) -> bool:
         """Whether the site is an MCP server too: it has ``@tool`` or ``@resource`` methods, or forwards tools."""
@@ -252,13 +274,22 @@ class WebsiteEnvironment(AgentEnvEnvironment):
     def extension_params(self, uri: str) -> dict:
         if uri == WEBSITE_EXTENSION_URI:
             declaration = self.declaration()
+            clock = {WEBSITE_CLOCK_PARAM: REAL_CLOCK} if declaration.clock == REAL_CLOCK else {}
             if declaration.live:
                 return {"domains": list(declaration.domains), WEBSITE_LIVE_PARAM: True,
-                        WEBSITE_ALLOW_HOSTS_PARAM: list(declaration.allow_hosts)}
-            return {"domains": list(declaration.domains),
-                    "routes": [r.advertised() for r in self.routes()], "session_cookie": self.session_cookie,
-                    "session_path": SESSION_PATH}
+                        WEBSITE_ALLOW_HOSTS_PARAM: list(declaration.allow_hosts), **clock}
+            session = {"session_cookie": self.session_cookie, "session_path": SESSION_PATH} \
+                if declaration.builtin_routes else {}
+            return {"domains": list(declaration.domains), "routes": [r.advertised() for r in self.routes()],
+                    **session, **clock}
         return super().extension_params(uri)
+
+    def served_extensions(self, extensions: list[EnvironmentExtension]) -> list[EnvironmentExtension]:
+        """A site with a real clock serves no ``clock/v1``: nothing could move its time."""
+        served = super().served_extensions(extensions)
+        if self.declaration().clock == REAL_CLOCK:
+            return [extension for extension in served if extension.uri != CLOCK_EXTENSION_URI]
+        return served
 
     @extension(CLOCK_EXTENSION_URI, description="Sync this site to the gateway's virtual clock.")
     async def sync_time(self, env_get_time_url: str, timezone: Optional[str] = None) -> dict:
@@ -367,8 +398,8 @@ class _Forwarded:
         if scope["type"] in ("http", "websocket"):
             headers = dict(scope["headers"])
             host = _first(headers.get(b"x-forwarded-host"))
+            scope = dict(scope, **{SITE_RAW_PATH: scope.get("raw_path")})
             proto = _first(headers.get(b"x-forwarded-proto")).lower()
-            scope = dict(scope)
             if host:
                 scope["headers"] = [(k, v) for k, v in scope["headers"] if k != b"host"] + [(b"host", host.encode())]
             if proto in ("http", "https"):
@@ -380,6 +411,11 @@ class _Forwarded:
                 if scope.get("raw_path") is not None:
                     scope["raw_path"] = prefix.encode("latin-1") + scope["raw_path"]
         await self.app(scope, receive, send)
+
+
+#: Where the scope keeps the request's path as it reached the server, its encoding intact, before ``_Forwarded`` put a
+#: forwarded prefix before it: the site's own path, as a forwarding site sends it on.
+SITE_RAW_PATH = "agentenv.site_raw_path"
 
 
 def _first(value: bytes | None) -> str:
@@ -399,7 +435,7 @@ class _Universe:
         self.app, self.env = app, env
 
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
-        if scope["type"] != "http":
+        if scope["type"] != "http" or self.env.declaration().clock == REAL_CLOCK:
             return await self.app(scope, receive, send)
         clock = self.env._clock()
         try:

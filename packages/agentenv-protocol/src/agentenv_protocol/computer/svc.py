@@ -21,14 +21,12 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from websockets.asyncio.client import ClientConnection
 
 from ..agent_env_environment import _error_response
+from ..passthrough import passed_on
 from .errors import DeliveryFailed
 from .served import TOKEN_HEADER, served
 
 #: The methods the route forwards.
 METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
-#: The headers that belong to one connection, which a proxy doesn't pass on.
-HOP_HEADERS = frozenset({"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "proxy-connection",
-                         "te", "trailer", "transfer-encoding", "upgrade"})
 #: The address a request reached the driver at, which the driver sets for the app in place of any the caller sent.
 FORWARDED = ("x-forwarded-host", "x-forwarded-proto", "x-forwarded-prefix")
 #: A WebSocket close code that means the connection ended without one, which a close can't send on.
@@ -43,16 +41,6 @@ SERVER_LOGGERS = ("uvicorn.access", "uvicorn.error")
 REDACTED = "<redacted>"
 #: The logger of the client requests are forwarded with, which logs each one's URL, an agent's token in it, at INFO.
 FORWARDER_LOGGER = "httpx"
-
-
-def passed_on(headers: Iterable[tuple[str, str]], *dropped: str) -> list[tuple[str, str]]:
-    """``headers`` as a proxy passes them on: without the hop-by-hop ones, those a ``Connection`` header names, and
-    ``dropped``."""
-    headers = list(headers)
-    named = {token.strip().lower() for name, value in headers if name.lower() == "connection"
-             for token in value.split(",")}
-    skipped = HOP_HEADERS | named | set(dropped)
-    return [(name, value) for name, value in headers if name.lower() not in skipped]
 
 
 def to_app(headers: Iterable[tuple[str, str]], host: str, scheme: str, prefix: str) -> list[tuple[str, str]]:

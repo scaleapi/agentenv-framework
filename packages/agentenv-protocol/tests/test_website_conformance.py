@@ -78,10 +78,12 @@ def _handwritten(*, leak_host: bool = False, domain_cookie: bool = False, dated_
                  leak_redirect: bool = False, stamp_rpc: bool = True, reset_keeps: bool = False,
                  get_fails_after_reset: bool = False, rpc_reply: tuple[int, dict] | None = None,
                  ready_answer: object = None, ready_status: int = 200, rpc_path: str | None = None,
-                 ready_endpoint: str = "/ready", card_url: str | None = None) -> Starlette:
+                 ready_endpoint: str = "/ready", card_url: str | None = None,
+                 foreign_redirect: str | None = None) -> Starlette:
     """A server written without the SDK: the contract by hand, optionally broken. Its state is its ``state.data``; with
     ``ready_answer`` its card advertises ``website/v1``'s ``ready``, which answers it with ``ready_status``. With ``rpc_path`` its card's
-    ``url`` names its data plane there, not at ``/agentenv``; ``card_url`` puts what it says in the card's ``url`` alone."""
+    ``url`` names its data plane there, not at ``/agentenv``; ``card_url`` puts what it says in the card's ``url`` alone.
+    With ``foreign_redirect``, ``/`` under an ``.invalid`` Host redirects there, as an app with a fixed base URL does."""
     state = {"items": ["a"], "url": None, "at": None, "reset": False}
 
     def now() -> datetime.datetime:
@@ -92,6 +94,8 @@ def _handwritten(*, leak_host: bool = False, domain_cookie: bool = False, dated_
         return response
 
     async def page(request: Request) -> Response:
+        if foreign_redirect and request.headers["host"].endswith(".invalid"):
+            return stamp(Response(status_code=302, headers={"Location": foreign_redirect}))
         host = request.headers["host"] if leak_host else request.headers.get("x-forwarded-host", request.headers["host"])
         response = stamp(HTMLResponse(f'<html><a href="https://{host}/x">x</a></html>'))
         response.set_cookie("s", "1", domain="example.com" if domain_cookie else None, expires=3600 if dated_cookie else None)
@@ -174,6 +178,19 @@ def _handwritten(*, leak_host: bool = False, domain_cookie: bool = False, dated_
 def test_a_handwritten_server_meeting_the_contract_passes() -> None:
     results = conformance.check("http://testserver", client=TestClient(_handwritten()))
     assert statuses(results) == {**dict.fromkeys(CHECKS, "passed"), "mcp": "skipped"}, results
+
+
+@pytest.mark.parametrize(("location", "status", "detail"), [
+    ("http://h.example/", "passed", "redirected to the site's own name h.example"),
+    ("https://h.example:8443/admin", "passed", "redirected to the site's own name h.example"),
+    ("http://elsewhere.example/", "failed", "answered 302 without a content type, redirecting to elsewhere.example, "
+                                            "not one of the site's names"),
+    ("/", "failed", "answered 302 without a content type"),
+])
+def test_any_host_passes_a_redirect_to_the_sites_own_name_alone(location: str, status: str, detail: str) -> None:
+    results = {r.name: r for r in conformance.check("http://testserver",
+                                                    client=TestClient(_handwritten(foreign_redirect=location)))}
+    assert (results["any_host"].status, results["any_host"].detail.endswith(detail)) == (status, True), results["any_host"]
 
 
 @pytest.mark.parametrize(("answer", "status", "detail"), [

@@ -23,9 +23,19 @@ WEBSITE_BROWSE_URL_PARAM = "browse_url"
 #: A live site's ``website/v1`` params: that it is one, and the other hosts its pages reach.
 WEBSITE_LIVE_PARAM = "live"
 WEBSITE_ALLOW_HOSTS_PARAM = "allow_hosts"
+#: A site's ``website/v1`` param naming its clock when it keeps real time, which the conformance check reads.
+WEBSITE_CLOCK_PARAM = "clock"
 READY_TIMEOUT_S = 10.0
 SITE_READY_TIMEOUT_S = 300.0
 DEFAULT_HEALTH_PATH = "/api/health"
+
+
+def names_host(domain: str, host: str) -> bool:
+    """Whether ``host`` is a name the site's ``domain`` names: itself, or for ``*.example.com`` one label more."""
+    if domain.startswith("*."):
+        head, dot, rest = host.partition(".")
+        return bool(head) and bool(dot) and rest == domain[2:]
+    return host == domain
 
 
 class WebsiteReadiness(BaseModel):

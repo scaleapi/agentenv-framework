@@ -2063,6 +2063,70 @@ async def test_under_a_chromium_default_a_site_gets_chromium_unnamed_which_brows
     assert context.metadata["browser_steps"]["in"]["names"] == ["shop.test"]
 
 
+FORWARDED_PAGE = "http://shop.localhost/admin/home"
+FORWARDED_CHROMIUM = {**MULTI_CHROMIUM,
+                      "env_params": {"form": "container", "app_settings": {"chromium": {"start_urls": [FORWARDED_PAGE]}}}}
+
+
+@pytest.fixture(scope="module")
+def forwarding_shop(browser_computer):
+    """A site named shop.localhost whose pages an app beside its server serves, signed in to by a header only the
+    site's own request sends, under a local id, as a multi env naming chromium's local id must be."""
+    with namespace_routing():
+        _seed_bootstrap_envs()
+        uid = uuid.uuid4().hex[:8]
+        return WebsiteEnv.put(id=f"@local/~/forwarding-{uid}/shop", environment_name="shop", domains=["shop.localhost"],
+                              server_docker_image_artifact=_image("forwarding_website", f"forwarding-shop-{uid}"))
+
+
+async def _forwarded(browser: DeployedEnv, user: str | None) -> dict:
+    """What the forwarding site's app saw of the browser's tab on its page, from the tab's title, once that says
+    ``user`` is signed in, or what it last said once ``WAIT_S`` passes."""
+    seen, deadline = {}, time.monotonic() + WAIT_S
+    while time.monotonic() < deadline:
+        for tab in (await _browser_op(browser, "tabs/list", {}))["tabs"]:
+            if tab["url"] == FORWARDED_PAGE and tab.get("title", "").startswith("{"):
+                seen = json.loads(tab["title"])
+        if seen and seen["user"] == user:
+            return seen
+        await asyncio.sleep(POLL_S)
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_a_site_wrapping_an_app_signs_chromium_in_by_a_header_only_it_sends_and_the_app_serves_its_pages(
+        browser_computer, forwarding_shop):
+    """M8.35: a ForwardingSite's app serves a multi env's chromium its pages at the site's name, over HTTP for a
+    .localhost name, seeing that name as its Host and the page's own path; browser_sign_in signs the browser in through
+    the site's @session_state, the one request that sends the app its sign-in header, and the start tab loads again
+    signed in; the browser's requests never carry the header, and network.har has the app's pages."""
+    with namespace_routing():
+        office = _office(forwarding_shop, [Env.get(browser_computer.id)])
+        sign_in = BrowserSignInTaskStep(id="in", version=None, env_id=office.id, site=forwarding_shop.id, user="amy")
+        context = TaskStepContext()
+        try:
+            [deployed] = (await DeployEnvTaskStep(id="office", version=None, env_id=office.id, sandbox_type="local",
+                                                  ttl_seconds=900, child_envs={"chromium": FORWARDED_CHROMIUM}
+                                                  ).execute(context)).deployed_envs
+            browser = DeployedEnv.from_dict(deployed.child_envs["chromium"])
+            before = await _forwarded(browser, None)
+            await sign_in.execute(context)
+            after = await _forwarded(browser, "amy")
+            entries = await _har_entries(browser)
+        finally:
+            report = await teardown_run(context)
+
+    assert not report.failed
+    [start_tab] = deployed.child_envs["chromium"]["metadata"]["computer"]["start_tabs"]["chromium"]
+    assert (start_tab["url"], start_tab["site"], start_tab["outcome"]) == (FORWARDED_PAGE, "shop", "loaded"), start_tab
+    page = {"host": "shop.localhost", "path": "/admin/home", "auto_login": False}
+    assert (before, after) == ({"user": None, **page}, {"user": "amy", **page}), (before, after)
+    loads = [entry for entry in entries if entry["request"]["url"] == FORWARDED_PAGE]
+    assert len(loads) >= 2 and {entry["response"]["status"] for entry in loads} == {200}, loads
+    assert not [entry for entry in entries for header in entry["request"]["headers"]
+                if header["name"].lower() == "x-auto-login"]
+
+
 @pytest.mark.asyncio
 async def test_a_multi_env_naming_no_browser_deploys_none(browser_computer, shop):
     with namespace_routing():
