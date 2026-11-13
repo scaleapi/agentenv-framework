@@ -10,7 +10,7 @@ from typing import Any, ClassVar, Literal, Mapping, Optional
 
 from agent_env.a2a_agent import conversation_store
 from agent_env.config import get_config
-from agent_env.task_step.context import PromptResponse, TaskStepContext
+from agent_env.task_step.context import ENTITY_IDS_KEY, PromptResponse, TaskStepContext
 
 
 class RunRecordUnavailable(LookupError):
@@ -83,6 +83,7 @@ class Run:
     _firings: tuple[Firing, ...] = ()  # oldest first
     _logs: tuple[str, ...] = ()  # the firing logs that were read, as ``Firing.source`` names them
     unavailable: Mapping[str, str] = field(default_factory=dict)  # what could not be read, and why
+    _entity_ids: Mapping[str, str] = field(default_factory=dict, repr=False)  # the run's task's ``Task.entity_ids``
 
     @property
     def turns(self) -> tuple[Turn, ...]:
@@ -95,8 +96,9 @@ class Run:
         return self._turns[number - 1]
 
     def firings(self, trigger_id: Optional[str] = None, *, env: Optional[str] = None) -> tuple[Firing, ...]:
-        """Oldest first, of ``trigger_id`` and ``env`` when given; raises ``RunRecordUnavailable`` for a missing log."""
-        source = None if env is None else f"env:{env}"
+        """Oldest first, of ``trigger_id`` and ``env`` when given, ``env`` as the run's task names it; raises
+        ``RunRecordUnavailable`` for a missing log."""
+        source = None if env is None else f"env:{self._entity_ids.get(env, env)}"
         _need(self.unavailable, [source] if source else self.unavailable)
         if source and source not in self._logs:
             raise RunRecordUnavailable(source, "no firing log was captured")
@@ -169,7 +171,7 @@ async def load_run_context(context: TaskStepContext, prompt_response: Optional[P
     if prompt_response is not None:
         env_events = await asyncio.to_thread(_until_next_prompt, env_events, context, prompt_response, unavailable)
     return _run(conversation, {**{f"env:{e}": events for e, events in env_events.items()}, "user_agent": agent_events},
-                unavailable)
+                unavailable, context.metadata.get(ENTITY_IDS_KEY) or {})
 
 
 def _error(e: Exception) -> str:
@@ -180,7 +182,8 @@ def _time(ts: Optional[str]) -> Optional[datetime]:
     return datetime.fromisoformat(ts) if ts else None
 
 
-def _run(conversation: list[Message], logs: dict[str, list[dict]], unavailable: dict[str, str]) -> Run:
+def _run(conversation: list[Message], logs: dict[str, list[dict]], unavailable: dict[str, str],
+         entity_ids: Mapping[str, str] | None = None) -> Run:
     """Places every firing in its turn; without the conversation the firing logs are withheld, as they can't be."""
     if "conversation" in unavailable:
         why = "withheld: without the conversation, its firings can't be placed in turns"
@@ -200,7 +203,7 @@ def _run(conversation: list[Message], logs: dict[str, list[dict]], unavailable: 
     turns = tuple(Turn(number=m.turn, message=m, reply=replies.get(m.turn), _unavailable=unavailable,
                        _firings=tuple(f for f in firings if f.turn == m.turn)) for m in opened)
     return Run(_turns=turns, _firings=tuple(firings), _logs=tuple(s for s in logs if s not in unavailable),
-               unavailable=unavailable)
+               unavailable=unavailable, _entity_ids=entity_ids or {})
 
 
 def _fold(source: str, events: list[dict], starts: list[Optional[datetime]]) -> list[Firing]:

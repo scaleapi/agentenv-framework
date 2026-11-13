@@ -10,13 +10,24 @@ from typing import Any
 PATH = re.compile(r"[A-Za-z_]\w*(\[\]|\{\})?(\.[A-Za-z_]\w*(\[\]|\{\})?)*")
 
 
-def field_sites(data: dict, path: str) -> Iterator[tuple[str, dict, str]]:
-    """Each place ``path`` holds a value that isn't None in ``data``: where, as a path with indexes, the dict holding
-    it, and its key there."""
+def field_sites(data: dict, path: str) -> Iterator[tuple[str, dict | list, str | int]]:
+    """Each place ``path`` holds a value that isn't None in ``data``: where, as a path with indexes, what holds it, and
+    its key there. A last segment's ``[]`` or ``{}`` is each element of its list or value of its table."""
     *parents, leaf = path.split(".")
+    key = leaf.removesuffix("[]").removesuffix("{}")
     for trail, holder in descend(data, parents, ()):
-        if isinstance(holder, dict) and holder.get(leaf) is not None:
-            yield ".".join((*trail, leaf)), holder, leaf
+        value = holder.get(key) if isinstance(holder, dict) else None
+        if value is None:
+            continue
+        where = ".".join((*trail, key))
+        if leaf.endswith("[]"):
+            items = enumerate(value) if isinstance(value, list) else ()
+            yield from ((f"{where}[{i}]", value, i) for i, item in items if item is not None)
+        elif leaf.endswith("{}"):
+            items = value.items() if isinstance(value, dict) else ()
+            yield from ((f"{where}.{name}", value, name) for name, item in items if item is not None)
+        else:
+            yield where, holder, key
 
 
 def descend(node: Any, segments: list[str], trail: tuple[str, ...]) -> Iterator[tuple[tuple[str, ...], Any]]:

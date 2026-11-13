@@ -91,6 +91,9 @@ class TaskStep(ABC):
     DEFAULT_AGENT_NAME: ClassVar[str] = "default-agent"
     # Fields holding env, A2A agent or artifact ids; None means undeclared.
     entity_refs: ClassVar[tuple[EntityRef, ...] | None] = None
+    # Fields holding paths into a run's context (``context_path_segments``), as dotted keys with ``[]`` / ``{}`` for each
+    # element or value; a bundle rewrites the ids in them as it does entity_refs'.
+    context_paths: ClassVar[tuple[str, ...]] = ()
     # Each field of a scope other than the task's, by its path in the stored step; any other field is task-scoped. A
     # subclass merges its parent's. Such a field is optional, so a step written out without it still builds and runs.
     field_scopes: ClassVar[Mapping[str, FieldScope]] = {"metadata.attribution": FieldScope.USER}
@@ -100,6 +103,8 @@ class TaskStep(ABC):
         # Never inherited: a subclass may add id fields its parent's declaration misses.
         if "entity_refs" not in vars(cls):
             cls.entity_refs = None
+        if "context_paths" not in vars(cls):
+            cls.context_paths = ()
 
     def __init__(
         self,

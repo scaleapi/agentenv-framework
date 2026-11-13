@@ -15,7 +15,7 @@ from agent_env.entity.refs import EntityKind, EntityRef, RefSite, ref_sites
 from agent_env.task_step.registry import get_task_step_registry
 
 from .parse import Bundle, BundleEntry, BundleError, BundleKind, segment_problem
-from .resolve import entity_class
+from .resolve import entity_class, sync_context_paths
 
 _TARGET = f"{BundleKind.ENV.value}/"
 _FORM = "envs/NAME.KEY=VALUE, such as envs/desktop.driver=cua-driver"
@@ -187,8 +187,10 @@ def _renamed(entry: BundleEntry, new_id: str, config: Any) -> BundleEntry:
 def _repointed(entry: BundleEntry, config: Any, renaming: dict[EntityKind, dict[str, str]]) -> Any:
     """``config``, ``entry``'s steps or toml, with each env or task it names by an id that changes named by its variant's
     id."""
-    config = copy.deepcopy(config)
+    written, config = config, copy.deepcopy(config)
     for site in _sites(entry, config):
         if site.value in renaming.get(site.ref.kind, {}):
             site.rewrite(renaming[site.ref.kind][site.value], site.version)
+    if entry.kind is BundleKind.TASK:
+        sync_context_paths(written, config)
     return config
