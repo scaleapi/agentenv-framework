@@ -4,6 +4,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
+# Where a run's rating by its user sim (user_sim_versions.rate) is recorded: metadata[SATISFACTION_KEY][step_id].
+SATISFACTION_KEY = "user_sim_satisfaction"
+
 
 def person_of(us: dict) -> dict:
     """The user a deploy_user_sim_agent record describes, as the user sim's ``answer`` takes them; the caller adds the

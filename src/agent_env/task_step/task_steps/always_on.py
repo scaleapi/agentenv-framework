@@ -120,7 +120,8 @@ from agent_env.task_step.task_steps.agent import user_sim_versions
 from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import USER_SIMS_KEY, DeployUserSimAgentTaskStep
 from agent_env.task_step.task_steps.notification_delivery import delivered_parts, label_time, take_due
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
-from agent_env.task_step.task_steps.agent.user_sim_common import iso as _iso, person_of, task_zone, utc as _utc
+from agent_env.task_step.task_steps.agent.user_sim_common import SATISFACTION_KEY, person_of, task_zone
+from agent_env.task_step.task_steps.agent.user_sim_common import iso as _iso, utc as _utc
 
 logger = logging.getLogger(__name__)
 
@@ -160,8 +161,6 @@ TURN_GRACE_SECONDS = 60.0
 TRAJECTORY_FETCH_SECONDS = 120.0
 READ_ASKS = 2
 GATEWAY_ALLOWANCE_SECONDS = 300.0
-# Where the rating after the run is recorded, by step id (prompt_agent records its rating there too).
-SATISFACTION_KEY = "user_sim_satisfaction"
 # At the end, how long taking the agent's messages no turn took may take (the run's record comes first).
 LEFTOVER_TAKE_SECONDS = 60.0
 # The final check-in's line when the task sets no `final`: the step's, not the user's.
