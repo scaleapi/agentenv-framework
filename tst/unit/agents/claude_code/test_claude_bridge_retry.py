@@ -61,6 +61,18 @@ def _write_session(scripted, session_id="sess-1"):
     (scripted["session_dir"] / f"{session_id}.jsonl").write_text('{"type":"assistant"}\n')
 
 
+def test_a_resume_prompt_given_replaces_the_default_one(scripted):
+    _write_session(scripted)
+    scripted["queue"].append((_api_error_stdout("API Error: The operation timed out.", tool_uses=1), 1))
+    scripted["queue"].append((_ok_stdout("resumed"), 0))
+
+    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False,
+                                                  resume_prompt="stay the user"))
+
+    assert result.attempts == 2
+    assert scripted["procs"][1].stdin.data == b"stay the user"
+
+
 def test_success_makes_exactly_one_invocation(scripted):
     scripted["queue"].append((_ok_stdout(), 0))
     result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False))

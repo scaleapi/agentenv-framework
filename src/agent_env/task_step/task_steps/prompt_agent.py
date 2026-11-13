@@ -117,6 +117,15 @@ def _file_uris(parts: list[dict]) -> list[str]:
 # The decide body that asks a user agent to record nothing when no agent trigger fires.
 _QUIET_DECIDE = ("turn", "solver_message", "context_id", "env_triggers", "record_unfired")
 
+# What a user-sim turn cut short by a transient API error is resumed with, for an agent that takes `resume_prompt`.
+# An agent's own resume prompt asks it to finish the request it was given; a user-sim's request is the agent's reply,
+# so that prompt has it carry on as the agent.
+USER_SIM_RESUME_PROMPT = (
+    "Your previous turn was interrupted by a transient API error before you sent your message. You are still the "
+    "user. Write the user's next message, as you were about to; the assistant's last reply above is what you are "
+    "answering."
+)
+
 _DEFAULT_USER_SIM_OUTPUT_FORMAT: dict[str, Any] = {
     "type": "json_schema",
     "schema": {
@@ -551,7 +560,8 @@ class PromptAgentTaskStep(TaskStep):
         elif is_user_sim:
             user_output_format = self.user_output_format or _DEFAULT_USER_SIM_OUTPUT_FORMAT
             user_model = self._resolve_user_model(context)
-            user_config = {k: v for k, v in {"output_format": user_output_format, "model": user_model}.items() if v is not None}
+            user_config = {k: v for k, v in {"output_format": user_output_format, "model": user_model,
+                                             "resume_prompt": USER_SIM_RESUME_PROMPT}.items() if v is not None}
             negotiated = A2AAgent.negotiate_agent_config(user_sim.a2a_card or {}, user_config)
             if negotiated:
                 await protocol.post_agent_config(user_url + negotiated.endpoint, negotiated.fields)
