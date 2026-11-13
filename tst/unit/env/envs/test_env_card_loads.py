@@ -249,6 +249,27 @@ async def test_multi_env_withholds_the_record_from_a_name_an_mcp_server_and_a_we
     assert [email._deployed, slack._deployed, slack_web._deployed] == [deployed, None, None]
 
 
+@pytest.mark.asyncio
+async def test_a_name_an_mcp_server_and_a_website_share_loads_and_resets_with_the_records_token(sent):
+    deployed = _record(await _card("mcp-email", "slack"))
+    deployed.control_token = "s3cret"
+    provider = MagicMock(get_sandbox=AsyncMock(return_value=MagicMock(mode="vm")))
+    with patch("agent_env.env.env.Env.get", side_effect=lambda *_: MultiEnv(
+            id="multi", version=1, mcp_server_envs=[_mcp_env(), _mcp_env("slack")], website_envs=[_website("slack")])), \
+         patch("agent_env.providers.get_env_sandbox_provider", return_value=provider), \
+         patch.object(EnvironmentGatewayProvider, "install_changelog_triggers", AsyncMock()):
+        env = await MultiEnv.from_deployed_env(deployed)
+        slack = env.mcp_server_envs[1]
+        slack._copy_artifact_into_container = AsyncMock(return_value="/data/slack.json")
+        slack._staged_artifact_size = AsyncMock(return_value=None)
+        await env.load_environment_artifact(_artifact("slack"))
+        await env.reset(deployed)
+
+    assert sorted((r.url.path, r.headers.get("authorization")) for r in sent if r.url.path.endswith("/agentenv")) == [
+        ("/sandbox/sb-1-18765/svc/mcp-email/agentenv", "Bearer s3cret"),
+        *[("/svc/mcp-slack/agentenv", "Bearer s3cret")] * 3, ("/svc/slack/agentenv", "Bearer s3cret")]
+
+
 async def _card(*keys: str) -> dict:
     """The real gateway's composed card, with a v1 backing server behind each key."""
     gw = Gateway(host="127.0.0.1", port=0, server_name="env1234", internal_mcp_servers=[],

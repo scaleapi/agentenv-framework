@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
 import httpx
+from agentenv_protocol.client import control_headers
 from agentenv_protocol.website import (
     SESSION_SECRET_ENV,
     SITE_READY_TIMEOUT_S,
@@ -984,7 +985,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         if card is None:
             raise RuntimeError("Tunnel did not become ready in time")
         if website_configs:
-            await _wait_for_websites(gateway_url, website_configs)
+            await _wait_for_websites(gateway_url, website_configs, headers=control_headers(control_token))
             card = await self._wait_for_tunnel(gateway_url, timeout=120) or card
         card_read_at_utc = datetime.now(timezone.utc).isoformat()
         await self._refuse_tool_name_clashes(gateway_url)
@@ -1781,8 +1782,10 @@ class WebsiteContractError(RuntimeError):
 
 
 async def _wait_for_websites(gateway_url: str, website_configs: list[WebsiteConfig], *,
-                             timeout_s: float = WEBSITE_READY_TIMEOUT_S, poll_s: float = WEBSITE_READY_POLL_S) -> None:
-    """Wait until each site is ready, as its card says through ``/svc/<name>/``: by ``website/v1``'s ``ready``, or,
+                             headers: dict[str, str] | None = None, timeout_s: float = WEBSITE_READY_TIMEOUT_S,
+                             poll_s: float = WEBSITE_READY_POLL_S) -> None:
+    """Wait until each site is ready, as its card says through ``/svc/<name>/``, asked with the gateway's control
+    ``headers``, since its data plane takes them: by ``website/v1``'s ``ready``, or,
     for a card without it or a site serving none, by its stored health path answering 200, which is deprecated.
     A site whose answer says how long it may take (``timeout_s``) is waited that long, or its own ``ready_timeout_s``
     if longer, and ``WEBSITE_READY_MARGIN_S``; any other its ``ready_timeout_s`` and the margin, or ``timeout_s`` if
@@ -1796,7 +1799,7 @@ async def _wait_for_websites(gateway_url: str, website_configs: list[WebsiteConf
     warned: set[str] = set()
     while waiting:
         for name, wc in list(waiting.items()):
-            ready, why[name], declared = await _website_ready(f"{gateway_url}/svc/{name}", wc.health_path)
+            ready, why[name], declared = await _website_ready(f"{gateway_url}/svc/{name}", wc.health_path, headers=headers)
             if declared is not None:
                 limit[name] = max(declared, own[name]) + WEBSITE_READY_MARGIN_S
             if ready is None and name not in warned:
@@ -1814,7 +1817,8 @@ async def _wait_for_websites(gateway_url: str, website_configs: list[WebsiteConf
         await asyncio.sleep(poll_s)
 
 
-async def _website_ready(base_url: str, health_path: str) -> tuple[Optional[bool], str, Optional[float]]:
+async def _website_ready(base_url: str, health_path: str, *,
+                         headers: dict[str, str] | None = None) -> tuple[Optional[bool], str, Optional[float]]:
     """Whether the site at ``base_url`` is ready, why not, and how long it says it may take: True or False by the
     ``WebsiteReadiness`` its card's ``website/v1`` ``ready`` answers, as the protocol's ``website_readiness`` reads it,
     an answer that isn't one False; with no card or no ``ready`` on it, None once its health path answers 200 and False
@@ -1822,7 +1826,7 @@ async def _website_ready(base_url: str, health_path: str) -> tuple[Optional[bool
     async with httpx.AsyncClient() as client:
         try:
             card = _card_of(await client.get(base_url + WELL_KNOWN_PATH, timeout=10), base_url)
-            readiness = None if card is None else await website_readiness(base_url, card, timeout=10)
+            readiness = None if card is None else await website_readiness(base_url, card, timeout=10, headers=headers)
             if readiness is not None:
                 return readiness.ready, "" if readiness.ready else _not_ready_why(readiness), readiness.timeout_s
             health = await client.get(base_url + health_path, timeout=10)

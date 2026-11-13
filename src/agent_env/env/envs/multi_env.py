@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional
 
 import yaml
+from agentenv_protocol import client as protocol_v1
 
 logger = logging.getLogger(__name__)
 
@@ -461,11 +462,13 @@ class MultiEnv(Env):
         # MCP servers are checked first; if a website shares the same environment_name, the MCP server wins.
         for env in self.mcp_server_envs:
             if env.environment_name == environment_artifact.environment_name:
-                await env.load_environment_artifact(environment_artifact)
+                with _record_grant(self._deployed):
+                    await env.load_environment_artifact(environment_artifact)
                 return
         for env in self.website_envs:
             if env.environment_name == environment_artifact.environment_name:
-                await env.load_environment_artifact(environment_artifact)
+                with _record_grant(self._deployed):
+                    await env.load_environment_artifact(environment_artifact)
                 return
         if (computer := self._computers.holding(environment_artifact.environment_name)) is not None:
             await computer.load_environment_artifact(environment_artifact)
@@ -1067,7 +1070,8 @@ class MultiEnv(Env):
                     for env in services.mcp_server_envs),
                   *((f"website {env.environment_name!r}", reset_server_data(env, mcp=False))
                     for env in services.website_envs)]
-        results = await _multi_computers.each(self.id, "reset", resets)
+        with _record_grant(deployed):
+            results = await _multi_computers.each(self.id, "reset", resets)
         for (child, _), result in zip(resets, results):
             if result is False:
                 logger.info(f"multi env '{self.id}': {child} serves no reset and takes no load, so it stays as it is")
@@ -1120,6 +1124,14 @@ def _gateway_state_provider(env: MultiEnv) -> DatabaseStateProvider | None:
     """The state provider behind our gateway, which a snapshot restores into or captures from; None for a deployment without it."""
     from agent_env.providers import EnvironmentGatewayProvider
     return env._env_provider._state_provider if isinstance(env._env_provider, EnvironmentGatewayProvider) else None
+
+
+def _record_grant(deployed: Optional[DeployedEnv]):
+    """The grant of ``deployed``'s control token to calls under its address and its gateway's, for a child env that a
+    name it shares with another keeps from the record (``_hand_record_to_child_envs``), whose calls go to the gateway."""
+    if deployed is None:
+        return protocol_v1.authorized({})
+    return protocol_v1.authorized({url: deployed.control_headers for url in (deployed.environment_url, gateway_url_of(deployed))})
 
 
 def _hand_record_to_child_envs(env: MultiEnv, deployed: DeployedEnv) -> None:

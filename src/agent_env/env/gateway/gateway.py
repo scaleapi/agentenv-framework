@@ -177,6 +177,7 @@ class Gateway:
         self._site_names = {site: lowered(names) for site, names in (site_names or {}).items()}
         self._listed_by_name = frozenset(listed_by_name)
         self._site_mcp_endpoints = site_mcp_endpoints(internal_mcp_servers, self.website_urls, self.rest_proxy_urls)
+        self._token_paths = token_paths(internal_mcp_servers, self.website_urls, self.rest_proxy_urls)
         self._site_cards: dict[str, SiteCard] = {}
         self._withheld = frozenset(name.strip().lower().encode() for name in provider_headers if name.strip())
         self._browsers = BrowserRoutes(self.rest_proxy_urls, self.REST_PROXY_TIMEOUT, self._log_event,
@@ -568,18 +569,14 @@ class Gateway:
         return app
 
     def _takes_control_token(self, path: str) -> bool:
-        """Whether a request to ``path`` takes the deploy's control token: a control route; the data plane, its
-        extensions included, the env's own or a service's behind /svc; or an MCP server's own endpoint behind /svc,
-        which skips the gateway's tool rules, trajectory and triggers. Judged as the proxy forwards a path, after
-        dot-segment normalisation. A site's /website route never reaches its data plane."""
+        """Whether a request to ``path`` takes the deploy's control token: a control route, the env's data plane, or
+        one of ``token_paths`` behind /svc. Judged as the proxy forwards a path, after dot-segment normalisation. A
+        site's /website route never reaches its data plane."""
         if path in CONTROL_ROUTES or is_child_mcp_path(path, RPC_PATH):
             return True
         prefix, _, rest = path.lstrip("/").partition("/")
         service, _, rest = rest.partition("/")
-        if prefix != "svc" or not service:
-            return False
-        endpoint = self._site_mcp_endpoints.get(service) or ("mcp" if service.startswith("mcp-") else None)
-        return is_child_mcp_path(rest, RPC_PATH) or (endpoint is not None and is_child_mcp_path(rest, endpoint))
+        return prefix == "svc" and any(is_child_mcp_path(rest, guarded) for guarded in self._token_paths.get(service, ()))
 
     @asynccontextmanager
     async def _session_lifespan(self, mcp: FastMCP):
@@ -1730,6 +1727,28 @@ def site_mcp_endpoints(servers: list[InternalMCPServer], website_urls: dict[str,
         if resolved is not None and resolved.own_server and resolved.route_path is not None:
             endpoints[server.name] = resolved.route_path
     return endpoints
+
+
+def token_paths(servers: list[InternalMCPServer], website_urls: dict[str, str],
+                rest_proxy_urls: dict[str, str]) -> dict[str, tuple[str, ...]]:
+    """The paths under /svc/<key>/ that take the gateway's control token, by key, for each MCP server and website the
+    gateway fronts: its data plane, extensions included, and an MCP server's own MCP endpoint, at the path its
+    ``mcp_url`` gives (``/mcp`` when none is under the route's address), which skips the gateway's tool rules,
+    trajectory and triggers. A child env of its own, a computer, takes its own token, so none of its paths are here."""
+    sites = site_mcp_endpoints(servers, website_urls, rest_proxy_urls)
+    paths = {}
+    for key, base in rest_proxy_urls.items():
+        if key in website_urls:
+            paths[key] = (RPC_PATH, *((sites[key],) if key in sites else ()))
+            continue
+        name = route_environment_name(key, base, servers, website=False)
+        if name == key:
+            continue
+        endpoints = [resolved.route_path for server in servers if server.name == name
+                     if (resolved := card_url(base, server.mcp_url)) is not None and resolved.own_server
+                     and resolved.route_path is not None]
+        paths[key] = (RPC_PATH, *(endpoints or ["/mcp"]))
+    return paths
 
 
 class CardURL(NamedTuple):

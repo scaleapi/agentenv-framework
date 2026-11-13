@@ -2646,14 +2646,15 @@ _READY_CARD = {"name": "mail", "capabilities": {"extensions": [{"uri": "urn:agen
 
 
 @pytest.mark.asyncio
-async def test_a_deploy_waits_for_a_site_until_its_cards_ready_says_so_and_never_reads_its_health_path():
-    asked = []
+async def test_a_deploy_waits_for_a_site_until_its_cards_ready_says_so_with_its_token_and_never_reads_its_health_path():
+    asked, sent = [], []
 
     def site(request: httpx.Request) -> httpx.Response:
         asked.append(request.url.path)
         if request.url.path == "/svc/mail/.well-known/agent-env.json":
             return httpx.Response(200, json=_READY_CARD)
         if request.url.path == "/svc/mail/agentenv/ext/website/ready":
+            sent.append(request.headers.get("authorization"))
             ready = asked.count(request.url.path) >= 2
             return httpx.Response(200, json={"ready": ready, "problems": [] if ready else ["seeded"]})
         return httpx.Response(500)
@@ -2661,8 +2662,9 @@ async def test_a_deploy_waits_for_a_site_until_its_cards_ready_says_so_and_never
     with _sites(site):
         await env_gateway_provider._wait_for_websites(
             "http://gw", [WebsiteConfig(backend_image="m", frontend_image=None, environment_name="mail",
-                                        health_path="/healthz")], poll_s=0)
+                                        health_path="/healthz")], headers={"Authorization": "Bearer s3cret"}, poll_s=0)
     assert asked.count("/svc/mail/agentenv/ext/website/ready") == 2 and "/svc/mail/healthz" not in asked
+    assert sent == ["Bearer s3cret"] * 2
 
 
 @pytest.mark.asyncio
