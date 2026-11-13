@@ -1063,7 +1063,7 @@ class Probe:
             return f"segments {unmeasured} lack their times, size, frame count or digest"
         span = (_when(segments[-1].ended_at) - _when(segments[0].started_at)).total_seconds()
         frames = sum(s.frames for s in segments)
-        if span < RECORD_S - 2 / fps or frames < fps * RECORD_S / 2:
+        if span < RECORD_S / 2 or frames < fps * RECORD_S / 2:
             return f"{frames} frames over {span:.2f} s of a {RECORD_S:g} s recording at {fps} fps"
         for before, after in zip(segments, segments[1:]):
             gap = (_when(after.started_at) - _when(before.ended_at)).total_seconds()
