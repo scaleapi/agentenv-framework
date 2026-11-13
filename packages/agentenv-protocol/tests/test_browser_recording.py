@@ -55,12 +55,15 @@ class Uploads:
 
     def __init__(self) -> None:
         self.by_path: dict[str, bytes] = {}
+        self.refused: tuple[str, ...] = ()
 
     def uploader(self, grant):
         uploads = self
 
         class Uploader:
             async def upload(self, path, source):
+                if path.endswith(uploads.refused) and uploads.refused:
+                    raise RuntimeError(f"the store refused {path}")
                 data = source if isinstance(source, bytes) else source.read_bytes()
                 uploads.by_path[f"{grant.root_path}/{path}"] = data
         return Uploader()
@@ -218,6 +221,7 @@ async def test_the_video_follows_an_agents_tab_a_popup_it_opens_and_goes_back_wh
     assert [seen.tab for seen in manifest.video.followed] == ["T0", "T3", "T4", "T3"]
     colors = uploads.colors(f"{ROOT}/{manifest.recording_id}")
     assert colors[0] == "green" and "yellow" in colors and "red" in colors and colors[-1] == "yellow"
+    assert "green" not in colors[colors.index("yellow"):], colors
 
 
 @pytest.mark.asyncio
@@ -329,8 +333,8 @@ async def test_its_network_log_is_the_browsers_whole_log_as_har_marking_what_it_
     assert [entry["request"]["url"] for entry in document["log"]["entries"]] == [
         "http://start-tab.localhost/", "http://during.localhost/"]
     assert manifest.network.model_dump() == {"file": "network.har", "scope": "browser", "uploaded": True,
-                                             "entries": 2, "during": [3, 4], "contexts_open": ["buyer", "later"],
-                                             "error": None}
+                                             "entries": 2, "unreadable": 0, "during": [3, 4],
+                                             "contexts_open": ["buyer", "later"], "error": None}
 
 
 @pytest.mark.asyncio
@@ -411,6 +415,62 @@ async def test_a_frame_follows_each_settled_burst_of_an_agents_actions_on_its_co
     assert all(f.uploaded and f.content_type == "image/jpeg" for f in manifest.frames)
     assert uploads.by_path[f"{ROOT}/{manifest.recording_id}/frames/0001.jpg"] == _jpeg(RED)
     assert manifest.missing_frames == 0 and manifest.frames_on
+
+
+@pytest.mark.asyncio
+async def test_a_frame_is_of_the_tab_its_agent_acted_on_though_that_didnt_move_the_video(browser):
+    pipe, control, contexts, network, recordings, uploads = browser
+    pipe.open("T1", RED)
+    pipe.open("T2", BLUE)
+    pipe.focused = "T1"
+    started = await recordings.start("run:a", _grant(), frames=True, network=False)
+    evaluated = _acted(recordings.log, "T2", method="Runtime.evaluate")
+    await asyncio.sleep(0.3)
+    manifest = BrowserRecordingManifest.model_validate(await recordings.end(started["recording_id"]))
+
+    assert [(f.kind, f.after, f.tab) for f in manifest.frames][1:2] == [("action", [evaluated], "T2")]
+    assert [seen.tab for seen in manifest.video.followed] == ["T1"]
+
+
+@pytest.mark.asyncio
+async def test_a_video_that_stops_at_its_limit_ends_its_recording_which_no_longer_counts_as_open(browser,
+                                                                                               monkeypatch):
+    pipe, control, contexts, network, recordings, uploads = browser
+    monkeypatch.setattr(browser_recording, "MAX_DURATION_S", 1)
+    pipe.open("T1", RED)
+    started = await recordings.start("run:a", _grant(), network=False)
+    await asyncio.sleep(1.6)
+    ended = BrowserRecordingManifest.model_validate(await recordings.end(started["recording_id"]))
+
+    assert (ended.ended_by, ended.video.ended_by) == ("limit", "limit") and recordings.every() == []
+
+
+@pytest.mark.asyncio
+async def test_lines_the_network_log_cant_read_are_counted(browser):
+    pipe, control, contexts, network, recordings, uploads = browser
+    pipe.open("T0", GREEN)
+    _network_lines(network.path, "start-tab")
+    with network.path.open("a") as file:
+        file.write(json.dumps({"seq": 3, "at": "2026-11-13T10:00:00.000Z", "end": {"ended": "2026-11-13"}}) + "\n")
+    started = await recordings.start("run:a", _grant())
+    manifest = BrowserRecordingManifest.model_validate(await recordings.end(started["recording_id"]))
+
+    assert manifest.network.unreadable == 1 and manifest.network.uploaded
+
+
+@pytest.mark.asyncio
+async def test_a_childs_manifest_that_didnt_upload_is_what_its_parent_says_is_missing_of_it(browser):
+    pipe, control, contexts, network, recordings, uploads = browser
+    seller = await contexts.lease("seller")
+    pipe.open("T2", BLUE, seller.id)
+    started = await recordings.start("run:a", _grant(), context="seller", network=False)
+    made = contexts.made_by_agent("bob", "ctx-bob", scope=seller.id)
+    pipe.open("T7", YELLOW, "ctx-bob")
+    await asyncio.sleep(0.3)
+    uploads.refused = (f"contexts/{made.label}/manifest.json",)
+    manifest = BrowserRecordingManifest.model_validate(await recordings.end(started["recording_id"]))
+
+    assert manifest.children[0].missing == "its manifest"
 
 
 @pytest.mark.asyncio

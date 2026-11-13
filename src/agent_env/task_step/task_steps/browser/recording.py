@@ -169,10 +169,16 @@ def incomplete(entry: dict) -> Optional[str]:
         return f"it has no video: {entry.get('video_error') or 'no segment was made'}"
     if entry.get("video") and entry.get("missing_segments"):
         return f"{entry['missing_segments']} of its {entry['segments']} video segments didn't upload"
+    if entry.get("video") and entry.get("video_ended_by") == "limit":
+        return "its video stopped at its limit before the recording ended"
+    if entry.get("video") and entry.get("video_ended_by") == "error":
+        return f"its video stopped failing before the recording ended: {entry.get('video_error')}"
     if entry.get("network") and not entry.get("har_uploaded"):
         return f"its network log didn't upload: {entry.get('har_error')}"
     if entry.get("network") and entry.get("har_entries") == 0:
         return "its network log has no entries, though its browser's start tabs loaded through the proxy that logs"
+    if entry.get("network") and entry.get("har_unreadable"):
+        return f"its network log left out {entry['har_unreadable']} lines it couldn't read"
     if entry.get("frames") and entry.get("missing_frames"):
         return f"{entry['missing_frames']} of its {entry['frames_taken'] + entry['missing_frames']} frames are missing"
     if problems := entry.get("children_incomplete"):
@@ -247,8 +253,9 @@ def _registered(context: TaskStepContext, name: str, entry: dict, manifest: Brow
     entry.update(state="ended", ended_by=manifest.ended_by, frames_taken=len(taken),
                  missing_frames=manifest.missing_frames, log_uploaded=manifest.log_uploaded,
                  log_missing=len(manifest.log_missing), segments=len(video.segments),
-                 missing_segments=video.missing_segments, video_error=video.error, har_uploaded=network.uploaded,
-                 har_entries=network.entries, har_error=network.error,
+                 missing_segments=video.missing_segments, video_ended_by=video.ended_by, video_error=video.error,
+                 har_uploaded=network.uploaded, har_entries=network.entries, har_unreadable=network.unreadable,
+                 har_error=network.error,
                  children=[child.model_dump(mode="json") for child in manifest.children],
                  children_incomplete=[f"{child.context}: {child.missing}" for child in manifest.children
                                       if child.missing])

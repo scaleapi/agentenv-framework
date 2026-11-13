@@ -125,6 +125,7 @@ class RecordedVideo(BaseModel):
     fps: Optional[int] = None
     segments: list[ManifestSegment] = []
     followed: list[FollowedTab] = []
+    ended_by: Optional[str] = None
     error: Optional[str] = None
 
     @property
@@ -141,6 +142,7 @@ class RecordedNetwork(BaseModel):
     scope: Literal["browser"] = "browser"
     uploaded: bool = False
     entries: Optional[int] = None
+    unreadable: int = 0
     during: Optional[list[int]] = None
     contexts_open: list[str] = []
     error: Optional[str] = None
@@ -331,10 +333,14 @@ class BrowserRecordings:
                 self._spawn(self._context_ended(recording))
 
     async def _context_ended(self, recording: _Recording) -> None:
+        await self._stopped(recording, "context_ended")
+
+    async def _stopped(self, recording: _Recording, reason: str) -> None:
+        """``recording`` ended for ``reason``, not by its end: its context's, or its video's limit or failure."""
         if recording.parent is None:
-            await self._end(recording.manifest.recording_id, None, "context_ended")
+            await self._end(recording.manifest.recording_id, None, reason)
         else:
-            await recording.end(None, "context_ended")
+            await recording.end(None, reason)
 
     def _spawn(self, work) -> None:
         task = asyncio.ensure_future(work)
@@ -371,8 +377,9 @@ class _Recording:
         self.contexts_open: list[str] = [lease.label for lease in recordings.contexts or ()] if network else []
         self.network_after = 0
         self.ending = False
-        #: The acting entries since the last frame.
+        #: The acting entries since the last frame, and the tab the latest was on, which a frame is of.
         self.pending: list[int] = []
+        self.acted_tab: Optional[str] = None
         self._timer: Optional[asyncio.TimerHandle] = None
         self._taking: set[asyncio.Future] = set()
         self._beginning: Optional[asyncio.Future] = None
@@ -385,9 +392,17 @@ class _Recording:
         if self.network_on:
             self.network_after = await asyncio.to_thread(self.recordings.network.last_seq)
         self.video.begin()
+        self.video.task.add_done_callback(self._video_stopped)
         await self.video.until_live()
         if self.frames_on:
             await self.take("first")
+
+    def _video_stopped(self, _: asyncio.Future) -> None:
+        """Its video stopped on its own, at its limit or after failing, which ends the recording: one still running
+        can't take frames or children without it."""
+        if not self.ending:
+            ended_by = "limit" if self.video.ended_by == "limit" else "error"
+            self.recordings._spawn(self.recordings._stopped(self, ended_by))
 
     async def abandon(self) -> None:
         """A recording whose start failed: nothing of it left running."""
@@ -403,6 +418,7 @@ class _Recording:
         if not self.frames_on:
             return
         self.pending.append(seq)
+        self.acted_tab = tab
         if self._timer is not None:
             self._timer.cancel()
         self._timer = asyncio.get_running_loop().call_later(SETTLE_S, self._settled)
@@ -427,23 +443,24 @@ class _Recording:
         taking.add_done_callback(self._taking.discard)
 
     async def take(self, kind: str) -> None:
-        """The frame of ``kind``, of the tab the video follows, uploaded as it's taken; one an action burst brings only
-        once that burst has entries no frame followed yet."""
+        """The frame of ``kind``, of the tab its context's agent last acted on, else the tab the video follows, uploaded
+        as it's taken; one an action burst brings only once that burst has entries no frame followed yet."""
         async with self._lock:
             after, self.pending = self.pending, []
             if kind == "action" and not after:
                 return
-            if self.stream.tab is None and not any(self.stream.sees(tab) for tab in self.recordings.control.tabs):
+            tab = self.acted_tab if self.acted_tab in self.recordings.control.tabs else self.stream.tab
+            if tab is None and not any(self.stream.sees(open_tab) for open_tab in self.recordings.control.tabs):
                 return
             index = len(self.manifest.frames)
-            frame = RecordedFrame(index=index, kind=kind, at=_iso(), after=after, tab=self.stream.tab)
+            frame = RecordedFrame(index=index, kind=kind, at=_iso(), after=after, tab=tab)
             self.manifest.frames.append(frame)
             if index >= MAX_FRAMES:
                 frame.error = f"the recording reached its {MAX_FRAMES} frames"
                 return
             try:
                 data, extension, frame.tab, frame.url = await self.recordings.control.frame(
-                    self.stream.tab, LOAD_WAIT_S, self.context_id, within=True)
+                    tab, LOAD_WAIT_S, self.context_id, within=True)
                 frame.at = _iso()
                 frame.path, frame.content_type = frame_path(index, extension), CONTENT_TYPES[extension]
                 await self.uploader.upload(self._path(frame.path), base64.b64decode(data))
@@ -480,6 +497,7 @@ class _Recording:
                                                  for segment in video.get("segments", [])])
         if video.get("ended_by") in ("limit", "error") and reason in REASONS:
             reason = video["ended_by"]
+        manifest.video.ended_by = video.get("ended_by")
         manifest.log_last = self.recordings.log.next_seq - 1
         lines = await self._log_lines()
         manifest.log_missing = sorted(set(range(manifest.log_after + 1, manifest.log_last + 1))
@@ -494,14 +512,17 @@ class _Recording:
         if self.network_on:
             manifest.network = await self._network()
         manifest.ended_at, manifest.ended_by = _iso(), reason
-        if self.parent is not None and (entry := next((child for child in self.parent.manifest.children
-                                                        if child.context == self.context), None)) is not None:
-            entry.ended_at, entry.ended_by, entry.missing = manifest.ended_at, reason, _missing(manifest)
         wire = manifest.model_dump(mode="json")
+        uploaded = True
         try:
             await self.uploader.upload(self._path(MANIFEST), json.dumps(wire, indent=1).encode())
         except Exception as e:
+            uploaded = False
             logger.warning("browser recording %s: its manifest didn't upload: %s", manifest.recording_id, e)
+        if self.parent is not None and (entry := next((child for child in self.parent.manifest.children
+                                                        if child.context == self.context), None)) is not None:
+            entry.ended_at, entry.ended_by = manifest.ended_at, reason
+            entry.missing = _missing(manifest) or (None if uploaded else "its manifest")
         return wire
 
     async def _network(self) -> RecordedNetwork:
@@ -512,6 +533,7 @@ class _Recording:
             lines = await asyncio.to_thread(self.recordings.network.every_line)
             document = har(lines)
             network.entries = len(document["log"]["entries"])
+            network.unreadable = document["log"].get("_unreadable", 0)
             last = max((line["seq"] for line in lines), default=0)
             network.during = [self.network_after + 1, last] if last > self.network_after else None
             await self.uploader.upload(self._path(HAR_FILE), json.dumps(document, indent=1).encode())
@@ -572,7 +594,7 @@ def _missing(manifest: BrowserRecordingManifest) -> Optional[str]:
     video = manifest.video or RecordedVideo()
     if not manifest.log_uploaded or manifest.log_missing:
         return "its log, or entries of it"
-    if not video.segments or video.missing_segments:
+    if not video.segments or video.missing_segments or video.ended_by in ("limit", "error"):
         return "its video, or segments of it"
     if manifest.frames_on and manifest.missing_frames:
         return f"{manifest.missing_frames} frames"

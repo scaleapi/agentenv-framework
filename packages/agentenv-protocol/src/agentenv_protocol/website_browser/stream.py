@@ -13,7 +13,7 @@ import io
 import logging
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 from PIL import Image
 
@@ -48,8 +48,10 @@ class TabStream:
         self._image: Optional[Image.Image] = None
         self._loop = asyncio.get_running_loop()
         self._heard_at = 0.0
-        self._casting: Optional[tuple[str, str]] = None
+        #: The screencast it runs: the tab, its session and what hears that tab's frames.
+        self._casting: Optional[tuple[str, str, Callable[[bytes], None]]] = None
         self._capturing: Optional[asyncio.Task] = None
+        self._seeding: Optional[asyncio.Future] = None
         self._max_edge: Optional[int] = None
         self._via: Optional[str] = None
 
@@ -79,10 +81,9 @@ class TabStream:
         if self.tab is None:
             active = await self.control.active_tab(self.context_id)
             self._move(active or next((t for t in reversed(self.control.tabs) if self.sees(t)), None))
-        if self.tab is not None:
-            with contextlib.suppress(asyncio.TimeoutError):
-                if (jpeg := await asyncio.wait_for(self.control.capture_tab(self.tab), FIRST_CAPTURE_S)) is not None:
-                    self._jpeg, self._image = jpeg, None
+        if self._seeding is not None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._seeding
 
     async def frames(self, hints: RecordHints) -> AsyncIterator[RecordedFrame]:
         """Its frames, ``hints.fps`` a second, each the latest the followed tab showed, until the recording ends."""
@@ -104,17 +105,34 @@ class TabStream:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._capturing
             self._capturing = None
+        if self._seeding is not None:
+            self._seeding.cancel()
+            self._seeding = None
         if (casting := self._casting) is not None:
             self._casting = None
-            await self.control.unscreencast(casting[1], self._heard)
+            await self.control.unscreencast(casting[1], casting[2])
 
     def _move(self, target: Optional[str]) -> None:
+        """Following ``target`` from now: what showed of the tab before it goes, and a capture of it is asked for at
+        once, so the video never shows one tab while ``followed`` names another."""
+        if target != self.tab:
+            self._jpeg, self._image = None, None
+            if self._seeding is not None:
+                self._seeding.cancel()
+            self._seeding = asyncio.ensure_future(self._seed(target)) if target is not None else None
         self.tab = target
         if target is not None:
             if target in self._history:
                 self._history.remove(target)
             self._history.append(target)
         self._noted(None)
+
+    async def _seed(self, target: str) -> None:
+        """A first frame of ``target``, captured, unless its screencast sends one first or it's left meanwhile."""
+        with contextlib.suppress(asyncio.TimeoutError):
+            jpeg = await asyncio.wait_for(self.control.capture_tab(target), FIRST_CAPTURE_S)
+            if jpeg is not None and self.tab == target and self._jpeg is None:
+                self._jpeg, self._image = jpeg, None
 
     def _noted(self, via: Optional[str]) -> None:
         """What the video shows from now in ``followed``: the tab and how its frames come, once either changes."""
@@ -131,14 +149,19 @@ class TabStream:
         if self._casting is not None and (self._casting[0] != self.tab or
                                           self.control.session_of(self.tab) != self._casting[1]):
             old, self._casting = self._casting, None
-            await self.control.unscreencast(old[1], self._heard)
+            await self.control.unscreencast(old[1], old[2])
         if self.tab is None:
             self._jpeg, self._image = None, None
             self._noted(BLANK)
             return
-        if self._casting is None and (session := await self.control.screencast(self.tab, self._heard,
+        target = self.tab
+
+        def heard(jpeg: bytes) -> None:
+            self._heard(target, jpeg)
+
+        if self._casting is None and (session := await self.control.screencast(target, heard,
                                                                                 self._max_edge)) is not None:
-            self._casting = (self.tab, session)
+            self._casting = (target, session, heard)
             self._heard_at = self._loop.time()
             self._noted(SCREENCAST)
         silent = self._loop.time() - self._heard_at >= SILENT_S
@@ -147,8 +170,9 @@ class TabStream:
         elif not silent and self._via != SCREENCAST and self._casting is not None:
             self._noted(SCREENCAST)
 
-    def _heard(self, jpeg: bytes) -> None:
-        self._jpeg, self._image, self._heard_at = jpeg, None, self._loop.time()
+    def _heard(self, target: str, jpeg: bytes) -> None:
+        if target == self.tab:
+            self._jpeg, self._image, self._heard_at = jpeg, None, self._loop.time()
 
     async def _capture(self, target: str) -> None:
         """Captures of ``target`` while it's followed, sends no screencast frame and isn't visible."""

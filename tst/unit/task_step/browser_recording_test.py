@@ -290,11 +290,15 @@ async def test_a_leases_recording_is_asked_for_with_its_context_and_registers_it
 @pytest.mark.parametrize("kind, why", [
     ("no video", "it has no video"), ("a segment", "1 of its 2 video segments didn't upload"),
     ("no network log", "its network log didn't upload"), ("an empty network log", "its network log has no entries"),
-    ("a child", "a context an agent made beside it is incomplete: agent-bob-1: its video")])
+    ("a child", "a context an agent made beside it is incomplete: agent-bob-1: its video"),
+    ("a video at its limit", "its video stopped at its limit"), ("a failed video", "its video stopped failing"),
+    ("unreadable network lines", "its network log left out 2 lines")])
 async def test_a_recording_missing_its_video_network_log_or_a_childs_parts_fails_the_end(store, kind, why):
-    video = {"no video": _video(), "a segment": _video(True, False)}.get(kind, _video(True))
-    network = {"no network log": _network(uploaded=False), "an empty network log": _network(entries=0)}.get(
-        kind, _network())
+    video = {"no video": _video(), "a segment": _video(True, False),
+             "a video at its limit": {**_video(True), "ended_by": "limit"},
+             "a failed video": {**_video(True), "ended_by": "error", "error": "OSError: disk"}}.get(kind, _video(True))
+    network = {"no network log": _network(uploaded=False), "an empty network log": _network(entries=0),
+               "unreadable network lines": {**_network(), "unreadable": 2}}.get(kind, _network())
     children = [_child("its video, or segments of it")] if kind == "a child" else []
     computer = _BrowserComputer(store, contexts=True, video=video, network=network, children=children)
     context = await _start().execute(_context(computer))
