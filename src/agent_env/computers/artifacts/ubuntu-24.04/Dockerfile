@@ -56,6 +56,12 @@ RUN sed -i -e "s/^AGENTENV_SESSION_UID=.*/AGENTENV_SESSION_UID=$(id -u user)/" \
         > /etc/ld.so.preload
 COPY --from=egress /out/egress /usr/local/lib/agentenv-egress/egress
 COPY egress/agentenv-egress.sh /etc/profile.d/agentenv-egress.sh
+# Every Chromium build an app brings goes out through the egress proxy by a managed policy, however it's launched.
+COPY egress/chromium-policy.json /usr/local/lib/agentenv-egress/chromium-policy.json
+RUN for build in /etc/opt/chrome_for_testing /etc/chromium /etc/chromium-browser /etc/opt/chrome; do \
+        install -D -m 0644 /usr/local/lib/agentenv-egress/chromium-policy.json \
+            "$build/policies/managed/agentenv-egress.json"; \
+    done
 COPY root.conf /etc/supervisor/root.conf
 COPY supervisord.conf /etc/supervisor/supervisord.conf
 COPY xfwm4.xml /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml
