@@ -677,7 +677,9 @@ def _built_disk(env: ComputerEnv, base: ComputerArtifact, arch: str, container: 
     """The status of the disk form of ``arch`` once built from ``container``, its container's result, and pushed, or
     reused, or the stage that failed and why. Its key is of the container's key, the base disk and the disk recipe;
     the base disk is the base's own, the one published for it, or else one made on the builder from the base's
-    container and the boot recipe. Its build runs no program of ``arch``'s but that recipe's."""
+    container and the boot recipe. Its build runs no program of ``arch``'s but that recipe's. Two composes of one disk
+    on this machine take turns, so the second reuses the first's: built again, its tag would move off the image the
+    first pinned, which a boot mounts by that name and Docker doesn't pull for a mount."""
     pair, platform = f"disk/{arch}", f"linux/{arch}"
     with (_attempting(env, "disk", arch) as attempt,
           tempfile.TemporaryDirectory(prefix="agentenv-compose-") as work, contextlib.ExitStack() as opened):
@@ -687,34 +689,36 @@ def _built_disk(env: ComputerEnv, base: ComputerArtifact, arch: str, container: 
         base_disk, base_identity, recipe = *_base_disk(base, arch), _digest(context)
         key = attempt.key = _key(container=container["key"], base_disk=base_identity, recipe=recipe, form="disk",
                                  arch=arch, format=FORMAT)
-        store, ref, pinned = _stored(env, key)
-        if pinned is not None:
-            progress.at(pair, "reusing", "reusing the disk of the same key, made earlier")
-            return {"status": "unverified", "key": key, "image": pinned, "reused": True, "built_at": now()}
-        link = builds.link(platform, base.image())
-        progress.at(pair, "starting its builder", f"making the disk {builder.where(link)}")
-        on = opened.enter_context(builds.open(link, platform, Path(work), base.image(), {}))
-        on.login(store.auth(container["image"]))
-        if base_disk is not None:
-            on.login(get_config().get_image_store().auth(base_disk))
-        if (tools := published_pinned(DISK_TOOLS_IMAGE)) is None:
-            tools = f"agentenv-disk-tools:{DISK_TOOLS_IMAGE.tag()}"
-            on.build((context / "tools" / "Dockerfile").read_text(), tools, on.platform, {},
-                     context=f"{builder.CONTEXT}/tools")
-        dockerfile = (context / "Dockerfile").read_text()
-        if base_disk is None:
-            progress.at(pair, "making the base's disk")
-            base_disk = _made_base_disk(on, base, arch, f"{base_identity} {recipe}", tools, dockerfile)
-        progress.at(pair, "making the disk")
-        local = f"agentenv-computer:{key[7:23]}-disk-{arch}"
-        on.build(dockerfile, local, platform, {KEY_LABEL: key}, build_args={
-            "ROOTFS": container["image"], "ROOTFS_CONFIG": _encoded(_config(on, container["image"], arch)),
-            "ESP": base_disk, "TOOLS": tools})
-        attempt.stage = "push"
-        progress.at(pair, "pushing the disk")
-        on.push(local, ref, store)
-        return {"status": "unverified", "key": key, "image": pin_digest(ref, store.auth(ref)), "reused": False,
-                "builder": on.name, "built_at": now()}
+        with holding_locks([f"linux-disk:{key}"], lambda: progress.at(
+                pair, "waiting", "waiting for the compose of the same disk under way on this machine")):
+            store, ref, pinned = _stored(env, key)
+            if pinned is not None:
+                progress.at(pair, "reusing", "reusing the disk of the same key, made earlier")
+                return {"status": "unverified", "key": key, "image": pinned, "reused": True, "built_at": now()}
+            link = builds.link(platform, base.image())
+            progress.at(pair, "starting its builder", f"making the disk {builder.where(link)}")
+            on = opened.enter_context(builds.open(link, platform, Path(work), base.image(), {}))
+            on.login(store.auth(container["image"]))
+            if base_disk is not None:
+                on.login(get_config().get_image_store().auth(base_disk))
+            if (tools := published_pinned(DISK_TOOLS_IMAGE)) is None:
+                tools = f"agentenv-disk-tools:{DISK_TOOLS_IMAGE.tag()}"
+                on.build((context / "tools" / "Dockerfile").read_text(), tools, on.platform, {},
+                         context=f"{builder.CONTEXT}/tools")
+            dockerfile = (context / "Dockerfile").read_text()
+            if base_disk is None:
+                progress.at(pair, "making the base's disk")
+                base_disk = _made_base_disk(on, base, arch, f"{base_identity} {recipe}", tools, dockerfile)
+            progress.at(pair, "making the disk")
+            local = f"agentenv-computer:{key[7:23]}-disk-{arch}"
+            on.build(dockerfile, local, platform, {KEY_LABEL: key}, build_args={
+                "ROOTFS": container["image"], "ROOTFS_CONFIG": _encoded(_config(on, container["image"], arch)),
+                "ESP": base_disk, "TOOLS": tools})
+            attempt.stage = "push"
+            progress.at(pair, "pushing the disk")
+            on.push(local, ref, store)
+            return {"status": "unverified", "key": key, "image": pin_digest(ref, store.auth(ref)), "reused": False,
+                    "builder": on.name, "built_at": now()}
     return attempt.result
 
 
