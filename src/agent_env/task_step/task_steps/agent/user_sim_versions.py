@@ -35,10 +35,10 @@ SECTIONS: tuple[tuple[str, str, str], ...] = (
     ("already_told", "THINGS YOU ALREADY TOLD THE ASSISTANT (if it asks for one again, remind it, a little annoyed, "
                      "that you already told it, and tell it again)", "T"),
     ("should_already_know", "THINGS THE ASSISTANT SHOULD ALREADY KNOW (never bring these up; if it gets one wrong, "
-                            "correct it briefly, a little irritated, and add nothing else)", "C"),
+                            "correct it briefly, a little irritated, even when you'd otherwise let something slide)",
+     "C"),
     ("what_to_look_up", "WHAT TO LOOK UP (say where; don't give the value)", "L"),
     ("decisions", "YOUR DECISIONS (when the assistant asks)", "D"),
-    ("never_supply", "NEVER SUPPLY (the assistant must find these itself)", "N"),
     ("how_you_react", "HOW YOU REACT", "H"),
     ("dont_mention", "DON'T MENTION THESE UNLESS THE ASSISTANT ASKS", "M"),
     ("phone", "WHAT YOU DO WITH YOUR EMAILS, TEXTS AND NOTIFICATIONS", "F"),
@@ -48,6 +48,11 @@ SECTION_KEYS = tuple(key for key, _, _ in SECTIONS)
 RULES_TITLE = "YOUR RULES FOR THE ASSISTANT (it has them in its notes)"
 PRIVATE_TITLE = "PRIVATE"
 RULES_AFTER = "decisions"
+# A description section that isn't one, with where its lines go: a task that has it is refused at load with that.
+MOVED_SECTIONS: dict[str, str] = {
+    "never_supply": "put never_supply's lines in keep_private: it holds what the user never says or hands over, even "
+                    "if asked",
+}
 
 PERMISSION_KINDS: dict[str, str] = {
     "just_do": "Just do",
@@ -242,7 +247,8 @@ def problems(person: Any) -> list[str]:
         if unknown:
             out.append(f"description has unknown sections {unknown}; the sections are {list(SECTION_KEYS)}"
                        + ("; satisfaction goes on the rate_user_satisfaction step, so the user sim's prompt never has "
-                          "it" if "satisfaction" in unknown else ""))
+                          "it" if "satisfaction" in unknown else "")
+                       + "".join(f"; {MOVED_SECTIONS[key]}" for key in unknown if key in MOVED_SECTIONS))
         out += [f"description.{key} must be a list of non-empty lines" for key in SECTION_KEYS
                 if key in description and not _lines(description[key])]
         if not any(_lines(description.get(key)) and description[key] for key in SECTION_KEYS):

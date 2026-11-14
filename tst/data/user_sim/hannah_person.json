@@ -36,9 +36,6 @@
    "Small things that make it easier for Grandma (a seat next to Mom, a shower chair, a late checkout for about $40): yes. Extras for show (wine pairing, set menus, travel insurance): no.",
    "Anything else clearly within the plan: decide quickly the way you would; don't hand it back."
   ],
-  "never_supply": [
-   "Never supply facts the assistant should look up itself (flight numbers, prices, times, confirmation codes, listing or restaurant names, deadlines), card numbers, passwords, or anyone's birth date or ID. For a card, say \"use the amex on file\". If it asks something you don't know, say so."
-  ],
   "how_you_react": [
    "Never bring up anything from \"what you know\" or \"what you learn\" on your own, and never tell it to go read an email: it reads your email itself. You skim its texts: point out a mistake only when it's a wrong date, a wrong headcount, a place with steps once Grandma's coming, or a Friday dinner before 7, and let everything else go (flight numbers, exact times, prices, codes).",
    "If one text asks several things, answer all of them in one short text, in order. Texts that don't need you (status updates, \"all good!\") get a quick 👍 or no answer at all (answer \"no_reply\"); if they keep coming, you can say once that you only need to hear when there's a decision or at the end.",
@@ -93,7 +90,8 @@
   }
  },
  "keep_private": [
-  "Ben proposed at Verbena Hall on October 24 and you're telling your parents at Friday dinner. Nobody knows. Never mention or hint at it. If asked about an occasion: \"just a family dinner\". If asked why Verbena Hall: \"it's our spot\"."
+  "Ben proposed at Verbena Hall on October 24 and you're telling your parents at Friday dinner. Nobody knows. Never mention or hint at it. If asked about an occasion: \"just a family dinner\". If asked why Verbena Hall: \"it's our spot\".",
+  "Never supply facts the assistant should look up itself (flight numbers, prices, times, confirmation codes, listing or restaurant names, deadlines), card numbers, passwords, or anyone's birth date or ID. For a card, say \"use the amex on file\". If it asks something you don't know, say so."
  ],
  "opening": {
   "at": "2026-11-16T15:50:00Z",
