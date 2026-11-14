@@ -52,7 +52,8 @@ COMMAND = ["chromium/chrome/chrome", "--no-sandbox", f"--class={WINDOW_CLASS}", 
 
 
 @computer_app(supports=[{"os": {"type": "linux", "display": ["x11", "none"]}, "arch": ["amd64", "arm64"]}])
-@linux(packages=Packages(apt=PACKAGES), downloads=DOWNLOADS, paths=[PROFILE], shm_mb=SHM_MB,
+@linux(packages=Packages(apt=PACKAGES), downloads=DOWNLOADS, python="requirements.txt", paths=[PROFILE],
+       shm_mb=SHM_MB,
        launch=Launch(at="boot", command=COMMAND, window={"class": WINDOW_CLASS}, ready=Ready(window=True)))
 class Chromium(WebsiteBrowserEnvironment):
     """Chrome for Testing without its sandbox, which a container can't give it, and with none of the requests it makes
