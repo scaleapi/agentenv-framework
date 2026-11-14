@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 
 import pytest
 
@@ -111,7 +112,7 @@ def test_task_items_go_with_the_check_that_owns_their_family_and_the_rest_get_a_
     calls = core.plan_calls(["oversharing", "made_up"], items)
     assert [i.id for i in calls["oversharing"]] == ["leak"] and calls["made_up"] == []
     assert [i.id for i in calls[core.TASK_ITEMS]] == ["ends", "tone"]  # style isn't running, so "tone" goes there too
-    assert "- leak (G1: Leaking and privacy): never mentions the engagement" in core.question_text(
+    assert "- leak (G1: Leaking and privacy; general): never mentions the engagement" in core.question_text(
         "oversharing", calls["oversharing"])
 
 
@@ -290,9 +291,9 @@ async def test_task_items_get_their_own_verdicts_and_one_that_can_error_makes_a_
     fake = FakeModel({TASK_ITEMS_Q: item_fail, "oversharing": leak_pass})
     result = await _judge(_run(("done", "thx bye")), fake, items=items)
     assert result["items"]["leak"] == {"verdict": "pass", "reason": "-", "turns": [], "family": "G1",
-                                       "asked_with": "oversharing"}
+                                       "kind": "general", "asked_with": "oversharing"}
     assert result["items"]["rating"] == {"verdict": "fail", "reason": "rated it 5", "turns": [1], "family": "A5",
-                                         "asked_with": "task_items"}
+                                         "kind": "general", "asked_with": "task_items"}
     assert "task_items" not in result["checks"] and result["user_sim_error"]["because"] == ["item:rating"]
     assert len(fake.calls) == 8
 
@@ -601,3 +602,261 @@ def test_a_fail_that_clears_one_turn_and_fails_another_is_kept():
                        "turns": [1], "verdict": "fail", "could_change_grade": True, "items": []})
     parsed = core.parse_answer(text, {1}, [])
     assert parsed["verdict"] == "fail" and parsed["could_change_grade"] is True
+
+
+# ---- task rubric items in usersim.yaml's shape ----------------------------------------------------------------------
+# From psi-ts-craftweb-holiday-rush's usersim.yaml, as psi-benchmark-tasks turns it into this step's settings.
+CALL_RAE = {
+    "id": "a1_call_rae", "family": "A1", "kind": "hard",
+    "name": "Rae: yes if it fits, ≥ $15 a jar and ≥ $9 a tin, by email",
+    "short": "Both floors, 'if it fits', settled by email. Missing a floor, a different floor, or 'text her' fails.",
+    "check": "If the assistant asks about Rae's order, Tess says yes only if it fits, gives BOTH floors (no less than $15 "
+             "a jar and $9 a tin), and lets the assistant settle it with Rae by email. A different floor, a missing "
+             "floor, a flat yes or no, or \"text her\" fails.",
+    "na_when": "The assistant didn't raise Rae's order."}
+NO_SILENT_FIX = {
+    "id": "g5_no_silent_fix", "family": "G5", "kind": "general", "name": "Doesn't do the assistant's homework",
+    "check": "When the assistant's plan has a gap, Tess gives her call rather than doing the work for it: she doesn't "
+             "work out how many jars Rae should get, recompute the budget, choose pour dates, or rewrite its plan.",
+    "na_when": "never"}
+HER_LENGTH = {"id": "f2_her_length", "family": "F2", "kind": "auto", "name": "As short as her real texts",
+              "check": "Every reply is at most 25 words.", "metric": "max_words", "max": 25}
+SATISFACTION = {"id": "a5_satisfaction", "family": "A5", "kind": "hard",
+                "name": "Satisfaction rating matches the outcome",
+                "check": "Not gradeable: the sim gives no rating.", "na_when": "always",
+                "static_na_reason": "No deployed version of the sim prompt has a satisfaction step."}
+# Tess's real texts, from the same file's style_reference.
+TESS = ("Never again. I ran out of oil and refunded 22 people at Christmas. Two 1-star reviews already 😩",
+        "Saw it! Let me look at my numbers this weekend.")
+
+
+def _items(*dicts) -> list[core.RubricItem]:
+    assert core.item_problems(list(dicts)) == []
+    return [core.RubricItem.from_dict(d) for d in dicts]
+
+
+def _answer_items(verdicts: dict[str, str], turns=(1,)):
+    """A complete() that answers every item it's asked, by id, with ``verdicts`` (else pass)."""
+    calls = []
+
+    async def complete(model, system, parts, schema):
+        asked = re.findall(r"^- (\S+) \([AFG]\d: ", parts[-1], re.M)
+        calls.append(asked)
+        items = [{"id": i, "reason": f"{i} per turn 1", "turns": list(turns), "verdict": verdicts.get(i, "pass")}
+                 for i in asked]
+        return {"text": _pass(items=items), "usage": None, "cost": 0.0}
+
+    complete.calls = calls
+    return complete
+
+
+def test_the_craftweb_item_round_trips_and_is_asked_as_written():
+    [item] = _items(CALL_RAE)
+    assert item.to_dict() == CALL_RAE and core.RubricItem.from_dict(item.to_dict()) == item
+    q = core.question_text("guidance", [item])
+    assert f"- a1_call_rae (A1: Requirement provision; hard): {CALL_RAE['check']}" in q
+    assert "  n/a when: The assistant didn't raise Rae's order." in q
+    assert CALL_RAE["name"] not in q and CALL_RAE["short"] not in q  # for reviewers, not the judge
+    step = usj.UserSimJudgeTaskStep("s", None, rubric_items=[CALL_RAE, HER_LENGTH, SATISFACTION], rubric_task_version=7)
+    again = usj.UserSimJudgeTaskStep.from_dict(json.loads(json.dumps(step.to_dict())))
+    assert step.config_problems() == [] and again.to_dict() == step.to_dict()
+    assert (again.rubric_items, again.rubric_task_version) == ([CALL_RAE, HER_LENGTH, SATISFACTION], 7)
+
+
+def test_the_old_text_field_still_loads_as_the_check_and_kind_defaults_to_general():
+    old = {"id": "leak", "family": "g1", "text": "never mentions the ring"}
+    [item] = _items(old)
+    assert (item.family, item.kind, item.check) == ("G1", "general", "never mentions the ring")
+    assert item.to_dict() == {"id": "leak", "family": "G1", "kind": "general", "check": "never mentions the ring"}
+    assert usj.UserSimJudgeTaskStep("s", None, rubric_items=[old]).config_problems() == []
+    [both] = core.item_problems([{**old, "check": "never mentions the ring"}])
+    assert both == "rubric_items[0] (leak): give check or text, not both (text is the old name of check)"
+
+
+def test_hard_and_general_items_are_told_to_the_judge_by_kind():
+    hard, general = _items(CALL_RAE, {**NO_SILENT_FIX, "family": "A3"})
+    q = core.question_text("guidance", [hard, general])
+    assert core.KIND_RULES["hard"] in q and "fails on any breach" in q
+    assert core.KIND_RULES["general"] in q and "fails only on a clear instance" in q
+    assert "- g5_no_silent_fix (A3: Decisions and preferences; general):" in q and "  n/a is not allowed" in q
+    only_general = core.question_text("guidance", [general])
+    assert core.KIND_RULES["hard"] not in only_general and core.KIND_RULES["general"] in only_general
+
+
+@pytest.mark.asyncio
+async def test_an_auto_item_is_counted_on_the_graded_answers_with_no_model_call():
+    [length] = _items(HER_LENGTH)
+    # Too long for Tess: the length a model playing her drifts to.
+    over = ("Yes to Rae if it fits, but no less than $15 a jar and $9 a tin. Settle it with her by email, and let me know "
+            "what she says before you confirm anything.")
+    run = _run(("reply", TESS[0]), ("no_reply", ""), ("reply", over), ("reply", TESS[1]))
+    fake = FakeModel()
+    result = await _judge(run, fake, checks=[], items=[length])
+    assert fake.calls == [] and result["calls"] == 0
+    assert result["items"]["f2_her_length"] == {
+        "verdict": "fail", "reason": "over the 25 words max at turn 3: 34", "turns": [3], "family": "F2", "kind": "auto",
+        "asked_with": "computed"}
+    passed = await _judge(_run(("reply", TESS[0]), ("reply", TESS[1])), fake, checks=[], items=[length])
+    assert passed["items"]["f2_her_length"]["verdict"] == "pass" and fake.calls == []
+    assert passed["items"]["f2_her_length"]["reason"] == "every answer at most 25 words; the longest, turn 1, has 18"
+    # A context-only turn is never failed; a run with no graded message is n/a.
+    context_only = await _judge(_run(("reply", over), ("reply", TESS[1]), graded={2}), fake, checks=[], items=[length])
+    assert context_only["items"]["f2_her_length"]["verdict"] == "pass"
+    silent = await _judge(_run(("no_reply", "")), fake, checks=[], items=[length])
+    assert silent["items"]["f2_her_length"]["verdict"] == "n/a"
+    # With the checks running, the auto item is in no question.
+    fake = FakeModel()
+    await _judge(_run(("reply", over)), fake, items=[length])
+    assert all("f2_her_length" not in c["parts"][-1] for c in fake.calls) and len(fake.calls) == 7
+
+
+@pytest.mark.asyncio
+async def test_an_auto_item_counts_sentences_simply():
+    assert [core.count_sentences(t) for t in TESS] == [3, 2]
+    assert core.count_sentences("no less than $15.50 a jar") == 1  # a decimal point ends nothing
+    assert core.count_sentences("ok\nsounds good") == 2 and core.count_sentences("😩") == 0
+    assert core.count_words(TESS[0]) == 18  # the emoji is a word
+    [two] = _items({"id": "f2_short", "family": "F2", "kind": "auto", "metric": "max_sentences", "max": 2})
+    result = await _judge(_run(("reply", TESS[1]), ("reply", TESS[0])), FakeModel(), checks=[], items=[two])
+    assert result["items"]["f2_short"]["verdict"] == "fail" and result["items"]["f2_short"]["turns"] == [2]
+    assert result["items"]["f2_short"]["reason"] == "over the 2 sentences max at turn 2: 3"
+
+
+@pytest.mark.asyncio
+async def test_na_when_always_is_n_a_with_its_reason_and_no_call():
+    [rating] = _items(SATISFACTION)
+    fake = FakeModel()
+    result = await _judge(_run(("done", "thx")), fake, checks=[], items=[rating])
+    assert fake.calls == [] and result["items"]["a5_satisfaction"] == {
+        "verdict": "n/a", "reason": SATISFACTION["static_na_reason"], "turns": [], "family": "A5", "kind": "hard",
+        "asked_with": "static_na"}
+    fake = FakeModel()
+    await _judge(_run(("done", "thx")), fake, items=[rating])
+    assert all("a5_satisfaction" not in c["parts"][-1] for c in fake.calls)
+
+
+@pytest.mark.asyncio
+async def test_na_when_never_doesn_t_allow_an_n_a_so_one_is_asked_again():
+    [fix] = _items(NO_SILENT_FIX)
+
+    def answer(verdict):
+        item = {"id": "g5_no_silent_fix", "reason": "she gave her call", "turns": [1], "verdict": verdict}
+        return _pass(items=[item])
+
+    fake = FakeModel({"rogue": [answer("n/a"), answer("pass")]})
+    result = await _judge(_run(("reply", "your call on the dates, just not oct 31")), fake, checks=["rogue"],
+                          items=[fix])
+    assert result["items"]["g5_no_silent_fix"]["verdict"] == "pass" and len(fake.calls) == 2
+    assert "item g5_no_silent_fix may not be n/a: it always applies" in fake.calls[1]["parts"][-1]
+    twice = await _judge(_run(("reply", "x")), FakeModel({"rogue": [answer("n/a")] * 2}), checks=["rogue"],
+                         items=[fix])
+    assert twice["items"]["g5_no_silent_fix"]["verdict"] == "error"
+    # Where n/a is allowed, it stands.
+    [rae] = _items(CALL_RAE)
+    na = _pass(items=[{"id": "a1_call_rae", "reason": "Rae never came up", "turns": [], "verdict": "n/a"}])
+    got = await _judge(_run(("reply", "x")), FakeModel({"guidance": na}), checks=["guidance"], items=[rae])
+    assert got["items"]["a1_call_rae"]["verdict"] == "n/a"
+
+
+def test_a_big_rubric_is_split_over_calls_of_at_most_the_cap():
+    assert core.MAX_ITEMS_PER_CALL == 12
+    items = _items(*[{"id": f"g1_{n}", "family": "G1", "check": f"never states fact {n}"} for n in range(30)],
+                   *[{"id": f"a5_{n}", "family": "A5", "check": f"rates outcome {n}"} for n in range(13)], HER_LENGTH)
+    calls = core.plan_calls(["oversharing", "rogue"], items)
+    assert {k: len(v) for k, v in calls.items()} == {"oversharing": 12, "oversharing#2": 12, "oversharing#3": 6,
+                                                     "rogue": 0, "task_items": 12, "task_items#2": 1}
+    assert [i.id for i in calls["oversharing#3"]] == [f"g1_{n}" for n in range(24, 30)]
+    more = core.question_text("oversharing#2", calls["oversharing#2"])
+    assert more.startswith("# YOUR QUESTION: the task's own rubric items (more of the Oversharing question's, G1, G2)")
+    assert core.CHECKS["oversharing"].question not in more  # the check itself is asked once
+
+
+@pytest.mark.asyncio
+async def test_split_items_get_their_verdicts_and_the_check_is_asked_once():
+    items = _items(*[{"id": f"g1_{n}", "family": "G1", "check": f"never states fact {n}"} for n in range(14)])
+    complete = _answer_items({"g1_13": "fail"})
+    result = await core.judge_run(_run(("reply", "x")), model=JUDGE, checks=["oversharing"], items=items,
+                                  complete=complete)
+    assert [len(c) for c in complete.calls] == [12, 2] and list(result["checks"]) == ["oversharing"]
+    assert result["items"]["g1_13"]["asked_with"] == "oversharing#2" and result["items"]["g1_13"]["verdict"] == "fail"
+    assert list(result["items"]) == [f"g1_{n}" for n in range(14)]  # in the task's order
+    assert result["user_sim_error"]["because"] == ["item:g1_13"]  # G1's owner, oversharing, is an error check
+
+
+def test_each_bad_item_is_refused_when_the_task_loads_with_a_clear_error():
+    cases = [
+        ({"family": "A1", "check": "x"}, "rubric_items[0] needs an id"),
+        ({"id": "a", "check": "x"}, "rubric_items[0] (a) needs a family"),
+        ({"id": "a", "family": "B1", "check": "x"}, "rubric_items[0] (a): family 'B1' is not one of"),
+        ({"id": "a", "family": "A1", "kind": "strict", "check": "x"}, "kind 'strict' is not one of ['hard', 'general', "
+                                                                      "'auto']"),
+        ({"id": "a", "family": "F2", "kind": "auto", "max": 25}, "an auto item's metric must be one of"),
+        ({"id": "a", "family": "F2", "kind": "auto", "metric": "max_chars", "max": 25}, "not 'max_chars'"),
+        ({"id": "a", "family": "F2", "kind": "auto", "metric": "max_words"}, "an auto item needs max"),
+        ({"id": "a", "family": "F2", "kind": "auto", "metric": "max_words", "max": 0}, "not 0"),
+        ({"id": "a", "family": "F2", "kind": "auto", "metric": "max_words", "max": "25"}, "not '25'"),
+        ({"id": "a", "family": "F2", "kind": "general", "check": "x", "metric": "max_words", "max": 25},
+         "metric and max are for kind auto only"),
+        ({"id": "a", "family": "A5", "check": "x", "na_when": "always"}, "na_when always needs a static_na_reason"),
+        ({"id": "a", "family": "A5", "check": "x", "static_na_reason": "y"}, "static_na_reason is only for na_when "
+                                                                            "always"),
+        ({"id": "a", "family": "A1", "kind": "hard", "check": "  "}, "a hard item needs a check"),
+        ({"id": "a", "family": "A1"}, "a general item needs a check"),
+        ({"id": "a", "family": "A1", "check": "x", "na-when": "never"}, "unknown fields ['na-when']"),
+    ]
+    for item, error in cases:
+        problems = core.item_problems([item])
+        assert any(error in p for p in problems), (item, problems)
+        with pytest.raises(ValueError, match="user_sim_judge 's': "):
+            usj.UserSimJudgeTaskStep("s", None, rubric_items=[item])._settings(TaskStepContext())
+    dup = core.item_problems([CALL_RAE, {**CALL_RAE, "family": "A3"}])
+    assert dup == ["rubric_items[1] (a1_call_rae): id 'a1_call_rae' is used twice"]
+    assert any("rubric_task_version must be a task version" in p for p in usj.UserSimJudgeTaskStep(
+        "s", None, rubric_items=[CALL_RAE], rubric_task_version="7").config_problems())
+
+
+# ---- the rubric's task version --------------------------------------------------------------------------------------
+def _versioned(ctx: TaskStepContext, version: int) -> None:
+    from agent_env.task.store import register_task_instance
+
+    ctx.instance_id = register_task_instance("psi-ts-craftweb-holiday-rush", version, 3).instance_id
+
+
+@pytest.mark.usefixtures("local_stores")
+@pytest.mark.asyncio
+async def test_items_written_for_another_task_version_aren_t_graded_and_the_checks_still_run(monkeypatch):
+    ctx = await _chat(monkeypatch)
+    _versioned(ctx, 8)
+    fake = FakeModel({"guidance": _fail()})
+
+    await _step(fake, monkeypatch, rubric_items=[CALL_RAE, HER_LENGTH], rubric_task_version=7).execute(ctx)
+
+    entry = _entry(ctx)
+    assert entry["rubric_version"] == {
+        "rubric_task_version": 7, "task_version": 8, "status": "mismatch",
+        "note": "the task items were written for task version 7 and this run is of version 8, so they weren't graded; "
+                "the general checks were"}
+    assert entry["items"] == {} and len(fake.calls) == 7
+    assert all("a1_call_rae" not in c["parts"][-1] for c in fake.calls)
+    assert entry["checks"]["guidance"]["verdict"] == "fail" and entry["user_sim_error"]["because"] == ["guidance"]
+
+
+@pytest.mark.usefixtures("local_stores")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("version, status", [(7, "match"), (None, "unknown")])
+async def test_items_for_this_task_version_or_an_unknown_one_are_graded(monkeypatch, version, status):
+    ctx = await _chat(monkeypatch)
+    if version is not None:
+        _versioned(ctx, version)
+
+    await _step(FakeModel(), monkeypatch, checks=["style"], rubric_items=[HER_LENGTH],
+                rubric_task_version=7).execute(ctx)
+
+    entry = _entry(ctx)
+    assert entry["rubric_version"]["status"] == status and entry["items"]["f2_her_length"]["verdict"] == "pass"
+    if version is None:
+        assert entry["rubric_version"]["task_version"] == "unknown"
+        assert "graded as written" in entry["rubric_version"]["note"]
+    # Without a rubric_task_version nothing is compared.
+    await _step(FakeModel(), monkeypatch, checks=["style"], rubric_items=[HER_LENGTH]).execute(ctx)
+    assert "rubric_version" not in _entry(ctx) and _entry(ctx)["items"]["f2_her_length"]["verdict"] == "pass"

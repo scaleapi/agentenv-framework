@@ -14,7 +14,35 @@ them, and checked against the record's ``prompt_sha256``. ``used`` is never show
 own pulse check, not evidence.
 
 Each check (``user_sim_judge_core.CHECKS``) is one narrow question to ``judge_model``, in its own call; a task's
-``rubric_items`` ride along with the check that owns their family.
+``rubric_items`` ride along with the check that owns their family, at most ``MAX_ITEMS_PER_CALL`` to a call.
+
+A rubric item is the shape of a criterion in a task's ``usersim.yaml`` (psi-benchmark-tasks), which that repo turns
+into this step's settings; this step reads no file:
+
+- ``id`` and ``family`` (A1-A5, F1-F4, G1-G5), both required; ids are unique.
+- ``kind``: ``hard`` (an exact rule from the user sim's instructions: the judge fails it on any breach), ``general``
+  (a judgement: it fails only on a clear instance; the default) or ``auto`` (never sent to the model: ``metric``
+  ``max_words`` or ``max_sentences`` is counted on each graded answer, and any answer over ``max`` fails it, naming
+  the turn; see ``user_sim_judge_core.count_sentences``).
+- ``check``: the text the judge applies, required unless auto. ``text`` is its old name and still loads.
+- ``name`` and ``short``: a title and one line for reviewers, recorded but not shown to the judge.
+- ``na_when``: the situation in which it never came up, told to the judge. ``always`` makes it n/a with no call,
+  recording ``static_na_reason`` (required with it); ``never`` means it always applies, and an n/a is asked again.
+- ``can_error``: whether its fail makes the run a user sim error; unset, as the check that owns its family.
+
+For example::
+
+    rubric_task_version: 7
+    rubric_items:
+    - {id: a1_call_rae, family: A1, kind: hard, name: "Rae: yes if it fits",
+       check: "If the assistant asks about Rae's order, Tess says yes only if it fits, gives both floors ...",
+       na_when: "The assistant didn't raise Rae's order."}
+    - {id: f2_her_length, family: F2, kind: auto, check: "Every reply is at most 25 words.", metric: max_words, max: 25}
+
+``rubric_task_version`` (``usersim.yaml``'s ``hub_version``) is the task version whose user sim prompt the items were written for.
+When it's set and the run's task version (its task instance record's) differs, the task items aren't graded and the
+entry's ``rubric_version`` says so; the general checks still run. A task version that can't be found is recorded as
+unknown, and the items are graded.
 
 What it writes: ``metadata["user_sim_judge"][verifier_id]``, with every verdict, its reason and cited turns, the task
 items, ``user_sim_error`` (``value`` yes / no / unknown, ``because``, ``marked``), the instructions check, token use
@@ -83,6 +111,7 @@ class UserSimJudgeTaskStep(TaskStep):
         checks: Optional[list[str]] = None,
         error_checks: Optional[list[str]] = None,
         rubric_items: Optional[list[dict]] = None,
+        rubric_task_version: Optional[int] = None,
         mark_user_sim_error: bool = False,
         verifier_id: Optional[str] = None,
         judge_timeout_seconds: Optional[int] = None,
@@ -96,13 +125,15 @@ class UserSimJudgeTaskStep(TaskStep):
         self.error_checks = (list(error_checks) if error_checks is not None
                              else [c for c in core.DEFAULT_ERROR_CHECKS if c in self.checks])
         self.rubric_items = list(rubric_items or [])
+        self.rubric_task_version = rubric_task_version
         self.mark_user_sim_error = mark_user_sim_error
         self.verifier_id = verifier_id or uuid.uuid4().hex
         self.judge_timeout_seconds = judge_timeout_seconds or self.DEFAULT_TIMEOUT_SECONDS
 
     # ---- settings ----------------------------------------------------------------------------------------------
     def config_problems(self) -> list[str]:
-        return _problems(self.judge_model, self.checks, self.error_checks, self.rubric_items, self.mark_user_sim_error)
+        return _problems(self.judge_model, self.checks, self.error_checks, self.rubric_items, self.mark_user_sim_error,
+                         self.rubric_task_version)
 
     def task_problems(self, steps: list[TaskStep]) -> list[str]:
         """The run it judges must be an always_on or prompt_agent step's; unset, the task must have exactly one."""
@@ -122,7 +153,8 @@ class UserSimJudgeTaskStep(TaskStep):
         base = super().to_dict()
         base.update(run_step_id=self.run_step_id, judge_model=self.judge_model, checks=self.checks,
                     error_checks=self.error_checks, rubric_items=self.rubric_items,
-                    mark_user_sim_error=self.mark_user_sim_error, verifier_id=self.verifier_id,
+                    rubric_task_version=self.rubric_task_version, mark_user_sim_error=self.mark_user_sim_error,
+                    verifier_id=self.verifier_id,
                     judge_timeout_seconds=self.judge_timeout_seconds)
         return base
 
@@ -131,7 +163,8 @@ class UserSimJudgeTaskStep(TaskStep):
         base = {**cls._base_from_dict(data), "fail_task_on_error": data.get("fail_task_on_error", False)}
         return cls(**base, run_step_id=data.get("run_step_id"), judge_model=data.get("judge_model"),
                    checks=data.get("checks"), error_checks=data.get("error_checks"),
-                   rubric_items=data.get("rubric_items"), mark_user_sim_error=data.get("mark_user_sim_error", False),
+                   rubric_items=data.get("rubric_items"), rubric_task_version=data.get("rubric_task_version"),
+                   mark_user_sim_error=data.get("mark_user_sim_error", False),
                    verifier_id=data.get("verifier_id"), judge_timeout_seconds=data.get("judge_timeout_seconds"))
 
     def _settings(self, context: TaskStepContext) -> dict:
@@ -141,13 +174,14 @@ class UserSimJudgeTaskStep(TaskStep):
         checks = list(over.get("checks", self.checks))
         error_checks = list(over["error_checks"]) if "error_checks" in over else (
             [c for c in self.error_checks if c in checks] if "checks" in over else list(self.error_checks))
-        items = list(over.get("rubric_items", self.rubric_items))
+        items = over.get("rubric_items", self.rubric_items)
+        version = over.get("rubric_task_version", self.rubric_task_version)
         mark = over.get("mark_user_sim_error", self.mark_user_sim_error)
-        problems = _problems(model, checks, error_checks, items, mark)
+        problems = _problems(model, checks, error_checks, items, mark, version)
         if problems:
             raise ValueError(f"user_sim_judge '{self.id}': " + "; ".join(problems))
         return {"model": model or default_judge_model(), "checks": checks, "error_checks": error_checks,
-                "mark": mark, "items": [core.RubricItem.from_dict(i) for i in items]}
+                "mark": mark, "items": [core.RubricItem.from_dict(i) for i in items], "rubric_task_version": version}
 
     # ---- the run -----------------------------------------------------------------------------------------------
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
@@ -158,6 +192,11 @@ class UserSimJudgeTaskStep(TaskStep):
                                  "checks_run": settings["checks"], "error_checks": settings["error_checks"],
                                  "rubric_items": [i.to_dict() for i in settings["items"]],
                                  "mark_user_sim_error": settings["mark"]}
+        items = settings["items"]
+        if settings["rubric_task_version"] is not None and items:
+            entry["rubric_version"] = await asyncio.to_thread(_rubric_version, settings["rubric_task_version"], context)
+            if entry["rubric_version"]["status"] == "mismatch":
+                items = []
         record = (context.metadata.get(ALWAYS_ON_KEY) or {}).get(step_id) if kind == ALWAYS_ON else None
         error_type = (record or {}).get("error_type") or (response.error_type if response else None)
         if error_type:
@@ -169,7 +208,7 @@ class UserSimJudgeTaskStep(TaskStep):
             entry["user_sim"], entry["instructions"] = about["user_sim"], about["instructions"]
             context.record_model("user sim judge", self.id, settings["model"])
             result = await core.judge_run(
-                run, model=settings["model"], checks=settings["checks"], items=settings["items"],
+                run, model=settings["model"], checks=settings["checks"], items=items,
                 error_checks=settings["error_checks"], complete=self._complete(context))
             result.pop("model", None)  # the entry's judge_model
             entry.update(result)
@@ -267,8 +306,12 @@ def _anthropic(model: str) -> bool:
     return m.startswith(("anthropic/", "bedrock/", "vertex_ai/")) and "claude" in m or m.startswith("claude")
 
 
-def _problems(model: Any, checks: Any, error_checks: Any, items: Any, mark: Any) -> list[str]:
+def _problems(model: Any, checks: Any, error_checks: Any, items: Any, mark: Any,
+              rubric_version: Any = None) -> list[str]:
     out = []
+    if rubric_version is not None and (isinstance(rubric_version, bool) or not isinstance(rubric_version, int)
+                                       or rubric_version < 0):
+        out.append(f"rubric_task_version must be a task version (a whole number), not {rubric_version!r}")
     if model is not None and (not isinstance(model, str) or not model.strip()):
         out.append("judge_model must be a model name")
     if not isinstance(mark, bool):
@@ -288,10 +331,40 @@ def _problems(model: Any, checks: Any, error_checks: Any, items: Any, mark: Any)
         if not_run:
             out.append(f"error_checks names checks that don't run: {not_run}")
     if not isinstance(items, list):
-        out.append("rubric_items must be a list of {id, family, text}")
+        out.append("rubric_items must be a list of {id, family, kind, check, ...}")
     else:
         out += core.item_problems(items)
     return out
+
+
+def task_version(context: TaskStepContext) -> Optional[int]:
+    """The version of the task this run is of: its task instance record's, None when there's none or it can't be
+    read."""
+    if not context.instance_id:
+        return None
+    try:
+        from agent_env.task.store import find_task_instance
+
+        instance = find_task_instance(context.instance_id)
+    except Exception as e:
+        logger.warning(f"user_sim_judge: could not read task instance {context.instance_id}: {type(e).__name__}: {e}")
+        return None
+    return instance.task_version if instance is not None else None
+
+
+def _rubric_version(rubric_version: int, context: TaskStepContext) -> dict:
+    """Whether the task items were written for this run's task version: ``status`` match, mismatch (the items
+    aren't graded) or unknown (they are)."""
+    found = task_version(context)
+    out: dict[str, Any] = {"rubric_task_version": rubric_version, "task_version": found}
+    if found is None:
+        return {**out, "task_version": "unknown", "status": "unknown",
+                "note": "the run's task version couldn't be found, so the task items are graded as written"}
+    if found != rubric_version:
+        return {**out, "status": "mismatch",
+                "note": f"the task items were written for task version {rubric_version} and this run is of version "
+                        f"{found}, so they weren't graded; the general checks were"}
+    return {**out, "status": "match"}
 
 
 def _prompt_response(context: TaskStepContext, step_id: str) -> Optional[PromptResponse]:

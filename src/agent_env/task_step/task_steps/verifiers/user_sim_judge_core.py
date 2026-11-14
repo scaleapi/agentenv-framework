@@ -14,8 +14,10 @@ the user sim's whole run and covers families of the User Simulator Rubric Taxono
 | ending      | G4             |
 
 A5 (satisfaction) has no check: the separate ``rate_user_satisfaction`` step covers it, not this judge. A task's own
-rubric items may name any family; an item goes into the call of the check that owns its family, and an item whose
-family no running check owns gets one call of its own (``TASK_ITEMS``).
+rubric items (``RubricItem``) may name any family; an item goes into the call of the check that owns its family, and an
+item whose family no running check owns gets one call of its own (``TASK_ITEMS``). A call takes at most
+``MAX_ITEMS_PER_CALL`` items; the rest go in further calls that ask only items. ``auto`` items and ``na_when: always``
+items are settled here, with no call.
 
 One judge model answers each check in its own call. ``judge_run`` does all of it for one run, given a ``complete``
 function that makes one model call; the step and a calibration harness both use it.
@@ -52,6 +54,8 @@ FAMILIES: dict[str, str] = {
 
 VERDICTS = ("pass", "fail", "n/a")
 TASK_ITEMS = "task_items"
+# An item's ``asked_with`` when no call asked it: an auto item counted here, an ``na_when: always`` item.
+COMPUTED, STATIC_NA = "computed", "static_na"
 
 
 @dataclass(frozen=True)
@@ -301,44 +305,165 @@ class UserSimRun:
     notes: list[str] = field(default_factory=list)
 
 
+# ---- a task's own rubric items ------------------------------------------------------------------------------------
+HARD, GENERAL, AUTO = "hard", "general", "auto"
+KINDS = (HARD, GENERAL, AUTO)
+NA_ALWAYS, NA_NEVER = "always", "never"
+MAX_WORDS, MAX_SENTENCES = "max_words", "max_sentences"
+METRICS = (MAX_WORDS, MAX_SENTENCES)
+MAX_ITEMS_PER_CALL = 12  # task items asked in one call; a check's or the task's further items get calls of their own
+ITEM_FIELDS = ("id", "family", "kind", "check", "text", "name", "short", "na_when", "static_na_reason", "metric", "max",
+               "can_error")
+
+
 @dataclass(frozen=True)
 class RubricItem:
-    """A task's own rubric item: one line the judge checks, under one family."""
+    """A task's own rubric item: one rule the judge checks, under one family. ``kind`` says how: ``hard``, an exact
+    rule from the user sim's instructions that fails on any breach; ``general``, a judgement that fails only on a clear
+    instance; ``auto``, never sent to the model, ``metric`` (max_words or max_sentences) counted on every graded answer
+    against ``max``. ``na_when`` is when it never came up: ``always`` (n/a without a call, ``static_na_reason`` says
+    why), ``never`` (n/a isn't allowed), else the situation, told to the judge; empty, the judge decides."""
     id: str
     family: str
-    text: str
+    check: str = ""
+    kind: str = GENERAL
+    name: str = ""
+    short: str = ""
+    na_when: str = ""
+    static_na_reason: str = ""
+    metric: str = ""
+    max: Optional[int] = None
     can_error: Optional[bool] = None  # None: as the check that owns its family
+
+    @property
+    def static_na(self) -> bool:
+        return self.na_when.strip().lower() == NA_ALWAYS
+
+    @property
+    def na_allowed(self) -> bool:
+        return self.na_when.strip().lower() != NA_NEVER
+
+    @property
+    def asks_the_model(self) -> bool:
+        return self.kind != AUTO and not self.static_na
 
     @classmethod
     def from_dict(cls, data: dict) -> "RubricItem":
-        return cls(id=str(data["id"]), family=str(data["family"]).upper(), text=str(data["text"]),
-                   can_error=data.get("can_error"))
+        """An item ``item_problems`` passed. ``text`` is the old name of ``check``."""
+        return cls(id=str(data["id"]), family=str(data["family"]).strip().upper(),
+                   check=str(data.get("check") if data.get("check") is not None else data.get("text") or "").strip(),
+                   kind=str(data.get("kind") or GENERAL).strip().lower(), name=str(data.get("name") or ""),
+                   short=str(data.get("short") or ""), na_when=str(data.get("na_when") or "").strip(),
+                   static_na_reason=str(data.get("static_na_reason") or "").strip(),
+                   metric=str(data.get("metric") or ""), max=data.get("max"), can_error=data.get("can_error"))
 
     def to_dict(self) -> dict:
-        out = {"id": self.id, "family": self.family, "text": self.text}
+        out: dict[str, Any] = {"id": self.id, "family": self.family, "kind": self.kind}
+        for k in ("name", "short", "check", "na_when", "static_na_reason", "metric"):
+            if getattr(self, k):
+                out[k] = getattr(self, k)
+        if self.max is not None:
+            out["max"] = self.max
         if self.can_error is not None:
             out["can_error"] = self.can_error
         return out
 
 
 def item_problems(items: list[dict]) -> list[str]:
+    """What's wrong with a task's rubric items, each problem naming the item; empty when they're fine."""
     out, seen = [], set()
     for i, item in enumerate(items):
-        if not isinstance(item, dict) or not all(isinstance(item.get(k), str) and item[k].strip()
-                                                 for k in ("id", "family", "text")):
-            out.append(f"rubric_items[{i}] needs an id, a family and a text")
+        if not isinstance(item, dict):
+            out.append(f"rubric_items[{i}] must be a mapping with an id, a family and a check")
             continue
-        if item["family"].upper() not in FAMILIES:
-            out.append(f"rubric_items[{i}] ({item['id']}): family {item['family']!r} is not one of {list(FAMILIES)}")
-        if item["id"] in seen:
-            out.append(f"rubric_items[{i}]: id {item['id']!r} is used twice")
-        seen.add(item["id"])
+        at = f"rubric_items[{i}]" + (f" ({item['id']})" if isinstance(item.get("id"), str) else "")
+        for key in ("id", "family"):
+            if not isinstance(item.get(key), str) or not item[key].strip():
+                out.append(f"{at} needs a{'n' if key == 'id' else ''} {key}")
+        if isinstance(item.get("family"), str) and item["family"].strip() and (
+                item["family"].strip().upper() not in FAMILIES):
+            out.append(f"{at}: family {item['family']!r} is not one of {list(FAMILIES)}")
+        if isinstance(item.get("id"), str) and item["id"].strip():
+            if item["id"] in seen:
+                out.append(f"{at}: id {item['id']!r} is used twice")
+            seen.add(item["id"])
+        kind = GENERAL if item.get("kind") is None else item["kind"]
+        if not isinstance(kind, str) or kind.strip().lower() not in KINDS:
+            out.append(f"{at}: kind {kind!r} is not one of {list(KINDS)}")
+            kind = None
+        else:
+            kind = kind.strip().lower()
+        for key in ("check", "text", "name", "short", "na_when", "static_na_reason"):
+            if item.get(key) is not None and not isinstance(item[key], str):
+                out.append(f"{at}: {key} must be text")
+        if item.get("check") is not None and item.get("text") is not None:
+            out.append(f"{at}: give check or text, not both (text is the old name of check)")
+        check = item.get("check") if item.get("check") is not None else item.get("text")
+        if kind in (HARD, GENERAL) and not (isinstance(check, str) and check.strip()):
+            out.append(f"{at}: a {kind} item needs a check: the text the judge applies")
+        if kind == AUTO:
+            if item.get("metric") not in METRICS:
+                out.append(f"{at}: an auto item's metric must be one of {list(METRICS)}, not {item.get('metric')!r}")
+            limit = item.get("max")
+            if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+                out.append(f"{at}: an auto item needs max, a whole number of at least 1, not {limit!r}")
+        elif kind is not None:
+            extra = [k for k in ("metric", "max") if item.get(k) is not None]
+            if extra:
+                out.append(f"{at}: {' and '.join(extra)} are for kind auto only")
+        na_when = item.get("na_when")
+        always = isinstance(na_when, str) and na_when.strip().lower() == NA_ALWAYS
+        reason = item.get("static_na_reason")
+        if always and not (isinstance(reason, str) and reason.strip()):
+            out.append(f"{at}: na_when always needs a static_na_reason saying why it can't apply")
+        if reason is not None and not always:
+            out.append(f"{at}: static_na_reason is only for na_when always")
         if "can_error" in item and not isinstance(item["can_error"], bool):
-            out.append(f"rubric_items[{i}] ({item['id']}): can_error must be true or false")
-        unknown = sorted(set(item) - {"id", "family", "text", "can_error"})
+            out.append(f"{at}: can_error must be true or false")
+        unknown = sorted(set(item) - set(ITEM_FIELDS))
         if unknown:
-            out.append(f"rubric_items[{i}] ({item['id']}): unknown fields {unknown}")
+            out.append(f"{at}: unknown fields {unknown}")
     return out
+
+
+# ---- the auto items -----------------------------------------------------------------------------------------------
+# A sentence ends at a run of . ! or ? followed by a space or the end, or at a line break; a piece with no letter or
+# digit (an emoji, "...") isn't one. So "$15.50" stays one sentence and "Mr. Lee" counts two: simple on purpose.
+_SENTENCE_END = re.compile(r"[.!?]+(?=\s|$)|\n+")
+
+
+def count_words(message: str) -> int:
+    """Words in a message: its pieces between whitespace, an emoji on its own counting as one."""
+    return len(message.split())
+
+
+def count_sentences(message: str) -> int:
+    return sum(1 for piece in _SENTENCE_END.split(message) if re.search(r"\w", piece))
+
+
+COUNTERS: dict[str, tuple[Callable[[str], int], str]] = {MAX_WORDS: (count_words, "words"),
+                                                          MAX_SENTENCES: (count_sentences, "sentences")}
+
+
+def sent_answers(run: "UserSimRun") -> list["Turn"]:
+    """The graded answers an auto item counts: each graded turn's message that isn't a no_reply."""
+    return [t for t in run.turns if t.graded and t.outcome != "no_reply" and (t.message or "").strip()]
+
+
+def auto_result(item: RubricItem, run: "UserSimRun") -> dict:
+    """An auto item, computed: fail when any graded answer is over ``max``, naming each turn that is."""
+    count, unit = COUNTERS[item.metric]
+    counts = [(t.n, count(t.message)) for t in sent_answers(run)]
+    if not counts:
+        return {"verdict": "n/a", "reason": "it sent no message at a graded turn", "turns": []}
+    over = [(n, c) for n, c in counts if c > item.max]
+    if over:
+        listed = ", ".join(f"turn {n}: {c}" for n, c in over)
+        return {"verdict": "fail", "reason": f"over the {item.max} {unit} max at {listed}",
+                "turns": [n for n, _ in over]}
+    n, c = max(counts, key=lambda x: x[1])
+    return {"verdict": "pass", "reason": f"every answer at most {item.max} {unit}; the longest, turn {n}, has {c}",
+            "turns": []}
 
 
 def render_run(run: UserSimRun) -> tuple[str, str]:
@@ -372,9 +497,24 @@ def render_run(run: UserSimRun) -> tuple[str, str]:
     return "\n".join(head), "\n".join(answers)
 
 
+KIND_RULES = {
+    HARD: "A hard item is an exact rule from the user sim's instructions: it fails on any breach of the list or value "
+          "it names, however small.",
+    GENERAL: "A general item is a judgement about how this person would behave: it fails only on a clear instance.",
+}
+
+
+def call_check(call: str) -> Optional[str]:
+    """The check whose question a call asks; None for a call that asks only task items (``TASK_ITEMS``, or a
+    check's or the task's further items, ``<check>#2``)."""
+    return call if call in CHECKS else None
+
+
 def question_text(check_name: str, items: list[RubricItem]) -> str:
-    if check_name == TASK_ITEMS:
-        lines = ["# YOUR QUESTION: the task's own rubric items",
+    if call_check(check_name) is None:
+        owner = CHECKS.get(check_name.split("#")[0])
+        part = f" (more of the {owner.title} question's, {', '.join(owner.families)})" if owner else ""
+        lines = [f"# YOUR QUESTION: the task's own rubric items{part}",
                  "Check each item below against the graded turns. Give \"verdict\" as \"fail\" if any item fails, "
                  "\"n/a\" if every item is n/a, else \"pass\"."]
     else:
@@ -390,25 +530,48 @@ def question_text(check_name: str, items: list[RubricItem]) -> str:
         if c.grade:
             lines += ["", f"could_change_grade: {c.grade}"]
     if items:
-        lines += ["", "Task rubric items (answer each in \"items\"; an item fails only on clear evidence):"]
-        lines += [f"- {i.id} ({i.family}: {FAMILIES[i.family].split(':')[0]}): {i.text}" for i in items]
+        lines += ["", "Task rubric items: answer each in \"items\"."]
+        lines += [f"- {KIND_RULES[k]}" for k in (HARD, GENERAL) if any(i.kind == k for i in items)]
+        if any(i.na_when for i in items):
+            lines.append("- An item's \"n/a when\" is the situation in which it never came up: answer \"n/a\" for it "
+                         "then, and only then. \"n/a is not allowed\" means it always applies: answer pass or fail.")
+        lines.append("")
+        for i in items:
+            lines.append(f"- {i.id} ({i.family}: {FAMILIES[i.family].split(':')[0]}; {i.kind}): {i.check}")
+            if not i.na_allowed:
+                lines.append("  n/a is not allowed")
+            elif i.na_when:
+                lines.append(f"  n/a when: {i.na_when}")
     lines += ["", "Return only the JSON object."]
     return "\n".join(lines)
 
 
-def plan_calls(checks: list[str], items: list[RubricItem]) -> dict[str, list[RubricItem]]:
-    """Which call asks what: each running check with the task items its families own; items no running check owns go
-    in one more call, ``TASK_ITEMS``."""
-    calls: dict[str, list[RubricItem]] = {c: [] for c in checks}
+def plan_calls(checks: list[str], items: list[RubricItem],
+               per_call: int = MAX_ITEMS_PER_CALL) -> dict[str, list[RubricItem]]:
+    """Which call asks what: each running check with the task items its families own, the first ``per_call`` of
+    them; items no running check owns go in one more call, ``TASK_ITEMS``. Items past ``per_call`` go, ``per_call``
+    at a time, in calls that ask only items (``<check>#2``, ``task_items#2``...). Only items that ask the model."""
+    grouped: dict[str, list[RubricItem]] = {c: [] for c in checks}
     for item in items:
+        if not item.asks_the_model:
+            continue
         owner = FAMILY_OWNER.get(item.family)
-        calls.setdefault(owner if owner in calls else TASK_ITEMS, []).append(item)
+        grouped.setdefault(owner if owner in grouped else TASK_ITEMS, []).append(item)
+    per_call = max(1, per_call)
+    calls: dict[str, list[RubricItem]] = {}
+    for call, its in grouped.items():
+        if call == TASK_ITEMS and not its:
+            continue
+        calls[call] = its[:per_call]
+        for part, start in enumerate(range(per_call, len(its), per_call), 2):
+            calls[f"{call}#{part}"] = its[start:start + per_call]
     return calls
 
 
 # ---- one judge's answer -------------------------------------------------------------------------------------------
-def parse_answer(text: str, graded: set[int], item_ids: list[str]) -> dict:
-    """One judge's answer to one call, checked. Raises ValueError with what's wrong."""
+def parse_answer(text: str, graded: set[int], item_ids: list[str], no_na: tuple[str, ...] | list[str] = ()) -> dict:
+    """One judge's answer to one call, checked. ``no_na``: the items that may not be n/a. Raises ValueError with
+    what's wrong."""
     obj = _json_object(text)
     if not isinstance(obj, dict):
         raise ValueError("the answer is not a JSON object")
@@ -434,6 +597,8 @@ def parse_answer(text: str, graded: set[int], item_ids: list[str]) -> dict:
         v = str(got[item_id].get("verdict", "")).strip().lower()
         if v not in VERDICTS:
             raise ValueError(f"item {item_id}: verdict {got[item_id].get('verdict')!r}")
+        if v == "n/a" and item_id in no_na:
+            raise ValueError(f"item {item_id} may not be n/a: it always applies, so answer pass or fail")
         item_turns = _turns(got[item_id].get("turns"))
         item_reason = str(got[item_id].get("reason") or "").strip()
         _fail_cites_a_graded_turn(f"item {item_id}: a fail", v, item_turns, graded)
@@ -536,7 +701,8 @@ async def judge_run(run: UserSimRun, *, model: str, checks: list[str], complete:
                     answer_retries: int = 1, concurrency: int = 6) -> dict:
     """Every check (and task item) on ``run``, each in its own call to ``model``. The first call runs alone so the
     rest can read its prompt cache. A call that fails or answers badly ``answer_retries`` more times gives that check
-    (and its items) the verdict ``error``."""
+    (and its items) the verdict ``error``. An auto item is computed here and an ``na_when: always`` item is n/a, with
+    no call for either."""
     graded = {t.n for t in run.turns if t.graded}
     if not graded:
         return {"skipped": "no graded turns", "checks": {}, "items": {}, "user_sim_error": dict(NOT_JUDGED)}
@@ -546,6 +712,7 @@ async def judge_run(run: UserSimRun, *, model: str, checks: list[str], complete:
 
     async def one(call: str) -> dict:
         ids = [i.id for i in calls[call]]
+        no_na = [i.id for i in calls[call] if not i.na_allowed]
         question = question_text(call, calls[call])
         errors: list[str] = []
         usage: list[Any] = []
@@ -561,7 +728,7 @@ async def judge_run(run: UserSimRun, *, model: str, checks: list[str], complete:
             usage.append(got.get("usage"))
             cost += got.get("cost") or 0.0
             try:
-                parsed = parse_answer(got.get("text"), graded, ids)
+                parsed = parse_answer(got.get("text"), graded, ids, no_na)
             except ValueError as e:
                 errors.append(f"answer not usable: {e}")
                 continue
@@ -570,17 +737,25 @@ async def judge_run(run: UserSimRun, *, model: str, checks: list[str], complete:
                 "usage": usage, "cost": cost, "errors": errors}
 
     order = list(calls)
-    first = await one(order[0])
-    answers = dict(zip(order, [first, *await asyncio.gather(*(one(c) for c in order[1:]))]))
+    answers: dict[str, dict] = {}
+    if order:
+        first = await one(order[0])
+        answers = dict(zip(order, [first, *await asyncio.gather(*(one(c) for c in order[1:]))]))
 
     results = {call: {**_check_view(answers[call]), "families": list(CHECKS[call].families)}
-               for call in order if call != TASK_ITEMS}
+               for call in order if call_check(call)}
+    asked_in = {item.id: call for call in order for item in calls[call]}
     item_results: dict[str, dict] = {}
-    for call in order:
-        for item in calls[call]:
+    for item in items:
+        if item.kind == AUTO and not item.static_na:
+            got, call = auto_result(item, run), COMPUTED
+        elif item.static_na:
+            got, call = {"verdict": "n/a", "reason": item.static_na_reason, "turns": []}, STATIC_NA
+        else:
+            call = asked_in[item.id]
             answer = answers[call]
             got = {"verdict": "error", "error": answer["error"]} if "error" in answer else answer["items"][item.id]
-            item_results[item.id] = {**got, "family": item.family, "asked_with": call}
+        item_results[item.id] = {**got, "family": item.family, "kind": item.kind, "asked_with": call}
     can_error = {i.id: (i.can_error if i.can_error is not None else FAMILY_OWNER.get(i.family) in error_checks)
                  for i in items}
     error = user_sim_error(results, [c for c in error_checks if c in results], item_results, can_error)
