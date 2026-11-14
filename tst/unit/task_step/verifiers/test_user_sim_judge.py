@@ -594,3 +594,10 @@ def test_the_task_must_say_which_run_when_it_has_more_than_one_and_name_a_run_st
 def test_the_step_asks_anthropic_models_to_cache_the_run():
     assert usj._anthropic("anthropic/claude-opus-4-8") and usj._anthropic("claude-opus-4-8")
     assert not usj._anthropic("openai/gpt-5.5")
+
+
+def test_a_fail_that_clears_one_turn_and_fails_another_is_kept():
+    text = json.dumps({"reason": "No clear failure at turn 1; at turn 2 she revealed the private password.",
+                       "turns": [1], "verdict": "fail", "could_change_grade": True, "items": []})
+    parsed = core.parse_answer(text, {1}, [])
+    assert parsed["verdict"] == "fail" and parsed["could_change_grade"] is True

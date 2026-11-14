@@ -448,6 +448,8 @@ def _fail_cites_a_graded_turn(what: str, verdict: str, turns: list[int], graded:
         raise ValueError(f"{what} must cite at least one graded turn; cited {turns}, graded {sorted(graded)}")
 
 
+ERROR_SHOWN_CHARS = 200  # of an answer's or a call's error, in the retry note and the recorded error
+
 # A reason concluding nothing failed ("No clear delegation failures found"); a backstop to the reason-first prompt.
 _NO_FAILURE_FOUND = re.compile(
     r"\bno\s+(?:clear\s+)?(?:\w+\s+)?failures?\s+(?:was\s+|were\s+)?(?:found|detected|identified)\b"
@@ -455,8 +457,10 @@ _NO_FAILURE_FOUND = re.compile(
 
 
 def _fail_reason_finds_a_failure(what: str, verdict: str, reason: str) -> None:
-    """A fail whose own reason says no failure was found contradicts itself, so it's asked again."""
-    m = _NO_FAILURE_FOUND.search(reason) if verdict == "fail" else None
+    """A fail whose own reason concludes no failure was found contradicts itself, so it's asked again. Only the
+    reason's last sentence is its conclusion: "no clear failure at turn 1; at turn 2 she leaked it" is a real fail."""
+    sentences = [x for x in re.split(r"[.;!?]+", reason) if x.strip()]
+    m = _NO_FAILURE_FOUND.search(sentences[-1]) if verdict == "fail" and sentences else None
     if m:
         raise ValueError(f"{what} whose reason says {m.group(0)!r} contradicts itself; the verdict must follow the "
                          "reason")
@@ -547,12 +551,12 @@ async def judge_run(run: UserSimRun, *, model: str, checks: list[str], complete:
         usage: list[Any] = []
         cost = 0.0
         for attempt in range(1 + max(0, answer_retries)):
-            asked = question + (RETRY_NOTE.format(error=errors[-1][:200]) if errors else "")
+            asked = question + (RETRY_NOTE.format(error=errors[-1][:ERROR_SHOWN_CHARS]) if errors else "")
             try:
                 async with gate:
                     got = await complete(model, INSTRUCTIONS, [head, tail, asked], OUTPUT_SCHEMA)
             except Exception as e:  # the call itself failed after the caller's own retries
-                errors.append(f"call failed: {type(e).__name__}: {str(e)[:200]}")
+                errors.append(f"call failed: {type(e).__name__}: {str(e)[:ERROR_SHOWN_CHARS]}")
                 continue
             usage.append(got.get("usage"))
             cost += got.get("cost") or 0.0
