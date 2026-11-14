@@ -26,6 +26,7 @@ from tst.unit.task_step.test_prompt_agent_built_in_user_sim import said
 from tst.unit.task_step.test_prompt_agent_user_side import AGENT, USER, Peers, text
 
 JUDGE = "fake/judge"
+OTHER_PERSONA = "0" * 64  # a persona fingerprint no run here has
 TASK_ITEMS_Q = "task's own rubric items"
 
 
@@ -707,10 +708,11 @@ def test_the_craftweb_item_round_trips_and_is_asked_as_written():
     assert f"- a1_call_rae (A1: Requirement provision; hard): {CALL_RAE['check']}" in q
     assert "  n/a when: The assistant didn't raise Rae's order." in q
     assert CALL_RAE["name"] not in q and CALL_RAE["short"] not in q  # for reviewers, not the judge
-    step = usj.UserSimJudgeTaskStep("s", None, rubric_items=[CALL_RAE, HER_LENGTH, SATISFACTION], rubric_task_version=7)
+    step = usj.UserSimJudgeTaskStep("s", None, rubric_items=[CALL_RAE, HER_LENGTH, SATISFACTION],
+                                    rubric_persona_sha256=OTHER_PERSONA)
     again = usj.UserSimJudgeTaskStep.from_dict(json.loads(json.dumps(step.to_dict())))
     assert step.config_problems() == [] and again.to_dict() == step.to_dict()
-    assert (again.rubric_items, again.rubric_task_version) == ([CALL_RAE, HER_LENGTH, SATISFACTION], 7)
+    assert (again.rubric_items, again.rubric_persona_sha256) == ([CALL_RAE, HER_LENGTH, SATISFACTION], OTHER_PERSONA)
 
 
 def test_the_old_text_field_still_loads_as_the_check_and_kind_defaults_to_general():
@@ -866,8 +868,9 @@ def test_each_bad_item_is_refused_when_the_task_loads_with_a_clear_error():
             usj.UserSimJudgeTaskStep("s", None, rubric_items=[item])._settings(TaskStepContext())
     dup = core.item_problems([CALL_RAE, {**CALL_RAE, "family": "A3"}])
     assert dup == ["rubric_items[1] (a1_call_rae): id 'a1_call_rae' is used twice"]
-    assert any("rubric_task_version must be a task version" in p for p in usj.UserSimJudgeTaskStep(
-        "s", None, rubric_items=[CALL_RAE], rubric_task_version="7").config_problems())
+    for bad in (7, "3f1c", "A" * 64):
+        assert any("rubric_persona_sha256 must be a persona fingerprint" in p for p in usj.UserSimJudgeTaskStep(
+            "s", None, rubric_items=[CALL_RAE], rubric_persona_sha256=bad).config_problems())
 
 
 def test_an_auto_item_loads_with_no_na_when_or_with_always():
@@ -876,27 +879,21 @@ def test_an_auto_item_loads_with_no_na_when_or_with_always():
     assert core.item_problems([{**auto, "na_when": "always", "static_na_reason": "She never texts here."}]) == []
 
 
-# ---- the rubric's task version --------------------------------------------------------------------------------------
-def _versioned(ctx: TaskStepContext, version: int) -> None:
-    from agent_env.task.store import register_task_instance
-
-    ctx.instance_id = register_task_instance("psi-ts-craftweb-holiday-rush", version, 3).instance_id
-
-
+# ---- the rubric's persona ------------------------------------------------------------------------------------------
 @pytest.mark.usefixtures("local_stores")
 @pytest.mark.asyncio
-async def test_items_written_for_another_task_version_aren_t_graded_and_the_checks_still_run(monkeypatch):
+async def test_items_written_for_another_persona_aren_t_graded_and_the_checks_still_run(monkeypatch):
     ctx = await _chat(monkeypatch)
-    _versioned(ctx, 8)
+    run = ctx.metadata[USER_SIMS_KEY]["hannah"]["persona_sha256"]
     fake = FakeModel({"guidance": _fail()})
 
-    await _step(fake, monkeypatch, rubric_items=[CALL_RAE, HER_LENGTH], rubric_task_version=7).execute(ctx)
+    await _step(fake, monkeypatch, rubric_items=[CALL_RAE, HER_LENGTH], rubric_persona_sha256=OTHER_PERSONA).execute(ctx)
 
     entry = _entry(ctx)
-    assert entry["rubric_version"] == {
-        "rubric_task_version": 7, "task_version": 8, "status": "mismatch",
-        "note": "the task items were written for task version 7 and this run is of version 8, so they weren't graded; "
-                "the general checks were"}
+    assert entry["rubric_persona"] == {
+        "rubric": OTHER_PERSONA, "run": run, "status": "mismatch",
+        "note": "the task items were written for a different persona or opening than this run's user sim had, so they "
+                "weren't graded; the general checks were"}
     assert entry["items"] == {} and len(fake.calls) == 7
     assert all("a1_call_rae" not in c["parts"][-1] for c in fake.calls)
     assert entry["checks"]["guidance"]["verdict"] == "fail" and entry["user_sim_error"]["because"] == ["guidance"]
@@ -904,20 +901,22 @@ async def test_items_written_for_another_task_version_aren_t_graded_and_the_chec
 
 @pytest.mark.usefixtures("local_stores")
 @pytest.mark.asyncio
-@pytest.mark.parametrize("version, status", [(7, "match"), (None, "unknown")])
-async def test_items_for_this_task_version_or_an_unknown_one_are_graded(monkeypatch, version, status):
+@pytest.mark.parametrize("recorded, status", [(True, "match"), (False, "unknown")])
+async def test_items_for_this_persona_or_a_run_with_no_fingerprint_are_graded(monkeypatch, recorded, status):
     ctx = await _chat(monkeypatch)
-    if version is not None:
-        _versioned(ctx, version)
+    us = ctx.metadata[USER_SIMS_KEY]["hannah"]
+    fingerprint = us["persona_sha256"] if recorded else OTHER_PERSONA
+    if not recorded:
+        del us["persona_sha256"]  # a run from before the step recorded it
 
     await _step(FakeModel(), monkeypatch, checks=["style"], rubric_items=[HER_LENGTH],
-                rubric_task_version=7).execute(ctx)
+                rubric_persona_sha256=fingerprint).execute(ctx)
 
     entry = _entry(ctx)
-    assert entry["rubric_version"]["status"] == status and entry["items"]["f2_her_length"]["verdict"] == "pass"
-    if version is None:
-        assert entry["rubric_version"]["task_version"] == "unknown"
-        assert "graded as written" in entry["rubric_version"]["note"]
-    # Without a rubric_task_version nothing is compared.
+    assert entry["rubric_persona"]["status"] == status and entry["items"]["f2_her_length"]["verdict"] == "pass"
+    assert entry["rubric_persona"]["rubric"] == fingerprint
+    if not recorded:
+        assert entry["rubric_persona"]["run"] is None and "graded as written" in entry["rubric_persona"]["note"]
+    # Without a rubric_persona_sha256 nothing is compared.
     await _step(FakeModel(), monkeypatch, checks=["style"], rubric_items=[HER_LENGTH]).execute(ctx)
-    assert "rubric_version" not in _entry(ctx) and _entry(ctx)["items"]["f2_her_length"]["verdict"] == "pass"
+    assert "rubric_persona" not in _entry(ctx) and _entry(ctx)["items"]["f2_her_length"]["verdict"] == "pass"

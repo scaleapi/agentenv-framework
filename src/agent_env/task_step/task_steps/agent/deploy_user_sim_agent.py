@@ -33,6 +33,8 @@ What always_on reads from the record (``metadata["user_sims"][agent_name]``):
 - ``prompt_set``: the system prompt and model are on the agent, so always_on sets neither; ``multi_day``: the done line
   the prompt was written with, which always_on refuses to run against a run of the other kind.
 - ``model``, ``model_source``, ``prompt_sha256``, ``user_version``, ``setup``: for the run's record.
+- ``persona_sha256``: ``user_sim_common.persona_fingerprint`` of the persona and ``opening_prompt`` as written, which
+  user_sim_judge compares a rubric's ``rubric_persona_sha256`` with.
 - ``tagged_lines``: each tag the system prompt shows with its line as written there (``{"W1": "...", "D9": "..."}``),
   so an answer's ``used`` resolves against the lines this run's user sim saw, whatever later edits to the persona move.
 
@@ -103,7 +105,7 @@ from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.agent import user_sim_versions
 from agent_env.task_step.task_steps.agent.user_sim_common import (attached, opening_parts, opening_problems, opening_text,
-                                                                  recorded_opening)
+                                                                  persona_fingerprint, recorded_opening)
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 
 logger = logging.getLogger(__name__)
@@ -333,6 +335,8 @@ class DeployUserSimAgentTaskStep(DeployAgentTaskStep):
             **({"opening_parts": opening_parts(self.opening_prompt)} if isinstance(self.opening_prompt, list) else {}),
             "user_version": user_sim_versions.VERSION, "model": model, "model_source": source,
             "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(), "prompt_set": True,
+            # Who the user is, as written: what user_sim_judge's rubric_persona_sha256 is compared with.
+            "persona_sha256": persona_fingerprint(persona, self.opening_prompt),
             # Each tag the prompt shows with its line, so an answer's ``used`` ("D9") names what this run saw.
             "tagged_lines": user_sim_versions.tagged_lines(self.person(context)),
             "multi_day": self.multi_day,
