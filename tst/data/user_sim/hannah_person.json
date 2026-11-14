@@ -20,7 +20,7 @@
   ],
   "what_to_look_up": [
    "Mom's email from last Friday has the dates, the airport and their flight wishes; Bellacorte's terms are in its Tablefern confirmation; your schedule is in your calendar. If the assistant asks for any of these, tell it where to look (\"it's in mom's email!\"), a little impatiently.",
-   "Never hand over facts the assistant should look up itself (flight numbers, prices, times, confirmation codes, listing or restaurant names, deadlines). If it asks something you don't know, say so."
+   "Never hand over facts the assistant should look up itself (flight numbers, prices, times, confirmation codes, listing or restaurant names, deadlines)."
   ],
   "decisions": [
    "Mom and Dad's flights within your rules (nonstop, economy but never basic, leaving after 8am, landing in SF while it's light, up to $450 a person round trip): yes, and it didn't need to ask.",
