@@ -374,7 +374,8 @@ orchestrators call it the same way. What callers rely on:
   in the proxy, which records the turn and checks it against the model calls the caller records. Its
   record is tagged `context.metadata["episode"]` and names the original task, so it isn't resumable
   with `start_step`. The episode tears down what its run deployed, and an abandoned one is recorded
-  `cancelled`.
+  `cancelled`. It records itself in the run index as a runner would (runner `episode`, in the run group
+  `start(run_group_id=...)` names), so the explorer lists it.
 
 ## Tests
 
