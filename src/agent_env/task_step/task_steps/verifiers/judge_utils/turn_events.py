@@ -175,13 +175,15 @@ def _span_text(attrs: dict) -> str:
 
 
 def _span_thinking(attrs: dict) -> str:
-    """A GenAI ``chat`` span's thinking: its completion's ``thinking`` blocks (Anthropic's shape) that have text. A
-    model that leaves its thinking out (an empty block, a signature only) has none."""
-    if attrs.get("gen_ai.operation.name") != "chat":
-        return ""
-    completion = parse_json_attr(attrs.get("gen_ai.completion", ""))
-    content = completion.get("content") if isinstance(completion, dict) else None
-    return "\n".join(b["thinking"] for b in content or []
+    """A model span's thinking, as ``thinking`` blocks (Anthropic's shape) that have text: the PSI harness's
+    ``psi.reasoning`` (a JSON list of blocks, on an OpenInference LLM span) or a GenAI ``chat`` span's completion
+    blocks. A model that leaves its thinking out (an empty block, a signature only) has none."""
+    blocks = parse_json_attr(attrs.get("psi.reasoning", "[]"))
+    if not isinstance(blocks, list) or not blocks:
+        completion = (parse_json_attr(attrs.get("gen_ai.completion", ""))
+                      if attrs.get("gen_ai.operation.name") == "chat" else None)
+        blocks = completion.get("content") if isinstance(completion, dict) else None
+    return "\n".join(b["thinking"] for b in blocks or []
                      if isinstance(b, dict) and b.get("type") == "thinking" and str(b.get("thinking") or "").strip())
 
 
