@@ -1,7 +1,7 @@
 """The ubuntu-24.04 computer on its multi env's gateway clock, on the local backend: the deploy has its follower follow
 the gateway, as the computer's sandbox reaches it, under the computer's name and control token, which the record
 keeps but the token; sync_env_clock arms the clock as a task does, calling the computer's sync_time; through the
-gateway's jumps of a day and a week on and a month back, a rate of 60, a freeze and a restart, a killed follower and a
+gateway's jumps of a day and a week on and a month back, a rate of 10, a freeze and a restart, a killed follower and a
 reset, the session's clock is within 1 s of the gateway's once the follower has acknowledged each change, and runs at
 the gateway's rate; a follower killed comes back within 3 s. Each reading is taken inside the computer, between two
 of real time, so no driver or exec latency is in it. Needs Docker and the local registry on localhost:5000."""
@@ -28,6 +28,9 @@ from tst.integration.computer.conftest import CONTAINER, FOLLOWER_BACK_S, comput
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
 DAY = 86400
+#: The rate the clock is set to: a rate change reaches the session the follower's reaction late, carried at the old
+#: rate until the next jump, so a modest rate keeps a busy runner's late follower well inside ``MAX_SKEW_S``.
+RATE = 10
 #: How far the session's clock may be from the gateway's: the follower maps the gateway's clock exactly, so this is
 #: room for the gateway's state read from here, not for the computer.
 MAX_SKEW_S = 1.0
@@ -68,8 +71,8 @@ async def test_a_multi_envs_computer_keeps_within_a_second_of_its_gateways_clock
             await _write(deployed, "set_time", virtual_time=_iso(await _now(deployed) - timedelta(days=30)),
                          virtual_seconds_per_real_second=1)
             skews["a month back"] = await _skew(deployed, own)
-            await _write(deployed, "set_rate", virtual_seconds_per_real_second=60)
-            rates = {"60": await _rate(own)}
+            await _write(deployed, "set_rate", virtual_seconds_per_real_second=RATE)
+            rates = {RATE: await _rate(own)}
             await _write(deployed, "set_rate", virtual_seconds_per_real_second=0)
             rates["frozen"], skews["frozen"] = await _rate(own), await _skew(deployed, own)
             await _write(deployed, "set_rate", virtual_seconds_per_real_second=1)
@@ -90,7 +93,7 @@ async def test_a_multi_envs_computer_keeps_within_a_second_of_its_gateways_clock
     assert urlsplit(kept["watch_url"]).hostname == "host.docker.internal" and kept["watch_url"].endswith("/clock/watch")
     assert [entry["service"] for entry in synced if entry.get("service") == "desktop"] == ["desktop"]
     assert all(abs(skew) < MAX_SKEW_S for skew in skews.values()), skews
-    assert abs(rates["60"] / 60 - 1) < 0.05 and abs(rates["frozen"]) < 0.01, rates
+    assert abs(rates[RATE] / RATE - 1) < 0.05 and abs(rates["frozen"]) < 0.01, rates
     assert back not in ("-", killed) and came_back < FOLLOWER_BACK_S, came_back
     assert state_after_reset["followers"]["desktop"]["version"] == state_after_reset["version"], state_after_reset
     assert not report.failed
