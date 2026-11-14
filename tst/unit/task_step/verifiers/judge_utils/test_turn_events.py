@@ -100,6 +100,22 @@ def test_a_failed_gemini_turn_keeps_its_error_message():
     assert events.events[-1] == {"type": "final", "text": "Quota exceeded for model", "error": True}
 
 
+def test_the_agent_s_thinking_is_kept_when_it_was_recorded_and_an_empty_block_is_dropped():
+    claude_code = [{"type": "assistant", "message": {"content": [
+        {"type": "thinking", "thinking": "", "signature": "sig"},
+        {"type": "thinking", "thinking": "Nina said no shellfish, so check the menu first.", "signature": "sig"},
+        {"type": "text", "text": "Checking the menu."}]}}]
+    otel = [{"name": "chat", "start_time": "1", "attributes": {
+        "gen_ai.operation.name": "chat",
+        "gen_ai.completion": json.dumps({"content": [{"type": "thinking", "thinking": "Ask before paying $855."},
+                                                     {"type": "text", "text": "Asking the user."}]})}}]
+
+    assert [(e["type"], e["text"]) for e in turn_events(json.dumps(claude_code)).events] == [
+        ("thinking", "Nina said no shellfish, so check the menu first."), ("text", "Checking the menu.")]
+    assert [(e["type"], e["text"]) for e in turn_events(json.dumps(otel)).events if e["type"] != "final"] == [
+        ("thinking", "Ask before paying $855."), ("text", "Asking the user.")]
+
+
 def test_an_unknown_format_passes_through_one_item_an_event():
     events = turn_events(json.dumps([{"kind": "step", "n": 1}, {"kind": "step", "n": 2}]))
     assert events.format == UNKNOWN and [e["event"]["n"] for e in events.events] == [1, 2]
