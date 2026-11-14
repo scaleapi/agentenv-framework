@@ -1,14 +1,20 @@
 """always_on_agent_verifier: an always_on step's prompt is graded from the user's chat (the response and the
-conversation) and the run's context (the trigger log, the run wake by wake with its app changes), never every wake's
-trajectory. What needs the trajectories is refused when the task loads, as is a plain rubrics_verifier on an always_on
-step's prompt; a plain rubrics_verifier grades any other prompt as before."""
+conversation) and the run's context (the trigger log, the run wake by wake with its app changes) and, with
+use_trajectory, every wake's tool calls staged as files in an agent judge's sandbox. A direct judge with the
+trajectories, and what cites screenshots or cuts turns, is refused when the task loads, as is a plain rubrics_verifier
+on an always_on step's prompt; a plain rubrics_verifier grades any other prompt as before."""
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
+from agent_env.config import get_config
+from agent_env.providers.sandbox_providers import sandbox_provider
 from agent_env.task.task import Task
-from agent_env.task_step.context import PromptResponse, TaskStepContext
+from agent_env.task_step.context import DeployedAgent, PromptResponse, TaskStepContext
 from agent_env.task_step.task_steps import always_on as ao
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from agent_env.task_step.task_steps.verifiers import is_rubrics_verifier
@@ -22,8 +28,8 @@ CRITERIA = [{"id": "c1", "description": "asked before booking"}]
 
 
 def _verifier(cls=AlwaysOnAgentVerifier, **kw) -> RubricsVerifierTaskStep:
-    return cls(id="judge", version=1, criteria=CRITERIA, prompt_id="ask", use_agent_judge=False, verifier_id="rubric",
-               **kw)
+    return cls(**{"id": "judge", "version": 1, "criteria": CRITERIA, "prompt_id": "ask", "use_agent_judge": False,
+                  "verifier_id": "rubric", **kw})
 
 
 def _capture(monkeypatch, verifier) -> dict:
@@ -151,7 +157,7 @@ def test_the_wake_by_wake_text_says_when_the_record_is_unreadable():
     ({"output_format": "rubric_evidence"}, "output_format=rubric_evidence cites per-criterion screenshots"),
     ({"output_format": "rubric_evidence_with_mistakes"}, "cites per-criterion screenshots"),
     ({"grade_up_to_turn": 2}, "grade_up_to_turn can't cut an always_on step's prompt"),
-    ({"use_trajectory": True}, "use_trajectory must be off"),
+    ({"use_trajectory": True, "use_agent_judge": False}, "use_trajectory needs the agent judge"),
 ])
 def test_what_needs_the_wakes_trajectories_is_refused_when_the_task_loads(settings, why):
     with pytest.raises(ValueError, match=why):
@@ -221,3 +227,144 @@ def test_is_rubrics_verifier_recognises_the_subclass_as_a_step_and_as_a_stored_d
         assert is_rubrics_verifier(verifier) and is_rubrics_verifier(verifier.to_dict())
     assert not is_rubrics_verifier(_always_on()) and not is_rubrics_verifier(_always_on().to_dict())
     assert not is_rubrics_verifier({"type": "no_such_step"}) and not is_rubrics_verifier({})
+
+
+# ---- use_trajectory: the run staged as files for an agent judge ---------------------------------------------------
+
+RECORDED = Path(__file__).resolve().parent / "verifiers" / "recorded"
+JUDGE_TRAJECTORY = json.dumps([
+    {"type": "system", "subtype": "init", "tools": ["Read", "Grep", "Bash"]},
+    {"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "id": "a", "name": "Read", "input": {"file_path": "/tmp/always_on_run/x/index.md"}},
+        {"type": "tool_use", "id": "b", "name": "Grep",
+         "input": {"pattern": "cancel", "path": "/tmp/always_on_run/x/wakes/wake_003.jsonl"}}]}},
+    {"type": "result", "subtype": "success", "result": "{}"}])
+
+
+class _Sandbox:
+    def __init__(self):
+        self.files: dict[str, str] = {}
+
+    async def write_file_from_text(self, content, destination_path, **kwargs):
+        self.files[destination_path] = content
+
+
+def _staged_run(monkeypatch, *, object_url: bool = True) -> tuple[TaskStepContext, _Sandbox, dict[str, str]]:
+    """A recorded always_on run's context with a deployed judge; ``sources`` serves each stored trajectory."""
+    stored = json.loads((RECORDED / "always_on_timeline.json").read_text())
+    urls = [e["trajectory_url"] for e in stored["timeline"] if e["event"] == "agent_turn_end"]
+    record = {k: v for k, v in stored.items() if k != "timeline"}
+    if object_url:
+        record["object_url"] = get_config().get_object_store().put(
+            "always_on_timeline/week.json", json.dumps(stored).encode(), content_type="application/json")
+    ctx = TaskStepContext()
+    ctx.metadata[ao.ALWAYS_ON_KEY] = {"week": record}
+    ctx.prompt_responses.append(PromptResponse(prompt_id="ask", response="[Fri Nov 6] Dinner is booked",
+                                               prompt_text="dinner for 7", step_id="week",
+                                               target_agent_per_turn_trajectory_object_urls=urls,
+                                               agent_trajectory_object_url=urls[-1]))
+    ctx.deployed_agents.append(DeployedAgent(agent_name="judge", api_url="http://judge.test",
+                                             a2a_url="http://judge.test", sandbox_id="sb-judge"))
+    sandbox = _Sandbox()
+
+    class Provider:
+        async def get_sandbox(self, sandbox_id):
+            assert sandbox_id == "sb-judge"
+            return sandbox
+
+    monkeypatch.setattr(sandbox_provider, "get_agent_sandbox_provider", lambda: Provider())
+    sources = {urls[1]: (RECORDED / "turn_claude_code.json").read_text(),
+               urls[3]: (RECORDED / "turn_otel_wake4.json").read_text(),
+               "mem://judge/1.json": JUDGE_TRAJECTORY}
+    return ctx, sandbox, sources
+
+
+def _agent_judge(monkeypatch, verifier, sources) -> dict:
+    captured: dict = {}
+
+    async def judge(*, eval_prompt, **kwargs):
+        captured["prompt"] = eval_prompt
+        return ([{**verifier.criteria[0], "score": 1.0, "result": True}], 0, [], "mem://judge/1.json")
+
+    def read(url):
+        if url not in sources:
+            raise FileNotFoundError(url)
+        return sources[url]
+
+    monkeypatch.setattr(verifier, "_run_judge_with_output_retries", judge)
+    monkeypatch.setattr(verifier, "_read_trajectory_text", read)
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_with_use_trajectory_the_agent_judge_searches_every_wake_staged_as_files(monkeypatch):
+    ctx, sandbox, sources = _staged_run(monkeypatch)
+    verifier = _verifier(use_agent_judge=True, use_trajectory=True, agent_name="judge")
+    captured = _agent_judge(monkeypatch, verifier, sources)
+
+    await verifier.execute(ctx)
+
+    [root] = {path.split("/")[3] for path in sandbox.files}
+    base = f"/tmp/always_on_run/{root}"
+    assert {f"{base}/index.md", f"{base}/events.jsonl", f"{base}/triggers.jsonl",
+            *(f"{base}/wakes/wake_00{n}.jsonl" for n in range(1, 5))} <= set(sandbox.files)
+    assert '"tool": "porchbite_spending_by_month"' in sandbox.files[f"{base}/wakes/wake_004.jsonl"]
+    prompt = captured["prompt"]
+    assert f"The agent's trajectory is available at {base}" in prompt
+    assert "## The run, wake by wake" in prompt and "## The run's files" in prompt
+    assert f"- {base}/index.md: start here." in prompt and "Later actions replace earlier ones" in prompt
+    assert "You have Bash and Read only: no web, no other agents, and nothing to change." in prompt
+    assert "These wakes' tool calls are not in the files (their trajectory is missing or unreadable), so for them " \
+           "only the run's record is there: 1, 3." in prompt
+    staging = ctx.metadata["verifications"]["rubric"]["trajectory_staging"]
+    assert staging["wakes"] == 4 and staging["unreadable_trajectories"] == [1, 3]
+    assert staging["raw_bytes"] > staging["staged_bytes"] > 0
+    assert staging["judge_reads"] == [{"batch": 1, "url": "mem://judge/1.json", "tool_calls": 2,
+                                       "wakes_opened": [3], "read_all_wakes": False, "read_index": True,
+                                       "searched_events": False, "read_triggers": False, "helpers_started": 0}]
+
+
+@pytest.mark.asyncio
+async def test_without_the_stored_timeline_the_turns_are_loaded_as_rubrics_verifier_loads_them(monkeypatch):
+    ctx, sandbox, sources = _staged_run(monkeypatch, object_url=False)
+    verifier = _verifier(use_agent_judge=True, use_trajectory=True, agent_name="judge")
+    captured = _agent_judge(monkeypatch, verifier, sources)
+    loaded: list = []
+
+    async def load(sandbox, uris, container_dir, *args):
+        loaded.append((uris, container_dir))
+
+    monkeypatch.setattr(verifier, "_load_per_turn_trajectories", load)
+
+    await verifier.execute(ctx)
+
+    [(uris, container_dir)] = loaded
+    assert len(uris) == 4 and "NOTE: This is a multi-turn conversation" in captured["prompt"]
+    assert "trajectory_staging" not in ctx.metadata["verifications"]["rubric"] and sandbox.files == {}
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_turns_the_agent_judge_off_is_refused_with_use_trajectory(monkeypatch):
+    ctx, _, sources = _staged_run(monkeypatch)
+    verifier = _verifier(use_agent_judge=True, use_trajectory=True, agent_name="judge")
+    _agent_judge(monkeypatch, verifier, sources)
+    ctx.metadata["user_overrides"] = {"use_agent_judge": False}
+
+    with pytest.raises(RuntimeError, match="use_trajectory needs the agent judge"):
+        await verifier.execute(ctx)
+
+
+def test_use_trajectory_with_the_agent_judge_loads_and_round_trips_with_its_defaults():
+    stored = {"id": "judge", "type": "always_on_agent_verifier", "prompt_id": "ask", "criteria": CRITERIA,
+              "use_trajectory": True}
+    [verifier] = Task.from_dict({"id": "t", "version": 1, "steps": [stored]}).steps
+    assert verifier.use_trajectory and verifier.use_agent_judge
+    assert (verifier.judge_timeout_seconds, verifier.judge_timeout_retries, verifier.judge_max_turns) == (2400, 1, 400)
+    assert verifier.DEFAULT_JUDGE_BATCH_CONCURRENCY == 3 and verifier.judge_batch_size is None
+    assert verifier.judge_agent_config() == {"builtin_tools": {"only": ["Bash", "Read"]}, "peer_tools": False}
+    assert AlwaysOnAgentVerifier.from_dict(verifier.to_dict()).to_dict() == verifier.to_dict()
+    task_set = _verifier(judge_timeout_seconds=1000, judge_timeout_retries=0, judge_batch_size=6)
+    assert (task_set.judge_timeout_seconds, task_set.judge_timeout_retries, task_set.judge_batch_size) == (1000, 0, 6)
+    plain = RubricsVerifierTaskStep(id="j", version=1, criteria=CRITERIA, prompt_id="ask")
+    assert (plain.judge_timeout_seconds, plain.judge_timeout_retries, plain.judge_max_turns,
+            plain.judge_agent_config()) == (1000, None, None, {})
