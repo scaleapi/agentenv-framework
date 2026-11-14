@@ -6,9 +6,11 @@ the seed fills a file's address; a text-only opening is unchanged."""
 from __future__ import annotations
 
 import copy
+import json
 
 import pytest
 
+from agent_env.a2a_agent import conversation_store
 from agent_env.a2a_agent.object_transfer import readable_parts
 from agent_env.config import configure
 from agent_env.task_step.context import TaskStepContext
@@ -257,6 +259,23 @@ async def test_prompt_agent_sends_the_opening_s_files_and_the_user_sim_knows_wha
     assert first["read"]["you_sent"][0]["files"] == [
         {"name": "itinerary.pdf", "description": "Mom and Dad's flight itinerary"}, {"name": "hotel-shortlist.xlsx"}]
     assert f"\nYOU SENT YOUR AI ASSISTANT:\n  [3:50 PM] {TEXT} {NOTE}\n" in first["input"]  # Hannah's zone: UTC
+
+
+@pytest.mark.usefixtures("local_stores")
+@pytest.mark.asyncio
+async def test_prompt_agent_with_the_opening_s_parts_copied_sends_and_stores_them_without_the_description(monkeypatch):
+    peers = Peers(monkeypatch, {AGENT: [text("Booking their flights now.")], USER: [said("done")]})
+    ctx = await _hannah(monkeypatch, OPENING)
+    await _prompt_agent(copy.deepcopy(OPENING)).execute(ctx)  # the opening_prompt's parts, descriptions and all
+
+    assert peers.requests(ctx)[:2] == exchange(
+        AGENT, [{"kind": "text", "text": TEXT}, _sent(ITINERARY), _sent(SHORTLIST)], "<id1>", "<ctx>", "task-1")
+    doc = conversation_store.get_conversation(ctx.metadata["a2a_conversations"]["talk"])
+    assert doc["messages"][0]["parts"] == [{"kind": "text", "text": TEXT}, _sent(ITINERARY), _sent(SHORTLIST)]
+    assert ctx.prompt_responses[0].source_agent_per_turn_prompt_parts[0] == doc["messages"][0]["parts"]
+    assert "Mom and Dad's flight itinerary" not in json.dumps([r[2] for r in peers.raw if r[1].startswith(AGENT)])
+    assert _full(_reads(ctx)[0])["read"]["you_sent"][0]["files"] == [  # the user sim still knows what it attached
+        {"name": "itinerary.pdf", "description": "Mom and Dad's flight itinerary"}, {"name": "hotel-shortlist.xlsx"}]
 
 
 @pytest.mark.usefixtures("local_stores")

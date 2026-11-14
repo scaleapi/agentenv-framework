@@ -43,7 +43,7 @@ from agent_env.task_step.task_steps.notification_delivery import delivered_parts
 from agent_env.task_step.task_steps.post_turn_hooks import PostTurnHooks, run_post_turn_hooks, validate_hook_specs
 from agent_env.task_step.task_steps.agent import user_sim_versions
 from agent_env.task_step.task_steps.agent.user_sim_common import iso, person_of, task_zone, utc
-from agent_env.task_step.task_steps.agent.user_sim_common import attached, opening_text, recorded_opening
+from agent_env.task_step.task_steps.agent.user_sim_common import attached, for_agent, opening_text, recorded_opening
 from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import (
     agent_error_text,
     fetch_container_logs,
@@ -527,6 +527,8 @@ class PromptAgentTaskStep(TaskStep):
             for key, value in seed.items():
                 system_prompt = system_prompt.replace(f"<{key}>", str(value))
         initial_parts = self._apply_seed(self._effective_parts(), seed)
+        if built_in is not None:  # a file part's description, copied from the opening_prompt, is for the user sim
+            initial_parts = [for_agent(p) for p in initial_parts]
         prompt_text = initial_parts[0]["text"] if self.prompt is not None else None
 
         model, effort = self._resolve_model_and_effort(context)

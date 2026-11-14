@@ -405,6 +405,17 @@ async def test_a_run_step_that_failed_and_let_the_task_go_on_is_not_rated(monkey
 
 
 @pytest.mark.asyncio
+async def test_a_run_step_that_failed_once_and_succeeded_on_its_retry_is_rated(monkeypatch, tmp_path):
+    rig, ctx = await _always_on_run(monkeypatch, tmp_path, _reply("blue!"), _reply("amazing, thanks"),
+                                    json.dumps(rated(5, "house and dinner booked", "S1")))
+    ctx.metadata["failed_steps"] = [{"step_id": "week", "step_type": "always_on", "error": "it broke",
+                                     "is_fatal": True, "retried": True}]
+    await _rater().execute(ctx)
+    rating = ctx.metadata[SATISFACTION_KEY]["week"]
+    assert "skipped" not in rating and rating["score"] == 5 and len(rig.user_calls) == 3
+
+
+@pytest.mark.asyncio
 async def test_a_step_with_no_run_before_it_fails():
     from agent_env.task_step.context import StepContextError, TaskStepContext
 

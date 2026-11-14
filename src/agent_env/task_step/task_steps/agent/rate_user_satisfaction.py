@@ -314,9 +314,9 @@ def _only_run(context: TaskStepContext, step_id: str) -> str:
 
 
 def _failed(context: TaskStepContext, run_id: str) -> Optional[str]:
-    """The run step's error, when it failed and the task went on."""
+    """The run step's error, when it failed and the task went on; a failure a retry recovered from is no failure."""
     return next((f.get("error") or f.get("error_type") or "an error" for f in context.metadata.get("failed_steps") or []
-                 if isinstance(f, dict) and f.get("step_id") == run_id), None)
+                 if isinstance(f, dict) and f.get("step_id") == run_id and not f.get("retried")), None)
 
 
 def _always_on_session(record: dict) -> _Session:
