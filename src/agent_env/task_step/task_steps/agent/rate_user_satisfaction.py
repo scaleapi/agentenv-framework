@@ -25,8 +25,9 @@ The message (``user_sim_versions.render_rating``) has those unread messages, the
 YOU'D RATE THE JOB" tagged S1..., and the 1-5 ask; a malformed answer gets one retry (``user_sim_versions.rate``). The
 rating is recorded at ``metadata["user_sim_satisfaction"][run step id]``: ``user_sim``, ``score`` (None when it
 failed), ``reason``, ``used``, ``at``, ``unread_shown``, ``schema_errors``, ``retried``, ``user_sim_error``,
-``user_sim_turns``, ``user_sim_trajectory_urls``, ``rated_by`` (this step's id), ``context_id`` and
-``session_from``, the whole ask and raw answers in the object store at its ``object_url``. It never reaches the
+``user_sim_turns``, ``user_sim_trajectory_urls``, ``rated_by`` (this step's id), ``context_id``, ``session_from``
+and ``tagged_lines`` (``{"S1": line, ...}``, the lines the ask tagged, so ``used`` resolves; a persona tag resolves by
+the deploy record's ``tagged_lines``), the whole ask and raw answers in the object store at its ``object_url``. It never reaches the
 agent, the graded conversation, or the verifications.
 
 Not rated, recorded with ``skipped`` and why: a run that ended on an error (always_on's error end reasons; a
@@ -212,7 +213,8 @@ class RateUserSatisfactionTaskStep(TaskStep):
                        at=read["time"], unread_shown=len(read["assistant_messages"]), user_sim_error=error,
                        user_sim_turns=got.get("turns", len(calls)),
                        user_sim_trajectory_urls=[c.get("trajectory_url") for c in calls],
-                       context_id=session.context_id, session_from=session.session_from)
+                       context_id=session.context_id, session_from=session.session_from,
+                       tagged_lines=user_sim_versions.rating_tagged_lines(self.satisfaction))
         logger.info(f"{self.type} '{self.id}': '{run_id}' rated {summary['score']} (error={error})")
         full = {**summary, "run_step_id": run_id, "satisfaction": self.satisfaction, "read": read,
                 **{k: got.get(k) for k in ("input", "raw", "first_answer")}}

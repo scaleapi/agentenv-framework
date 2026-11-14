@@ -33,6 +33,8 @@ What always_on reads from the record (``metadata["user_sims"][agent_name]``):
 - ``prompt_set``: the system prompt and model are on the agent, so always_on sets neither; ``multi_day``: the done line
   the prompt was written with, which always_on refuses to run against a run of the other kind.
 - ``model``, ``model_source``, ``prompt_sha256``, ``user_version``, ``setup``: for the run's record.
+- ``tagged_lines``: each tag the system prompt shows with its line as written there (``{"W1": "...", "D9": "..."}``),
+  so an answer's ``used`` resolves against the lines this run's user sim saw, whatever later edits to the persona move.
 
 The built-in user sim (``user_sim_versions``) is used directly; its interface, internal to the two steps and
 rate_user_satisfaction:
@@ -317,6 +319,8 @@ class DeployUserSimAgentTaskStep(DeployAgentTaskStep):
             **({"opening_parts": opening_parts(self.opening_prompt)} if isinstance(self.opening_prompt, list) else {}),
             "user_version": user_sim_versions.VERSION, "model": model, "model_source": source,
             "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(), "prompt_set": True,
+            # Each tag the prompt shows with its line, so an answer's ``used`` ("D9") names what this run saw.
+            "tagged_lines": user_sim_versions.tagged_lines(self.person(context)),
             "multi_day": self.multi_day,
             # The run record's user sim settings, as always_on wrote them when it set the agent up itself.
             "setup": {"model": model, "model_from": source, "user_sim_step_model": self.model, "model_set": True,

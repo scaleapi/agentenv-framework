@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -94,6 +95,30 @@ async def test_the_prompt_set_on_the_user_s_agent_is_the_tested_one_byte_for_byt
     assert [a.agent_name for a in context.deployed_agents] == ["hannah"]
     assert context.deployed_agents[0].env_ids == []  # no env tools unless the task gives some
     assert context.metadata["models"]["user simulator"]["user"] == "sim-model"
+
+
+@pytest.mark.asyncio
+async def test_the_record_keeps_each_tag_s_line_so_an_old_used_resolves_after_the_persona_is_reordered(monkeypatch):
+    record = await _published(monkeypatch, _step())
+    seen = record["tagged_lines"]
+    # Every tag the prompt shows, each with its line as the prompt shows it.
+    assert list(seen) == re.findall(r"^  ([A-Z]\d+) ", PROMPT, re.M)
+    assert all(f"  {tag:<4}{line.split(chr(10))[0]}" in PROMPT for tag, line in seen.items())
+    decisions = HANNAH["description"]["decisions"]
+    assert seen["D9"] == decisions[8]
+    assert seen["W2"] == f'Earlier you texted the assistant:\n"{PERSON["opening"]["text"]}"'
+    used = "D9"  # what the user sim answered in that run
+
+    # The task writer later reorders the decisions and adds one at the top: D9 now names another line.
+    edited = {**HANNAH, "description": {**HANNAH["description"],
+                                        "decisions": ["Anything over $600 for the weekend: ask you first.",
+                                                      *reversed(decisions)]}}
+    now = (await _published(monkeypatch, _step(persona=edited)))["tagged_lines"]
+    assert now["D9"] != decisions[8]
+    # The old run's record still resolves its used to the line its user sim saw.
+    assert seen[used] == decisions[8]
+    # Recording the map leaves the prompt as tested.
+    assert record["prompt_sha256"] == hashlib.sha256(PROMPT.encode()).hexdigest()
 
 
 @pytest.mark.asyncio

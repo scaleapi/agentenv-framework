@@ -97,6 +97,13 @@ def test_a_persona_with_satisfaction_lines_is_refused_and_pointed_at_the_step():
 
 
 # ---- the ask ------------------------------------------------------------------------------------------------------------
+def test_the_rating_s_tag_map_is_the_tags_the_ask_shows():
+    ask = us.render_rating(PERSON, SATISFIED, NO_UNREAD)
+    lines = us.rating_tagged_lines(SATISFIED)
+    assert list(lines) == ["S1", "S2", "S3", "S4"]
+    assert all(f"\n  {tag:<4}{line}\n" in ask + "\n" for tag, line in lines.items())
+
+
 def test_the_rating_ask_word_for_word():
     read = {"time": "2026-11-24T05:00:00Z", "assistant_messages": [
         {"at": "2026-11-24T04:55:00Z", "text": "All set: flights, the Castro Street flat, both dinners.\n\nEnjoy!"}]}
@@ -298,6 +305,9 @@ async def test_after_always_on_one_ask_in_the_runs_session_recorded_and_never_de
         record["user_sim"]["context_id"], "always_on record", 0)
     stored = json.loads(get_config().get_object_store().get(rating["object_url"]))
     assert stored["input"] == ask and stored["satisfaction"] == LINDA_LINES
+    # The S tags the ask showed, with their lines, so used resolves however the step's lines change later.
+    assert rating["tagged_lines"] == {"S1": LINDA_LINES[0], "S2": LINDA_LINES[1]}
+    assert rating["tagged_lines"][rating["used"]] == "5: the house and the dinner booked."
 
     # Never delivered: the agent's wakes, the graded chat, the responses, the hook records and the verifications are as
     # the run left them.

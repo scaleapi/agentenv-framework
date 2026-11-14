@@ -56,7 +56,9 @@ open a file is up to its harness.
 
 The user sim can't open files, so its prompt and its first read say what it attached, after its message: `"ok mom
 and dad…" (you attached itinerary.pdf: Mom and Dad's flight itinerary)`. `metadata.description` is that one line; the
-agent is sent the file without it. With no description, the user sim gets the file's name only (its `name`, else the
+agent is sent the file without it. The prompt adds, under that line, that the user sim remembers only what's said of
+each file, not what's in it, so asked what a file holds it says it doesn't remember or points the assistant to the
+file rather than making the contents up. With no description, the user sim gets the file's name only (its `name`, else the
 last part of its `uri`). The step refuses, when the task loads, an opening with no text, a part that isn't a valid
 text or file part, or a description that isn't one line. The run records the opening's text in
 `metadata["user_sims"][<agent_name>]["opening"]`, as for a text-only opening, and the parts, as written, in
@@ -92,7 +94,10 @@ it starts, before its first agent turn; a refused one leaves no conversation.
 ## The description
 
 `description` is the person in plain English, as sections of lines. Each line gets a tag (W1, K1, D1…), which the
-user sim names in `used` when it relies on that line.
+user sim names in `used` when it relies on that line. A tag is its section's letter and the line's place in it, so
+reordering or adding lines moves it; the run records each tag with its line, as the prompt showed it, in
+`metadata["user_sims"][<agent_name>]["tagged_lines"]` (`{"W1": "...", "D9": "..."}`), and an old run's `used`
+resolves there.
 
 | Section | Tag | What goes in it |
 |---|---|---|
@@ -148,7 +153,8 @@ done. The answer uses the usual format, with `score` and the reason in `message`
 
 The rating goes to `metadata["user_sim_satisfaction"][<run step id>]`: `score` (None when it failed), `reason`,
 `used`, `at`, `unread_shown`, `schema_errors`, `retried`, `user_sim_error`, `user_sim_turns`, `context_id` (the
-session it asked in), `rated_by` (the rating step), and `skipped` with the reason when it wasn't asked: the run ended
+session it asked in), `rated_by` (the rating step), `tagged_lines` (`{"S1": "...", ...}`, the lines the ask tagged, so
+its `used` resolves), and `skipped` with the reason when it wasn't asked: the run ended
 on an error (always-on's error ends, a `prompt_agent` agent turn or user sim that failed, a run step that failed), or
 the user sim's agent is no longer deployed. The whole ask and raw answer are in the object store at its `object_url`.
 It never reaches the assistant, the graded conversation, or the verifications. A user sim rates more kindly than

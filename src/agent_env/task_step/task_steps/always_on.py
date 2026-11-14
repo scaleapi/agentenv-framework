@@ -5,10 +5,11 @@ The ``deploy_user_sim_agent`` step (``deploy_user_sim_agent.py``, which document
 deploys the agent that plays the user, with its system prompt and model set, and records the user in the run's
 metadata under its ``agent_name``. The ``always_on`` step names it with ``user_sim`` and runs the loop:
 
-- The first wake is the user's request, with the files its opening attaches in their place. Each wake opens with
-  what came due for the agent on notifications/v1 (a trigger's ``notify``, a scheduled check), labelled
-  ``[time · channel]``, then the user's own messages, each labelled with its time; while the task's clock is set,
-  the agent can read it with the gateway's ``get_time``.
+- The first wake is the user's request, with the files its opening attaches in their place (its timeline ``wake``
+  event names them in ``files``, by ``name`` and ``uri``). Each wake opens with what came due for the agent on
+  notifications/v1 (a trigger's ``notify``, a scheduled check), labelled ``[time · channel]``, then the user's own
+  messages, each labelled with its time; while the task's clock is set, the agent can read it with the gateway's
+  ``get_time``.
 - Only what the agent sends with the gateway's ``message_user`` tool (user-chat/v1) reaches the user; its plain reply
   goes to the log. Each wake should end with ``message_user`` or ``stay_quiet``: one that ends with closing text and
   neither gets one ``nudge`` turn. ``stay_quiet`` and the nudge are on unless the task turns them off; the rule itself is
@@ -117,7 +118,7 @@ from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import USER_SIMS
 from agent_env.task_step.task_steps.notification_delivery import delivered_parts, label_time, take_due
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from agent_env.task_step.task_steps.agent.user_sim_common import iso as _iso, person_of, task_zone, utc as _utc
-from agent_env.task_step.task_steps.agent.user_sim_common import attached, for_agent, recorded_opening
+from agent_env.task_step.task_steps.agent.user_sim_common import attached, file_name, for_agent, recorded_opening
 
 logger = logging.getLogger(__name__)
 
@@ -1256,8 +1257,12 @@ class _Run:
         def record() -> None:
             self.per_turn_parts.append(self._kept_parts(parts))
 
+        # The files a wake carries (the opening's), by name and address; their descriptions are the user sim's.
+        files = [{"name": file_name(p), "uri": (p.get("file") or {}).get("uri")}
+                 for p in parts if p.get("kind") == "file"]
         self.log("wake", n=self.wakes, virtual_time=_iso(sent_at), woke_by=woke_by, notifications=notifications or [],
-                 last=last, parts_text="\n".join(p.get("text", "") for p in parts if p.get("kind") == "text"))
+                 last=last, parts_text="\n".join(p.get("text", "") for p in parts if p.get("kind") == "text"),
+                 **({"files": files} if files else {}))
         t = time.time()
         try:
             task_id, result = await self._agent_turn(parts, msg_id, record)

@@ -9,7 +9,10 @@ answer format. Its done line follows ``person["done_ends_run"]``, the multi-day 
 gets one retry in the same session. What earlier reads showed, and when the user last wrote, come from ``history``;
 keys of ``read`` it doesn't know are ignored. A line the user sent with files (the opening's ``files``,
 ``{"name", "description"}``) shows each after its text, "(you attached itinerary.pdf: Mom and Dad's flight
-itinerary)", or by name alone with no description: the user sim can't open them.
+itinerary)", or by name alone with no description: the user sim can't open them, and the opening's line says it
+knows only that much of them.
+``tagged_lines`` is each tag the system prompt shows with its line, which deploy_user_sim_agent records so an answer's
+``used`` resolves against the lines the user sim saw.
 ``rate`` asks the user sim, once the run is over, to rate the outcome 1-5 by the ``satisfaction`` lines it is given
 (the rate_user_satisfaction step's, never the persona's, so the system prompt never has them), with a one-line
 reason.
@@ -54,6 +57,9 @@ OPENING_LINE = 'Earlier you texted the assistant:\n"{text}"'
 # A file the user sent with a line, after its text: the user sim can't open it, so it's told what it attached.
 ATTACHED = "(you attached {name}: {description})"
 ATTACHED_NAME_ONLY = "(you attached {name})"
+# Under an opening with files, so the user sim never makes up what one holds.
+ATTACHED_KNOWN = ("You remember only what's said here about each file you attached, not what's in it; if the "
+                  "assistant asks what's in one, say you don't remember or point it to the file.")
 
 OUTCOMES = ("reply", "no_reply", "done")
 ANSWER_LINE = '{"outcome": "reply" | "no_reply" | "done", "message": "...", "used": "..."}'
@@ -171,7 +177,7 @@ def _who(person: dict) -> list[str]:
     opening = person.get("opening") or {}
     if opening.get("text"):
         line = OPENING_LINE.format(text=opening["text"]) + attached_note(opening.get("files"))
-        lines.insert(min(1, len(lines)), line)
+        lines.insert(min(1, len(lines)), line + ("\n" + ATTACHED_KNOWN if opening.get("files") else ""))
     return lines
 
 
@@ -180,14 +186,33 @@ def _section(out: list[str], title: str, tag: str, lines: list[str]) -> None:
         out += ["", title] + [tag_line(f"{tag}{i}" if tag else "", text) for i, text in enumerate(lines, 1)]
 
 
+def _sections(person: dict) -> list[tuple[str, str, list[str]]]:
+    """Each section the system prompt shows, in order: its title, its tag letter ("" for none) and its lines."""
+    out = []
+    for key, title, tag in SECTIONS:
+        out.append((title, tag, _who(person) if key == "who_you_are" else list(person["description"].get(key) or [])))
+        if key == RULES_AFTER:
+            out.append((RULES_TITLE, "A", rule_lines(person.get("permissions") or {})))
+            out.append((PRIVATE_TITLE, "P", list(person.get("keep_private") or [])))
+    return out
+
+
 def system_prompt(person: dict) -> str:
     out = _preamble(person)
-    for key, title, tag in SECTIONS:
-        _section(out, title, tag, _who(person) if key == "who_you_are" else list(person["description"].get(key) or []))
-        if key == RULES_AFTER:
-            _section(out, RULES_TITLE, "A", rule_lines(person.get("permissions") or {}))
-            _section(out, PRIVATE_TITLE, "P", list(person.get("keep_private") or []))
+    for title, tag, lines in _sections(person):
+        _section(out, title, tag, lines)
     return "\n".join(out) + "\n"
+
+
+def tagged_lines(person: dict) -> dict[str, str]:
+    """Each tag the system prompt shows, with its line as written there ("W2": the opening request, ...): what an
+    answer's ``used`` names, recorded with the run so it resolves however the persona's lines change later."""
+    return {f"{tag}{i}": text for _, tag, lines in _sections(person) if tag for i, text in enumerate(lines, 1)}
+
+
+def rating_tagged_lines(satisfaction: list[str]) -> dict[str, str]:
+    """The rating ask's tags, ``S1``..., with their ``satisfaction`` lines, as ``tagged_lines`` for the rating."""
+    return {f"{RATING_TAG}{i}": text for i, text in enumerate(satisfaction, 1)}
 
 
 # ---- the load check -----------------------------------------------------------------------------------------------

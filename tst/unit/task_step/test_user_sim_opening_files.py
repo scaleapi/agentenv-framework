@@ -34,6 +34,8 @@ SHORTLIST = {"kind": "file", "file": {"uri": "s3://reyes-family/<trip>/hotel-sho
                                       "name": "hotel-shortlist.xlsx"}}
 OPENING = [{"kind": "text", "text": TEXT}, ITINERARY, SHORTLIST]
 NOTE = "(you attached itinerary.pdf: Mom and Dad's flight itinerary) (you attached hotel-shortlist.xlsx)"
+KNOWN = ("You remember only what's said here about each file you attached, not what's in it; if the assistant asks "
+         "what's in one, say you don't remember or point it to the file.")
 
 
 def _sent(part: dict) -> dict:
@@ -56,6 +58,7 @@ async def test_a_text_only_opening_is_recorded_and_prompted_as_before(monkeypatc
     deploy = _Deploy(monkeypatch)
     await deploy.run(_step(opening_prompt=[{"kind": "text", "text": TEXT}]))
     assert deploy.fields("system_prompt") == [PROMPT]
+    assert user_sim_versions.ATTACHED_KNOWN == KNOWN and KNOWN not in PROMPT
 
 
 @pytest.mark.asyncio
@@ -64,11 +67,13 @@ async def test_the_prompt_says_what_the_user_attached_by_description_else_by_nam
     context = await deploy.run(_step(opening_prompt=OPENING), _seeded())
 
     assert PROMPT.count(f'"{TEXT}"\n') == 1
-    assert deploy.fields("system_prompt") == [PROMPT.replace(f'"{TEXT}"\n', f'"{TEXT}" {NOTE}\n')]
+    # Under the opening's line, hanging in W2: it knows only what's said of the files, never what's in them.
+    assert deploy.fields("system_prompt") == [PROMPT.replace(f'"{TEXT}"\n', f'"{TEXT}" {NOTE}\n      {KNOWN}\n')]
     record = context.metadata[USER_SIMS_KEY]["hannah"]
     # The text as before, so text readers keep working; the parts as written, the seed still to fill in.
     assert record["opening"] == TEXT
     assert record["opening_parts"] == OPENING
+    assert record["tagged_lines"]["W2"] == f'Earlier you texted the assistant:\n"{TEXT}" {NOTE}\n{KNOWN}'
 
 
 @pytest.mark.asyncio
@@ -181,6 +186,13 @@ async def test_always_on_sends_the_files_on_the_first_wake_in_their_place_and_th
     [call] = rig.user_calls
     assert (f"\nYOU SENT YOUR AI ASSISTANT:\n  [7:50 AM] {TEXT}\n{later['text']} {NOTE}\n"
             in call["parts"][0]["text"])
+    # The opening wake's timeline event names its files, by name and address as the agent was sent them; no
+    # description, which is the user sim's. Later wakes carry no files and name none.
+    [first_wake, *later_wakes] = rig.events(ctx, "wake")
+    assert first_wake["files"] == [{"name": "itinerary.pdf", "uri": "s3://reyes-family/nov-19/itinerary.pdf"},
+                                   {"name": "hotel-shortlist.xlsx", "uri": "s3://reyes-family/nov-19/hotel-shortlist.xlsx"}]
+    assert "Mom and Dad's flight itinerary" not in json.dumps(first_wake)
+    assert later_wakes and all("files" not in w for w in later_wakes)
 
 
 @pytest.mark.usefixtures("local_stores")
@@ -192,6 +204,7 @@ async def test_always_on_with_a_text_only_opening_sends_and_shows_only_the_text(
     ctx = await rig.run(_always_on(), await _always_on_context(monkeypatch, rig, TEXT))
 
     assert {p.get("kind") for p in rig.parts[0]} == {"text"}
+    assert all("files" not in w for w in rig.events(ctx, "wake"))
     [first_turn, *_] = [m for m in rig.chat(ctx) if m["role"] == "user"]
     assert first_turn["texts"] == [f"[Mon Nov 16, 3:50 PM UTC] Hannah: {TEXT}"]
     [call] = rig.user_calls
