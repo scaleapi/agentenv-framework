@@ -77,6 +77,29 @@ def test_gemini_stream_json_joins_deltas_and_pairs_results_by_tool_id():
                                 "result": "calendar unavailable", "error": True}
 
 
+def test_a_tool_span_named_generically_takes_its_tool_name_from_the_prompt():
+    spans = [{"name": "execute_tool", "start_time": "1", "attributes": {
+        "gen_ai.operation.name": "execute_tool",
+        "gen_ai.prompt": json.dumps({"tool": "gmail_send_message", "input": {"to": "nina@example.com"}}),
+        "gen_ai.completion": json.dumps({"output": {"id": "m1"}})}}]
+
+    calls = _calls(turn_events(json.dumps(spans)))
+
+    assert [(c["tool"], c["input"], c["result"]) for c in calls] == [
+        ("gmail_send_message", {"to": "nina@example.com"}, {"id": "m1"})]
+
+
+def test_a_failed_gemini_turn_keeps_its_error_message():
+    items = [
+        {"type": "message", "role": "user", "content": "book it"},
+        {"type": "result", "status": "error", "error": {"type": "unknown", "message": "Quota exceeded for model"}},
+    ]
+    events = turn_events(json.dumps(items))
+
+    assert events.format == GEMINI
+    assert events.events[-1] == {"type": "final", "text": "Quota exceeded for model", "error": True}
+
+
 def test_an_unknown_format_passes_through_one_item_an_event():
     events = turn_events(json.dumps([{"kind": "step", "n": 1}, {"kind": "step", "n": 2}]))
     assert events.format == UNKNOWN and [e["event"]["n"] for e in events.events] == [1, 2]
