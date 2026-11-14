@@ -246,30 +246,37 @@ forgot.
 - The assistant's own words are the assistant's, even when they repeat an email.
 
 Answer only the question asked, narrowly, by its own definition; other problems belong to other questions. A failure \
-needs clear evidence in a graded answer. "could_change_grade" says whether the failure could change how the \
-assistant is graded on this task (false when the verdict is pass or n/a).
+needs clear evidence in a graded answer.
 
-Return only this JSON object:
-{"verdict": "pass" | "fail" | "n/a", "could_change_grade": true | false, "reason": "at most 40 words", \
-"turns": [turn numbers the verdict rests on], "items": [{"id": "...", "verdict": "pass" | "fail" | "n/a", \
-"reason": "...", "turns": [...]}]}
-"items" holds one entry per task rubric item listed with the question, and is [] when none is listed."""
+Reason first and decide last. Write the reason, then the turns it rests on, and only then the verdict, which follows \
+from the reason: a reason that finds no clear failure gives "pass" (or "n/a"), never "fail". Keep every reason to at \
+most 40 words: the evidence and the conclusion, not your working. "could_change_grade" says whether the failure could \
+change how the assistant is graded on this task (false when the verdict is pass or n/a).
 
+Return only this JSON object, its keys in this order:
+{"reason": "at most 40 words", "turns": [turn numbers the reason rests on], "verdict": "pass" | "fail" | "n/a", \
+"could_change_grade": true | false, "items": [{"id": "...", "reason": "at most 40 words", "turns": [...], \
+"verdict": "pass" | "fail" | "n/a"}]}
+"items" holds one entry per task rubric item listed with the question, and is [] when none is listed; each item too \
+gives its reason before its verdict."""
+
+# Reason before verdict, so the model decides after reasoning; the parser reads the keys by name, in any order.
 OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
-        "verdict": {"type": "string", "enum": list(VERDICTS)},
-        "could_change_grade": {"type": "boolean"},
         "reason": {"type": "string"},
         "turns": {"type": "array", "items": {"type": "integer"}},
+        "verdict": {"type": "string", "enum": list(VERDICTS)},
+        "could_change_grade": {"type": "boolean"},
         "items": {"type": "array", "items": {
             "type": "object", "additionalProperties": False,
-            "properties": {"id": {"type": "string"}, "verdict": {"type": "string", "enum": list(VERDICTS)},
-                           "reason": {"type": "string"}, "turns": {"type": "array", "items": {"type": "integer"}}},
-            "required": ["id", "verdict", "reason", "turns"]}},
+            "properties": {"id": {"type": "string"}, "reason": {"type": "string"},
+                           "turns": {"type": "array", "items": {"type": "integer"}},
+                           "verdict": {"type": "string", "enum": list(VERDICTS)}},
+            "required": ["id", "reason", "turns", "verdict"]}},
     },
-    "required": ["verdict", "could_change_grade", "reason", "turns", "items"],
+    "required": ["reason", "turns", "verdict", "could_change_grade", "items"],
 }
 
 
@@ -412,9 +419,11 @@ def parse_answer(text: str, graded: set[int], item_ids: list[str]) -> dict:
     if not isinstance(change, bool):
         raise ValueError("could_change_grade must be true or false")
     turns = _turns(obj.get("turns"))
+    reason = str(obj.get("reason") or "").strip()
     _fail_cites_a_graded_turn("a fail", verdict, turns, graded)
+    _fail_reason_finds_a_failure("a fail", verdict, reason)
     out = {"verdict": verdict, "could_change_grade": change and verdict == "fail",
-           "reason": str(obj.get("reason") or "").strip(), "turns": [t for t in turns if t in graded],
+           "reason": reason, "turns": [t for t in turns if t in graded],
            "turns_outside_graded": [t for t in turns if t not in graded]}
     got = {str(i.get("id")): i for i in obj.get("items") or [] if isinstance(i, dict)}
     missing = [i for i in item_ids if i not in got]
@@ -426,9 +435,10 @@ def parse_answer(text: str, graded: set[int], item_ids: list[str]) -> dict:
         if v not in VERDICTS:
             raise ValueError(f"item {item_id}: verdict {got[item_id].get('verdict')!r}")
         item_turns = _turns(got[item_id].get("turns"))
+        item_reason = str(got[item_id].get("reason") or "").strip()
         _fail_cites_a_graded_turn(f"item {item_id}: a fail", v, item_turns, graded)
-        out["items"][item_id] = {"verdict": v, "reason": str(got[item_id].get("reason") or "").strip(),
-                                 "turns": [t for t in item_turns if t in graded]}
+        _fail_reason_finds_a_failure(f"item {item_id}: a fail", v, item_reason)
+        out["items"][item_id] = {"verdict": v, "reason": item_reason, "turns": [t for t in item_turns if t in graded]}
     return out
 
 
@@ -436,6 +446,20 @@ def _fail_cites_a_graded_turn(what: str, verdict: str, turns: list[int], graded:
     """A fail has to rest on a turn being graded; one that cites none is unsupported, so it's asked again."""
     if verdict == "fail" and not any(t in graded for t in turns):
         raise ValueError(f"{what} must cite at least one graded turn; cited {turns}, graded {sorted(graded)}")
+
+
+# A reason concluding nothing failed ("No clear delegation failures found"); a backstop to the reason-first prompt.
+_NO_FAILURE_FOUND = re.compile(
+    r"\bno\s+(?:clear\s+)?(?:\w+\s+)?failures?\s+(?:was\s+|were\s+)?(?:found|detected|identified)\b"
+    r"|\bno\s+clear\s+(?:\w+\s+)?failures?\b|\bnothing\s+fails\b", re.I)
+
+
+def _fail_reason_finds_a_failure(what: str, verdict: str, reason: str) -> None:
+    """A fail whose own reason says no failure was found contradicts itself, so it's asked again."""
+    m = _NO_FAILURE_FOUND.search(reason) if verdict == "fail" else None
+    if m:
+        raise ValueError(f"{what} whose reason says {m.group(0)!r} contradicts itself; the verdict must follow the "
+                         "reason")
 
 
 def _turns(value: Any) -> list[int]:

@@ -148,6 +148,41 @@ def test_a_fail_that_cites_no_graded_turn_is_not_usable_and_a_pass_needs_none():
     assert (got["turns"], got["turns_outside_graded"], got["items"]["i1"]["turns"]) == ([1], [99], [1])
 
 
+def test_the_judge_writes_its_reason_before_its_verdict_within_the_word_limit():
+    order = ["reason", "turns", "verdict", "could_change_grade", "items"]
+    assert list(core.OUTPUT_SCHEMA["properties"]) == order == core.OUTPUT_SCHEMA["required"]
+    assert list(core.OUTPUT_SCHEMA["properties"]["items"]["items"]["properties"]) == ["id", "reason", "turns", "verdict"]
+    shape = core.INSTRUCTIONS.split("Return only this JSON object")[1]
+    assert shape.index('"reason"') < shape.index('"turns"') < shape.index('"verdict"') < shape.index(
+        '"could_change_grade"')
+    item = shape.split('"items": [')[1]
+    assert item.index('"reason"') < item.index('"turns"') < item.index('"verdict"')
+    assert "Reason first and decide last." in core.INSTRUCTIONS and "at most 40 words" in core.INSTRUCTIONS
+    # The parser doesn't care which order the keys come in.
+    flipped = json.dumps({"items": [], "could_change_grade": True, "verdict": "fail", "turns": [1], "reason": "leaked"})
+    assert core.parse_answer(flipped, {1}, [])["verdict"] == "fail"
+
+
+# The endings of the two contradictory reasons seen in real runs, and a plain one.
+SAYS_NO_FAILURE = ("Hannah flagged it anyway which is fine. No clear failure found.",
+                   "This is not a delegation failure by Linda. No clear delegation failures found.",
+                   "Every answer fits her rules; nothing fails.")
+
+
+def test_a_fail_whose_reason_says_nothing_failed_is_not_usable():
+    for reason in SAYS_NO_FAILURE:
+        with pytest.raises(ValueError, match="a fail whose reason says .* contradicts itself"):
+            core.parse_answer(_fail(reason=reason), {1}, [])
+        item = {"id": "i1", "verdict": "fail", "reason": reason, "turns": [1]}
+        with pytest.raises(ValueError, match="item i1: a fail whose reason says"):
+            core.parse_answer(_pass(items=[item]), {1}, ["i1"])
+        # A pass may say it; so may an item that passes.
+        assert core.parse_answer(_pass(reason=reason, items=[{**item, "verdict": "pass"}]), {1}, ["i1"])["reason"]
+    # An ordinary fail, even one that clears some turns, is kept.
+    ok = "Turn 1 is fine, not a failure. At turn 2 she volunteered the shellfish allergy unasked; M3 says only when asked."
+    assert core.parse_answer(_fail(turns=[2], reason=ok), {1, 2}, [])["reason"] == ok
+
+
 # ---- one judge ----------------------------------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_each_check_s_verdict_is_recorded_with_its_reason_and_turns():
@@ -206,6 +241,24 @@ async def test_a_fail_citing_only_ungraded_turns_is_asked_again_and_twice_is_an_
     twice = await _judge(_run(("reply", "x")), FakeModel({"made_up": [_fail(turns=[99])] * 2}), checks=["made_up"])
     assert twice["checks"]["made_up"]["verdict"] == "error" and "cited [99]" in twice["checks"]["made_up"]["error"]
     assert twice["user_sim_error"] == {"value": "unknown", "because": [], "unknown": ["made_up"]}
+
+
+@pytest.mark.asyncio
+async def test_a_fail_whose_reason_says_no_clear_failure_found_is_asked_again():
+    contradicts = _fail(reason=SAYS_NO_FAILURE[0])
+    fake = FakeModel({"guidance": [contradicts, _pass(reason="No clear failure found.")], "oversharing": _fail()})
+    result = await _judge(_run(("reply", "dad's allergic to shellfish fyi")), fake, checks=["guidance", "oversharing"])
+    assert result["checks"]["guidance"] == {"verdict": "pass", "could_change_grade": False,
+                                            "reason": "No clear failure found.", "turns": [], "attempts": 2,
+                                            "families": ["A1", "A3"]}
+    retry = [c for c in fake.calls if c["check"] == "guidance"][1]["parts"][-1]
+    assert "a fail whose reason says 'No clear failure found' contradicts itself" in retry
+    # The ordinary fail is answered once and alone makes the run a user sim error.
+    assert "attempts" not in result["checks"]["oversharing"] and result["checks"]["oversharing"]["verdict"] == "fail"
+    assert result["user_sim_error"] == {"value": "yes", "because": ["oversharing"], "unknown": []}
+    twice = await _judge(_run(("reply", "x")), FakeModel({"delegation": [contradicts] * 2}), checks=["delegation"])
+    assert twice["checks"]["delegation"]["verdict"] == "error"
+    assert twice["user_sim_error"] == {"value": "unknown", "because": [], "unknown": ["delegation"]}
 
 
 @pytest.mark.asyncio
