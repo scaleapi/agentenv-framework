@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from dataclasses import replace
 
 import pytest
 
@@ -416,6 +417,18 @@ async def test_without_the_stored_timeline_the_judge_reads_the_tail_and_is_told_
 
 @pytest.mark.usefixtures("local_stores")
 @pytest.mark.asyncio
+async def test_from_the_tail_an_answer_always_on_shortened_is_marked_cut(monkeypatch, tmp_path):
+    from agent_env.task_step.task_steps.always_on import PENDING_TEXT_CHARS, _small
+
+    record = {"timeline_tail": [_small({"event": "user_sim_read", "outcome": "reply", "message": "ok " * 200}),
+                                _small({"event": "user_sim_read", "outcome": "reply", "message": "sounds good"})]}
+    reads, notes = usj._always_on_reads(record)
+    assert [r["message_cut"] for r in reads] == [True, False] and len(reads[0]["message"]) == PENDING_TEXT_CHARS + 1
+    assert usj._turn(1, reads[0]).cut and not usj._turn(2, reads[1]).cut
+
+
+@pytest.mark.usefixtures("local_stores")
+@pytest.mark.asyncio
 async def test_a_run_that_ended_in_an_error_is_not_judged(monkeypatch, tmp_path):
     rig, ctx, _ = await _always_on(monkeypatch, tmp_path, answers=[])
     rig.record(ctx)["error_type"] = "agent_turn_failed"
@@ -760,6 +773,22 @@ async def test_an_auto_item_is_counted_on_the_graded_answers_with_no_model_call(
     fake = FakeModel()
     await _judge(_run(("reply", over)), fake, items=[length])
     assert all("f2_her_length" not in c["parts"][-1] for c in fake.calls) and len(fake.calls) == 7
+
+
+@pytest.mark.asyncio
+async def test_an_auto_item_can_t_pass_an_answer_the_record_kept_only_the_start_of():
+    [length] = _items(HER_LENGTH)
+    short = _run(("reply", TESS[0]), ("reply", TESS[1]))
+    short.turns[1] = replace(short.turns[1], cut=True)  # under 25 words as kept, but the whole answer may not be
+    result = await _judge(short, FakeModel(), checks=[], items=[length])
+    assert result["items"]["f2_her_length"] == {
+        "verdict": "error", "turns": [2], "family": "F2", "kind": "auto", "asked_with": "computed",
+        "error": "only the start of the answer at turn 2 was kept, so its full length can't be counted"}
+    # Over the max as kept is over it whole: still a fail.
+    long = "word " * 30
+    over = _run(("reply", long.strip()), ("reply", TESS[1]))
+    over.turns[0] = replace(over.turns[0], cut=True)
+    assert (await _judge(over, FakeModel(), checks=[], items=[length]))["items"]["f2_her_length"]["verdict"] == "fail"
 
 
 @pytest.mark.asyncio

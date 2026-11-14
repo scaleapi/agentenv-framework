@@ -23,7 +23,8 @@ into this step's settings; this step reads no file:
 - ``kind``: ``hard`` (an exact rule from the user sim's instructions: the judge fails it on any breach), ``general``
   (a judgement: it fails only on a clear instance; the default) or ``auto`` (never sent to the model: ``metric``
   ``max_words`` or ``max_sentences`` is counted on each graded answer, and any answer over ``max`` fails it, naming
-  the turn; see ``user_sim_judge_core.count_sentences``).
+  the turn; see ``user_sim_judge_core.count_sentences``). If none is over but the record kept only the start of one
+  (always_on's tail, when its stored timeline can't be read), the item is ``error``: that length can't be counted.
 - ``check``: the text the judge applies, required unless auto. ``text`` is its old name and still loads.
 - ``name`` and ``short``: a title and one line for reviewers, recorded but not shown to the judge.
 - ``na_when``: the situation in which it never came up, told to the judge. ``always`` makes it n/a with no call,
@@ -407,7 +408,13 @@ def _always_on_reads(record: dict) -> tuple[list[dict], list[str]]:
                     "what the user sim was sent, are shown")
     else:
         note = "the run's full record wasn't stored; only its last events, without what the user sim was sent, are shown"
-    reads = [e for e in record.get("timeline_tail") or [] if e.get("event") == "user_sim_read"]
+    from agent_env.task_step.task_steps.always_on import PENDING_TEXT_CHARS
+
+    reads = []
+    for e in record.get("timeline_tail") or []:
+        if e.get("event") == "user_sim_read":
+            message = e.get("message") or ""  # the tail keeps each string's first PENDING_TEXT_CHARS, then "…"
+            reads.append({**e, "message_cut": len(message) == PENDING_TEXT_CHARS + 1 and message.endswith("…")})
     return reads, [note]
 
 
@@ -464,7 +471,8 @@ def _turn(n: int, e: dict) -> core.Turn:
         flags.append(FLAG_LAST)
     when = e.get("virtual_time") or (e.get("read") or {}).get("time")
     return core.Turn(n=n, outcome=e.get("outcome") or "no_reply", message=e.get("message") or "",
-                     input=e.get("input"), flags=flags, time=None if e.get("input") or not when else f"{when} UTC")
+                     input=e.get("input"), flags=flags, time=None if e.get("input") or not when else f"{when} UTC",
+                     cut=bool(e.get("message_cut")))
 
 
 def _instructions(us: Optional[dict], seed: dict, multi_day: Optional[bool]) -> tuple[Optional[str], dict, list[str]]:

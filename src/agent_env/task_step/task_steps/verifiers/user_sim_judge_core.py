@@ -295,6 +295,7 @@ class Turn:
     time: Optional[str] = None
     graded: bool = True
     flags: list[str] = field(default_factory=list)
+    cut: bool = False  # ``message`` is only the start of what it sent (the record kept a shortened copy)
 
 
 @dataclass
@@ -461,10 +462,15 @@ def auto_result(item: RubricItem, run: "UserSimRun") -> dict:
     if not counts:
         return {"verdict": "n/a", "reason": "it sent no message at a graded turn", "turns": []}
     over = [(n, c) for n, c in counts if c > item.max]
-    if over:
+    if over:  # a shortened answer over the max is over it whole too
         listed = ", ".join(f"turn {n}: {c}" for n, c in over)
         return {"verdict": "fail", "reason": f"over the {item.max} {unit} max at {listed}",
                 "turns": [n for n, _ in over]}
+    cut = [t.n for t in sent_answers(run) if t.cut]
+    if cut:
+        return {"verdict": "error", "turns": cut,
+                "error": f"only the start of the answer at turn{'s' if len(cut) > 1 else ''} "
+                         f"{', '.join(map(str, cut))} was kept, so its full length can't be counted"}
     n, c = max(counts, key=lambda x: x[1])
     return {"verdict": "pass", "reason": f"every answer at most {item.max} {unit}; the longest, turn {n}, has {c}",
             "turns": []}
