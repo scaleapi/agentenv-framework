@@ -85,17 +85,6 @@ def test_a_cli_error_is_a_failed_task_with_the_capped_message(calls, client):
     ]
 
 
-def test_a_turn_that_ran_out_of_its_time_says_so_in_its_error_code(calls, client):
-    calls.result_for = lambda kwargs: claude_bridge.ClaudeResult(
-        response="", tool_call_count=7, session_id=kwargs["session_id"], error="claude CLI timed out after 60s",
-        timed_out=True,
-    )
-
-    state, _, data = terminal(send(client, "hello"))
-
-    assert state == "failed" and data[1]["error_code"] == a2a_server.TIMEOUT_CODE == "claude_code.timeout"
-
-
 def test_a_cli_error_keeps_the_response_text_when_there_is_one(calls, client):
     calls.result_for = lambda kwargs: claude_bridge.ClaudeResult(
         response="partial answer", tool_call_count=0, session_id=kwargs["session_id"], error="boom",

@@ -148,8 +148,6 @@ class ClaudeResult:
     structured_output: dict | None = None
     # How many `claude -p` runs the turn took; more than one means it was resumed.
     attempts: int = 1
-    # The turn ran out of its timeout_s, rather than failing on its own.
-    timed_out: bool = False
 
 
 def _attribution_headers(project_id: str | None, task_id: str | None) -> dict[str, str]:
@@ -747,7 +745,7 @@ async def _spawn_claude(
         _kill_cli(proc)
         await _reap(proc)
         return ClaudeResult(response="", tool_call_count=tool_count, session_id=session_id,
-                            error=f"claude CLI timed out after {timeout_s}s", timed_out=True)
+                            error=f"claude CLI timed out after {timeout_s}s")
     except Exception:
         # Reading failed, as when an event_callback raises: the CLI mustn't keep running.
         _kill_cli(proc)
