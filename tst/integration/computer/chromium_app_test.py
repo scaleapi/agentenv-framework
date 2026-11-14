@@ -20,6 +20,7 @@ import hashlib
 import json
 import platform
 import re
+import uuid
 
 import httpx
 import pytest
@@ -41,6 +42,13 @@ from agent_env.env.envs.computer.utils import inside
 from agent_env.store.routing import namespace_routing
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
+from agent_env.store.object_store.local.grant_server import grant_server
+from agent_env.task_step.task_steps.browser.recording import (RECORDINGS_KEY as BROWSER_RECORDINGS,
+                                                              EndBrowserRecordingTaskStep,
+                                                              StartBrowserRecordingTaskStep)
+from agent_env.task_step.task_steps.computer_recording import (RECORDINGS_KEY as COMPUTER_RECORDINGS,
+                                                               EndComputerRecordingTaskStep,
+                                                               StartComputerRecordingTaskStep)
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
@@ -451,6 +459,33 @@ async def test_its_task_steps_set_cookies_and_storage_open_a_tab_behind_and_acti
             report = await teardown_run(context)
 
     assert not report.failed
+
+
+@pytest.mark.asyncio
+async def test_its_recording_of_its_pages_runs_beside_the_desktops_own_recording_each_with_its_video(chromium_desktop):
+    with namespace_routing():
+        deployed = await Env.get(chromium_desktop.id).deploy(
+            env_params={"app_settings": {"chromium": {"start_urls": [DATA_SITE]}}})
+        context = TaskStepContext(instance_id=f"run-{uuid.uuid4().hex[:8]}", deployed_envs=[deployed])
+        try:
+            card = await _app(deployed, WELL_KNOWN_PATH, "chromium")
+            await _ready(deployed, card, "chromium")
+            context = await StartComputerRecordingTaskStep(id="start-desktop", version=None, env_id=chromium_desktop.id,
+                                                           name="desktop", fail_task_on_error=True).execute(context)
+            context = await StartBrowserRecordingTaskStep(id="start-pages", version=None, env_id=chromium_desktop.id,
+                                                          name="pages").execute(context)
+            await asyncio.sleep(8)
+            context = await EndBrowserRecordingTaskStep(id="end-pages", version=None, name="pages").execute(context)
+            context = await EndComputerRecordingTaskStep(id="end-desktop", version=None, name="desktop",
+                                                         fail_task_on_error=True).execute(context)
+        finally:
+            report = await teardown_run(context)
+            grant_server(None, None).close()
+        pages, desktop = context.metadata[BROWSER_RECORDINGS]["pages"], context.metadata[COMPUTER_RECORDINGS]["desktop"]
+
+    assert not report.failed
+    assert (pages["state"], pages["missing_segments"], pages["network"]) == ("ended", 0, False) and pages["segments"]
+    assert (desktop["state"], desktop["missing_segments"]) == ("ended", 0) and desktop["segments"] >= 1, desktop
 
 
 def _report(n: int) -> bytes:

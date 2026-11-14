@@ -472,7 +472,8 @@ class Relay:
         if self.contexts is None:
             return
         if method == MAKES_CONTEXT and isinstance(made := result.get("browserContextId"), str):
-            self.contexts.made_by_agent(connection.user, made)
+            self.contexts.made_by_agent(connection.user, made,
+                                        connection.scope.lease if connection.scope is not None else None)
             if params.get("disposeOnDetach"):
                 connection.ends_on_detach.add(made)
         elif method == ENDS_CONTEXT:
@@ -501,7 +502,8 @@ class Relay:
         url = self.control.url_of(target) if self.control is not None and target else None
         crediting = [call for call in self.calls.values() if call.user == connection.user]
         action = {"via": "cdp", "who": connection.user, "connection": connection.number, "method": method,
-                  "acts": acting, "tab": target, "url": url}
+                  "acts": acting, "tab": target, "url": url,
+                  **({"context": connection.record["context"]} if "context" in connection.record else {})}
         if crediting:
             action["for"] = crediting[0].begun["seq"] if len(crediting) == 1 else [c.begun["seq"] for c in crediting]
         return _Logged(self, self.log.begin(action), method, params, target, acting, crediting)
