@@ -303,10 +303,14 @@ class ModalSandboxProvider(SandboxProvider):
         gpu: Optional[str] = None,
         ecr_pull_secret_name: Optional[str] = None,
         environment_name: Optional[str] = None,
+        idle_timeout: Optional[int] = None,
     ):
+        """``idle_timeout`` (``[sandbox.providers.modal.config]``) ends each sandbox once it has been idle that many
+        seconds, with no connection open and no command running; unset, a sandbox lasts until its ``timeout``."""
         self._app_name = _resolve_app_base_name(app_name)
         self._ecr_pull_secret_name = ecr_pull_secret_name
         self._environment_name = environment_name
+        self._idle_timeout = idle_timeout
         self._client: Optional[modal.Client] = None
         # GPU sandboxes use the V1 backend, which supports Docker in gVisor but not i6pn.
         self._gpu = gpu
@@ -415,7 +419,7 @@ class ModalSandboxProvider(SandboxProvider):
         logger.info(
             f"Creating Modal sandbox from image {image_name} "
             f"(app={app_name}, tags={app_tags}, sandbox_tags={sandbox_tags}, port={port}, "
-            f"cpu={cpu}, memory={memory}MB, "
+            f"cpu={cpu}, memory={memory}MB, idle_timeout={self._idle_timeout}, "
             f"gpu={self._gpu}, i6pn={i6pn}, region={region}, expose_externally={expose_externally})"
         )
         client = await self._get_client()
@@ -429,7 +433,7 @@ class ModalSandboxProvider(SandboxProvider):
 
         # Private networking requires the experimental factory; other calls use the public API.
         create_kwargs = dict(
-            app=app, cpu=cpu, memory=memory, timeout=timeout,
+            app=app, cpu=cpu, memory=memory, timeout=timeout, idle_timeout=self._idle_timeout,
             env=env or {}, client=client, **port_kwargs,
             tags=sandbox_tags or None,
             readiness_probe=modal.Probe.with_exec("true"),
