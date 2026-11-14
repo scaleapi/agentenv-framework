@@ -158,6 +158,17 @@ def test_the_index_points_at_the_line_each_action_and_message_is_on(run):
     assert "- nudged after closing text; then message_user" in block
 
 
+def test_a_write_tool_no_app_change_names_is_a_labelled_possible_action(run):
+    timeline, turns = run
+    _changed_by(timeline, 2, "gcal_create_event")
+    index = stage_run(timeline, turns).files[INDEX_FILE]
+
+    block = index[index.index("## Wake 2 "):index.index("## Wake 3 ")]
+    possible = [line.split("): ", 1)[1].split(" ")[0] for line in block.splitlines() if line.startswith("- possible action")]
+    assert possible == ["gsheets_values_update", "gcal_patch_event"]
+    assert "A \"possible action\" is a call of a tool no app change in the run names" in index
+
+
 def test_without_a_change_log_actions_are_guessed_from_tool_names(run):
     timeline, turns = run
     timeline = [e for e in timeline if e["event"] != "app_changes"]
@@ -183,7 +194,9 @@ def test_every_line_too_long_to_read_whole_keeps_a_preview_and_a_file(run):
                for line in text.splitlines())
     head = _lines(staged.files, "wakes/wake_003.jsonl")[1]
     assert head["event"] == "user_message" and "text" not in head
-    assert staged.files[head["text_file"]] == reply and head["text_file"].startswith("wakes/results/wake_003_line_002_")
+    side = staged.files[head["text_file"]]
+    assert side.replace("\n", "") == reply and all(len(line) <= LINE_CHARS for line in side.splitlines())
+    assert head["text_file"].startswith("wakes/results/wake_003_line_002_")
     assert head["text_preview"].startswith("please book it please book it")
     assert "- the user (Fri Nov 6, 9:00 PM UTC): \"please book it please book it" in staged.files[INDEX_FILE]
 
@@ -249,6 +262,15 @@ def _judge(*calls: tuple[str, dict, str]) -> list[dict]:
     return [{"type": "assistant", "message": {"content": blocks}}, {"type": "user", "message": {"content": results}}]
 
 
+def test_a_firing_a_fraction_of_a_second_after_a_wake_comes_after_it(run):
+    t = datetime.fromisoformat("2026-11-06T20:00:00.500000+00:00")
+    firing = Firing(trigger_id="tess-text", source="env:world", turn=1, at=t, virtual_time=t, ok=True, provoked_by=None)
+
+    lines = _lines(stage_run(*run, firings=[firing]).files, TRIGGERS_FILE)
+
+    assert lines[0]["after_wake"] == 1
+
+
 def test_judge_reads_names_the_wake_files_a_judge_opened_with_any_tool():
     judge = turn_events(json.dumps(_judge(
         ("Read", {"file_path": "/tmp/r/index.md"}, "## Wake 4 · … wakes/wake_004.jsonl\n## Wake 5 · … wakes/wake_005.jsonl"),
@@ -261,6 +283,15 @@ def test_judge_reads_names_the_wake_files_a_judge_opened_with_any_tool():
     assert judge_reads(judge) == {"tool_calls": 6, "wakes_opened": [3, 12, 23, 75, 80], "read_all_wakes": False,
                                   "read_index": True, "searched_events": True, "read_triggers": False,
                                   "helpers_started": 0}
+
+
+def test_judge_reads_finds_the_wakes_in_a_search_that_returned_several_lines():
+    judge = turn_events(json.dumps(_judge(
+        ("Grep", {"pattern": "porchbite_place_order", "path": "/tmp/r/events.jsonl", "-n": True},
+         '12:{"event": "tool_call", "wake": 7, "tool": "porchbite_place_order"}\n'
+         '40:{"event": "tool_call", "wake": 19, "tool": "porchbite_place_order"}'))))
+
+    assert judge_reads(judge)["wakes_opened"] == [7, 19]
 
 
 def test_judge_reads_tells_one_pass_over_every_wake_file():

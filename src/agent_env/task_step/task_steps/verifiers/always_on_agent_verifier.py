@@ -71,7 +71,7 @@ order: every app change ("app_change", "by": "agent" for its own), its closing r
 it), each message the user got ("message_to_user"), a nudge and its calls, and the user's reads of its messages.
 - {results}/: what is too long for a line (a tool's input or result, a long message): the line names the file \
 ("<field>_file", such as "result_file" or "text_file") and shows its start ("<field>_preview"). Email bodies are \
-decoded (body.text).
+decoded (body.text). A line longer than 1,800 characters is split across lines there, nothing dropped.
 - {events}: every wake's events in one file, so "did it ever do X" is one search. {triggers}: every trigger firing, \
 fired or failed, with its pretend time and the wake it came after.
 
@@ -249,7 +249,8 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
                     r["staged_bytes"])
         if r.get("not_compacted"):
             logger.error("Verifier '%s': compaction removed nothing from %d trajectories (unknown format, or nothing "
-                         "to drop): %s", self.verifier_id, len(r["not_compacted"]), r["not_compacted"])
+                         "to drop), first in wake %s; the rest are in trajectory_staging.not_compacted",
+                         self.verifier_id, len(r["not_compacted"]), r["not_compacted"][0]["wake"])
         for key in ("missing_trajectories", "unreadable_trajectories"):
             if r.get(key):
                 logger.warning("Verifier '%s': %s in wakes %s", self.verifier_id, key.replace("_", " "), r[key])

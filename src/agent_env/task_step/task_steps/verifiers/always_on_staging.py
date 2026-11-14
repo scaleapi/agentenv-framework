@@ -7,7 +7,7 @@ stored timeline and each wake's trajectory: one file per wake, one event per lin
   ``turn_end`` with its closing reply, ``message_to_user``, a ``nudge`` and its calls, the user's reads). A turn's
   trajectory is matched to its wake by the timeline's ``trajectory_url``; one that's missing is a line saying so.
 - ``wakes/results/``: what is too long for a line to be read whole (a tool's input or result, a long message), named
-  by wake and call (or line); the line keeps a preview.
+  by wake and call (or line); the line keeps a preview. Lines longer than LINE_CHARS are split there, nothing dropped.
 - ``events.jsonl``: every line of every wake, and the run's start and end. ``triggers.jsonl``: every trigger firing.
 - ``index.md``: a block per wake with its time, what woke it, the user's message, its write actions (tool and key
   arguments) and messages with the ``file:line`` they're at, and its errors.
@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional, Sequence
 
@@ -242,8 +243,12 @@ class _Stager:
         while len(_dumps(line)) > LINE_CHARS and (inline := [k for k in movable if line.get(k) not in (None, "")]):
             key = max(inline, key=lambda k: len(_dumps(line[k])))
             value = line.pop(key)
-            path = f"{stem}{'' if key == 'result' else '_' + key}.{'txt' if isinstance(value, str) else 'json'}"
             body = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, indent=1, default=str)
+            wrapped = _wrapped(body)
+            # A wrapped file is .txt even when it held JSON: it no longer parses as one.
+            ext = "txt" if isinstance(value, str) or wrapped != body else "json"
+            path = f"{stem}{'' if key == 'result' else '_' + key}.{ext}"
+            body = wrapped
             self.files[path] = body
             written += len(body.encode())
             line[f"{key}_file"] = path
@@ -272,8 +277,12 @@ class _Stager:
             path = wake_file(n, self.width)
             self.files[path] = "".join(_dumps(line) + "\n" for line in lines)
             everything += lines
-            index_blocks.append(_index_block(w, path, lines, self.by_changes))
+            index_blocks.append((w, path, lines))
         everything += end
+        # A tool no app change names anywhere in the run may be an app that keeps no change log: its writes are
+        # guessed from their names, labelled as such, so they aren't left out of the index.
+        run_changing = set().union(*(_changing_tools(lines) for _, _, lines in index_blocks))
+        index_blocks = [_index_block(w, path, lines, self.by_changes, run_changing) for w, path, lines in index_blocks]
         self.files[EVENTS_FILE] = "".join(_dumps(line) + "\n" for line in everything)
         self.files[TRIGGERS_FILE] = _triggers(firings, unavailable, self.wakes)
         self.files[INDEX_FILE] = _index(self, index_blocks, start, end, firings)
@@ -300,9 +309,11 @@ def _changing_tools(lines: list[dict]) -> set[str]:
             for a in line.get("actors") or [] if a.get("tool")}
 
 
-def _index_block(w: _Wake, path: str, lines: list[dict], by_changes: bool) -> str:
+def _index_block(w: _Wake, path: str, lines: list[dict], by_changes: bool, run_changing: set[str]) -> str:
     """The wake's block. With ``by_changes`` its write actions are the calls of a tool that made one of the wake's app
-    changes; else (a run whose apps keep no change log) calls whose tool name has no read word (``is_write_action``)."""
+    changes, and calls of a tool no app change in the run names (``run_changing``) whose name has no read word are
+    "possible actions"; else (a run whose apps keep no change log) every call whose name has no read word is an action
+    (``is_write_action``)."""
     calls = sum(1 for line in lines if line["event"] == "tool_call")
     changing = _changing_tools(lines)
     out = [f"## Wake {w.n} · {label_time(w.at)} · woken by {woke_by_text(w.woke_by)} · {path} "
@@ -318,11 +329,13 @@ def _index_block(w: _Wake, path: str, lines: list[dict], by_changes: bool) -> st
     changes = Counter()
     for i, line in enumerate(lines, 1):
         event = line["event"]
-        writes = _short_tool(line.get("tool") or "") in changing if by_changes else is_write_action(line.get("tool") or "")
-        if event == "tool_call" and writes:
-            action = _cut(f"{_short_tool(line['tool'])} {_key_args(line.get('input', line.get('input_preview')))}",
-                          ACTION_CHARS)
-            out.append(f"- {'FAILED ' if line.get('error') else ''}action: {action} ({path}:{i})")
+        tool = line.get("tool") or ""
+        writes = _short_tool(tool) in changing if by_changes else is_write_action(tool)
+        guessed = by_changes and not writes and _short_tool(tool) not in run_changing and is_write_action(tool)
+        if event == "tool_call" and (writes or guessed):
+            action = _cut(f"{_short_tool(tool)} {_key_args(line.get('input', line.get('input_preview')))}", ACTION_CHARS)
+            kind = "possible action (no app change names this tool)" if guessed else "action"
+            out.append(f"- {'FAILED ' if line.get('error') else ''}{kind}: {action} ({path}:{i})")
         elif event == "tool_call" and line.get("error"):
             out.append(f"- error: {_short_tool(line['tool'])} failed ({path}:{i})")
         elif event == "message_to_user":
@@ -370,7 +383,9 @@ def _index(stager: _Stager, blocks: list[str], start: list[dict], end: list[dict
              f"fields and names the file in {RESULTS_DIR}/ that holds them (\"<field>_file\").",
              "",
              "Actions below are the assistant's tool calls of a tool that changed the apps' data in that wake (from the "
-             "apps' change logs)." if stager.by_changes else
+             "apps' change logs). A \"possible action\" is a call of a tool no app change in the run names whose name "
+             "has no read word (get, list, search, …): an app that keeps no change log, or a write that changed "
+             "nothing." if stager.by_changes else
              "Actions below are the assistant's tool calls whose tool name has no read word (get, list, search, …): "
              "this run's apps kept no change log, so this is a guess from the name."]
     gaps = sorted(set(stager.missing) | set(stager.unreadable))
@@ -393,15 +408,37 @@ def _index(stager: _Stager, blocks: list[str], start: list[dict], end: list[dict
 def _triggers(firings: Sequence[Firing], unavailable: Mapping[str, str], wakes: Mapping[int, _Wake]) -> str:
     """One line per firing, oldest first, with the last wake at or before its pretend time (``after_wake``, 0 before
     the first); then one per firing log that couldn't be read."""
-    starts = sorted((w.at, n) for n, w in wakes.items() if w.at)
+    starts = sorted((t, n) for n, w in wakes.items() if (t := _instant(w.at)))
     out = []
     for f in sorted(firings, key=lambda f: f.at):
         vt = f.virtual_time.isoformat().replace("+00:00", "Z") if f.virtual_time else None
-        after = max((n for at, n in starts if vt and at <= vt), default=0)
+        when = _instant(f.virtual_time)
+        after = max((n for t, n in starts if when and t <= when), default=0)
         out.append(_dumps({"trigger_id": f.trigger_id, "source": f.source, "fired": f.ok, "at": vt,
                            "recorded_at": f.at.isoformat(), "after_wake": after, "provoked_by": f.provoked_by}))
     out += [_dumps({"unavailable": source, "why": why}) for source, why in unavailable.items() if source != "conversation"]
     return "".join(line + "\n" for line in out)
+
+
+def _instant(value: Any) -> Optional[datetime]:
+    """A time (a datetime or an ISO string, "Z" or an offset; naive is UTC) as an aware datetime, for comparing."""
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _wrapped(text: str) -> str:
+    """``text`` with every line longer than LINE_CHARS split into lines of LINE_CHARS, nothing dropped, so a reader
+    that cuts long lines shows it all."""
+    if all(len(line) <= LINE_CHARS for line in text.split("\n")):
+        return text
+    return "\n".join(line[i:i + LINE_CHARS] if line else ""
+                     for line in text.split("\n") for i in range(0, max(len(line), 1), LINE_CHARS))
 
 
 _WAKE_NAME = re.compile(r"wake_(\d+)")
@@ -430,7 +467,10 @@ def judge_reads(judge: TurnEvents) -> dict:
                 wakes |= {int(n) for n in numbers.split()}
         every = every or bool(_ALL_WAKES.search(named))
         if INDEX_FILE not in named:
-            wakes |= {int(n) for n in _WAKE_FIELD.findall(_dumps(call.get("result")))}
+            # A text result (Grep's lines, several events.jsonl lines) is searched as it is: serializing it would
+            # escape its quotes.
+            result = call.get("result")
+            wakes |= {int(n) for n in _WAKE_FIELD.findall(result if isinstance(result, str) else _dumps(result))}
     text = " ".join(_dumps(c.get("input")) for c in calls)
     return {"tool_calls": len(calls), "wakes_opened": sorted(wakes), "read_all_wakes": every,
             "read_index": INDEX_FILE in text, "searched_events": EVENTS_FILE in text,
