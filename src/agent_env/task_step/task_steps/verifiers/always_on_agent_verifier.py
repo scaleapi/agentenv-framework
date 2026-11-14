@@ -11,6 +11,14 @@ refused when the verifier runs. Unlike rubrics_verifier, its judge has 2,400 s a
 call that runs out of time is tried once more, at most 3 batches run at once, and the judge has only Bash and Read: no
 helper agents, no web, no writes, no messaging other agents. An always_on step's prompt takes this verifier, never a
 plain rubrics_verifier, and this verifier only an always_on step's prompt: a task that pairs them otherwise is refused when it loads.
+
+With ``grade_user_rules`` (off by default; it needs use_trajectory) the judge also grades the user's rules, the user
+sim's ``persona.permissions``: one criterion per rule (``always_on_user_rules``), graded from ``rules.md``, which lists
+every app change the assistant made, every message it sent the user and every message from the user in the order
+they happened, each reply with the message it answers. The entry's ``user_rules`` has each rule's result with the
+changes and messages it cites, and the run's verdict; the rules are a verdict, so the entry's score is the task's own
+criteria aggregated as usual when every rule passed, and 0 when one failed or has no answer. A run whose timeline
+can't be read is refused rather than graded without its rules.
 """
 
 from __future__ import annotations
@@ -25,6 +33,16 @@ from agent_env.task_step.context import PromptResponse, TaskStepContext
 from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.always_on import ALWAYS_ON_KEY, AlwaysOnTaskStep, render_for_judge, stored_timeline
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
+from agent_env.task_step.task_steps.verifiers.always_on_user_rules import (
+    RULES_FILE,
+    is_rule_row,
+    persona_rules,
+    rule_criteria,
+    rule_events,
+    rules_block,
+    rules_file,
+    run_permissions,
+)
 from agent_env.task_step.task_steps.verifiers.always_on_staging import (
     EVENTS_FILE,
     INDEX_FILE,
@@ -46,6 +64,7 @@ from agent_env.task_step.task_steps.verifiers.rubrics_verifier import (
     StagedTrajectory,
 )
 from agent_env.task_step.task_steps.verifiers.run_context import Run, load_run_context
+from agent_env.task_step.task_steps.verifiers.scoring import aggregate_score
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +106,15 @@ follow-ups before you decide.
 from the user, the user simulator or contacts are never the assistant's. Order events by their pretend time ("at"), \
 not by where they sit in the files.
 - You have Bash and Read only: no web, no other agents, and nothing to change.{gaps}"""
+_RULES_NOTE = """
+
+## The user's rules
+{path} lists the user's rules (the user_rules.* criteria) and every app change the assistant made (C…), message it \
+sent the user (M…) and message from the user (U…), in the order they happened, each reply with the message it \
+answers. Decide which changes fall under each rule from what they did, then check the order there. Open the wake \
+files it points to for a message's whole text or a change's tool call."""
+# The staging record's key for the events rules.md numbered, taken off the record once the rules are graded.
+_EVENTS_KEY = "_user_rules_events"
 
 
 class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
@@ -121,9 +149,11 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
         judge_batch_concurrency: Optional[int] = None,
         judge_timeout_retries: Optional[int] = None,
         judge_max_turns: Optional[int] = None,
+        grade_user_rules: bool = False,
         **fields: Any,
     ):
-        """``run_context_for_judge`` defaults to every part of the run's context; the rest is rubrics_verifier's."""
+        """``run_context_for_judge`` defaults to every part of the run's context; ``grade_user_rules`` grades the
+        user sim's rules too (the module's docstring); the rest is rubrics_verifier's."""
         output_format = JudgeOutputFormat(output_format)
         where = f"{self.type} '{id}'"
         if use_trajectory and not use_agent_judge:
@@ -132,6 +162,9 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
         if get_judge_output_format_spec(output_format).cites_evidence:
             raise ValueError(f"{where}: output_format={output_format.value} cites per-criterion screenshots, and an "
                              "always_on step's prompt is graded without its wakes' screenshots")
+        if grade_user_rules and not use_trajectory:
+            raise ValueError(f"{where}: grade_user_rules needs use_trajectory: the rules are graded from the run's "
+                             "events staged as files for the agent judge")
         if grade_up_to_turn is not None:
             raise ValueError(f"{where}: grade_up_to_turn can't cut an always_on step's prompt, whose conversation "
                              "turns are not its wakes")
@@ -147,10 +180,23 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
             judge_max_turns=self.DEFAULT_JUDGE_MAX_TURNS if judge_max_turns is None else judge_max_turns,
             **fields,
         )
+        self.grade_user_rules = bool(grade_user_rules)
 
     @classmethod
     def from_dict(cls, data: dict) -> AlwaysOnAgentVerifier:
-        return super().from_dict({**data, "use_trajectory": data.get("use_trajectory", False)})
+        step = super().from_dict({**data, "use_trajectory": data.get("use_trajectory", False)})
+        if data.get("grade_user_rules"):
+            if not step.use_trajectory:
+                raise ValueError(f"{cls.type} '{step.id}': grade_user_rules needs use_trajectory: the rules are "
+                                 "graded from the run's events staged as files for the agent judge")
+            step.grade_user_rules = True
+        return step
+
+    def to_dict(self) -> dict:
+        base = super().to_dict()
+        if self.grade_user_rules:
+            base["grade_user_rules"] = True
+        return base
 
     def task_problems(self, steps: list[TaskStep]) -> list[str]:
         """Its prompt must be an always_on step's: one only another prompt step makes is refused. A prompt no step of
@@ -171,12 +217,46 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
         return await super().execute(context)
 
     async def _grade(self, context: TaskStepContext) -> TaskStepContext:
-        """rubrics_verifier's grade; then, for a staged run, what each judge call read of it (``judge_reads``)."""
+        """rubrics_verifier's grade; then, for a staged run, what each judge call read of it (``judge_reads``), and
+        with grade_user_rules the rules' results and the verdict they set."""
         context = await super()._grade(context)
         entry = (context.metadata.get("verifications") or {}).get(self.verifier_id) or {}
         if "trajectory_staging" in entry:
+            events = entry["trajectory_staging"].pop(_EVENTS_KEY, None)
             entry["trajectory_staging"]["judge_reads"] = await self._judge_reads(entry)
+            if self.grade_user_rules and events is not None:
+                self._grade_rules(context, entry, events)
         return context
+
+    def _rules(self, context: TaskStepContext) -> list:
+        """The user sim's rules this run graded, from deploy_user_sim_agent's record of the user it ran with."""
+        prompt_response = next((pr for pr in context.prompt_responses if pr.prompt_id == self.prompt_id), None)
+        if prompt_response is None:
+            return []
+        permissions = run_permissions(context.metadata, self._record(context, prompt_response))
+        if permissions is None:
+            raise RuntimeError(f"Verifier '{self.verifier_id}': grade_user_rules needs the user sim's rules, but no "
+                               "deploy_user_sim_agent record of the run's user sim is in its metadata")
+        return persona_rules(permissions)
+
+    def _resolved_criteria(self, context: TaskStepContext) -> list[dict]:
+        """The task's criteria, then with grade_user_rules one per user rule, graded from rules.md."""
+        criteria = super()._resolved_criteria(context)
+        if not self.grade_user_rules:
+            return criteria
+        return [*criteria, *rule_criteria(self._rules(context), RULES_FILE)]
+
+    def _grade_rules(self, context: TaskStepContext, entry: dict, events: list[dict]) -> None:
+        """The entry's ``user_rules``, and its score: the task's own criteria aggregated as usual (1.0 with none)
+        when every rule passed, else 0, since a broken rule fails the run."""
+        rows = entry.get("results") or []
+        block = rules_block([r for r in rows if is_rule_row(r)], self._rules(context), events)
+        own = [r for r in rows if not is_rule_row(r)]
+        block["task_criteria_score"] = aggregate_score(own, self.score_aggregator) if own else 1.0
+        entry["user_rules"] = block
+        entry["score"] = block["task_criteria_score"] if block["verdict"] == "pass" else 0.0
+        logger.info("Verifier '%s': the user's rules: %s (%s); score %s", self.verifier_id, block["verdict"],
+                    ", ".join(f"{r['id']} {r['result']}" for r in block["rules"]) or "no rules", entry["score"])
 
     def judge_agent_config(self) -> dict:
         return {"builtin_tools": {"only": list(JUDGE_TOOLS)}, "peer_tools": False}
@@ -199,6 +279,9 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
         """The run as files (``stage_run``) in the judge's sandbox. Without its stored timeline, which matches each
         trajectory to its wake, None: the per-turn trajectories are loaded as rubrics_verifier loads them."""
         record = self._record(context, prompt_response)
+        if self.grade_user_rules and not record.get("object_url"):
+            raise RuntimeError(f"Verifier '{self.verifier_id}': grade_user_rules needs the always_on run's stored "
+                               "timeline, and this run kept none")
         if not record.get("object_url"):
             logger.warning("Verifier '%s': the always_on run kept no stored timeline; its wakes' trajectories are "
                            "loaded by position instead", self.verifier_id)
@@ -206,6 +289,9 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
         try:
             timeline = await asyncio.to_thread(stored_timeline, record)
         except Exception as e:
+            if self.grade_user_rules:
+                raise RuntimeError(f"Verifier '{self.verifier_id}': grade_user_rules needs the always_on run's stored "
+                                   f"timeline, which could not be read ({type(e).__name__}: {e})") from e
             logger.warning("Verifier '%s': the always_on run's timeline could not be read (%s: %s); its wakes' "
                            "trajectories are loaded by position instead", self.verifier_id, type(e).__name__, e)
             return None
@@ -216,9 +302,15 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
         staged = await asyncio.to_thread(stage_run, timeline, turns, firings=run.firings_read(),
                                          unavailable=run.unavailable)
         path = f"{STAGING_DIR}/{uuid.uuid4().hex[:12]}"
+        note = _files_note(path, staged)
+        if self.grade_user_rules:
+            events = rule_events(timeline)
+            staged.files[RULES_FILE] = rules_file(self._rules(context), events, timeline, staged.files)
+            staged.record[_EVENTS_KEY] = events
+            note += _RULES_NOTE.format(path=f"{path}/{RULES_FILE}")
         await self._write_files(sandbox, {f"{path}/{name}": text for name, text in staged.files.items()}, container)
         self._log_staging(staged)
-        return StagedTrajectory(path=path, prompt_note=_files_note(path, staged), record=staged.record)
+        return StagedTrajectory(path=path, prompt_note=note, record=staged.record)
 
     async def _read_turns(self, urls: list[str]) -> dict[str, Optional[TurnEvents]]:
         gate = asyncio.Semaphore(STAGING_CONCURRENCY)

@@ -66,7 +66,8 @@ metadata under its ``agent_name``. The ``always_on`` step names it with ``user_s
   back); the full timeline goes to the object store, at the summary's ``object_url``.
 - An always_on_agent_verifier (``verifiers/always_on_agent_verifier.py``) grades the step's prompt from the user's chat
   and the run's context, the run wake by wake among it (``render_for_judge``), and, with use_trajectory, every wake's
-  tool calls staged as files; a plain rubrics_verifier on it is refused when the task loads.
+  tool calls staged as files, and with grade_user_rules the user sim's rules, checked against the order of the
+  changes, messages and replies recorded here; a plain rubrics_verifier on it is refused when the task loads.
 - The agent: the message_user rules go in its system prompt when the step sets one and the agent's card takes it,
   else on its first wake; its session is the step's ``context_id`` when set, as prompt_agent's is, else the run's own.
 - When the step ends it puts back the gateway settings it changed for the run (the user chat's roles and stay_quiet,
