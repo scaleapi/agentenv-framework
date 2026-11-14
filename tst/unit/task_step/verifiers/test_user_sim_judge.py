@@ -133,6 +133,21 @@ def test_an_answer_is_checked_and_its_turns_kept_to_the_graded_ones():
             core.parse_answer(bad, {1}, ["i1"] if "items" in why else [])
 
 
+def test_a_fail_that_cites_no_graded_turn_is_not_usable_and_a_pass_needs_none():
+    with pytest.raises(ValueError, match=r"a fail must cite at least one graded turn; cited \[99\], graded \[1\]"):
+        core.parse_answer(_fail(turns=[99]), {1}, [])
+    with pytest.raises(ValueError, match=r"a fail must cite at least one graded turn; cited \[\], graded \[1\]"):
+        core.parse_answer(_fail(turns=[]), {1}, [])
+    item = {"id": "i1", "verdict": "fail", "reason": "rated it 5", "turns": [99]}
+    with pytest.raises(ValueError, match=r"item i1: a fail must cite at least one graded turn; cited \[99\]"):
+        core.parse_answer(_fail(items=[item]), {1}, ["i1"])
+    na = {"verdict": "n/a", "could_change_grade": False, "reason": "-", "turns": [99], "items": []}
+    for ok in (_pass(turns=[99]), json.dumps(na), _pass(items=[{**item, "verdict": "pass"}])):
+        assert core.parse_answer(ok, {1}, ["i1"] if "i1" in ok else [])["turns"] == []
+    got = core.parse_answer(_fail(turns=[1, 99], items=[{**item, "turns": [1, 99]}]), {1}, ["i1"])
+    assert (got["turns"], got["turns_outside_graded"], got["items"]["i1"]["turns"]) == ([1], [99], [1])
+
+
 # ---- one judge ----------------------------------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_each_check_s_verdict_is_recorded_with_its_reason_and_turns():
@@ -179,6 +194,36 @@ async def test_a_bad_answer_is_asked_again_once_and_a_check_whose_calls_keep_fai
     assert result["user_sim_error"] == {"value": "yes", "because": ["guidance"], "unknown": ["rogue"]}
     alone = await _judge(_run(("reply", "x")), FakeModel({"rogue": [RuntimeError("503")] * 2}), checks=["rogue"])
     assert alone["user_sim_error"] == {"value": "unknown", "because": [], "unknown": ["rogue"]}
+
+
+@pytest.mark.asyncio
+async def test_a_fail_citing_only_ungraded_turns_is_asked_again_and_twice_is_an_error():
+    fake = FakeModel({"made_up": [_fail(turns=[99]), _fail(turns=[1])]})
+    result = await _judge(_run(("reply", "dad's allergic to shellfish")), fake, checks=["made_up"])
+    assert result["checks"]["made_up"]["verdict"] == "fail" and result["checks"]["made_up"]["turns"] == [1]
+    assert result["checks"]["made_up"]["attempts"] == 2 and result["user_sim_error"]["value"] == "yes"
+    assert "a fail must cite at least one graded turn; cited [99], graded [1]" in fake.calls[1]["parts"][-1]
+    twice = await _judge(_run(("reply", "x")), FakeModel({"made_up": [_fail(turns=[99])] * 2}), checks=["made_up"])
+    assert twice["checks"]["made_up"]["verdict"] == "error" and "cited [99]" in twice["checks"]["made_up"]["error"]
+    assert twice["user_sim_error"] == {"value": "unknown", "because": [], "unknown": ["made_up"]}
+
+
+@pytest.mark.asyncio
+async def test_a_task_item_fail_citing_no_graded_turn_is_asked_again_and_twice_is_an_error():
+    items = [core.RubricItem("rating", "A5", "rates the trip 2 or lower", can_error=True)]
+
+    def answer(turns):
+        return json.dumps({"verdict": "fail", "could_change_grade": False, "reason": "rated it 5", "turns": [1],
+                           "items": [{"id": "rating", "verdict": "fail", "reason": "rated it 5", "turns": turns}]})
+
+    fake = FakeModel({TASK_ITEMS_Q: [answer([99]), answer([1])]})
+    result = await _judge(_run(("done", "5 stars")), fake, checks=[], items=items)
+    assert result["items"]["rating"]["verdict"] == "fail" and result["items"]["rating"]["turns"] == [1]
+    assert result["user_sim_error"]["because"] == ["item:rating"] and len(fake.calls) == 2
+    twice = await _judge(_run(("done", "5 stars")), FakeModel({TASK_ITEMS_Q: [answer([])] * 2}), checks=[],
+                         items=items)
+    assert twice["items"]["rating"]["verdict"] == "error" and "item rating: a fail" in twice["items"]["rating"]["error"]
+    assert twice["user_sim_error"] == {"value": "unknown", "because": [], "unknown": ["item:rating"]}
 
 
 @pytest.mark.asyncio

@@ -412,6 +412,7 @@ def parse_answer(text: str, graded: set[int], item_ids: list[str]) -> dict:
     if not isinstance(change, bool):
         raise ValueError("could_change_grade must be true or false")
     turns = _turns(obj.get("turns"))
+    _fail_cites_a_graded_turn("a fail", verdict, turns, graded)
     out = {"verdict": verdict, "could_change_grade": change and verdict == "fail",
            "reason": str(obj.get("reason") or "").strip(), "turns": [t for t in turns if t in graded],
            "turns_outside_graded": [t for t in turns if t not in graded]}
@@ -424,9 +425,17 @@ def parse_answer(text: str, graded: set[int], item_ids: list[str]) -> dict:
         v = str(got[item_id].get("verdict", "")).strip().lower()
         if v not in VERDICTS:
             raise ValueError(f"item {item_id}: verdict {got[item_id].get('verdict')!r}")
+        item_turns = _turns(got[item_id].get("turns"))
+        _fail_cites_a_graded_turn(f"item {item_id}: a fail", v, item_turns, graded)
         out["items"][item_id] = {"verdict": v, "reason": str(got[item_id].get("reason") or "").strip(),
-                                 "turns": [t for t in _turns(got[item_id].get("turns")) if t in graded]}
+                                 "turns": [t for t in item_turns if t in graded]}
     return out
+
+
+def _fail_cites_a_graded_turn(what: str, verdict: str, turns: list[int], graded: set[int]) -> None:
+    """A fail has to rest on a turn being graded; one that cites none is unsupported, so it's asked again."""
+    if verdict == "fail" and not any(t in graded for t in turns):
+        raise ValueError(f"{what} must cite at least one graded turn; cited {turns}, graded {sorted(graded)}")
 
 
 def _turns(value: Any) -> list[int]:
