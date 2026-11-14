@@ -1166,15 +1166,23 @@ def _running(pid: int) -> bool:
 
 
 async def _detached(sandbox: LocalSandbox, command: str = "sleep 300") -> int:
-    """Start ``command`` the way a host install starts its agent, outliving the exec that started it, and wait until
-    it reads as marked: while a process execs, /proc shows it no environment, which on a loaded machine can last."""
+    """Start ``command``, which ends in a ``sleep``, the way a host install starts its agent, outliving the exec that
+    started it, and wait until its ``sleep`` reads as marked. On its way there the process execs (``nohup``, then a
+    ``bash -c``), and /proc shows it no environment while it does, so a scan in between finds nothing to stop."""
     _, stdout, _ = await sandbox.exec_with_output("bash", "-c", f"nohup {command} >/dev/null 2>&1 </dev/null & echo $!")
     pid = int(stdout)
     for _ in range(100):
-        if pid in ls._marked_pids(sandbox.sandbox_id):
+        if any(_comm(marked) == "sleep" for marked in ls._marked_pids(sandbox.sandbox_id)):
             break
         await asyncio.sleep(0.1)
     return pid
+
+
+def _comm(pid: int) -> str | None:
+    try:
+        return Path(f"/proc/{pid}/comm").read_text().strip()
+    except (FileNotFoundError, ProcessLookupError):
+        return None
 
 
 @pytest.mark.asyncio
