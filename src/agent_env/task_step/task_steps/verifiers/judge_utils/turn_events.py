@@ -27,7 +27,9 @@ UNKNOWN = "unknown"
 IMAGE_OMITTED = "<image omitted>"
 # How many JSON-in-a-string layers a result is unwrapped through (an MCP result is often two deep).
 _UNWRAP_DEPTH = 4
-_OUTPUT_TEXT = re.compile(r"^llm\.output_messages\.(\d+)\.message\.content$")
+# An OpenInference LLM span's output text: ``message.content`` (chat completions) or
+# ``message.contents.N.message_content.text`` (the Responses API, as GPT models are called).
+_OUTPUT_TEXT = re.compile(r"^llm\.output_messages\.(\d+)\.message\.(?:content|contents\.(\d+)\.message_content\.text)$")
 
 
 @dataclass(frozen=True)
@@ -166,7 +168,7 @@ def _span_text(attrs: dict) -> str:
     """A model span's own output text: OpenInference's ``llm.output_messages.N.message.content`` or a GenAI ``chat``
     span's text blocks."""
     numbered = ((_OUTPUT_TEXT.match(k), v) for k, v in attrs.items())
-    texts = [str(v) for _, v in sorted((int(m.group(1)), v) for m, v in numbered if m and v)]
+    texts = [str(v) for _, v in sorted(((int(m.group(1)), int(m.group(2) or 0)), v) for m, v in numbered if m and v)]
     if not texts and attrs.get("gen_ai.operation.name") == "chat":
         completion = parse_json_attr(attrs.get("gen_ai.completion", ""))
         content = completion.get("content") if isinstance(completion, dict) else None
