@@ -143,7 +143,9 @@ def _otel_events(spans: list[dict]) -> list[dict]:
         start = str(span.get("start_time") or "")
         if is_tool_span(span):
             tool, tool_input, output = tool_span_io(span)
-            call = _call(tool, None, tool_input)
+            # Harnesses that name every tool span generically ("execute_tool") carry the real name in the prompt.
+            prompt = parse_json_attr((span.get("attributes") or {}).get("gen_ai.prompt", "{}"))
+            call = _call(str((prompt.get("tool") if isinstance(prompt, dict) else None) or tool), None, tool_input)
             _settle(call, output, (span.get("status") or {}).get("status_code") == "ERROR")
             timed.append((start, i, call))
             continue
@@ -230,7 +232,10 @@ def _gemini_events(items: list[dict]) -> list[dict]:
         elif kind == "tool_result" and item.get("tool_id") in calls:
             _settle(calls[item["tool_id"]], item.get("output", item.get("error")), item.get("status") == "error")
         elif kind == "result":
-            events.append({"type": "final", "text": None, "error": item.get("status") not in (None, "success")})
+            error = item.get("error")
+            text = error.get("message") if isinstance(error, dict) else error
+            events.append({"type": "final", "text": text if isinstance(text, str) else None,
+                           "error": item.get("status") not in (None, "success")})
     for e in events:
         e.pop("open", None)
     return [e for e in events if e.get("type") != "text" or e["text"].strip()]
