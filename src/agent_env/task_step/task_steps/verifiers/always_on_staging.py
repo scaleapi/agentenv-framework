@@ -2,8 +2,8 @@
 stored timeline and each wake's trajectory: one file per wake, one event per line, so no line is a whole turn.
 
 - ``wakes/wake_NNN.jsonl``: what woke the assistant (``woke``, the user's messages in full ``user_message``, the full
-  text it was sent ``wake_input``), then its turn's tool calls with their inputs and results (``tool_call``) and its
-  own text (``assistant_text``), then the rest of the wake in time order (``app_change`` for every change,
+  text it was sent ``wake_input``), then its turn's tool calls with their inputs and results (``tool_call``), its
+  own text (``assistant_text``) and its thinking when the trajectory recorded it (``assistant_thinking``), then the rest of the wake in time order (``app_change`` for every change,
   ``turn_end`` with its closing reply, ``message_to_user``, a ``nudge`` and its calls, the user's reads). A turn's
   trajectory is matched to its wake by the timeline's ``trajectory_url``; one that's missing is a line saying so.
 - ``wakes/results/``: what is too long for a line to be read whole (a tool's input or result, a long message), named
@@ -211,6 +211,8 @@ class _Stager:
                 side += written
             elif kind == "text":
                 lines.append(_line("assistant_text", w.n, turn=which, text=e["text"], subagent=e.get("subagent")))
+            elif kind == "thinking":
+                lines.append(_line("assistant_thinking", w.n, turn=which, text=e["text"], subagent=e.get("subagent")))
             elif kind == "note":
                 lines.append(_line("harness_note", w.n, turn=which, text=e["text"]))
             elif kind == "raw":

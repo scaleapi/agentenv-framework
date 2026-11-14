@@ -66,7 +66,8 @@ action (tool and key arguments; how actions were told apart is at its top) and m
 `file:line` it is at, and errors.
 - {first} … {last}: one file per wake. First what woke the assistant ("woke", the user's own messages in full as \
 "user_message", the whole text it was sent as "wake_input"); then every tool call of its turn with input and result \
-("tool_call", numbered "call") and its own text ("assistant_text", which nobody saw); then the rest of the wake in time \
+("tool_call", numbered "call"), its own text ("assistant_text", which nobody saw) and its thinking when it was \
+recorded ("assistant_thinking": why it acted; what it did is in the tool calls and app changes); then the rest of the wake in time \
 order: every app change ("app_change", "by": "agent" for its own), its closing reply ("turn_end"; the user never saw \
 it), each message the user got ("message_to_user"), a nudge and its calls, and the user's reads of its messages.
 - {results}/: what is too long for a line (a tool's input or result, a long message): the line names the file \

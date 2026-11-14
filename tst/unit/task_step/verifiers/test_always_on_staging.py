@@ -107,6 +107,20 @@ def test_what_woke_the_assistant_comes_first_with_the_user_s_whole_message(run):
     assert "the user (Fri Nov 6, 9:00 PM UTC): \"omg yes good catch" in staged.files[INDEX_FILE]
 
 
+def test_the_agent_s_thinking_is_a_line_in_its_wake(run):
+    timeline, turns = run
+    wake2 = _url(timeline, 2)
+    turns[wake2] = turn_events(json.dumps([{"type": "assistant", "message": {"content": [
+        {"type": "thinking", "thinking": "Nina is allergic; ask before ordering.", "signature": "s"},
+        {"type": "text", "text": "Asking Nina."}]}}]))
+
+    lines = _lines(stage_run(timeline, turns).files, "wakes/wake_002.jsonl")
+
+    kinds = [line["event"] for line in lines if line["event"] in ("assistant_thinking", "assistant_text")]
+    assert kinds == ["assistant_thinking", "assistant_text"]
+    assert next(line for line in lines if line["event"] == "assistant_thinking")["text"].startswith("Nina is allergic")
+
+
 def test_every_app_change_is_kept_with_its_whole_summary(run):
     staged = stage_run(*run)
 
