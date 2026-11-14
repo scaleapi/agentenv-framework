@@ -260,6 +260,48 @@ def test_run_roundtrip_through_the_runner_seam(client, monkeypatch):
     assert listed["items"][0]["run_id"] == body["workflow_id"]
 
 
+def test_run_idempotency_key_dedupes_and_conflicts(client, monkeypatch):
+    from agent_env.task import Task
+
+    calls = []
+
+    class _Task:
+        version = 1
+
+        async def run(self, **kw):
+            calls.append(kw)
+            return kw.get("context")
+
+    monkeypatch.setattr(Task, "get", classmethod(lambda cls, tid, ver=None: _Task()))
+
+    request = {"version": 1, "agent_model": "claude-x", "idempotency_key": "k"}
+    first = client.post("/api/v1/tasks/t1/run", json=request)
+    second = client.post("/api/v1/tasks/t1/run", json=request)
+    assert first.status_code == second.status_code == 200
+    assert second.json()["workflow_id"] == first.json()["workflow_id"]
+    assert second.json()["instance_id"] == first.json()["instance_id"]
+
+    conflict = client.post("/api/v1/tasks/t1/run", json={**request, "agent_model": "other"})
+    assert conflict.status_code == 409
+    assert client.get("/api/v1/tasks/t1/runs").json()["total"] == 1
+
+
+@pytest.mark.parametrize("key", ["", "k" * 257])
+def test_run_idempotency_key_length_is_validated(client, key):
+    assert client.post("/api/v1/tasks/t1/run", json={"idempotency_key": key}).status_code == 422
+
+
+def test_run_group_rejects_an_idempotency_key(client, monkeypatch):
+    from agent_env.task import Task
+
+    class _Task:
+        version = 1
+
+    monkeypatch.setattr(Task, "get", classmethod(lambda cls, tid, ver=None: _Task()))
+    assert client.post("/api/v1/tasks/t1/runs", json={"version": 1, "idempotency_key": "k"}).status_code == 422
+    assert client.get("/api/v1/tasks/t1/runs").json()["total"] == 0
+
+
 def test_run_for_unknown_task_is_404(client):
     """Submitting a run for a task that does not exist must 404, not enqueue."""
     assert client.post("/api/v1/tasks/ghost/run", json={}).status_code == 404

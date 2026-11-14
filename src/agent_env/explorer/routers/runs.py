@@ -15,12 +15,12 @@ import uuid
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from agent_env.config import get_runner
 from agent_env.explorer.entity_ids import EntityId
 from agent_env.explorer.routers.common import PaginatedResponse, docs
-from agent_env.runner.runner import RunStatus
+from agent_env.runner.runner import IdempotencyConflict, RunStatus
 from agent_env.store import Filter
 from agent_env.task.store import TaskStepStatus, count_task_instances, find_task_instance, task_instances
 
@@ -55,6 +55,8 @@ class RunRequest(BaseModel):
     context_json: Optional[dict] = None
     step_overrides: Optional[dict] = None
     overrides: Optional[dict] = None
+    # Repeating a request with the same key returns the first run instead of starting another.
+    idempotency_key: Optional[str] = Field(default=None, min_length=1, max_length=256)
     # Accepted but ignored: the local explorer gets models from the [model] config, not a
     # per-request key; declared so a client that always sends them isn't rejected.
     litellm_api_key: Optional[str] = None
@@ -145,13 +147,24 @@ def _resolve_task_version(task_id: str, version: Optional[int]) -> int:
 async def start_run(task_id: EntityId, body: RunRequest | None = None) -> RunResponse:
     body = body or RunRequest()
     version = _resolve_task_version(task_id, body.version)
-    handle = await get_runner().submit(
-        task_id, version,
-        agent_model=body.agent_model,
-        agent_artifact_id=body.agent_artifact_id,
-        metadata=_run_metadata(body),
+    runner = get_runner()
+    # Passed only when set, so a custom Runner that predates the argument keeps working.
+    key = {"idempotency_key": body.idempotency_key} if body.idempotency_key is not None else {}
+    try:
+        handle = await runner.submit(
+            task_id, version,
+            agent_model=body.agent_model,
+            agent_artifact_id=body.agent_artifact_id,
+            metadata=_run_metadata(body),
+            **key,
+        )
+    except IdempotencyConflict as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    record = await runner.status(handle.run_id)
+    return RunResponse(
+        workflow_id=handle.run_id, instance_id=handle.instance_id,
+        status=record.status if record else RunStatus.QUEUED,
     )
-    return RunResponse(workflow_id=handle.run_id, instance_id=handle.instance_id, status=RunStatus.QUEUED)
 
 
 class StartRunsRequest(RunRequest):
@@ -187,6 +200,8 @@ async def start_runs(task_id: EntityId, body: StartRunsRequest | None = None) ->
     """Start a group of runs, returning their handles immediately. ``seeds`` wins over
     ``count`` when both are given (one run per seed)."""
     body = body or StartRunsRequest()
+    if body.idempotency_key is not None:
+        raise HTTPException(status_code=422, detail="idempotency_key is not supported for run groups; use POST /run")
     version = _resolve_task_version(task_id, body.version)  # 404 the whole group if the task is absent
     requested = len(body.seeds) if body.seeds is not None else max(body.count or 1, 1)
     if requested > MAX_RUNS_PER_REQUEST:
