@@ -2556,6 +2556,22 @@ The folder's other files, like the rest of the repository, are licensed under th
 - Source: <https://github.com/wolfcw/libfaketime/tree/v0.9.12>
 - License: GPL-2.0-only
 
+## The egress proxy's Go modules
+
+`src/agent_env/computers/artifacts/ubuntu-24.04/egress/` is agent-env's egress proxy, a Go program the base
+computer's Dockerfile builds, statically linked with the Go standard library and the modules below. Their source is
+not in the repository: the folder's `go.sum` pins each, the build downloads them, and the program runs inside
+computers.
+
+| Module | Version | License |
+| --- | --- | --- |
+| Go standard library | 1.26.11 | BSD-3-Clause |
+| github.com/refraction-networking/utls | v1.8.2 | BSD-3-Clause |
+| golang.org/x/crypto | v0.36.0 | BSD-3-Clause |
+| golang.org/x/sys | v0.31.0 | BSD-3-Clause |
+| github.com/andybalholm/brotli | v1.0.6 | MIT |
+| github.com/klauspost/compress | v1.17.4 | BSD-3-Clause (a few packages the proxy doesn't link are Apache-2.0 or MIT) |
+
 ## License texts
 
 License and notice files as shipped by each package, with copyright lines removed: they are listed with each package above. Packages whose files differ only in those lines share a text.

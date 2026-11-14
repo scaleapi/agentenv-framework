@@ -673,6 +673,7 @@ def env_sources() -> tuple[EnvSource, ...]:
             EnvSource("AGENT_ENV_MODAL_REGION", None, "no file equivalent"),
             EnvSource("AGENT_ENV_MODAL_APP_NAME", None, "no file equivalent"),
             EnvSource("AGENT_ENV_FIXTURE_PREFIX", None, "no file equivalent"),
+            EnvSource("AGENT_ENV_COMPUTER_IMAGE_MIRROR", None, "no file equivalent"),
             EnvSource("MODAL_TOKEN_ID", None, "credential, no file equivalent"),
             EnvSource("MODAL_TOKEN_SECRET", None, "credential, no file equivalent"),
     ]

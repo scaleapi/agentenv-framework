@@ -2591,9 +2591,9 @@ def test_a_one_image_site_runs_alone_on_its_port_up_once_it_answers_and_its_rout
     assert {"mail-website-backend", "shop-website-backend", "shop-website-frontend"} <= set(services)
     assert "mail-website-frontend" not in services
     assert services["mail-website-backend"]["healthcheck"]["test"] == [
-        "CMD-SHELL", "curl -sf -o /dev/null http://localhost:8000/.well-known/agent-env.json"
-                     " || curl -sf -o /dev/null http://localhost:8000/healthz"]
-    assert services["shop-website-backend"]["healthcheck"]["test"][1].endswith("http://localhost:8000/api/health")
+        "CMD-SHELL", env_gateway_provider._http_probe(8000, "/.well-known/agent-env.json", "/healthz")]
+    assert services["shop-website-backend"]["healthcheck"]["test"] == [
+        "CMD-SHELL", env_gateway_provider._http_probe(8000, "/.well-known/agent-env.json", "/api/health")]
     gateway = dict(item.split("=", 1) for item in services[GATEWAY_SERVICE_NAME]["environment"])
     assert gateway["WEBSITE_URLS"] == "mail=http://mail-website-backend:8000,shop=http://shop-website-frontend:80"
     assert gateway["REST_PROXY_URLS"] == "mail=http://mail-website-backend:8000,shop=http://shop-website-backend:8000"
@@ -2685,7 +2685,9 @@ async def test_a_site_with_no_ready_on_its_card_is_waited_for_at_its_health_path
 
 
 @pytest.mark.asyncio
-async def test_a_site_that_never_says_it_is_ready_fails_the_deploy_naming_why():
+async def test_a_site_that_never_says_it_is_ready_fails_the_deploy_naming_why(monkeypatch):
+    monkeypatch.setattr(env_gateway_provider, "WEBSITE_READY_MARGIN_S", 0)
+
     def site(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/.well-known/agent-env.json"):
             return httpx.Response(200, json=_READY_CARD)
@@ -2698,7 +2700,9 @@ async def test_a_site_that_never_says_it_is_ready_fails_the_deploy_naming_why():
 
 
 @pytest.mark.asyncio
-async def test_a_site_whose_ready_answers_no_website_readiness_is_never_ready_and_the_deploy_says_so():
+async def test_a_site_whose_ready_answers_no_website_readiness_is_never_ready_and_the_deploy_says_so(monkeypatch):
+    monkeypatch.setattr(env_gateway_provider, "WEBSITE_READY_MARGIN_S", 0)
+
     def site(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/.well-known/agent-env.json"):
             return httpx.Response(200, json=_READY_CARD)
@@ -3041,3 +3045,46 @@ async def test_container_mode_starts_children_beside_its_servers_and_hands_the_g
     assert env["INTERNAL_MCP_SERVERS"].split(",")[-1] == "desktop=https://desk.example/mcp"
     assert env["REST_PROXY_URLS"].split(",")[-1] == "desktop=https://desk.example"
     assert env["CLOCK_FOLLOWER_TOKENS"] == "desktop=read-desk"
+
+
+def _run_probe(tmp_path, statuses: dict[str, int]) -> int:
+    """Run the site health probe the way compose does, in a shell that has python3 but no curl, wget or node, against
+    a server that answers each path with its status in ``statuses`` and every other path with 404."""
+    import http.server
+    import os
+    import shutil
+    import subprocess
+    import sys
+    import threading
+
+    from pytest_socket import enable_socket
+
+    enable_socket()
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(statuses.get(self.path, 404))
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("localhost", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "python3").symlink_to(sys.executable)
+    try:
+        probe = env_gateway_provider._http_probe(server.server_port, "/.well-known/agent-env.json", "/api/health")
+        return subprocess.run([shutil.which("sh"), "-c", probe.replace("$$", "$")], timeout=30,
+                              env={**os.environ, "PATH": str(bin_dir)}).returncode
+    finally:
+        server.shutdown()
+
+
+def test_a_site_image_without_curl_passes_its_health_probe_once_its_health_path_answers(tmp_path):
+    assert _run_probe(tmp_path, {"/api/health": 200}) == 0
+
+
+def test_a_site_answering_only_errors_fails_its_health_probe(tmp_path):
+    assert _run_probe(tmp_path, {"/.well-known/agent-env.json": 500, "/api/health": 503}) != 0

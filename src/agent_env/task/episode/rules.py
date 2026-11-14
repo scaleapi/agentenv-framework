@@ -159,7 +159,8 @@ UNAFFECTED = frozenset({
     "combine_universe_verdicts", "configure_scheduled_checks", "deploy_env", "deploy_sandbox", "end_browser_recording",
     "end_computer_recording", "start_browser_recording", "start_computer_recording", "env_outcome_verifier",
     "modify_env_tool_access", "reset_env", "review",
-    "run_container_unit_tests_verifier", "run_docker_container", "snapshot_env", "snapshot_computer_env", "sync_env_clock",
+    "run_container_unit_tests_verifier", "run_docker_container", "set_env_clock_rate", "snapshot_env", "snapshot_computer_env",
+    "sync_env_clock",
     "validation_gate_aggregator", "verify_env_card", "verify_env_core_protocol", "verify_mcp_tool_schema",
     "verify_spec_conformance", "verify_universe_load_export_roundtrip",
     # They read only what an outside turn leaves: its reply.

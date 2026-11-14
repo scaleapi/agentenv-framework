@@ -83,15 +83,18 @@ from .rest_proxy import (
     UpstreamResponse,
     WebsiteRoute,
     declared_site_names,
+    called_tools,
     fetch_child_card,
     forward,
     listed_url,
     lowered,
     operations,
+    reaches_child_mcp,
     refuse_websocket,
     relay_websocket,
     rewrite_child_card,
     route_name,
+    tool_call_refusal,
     upstream_url,
     website_routes,
 )
@@ -773,7 +776,8 @@ class Gateway:
     async def _proxy_rest_request(self, request: Request, url_map: dict[str, str] | None = None,
                                   site_names: tuple[str, ...] = ()) -> Response:
         """Reverse-proxy an HTTP request to an internal service, streaming the response through; a site reached at one
-        of its `site_names` takes it as its ``Host``."""
+        of its `site_names` takes it as its ``Host``. A call to a backing server's own MCP endpoint that the caller's
+        role may not make is refused here, as ``/mcp`` refuses it."""
         url_map = self.rest_proxy_urls if url_map is None else url_map
         service_name = request.path_params["service_name"]
         base_url = url_map.get(service_name)
@@ -785,6 +789,9 @@ class Gateway:
         mcp_endpoint = site_mcp or "mcp"
         if url_map is self.rest_proxy_urls and (cdp := await self._browsers.cdp_answer(request, base_url, role)) is not None:
             return cdp
+        if mcp_server and request.method == "POST" and reaches_child_mcp(request, mcp_endpoint):
+            if (refusal := await self._refuse_disabled_calls(await request.body(), role)) is not None:
+                return refusal
         if request.method in _SAFE_METHODS:
             return await forward(request, base_url, role=role, timeout=self.REST_PROXY_TIMEOUT, mcp_server=mcp_server,
                                  withheld=self._withheld, mcp_endpoint=mcp_endpoint, site_names=site_names)
@@ -1176,15 +1183,8 @@ class Gateway:
         return self._json_response({"role": role, **snapshot}, 200)
 
     async def _handle_step(self, request: Request) -> Response:
-        try:
-            await self._ensure_tools_discovered()
-        except ToolNameClash as e:
-            return self._json_response({"error": f"{e}, so the env serves none of its servers' tools."}, 503)
-        except Exception:
-            return self._json_response(
-                {"error": "Tool discovery has not completed. Internal MCP servers may be unavailable."},
-                503,
-            )
+        if (unavailable := await self._discovery_unavailable()) is not None:
+            return unavailable
         try:
             body = await request.json()
         except Exception:
@@ -1613,6 +1613,30 @@ class Gateway:
                     yield chunk
 
         return StreamingResponse(_iter(), media_type="application/jsonl", headers={"X-Trajectory-Total-Bytes": str(total)})
+
+    async def _discovery_unavailable(self) -> Response | None:
+        """The 503 for a request that needs the servers' tools while their discovery can't complete; None once it has."""
+        try:
+            await self._ensure_tools_discovered()
+        except ToolNameClash as e:
+            return self._json_response({"error": f"{e}, so the env serves none of its servers' tools."}, 503)
+        except Exception:
+            return self._json_response(
+                {"error": "Tool discovery has not completed. Internal MCP servers may be unavailable."},
+                503,
+            )
+        return None
+
+    async def _refuse_disabled_calls(self, body: bytes, role: str) -> Response | None:
+        """The refusal for a child MCP POST through ``/svc`` calling a tool `role` may not call; None to forward it."""
+        if (names := called_tools(body)) is None:  # unread, it could carry a call a lenient server parses (gzip)
+            return tool_call_refusal(body, "The request body is not JSON")
+        if not names:
+            return None
+        if (unavailable := await self._discovery_unavailable()) is not None:
+            return unavailable  # a tool hidden by default is known only once discovery has listed it
+        disabled = next((name for name in names if self._is_disabled(role, name)), None)
+        return None if disabled is None else tool_call_refusal(body, f"Tool '{disabled}' is disabled for role '{role}'")
 
 
 class _ProxyArgModelBase(ArgModelBase):

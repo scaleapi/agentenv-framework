@@ -18,8 +18,10 @@ from typing import TYPE_CHECKING, Any, Literal, Optional
 from starlette.requests import Request
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
+from .devtools import DevToolsError
 from .log import (ERROR_CHARS, KEY_FIELDS, TYPING_METHODS, BrowserLog, acts, redact_text, redacted_args,
                   redacted_params)
+from .scope import ENDS_CONTEXT, MAKES_CONTEXT, WITH_INFO, Scope, Targets
 
 if TYPE_CHECKING:
     from .contexts import Contexts
@@ -34,6 +36,8 @@ TOKEN_BYTES = 32
 ROUTE = "/cdp/"
 #: The close code and reason a connection gets when its browser goes away, which a client may connect again after.
 RELAUNCHED = (1012, "the browser relaunched: connect again")
+#: The close code and reason a connection scoped to a lease gets when the lease ends, which its address ends with.
+LEASE_ENDED = (1001, "the lease ended: ask for an address again")
 #: The close code and reason a connection gets when its client falls behind by more than ``OUTBOX_LIMIT_BYTES``.
 TOO_SLOW = (1013, "the client fell too far behind: connect again")
 #: How much a connection's client may have waiting to be sent to it before it is closed; a single answer bigger than
@@ -52,8 +56,6 @@ MALFORMED = {"code": -32600, "message": "a command is an object with a string me
 ENDS_BROWSER = frozenset({"Browser.close", "Browser.crash", "Browser.crashGpuProcess"})
 #: The commands that set how and where downloads are saved, which agentenv keeps as its own.
 SETS_DOWNLOADS = frozenset({"Browser.setDownloadBehavior", "Page.setDownloadBehavior"})
-#: The commands that make and end a browser context, which agentenv records as leases.
-MAKES_CONTEXT, ENDS_CONTEXT = "Target.createBrowserContext", "Target.disposeBrowserContext"
 #: The schemes of the browser's own files, settings and tools, which an agent's navigation or new tab may not open.
 OWN_SCHEMES = frozenset({"file", "chrome", "chrome-extension", "chrome-untrusted", "view-source", "devtools"})
 #: The ``about:`` pages that aren't the browser's own under another name.
@@ -77,6 +79,8 @@ class Address:
     http_url: str
     ws_url: str
     named: bool = False
+    #: The label of the lease it's scoped to, None for the browser's default context.
+    context: Optional[str] = None
 
 
 def reached(request: Request) -> str:
@@ -102,19 +106,22 @@ def _hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-def _address(user: str, base: str, named: bool, token: str) -> Address:
+def _address(user: str, base: str, named: bool, token: str, context: Optional[str] = None) -> Address:
     root = f"{base}{ROUTE}{token}"
-    return Address(user, f"{root}/", f"{websocket_form(root)}/devtools/browser", named)
+    return Address(user, f"{root}/", f"{websocket_form(root)}/devtools/browser", named, context)
 
 
 class Tokens:
     """The tokens minted, one per user: in memory, so asking twice gives the same address, and in ``path`` only by
     hash, with the user, the base address and whether its caller named it, so an address still works after the server
-    restarts while the computer's session, which can read the file, can't use one."""
+    restarts while the computer's session, which can read the file, can't use one. A token scoped to a lease is one per
+    user and lease, in memory only, as no lease outlives the server; the lease's end revokes it."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
         self._minted: dict[str, Address] = {}
+        self._scoped: dict[tuple[str, str], Address] = {}
+        self._scoped_known: dict[str, tuple[str, str, bool, str]] = {}
         try:
             stored = json.loads(path.read_text())
             self._known = {digest: (entry["user"], entry["base"], entry["named"])
@@ -122,9 +129,15 @@ class Tokens:
         except (OSError, ValueError, TypeError, KeyError):
             self._known = {}
 
-    def mint(self, user: str, base: str, *, named: bool = False) -> Address:
-        """``user``'s address under ``base``, ``named`` when its caller named where its agent reaches the env: the one
-        minted before, else a new one."""
+    def mint(self, user: str, base: str, *, named: bool = False, context: Optional[str] = None) -> Address:
+        """``user``'s address under ``base``, ``named`` when its caller named where its agent reaches the env, scoped
+        to the lease ``context`` when it names one: the one minted before, else a new one."""
+        if context is not None:
+            if (user, context) not in self._scoped:
+                token = secrets.token_urlsafe(TOKEN_BYTES)
+                self._scoped[(user, context)] = _address(user, base, named, token, context)
+                self._scoped_known[_hash(token)] = (user, base, named, context)
+            return self._scoped[(user, context)]
         if user not in self._minted:
             token = secrets.token_urlsafe(TOKEN_BYTES)
             self._minted[user] = _address(user, base, named, token)
@@ -134,13 +147,22 @@ class Tokens:
 
     def revoke_all(self) -> None:
         """Every address minted so far ended, as a reset ends them."""
-        self._minted, self._known = {}, {}
+        self._minted, self._known, self._scoped, self._scoped_known = {}, {}, {}, {}
         self._save()
 
+    def revoke(self, context: str) -> None:
+        """Every address scoped to the lease ``context`` ended, as the lease has."""
+        self._scoped = {key: address for key, address in self._scoped.items() if key[1] != context}
+        self._scoped_known = {digest: known for digest, known in self._scoped_known.items() if known[3] != context}
+
     def address(self, token: str) -> Optional[Address]:
-        """The address ``token`` was minted for, or None for one that wasn't."""
-        known = self._known.get(_hash(token))
-        return _address(*known, token) if known is not None else None
+        """The address ``token`` was minted for, or None for one that wasn't, or whose lease has ended."""
+        digest = _hash(token)
+        if (known := self._known.get(digest)) is not None:
+            return _address(*known, token)
+        if (scoped := self._scoped_known.get(digest)) is not None:
+            return _address(*scoped[:3], token, scoped[3])
+        return None
 
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -159,6 +181,8 @@ class Verdict:
     params: dict
     reason: str = ""
     changed: bool = False
+    #: The error a refusal answers with in place of agentenv's own, as for a target the connection doesn't see.
+    error: Optional[dict] = None
 
 
 def guard(method: str, params: dict, *, dialogs_answered: bool, download_path: Optional[str] = None) -> Verdict:
@@ -204,11 +228,14 @@ class _Connection:
     """One client's WebSocket, its sessions over the pipe (its browser-level one and those it attached), its unanswered
     commands, what waits to be sent to it, and its entry in the record."""
 
-    def __init__(self, websocket: WebSocket, user: str, session: str, record: dict, number: int) -> None:
+    def __init__(self, websocket: WebSocket, user: str, session: str, record: dict, number: int,
+                 scope: Optional[Scope] = None) -> None:
         self.websocket, self.user, self.session, self.record, self.number = websocket, user, session, record, number
+        #: What it sees and acts in, a lease or the default context; None where the relay keeps no contexts.
+        self.scope = scope
         self.sessions = {session}
         #: The tab each session it attached is on.
-        self.targets: dict[str, str] = {}
+        self.session_tabs: dict[str, str] = {}
         #: Held by each of its commands from when it arrives until it's sent, so they're sent in the order they came,
         #: whatever one waits on before it's sent.
         self.order = asyncio.Lock()
@@ -251,12 +278,16 @@ class Relay:
     causes the tab events a command brings. An agent's tool call a driver serves through a CDP user's connections,
     such as Playwright MCP's, is an entry too, which that user's commands are credited to while it's open. With
     ``contexts``, a context a connection makes is leased to its user, only one it made may it dispose, and a lease's
-    downloads stay in its folder."""
+    downloads stay in its folder. A connection is scoped to a lease or to the default context, and sees only its scope
+    and the contexts its user made (``scope``)."""
 
     def __init__(self, devtools: DevToolsPipe, *, dialogs_answered: bool = False, log: Optional[BrowserLog] = None,
                  control: Optional[BrowserControl] = None, contexts: Optional[Contexts] = None) -> None:
         self.devtools, self.dialogs_answered, self.log, self.control = devtools, dialogs_answered, log, control
         self.contexts = contexts
+        #: Each target's context, as Chromium reports it.
+        self.target_contexts = Targets()
+        self._tasks: set[asyncio.Future] = set()
         self.connections: list[dict] = []
         self._by_session: dict[str, _Connection] = {}
         self._open: set[_Connection] = set()
@@ -291,15 +322,32 @@ class Relay:
         self.log.finish(call.begun, **fields)
         return True
 
-    async def serve(self, websocket: WebSocket, user: str) -> None:
-        """``websocket``, a client of ``user``'s, relayed over a browser-level session of its own until either ends."""
+    async def serve(self, websocket: WebSocket, user: str, context: Optional[str] = None) -> None:
+        """``websocket``, a client of ``user``'s, relayed over a browser-level session of its own until either ends,
+        scoped to the lease ``context`` when it names one."""
+        lease_id = None
+        if context is not None:
+            lease = self.contexts.get(context) if self.contexts is not None else None
+            if lease is None:
+                await websocket.accept()
+                await websocket.close(code=LEASE_ENDED[0], reason=LEASE_ENDED[1])
+                return
+            lease_id = lease.id
         try:
             session = (await self.devtools.call("Target.attachToBrowserTarget"))["sessionId"]
         except Exception as e:
             await websocket.close(code=1013, reason=f"the browser isn't answering: {type(e).__name__}")
             return
-        record = {"user": user, "opened_at": _now(), "guarded": []}
-        connection = _Connection(websocket, user, session, record, len(self.connections) + 1)
+        if context is not None and ((lease := self.contexts.get(context)) is None or lease.id != lease_id):
+            with contextlib.suppress(Exception):
+                await self.devtools.call("Target.detachFromTarget", {"sessionId": session})
+            await websocket.accept()
+            await websocket.close(code=LEASE_ENDED[0], reason=LEASE_ENDED[1])
+            return
+        record = {"user": user, "opened_at": _now(), "guarded": [], **({"context": context} if context else {})}
+        scope = Scope(self.contexts, self.target_contexts, user, lease_id, self._frame_context) \
+            if self.contexts is not None else None
+        connection = _Connection(websocket, user, session, record, len(self.connections) + 1, scope)
         self._by_session[session] = connection
         self._open.add(connection)
         self.connections.append(record)
@@ -331,6 +379,14 @@ class Relay:
         """The browser has gone: every connection is closed with a reason a client may connect again after."""
         for connection in list(self._open):
             self._close(connection, RELAUNCHED)
+        self.target_contexts.forget()
+
+    def lease_ended(self, context_id: str) -> None:
+        """The lease the browser knows as ``context_id`` has ended: each connection scoped to it is closed, saying
+        so."""
+        for connection in list(self._open):
+            if connection.scope is not None and connection.scope.lease == context_id:
+                self._close(connection, LEASE_ENDED)
 
     async def _command(self, connection: _Connection, message: Any) -> None:
         if connection.closing:
@@ -351,6 +407,8 @@ class Relay:
             replied = True
             if sending is not None and isinstance(answer.get("result"), dict):
                 self._answered(connection, method, params, answer["result"])
+                if connection.scope is not None:
+                    answer = {**answer, "result": connection.scope.answer(method, answer["result"])}
             self._put(connection, _reply(message, answer))
 
         try:
@@ -360,8 +418,8 @@ class Relay:
                 if session not in connection.sessions:
                     verdict, answer = None, {"error": NO_SESSION}
                 elif verdict.action == "refuse":
-                    answer = {"error": {"code": SERVER_ERROR,
-                                        "message": f"agentenv refuses {method}: {verdict.reason}"}}
+                    answer = {"error": verdict.error or {"code": SERVER_ERROR,
+                                                         "message": f"agentenv refuses {method}: {verdict.reason}"}}
                 elif verdict.action != "send":
                     answer = {"result": {}}
                 else:
@@ -387,23 +445,27 @@ class Relay:
                 logged.finish(answer, guarded)
 
     def _verdict(self, connection: _Connection, session: str, method: str, params: dict) -> Verdict:
-        """The guard's verdict on ``connection``'s command, with what its contexts say: where a lease's downloads
-        go, and that only a context it made may it dispose."""
-        if self.contexts is None:
+        """The guard's verdict on ``connection``'s command, after its scope's (``Scope.verdict``), and with where a
+        lease's downloads go."""
+        if connection.scope is None:
             return guard(method, params, dialogs_answered=self.dialogs_answered)
-        if method == ENDS_CONTEXT and (reason := self.contexts.may_dispose(connection.user,
-                                                                           params.get("browserContextId"))):
-            return Verdict("refuse", params, reason)
+        ruling = connection.scope.verdict(method, params, on_browser_session=session == connection.session)
+        if ruling.refused:
+            return Verdict("refuse", params, ruling.refused, error=ruling.error)
+        params = ruling.params
         download_path = None
         if method in SETS_DOWNLOADS:
             connection.set_downloads = True
             context = params.get("browserContextId") if method.startswith("Browser.") else \
-                self._context_of(connection.targets.get(session))
+                self._context_of(connection.session_tabs.get(session))
             download_path = self.contexts.download_path(context)
         return guard(method, params, dialogs_answered=self.dialogs_answered, download_path=download_path)
 
     def _context_of(self, target: Optional[str]) -> Optional[str]:
         return self.control.tabs.get(target, {}).get("context_id") if self.control is not None and target else None
+
+    def _frame_context(self, frame: object) -> Optional[str]:
+        return self.control.context_of_frame(frame) if self.control is not None else None
 
     def _answered(self, connection: _Connection, method: str, params: dict, result: dict) -> None:
         """A context ``connection`` made leased to its user before it hears the answer, and one it disposed ended."""
@@ -432,7 +494,7 @@ class Relay:
         control."""
         if self.log is None:
             return None
-        target = connection.targets.get(session) if session != connection.session else None
+        target = connection.session_tabs.get(session) if session != connection.session else None
         if target is None and isinstance(params.get("targetId"), str):
             target = params["targetId"]
         acting = acts(method)
@@ -451,22 +513,52 @@ class Relay:
             guarded.append({"method": method, "did": GUARDED[verdict.action], "at": _now()})
 
     def _event(self, message: dict) -> None:
+        params = message.get("params") or {}
+        if message.get("method") in WITH_INFO:
+            self.target_contexts.saw(params.get("targetInfo"))
         connection = self._by_session.get(message.get("sessionId"))
         if connection is None:
             return
-        params = message.get("params") or {}
+        if message.get("sessionId") == connection.session and not self._hears(connection, message):
+            return
         if message.get("method") == "Target.attachedToTarget" and params.get("sessionId"):
             connection.sessions.add(params["sessionId"])
             self._by_session[params["sessionId"]] = connection
             if isinstance(target := (params.get("targetInfo") or {}).get("targetId"), str):
-                connection.targets[params["sessionId"]] = target
+                connection.session_tabs[params["sessionId"]] = target
         elif message.get("method") == "Target.detachedFromTarget" and params.get("sessionId"):
             connection.sessions.discard(params["sessionId"])
-            connection.targets.pop(params["sessionId"], None)
+            connection.session_tabs.pop(params["sessionId"], None)
             self._by_session.pop(params["sessionId"], None)
         if message["sessionId"] == connection.session:
             message = {key: value for key, value in message.items() if key != "sessionId"}
         self._put(connection, message)
+
+    def _hears(self, connection: _Connection, message: dict) -> bool:
+        """Whether ``connection`` hears an event on its browser session, as its scope says: never one about a session it
+        doesn't have, and a target it doesn't see that auto-attached to it let go."""
+        if connection.scope is None:
+            return True
+        method, params = message.get("method"), message.get("params") or {}
+        if method == "Target.detachedFromTarget":
+            return params.get("sessionId") in connection.sessions
+        heard, let_go = connection.scope.hears(method, params)
+        if let_go is not None:
+            self._spawn(self._let_go(connection.session, let_go, params.get("waitingForDebugger")))
+        return heard
+
+    async def _let_go(self, owner: str, session: str, waiting: object) -> None:
+        """A target auto-attached to the browser session ``owner`` as ``session`` that its connection doesn't see: told
+        to run when it waits for its debugger, so it isn't held, and detached."""
+        with contextlib.suppress(ConnectionError, DevToolsError):
+            if waiting:
+                await self.devtools.call("Runtime.runIfWaitingForDebugger", session_id=session)
+            await self.devtools.call("Target.detachFromTarget", {"sessionId": session}, session_id=owner)
+
+    def _spawn(self, work) -> None:
+        task = asyncio.ensure_future(work)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
 
     def _put(self, connection: _Connection, message: dict) -> None:
         """``message`` waiting to be sent to ``connection``'s client, which is closed instead, with what waited dropped,

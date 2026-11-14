@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -15,6 +17,10 @@ from agent_env.providers.sandbox_providers.sandbox_provider import reachable_url
 HEARTBEAT_KEY = "_heartbeat_fn"
 # context.metadata[ENTITY_IDS_KEY]: the run's task's Task.entity_ids, set by Task.run.
 ENTITY_IDS_KEY = "entity_ids"
+# The context.metadata keys whose entries name a deployed env by its id, each with the index of the path segment that
+# names it: env_skills is keyed by agent name, then env id.
+ENV_KEYED_METADATA = {"env_trigger_state": 1, "env_changes": 1, "env_trajectory": 1, "live_websites": 1,
+                      "env_skills": 2}
 
 
 def run_entity_id(metadata: dict, entity_id: str) -> str:
@@ -22,10 +28,36 @@ def run_entity_id(metadata: dict, entity_id: str) -> str:
     return (metadata.get(ENTITY_IDS_KEY) or {}).get(entity_id, entity_id)
 
 
+def context_path_segments(path: Any) -> list[str] | None:
+    """The keys and list indexes a path into a run's context walks, or None when ``path`` isn't one. A segment is
+    letters, digits, ``_`` and ``-`` after a ``.``, or any id in brackets: ``env_trigger_state[@local/x/crm].statuses``."""
+    if not isinstance(path, str) or not _CONTEXT_PATH.fullmatch(path):
+        return None
+    return [plain or bracketed for plain, bracketed in _CONTEXT_PATH_SEGMENT.findall(path)]
+
+
+def context_path(segments: list[str]) -> str:
+    """The path into a run's context that walks ``segments``: each that a dotted path can't hold in brackets."""
+    return "".join(_path_segment(segment, first=i == 0) for i, segment in enumerate(segments))
+
+
+def renamed_context_path(path: str, rename: Callable[[str], str | None]) -> str:
+    """``path`` with each segment ``rename`` gives another id for naming that id; ``path`` itself when it isn't a path
+    into a run's context or ``rename`` renames none of its segments."""
+    segments = context_path_segments(path) or []
+    renamed = [rename(segment) or segment for segment in segments]
+    return path if renamed == segments else context_path(renamed)
+
+
 class StepContextError(RuntimeError):
     """The run's context can't satisfy a step: something the step needs from an earlier step is missing, or
     something it would create is already there. Running the step again on the same context fails the same
     way, so a runner should not retry it."""
+
+
+class VerifierNotPassingError(RuntimeError):
+    """A verifier set to fail its task when its verdict isn't passing recorded one that isn't. Grading the same run
+    again could pass it, so a runner should not retry it."""
 
 _REDACTED_KEYS = {
     "litellm_api_key", "judge_litellm_api_key", "usersim_api_key", "remote_tokens", "cf_access_client_secret",
@@ -293,3 +325,14 @@ class TaskStepContext:
             agent_harness=data.get("agent_harness"),
             instance_id=data.get("instance_id"),
         )
+
+
+_PLAIN_SEGMENT = re.compile(r"[\w-]+")
+_CONTEXT_PATH = re.compile(r"(?:[\w-]+|\[[^\[\]]+\])(?:\.[\w-]+|\[[^\[\]]+\])*")
+_CONTEXT_PATH_SEGMENT = re.compile(r"\.?([\w-]+)|\[([^\[\]]+)\]")
+
+
+def _path_segment(segment: str, *, first: bool) -> str:
+    if not _PLAIN_SEGMENT.fullmatch(segment):
+        return f"[{segment}]"
+    return segment if first else f".{segment}"

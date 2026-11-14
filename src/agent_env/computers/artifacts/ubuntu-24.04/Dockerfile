@@ -1,13 +1,21 @@
 # The ubuntu-24.04 base computer: Ubuntu 24.04 with XFCE on Xvfb, D-Bus and AT-SPI, whose session user's home has a
 # desktop's standard folders (Documents, Downloads, ...). It starts as root: root's supervisord (root.conf) runs the clock
-# follower as its own user and the session's supervisord (supervisord.conf) as the session user, which runs every
-# session program. Composing a driver or an app onto it adds its services as programs in /etc/supervisor/conf.d. The
-# trust files agentenv adds are in /etc/agentenv from boot: ca.pem, empty until a deploy adds a CA, and ca-bundle.pem,
-# the public roots and those CAs.
+# follower and the egress proxy, each as its own user, and the session's supervisord (supervisord.conf) as the session
+# user, which runs every session program. Composing a driver or an app onto it adds its services as programs in
+# /etc/supervisor/conf.d. The trust files agentenv adds are in /etc/agentenv from boot: ca.pem, the CAs agentenv adds
+# (the egress proxy's from boot, a deploy's for its sites), and ca-bundle.pem, the public roots and those CAs.
 #
 # The universe clock (clock/): agent-env's libfaketime and its TLS shim, built in a stage of their own so no compiler is
 # left in the image, are preloaded into every process and fake only the session user's, from the clock page the
 # follower writes, which the session user can read but neither write nor replace.
+#
+# The egress proxy (egress/), on real time, which every session program goes out through, so a live site loads at any
+# universe date: built and tested in a stage of its own, so no Go toolchain is left in the image.
+FROM public.ecr.aws/docker/library/golang:1.26.11-bookworm@sha256:dc40a13b61304647ed7e5d581d246b86413dfc29d63c6d018310feb93cd98fc0 AS egress
+COPY egress/ /egress/
+RUN cd /egress && go vet ./... && go test -count=1 ./... \
+    && CGO_ENABLED=0 GOFLAGS=-mod=readonly go build -trimpath -ldflags=-s -o /out/egress .
+
 FROM public.ecr.aws/docker/library/ubuntu:24.04@sha256:24737cef17f4e22b1977df7d9a05e77c4e28b7da5b8911f8d8ccda136bf3573c AS clock
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         build-essential patch curl ca-certificates
@@ -22,19 +30,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         dbus dbus-x11 at-spi2-core xdg-user-dirs \
         supervisor tini \
         python3 python3-venv python3-tk \
-        fonts-dejavu-core locales tzdata ca-certificates procps \
+        fonts-dejavu-core locales tzdata ca-certificates libnss3-tools procps \
     && rm -rf /var/lib/apt/lists/* \
     && sed -i 's/^# *en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen && locale-gen \
     && userdel --remove ubuntu \
     && useradd --create-home --uid 1000 --shell /bin/bash user \
     && runuser -u user -- xdg-user-dirs-update \
     && useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin agentenv-clock \
+    && useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin agentenv-egress \
     && mkdir -p /etc/supervisor/conf.d /var/log/agentenv /run/agentenv /var/log/agentenv-root /run/agentenv-root \
-        /usr/local/lib/agentenv-clock /etc/agentenv/clock \
+        /usr/local/lib/agentenv-clock /etc/agentenv/clock /usr/local/lib/agentenv-egress \
     && chmod 0700 /var/log/agentenv-root /run/agentenv-root \
     && chown root:agentenv-clock /etc/agentenv/clock && chmod 0750 /etc/agentenv/clock \
     && touch /etc/agentenv/ca.pem \
     && cp /etc/ssl/certs/ca-certificates.crt /etc/agentenv/ca-bundle.pem \
+    && cp /etc/ssl/certs/ca-certificates.crt /usr/local/lib/agentenv-egress/roots.pem \
     && chown user:user /var/log/agentenv /run/agentenv
 COPY --from=clock /out/libfaketimeMT.so.1 /out/libtls_realtime.so /usr/local/lib/agentenv-clock/
 COPY clock/clockpage.py clock/clock-follower /usr/local/lib/agentenv-clock/
@@ -44,6 +54,14 @@ RUN sed -i -e "s/^AGENTENV_SESSION_UID=.*/AGENTENV_SESSION_UID=$(id -u user)/" \
     && chmod 0755 /usr/local/lib/agentenv-clock/clock-follower \
     && printf '%s\n' /usr/local/lib/agentenv-clock/libfaketimeMT.so.1 /usr/local/lib/agentenv-clock/libtls_realtime.so \
         > /etc/ld.so.preload
+COPY --from=egress /out/egress /usr/local/lib/agentenv-egress/egress
+COPY egress/agentenv-egress.sh /etc/profile.d/agentenv-egress.sh
+# Every Chromium build an app brings goes out through the egress proxy by a managed policy, however it's launched.
+COPY egress/chromium-policy.json /usr/local/lib/agentenv-egress/chromium-policy.json
+RUN for build in /etc/opt/chrome_for_testing /etc/chromium /etc/chromium-browser /etc/opt/chrome; do \
+        install -D -m 0644 /usr/local/lib/agentenv-egress/chromium-policy.json \
+            "$build/policies/managed/agentenv-egress.json"; \
+    done
 COPY root.conf /etc/supervisor/root.conf
 COPY supervisord.conf /etc/supervisor/supervisord.conf
 COPY xfwm4.xml /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml

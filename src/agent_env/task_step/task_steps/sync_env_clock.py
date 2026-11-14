@@ -4,7 +4,8 @@ Arms the clock (set_time) and reads the gateway's server-reachable env_get_time_
 stored env card declares clock/v1, then invokes sync_time on each backing server, MCP server or website, the
 env card lists (``legacy_protocol.backing_servers``) whose own card advertises it, at the route that card gives.
 Non-advertisers are skipped when tolerate_missing_sync_time (default True), and websites always. Place right
-before prompt_agent so the virtual timeline starts at agent-start.
+before prompt_agent so the virtual timeline starts at agent-start; when setup needs the clock armed, arm it at rate 0
+and start it with set_env_clock_rate right before prompt_agent.
 """
 
 from __future__ import annotations
@@ -181,14 +182,14 @@ class SyncEnvClockTaskStep(TaskStep):
             if tolerate:
                 logger.info(f"sync_env_clock: {service} does not advertise {EXT_CLOCK_URI}; skipping")
                 return {"synced": False, "reason": "not_advertised"}
-            raise RuntimeError(f"{service} does not advertise {EXT_CLOCK_URI}")
+            raise StepContextError(f"{service} does not advertise {EXT_CLOCK_URI}")
         if not env_get_time_url:
             raise RuntimeError(f"gateway did not expose env_get_time_url; cannot sync {service}")
         params = {"env_get_time_url": env_get_time_url}
         if self.timezone is not None:
             method = protocol_v1.find_extension_method(card, EXT_CLOCK_URI, "sync_time") or {}
             if "timezone" not in ((method.get("request") or {}).get("properties") or {}):
-                raise RuntimeError(f"{service} advertises {EXT_CLOCK_URI} but its sync_time takes no timezone; "
+                raise StepContextError(f"{service} advertises {EXT_CLOCK_URI} but its sync_time takes no timezone; "
                                    f"rebuild its image or drop timezone={self.timezone!r} from the task")
             params["timezone"] = self.timezone
         result = await protocol_v1.invoke_extension(base_url, card, EXT_CLOCK_URI,

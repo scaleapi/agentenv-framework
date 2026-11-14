@@ -73,7 +73,7 @@ time.sleep(float(sys.argv[1]))
 # The browser's pid and argv, and how many TCP sockets anything in its session listens on: its oldest process with
 # agentenv's pipe flag, whose title Chromium rewrites as one line.
 BROWSER_PROCESS = """import glob, json, os, subprocess
-pid = int(subprocess.run(["pgrep", "-o", "-f", "--", "--remote-debugging-pipe"], capture_output=True, text=True,
+pid = int(subprocess.run(["pgrep", "-o", "-f", "--", "[-]-remote-debugging-pipe"], capture_output=True, text=True,
                          check=True).stdout)
 listening = set()
 for table in ("/proc/net/tcp", "/proc/net/tcp6"):

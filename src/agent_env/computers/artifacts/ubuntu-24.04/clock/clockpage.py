@@ -47,11 +47,19 @@ def check(seq, universe_ns, anchor_ns, rate, armed, generation, mono_universe_ns
             ^ (mono_universe_ns & MASK) ^ (mono_anchor_ns & MASK) ^ 0x9E3779B97F4A7C15) & MASK
 
 
+def encode(seq, universe_ns, anchor_ns, rate, armed, generation, mono_universe_ns, mono_anchor_ns) -> bytes:
+    """The page's bytes for these fields, its check among them: what every write writes and every reader checks,
+    agent-env's libfaketime and the egress proxy (its egress/testdata pins them)."""
+    return LAYOUT.pack(MAGIC, VERSION, seq, universe_ns, anchor_ns, rate, armed, 0, generation,
+                       check(seq, universe_ns, anchor_ns, rate, armed, generation, mono_universe_ns, mono_anchor_ns),
+                       mono_universe_ns, mono_anchor_ns)
+
+
 def open_page() -> mmap.mmap:
     try:
         fd = os.open(PAGE, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o644)
         os.ftruncate(fd, LAYOUT.size)
-        os.write(fd, LAYOUT.pack(MAGIC, VERSION, 0, 0, 0, 1.0, 0, 0, 0, check(0, 0, 0, 1.0, 0, 0, 0, 0), 0, 0))
+        os.write(fd, encode(0, 0, 0, 1.0, 0, 0, 0, 0))
     except FileExistsError:
         fd = os.open(PAGE, os.O_RDWR)
         if os.fstat(fd).st_uid != os.getuid():
@@ -102,9 +110,7 @@ def write(armed: int, universe: float, rate: float, anchor: float) -> dict:
     continued = armed and generation > 1 and not dead and 0 < old_now - new_now < CONTINUITY_NS
     if continued:
         universe_ns, anchor_ns = old_now, now_rt
-    body = LAYOUT.pack(MAGIC, VERSION, seq + 2, universe_ns, anchor_ns, rate, armed, 0, generation,
-                       check(seq + 2, universe_ns, anchor_ns, rate, armed, generation, now_mono, now_mono),
-                       now_mono, now_mono)
+    body = encode(seq + 2, universe_ns, anchor_ns, rate, armed, generation, now_mono, now_mono)
     m[16:] = body[16:]
     m[8:16] = struct.pack("<Q", seq + 2)
     _wake(m)
@@ -131,7 +137,7 @@ def create(owner: str) -> None:
     fd = os.open(PAGE, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     try:
         os.fchown(fd, user.pw_uid, user.pw_gid)
-        os.write(fd, LAYOUT.pack(MAGIC, VERSION, 0, 0, 0, 1.0, 0, 0, 0, check(0, 0, 0, 1.0, 0, 0, 0, 0), 0, 0))
+        os.write(fd, encode(0, 0, 0, 1.0, 0, 0, 0, 0))
         os.fchmod(fd, 0o644)
     finally:
         os.close(fd)

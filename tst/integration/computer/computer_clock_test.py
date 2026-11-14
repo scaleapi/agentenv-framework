@@ -6,13 +6,11 @@ back within 3 s and acknowledges the next advance; and a reset brings the page a
 current version. Needs Docker and the local registry on localhost:5000."""
 
 import asyncio
-import subprocess
 import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
 import pytest
-from agentenv_protocol.computer.clock import FOLLOWER, FOLLOWER_USER
 
 from agent_env.env import Env
 from agent_env.env.env import DeployedEnv
@@ -24,7 +22,7 @@ from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
 from agent_env.task_step.task_steps.sync_env_clock import SyncEnvClockTaskStep
-from tst.integration.computer.conftest import CONTAINER, FOLLOWER_BACK_S, kill_follower, multi_env
+from tst.integration.computer.conftest import CONTAINER, FOLLOWER_BACK_S, computer_container, kill_follower, multi_env
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
@@ -47,7 +45,7 @@ async def test_a_multi_envs_computer_follows_its_gateways_clock_through_arming_a
             [deployed] = (await step.execute(context)).deployed_envs
             own = DeployedEnv.from_dict(deployed.child_envs["desktop"])
             kept = own.metadata["computer"]["clock"]
-            container = _container(own.sandbox_id)
+            container = computer_container(own.sandbox_id)
 
             universe = datetime.now(timezone.utc) - timedelta(days=182)
             await SyncEnvClockTaskStep(id="clock", version=None, env_id=office.id,
@@ -105,18 +103,3 @@ async def _session_offset(computer) -> float:
     ran = await inside.run(computer, ["date", "+%s.%N"], timeout_s=30)
     assert ran["exit_code"] == 0, ran
     return float(ran["stdout"]) - time.time()
-
-
-def _follower(container: str) -> str:
-    return subprocess.run(["docker", "exec", container, "pgrep", "-u", FOLLOWER_USER, "-f", FOLLOWER],
-                          capture_output=True, text=True).stdout.strip()
-
-
-def _container(sandbox_id: str) -> str:
-    """The computer's container, the one of its sandbox's (each named for the sandbox) that runs the follower."""
-    listed = subprocess.run(["docker", "ps", "-q", "--filter", f"name={sandbox_id}"], capture_output=True, text=True,
-                            check=True).stdout.split()
-    for container in listed:
-        if _follower(container):
-            return container
-    raise AssertionError(f"no container of sandbox {sandbox_id} runs the follower: {listed}")

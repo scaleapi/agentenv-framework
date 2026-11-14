@@ -220,6 +220,36 @@ def test_an_id_a_bundle_named_under_its_task_is_renamed_so_the_import_names_it_u
     assert (steps[1]["cli_artifact_id"], steps[2]["cli_artifact_ids"]) == ("crm-cli", ["crm-cli"])
 
 
+def test_a_context_fact_names_an_entity_as_its_folder_does_when_the_folder_isnt_named_as_its_id(store):
+    other, old = "@local/~/elsewhere/crm-env", "@local/~/old/triage"
+    judge = {**STEPS[4], "context_facts_for_judge": {"mine": "env_trigger_state.crm-env.statuses.wf-1",
+                                                     "other": f"env_trigger_state[{other}].statuses.wf-1"}}
+    with namespace_routing():
+        MCPServerEnv.put(id=other, docker_image_artifact=context_image(store, "crm-image"), environment_name="crm")
+        _task(old, [STEPS[0], {**STEPS[0], "id": "env2", "env_id": other}, STEPS[2], judge])
+        imported = import_task(old, store / "again")
+    steps = _steps(imported.root, "triage")
+
+    assert (steps[0]["env_id"], steps[1]["env_id"]) == ("crm-env", "crm-env-2")
+    assert steps[3]["context_facts_for_judge"] == {"mine": "env_trigger_state.crm-env.statuses.wf-1",
+                                                   "other": "env_trigger_state.crm-env-2.statuses.wf-1"}
+
+
+def test_a_credential_masked_in_a_context_path_stays_masked_when_the_paths_env_is_renamed(store):
+    other, old = "@local/~/elsewhere/crm-env", "@local/~/old/triage"
+    leak = f"env_trigger_state[{other}][https://user:hunter2@wiki.example.com/x]"
+    judge = {**STEPS[4], "context_facts_for_judge": {"leak": leak}}
+    with namespace_routing():
+        MCPServerEnv.put(id=other, docker_image_artifact=context_image(store, "crm-image"), environment_name="crm")
+        _task(old, [STEPS[0], {**STEPS[0], "id": "env2", "env_id": other}, STEPS[2], judge])
+        imported = import_task(old, store / "again")
+
+    written = (imported.root / "tasks" / "triage.json").read_text()
+    assert "hunter2" not in written
+    assert _steps(imported.root, "triage")[3]["context_facts_for_judge"]["leak"].startswith(
+        "env_trigger_state.crm-env-2[")
+
+
 def test_a_renamed_output_is_numbered_when_another_output_or_a_store_reference_has_its_name(store):
     old = "@local/~/old/triage"
     with namespace_routing():

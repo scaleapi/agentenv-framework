@@ -1,0 +1,3 @@
+# browser-use's own environment, beside the agent's: it pins every dependency exactly, mcp 2 among them, which the
+# protocol's agent extra can't share.
+browser-use==1.0.3

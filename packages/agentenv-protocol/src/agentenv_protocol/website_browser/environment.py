@@ -27,12 +27,14 @@ from ..computer import app as computer_app
 from ..computer import app_data
 from ..computer.app import SOCKET, agent_acted, forget_agent_acted
 from ..computer.dataplane import file_parts
-from ..computer.errors import DeviceUnavailable, InvalidArgument
+from ..computer.errors import DeviceUnavailable, InvalidArgument, PermissionDenied, TargetUnavailable
 from ..tool_context import DEFAULT_ROLE, ROLE_HEADER, normalize_role
 from ..transfers import WriteNamespaceGrant
 from ..types import METHOD_ADD, RPC_PATH, EnvironmentExtension, IntakeDeclaration, IntakeFormat, intake_extension
+from ..website.readiness import names_host
 from . import data
 from .contexts import CONTEXTS, TASK, Contexts, label_problem
+from .scope import Scope
 from .control import AGENT, DOWNLOADS, EXIT, LIVE_START_TAB_TIMEOUT_S, LOADED, STOP, UPLOADS, BrowserControl, _now
 from .devtools import PIPE_IN, PIPE_OUT, DevToolsError, DevToolsPipe
 from .recording import BROWSER_RECORDING, MAX_DURATION_S, MAX_FRAMES, BrowserRecordings
@@ -168,6 +170,7 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         self.cdp_tokens = Tokens(SOCKET.parent / "cdp-tokens.json")
         self.relay = Relay(self.devtools, dialogs_answered=self.settings.dialogs != AGENT, log=self.log,
                            control=self.control, contexts=self.contexts)
+        self.contexts.on_end.append(self._lease_ended)
         #: Its recordings: frames of the tab an agent last acted in, and its log, uploaded under each one's grant.
         self.recordings = BrowserRecordings(self.log, self.control)
         self.devtools.on_close(self._pipe_closed)
@@ -350,6 +353,10 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         "caller's agent reaches the env, when it names one, else at the address the call reached the browser at, "
         "with a token agentenv mints in its path: each connection to it gets its own browser-level session behind a "
         "guard, and record lists them as cdp_connections, each with the commands the guard refused or changed. "
+        "Naming a lease's label as context, cdp returns an address scoped to it, for a user it's granted to: its "
+        "connections see that lease as the browser's default context, its targets alone, pages, iframes and workers, "
+        "with the contexts their user made, and what they open, set or download lands in it; the address ends with "
+        "the lease. An address with no context sees the default context and its user's own, not the leases. "
         "sites/set hands it the env's own sites, by name and domains: a start tab on one must load, its document's "
         "status 2xx, or its launch counts it failed, while one on any other site is waited on 30 s at most. record "
         "keeps each launch's start_tabs: the URL asked for and ended on, the status, any network error, the load time, "
@@ -429,15 +436,27 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         return {"recordings": await self.recordings.end_all(reason)}
 
     @extension(BROWSER, op="cdp")
-    async def browser_cdp(self, user: str, request: Request, origin: Optional[str] = None) -> dict:
+    async def browser_cdp(self, user: str, request: Request, origin: Optional[str] = None,
+                          context: Optional[str] = None) -> dict:
         """``user``'s CDP address once the browser's ready, the same one each time it's asked for, as the server that
         minted it keeps it: under ``origin``, where the caller's agent reaches the env, when the caller names it, as a
         deploy names the env's other addresses, since a tunnel in front of the env may not say how it was reached;
-        else at the address this call reached the browser at."""
+        else at the address this call reached the browser at. Scoped to the lease ``context`` when it names one,
+        which must be granted to ``user``, and which the address ends with."""
         base = under(_origin(origin), request) if origin is not None else reached(request)
         await self._until_ready()
-        address = self.cdp_tokens.mint(user, base, named=origin is not None)
+        if context is not None:
+            if (lease := self.contexts.get(context)) is None:
+                raise TargetUnavailable(f"no context {context!r} is leased; contexts/list names the leased ones")
+            if user not in lease.grants:
+                raise PermissionDenied(f"the context {context!r} isn't granted to {user!r}: contexts/grant grants it")
+        address = self.cdp_tokens.mint(user, base, named=origin is not None, context=context)
         return {"http_url": address.http_url, "ws_url": address.ws_url}
+
+    def _lease_ended(self, lease: Any) -> None:
+        """A lease ended: the addresses scoped to it end with it, and their connections are closed."""
+        self.cdp_tokens.revoke(lease.label)
+        self.relay.lease_ended(lease.id)
 
     def served_asgi(self, asgi: Any) -> Any:
         return _LoggedOps(super().served_asgi(asgi), self)
@@ -466,7 +485,8 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
                     "WebKit-Version": version.get("revision"),
                     "webSocketDebuggerUrl": address.ws_url if address.named else
                     f"{websocket_form(reached(request))}{ROUTE}{token}/devtools/browser"})
-            tabs = await self.control.tab_list()
+            tabs = [tab for tab in await self.control.tab_list(every=True)
+                    if self._sees(address, self.control.tabs.get(tab["id"], {}).get("context_id"))]
         except (ConnectionError, DevToolsError, asyncio.TimeoutError) as e:
             return JSONResponse({"error": f"the browser isn't answering: {e}"}, status_code=503)
         return JSONResponse([{"id": tab["id"], "type": "page", "title": tab["title"], "url": tab["url"],
@@ -477,7 +497,15 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
         if address is None:
             await websocket.close(code=1008)
             return
-        await self.relay.serve(websocket, address.user)
+        await self.relay.serve(websocket, address.user, address.context)
+
+    def _sees(self, address: Any, context_id: Optional[str]) -> bool:
+        """Whether an address sees a tab in the browser context ``context_id``, as a connection to it does."""
+        lease = self.contexts.get(address.context) if address.context is not None else None
+        if address.context is not None and lease is None:
+            return False
+        return Scope(self.contexts, self.relay.target_contexts, address.user, lease.id if lease else None).sees(
+            context_id)
 
     async def _until_ready(self) -> None:
         """Back once it's ready, as ``computer-app/v1``'s ``ready`` says, or DeviceUnavailable after its ready
@@ -898,15 +926,7 @@ def _read_sites() -> list[SiteNames]:
 def _site_of(url: str, sites: list[SiteNames]) -> Optional[str]:
     """The name of the env's site among ``sites`` that serves ``url``'s host, None for any other."""
     host = (urlsplit(url).hostname or "").rstrip(".")
-    return next((site.name for site in sites if any(_matches(domain.lower(), host) for domain in site.domains)), None)
-
-
-def _matches(pattern: str, host: str) -> bool:
-    """Whether ``host`` is the name ``pattern`` names: itself, or for ``*.example.com`` one label more."""
-    if pattern.startswith("*."):
-        head, dot, rest = host.partition(".")
-        return bool(head) and bool(dot) and rest == pattern[2:]
-    return host == pattern
+    return next((site.name for site in sites if any(names_host(domain.lower(), host) for domain in site.domains)), None)
 
 
 def _refuse_failed(tabs: list[dict]) -> None:

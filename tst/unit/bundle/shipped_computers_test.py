@@ -47,8 +47,11 @@ def test_a_task_naming_ubuntu_24_04_writes_the_shipped_base_over_its_folders_ima
     built = next(call["build"] for call in builds if call["build"][2] == image.image_name)
     assert built[1] == ["Dockerfile", "artifact.toml", *(f"clock/{name}" for name in (
         "COPYING", "README.md", "agentenv_clock_page.c", "agentenv_clock_waits.c", "build.sh", "clock-follower",
-        "clock.conf", "clockpage.py", "libfaketime.patch", "tls_realtime.c")), "root.conf", "start-desktop",
-                        "supervisord.conf", "xfwm4.xml"]
+        "clock.conf", "clockpage.py", "libfaketime.patch", "tls_realtime.c")), *(f"egress/{name}" for name in (
+        "README.md", "agentenv-egress.sh", "boot.go", "boot_test.go", "chromium-policy.json", "clock.go",
+        "clock_test.go", "go.mod", "go.sum", "hello.go", "hello_test.go", "leaves.go", "main.go", "proxy.go",
+        "proxy_test.go", "testdata/page-armed.hex", "testdata/page-unarmed.hex", "upstream.go")), "root.conf",
+                        "start-desktop", "supervisord.conf", "xfwm4.xml"]
     assert computer.metadata["validated_images"]["container"]["arm64"]["status"] == "uninspected"
 
 

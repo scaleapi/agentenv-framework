@@ -1,6 +1,6 @@
-"""Serves Browser Use Pi as an A2A agent: each turn runs ``agent.mjs`` once on the browser the task gives it through
-cdp-config/v1, and a context's turns share one conversation through a saved history file. ``AGENT_CARD`` is what
-agent-env's install/v1 reads."""
+"""Serves browser-use 1.0 as an A2A agent: each turn runs ``agent.py`` once, in browser-use's own environment, on the
+browser the task gives it through cdp-config/v1, and a context's turns share one conversation through a saved history
+file. ``AGENT_CARD`` is what agent-env's install/v1 reads."""
 
 import asyncio
 import contextlib
@@ -28,18 +28,24 @@ from agentenv_protocol.a2a_agent import (
 
 HERE = Path(__file__).parent
 HOME = Path(os.environ.get("BROWSER_USE_A2A_HOME", Path.home() / ".browser-use-a2a"))
-# Leaves the agent time to deliver what it has before the turn's deadline kills it.
-DELIVERY_SECONDS = 30
+#: The Python of browser-use's own environment, whose pins (mcp 2, among others) the protocol's can't share.
+PYTHON = os.environ.get("BROWSER_USE_PYTHON", "/opt/browser-use/bin/python")
+#: How much of the turn's deadline browser-use's own run leaves: its forced delivery when it runs out, and its stop.
+DELIVERY_SECONDS = 100
 STOP_SECONDS = 5
-# Streamed token deltas; each message's end event carries the whole message.
-_UNRECORDED_EVENTS = frozenset({"message_update", "tool_execution_update"})
+#: browser-use and its browser daemon report usage to their makers unless told not to.
+_PRIVATE_ENV = {"ANONYMIZED_TELEMETRY": "false", "BH_TELEMETRY": "0"}
 
 
 class BrowserUseConfig(AgentConfig):
     model: str | None = None
-    effort: Literal["minimal", "low", "medium", "high", "xhigh"] | None = None
+    #: browser-use's reasoning effort, on a Claude model its adaptive thinking's; unset, browser-use's own, medium.
+    effort: Literal["low", "medium", "high"] | None = None
+    #: browser-use's mode: ``ultrafast`` adds its accessibility-tree helpers; unset, its own, ``default`` here.
+    mode: Literal["default", "ultrafast"] | None = None
     system_prompt: str | None = None
-    max_steps: int = 40
+    #: Model requests a turn may make, its delivery included; unset, browser-use's own, 100.
+    max_steps: int | None = None
     # The cdp-config endpoint to drive, the turn's only one when unnamed, and which of its addresses to connect by: the
     # browser's WebSocket, or its http_url to discover that from.
     browser: str | None = None
@@ -50,20 +56,20 @@ class BrowserUseConfig(AgentConfig):
 @a2a_agent(
     identity=AgentIdentity(
         name="browser-use",
-        description="Browser Use Pi: drives a real browser over CDP from a persistent JavaScript REPL.",
-        version="1.0.0",
+        description="browser-use 1.0: drives a real browser over CDP from a persistent Python REPL.",
+        version="2.0.0",
         input_modes=("text",),
     ),
     config=BrowserUseConfig,
-    config_description="Configure Browser Use Pi: model, effort, system prompt, step budget and browser.",
+    config_description="Configure browser-use: model, effort, mode, system prompt, step budget and browser.",
     extensions=(
         MCP_CONFIG_V1,
         CDP_CONFIG_V1,
-        enable(TRAJECTORY_V1, live=True, description="Browser Use Pi's agent events, live."),
+        enable(TRAJECTORY_V1, live=False, description="browser-use's messages, each turn's when it ends."),
     ),
 )
 class BrowserUseAgent(AgentEnvAgent):
-    def __init__(self, command: tuple[str, ...] = ("node", str(HERE / "agent.mjs"))) -> None:
+    def __init__(self, command: tuple[str, ...] = (PYTHON, str(HERE / "agent.py"))) -> None:
         self.command = command
 
     async def run(self, request: TaskRequest[BrowserUseConfig]) -> TaskResult:
@@ -74,10 +80,10 @@ class BrowserUseAgent(AgentEnvAgent):
         # With no browser from the task the turn fails closed, so the agent never drives one of its own.
         endpoint = request.cdp_endpoint(config.browser)
         if endpoint["headers"]:
-            # Browser Use Pi connects with the address alone, so a browser that needs headers isn't reached without them.
+            # browser-use connects with the address alone, so a browser that needs headers isn't reached without them.
             return TaskResult.failure(
                 "browser_use.cdp_headers",
-                f"the browser needs headers ({', '.join(sorted(endpoint['headers']))}), which Browser Use can't send",
+                f"the browser needs headers ({', '.join(sorted(endpoint['headers']))}), which browser-use can't send",
                 error_type="infra_error")
         session = request.session_ref or hashlib.sha256(request.context_id.encode()).hexdigest()[:32]
         workspace = request.workspace or HOME / "workspaces" / session
@@ -86,26 +92,26 @@ class BrowserUseAgent(AgentEnvAgent):
             "prompt": "\n\n".join(part.text for part in request.parts if isinstance(part, TextPart)),
             "model": model,
             "effort": config.effort,
+            "mode": config.mode,
             "systemPrompt": config.system_prompt,
-            "maxSteps": config.max_steps,
-            "timeoutMs": max(config.timeout_seconds - DELIVERY_SECONDS, 1) * 1000,
+            "max_steps": config.max_steps,
+            "timeout": max(config.timeout_seconds - DELIVERY_SECONDS, 1),
             "cdpUrl": endpoint["ws_url"] if config.connect_by == "ws" else endpoint["http_url"],
             "mcpServers": {name: {"url": s["url"], "headers": s.get("headers") or {}} for name, s in request.mcp_servers.items()},
             "workspace": str(workspace),
-            # Browser Use Pi refuses a history saved under another model, so a model change starts a new conversation.
+            # A history holds the model's signed thinking, which another model refuses, so a model change starts anew.
             "historyFile": str(HOME / "sessions" / f"{session}-{hashlib.sha256(model.encode()).hexdigest()[:8]}.json"),
         }
         (HOME / "sessions").mkdir(parents=True, exist_ok=True)
-        request.trajectory.set_format("browser-use-pi-events/1")
+        request.trajectory.set_format("browser-use-messages/1")
 
         process = await asyncio.create_subprocess_exec(
             *self.command,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            start_new_session=True, limit=64 * 1024 * 1024,
+            env={**os.environ, **_PRIVATE_ENV}, start_new_session=True, limit=256 * 1024 * 1024,
         )
         stderr = asyncio.create_task(process.stderr.read())
         result = None
-        tool_calls = 0
         try:
             async with asyncio.timeout(config.timeout_seconds):
                 process.stdin.write(json.dumps(turn).encode())
@@ -114,19 +120,14 @@ class BrowserUseAgent(AgentEnvAgent):
                     try:
                         message = json.loads(line)
                     except ValueError:
-                        continue  # output of agent.mjs' libraries, not one of its own lines
-                    if not isinstance(message, dict):
-                        continue
-                    if message.get("type") == "result":
+                        continue  # output of browser-use's libraries, not one of agent.py's lines
+                    if isinstance(message, dict) and message.get("type") == "result":
                         result = message["result"]
-                    elif message.get("type") == "event" and message["event"]["type"] not in _UNRECORDED_EVENTS:
-                        request.trajectory.append(message["event"])
-                        tool_calls += message["event"]["type"] == "tool_execution_end"
                 await process.wait()
         except TimeoutError:
             return TaskResult.failure("browser_use.timeout", f"no answer within {config.timeout_seconds}s")
         finally:
-            # On a timeout or a cancel, the agent stops its browser, then goes with everything it started.
+            # On a timeout or a cancel, the agent stops its browser daemon, then goes with everything it started.
             if process.returncode is None:
                 with contextlib.suppress(ProcessLookupError):
                     os.killpg(process.pid, signal.SIGTERM)
@@ -137,8 +138,12 @@ class BrowserUseAgent(AgentEnvAgent):
                 await process.wait()
 
         if result is None:
-            error = (await stderr).decode(errors="replace")[-4000:] or f"agent.mjs exited {process.returncode}"
+            error = (await stderr).decode(errors="replace")[-4000:] or f"agent.py exited {process.returncode}"
             return TaskResult.failure("browser_use.crashed", error, error_type="infra_error")
+        tool_calls = 0
+        for message in result["messages"]:
+            request.trajectory.append(message)
+            tool_calls += sum(part.get("part_kind") == "tool-call" for part in message.get("parts") or [])
         usage = result["usage"]
         builder = TaskResult.builder()
         if result["status"] == "completed":
@@ -146,14 +151,16 @@ class BrowserUseAgent(AgentEnvAgent):
         else:
             builder.failed(f"browser_use.{result['status']}", result.get("error") or result["status"])
         return (
-            builder.add_text(result["text"] or result["status"])
+            builder.add_text(result["text"] or result.get("error") or result["status"])
             .session_ref(session)
             .usage(Usage(
                 tool_call_count=tool_calls,
                 input_tokens=usage["input"],
                 output_tokens=usage["output"],
-                total_tokens=usage["totalTokens"],
-                provider_details={"steps": result["steps"], "model": result["model"]},
+                total_tokens=usage["input"] + usage["output"],
+                provider_details={"steps": result["steps"], "model": result["model"], "requests": usage["requests"],
+                                  "cache_read_tokens": usage["cache_read"], "cache_write_tokens": usage["cache_write"],
+                                  "cost_usd": result.get("cost_usd"), "success": result.get("success")},
             ))
             .build()
         )

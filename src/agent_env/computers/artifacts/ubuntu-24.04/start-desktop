@@ -1,9 +1,9 @@
 #!/bin/sh
 # The base's start, with the settings a deploy passes as AGENTENV_SETTING_<NAME>, their defaults artifact.toml's. init,
 # as root at the computer's start, sets the time zone for every program (docker exec's included), makes what the
-# session must not touch (the clock page and file, the clock user's from their first byte), then starts root's
-# supervisord (root.conf), which runs the clock follower as its own user and the session's supervisord as the session
-# user. That one runs xvfb at the resolution, and with-x runs a program, the XFCE session first, once X answers.
+# session must not touch (the clock page and file, the clock user's from their first byte; the egress proxy's CA, its
+# key the egress user's alone, trusted everywhere), then starts root's supervisord (root.conf), which runs the clock
+# follower and the egress proxy, each as its own user, and the session's supervisord as the session user. That one runs xvfb at the resolution, and with-x runs a program, the XFCE session first, once X answers.
 set -eu
 resolution="${AGENTENV_SETTING_RESOLUTION:-1280x800}"
 width="${resolution%%x*}" height="${resolution#*x}"
@@ -18,13 +18,16 @@ case "${1:-}" in
         ln -sfn "/usr/share/zoneinfo/$timezone" /etc/localtime && echo "$timezone" > /etc/timezone
         install -d -o agentenv-clock -g agentenv-clock -m 0755 /run/agentenv-clock
         python3 -I /usr/local/lib/agentenv-clock/clockpage.py create agentenv-clock
+        /usr/local/lib/agentenv-egress/egress boot > /var/log/agentenv-root/egress-boot.log 2>&1 \
+            || { cat /var/log/agentenv-root/egress-boot.log >&2; echo "the egress proxy's boot failed" >&2; exit 2; }
         exec /usr/bin/supervisord -c /etc/supervisor/root.conf
         ;;
     xvfb)
         # supervisord runs one X at a time, so a lock here is one a killed X left, and X refuses to start while the pid
         # it names is taken, which after a restart it often is.
         rm -f "/tmp/.X${DISPLAY#:}-lock"
-        exec Xvfb "$DISPLAY" -screen 0 "${resolution}x24" -nolisten tcp -ac
+        # No screensaver and no DPMS: their timeouts run on real time, and would blank an unattended screen.
+        exec Xvfb "$DISPLAY" -screen 0 "${resolution}x24" -nolisten tcp -ac -s 0 -dpms
         ;;
     with-x)
         shift
