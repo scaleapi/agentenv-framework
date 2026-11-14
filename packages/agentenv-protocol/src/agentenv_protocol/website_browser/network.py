@@ -39,6 +39,8 @@ HAR_FILE = "network.har"
 #: How many lines, and how many of their bytes, one read returns at most.
 READ_LIMIT = 500
 READ_BYTES = 32 << 20
+#: A line number past any line's: a read after it returns no lines, but its mark moves on to the last one written.
+PAST_EVERY_SEQ = 1 << 62
 #: How much of an answer's body, and of a request's, an entry keeps once decoded; decoding stops there.
 DECODED_LIMIT, REQUEST_DECODED_LIMIT = 1 << 20, 10 << 20
 #: A ``charset`` in a ``Content-Type``.
@@ -97,7 +99,7 @@ class NetworkLog:
 
     def last_seq(self) -> int:
         """The number of the last line written so far, 0 before any: read on from where the last read ended."""
-        self.read(after=1 << 62, limit=1)
+        self.read(after=PAST_EVERY_SEQ, limit=1)
         return self._mark[0]
 
     def every_line(self) -> list[dict]:
