@@ -149,7 +149,11 @@ def _otel_events(spans: list[dict]) -> list[dict]:
             _settle(call, output, (span.get("status") or {}).get("status_code") == "ERROR")
             timed.append((start, i, call))
             continue
-        text = _span_text(span.get("attributes") or {})
+        attrs = span.get("attributes") or {}
+        thinking = _span_thinking(attrs)
+        if thinking:
+            timed.append((start, i, {"type": "thinking", "text": thinking}))
+        text = _span_text(attrs)
         if text:
             timed.append((start, i, {"type": "text", "text": text}))
     timed.sort(key=lambda t: (t[0], t[1]))
@@ -170,10 +174,21 @@ def _span_text(attrs: dict) -> str:
     return "\n".join(t for t in texts if t.strip())
 
 
+def _span_thinking(attrs: dict) -> str:
+    """A GenAI ``chat`` span's thinking: its completion's ``thinking`` blocks (Anthropic's shape) that have text. A
+    model that leaves its thinking out (an empty block, a signature only) has none."""
+    if attrs.get("gen_ai.operation.name") != "chat":
+        return ""
+    completion = parse_json_attr(attrs.get("gen_ai.completion", ""))
+    content = completion.get("content") if isinstance(completion, dict) else None
+    return "\n".join(b["thinking"] for b in content or []
+                     if isinstance(b, dict) and b.get("type") == "thinking" and str(b.get("thinking") or "").strip())
+
+
 # ---- Claude Code stream-json -----------------------------------------------------------------------------------------
 def _claude_code_events(items: list[dict]) -> list[dict]:
-    """Assistant text and tool calls paired with their results by ``tool_use_id``; the init event's tool list,
-    thinking signatures, token counts and ``tool_use_result`` (a copy of the result) are left out. A subagent's events
+    """Assistant text, its thinking (when the CLI recorded any; a block with only a signature has none) and tool calls
+    paired with their results by ``tool_use_id``; the init event's tool list, thinking signatures, token counts and ``tool_use_result`` (a copy of the result) are left out. A subagent's events
     carry ``subagent`` (the tool call that started it)."""
     events: list[dict] = []
     calls: dict[str, dict] = {}
@@ -188,6 +203,8 @@ def _claude_code_events(items: list[dict]) -> list[dict]:
                     continue
                 if block.get("type") == "text" and (block.get("text") or "").strip():
                     events.append({"type": "text", "text": block["text"], **tag})
+                elif block.get("type") == "thinking" and (block.get("thinking") or "").strip():
+                    events.append({"type": "thinking", "text": block["thinking"], **tag})
                 elif block.get("type") == "tool_use":
                     call = {**_call(block.get("name", ""), block.get("id"), block.get("input")), **tag}
                     calls[block.get("id")] = call
