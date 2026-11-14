@@ -32,10 +32,13 @@ DAY = 86400
 #: rate until the next jump, so a modest rate keeps a busy runner's late follower well inside ``MAX_SKEW_S``.
 RATE = 10
 #: How far the session's clock may be from the gateway's: the follower maps the gateway's clock exactly, so this is
-#: room for the gateway's state read from here, not for the computer.
+#: room for reading the two, not for the computer.
 MAX_SKEW_S = 1.0
-#: The widest a reading's bracket of real time may be; one wider is taken again.
-BRACKET_S = 0.5
+#: How far, in universe seconds, a reading's bracket of real time may leave it: half the bracket at the clock's rate.
+#: The gateway's reading and the computer's each get this much, together well inside ``MAX_SKEW_S``, and a reading
+#: whose bracket is wider is taken again.
+READING_S = 0.25
+ATTEMPTS = 5
 #: Inside the computer: real time, the session's time, real time again, each a fresh ``date``, the first and last
 #: started on real time (``AGENTENV_REAL_TIME``).
 BRACKET = ('r1=$(AGENTENV_REAL_TIME=1 date +%s.%N); u=$(date +%s.%N); r2=$(AGENTENV_REAL_TIME=1 date +%s.%N); '
@@ -72,9 +75,9 @@ async def test_a_multi_envs_computer_keeps_within_a_second_of_its_gateways_clock
                          virtual_seconds_per_real_second=1)
             skews["a month back"] = await _skew(deployed, own)
             await _write(deployed, "set_rate", virtual_seconds_per_real_second=RATE)
-            rates = {RATE: await _rate(own)}
+            rates, skews[f"at a rate of {RATE}"] = {RATE: await _rate(own, RATE)}, await _skew(deployed, own)
             await _write(deployed, "set_rate", virtual_seconds_per_real_second=0)
-            rates["frozen"], skews["frozen"] = await _rate(own), await _skew(deployed, own)
+            rates["frozen"], skews["frozen"] = await _rate(own, 0), await _skew(deployed, own)
             await _write(deployed, "set_rate", virtual_seconds_per_real_second=1)
             skews["running again"] = await _skew(deployed, own)
 
@@ -109,36 +112,50 @@ async def _now(deployed) -> datetime:
     return datetime.fromtimestamp(_universe_now(state), timezone.utc)
 
 
-async def _reading(computer) -> tuple[float, float]:
+def _widest(rate: float) -> float:
+    """The widest a bracket of real time may be for a reading at ``rate`` to be within ``READING_S`` of its truth."""
+    return 2 * READING_S / max(rate, 1)
+
+
+async def _reading(computer, rate: float) -> tuple[float, float]:
     """(real, universe): the session's time and the real time it was read at, both from inside the computer."""
-    for _ in range(3):
+    for _ in range(ATTEMPTS):
         ran = await inside.run(computer, ["sh", "-c", BRACKET], timeout_s=30)
         assert ran["exit_code"] == 0, ran
         before, universe, after = map(float, ran["stdout"].split())
-        if after - before < BRACKET_S:
+        if after - before < _widest(rate):
             return (before + after) / 2, universe
-    raise AssertionError(f"reading the computer's time three times took over {BRACKET_S} s each: {ran['stdout']}")
+    raise AssertionError(f"the computer's time took over {_widest(rate):.3f} s to read each of {ATTEMPTS} times: "
+                         f"{ran['stdout']}")
 
 
-async def _skew(deployed, computer) -> float:
-    """How far the session's clock is from the gateway's, in universe seconds: the gateway's state, its real time the
-    middle of its request from here, carried at its rate to the real time of the computer's reading."""
-    for _ in range(3):
+async def _gateway(deployed) -> tuple[float, dict]:
+    """(real, state): the gateway's clock state and the real time it was read at, from here."""
+    for _ in range(ATTEMPTS):
         sent = time.time()
         state = await deployed.invoke(EXT_CLOCK_URI, "state", timeout=30)
         answered = time.time()
-        if answered - sent < BRACKET_S:
-            break
-    real, universe = await _reading(computer)
-    expected = _universe_now(state) + state["virtual_seconds_per_real_second"] * (real - (sent + answered) / 2)
-    return universe - expected
+        if answered - sent < _widest(state["virtual_seconds_per_real_second"]):
+            return (sent + answered) / 2, state
+    raise AssertionError(f"the gateway's state took over {_widest(state['virtual_seconds_per_real_second']):.3f} s "
+                         f"to read each of {ATTEMPTS} times")
 
 
-async def _rate(computer, over_s: float = 2.0) -> float:
-    """The session clock's rate: universe seconds per real second between two readings ``over_s`` apart."""
-    real, universe = await _reading(computer)
+async def _skew(deployed, computer) -> float:
+    """How far the session's clock is from the gateway's, in universe seconds: the gateway's state carried at its rate
+    to the real time of the computer's reading."""
+    real_then, state = await _gateway(deployed)
+    rate = state["virtual_seconds_per_real_second"]
+    real, universe = await _reading(computer, rate)
+    return universe - (_universe_now(state) + rate * (real - real_then))
+
+
+async def _rate(computer, rate: float, over_s: float = 2.0) -> float:
+    """The session clock's rate, set to ``rate``: universe seconds per real second between two readings ``over_s``
+    apart."""
+    real, universe = await _reading(computer, rate)
     await asyncio.sleep(over_s)
-    later, then = await _reading(computer)
+    later, then = await _reading(computer, rate)
     return (then - universe) / (later - real)
 
 
