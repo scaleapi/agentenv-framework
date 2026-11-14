@@ -12,6 +12,9 @@ File-access modes:
     Required for CUA tasks, where deliverables live on the desktop VM (e.g.
     /home/docker/Desktop) which is NOT mounted into the a2a `agent-api`
     container — so the docker-exec path reports "File not found".
+  - Computer (`env_id` names a `computer` env, one whose card serves computer-exec/v1
+    ``run``): the same reads, run inside the computer as its session user through
+    computer-exec, in ranges that fit the card's ``max_output_bytes``.
 
 Artifact paths come from one of these sources (in priority order):
   1. Manifest (`manifest_step_id`): a prior prompt step's declared artifacts from
@@ -81,6 +84,8 @@ import tempfile
 import time
 from typing import ClassVar, Optional
 
+from agentenv_protocol.computer import COMPUTER_EXEC
+
 from agent_env.config import get_config
 from agent_env.env.gateway.constants import EXT_STEP_URI
 from agent_env.store.ids import derive_path_id, is_local_id, validate_local_id
@@ -103,6 +108,8 @@ _CUA_ENV_METADATA_MARKER = "cua_vm_sandbox_id"
 # cua_bash so no single call has to move the whole file.
 _CUA_SINGLE_SHOT_MAX = 16 * 1024 * 1024  # 16 MB
 _CUA_CHUNK_BYTES = 8 * 1024 * 1024       # 8 MB per ranged read
+# How long one command inside a computer may run when collect reads a file through computer-exec.
+_COMPUTER_EXEC_TIMEOUT_S = 600
 
 # artifact_paths entries with a URL scheme are not VM files — they're gold/source
 # URLs that downstream consumers (evaluator, artifact previewer) fetch directly.
@@ -194,6 +201,15 @@ def _cua_bash_error(text: str) -> str:
     if not isinstance(payload, dict):
         return ""
     return str(payload.get("error") or "")
+
+
+def _is_computer(deployed_env) -> bool:
+    """Whether a deployed env is a computer collect reads through computer-exec/v1 ``run``, not a CUA desktop VM: no
+    CUA marker in its metadata, and a card that serves ``run``."""
+    if _CUA_ENV_METADATA_MARKER in (deployed_env.metadata or {}):
+        return False
+    supports = getattr(deployed_env, "supports", None)
+    return bool(supports and supports(COMPUTER_EXEC, "run"))
 
 
 def _looks_absent(stderr: str) -> bool:
@@ -548,7 +564,10 @@ class CollectArtifactsTaskStep(TaskStep):
                 _remove(local_path)
 
     async def _controller_call(self, deployed_env, tool_name: str, arguments: dict) -> str:
-        """Call a CUA MCP tool through the gateway's step/v1, as the env card declares it. Returns the text content."""
+        """Call a CUA MCP tool through the gateway's step/v1, as the env card declares it. Returns the text content.
+        On a computer env, ``cua_bash`` and ``cua_get_file`` run inside the computer instead (``_computer_call``)."""
+        if _is_computer(deployed_env):
+            return await self._computer_call(deployed_env, tool_name, arguments)
         data = await deployed_env.invoke(
             EXT_STEP_URI, "step", {"action": "call_tool", "tool_name": tool_name, "arguments": arguments}, timeout=600,
         )
@@ -558,6 +577,41 @@ class CollectArtifactsTaskStep(TaskStep):
         if not content:
             raise RuntimeError(f"{tool_name} returned no content: {data}")
         return content[0].get("text", "")
+
+    async def _computer_call(self, deployed_env, tool_name: str, arguments: dict) -> str:
+        """``cua_bash`` or ``cua_get_file`` answered as the CUA MCP server answers them, by a command run inside a
+        computer through computer-exec/v1 ``run``: ``cua_bash`` as its JSON envelope, ``cua_get_file`` as the file's
+        bare base64. Output computer-exec cut short raises rather than handing back a partial file or listing."""
+        from agent_env.env.envs.computer.utils.inside import run
+
+        if tool_name == "cua_bash":
+            script = arguments["script"]
+        elif tool_name == "cua_get_file":
+            script = f"base64 < {shlex.quote(arguments['path'])} | tr -d '\\n'"
+        else:
+            raise RuntimeError(f"env '{self.env_id}' is a computer: collect has no {tool_name} there")
+        answer = await run(deployed_env, ["/bin/sh", "-c", script], timeout_s=_COMPUTER_EXEC_TIMEOUT_S)
+        if answer.get("truncated") or answer.get("timed_out"):
+            raise RuntimeError(f"{tool_name} on computer env '{self.env_id}' was cut short "
+                               f"({'timed out' if answer.get('timed_out') else 'output truncated'})")
+        if tool_name == "cua_get_file":
+            if answer.get("exit_code"):
+                raise RuntimeError(f"cua_get_file failed on computer env '{self.env_id}': "
+                                   f"{answer.get('stderr', '')[:300]}")
+            return answer.get("stdout", "")
+        return json.dumps({"output": answer.get("stdout", ""), "error": answer.get("stderr", ""),
+                           "returncode": answer.get("exit_code")})
+
+    def _read_limits(self, deployed_env) -> tuple[int, int]:
+        """The largest file read in one call, and the bytes each ranged read moves: on a computer, both fit the base64
+        of a range in the output its card's computer-exec/v1 returns whole."""
+        if not _is_computer(deployed_env):
+            return _CUA_SINGLE_SHOT_MAX, _CUA_CHUNK_BYTES
+        from agent_env.env.envs.computer.utils.inside import max_output_bytes
+
+        # base64 is 4 bytes out per 3 in, and GNU base64 wraps a ranged read's lines at 76 columns.
+        chunk = max(3, (max_output_bytes(deployed_env) * 3 // 4) * 76 // 77 // 3 * 3)
+        return chunk, chunk
 
     async def _controller_file_size(self, deployed_env, path: str) -> int:
         """Size of ``path`` on the CUA VM in bytes, or -1 only if the file is genuinely
@@ -597,7 +651,8 @@ class CollectArtifactsTaskStep(TaskStep):
         with tempfile.NamedTemporaryFile(delete=False, suffix=f"-{os.path.basename(path)}") as tmp:
             local_path = tmp.name
         try:
-            if size > _CUA_SINGLE_SHOT_MAX:
+            single_shot_max, _ = self._read_limits(deployed_env)
+            if size > single_shot_max:
                 await self._controller_stream_to_file(deployed_env, path, size, local_path)
             else:
                 b64 = await self._controller_call(deployed_env, "cua_get_file", {"path": path})
@@ -617,14 +672,15 @@ class CollectArtifactsTaskStep(TaskStep):
         short read fails loudly rather than leaving a truncated artifact."""
         import base64
 
+        _, chunk_bytes = self._read_limits(deployed_env)
         logger.info(
-            f"Streaming {path} ({size} bytes) off the CUA VM in {_CUA_CHUNK_BYTES}-byte chunks"
+            f"Streaming {path} ({size} bytes) off the CUA VM in {chunk_bytes}-byte chunks"
         )
         quoted = shlex.quote(path)
         written = 0
         with open(local_path, "wb") as fh:
             while written < size:
-                script = f"tail -c +{written + 1} {quoted} | head -c {_CUA_CHUNK_BYTES} | base64"
+                script = f"tail -c +{written + 1} {quoted} | head -c {chunk_bytes} | base64"
                 out = await self._controller_call(deployed_env, "cua_bash", {"script": script})
                 chunk = base64.b64decode(_cua_bash_stdout(out).encode().translate(None, b"\r\n\t "))
                 if not chunk:
@@ -641,7 +697,8 @@ class CollectArtifactsTaskStep(TaskStep):
         """Recursively enumerate regular files under base_path via cua_bash.
         Returns paths relative to base_path. Fallback when no explicit list
         was configured."""
-        script = f"find {shlex.quote(self.base_path)} -type f -printf '%P\\n'"
+        # Portable across GNU and BSD find (macOS computers): BSD find has no -printf.
+        script = f"cd {shlex.quote(self.base_path)} && find . -type f | sed 's|^\\./||'"
         try:
             out = await self._controller_call(deployed_env, "cua_bash", {"script": script})
         except Exception as e:
@@ -650,7 +707,7 @@ class CollectArtifactsTaskStep(TaskStep):
         return [f.strip() for f in _cua_bash_stdout(out).splitlines() if f.strip()]
 
     def _resolve_cua_env(self, context):
-        """Resolve self.env_id to a deployed CUA env, refusing non-CUA envs.
+        """Resolve self.env_id to a deployed CUA env or computer env, refusing any other env.
 
         cua_get_file / cua_bash are CUA-controller tools; firing them at an
         arbitrary env's gateway would hang or error confusingly. A desktop-VM env's
@@ -661,12 +718,15 @@ class CollectArtifactsTaskStep(TaskStep):
             raise StepContextError(
                 f"Env '{self.env_id}' not found in context.deployed_envs — cannot collect artifacts via controller"
             )
+        if _CUA_ENV_METADATA_MARKER not in (deployed_env.metadata or {}) and _is_computer(deployed_env):
+            return deployed_env
         if _CUA_ENV_METADATA_MARKER not in (deployed_env.metadata or {}):
             raise RuntimeError(
                 f"Env '{self.env_id}' is not a CUA environment "
                 f"(no '{_CUA_ENV_METADATA_MARKER}' in its deployed metadata) — refusing to issue "
                 f"cua_* controller calls against a non-CUA gateway. collect_artifacts with `env_id` "
-                f"set is only valid for CUA envs; omit `env_id` to use the agent-container path."
+                f"set is only valid for CUA envs and computer envs serving {COMPUTER_EXEC} run; omit `env_id` to use "
+                f"the agent-container path."
             )
         # Up front: enumeration swallows errors into [], so a missing step/v1 would become a silent empty collect.
         deployed_env.require(EXT_STEP_URI, "step")
@@ -689,7 +749,8 @@ class CollectArtifactsTaskStep(TaskStep):
         # gateway's step/v1. These are MCP tools registered on the gateway on both
         # Ubuntu and macOS — NOT endpoints on the macOS controller sidecar, whose
         # /step only accepts a computer-use action and 500s on a call_tool payload.
-        logger.info(f"Collecting artifacts via CUA MCP server (env_id={self.env_id}, gateway={deployed_env.environment_url})")
+        via = "computer-exec" if _is_computer(deployed_env) else "CUA MCP server"
+        logger.info(f"Collecting artifacts via {via} (env_id={self.env_id}, gateway={deployed_env.environment_url})")
 
         items = self._resolve_items(context)
         if not items:
