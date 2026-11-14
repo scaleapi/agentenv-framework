@@ -17,16 +17,18 @@ logger = logging.getLogger(__name__)
 
 
 class BrowserSetCookiesTaskStep(BrowserStep):
-    """Set ``cookies`` in the browser, all or none, each in the shape cookies/set takes: a ``url``, or a ``domain`` and
-    ``path``, and ``max_age`` in place of ``expires`` for a lifetime from when it's set."""
+    """Set ``cookies`` in the browser, or the lease ``context`` names, all or none, each in the shape cookies/set
+    takes: a ``url``, or a ``domain`` and ``path``, and ``max_age`` in place of ``expires`` for a lifetime from when
+    it's set."""
 
     type: ClassVar[str] = "browser_set_cookies"
     entity_refs = (EntityRef.env("env_id"),)
 
     def __init__(self, id: str, version: Optional[int], env_id: str, cookies: list[dict],
                  browser: Optional[str] = None, depends_on: Optional[list[TaskStepDependency]] = None,
-                 fail_task_on_error: bool = True):
-        super().__init__(id, version, env_id, browser, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
+                 fail_task_on_error: bool = True, context: Optional[str] = None):
+        super().__init__(id, version, env_id, browser, depends_on=depends_on, fail_task_on_error=fail_task_on_error,
+                         context=context)
         self.cookies = cookies
 
     def config_problems(self) -> list[str]:
@@ -47,7 +49,7 @@ class BrowserSetCookiesTaskStep(BrowserStep):
 
     @classmethod
     def from_dict(cls, data: dict) -> BrowserSetCookiesTaskStep:
-        return cls(**cls._browser_from_dict(data), cookies=data["cookies"])
+        return cls(**cls._in_context_from_dict(data), cookies=data["cookies"])
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         await self._call(context, "cookies/set", {"cookies": self.cookies})
@@ -65,8 +67,10 @@ class BrowserDeleteCookiesTaskStep(BrowserStep):
 
     def __init__(self, id: str, version: Optional[int], env_id: str, name: Optional[str] = None,
                  domain: Optional[str] = None, path: Optional[str] = None, browser: Optional[str] = None,
-                 depends_on: Optional[list[TaskStepDependency]] = None, fail_task_on_error: bool = True):
-        super().__init__(id, version, env_id, browser, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
+                 depends_on: Optional[list[TaskStepDependency]] = None, fail_task_on_error: bool = True,
+                 context: Optional[str] = None):
+        super().__init__(id, version, env_id, browser, depends_on=depends_on, fail_task_on_error=fail_task_on_error,
+                         context=context)
         self.name, self.domain, self.path = name, domain, path
 
     def config_problems(self) -> list[str]:
@@ -82,7 +86,7 @@ class BrowserDeleteCookiesTaskStep(BrowserStep):
 
     @classmethod
     def from_dict(cls, data: dict) -> BrowserDeleteCookiesTaskStep:
-        return cls(**cls._browser_from_dict(data), name=data.get("name"), domain=data.get("domain"),
+        return cls(**cls._in_context_from_dict(data), name=data.get("name"), domain=data.get("domain"),
                    path=data.get("path"))
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:

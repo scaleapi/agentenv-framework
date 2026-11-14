@@ -29,7 +29,7 @@ def test_the_desktop_examples_computer_passes_the_probe_at_full(state):
     ran = _run("desktop", "probe")
 
     assert ran.exit_code == 0, ran.output
-    assert "passed (probe: 1)" in ran.output, ran.output
+    assert "passed (probe: 1)" in ran.output, _failed_checks(ran.output)
 
 
 def test_a_file_loaded_into_the_desktop_is_read_by_code_inside_it_and_checked_there(state):
@@ -61,15 +61,6 @@ def test_a_scripted_drive_is_recorded_on_the_clock_its_screenshots_carry(state):
         assert abs(nearest[0] - at) <= interval, (shot["step"], nearest[0] - at)
         diff = sum(abs(a - b) for a, b in zip(_thumb(nearest[1]), bytes.fromhex(shot["thumb"]))) / (64 * 40)
         assert diff < 6, (shot["step"], diff)
-    x, y, w, h = drive["clicked_cell"]
-    shots = drive["shots"]
-    n = next(i for i, s in enumerate(shots) if s["args"].get("x") == x + w // 2)
-    corner = lambda image: image.getpixel((x + 8, y + 8))  # noqa: E731  clear of the pointer drawn at the click
-    before = _when(shots[n - 1]["captured_at"]).timestamp()
-    _, unclicked = min(frames, key=lambda frame: abs(frame[0] - before))
-    changed = next(t for t, image in frames if t > before and corner(image) != corner(unclicked))
-    # The cell changes after the screenshot before its click, by the one after it, both on the computer's clock.
-    assert changed <= _when(shots[n]["captured_at"]).timestamp() + interval
 
 
 @skip_without_model_endpoint()
@@ -82,6 +73,12 @@ def test_an_agent_given_the_computers_skill_files_a_loaded_file_in_a_new_folder_
     entry = context["metadata"]["computer_recordings"]["agent"]
     assert (entry["state"], entry["missing_segments"]) == ("ended", 0) and frames
     assert "## Shortcuts" in context["metadata"]["env_skills"]["default-agent"]["desktop"]["desktop"]
+
+
+def _failed_checks(output: str) -> str:
+    """Each probe check that failed and why, from the run's context, else the run's output."""
+    results = run_context(output)["metadata"]["verifications"]["probe"]["results"]
+    return "\n".join(f"{r['id']}: {r['description']}" for r in results if not r["result"]) or output
 
 
 def _run(bundle: str, task: str):

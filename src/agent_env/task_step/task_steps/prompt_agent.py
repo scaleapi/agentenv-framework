@@ -1350,3 +1350,25 @@ def _trigger_answer(resp: dict) -> Optional[dict]:
     if resp.get("fired"):
         return {"message": resp.get("parts") or []}
     return None
+
+
+def is_prompt_step(step: Any) -> bool:
+    """Whether ``step`` prompts an agent: a prompt_agent step or a subclass of one, such as always_on. A step dict, or
+    anything else with a ``type``, is looked up by that type in the step registry."""
+    if isinstance(step, PromptAgentTaskStep):
+        return True
+    from agent_env.task_step.registry import get_task_step_registry  # its built-ins import this module
+
+    kind = step.get("type") if isinstance(step, dict) else getattr(step, "type", None)
+    cls = get_task_step_registry().get(kind) if isinstance(kind, str) else None
+    return isinstance(cls, type) and issubclass(cls, PromptAgentTaskStep)
+
+
+def user_sim_agents(steps: Any) -> set[str]:
+    """The agents a task's prompting steps talk to as their user: an always_on step's ``user_sim``, a prompt_agent
+    step's ``user_agent_name`` (its default when unset). ``steps`` are steps or step dicts."""
+    def field(step: Any, name: str) -> Any:
+        return step.get(name) if isinstance(step, dict) else getattr(step, name, None)
+
+    return {field(step, "user_sim") or field(step, "user_agent_name") or PromptAgentTaskStep.DEFAULT_USER_AGENT_NAME
+            for step in steps if is_prompt_step(step)}

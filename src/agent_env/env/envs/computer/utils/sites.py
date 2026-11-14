@@ -8,12 +8,13 @@ a site's name winning over the allowlist; two sites claiming a name are refused.
 site's names (``issue``), and the site proxy (``site_proxy.py``) is installed through the sandbox's root channel and
 started (``route``), which a reset does again on its fresh computer. In the computer they live in
 ``/etc/agentenv/sites``, root's alone (0700) before the config and its keys are written into it, until the install has
-made the keys and the config private; the CA and certificates are valid for the deploy's ttl and a day more, from a few
-minutes back for a clock that's behind. The CA also joins the trust agentenv adds, two files at fixed paths for each OS
-site routing reaches (``TRUST_ENVIRONMENTS``), which on Linux are the local provider's (``LOCAL_TRUST_ENV``):
-``/etc/agentenv/ca.pem``, every CA agentenv adds, for an app with a certificate list of its own, and
-``/etc/agentenv/ca-bundle.pem``, the public roots and them. The computer's boot environment names them, so every program
-in it trusts the sites however it was started. Site routing reaches Linux computers alone."""
+made the keys and the config private; the CA and certificates are valid from 1950 to the end of 9999 (``UNIVERSE_FROM``
+to ``UNIVERSE_UNTIL``), since its programs check them against the universe's time. The CA also
+joins the trust agentenv adds, two files at fixed paths for each OS site routing reaches (``TRUST_ENVIRONMENTS``),
+which on Linux are the local provider's (``LOCAL_TRUST_ENV``): ``/etc/agentenv/ca.pem``, every CA agentenv adds, for
+an app with a certificate list of its own, and ``/etc/agentenv/ca-bundle.pem``, the public roots and them. The
+computer's boot environment names them, so every program in it trusts the sites however it was started. Site routing
+reaches Linux computers alone."""
 
 from __future__ import annotations
 
@@ -26,7 +27,7 @@ import shlex
 import time
 from collections.abc import Collection
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Iterable, Optional
 from urllib.parse import urlsplit
@@ -34,7 +35,7 @@ from urllib.parse import urlsplit
 import httpx
 from agentenv_protocol import client as protocol_client
 from agentenv_protocol.website import WEBSITE_EXTENSION_URI as WEBSITE
-from agentenv_protocol.website import WEBSITE_LIVE_PARAM
+from agentenv_protocol.website import WEBSITE_LIVE_PARAM, WEBSITE_SIGN_IN_HEADERS_PARAM
 from agentenv_protocol.website_browser import NETWORK_LOG_ENV, SITE_PROXY_ENV
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -69,8 +70,12 @@ LOG = FOLDER / "site-proxy.log"
 NETWORK_LOG = FOLDER / "network.jsonl"
 SYNTHETIC, ALLOWLIST = "synthetic", "allowlist"
 RANKS = (SYNTHETIC, ALLOWLIST)
-VALID_MARGIN = timedelta(days=1)
-CLOCK_SKEW = timedelta(minutes=5)
+#: The dates the sites' CA and certificates are valid between, the widest a certificate carries: from 1950, the
+#: earliest X.509's UTCTime holds, to the end of 9999, RFC 5280's date for one with no expiry. A program on the computer
+#: checks them against the universe's time, so they hold however far the universe is from now. The CA is
+#: name-constrained and its key gone once they're signed, so the wide window vouches for nothing more.
+UNIVERSE_FROM = datetime(1950, 1, 1, tzinfo=UTC)
+UNIVERSE_UNTIL = datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)
 CARD_ATTEMPTS = 3
 CARD_RETRY_S = 1.0
 #: How long a computer's deploy waits for the run's websites it routes to say they're ready, as each said at its own
@@ -228,14 +233,14 @@ class Issued:
     leaves: dict[str, tuple[str, str]]
 
 
-def issue(routes: list[Route], *, valid_for: timedelta, label: str, now: Optional[datetime] = None) -> Issued:
+def issue(routes: list[Route], *, label: str) -> Issued:
     """A CA name-constrained to the routes' names, so it vouches for nothing else however widely it's trusted, and a
-    certificate signed by it for each route's names served over HTTPS, all valid ``valid_for`` and a margin more."""
+    certificate signed by it for each route's names served over HTTPS, all valid from ``UNIVERSE_FROM`` to
+    ``UNIVERSE_UNTIL``."""
     tls = [route for route in routes if route.tls_names]
     if not tls:
         return Issued(None, {})
-    now = now or datetime.now(UTC)
-    start, end = now - CLOCK_SKEW, now + valid_for + VALID_MARGIN
+    start, end = UNIVERSE_FROM, UNIVERSE_UNTIL
     ca_key = ec.generate_private_key(ec.SECP256R1())
     subject = x509.Name([x509.NameAttribute(NameOID.ORGANIZATION_NAME, "agentenv"),
                          x509.NameAttribute(NameOID.COMMON_NAME, f"agentenv sites {label}"[:64])])
@@ -308,12 +313,15 @@ def browser_environment(display: str) -> dict[str, str]:
 
 
 def proxy_config(table: SiteTable, issued: Issued, *, user: Optional[str], os_type: str, forward_port: bool,
-                 upstream_headers: Optional[dict[str, dict[str, str]]] = None, direct: Iterable[str] = ()) -> dict:
+                 upstream_headers: Optional[dict[str, dict[str, str]]] = None, direct: Iterable[str] = (),
+                 sign_in_headers: Optional[dict[str, list[str]]] = None) -> dict:
     """What ``site_proxy.py install`` reads: the session user, the CA, the trust files on an ``os_type`` computer and
     the variables naming them, which its profile script sets as the computer's boot environment does, each route with
-    its certificate and key, and the headers its gateway's sandbox provider asks requests to it to carry
-    (``upstream_headers``, by site), which the proxy sends upstream alone, and with ``forward_port``, for a browser
-    alone, the forward port, the live sites' hosts it takes straight to them (``direct``) and its network log."""
+    its certificate and key, the headers its gateway's sandbox provider asks requests to it to carry
+    (``upstream_headers``, by site), which the proxy sends upstream alone, and those its site names as its sign-in
+    headers (``sign_in_headers``, by site), whose values its network log takes out, and with ``forward_port``, for a
+    browser alone, the forward port, the live sites' hosts it takes straight to them (``direct``) and its network
+    log."""
     sites = []
     for route in table.routes:
         site = {"name": route.site, "upstream": route.url, "domains": list(route.domains)}
@@ -321,6 +329,8 @@ def proxy_config(table: SiteTable, issued: Issued, *, user: Optional[str], os_ty
             site["cert_pem"], site["key_pem"] = issued.leaves[route.site]
         if (upstream_headers or {}).get(route.site):
             site["upstream_headers"] = dict(upstream_headers[route.site])
+        if (sign_in_headers or {}).get(route.site):
+            site["sign_in_headers"] = list(sign_in_headers[route.site])
         sites.append(site)
     return {"user": user, "ca_pem": issued.ca_pem, "sites": sites, "log": str(LOG),
             "trust_files": trust_files(os_type), "trust_environment": dict(TRUST_ENVIRONMENTS[os_type]),
@@ -430,7 +440,7 @@ class RootChannel:
 
 
 async def route(sandbox: Sandbox, sites: list[Site], *, user: Optional[str], network: Optional[dict],
-                valid_for: timedelta, label: str, os_type: str, display: str, live_hosts: Iterable[str] = ()) -> dict:
+                label: str, os_type: str, display: str, live_hosts: Iterable[str] = ()) -> dict:
     """Have the ``os_type`` computer on ``sandbox`` reach each of ``sites`` by its names: the table made, the CA and
     certificates issued, the proxy installed and started as root, with its forward port on a computer with no
     ``display``, a browser alone's, which also takes the run's ``live_hosts`` straight to them, and each name checked
@@ -446,14 +456,15 @@ async def route(sandbox: Sandbox, sites: list[Site], *, user: Optional[str], net
         return {"names": table.to_dict()}
     from agent_env.providers.sandbox_providers.sandbox_provider import sandbox_request_headers_for_url
 
-    issued = issue(table.routes, valid_for=valid_for, label=label)
+    issued = issue(table.routes, label=label)
     upstream_headers = {r.site: sandbox_request_headers_for_url(r.url) for r in table.routes}
     channel = RootChannel(sandbox)
     await channel.private_folder(FOLDER)
     await channel.write(PROXY, _PROXY_SOURCE.read_text())
-    await channel.write_secret(CONFIG, json.dumps(proxy_config(table, issued, user=user, os_type=os_type,
-                                                               forward_port=display == ALONE_DISPLAY,
-                                                               upstream_headers=upstream_headers, direct=direct)))
+    await channel.write_secret(CONFIG, json.dumps(proxy_config(
+        table, issued, user=user, os_type=os_type, forward_port=display == ALONE_DISPLAY,
+        upstream_headers=upstream_headers, direct=direct,
+        sign_in_headers={site.name: site.sign_in_headers for site in sites if site.sign_in_headers})))
     await channel.run(["chmod", "0600", str(CONFIG)])
     output = await channel.run(["python3", str(PROXY), "install", str(CONFIG)])
     report = json.loads(output.strip().splitlines()[-1])
@@ -619,7 +630,11 @@ def _stored_domains(record: DeployedEnv) -> dict[str, list[str]]:
 
 
 def _found(name: str, url: str, params: dict, stored: Optional[list[str]] = None) -> dict:
-    return {"name": name, "url": url, "domains": list(stored or params.get("domains") or [])}
+    """A site found, with its card's sign-in headers when it names any."""
+    sign_in = params.get(WEBSITE_SIGN_IN_HEADERS_PARAM)
+    named = [header for header in sign_in if isinstance(header, str) and header] if isinstance(sign_in, list) else []
+    return {"name": name, "url": url, "domains": list(stored or params.get("domains") or []),
+            **({"sign_in_headers": named} if named else {})}
 
 
 def _joined(address: str, url: str) -> str:

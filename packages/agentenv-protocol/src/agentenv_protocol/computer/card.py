@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from . import clock
 from .dataplane import DEFAULT_DATA_PATHS
 from .recording import recording_params
 from ..types import METHOD_ADD, EnvironmentExtension, EnvironmentTool, IntakeDeclaration, IntakeFormat, intake_extension
@@ -54,6 +55,8 @@ def served_extensions(driver: ComputerDriverEnvironment,
         if need is not None and not driver.has(need):
             continue
         if extension.uri == COMPUTER_RECORDING and driver.recording is None:
+            continue
+        if extension.uri == clock.CLOCK and not clock.follows():
             continue
         dropped = {op for (uri, op), need in _METHOD_NEEDS.items() if uri == extension.uri and not driver.has(need)}
         if dropped:

@@ -45,7 +45,7 @@ class _VmSandbox:
                 return 0, "bundle\n", ""
             return 0, "".join(f"{p}\n" for p in FILES), ""
         if "stat" in args:
-            return 0, str(len(next(iter(FILES.values())))), ""
+            return 0, f"81a4:{len(next(iter(FILES.values())))}", ""
         return 0, "", ""
 
     async def exec(self, *args):

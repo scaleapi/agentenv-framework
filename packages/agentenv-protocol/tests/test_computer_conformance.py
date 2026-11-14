@@ -4,6 +4,7 @@ full needs gets those checks unverified; a driver broken one way fails the check
 fronts that exports is asked for its export once; the report's verdicts and the CLI."""
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import subprocess
@@ -87,6 +88,38 @@ async def test_a_driver_given_a_control_token_passes_with_it_and_refuses_calls_w
     assert report.passed, _failed(report)
     assert _status(report, "a framework-only route refuses a call without the control token") == "passed"
     assert not unauthorized.passed and "401 unauthorized" in _failed(unauthorized)[0]
+
+
+#: How long after its drag the desk of ``StarvedOnce`` saves the stroke: after the probe first looks, before it gives up.
+STROKE_SAVED_AFTER_S = 1.0
+DRAG_CHECK = "a drag starts and ends where it says, through its waypoints"
+
+
+class StarvedOnce(FixtureDriver):
+    """A desk starved through its first drag, which it sees as the press, one motion and the release, and slow to save
+    the next, which it records ``STROKE_SAVED_AFTER_S`` after the drag."""
+
+    drags = 0
+
+    @drag
+    async def drag_along(self, path, button, duration_ms, modifiers):
+        await super(FixtureDriver, self).drag_along(path, button, duration_ms, modifiers)
+        self.drags += 1
+        if self.drags > 1:
+            asyncio.get_running_loop().call_later(STROKE_SAVED_AFTER_S, self.desk.drag, path)
+            return
+        start, end = self.desk._in("pad", *path[0]), self.desk._in("pad", *path[-1])
+        self.desk.state["drags"].append({"start": list(start), "end": list(end), "points": 3,
+                                         "path": [list(start), list(end), list(end)]})
+
+
+@pytest.mark.asyncio
+async def test_a_drag_tried_again_is_judged_by_its_own_stroke_not_the_one_before(home):
+    report = await _probe(StarvedOnce())
+
+    [check] = [c for c in report.checks if c.name == DRAG_CHECK]
+    assert check.status == "passed" and check.detail.startswith("passed on try 2 of 2; before: "), check
+    assert "in 3 points" in check.detail
 
 
 class StaleFrame(FixtureDriver):

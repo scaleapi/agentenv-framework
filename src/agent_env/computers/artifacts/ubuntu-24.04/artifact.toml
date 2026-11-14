@@ -1,5 +1,5 @@
 type = "computer"
-description = "Ubuntu 24.04 with XFCE on Xvfb, D-Bus and AT-SPI, run by supervisord as the session user"
+description = "Ubuntu 24.04 with XFCE on Xvfb, D-Bus and AT-SPI, run by supervisord as the session user, on the universe clock"
 arch = ["amd64", "arm64"]
 os = { type = "linux", distribution = "ubuntu", version = "24.04", display = "x11" }
 session = { user = "user" }
@@ -8,6 +8,7 @@ session = { user = "user" }
 image = { dockerfile = "Dockerfile" }
 init = "supervisord"
 input_channel = "env"
+start_as = "root"
 
 [forms.disk]
 init = "supervisord"

@@ -40,10 +40,16 @@ from tst.util.sandbox_providers import mock_provider
 GATEWAY = "https://gw.example"
 
 
-def _record(name: str) -> DeployedSandboxEnv:
+#: A computer's card whose driver serves clock/v1's sync_time: it follows the gateway's clock.
+CLOCK_CARD = {"capabilities": {"extensions": [
+    {"uri": "urn:agentenv:clock/v1", "params": {"methods": {"sync_time": {"method": "POST", "endpoint": "/clock/sync"}}}}]}}
+
+
+def _record(name: str, *, clock: bool = False) -> DeployedSandboxEnv:
     return DeployedSandboxEnv(env_id=f"{name}-computer", env_version=1, env_provider_type="computer", sandbox_id=f"sb-{name}",
                               sandbox_type="modal_vm", environment_card_url=f"https://{name}.example{WELL_KNOWN_PATH}",
-                              mcp_url=f"https://{name}.example/mcp", control_token=f"token-{name}")
+                              mcp_url=f"https://{name}.example/mcp", control_token=f"token-{name}",
+                              environment_card={"name": name, **CLOCK_CARD} if clock else None)
 
 
 class FakeComputer:
@@ -53,11 +59,12 @@ class FakeComputer:
 
     def __init__(self, name: str, *, fails: Exception | None = None, refusal: str | None = None, log: list | None = None,
                  apps: tuple[str, ...] = (), resets: Exception | None = None, routes: Exception | None = None,
-                 loads: Exception | None = None):
+                 loads: Exception | None = None, clock: bool = False):
         self.id, self.version, self.environment_name = f"{name}-computer", 1, name
         self.fails, self.refusal, self.log = fails, refusal, [] if log is None else log
         self.deploys, self.refusals, self._deployed, self.closes = [], [], None, 0
         self.apps, self.reset_fails, self.route_fails, self.load_fails = apps, resets, routes, loads
+        self.clock = clock
 
     def composed_apps(self):
         return [SimpleNamespace(environment_name=app, declaration=SimpleNamespace(browser=False)) for app in self.apps]
@@ -85,6 +92,10 @@ class FakeComputer:
         if self.route_fails:
             raise self.route_fails
 
+    async def follow_clock(self, gateway_url):
+        inspect.signature(ComputerEnv.follow_clock).bind(self, gateway_url)
+        self.log.append(("follows", self.environment_name, gateway_url))
+
     async def reset(self, deployed):
         inspect.signature(ComputerEnv.reset).bind(self, deployed)
         await asyncio.sleep(0.01)
@@ -103,7 +114,7 @@ class FakeComputer:
         await asyncio.sleep(0.01)
         if self.fails:
             raise self.fails
-        self._deployed = _record(self.environment_name)
+        self._deployed = _record(self.environment_name, clock=self.clock)
         self.log.append(("deployed", self.environment_name))
         return self._deployed
 
@@ -315,9 +326,19 @@ async def test_deploy_hands_the_gateway_each_computer_deployed_under_its_name_an
 def test_a_computer_whose_card_follows_a_clock_hands_the_gateway_its_control_token_as_its_read_token():
     from agent_env.env.envs._multi_computers import _clock_read_token
 
-    following = dataclasses.replace(_record("desktop"), environment_card={"name": "desktop", "capabilities": {"extensions": [
-        {"uri": "urn:agentenv:clock/v1", "params": {"methods": {"sync_time": {"method": "POST", "endpoint": "/clock/sync"}}}}]}})
-    assert (_clock_read_token(following), _clock_read_token(_record("laptop"))) == ("token-desktop", None)
+    assert (_clock_read_token(_record("desktop", clock=True)), _clock_read_token(_record("laptop"))) == (
+        "token-desktop", None)
+
+
+@pytest.mark.asyncio
+async def test_once_the_gateway_is_up_each_computer_whose_card_follows_the_clock_follows_the_gateways(gateway, providers):
+    log = gateway.log
+    desktop, laptop = FakeComputer("desktop", log=log, clock=True), FakeComputer("laptop", log=log)
+
+    deployed = await _multi(desktop, laptop).deploy()
+
+    assert [entry for entry in log if entry[0] == "follows"] == [("follows", "desktop", GATEWAY)]
+    assert set(deployed.child_envs) == {"desktop", "laptop"}
 
 
 @pytest.mark.asyncio

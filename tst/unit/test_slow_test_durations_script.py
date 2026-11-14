@@ -67,3 +67,29 @@ def test_reports_with_no_cases_leave_the_table_as_it_was(tmp_path):
     result = _refresh(table, tmp_path, _report(tmp_path, "empty.xml", []))
     assert result.returncode == 1
     assert table.read_text() == before
+
+
+def test_a_file_the_reports_have_no_test_of_keeps_its_times(tmp_path):
+    table = _checkout(tmp_path)
+    installer = "tst/installer/plugin_add_test.py"
+    (tmp_path / installer).parent.mkdir(parents=True)
+    (tmp_path / installer).write_text("")
+    table.write_text(json.dumps({"split_by_test": [SPLIT], "seconds": {
+        installer: 120.0, f"{SPLIT}::test_old": 50.0, "tst/integration/cli/cli_test.py": 80.0,
+        "tst/integration/gone_test.py": 9}}))
+    report = _report(tmp_path, "r.xml", [("tst.integration.cli.cli_test", "test_deploy", 5.0)])
+    result = _refresh(table, tmp_path, report)
+    assert result.returncode == 0, result.stdout
+    assert json.loads(table.read_text())["seconds"] == {
+        "tst/installer/plugin_add_test.py": 120.0,
+        "tst/integration/cli/cli_test.py": 5.0,
+        f"{SPLIT}::test_old": 50.0,
+    }
+
+
+def test_a_reported_split_file_drops_its_tests_the_reports_dont_have(tmp_path):
+    table = _checkout(tmp_path)
+    table.write_text(json.dumps({"split_by_test": [SPLIT], "seconds": {f"{SPLIT}::test_renamed": 50.0}}))
+    report = _report(tmp_path, "r.xml", [("tst.integration.env.gateway.gateway_test", "test_new", 7.0)])
+    assert _refresh(table, tmp_path, report).returncode == 0
+    assert json.loads(table.read_text())["seconds"] == {f"{SPLIT}::test_new": 7.0}

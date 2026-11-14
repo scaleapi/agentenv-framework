@@ -6,7 +6,7 @@ import pytest
 
 from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, EnvCapabilityUnsupported
 from agent_env.env.gateway.constants import EXT_CLOCK_URI
-from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.task_step.task_steps import sync_env_clock as mod
 from agent_env.task_step.task_steps.sync_env_clock import SyncEnvClockTaskStep, resolve_virtual_time
 
@@ -254,7 +254,7 @@ async def test_strict_execute_skips_websites_but_not_mcp_servers_that_do_not_fol
     assert [(s["service"], s["reason"]) for s in record["skipped"]] == [("shop", "not_advertised"), ("legacy", "no_env_card")]
 
     unsynced = TaskStepContext(deployed_envs=[_carded(await _composed_card({"mcp-email": [], "shop": [_CLOCK_EXT]}))])
-    with patch("agent_env.env.env.Env.get", return_value=env), pytest.raises(RuntimeError, match="email does not advertise"):
+    with patch("agent_env.env.env.Env.get", return_value=env), pytest.raises(StepContextError, match="email does not advertise"):
         await _step(tolerate_missing_sync_time=False).execute(unsynced)
 
 
@@ -378,7 +378,7 @@ async def test_a_server_that_cannot_take_the_zone_fails_the_step_before_any_sync
     monkeypatch.setattr("agent_env.env.env.Env.get", lambda *a, **k: SimpleNamespace(environment_name="email"))
     context = TaskStepContext(deployed_envs=[_carded(await _composed_card({"mcp-email": [_OLD_EXT]}))])
 
-    with pytest.raises(RuntimeError, match="takes no timezone"):
+    with pytest.raises(StepContextError, match="takes no timezone"):
         await _zoned(tolerate_missing_sync_time=tolerate).execute(context)
     assert not any(str(r.url).endswith("/sync_time") for r in sent)
 
@@ -415,7 +415,7 @@ async def test_a_zoned_step_tells_a_website_that_takes_the_zone_and_fails_on_one
 
     _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL})
     older = TaskStepContext(deployed_envs=[_carded(await _composed_card({"shop": [_OLD_EXT]}))])
-    with patch("agent_env.env.env.Env.get", return_value=env), pytest.raises(RuntimeError, match="shop advertises .* takes no timezone"):
+    with patch("agent_env.env.env.Env.get", return_value=env), pytest.raises(StepContextError, match="shop advertises .* takes no timezone"):
         await _zoned().execute(older)
 
 

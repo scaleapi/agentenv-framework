@@ -72,7 +72,7 @@ _HEALTH_POLL_SECONDS = 2
 _LOG_TAIL_LINES = 30  # of a container that never turned healthy, in the error
 # How long a disk form may take to boot to its desktop: seconds with KVM, minutes under TCG.
 _BOOTED_WITHIN_SECONDS = 900
-# What supervisord prints on a disk form's console as each program starts.
+# What supervisord prints on a disk form's console as each program starts, root's and the session's.
 _RUNNING = re.compile(r"success: (\S+) entered RUNNING")
 _PROGRAM = re.compile(r"^\[program:([^\]]+)\]", re.MULTILINE)
 _PRINTED_CHARS = 200  # of what docker printed in place of a manifest, in the error
@@ -91,7 +91,7 @@ _RETRY_WAITS_SECONDS = (30, 60, 120)
 # Each image's check, beyond its build: the gateway imports its server, Postgres turns healthy, the sidecars and the
 # browser answer their own commands, Claude Code's, Codex's, Gemini's, Hermes', OpenCode's and pi's agents run their
 # CLIs and import their servers, OpenHands' imports its server, which loads the OpenHands SDK, Pydantic AI's imports its
-# server, which loads Pydantic AI, Browser Use's loads Browser Use Pi and imports its server, the proxy imports its
+# server, which loads Pydantic AI, Browser Use's loads browser-use in its own environment and imports its server, the proxy imports its
 # server, the mail example's env imports its server, and the base computer's desktop comes up, every program running.
 _SMOKES = {
     "agentenv-gateway": ["docker", "run", "--rm", "--entrypoint", "python", "{image}", "-c", "import gateway.entrypoint"],
@@ -103,7 +103,7 @@ _SMOKES = {
     "agentenv-claude-code": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
                              'claude --version && python -c "import a2a_server"'],
     "agentenv-browser-use": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
-                             'node -e "import(\'@browser_use/pi\')" && python -c "import a2a_server"'],
+                             '/opt/browser-use/bin/python -c "import agent" && python -c "import a2a_server"'],
     "agentenv-codex": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
                        'codex --version && mcp-remote --help >/dev/null && python -c "import a2a_server"'],
     "agentenv-gemini": ["docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
@@ -415,9 +415,11 @@ def _smoke(name: str, image: str, launcher: str | None) -> int:
 
 def _boots(name: str, image: str, launcher: str) -> int:
     """Boot ``image``, a build of the disk form ``name``, in ``launcher``, with KVM where it can, and wait for every
-    program its base computer's supervisord.conf declares to run, which its console shows."""
-    programs = set(_PROGRAM.findall((REPO / Path(IMAGES[DISK_ARGS[name]["ROOTFS"]]).with_name("supervisord.conf"))
-                                    .read_text()))
+    program its base computer declares to run, which its console shows: root's supervisord's (root.conf) and the
+    session's it starts (supervisord.conf)."""
+    base = REPO / Path(IMAGES[DISK_ARGS[name]["ROOTFS"]])
+    programs = {program for conf in ("root.conf", "supervisord.conf")
+                for program in _PROGRAM.findall(base.with_name(conf).read_text())}
     arch = subprocess.run(["docker", "image", "inspect", "--format", "{{.Architecture}}", image], capture_output=True,
                           text=True, check=True).stdout.strip()
     machine = f"{image}-machine"

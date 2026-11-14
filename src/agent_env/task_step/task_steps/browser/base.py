@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 from agentenv_protocol.client import find_extension, find_extension_method, invoke_extension
 from agentenv_protocol.website_browser import BROWSER
+from agentenv_protocol.website_browser.contexts import label_problem
 
 from agent_env.env.env import DeployedEnv, Env
 from agent_env.env.envs.computer.env import ComputerEnv
@@ -20,17 +21,22 @@ from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 CALL_TIMEOUT_S = 60
 #: Where the steps record what each found or did, by step id.
 RECORDS_KEY = "browser_steps"
+#: The browser/v1 operation a browser that leases contexts serves, and so takes a ``context`` on its other ops.
+LEASES = "contexts/lease"
 
 
 class BrowserStep(TaskStep):
-    """A step on the website browser in the env ``env_id``: the one ``browser`` names, else the env's only one.
-    Preflight refuses an env that has no browser, or none of that name, or several when it names none."""
+    """A step on the website browser in the env ``env_id``: the one ``browser`` names, else the env's only one; one
+that takes a ``context`` acts in the lease it names, by its label, else in the browser's default context.
+Preflight refuses an env that has no browser, or none of that name, or several when it names none."""
 
     def __init__(self, id: str, version: Optional[int], env_id: str, browser: Optional[str] = None,
-                 depends_on: Optional[list[TaskStepDependency]] = None, fail_task_on_error: bool = True):
+                 depends_on: Optional[list[TaskStepDependency]] = None, fail_task_on_error: bool = True,
+                 context: Optional[str] = None):
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
         self.env_id = env_id
         self.browser = browser
+        self.context_label = context
 
     def config_problems(self) -> list[str]:
         problems = []
@@ -38,6 +44,8 @@ class BrowserStep(TaskStep):
             problems.append(f"step {self.id!r}: env_id must be a non-empty string")
         if self.browser is not None and (not isinstance(self.browser, str) or not self.browser):
             problems.append(f"step {self.id!r}: browser, when given, must be a non-empty string")
+        if self.context_label is not None and (problem := label_problem(self.context_label, by_task=False)):
+            problems.append(f"step {self.id!r}: context: {problem}")
         return problems
 
     def preflight(self) -> list[str]:
@@ -60,11 +68,16 @@ class BrowserStep(TaskStep):
         return problems
 
     def to_dict(self) -> dict:
-        return {**super().to_dict(), "env_id": self.env_id, "browser": self.browser}
+        return {**super().to_dict(), "env_id": self.env_id, "browser": self.browser,
+                **({"context": self.context_label} if self.context_label is not None else {})}
 
     @classmethod
     def _browser_from_dict(cls, data: dict) -> dict:
         return {**cls._base_from_dict(data), "env_id": data["env_id"], "browser": data.get("browser")}
+
+    @classmethod
+    def _in_context_from_dict(cls, data: dict) -> dict:
+        return {**cls._browser_from_dict(data), "context": data.get("context")}
 
     def _find(self, context: TaskStepContext) -> tuple[DeployedEnv, Optional[str], dict]:
         """The record that serves the browser, the deployed env's or a multi env's computer's, and the browser's name,
@@ -72,18 +85,24 @@ class BrowserStep(TaskStep):
         return find_browser(deployed_env(context, self.env_id), self.browser)
 
     async def _call(self, context: TaskStepContext, op: str, params: dict,
-                    timeout_s: float = CALL_TIMEOUT_S) -> Any:
-        """``op``'s answer from the browser, refused when its card serves no such operation."""
+                    timeout_s: float = CALL_TIMEOUT_S, in_context: bool = True) -> Any:
+        """``op``'s answer from the browser, in the step's context when it names one and ``in_context``, refused when
+        its card serves no such operation, or none in a context."""
         deployed, name, card = self._find(context)
-        if find_extension_method(card, BROWSER, op) is None:
-            raise RuntimeError(f"the website browser {name or deployed.env_id!r} in env {deployed.env_id!r} serves no "
-                               f"browser/v1 {op}: rebuild it on a newer agentenv-framework-protocol")
+        in_context = in_context and self.context_label is not None
+        for needed in [op, *([LEASES] if in_context else [])]:
+            if find_extension_method(card, BROWSER, needed) is None:
+                raise RuntimeError(f"the website browser {name or deployed.env_id!r} in env {deployed.env_id!r} serves "
+                                   f"no browser/v1 {needed}: rebuild it on a newer agentenv-framework-protocol")
+        if in_context:
+            params = {**params, "context": self.context_label}
         return await invoke_extension(deployed.environment_url, card, BROWSER, params, timeout_s, method=op,
                                       headers=deployed.control_headers)
 
     def _record(self, context: TaskStepContext, **fields: Any) -> None:
-        context.metadata.setdefault(RECORDS_KEY, {})[self.id] = {"env_id": self.env_id, "browser": self.browser,
-                                                                 **fields}
+        context.metadata.setdefault(RECORDS_KEY, {})[self.id] = {
+            "env_id": self.env_id, "browser": self.browser,
+            **({"context": self.context_label} if self.context_label is not None else {}), **fields}
 
 
 def stored_browsers(env: Env) -> list[str]:

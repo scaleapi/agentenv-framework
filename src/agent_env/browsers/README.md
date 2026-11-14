@@ -48,13 +48,25 @@ values, the origin's other keys left as they are; `browser_clear_local_storage {
 `browser_open_tab {url, background?}`, in front, or with `background` behind the active tab, which stays active; and
 `browser_close_tab {url}` and `browser_activate_tab {url}`, on the one open tab at that URL as the browser shows it
 (scheme and host lowercase, no default port, `/` for an empty path), none or several failing the step with the tabs
-open listed. `browser_sign_in {site, user}` signs the browser in to `site`, a website env deployed in the run on its
+open listed. `browser_lease_context {label, grants?}` leases a context of the browser's beside its default one, its own
+cookies, local storage, tabs and downloads (in `~/Contexts/<label>/Downloads`), recorded as granted to the agents
+`grants` names, which nothing enforces yet; leasing a label again finds the same lease. Each step above, and
+`browser_sign_in`, takes a `context`, a lease's label, to act in it instead of the default context.
+`browser_release_context {label}` ends a lease, closing its tabs and deleting its folder; a reset or relaunch of the
+browser ends every lease, so a task leases again after `reset_env`. A context an agent makes over its CDP address is
+leased to it as `agent-<agent name>-<n>`, and only that agent may dispose it. `browser_sign_in {site, user}` signs the browser in to `site`, a website env deployed in the run on its
 own or in a multi env, by its env id: the site's `website/v1` `session {user}` gives the cookies and local storage,
 each cookie is set for every name the site is reached by (an exact name by its URL, a `*.` name as a domain cookie),
 and the browser's `data/add` loads them, which opens the start tabs again while no agent has acted. A task runs it
 after the load that seeds the site and again after `reset_env`, which starts the browser afresh. Preflight refuses a
 step on an env with no browser, none of the name given, or several and none named. On a multi env, the steps reach
 the browser apps of its computers, each through the computer's own record and control token.
+`browser_connect_cdp {context?}` with a `context`, a lease granted to the agent, hands it an address scoped to
+that lease: the agent sees the lease as the browser's default context, its pages, cross-origin iframes and workers
+alone, with the contexts it made itself, and what it opens, sets or downloads lands there; it can't see or attach to
+another context's targets, nor send on its browser session the commands that act on every context (`Fetch`,
+`Tracing`, `Security`, `Storage` beyond cookies, or another context's windows), and the address ends with the lease. An address with no context sees the default context
+and the agent's own, not the leases.
 `browser_connect_cdp` hands an agent a CDP address to the same browser, under the origin where the agent reaches the
 env, so through a tunnel that ends TLS it's https and wss; on a multi env, one at its gateway, asked through the
 gateway's `/svc/<computer>/` route, so the agent reaches the browser through the gateway's CDP relay as it reaches the

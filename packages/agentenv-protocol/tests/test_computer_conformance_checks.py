@@ -252,7 +252,16 @@ async def test_crops_the_driver_refuses_fail_p3_and_p4(monkeypatch):
 ])
 async def test_a_drag_that_doesnt_arrive_whole_fails_p7(drags, problem, monkeypatch):
     monkeypatch.setattr(checks, "SETTLE_S", 0.01)
-    p = fixture({"drags": drags, "scroll_top": 0, "wheel": {}})
+    state = {"drags": [], "scroll_top": 0, "wheel": {}}
+    p = fixture(state)
+    answer = p.session.call
+
+    def call(name, args):
+        if name == "computer_drag":
+            state["drags"] = state["drags"] + drags
+        return answer(name, args)
+
+    p.session.call = call
     await p._scroll_and_drag()
     assert details(p)["a drag starts and ends where it says, through its waypoints"] == ("failed", problem)
 

@@ -2,8 +2,17 @@ Base computers that come with agent-env, each a `computer` artifact a computer e
 `agent-env run <bundle> --set envs/desktop.computer=ubuntu-24.04-browser` composes a bundle's `desktop` env on
 another of them for one run, the bundle left as written.
 
-`artifacts/ubuntu-24.04/` is Ubuntu 24.04 (`amd64` and `arm64`) with XFCE on Xvfb, D-Bus and AT-SPI. tini starts
-supervisord, which runs every program as the session user, `user` (uid 1000); nothing in it runs as root. Its home
+`artifacts/ubuntu-24.04/` is Ubuntu 24.04 (`amd64` and `arm64`) with XFCE on Xvfb, D-Bus and AT-SPI. It starts as
+root: its init sets the time zone, makes the clock page and boots the egress proxy, then root's supervisord runs the
+clock follower as `agentenv-clock`, the egress proxy as `agentenv-egress` and the session's supervisord as the
+session user, `user` (uid 1000), which runs every session program. Every session program goes out through the
+egress proxy, on `127.0.0.1:3128` and on real time (`egress/`, a Go program the Dockerfile builds and tests): it
+passes a site's TLS through untouched when the universe's date is inside the site's certificate, else verifies the
+site against real time and hands the program a certificate from the computer's own CA, minted at boot, its key the
+proxy's alone, and valid from 1950 to 9999, so a live site loads however far the clock is from now. Its handshake
+with the site is built from the program's own, so the site sees the program's TLS fingerprint either way, and it
+refuses any destination that isn't global. Java and Node's `fetch` reach it by their own settings, which the
+session sets too. Its home
 has a desktop's standard folders (`Desktop`, `Documents`, `Downloads`, `Pictures` and the rest, from `xdg-user-dirs`). Its
 container form's image is built from the folder's `Dockerfile`, and a release publishes it as
 `ghcr.io/scaleapi/agentenv-ubuntu-24.04:src-<hex>`, tagged by its sources, so a run pulls it by digest instead of

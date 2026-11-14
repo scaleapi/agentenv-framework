@@ -32,7 +32,6 @@ from agent_env.env.env import DeployedEnv
 from agent_env.env.envs.computer.env import COMPUTER_TOOLS, ComputerEnv
 from agent_env.env.envs.computer.utils import inside
 from agent_env.env.envs.mcp_server import MCPServerEnv
-from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.env.envs.playwright_mcp import PLAYWRIGHT_MCP_ENVIRONMENT_NAME
 from agent_env.env.envs.website import WebsiteEnv
 from agent_env.env.legacy_protocol import card_servers
@@ -46,24 +45,13 @@ from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
 from agent_env.task_step.task_steps.snapshot_env import SnapshotEnvTaskStep
 from tst.util import local_sandboxes
-from tst.integration.env.envs.server_env_local_test import _items_artifact, _put_items_image
-from tst.integration.store.local_parallel_deploy_test import _docker, _seed_bootstrap_envs
+from tst.integration.computer.conftest import CONTAINER, multi_env
+from tst.integration.env.envs.server_env_local_test import _items_artifact
+from tst.integration.store.local_parallel_deploy_test import _docker
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
 UNPREFIXED = re.compile(r"^computer_")
-CONTAINER = {"sandbox_type": "local", "env_params": {"form": "container"}}
-
-
-@pytest.fixture(scope="module")
-def items(desktop):
-    """The gateway's and service-db's envs, and the items MCP server under a local id, since a multi env naming the
-    desktop's local id must be local too and a store's id can't reference a local one."""
-    with namespace_routing():
-        _seed_bootstrap_envs()
-        uid = uuid.uuid4().hex[:8]
-        return MCPServerEnv.put(id=f"@local/~/office-{uid}/items", environment_name="items",
-                                docker_image_artifact=_put_items_image(f"office-items-{uid}"))
 
 
 def _image(fixture: str, tag: str) -> DockerImageArtifact:
@@ -91,11 +79,6 @@ def shop(items):
                          docker_image_artifact=_image("cardless_mcp", f"office-browser-{uid}"))
         return WebsiteEnv.put(id=f"{items.id.rsplit('/', 1)[0]}/shop", environment_name="shop", domains=["shop.test"],
                               backend_docker_image_artifact=_image("agentenv_website", f"office-shop-{uid}"))
-
-
-def _multi(items, *computers, websites=()) -> MultiEnv:
-    return MultiEnv.put(id=f"@local/~/office-{uuid.uuid4().hex[:8]}/office", mcp_server_envs=[items],
-                        website_envs=list(websites), computer_envs=list(computers), name="office")
 
 
 LOAD_TIMEOUT_S = 20  # a site's answer inside the computer
@@ -184,7 +167,7 @@ def _gateway(deployed, made: list[str]) -> str:
 async def test_a_computer_in_a_multi_env_is_served_through_its_gateway_under_its_name_and_torn_down_with_it(desktop, items,
                                                                                                          shop):
     with namespace_routing():
-        office = _multi(items, Env.get(desktop.id), websites=[shop])
+        office = multi_env(items, Env.get(desktop.id), websites=[shop])
         step = DeployEnvTaskStep(id="office", version=None, env_id=office.id, sandbox_type="local", ttl_seconds=900,
                                  child_envs={"desktop": {**CONTAINER, "env_params": {"form": "container", "site_routing": True}}})
         assert step.preflight() == []
@@ -266,7 +249,7 @@ async def test_two_computers_keep_serving_through_restarts_and_a_failed_redeploy
     with namespace_routing():
         laptop = ComputerEnv.put(id=f"{desktop.id}-laptop", computer=desktop.computer, driver=desktop.driver,
                                  environment_name="laptop")
-        env = Env.get(_multi(items, Env.get(desktop.id), laptop).id)
+        env = Env.get(multi_env(items, Env.get(desktop.id), laptop).id)
         try:
             deployed = await env.deploy(sandbox_type="local", ttl_seconds=900,
                                         child_envs={"desktop": CONTAINER, "laptop": CONTAINER})
@@ -315,7 +298,7 @@ async def test_a_computer_that_fails_mid_deploy_fails_the_deploy_and_leaves_noth
 
     monkeypatch.setattr(ComputerEnv, "_give_tools", refuse)
     with namespace_routing():
-        office = _multi(items, Env.get(desktop.id))
+        office = multi_env(items, Env.get(desktop.id))
         context = TaskStepContext()
         with pytest.raises(RuntimeError, match="the computer's tools couldn't be applied"):
             await DeployEnvTaskStep(id="office", version=None, env_id=office.id, sandbox_type="local", ttl_seconds=600,
@@ -330,7 +313,7 @@ async def test_a_computer_entry_the_multi_env_refuses_makes_no_sandbox(desktop, 
     for name in ("create_sandbox", "create_vm", "create_container"):
         monkeypatch.setattr(LocalSandboxProvider, name, lambda *args, _name=name, **kwargs: made.append(_name))
     with namespace_routing():
-        office = _multi(items, Env.get(desktop.id))
+        office = multi_env(items, Env.get(desktop.id))
         refused = [
             ({"desktop": {**CONTAINER, "env_params": {"site_routing": True}}},
              "child_envs.desktop: env_params.site_routing routes the multi env's websites, and it has none"),

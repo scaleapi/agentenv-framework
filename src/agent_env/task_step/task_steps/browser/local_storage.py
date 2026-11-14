@@ -25,8 +25,9 @@ class BrowserSetLocalStorageTaskStep(BrowserStep):
 
     def __init__(self, id: str, version: Optional[int], env_id: str, origin: str, items: dict[str, str],
                  browser: Optional[str] = None, depends_on: Optional[list[TaskStepDependency]] = None,
-                 fail_task_on_error: bool = True):
-        super().__init__(id, version, env_id, browser, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
+                 fail_task_on_error: bool = True, context: Optional[str] = None):
+        super().__init__(id, version, env_id, browser, depends_on=depends_on, fail_task_on_error=fail_task_on_error,
+                         context=context)
         self.origin, self.items = origin, items
 
     def config_problems(self) -> list[str]:
@@ -41,7 +42,7 @@ class BrowserSetLocalStorageTaskStep(BrowserStep):
 
     @classmethod
     def from_dict(cls, data: dict) -> BrowserSetLocalStorageTaskStep:
-        return cls(**cls._browser_from_dict(data), origin=data["origin"], items=data["items"])
+        return cls(**cls._in_context_from_dict(data), origin=data["origin"], items=data["items"])
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         await self._call(context, "local_storage/set", {"origins": [{
@@ -59,8 +60,9 @@ class BrowserClearLocalStorageTaskStep(BrowserStep):
 
     def __init__(self, id: str, version: Optional[int], env_id: str, origin: Optional[str] = None,
                  browser: Optional[str] = None, depends_on: Optional[list[TaskStepDependency]] = None,
-                 fail_task_on_error: bool = True):
-        super().__init__(id, version, env_id, browser, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
+                 fail_task_on_error: bool = True, context: Optional[str] = None):
+        super().__init__(id, version, env_id, browser, depends_on=depends_on, fail_task_on_error=fail_task_on_error,
+                         context=context)
         self.origin = origin
 
     def config_problems(self) -> list[str]:
@@ -71,7 +73,7 @@ class BrowserClearLocalStorageTaskStep(BrowserStep):
 
     @classmethod
     def from_dict(cls, data: dict) -> BrowserClearLocalStorageTaskStep:
-        return cls(**cls._browser_from_dict(data), origin=data.get("origin"))
+        return cls(**cls._in_context_from_dict(data), origin=data.get("origin"))
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         cleared = (await self._call(context, "local_storage/clear",

@@ -20,7 +20,8 @@ import agent_env
 
 SRC = Path(agent_env.__file__).resolve().parent
 PYPROJECT = SRC.parents[1] / "pyproject.toml"
-CONTAINER_ONLY = (SRC / "env" / "gateway",)
+# The gateway's image, and each agent's, which installs its folder's requirements and never the library.
+CONTAINER_ONLY = (SRC / "env" / "gateway", SRC / "agents" / "agents")
 SELF = "agentenv-framework"
 # The Smol SDK has no wheel for some development hosts, and NeMo Gym needs Python 3.13.14 or later, as the extra's
 # omegaconf does with it; all are deliberately absent from [dev].

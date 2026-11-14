@@ -75,13 +75,15 @@ class OriginStorage(BaseModel):
 
 
 class OpenTab(BaseModel):
-    """An open tab, by the browser's target id, with the tab that opened it, a popup's, and whether it's active."""
+    """An open tab, by the browser's target id, with the tab that opened it, a popup's, whether it's its context's
+    active tab, and the label of the lease it's in, None for the default context."""
     id: str
     url: str
     title: str
     opened_at: str
     opener: Optional[str] = None
     active: bool
+    context: Optional[str] = None
 
 
 class ClosedTab(BaseModel):
@@ -94,10 +96,12 @@ class ClosedTab(BaseModel):
     opener: Optional[str] = None
     closed_at: str
     closed_by: Literal["agentenv", "unknown", "exit", "stop"]
+    context: Optional[str] = None
 
 
 class Download(BaseModel):
-    """A download into ``~/Downloads``; when completed, with where it landed, and its size and sha256 when available."""
+    """A download into ``~/Downloads``, or a lease's into its own folder, by the lease's label; when completed, with
+    where it landed, and its size and sha256 when available."""
     guid: str
     url: str
     filename: str
@@ -107,6 +111,7 @@ class Download(BaseModel):
     path: Optional[str] = None
     size: Optional[int] = None
     sha256: Optional[str] = None
+    context: Optional[str] = None
 
 
 class Dialog(BaseModel):
@@ -142,14 +147,28 @@ class TabToOpen(BaseModel):
     active: bool = False
 
 
+class ContextToLoad(BaseModel):
+    """A lease ``data/add`` makes when it isn't leased, who made it and its grants, and the cookies, local storage and,
+    when given, tabs it loads into it. A snapshot's context is one."""
+    model_config = ConfigDict(extra="ignore")
+
+    made_by: str = Field("task", min_length=1)
+    grants: list[str] = []
+    cookies: list[CookieToSet] = []
+    local_storage: list[OriginStorage] = []
+    tabs: Optional[list[TabToOpen]] = None
+
+
 class StateToLoad(BaseModel):
-    """What ``data/add`` applies of the browser's state: its cookies, its local storage and, when given, its tabs.
-    A snapshot's state loads as it is: what it records of the past, its closed tabs, downloads and clock, is left."""
+    """What ``data/add`` applies of the browser's state: its cookies, its local storage and, when given, its tabs,
+    and its leases by label. A snapshot's state loads as it is: what it records of the past, its closed tabs,
+    downloads and clock, is left."""
     model_config = ConfigDict(extra="ignore")
 
     cookies: list[CookieToSet] = []
     local_storage: list[OriginStorage] = []
     tabs: Optional[list[TabToOpen]] = None
+    contexts: dict[str, ContextToLoad] = {}
 
 
 class SiteNames(BaseModel):
@@ -187,8 +206,20 @@ class Clock(BaseModel):
     now: str
 
 
+class ContextState(BaseModel):
+    """A lease's state in ``data/get``: who made it, the agents it's granted to, and its cookies, local storage, open
+    tabs and downloads."""
+    made_by: str
+    grants: list[str]
+    cookies: list[Cookie]
+    local_storage: list[OriginStorage]
+    tabs: list[OpenTab]
+    downloads: list[Download]
+
+
 class BrowserState(BaseModel):
-    """``data/get``'s state of the browser, read at one moment and kept as ``browser-state.json`` in a snapshot."""
+    """``data/get``'s state of the browser, read at one moment and kept as ``browser-state.json`` in a snapshot: its
+    default context's cookies, local storage, tabs and downloads, every tab it closed, and each lease's by label."""
     cookies: list[Cookie]
     local_storage: list[OriginStorage]
     tabs: list[OpenTab]
@@ -197,6 +228,7 @@ class BrowserState(BaseModel):
     clock: Clock
     #: The start tabs of its latest launch.
     start_tabs: list[StartTab] = []
+    contexts: dict[str, ContextState] = {}
 
 
 class BrowserRecord(BaseModel):

@@ -313,6 +313,24 @@ def test_an_at_local_id_left_in_what_would_be_written_is_refused(home):
         "tasks/t.json: [0].metadata.from names '@local/~/elsewhere/x', which only this machine's stores hold",)
 
 
+def test_an_at_local_id_left_in_a_path_into_the_run_s_context_is_refused(home):
+    files = {"tasks/t.json": json.dumps([{**BOX, "metadata": {"from": "env_trigger_state[@local/~/elsewhere/x].s"}}])}
+
+    with pytest.raises(BundleError) as refused:
+        register_bundle(layout(home / "triage", files))
+
+    assert refused.value.problems == (
+        "tasks/t.json: [0].metadata.from names '@local/~/elsewhere/x', which only this machine's stores hold",)
+
+
+def test_an_at_local_id_in_a_path_into_the_run_s_context_takes_its_registry_id():
+    facts = {"wf-1": "env_trigger_state[@local/~/triage/crm].statuses.wf-1", "score": "verifications.judge.score"}
+
+    renamed = register_module._renamed({"context_facts_for_judge": facts}, {"@local/~/triage/crm": "triage-crm"})
+
+    assert renamed == {"context_facts_for_judge": {**facts, "wf-1": "env_trigger_state.triage-crm.statuses.wf-1"}}
+
+
 def test_a_shared_store_refuses_a_credential_or_reference_in_env_vars_and_a_url_only_this_machine_reaches(
         home, monkeypatch):
     monkeypatch.setattr(register_module, "shared_store", lambda store: True)

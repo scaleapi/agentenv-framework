@@ -112,7 +112,8 @@ async def test_a_burst_still_settling_at_the_end_gets_its_frame_before_the_last(
 
 
 @pytest.mark.asyncio
-async def test_an_end_waits_for_entries_in_flight_and_lists_any_still_unwritten_as_missing(recorded, monkeypatch):
+async def test_an_end_waits_for_entries_in_flight_writes_an_action_still_going_as_unfinished_and_lists_the_rest(
+        recorded, monkeypatch):
     log, control, uploads, recordings = recorded
     monkeypatch.setattr(browser_recording, "LOG_WAIT_S", 0.3)
     started = await recordings.start("run-1:record", _grant(), frames=False)
@@ -120,11 +121,16 @@ async def test_an_end_waits_for_entries_in_flight_and_lists_any_still_unwritten_
     asyncio.get_running_loop().call_later(0.1, lambda: log.finish(finishing, ok=True))
     complete = await recordings.end(started["recording_id"])
     started = await recordings.start("run-2:record", _grant(), frames=False)
-    stuck = log.begin({"via": "cdp", "who": "ada", "method": "Page.navigate", "acts": True, "tab": "T1"})
-    incomplete = await recordings.end(started["recording_id"])
+    going = log.begin({"via": "mcp", "who": "default", "tool": "browser_navigate", "acts": True, "tab": "T1"})
+    after = _acted(log, "cdp", "Input.insertText", "T1")
+    held = log.reserve()
+    ended = await recordings.end(started["recording_id"])
+    lines = [json.loads(line) for line in uploads.by_path[
+        f"agentenv-browser-recordings/r1/{ended['recording_id']}/log.jsonl"].decode().splitlines()]
 
     assert complete["log_missing"] == [] and complete["log_last"] == finishing["seq"]
-    assert incomplete["log_missing"] == [stuck["seq"]]
+    assert ended["log_missing"] == [held] and [line["seq"] for line in lines] == [going["seq"], after]
+    assert lines[0]["action"]["unfinished"] is True
 
 
 @pytest.mark.asyncio
@@ -325,6 +331,66 @@ async def test_a_tab_that_closes_while_its_frame_is_asked_again_is_framed_as_the
 
 
 @pytest.mark.asyncio
+async def test_a_frame_whose_session_is_gone_is_taken_on_the_session_its_tab_was_attached_on_anew():
+    pipe = RefusingPipe(refusals=1, why="Page.captureScreenshot: Session with given id not found")
+    control = _one_tab(pipe)
+
+    def reattach() -> None:
+        pipe.emit("Target.detachedFromTarget", {"sessionId": "s-T1"})
+        pipe.emit("Target.attachedToTarget", {"sessionId": "s-T1b", "targetInfo": {"targetId": "T1", "type": "page"}})
+    asyncio.get_running_loop().call_later(0.05, reattach)
+
+    _, _, tab, _ = await control.frame("T1", load_wait_s=0)
+
+    assert tab == "T1" and [s for s, _, _ in pipe.captured] == ["s-T1", "s-T1b"]
+
+
+@pytest.mark.asyncio
+async def test_a_frame_whose_only_tab_is_attached_anew_only_after_a_retry_waits_for_it_within_its_budget():
+    pipe = RefusingPipe(refusals=1, why="Page.captureScreenshot: Session with given id not found")
+    control = _one_tab(pipe)
+    loop = asyncio.get_running_loop()
+    loop.call_later(0.05, pipe.emit, "Target.detachedFromTarget", {"sessionId": "s-T1"})
+    loop.call_later(0.6, pipe.emit, "Target.attachedToTarget",
+                    {"sessionId": "s-T1b", "targetInfo": {"targetId": "T1", "type": "page"}})
+
+    _, _, tab, _ = await control.frame("T1", load_wait_s=0)
+
+    assert tab == "T1" and [s for s, _, _ in pipe.captured] == ["s-T1", "s-T1b"]
+
+
+class HangingPipe(Pipe):
+    """A pipe whose captures of the sessions in ``hanging`` never answer, as a tab's that closes mid-capture."""
+
+    def __init__(self, *hanging: str) -> None:
+        super().__init__()
+        self.hanging = set(hanging)
+
+    async def call(self, method, params=None, *, session_id=None, timeout_s=None):
+        if method == "Page.captureScreenshot" and session_id in self.hanging:
+            self.captured.append((session_id, params, asyncio.get_running_loop().time()))
+            await asyncio.sleep(timeout_s)
+            raise asyncio.TimeoutError()
+        return await super().call(method, params, session_id=session_id, timeout_s=timeout_s)
+
+
+@pytest.mark.asyncio
+async def test_a_frame_whose_tab_closes_while_its_capture_waits_is_taken_of_the_tab_left_at_once():
+    pipe = HangingPipe("s-T2")
+    control = BrowserControl(pipe, "agent", (1280, 800))
+    for tab in ("T1", "T2"):
+        pipe.emit("Target.targetCreated", {"targetInfo": {"targetId": tab, "type": "page", "url": "about:blank"}})
+        pipe.emit("Target.attachedToTarget", {"sessionId": f"s-{tab}", "targetInfo": {"targetId": tab, "type": "page"}})
+    loop = asyncio.get_running_loop()
+    loop.call_later(0.1, pipe.emit, "Target.detachedFromTarget", {"sessionId": "s-T2"})
+    started = loop.time()
+
+    _, _, tab, _ = await control.frame("T2", load_wait_s=0)
+
+    assert tab == "T1" and pipe.captured[-1][0] == "s-T1" and loop.time() - started < 2
+
+
+@pytest.mark.asyncio
 async def test_a_frame_the_browser_refuses_for_another_reason_is_missing_at_once():
     pipe = RefusingPipe(refusals=5, why="Page.captureScreenshot: Internal error")
 
@@ -351,10 +417,11 @@ async def test_a_tab_behind_the_active_one_is_framed_once_a_second_capture_nudge
     pipe.emit("Target.targetCreated", {"targetInfo": {"targetId": "T1", "type": "page", "url": "about:blank"}})
     pipe.emit("Target.attachedToTarget", {"sessionId": "s-T1", "targetInfo": {"targetId": "T1", "type": "page"}})
 
+    asked = asyncio.get_running_loop().time()
     data, _, tab, _ = await control.frame("T1", load_wait_s=0)
 
-    (_, _, first), (_, _, second) = pipe.captured
-    assert (base64.b64decode(data), tab) == (b"behind", "T1") and second - first >= NUDGE_S
+    (_, _, _), (_, _, second) = pipe.captured
+    assert (base64.b64decode(data), tab) == (b"behind", "T1") and second - asked >= NUDGE_S
 
 
 @pytest.mark.asyncio

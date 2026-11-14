@@ -1,6 +1,6 @@
 """The agents bundle's Browser Use agent driving agentenv's chromium, deployed alone as a browser computer, through the
-address ``browser_connect_cdp`` gives it: its image built from the shipped folder with real docker, real Browser Use
-Pi, and a fake OpenAI Chat Completions endpoint as the configured model endpoint, which scripts its JavaScript, so no
+address ``browser_connect_cdp`` gives it: its image built from the shipped folder with real docker, real browser-use
+1.0, and a fake OpenAI Chat Completions endpoint as the configured model endpoint, which scripts its Python, so no
 model key is needed. Needs a Docker daemon and network access for the images' downloads."""
 
 import asyncio
@@ -38,7 +38,11 @@ MODEL: Final[str] = "fake-model-1"
 # The page names itself only once it runs, so its title in an answer came from the browser, not the prompt.
 PAGE: Final[str] = "data:text/html," + urllib.parse.quote("<script>document.title = 'Lantern ' + (3 + 4)</script>")
 # The browser opens PAGE at boot, so the title is read only when the tab the agent drives is the browser's own.
-OPEN: Final[str] = "await page.waitFor(() => document.title.startsWith('Lantern'));\n(await page.info()).title"
+OPEN: Final[str] = ("import time\n"
+                    "for _ in range(50):\n"
+                    "    if js('document.title').startswith('Lantern'): break\n"
+                    "    time.sleep(0.2)\n"
+                    "js('document.title')")
 ON_PAGE: Final[dict] = {"app_settings": {"chromium": {"start_urls": [PAGE]}}}
 PROMPT: Final[str] = "Open the page and reply with its title."
 AGAIN: Final[str] = "Open it once more and reply with its title."
@@ -155,22 +159,23 @@ def test_it_connects_by_http_url_too_refuses_a_wrong_credential_and_without_an_a
     assert outcomes["http"]["state"] == "completed" and "Lantern 7" in outcomes["http"]["text"], seen
     # The context's second turn continues its conversation, through a connection of its own.
     assert outcomes["again"]["state"] == "completed" and "Lantern 7" in outcomes["again"]["text"], seen
-    assert PROMPT in outcomes["again_carried"] and "'Lantern 7'" in outcomes["again_carried"], seen
+    # browser-use's REPL hands back what a cell printed as a list of its lines.
+    assert PROMPT in outcomes["again_carried"] and '\\"Lantern 7' in outcomes["again_carried"], seen
     # The relay refuses the forged token's WebSocket upgrade, and its discovery with a 403.
-    assert "Could not connect to CDP endpoint" in outcomes["forged_ws"]["text"], seen
-    assert "CDP discovery failed (403)" in outcomes["forged_http"]["text"], seen
+    for connect_by in ("ws", "http"):
+        assert outcomes[f"forged_{connect_by}"]["state"] == "failed", seen
+        assert "could not connect to a browser" in outcomes[f"forged_{connect_by}"]["text"], seen
 
 
 def _browses(body: dict) -> Text | ToolCall:
-    """Run ``OPEN``, then finish with what it printed, or the error it raised, for the turn's prompt."""
+    """Run ``OPEN`` in browser-use's REPL, then finish with what it printed, or the error it raised, for the turn's
+    prompt."""
     messages = body.get("messages") or []
     asked = max((i for i, m in enumerate(messages) if m.get("role") == "user" and "reply with its title" in json.dumps(m)),
                 default=0)
     results = _tool_results({"messages": messages[asked:]})
     if not results:
-        return ToolCall("javascript", {"code": OPEN})
-    if results[-1] == "Result accepted.":
-        return Text("done")
+        return ToolCall("python", {"code": OPEN})
     return ToolCall("finish", {"result": results[-1]})
 
 

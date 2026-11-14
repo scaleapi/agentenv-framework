@@ -15,7 +15,6 @@ import re
 import shutil
 import subprocess
 import urllib.parse
-from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -47,6 +46,7 @@ from agent_env.env.envs.computer.utils import (boot, builder, composed, composer
                                                probing, resolve_in_base)
 from agent_env.env.envs.computer.utils import sites as computer_sites
 from agent_env.env.envs.computer.utils.composer import Composing
+from agent_env.store.image_store.registry_api import RegistryRefusedError
 from agent_env.env.envs.computer.utils.probing import _probe
 from agent_env.env.envs.computer.env import COMPUTER_TOOLS, ComputerEnv
 from agent_env.env.envs.computer import app_env
@@ -121,9 +121,24 @@ def test_a_computer_env_is_composed_for_each_arch_and_written_with_the_computer_
     assert composed["arm64"]["lock"].startswith("sha256:") and composed["arm64"]["lock"] != composed["amd64"]["lock"]
     assert arm64["conf"] == (
         "[program:driver-desk-driver]\ncommand=/opt/agentenv/drivers/desk/venv/bin/python -m agentenv_protocol.computer.serve "
-        'driver.py:Desk\ndirectory=/opt/agentenv/drivers/desk\nenvironment=MCP_PORT="18765"\nautorestart=true\n'
+        'driver.py:Desk\ndirectory=/opt/agentenv/drivers/desk\nenvironment=MCP_PORT="18765",AGENTENV_REAL_TIME="1"\n'
+        'autorestart=true\n'
         "redirect_stderr=true\nstdout_logfile=/var/log/agentenv/driver-desk-driver.log\n")
     assert ComputerEnv.from_dict(stored.to_dict()).to_dict() == stored.to_dict()
+
+
+def test_a_base_whose_container_form_starts_as_root_composes_an_image_that_starts_as_root(base, driver, docker):
+    image = base.image()
+    rooted = _base(image, forms={"container": {"image": {"id": image.id, "version": image.version}, "init": "supervisord",
+                                               "input_channel": "env", "start_as": "root"}})
+
+    _put(rooted, driver)
+
+    composed = Env.get("@local/~/kit/desktop").metadata["computer"]
+    assert ComputerArtifact.get(rooted.id, rooted.version).forms.container.start_as == "root"
+    assert ComputerArtifact.get(composed["id"], composed["version"]).forms.container.start_as == "root"
+    assert all(build["dockerfile"].splitlines()[-2] == "USER root" for build in docker.builds)
+    assert "start_as" not in base.model_dump()["forms"]["container"]
 
 
 def test_a_key_covers_its_build_files_executable_bits_and_the_composers_format(base, driver, docker, tmp_path,
@@ -735,6 +750,77 @@ def test_env_build_by_an_installed_alias_composes_under_the_id_of_the_env_it_nam
         "@local/acme-kit/kit/desktop__computer").image().image_name])
 
 
+MIRROR = "ghcr.io/org/computers"
+
+
+def _mirrored(docker, monkeypatch, read=None):
+    """Move every composed image out of the env's image store into the computer image mirror, as a fresh runner of CI
+    finds them, and record each copy back: the mirror's refs, read with ``read`` when given."""
+    stored = {ref: digest for ref, digest in docker.registry.tags.items()
+              if f"/{composed.REPOSITORY}:" in ref and ":index-" not in ref}
+    for ref in stored:
+        del docker.registry.tags[ref]
+    mirror = {f"{MIRROR}:{composed.mirror_tag(ref.rpartition(':')[2])}": digest for ref, digest in stored.items()}
+    copied, real = [], composer.pin_if_served
+
+    def pin(ref, auth):
+        if ref.startswith(f"{MIRROR}:"):
+            return read(ref) if read else (f"{ref}@{mirror[ref]}" if ref in mirror else None)
+        return real(ref, auth)
+
+    def copy(source, target, source_auth, target_auth):
+        copied.append((source.partition("@")[0], target))
+        docker.registry.tags[target] = source.rpartition("@")[2]
+
+    monkeypatch.setattr(composer, "pin_if_served", pin)
+    monkeypatch.setattr(composer, "copy_image", copy)
+    monkeypatch.setattr(get_config(), "computer_image_mirror", MIRROR)
+    return stored, copied
+
+
+def test_an_image_the_store_lacks_is_copied_from_the_computer_image_mirror_and_reused_rather_than_built(base, driver,
+                                                                                                        docker,
+                                                                                                        monkeypatch):
+    first = _put(base, driver)
+    stored, copied = _mirrored(docker, monkeypatch)
+
+    second = _put(base, driver, id="@local/~/kit/other", environment_name="other")
+
+    reused = Env.get(second.id).metadata["composed"]["container"]
+    assert len(docker.builds) == 2 and all(r["reused"] for r in reused.values())
+    assert sorted(copied) == sorted((f"{MIRROR}:{composed.mirror_tag(ref.rpartition(':')[2])}", ref) for ref in stored)
+    assert {arch: r["image"] for arch, r in reused.items()} == {
+        arch: r["image"] for arch, r in Env.get(first.id).metadata["composed"]["container"].items()}
+
+
+def test_a_change_to_the_code_that_composes_an_image_misses_the_mirror_and_builds_it(base, driver, docker,
+                                                                                    monkeypatch):
+    _put(base, driver)
+    _, copied = _mirrored(docker, monkeypatch)
+    monkeypatch.setattr(composed, "composition", lambda: "sha256:" + "f" * 64)
+
+    second = _put(base, driver, id="@local/~/kit/other", environment_name="other")
+
+    assert len(docker.builds) == 4 and copied == []
+    assert not any(r["reused"] for r in Env.get(second.id).metadata["composed"]["container"].values())
+
+
+def test_a_computer_image_mirror_that_cant_be_read_leaves_the_image_to_be_built(base, driver, docker, monkeypatch,
+                                                                               caplog):
+    _put(base, driver)
+
+    def refused(ref):
+        raise RegistryRefusedError(f"{ref}: ghcr.io refused to serve it (HTTP 403)")
+
+    _, copied = _mirrored(docker, monkeypatch, read=refused)
+    with caplog.at_level(logging.WARNING, logger=composer.__name__):
+        second = _put(base, driver, id="@local/~/kit/other", environment_name="other")
+
+    built = Env.get(second.id).metadata["composed"]["container"]
+    assert len(docker.builds) == 4 and not any(r["reused"] for r in built.values()) and copied == []
+    assert f"the computer image mirror {MIRROR} couldn't give" in caplog.text
+
+
 def test_builds_of_one_env_at_once_keep_each_others_pairs_and_a_failure_doesnt_replace_a_built_one(base, driver,
                                                                                                     docker,
                                                                                                     monkeypatch):
@@ -1128,12 +1214,12 @@ async def test_a_computer_with_site_routing_reaches_the_websites_the_run_deploye
     ((sandbox, sites, options),) = routes
     assert sandbox is boots.sandboxes[0]
     assert [site.model_dump() for site in sites] == [{"name": "notes", "url": "http://localhost:8080/website/notes/",
-                                                      "domains": ["notes.test"]}]
-    assert options == {"user": "user", "network": None, "valid_for": timedelta(seconds=3600), "label": "desktop",
-                       "os_type": "linux", "display": "x11", "live_hosts": ()}
+                                                      "domains": ["notes.test"], "sign_in_headers": []}]
+    assert options == {"user": "user", "network": None, "label": "desktop", "os_type": "linux", "display": "x11",
+                       "live_hosts": ()}
     assert boots.boots[0]["environment"][HOLD_BOOT_LAUNCH_ENV] == "1"
     record = context.deployed_envs[-1].metadata["computer"]
-    assert record["sites"] == {"names": {"routes": {"notes": ["notes.test"]}}, "ca": "CA PEM", "valid_for_s": 3600}
+    assert record["sites"] == {"names": {"routes": {"notes": ["notes.test"]}}, "ca": "CA PEM"}
     assert record["env_params"]["site_routing"] is True and record["env_params"]["sites"][0]["name"] == "notes"
 
 
@@ -1151,9 +1237,8 @@ async def test_a_computer_deployed_to_route_its_sites_later_boots_held_and_route
     assert boots.boots[0]["environment"].items() >= computer_sites.TRUST_ENVIRONMENTS["linux"].items()
     ((sandbox, sites, options),) = routes
     assert sandbox is boots.sandboxes[0] and [site.name for site in sites] == ["notes"]
-    assert options["valid_for"] == timedelta(seconds=3600)
     record = deployed.metadata["computer"]
-    assert record["env_params"]["sites"][0]["name"] == "notes" and record["sites"]["valid_for_s"] == 3600
+    assert record["env_params"]["sites"][0]["name"] == "notes" and record["sites"]["ca"] == "CA PEM"
 
 
 @pytest.mark.asyncio
@@ -1375,7 +1460,7 @@ async def test_a_start_tab_on_one_of_the_env_sites_that_didnt_load_fails_the_boo
 
     with pytest.raises(RuntimeError) as failed:
         await env_computer_provider._finish_boot(SimpleNamespace(), record, None,
-                                                 SimpleNamespace(site_routing=False), 0, None)
+                                                 SimpleNamespace(site_routing=False), None)
 
     assert record.metadata["computer"]["start_tabs"] == {"chromium": tabs}
     assert str(failed.value) == (
@@ -1420,8 +1505,8 @@ async def test_a_reset_routes_the_fresh_computer_to_the_same_sites_under_a_ca_of
     await ResetEnvTaskStep(id="reset", version=None, env_id=env.id, fail_task_on_error=True).execute(context)
 
     first, again = routes
-    assert again[0] is sandbox and again[1] == first[1] and again[2]["valid_for"] == timedelta(seconds=3600)
-    assert context.deployed_envs[-1].metadata["computer"]["sites"]["valid_for_s"] == 3600
+    assert again[0] is sandbox and again[1] == first[1] and again[2] == first[2]
+    assert context.deployed_envs[-1].metadata["computer"]["sites"]["ca"] == "CA PEM"
 
 
 @pytest.mark.asyncio

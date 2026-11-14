@@ -28,6 +28,10 @@ def get_task_step_registry() -> dict[str, type["TaskStep"]]:
 
 def _builtin_registry() -> dict[str, type["TaskStep"]]:
     from agent_env.task_step.task_steps.browser.connect_cdp import BrowserConnectCdpTaskStep
+    from agent_env.task_step.task_steps.browser.contexts import (
+        BrowserLeaseContextTaskStep,
+        BrowserReleaseContextTaskStep,
+    )
     from agent_env.task_step.task_steps.browser.cookies import BrowserDeleteCookiesTaskStep, BrowserSetCookiesTaskStep
     from agent_env.task_step.task_steps.browser.sign_in import BrowserSignInTaskStep
     from agent_env.task_step.task_steps.browser.local_storage import (
@@ -64,6 +68,7 @@ def _builtin_registry() -> dict[str, type["TaskStep"]]:
     from agent_env.task_step.task_steps.register_env_triggers import RegisterEnvTriggersStep
     from agent_env.task_step.task_steps.register_agent_triggers import RegisterAgentTriggersStep
     from agent_env.task_step.task_steps.sync_env_clock import SyncEnvClockTaskStep
+    from agent_env.task_step.task_steps.set_env_clock_rate import SetEnvClockRateTaskStep
     from agent_env.task_step.task_steps.configure_scheduled_checks import ConfigureScheduledChecksTaskStep
     from agent_env.task_step.task_steps.install_agent import InstallAgentTaskStep
     from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
@@ -116,6 +121,8 @@ def _builtin_registry() -> dict[str, type["TaskStep"]]:
         _get_type(BrowserOpenTabTaskStep): BrowserOpenTabTaskStep,
         _get_type(BrowserCloseTabTaskStep): BrowserCloseTabTaskStep,
         _get_type(BrowserActivateTabTaskStep): BrowserActivateTabTaskStep,
+        _get_type(BrowserLeaseContextTaskStep): BrowserLeaseContextTaskStep,
+        _get_type(BrowserReleaseContextTaskStep): BrowserReleaseContextTaskStep,
         _get_type(CollectArtifactsTaskStep): CollectArtifactsTaskStep,
         _get_type(StartComputerRecordingTaskStep): StartComputerRecordingTaskStep,
         _get_type(EndComputerRecordingTaskStep): EndComputerRecordingTaskStep,
@@ -136,6 +143,7 @@ def _builtin_registry() -> dict[str, type["TaskStep"]]:
         _get_type(RegisterEnvTriggersStep): RegisterEnvTriggersStep,
         _get_type(RegisterAgentTriggersStep): RegisterAgentTriggersStep,
         _get_type(SyncEnvClockTaskStep): SyncEnvClockTaskStep,
+        _get_type(SetEnvClockRateTaskStep): SetEnvClockRateTaskStep,
         _get_type(ConfigureScheduledChecksTaskStep): ConfigureScheduledChecksTaskStep,
         _get_type(InstallAgentTaskStep): InstallAgentTaskStep,
         _get_type(RubricsVerifierTaskStep): RubricsVerifierTaskStep,

@@ -94,6 +94,11 @@ KEPT_ANSWERS = re.compile(
     r"^\s*(text/|application/(json|x-www-form-urlencoded|xml|javascript|ecmascript)\b|[^;]*\+(json|xml)\b)", re.I)
 #: What the network log keeps of a header a site names as its sign-in header.
 REMOVED = "<removed>"
+#: A site's fields in the config ``install`` reads that the config it serves from keeps as given, which the session
+#: user reads too; its certificate and key ``install`` writes to files, and its upstream headers to one root alone
+#: reads (``PRIVATE_SITE_FIELDS``). Every field a site's config has is one or the other.
+SERVED_SITE_FIELDS = ("name", "upstream", "domains", "sign_in_headers")
+PRIVATE_SITE_FIELDS = ("cert_pem", "key_pem", "upstream_headers")
 #: How a network log line begins, its number, its kind and its entry's id, so a proxy started again finds its last
 #: number and the entries left open without reading every body.
 NUMBERED = re.compile(rb'^\{"seq":(\d+),"at":"[^"]*","(open|end)":\{"id":"([^"]*)"')
@@ -326,9 +331,8 @@ class Config:
                 headers = json.loads(Path(data["upstream_headers"]).read_text())
             except PermissionError:
                 headers = {}
-        sites = [Site(name=s["name"], upstream=s["upstream"], domains=list(s["domains"]), cert=s.get("cert"),
-                      key=s.get("key"), upstream_headers=dict(headers.get(s["name"]) or {}),
-                      sign_in_headers=list(s.get("sign_in_headers") or [])) for s in data["sites"]]
+        sites = [Site(**{field: s[field] for field in SERVED_SITE_FIELDS if field in s}, cert=s.get("cert"),
+                      key=s.get("key"), upstream_headers=dict(headers.get(s["name"]) or {})) for s in data["sites"]]
         return cls(user=data.get("user"), sites=sites, serve_user=data.get("serve_user"),
                    listen=data.get("listen", LOOPBACK),
                    https_port=data.get("https_port", 443), http_port=data.get("http_port", 80),
@@ -1403,7 +1407,7 @@ def install(config_path: str, paths: Paths = Paths()) -> dict:
         Path(ca).write_text(given["ca_pem"])
     sites = []
     for site in given["sites"]:
-        served = {"name": site["name"], "upstream": site["upstream"], "domains": site["domains"]}
+        served = {field: site[field] for field in SERVED_SITE_FIELDS if field in site}
         if site.get("cert_pem"):
             cert, key = folder / f"{site['name']}.crt", folder / f"{site['name']}.key"
             cert.write_text(site["cert_pem"])
