@@ -21,6 +21,7 @@ from agent_env.task_step.task_steps import always_on as ao
 from agent_env.task_step.task_steps.agent import user_sim_versions
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import USER_SIMS_KEY, DeployUserSimAgentTaskStep
+from agent_env.task_step.task_steps.agent.user_sim_common import persona_fingerprint
 from tst.unit.task_step.always_on_harness import USER_SIM, Rig
 
 DATA = Path(__file__).parents[2] / "data" / "user_sim"
@@ -119,6 +120,38 @@ async def test_the_record_keeps_each_tag_s_line_so_an_old_used_resolves_after_th
     assert seen[used] == decisions[8]
     # Recording the map leaves the prompt as tested.
     assert record["prompt_sha256"] == hashlib.sha256(PROMPT.encode()).hexdigest()
+
+
+# The persona fingerprint, pinned: psi-benchmark-tasks's converter computes it too, and its test uses this sample.
+FINGERPRINT_PERSONA = {
+    "display_name": "Hannah Reyes",
+    "description": {"who_you_are": ["Hannah Reyes, 32, a project manager in San Francisco."],
+                    "decisions": ["A place at $180 a night or less: yes."]},
+    "permissions": {"just_do": ["book flights"]},
+    "keep_private": ["Your card number."],
+}
+FINGERPRINT_OPENING = "ok mom and dad are coming thu\u2013mon (nov 19\u201323), can you handle it?"
+FINGERPRINT = "2d287ae4fd69f1f2398e223d7a3ed94976c912c825c606378859656b2ec2fdcd"
+
+
+def test_the_persona_fingerprint_is_pinned():
+    assert persona_fingerprint(FINGERPRINT_PERSONA, FINGERPRINT_OPENING) == FINGERPRINT
+    # The name and the reading settings aren't in it; the opening as written is.
+    assert persona_fingerprint({**FINGERPRINT_PERSONA, "display_name": "H. Reyes", "max_replies": 3},
+                               FINGERPRINT_OPENING) == FINGERPRINT
+    assert persona_fingerprint(FINGERPRINT_PERSONA, [{"kind": "text", "text": FINGERPRINT_OPENING}]) != FINGERPRINT
+
+
+@pytest.mark.asyncio
+async def test_the_record_has_the_persona_fingerprint_of_the_step_as_written(monkeypatch):
+    opening = [{"kind": "text", "text": "the <trip> trip, can you handle it?"},
+               {"kind": "file", "file": {"uri": "s3://reyes-family/<trip>/itinerary.pdf", "name": "itinerary.pdf"}}]
+    context = TaskStepContext()
+    context.metadata["seed"] = {"trip": "nov-19"}
+    record = await _published(monkeypatch, _step(opening_prompt=opening), context)
+    assert record["persona_sha256"] == persona_fingerprint(HANNAH, opening)  # unseeded
+    assert (await _published(monkeypatch, _step()))["persona_sha256"] == persona_fingerprint(
+        HANNAH, PERSON["opening"]["text"])
 
 
 @pytest.mark.asyncio

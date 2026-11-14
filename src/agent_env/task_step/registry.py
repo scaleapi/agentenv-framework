@@ -73,6 +73,7 @@ def _builtin_registry() -> dict[str, type["TaskStep"]]:
     from agent_env.task_step.task_steps.configure_scheduled_checks import ConfigureScheduledChecksTaskStep
     from agent_env.task_step.task_steps.install_agent import InstallAgentTaskStep
     from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
+    from agent_env.task_step.task_steps.verifiers.user_sim_judge import UserSimJudgeTaskStep
     from agent_env.task_step.task_steps.verifiers.always_on_agent_verifier import AlwaysOnAgentVerifier
     from agent_env.task_step.task_steps.verifiers.run_container_unit_tests_verifier import RunContainerUnitTestsVerifierTaskStep
     from agent_env.task_step.task_steps.run_docker_container import RunDockerContainerTaskStep
@@ -148,6 +149,7 @@ def _builtin_registry() -> dict[str, type["TaskStep"]]:
         _get_type(ConfigureScheduledChecksTaskStep): ConfigureScheduledChecksTaskStep,
         _get_type(InstallAgentTaskStep): InstallAgentTaskStep,
         _get_type(RubricsVerifierTaskStep): RubricsVerifierTaskStep,
+        _get_type(UserSimJudgeTaskStep): UserSimJudgeTaskStep,
         _get_type(AlwaysOnAgentVerifier): AlwaysOnAgentVerifier,
         _get_type(RunContainerUnitTestsVerifierTaskStep): RunContainerUnitTestsVerifierTaskStep,
         _get_type(RunDockerContainerTaskStep): RunDockerContainerTaskStep,
