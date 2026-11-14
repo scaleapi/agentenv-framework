@@ -57,6 +57,8 @@ FLAG_ASSISTANT = "this answer looks like the assistant's (very long, or markdown
 FLAG_LAST = "after the run's last wake: this answer never reached the assistant"
 # always_on.ASSISTANT_LIKE_MESSAGE_CHARS: a chat run's reads carry no flag of their own, so it's computed the same way.
 ASSISTANT_LIKE_MESSAGE_CHARS = 1200
+SCHEMA_ERRORS_SHOWN_CHARS = 300  # of a malformed answer's schema errors, in the judge's turn note
+USER_SIM_ERROR_SHOWN_CHARS = 200  # of a user sim agent error, in the judge's turn note
 
 
 def default_judge_model() -> str:
@@ -391,11 +393,11 @@ def _turn(n: int, e: dict) -> core.Turn:
     if e.get("looks_like_assistant"):
         flags.append(FLAG_ASSISTANT)
     if e.get("schema_errors"):
-        flags.append("its answer was malformed, so nothing was sent: " + "; ".join(e["schema_errors"])[:300])
+        flags.append("its answer was malformed, so nothing was sent: " + "; ".join(e["schema_errors"])[:SCHEMA_ERRORS_SHOWN_CHARS])
     elif e.get("retried"):
         flags.append("its first answer was malformed and it answered again")
     if e.get("user_sim_error"):
-        flags.append(f"the user sim agent failed at this check-in: {str(e['user_sim_error'])[:200]}")
+        flags.append(f"the user sim agent failed at this check-in: {str(e['user_sim_error'])[:USER_SIM_ERROR_SHOWN_CHARS]}")
     if e.get("last_read"):
         flags.append(FLAG_LAST)
     when = e.get("virtual_time") or (e.get("read") or {}).get("time")
