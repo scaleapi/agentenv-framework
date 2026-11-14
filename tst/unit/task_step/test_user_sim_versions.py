@@ -82,8 +82,8 @@ def test_things_already_told_and_things_it_should_know_show_tagged_after_what_yo
     told = ("\n\nTHINGS YOU ALREADY TOLD THE ASSISTANT (if it asks for one again, remind it, a little annoyed, that you "
             "already told it, and tell it again)\n  T1  Dad can't do stairs since his knee surgery.\n")
     known = ("\n\nTHINGS THE ASSISTANT SHOULD ALREADY KNOW (never bring these up; if it gets one wrong, correct it "
-             "briefly, a little irritated, and add nothing else)\n  C1  You never book anything before 9am for your "
-             "parents.\n")
+             "briefly, a little irritated, even when you'd otherwise let something slide)\n  C1  You never book "
+             "anything before 9am for your parents.\n")
     assert told in prompt and known in prompt
     assert prompt.index("\nWHAT YOU KNOW") < prompt.index(told) < prompt.index(known) < prompt.index("\nWHAT TO LOOK UP")
     lines = us.tagged_lines(person)
@@ -96,6 +96,14 @@ def test_without_them_the_prompt_and_tags_are_as_before():
     assert us.system_prompt(PERSON) == PROMPT
     assert "ALREADY" not in PROMPT
     assert not any(tag[0] in "TC" for tag in us.tagged_lines(PERSON))
+
+
+def test_keep_private_lines_show_under_private_tagged_p_so_used_can_name_them():
+    prompt = us.system_prompt(PERSON)
+    assert "\n\nPRIVATE\n  P1  Ben proposed" in prompt and "\n  P2  Never supply facts" in prompt
+    lines = us.tagged_lines(PERSON)
+    assert [lines["P1"], lines["P2"]] == PERSON["keep_private"]
+    assert not any(tag.startswith("N") for tag in lines) and "NEVER SUPPLY" not in prompt
 
 
 def test_a_line_s_later_lines_hang_under_its_text():
@@ -116,6 +124,10 @@ def test_the_tested_settings_have_no_problems():
     ({"description": {"who_you_are": []}}, "description is empty"),
     ({"description": {"who_you_are": ["Hannah."], "events": ["Tue: an email"]}}, "unknown sections ['events']"),
     ({"description": {"who_you_are": ["Hannah.", ""]}}, "description.who_you_are must be a list of non-empty lines"),
+    ({"description": {"who_you_are": ["Hannah."], "never_supply": ["Your card number."]}},
+     "unknown sections ['never_supply']"),
+    ({"description": {"who_you_are": ["Hannah."], "never_supply": ["Your card number."]}},
+     "put never_supply's lines in keep_private: it holds what the user never says or hands over, even if asked"),
     ({"description": {"who_you_are": ["Hannah."], "already_told": "Dad can't do stairs."}},
      "description.already_told must be a list of non-empty lines"),
     ({"description": {"who_you_are": ["Hannah."], "already_told": ["  "]}},
