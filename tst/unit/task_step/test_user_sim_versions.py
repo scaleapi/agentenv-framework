@@ -71,6 +71,33 @@ def test_sections_with_nothing_in_them_are_left_out():
     assert prompt.endswith("\n\nWHO YOU ARE\n  W1  Hannah Reyes.\n")
 
 
+TOLD = ["Dad can't do stairs since his knee surgery."]
+KNOWN = ["You never book anything before 9am for your parents."]
+
+
+def test_things_already_told_and_things_it_should_know_show_tagged_after_what_you_know():
+    person = _person()
+    person["description"].update(already_told=TOLD, should_already_know=KNOWN)
+    prompt = us.system_prompt(person)
+    told = ("\n\nTHINGS YOU ALREADY TOLD THE ASSISTANT (if it asks for one again, remind it, a little annoyed, that you "
+            "already told it, and tell it again)\n  T1  Dad can't do stairs since his knee surgery.\n")
+    known = ("\n\nTHINGS THE ASSISTANT SHOULD ALREADY KNOW (never bring these up; if it gets one wrong, correct it "
+             "briefly, a little irritated, and add nothing else)\n  C1  You never book anything before 9am for your "
+             "parents.\n")
+    assert told in prompt and known in prompt
+    assert prompt.index("\nWHAT YOU KNOW") < prompt.index(told) < prompt.index(known) < prompt.index("\nWHAT TO LOOK UP")
+    lines = us.tagged_lines(person)
+    assert lines["T1"] == TOLD[0] and lines["C1"] == KNOWN[0]
+    assert us.problems(person) == []
+
+
+def test_without_them_the_prompt_and_tags_are_as_before():
+    assert not {"already_told", "should_already_know"} & set(PERSON["description"])
+    assert us.system_prompt(PERSON) == PROMPT
+    assert "ALREADY" not in PROMPT
+    assert not any(tag[0] in "TC" for tag in us.tagged_lines(PERSON))
+
+
 def test_a_line_s_later_lines_hang_under_its_text():
     assert us.tag_line("W2", 'Earlier you texted:\n"hi"') == '  W2  Earlier you texted:\n      "hi"'
     assert us.tag_line("", "Answer short.\nNo emojis.") == "  Answer short.\n    No emojis."
@@ -89,6 +116,14 @@ def test_the_tested_settings_have_no_problems():
     ({"description": {"who_you_are": []}}, "description is empty"),
     ({"description": {"who_you_are": ["Hannah."], "events": ["Tue: an email"]}}, "unknown sections ['events']"),
     ({"description": {"who_you_are": ["Hannah.", ""]}}, "description.who_you_are must be a list of non-empty lines"),
+    ({"description": {"who_you_are": ["Hannah."], "already_told": "Dad can't do stairs."}},
+     "description.already_told must be a list of non-empty lines"),
+    ({"description": {"who_you_are": ["Hannah."], "already_told": ["  "]}},
+     "description.already_told must be a list of non-empty lines"),
+    ({"description": {"who_you_are": ["Hannah."], "should_already_know": [3]}},
+     "description.should_already_know must be a list of non-empty lines"),
+    ({"description": {"who_you_are": ["Hannah."], "should_already_know": ["Nothing before 9am.", ""]}},
+     "description.should_already_know must be a list of non-empty lines"),
     ({"permissions": ["book flights"]}, "permissions must be an object"),
     ({"permissions": {"just_do": ["x"], "maybe": ["y"]}}, "permissions has unknown kinds ['maybe']"),
     ({"permissions": {"never": "text her mom"}}, "permissions.never must be a list of rules"),

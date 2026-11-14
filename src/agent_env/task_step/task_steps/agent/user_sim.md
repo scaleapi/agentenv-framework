@@ -104,6 +104,8 @@ resolves there.
 | `who_you_are` | W | Who they are, the week it is, their day ("at work 9-6, asleep 11pm-7am") |
 | `how_you_write` | | How they text, best shown with 2–3 of their real messages |
 | `what_you_know` | K | Facts they give only when asked |
+| `already_told` | T | Optional. Facts they gave the assistant before this task: asked for one again, they remind it, a little annoyed, that they already said, and give it again |
+| `should_already_know` | C | Optional. What the assistant should know without being told: they never bring it up, and if the assistant gets it wrong they correct it briefly, a little irritated, and add nothing else |
 | `what_to_look_up` | L | Facts the assistant must find: say where they are ("it's in mom's email"), never the value |
 | `decisions` | D | What they say when the assistant asks or proposes something |
 | `never_supply` | N | What they never hand over (card numbers, codes, anything the assistant should find) |
@@ -111,6 +113,11 @@ resolves there.
 | `dont_mention` | M | One "don't mention X unless asked" line per tempting fact |
 | `phone` | F | What they do with what reaches their phone |
 | `when_done` | | When they'd say they're done |
+
+`already_told` and `should_already_know` are for what the assistant has from before this task. Each "should already
+know" line must also be in the assistant's own instructions or notes, and each "already told" fact somewhere it can
+read, or the user sim expects knowledge the assistant was never given. A fact the assistant should find in the apps
+goes in `what_to_look_up` or `never_supply` instead: an "already told" fact is given again when asked.
 
 Don't write the opening request into the description. Put it in `opening_prompt`: the prompt shows it right
 after the first `who_you_are` line ("Earlier you texted the assistant: …").

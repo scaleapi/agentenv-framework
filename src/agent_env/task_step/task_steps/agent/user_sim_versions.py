@@ -32,6 +32,10 @@ SECTIONS: tuple[tuple[str, str, str], ...] = (
     ("who_you_are", "WHO YOU ARE", "W"),
     ("how_you_write", "HOW YOU WRITE", ""),
     ("what_you_know", "WHAT YOU KNOW (to use only when the assistant asks about it)", "K"),
+    ("already_told", "THINGS YOU ALREADY TOLD THE ASSISTANT (if it asks for one again, remind it, a little annoyed, "
+                     "that you already told it, and tell it again)", "T"),
+    ("should_already_know", "THINGS THE ASSISTANT SHOULD ALREADY KNOW (never bring these up; if it gets one wrong, "
+                            "correct it briefly, a little irritated, and add nothing else)", "C"),
     ("what_to_look_up", "WHAT TO LOOK UP (say where; don't give the value)", "L"),
     ("decisions", "YOUR DECISIONS (when the assistant asks)", "D"),
     ("never_supply", "NEVER SUPPLY (the assistant must find these itself)", "N"),
