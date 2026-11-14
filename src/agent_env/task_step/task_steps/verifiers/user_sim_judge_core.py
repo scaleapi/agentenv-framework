@@ -17,7 +17,8 @@ A5 (satisfaction) has no check: the separate ``rate_user_satisfaction`` step cov
 rubric items (``RubricItem``) may name any family; an item goes into the call of the check that owns its family, and an
 item whose family no running check owns gets one call of its own (``TASK_ITEMS``). A call takes at most
 ``MAX_ITEMS_PER_CALL`` items; the rest go in further calls that ask only items. ``auto`` items and ``na_when: always``
-items are settled here, with no call.
+items are settled here, with no call. An item's ``line`` (a tag, "P1") is graded by that line's text in the run's
+``tagged_lines``; a tag the run doesn't have makes the item ``error``, with no call.
 
 One judge model answers each check in its own call. ``judge_run`` does all of it for one run, given a ``complete``
 function that makes one model call; the step and a calibration harness both use it.
@@ -27,7 +28,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Awaitable, Callable, Optional
 
 # ---- the rubric families ------------------------------------------------------------------------------------------
@@ -84,6 +85,10 @@ CHECKS: dict[str, Check] = {c.name: c for c in (
             "hold firm.",
             "Asked the same thing again, it chose differently with nothing new to justify it.",
             "Asked again for something it already gave, it didn't give it again.",
+            "The assistant asked for a fact in its THINGS YOU ALREADY TOLD THE ASSISTANT lines (T), and it didn't "
+            "remind it, a little annoyed, that it already told it, and give it again.",
+            "The assistant got something in its THINGS THE ASSISTANT SHOULD ALREADY KNOW lines (C) wrong, and it "
+            "didn't correct it briefly, even where its other lines say to let that kind of mistake pass.",
             "Its instructions say this person points out a kind of mistake, that mistake was in what it was shown "
             "(the assistant's message or an email, text or notification), and it let it pass. Or it pointed out a "
             "mistake its instructions say this person wouldn't notice or wouldn't mention.",
@@ -96,6 +101,8 @@ CHECKS: dict[str, Check] = {c.name: c for c in (
             "Silence or a brief reply to a message that asks nothing.",
             "A requirement the assistant never asked about and this person wouldn't volunteer: that is the "
             "assistant's miss, not the user sim's.",
+            "Correcting a THINGS THE ASSISTANT SHOULD ALREADY KNOW line (C) the assistant got wrong, where its other "
+            "lines say this person would let that kind of mistake pass.",
         ),
         grade="Yes when the assistant's next step or its grade depends on what was withheld, decided or let pass.",
     ),
@@ -304,6 +311,8 @@ class UserSimRun:
     instructions: Optional[str]
     turns: list[Turn]
     notes: list[str] = field(default_factory=list)
+    # Each tag the user sim's instructions showed, with its line (deploy_user_sim_agent's record); None: not recorded.
+    tagged_lines: Optional[dict[str, str]] = None
 
 
 # ---- a task's own rubric items ------------------------------------------------------------------------------------
@@ -313,8 +322,14 @@ NA_ALWAYS, NA_NEVER = "always", "never"
 MAX_WORDS, MAX_SENTENCES = "max_words", "max_sentences"
 METRICS = (MAX_WORDS, MAX_SENTENCES)
 MAX_ITEMS_PER_CALL = 12  # task items asked in one call; a check's or the task's further items get calls of their own
-ITEM_FIELDS = ("id", "family", "kind", "check", "text", "name", "short", "na_when", "static_na_reason", "metric", "max",
-               "can_error")
+ITEM_FIELDS = ("id", "family", "kind", "check", "text", "line", "name", "short", "na_when", "static_na_reason", "metric",
+               "max", "can_error")
+# A line item's tag: a section letter and the line's place in it, as the user sim's instructions show it ("P1", "D10").
+LINE_TAG = re.compile(r"[A-Z][1-9][0-9]*")
+# What the judge applies for a line item: the line's text as the run recorded it.
+LINE_CHECK = "Follows its instruction {tag}: {text}"
+# An item's ``asked_with`` when its line isn't in the run's tagged_lines: it's an error, with no call.
+NO_LINE = "no_line"
 
 
 @dataclass(frozen=True)
@@ -322,9 +337,11 @@ class RubricItem:
     """A task's own rubric item: one rule the judge checks, under one family. ``kind`` says how: ``hard``, an exact
     rule from the user sim's instructions that fails on any breach; ``general``, a judgement that fails only on a clear
     instance; ``auto``, never sent to the model, ``metric`` (max_words or max_sentences) counted on every graded answer
-    against ``max``. ``na_when`` is when it never came up: ``always`` (n/a without a call, ``static_na_reason`` says
-    why), ``never`` (n/a isn't allowed), else the situation, told to the judge; empty, the judge decides. An auto item
-    takes only ``always``: it is counted, never judged."""
+    against ``max``. A hard or general item has ``check``, the text the judge applies, or ``line``, a tag of the user
+    sim's instructions ("P1") whose text is applied, read from the run's ``tagged_lines``. ``na_when`` is when it
+    never came up: ``always`` (n/a without a call, ``static_na_reason`` says why), ``never`` (n/a isn't allowed), else
+    the situation, told to the judge; empty, the judge decides. An auto item takes only ``always``: it is counted,
+    never judged."""
     id: str
     family: str
     check: str = ""
@@ -336,6 +353,7 @@ class RubricItem:
     metric: str = ""
     max: Optional[int] = None
     can_error: Optional[bool] = None  # None: as the check that owns its family
+    line: str = ""  # a tag of the user sim's instructions, graded by that line's text instead of ``check``
 
     @property
     def static_na(self) -> bool:
@@ -354,6 +372,7 @@ class RubricItem:
         """An item ``item_problems`` passed. ``text`` is the old name of ``check``."""
         return cls(id=str(data["id"]), family=str(data["family"]).strip().upper(),
                    check=str(data.get("check") if data.get("check") is not None else data.get("text") or "").strip(),
+                   line=str(data.get("line") or "").strip(),
                    kind=str(data.get("kind") or GENERAL).strip().lower(), name=str(data.get("name") or ""),
                    short=str(data.get("short") or ""), na_when=str(data.get("na_when") or "").strip(),
                    static_na_reason=str(data.get("static_na_reason") or "").strip(),
@@ -361,7 +380,7 @@ class RubricItem:
 
     def to_dict(self) -> dict:
         out: dict[str, Any] = {"id": self.id, "family": self.family, "kind": self.kind}
-        for k in ("name", "short", "check", "na_when", "static_na_reason", "metric"):
+        for k in ("name", "short", "check", "line", "na_when", "static_na_reason", "metric"):
             if getattr(self, k):
                 out[k] = getattr(self, k)
         if self.max is not None:
@@ -395,14 +414,23 @@ def item_problems(items: list[dict]) -> list[str]:
             kind = None
         else:
             kind = kind.strip().lower()
-        for key in ("check", "text", "name", "short", "na_when", "static_na_reason"):
+        for key in ("check", "text", "line", "name", "short", "na_when", "static_na_reason"):
             if item.get(key) is not None and not isinstance(item[key], str):
                 out.append(f"{at}: {key} must be text")
         if item.get("check") is not None and item.get("text") is not None:
             out.append(f"{at}: give check or text, not both (text is the old name of check)")
         check = item.get("check") if item.get("check") is not None else item.get("text")
-        if kind in (HARD, GENERAL) and not (isinstance(check, str) and check.strip()):
-            out.append(f"{at}: a {kind} item needs a check: the text the judge applies")
+        line = item.get("line")
+        if line is not None:
+            if isinstance(line, str) and not LINE_TAG.fullmatch(line.strip()):
+                out.append(f"{at}: line must be a tag of the user sim's instructions, like P1 or D3, not {line!r}")
+            if check is not None:
+                out.append(f"{at}: give line or check, not both: a line item is graded by that line's own text")
+            if kind == AUTO:
+                out.append(f"{at}: line is for hard and general items: an auto item is counted, not judged")
+        elif kind in (HARD, GENERAL) and not (isinstance(check, str) and check.strip()):
+            out.append(f"{at}: a {kind} item needs a check (the text the judge applies) or a line (a tag of the user "
+                       "sim's instructions, like P1)")
         if kind == AUTO:
             if item.get("metric") not in METRICS:
                 out.append(f"{at}: an auto item's metric must be one of {list(METRICS)}, not {item.get('metric')!r}")
@@ -474,6 +502,31 @@ def auto_result(item: RubricItem, run: "UserSimRun") -> dict:
     n, c = max(counts, key=lambda x: x[1])
     return {"verdict": "pass", "reason": f"every answer at most {item.max} {unit}; the longest, turn {n}, has {c}",
             "turns": []}
+
+
+def resolve_lines(items: list[RubricItem], tagged_lines: Optional[dict[str, str]],
+                  unusable: str = "") -> tuple[list[RubricItem], dict[str, dict]]:
+    """Each item with its ``line``'s text as its check (``LINE_CHECK``), and, by id, the line items that can't be
+    graded: their ``error``, never a guess. ``unusable`` says why no line can be trusted to be the one an item was
+    written for. An ``na_when: always`` item isn't graded, so its line isn't needed."""
+    out, missing = [], {}
+    for item in items:
+        if not item.line or item.static_na:
+            out.append(item)
+        elif unusable:
+            missing[item.id] = {"verdict": "error", "turns": [], "line": item.line,
+                                "error": f"line {item.line} can't be graded: {unusable}"}
+        elif tagged_lines is None:
+            missing[item.id] = {"verdict": "error", "turns": [], "line": item.line,
+                                "error": f"the run recorded no tagged_lines for the user sim, so its line {item.line} "
+                                         "can't be read"}
+        elif item.line not in tagged_lines:
+            missing[item.id] = {"verdict": "error", "turns": [], "line": item.line,
+                                "error": f"the user sim's instructions have no line {item.line}"}
+        else:
+            text = tagged_lines[item.line]
+            out.append(replace(item, check=LINE_CHECK.format(tag=item.line, text=text.replace("\n", "\n  "))))
+    return out, missing
 
 
 def render_run(run: UserSimRun) -> tuple[str, str]:
@@ -708,15 +761,17 @@ RETRY_NOTE = "\n\nYour last answer could not be used ({error}). Return only the 
 async def judge_run(run: UserSimRun, *, model: str, checks: list[str], complete: Complete,
                     items: tuple[RubricItem, ...] | list[RubricItem] = (),
                     error_checks: tuple[str, ...] | list[str] = DEFAULT_ERROR_CHECKS,
-                    answer_retries: int = 1, concurrency: int = 6) -> dict:
+                    answer_retries: int = 1, concurrency: int = 6, lines_unusable: str = "") -> dict:
     """Every check (and task item) on ``run``, each in its own call to ``model``. The first call runs alone so the
     rest can read its prompt cache. A call that fails or answers badly ``answer_retries`` more times gives that check
     (and its items) the verdict ``error``. An auto item is computed here and an ``na_when: always`` item is n/a, with
-    no call for either."""
+    no call for either. A ``line`` item is graded by its line's text in ``run.tagged_lines``, or is ``error`` when the
+    run has no such tag, or when ``lines_unusable`` says why no tag can be trusted."""
     graded = {t.n for t in run.turns if t.graded}
     if not graded:
         return {"skipped": "no graded turns", "checks": {}, "items": {}, "user_sim_error": dict(NOT_JUDGED)}
-    calls = plan_calls(list(checks), list(items))
+    resolved, no_line = resolve_lines(list(items), run.tagged_lines, lines_unusable)
+    calls = plan_calls(list(checks), resolved)
     head, tail = render_run(run)
     gate = asyncio.Semaphore(max(1, concurrency))
 
@@ -756,8 +811,11 @@ async def judge_run(run: UserSimRun, *, model: str, checks: list[str], complete:
                for call in order if call_check(call)}
     asked_in = {item.id: call for call in order for item in calls[call]}
     item_results: dict[str, dict] = {}
+    lines = run.tagged_lines or {}
     for item in items:
-        if item.kind == AUTO and not item.static_na:
+        if item.id in no_line:
+            got, call = no_line[item.id], NO_LINE
+        elif item.kind == AUTO and not item.static_na:
             got, call = auto_result(item, run), COMPUTED
         elif item.static_na:
             got, call = {"verdict": "n/a", "reason": item.static_na_reason, "turns": []}, STATIC_NA
@@ -765,6 +823,8 @@ async def judge_run(run: UserSimRun, *, model: str, checks: list[str], complete:
             call = asked_in[item.id]
             answer = answers[call]
             got = {"verdict": "error", "error": answer["error"]} if "error" in answer else answer["items"][item.id]
+        if item.line and item.asks_the_model and item.id not in no_line:  # what was graded, for a reviewer
+            got = {**got, "line": item.line, "line_text": lines[item.line]}
         item_results[item.id] = {**got, "family": item.family, "kind": item.kind, "asked_with": call}
     can_error = {i.id: (i.can_error if i.can_error is not None else FAMILY_OWNER.get(i.family) in error_checks)
                  for i in items}

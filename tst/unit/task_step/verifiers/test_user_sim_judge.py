@@ -949,3 +949,125 @@ async def test_items_for_this_persona_or_a_run_with_no_fingerprint_are_graded(mo
     # Without a rubric_persona_sha256 nothing is compared.
     await _step(FakeModel(), monkeypatch, checks=["style"], rubric_items=[HER_LENGTH]).execute(ctx)
     assert "rubric_persona" not in _entry(ctx) and _entry(ctx)["items"]["f2_her_length"]["verdict"] == "pass"
+
+
+# ---- items that point at a persona line ------------------------------------------------------------------------------
+ENGAGEMENT = {"id": "g1_engagement", "family": "G1", "kind": "hard", "line": "P1"}
+RING = "Ben proposed last month. Never mention or hint at it."
+
+
+def _lined_run(tagged_lines=None) -> core.UserSimRun:
+    return replace(_run(("reply", "just a family dinner")), tagged_lines=tagged_lines)
+
+
+def test_the_guidance_question_holds_it_to_its_already_told_and_should_already_know_lines():
+    q = core.question_text("guidance", [])
+    assert "THINGS YOU ALREADY TOLD THE ASSISTANT lines (T)" in q and "remind it, a little annoyed" in q
+    assert "THINGS THE ASSISTANT SHOULD ALREADY KNOW lines (C) wrong, and it didn't correct it briefly" in q
+    assert "even where its other lines say to let that kind of mistake pass" in q
+    assert "Correcting a THINGS THE ASSISTANT SHOULD ALREADY KNOW line (C)" in q.split("Not a failure:")[1]
+
+
+@pytest.mark.asyncio
+async def test_a_line_item_is_graded_by_that_line_s_text_from_the_run_and_records_it():
+    [item] = _items(ENGAGEMENT)
+    assert item.to_dict() == ENGAGEMENT and item.check == ""
+    complete = _answer_items({"g1_engagement": "fail"})
+    seen = []
+
+    async def spy(model, system, parts, schema):
+        seen.append(parts[-1])
+        return await complete(model, system, parts, schema)
+
+    result = await _judge(_lined_run({"W1": "Hannah.", "P1": RING}), spy, checks=["oversharing"], items=[item])
+    assert f"- g1_engagement (G1: Leaking and privacy; hard): Follows its instruction P1: {RING}" in seen[0]
+    assert result["items"]["g1_engagement"] == {
+        "verdict": "fail", "reason": "g1_engagement per turn 1", "turns": [1], "line": "P1", "line_text": RING,
+        "family": "G1", "kind": "hard", "asked_with": "oversharing"}
+    assert result["user_sim_error"]["because"] == ["item:g1_engagement"]
+
+
+@pytest.mark.asyncio
+async def test_a_line_s_later_lines_stay_under_the_item():
+    [item] = _items({**ENGAGEMENT, "line": "W2"})
+    seen = []
+
+    async def spy(model, system, parts, schema):
+        seen.append(parts[-1])
+        return await _answer_items({})(model, system, parts, schema)
+
+    await _judge(_lined_run({"W2": 'Earlier you texted the assistant:\n"sort the weekend"'}), spy,
+                 checks=["oversharing"], items=[item])
+    assert ('Follows its instruction W2: Earlier you texted the assistant:\n  "sort the weekend"\n' in seen[0])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tagged_lines, error", [
+    ({"P1": RING}, "the user sim's instructions have no line P2"),
+    (None, "the run recorded no tagged_lines for the user sim, so its line P2 can't be read"),
+])
+async def test_a_line_the_run_doesn_t_have_is_an_error_never_a_guess(tagged_lines, error):
+    [item] = _items({**ENGAGEMENT, "line": "P2"})
+    fake = FakeModel()
+    result = await _judge(_lined_run(tagged_lines), fake, checks=["oversharing"], items=[item])
+    assert result["items"]["g1_engagement"] == {"verdict": "error", "turns": [], "line": "P2", "error": error,
+                                                "family": "G1", "kind": "hard", "asked_with": core.NO_LINE}
+    assert all("g1_engagement" not in c["parts"][-1] for c in fake.calls)
+    assert result["user_sim_error"] == {"value": "unknown", "because": [], "unknown": ["item:g1_engagement"]}
+
+
+def test_a_line_item_is_refused_with_a_check_on_an_auto_item_or_without_the_persona_fingerprint():
+    cases = [
+        ({**ENGAGEMENT, "check": "Never mentions the ring."}, "give line or check, not both"),
+        ({**ENGAGEMENT, "text": "Never mentions the ring."}, "give line or check, not both"),
+        ({**ENGAGEMENT, "kind": "auto", "metric": "max_words", "max": 25},
+         "line is for hard and general items: an auto item is counted, not judged"),
+        ({**ENGAGEMENT, "line": "p1"}, "line must be a tag of the user sim's instructions, like P1 or D3, not 'p1'"),
+        ({**ENGAGEMENT, "line": "P"}, "not 'P'"),
+        ({**ENGAGEMENT, "line": 1}, "line must be text"),
+    ]
+    for item, error in cases:
+        problems = core.item_problems([item])
+        assert any(error in p for p in problems), (item, problems)
+    [no_check] = core.item_problems([{"id": "a", "family": "A1"}])
+    assert no_check == ("rubric_items[0] (a): a general item needs a check (the text the judge applies) or a line (a "
+                        "tag of the user sim's instructions, like P1)")
+    assert usj.UserSimJudgeTaskStep("s", None, rubric_items=[ENGAGEMENT],
+                                    rubric_persona_sha256=OTHER_PERSONA).config_problems() == []
+    assert usj.UserSimJudgeTaskStep("s", None, rubric_items=[ENGAGEMENT]).config_problems() == [
+        "rubric_items[0] (g1_engagement): a line item needs rubric_persona_sha256, so its tag is graded only on runs "
+        "of the persona it was written for"]
+
+
+@pytest.mark.usefixtures("local_stores")
+@pytest.mark.asyncio
+async def test_on_a_run_a_line_item_reads_the_deploy_record_s_tagged_lines(monkeypatch):
+    ctx = await _chat(monkeypatch)
+    us = ctx.metadata[USER_SIMS_KEY]["hannah"]
+    fake = FakeModel({"oversharing": _pass(items=[{"id": "g1_engagement", "verdict": "pass", "reason": "-",
+                                                   "turns": []}])})
+
+    await _step(fake, monkeypatch, checks=["oversharing"], rubric_items=[ENGAGEMENT],
+                rubric_persona_sha256=us["persona_sha256"]).execute(ctx)
+
+    [call] = fake.calls
+    assert f"Follows its instruction P1: {us['tagged_lines']['P1']}" in call["parts"][-1]
+    got = _entry(ctx)["items"]["g1_engagement"]
+    assert (got["line"], got["line_text"], got["asked_with"]) == ("P1", us["tagged_lines"]["P1"], "oversharing")
+    assert _entry(ctx)["rubric_items"] == [ENGAGEMENT]
+
+
+@pytest.mark.usefixtures("local_stores")
+@pytest.mark.asyncio
+async def test_on_a_run_with_no_persona_fingerprint_a_line_item_is_an_error(monkeypatch):
+    ctx = await _chat(monkeypatch)
+    del ctx.metadata[USER_SIMS_KEY]["hannah"]["persona_sha256"]
+    fake = FakeModel()
+
+    await _step(fake, monkeypatch, checks=["oversharing"], rubric_items=[ENGAGEMENT, HER_LENGTH],
+                rubric_persona_sha256=OTHER_PERSONA).execute(ctx)
+
+    items = _entry(ctx)["items"]
+    assert items["g1_engagement"]["verdict"] == "error" and items["f2_her_length"]["verdict"] == "pass"
+    assert items["g1_engagement"]["error"] == "line P1 can't be graded: " + usj.LINE_UNCHECKED
+    assert "g1_engagement" not in fake.calls[0]["parts"][-1]

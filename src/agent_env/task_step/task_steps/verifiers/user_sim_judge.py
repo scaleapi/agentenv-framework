@@ -25,12 +25,23 @@ into this step's settings; this step reads no file:
   ``max_words`` or ``max_sentences`` is counted on each graded answer, and any answer over ``max`` fails it, naming
   the turn; see ``user_sim_judge_core.count_sentences``). If none is over but the record kept only the start of one
   (always_on's tail, when its stored timeline can't be read), the item is ``error``: that length can't be counted.
-- ``check``: the text the judge applies, required unless auto. ``text`` is its old name and still loads.
+- ``check``: the text the judge applies. ``text`` is its old name and still loads.
+- ``line``: instead of ``check``, a tag of the user sim's instructions ("P1", "T1", "C2", "D3"): the judge applies
+  that line's text from the run's ``metadata["user_sims"][name]["tagged_lines"]``, shown as "Follows its instruction
+  P1: ...", and the item's result records ``line`` and ``line_text``. A hard or general item has exactly one of
+  ``check`` and ``line``; an auto item, counted rather than judged, takes no ``line``. A tag names the same line only
+  for the same persona, so a line item needs ``rubric_persona_sha256``, and grades only on a run whose fingerprint
+  matches it: on a run that recorded none, it is ``error``. A tag the run doesn't have makes the item ``error``
+  ("the user sim's instructions have no line P1"). Neither makes a call.
 - ``name`` and ``short``: a title and one line for reviewers, recorded but not shown to the judge.
 - ``na_when``: the situation in which it never came up, told to the judge. ``always`` makes it n/a with no call,
   recording ``static_na_reason`` (required with it); ``never`` means it always applies, and an n/a is asked again.
   An auto item is counted, not judged, so it takes only ``always``; any other ``na_when`` is refused when the task loads.
 - ``can_error``: whether its fail makes the run a user sim error; unset, as the check that owns its family.
+
+A task item never restates a persona line. The persona is the one place that says what the user sim knows and must
+not say, and the judge reads all of it with every check. Task items are for counted limits (``auto``) and judgment
+calls specific to the task, or they point at a persona line with ``line``.
 
 For example::
 
@@ -40,6 +51,7 @@ For example::
        check: "If the assistant asks about Rae's order, Tess says yes only if it fits, gives both floors ...",
        na_when: "The assistant didn't raise Rae's order."}
     - {id: f2_her_length, family: F2, kind: auto, check: "Every reply is at most 25 words.", metric: max_words, max: 25}
+    - {id: g1_engagement, family: G1, kind: hard, line: P1}
 
 ``rubric_persona_sha256`` is the fingerprint of the user sim the items were written for:
 ``user_sim_common.persona_fingerprint`` of its persona and ``opening_prompt``, which deploy_user_sim_agent records as
@@ -91,6 +103,9 @@ FLAG_LAST = "after the run's last wake: this answer never reached the assistant"
 ASSISTANT_LIKE_MESSAGE_CHARS = 1200
 SCHEMA_ERRORS_SHOWN_CHARS = 300  # of a malformed answer's schema errors, in the judge's turn note
 USER_SIM_ERROR_SHOWN_CHARS = 200  # of a user sim agent error, in the judge's turn note
+# Why a line item isn't graded on a run that recorded no persona fingerprint: its tag may name another line now.
+LINE_UNCHECKED = ("the run recorded no persona fingerprint, so its tags can't be checked against the persona the item "
+                  "was written for")
 
 
 def default_judge_model() -> str:
@@ -212,9 +227,11 @@ class UserSimJudgeTaskStep(TaskStep):
                 if entry["rubric_persona"]["status"] == "mismatch":
                     items = []
             context.record_model("user sim judge", self.id, settings["model"])
+            unknown = (entry.get("rubric_persona") or {}).get("status") == "unknown"
             result = await core.judge_run(
                 run, model=settings["model"], checks=settings["checks"], items=items,
-                error_checks=settings["error_checks"], complete=self._complete(context))
+                error_checks=settings["error_checks"], complete=self._complete(context),
+                lines_unusable=LINE_UNCHECKED if unknown else "")
             result.pop("model", None)  # the entry's judge_model
             entry.update(result)
         if "skipped" in entry:
@@ -340,6 +357,10 @@ def _problems(model: Any, checks: Any, error_checks: Any, items: Any, mark: Any,
         out.append("rubric_items must be a list of {id, family, kind, check, ...}")
     else:
         out += core.item_problems(items)
+        if rubric_persona is None:
+            out += [f"rubric_items[{i}] ({item.get('id')}): a line item needs rubric_persona_sha256, so its tag is "
+                    "graded only on runs of the persona it was written for"
+                    for i, item in enumerate(items) if isinstance(item, dict) and item.get("line") is not None]
     return out
 
 
@@ -377,7 +398,8 @@ def _read_run(kind: str, step_id: str, record: Optional[dict], context: TaskStep
     instructions, check, more = _instructions(us, metadata.get("seed") or {}, multi_day)
     turns = [_turn(n, e) for n, e in enumerate(reads, 1)]
     more += _reply_limit_note(turns, (us or {}).get("max_replies"))
-    run = core.UserSimRun(name=name or "the user", instructions=instructions, turns=turns, notes=notes + more)
+    run = core.UserSimRun(name=name or "the user", instructions=instructions, turns=turns, notes=notes + more,
+                          tagged_lines=(us or {}).get("tagged_lines"))
     return run, {"user_sim": name, "instructions": check}
 
 
