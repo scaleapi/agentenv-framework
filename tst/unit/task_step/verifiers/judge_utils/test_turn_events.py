@@ -129,6 +129,19 @@ def test_the_psi_harness_s_reasoning_on_an_llm_span_comes_before_that_call_s_tex
     assert events == [("thinking", "Paying $855 needs her OK."), ("text", "I'll ask Nina first.")]
 
 
+def test_a_responses_api_llm_span_s_text_and_reasoning_are_read():
+    spans = [{"name": "Response", "start_time": "1", "attributes": {
+        "openinference.span.kind": "LLM",
+        "llm.output_messages.0.message.role": "assistant",
+        "llm.output_messages.0.message.contents.0.message_content.type": "text",
+        "llm.output_messages.0.message.contents.0.message_content.text": "Booked for Friday.",
+        "psi.reasoning": json.dumps([{"type": "thinking", "thinking": "She said Friday works."}])}}]
+
+    events = [(e["type"], e["text"]) for e in turn_events(json.dumps(spans)).events if e["type"] != "final"]
+
+    assert events == [("thinking", "She said Friday works."), ("text", "Booked for Friday.")]
+
+
 def test_an_unknown_format_passes_through_one_item_an_event():
     events = turn_events(json.dumps([{"kind": "step", "n": 1}, {"kind": "step", "n": 2}]))
     assert events.format == UNKNOWN and [e["event"]["n"] for e in events.events] == [1, 2]
