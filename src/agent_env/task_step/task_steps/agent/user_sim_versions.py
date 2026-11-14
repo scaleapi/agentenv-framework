@@ -50,8 +50,7 @@ PRIVATE_TITLE = "PRIVATE"
 RULES_AFTER = "decisions"
 # A description section that isn't one, with where its lines go: a task that has it is refused at load with that.
 MOVED_SECTIONS: dict[str, str] = {
-    "never_supply": "put never_supply's lines in keep_private: it holds what the user never says or hands over, even "
-                    "if asked",
+    "never_supply": "put facts the assistant should find in what_to_look_up, and secrets in keep_private",
 }
 
 PERMISSION_KINDS: dict[str, str] = {

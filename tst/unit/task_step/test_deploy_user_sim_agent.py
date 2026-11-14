@@ -176,7 +176,7 @@ def test_the_step_round_trips_and_holds_no_system_prompt():
     ({"persona": {**HANNAH, "description": {"who_you_are": ["Linda."], "events": ["Tue"]}}},
      "unknown sections ['events']"),
     ({"persona": {**HANNAH, "description": {"who_you_are": ["Linda."], "never_supply": ["Her card number."]}}},
-     "put never_supply's lines in keep_private"),
+     "put facts the assistant should find in what_to_look_up, and secrets in keep_private"),
     ({"persona": {**HANNAH, "permissions": {"maybe": ["book it"]}}}, "permissions has unknown kinds ['maybe']"),
     ({"persona": {**HANNAH, "keep_private": "her age"}}, "keep_private must be a list of non-empty lines"),
     ({"persona": {**HANNAH, "schedule": ["07:30", "23:30"]}}, "schedule must be an object"),

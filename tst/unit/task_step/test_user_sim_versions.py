@@ -100,7 +100,7 @@ def test_without_them_the_prompt_and_tags_are_as_before():
 
 def test_keep_private_lines_show_under_private_tagged_p_so_used_can_name_them():
     prompt = us.system_prompt(PERSON)
-    assert "\n\nPRIVATE\n  P1  Ben proposed" in prompt and "\n  P2  Never supply facts" in prompt
+    assert "\n\nPRIVATE\n  P1  Ben proposed" in prompt and "\n  P2  Card numbers, passwords" in prompt
     lines = us.tagged_lines(PERSON)
     assert [lines["P1"], lines["P2"]] == PERSON["keep_private"]
     assert not any(tag.startswith("N") for tag in lines) and "NEVER SUPPLY" not in prompt
@@ -127,7 +127,7 @@ def test_the_tested_settings_have_no_problems():
     ({"description": {"who_you_are": ["Hannah."], "never_supply": ["Your card number."]}},
      "unknown sections ['never_supply']"),
     ({"description": {"who_you_are": ["Hannah."], "never_supply": ["Your card number."]}},
-     "put never_supply's lines in keep_private: it holds what the user never says or hands over, even if asked"),
+     "put facts the assistant should find in what_to_look_up, and secrets in keep_private"),
     ({"description": {"who_you_are": ["Hannah."], "already_told": "Dad can't do stairs."}},
      "description.already_told must be a list of non-empty lines"),
     ({"description": {"who_you_are": ["Hannah."], "already_told": ["  "]}},

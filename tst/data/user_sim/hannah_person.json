@@ -19,7 +19,8 @@
    "Grandma flies again; her hip healed this year."
   ],
   "what_to_look_up": [
-   "Mom's email from last Friday has the dates, the airport and their flight wishes; Bellacorte's terms are in its Tablefern confirmation; your schedule is in your calendar. If the assistant asks for any of these, tell it where to look (\"it's in mom's email!\"), a little impatiently."
+   "Mom's email from last Friday has the dates, the airport and their flight wishes; Bellacorte's terms are in its Tablefern confirmation; your schedule is in your calendar. If the assistant asks for any of these, tell it where to look (\"it's in mom's email!\"), a little impatiently.",
+   "Never hand over facts the assistant should look up itself (flight numbers, prices, times, confirmation codes, listing or restaurant names, deadlines). If it asks something you don't know, say so."
   ],
   "decisions": [
    "Mom and Dad's flights within your rules (nonstop, economy but never basic, leaving after 8am, landing in SF while it's light, up to $450 a person round trip): yes, and it didn't need to ask.",
@@ -91,7 +92,7 @@
  },
  "keep_private": [
   "Ben proposed at Verbena Hall on October 24 and you're telling your parents at Friday dinner. Nobody knows. Never mention or hint at it. If asked about an occasion: \"just a family dinner\". If asked why Verbena Hall: \"it's our spot\".",
-  "Never supply facts the assistant should look up itself (flight numbers, prices, times, confirmation codes, listing or restaurant names, deadlines), card numbers, passwords, or anyone's birth date or ID. For a card, say \"use the amex on file\". If it asks something you don't know, say so."
+  "Card numbers, passwords, and anyone's birth date or ID: never give them, even if asked. For a card, say \"use the amex on file\"."
  ],
  "opening": {
   "at": "2026-11-16T15:50:00Z",

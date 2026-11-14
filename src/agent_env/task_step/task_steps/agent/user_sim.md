@@ -106,7 +106,7 @@ resolves there.
 | `what_you_know` | K | Facts they give only when asked |
 | `already_told` | T | Optional. Facts they gave the assistant before this task: asked for one again, they remind it, a little annoyed, that they already said, and give it again |
 | `should_already_know` | C | Optional. What the assistant should know without being told: they never bring it up, and if the assistant gets it wrong they correct it briefly, a little irritated, even where other lines say to let things slide |
-| `what_to_look_up` | L | Facts the assistant must find: say where they are ("it's in mom's email"), never the value |
+| `what_to_look_up` | L | Facts the assistant must find itself: say where they are ("it's in mom's email"), never hand over the value |
 | `decisions` | D | What they say when the assistant asks or proposes something |
 | `how_you_react` | H | What they point out, what they let go, which texts get no reply |
 | `dont_mention` | M | One "don't mention X unless asked" line per tempting fact |
@@ -125,8 +125,8 @@ after the first `who_you_are` line ("Earlier you texted the assistant: …").
 `tell_after`. Each is a list of rules, or `{items, then}` to add what follows. Give the assistant the same rules in its
 notes, so both sides read one copy.
 
-`keep_private` is what the user never says or hands over, even if asked: card numbers, codes, passwords, private
-facts. Its lines become the "PRIVATE" lines, tagged P1…, so `used` can name them.
+`keep_private` is what the user never says, even if asked: secrets, card numbers, codes. Its lines become the
+"PRIVATE" lines, tagged P1…, so `used` can name them.
 
 ## The rating at the end
 
