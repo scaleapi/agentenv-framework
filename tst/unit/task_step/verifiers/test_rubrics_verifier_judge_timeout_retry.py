@@ -84,9 +84,9 @@ async def test_a_timed_out_call_is_tried_again_and_its_trajectory_kept(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_the_judge_s_own_timeout_code_counts_too_and_the_last_one_fails_with_its_trajectory(monkeypatch):
+async def test_a_failed_turn_that_ran_out_of_time_counts_too_and_the_last_one_fails_with_its_trajectory(monkeypatch):
     verifier = _verifier(judge_timeout_retries=1)
-    _judge(monkeypatch, verifier, ["failed:claude_code.timeout:claude CLI timed out after 60s", "poll-timeout"])
+    _judge(monkeypatch, verifier, ["failed:cli_error:claude CLI timed out after 60s", "poll-timeout"])
 
     with pytest.raises(JudgeTimeoutError, match=re.escape("its trajectory so far: mem://judge/task-2.json")) as raised:
         await _grade(verifier)
@@ -96,9 +96,9 @@ async def test_the_judge_s_own_timeout_code_counts_too_and_the_last_one_fails_wi
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", [
-    "failed:cli_error:claude CLI timed out after 60s",   # an image from before the timeout code: its message
+    "failed:cli_error:claude CLI timed out after 60s",   # Claude Code: its message
     "failed::claude CLI timed out after 60s",            # a harness that sends no code
-    "failed:pi.timeout:pi did not finish within 60s",    # another harness's code
+    "failed:openhands.timeout:did not finish in 60s",    # a harness whose code says so
 ])
 async def test_a_timeout_the_code_or_else_the_message_tells_is_retried(monkeypatch, failure):
     verifier = _verifier(judge_timeout_retries=1)

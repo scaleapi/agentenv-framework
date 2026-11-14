@@ -337,9 +337,9 @@ class JudgeTimeoutError(TimeoutError):
         self.trajectory_object_url = trajectory_object_url
 
 
-# A harness that ran out of its own time limit fails its task with an error code that says so (``<harness>.timeout``).
-# One whose code doesn't say, or an older image, is read from its message, which harnesses phrase "timed out after Ns";
-# that phrase only, since a model API call that timed out ("The operation timed out") is not the judge running out.
+# A harness that ran out of its own time limit says so in its error code (``<harness>.timeout``, as OpenHands and
+# pydantic-ai do) or, when its code doesn't (Claude Code's ``cli_error``), in its message: "timed out after Ns". That
+# phrase only, since a model API call that timed out ("The operation timed out") is not the judge running out.
 _TIMEOUT_CODE = re.compile(r"(^|\.)timeout$")
 _UNSPECIFIC_CODES = frozenset({None, "", "cli_error"})
 _TIMED_OUT_MESSAGE = re.compile(r"\btimed out after \d+")

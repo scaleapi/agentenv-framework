@@ -105,8 +105,6 @@ SKILLS_DIR = CLAUDE_STATE_DIR / "skills"
 INPUTS_DIR = WORKSPACE_DIR / "inputs"
 _SKIPPABLE_WORKSPACE_ERRORS = (FileNotFoundError, PermissionError, NotADirectoryError, IsADirectoryError)
 
-# The error code of a turn that ran out of its timeout_seconds, as other harnesses name theirs (``<harness>.timeout``).
-TIMEOUT_CODE = "claude_code.timeout"
 # What agent-env keeps of a failed task's error_message.
 _ERROR_MESSAGE_LIMIT = 1000
 # How much of a changing workspace file one read stages.
@@ -514,7 +512,7 @@ class ClaudeCodeAgent(DurableSessionRefs, AgentEnvAgent):
             data["cli_attempts"] = result.attempts
         builder = TaskResult.builder()
         if result.error:
-            builder.failed(TIMEOUT_CODE if result.timed_out else "cli_error", result.error[:_ERROR_MESSAGE_LIMIT])
+            builder.failed("cli_error", result.error[:_ERROR_MESSAGE_LIMIT])
         else:
             builder.succeeded()
         return (
