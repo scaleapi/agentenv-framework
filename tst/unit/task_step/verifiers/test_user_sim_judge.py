@@ -422,8 +422,9 @@ async def test_from_the_tail_an_answer_always_on_shortened_is_marked_cut(monkeyp
 
     record = {"timeline_tail": [_small({"event": "user_sim_read", "outcome": "reply", "message": "ok " * 200}),
                                 _small({"event": "user_sim_read", "outcome": "reply", "message": "sounds good"})]}
-    reads, notes = usj._always_on_reads(record)
+    reads, notes, missing = usj._always_on_reads(record)
     assert [r["message_cut"] for r in reads] == [True, False] and len(reads[0]["message"]) == PENDING_TEXT_CHARS + 1
+    assert missing == 0  # the record has no counts to compare with
     assert usj._turn(1, reads[0]).cut and not usj._turn(2, reads[1]).cut
 
 
@@ -789,6 +790,27 @@ async def test_an_auto_item_can_t_pass_an_answer_the_record_kept_only_the_start_
     over = _run(("reply", long.strip()), ("reply", TESS[1]))
     over.turns[0] = replace(over.turns[0], cut=True)
     assert (await _judge(over, FakeModel(), checks=[], items=[length]))["items"]["f2_her_length"]["verdict"] == "fail"
+
+
+def test_from_the_tail_the_check_ins_it_dropped_are_counted():
+    tail = [{"event": "user_sim_read", "outcome": "reply", "message": "sounds good"}] * 2
+    reads, notes, missing = usj._always_on_reads({"timeline_tail": tail, "counts": {"user_sim_reads": 5}})
+    assert len(reads) == 2 and missing == 3
+    assert notes[-1] == "the first 3 of the run's 5 check-ins aren't kept, so they aren't shown"
+    assert usj._always_on_reads({"timeline_tail": tail, "counts": {"user_sim_reads": 2}})[2] == 0
+
+
+@pytest.mark.asyncio
+async def test_an_auto_item_can_t_pass_when_some_answers_weren_t_kept():
+    [length] = _items(HER_LENGTH)
+    run = _run(("reply", TESS[0]), ("reply", TESS[1]))
+    run.missing_answers = 3
+    assert (await _judge(run, FakeModel(), checks=[], items=[length]))["items"]["f2_her_length"] == {
+        "verdict": "error", "turns": [], "family": "F2", "kind": "auto", "asked_with": "computed",
+        "error": "3 of the run's answers weren't kept, so they can't be counted"}
+    long = _run(("reply", "word " * 30), ("reply", TESS[1]))
+    long.missing_answers = 3  # a kept answer over the max is a fail either way
+    assert (await _judge(long, FakeModel(), checks=[], items=[length]))["items"]["f2_her_length"]["verdict"] == "fail"
 
 
 @pytest.mark.asyncio

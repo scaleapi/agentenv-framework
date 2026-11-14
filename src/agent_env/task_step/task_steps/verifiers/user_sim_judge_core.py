@@ -313,6 +313,7 @@ class UserSimRun:
     notes: list[str] = field(default_factory=list)
     # Each tag the user sim's instructions showed, with its line (deploy_user_sim_agent's record); None: not recorded.
     tagged_lines: Optional[dict[str, str]] = None
+    missing_answers: int = 0  # the run's answers its record didn't keep (always_on's tail drops the earliest)
 
 
 # ---- a task's own rubric items ------------------------------------------------------------------------------------
@@ -494,6 +495,9 @@ def auto_result(item: RubricItem, run: "UserSimRun") -> dict:
         listed = ", ".join(f"turn {n}: {c}" for n, c in over)
         return {"verdict": "fail", "reason": f"over the {item.max} {unit} max at {listed}",
                 "turns": [n for n, _ in over]}
+    if run.missing_answers:
+        return {"verdict": "error", "turns": [],
+                "error": f"{run.missing_answers} of the run's answers weren't kept, so they can't be counted"}
     cut = [t.n for t in sent_answers(run) if t.cut]
     if cut:
         return {"verdict": "error", "turns": cut,

@@ -23,8 +23,9 @@ into this step's settings; this step reads no file:
 - ``kind``: ``hard`` (an exact rule from the user sim's instructions: the judge fails it on any breach), ``general``
   (a judgement: it fails only on a clear instance; the default) or ``auto`` (never sent to the model: ``metric``
   ``max_words`` or ``max_sentences`` is counted on each graded answer, and any answer over ``max`` fails it, naming
-  the turn; see ``user_sim_judge_core.count_sentences``). If none is over but the record kept only the start of one
-  (always_on's tail, when its stored timeline can't be read), the item is ``error``: that length can't be counted.
+  the turn; see ``user_sim_judge_core.count_sentences``). If none is over but the record kept only the start of one,
+  or dropped some answers (always_on's tail, when its stored timeline can't be read), the item is ``error``: those
+  lengths can't be counted.
 - ``check``: the text the judge applies. ``text`` is its old name and still loads.
 - ``line``: instead of ``check``, a tag of the user sim's instructions ("P1", "T1", "C2", "D3"): the judge applies
   that line's text from the run's ``metadata["user_sims"][name]["tagged_lines"]``, shown as "Follows its instruction
@@ -387,11 +388,12 @@ def _read_run(kind: str, step_id: str, record: Optional[dict], context: TaskStep
     """The user sim's run, and what the entry records about it: ``user_sim`` (its name) and ``instructions``."""
     metadata = context.metadata
     if kind == ALWAYS_ON:
-        reads, notes = _always_on_reads(record)
+        reads, notes, missing = _always_on_reads(record)
         name = (record.get("user_sim") or {}).get("name")
         multi_day = record.get("multi_day")
     else:
         reads, notes = _chat_reads(metadata.get(READS_KEY, {}).get(step_id) or [])
+        missing = 0  # a chat run keeps a summary of every read
         name = _chat_user_sim(metadata, step_id)
         multi_day = False
     us = (metadata.get(USER_SIMS_KEY) or {}).get(name) if name else None
@@ -399,7 +401,7 @@ def _read_run(kind: str, step_id: str, record: Optional[dict], context: TaskStep
     turns = [_turn(n, e) for n, e in enumerate(reads, 1)]
     more += _reply_limit_note(turns, (us or {}).get("max_replies"))
     run = core.UserSimRun(name=name or "the user", instructions=instructions, turns=turns, notes=notes + more,
-                          tagged_lines=(us or {}).get("tagged_lines"))
+                          tagged_lines=(us or {}).get("tagged_lines"), missing_answers=missing)
     return run, {"user_sim": name, "instructions": check}
 
 
@@ -419,12 +421,13 @@ def _load(url: str) -> dict:
     return json.loads(get_config().get_object_store_at(url).get(url))
 
 
-def _always_on_reads(record: dict) -> tuple[list[dict], list[str]]:
-    """Every ``user_sim_read`` in the always_on step's stored timeline, else its tail."""
+def _always_on_reads(record: dict) -> tuple[list[dict], list[str], int]:
+    """Every ``user_sim_read`` in the always_on step's stored timeline, else its tail; with notes for the judge and how
+    many of the run's reads the tail dropped (by the record's ``counts.user_sim_reads``)."""
     if record.get("object_url"):
         try:
             timeline = _load(record["object_url"])["timeline"]
-            return [e for e in timeline if e.get("event") == "user_sim_read"], []
+            return [e for e in timeline if e.get("event") == "user_sim_read"], [], 0
         except Exception as e:
             note = (f"the run's stored record could not be read ({type(e).__name__}); only its last events, without "
                     "what the user sim was sent, are shown")
@@ -437,7 +440,11 @@ def _always_on_reads(record: dict) -> tuple[list[dict], list[str]]:
         if e.get("event") == "user_sim_read":
             message = e.get("message") or ""  # the tail keeps each string's first PENDING_TEXT_CHARS, then "…"
             reads.append({**e, "message_cut": len(message) == PENDING_TEXT_CHARS + 1 and message.endswith("…")})
-    return reads, [note]
+    total = (record.get("counts") or {}).get("user_sim_reads")
+    missing = total - len(reads) if isinstance(total, int) and not isinstance(total, bool) and total > len(reads) else 0
+    notes = [note] + ([f"the first {missing} of the run's {total} check-ins aren't kept, so they aren't shown"]
+                      if missing else [])
+    return reads, notes, missing
 
 
 def _chat_reads(summaries: list[dict]) -> tuple[list[dict], list[str]]:
