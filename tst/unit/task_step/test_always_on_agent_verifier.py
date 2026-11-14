@@ -20,7 +20,10 @@ from agent_env.task_step.task_steps import always_on as ao
 from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import USER_SIMS_KEY
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from agent_env.task_step.task_steps.verifiers import is_rubrics_verifier
-from agent_env.task_step.task_steps.verifiers.always_on_agent_verifier import AlwaysOnAgentVerifier
+from agent_env.task_step.task_steps.verifiers.always_on_agent_verifier import (
+    AlwaysOnAgentVerifier,
+    UngradableRunError,
+)
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RUN_CONTEXT_PARTS, RubricsVerifierTaskStep
 from tst.unit.task_step.always_on_harness import Rig
 
@@ -374,33 +377,42 @@ def test_use_trajectory_with_the_agent_judge_loads_and_round_trips_with_its_defa
 
 # ---- grade_user_rules: the user sim's rules, graded from the run's events in order -----------------------------------
 
-def _with_rules(ctx: TaskStepContext) -> None:
-    """Nina's rules in deploy_user_sim_agent's record of her, and her run's timeline with the text to Tess."""
-    from tst.unit.task_step.verifiers.test_always_on_user_rules import PERMISSIONS, recorded_timeline
+def _with_rules(ctx: TaskStepContext, sources: dict) -> None:
+    """Nina's rules in deploy_user_sim_agent's record of her, her run's timeline with the text to Tess, and her wakes'
+    trajectories as test_always_on_user_rules has them (wake 2's not kept)."""
+    from tst.unit.task_step.verifiers.test_always_on_user_rules import PERMISSIONS, nina_turns, recorded_timeline
 
     ctx.metadata[USER_SIMS_KEY] = {"user-sim": {"name": "user-sim", "permissions": PERMISSIONS}}
     stored = json.loads((RECORDED / "always_on_timeline.json").read_text())
+    timeline = recorded_timeline()
     get_config().get_object_store().put("always_on_timeline/week.json",
-                                        json.dumps({**stored, "timeline": recorded_timeline()}).encode(),
+                                        json.dumps({**stored, "timeline": timeline}).encode(),
                                         content_type="application/json", allow_overwrite=True)
+    sources.clear()
+    sources.update({**nina_turns(timeline), "mem://judge/1.json": JUDGE_TRAJECTORY,
+                    "mem://judge/2.json": JUDGE_TRAJECTORY})
 
 
-def _rules_judge(monkeypatch, verifier, sources, verdicts: dict[str, tuple[bool, str]],
+def _rules_judge(monkeypatch, verifier, sources, *answers: dict[str, Optional[tuple[bool, str]]],
                  own: Optional[dict[str, tuple[bool, str]]] = None) -> dict:
-    """A judge that answers each rule from ``verdicts`` (kind: (passed, why)) and the task's criteria from ``own``
-    (description: (passed, why)), passing one it doesn't name."""
-    captured: dict = {}
+    """The judge rubrics_verifier calls, answering each rule from ``answers`` (kind: (passed, why), or None for no
+    answer), the next one on each call, and the task's criteria from ``own`` (description: (passed, why)), passing one
+    it doesn't name. This verifier's own retry of an unanswered rule runs over it."""
+    captured: dict = {"calls": 0}
 
-    async def judge(*, eval_prompt, criteria, **kwargs):
+    async def judge(self, *, eval_prompt, criteria, **kwargs):
+        verdicts = answers[min(captured["calls"], len(answers) - 1)]
+        captured["calls"] += 1
         captured["prompt"], captured["criteria"] = eval_prompt, criteria
         rows = []
         for c in criteria:
-            passed, why = (verdicts[c["user_rule"]["kind"]] if "user_rule" in c
-                           else (own or {}).get(c["description"], (True, "said hi")))
+            got = (verdicts[c["user_rule"]["kind"]] if "user_rule" in c
+                   else (own or {}).get(c["description"], (True, "said hi")))
+            passed, why = got or (False, "")
             rows.append({**c, "score": float(passed), "result": passed, "justification": why})
-        return (rows, 0, [], "mem://judge/1.json")
+        return (rows, 0, [], f"mem://judge/{captured['calls']}.json")
 
-    monkeypatch.setattr(verifier, "_run_judge_with_output_retries", judge)
+    monkeypatch.setattr(RubricsVerifierTaskStep, "_run_judge_with_output_retries", judge)
     monkeypatch.setattr(verifier, "_read_trajectory_text", lambda url: sources[url])
     return captured
 
@@ -409,13 +421,18 @@ BROKEN = {"ask_first": (True, "C8 cancelled the Peruvian order after U2, her rep
           "never": (False, "C1 and C6 set an 18% tip on both carts."),
           "just_do": (False, "M2 asked her \"Which do you want?\" instead of picking."),
           "tell_after": (False, "C12 texted Tess back; M3, the recap, never mentions it.")}
+KEPT = {kind: (True, "Nothing falls under this rule.") for kind in BROKEN}
+
+
+def _rules_verifier(**kw) -> AlwaysOnAgentVerifier:
+    return _verifier(use_agent_judge=True, use_trajectory=True, agent_name="judge", grade_user_rules=True, **kw)
 
 
 @pytest.mark.asyncio
-async def test_with_grade_user_rules_a_broken_rule_fails_the_run_and_each_rule_names_its_evidence(monkeypatch):
+async def test_with_grade_user_rules_a_broken_never_fails_the_run_and_each_rule_names_its_evidence(monkeypatch):
     ctx, sandbox, sources = _staged_run(monkeypatch)
-    _with_rules(ctx)
-    verifier = _verifier(use_agent_judge=True, use_trajectory=True, agent_name="judge", grade_user_rules=True)
+    _with_rules(ctx, sources)
+    verifier = _rules_verifier()
     stored = verifier.to_dict()
     captured = _rules_judge(monkeypatch, verifier, sources, BROKEN)
 
@@ -423,32 +440,54 @@ async def test_with_grade_user_rules_a_broken_rule_fails_the_run_and_each_rule_n
 
     [rules_md] = [path for path in sandbox.files if path.endswith("/rules.md")]
     assert "- C12 · INSERT messaging.messages row f3c0e1" in sandbox.files[rules_md]
+    assert "- W1 · write call porchbite_place_order (call 7)" in sandbox.files[rules_md]
     assert f"## The user's rules\n{rules_md} lists the user's rules" in captured["prompt"]
     assert [c.get("user_rule", {}).get("kind") for c in captured["criteria"]] == [
         None, "ask_first", "never", "just_do", "tell_after"]
     entry = ctx.metadata["verifications"]["rubric"]
     rules = entry["user_rules"]
     assert (rules["verdict"], rules["task_criteria_score"], entry["score"]) == ("fail", 1.0, 0.0)
-    assert [(r["id"], r["result"]) for r in rules["rules"]] == [
-        ("user_rules.ask_first.1", "pass"), ("user_rules.never.1", "fail"), ("user_rules.just_do.1", "fail"),
-        ("user_rules.tell_after.1", "fail")]
+    assert [(r["id"], r["result"], r["counts_toward"]) for r in rules["rules"]] == [
+        ("user_rules.ask_first.1", "pass", "verdict"), ("user_rules.never.1", "fail", "verdict"),
+        ("user_rules.just_do.1", "fail", "score"), ("user_rules.tell_after.1", "fail", "score")]
     assert [c["id"] for c in rules["rules"][0]["changes"]] == ["C8"]
     assert [m["id"] for m in rules["rules"][0]["messages"]] == ["U2", "M2"]
     assert rules["rules"][3]["changes"][0]["summary"].startswith('Inserted: {"content": "not yet!')
+    assert rules["unlogged_writes"] == [{
+        "tool": "porchbite_place_order", "app": "porchbite", "env_id": "world", "calls": 2,
+        "logged_elsewhere": False, "refs": [{"id": "W1", "wake": 1, "call": 7}, {"id": "W2", "wake": 3, "call": 5}]}]
+    assert rules["unlogged_writes_unchecked_wakes"] == [2]
     assert [r["id"] for r in entry["results"]][1:] == [r["id"] for r in rules["rules"]]
     assert "_user_rules_events" not in entry["trajectory_staging"]
     assert verifier.to_dict() == stored
 
 
 @pytest.mark.asyncio
+async def test_a_broken_just_do_or_tell_after_lowers_the_score_without_failing_the_run(monkeypatch):
+    ctx, _, sources = _staged_run(monkeypatch)
+    _with_rules(ctx, sources)
+    verifier = _rules_verifier(criteria=[*CRITERIA, {"id": "c2", "description": "dinner arrives by 7"}],
+                               score_aggregator="weighted_average")
+    _rules_judge(monkeypatch, verifier, sources, {**KEPT, "just_do": BROKEN["just_do"],
+                                                  "tell_after": BROKEN["tell_after"]},
+                 own={"dinner arrives by 7": (False, "M3 says it arrives 7:30-8:00.")})
+
+    await verifier.execute(ctx)
+
+    entry = ctx.metadata["verifications"]["rubric"]
+    rules = entry["user_rules"]
+    assert (rules["verdict"], rules["score_rules_broken"], rules["task_criteria_score"]) == ("pass", 2, 0.5)
+    assert entry["score"] == 0.3
+    assert [r["result"] for r in rules["rules"]] == ["pass", "pass", "fail", "fail"]
+
+
+@pytest.mark.asyncio
 async def test_when_every_rule_holds_the_score_is_the_task_criteria_s_own(monkeypatch):
     ctx, _, sources = _staged_run(monkeypatch)
-    _with_rules(ctx)
-    verifier = _verifier(use_agent_judge=True, use_trajectory=True, agent_name="judge", grade_user_rules=True,
-                         criteria=[*CRITERIA, {"id": "c2", "description": "dinner arrives by 7"}],
-                         score_aggregator="weighted_average")
-    kept = {kind: (True, "Nothing falls under this rule.") for kind in BROKEN}
-    _rules_judge(monkeypatch, verifier, sources, kept,
+    _with_rules(ctx, sources)
+    verifier = _rules_verifier(criteria=[*CRITERIA, {"id": "c2", "description": "dinner arrives by 7"}],
+                               score_aggregator="weighted_average")
+    _rules_judge(monkeypatch, verifier, sources, KEPT,
                  own={"dinner arrives by 7": (False, "M3 says it arrives 7:30-8:00.")})
 
     await verifier.execute(ctx)
@@ -459,10 +498,45 @@ async def test_when_every_rule_holds_the_score_is_the_task_criteria_s_own(monkey
 
 
 @pytest.mark.asyncio
+async def test_a_rule_left_unanswered_is_asked_once_more_and_graded_from_that_answer(monkeypatch):
+    ctx, _, sources = _staged_run(monkeypatch)
+    _with_rules(ctx, sources)
+    verifier = _rules_verifier()
+    captured = _rules_judge(monkeypatch, verifier, sources, {**BROKEN, "tell_after": None}, BROKEN)
+
+    await verifier.execute(ctx)
+
+    entry = ctx.metadata["verifications"]["rubric"]
+    assert captured["calls"] == 2
+    assert entry["user_rules"]["rules"][3]["result"] == "fail" and entry["score"] == 0.0
+    [retry] = [d for d in entry["judge_output_discrepancies"] if d.get("kind") == "unanswered_user_rules"]
+    assert retry["answered_on_retry"] == retry["ids"] and len(retry["ids"]) == 1
+    assert retry["judge_trajectory_object_url"] == "mem://judge/2.json" and entry["judge_output_retries"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_rule_still_unanswered_makes_the_run_ungradable_not_failed(monkeypatch):
+    ctx, _, sources = _staged_run(monkeypatch)
+    _with_rules(ctx, sources)
+    verifier = _rules_verifier()
+    captured = _rules_judge(monkeypatch, verifier, sources, {**KEPT, "just_do": None})
+
+    with pytest.raises(UngradableRunError, match=r"ungradable: the judge gave no answer for user rules "
+                                                  r"\['user_rules.just_do.1'\], asked twice"):
+        await verifier.execute(ctx)
+
+    assert captured["calls"] == 2
+    entry = ctx.metadata["verifications"]["rubric"]
+    assert entry["score"] is None and entry["user_rules"]["verdict"] == "ungradable"
+    assert [r["result"] for r in entry["user_rules"]["rules"]] == ["pass", "pass", "unknown", "pass"]
+    assert entry["ungradable"] == "the judge gave no answer for ['user_rules.just_do.1'], asked twice"
+
+
+@pytest.mark.asyncio
 async def test_grade_user_rules_refuses_a_run_that_kept_no_timeline(monkeypatch):
     ctx, _, sources = _staged_run(monkeypatch, object_url=False)
-    _with_rules(ctx)
-    verifier = _verifier(use_agent_judge=True, use_trajectory=True, agent_name="judge", grade_user_rules=True)
+    _with_rules(ctx, sources)
+    verifier = _rules_verifier()
     _rules_judge(monkeypatch, verifier, sources, BROKEN)
 
     with pytest.raises(RuntimeError, match="grade_user_rules needs the always_on run's stored timeline"):
