@@ -317,6 +317,44 @@ class _CompactedTrajectory:
                    per_criterion=per_criterion)
 
 
+@dataclass(frozen=True)
+class StagedTrajectory:
+    """A run a subclass staged in the agent judge's sandbox itself (``stage_trajectory``): the path the judge prompt
+    names as the trajectory, a note added to every judge prompt on how to read it, and what the verification entry
+    keeps of the staging (``trajectory_staging``)."""
+
+    path: str
+    prompt_note: str
+    record: dict = field(default_factory=dict)
+
+
+class JudgeTimeoutError(TimeoutError):
+    """An agent judge ran out of ``judge_timeout_seconds``; ``trajectory_object_url`` is what it had done by then, when
+    its trajectory could be fetched."""
+
+    def __init__(self, message: str, trajectory_object_url: Optional[str]):
+        super().__init__(message)
+        self.trajectory_object_url = trajectory_object_url
+
+
+# A harness that ran out of its own time limit fails its task with an error code that says so (``<harness>.timeout``).
+# One whose code doesn't say, or an older image, is read from its message, which harnesses phrase "timed out after Ns";
+# that phrase only, since a model API call that timed out ("The operation timed out") is not the judge running out.
+_TIMEOUT_CODE = re.compile(r"(^|\.)timeout$")
+_UNSPECIFIC_CODES = frozenset({None, "", "cli_error"})
+_TIMED_OUT_MESSAGE = re.compile(r"\btimed out after \d+")
+
+
+def _judge_ran_out_of_time(tr: Any) -> bool:
+    """Whether a failed judge task failed by running out of its time limit: its error code first, its message only
+    when the code doesn't tell."""
+    if tr.error_code and _TIMEOUT_CODE.search(tr.error_code):
+        return True
+    if tr.error_code not in _UNSPECIFIC_CODES:
+        return False
+    return bool(_TIMED_OUT_MESSAGE.search(" ".join(filter(None, [tr.error_message, tr.response_text]))))
+
+
 def _image_count(blocks: list[dict]) -> int:
     """Images among judge message blocks (per-criterion frames interleave a ``FRAME:`` text block before each)."""
     return sum(1 for b in blocks if b.get("type") == "image_url")
@@ -463,6 +501,8 @@ class RubricsVerifierTaskStep(TaskStep):
         run_context_for_judge: Optional[list[str]] = None,
         judge_batch_size: Optional[int] = None,
         judge_batch_concurrency: Optional[int] = None,
+        judge_timeout_retries: Optional[int] = None,
+        judge_max_turns: Optional[int] = None,
         depends_on: Optional[list[TaskStepDependency]] = None,
         fail_task_on_error: bool = True,
         fail_task_when_not_passing: bool = False,
@@ -481,6 +521,15 @@ class RubricsVerifierTaskStep(TaskStep):
         # judge_batch_concurrency at once), and retry a batch whose rows read as bulk verdicts.
         self.judge_batch_size = _validated_batch_option("judge_batch_size", judge_batch_size)
         self.judge_batch_concurrency = _validated_batch_option("judge_batch_concurrency", judge_batch_concurrency)
+        # An agent judge call (a batch's, with batches) that runs out of judge_timeout_seconds is tried again this many
+        # times, and the timed-out attempt's trajectory is kept; None keeps the first timeout fatal, as it always was.
+        if judge_timeout_retries is not None and (isinstance(judge_timeout_retries, bool)
+                                                  or not isinstance(judge_timeout_retries, int)
+                                                  or judge_timeout_retries < 0):
+            raise ValueError(f"judge_timeout_retries must be a non-negative integer, got {judge_timeout_retries!r}")
+        self.judge_timeout_retries = judge_timeout_retries
+        # The agent judge's turn cap (its agent config's max_turns); None leaves the judge's own.
+        self.judge_max_turns = _validated_batch_option("judge_max_turns", judge_max_turns)
         # Grade a multi-turn run as it stood after this (1-based) turn: the judge sees turns 1..k only,
         # so a per-turn env snapshot can be scored on what the agent had done by then. None grades all.
         self.grade_up_to_turn = _validated_turn(grade_up_to_turn)
@@ -608,6 +657,10 @@ class RubricsVerifierTaskStep(TaskStep):
             base["judge_batch_size"] = self.judge_batch_size
         if self.judge_batch_concurrency is not None:
             base["judge_batch_concurrency"] = self.judge_batch_concurrency
+        if self.judge_timeout_retries is not None:
+            base["judge_timeout_retries"] = self.judge_timeout_retries
+        if self.judge_max_turns is not None:
+            base["judge_max_turns"] = self.judge_max_turns
         if self.fail_task_when_not_passing:
             base["fail_task_when_not_passing"] = True
         return base
@@ -640,6 +693,8 @@ class RubricsVerifierTaskStep(TaskStep):
             run_context_for_judge=data.get("run_context_for_judge"),
             judge_batch_size=data.get("judge_batch_size"),
             judge_batch_concurrency=data.get("judge_batch_concurrency"),
+            judge_timeout_retries=data.get("judge_timeout_retries"),
+            judge_max_turns=data.get("judge_max_turns"),
             fail_task_when_not_passing=data.get("fail_task_when_not_passing", False),
         )
 
@@ -647,6 +702,19 @@ class RubricsVerifierTaskStep(TaskStep):
         """Sections a subclass adds to this run's judge prompt, after the run context: an override point, called once
         per run (never for one skipped) with the prompt's stored response. None here."""
         return []
+
+    async def stage_trajectory(self, context: TaskStepContext, prompt_response: PromptResponse,
+                               run_context: Optional[Run], sandbox: Any,
+                               container: Optional[str]) -> Optional[StagedTrajectory]:
+        """An override point for an agent judge with use_trajectory: stage the run in the judge's ``sandbox`` (into
+        ``container`` when the judge runs in one) and say where. None here: the prompt's trajectory files are loaded
+        as they are."""
+        return None
+
+    def judge_agent_config(self) -> dict:
+        """Settings an override adds to what the agent judge is configured with (its card's agent-config extension
+        takes only the ones it supports). None here."""
+        return {}
 
     def _resolved_criteria(self, context: TaskStepContext) -> list[dict]:
         """Criteria for this run: a per-run ``step_params`` override replaces the stored list.
@@ -767,6 +835,7 @@ class RubricsVerifierTaskStep(TaskStep):
             )
 
         auto_deployed_judge = None
+        staged: Optional[StagedTrajectory] = None
         judge_agent = None
         judge_a2a_url: Optional[str] = None
         judge_sandbox_id: Optional[str] = None
@@ -821,10 +890,11 @@ class RubricsVerifierTaskStep(TaskStep):
                 judge_sandbox_type = auto_deployed_judge.sandbox_type if auto_deployed_judge else (agent.sandbox_type if self.agent_name else None)
                 provider = build_sandbox_provider(judge_sandbox_type) if judge_sandbox_type else get_agent_sandbox_provider()
                 sandbox = await provider.get_sandbox(judge_sandbox_id)
-                if multiturn:
+                staged = await self.stage_trajectory(context, stored_response, run_context, sandbox, judge_container)
+                if staged is None and multiturn:
                     await self._load_per_turn_trajectories(
                         sandbox, per_turn_uris, multiturn_dir, filter_to_apply, judge_container)
-                else:
+                elif staged is None:
                     await sandbox.write_file_from_object(compacted.container_object_url, self.TRAJECTORY_CONTAINER_PATH,
                                                          **into_container(judge_container))
                     if compacted.tool_result_files:
@@ -862,7 +932,9 @@ class RubricsVerifierTaskStep(TaskStep):
                         f"verifier '{self.verifier_id}' uses an agent judge — raw trajectory "
                         "passed through unchanged."
                     )
-                if self.use_trajectory:
+                if staged is not None:
+                    trajectory_path = staged.path
+                elif self.use_trajectory:
                     trajectory_path = multiturn_dir if multiturn else self.TRAJECTORY_CONTAINER_PATH
             else:
                 image_blocks = compacted.image_blocks
@@ -890,7 +962,9 @@ class RubricsVerifierTaskStep(TaskStep):
                         run_context=run_context,
                         extra_sections=extra_sections,
                     )
-                    if self.use_trajectory and multiturn:
+                    if staged is not None:
+                        prompt += staged.prompt_note
+                    elif self.use_trajectory and multiturn:
                         prompt += self._MULTITURN_DIR_NOTE.format(n=len(per_turn_uris))
                 else:
                     prompt = self._build_eval_prompt(
@@ -991,6 +1065,8 @@ class RubricsVerifierTaskStep(TaskStep):
             judge_call_fields["judge_batch_trajectory_object_urls"] = batch_trajectory_urls
         if grade_up_to_turn is not None:
             judge_call_fields["graded_up_to_turn"] = grade_up_to_turn
+        if staged is not None:
+            judge_call_fields["trajectory_staging"] = staged.record
         self._write_entries(context, verification_results, judge_call_fields)
         return context
 
@@ -1285,7 +1361,9 @@ class RubricsVerifierTaskStep(TaskStep):
             "max_thinking_tokens": judge_max_thinking_tokens,
             "output_format": self._spec().output_format,
             "timeout_seconds": self.judge_timeout_seconds,
+            "max_turns": self.judge_max_turns,
             "task_id": context.metadata.get("task_id"),
+            **self.judge_agent_config(),
         }
         desired_config = {k: v for k, v in desired_config.items() if v is not None}
         config_ext = A2AAgent.find_extension(judge_agent_card, A2AAgent.EXT_AGENT_CONFIG)
@@ -1293,6 +1371,9 @@ class RubricsVerifierTaskStep(TaskStep):
         if config_ext and desired_config:
             supported = (config_ext.get("params") or {}).get("methods", {}).get("set", {}).get("request", {}).get("supported", [])
             config_payload = {k: v for k, v in desired_config.items() if k in supported}
+            if unsupported := sorted(set(self.judge_agent_config()) - set(supported)):
+                logger.warning("Verifier '%s': the judge agent doesn't take %s; it runs without them",
+                               self.verifier_id, unsupported)
             if config_payload:
                 endpoint = (config_ext.get("params") or {}).get("endpoint", "/ext/agent-config")
                 await protocol.post_agent_config(judge_a2a_url + endpoint, config_payload)
@@ -1330,9 +1411,18 @@ class RubricsVerifierTaskStep(TaskStep):
             # A sibling batch failed: stop this judge too, or it keeps working on a reused judge sandbox.
             await asyncio.shield(protocol.cancel_a2a_task(judge_a2a_url, task_id))
             raise
+        except protocol.AgentUnreachableError:
+            raise
+        except TimeoutError as e:
+            if self.judge_timeout_retries is None:
+                raise
+            raise await self._judge_timed_out(str(e), judge_a2a_url, judge_agent_card, task_id, judge_agent) from e
         state = result["status"]["state"]
         status_msg = (result.get("status") or {}).get("message") or {}
         tr = protocol.TerminalResponse.from_message(status_msg)
+        if state == "failed" and self.judge_timeout_retries is not None and _judge_ran_out_of_time(tr):
+            raise await self._judge_timed_out(agent_error_text(tr.error_message, tr.response_text) or "timed out",
+                                              judge_a2a_url, judge_agent_card, task_id, judge_agent)
         if state == "failed":
             sandbox_id = getattr(judge_agent, "sandbox_id", None)
             logger.error(
@@ -1365,6 +1455,32 @@ class RubricsVerifierTaskStep(TaskStep):
             sandbox_type=getattr(judge_agent, "sandbox_type", None),
         )
         return {"response": tr.response_text, "trajectory_object_url": judge_trajectory_url}
+
+    async def _judge_timed_out(self, why: str, judge_a2a_url: str, judge_agent_card: dict, task_id: str,
+                               judge_agent: Any) -> JudgeTimeoutError:
+        """The error for a judge call that ran out of time, carrying the judge's trajectory so far."""
+        url = await self._fetch_judge_trajectory(judge_a2a_url=judge_a2a_url, judge_agent_card=judge_agent_card,
+                                                 a2a_server_task_id=task_id,
+                                                 sandbox_type=getattr(judge_agent, "sandbox_type", None))
+        logger.warning("Verifier '%s': judge task %s ran out of its %ss (%s); its trajectory so far: %s",
+                       self.verifier_id, task_id, self.judge_timeout_seconds, why, url)
+        return JudgeTimeoutError(f"Judge A2A task {task_id} ran out of its {self.judge_timeout_seconds}s: {why} "
+                                 f"(its trajectory so far: {url})", url)
+
+    async def _invoke_judge_retrying_timeouts(self, *, discrepancy_log: list[dict], **kwargs: Any) -> dict:
+        """``_invoke_judge_a2a``, tried again up to ``judge_timeout_retries`` times when it runs out of time; each
+        timeout is logged in ``discrepancy_log`` with the trajectory the judge left."""
+        retries = self.judge_timeout_retries or 0
+        for attempt in range(1, retries + 2):
+            try:
+                return await self._invoke_judge_a2a(**kwargs)
+            except JudgeTimeoutError as e:
+                discrepancy_log.append({"kind": "judge_timeout", "attempt": attempt,
+                                        "timeout_seconds": self.judge_timeout_seconds,
+                                        "judge_trajectory_object_url": e.trajectory_object_url})
+                if attempt > retries:
+                    raise
+        raise RuntimeError("Judge timeout retry loop exited unexpectedly")
 
     async def _fetch_judge_trajectory(
         self,
@@ -1474,7 +1590,8 @@ class RubricsVerifierTaskStep(TaskStep):
 
         for attempt in range(1, self.DEFAULT_MAX_RETRIES + 1):
             if use_agent_judge:
-                data = await self._invoke_judge_a2a(
+                data = await self._invoke_judge_retrying_timeouts(
+                    discrepancy_log=discrepancy_log,
                     eval_prompt=prompt,
                     judge_a2a_url=judge_a2a_url,
                     judge_agent_card=judge_agent_card,

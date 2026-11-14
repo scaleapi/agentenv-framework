@@ -10,7 +10,7 @@ import time
 import httpx
 import pytest
 from agentenv_protocol.a2a_agent import AGENT_CONFIG_V1, FilePart
-from agentenv_protocol.a2a_agent.peer_agents import PEER_MCP_PATH
+from agentenv_protocol.a2a_agent.peer_agents import PEER_MCP_PATH, PEER_MCP_SERVER_NAME
 
 from tst.unit.agents.claude_code.support import send, terminal
 from tst.unit.agents.claude_code.agent import a2a_server, claude_bridge, kit
@@ -83,6 +83,17 @@ def test_a_cli_error_is_a_failed_task_with_the_capped_message(calls, client):
             "error_message": error[:1000],
         },
     ]
+
+
+def test_a_turn_that_ran_out_of_its_time_says_so_in_its_error_code(calls, client):
+    calls.result_for = lambda kwargs: claude_bridge.ClaudeResult(
+        response="", tool_call_count=7, session_id=kwargs["session_id"], error="claude CLI timed out after 60s",
+        timed_out=True,
+    )
+
+    state, _, data = terminal(send(client, "hello"))
+
+    assert state == "failed" and data[1]["error_code"] == a2a_server.TIMEOUT_CODE == "claude_code.timeout"
 
 
 def test_a_cli_error_keeps_the_response_text_when_there_is_one(calls, client):
@@ -332,3 +343,19 @@ def test_a_raw_store_uri_is_refused_saying_how_a_stored_object_arrives(calls, cl
 
     assert state == "failed" and text.startswith("unsupported URI scheme 's3' in s3://bucket/a.png")
     assert "agent-env sends an object its stores own as an https one" in text and calls == []
+
+
+def test_peer_tools_off_leaves_the_sdk_s_peer_agents_server_out_of_the_turn(monkeypatch, client):
+    sent: list[dict] = []
+
+    async def run_claude(**kwargs):
+        sent.append(kwargs["mcp_servers"])
+        return claude_bridge.ClaudeResult(response="{}", tool_call_count=0, session_id=kwargs["session_id"])
+
+    monkeypatch.setattr(a2a_server, "run_claude", run_claude)
+    for peer_tools in (True, False):
+        r = client.post("/ext/agent-config", json={"peer_tools": peer_tools})
+        assert r.status_code == 200, r.text
+        send(client, "grade it")
+
+    assert PEER_MCP_SERVER_NAME in sent[0] and PEER_MCP_SERVER_NAME not in sent[1]

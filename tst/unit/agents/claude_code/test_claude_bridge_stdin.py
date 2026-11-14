@@ -111,7 +111,7 @@ def test_timeout_kills_process_and_returns_error(spawn_capture_hang):
         claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False, timeout_s=0)
     )
     assert result.error is not None
-    assert "timed out" in result.error
+    assert "timed out" in result.error and result.timed_out is True
     assert result.response == ""
     assert spawn_capture_hang["proc"].killed is True
 
