@@ -345,6 +345,20 @@ _UNSPECIFIC_CODES = frozenset({None, "", "cli_error"})
 _TIMED_OUT_MESSAGE = re.compile(r"\btimed out after \d+")
 
 
+async def _terminate_auto_deployed_judge(judge: Any) -> None:
+    """Terminate the judge sandbox a verifier deployed itself; None (it used a task's agent) has nothing to release."""
+    if judge is None:
+        return
+    from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider, get_agent_sandbox_provider
+    try:
+        provider = build_sandbox_provider(judge.sandbox_type) if judge.sandbox_type else get_agent_sandbox_provider()
+        sandbox = await provider.get_sandbox(judge.sandbox_id)
+        await sandbox.terminate()
+        logger.info(f"Terminated auto-deployed judge sandbox {judge.sandbox_id}")
+    except Exception as e:
+        logger.warning(f"Failed to terminate auto-deployed judge sandbox: {e}")
+
+
 def _judge_ran_out_of_time(tr: Any) -> bool:
     """Whether a failed judge task failed by running out of its time limit: its error code first, its message only
     when the code doesn't tell."""
@@ -885,21 +899,27 @@ class RubricsVerifierTaskStep(TaskStep):
                 judge_agent_card = auto_deployed_judge.agent_card
                 judge_agent = auto_deployed_judge
                 logger.info(f"Auto-deployed judge A2A agent '{resolved_judge_id}' at {judge_a2a_url}")
-            if self.use_trajectory:
-                from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider, get_agent_sandbox_provider
-                judge_sandbox_type = auto_deployed_judge.sandbox_type if auto_deployed_judge else (agent.sandbox_type if self.agent_name else None)
-                provider = build_sandbox_provider(judge_sandbox_type) if judge_sandbox_type else get_agent_sandbox_provider()
-                sandbox = await provider.get_sandbox(judge_sandbox_id)
-                staged = await self.stage_trajectory(context, stored_response, run_context, sandbox, judge_container)
-                if staged is None and multiturn:
-                    await self._load_per_turn_trajectories(
-                        sandbox, per_turn_uris, multiturn_dir, filter_to_apply, judge_container)
-                elif staged is None:
-                    await sandbox.write_file_from_object(compacted.container_object_url, self.TRAJECTORY_CONTAINER_PATH,
-                                                         **into_container(judge_container))
-                    if compacted.tool_result_files:
-                        await self._load_tool_result_files(sandbox, compacted.tool_result_files, judge_container)
-                        compacted.tool_result_files = []
+            # Loading the trajectory can fail (an override's staging, a transfer): the judge this step deployed is
+            # released then too, not only after grading.
+            try:
+                if self.use_trajectory:
+                    from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider, get_agent_sandbox_provider
+                    judge_sandbox_type = auto_deployed_judge.sandbox_type if auto_deployed_judge else (agent.sandbox_type if self.agent_name else None)
+                    provider = build_sandbox_provider(judge_sandbox_type) if judge_sandbox_type else get_agent_sandbox_provider()
+                    sandbox = await provider.get_sandbox(judge_sandbox_id)
+                    staged = await self.stage_trajectory(context, stored_response, run_context, sandbox, judge_container)
+                    if staged is None and multiturn:
+                        await self._load_per_turn_trajectories(
+                            sandbox, per_turn_uris, multiturn_dir, filter_to_apply, judge_container)
+                    elif staged is None:
+                        await sandbox.write_file_from_object(compacted.container_object_url, self.TRAJECTORY_CONTAINER_PATH,
+                                                             **into_container(judge_container))
+                        if compacted.tool_result_files:
+                            await self._load_tool_result_files(sandbox, compacted.tool_result_files, judge_container)
+                            compacted.tool_result_files = []
+            except BaseException:
+                await _terminate_auto_deployed_judge(auto_deployed_judge)
+                raise
 
         try:
             model = overrides.get("judge_model") or self.default_model
@@ -1041,16 +1061,7 @@ class RubricsVerifierTaskStep(TaskStep):
                 _restore_frame_labels(verification_results, real_by_short)
                 _restore_frame_labels(verification_results.checks, real_by_short)
         finally:
-            if auto_deployed_judge is not None:
-                from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider, get_agent_sandbox_provider
-                try:
-                    judge_type = auto_deployed_judge.sandbox_type
-                    provider = build_sandbox_provider(judge_type) if judge_type else get_agent_sandbox_provider()
-                    sandbox = await provider.get_sandbox(auto_deployed_judge.sandbox_id)
-                    await sandbox.terminate()
-                    logger.info(f"Terminated auto-deployed judge sandbox {auto_deployed_judge.sandbox_id}")
-                except Exception as e:
-                    logger.warning(f"Failed to terminate auto-deployed judge sandbox: {e}")
+            await _terminate_auto_deployed_judge(auto_deployed_judge)
 
         judge_call_fields: dict = {
             **dual_keyed("compact_trajectory_s3_uri", "compact_trajectory_object_url", compacted.compact_object_url),
