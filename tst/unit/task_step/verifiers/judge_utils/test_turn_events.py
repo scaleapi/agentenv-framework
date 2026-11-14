@@ -116,6 +116,19 @@ def test_the_agent_s_thinking_is_kept_when_it_was_recorded_and_an_empty_block_is
         ("thinking", "Ask before paying $855."), ("text", "Asking the user.")]
 
 
+def test_the_psi_harness_s_reasoning_on_an_llm_span_comes_before_that_call_s_text():
+    spans = [{"name": "ChatCompletion", "start_time": "1", "attributes": {
+        "openinference.span.kind": "LLM",
+        "llm.output_messages.0.message.role": "assistant",
+        "llm.output_messages.0.message.content": "I'll ask Nina first.",
+        "psi.reasoning": json.dumps([{"type": "thinking", "thinking": ""},
+                                     {"type": "thinking", "thinking": "Paying $855 needs her OK."}])}}]
+
+    events = [(e["type"], e["text"]) for e in turn_events(json.dumps(spans)).events if e["type"] != "final"]
+
+    assert events == [("thinking", "Paying $855 needs her OK."), ("text", "I'll ask Nina first.")]
+
+
 def test_an_unknown_format_passes_through_one_item_an_event():
     events = turn_events(json.dumps([{"kind": "step", "n": 1}, {"kind": "step", "n": 2}]))
     assert events.format == UNKNOWN and [e["event"]["n"] for e in events.events] == [1, 2]
