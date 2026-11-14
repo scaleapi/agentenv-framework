@@ -3,6 +3,8 @@
 Arms the clock (set_time) and reads the gateway's server-reachable env_get_time_url (state), both as the
 stored env card declares clock/v1, then invokes sync_time on each backing server, MCP server or website, the
 env card lists (``legacy_protocol.backing_servers``) whose own card advertises it, at the route that card gives.
+An env whose card offers no set_time has no gateway clock to arm, as a computer deployed alone, and is refused
+saying to deploy it in a multi env.
 Non-advertisers are skipped when tolerate_missing_sync_time (default True), and websites always. Place right
 before prompt_agent so the virtual timeline starts at agent-start; when setup needs the clock armed, arm it at rate 0
 and start it with set_env_clock_rate right before prompt_agent.
@@ -19,6 +21,7 @@ import httpx
 import tzdata  # noqa: F401
 from agentenv_protocol import client as protocol_v1
 
+from agent_env.env.env import EnvCapabilityUnsupported
 from agent_env.env.gateway.constants import EXT_CLOCK_URI
 from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef
@@ -132,6 +135,10 @@ class SyncEnvClockTaskStep(TaskStep):
                                   timeout=self.timeout_seconds)
         except httpx.HTTPStatusError as e:
             raise RuntimeError(f"clock arm failed (HTTP {e.response.status_code}): {e.response.text}") from e
+        except EnvCapabilityUnsupported as e:
+            raise RuntimeError(f"env '{self.env_id}' has no clock to arm: its card offers no {EXT_CLOCK_URI} set_time, "
+                               "which a gateway serves. A computer deployed alone follows no clock; deploy it in a "
+                               "multi env, whose gateway it follows") from e
         state = await deployed.invoke(EXT_CLOCK_URI, "state", timeout=self.timeout_seconds)
         env_get_time_url = state.get("env_get_time_url")
 
