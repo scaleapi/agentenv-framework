@@ -544,6 +544,56 @@ def test_without_run_step_id_the_run_must_have_one_run_to_judge():
     assert usj.UserSimJudgeTaskStep("j", None, run_step_id="talk")._find_run(ctx) == ("prompt_agent", "talk")
 
 
+# ---- the instructions, rebuilt as deploy_user_sim_agent wrote them ---------------------------------------------------
+SEED = {"trip": "nov-19"}
+TEXT = "ok mom and dad are officially coming thu-mon (nov 19-23), can you handle it?"
+ITINERARY = {"kind": "file", "file": {"uri": "s3://reyes-family/<trip>/itinerary.pdf", "name": "itinerary.pdf",
+                                      "mimeType": "application/pdf"},
+             "metadata": {"description": "Mom and Dad's flight itinerary"}}
+SHORTLIST = {"kind": "file", "file": {"uri": "s3://reyes-family/<trip>/<trip>-shortlist.xlsx"}}
+TOLD_AND_KNOWN = {**HANNAH["description"], "already_told": ["Dad can't do stairs since his knee surgery."],
+                  "should_already_know": ["You never book anything before 9am for your parents."]}
+
+
+@pytest.mark.parametrize("fields, shows", [
+    pytest.param({"opening_prompt": [{"kind": "text", "text": TEXT}, ITINERARY]},
+                 ["(you attached itinerary.pdf: Mom and Dad's flight itinerary)", user_sim_versions.ATTACHED_KNOWN],
+                 id="a-described-file"),
+    pytest.param({"opening_prompt": [{"kind": "text", "text": TEXT}, SHORTLIST]},
+                 ["(you attached nov-19-shortlist.xlsx)", user_sim_versions.ATTACHED_KNOWN], id="an-undescribed-file"),
+    pytest.param({"persona": {**HANNAH, "description": TOLD_AND_KNOWN}},
+                 ["  T1  Dad can't do stairs", "  C1  You never book anything before 9am"], id="told-and-known"),
+    pytest.param({"opening_prompt": TEXT, "multi_day": False}, [], id="text-only"),
+])
+@pytest.mark.asyncio
+async def test_the_rebuilt_instructions_are_the_ones_deployed(monkeypatch, fields, shows):
+    deploy = _Deploy(monkeypatch)
+    ctx = TaskStepContext()
+    ctx.metadata["seed"] = dict(SEED)
+    await deploy.run(_deploy_step(**fields), ctx)
+    us = ctx.metadata[USER_SIMS_KEY]["hannah"]
+
+    prompt, check, notes = usj._instructions(us, SEED, None)
+
+    assert prompt == deploy.fields("system_prompt")[0] and all(line in prompt for line in shows)
+    assert check["matches"] is True and check["prompt_sha256"] == us["prompt_sha256"] and notes == []
+
+
+@pytest.mark.asyncio
+async def test_a_text_only_opening_rebuilds_as_before(monkeypatch):
+    deploy = _Deploy(monkeypatch)
+    ctx = TaskStepContext()
+    await deploy.run(_deploy_step(), ctx)
+    us = ctx.metadata[USER_SIMS_KEY]["hannah"]
+    assert "opening_parts" not in us
+    person = {"key": "hannah", "name": HANNAH["display_name"], "first": HANNAH["first_name"],
+              "description": HANNAH["description"], "permissions": HANNAH["permissions"],
+              "keep_private": HANNAH["keep_private"], "opening": {"text": us["opening"]}, "done_ends_run": False}
+    prompt, check, _ = usj._instructions(us, {}, None)
+    assert prompt == user_sim_versions.setup("ours", person)["system_prompt"] == deploy.fields("system_prompt")[0]
+    assert check["matches"] is True
+
+
 # ---- settings -----------------------------------------------------------------------------------------------------
 def test_settings_are_checked_and_round_trip(monkeypatch):
     assert "user_sim_judge" in _builtin_registry()
@@ -803,6 +853,11 @@ def test_each_bad_item_is_refused_when_the_task_loads_with_a_clear_error():
         ({"id": "a", "family": "A1", "kind": "hard", "check": "  "}, "a hard item needs a check"),
         ({"id": "a", "family": "A1"}, "a general item needs a check"),
         ({"id": "a", "family": "A1", "check": "x", "na-when": "never"}, "unknown fields ['na-when']"),
+        ({"id": "a", "family": "F2", "kind": "auto", "metric": "max_words", "max": 25, "na_when": "never"},
+         "auto items are counted, so na_when can only be 'always' (with a static_na_reason), not 'never'"),
+        ({"id": "a", "family": "F2", "kind": "auto", "metric": "max_words", "max": 25,
+          "na_when": "The assistant never asked her anything."},
+         "auto items are counted, so na_when can only be 'always'"),
     ]
     for item, error in cases:
         problems = core.item_problems([item])
@@ -813,6 +868,12 @@ def test_each_bad_item_is_refused_when_the_task_loads_with_a_clear_error():
     assert dup == ["rubric_items[1] (a1_call_rae): id 'a1_call_rae' is used twice"]
     assert any("rubric_task_version must be a task version" in p for p in usj.UserSimJudgeTaskStep(
         "s", None, rubric_items=[CALL_RAE], rubric_task_version="7").config_problems())
+
+
+def test_an_auto_item_loads_with_no_na_when_or_with_always():
+    auto = {"id": "a", "family": "F2", "kind": "auto", "metric": "max_words", "max": 25}
+    assert core.item_problems([auto]) == []
+    assert core.item_problems([{**auto, "na_when": "always", "static_na_reason": "She never texts here."}]) == []
 
 
 # ---- the rubric's task version --------------------------------------------------------------------------------------

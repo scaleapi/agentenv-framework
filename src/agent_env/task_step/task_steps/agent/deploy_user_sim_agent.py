@@ -102,7 +102,8 @@ from agent_env.config import get_config
 from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.agent import user_sim_versions
-from agent_env.task_step.task_steps.agent.user_sim_common import attached, opening_parts, opening_problems, opening_text
+from agent_env.task_step.task_steps.agent.user_sim_common import (attached, opening_parts, opening_problems, opening_text,
+                                                                  recorded_opening)
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 
 logger = logging.getLogger(__name__)
@@ -188,6 +189,31 @@ def persona_problems(persona: Any) -> list[str]:
     return out
 
 
+def person(key: str, persona: dict, opening: list[dict], seed: dict, multi_day: Optional[bool]) -> dict:
+    """The user as the built-in user sim's ``setup`` takes them: ``persona``'s fields, the ``opening`` parts with the
+    run's ``<seed>`` placeholders filled in (as always_on fills them), and the done line ``multi_day`` picks. The step
+    writes its prompt from this, and user_sim_judge rebuilds that prompt from the step's record (``recorded_person``)."""
+    from agent_env.task_step.task_steps.prompt_agent import apply_seed
+
+    name = persona["display_name"]
+    parts = apply_seed(opening, seed)
+    text, files = opening_text(parts), attached(parts)
+    return {"key": key, "name": name, "first": persona.get("first_name") or name.split()[0],
+            "description": persona.get("description"), "permissions": persona.get("permissions"),
+            "keep_private": persona.get("keep_private"),
+            "opening": {"text": text, **({"files": files} if files else {})} if text else None,
+            "done_ends_run": not multi_day}
+
+
+def recorded_person(us: dict, seed: dict, multi_day: Optional[bool] = None) -> dict:
+    """``person`` from the step's ``metadata["user_sims"]`` record, with its ``opening_parts`` when it has them, so
+    ``setup`` gives the prompt the step wrote; ``multi_day`` is the record's, else the one given."""
+    persona = {**{k: us.get(k) for k in PERSONA_KEYS},
+               "display_name": us.get("display_name") or us.get("name") or "the user"}
+    return person(us.get("name"), persona, recorded_opening(us), seed,
+                  us["multi_day"] if us.get("multi_day") is not None else multi_day)
+
+
 class DeployUserSimAgentTaskStep(DeployAgentTaskStep):
     """Deploys the agent that plays the task's user, its persona set at deploy, and records the user under
     ``agent_name`` in ``metadata["user_sims"]``."""
@@ -250,20 +276,8 @@ class DeployUserSimAgentTaskStep(DeployAgentTaskStep):
 
     def person(self, context: TaskStepContext) -> dict:
         """The user as the built-in user sim's ``setup`` takes them, as always_on hands them over."""
-        name = self.persona["display_name"]
-        parts = self._opening(context)
-        text, files = opening_text(parts), attached(parts)
-        return {"key": self.agent_name, "name": name, "first": self.persona.get("first_name") or name.split()[0],
-                "description": self.persona.get("description"), "permissions": self.persona.get("permissions"),
-                "keep_private": self.persona.get("keep_private"),
-                "opening": {"text": text, **({"files": files} if files else {})} if text else None,
-                "done_ends_run": not self.multi_day}
-
-    def _opening(self, context: TaskStepContext) -> list[dict]:
-        """``opening_prompt`` as parts with the run's ``<seed>`` placeholders filled in, as always_on fills them."""
-        from agent_env.task_step.task_steps.prompt_agent import apply_seed
-
-        return apply_seed(opening_parts(self.opening_prompt), context.metadata.get("seed") or {})
+        return person(self.agent_name, self.persona, opening_parts(self.opening_prompt),
+                      context.metadata.get("seed") or {}, self.multi_day)
 
     def _setup(self, context: TaskStepContext) -> dict:
         return user_sim_versions.setup(user_sim_versions.VERSION, self.person(context))

@@ -9,8 +9,8 @@ It judges either kind of run the built-in user sim plays (``deploy_user_sim_agen
   ``object_url`` (else the entry, which keeps the answer only).
 
 ``run_step_id`` names that step; unset, the run must have exactly one of them. The user sim's instructions are rebuilt
-from its ``metadata["user_sims"]`` record with ``user_sim_versions.setup``, the way ``deploy_user_sim_agent`` wrote
-them, and checked against the record's ``prompt_sha256``. ``used`` is never shown to the judge: it is the user sim's
+from its ``metadata["user_sims"]`` record by ``deploy_user_sim_agent``'s own path (``recorded_person``, then
+``user_sim_versions.setup``), its opening's files included, and checked against the record's ``prompt_sha256``. ``used`` is never shown to the judge: it is the user sim's
 own pulse check, not evidence.
 
 Each check (``user_sim_judge_core.CHECKS``) is one narrow question to ``judge_model``, in its own call; a task's
@@ -28,6 +28,7 @@ into this step's settings; this step reads no file:
 - ``name`` and ``short``: a title and one line for reviewers, recorded but not shown to the judge.
 - ``na_when``: the situation in which it never came up, told to the judge. ``always`` makes it n/a with no call,
   recording ``static_na_reason`` (required with it); ``never`` means it always applies, and an n/a is asked again.
+  An auto item is counted, not judged, so it takes only ``always``; any other ``na_when`` is refused when the task loads.
 - ``can_error``: whether its fail makes the run a user sim error; unset, as the check that owns its family.
 
 For example::
@@ -485,19 +486,10 @@ def _instructions(us: Optional[dict], seed: dict, multi_day: Optional[bool]) -> 
         return None, {"source": "missing", "matches": False}, [
             "the user sim's settings were not found, so its instructions aren't shown"]
     from agent_env.task_step.task_steps.agent import user_sim_versions
+    from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import recorded_person
 
-    name = us.get("display_name") or us.get("name") or "the user"
-    opening = us.get("opening")
-    if opening:
-        for key, value in seed.items():
-            opening = opening.replace(f"<{key}>", str(value))
-    if us.get("multi_day") is not None:
-        multi_day = us["multi_day"]
-    person = {"key": us.get("name"), "name": name, "first": us.get("first_name") or name.split()[0],
-              "description": us.get("description"), "permissions": us.get("permissions"),
-              "keep_private": us.get("keep_private"), "opening": {"text": opening} if opening else None,
-              "done_ends_run": not multi_day}
     try:
+        person = recorded_person(us, seed, multi_day)
         prompt = user_sim_versions.setup(us.get("user_version") or user_sim_versions.VERSION, person)["system_prompt"]
     except Exception as e:
         return None, {"source": "missing", "matches": False, "error": f"{type(e).__name__}: {e}"}, [
@@ -512,6 +504,6 @@ def _instructions(us: Optional[dict], seed: dict, multi_day: Optional[bool]) -> 
     if recorded != sha:
         return prompt, check, ["these instructions were rebuilt from the user sim's settings and differ from the ones "
                                "it got, so a line may be missing or changed"]
-    if not opening:
+    if not person["opening"]:
         return prompt, check, ["the opening request wasn't recorded, so it is missing from these instructions"]
     return prompt, check, []

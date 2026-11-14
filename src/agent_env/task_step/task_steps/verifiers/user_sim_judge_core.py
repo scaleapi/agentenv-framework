@@ -322,7 +322,8 @@ class RubricItem:
     rule from the user sim's instructions that fails on any breach; ``general``, a judgement that fails only on a clear
     instance; ``auto``, never sent to the model, ``metric`` (max_words or max_sentences) counted on every graded answer
     against ``max``. ``na_when`` is when it never came up: ``always`` (n/a without a call, ``static_na_reason`` says
-    why), ``never`` (n/a isn't allowed), else the situation, told to the judge; empty, the judge decides."""
+    why), ``never`` (n/a isn't allowed), else the situation, told to the judge; empty, the judge decides. An auto item
+    takes only ``always``: it is counted, never judged."""
     id: str
     family: str
     check: str = ""
@@ -418,6 +419,9 @@ def item_problems(items: list[dict]) -> list[str]:
             out.append(f"{at}: na_when always needs a static_na_reason saying why it can't apply")
         if reason is not None and not always:
             out.append(f"{at}: static_na_reason is only for na_when always")
+        if kind == AUTO and isinstance(na_when, str) and na_when.strip() and not always:
+            out.append(f"{at}: auto items are counted, so na_when can only be 'always' (with a static_na_reason), "
+                       f"not {na_when!r}")
         if "can_error" in item and not isinstance(item["can_error"], bool):
             out.append(f"{at}: can_error must be true or false")
         unknown = sorted(set(item) - set(ITEM_FIELDS))
