@@ -311,8 +311,19 @@ def _read_run(kind: str, step_id: str, record: Optional[dict], context: TaskStep
     us = (metadata.get(USER_SIMS_KEY) or {}).get(name) if name else None
     instructions, check, more = _instructions(us, metadata.get("seed") or {}, multi_day)
     turns = [_turn(n, e) for n, e in enumerate(reads, 1)]
+    more += _reply_limit_note(turns, (us or {}).get("max_replies"))
     run = core.UserSimRun(name=name or "the user", instructions=instructions, turns=turns, notes=notes + more)
     return run, {"user_sim": name, "instructions": check}
+
+
+def _reply_limit_note(turns: list[core.Turn], max_replies: Any) -> list[str]:
+    """A note when the user sim reached its ``max_replies``, which its instructions never mention: the ending check
+    needs it."""
+    replies = [t.n for t in turns if t.outcome == "reply" and t.message.strip()]
+    if isinstance(max_replies, bool) or not isinstance(max_replies, int) or not 0 < max_replies <= len(replies):
+        return []
+    return [f"the run ended at the user sim's reply limit: its reply at turn {replies[max_replies - 1]} was the last of "
+            f"its {max_replies} and it was never asked again (its instructions don't mention the limit)"]
 
 
 def _load(url: str) -> dict:

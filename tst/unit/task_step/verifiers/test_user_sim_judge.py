@@ -86,7 +86,12 @@ def test_each_check_gets_one_narrow_question_naming_its_families():
         q = core.question_text(name, [])
         assert q.startswith(f"# YOUR QUESTION: {check.title} ({', '.join(check.families)})\n{check.question}")
         assert all(f in q for f in check.fails) and "Return only the JSON object." in q
-    assert sorted(core.FAMILY_OWNER) == ["A1", "A2", "A3", "A4", "F1", "F2", "F3", "G1", "G2", "G3", "G5"]
+    assert sorted(core.FAMILY_OWNER) == ["A1", "A2", "A3", "A4", "F1", "F2", "F3", "F4", "G1", "G2", "G3", "G4", "G5"]
+
+
+def test_self_contradiction_is_asked_under_made_up_not_guidance():
+    line = "It contradicted something it said earlier in the run."
+    assert line in core.question_text("made_up", []) and "contradict" not in core.question_text("guidance", [])
 
 
 def test_the_run_is_split_before_the_last_graded_answer_so_repeats_share_a_cached_prefix():
@@ -136,14 +141,14 @@ async def test_each_check_s_verdict_is_recorded_with_its_reason_and_turns():
     result = await _judge(_run(("reply", "dad's allergic to shellfish fyi")), fake)
     assert {k: v["verdict"] for k, v in result["checks"].items()} == {
         "guidance": "pass", "oversharing": "pass", "delegation": "n/a", "style": "fail", "rogue": "pass",
-        "made_up": "fail"}
+        "made_up": "fail", "ending": "pass"}
     assert result["checks"]["made_up"] == {"verdict": "fail", "could_change_grade": True, "reason": "it broke the rule",
                                            "turns": [1], "families": ["A2"]}
     assert result["checks"]["delegation"]["reason"] == "no rules"
     # Style failed, but it isn't an error check; made_up failed in a way that could change the grade.
     assert result["user_sim_error"] == {"value": "yes", "because": ["made_up"], "unknown": []}
-    assert len(fake.calls) == 6 == result["calls"] and {c["model"] for c in fake.calls} == {JUDGE}
-    assert result["usage"]["prompt_tokens"] == 600 and result["cost"] == pytest.approx(0.006)
+    assert len(fake.calls) == 7 == result["calls"] and {c["model"] for c in fake.calls} == {JUDGE}
+    assert result["usage"]["prompt_tokens"] == 700 and result["cost"] == pytest.approx(0.007)
 
 
 @pytest.mark.asyncio
@@ -179,19 +184,40 @@ async def test_a_bad_answer_is_asked_again_once_and_a_check_whose_calls_keep_fai
 @pytest.mark.asyncio
 async def test_task_items_get_their_own_verdicts_and_one_that_can_error_makes_a_user_sim_error():
     items = [core.RubricItem("leak", "G1", "never hints at the engagement"),
-             core.RubricItem("ends", "G4", "signs off only after the recap", can_error=True)]
-    item_fail = json.dumps({"verdict": "fail", "could_change_grade": False, "reason": "signed off early",
-                            "turns": [1], "items": [{"id": "ends", "verdict": "fail", "reason": "early",
+             core.RubricItem("rating", "A5", "rates the trip 2 or lower", can_error=True)]
+    item_fail = json.dumps({"verdict": "fail", "could_change_grade": False, "reason": "rated it 5",
+                            "turns": [1], "items": [{"id": "rating", "verdict": "fail", "reason": "rated it 5",
                                                      "turns": [1]}]})
     leak_pass = _pass(items=[{"id": "leak", "verdict": "pass", "reason": "-", "turns": []}])
     fake = FakeModel({TASK_ITEMS_Q: item_fail, "oversharing": leak_pass})
     result = await _judge(_run(("done", "thx bye")), fake, items=items)
     assert result["items"]["leak"] == {"verdict": "pass", "reason": "-", "turns": [], "family": "G1",
                                        "asked_with": "oversharing"}
-    assert result["items"]["ends"] == {"verdict": "fail", "reason": "early", "turns": [1], "family": "G4",
-                                       "asked_with": "task_items"}
-    assert "task_items" not in result["checks"] and result["user_sim_error"]["because"] == ["item:ends"]
-    assert len(fake.calls) == 7
+    assert result["items"]["rating"] == {"verdict": "fail", "reason": "rated it 5", "turns": [1], "family": "A5",
+                                         "asked_with": "task_items"}
+    assert "task_items" not in result["checks"] and result["user_sim_error"]["because"] == ["item:rating"]
+    assert len(fake.calls) == 8
+
+
+@pytest.mark.asyncio
+async def test_the_ending_check_asks_when_it_signed_off_and_a_grade_changing_fail_makes_a_user_sim_error():
+    q = core.question_text("ending", [])
+    assert "while the assistant was waiting on its answer" in q and "WHEN YOU'RE DONE" in q
+    assert "A short sign-off when its reply limit is reached." in q and "never said \"done\"" in q
+    assert "ending" in core.DEFAULT_ERROR_CHECKS
+    na = json.dumps({"verdict": "n/a", "could_change_grade": False, "reason": "never said done", "turns": [],
+                     "items": []})
+    for answer, verdict, error in ((_fail(turns=[1]), "fail", "yes"), (_pass(), "pass", "no"), (na, "n/a", "no")):
+        result = await _judge(_run(("done", "ok thx bye")), FakeModel({"ending": answer}), checks=["ending"])
+        assert result["checks"]["ending"]["verdict"] == verdict and result["checks"]["ending"]["families"] == ["G4"]
+        assert result["user_sim_error"]["value"] == error
+
+
+def test_the_judge_is_told_when_the_run_ended_at_the_user_sim_s_reply_limit():
+    turns = _run(("reply", "swap it"), ("no_reply", ""), ("reply", "ok"), ("reply", "thx")).turns
+    [note] = usj._reply_limit_note(turns, 2)
+    assert note.startswith("the run ended at the user sim's reply limit: its reply at turn 3 was the last of its 2")
+    assert usj._reply_limit_note(turns, 4) == usj._reply_limit_note(turns, None) == []
 
 
 @pytest.mark.asyncio

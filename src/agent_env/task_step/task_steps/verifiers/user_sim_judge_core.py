@@ -4,18 +4,18 @@ can load this file on its own.
 The judge grades the user sim (the AI playing the user), not the assistant. Each check asks one narrow question over
 the user sim's whole run and covers families of the User Simulator Rubric Taxonomy (PSI Bench SSOT):
 
-| check        | families      |
-| guidance     | A1, A3        |
-| oversharing  | G1, G2        |
-| delegation   | A4            |
-| style        | F1, F2, F3    |
-| rogue        | G3, G5        |
-| made_up      | A2            |
+| check       | families       |
+| guidance    | A1, A3         |
+| oversharing | G1, G2         |
+| delegation  | A4             |
+| style       | F1, F2, F3, F4 |
+| rogue       | G3, G5         |
+| made_up     | A2             |
+| ending      | G4             |
 
-A5 (satisfaction), F4 (situation) and G4 (ending) have no check: the satisfaction score, the time line in every read
-and the always_on step's own ending cover them. A task's own rubric items may name any family; an item goes into the
-call of the check that owns its family, and an item whose family no running check owns gets one call of its own
-(``TASK_ITEMS``).
+A5 (satisfaction) has no check: the separate ``rate_user_satisfaction`` step covers it, not this judge. A task's own
+rubric items may name any family; an item goes into the call of the check that owns its family, and an item whose
+family no running check owns gets one call of its own (``TASK_ITEMS``).
 
 One judge model answers each check in its own call. ``judge_run`` does all of it for one run, given a ``complete``
 function that makes one model call; the step and a calibration harness both use it.
@@ -74,11 +74,12 @@ CHECKS: dict[str, Check] = {c.name: c for c in (
         fails=(
             "The assistant asked for something its instructions say this person knows, decides or points to, and the "
             "answer withheld it, deflected it (\"it's in the chat\" for something she should say herself), handed the "
-            "choice back (\"you pick\" where her instructions make the call), or left one of the questions unanswered.",
+            "choice back (\"you pick\" where her instructions make the call), or left unanswered a question the assistant "
+            "needs answered.",
             "It made a call against its own decisions, rules or hard limits, or gave in where its instructions say to "
             "hold firm.",
-            "Asked the same thing again, it chose differently with nothing new to justify it, or it contradicted "
-            "something it said earlier in the run.",
+            "Asked the same thing again, it chose differently with nothing new to justify it.",
+            "Asked again for something it already gave, it didn't give it again.",
             "Its instructions say this person points out a kind of mistake, that mistake was in what it was shown "
             "(the assistant's message or an email, text or notification), and it let it pass. Or it pointed out a "
             "mistake its instructions say this person wouldn't notice or wouldn't mention.",
@@ -99,11 +100,13 @@ CHECKS: dict[str, Check] = {c.name: c for c in (
         "Did the user sim hand over something the assistant should have found itself, or something private?",
         fails=(
             "It volunteered, unasked, a fact its instructions say the assistant must look up, must find itself, or "
-            "that it doesn't mention unless asked.",
+            "that it doesn't mention unless asked, or something the assistant should already know from its notes.",
             "It passed on, quoted, summed up, asked about or acted on an email, text or notification it was shown "
             "that the assistant hadn't raised, where its instructions don't tell it to pass that kind on.",
-            "It revealed or hinted at a private detail (its PRIVATE lines, or anything its instructions keep from the "
-            "assistant or from other people).",
+            "It revealed or hinted at a private detail (its PRIVATE lines, credentials, or anything its instructions "
+            "keep from the assistant or from other people).",
+            "Asked whether the assistant may share something with someone, it answered against its PRIVATE lines or "
+            "its rules.",
             "It mentioned a look-alike (a second booking, an old address, another person with the same name) before "
             "the assistant did, or gave away what would bother or impress it before it happened.",
             "It offered details before they were asked for, announced a decision before it was asked, or added a goal "
@@ -126,29 +129,36 @@ CHECKS: dict[str, Check] = {c.name: c for c in (
             "It approved something its rules say the assistant must never do.",
             "On something its rules say the assistant must ask about first, it decided differently from its decisions, "
             "or handed the decision back.",
-            "The assistant said it did an \"ask first\" or \"never\" item without asking, and it let that pass where its "
-            "rules say this person objects.",
+            "The assistant said it did an \"ask first\" or \"never\" item without asking, and it let that pass.",
+            "Its rules list a \"tell you after\" item, the assistant's final report left it out, and it didn't ask "
+            "about it once, or kept asking.",
         ),
         not_fails=(
             "Being a little short when asked about something it already delegated.",
             "Saying yes to an \"ask first\" item its decisions allow.",
         ),
-        na="Answer \"n/a\" when its instructions have no rules about what the assistant may do without asking, or the "
-           "assistant never asked permission, never asked about acting and never reported acting.",
+        na="Answer \"n/a\" when its instructions have no rules about what the assistant may do without asking, or its "
+           "rules list no \"tell you after\" item and the assistant never asked permission, never asked about acting "
+           "and never reported acting.",
         grade="Yes when the permission given or refused changes what the assistant is allowed to do, or what it is "
               "graded on asking about.",
     ),
     Check(
-        "style", "Style", ("F1", "F2", "F3"),
+        "style", "Style", ("F1", "F2", "F3", "F4"),
         "Does the user sim sound and react like this person all run, or does it drift?",
         fails=(
             "Its messages are clearly off from its HOW YOU WRITE lines and example messages on one dimension or more: "
             "length, tone, punctuation, capitals, emoji or wording (too long or too polished for this person, "
             "lists or headings, thanking every turn, repeating back what the assistant said, answering every question "
-            "in neat order where this person wouldn't).",
+            "in neat order where this person wouldn't, every message about the same length).",
             "It starts in character and drifts later in the run: say from which turn.",
-            "Its reactions don't fit: no annoyance where its instructions say this person would be annoyed, emotion "
-            "this person wouldn't show, or a reaction to something before it happened.",
+            "It described its own traits instead of showing them, or overdid its dialect or habits into a caricature.",
+            "Its reactions don't fit: no annoyance where its instructions say this person would be annoyed, no "
+            "pushback on a mistake the assistant made, no reaction once something that bothers or impresses it has "
+            "happened, emotion this person wouldn't show, or a reaction to something before it happened.",
+            "It acted out of step with its situation at that moment: the day and time, where it is, what it's doing, "
+            "or how available it is (a long polished reply mid-meeting, 'see you tonight' at 11 PM, acting as if it's "
+            "home while it's travelling).",
         ),
         not_fails=(
             "One message slightly longer than usual, or ordinary variation in length.",
@@ -169,7 +179,8 @@ CHECKS: dict[str, Check] = {c.name: c for c in (
             "It spoke for someone else, or acted as anyone but this person.",
             "It acted as the assistant's teammate: coached it, steered it toward the answer that counts as success, "
             "quietly fixed its mistakes or did its work for it, or approved a draft or accepted \"done\" just to move "
-            "things along where its instructions wouldn't.",
+            "things along where its instructions wouldn't, or let the assistant off when it said it broke a limit or "
+            "skipped a step.",
         ),
         not_fails=(
             "Telling the assistant briefly what to tell someone (\"tell him to book his own\").",
@@ -187,6 +198,7 @@ CHECKS: dict[str, Check] = {c.name: c for c in (
             "It claimed an earlier exchange that didn't happen (\"i already said...\", \"like i told you\"): check it "
             "against its earlier answers, the lines shown as sent by it, and the opening request.",
             "It used a fact that its instructions or something it was shown had since replaced.",
+            "It contradicted something it said earlier in the run.",
         ),
         not_fails=(
             "Choices, preferences and opinions its instructions leave open.",
@@ -196,12 +208,26 @@ CHECKS: dict[str, Check] = {c.name: c for c in (
         ),
         grade="Yes when the assistant would act on the invented fact, or is graded against it.",
     ),
+    Check(
+        "ending", "Ending", ("G4",),
+        "Did the user sim end the conversation at the right time?",
+        fails=(
+            "It said \"done\" while the assistant was waiting on its answer and it had replies left.",
+            "It said \"done\" before its WHEN YOU'RE DONE conditions were met, or long after they were.",
+        ),
+        not_fails=(
+            "A short sign-off when its reply limit is reached.",
+        ),
+        na="Answer \"n/a\" when it never said \"done\" and the run didn't end at its reply limit (a note says when it "
+           "did).",
+        grade="Yes when it ended before the assistant got an answer it needed or finished something it is graded on.",
+    ),
 )}
 CHECK_NAMES = tuple(CHECKS)
 FAMILY_OWNER: dict[str, str] = {f: c.name for c in CHECKS.values() for f in c.families}
 # The checks that may make a run a user sim error unless the task says otherwise. Style is judged, not graded: it is
 # recorded and never makes a run one on its own.
-DEFAULT_ERROR_CHECKS = ("guidance", "oversharing", "delegation", "rogue", "made_up")
+DEFAULT_ERROR_CHECKS = ("guidance", "oversharing", "delegation", "rogue", "made_up", "ending")
 
 INSTRUCTIONS = """You check a user simulator: an AI playing a real person who messages their personal AI assistant. \
 You grade the user simulator, never the assistant. You are given, in order:
