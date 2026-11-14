@@ -342,13 +342,18 @@ async def test_its_network_log_is_the_browsers_whole_log_as_har_marking_what_it_
 
 
 @pytest.mark.asyncio
-async def test_a_start_is_refused_with_no_network_log_an_unleased_context_a_bad_fps_or_no_encoder(browser,
-                                                                                                    monkeypatch):
+async def test_a_start_is_refused_the_network_log_a_browser_keeps_none_of_an_unleased_context_a_bad_fps_or_no_encoder(
+        browser, monkeypatch):
     pipe, control, contexts, network, recordings, uploads = browser
+    pipe.open("T1", RED)
     alone = BrowserRecordings(recordings.log, control, contexts, None)
+    without = await alone.start("run:z", _grant())
+    with_one = await recordings.start("run:y", _grant())
 
+    assert (without["network"], with_one["network"]) == (False, True)
+    assert (await alone.end(without["recording_id"]))["network"] is None
     with pytest.raises(Unsupported, match="no network log"):
-        await alone.start("run:a", _grant())
+        await alone.start("run:a", _grant(), network=True)
     with pytest.raises(TargetUnavailable, match="'nope'"):
         await recordings.start("run:b", _grant(), context="nope")
     with pytest.raises(InvalidArgument, match="fps is an integer from 1 to 15"):

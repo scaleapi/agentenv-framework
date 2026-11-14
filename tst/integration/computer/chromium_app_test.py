@@ -44,7 +44,8 @@ from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
 from agent_env.store.object_store.local.grant_server import grant_server
 from agent_env.task_step.task_steps.browser.recording import (RECORDINGS_KEY as BROWSER_RECORDINGS,
-                                                              EndBrowserRecordingTaskStep, StartBrowserRecordingTaskStep)
+                                                              EndBrowserRecordingTaskStep,
+                                                              StartBrowserRecordingTaskStep)
 from agent_env.task_step.task_steps.computer_recording import (RECORDINGS_KEY as COMPUTER_RECORDINGS,
                                                                EndComputerRecordingTaskStep,
                                                                StartComputerRecordingTaskStep)
@@ -472,7 +473,7 @@ async def test_its_recording_of_its_pages_runs_beside_the_desktops_own_recording
             context = await StartComputerRecordingTaskStep(id="start-desktop", version=None, env_id=chromium_desktop.id,
                                                            name="desktop", fail_task_on_error=True).execute(context)
             context = await StartBrowserRecordingTaskStep(id="start-pages", version=None, env_id=chromium_desktop.id,
-                                                          name="pages", network=False).execute(context)
+                                                          name="pages").execute(context)
             await asyncio.sleep(8)
             context = await EndBrowserRecordingTaskStep(id="end-pages", version=None, name="pages").execute(context)
             context = await EndComputerRecordingTaskStep(id="end-desktop", version=None, name="desktop",
@@ -483,7 +484,7 @@ async def test_its_recording_of_its_pages_runs_beside_the_desktops_own_recording
         pages, desktop = context.metadata[BROWSER_RECORDINGS]["pages"], context.metadata[COMPUTER_RECORDINGS]["desktop"]
 
     assert not report.failed
-    assert (pages["state"], pages["missing_segments"]) == ("ended", 0) and pages["segments"] >= 1, pages
+    assert (pages["state"], pages["missing_segments"], pages["network"]) == ("ended", 0, False) and pages["segments"]
     assert (desktop["state"], desktop["missing_segments"]) == ("ended", 0) and desktop["segments"] >= 1, desktop
 
 

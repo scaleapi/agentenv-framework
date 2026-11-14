@@ -1209,9 +1209,10 @@ are the profile's template. The base class adds:
     frame, as a tab behind another in its window does; `video.followed` says which tab showed when, and how.
   - **its log**: at the end, the lines of its context since its start, actions and tab events on its tabs and a
     scoped connection's actions on none, as `log.jsonl`.
-  - **the network log**, with `network` (on by default): the browser's whole log at the end as `network.har`, so
-    the start tabs' loads are in it, every context's requests among them; the manifest marks it browser-wide, with
-    the log lines written while it ran (`during`) and the leases open meanwhile.
+  - **the network log**, by default when the browser keeps one, as a browser alone does and one in a desktop
+    computer doesn't (`network` false leaves it out, true refuses a browser with none): the browser's whole log at
+    the end as `network.har`, so the start tabs' loads are in it, every context's requests among them; the manifest
+    marks it browser-wide, with the log lines written while it ran (`during`) and the leases open meanwhile.
   - **frames**, with `frames` (off by default): a JPEG of the tab the video follows at the start, after each burst of
     an agent's acting entries has gone quiet for 0.5 s and its page has loaded (up to 5 s), and at the end, under
     `<recording_id>/frames/`, keyed to the entries it follows (`after`); a frame it couldn't take is kept with its

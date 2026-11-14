@@ -45,8 +45,9 @@ logger = logging.getLogger(__name__)
 #: ``context.metadata[RECORDINGS_KEY][name]``: each browser recording a run started, open or ended.
 RECORDINGS_KEY = "browser_recordings"
 _KEY_PREFIX = "agentenv-browser-recordings"
-#: A grant's limits: each frame or the log at most this big, and the whole recording at most this.
-MAX_OBJECT_BYTES = 256 << 20
+#: A grant's limits: each object at most this big, or the store's single upload if that's smaller, since a long run's
+#: network.har can hold a great many bodies; and the whole recording at most this.
+MAX_OBJECT_BYTES = 5 << 30
 MAX_RECORDING_BYTES = 16 << 30
 #: What a recording uploads besides its frames, which its grant has room for too.
 BESIDE_FRAMES = (LOG, MANIFEST)
@@ -58,9 +59,9 @@ CONTENT_TYPES = {".json": "application/json", ".jsonl": "application/x-ndjson", 
 class StartBrowserRecordingTaskStep(BrowserStep):
     """Start recording the website browser in the env ``env_id`` (the one ``browser`` names, else its only one) under
     ``name``, in the lease ``context`` names, else the default context: a video of the tab its agent is on, at ``fps``;
-    its log; with ``network``, the browser's network log as HAR; and with ``frames``, a frame of that tab at the start,
-    after each burst of its agent's actions and at the end. A start that fails fails the task unless
-    ``fail_task_on_error`` is off."""
+    its log; the browser's network log as HAR, when it keeps one unless ``network`` is false, refused where it keeps
+    none if ``network`` is true; and with ``frames``, a frame of that tab at the start, after each burst of its agent's
+    actions and at the end. A start that fails fails the task unless ``fail_task_on_error`` is off."""
 
     type: ClassVar[str] = "start_browser_recording"
     entity_refs = (EntityRef.env("env_id"),)
@@ -68,7 +69,7 @@ class StartBrowserRecordingTaskStep(BrowserStep):
     def __init__(self, id: str, version: Optional[int], env_id: str, name: str, frames: bool = False,
                  browser: Optional[str] = None, depends_on: Optional[list[TaskStepDependency]] = None,
                  fail_task_on_error: bool = True, context: Optional[str] = None, fps: Optional[int] = None,
-                 network: bool = True):
+                 network: Optional[bool] = None):
         super().__init__(id, version, env_id, browser, depends_on=depends_on, fail_task_on_error=fail_task_on_error,
                          context=context)
         if not name:
@@ -80,12 +81,12 @@ class StartBrowserRecordingTaskStep(BrowserStep):
     def to_dict(self) -> dict:
         return {**super().to_dict(), "name": self.name, "frames": self.frames,
                 **({"fps": self.fps} if self.fps is not None else {}),
-                **({"network": False} if not self.network else {})}
+                **({"network": self.network} if self.network is not None else {})}
 
     @classmethod
     def from_dict(cls, data: dict) -> StartBrowserRecordingTaskStep:
         return cls(**cls._in_context_from_dict(data), name=data["name"], frames=data.get("frames", False),
-                   fps=data.get("fps"), network=data.get("network", True))
+                   fps=data.get("fps"), network=data.get("network"))
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         recordings = context.metadata.setdefault(RECORDINGS_KEY, {})
@@ -96,7 +97,7 @@ class StartBrowserRecordingTaskStep(BrowserStep):
         request_id = f"{context.instance_id}:{self.id}" if context.instance_id else uuid.uuid4().hex
         asked = {**({"context": self.context_label} if self.context_label is not None else {}),
                  **({"fps": self.fps} if self.fps is not None else {}),
-                 **({"network": False} if not self.network else {})}
+                 **({"network": self.network} if self.network is not None else {})}
         try:
             record, browser, card = self._find(context)
             refuse_no_network(record)
@@ -117,7 +118,7 @@ class StartBrowserRecordingTaskStep(BrowserStep):
         params = (find_extension(card or {}, BROWSER_RECORDING) or {}).get("params") or {}
         recordings[self.name] = {
             "env_id": self.env_id, "browser": browser, "frames": self.frames, "context": self.context_label,
-            "video": bool(params.get("video")), "network": self.network and "network" in params,
+            "video": bool(params.get("video")), "network": bool(started.get("network")),
             "recording_id": started["recording_id"], "started_at": started["started_at"], "namespace": namespace,
             "state": "open"}
         logger.info("start_browser_recording %s on %s: %s", self.name, self.env_id, started["recording_id"])
@@ -175,8 +176,6 @@ def incomplete(entry: dict) -> Optional[str]:
         return f"its video stopped failing before the recording ended: {entry.get('video_error')}"
     if entry.get("network") and not entry.get("har_uploaded"):
         return f"its network log didn't upload: {entry.get('har_error')}"
-    if entry.get("network") and entry.get("har_entries") == 0:
-        return "its network log has no entries, though its browser's start tabs loaded through the proxy that logs"
     if entry.get("network") and entry.get("har_unreadable"):
         return f"its network log left out {entry['har_unreadable']} lines it couldn't read"
     if entry.get("frames") and entry.get("missing_frames"):

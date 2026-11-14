@@ -422,13 +422,13 @@ class WebsiteBrowserEnvironment(ComputerAppEnvironment):
 
     @extension(BROWSER_RECORDING, op="start")
     async def browser_recording_start(self, request_id: str, upload: dict, frames: bool = False,
-                                      context: Optional[str] = None, fps: Optional[int] = None, network: bool = True,
-                                      max_edge: Optional[int] = None) -> dict:
+                                      context: Optional[str] = None, fps: Optional[int] = None,
+                                      network: Optional[bool] = None, max_edge: Optional[int] = None) -> dict:
         """A recording of the lease ``context``, else of the default context, uploaded under the write namespace grant
         ``upload``: a video of the tab its agent is on at ``fps``, its longer edge at most ``max_edge``; its log's lines
-        of that context; with ``network``, the browser's network log as HAR; and with ``frames``, a frame of that tab
-        at the start, after each burst of its agent's actions settles and at the end. A start again with the same
-        ``request_id`` answers the recording it began."""
+        of that context; with ``network``, the browser's network log as HAR, by default when it keeps one; and with
+        ``frames``, a frame of that tab at the start, after each burst of its agent's actions settles and at the end.
+        A start again with the same ``request_id`` answers the recording it began."""
         return await self.recordings.start(request_id, upload, frames, context, fps, network, max_edge)
 
     @extension(BROWSER_RECORDING, op="end")

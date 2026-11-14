@@ -221,13 +221,15 @@ class BrowserRecordings:
             contexts.on_end.append(self.context_ended)
 
     async def start(self, request_id: str, upload: dict, frames: bool = False, context: Optional[str] = None,
-                    fps: Optional[int] = None, network: bool = True, max_edge: Optional[int] = None) -> dict:
+                    fps: Optional[int] = None, network: Optional[bool] = None, max_edge: Optional[int] = None) -> dict:
         """A recording of the lease ``context``, else of the default context, under the grant ``upload``, or the one a
-        start with the same ``request_id`` began, which a retried start joins: its ``recording_id``, ``started_at``
-        and video ``format``."""
+        start with the same ``request_id`` began, which a retried start joins: its ``recording_id``, ``started_at``,
+        video ``format`` and whether it has the network log, which ``network`` None gives it when the browser keeps
+        one, as a browser alone does and one in a desktop computer doesn't."""
         if (known := self._by_request.get(request_id)) in self._open:
             recording = self._open[known]
-            return {"recording_id": known, "started_at": recording.manifest.started_at, "format": MP4}
+            return {"recording_id": known, "started_at": recording.manifest.started_at, "format": MP4,
+                    "network": recording.network_on}
         if Video is None:
             raise Unsupported(NO_VIDEO)
         fps = DEFAULT_FPS if fps is None else fps
@@ -238,7 +240,8 @@ class BrowserRecordings:
             raise InvalidArgument(f"max_edge is an integer from {MIN_EDGE} to {MAX_EDGE}, got {max_edge!r}")
         if network and self.network is None:
             raise Unsupported("this browser keeps no network log, so a recording of it has no network.har: start it "
-                              "with network false")
+                              "with network false, or leave network out")
+        network = self.network is not None if network is None else network
         if context is not None and self.contexts is None:
             raise TargetUnavailable(f"no context {context!r} is leased: this browser leases none")
         context_id = self.contexts.id_of(context) if context is not None else None
@@ -256,7 +259,8 @@ class BrowserRecordings:
             self._open.pop(recording_id, None)
             await recording.abandon()
             raise
-        return {"recording_id": recording_id, "started_at": recording.manifest.started_at, "format": MP4}
+        return {"recording_id": recording_id, "started_at": recording.manifest.started_at, "format": MP4,
+                "network": network}
 
     async def end(self, recording_id: str, upload: Optional[dict] = None, reason: str = "end") -> dict:
         """The recording ended, its last frames taken, its video sealed and its log, HAR and manifest uploaded, under
