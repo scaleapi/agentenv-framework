@@ -13,7 +13,7 @@ import json
 import os
 import signal
 import sys
-from urllib.parse import urldefrag
+from urllib.parse import urldefrag, urlsplit, urlunsplit
 
 import pytest
 
@@ -612,9 +612,9 @@ class Navigating(StubDevTools):
     navigation as ``pages`` says by URL: a status and the URL it ends on, then committed and, unless ``no-load``
     follows, loaded, or with ``("redirect", status, url)`` following, sending itself there by script before it loads;
     ``refused``, a network error; ``silent``, never answered, as a page that never answers isn't; or ``stale``, a load
-    event with no commit. A navigation that stays in a tab's document, to a URL with a fragment that differs from
-    where it is (``at``) in its fragment alone, moves within it and names no loader, as a browser's does; a reload
-    loads where the tab is as a navigation there would, naming no loader either."""
+    event with no commit. A navigation that stays in a tab's document, to a URL with a fragment that differs from where
+    it is (``at``) in its fragment alone, as a browser spells both (``_document``), moves within it and names no loader,
+    as a browser's does; a reload loads where the tab is as a navigation there would, naming no loader either."""
 
     def __init__(self, pages):
         super().__init__({"Target.getTargets": {"targetInfos": []}})
@@ -642,7 +642,7 @@ class Navigating(StubDevTools):
             return await super().call(method, params, session_id=session_id, timeout_s=timeout_s)
         self.calls.append((method, params, session_id))
         url, target = params["url"], session_id[2:]
-        if "#" in url and urldefrag(url)[0] == urldefrag(self.urls.get(target, ""))[0]:
+        if "#" in url and _document(url) == _document(self.urls.get(target, "")):
             self.send("Page.navigatedWithinDocument", {"frameId": target, "url": url}, session_id)
             self.at(target, url)
             return {"frameId": target}
@@ -674,6 +674,12 @@ class Navigating(StubDevTools):
         self.send("Network.requestWillBeSent", document, session)
         self.send("Network.responseReceived", {**document, "response": {"status": status, "url": url}}, session)
         self.send("Page.frameNavigated", {"frame": {"id": target, "loaderId": loader, "url": url}}, session)
+
+
+def _document(url):
+    """The document ``url`` names, as a browser spells it: without its fragment, an empty path as "/"."""
+    parts = urlsplit(urldefrag(url)[0])
+    return urlunsplit(parts._replace(path=parts.path or "/"))
 
 
 async def _started(devtools, viewport=(1280, 800)) -> BrowserControl:
@@ -758,10 +764,11 @@ async def test_a_start_page_that_sends_itself_elsewhere_before_it_loads_is_judge
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("at, moved", [("https://shop.test/#/orders", False), ("https://shop.test/#/cart", True)],
-                         ids=["at-its-url", "at-another-route-of-its-page"])
-async def test_a_start_tab_already_on_its_pages_document_is_reloaded_there_and_loads_again(at, moved):
-    url = "https://shop.test/#/orders"
+@pytest.mark.parametrize("at, url", [("https://shop.test/#/orders", "https://shop.test/#/orders"),
+                                     ("https://shop.test/#/cart", "https://shop.test/#/orders"),
+                                     ("https://shop.test/#/orders", "https://shop.test#/orders")],
+                         ids=["at-its-url", "at-another-route-of-its-page", "at-its-url-spelled-otherwise"])
+async def test_a_start_tab_already_on_its_pages_document_is_reloaded_there_and_loads_again(at, url):
     devtools = Navigating({url: (200, url)})
     control = await _started(devtools)
     devtools.at("start", at)
@@ -769,8 +776,8 @@ async def test_a_start_tab_already_on_its_pages_document_is_reloaded_there_and_l
     (tab,) = await control.load_start_tabs([url], _shop, own_timeout_s=2)
 
     assert (tab["outcome"], tab["status"], tab["final_url"], tab["error"]) == ("loaded", 200, url, None)
-    assert _sent(devtools, "Page.navigate") == ([({"url": url}, "s-start")] if moved else [])
-    assert _sent(devtools, "Page.reload") == [({}, "s-start")]
+    assert [(method, params) for method, params, on in devtools.calls if on == "s-start" and method in (
+        "Page.navigate", "Page.reload")] == [("Page.navigate", {"url": url}), ("Page.reload", {})]
     assert not control._loading
 
 
