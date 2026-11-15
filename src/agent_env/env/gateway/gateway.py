@@ -46,6 +46,7 @@ from .constants import (
     AGENT_ENV_SESSION_META_KEY,  # noqa: F401
     CARD_FETCH_TIMEOUT_S,
     CHANGES_PAGE_DEFAULT,
+    CLOCK_WATCH_PATH,
     CHANGES_PAGE_MAX,
     CHILD_DISCOVERY_TIMEOUT_S,
     CONTROL_ROUTES,
@@ -159,6 +160,7 @@ class Gateway:
         gateway_mode: GatewayMode = GatewayMode.PERFORMANCE,
         service_db_url: str | None = None,
         control_token: str | None = None,
+        control_token_children: Iterable[str] = (),
         provider_headers: Iterable[str] = (),
         clock_followers: Mapping[str, str] | None = None,
         site_names: dict[str, Iterable[str]] | None = None,
@@ -169,7 +171,8 @@ class Gateway:
         followers of its clock, each with the read token its watch carries. `site_names` are each site's names as its
         env stores them, the names its card declares standing in for a site's that stores none: a site reached at one
         takes it as its ``Host``. ``list_website_urls`` gives each site `listed_by_name` at its first name, as a browser
-        computer opens it, and the others at their ``website_urls``."""
+        computer opens it, and the others at their ``website_urls``. `control_token_children` are the children its
+        /svc routes pass its control token on to, a multi env's computers, which take it."""
         self.host = host
         self.port = port
         self.server_name = server_name
@@ -190,6 +193,7 @@ class Gateway:
         self.gateway_mode = gateway_mode
         self._service_db_url = service_db_url
         self._control_bearer = f"Bearer {control_token}".encode() if control_token else None
+        self._control_token_children = frozenset(control_token_children)
         self._website_routes: dict[str, list[WebsiteRoute] | None] = {}
         self._db_conn: psycopg2.extensions.connection | None = None
         if service_db_url:
@@ -370,7 +374,7 @@ class Gateway:
 
             return await self._clock_write(request, disarm, body_optional=True)
 
-        @self._mcp.custom_route("/clock/watch", methods=["GET"])
+        @self._mcp.custom_route(CLOCK_WATCH_PATH, methods=["GET"])
         async def clock_watch(request: Request) -> Response:
             received = time.time()
             token = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
@@ -534,6 +538,14 @@ class Gateway:
     # by every tools/call of that session (and the role is the one its initialize request carried, which that task
     # inherited). Process: child sessions and the time-trigger driver, outer to the MCP session manager's lifespan.
 
+    def _keeps_control_token(self, path: str) -> bool:
+        """Whether a request to ``path`` keeps the gateway's control token: its clock watch, where a computer it fronts
+        sends the token as its read token, and its /svc route to one of those computers, which takes the token."""
+        if path == CLOCK_WATCH_PATH:
+            return True
+        child = path.removeprefix("/svc/").split("/", 1)[0] if path.startswith("/svc/") else None
+        return child in self._control_token_children
+
     def _asgi_app(self):
         """The served app: FastMCP's Starlette app with the request's caller bound around it, the control routes behind
         the deploy's token when it has one, and the process lifespan wrapped around the MCP session manager's."""
@@ -550,9 +562,11 @@ class Gateway:
                     response = self._json_response({"ok": False, "error": "this route takes the env's control token"}, 401)
                     await response(scope, receive, send)
                     return
-                # The token is the gateway's own: no route reads it, and no service a route proxies to receives it.
-                scope = {**scope, "headers": [(name, value) for name, value in headers if not (
-                    name == b"authorization" and hmac.compare_digest(value, self._control_bearer))]}
+                # Only the clock watch reads the token, which the computers the gateway fronts send it, and only they
+                # receive it, through their /svc routes; every other request goes on without it.
+                if not self._keeps_control_token(scope["path"]):
+                    scope = {**scope, "headers": [(name, value) for name, value in headers if not (
+                        name == b"authorization" and hmac.compare_digest(value, self._control_bearer))]}
             if scope["type"] != "http":
                 await inner(scope, receive, send)
                 return
