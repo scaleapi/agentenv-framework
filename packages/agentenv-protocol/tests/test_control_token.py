@@ -124,6 +124,19 @@ def test_a_call_sends_its_own_headers_or_else_the_ones_its_grant_gives_an_addres
     assert client.control_headers(None) == {} and client.control_headers("") == {}
 
 
+def test_a_call_under_two_granted_addresses_sends_the_longer_ones_headers_whichever_was_granted_first():
+    env = "http://gateway:8080"
+    desk, gateway = client.control_headers("desk"), client.control_headers("gateway")
+
+    with client.authorized({f"{env}/svc/desk/": desk, env: gateway}):
+        child_first = [client.request_headers(url) for url in (f"{env}/svc/desk/agentenv/x", f"{env}/svc/desk",
+                                                               f"{env}/svc/desktop/agentenv", f"{env}/agentenv")]
+    with client.authorized({env: gateway}), client.authorized({f"{env}/svc/desk": desk}):
+        nested = client.request_headers(f"{env}/svc/desk/agentenv/x")
+
+    assert child_first == [desk, desk, gateway, gateway] and nested == desk
+
+
 @pytest.mark.asyncio
 async def test_invoke_extension_and_the_data_plane_send_the_token(monkeypatch):
     seen = []

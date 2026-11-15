@@ -118,10 +118,16 @@ class DeployedEnv:
         """What a call to the env's framework-only routes sends: its control token, when it has one."""
         return protocol_v1.control_headers(self.control_token)
 
+    @property
+    def control_grants(self) -> dict[str, dict[str, str]]:
+        """The addresses the env's framework-only routes are at, each with the headers that carry the token they take,
+        as ``protocol_v1.authorized`` takes them: the env's own address."""
+        return {self.environment_url: self.control_headers} if self.environment_url else {}
+
     def control_headers_for(self, url: str) -> dict[str, str]:
-        """What a call to ``url`` sends of the env's control token: ``control_headers`` when ``url`` is the env's
-        address or under it, as a step's grant gives them, and none anywhere else, an override's address say."""
-        return protocol_v1.granted_headers(url, {self.environment_url: self.control_headers})
+        """What a call to ``url`` sends of the env's control tokens: those ``control_grants`` give the address it is or
+        is under, as a step's grant gives them, and none anywhere else, an override's address say."""
+        return protocol_v1.granted_headers(url, self.control_grants)
 
     def supports(self, uri: str, method: str) -> bool:
         """Whether the stored env card offers `method` on the extension at `uri`; no network."""
@@ -166,10 +172,12 @@ class DeployedEnv:
             environment_name = child.name
         else:
             card = self.environment_card if environment_name is None else self.get_child_env_card(environment_name)
-        if card is None or not self.environment_url or protocol_v1.find_extension_method(card, uri, method) is None:
+        op = protocol_v1.find_extension_method(card, uri, method) if card is not None else None
+        if op is None or not self.environment_url:
             raise EnvCapabilityUnsupported(uri, method, self.env_id, self.instance_id, environment_name)
+        url = f"{self.environment_url.rstrip('/')}{op['endpoint'] or ''}"
         return await protocol_v1.invoke_extension(self.environment_url, card, uri, params, timeout, method=method,
-                                                  headers=self.control_headers)
+                                                  headers=self.control_headers_for(url))
 
     async def readiness(self, timeout: float = READY_TIMEOUT_S) -> WebsiteReadiness:
         """Whether the env is ready, as the protocol determines a website env's health (``env_readiness``): every site
@@ -253,6 +261,15 @@ class DeployedGatewayEnv(DeployedSandboxEnv):
             "env_state_instance_ids": data.get("env_state_instance_ids") or [],
             "child_envs": data.get("child_envs") or {},
         }
+
+    @property
+    def control_grants(self) -> dict[str, dict[str, str]]:
+        """The gateway's address with its token, and its route to each child env it fronts on a sandbox of its own with
+        that child's: the gateway takes its own token off a call and passes any other on."""
+        return {**super().control_grants, **{
+            f"{self.environment_url}/svc/{name}": child.control_headers
+            for name, child in ((name, DeployedEnv.from_dict(record)) for name, record in self.child_envs.items())
+            if self.environment_url and child.control_token}}
 
 
 @dataclass

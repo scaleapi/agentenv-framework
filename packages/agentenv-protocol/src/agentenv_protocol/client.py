@@ -72,9 +72,11 @@ def request_headers(url: str, headers: dict[str, str] | None = None) -> dict[str
 
 def granted_headers(url: str, grants: dict[str | None, dict[str, str]]) -> dict[str, str]:
     """What ``grants``, env addresses and the headers that carry their control tokens, give a call to ``url``: those of
-    the address it is or is under, and none anywhere else."""
-    return next((sent for base, sent in grants.items()
-                 if base and (url == base.rstrip("/") or url.startswith(f"{base.rstrip('/')}/"))), {})
+    the longest address it is or is under, as a gateway's route to a child env it fronts, granted the child's own token,
+    is under the gateway's address, and none anywhere else."""
+    under = [(len(base), sent) for base, sent in ((base.rstrip("/"), sent) for base, sent in grants.items() if base)
+             if url == base or url.startswith(f"{base}/")]
+    return max(under, key=lambda granted: granted[0])[1] if under else {}
 
 
 async def _rpc(base_url: str, method: str, params: dict, timeout: int, verify: bool,

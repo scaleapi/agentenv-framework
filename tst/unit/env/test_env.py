@@ -132,6 +132,37 @@ async def test_a_record_with_a_control_token_sends_it_on_each_extension_call_onl
     assert _record(composed).control_headers == {} and _record(composed).control_headers_for(env) == {}
 
 
+@pytest.mark.asyncio
+async def test_a_call_to_a_computer_the_gateway_fronts_sends_the_computers_own_token_and_one_to_the_gateway_its(sent):
+    """The gateway takes its own token off a call and passes any other on, so a multi env's computer, which takes only
+    its own, is reached through the gateway's route to it with the token its own record keeps."""
+    gw = Gateway(host="127.0.0.1", port=0, server_name="env1234", internal_mcp_servers=[],
+                 rest_proxy_urls={"mcp-slack": "http://slack:18765", "desk": "http://desk:18765"})
+    desk_card = {"name": "desk", "url": "/agentenv", "capabilities": {"extensions": [
+        _ext("urn:agentenv:computer-exec/v1", "/agentenv/ext/computer-exec", "run")]}}
+
+    async def fetch(client, key, base_url):
+        return gw._rewrite_child_card(key, desk_card if key == "desk" else _SLACK)
+
+    gw._fetch_child_card = fetch
+    deployed = _record(json.loads((await gw._serve_env_card()).body))
+    deployed.control_token = "g4teway"
+    desk = DeployedSandboxEnv(env_id="desk-env", env_version=1, env_provider_type="computer", sandbox_id="sb-2",
+                              environment_card_url=f"http://desk.example{WELL_KNOWN_PATH}", control_token="d3sk")
+    deployed.child_envs = {"desk": dataclasses.asdict(desk)}
+    env = deployed.environment_url
+
+    await deployed.invoke("urn:agentenv:computer-exec/v1", "run", {"argv": ["true"]}, environment_name="desk")
+    await deployed.invoke("urn:agentenv:set-errors/v1", "set_errors", {}, environment_name="slack")
+
+    assert [(request.url.path, request.headers.get("authorization")) for request in sent] == [
+        ("/svc/desk/agentenv/ext/computer-exec", "Bearer d3sk"), ("/svc/mcp-slack/agentenv/ext/set_errors", "Bearer g4teway")]
+    assert [deployed.control_headers_for(url) for url in (f"{env}/svc/desk/agentenv", f"{env}/svc/mcp-slack/agentenv")] == [
+        {"Authorization": "Bearer d3sk"}, {"Authorization": "Bearer g4teway"}]
+    deployed.child_envs = {"desk": dataclasses.asdict(dataclasses.replace(desk, control_token=None))}
+    assert deployed.control_grants == {env: {"Authorization": "Bearer g4teway"}}
+
+
 def test_child_env_cards_come_from_the_card_by_name(composed):
     deployed = _record(composed)
     assert deployed.get_child_env_card("slack")["url"] == "/svc/mcp-slack/agentenv"

@@ -674,7 +674,8 @@ class Task:
             started_mono = time.monotonic()
             started_utc = datetime.now(timezone.utc).isoformat()
             try:
-                with protocol_v1.authorized({d.environment_url: d.control_headers for d in context.deployed_envs}):
+                grants = {url: sent for deployed in context.deployed_envs for url, sent in deployed.control_grants.items()}
+                with protocol_v1.authorized(grants):
                     await step.execute(context)
             except asyncio.CancelledError:
                 raise
