@@ -611,14 +611,14 @@ class Navigating(StubDevTools):
     """A browser whose first tab is ``start`` and whose new tabs are t1, t2, …, each attached as it opens, answering a
     navigation as ``pages`` says by URL: a status and the URL it ends on, then committed and, unless ``no-load``
     follows, loaded, or with ``("redirect", status, url)`` following, sending itself there by script before it loads;
-    ``refused``, a network error; ``silent``, never answered, as a page that never answers isn't; or ``stale``, a load
+    ``refused``, a network error; ``aborted``, a document request that fails before it commits; ``silent``, never answered, as a page that never answers isn't; or ``stale``, a load
     event with no commit. A navigation that stays in a tab's document, to a URL with a fragment that differs from where
     it is (``at``) in its fragment alone, as a browser spells both (``_document``), moves within it and names no loader,
     as a browser's does; a reload loads where the tab is as a navigation there would, naming no loader either."""
 
     def __init__(self, pages):
         super().__init__({"Target.getTargets": {"targetInfos": []}})
-        self.pages, self.opened, self.loaders, self.urls = pages, 0, 0, {}
+        self.pages, self.opened, self.loaders, self.urls, self.reloading = pages, 0, 0, {}, None
 
     def at(self, target, url):
         """The tab ``target`` at ``url``, as the browser tells the control."""
@@ -636,7 +636,7 @@ class Navigating(StubDevTools):
             return {"targetId": target}
         if method == "Page.reload":
             self.calls.append((method, params, session_id))
-            await self._load(self.urls[session_id[2:]], session_id)
+            self.reloading = asyncio.ensure_future(self._reload(self.urls[session_id[2:]], session_id))
             return {}
         if method != "Page.navigate":
             return await super().call(method, params, session_id=session_id, timeout_s=timeout_s)
@@ -648,11 +648,21 @@ class Navigating(StubDevTools):
             return {"frameId": target}
         return await self._load(url, session_id)
 
+    async def _reload(self, url, session_id):
+        """A reload, which the browser answers before it commits."""
+        await asyncio.sleep(0.01)
+        await self._load(url, session_id)
+
     async def _load(self, url, session_id):
         page, target = self.pages[url], session_id[2:]
         self.urls[target] = url
         self.loaders += 1
         loader, request = f"L{self.loaders}", f"r{self.loaders}"
+        if page == "aborted":
+            document = {"requestId": request, "loaderId": loader, "type": "Document", "frameId": target}
+            self.send("Network.requestWillBeSent", document, session_id)
+            self.send("Network.loadingFailed", {"requestId": request, "errorText": "net::ERR_ABORTED"}, session_id)
+            return {"frameId": target, "loaderId": loader, "errorText": "net::ERR_ABORTED"}
         if page == "refused":
             return {"frameId": target, "loaderId": loader, "errorText": "net::ERR_CONNECTION_REFUSED"}
         if page == "silent":
@@ -779,6 +789,21 @@ async def test_a_start_tab_already_on_its_pages_document_is_reloaded_there_and_l
     assert [(method, params) for method, params, on in devtools.calls if on == "s-start" and method in (
         "Page.navigate", "Page.reload")] == [("Page.navigate", {"url": url}), ("Page.reload", {})]
     assert not control._loading
+
+
+@pytest.mark.asyncio
+async def test_a_start_tab_whose_reload_fails_before_it_commits_fails_at_once_naming_why():
+    url = "https://shop.test/#/orders"
+    devtools = Navigating({url: "aborted"})
+    control = await _started(devtools)
+    devtools.at("start", url)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+
+    (tab,) = await control.load_start_tabs([url], _shop, own_timeout_s=2)
+
+    assert (tab["outcome"], tab["error"]) == ("failed", "net::ERR_ABORTED")
+    assert loop.time() - started < 1
 
 
 @pytest.mark.asyncio

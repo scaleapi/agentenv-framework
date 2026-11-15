@@ -10,8 +10,8 @@ desktop that gives it French defaults deploys with them, a deploy's time zone ov
 its control connection keeps lists a tab an agent opened and closed, a download with its size and sha256, a confirm()
 accepted for it, and each launch, exit and stop with its cause, across a kill and a restart of its server; and browser/v1 reads and sets its
 cookies, local storage and downloads; and its data plane signs it in, snapshots it, resets it and loads a
-snapshot back, a load of cookies alone reloading a start tab on a hash route so its page reads them; and the browser
-task steps set its cookies and storage and open, activate and close its tabs by URL.
+snapshot back, a load of cookies alone reloading a start tab on a hash route so its page reads them, the tab on its
+start URL or on another route of its page; and the browser task steps set its cookies and storage and open, activate and close its tabs by URL.
 Its start tabs open in order, the first active, a deploy recording each one's outcome and going on past a live page
 that never answers; and with the run's sites routed to it, a start tab on one must load, judged by the page it
 lands on when it sends itself elsewhere before it loads, so a site answering 503 fails the deploy, naming it. Needs Docker and the local registry on localhost:5000."""
@@ -423,12 +423,20 @@ async def test_a_load_of_cookies_alone_reloads_a_start_tab_on_a_hash_route_so_it
             context = await _load(context, chromium_desktop.id, "cookies", artifact_id=cookies.id)
             loaded_s = time.monotonic() - loading
             signed_in = await titled("app ada")
+            await call("navigate", {"url": f"{DATA_SITE}app#/home"})
+            elsewhere = (await call("tabs/list", method="GET"))["tabs"]
+            bob = _universe(chromium_desktop.id, {"browser-state.json": _state(
+                cookies=[{"name": "sid", "value": "bob", "url": DATA_SITE, "max_age": 3600}])})
+            context = await _load(context, chromium_desktop.id, "cookies-elsewhere", artifact_id=bob.id)
+            moved_back = await titled("app bob")
         finally:
             serving.cancel()
             report = await teardown_run(context)
 
     assert signed_out["url"] == start and signed_in["url"] == start, (signed_out, signed_in)
     assert loaded_s < LIVE_START_TAB_TIMEOUT_S, loaded_s
+    assert [(tab["url"], tab["title"]) for tab in elsewhere] == [(f"{DATA_SITE}app#/home", "app ada")], elsewhere
+    assert moved_back["url"] == start, moved_back
     assert not report.failed
 
 

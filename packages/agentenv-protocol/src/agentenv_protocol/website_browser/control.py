@@ -1084,6 +1084,8 @@ class BrowserControl:
     def _on_Network_requestWillBeSent(self, params: dict, session: Optional[str]) -> None:
         if (load := self._loading.get(session)) is not None and params.get("type") == "Document":
             load.requests[params["requestId"]] = params.get("loaderId", "")
+            if load.reloading and load.loader is None and params.get("frameId") == self._sessions.get(session):
+                load.loader = params.get("loaderId") or None
 
     def _on_Network_responseReceived(self, params: dict, session: Optional[str]) -> None:
         if (load := self._loading.get(session)) is not None and params.get("type") == "Document" and \
@@ -1256,7 +1258,7 @@ class _StartLoad:
     elsewhere before it loads replaces. It's ``settled`` once its navigation or its document has failed, its document
     has loaded or, on one of the env's ``site``, answered an error. A ``reloading`` one's navigation stayed in its
     document and was followed by a reload, whose answer names no loader either: its loader is its main frame's first
-    commit after."""
+    document request or commit after, so a reload that fails before it commits fails the load."""
     session: str
     url: str
     site: Optional[str]
