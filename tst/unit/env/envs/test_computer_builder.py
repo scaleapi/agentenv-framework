@@ -27,6 +27,7 @@ from agent_env.env import Env
 from agent_env.env.envs.computer.utils import builder, composer, layers_in_image, packages
 from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.providers.sandbox_providers import host_images
+from agent_env.store.local_state import holding_locks
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
@@ -196,6 +197,22 @@ def test_a_resolves_pull_of_its_base_takes_turns_with_a_platform_checks_and_a_de
 
     assert results == [{"apt": [], "wheels": {}}, True, None]
     assert sorted(ran) == ["create", "pull", "run"] and max(most) == 1
+
+
+def test_a_resolve_waiting_for_another_pull_of_its_base_gives_up_at_its_own_timeout(tmp_path, monkeypatch):
+    ran = []
+
+    def docker(command, **kwargs):
+        ran.append(command[1])
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    _, local = _resolving(tmp_path, monkeypatch, docker)
+    started = time.monotonic()
+    with holding_locks([host_images.pull_lock("base")]), \
+            pytest.raises(builder.ResolveError, match="resolving took over 1 s, waiting for another pull of base"):
+        local.resolve({"apt": [], "python": []}, "base", "amd64", 1)
+
+    assert 1 <= time.monotonic() - started < 5 and ran == ["rm"]
 
 
 def _resolving(tmp_path, monkeypatch, docker):

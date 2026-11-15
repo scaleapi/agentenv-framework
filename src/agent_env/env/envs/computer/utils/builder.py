@@ -289,14 +289,14 @@ class LocalBuilder(Builder):
         """With the build context and what the resolver reads copied into its container, and what it wrote copied out,
         rather than bind-mounted: a Docker in a VM, as on a Mac, mounts only the folders the VM shares, colima's only the
         home, and keeps no owner on them. The container's pull of ``source`` takes turns with the others
-        (``pull_lock``)."""
+        (``pull_lock``), its wait for its turn within ``timeout`` too."""
         out = self.work / RESOLVED / "out"
         out.mkdir(parents=True)
         (out / "request.json").write_text(json.dumps({**request, "owner": [os.getuid(), os.getgid()]}))
         shutil.copy(RESOLVER, out / "resolve.py")
         container, deadline = f"agentenv-resolve-{uuid.uuid4().hex[:12]}", time.monotonic() + timeout
         try:
-            with holding_locks([pull_lock(source)]):
+            with holding_locks([pull_lock(source)], deadline=deadline):
                 _docker("create", "--name", container, "--platform", f"linux/{arch}", "--user", "root", "--entrypoint",
                         "python3", source, "/out/resolve.py", "/out/request.json", "/out", deadline=deadline)
             _docker("cp", f"{self.work / CONTEXT}/.", f"{container}:/ctx", deadline=deadline)
@@ -308,6 +308,8 @@ class LocalBuilder(Builder):
             _docker("cp", f"{container}:/out/.", str(out), deadline=deadline)
         except subprocess.TimeoutExpired as e:
             raise ResolveError(f"resolving took over {timeout} s", str(e.stdout or "")) from None
+        except TimeoutError:
+            raise ResolveError(f"resolving took over {timeout} s, waiting for another pull of {source}") from None
         finally:
             subprocess.run(["docker", "rm", "--force", container], capture_output=True)
         return json.loads((out / "result.json").read_text())
