@@ -372,8 +372,12 @@ class Relay:
             for task in [*connection.commands, sending]:
                 task.cancel()
             await asyncio.gather(*connection.commands, sending, return_exceptions=True)
-            with contextlib.suppress(Exception):
-                await self.devtools.call("Target.detachFromTarget", {"sessionId": session})
+            # Its detach disposes the contexts it made to end on detach, so it waits as a dispose does.
+            async with contextlib.AsyncExitStack() as disposal:
+                for made in connection.ends_on_detach if self.control is not None else ():
+                    await disposal.enter_async_context(self.control.disposing(made))
+                with contextlib.suppress(Exception):
+                    await self.devtools.call("Target.detachFromTarget", {"sessionId": session})
             self._detached(connection)
 
     def ended(self) -> None:

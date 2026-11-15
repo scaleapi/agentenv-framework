@@ -136,6 +136,15 @@ class PagesPipe(ContextPipe):
         return await super().request(method, params, session_id=session_id, answered=answered)
 
 
+class DetachPipe(PagesPipe):
+    """A PagesPipe that keeps in ``ended`` each session the relay detaches too."""
+
+    async def call(self, method, params=None, *, session_id=None, timeout_s=None):
+        if method == "Target.detachFromTarget":
+            self.ended.append(("detached", params["sessionId"]))
+        return await super().call(method, params, session_id=session_id, timeout_s=timeout_s)
+
+
 class ScopePipe(ContextPipe):
     """A browser whose default context ``DEF`` has the page ``P0``, and whose task leases ``L1`` and ``L2`` have the
     pages ``PB`` and ``PS`` and ``L1`` the worker ``WB``: a connection's setDiscoverTargets announces them, getTargets
@@ -450,6 +459,29 @@ async def test_an_agents_dispose_waits_for_agentenvs_own_page_in_its_context_whi
     assert held == [("disposed", "A2")] and "result" in other
     assert pipe.ended == [("disposed", "A2"), ("closed", "H1"), ("disposed", "A1")]
     assert disposed["id"] == 3 and "result" in disposed and list(contexts) == [] and control._disposing == []
+
+
+@pytest.mark.asyncio
+async def test_a_connection_ending_waits_for_agentenvs_own_page_in_a_context_it_made_to_end_on_detach(tmp_path):
+    pipe = DetachPipe()
+    control = BrowserControl(pipe, "agent")
+    contexts = Contexts(pipe, control, home=lambda: tmp_path)
+    async with _relay(pipe=pipe, contexts=contexts, control=control) as (_, relay, base):
+        async with control.hidden_page(context="A1"):
+            async with connect(f"{base}/ada") as ada:
+                await _ask(ada, {"id": 1, "method": "Target.createBrowserContext", "params": {"disposeOnDetach": True}})
+            for _ in range(500):
+                if "A1" in control._disposing:
+                    break
+                await asyncio.sleep(0.01)
+            held = [event for event in pipe.ended if event[0] == "detached"]
+        for _ in range(500):
+            if any(event[0] == "detached" for event in pipe.ended):
+                break
+            await asyncio.sleep(0.01)
+
+    assert held == [] and [event[0] for event in pipe.ended] == ["closed", "detached"]
+    assert list(contexts) == [] and control._disposing == []
 
 
 @pytest.mark.asyncio

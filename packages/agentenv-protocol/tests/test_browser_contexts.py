@@ -260,14 +260,19 @@ async def test_a_release_waits_for_agentenvs_own_page_in_its_context_which_takes
         with pytest.raises(TargetUnavailable, match="the context 'buyer' is being disposed"):
             await control.clear_local_storage(["https://shop.test"], "C1")
         cleared = await control.clear_local_storage(["https://shop.test"], "C2")
-        held = _sent(devtools, "Target.disposeBrowserContext")
+        courier = await asyncio.wait_for(contexts.lease("courier"), 5)
+        courier_released = await asyncio.wait_for(contexts.release("courier"), 5)
+        held = [sent for sent in _sent(devtools, "Target.disposeBrowserContext") if sent["browserContextId"] == "C1"]
         devtools.go.set()
         deleted, released = await asyncio.wait_for(asyncio.gather(deleting, releasing), 5)
     ended = [(method, params) for method, params, _ in devtools.calls
              if method in ("Target.closeTarget", "Target.disposeBrowserContext")]
 
     assert held == [] and cleared == ["https://shop.test"] and (deleted, released) == (1, True)
-    assert ended == [("Target.closeTarget", {"targetId": "H3"}), ("Target.closeTarget", {"targetId": "H2"}),
+    assert courier.id == "C3" and courier_released
+    assert ended == [("Target.closeTarget", {"targetId": "H3"}),
+                     ("Target.disposeBrowserContext", {"browserContextId": "C3"}),
+                     ("Target.closeTarget", {"targetId": "H2"}),
                      ("Target.disposeBrowserContext", {"browserContextId": "C1"}),
                      ("Target.closeTarget", {"targetId": "H1"})]
     assert [params.get("browserContextId") for params in _sent(devtools, "Target.createTarget")] == ["C2", "C1", "C2"]
@@ -367,7 +372,7 @@ async def test_a_load_waiting_on_an_agents_lease_that_ends_meanwhile_cant_lease_
     _, _, contexts = _contexts(browser_home)
     contexts.made_by_agent("ada", "X1")
 
-    async with contexts._lock:
+    async with contexts._locks["agent-ada-1"]:
         waiting = asyncio.ensure_future(contexts.lease("agent-ada-1"))
         await asyncio.sleep(0)
         contexts.disposed("X1")
