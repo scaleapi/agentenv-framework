@@ -32,12 +32,13 @@ from agent_env.artifact.artifacts.docker_image import docker_login, push_local_i
 from agent_env.config import get_config
 from agent_env.env.envs.computer.utils import layers_in_image
 from agent_env.env.published_images import COMPUTER_IMAGES
-from agent_env.providers.sandbox_providers.host_images import build_for, host_platform, platform_tag
+from agent_env.providers.sandbox_providers.host_images import build_for, host_platform, platform_tag, pull_lock
 from agent_env.providers.sandbox_providers.sandbox import upload_vm_file
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_VM
 from agent_env.store.base import ObjectAlreadyExistsError
 from agent_env.store.image_store.oci_registry_credentials import (
     is_loopback_host, names_registry, registry_host_from_ref)
+from agent_env.store.local_state import holding_locks
 from agent_env.utils.docker.build import DockerBuildError, build_image
 
 if TYPE_CHECKING:
@@ -243,10 +244,12 @@ def _docker_here(link: SandboxProvider) -> bool:
 @functools.cache
 def _runs_here(platform: str, image: str) -> bool:
     """Whether this machine's Docker runs ``platform``'s programs, natively or emulated, as a container of ``image`` for
-    it shows: what its builder lists can leave out a platform it runs, as colima's does Rosetta's linux/amd64."""
+    it shows: what its builder lists can leave out a platform it runs, as colima's does Rosetta's linux/amd64. Its pull
+    of ``image`` takes turns with the others (``pull_lock``), as a compose's other arch resolves on the same base."""
     try:
-        return subprocess.run(["docker", "run", "--rm", "--platform", platform, "--entrypoint", "true", image],
-                              capture_output=True).returncode == 0
+        with holding_locks([pull_lock(image)]):
+            return subprocess.run(["docker", "run", "--rm", "--platform", platform, "--entrypoint", "true", image],
+                                  capture_output=True).returncode == 0
     except FileNotFoundError:
         return False
 
@@ -285,15 +288,17 @@ class LocalBuilder(Builder):
     def resolve(self, request: dict, source: str, arch: str, timeout: int) -> dict:
         """With the build context and what the resolver reads copied into its container, and what it wrote copied out,
         rather than bind-mounted: a Docker in a VM, as on a Mac, mounts only the folders the VM shares, colima's only the
-        home, and keeps no owner on them."""
+        home, and keeps no owner on them. The container's pull of ``source`` takes turns with the others
+        (``pull_lock``)."""
         out = self.work / RESOLVED / "out"
         out.mkdir(parents=True)
         (out / "request.json").write_text(json.dumps({**request, "owner": [os.getuid(), os.getgid()]}))
         shutil.copy(RESOLVER, out / "resolve.py")
         container, deadline = f"agentenv-resolve-{uuid.uuid4().hex[:12]}", time.monotonic() + timeout
         try:
-            _docker("create", "--name", container, "--platform", f"linux/{arch}", "--user", "root", "--entrypoint",
-                    "python3", source, "/out/resolve.py", "/out/request.json", "/out", deadline=deadline)
+            with holding_locks([pull_lock(source)]):
+                _docker("create", "--name", container, "--platform", f"linux/{arch}", "--user", "root", "--entrypoint",
+                        "python3", source, "/out/resolve.py", "/out/request.json", "/out", deadline=deadline)
             _docker("cp", f"{self.work / CONTEXT}/.", f"{container}:/ctx", deadline=deadline)
             _docker("cp", f"{out}/.", f"{container}:/out", deadline=deadline)
             ran = subprocess.run(["docker", "start", "--attach", container], capture_output=True, text=True,
