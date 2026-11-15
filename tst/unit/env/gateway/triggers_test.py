@@ -493,6 +493,20 @@ async def test_a_write_landing_while_a_state_check_runs_has_it_checked_once_more
 
 
 @pytest.mark.asyncio
+async def test_a_write_landing_before_a_scheduled_state_check_starts_is_the_one_it_is_detected_as(engine):
+    check = {"steps": [{"tool": "gdocs_get_document_text", "args": {"documentId": "doc-1"}, "extract": "text",
+                        "predicate": {"regex": "Budget Fit"}}]}
+    engine.register({"triggers": [{"id": "x", "when": {"type": "state", "check": check}, "actions": []}]})
+    engine.on_tool_call("default", "gdocs_batch_update", {"documentId": "doc-1"}, _result())
+    engine._test_state["doc_text"] = "Budget Fit: fine."
+    engine.on_tool_call("default", "gdocs_append_text", {"documentId": "doc-1"}, _result())
+    await asyncio.sleep(0.2)
+
+    assert engine._triggers["x"]["status"] == "fired"
+    assert [e["provoking"]["tool"] for e in engine._events if e["kind"] == "detected"] == ["gdocs_append_text"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("rechecked", [True, False], ids=["with-a-recheck-asked-for", "on-its-own-check"])
 async def test_a_state_trigger_removed_while_its_check_runs_is_neither_checked_again_nor_detected(engine, monkeypatch,
                                                                                                  rechecked):

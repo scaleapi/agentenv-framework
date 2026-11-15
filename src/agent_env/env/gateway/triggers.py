@@ -1410,7 +1410,7 @@ class TriggerEngine:
         is neither checked again nor detected."""
         try:
             while True:
-                trig["recheck"] = None
+                provoking, trig["recheck"] = trig["recheck"] or provoking, None
                 try:
                     matched = await self._run_check(trig["spec"]["when"]["check"])
                 except Exception as e:
@@ -1418,7 +1418,6 @@ class TriggerEngine:
                     matched = False
                 if matched or trig["recheck"] is None or not self._armed(tid, trig):
                     break
-                provoking = trig["recheck"]
         finally:
             trig["evaluating"], trig["recheck"] = False, None
         if matched and self._armed(tid, trig):
