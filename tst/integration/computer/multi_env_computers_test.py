@@ -2,7 +2,8 @@
 
 The deploy_env step deploys each computer on a sandbox of its own and the gateway in front of them all. Through the
 gateway's one /mcp an agent sees the server's tools and each computer's under its name, takes screenshots by those names,
-and a role rule narrows them as it would a server's; /svc/<computer>/ reaches the computer. A later process reattaches the
+and a role rule narrows them as it would a server's; /svc/<computer>/ reaches the computer, its framework-only routes
+with its own token. A later process reattaches the
 computers from the multi env's record, and the run's teardown leaves nothing up. Two computers keep serving through a
 computer's restart and the gateway's, a failed redeploy leaves the earlier deployment serving, and a computer that fails
 mid-deploy, or an entry the multi env refuses, leaves nothing up. Needs Docker and the local registry on localhost:5000."""
@@ -18,6 +19,7 @@ from pathlib import Path
 import httpx
 import pytest
 from agentenv_protocol import client as protocol_v1
+from agentenv_protocol.computer import COMPUTER_EXEC
 from agentenv_protocol.tool_access import (DISABLE, DISABLE_TOOL_EXTENSION_URI, ENABLE, ENABLE_TOOL_EXTENSION_URI,
                                            WILDCARD)
 from agentenv_protocol.tool_context import DEFAULT_ROLE
@@ -188,6 +190,10 @@ async def test_a_computer_in_a_multi_env_is_served_through_its_gateway_under_its
             world = _universe(uid, {"Documents/note.txt": b"from the universe"})
             await LoadArtifactTaskStep(id="seed", version=None, env_id=office.id, artifact_id=world.id).execute(context)
             note = (await inside.run(own, ["cat", "Documents/note.txt"], timeout_s=30))["stdout"]
+            # A framework-only route of the computer's, through the gateway, takes the computer's own token.
+            through_gateway = (await deployed.invoke(COMPUTER_EXEC, "run", {
+                "argv": ["cat", "Documents/note.txt"], "request_id": uuid.uuid4().hex, "timeout_s": 30},
+                environment_name="desktop"))["stdout"]
             listed_items = await _items(deployed)
             await SnapshotEnvTaskStep(id="snap", version=None, env_id=office.id,
                                       snapshot_id=f"office-snap-{uid}").execute(context)
@@ -223,7 +229,7 @@ async def test_a_computer_in_a_multi_env_is_served_through_its_gateway_under_its
     assert [env._deployed.sandbox_id for env in reattached.computer_envs] == [computer["sandbox_id"]]
     assert _containers(computer["sandbox_id"]) == []
     assert json.dumps(deployed.child_envs)  # the record stores as JSON
-    assert note == "from the universe" and "snap-x" in listed_items
+    assert note == through_gateway == "from the universe" and "snap-x" in listed_items
     assert {"items", "desktop"} <= set(snapshot) and snapshot["desktop"]["Documents/note.txt"] == b"from the universe"
     # The gateway states each child's environment_name, which lookups, servers and snapshots go by: the shop
     # website's card is named webitems.
