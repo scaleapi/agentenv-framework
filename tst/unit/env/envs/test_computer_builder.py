@@ -167,6 +167,10 @@ def test_one_deadline_bounds_a_resolve_from_its_containers_pull_to_its_output_an
     assert failed.value.log == "Pulling from acme/base"
 
 
+#: How long a fake pull of the base takes: long enough that pulls not taking turns would overlap.
+PULL_S = 0.2
+
+
 def test_a_resolves_pull_of_its_base_takes_turns_with_a_platform_checks_and_a_deploys(tmp_path, monkeypatch):
     """A compose resolves one arch in a container of the base as it checks the other's with another, each pulled when
     Docker lacks the base, and two pulls of one image at once left Docker's containerd image store without layers of
@@ -178,7 +182,7 @@ def test_a_resolves_pull_of_its_base_takes_turns_with_a_platform_checks_and_a_de
         if f"{base}@{digest}" in command and command[1] in ("create", "run", "pull"):
             pulling.append(command[1])
             most.append(len(pulling))
-            time.sleep(0.2)
+            time.sleep(PULL_S)
             pulling.remove(command[1])
             ran.append(command[1])
         if command[1] == "cp" and command[3] == str(tmp_path / "work" / builder.RESOLVED / "out"):
