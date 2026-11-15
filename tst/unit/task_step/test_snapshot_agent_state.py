@@ -378,3 +378,34 @@ def test_a_stored_step_without_the_artifact_id_key_loads():
     del data["artifact_id"]
 
     assert mod.SnapshotAgentStateTaskStep.from_dict(data).artifact_id is None
+
+
+def test_a_save_defaults_to_the_budget_of_a_call_that_moves_objects():
+    from agent_env.a2a_agent.object_transfer import TRANSFER_TIMEOUT_SECONDS
+
+    data = _per_run_step().to_dict()
+    del data["timeout_seconds"]
+
+    assert _per_run_step().timeout_seconds == TRANSFER_TIMEOUT_SECONDS
+    assert mod.SnapshotAgentStateTaskStep.from_dict(data).timeout_seconds == TRANSFER_TIMEOUT_SECONDS
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("configured", "expected"), [(None, 600), (45, 45)])
+async def test_the_save_waits_for_the_steps_timeout_seconds(monkeypatch, configured, expected):
+    waited: list[float] = []
+
+    async def _capture(*, timeout_seconds, artifact_id, **_):
+        waited.append(timeout_seconds)
+        return agent_state_capture.WorkspaceCapture(
+            universe_id=artifact_id, universe_version=1, bundle_object_url="fake://b/w", capture_prefix="fake://b/",
+        )
+
+    monkeypatch.setattr(agent_state_capture, "capture_workspace", _capture)
+    step = _per_run_step()
+    if configured is not None:
+        step.timeout_seconds = configured
+
+    await step.execute(_run_ctx("inst-a"))
+
+    assert waited == [expected]
