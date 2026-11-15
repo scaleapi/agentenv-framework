@@ -58,6 +58,25 @@ class StubDevTools:
             listener({"method": method, "params": params, **({"sessionId": session} if session else {})})
 
 
+class HeldDevTools(StubDevTools):
+    """A StubDevTools whose pages of agentenv's own are ``H<n>``, which holds each call of ``held`` until ``go`` is set,
+    ``reached`` set as one arrives."""
+
+    def __init__(self, held, answers=None):
+        super().__init__(answers)
+        self.held, self.reached, self.go, self.pages = held, asyncio.Event(), asyncio.Event(), 0
+
+    async def call(self, method, params=None, *, session_id=None, timeout_s=None):
+        if method == "Target.createTarget":
+            self.pages += 1
+            self.calls.append((method, params or {}, session_id))
+            return {"targetId": f"H{self.pages}"}
+        if method == self.held:
+            self.reached.set()
+            await self.go.wait()
+        return await super().call(method, params, session_id=session_id, timeout_s=timeout_s)
+
+
 def _sent(devtools, method):
     return [params for called, params, _ in devtools.calls if called == method]
 
@@ -218,6 +237,48 @@ async def test_a_release_closes_its_tabs_as_agentenvs_deletes_its_folder_and_doe
 
 
 @pytest.mark.asyncio
+async def test_a_release_waits_for_agentenvs_own_page_in_its_context_which_takes_no_new_one_and_no_other_context_waits(
+        browser_home):
+    devtools = HeldDevTools("Network.deleteCookies", {
+        "Storage.getCookies": {"cookies": [{"name": "sid", "value": "v", "domain": "shop.test", "path": "/",
+                                            "expires": -1, "httpOnly": False, "secure": False}]},
+        "Target.attachToTarget": {"sessionId": "s-hidden"},
+        "Runtime.evaluate": {"result": {"value": "https://shop.test"}}})
+    control = BrowserControl(devtools, "agent")
+    contexts = Contexts(devtools, control, home=lambda: browser_home)
+    await contexts.lease("buyer")
+    await contexts.lease("seller")
+
+    async with control.hidden_page(context="C2"):
+        deleting = asyncio.ensure_future(control.delete_cookies(context="C1"))
+        await asyncio.wait_for(devtools.reached.wait(), 5)
+        releasing = asyncio.ensure_future(contexts.release("buyer"))
+        for _ in range(500):
+            if "C1" in control._disposing:
+                break
+            await asyncio.sleep(0.01)
+        with pytest.raises(TargetUnavailable, match="the context 'buyer' is being disposed"):
+            await control.clear_local_storage(["https://shop.test"], "C1")
+        cleared = await control.clear_local_storage(["https://shop.test"], "C2")
+        courier = await asyncio.wait_for(contexts.lease("courier"), 5)
+        courier_released = await asyncio.wait_for(contexts.release("courier"), 5)
+        held = [sent for sent in _sent(devtools, "Target.disposeBrowserContext") if sent["browserContextId"] == "C1"]
+        devtools.go.set()
+        deleted, released = await asyncio.wait_for(asyncio.gather(deleting, releasing), 5)
+    ended = [(method, params) for method, params, _ in devtools.calls
+             if method in ("Target.closeTarget", "Target.disposeBrowserContext")]
+
+    assert held == [] and cleared == ["https://shop.test"] and (deleted, released) == (1, True)
+    assert courier.id == "C3" and courier_released
+    assert ended == [("Target.closeTarget", {"targetId": "H3"}),
+                     ("Target.disposeBrowserContext", {"browserContextId": "C3"}),
+                     ("Target.closeTarget", {"targetId": "H2"}),
+                     ("Target.disposeBrowserContext", {"browserContextId": "C1"}),
+                     ("Target.closeTarget", {"targetId": "H1"})]
+    assert [params.get("browserContextId") for params in _sent(devtools, "Target.createTarget")] == ["C2", "C1", "C2"]
+
+
+@pytest.mark.asyncio
 async def test_a_label_released_and_leased_again_at_once_keeps_the_new_leases_folder(browser_home):
     _, _, contexts = _contexts(browser_home)
     await contexts.lease("buyer")
@@ -311,7 +372,7 @@ async def test_a_load_waiting_on_an_agents_lease_that_ends_meanwhile_cant_lease_
     _, _, contexts = _contexts(browser_home)
     contexts.made_by_agent("ada", "X1")
 
-    async with contexts._lock:
+    async with contexts._locks["agent-ada-1"]:
         waiting = asyncio.ensure_future(contexts.lease("agent-ada-1"))
         await asyncio.sleep(0)
         contexts.disposed("X1")

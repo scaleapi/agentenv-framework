@@ -15,7 +15,7 @@ from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import urlsplit
 
 from .log import ACTOR, KEY_FIELDS, TYPING_METHODS, BrowserLog, Causes, caused, log_time, redact_url
-from ..computer.errors import DeviceUnavailable, InvalidArgument
+from ..computer.errors import DeviceUnavailable, InvalidArgument, TargetUnavailable
 from .devtools import DevToolsError, DevToolsPipe
 from .shapes import (ClosedTab, Cookie, CookieToSet, Dialog, Download, OpenTab, OriginStorage, StartTab, StorageItem,
                      origin_of)
@@ -110,6 +110,10 @@ class BrowserControl:
         self.dialog_log: list[dict] = []
         self._sessions: dict[str, str] = {}
         self._hidden: set[str] = set()
+        #: What each page of agentenv's own open now sets as it closes, with its context, None for the default one; and
+        #: the contexts being disposed, once per disposal under way, which open no more (``disposing``).
+        self._hidden_pages: dict[asyncio.Event, Optional[str]] = {}
+        self._disposing: list[str] = []
         self._closing: set[str] = set()
         self._open_dialogs: dict[str, dict] = {}
         self._answering: set[str] = set()
@@ -583,17 +587,38 @@ class BrowserControl:
     @contextlib.asynccontextmanager
     async def hidden_page(self, url: str = "about:blank", context: Optional[str] = None) -> AsyncIterator[str]:
         """A page of agentenv's own for reading state, in the context ``context``, else the default one, in no window
-        and never in the record; its session's id. It's closed after."""
-        target = (await self.devtools.call("Target.createTarget", {
-            "url": url, "hidden": True, "background": True,
-            **({"browserContextId": context} if context else {})}))["targetId"]
-        self._hidden.add(target)
-        self.tabs.pop(target, None)
+        and never in the record; its session's id. It's closed after, before its context is disposed;
+        TargetUnavailable for a context being disposed."""
+        if context in self._disposing:
+            raise TargetUnavailable(f"the context {self.other_contexts.get(context, context)!r} is being disposed")
+        closed = asyncio.Event()
+        self._hidden_pages[closed] = context
         try:
-            yield (await self.devtools.call("Target.attachToTarget", {"targetId": target, "flatten": True}))["sessionId"]
+            target = (await self.devtools.call("Target.createTarget", {
+                "url": url, "hidden": True, "background": True, **_in(context)}))["targetId"]
+            self._hidden.add(target)
+            self.tabs.pop(target, None)
+            try:
+                attached = await self.devtools.call("Target.attachToTarget", {"targetId": target, "flatten": True})
+                yield attached["sessionId"]
+            finally:
+                with contextlib.suppress(ConnectionError, DevToolsError):
+                    await self.devtools.call("Target.closeTarget", {"targetId": target})
         finally:
-            with contextlib.suppress(ConnectionError, DevToolsError):
-                await self.devtools.call("Target.closeTarget", {"targetId": target})
+            del self._hidden_pages[closed]
+            closed.set()
+
+    @contextlib.asynccontextmanager
+    async def disposing(self, context: str) -> AsyncIterator[None]:
+        """The context ``context`` disposed within: from its start no page of agentenv's own opens in it, and it waits
+        for those open there to close, as Chromium crashes disposing a context that holds a hidden page."""
+        self._disposing.append(context)
+        try:
+            for closed in [closed for closed, of in self._hidden_pages.items() if of == context]:
+                await closed.wait()
+            yield
+        finally:
+            self._disposing.remove(context)
 
     async def active_tab(self, context: Optional[str] = None) -> Optional[str]:
         """The active tab of the context ``context``, else of the default one, as ``page_tab`` picks among its tabs."""

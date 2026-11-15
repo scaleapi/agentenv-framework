@@ -6,6 +6,7 @@ enforced: the CDP addresses agents hold still see every context."""
 from __future__ import annotations
 
 import asyncio
+import collections
 import contextlib
 import logging
 import re
@@ -85,7 +86,8 @@ class Contexts:
         self.on_made: list[Callable[[Lease, Optional[str]], None]] = []
         self._made: dict[str, int] = {}
         self._tasks: set[asyncio.Future] = set()
-        self._lock = asyncio.Lock()
+        #: A lock per label, so leasing or releasing one waits only for another of the same label.
+        self._locks: dict[str, asyncio.Lock] = collections.defaultdict(asyncio.Lock)
 
     def __iter__(self):
         return iter(list(self.leases.values()))
@@ -110,7 +112,7 @@ class Contexts:
         """The lease ``label``: the one leased under it before, as a retried step finds it, else a new context, its
         downloads going to its own folder. A task's label is checked; one ``made_by`` an agent may start ``agent-``,
         as a load of a snapshot restores such leases."""
-        async with self._lock:
+        async with self._locks[label]:
             if (lease := self.leases.get(label)) is None:
                 if problem := label_problem(label, by_task=made_by == TASK):
                     raise InvalidArgument(problem)
@@ -133,15 +135,17 @@ class Contexts:
         return lease
 
     async def release(self, label: str) -> bool:
-        """The lease ``label`` ended: its context disposed, which closes its tabs, and its folder deleted. Whether
-        there was one: releasing a label that isn't leased does nothing, so a retried step is harmless."""
-        async with self._lock:
+        """The lease ``label`` ended: its context disposed once agentenv's own pages in it have closed, which closes its
+        tabs, and its folder deleted. Whether there was one: releasing a label that isn't leased does nothing, so a
+        retried step is harmless."""
+        async with self._locks[label]:
             if (lease := self.leases.pop(label, None)) is None:
                 return False
             self.control.closing_context(lease.id)
             self._ended(lease)
-            with contextlib.suppress(DevToolsError):
-                await self.devtools.call("Target.disposeBrowserContext", {"browserContextId": lease.id})
+            async with self.control.disposing(lease.id):
+                with contextlib.suppress(DevToolsError):
+                    await self.devtools.call("Target.disposeBrowserContext", {"browserContextId": lease.id})
             await asyncio.to_thread(shutil.rmtree, lease.folder(self.home()), True)
         return True
 
