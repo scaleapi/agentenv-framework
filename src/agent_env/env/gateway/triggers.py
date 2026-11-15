@@ -506,9 +506,10 @@ class TriggerEngine:
         self._config_set = True
         for tid, spec in to_add:
             # `running` counts its fires in flight, `alongside` holds those run beside the first (concurrent_fires),
-            # `waits` each fire waiting out a delay or its executor's hours, `calls` each executor call in progress.
+            # `waits` each fire waiting out a delay or its executor's hours, `calls` each executor call in progress,
+            # `recheck` the write that asked a state check under way to run again.
             self._triggers[tid] = {"spec": spec, "status": "armed", "detected_at": None,
-                                   "fired_at": None, "evaluating": False,
+                                   "fired_at": None, "evaluating": False, "recheck": None,
                                    "next_mark": None, "resolved": False, "fire_count": 0,
                                    "failure_count": 0, "last_failure_at": None,
                                    "rng": _make_rng(spec), "mark_gen": None,
@@ -1065,10 +1066,16 @@ class TriggerEngine:
         return pending, timeout_s
 
     def _reevaluate_states(self, provokable: list[tuple[str, dict]], provoking: dict) -> None:
+        """Each armed state trigger ``provoking`` can provoke checked: once more after the check under way, which may
+        have read the state from before this write, when one is."""
         for tid, trig in provokable:
-            if trig["status"] == "armed" and trig["spec"]["when"]["type"] == "state" and not trig["evaluating"]:
-                trig["evaluating"] = True
-                self._schedule(self._eval_state(tid, trig, provoking))
+            if trig["status"] != "armed" or trig["spec"]["when"]["type"] != "state":
+                continue
+            if trig["evaluating"]:
+                trig["recheck"] = provoking
+                continue
+            trig["evaluating"] = True
+            self._schedule(self._eval_state(tid, trig, provoking))
 
     def may_hold_website_request(self, role: str, app: str, method: str, path: str, status: int,
                                  op: str | None = None) -> bool:
@@ -1398,13 +1405,21 @@ class TriggerEngine:
         return event
 
     async def _eval_state(self, tid: str, trig: dict, provoking: dict) -> None:
+        """``trig``'s check, run again while a write asked for it as it ran and it hasn't matched; a match is
+        detected as the write that asked for that check's."""
         try:
-            matched = await self._run_check(trig["spec"]["when"]["check"])
-        except Exception as e:
-            self._emit("eval_error", tid, detail=str(e)[:300])
-            matched = False
+            while True:
+                trig["recheck"] = None
+                try:
+                    matched = await self._run_check(trig["spec"]["when"]["check"])
+                except Exception as e:
+                    self._emit("eval_error", tid, detail=str(e)[:300])
+                    matched = False
+                if matched or trig["recheck"] is None or trig["status"] != "armed":
+                    break
+                provoking = trig["recheck"]
         finally:
-            trig["evaluating"] = False
+            trig["evaluating"], trig["recheck"] = False, None
         if matched and trig["status"] == "armed":
             self._mark_detected(tid, trig, provoking)
 

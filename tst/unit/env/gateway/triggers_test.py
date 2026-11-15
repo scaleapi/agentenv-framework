@@ -457,6 +457,42 @@ async def test_an_executor_write_prompts_only_the_state_triggers_that_list_it(en
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("second_write_holds", [True, False], ids=["it-now-holds", "it-still-doesnt"])
+async def test_a_write_landing_while_a_state_check_runs_has_it_checked_once_more(engine, monkeypatch,
+                                                                                 second_write_holds):
+    """A check that read the state from before a write, while that write's own re-check was asked for, runs again: so
+    the trigger fires as the write that made it hold, and stays armed when nothing does."""
+    reads, slow = [], asyncio.Event()
+    read = TriggerEngine._internal_call
+
+    async def read_then_answer_late_once(self, tool_name, arguments, role=None):
+        result = await read(self, tool_name, arguments, role=role)
+        reads.append(result.content[0].text)
+        if len(reads) == 1:
+            await slow.wait()
+        return result
+
+    monkeypatch.setattr(TriggerEngine, "_internal_call", read_then_answer_late_once)
+    check = {"steps": [{"tool": "gdocs_get_document_text", "args": {"documentId": "doc-1"}, "extract": "text",
+                        "predicate": {"regex": "Budget Fit"}}]}
+    engine.register({"triggers": [{"id": "x", "when": {"type": "state", "check": check}, "actions": []}]})
+    engine.on_tool_call("default", "gdocs_batch_update", {"documentId": "doc-1"}, _result())
+    await asyncio.sleep(0.05)
+    if second_write_holds:
+        engine._test_state["doc_text"] = "Budget Fit: fine."
+    engine.on_tool_call("default", "gdocs_append_text", {"documentId": "doc-1"}, _result())
+    await asyncio.sleep(0.05)
+    slow.set()
+    await asyncio.sleep(0.2)
+
+    assert len(reads) == 2 and "Budget Fit" not in reads[0], reads
+    assert engine._triggers["x"]["status"] == ("fired" if second_write_holds else "armed")
+    assert not engine._triggers["x"]["evaluating"] and engine._triggers["x"]["recheck"] is None
+    detected = [e for e in engine._events if e["kind"] == "detected"]
+    assert [e["provoking"]["tool"] for e in detected] == (["gdocs_append_text"] if second_write_holds else [])
+
+
+@pytest.mark.asyncio
 async def test_a_delay_waits_its_virtual_time_before_the_action(engine, executor_calls, virtual_time):
     engine.register({"executors": {"bob": {"a2a_url": "http://bob", "role": "bob"}},
                      "triggers": [{"id": "x", "when": {"type": "action", "tool": "t"},
