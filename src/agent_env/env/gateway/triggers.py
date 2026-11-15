@@ -1406,7 +1406,8 @@ class TriggerEngine:
 
     async def _eval_state(self, tid: str, trig: dict, provoking: dict) -> None:
         """``trig``'s check, run again while a write asked for it as it ran and it hasn't matched; a match is
-        detected as the write that asked for that check's."""
+        detected as the write that asked for that check's. A trigger removed meanwhile, or replaced by one of its id,
+        is neither checked again nor detected."""
         try:
             while True:
                 trig["recheck"] = None
@@ -1415,13 +1416,17 @@ class TriggerEngine:
                 except Exception as e:
                     self._emit("eval_error", tid, detail=str(e)[:300])
                     matched = False
-                if matched or trig["recheck"] is None or trig["status"] != "armed":
+                if matched or trig["recheck"] is None or not self._armed(tid, trig):
                     break
                 provoking = trig["recheck"]
         finally:
             trig["evaluating"], trig["recheck"] = False, None
-        if matched and trig["status"] == "armed":
+        if matched and self._armed(tid, trig):
             self._mark_detected(tid, trig, provoking)
+
+    def _armed(self, tid: str, trig: dict) -> bool:
+        """Whether ``trig`` is still the engine's trigger ``tid``, and armed."""
+        return self._triggers.get(tid) is trig and trig["status"] == "armed"
 
     async def _run_check(self, check: dict, ctx: dict | None = None, role: str | None = None) -> bool:
         bindings: dict[str, Any] = {}

@@ -493,6 +493,39 @@ async def test_a_write_landing_while_a_state_check_runs_has_it_checked_once_more
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("rechecked", [True, False], ids=["with-a-recheck-asked-for", "on-its-own-check"])
+async def test_a_state_trigger_removed_while_its_check_runs_is_neither_checked_again_nor_detected(engine, monkeypatch,
+                                                                                                 rechecked):
+    reads, slow = [], asyncio.Event()
+    read = TriggerEngine._internal_call
+
+    async def read_then_answer_late_once(self, tool_name, arguments, role=None):
+        result = await read(self, tool_name, arguments, role=role)
+        reads.append(result.content[0].text)
+        if len(reads) == 1:
+            await slow.wait()
+        return result
+
+    monkeypatch.setattr(TriggerEngine, "_internal_call", read_then_answer_late_once)
+    check = {"steps": [{"tool": "gdocs_get_document_text", "args": {"documentId": "doc-1"}, "extract": "text",
+                        "predicate": {"regex": "Budget Fit"}}]}
+    engine.register({"triggers": [{"id": "x", "when": {"type": "state", "check": check}, "actions": []}]})
+    if not rechecked:
+        engine._test_state["doc_text"] = "Budget Fit: fine."
+    engine.on_tool_call("default", "gdocs_batch_update", {"documentId": "doc-1"}, _result())
+    await asyncio.sleep(0.05)
+    engine._test_state["doc_text"] = "Budget Fit: fine."
+    if rechecked:
+        engine.on_tool_call("default", "gdocs_append_text", {"documentId": "doc-1"}, _result())
+    engine.remove({"ids": ["x"]})
+    slow.set()
+    await asyncio.sleep(0.2)
+
+    assert len(reads) == 1, reads
+    assert not [e for e in engine._events if e["kind"] == "detected"]
+
+
+@pytest.mark.asyncio
 async def test_a_delay_waits_its_virtual_time_before_the_action(engine, executor_calls, virtual_time):
     engine.register({"executors": {"bob": {"a2a_url": "http://bob", "role": "bob"}},
                      "triggers": [{"id": "x", "when": {"type": "action", "tool": "t"},
