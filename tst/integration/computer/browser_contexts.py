@@ -2,8 +2,10 @@
 to a loopback site as its own user, by cookies and local storage of its own, in tabs of its own the default context
 doesn't list; five leases of one label at once are one; a lease's download lands in its own folder, listed in it alone;
 a context an agent makes over CDP is leased to it as agent-<user>-<n>, another agent and the task's lease can't be
-disposed by it, its own can; data/get carries each lease, and once agents have acted a load still leases a missing one
-back with its cookies; and a release, then a reset, end them and delete their folders."""
+disposed by it, its own can; a lease released, or a context an agent disposes, while browser/v1 reads its local storage
+through pages of its own in it leaves the browser up, each read answered or refused cleanly; data/get carries each
+lease, and once agents have acted a load still leases a missing one back with its cookies; and a release, then a reset,
+end them and delete their folders."""
 
 import asyncio
 import base64
@@ -23,6 +25,11 @@ from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_step import TaskStep
 from tst.integration.computer.browser_data import ORIGIN, POLL_S, SERVE_S, SERVE_SITE, SITE, WAIT_S
+
+#: How many times a context is ended while browser/v1 reads its local storage, by a release and by an agent's dispose.
+ROUNDS = 6
+#: How a read whose context ends under it may answer: read, or refused as the context it names is gone.
+SETTLED = {200, 404}
 
 #: A loopback server, for the seconds it's given, whose /file is a download.
 FILE_SITE = "http://127.0.0.1:8786/file"
@@ -137,6 +144,25 @@ async def check_browser_contexts(deployed, env_id: str, op_url: Callable[[str], 
                                                ("Target.disposeBrowserContext", {"browserContextId": agents})])
         after_dispose = [lease["context"] for lease in (await call("contexts/list", method="GET"))["contexts"]]
 
+        ended_under_reads = []
+        for n in range(ROUNDS):
+            label = f"churn-{n}"
+            await call("contexts/lease", {"label": label})
+            reads = [_answer(deployed, op_url, "local_storage/get", {"origins": [ORIGIN], "context": label})
+                     for _ in range(3)]
+            *read, _ = await asyncio.gather(*reads, call("contexts/release", {"context": label}))
+            ended_under_reads.append(read)
+            [made] = await _cdp_commands(ada, [("Target.createBrowserContext", {})])
+            mine = made["result"]["browserContextId"]
+            lease = next(entry["context"] for entry in (await call("contexts/list", method="GET"))["contexts"]
+                         if entry["id"] == mine)
+            reads = [_answer(deployed, op_url, "local_storage/get", {"origins": [ORIGIN], "context": lease})
+                     for _ in range(3)]
+            *read, disposed = await asyncio.gather(
+                *reads, _cdp_commands(ada, [("Target.disposeBrowserContext", {"browserContextId": mine})]))
+            ended_under_reads.append([*read, (200 if "result" in disposed[0] else 500, disposed[0])])
+        still_up = [tab["id"] for tab in await tabs()]
+
         state = await _state(deployed, data_url)
         context = await step("browser_release_context", label="seller").execute(context)
         released = context.metadata["browser_steps"]["browser_release_context"]["released"]
@@ -167,12 +193,21 @@ async def check_browser_contexts(deployed, env_id: str, op_url: Callable[[str], 
     assert {"context": "buyer", "id": buyer_id, "made_by": "task", "grants": ["ada"]} in listed, listed
     assert "is another agent's" in theirs["error"]["message"] and "is the task's" in tasks["error"]["message"]
     assert "result" in own and sorted(after_dispose) == ["buyer", "race", "seller"], (own, after_dispose)
+    assert all(status in SETTLED for read in ended_under_reads for status, _ in read), ended_under_reads
+    assert still_up == default_after, (still_up, default_after)
     assert state["contexts"]["buyer"]["cookies"][0]["value"] == "buyer", state["contexts"]
     assert any(path.startswith("Contexts/buyer/Downloads/") for path in state["files"]), state["files"]
     assert released is True and again.metadata["browser_steps"]["browser_release_context"]["released"] is False
     assert seller_folder == "gone" and reloaded["context"] == "seller", (seller_folder, reloaded)
     assert after_reset == [] and folders_after_reset == "0", (after_reset, folders_after_reset)
     assert "target_unavailable" in json.dumps(refused), refused
+
+
+async def _answer(deployed, op_url: Callable[[str], str], op: str, params: dict) -> tuple[int, dict]:
+    """``op``'s status and answer, whatever the status."""
+    async with httpx.AsyncClient(timeout=120, headers=deployed.control_headers) as http:
+        answer = await http.post(op_url(op), json=params)
+    return answer.status_code, answer.json() if answer.content else {}
 
 
 async def _state(deployed, data_url: str) -> dict:
