@@ -8,6 +8,8 @@ import os
 import tarfile
 from pathlib import Path
 
+import pytest
+
 from agentenv_protocol.transfers import Uploaded
 
 from tst.unit.agents.claude_code.support import extension_methods, read_grant, write_grant
@@ -344,3 +346,46 @@ def test_a_saved_conversation_holds_no_key_an_api_error_echoed(monkeypatch, tmp_
     saved = a2a_server._read_complete_session_jsonl(transcript).decode()
 
     assert key not in saved and "[redacted]" in saved and saved.startswith(f"{ok}\n")
+
+
+def test_the_workspace_archive_stores_bytes_as_they_are_in_a_gzip_stream_older_loaders_read(monkeypatch, tmp_path):
+    workspace, _ = _snapshot_roots(monkeypatch, tmp_path)
+    text = b"the same line of source code\n" * 40_000
+    text_size = len(text)
+    (workspace / "notes.txt").write_bytes(text)
+    archive = tmp_path / "workspace.tar.gz"
+
+    _, bytes_written = a2a_server._build_workspace_archive(archive)
+
+    assert bytes_written > text_size
+    with tarfile.open(archive, mode="r:gz") as tar:
+        assert tar.extractfile("notes.txt").read() == text
+
+
+def _recompressed(archive: Path, level: int) -> Path:
+    with tarfile.open(archive, mode="r:gz") as source:
+        members = [(member, source.extractfile(member).read() if member.isfile() else None)
+                   for member in source.getmembers()]
+    copy = archive.with_name(f"level-{level}.tar.gz")
+    with tarfile.open(copy, mode="w:gz", compresslevel=level) as tar:
+        for member, data in members:
+            tar.addfile(member, io.BytesIO(data) if data is not None else None)
+    return copy
+
+
+@pytest.mark.parametrize("level", [None, 9], ids=["as-saved", "compressed-by-an-older-agent"])
+def test_a_workspace_archive_restores_whether_or_not_its_gzip_stream_is_compressed(monkeypatch, tmp_path, level):
+    _snapshot_roots(monkeypatch, tmp_path / "source")
+    archive = tmp_path / "workspace.tar.gz"
+    a2a_server._build_workspace_archive(archive)
+    if level is not None:
+        archive = _recompressed(archive, level)
+    destination_workspace = tmp_path / "destination" / "app"
+    destination_state = tmp_path / "destination" / "home" / ".claude"
+    monkeypatch.setattr(a2a_server, "WORKSPACE_DIR", destination_workspace)
+    monkeypatch.setattr(a2a_server, "CLAUDE_STATE_DIR", destination_state)
+
+    a2a_server._restore_workspace_archive(archive)
+
+    assert (destination_workspace / "report" / "answer.txt").read_text() == "done"
+    assert (destination_state / "projects" / "-app" / "memory" / "MEMORY.md").read_text() == "remember this"
