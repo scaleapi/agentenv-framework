@@ -98,6 +98,9 @@ FAKE = textwrap.dedent('''\
 
     anyio.run(main)
 ''')
+#: How long a REPL may sit unused before the driver closes it, in the idle test: well over two calls in a row on a busy
+#: runner, so the second still finds the first's REPL.
+IDLE_S = 1.0
 MACOS = Platform(os="macos", version="26.5", arch="arm64", display="aqua")
 WINDOWS = Platform(os="windows", version="11", arch="amd64", display="dwm")
 
@@ -184,8 +187,8 @@ def _text(result) -> str:
     return " ".join(c.text for c in result.content if c.type == "text")
 
 
-async def _gone(pid: int) -> bool:
-    for _ in range(200):
+async def _gone(pid: int, within_s: float = 5.0) -> bool:
+    for _ in range(int(within_s / 0.01)):
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
@@ -357,7 +360,7 @@ async def test_past_the_most_repls_kept_the_least_recently_used_is_closed_and_th
 @pytest.mark.asyncio
 async def test_a_repl_left_idle_is_closed_without_another_call_and_its_session_starts_afresh(module, monkeypatch):
     monkeypatch.setattr(module, "SWEEP_S", 0.05)
-    monkeypatch.setattr(module, "IDLE_S", 0.2)
+    monkeypatch.setattr(module, "IDLE_S", IDLE_S)
     async with mcp_session(_driver(module, monkeypatch)) as session:
         await session.call_tool("js", {"code": "set 1"}, meta={SESSION_META_KEY: "a"})
         before = _text(await session.call_tool("js", {"code": "get"}, meta={SESSION_META_KEY: "a"}))
