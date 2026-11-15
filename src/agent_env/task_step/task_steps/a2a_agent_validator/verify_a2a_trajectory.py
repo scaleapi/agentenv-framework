@@ -15,13 +15,14 @@ from agent_env.a2a_agent.object_transfer import (
 from agent_env.a2a_agent.staging import transfer_store
 from agent_env.task_step.snapshot_utils.agent_state_capture import trajectory_object_url
 from agent_env.entity.refs import EntityRef
-from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_step import StepRole, TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)
 
 
 class VerifyA2ATrajectoryStep(TaskStep):
     type: ClassVar[str] = "verify_a2a_trajectory"
+    step_role = StepRole.GRADER
     entity_refs = (EntityRef.agent("a2a_agent_id"),)
 
     def __init__(

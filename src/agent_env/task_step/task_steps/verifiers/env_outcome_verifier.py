@@ -15,7 +15,7 @@ from typing import ClassVar, Optional
 from agent_env.config import get_config
 from agent_env.task_step.context import PromptResponse, StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef
-from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_step import StepRole, TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.verifiers.run_context import load_run_context
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
 
@@ -32,6 +32,7 @@ class EnvOutcomeVerifierTaskStep(TaskStep):
     control token, so its calls reach the env's framework-only routes as written."""
 
     type: ClassVar[str] = "env_outcome_verifier"
+    step_role = StepRole.GRADER
     entity_refs = (
         EntityRef.env("env_id"),
         EntityRef.artifact("file_artifact_id", version_field="file_artifact_version", artifact_type="file"),

@@ -7,7 +7,7 @@ from typing import ClassVar, Optional
 
 from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef
-from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_step import StepRole, TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +20,7 @@ VALIDATED_ENVIRONMENT_CARD_KEY = "validated_environment_card"
 
 class VerifyEnvironmentCardStep(TaskStep):
     type: ClassVar[str] = "verify_env_card"
+    step_role = StepRole.GRADER
     entity_refs = (EntityRef.env("env_id"),)
 
     def __init__(
