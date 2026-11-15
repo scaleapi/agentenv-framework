@@ -64,9 +64,16 @@ class VerifierNotPassingError(RuntimeError):
 ERRORED_TURN_UNGRADED_ENV_VAR = "AGENT_ENV_ERRORED_TURN_UNGRADED"
 
 
-def errored_turn_ungraded() -> bool:
-    """Whether a verifier leaves an errored agent turn ungraded, raising ``AgentTurnError``, instead of scoring it 0."""
-    return os.environ.get(ERRORED_TURN_UNGRADED_ENV_VAR, "").strip().lower() in ("1", "true", "yes")
+# Turn failures the agent did not cause: the platform or its model key. An ``agent_error`` stays a scored 0, since
+# the agent made the attempt and failed it.
+PLATFORM_TURN_ERROR_TYPES = frozenset({"infra_error", "model_key_budget", "model_key_auth"})
+
+
+def errored_turn_ungraded(turn_error_type: str) -> bool:
+    """Whether a verifier leaves this errored agent turn ungraded, raising ``AgentTurnError``, instead of scoring it
+    0: only behind the flag, and only for failures the agent did not cause."""
+    flag_on = os.environ.get(ERRORED_TURN_UNGRADED_ENV_VAR, "").strip().lower() in ("1", "true", "yes")
+    return flag_on and turn_error_type in PLATFORM_TURN_ERROR_TYPES
 
 
 class AgentTurnError(RuntimeError):

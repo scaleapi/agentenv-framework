@@ -68,6 +68,33 @@ async def test_on_an_errored_turn_is_left_ungraded_and_its_verifier_fails(monkey
 
 
 @VERIFIERS
+@pytest.mark.parametrize("platform_error", ["infra_error", "model_key_auth"])
+@pytest.mark.asyncio
+async def test_on_other_platform_failures_are_left_ungraded(monkeypatch, local_stores, make_verifier, platform_error):
+    monkeypatch.setenv(ERRORED_TURN_UNGRADED_ENV_VAR, "1")
+    ctx = _context(platform_error)
+
+    await Task(id="t", version=None, steps=[make_verifier(monkeypatch)]).run(context=ctx)
+
+    assert "grade" not in ctx.metadata.get("verifications", {})
+    [failed] = ctx.metadata["failed_steps"]
+    assert f"error_type={platform_error}" in failed["error"]
+
+
+@VERIFIERS
+@pytest.mark.asyncio
+async def test_on_an_agent_error_still_scores_zero(monkeypatch, local_stores, make_verifier):
+    monkeypatch.setenv(ERRORED_TURN_UNGRADED_ENV_VAR, "1")
+    ctx = _context("agent_error")
+
+    await Task(id="t", version=None, steps=[make_verifier(monkeypatch)]).run(context=ctx)
+
+    entry = ctx.metadata["verifications"]["grade"]
+    assert (entry["score"], entry["results"][0]["id"]) == (0, "prompt_error")
+    assert "failed_steps" not in ctx.metadata
+
+
+@VERIFIERS
 @pytest.mark.asyncio
 async def test_on_a_turn_without_an_error_is_graded(monkeypatch, local_stores, make_verifier):
     monkeypatch.setenv(ERRORED_TURN_UNGRADED_ENV_VAR, "1")

@@ -84,7 +84,7 @@ class AgentPromptResponseVerifierTaskStep(TaskStep):
             raise StepContextError(f"PromptResponse with prompt_id='{self.prompt_id}' not found in context")
 
         if prompt_response.error_type:
-            if errored_turn_ungraded():
+            if errored_turn_ungraded(prompt_response.error_type):
                 raise AgentTurnError(self.verifier_id, self.prompt_id, prompt_response.error_type)
             logger.warning(
                 f"Skipping verification '{self.verifier_id}': prompt had error_type={prompt_response.error_type}"

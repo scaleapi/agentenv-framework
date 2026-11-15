@@ -685,7 +685,7 @@ class RubricsVerifierTaskStep(TaskStep):
         stored_response, prompt_response = prompt_response, as_of
 
         if prompt_response.error_type:
-            if errored_turn_ungraded():
+            if errored_turn_ungraded(prompt_response.error_type):
                 raise AgentTurnError(self.verifier_id, self.prompt_id, prompt_response.error_type)
             logger.warning(f"Skipping verification '{self.verifier_id}': prompt had error_type={prompt_response.error_type}")
             self._write_skipped_entries(
