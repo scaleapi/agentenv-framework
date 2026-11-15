@@ -33,7 +33,8 @@ PROFILE = ".config/chromium"
 #: How long the site serves, an effect may take to show and how often it's asked meanwhile.
 SERVE_S, WAIT_S, POLL_S = 900, 90.0, 0.5
 # Serves, on loopback for the seconds it's given: / as "signed in as <sid> theme <its local storage's theme>" for a
-# request with the sid cookie, else a redirect to /login, titled "login"; and /other, titled "other".
+# request with the sid cookie, else a redirect to /login, titled "login"; /app, a page that routes by its URL's
+# fragment, as "app <sid>", else "app signed out"; and /other, titled "other".
 SERVE_SITE = r"""import http.cookies, http.server, json, sys, threading, time
 class Page(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
@@ -44,7 +45,9 @@ class Page(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
-        if self.path == "/":
+        if self.path == "/app":
+            body = ("<title>app %s</title>" % (sid.value if sid is not None else "signed out")).encode()
+        elif self.path == "/":
             body = ("<title>loading</title><script>document.title = 'signed in as ' + %s + ' theme ' + "
                     "(localStorage.getItem('theme') || 'none')</script>" % json.dumps(sid.value)).encode()
         else:

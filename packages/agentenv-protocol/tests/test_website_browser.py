@@ -13,6 +13,7 @@ import json
 import os
 import signal
 import sys
+from urllib.parse import urldefrag
 
 import pytest
 
@@ -611,11 +612,18 @@ class Navigating(StubDevTools):
     navigation as ``pages`` says by URL: a status and the URL it ends on, then committed and, unless ``no-load``
     follows, loaded, or with ``("redirect", status, url)`` following, sending itself there by script before it loads;
     ``refused``, a network error; ``silent``, never answered, as a page that never answers isn't; or ``stale``, a load
-    event with no commit."""
+    event with no commit. A navigation that stays in a tab's document, to a URL with a fragment that differs from
+    where it is (``at``) in its fragment alone, moves within it and names no loader, as a browser's does; a reload
+    loads where the tab is as a navigation there would, naming no loader either."""
 
     def __init__(self, pages):
         super().__init__({"Target.getTargets": {"targetInfos": []}})
-        self.pages, self.opened, self.loaders = pages, 0, 0
+        self.pages, self.opened, self.loaders, self.urls = pages, 0, 0, {}
+
+    def at(self, target, url):
+        """The tab ``target`` at ``url``, as the browser tells the control."""
+        self.urls[target] = url
+        self.send("Target.targetInfoChanged", _page(target, url))
 
     async def call(self, method, params=None, *, session_id=None, timeout_s=None):
         if method == "Target.createTarget":
@@ -626,10 +634,23 @@ class Navigating(StubDevTools):
             self.send("Target.attachedToTarget", {"sessionId": f"s-{target}", "waitingForDebugger": True,
                                                   **_page(target)})
             return {"targetId": target}
+        if method == "Page.reload":
+            self.calls.append((method, params, session_id))
+            await self._load(self.urls[session_id[2:]], session_id)
+            return {}
         if method != "Page.navigate":
             return await super().call(method, params, session_id=session_id, timeout_s=timeout_s)
         self.calls.append((method, params, session_id))
-        page, target = self.pages[params["url"]], session_id[2:]
+        url, target = params["url"], session_id[2:]
+        if "#" in url and urldefrag(url)[0] == urldefrag(self.urls.get(target, ""))[0]:
+            self.send("Page.navigatedWithinDocument", {"frameId": target, "url": url}, session_id)
+            self.at(target, url)
+            return {"frameId": target}
+        return await self._load(url, session_id)
+
+    async def _load(self, url, session_id):
+        page, target = self.pages[url], session_id[2:]
+        self.urls[target] = url
         self.loaders += 1
         loader, request = f"L{self.loaders}", f"r{self.loaders}"
         if page == "refused":
@@ -734,6 +755,36 @@ async def test_a_start_page_that_sends_itself_elsewhere_before_it_loads_is_judge
     (tab,) = await control.load_start_tabs(["https://shop.test/"], _shop, own_timeout_s=5)
 
     assert (tab["final_url"], tab["status"], tab["outcome"]) == (final, status, outcome)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("at, moved", [("https://shop.test/#/orders", False), ("https://shop.test/#/cart", True)],
+                         ids=["at-its-url", "at-another-route-of-its-page"])
+async def test_a_start_tab_already_on_its_pages_document_is_reloaded_there_and_loads_again(at, moved):
+    url = "https://shop.test/#/orders"
+    devtools = Navigating({url: (200, url)})
+    control = await _started(devtools)
+    devtools.at("start", at)
+
+    (tab,) = await control.load_start_tabs([url], _shop, own_timeout_s=2)
+
+    assert (tab["outcome"], tab["status"], tab["final_url"], tab["error"]) == ("loaded", 200, url, None)
+    assert _sent(devtools, "Page.navigate") == ([({"url": url}, "s-start")] if moved else [])
+    assert _sent(devtools, "Page.reload") == [({}, "s-start")]
+    assert not control._loading
+
+
+@pytest.mark.asyncio
+async def test_a_start_tab_on_another_page_of_its_site_navigates_and_isnt_reloaded():
+    url = "https://shop.test/#/orders"
+    devtools = Navigating({url: (200, url)})
+    control = await _started(devtools)
+    devtools.at("start", "https://shop.test/account")
+
+    (tab,) = await control.load_start_tabs([url], _shop, own_timeout_s=2)
+
+    assert (tab["outcome"], tab["final_url"]) == ("loaded", url)
+    assert (_sent(devtools, "Page.navigate"), _sent(devtools, "Page.reload")) == ([({"url": url}, "s-start")], [])
 
 
 @pytest.mark.asyncio
