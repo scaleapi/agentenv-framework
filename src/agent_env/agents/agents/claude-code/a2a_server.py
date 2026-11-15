@@ -241,7 +241,9 @@ def _write_workspace_archive(archive_path: Path, *, stage_sources: bool = False)
                     count += 1
         return count
 
-    with tarfile.open(archive_path, mode="w:gz", dereference=False) as tar:
+    # Level 0 stores the bytes in a gzip stream: deflate on one core is the save's bottleneck and gains nothing on
+    # media, and the stream stays one that every agent's loader opens.
+    with tarfile.open(archive_path, mode="w:gz", compresslevel=0, dereference=False) as tar:
         # The CLI's state goes in as `.claude` from wherever it lives, so a `/app/.claude` isn't added twice.
         file_count = add_tree(tar, WORKSPACE_DIR, excluded_top_level=frozenset({".claude"}))
         if CLAUDE_STATE_DIR.is_dir():
@@ -250,9 +252,9 @@ def _write_workspace_archive(archive_path: Path, *, stage_sources: bool = False)
 
 
 def _build_workspace_archive(archive_path: Path) -> tuple[int, int]:
-    """``/app`` and the CLI's state as a gzip tar on disk, out of the agent's heap; its file count and size. A file
-    that changes while it's read rebuilds the archive with each file staged first, so it can be skipped. Symlinked
-    directories aren't followed."""
+    """``/app`` and the CLI's state as a tar in an uncompressed gzip stream on disk, out of the agent's heap; its file
+    count and size. A file that changes while it's read rebuilds the archive with each file staged first, so it can be
+    skipped. Symlinked directories aren't followed."""
     if not WORKSPACE_DIR.is_dir():
         raise FileNotFoundError(f"workspace directory does not exist: {WORKSPACE_DIR}")
     try:
