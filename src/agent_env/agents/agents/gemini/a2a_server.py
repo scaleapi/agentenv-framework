@@ -137,6 +137,7 @@ _SNAPSHOT_LOCK_TIMEOUT_S = 0.05
 # the CLI prints each model call's events once that call returns, so the live
 # trajectory advances per call.
 _LITELLM_PROXY_PATH = "/litellm-gemini"
+_UPSTREAM_ERROR_BODY_LOG_LIMIT = 500
 _LITELLM_PROXY_METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH"]
 _PROXY_DROP_REQ_HEADERS = {"host", "content-length", "transfer-encoding", "connection", "keep-alive", "accept-encoding"}
 _PROXY_DROP_RESP_HEADERS = {"content-length", "transfer-encoding", "content-encoding", "connection", "keep-alive"}
@@ -159,7 +160,7 @@ def _log_upstream_error(proxy: str, upstream: httpx.Response) -> None:
     route_text = "".join(f" {name}={value}" for name, value in route.items())
     logger.warning(
         "%s upstream %s: %s event=litellm_upstream_error_response%s",
-        proxy, upstream.status_code, upstream.text[:500], route_text,
+        proxy, upstream.status_code, upstream.text[:_UPSTREAM_ERROR_BODY_LOG_LIMIT], route_text,
         extra={"event": "litellm_upstream_error_response", "proxy": proxy,
                "upstream_status": upstream.status_code, **route},
     )
