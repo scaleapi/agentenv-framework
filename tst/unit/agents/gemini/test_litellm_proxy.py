@@ -191,6 +191,7 @@ def test_an_exception_with_no_message_is_named_in_the_502_and_the_log(caplog, up
     (record,) = [r for r in caplog.records if getattr(r, "event", None) == "litellm_upstream_transport_error"]
     assert (record.proxy, record.error_type) == ("gemini", "ReadTimeout")
     assert "ReadTimeout" in record.getMessage()
+    assert "event=litellm_upstream_transport_error" in record.getMessage()
 
 
 def test_an_unreachable_bridge_upstream_names_the_exception(vertex, client):
@@ -214,8 +215,10 @@ def test_an_error_response_logs_the_litellm_routing_headers_that_are_present(cap
     assert response.status_code == 429
     (record,) = [r for r in caplog.records if getattr(r, "event", None) == "litellm_upstream_error_response"]
     assert record.upstream_status == 429
-    assert (record.__dict__["x-litellm-model-id"], record.__dict__["x-litellm-model-group"]) == ("dep-1", "grp")
-    assert "x-litellm-model-api-base" not in record.__dict__ and "x-litellm-response-cost" not in record.__dict__
+    message = record.getMessage()
+    assert "event=litellm_upstream_error_response" in message
+    assert "x-litellm-model-id=dep-1" in message and "x-litellm-model-group=grp" in message
+    assert "x-litellm-model-api-base" not in message and "x-litellm-response-cost" not in message
 
 
 # ── provider-prefixed models: the chat-completions bridge ────────────────────────

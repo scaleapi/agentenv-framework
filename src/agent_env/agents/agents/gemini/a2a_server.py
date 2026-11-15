@@ -155,16 +155,19 @@ def _litellm_route_headers(headers: httpx.Headers) -> dict[str, str]:
 
 
 def _log_upstream_error(proxy: str, upstream: httpx.Response) -> None:
+    route = _litellm_route_headers(upstream.headers)
+    route_text = "".join(f" {name}={value}" for name, value in route.items())
     logger.warning(
-        "%s upstream %s: %s", proxy, upstream.status_code, upstream.text[:500],
+        "%s upstream %s: %s event=litellm_upstream_error_response%s",
+        proxy, upstream.status_code, upstream.text[:500], route_text,
         extra={"event": "litellm_upstream_error_response", "proxy": proxy,
-               "upstream_status": upstream.status_code, **_litellm_route_headers(upstream.headers)},
+               "upstream_status": upstream.status_code, **route},
     )
 
 
 def _log_transport_error(proxy: str, exc: Exception) -> str:
     detail = _describe_transport_error(exc)
-    logger.warning("%s upstream request failed: %s", proxy, detail,
+    logger.warning("%s upstream request failed: %s event=litellm_upstream_transport_error", proxy, detail,
                    extra={"event": "litellm_upstream_transport_error", "proxy": proxy,
                           "error_type": type(exc).__name__})
     return detail
