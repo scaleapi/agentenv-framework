@@ -380,19 +380,7 @@ def test_a_stored_step_without_the_artifact_id_key_loads():
     assert mod.SnapshotAgentStateTaskStep.from_dict(data).artifact_id is None
 
 
-def test_a_save_defaults_to_the_budget_of_a_call_that_moves_objects():
-    from agent_env.a2a_agent.object_transfer import TRANSFER_TIMEOUT_SECONDS
-
-    data = _per_run_step().to_dict()
-    del data["timeout_seconds"]
-
-    assert _per_run_step().timeout_seconds == TRANSFER_TIMEOUT_SECONDS
-    assert mod.SnapshotAgentStateTaskStep.from_dict(data).timeout_seconds == TRANSFER_TIMEOUT_SECONDS
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(("configured", "expected"), [(None, 600), (45, 45)])
-async def test_the_save_waits_for_the_steps_timeout_seconds(monkeypatch, configured, expected):
+async def _waited_for(monkeypatch, step) -> float:
     waited: list[float] = []
 
     async def _capture(*, timeout_seconds, artifact_id, **_):
@@ -402,10 +390,34 @@ async def test_the_save_waits_for_the_steps_timeout_seconds(monkeypatch, configu
         )
 
     monkeypatch.setattr(agent_state_capture, "capture_workspace", _capture)
-    step = _per_run_step()
-    if configured is not None:
-        step.timeout_seconds = configured
-
     await step.execute(_run_ctx("inst-a"))
+    (seconds,) = waited
+    return seconds
 
-    assert waited == [expected]
+
+@pytest.mark.asyncio
+async def test_a_step_built_without_a_timeout_omits_it_and_waits_the_transfer_budget(monkeypatch):
+    stored = _per_run_step().to_dict()
+
+    assert "timeout_seconds" not in stored
+    assert await _waited_for(monkeypatch, mod.SnapshotAgentStateTaskStep.from_dict(stored)) == 600
+
+
+@pytest.mark.asyncio
+async def test_a_stored_step_carrying_the_old_default_waits_the_transfer_budget(monkeypatch):
+    stored = {**_per_run_step().to_dict(), "timeout_seconds": 120}
+
+    step = mod.SnapshotAgentStateTaskStep.from_dict(stored)
+
+    assert "timeout_seconds" not in step.to_dict()
+    assert await _waited_for(monkeypatch, step) == 600
+
+
+@pytest.mark.asyncio
+async def test_a_chosen_timeout_round_trips_and_bounds_the_save(monkeypatch):
+    stored = mod.SnapshotAgentStateTaskStep(
+        id="t-agent-snapshot", version=None, artifact_id=None, prompt_id="main", agent_name="agent", timeout_seconds=45,
+    ).to_dict()
+
+    assert stored["timeout_seconds"] == 45
+    assert await _waited_for(monkeypatch, mod.SnapshotAgentStateTaskStep.from_dict(stored)) == 45

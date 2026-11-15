@@ -57,6 +57,9 @@ class SnapshotAgentStateTaskStep(TaskStep):
     )
     # A save moves the workspace, so it gets the budget of a call that moves objects.
     DEFAULT_TIMEOUT_SECONDS: ClassVar[int] = TRANSFER_TIMEOUT_SECONDS
+    # to_dict once wrote the default into every stored step, so a stored 120 cannot be told apart
+    # from a chosen one. Reading it as unset lets those steps pick up the current default.
+    _LEGACY_DEFAULT_TIMEOUT_SECONDS: ClassVar[int] = 120
 
     def __init__(
         self,
@@ -67,7 +70,7 @@ class SnapshotAgentStateTaskStep(TaskStep):
         agent_name: Optional[str] = None,
         env_id: Optional[str] = None,
         universe_artifact_id: Optional[str] = None,
-        timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+        timeout_seconds: Optional[int] = None,
         depends_on: Optional[list[TaskStepDependency]] = None,
         fail_task_on_error: bool = True,
     ):
@@ -92,11 +95,13 @@ class SnapshotAgentStateTaskStep(TaskStep):
         base["agent_name"] = self.agent_name
         base["env_id"] = self.env_id
         base["universe_artifact_id"] = self.universe_artifact_id
-        base["timeout_seconds"] = self.timeout_seconds
+        if self.timeout_seconds is not None:
+            base["timeout_seconds"] = self.timeout_seconds
         return base
 
     @classmethod
     def from_dict(cls, data: dict) -> SnapshotAgentStateTaskStep:
+        stored_timeout = data.get("timeout_seconds")
         return cls(
             **cls._base_from_dict(data),
             artifact_id=data.get("artifact_id"),
@@ -104,7 +109,7 @@ class SnapshotAgentStateTaskStep(TaskStep):
             agent_name=data.get("agent_name"),
             env_id=data.get("env_id"),
             universe_artifact_id=data.get("universe_artifact_id"),
-            timeout_seconds=data.get("timeout_seconds", cls.DEFAULT_TIMEOUT_SECONDS),
+            timeout_seconds=None if stored_timeout == cls._LEGACY_DEFAULT_TIMEOUT_SECONDS else stored_timeout,
         )
 
     @property
@@ -154,7 +159,7 @@ class SnapshotAgentStateTaskStep(TaskStep):
             agent_name=self.agent_name,
             a2a_context_id=a2a_context_id,
             artifact_id=self._resolve_artifact_id(context),
-            timeout_seconds=self.timeout_seconds,
+            timeout_seconds=self.DEFAULT_TIMEOUT_SECONDS if self.timeout_seconds is None else self.timeout_seconds,
             sandbox_type=deployed.sandbox_type,
         )
 
