@@ -7,7 +7,7 @@ import dataclasses
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from agent_env.config.loader import ENV_REF_PREFIX, SECRET_REF_PREFIX
 from agent_env.env.env import DeployedEnv
@@ -53,6 +53,21 @@ class StepContextError(RuntimeError):
     """The run's context can't satisfy a step: something the step needs from an earlier step is missing, or
     something it would create is already there. Running the step again on the same context fails the same
     way, so a runner should not retry it."""
+
+
+ModelKeyCause = Literal["budget", "auth"]
+
+MODEL_KEY_ERROR_TYPES: dict[str, ModelKeyCause] = {"model_key_budget": "budget", "model_key_auth": "auth"}
+
+
+class ModelKeyUnusable(RuntimeError):
+    """The model endpoint refused the run's key as out of budget or not authorized. The same key fails the same
+    way on every attempt, so a runner should not retry it. Carries no key material."""
+
+    def __init__(self, cause: ModelKeyCause, where: str) -> None:
+        super().__init__(f"The model key is unusable ({cause}) for the {where}; retrying with it cannot succeed")
+        self.cause = cause
+        self.where = where
 
 
 class VerifierNotPassingError(RuntimeError):

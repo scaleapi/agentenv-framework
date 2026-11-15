@@ -37,7 +37,13 @@ from agent_env.task.store import (
     set_task_instance_store,
 )
 from agent_env.task.task import Task, _rolled_back_sandboxes
-from agent_env.task_step.context import DeployedAgent, DeployedSandbox, PromptResponse, TaskStepContext
+from agent_env.task_step.context import (
+    DeployedAgent,
+    DeployedSandbox,
+    ModelKeyUnusable,
+    PromptResponse,
+    TaskStepContext,
+)
 from agent_env.task_step.context_ops import ContextUpdateOps, build_context_update_ops
 from agent_env.task_step.task_step import RetryConfig
 from agent_env.config import set_document_store
@@ -1110,3 +1116,23 @@ def test_validate_dag_accepts_ancestor_resume_point():
     c = _FlakyPrompt("c", retry_config=RetryConfig(retry_from_step_id="a"), depends_on=["a"])
     # Should not raise.
     Task(id="t", version=1, steps=[a, c])
+
+
+class _DeadKeyPrompt(_FlakyPrompt):
+    async def execute(self, context: TaskStepContext) -> TaskStepContext:
+        self.attempts += 1
+        raise ModelKeyUnusable("budget", "agent")
+
+
+@pytest.mark.asyncio
+async def test_a_step_whose_model_key_is_unusable_is_not_retried(store):
+    deploy = _FakeDeployEnv("s0")
+    dead = _DeadKeyPrompt("s1", retry_config=RetryConfig(retry_from_step_id="s0", max_retries=3))
+    task = Task(id="t", version=1, steps=[deploy, dead])
+
+    ctx = TaskStepContext()
+    with pytest.raises(ModelKeyUnusable):
+        await task.run(context=ctx)
+
+    assert dead.attempts == 1
+    assert store.get(ctx.instance_id).status == "failed"
