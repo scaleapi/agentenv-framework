@@ -140,6 +140,34 @@ _LITELLM_PROXY_PATH = "/litellm-gemini"
 _LITELLM_PROXY_METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH"]
 _PROXY_DROP_REQ_HEADERS = {"host", "content-length", "transfer-encoding", "connection", "keep-alive", "accept-encoding"}
 _PROXY_DROP_RESP_HEADERS = {"content-length", "transfer-encoding", "content-encoding", "connection", "keep-alive"}
+_LITELLM_ROUTE_HEADERS = ("x-litellm-model-id", "x-litellm-model-api-base", "x-litellm-model-group")
+
+
+def _describe_transport_error(exc: Exception) -> str:
+    """Name the exception class: many httpx errors (ReadTimeout, RemoteProtocolError) stringify to ''."""
+    text = str(exc)
+    return f"{type(exc).__name__}: {text}" if text else repr(exc)
+
+
+def _litellm_route_headers(headers: httpx.Headers) -> dict[str, str]:
+    """The headers by which LiteLLM names the deployment that served (or failed) a call, when it sent them."""
+    return {name: headers[name] for name in _LITELLM_ROUTE_HEADERS if name in headers}
+
+
+def _log_upstream_error(proxy: str, upstream: httpx.Response) -> None:
+    logger.warning(
+        "%s upstream %s: %s", proxy, upstream.status_code, upstream.text[:500],
+        extra={"event": "litellm_upstream_error_response", "proxy": proxy,
+               "upstream_status": upstream.status_code, **_litellm_route_headers(upstream.headers)},
+    )
+
+
+def _log_transport_error(proxy: str, exc: Exception) -> str:
+    detail = _describe_transport_error(exc)
+    logger.warning("%s upstream request failed: %s", proxy, detail,
+                   extra={"event": "litellm_upstream_transport_error", "proxy": proxy,
+                          "error_type": type(exc).__name__})
+    return detail
 
 
 class GeminiConfig(AgentConfig):
@@ -347,9 +375,9 @@ async def _vertex_openai_bridge(
                 headers=headers, content=json.dumps(oai_req).encode(),
             )
     except httpx.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"vertex bridge upstream failed: {e}")
+        raise HTTPException(status_code=502, detail=f"vertex bridge upstream failed: {_log_transport_error('vertex bridge', e)}")
     if upstream.status_code >= 400:
-        logger.warning("vertex bridge upstream %s: %s", upstream.status_code, upstream.text[:500])
+        _log_upstream_error("vertex bridge", upstream)
         return Response(
             content=upstream.content, status_code=upstream.status_code,
             media_type=upstream.headers.get("content-type", "application/json"),
@@ -734,7 +762,9 @@ class GeminiAgent(DurableSessionRefs, AgentEnvAgent):
                     params=request.query_params, headers=fwd_headers, content=body,
                 )
         except httpx.HTTPError as e:
-            raise HTTPException(status_code=502, detail=f"gemini upstream request failed: {e}")
+            raise HTTPException(status_code=502, detail=f"gemini upstream request failed: {_log_transport_error('gemini', e)}")
+        if upstream.status_code >= 400:
+            _log_upstream_error("gemini", upstream)
         resp_headers = {k: v for k, v in upstream.headers.items() if k.lower() not in _PROXY_DROP_RESP_HEADERS}
         return Response(content=upstream.content, status_code=upstream.status_code, headers=resp_headers)
 
