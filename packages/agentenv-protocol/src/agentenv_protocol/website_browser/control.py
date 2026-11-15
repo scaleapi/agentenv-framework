@@ -400,7 +400,11 @@ class BrowserControl:
             await asyncio.wait_for(load.moved.wait(), MOVE_WITHIN_S)
         load.reloading = True
         self.causes.navigates_next(target, cause)
-        reloaded = await self.devtools.request("Page.reload", {}, session_id=session)
+        try:
+            reloaded = await self.devtools.request("Page.reload", {}, session_id=session)
+        except BaseException:
+            self.causes.navigated_nowhere(target, cause)
+            raise
         if "error" in reloaded:
             self.causes.navigated_nowhere(target, cause)
         return reloaded

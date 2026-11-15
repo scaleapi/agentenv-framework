@@ -617,9 +617,13 @@ class Navigating(StubDevTools):
     browser spells both (``_document``), moves within it and names no loader, as a browser's does; a reload loads where
     the tab is as a navigation there would, naming no loader either."""
 
-    def __init__(self, pages):
+    #: How long after the browser answers them a move within a document lands, and a reload starts loading.
+    MOVE_LANDS_S, RELOAD_LOADS_S = 0.05, 0.01
+
+    def __init__(self, pages, reload_answers=True):
         super().__init__({"Target.getTargets": {"targetInfos": []}})
         self.pages, self.opened, self.loaders, self.urls, self.pending = pages, 0, 0, {}, []
+        self.reload_answers = reload_answers
 
     def at(self, target, url):
         """The tab ``target`` at ``url``, as the browser tells the control."""
@@ -637,6 +641,8 @@ class Navigating(StubDevTools):
             return {"targetId": target}
         if method == "Page.reload":
             self.calls.append((method, params, session_id))
+            if not self.reload_answers:
+                await asyncio.Event().wait()
             self.pending.append(asyncio.ensure_future(self._reload(self.urls[session_id[2:]], session_id)))
             return {}
         if method != "Page.navigate":
@@ -650,13 +656,13 @@ class Navigating(StubDevTools):
 
     async def _move_within(self, target, url, session_id):
         """A move within a tab's document, which the browser answers before it lands."""
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(self.MOVE_LANDS_S)
         self.send("Page.navigatedWithinDocument", {"frameId": target, "url": url}, session_id)
         self.at(target, url)
 
     async def _reload(self, url, session_id):
         """A reload, which the browser answers before it commits."""
-        await asyncio.sleep(0.01)
+        await asyncio.sleep(self.RELOAD_LOADS_S)
         await self._load(url, session_id)
 
     async def _load(self, url, session_id):
@@ -810,6 +816,20 @@ async def test_a_start_tab_whose_reload_fails_before_it_commits_fails_at_once_na
 
     assert (tab["outcome"], tab["error"]) == ("failed", "net::ERR_ABORTED")
     assert loop.time() - started < 1
+
+
+@pytest.mark.asyncio
+async def test_a_start_tab_whose_reload_never_answers_times_out_and_leaves_no_cause_for_a_later_navigation():
+    url = "https://shop.test/#/orders"
+    devtools = Navigating({url: (200, url)}, reload_answers=False)
+    control = await _started(devtools)
+    devtools.at("start", url)
+
+    (tab,) = await control.load_start_tabs([url], _shop, own_timeout_s=0.5)
+    await asyncio.sleep(0)
+
+    assert tab["outcome"] == "timed_out"
+    assert "start" not in control.causes._next
 
 
 @pytest.mark.asyncio
