@@ -1,14 +1,15 @@
-"""What a step failure means for its run: the role the failed step played and why it failed.
+"""What a step failure means for its run: the role the failed step played, why it failed, and whether the completed
+run is degraded.
 
 A tolerated failure (``fail_task_on_error=False``) lets the run complete, so these facts are the only record of what
-the run lost. Each ``context.metadata.failed_steps`` entry carries them.
+the run lost. Each ``context.metadata.failed_steps`` entry carries them, and a completed run's ``quality`` sums them up.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
-from dataclasses import dataclass
+from collections.abc import Iterable, Iterator, Mapping
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
@@ -20,7 +21,7 @@ from agent_env.task_step.task_step import StepRole
 if TYPE_CHECKING:
     from agent_env.task_step.task_step import TaskStep
 
-__all__ = ["FailedStep", "FailureCause", "StepRole", "classify_failure"]
+__all__ = ["FailedStep", "FailureCause", "RunQuality", "StepRole", "classify_failure", "run_quality"]
 
 
 class FailureCause(StrEnum):
@@ -128,6 +129,24 @@ class FailedStep:
             cause=classify_failure(exc),
         )
 
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> FailedStep:
+        """An entry as stored. One written before ``step_role`` and ``cause`` existed, or holding a value this version
+        does not know, reads as ``other`` and ``unknown``."""
+        return cls(
+            step_id=data.get("step_id", ""),
+            step_type=data.get("step_type", ""),
+            error=data.get("error", ""),
+            error_type=data.get("error_type", ""),
+            started_at_utc=data.get("started_at_utc", ""),
+            duration_seconds=data.get("duration_seconds", 0.0),
+            is_fatal=bool(data.get("is_fatal", True)),
+            retried=bool(data.get("retried", False)),
+            step_role=StepRole(data["step_role"]) if data.get("step_role") in _ROLES else StepRole.OTHER,
+            cause=FailureCause(data["cause"]) if data.get("cause") in _CAUSES else FailureCause.UNKNOWN,
+            resolved_by=data.get("resolved_by"),
+        )
+
     def to_dict(self) -> dict[str, Any]:
         """The stored form: the keys every reader already knows, plus ``step_role`` and ``cause``. ``retried`` and
         ``resolved_by`` appear only once set, as ``retried`` always has."""
@@ -144,3 +163,37 @@ class FailedStep:
             out["resolved_by"] = self.resolved_by
         return out
 
+
+_ROLES = frozenset(StepRole)
+_CAUSES = frozenset(FailureCause)
+# Most severe first: a run with no grade is worse than one missing its agent's turn, which is worse than one missing
+# evidence.
+_SEVERITY = (StepRole.GRADER, StepRole.AGENT, StepRole.EVIDENCE, StepRole.OTHER)
+
+
+@dataclass(frozen=True)
+class RunQuality:
+    """How much of a completed run is usable. ``reasons`` holds the roles of the steps whose failure the run tolerated
+    and nothing has repaired, most severe first; a run with none is clean."""
+
+    reasons: tuple[StepRole, ...] = ()
+    # Derived, never passed, so it cannot disagree with ``reasons``; a field so ``asdict`` matches the stored form.
+    degraded: bool = field(init=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "degraded", bool(self.reasons))
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any] | None) -> RunQuality:
+        """``quality`` as stored. A run completed before ``quality`` existed has none and reads as clean."""
+        roles = {StepRole(r) for r in (data or {}).get("reasons", ()) if r in _ROLES}
+        return cls(tuple(r for r in _SEVERITY if r in roles))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"degraded": self.degraded, "reasons": [r.value for r in self.reasons]}
+
+
+def run_quality(failed_steps: Iterable[FailedStep]) -> RunQuality:
+    """A fatal failure fails the run instead, and a retried or resolved one lost nothing."""
+    open_roles = {f.step_role for f in failed_steps if not f.is_fatal and not f.retried and f.resolved_by is None}
+    return RunQuality(tuple(r for r in _SEVERITY if r in open_roles))
