@@ -269,6 +269,10 @@ async def test_two_computers_keep_serving_through_restarts_and_a_failed_redeploy
             started = await _answers(deployed, every)
             _docker("restart", _gateway(deployed, made))
             restarted = await _answers(deployed, every)
+            # The restarted gateway still passes the multi env's token on to each computer, which takes it.
+            reached = [(await deployed.invoke(COMPUTER_EXEC, "run", {
+                "argv": ["true"], "request_id": uuid.uuid4().hex, "timeout_s": 30}, environment_name=name))["exit_code"]
+                for name in ("desktop", "laptop")]
 
             deployed_before = _containers_made(made)
             real = EnvironmentGatewayProvider._compose_up
@@ -292,6 +296,7 @@ async def test_two_computers_keep_serving_through_restarts_and_a_failed_redeploy
     assert all(both.values()), both
     assert killed == {"list_items": True, "desktop_computer_screenshot": False, "laptop_computer_screenshot": True}
     assert all(started.values()) and all(restarted.values()), (started, restarted)
+    assert reached == [0, 0]
     assert after_failure == deployed_before and all(still.values()), (after_failure - deployed_before, still)
     assert kept == [deployed.child_envs[name]["sandbox_id"] for name in ("desktop", "laptop")]
     assert _containers_made(made) == set()
