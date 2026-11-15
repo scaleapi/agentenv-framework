@@ -275,11 +275,12 @@ class Relay:
     who connected when, and what the guard did to their commands. ``dialogs_answered`` says agentenv answers the
     browser's dialogs itself. With a ``log``, each command is an entry in it, on the tab its session is on, and
     ``control``, agentenv's own connection, tells its tab's URL, whether a password field has focus there, and what
-    causes the tab events a command brings. An agent's tool call a driver serves through a CDP user's connections,
-    such as Playwright MCP's, is an entry too, which that user's commands are credited to while it's open. With
-    ``contexts``, a context a connection makes is leased to its user, only one it made may it dispose, and a lease's
-    downloads stay in its folder. A connection is scoped to a lease or to the default context, and sees only its scope
-    and the contexts its user made (``scope``)."""
+    causes the tab events a command brings; an agent's disposal of a context waits for ``control``'s own pages open
+    there to close (``BrowserControl.disposing``), and its connection's later commands wait with it. An agent's tool
+    call a driver serves through a CDP user's connections, such as Playwright MCP's, is an entry too, which that user's
+    commands are credited to while it's open. With ``contexts``, a context a connection makes is leased to its user,
+    only one it made may it dispose, and a lease's downloads stay in its folder. A connection is scoped to a lease or to
+    the default context, and sees only its scope and the contexts its user made (``scope``)."""
 
     def __init__(self, devtools: DevToolsPipe, *, dialogs_answered: bool = False, log: Optional[BrowserLog] = None,
                  control: Optional[BrowserControl] = None, contexts: Optional[Contexts] = None) -> None:
@@ -400,6 +401,7 @@ class Relay:
         logged = self._begin(connection, session, method, params)
         answer, guarded = {"error": {"code": SERVER_ERROR, "message": ENDED_UNANSWERED}}, None
         sending: Optional[asyncio.Future] = None
+        disposal = contextlib.AsyncExitStack()
         replied = False
 
         def reply(answer: dict) -> None:
@@ -423,6 +425,9 @@ class Relay:
                 elif verdict.action != "send":
                     answer = {"result": {}}
                 else:
+                    if method == ENDS_CONTEXT and self.control is not None and \
+                            isinstance(context := verdict.params.get("browserContextId"), str):
+                        await disposal.enter_async_context(self.control.disposing(context))
                     sending = asyncio.ensure_future(self.devtools.request(method, verdict.params, session_id=session,
                                                                           answered=reply))
                     await asyncio.sleep(0)
@@ -441,6 +446,7 @@ class Relay:
         finally:
             if sending is not None and not sending.done():
                 sending.cancel()
+            await disposal.aclose()
             if logged is not None:
                 logged.finish(answer, guarded)
 

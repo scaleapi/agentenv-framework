@@ -133,15 +133,17 @@ class Contexts:
         return lease
 
     async def release(self, label: str) -> bool:
-        """The lease ``label`` ended: its context disposed, which closes its tabs, and its folder deleted. Whether
-        there was one: releasing a label that isn't leased does nothing, so a retried step is harmless."""
+        """The lease ``label`` ended: its context disposed once agentenv's own pages in it have closed, which closes its
+        tabs, and its folder deleted. Whether there was one: releasing a label that isn't leased does nothing, so a
+        retried step is harmless."""
         async with self._lock:
             if (lease := self.leases.pop(label, None)) is None:
                 return False
             self.control.closing_context(lease.id)
             self._ended(lease)
-            with contextlib.suppress(DevToolsError):
-                await self.devtools.call("Target.disposeBrowserContext", {"browserContextId": lease.id})
+            async with self.control.disposing(lease.id):
+                with contextlib.suppress(DevToolsError):
+                    await self.devtools.call("Target.disposeBrowserContext", {"browserContextId": lease.id})
             await asyncio.to_thread(shutil.rmtree, lease.folder(self.home()), True)
         return True
 
