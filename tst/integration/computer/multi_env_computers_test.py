@@ -2,8 +2,8 @@
 
 The deploy_env step deploys each computer on a sandbox of its own and the gateway in front of them all. Through the
 gateway's one /mcp an agent sees the server's tools and each computer's under its name, takes screenshots by those names,
-and a role rule narrows them as it would a server's; /svc/<computer>/ reaches the computer, its framework-only routes
-with its own token. A later process reattaches the
+and a role rule narrows them as it would a server's; /svc/<computer>/ reaches the computer, which boots with the
+multi env's control token, its framework-only routes too. A later process reattaches the
 computers from the multi env's record, and the run's teardown leaves nothing up. Two computers keep serving through a
 computer's restart and the gateway's, a failed redeploy leaves the earlier deployment serving, and a computer that fails
 mid-deploy, or an entry the multi env refuses, leaves nothing up. Needs Docker and the local registry on localhost:5000."""
@@ -230,6 +230,7 @@ async def test_a_computer_in_a_multi_env_is_served_through_its_gateway_under_its
     assert _containers(computer["sandbox_id"]) == []
     assert json.dumps(deployed.child_envs)  # the record stores as JSON
     assert note == through_gateway == "from the universe" and "snap-x" in listed_items
+    assert computer["control_token"] == deployed.control_token  # one token for the multi env, which the gateway passes on
     assert {"items", "desktop"} <= set(snapshot) and snapshot["desktop"]["Documents/note.txt"] == b"from the universe"
     # The gateway states each child's environment_name, which lookups, servers and snapshots go by: the shop
     # website's card is named webitems.

@@ -82,6 +82,18 @@ async def test_no_route_behind_the_gateway_reads_its_token(value, seen):
     assert response.json() == {"authorization": seen}
 
 
+@pytest.mark.parametrize("path, kept", [
+    ("/svc/desktop/agentenv/ext/computer-exec", True), ("/svc/desktop", True), ("/clock/watch", True),
+    ("/svc/mcp-items/agentenv", False), ("/svc/desktop-2/agentenv", False), ("/website/desktop/", False),
+    ("/state", False)])
+def test_its_token_goes_on_only_to_the_computers_it_fronts_and_to_its_clock_watch(path, kept):
+    """A multi env's computers boot with the gateway's token and take it on their /svc routes, and send it to its clock
+    watch as their read token; every other request loses it."""
+    gw = Gateway(host="127.0.0.1", port=0, server_name="unit", internal_mcp_servers=[], control_token=TOKEN,
+                 control_token_children=["desktop"])
+    assert gw._keeps_control_token(path) is kept
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", sorted(CONTROL))
 async def test_a_gateway_started_without_a_token_checks_none(path):
