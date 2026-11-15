@@ -611,14 +611,15 @@ class Navigating(StubDevTools):
     """A browser whose first tab is ``start`` and whose new tabs are t1, t2, …, each attached as it opens, answering a
     navigation as ``pages`` says by URL: a status and the URL it ends on, then committed and, unless ``no-load``
     follows, loaded, or with ``("redirect", status, url)`` following, sending itself there by script before it loads;
-    ``refused``, a network error; ``aborted``, a document request that fails before it commits; ``silent``, never answered, as a page that never answers isn't; or ``stale``, a load
-    event with no commit. A navigation that stays in a tab's document, to a URL with a fragment that differs from where
-    it is (``at``) in its fragment alone, as a browser spells both (``_document``), moves within it and names no loader,
-    as a browser's does; a reload loads where the tab is as a navigation there would, naming no loader either."""
+    ``refused``, a network error; ``aborted``, a document request that fails before it commits; ``silent``, never
+    answered, as a page that never answers isn't; or ``stale``, a load event with no commit. A navigation that stays in
+    a tab's document, to a URL with a fragment that differs from where it is (``at``) in its fragment alone, as a
+    browser spells both (``_document``), moves within it and names no loader, as a browser's does; a reload loads where
+    the tab is as a navigation there would, naming no loader either."""
 
     def __init__(self, pages):
         super().__init__({"Target.getTargets": {"targetInfos": []}})
-        self.pages, self.opened, self.loaders, self.urls, self.reloading = pages, 0, 0, {}, None
+        self.pages, self.opened, self.loaders, self.urls, self.pending = pages, 0, 0, {}, []
 
     def at(self, target, url):
         """The tab ``target`` at ``url``, as the browser tells the control."""
@@ -636,17 +637,22 @@ class Navigating(StubDevTools):
             return {"targetId": target}
         if method == "Page.reload":
             self.calls.append((method, params, session_id))
-            self.reloading = asyncio.ensure_future(self._reload(self.urls[session_id[2:]], session_id))
+            self.pending.append(asyncio.ensure_future(self._reload(self.urls[session_id[2:]], session_id)))
             return {}
         if method != "Page.navigate":
             return await super().call(method, params, session_id=session_id, timeout_s=timeout_s)
         self.calls.append((method, params, session_id))
         url, target = params["url"], session_id[2:]
         if "#" in url and _document(url) == _document(self.urls.get(target, "")):
-            self.send("Page.navigatedWithinDocument", {"frameId": target, "url": url}, session_id)
-            self.at(target, url)
+            self.pending.append(asyncio.ensure_future(self._move_within(target, url, session_id)))
             return {"frameId": target}
         return await self._load(url, session_id)
+
+    async def _move_within(self, target, url, session_id):
+        """A move within a tab's document, which the browser answers before it lands."""
+        await asyncio.sleep(0.05)
+        self.send("Page.navigatedWithinDocument", {"frameId": target, "url": url}, session_id)
+        self.at(target, url)
 
     async def _reload(self, url, session_id):
         """A reload, which the browser answers before it commits."""

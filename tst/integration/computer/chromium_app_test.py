@@ -5,16 +5,17 @@ policies are where Chrome for Testing reads them; and a reset of its data clears
 website browser it runs Chrome itself with agentenv's flags on its debugging pipe, its computer's /dev/shm the 1 GiB it
 asks for, as a container or a disk, so Chrome keeps its shared memory there, a reset_env too, answers location prompts
 and leaves notification ones to ask as the deploy says, and its menu launcher, run while it runs, opens another window
-of it with no second copy, its cache kept and it still ready; and the
-desktop that gives it French defaults deploys with them, a deploy's time zone over them, each recorded; and the record
-its control connection keeps lists a tab an agent opened and closed, a download with its size and sha256, a confirm()
-accepted for it, and each launch, exit and stop with its cause, across a kill and a restart of its server; and browser/v1 reads and sets its
-cookies, local storage and downloads; and its data plane signs it in, snapshots it, resets it and loads a
-snapshot back, a load of cookies alone reloading a start tab on a hash route so its page reads them, the tab on its
-start URL or on another route of its page; and the browser task steps set its cookies and storage and open, activate and close its tabs by URL.
-Its start tabs open in order, the first active, a deploy recording each one's outcome and going on past a live page
-that never answers; and with the run's sites routed to it, a start tab on one must load, judged by the page it
-lands on when it sends itself elsewhere before it loads, so a site answering 503 fails the deploy, naming it. Needs Docker and the local registry on localhost:5000."""
+of it with no second copy, its cache kept and it still ready; and the desktop that gives it French defaults deploys with
+them, a deploy's time zone over them, each recorded; and the record its control connection keeps lists a tab an agent
+opened and closed, a download with its size and sha256, a confirm() accepted for it, and each launch, exit and stop with
+its cause, across a kill and a restart of its server; and browser/v1 reads and sets its cookies, local storage and
+downloads; and its data plane signs it in, snapshots it, resets it and loads a snapshot back, a load of cookies alone
+reloading a start tab on a hash route so its page reads them, the tab on its start URL or on another route of its page;
+and the browser task steps set its cookies and storage and open, activate and close its tabs by URL. Its start tabs open
+in order, the first active, a deploy recording each one's outcome and going on past a live page that never answers; and
+with the run's sites routed to it, a start tab on one must load, judged by the page it lands on when it sends itself
+elsewhere before it loads, so a site answering 503 fails the deploy, naming it. Needs Docker and the local registry on
+localhost:5000."""
 
 import asyncio
 import hashlib

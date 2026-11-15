@@ -33,6 +33,8 @@ PIN_TIMEOUT_S = 10.0
 ARRIVAL_POLL_S = 0.05
 #: How long a start tab on a site the env doesn't serve may take to load before it's left loading.
 LIVE_START_TAB_TIMEOUT_S = 30.0
+#: How long a start tab's move within its document may take to land after the browser answers it, before its reload.
+MOVE_WITHIN_S = 5.0
 #: How a start tab settled.
 LOADED, FAILED, TIMED_OUT = "loaded", "failed", "timed_out"
 #: How much of a download each read hashes.
@@ -377,8 +379,9 @@ class BrowserControl:
     async def _start_navigation(self, target: str, load: _StartLoad, session: str) -> dict:
         """``load``'s tab sent to its URL, which the log says who asked for: the browser's answer. A tab already on the
         URL's document, as a hash-routed page is, only moves within it, which loads nothing and names no loader, so the
-        page wouldn't read what a load just set: it's reloaded there, the load taking its main frame's first commit
-        after for its document, and the log that navigation for the reload."""
+        page wouldn't read what a load just set: it's reloaded there once the move has landed, which the browser
+        answers before it does (else the reload loads where the tab was), the load taking its main frame's first
+        document after for its own, and the log that navigation for the reload."""
         cause, landed = _cause(), asyncio.get_running_loop().create_future()
         self.causes.navigating(target, landed, cause)
         try:
@@ -393,6 +396,8 @@ class BrowserControl:
         landed.set_result(result.get("loaderId"))
         if result.get("loaderId"):
             return answer
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(load.moved.wait(), MOVE_WITHIN_S)
         load.reloading = True
         self.causes.navigates_next(target, cause)
         reloaded = await self.devtools.request("Page.reload", {}, session_id=session)
@@ -1076,8 +1081,10 @@ class BrowserControl:
 
     def _on_Page_navigatedWithinDocument(self, params: dict, session: Optional[str]) -> None:
         """A tab's page moving to another URL of its document, a fragment or its history API: a command's, when one
-        asked for it, else its page's."""
+        asked for it, else its page's; a start tab's move before its reload."""
         target = self._sessions.get(session)
+        if (load := self._loading.get(session)) is not None and params.get("frameId") == target:
+            load.moved.set()
         if self.log is not None and target in self.tabs and params.get("frameId") == target:
             self._spawn(self._log_navigated(self.log.reserve(), log_time(), target, params.get("url", ""), False))
 
@@ -1273,6 +1280,7 @@ class _StartLoad:
     settled: asyncio.Event = field(default_factory=asyncio.Event)
     navigating: Optional[asyncio.Future] = None
     reloading: bool = False
+    moved: asyncio.Event = field(default_factory=asyncio.Event)
 
     def answered(self, navigating: asyncio.Future) -> None:
         """The browser's answer to its navigation: its loader, or why it couldn't navigate."""
