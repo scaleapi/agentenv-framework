@@ -33,6 +33,8 @@ PIN_TIMEOUT_S = 10.0
 ARRIVAL_POLL_S = 0.05
 #: How long a start tab on a site the env doesn't serve may take to load before it's left loading.
 LIVE_START_TAB_TIMEOUT_S = 30.0
+#: How long a start tab's move within its document may take to land after the browser answers it, before its reload.
+MOVE_WITHIN_S = 5.0
 #: How a start tab settled.
 LOADED, FAILED, TIMED_OUT = "loaded", "failed", "timed_out"
 #: How much of a download each read hashes.
@@ -326,7 +328,8 @@ class BrowserControl:
         as ``site_of`` names them, an error status is too, or once it has been waited on ``own_timeout_s`` on such a
         site, else ``live_timeout_s``. Each tab's outcome, in order, kept though the browser has gone and the first
         can't come to the front. A page already loaded doesn't read cookies set after it, so a tab a load signed in
-        shows it only once it loads again."""
+        shows it only once it loads again: a tab already on its URL's document, as a hash-routed page, is reloaded
+        there, since going to the URL alone only moves within the document (``_start_navigation``)."""
         if not urls:
             return []
         targets = [target for target, tab in self.tabs.items()
@@ -357,7 +360,8 @@ class BrowserControl:
     async def _start_load(self, target: str, url: str, site: Optional[str]) -> _StartLoad:
         """The tab ``target`` sent to ``url``, its navigation followed by what the browser says of it. The browser
         answers a navigation once it commits, which a page that never answers never does, so its answer is awaited
-        apart, for as long as the tab is."""
+        apart, for as long as the tab is, and a navigation that stays in the tab's document is followed by a reload
+        (``_start_navigation``)."""
         session = next((s for s, t in self._sessions.items() if t == target), None)
         if session is None:
             raise DeviceUnavailable(f"the browser's tab {target} has no session to load a start tab in")
@@ -368,13 +372,42 @@ class BrowserControl:
             load.error = f"{type(e).__name__}: {e}"
             load.check()
             return load
-        landed = asyncio.get_running_loop().create_future()
-        self.causes.navigating(target, landed, _cause())
-        load.navigating = asyncio.ensure_future(self.devtools.request("Page.navigate", {"url": url},
-                                                                      session_id=session))
+        load.navigating = asyncio.ensure_future(self._start_navigation(target, load, session))
         load.navigating.add_done_callback(load.answered)
-        load.navigating.add_done_callback(lambda done: _landed_at(landed, done))
         return load
+
+    async def _start_navigation(self, target: str, load: _StartLoad, session: str) -> dict:
+        """``load``'s tab sent to its URL, which the log says who asked for: the browser's answer. A tab already on the
+        URL's document, as a hash-routed page is, only moves within it, which loads nothing and names no loader, so the
+        page wouldn't read what a load just set: it's reloaded there once the move has landed, which the browser
+        answers before it does (else the reload loads where the tab was), the load taking its main frame's first
+        document after for its own, and the log that navigation for the reload."""
+        cause, landed = _cause(), asyncio.get_running_loop().create_future()
+        self.causes.navigating(target, landed, cause)
+        try:
+            answer = await self.devtools.request("Page.navigate", {"url": load.url}, session_id=session)
+        except BaseException:
+            landed.cancel()
+            raise
+        result = answer.get("result") or {}
+        if "error" in answer or result.get("errorText"):
+            landed.cancel()
+            return answer
+        landed.set_result(result.get("loaderId"))
+        if result.get("loaderId"):
+            return answer
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(load.moved.wait(), MOVE_WITHIN_S)
+        load.reloading = True
+        self.causes.navigates_next(target, cause)
+        try:
+            reloaded = await self.devtools.request("Page.reload", {}, session_id=session)
+        except BaseException:
+            self.causes.navigated_nowhere(target, cause)
+            raise
+        if "error" in reloaded:
+            self.causes.navigated_nowhere(target, cause)
+        return reloaded
 
     async def _settled(self, target: str, load: _StartLoad, timeout_s: float) -> dict:
         """``load``'s outcome once it settles, or once it has been waited on ``timeout_s``."""
@@ -1039,6 +1072,8 @@ class BrowserControl:
             self._spawn(self._log_navigated(self.log.reserve(), log_time(), target, frame.get("url", ""),
                                             frame.get("loaderId")))
         if (load := self._loading.get(session)) is not None and not frame.get("parentId") and frame.get("loaderId"):
+            if load.reloading and load.loader is None:
+                load.loader = frame["loaderId"]
             load.commits.append(frame["loaderId"])
             load.check()
 
@@ -1050,14 +1085,18 @@ class BrowserControl:
 
     def _on_Page_navigatedWithinDocument(self, params: dict, session: Optional[str]) -> None:
         """A tab's page moving to another URL of its document, a fragment or its history API: a command's, when one
-        asked for it, else its page's."""
+        asked for it, else its page's; a start tab's move before its reload."""
         target = self._sessions.get(session)
+        if (load := self._loading.get(session)) is not None and params.get("frameId") == target:
+            load.moved.set()
         if self.log is not None and target in self.tabs and params.get("frameId") == target:
             self._spawn(self._log_navigated(self.log.reserve(), log_time(), target, params.get("url", ""), False))
 
     def _on_Network_requestWillBeSent(self, params: dict, session: Optional[str]) -> None:
         if (load := self._loading.get(session)) is not None and params.get("type") == "Document":
             load.requests[params["requestId"]] = params.get("loaderId", "")
+            if load.reloading and load.loader is None and params.get("frameId") == self._sessions.get(session):
+                load.loader = params.get("loaderId") or None
 
     def _on_Network_responseReceived(self, params: dict, session: Optional[str]) -> None:
         if (load := self._loading.get(session)) is not None and params.get("type") == "Document" and \
@@ -1228,7 +1267,9 @@ class _StartLoad:
     commits in order, the loads that fired after a commit, and its documents' requests, final responses and failures.
     Its document is the last its main frame committed from its own navigation on, which a page that sends itself
     elsewhere before it loads replaces. It's ``settled`` once its navigation or its document has failed, its document
-    has loaded or, on one of the env's ``site``, answered an error."""
+    has loaded or, on one of the env's ``site``, answered an error. A ``reloading`` one's navigation stayed in its
+    document and was followed by a reload, whose answer names no loader either: its loader is its main frame's first
+    document request or commit after, so a reload that fails before it commits fails the load."""
     session: str
     url: str
     site: Optional[str]
@@ -1242,6 +1283,8 @@ class _StartLoad:
     failures: dict[str, str] = field(default_factory=dict)
     settled: asyncio.Event = field(default_factory=asyncio.Event)
     navigating: Optional[asyncio.Future] = None
+    reloading: bool = False
+    moved: asyncio.Event = field(default_factory=asyncio.Event)
 
     def answered(self, navigating: asyncio.Future) -> None:
         """The browser's answer to its navigation: its loader, or why it couldn't navigate."""
@@ -1255,7 +1298,7 @@ class _StartLoad:
                 self.error = str(answer["error"].get("message", answer["error"]))
             else:
                 self.error = answer.get("result", {}).get("errorText") or None
-                self.loader = answer.get("result", {}).get("loaderId")
+                self.loader = answer.get("result", {}).get("loaderId") or self.loader
         self.check()
 
     def current(self) -> Optional[str]:
@@ -1272,18 +1315,6 @@ class _StartLoad:
         if document in self.failures or document in self.loaded or (
                 self.site is not None and status is not None and status >= 400):
             self.settled.set()
-
-
-def _landed_at(landed: asyncio.Future, navigating: asyncio.Future) -> None:
-    """``landed`` given the loader a start tab's navigation answered with; cancelled when it failed or named none."""
-    if landed.done():
-        return
-    answer = None if navigating.cancelled() or navigating.exception() is not None else navigating.result()
-    loader = ((answer or {}).get("result") or {}).get("loaderId")
-    if isinstance(loader, str):
-        landed.set_result(loader)
-    else:
-        landed.cancel()
 
 
 def _types(event: dict) -> bool:

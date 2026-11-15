@@ -5,21 +5,24 @@ policies are where Chrome for Testing reads them; and a reset of its data clears
 website browser it runs Chrome itself with agentenv's flags on its debugging pipe, its computer's /dev/shm the 1 GiB it
 asks for, as a container or a disk, so Chrome keeps its shared memory there, a reset_env too, answers location prompts
 and leaves notification ones to ask as the deploy says, and its menu launcher, run while it runs, opens another window
-of it with no second copy, its cache kept and it still ready; and the
-desktop that gives it French defaults deploys with them, a deploy's time zone over them, each recorded; and the record
-its control connection keeps lists a tab an agent opened and closed, a download with its size and sha256, a confirm()
-accepted for it, and each launch, exit and stop with its cause, across a kill and a restart of its server; and browser/v1 reads and sets its
-cookies, local storage and downloads; and its data plane signs it in, snapshots it, resets it and loads a
-snapshot back; and the browser task steps set its cookies and storage and open, activate and close its tabs by URL.
-Its start tabs open in order, the first active, a deploy recording each one's outcome and going on past a live page
-that never answers; and with the run's sites routed to it, a start tab on one must load, judged by the page it
-lands on when it sends itself elsewhere before it loads, so a site answering 503 fails the deploy, naming it. Needs Docker and the local registry on localhost:5000."""
+of it with no second copy, its cache kept and it still ready; and the desktop that gives it French defaults deploys with
+them, a deploy's time zone over them, each recorded; and the record its control connection keeps lists a tab an agent
+opened and closed, a download with its size and sha256, a confirm() accepted for it, and each launch, exit and stop with
+its cause, across a kill and a restart of its server; and browser/v1 reads and sets its cookies, local storage and
+downloads; and its data plane signs it in, snapshots it, resets it and loads a snapshot back, a load of cookies alone
+reloading a start tab on a hash route so its page reads them, the tab on its start URL or on another route of its page;
+and the browser task steps set its cookies and storage and open, activate and close its tabs by URL. Its start tabs open
+in order, the first active, a deploy recording each one's outcome and going on past a live page that never answers; and
+with the run's sites routed to it, a start tab on one must load, judged by the page it lands on when it sends itself
+elsewhere before it loads, so a site answering 503 fails the deploy, naming it. Needs Docker and the local registry on
+localhost:5000."""
 
 import asyncio
 import hashlib
 import json
 import platform
 import re
+import time
 import uuid
 
 import httpx
@@ -32,7 +35,9 @@ from agentenv_protocol import client as protocol_v1
 from agent_env.env import Env
 from agentenv_protocol.types import WELL_KNOWN_PATH
 from agentenv_protocol.website_browser import BROWSER, SHM_MIN_BYTES
-from tst.integration.computer.browser_data import SITE as DATA_SITE, check_browser_data
+from agentenv_protocol.website_browser.control import LIVE_START_TAB_TIMEOUT_S
+from tst.integration.computer.browser_data import (SERVE_S, SERVE_SITE, SITE as DATA_SITE, _client, _load, _state,
+                                                   _universe, check_browser_data)
 from tst.integration.computer.browser_steps import check_browser_steps
 from tst.integration.computer.browser_state import check_browser_state
 from tst.integration.computer.start_tabs import host_pages, tabs_of
@@ -391,6 +396,48 @@ async def test_its_data_plane_signs_it_in_snapshots_it_resets_it_and_loads_a_sna
         finally:
             report = await teardown_run(context)
 
+    assert not report.failed
+
+
+@pytest.mark.asyncio
+async def test_a_load_of_cookies_alone_reloads_a_start_tab_on_a_hash_route_so_its_page_reads_them(chromium_desktop):
+    start = f"{DATA_SITE}app#/trips"
+    with namespace_routing():
+        deployed = await Env.get(chromium_desktop.id).deploy(
+            env_params={"app_settings": {"chromium": {"start_urls": [start]}}})
+        context = TaskStepContext(deployed_envs=[deployed])
+        serving = asyncio.ensure_future(inside.run(deployed, ["python3", "-c", SERVE_SITE, str(SERVE_S)],
+                                                   timeout_s=SERVE_S + 60))
+        try:
+            card = await _app(deployed, WELL_KNOWN_PATH, "chromium")
+            await _ready(deployed, card, "chromium")
+            call, titled = _client(deployed, lambda op: f"{deployed.environment_url}/svc/chromium"
+                                   f"{protocol_v1.find_extension_method(card, BROWSER, op)['endpoint']}")
+            await asyncio.sleep(SERVE_START_S)
+            await call("navigate", {"url": f"{DATA_SITE}other"})
+            await titled("other")
+            await call("navigate", {"url": start})
+            signed_out = await titled("app signed out")
+            cookies = _universe(chromium_desktop.id, {"browser-state.json": _state(
+                cookies=[{"name": "sid", "value": "ada", "url": DATA_SITE, "max_age": 3600}])})
+            loading = time.monotonic()
+            context = await _load(context, chromium_desktop.id, "cookies", artifact_id=cookies.id)
+            loaded_s = time.monotonic() - loading
+            signed_in = await titled("app ada")
+            await call("navigate", {"url": f"{DATA_SITE}app#/home"})
+            elsewhere = (await call("tabs/list", method="GET"))["tabs"]
+            bob = _universe(chromium_desktop.id, {"browser-state.json": _state(
+                cookies=[{"name": "sid", "value": "bob", "url": DATA_SITE, "max_age": 3600}])})
+            context = await _load(context, chromium_desktop.id, "cookies-elsewhere", artifact_id=bob.id)
+            moved_back = await titled("app bob")
+        finally:
+            serving.cancel()
+            report = await teardown_run(context)
+
+    assert signed_out["url"] == start and signed_in["url"] == start, (signed_out, signed_in)
+    assert loaded_s < LIVE_START_TAB_TIMEOUT_S, loaded_s
+    assert [(tab["url"], tab["title"]) for tab in elsewhere] == [(f"{DATA_SITE}app#/home", "app ada")], elsewhere
+    assert moved_back["url"] == start, moved_back
     assert not report.failed
 
 
