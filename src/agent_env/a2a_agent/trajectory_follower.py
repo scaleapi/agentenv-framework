@@ -30,6 +30,11 @@ _READ_TIMEOUT_SECONDS = 30
 _MAX_BACKOFF_SECONDS = 60
 # Once stopped, the task has ended and its log is sealed, so the next read is normally the last.
 _STOPPED_INTERVAL_SECONDS = 0.2
+# After the task has ended, a failing read gets a short, bounded drain: enough to ride out a blip
+# without losing the trajectory's tail, short enough that a gone agent frees the step.
+_STOPPED_RETRY_SECONDS = 1.0
+_STOPPED_MAX_FAILURES = 3
+_ERROR_AFTER_FAILURES = 10
 
 
 @dataclass(frozen=True)
@@ -59,6 +64,16 @@ def live_trajectory_endpoint(card: dict, a2a_url: str) -> str | None:
     return a2a_url + path
 
 
+def _log_read_failure(task_id: str, failures: int, exc: Exception) -> None:
+    logger.log(
+        logging.ERROR if failures >= _ERROR_AFTER_FAILURES else logging.WARNING,
+        "Live trajectory read failed (consec=%d, will retry): %r",
+        failures,
+        exc,
+        extra={"event": "live_trajectory_read_failed", "consec": failures, "task_id": task_id},
+    )
+
+
 async def follow_trajectory(
     endpoint: str,
     task_id: str,
@@ -72,8 +87,8 @@ async def follow_trajectory(
     events and the last one, until the task has ended and every event is read.
 
     Between reads it waits ``poll_interval_seconds``, or less once ``stop`` is set. Transport errors
-    and 5xx answers are retried with backoff until ``stop`` is set, and end following after it; a
-    task the agent no longer knows (404) ends following."""
+    and 5xx answers are retried with backoff. Once ``stop`` is set they are retried a few more times,
+    then end following; a task the agent no longer knows (404) ends following."""
     after = 0
     failures = 0
     async with nullcontext(client) if client is not None else httpx.AsyncClient() as http:
@@ -90,10 +105,10 @@ async def follow_trajectory(
                 if exc.response.status_code < 500:
                     raise
                 failures += 1
-                logger.warning("Live trajectory read failed (consec=%d, will retry): %s", failures, exc)
+                _log_read_failure(task_id, failures, exc)
             except httpx.TransportError as exc:
                 failures += 1
-                logger.warning("Live trajectory read failed (consec=%d, will retry): %r", failures, exc)
+                _log_read_failure(task_id, failures, exc)
             else:
                 failures = 0
                 page = parse_response(TrajectoryEventsResponse, response.json(), operation="trajectory get")
@@ -115,12 +130,14 @@ async def follow_trajectory(
                 if page.has_more:
                     continue
             if stop.is_set():
-                if failures:
-                    # The turn has ended, so an agent that stops answering now is gone, not busy: retrying
-                    # would poll a dead address until the step's drain gives up. The step marks the turn's end.
-                    logger.warning("Agent stopped answering after task %s ended; stopped following its trajectory", task_id)
+                if failures >= _STOPPED_MAX_FAILURES:
+                    logger.warning(
+                        "Agent stopped answering after task %s ended; stopped following its trajectory",
+                        task_id,
+                        extra={"event": "live_trajectory_follow_abandoned", "consec": failures, "task_id": task_id},
+                    )
                     return
-                await asyncio.sleep(_STOPPED_INTERVAL_SECONDS)
+                await asyncio.sleep(_STOPPED_RETRY_SECONDS * failures or _STOPPED_INTERVAL_SECONDS)
                 continue
             # Not `wait_for`: on 3.11 it drops a cancel that lands as `stop` is set, the step's own
             # teardown, and the follower then outlives its step.
