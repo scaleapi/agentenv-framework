@@ -252,8 +252,15 @@ class DeployUserSimAgentTaskStep(DeployAgentTaskStep):
         self.model = model
         self.multi_day = multi_day
         self.opening_prompt = opening_prompt
+        # Who the user is as the task writes it, the seed not filled in: what the judge's rubric_persona_sha256 is.
+        self.persona_sha256 = persona_fingerprint(persona, opening_prompt)
 
     _OWN = ("persona", "model", "multi_day", "opening_prompt")
+
+    def seeded_from(self, written: "DeployUserSimAgentTaskStep") -> None:
+        """This step is ``written`` with the run's seed filled in (``substitute_seed_in_steps``): keep the fingerprint
+        of the persona and opening as written."""
+        self.persona_sha256 = written.persona_sha256
 
     def to_dict(self) -> dict:
         base = super().to_dict()
@@ -336,7 +343,7 @@ class DeployUserSimAgentTaskStep(DeployAgentTaskStep):
             "user_version": user_sim_versions.VERSION, "model": model, "model_source": source,
             "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(), "prompt_set": True,
             # Who the user is, as written: what user_sim_judge's rubric_persona_sha256 is compared with.
-            "persona_sha256": persona_fingerprint(persona, self.opening_prompt),
+            "persona_sha256": self.persona_sha256,
             # Each tag the prompt shows with its line, so an answer's ``used`` ("D9") names what this run saw.
             "tagged_lines": user_sim_versions.tagged_lines(self.person(context)),
             "multi_day": self.multi_day,

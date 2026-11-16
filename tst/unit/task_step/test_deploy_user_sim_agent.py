@@ -142,14 +142,26 @@ def test_the_persona_fingerprint_is_pinned():
     assert persona_fingerprint(FINGERPRINT_PERSONA, [{"kind": "text", "text": FINGERPRINT_OPENING}]) != FINGERPRINT
 
 
+@pytest.mark.usefixtures("local_stores")
 @pytest.mark.asyncio
 async def test_the_record_has_the_persona_fingerprint_of_the_step_as_written(monkeypatch):
+    from agent_env.task import Task
+
     opening = [{"kind": "text", "text": "the <trip> trip, can you handle it?"},
                {"kind": "file", "file": {"uri": "s3://reyes-family/<trip>/itinerary.pdf", "name": "itinerary.pdf"}}]
+    persona = {**HANNAH, "description": {**HANNAH["description"],
+                                         "who_you_are": [*HANNAH["description"]["who_you_are"], "Back from <trip>."]}}
     context = TaskStepContext()
     context.metadata["seed"] = {"trip": "nov-19"}
-    record = await _published(monkeypatch, _step(opening_prompt=opening), context)
-    assert record["persona_sha256"] == persona_fingerprint(HANNAH, opening)  # unseeded
+    deploy = _Deploy(monkeypatch)
+    # Task.run fills the seed into every step before it runs: the record still has the fingerprint as written.
+    with (patch.object(A2AAgent, "get", return_value=deploy.agent),
+          patch("agent_env.task_step.task_steps.deploy_agent.get_config") as get_config):
+        get_config.return_value.get_model_for_role.return_value = None
+        context = await Task("t", None, [_step(persona=persona, opening_prompt=opening)]).run(context=context)
+    record = context.metadata[USER_SIMS_KEY]["hannah"]
+    assert "nov-19" in record["opening"] and "<trip>" not in json.dumps(record["description"])  # it ran seeded
+    assert record["persona_sha256"] == persona_fingerprint(persona, opening)  # unseeded
     assert (await _published(monkeypatch, _step()))["persona_sha256"] == persona_fingerprint(
         HANNAH, PERSON["opening"]["text"])
 

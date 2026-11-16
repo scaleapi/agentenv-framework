@@ -31,7 +31,12 @@ from agent_env.task_step.task_steps.verifiers.judge_utils.judge_output_format im
     diagnose_user_sim_checks_response,
     get_judge_output_format_spec,
 )
-from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep, is_rubrics_verifier
+from agent_env.a2a_agent.protocol import AgentUnreachableError
+from agent_env.task_step.task_steps.verifiers.rubrics_verifier import (
+    JudgeTimeoutError,
+    RubricsVerifierTaskStep,
+    is_rubrics_verifier,
+)
 from tst.unit.task_step.always_on_harness import Rig
 from tst.unit.task_step.test_deploy_user_sim_agent import HANNAH, _Deploy
 from tst.unit.task_step.test_deploy_user_sim_agent import _step as _deploy_step
@@ -785,6 +790,20 @@ async def test_a_flaky_model_call_is_tried_as_rubrics_verifier_tries_it_and_left
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("error", [TimeoutError("judge ran out of time"),
+                                   JudgeTimeoutError("Judge A2A task t1 ran out of its 1000s", None),
+                                   AgentUnreachableError("the judge stopped answering")],
+                         ids=["timeout", "judge timeout", "agent unreachable"])
+async def test_an_agent_judge_that_times_out_or_stops_answering_leaves_its_check_undecided(monkeypatch, error):
+    # A run-wide use_agent_judge sends the prompt to an agent judge, whose call can run out of time or lose the agent.
+    fake = FakeModel({"rogue": [error]})
+    entry = await _judge(_run(("reply", "ok")), fake, monkeypatch, fail_task_when_not_passing=True)
+    assert _verdicts(entry, "rogue", "guidance") == {"rogue": "error", "guidance": "pass"}
+    assert _rows(entry)["rogue"]["error"].startswith(f"no usable answer after 4 tries: {type(error).__name__}: ")
+    assert entry["flag"] == "user sim judge undecided" and entry["user_sim_error"]["fails_task"] is False
+
+
+@pytest.mark.asyncio
 async def test_one_undecided_check_among_decided_ones_is_flagged_undecided(monkeypatch, litellm_config):
     def answer(kwargs):
         content = kwargs["messages"][-1]["content"]
@@ -919,6 +938,7 @@ def test_checks_and_error_checks_are_refused_when_the_task_loads():
 
 def test_a_rubrics_verifier_setting_the_judge_fixes_is_refused_unless_it_has_the_fixed_value():
     for key, value in (("use_trajectory", True), ("output_format", "rubric_binary"), ("judge_batch_size", 3),
+                       ("judge_timeout_retries", 2), ("judge_max_turns", 40),
                        ("use_agent_judge", True), ("criteria", [{"id": "c1"}]), ("prompt_id", "ask"),
                        ("default_model", "x"), ("score_aggregator", "weighted_average"), ("grade_up_to_turn", 2)):
         with pytest.raises(ValueError, match=f"user_sim_judge 's': {key} can't be set on the user sim judge, which "

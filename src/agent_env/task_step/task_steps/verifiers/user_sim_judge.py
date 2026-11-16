@@ -122,7 +122,8 @@ its model: ..."): agent-env's ``ConfigError`` (no key, missing config) and LiteL
 ``PermissionDeniedError``, ``NotFoundError`` (an unknown model), ``BadRequestError`` and its kinds,
 ``UnprocessableEntityError`` and ``BudgetExceededError`` (``_setup_error``). Every other failure is taken as flaky
 (``Timeout``, ``RateLimitError``, ``ServiceUnavailableError``, ``InternalServerError``, ``BadGatewayError``,
-``APIConnectionError``, an answer still unusable after its retries), and unknown never fails the task: a run is failed
+``APIConnectionError``, an agent judge's ``TimeoutError``, ``JudgeTimeoutError`` or ``AgentUnreachableError``, an answer
+still unusable after its retries), and unknown never fails the task: a run is failed
 only on a slip the judge found, so a flaky judge never throws away a good run. A judge answer the format can't use is
 asked again with the format's correction, up to 3 more times (``DEFAULT_MAX_RETRIES``, 4, counts the first ask;
 rubrics_verifier tries a failed model call as many times). A call still without a usable answer leaves its rows
@@ -173,7 +174,7 @@ PINNED: dict[str, Any] = {
     **dict.fromkeys(("criteria", "prompt_id", "default_model", "default_model_api_base", "agent_name",
                      "trajectory_filter", "max_thinking_tokens", "effort", "judge_a2a_agent_id", "judge_sandbox_type",
                      "grading_policy_prompt", "context_facts_for_judge", "grade_up_to_turn", "run_context_for_judge",
-                     "judge_batch_size", "judge_batch_concurrency"))}
+                     "judge_batch_size", "judge_batch_concurrency", "judge_timeout_retries", "judge_max_turns"))}
 NOT_FAILING_OFF = "fail_task_when_not_passing is off: verdicts are recorded only"
 NOT_FAILING_UNCONFIRMED = ("the judge's copy of the user sim's instructions isn't confirmed to be the one it ran with, "
                            "so it doesn't fail the task")
@@ -468,7 +469,7 @@ class UserSimJudge(RubricsVerifierTaskStep):
         (``error``) rather than failing the step: an unknown never fails the task."""
         try:
             return await super()._run_judge_with_output_retries(criteria=criteria, **kwargs)
-        except (ValueError, RuntimeError) as e:
+        except (ValueError, RuntimeError, TimeoutError) as e:  # TimeoutError: an agent judge's (run-wide use_agent_judge)
             if (setup := _setup_error(e)) is not None:
                 raise JudgeSetupError(f"the user sim judge can't reach its model: {type(setup).__name__}: "
                                       f"{str(setup)[:ERROR_SHOWN_CHARS]}") from e
@@ -502,8 +503,9 @@ def _setup_error(e: BaseException) -> Optional[BaseException]:
     missing config) and LiteLLM's AuthenticationError, PermissionDeniedError, NotFoundError (an unknown model),
     BadRequestError (with its kinds: an unknown provider, unsupported params, a prompt over the context window),
     UnprocessableEntityError and BudgetExceededError. Anything else is flaky (Timeout, RateLimitError,
-    ServiceUnavailableError, InternalServerError, BadGatewayError, APIConnectionError, an answer still unusable after
-    its retries) and leaves the call's rows undecided."""
+    ServiceUnavailableError, InternalServerError, BadGatewayError, APIConnectionError, an agent judge's TimeoutError,
+    JudgeTimeoutError or AgentUnreachableError, an answer still unusable after its retries) and leaves the call's rows
+    undecided."""
     import litellm
 
     from agent_env.config.errors import ConfigError
