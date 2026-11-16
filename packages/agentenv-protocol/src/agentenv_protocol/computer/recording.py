@@ -1,6 +1,7 @@
 """Recording a computer's display, computer-recording/v1: the base class runs each recording from the driver's
 ``@record`` stream, or by polling ``@capture`` where the driver has none, encodes frames as H.264 segments, uploads
-each segment as it closes and seals the recording at ``end`` with its manifest."""
+each segment as it closes and seals the recording at ``end`` with its manifest. ``Video`` is that recording, from any
+source of frames, which a website browser's recordings (browser-recording/v1) use too."""
 from __future__ import annotations
 
 import asyncio
@@ -135,7 +136,7 @@ class Recordings:
 
     def __init__(self, runtime: ComputerRuntime) -> None:
         self.runtime = runtime
-        self.running: dict[str, _Recording] = {}
+        self.running: dict[str, Video] = {}
         self.ended: OrderedDict[str, dict] = OrderedDict()
         self.started: OrderedDict[str, dict] = OrderedDict()
         self._lock = asyncio.Lock()
@@ -161,10 +162,13 @@ class Recordings:
             root = Path.home() / RECORDINGS_DIR
             hints = dataclasses.replace(hints, directory=root / recording_id)
             hints.directory.mkdir(parents=True, exist_ok=True)
-            recording = _Recording(recording_id, hints, features, root, grant, self.runtime)
+            streams, runtime = self.runtime.has("record"), self.runtime
+            cursor = hints.cursor if streams else hints.cursor and runtime.has("pointer")
+            source = (lambda hints: runtime.stream(hints)) if streams else \
+                (lambda hints: _poll(runtime, hints, cursor))
+            recording = Video(recording_id, hints, features, root, grant, source, streams=streams, cursor=cursor)
             self.running[recording_id] = recording
-            recording.task = asyncio.create_task(recording.run())
-            recording.timer = asyncio.get_running_loop().call_later(features.max_duration_s, recording.expire)
+            recording.begin()
             answer = {"recording_id": recording_id, "started_at": _iso(recording.requested_at), "format": MP4}
             self.started[request_id] = answer
             while len(self.started) > KEEP_STARTED:
@@ -173,11 +177,9 @@ class Recordings:
             return answer
 
     @staticmethod
-    async def _live(recording: Optional[_Recording]) -> None:
-        """Wait up to FIRST_FRAME_S for ``recording``, one still running, to have its first frame."""
+    async def _live(recording: Optional[Video]) -> None:
         if recording is not None:
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(recording.live.wait(), FIRST_FRAME_S)
+            await recording.until_live()
 
     async def end(self, recording_id: str, upload: Optional[dict], reason: str) -> dict:
         if reason not in REASONS:
@@ -215,18 +217,26 @@ class Recordings:
         return RecordHints(scope, fps, max_edge, bool(cursor), features.max_segment_s, Path()), grant
 
 
-class _Recording:
+class Video:
+    """One recording's video: frames or segments from ``source(hints)``, encoded as H.264 segments in
+    ``hints.directory``, each uploaded under ``grant`` as it closes, at ``<prefix>/<index>.mp4``, ``prefix`` its id by
+    default; sealed by ``end``, which answers its manifest and, with ``manifest``, uploads it beside the segments.
+    ``streams`` says the source streams rather than polls, ``cursor`` that its frames draw the pointer."""
+
     def __init__(self, recording_id: str, hints: RecordHints, features: Recording, root: Path,
-                 grant: Optional[WriteNamespaceGrant], runtime: ComputerRuntime) -> None:
+                 grant: Optional[WriteNamespaceGrant], source: Callable[[RecordHints], AsyncIterator], *,
+                 streams: bool, cursor: bool, prefix: Optional[str] = None, manifest: bool = True) -> None:
         self.id = recording_id
         self.hints = hints
         self.features = features
         self.root = root
-        self.runtime = runtime
+        self.source = source
+        self.prefix = prefix or recording_id
+        self.uploads_manifest = manifest
         self.uploader = NamespaceUploader(grant) if grant is not None else None
         self.requested_at = datetime.now(timezone.utc)
-        self.streams = runtime.has("record")
-        self.cursor = hints.cursor if self.streams else hints.cursor and runtime.has("pointer")
+        self.streams = streams
+        self.cursor = cursor
         self.segments: list[_Segment] = []
         self.encoder: Optional[_Encoder] = None
         self.ended_by: Optional[str] = None
@@ -240,6 +250,16 @@ class _Recording:
         self.sealing: set[asyncio.Future] = set()
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"computer-{recording_id}")
         self._last_disk_check = 0.0
+
+    def begin(self) -> None:
+        """Recording from now, until ``end`` or ``max_duration_s``."""
+        self.task = asyncio.create_task(self.run())
+        self.timer = asyncio.get_running_loop().call_later(self.features.max_duration_s, self.expire)
+
+    async def until_live(self) -> None:
+        """Wait up to FIRST_FRAME_S for it, still running, to have its first frame."""
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(self.live.wait(), FIRST_FRAME_S)
 
     async def run(self) -> None:
         """Frames or segments from the source, recorded until the recording ends; ``live`` once it's recording: a
@@ -289,9 +309,7 @@ class _Recording:
         self.executor.shutdown(wait=False)
 
     def _source(self) -> AsyncIterator:
-        if self.streams:
-            return self.runtime.stream(self.hints)
-        return _poll(self.runtime, self.hints, self.cursor)
+        return self.source(self.hints)
 
     async def end(self, reason: str, grant: Optional[WriteNamespaceGrant]) -> dict:
         if self.timer is not None:
@@ -318,9 +336,9 @@ class _Recording:
             source="stream" if self.streams else "capture", started_at=entries[0].started_at if entries else None,
             ended_at=entries[-1].ended_at if entries else None, ended_by=self.ended_by, segments=entries,
             error=self.error if self.ended_by == "error" else None).wire()
-        if uploader is not None:  # beside the segments, so a reader who didn't end the recording finds it
-            with contextlib.suppress(Exception):
-                await uploader.upload(f"{self.id}/{MANIFEST}", json.dumps(manifest).encode())
+        if uploader is not None and self.uploads_manifest:  # beside the segments, so a reader who didn't end the
+            with contextlib.suppress(Exception):  # recording finds it
+                await uploader.upload(f"{self.prefix}/{MANIFEST}", json.dumps(manifest).encode())
         return manifest
 
     async def _add_frame(self, item: RecordedFrame) -> None:
@@ -373,7 +391,7 @@ class _Recording:
                       frames: int) -> None:
         size, digest = await asyncio.to_thread(_digest, path)
         segment = _Segment(ManifestSegment(
-            index=len(self.segments), path=f"{self.id}/{path.name}", started_at=_iso(started_at),
+            index=len(self.segments), path=f"{self.prefix}/{path.name}", started_at=_iso(started_at),
             ended_at=_iso(ended_at), width=width, height=height, frames=frames, bytes=size, sha256=digest,
             uploaded=False), path)
         self.segments.append(segment)

@@ -17,8 +17,8 @@ WORKDIR /opt/agent
 COPY package.json package-lock.json ./
 RUN npm ci --ignore-scripts --omit=dev --no-audit --no-fund --loglevel=error && npm cache clean --force \
     && ln -s /opt/agent/node_modules/.bin/gemini /usr/local/bin/gemini
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt model-requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt -r model-requirements.txt
 # install.sh and run.sh are install/v1's: in the image, so they stay in its build context.
 COPY a2a_server.py gemini_bridge.py gemini_changelog.py gemini_config.py gemini_kit.py entrypoint.sh install.sh run.sh ./
 # The CLI's cwd and file-tool boundary, /workspace, and its state, fixed so neither follows the uid: Modal runs the

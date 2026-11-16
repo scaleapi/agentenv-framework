@@ -11,6 +11,7 @@ from importlib import resources
 from PIL import Image
 
 from agentenv_protocol.computer.conformance.client import Driver
+from agentenv_protocol.computer.results import CAPTURED_AT_META
 
 THUMB = (64, 40)
 DESK = {name: resources.files("agentenv_protocol.computer.conformance").joinpath(name).read_bytes()
@@ -58,7 +59,7 @@ async def verify(mcp_url, env_url):
             if result.isError:
                 return [{"id": "drove", "result": False, "description": f"{tool}: {result.content[0].text}"}]
             shots.append({"step": tool, "args": args, "sent_at": sent_at,
-                          "captured_at": result.structuredContent["frame"]["captured_at"], "thumb": _thumb(result),
+                          "captured_at": result.meta[CAPTURED_AT_META], "thumb": _thumb(result),
                           "cell": list(_image(result).convert("RGB").getpixel((clicked[0] + 8, clicked[1] + 8)))})
             await asyncio.sleep(0.7)
     return [{"id": "drove", "result": True, "description": json.dumps({"shots": shots, "clicked_cell": clicked})}]

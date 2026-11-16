@@ -177,7 +177,48 @@ def test_an_unreachable_upstream_is_a_502(upstream, agent, client):
     response = client.post(GENERATE, content=b"{}")
 
     assert (response.status_code, response.json()) == (
-        502, {"detail": "gemini upstream request failed: All connection attempts failed"})
+        502, {"detail": "gemini upstream request failed: ConnectError: All connection attempts failed"})
+
+
+def test_an_exception_with_no_message_is_named_in_the_502_and_the_log(caplog, upstream, agent, client):
+    _route(agent)
+    upstream.response = httpx.ReadTimeout("")
+
+    response = client.post(GENERATE, content=b"{}")
+
+    assert response.status_code == 502
+    assert response.json() == {"detail": "gemini upstream request failed: ReadTimeout('')"}
+    (record,) = [r for r in caplog.records if getattr(r, "event", None) == "litellm_upstream_transport_error"]
+    assert (record.proxy, record.error_type) == ("gemini", "ReadTimeout")
+    assert "ReadTimeout" in record.getMessage()
+    assert "event=litellm_upstream_transport_error" in record.getMessage()
+
+
+def test_an_unreachable_bridge_upstream_names_the_exception(vertex, client):
+    vertex.response = httpx.RemoteProtocolError("")
+
+    response = client.post(GENERATE, json=_GREQ)
+
+    assert response.json() == {"detail": "vertex bridge upstream failed: RemoteProtocolError('')"}
+
+
+@pytest.mark.parametrize("path", ["passthrough", "bridge"])
+def test_an_error_response_logs_the_litellm_routing_headers_that_are_present(caplog, upstream, agent, client, path):
+    _route(agent, model="vertex_ai/global/g" if path == "bridge" else None)
+    upstream.response = httpx.Response(
+        429, json={"error": "slow down"},
+        headers={"x-litellm-model-id": "dep-1", "x-litellm-model-group": "grp", "x-litellm-response-cost": "0.1"},
+    )
+
+    response = client.post(GENERATE, json=_GREQ)
+
+    assert response.status_code == 429
+    (record,) = [r for r in caplog.records if getattr(r, "event", None) == "litellm_upstream_error_response"]
+    assert record.upstream_status == 429
+    message = record.getMessage()
+    assert "event=litellm_upstream_error_response" in message
+    assert "x-litellm-model-id=dep-1" in message and "x-litellm-model-group=grp" in message
+    assert "x-litellm-model-api-base" not in message and "x-litellm-response-cost" not in message
 
 
 # ── provider-prefixed models: the chat-completions bridge ────────────────────────
@@ -245,7 +286,7 @@ def test_bridge_upstream_errors(vertex, client):
 
     assert (limited.status_code, limited.content) == (429, b'{"error":"slow down"}')
     assert (garbled.status_code, garbled.json()) == (502, {"detail": "vertex bridge: non-JSON upstream response"})
-    assert (unreachable.status_code, unreachable.json()) == (502, {"detail": "vertex bridge upstream failed: refused"})
+    assert (unreachable.status_code, unreachable.json()) == (502, {"detail": "vertex bridge upstream failed: ConnectError: refused"})
 
 
 

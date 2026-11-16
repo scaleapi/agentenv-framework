@@ -134,6 +134,7 @@ class Clock:
         self._lock = threading.Lock()
         self._armed = False
         self._t0: datetime | None = None
+        self._time_zone: str | None = None  # the universe's zone, its users', as the arm named it
         self._anchor = now_fn()  # real time the current arm (or unarmed stretch) began
         self._rate = 1.0
         self._generation = 0
@@ -181,10 +182,13 @@ class Clock:
         with self._lock:
             return self._t0
 
-    def set_time(self, virtual_time: str, rate=1.0) -> dict:
-        """Arm/re-arm: anchor t0=virtual_time to now, advancing at `rate` virtual s per real s."""
+    def set_time(self, virtual_time: str, rate=1.0, time_zone: str | None = None) -> dict:
+        """Arm/re-arm: anchor t0=virtual_time to now, advancing at `rate` virtual s per real s, in the universe's
+        `time_zone` (its users' IANA zone), or none."""
         t0 = _parse_rfc3339(virtual_time)
         r = _parse_rate(1.0 if rate is None else rate)
+        if time_zone is not None and _zone(time_zone) is None:
+            raise ClockError(f"unknown time zone {time_zone!r}: pass an IANA time zone name such as 'America/New_York'")
         if t0 > _MAX_T0 - timedelta(seconds=_OVERFLOW_HORIZON_S * r):
             raise ClockError(f"virtual_time {virtual_time!r} at rate {r:g} would overflow datetime near the max")
         with self._lock:
@@ -193,6 +197,7 @@ class Clock:
             self._rate = r
             self._ahead = 0.0
             self._armed = True
+            self._time_zone = time_zone
             self._generation += 1
             self._count += 1
         return self.state()
@@ -239,6 +244,7 @@ class Clock:
             self._bank()
             self._armed = False
             self._t0 = None
+            self._time_zone = None
             self._rate = 1.0
             self._ahead = 0.0
             self._generation += 1
@@ -256,6 +262,12 @@ class Clock:
                 return None
             elapsed = self._now() - self._anchor
             return _advance(self._t0, elapsed * self._rate + self._ahead)
+
+    @property
+    def time_zone(self) -> str | None:
+        """The universe's zone, its users', as the current arm named it; None unarmed or when it named none."""
+        with self._lock:
+            return self._time_zone if self._armed else None
 
     def at_elapsed(self, elapsed: float) -> datetime | None:
         """The virtual time at which elapsed() reaches `elapsed` on the current arm; None while unarmed."""
@@ -278,7 +290,7 @@ class Clock:
             elapsed = self._now() - self._anchor
             return {"armed": True, "t0": _iso(self._t0), "virtual_seconds_per_real_second": self._rate,
                     "virtual_time": _iso(_advance(self._t0, elapsed * self._rate + self._ahead)),
-                    "version": self.version}
+                    **({"time_zone": self._time_zone} if self._time_zone else {}), "version": self.version}
 
     def _bank(self, t0: datetime | None = None) -> None:
         """Fold the stretch since the last arm/clear into `_lived` at its rate, and start the next one now."""

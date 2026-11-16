@@ -35,6 +35,7 @@ from agent_env.openenv.reward import reward_of
 from agent_env.task.task import Task, recorded_scores
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext, sandbox_overrides
+from agent_env.task_step.task_steps.agent.user_sim_common import opening_parts, opening_text
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.prompt_agent import is_prompt_step, user_sim_agents
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
@@ -233,8 +234,9 @@ def _index_named(prompt: Any, ids: list[str]) -> int:
 
 def _first_prompt(task: Task) -> str:
     """The user's first message to the agent under test: its step's prompt, else the opening of the user sim the step
-    names (an always_on step's ``user_sim``, a prompt_agent step's ``user_agent_name``), as it was written. A step that
-    prompts an agent another step talks to as its user (the user sim, say a briefing) isn't the agent under test's."""
+    names (an always_on step's ``user_sim``, a prompt_agent step's ``user_agent_name``), as it was written (its
+    text, for an opening with files). A step that prompts an agent another step talks to as its user (the user sim,
+    say a briefing) isn't the agent under test's."""
     users = user_sim_agents(task.steps)
     step = next((each for each in task.steps
                  if is_prompt_step(each) and getattr(each, "agent_name", None) not in users), None)
@@ -245,7 +247,8 @@ def _first_prompt(task: Task) -> str:
     user = getattr(step, "user_sim", None) or getattr(step, "user_agent_name", None)
     sim = next((each for each in task.steps
                 if user and getattr(each, "agent_name", None) == user and getattr(each, "opening_prompt", None)), None)
-    return getattr(sim, "opening_prompt", None) or ""
+    opening = getattr(sim, "opening_prompt", None) or ""
+    return opening if isinstance(opening, str) else opening_text(opening_parts(opening))
 
 
 def _free_port() -> int:
