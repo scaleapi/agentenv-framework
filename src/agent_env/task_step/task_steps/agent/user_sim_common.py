@@ -12,11 +12,13 @@ SATISFACTION_KEY = "user_sim_satisfaction"
 # What a user-sim turn cut short by a transient API error is resumed with, for an agent that takes `resume_prompt`
 # (prompt_agent's peer user sim, and the user deploy_user_sim_agent deploys).
 # An agent's own resume prompt asks it to finish the request it was given; a user-sim's request is the agent's reply,
-# so that prompt has it carry on as the agent.
+# so that prompt has it carry on as the agent. The last sentence covers a turn that isn't a reply to the assistant: the
+# rating rate_user_satisfaction asks for in the same session.
 USER_SIM_RESUME_PROMPT = (
     "Your previous turn was interrupted by a transient API error before you sent your message. You are still the "
     "user. Write the user's next message, as you were about to; the assistant's last reply above is what you are "
-    "answering."
+    "answering. If what you were last sent asks for something else, such as a rating, give that instead, in the "
+    "format it asks for."
 )
 
 
