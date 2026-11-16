@@ -175,9 +175,14 @@ def test_a_label_reads_the_time_in_its_zone_and_names_the_zone(at, zone, label):
 
 
 def test_lines_take_the_one_zone_the_world_was_given_and_utc_without_one_or_with_several():
-    assert labels_zone([{"step_id": "a", "timezone": "America/Denver"}, {"step_id": "b"}]) == "America/Denver"
+    assert labels_zone([{"env_id": "a", "timezone": "America/Denver"}, {"env_id": "b"}]) == "America/Denver"
     assert labels_zone([]) == "UTC"
-    assert labels_zone([{"timezone": "America/Denver"}, {"timezone": "Europe/Paris"}]) == "UTC"
+    assert labels_zone([{"env_id": "a", "timezone": "America/Denver"}, {"env_id": "b", "timezone": "Europe/Paris"}]) == "UTC"
+
+
+def test_an_env_armed_again_in_another_zone_is_labelled_in_the_zone_it_was_armed_in_last():
+    assert labels_zone([{"env_id": "office", "timezone": "America/Los_Angeles"},
+                        {"env_id": "office", "timezone": "America/Denver"}]) == "America/Denver"
 
 
 @pytest.mark.asyncio

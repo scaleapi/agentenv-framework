@@ -54,9 +54,10 @@ def label_time(at: Optional[str], zone: str = "UTC") -> str:
 
 
 def labels_zone(clocks: list[dict]) -> str:
-    """The zone lines are labelled in when no user names one: the one sync_env_clock gave the world, else UTC, as it is
-    when the world has several."""
-    zones = {c["timezone"] for c in clocks if c.get("timezone")}
+    """The zone lines are labelled in when no user names one: the one sync_env_clock gave the world, by each env's
+    latest arm, else UTC, as it is when the world has several."""
+    latest = {c.get("env_id"): c.get("timezone") for c in clocks}  # a later arm of an env replaces an earlier one
+    zones = {zone for zone in latest.values() if zone}
     return zones.pop() if len(zones) == 1 else "UTC"
 
 

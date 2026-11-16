@@ -1786,7 +1786,8 @@ def render_for_judge(record: dict) -> str:
              "with no known actor (made outside the env's gateway, such as on a website reached directly), each with "
              "when it was seen. The user saw only the messages the assistant sent."]
     wakes = [e for e in timeline if e["event"] == "wake"]
-    zone = next((e.get("time_zone") for e in timeline if e["event"] == "start"), None) or "UTC"
+    zone = (record.get("time_zone") or next((e.get("time_zone") for e in timeline if e["event"] == "start"), None)
+            or "UTC")  # the record's own, since a tail kept when the store failed may have lost the start
     for wake in wakes[:JUDGE_WAKES]:
         n = wake["n"]
         turn = turns.get(n) or {}

@@ -140,6 +140,12 @@ async def test_a_prompt_no_always_on_step_made_is_refused_when_it_is_graded(monk
         await verifier.execute(ctx)
 
 
+def test_the_wake_by_wake_text_is_in_the_run_s_zone_though_its_kept_tail_lost_the_start():
+    record = {"time_zone": "America/Denver", "timeline_tail": [
+        {"event": "wake", "n": 30, "virtual_time": "2027-02-06T00:30:00Z", "woke_by": ["user_reply"]}]}
+    assert "- Wake 30 · Fri Feb 5, 5:30 PM MST · woken by" in ao.render_for_judge(record)
+
+
 def test_the_wake_by_wake_text_says_when_the_record_is_unreadable():
     text = ao.render_for_judge({"object_url": "file:///nowhere/at/all.json", "end_reason": "end_time"})
     assert text.startswith("## The run, wake by wake\n(The run's record could not be read:")
