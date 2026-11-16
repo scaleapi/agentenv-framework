@@ -1,25 +1,43 @@
 """The user_sim_judge step: after a run with the built-in user sim, grade the user sim (the AI playing the user), not
-the assistant. A task writer adds it after the run's step; nothing turns it on by default.
+the assistant, and fail the task when the user sim slipped in a way that could change the assistant's grade, so the
+run is done again rather than scored. A task writer adds it after the run's step.
 
-It judges either kind of run the built-in user sim plays (``deploy_user_sim_agent``):
+It is a rubrics_verifier (``RubricsVerifierTaskStep``) with its own criteria and its own context: the direct judge,
+``use_trajectory`` off and ``output_format`` ``user_sim_checks`` (judge_output_format.py), none of them settings. Its
+settings are its own fields, all described below: ``run_step_id``, ``judge_model`` (unset, rubrics_verifier's default:
+the config's judge model), ``checks``, ``error_checks``, ``rubric_items``, ``rubric_persona_sha256``,
+``fail_task_when_not_passing``, ``verifier_id`` and ``judge_timeout_seconds``. The model call, its key and base, its
+retries and the calls' concurrency are rubrics_verifier's, and a run's ``user_overrides`` change them as they do for
+every judge (``judge_model``; ``use_agent_judge`` sends the same prompt to an agent judge, without the system message
+and the cache marks).
+
+Which run: ``run_step_id``, else the task's only always_on or prompt_agent step. It judges either kind the built-in user
+sim plays (``deploy_user_sim_agent``):
 
 - an ``always_on`` run: every ``user_sim_read`` in the timeline stored at ``metadata["always_on"][step]["object_url"]``
   (else the record's ``timeline_tail``, which keeps answers but not what the user sim was sent);
 - a ``prompt_agent`` chat run: each short entry in ``metadata["user_sim_reads"][step]``, read whole from its
   ``object_url`` (else the entry, which keeps the answer only).
 
-``run_step_id`` names that step; unset, the run must have exactly one of them. The user sim's instructions are rebuilt
-from its ``metadata["user_sims"]`` record by ``deploy_user_sim_agent``'s own path (``recorded_person``, then
-``user_sim_versions.setup``), its opening's files included, and checked against the record's ``prompt_sha256``. ``used`` is never shown to the judge: it is the user sim's
-own pulse check, not evidence.
+The user sim's instructions are rebuilt from its ``metadata["user_sims"]`` record by ``deploy_user_sim_agent``'s own
+path (``recorded_person``, then ``user_sim_versions.setup``), its opening's files included, and checked against the
+record's ``prompt_sha256``. ``used`` is never shown to the judge: it is the user sim's own pulse check, not evidence.
 
-Each check (``user_sim_judge_core.CHECKS``) is one narrow question to ``judge_model``, in its own call; a task's
-``rubric_items`` ride along with the check that owns their family, at most ``MAX_ITEMS_PER_CALL`` to a call.
+What the judge reads: a system message saying it grades the user sim, the format's framing, then the run
+(``judge_trajectory_content``: the rebuilt instructions and every check-in, ``user_sim_judge_core.render_run``), then
+the criteria. Everything up to the end of the run is the same in every call on a run, so it is marked for the prompt
+cache, and the run's first call goes alone so the rest read it from the cache.
+
+The criteria (``user_sim_judge_core.plan_run``): each check in ``checks`` (``user_sim_judge_core.CHECKS``, all seven
+by default) is one criterion and one call, and a task's ``rubric_items`` ride in the call of the check that owns their
+family, at most ``MAX_ITEMS_PER_CALL`` to a call. Each row has a weight: 1 for a check in ``error_checks`` (every check
+but style, by default; style is never one) and for an item that can make the run a user sim error (its ``can_error``,
+unset as its family's check), else 0. A weight-0 row is recorded and never gates.
 
 A rubric item is the shape of a criterion in a task's ``usersim.yaml`` (psi-benchmark-tasks), which that repo turns
 into this step's settings; this step reads no file:
 
-- ``id`` and ``family`` (A1-A5, F1-F4, G1-G5), both required; ids are unique.
+- ``id`` and ``family`` (A1-A5, F1-F4, G1-G5), both required; ids are unique, and none is a check's name.
 - ``kind``: ``hard`` (an exact rule from the user sim's instructions: the judge fails it on any breach), ``general``
   (a judgement: it fails only on a clear instance; the default) or ``auto`` (never sent to the model: ``metric``
   ``max_words`` or ``max_sentences`` is counted on each graded answer, and any answer over ``max`` fails it, naming
@@ -28,17 +46,18 @@ into this step's settings; this step reads no file:
   lengths can't be counted.
 - ``check``: the text the judge applies. ``text`` is its old name and still loads.
 - ``line``: instead of ``check``, a tag of the user sim's instructions ("P1", "T1", "C2", "D3"): the judge applies
-  that line's text from the run's ``metadata["user_sims"][name]["tagged_lines"]``, shown as "Follows its instruction
-  P1: ...", and the item's result records ``line`` and ``line_text``. A hard or general item has exactly one of
-  ``check`` and ``line``; an auto item, counted rather than judged, takes no ``line``. A tag names the same line only
-  for the same persona, so a line item needs ``rubric_persona_sha256``, and grades only on a run whose fingerprint
-  matches it: on a run that recorded none, it is ``error``. A tag the run doesn't have makes the item ``error``
-  ("the user sim's instructions have no line P1"). Neither makes a call.
-- ``name`` and ``short``: a title and one line for reviewers, recorded but not shown to the judge.
+  that line's text from the run's ``metadata["user_sims"][name]["tagged_lines"]``, and the item's row records ``line``
+  and ``line_text``. A hard or general item has exactly one of ``check`` and ``line``; an auto item, counted rather
+  than judged, takes no ``line``. A tag names the same line only for the same persona, so a line item needs
+  ``rubric_persona_sha256``, and grades only on a run whose fingerprint matches it: on a run that recorded none, it
+  is ``error``. A tag the run doesn't have makes the item ``error`` ("the user sim's instructions have no line P1").
+  Neither makes a call.
+- ``name`` and ``short``: a title and one line for reviewers, on the item's row but never shown to the judge.
 - ``na_when``: the situation in which it never came up, told to the judge. ``always`` makes it n/a with no call,
   recording ``static_na_reason`` (required with it); ``never`` means it always applies, and an n/a is asked again.
   An auto item is counted, not judged, so it takes only ``always``; any other ``na_when`` is refused when the task loads.
-- ``can_error``: whether its fail makes the run a user sim error; unset, as the check that owns its family.
+- ``can_error``: whether its fail can make the run a user sim error (weight 1, or 0); unset, as the check that owns
+  its family.
 
 A task item never restates a persona line. The persona is the one place that says what the user sim knows and must
 not say, and the judge reads all of it with every check. Task items are for counted limits (``auto``) and judgment
@@ -61,43 +80,76 @@ the run's ``persona_sha256``. When it's set and differs from the run's, the task
 recorded no ``persona_sha256`` is ``unknown``, and the items are graded. Edits to the task that leave the persona and
 the opening as they were keep the items graded.
 
-What it writes: ``metadata["user_sim_judge"][verifier_id]``, with every verdict, its reason and cited turns, the task
-items, ``user_sim_error`` (``value`` yes / no / unknown, ``because``, ``marked``), the instructions check, token use
-and cost. It writes no ``verifications`` entry, so its verdicts never mix into the assistant's scores.
+What it writes, all in one place, ``metadata["verifications"][verifier_id]``:
 
-Record only, by default: with ``mark_user_sim_error`` off it changes nothing a grader reads. Turned on, a run whose
-``user_sim_error`` is yes, judged against instructions that match the recorded hash, has its prompt response marked
-``error_type = "user_sim_error"``, as a user sim that fails mid-run marks it, so graders that run after this step skip
-it. A failure of this step doesn't fail the task unless ``fail_task_on_error`` says so.
+- ``format`` (``user_sim_checks``), ``results`` and ``score``, as rubrics_verifier writes them. Each row: ``id`` (a
+  check's name or an item's id); what a reviewer reads (a check's ``title`` and ``families``; an item's ``family``,
+  ``kind``, ``check`` or ``line`` and ``line_text``, ``name``, ``short``, ``na_when``, ``asked_with``: the call it
+  rode in, or ``computed``, ``static_na``, ``no_line``); its ``weight``; then its ``verdict`` (pass, fail, n/a, or
+  error when undecided), ``reason``, ``turns``, ``could_change_grade``, ``assistant_asked`` (whether the assistant
+  asked for or invited what was graded: recorded only, never part of the gate; None on a row no model graded),
+  ``score`` and ``result``. A row lowers the score only on a fail that could change the grade at a weight other
+  than 0, so ``score`` is 0 when ``user_sim_error`` is yes, else 1. ``can_be_reward`` is False: the score checks the
+  run, so it is never the task's reward.
+- ``user_sim_error``: ``value`` yes / no / unknown, ``because`` and ``unknown`` (the row ids), ``fails_task``, and
+  ``not_failing`` (why a yes didn't fail the task). ``flag``: "user sim judge undecided" when ``value`` is unknown.
+- ``run_step_id``, ``run_kind``, ``user_sim``, ``judge_model``; ``instructions`` (``source``, ``prompt_sha256``,
+  ``recorded_prompt_sha256``, ``matches``); ``rubric_persona`` (when ``rubric_persona_sha256`` is set); ``notes``
+  (what the judge was told about gaps in the record); ``graded_turns``, ``turns``; ``calls``, ``usage``, ``cost``; and
+  rubrics_verifier's ``judge_output_retries`` / ``judge_output_discrepancies`` / ``judge_batches``.
+- ``skipped`` instead, with ``score`` None and no rows, for a run that isn't judged: one that ended in an error (the
+  always_on record's or the prompt response's ``error_type``: every verifier skips its prompt anyway), a chat run
+  whose user sim never read, and a run with no graded turn.
 
-A run that ended in an error (the always_on record's or the prompt response's ``error_type``) is not judged: every
-verifier skips its prompt anyway.
+The gate, ``fail_task_when_not_passing`` (on by default; it needs ``fail_task_on_error``, also on by default, and is
+refused without it): the step raises ``VerifierNotPassingError``, naming the failing rows, when ``user_sim_error`` is
+yes and the rebuilt instructions match the recorded ``prompt_sha256``. The task then ends FAILED with no score, and
+the run is done again. Whoever caused the slip, the run is spoiled for grading the assistant, so ``assistant_asked``
+never changes it. Off, the verdicts are recorded only. When the gate is on, every step that can be the task's reward
+(one with a ``verifier_id`` and ``can_be_reward``) must depend on this step, directly or through others, or the task is
+refused when it loads.
+
+Unknown never fails the task: a run is failed only on a slip the judge found, so a flaky judge never throws away a good
+run. A judge answer the format can't use is asked again with the format's correction, up to 3 more times
+(``DEFAULT_MAX_RETRIES``, 4, counts the first ask; rubrics_verifier tries a failed model call as many times). A call
+still without a usable answer leaves its rows ``error``, ``user_sim_error`` unknown and the entry flagged; the step
+doesn't raise, and nothing the assistant is scored on changes.
+
+When the task loads it is refused when the run step can't be found (``rate_user_satisfaction.run_step_of``), when the
+run's user isn't a user sim a deploy_user_sim_agent step deploys, when this step doesn't come after the run (its
+``depends_on``, when set, must name it), when a reward step doesn't depend on it (above), and when it still sets
+``mark_user_sim_error``, which ``fail_task_when_not_passing`` replaces.
 """
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import logging
 import re
-import uuid
+from dataclasses import dataclass, field
 from typing import Any, ClassVar, Optional
 
-from agent_env.task_step.context import PromptResponse, TaskStepContext
+from agent_env.task_step.context import PromptResponse, StepContextError, TaskStepContext, VerifierNotPassingError
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.verifiers import user_sim_judge_core as core
+from agent_env.task_step.task_steps.verifiers.judge_utils.judge_output_format import JudgeOutputFormat
+from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
 
 logger = logging.getLogger(__name__)
 
-JUDGE_KEY = "user_sim_judge"
 # Not imported: always_on and prompt_agent import the verifiers' peers. Each is the key its module names.
 ALWAYS_ON_KEY = "always_on"  # always_on.ALWAYS_ON_KEY
 READS_KEY = "user_sim_reads"  # prompt_agent's _BuiltInUserSim
 USER_SIMS_KEY = "user_sims"  # deploy_user_sim_agent.USER_SIMS_KEY
 ALWAYS_ON, CHAT = "always_on", "prompt_agent"
-RUN_STEP_TYPES = (ALWAYS_ON, CHAT)
-FALLBACK_JUDGE_MODEL = "claude-sonnet-4-6"  # rubrics_verifier's, when the config names no judge
-USER_SIM_ERROR = "user_sim_error"
+SYSTEM = ("You grade a user simulator: an AI playing a real person who messages their personal AI assistant. You "
+          "grade the user sim, never the assistant.")
+FLAG_UNDECIDED = "user sim judge undecided"
+NOT_FAILING_OFF = "fail_task_when_not_passing is off: verdicts are recorded only"
+NOT_FAILING_UNCONFIRMED = ("the judge's copy of the user sim's instructions isn't confirmed to be the one it ran with, "
+                           "so it doesn't fail the task")
 FLAG_ASSISTANT = "this answer looks like the assistant's (very long, or markdown)"
 FLAG_LAST = "after the run's last wake: this answer never reached the assistant"
 FLAG_HELD = "its reply was still waiting to be delivered when the run ended: it never reached the assistant"
@@ -105,23 +157,33 @@ FLAG_HELD = "its reply was still waiting to be delivered when the run ended: it 
 ASSISTANT_LIKE_MESSAGE_CHARS = 1200
 SCHEMA_ERRORS_SHOWN_CHARS = 300  # of a malformed answer's schema errors, in the judge's turn note
 USER_SIM_ERROR_SHOWN_CHARS = 200  # of a user sim agent error, in the judge's turn note
+ERROR_SHOWN_CHARS = 300  # of why a call got no usable answer, on its rows
 # Why a line item isn't graded on a run that recorded no persona fingerprint: its tag may name another line now.
 LINE_UNCHECKED = ("the run recorded no persona fingerprint, so its tags can't be checked against the persona the item "
                   "was written for")
 
 
-def default_judge_model() -> str:
-    """The model rubrics_verifier defaults to: the config's ``judge`` role, else claude-sonnet-4-6."""
-    from agent_env.config import get_config
+@dataclass
+class _ThisRun:
+    """One run's judging: what it asks and what its calls cost. Held by the run's own copy of the step, never by the
+    step a task shares across runs."""
+    plan: core.Plan
+    text: str  # the run as the judge reads it
+    first: Optional[asyncio.Event] = None  # set once the run's first call is over
+    calls: int = 0
+    usage: list[Any] = field(default_factory=list)
+    cost: float = 0.0
 
-    return get_config().get_model_for_role("judge") or FALLBACK_JUDGE_MODEL
 
-
-class UserSimJudgeTaskStep(TaskStep):
+class UserSimJudge(RubricsVerifierTaskStep):
     type: ClassVar[str] = "user_sim_judge"
     entity_refs = ()
-    DEFAULT_TIMEOUT_SECONDS: ClassVar[int] = 600
-    DEFAULT_MAX_RETRIES: ClassVar[int] = 3
+    context_paths = ()
+    field_scopes = TaskStep.field_scopes
+    can_be_reward: ClassVar[bool] = False
+    # Each call's answer is asked for up to this many times: the first ask and 3 corrections. rubrics_verifier tries a
+    # failed model call the same number of times.
+    DEFAULT_MAX_RETRIES: ClassVar[int] = 4
 
     def __init__(
         self,
@@ -133,119 +195,167 @@ class UserSimJudgeTaskStep(TaskStep):
         error_checks: Optional[list[str]] = None,
         rubric_items: Optional[list[dict]] = None,
         rubric_persona_sha256: Optional[str] = None,
-        mark_user_sim_error: bool = False,
+        fail_task_when_not_passing: bool = True,
         verifier_id: Optional[str] = None,
         judge_timeout_seconds: Optional[int] = None,
         depends_on: Optional[list[TaskStepDependency]] = None,
-        fail_task_on_error: bool = False,
+        fail_task_on_error: bool = True,
     ):
-        super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
+        if fail_task_when_not_passing is True and not fail_task_on_error:
+            raise ValueError(
+                f"user_sim_judge '{id}': fail_task_when_not_passing (on by default) needs fail_task_on_error: a "
+                "tolerated failure lets the steps after it run and score the run. Set fail_task_on_error to true, or "
+                "fail_task_when_not_passing to false to record the verdicts only.")
+        super().__init__(
+            id, version, criteria=[], prompt_id=None, default_model=judge_model, verifier_id=verifier_id,
+            use_agent_judge=False, use_trajectory=False, output_format=JudgeOutputFormat.USER_SIM_CHECKS,
+            judge_timeout_seconds=judge_timeout_seconds, depends_on=depends_on, fail_task_on_error=fail_task_on_error,
+            fail_task_when_not_passing=fail_task_when_not_passing is True)
+        self.fail_task_when_not_passing = fail_task_when_not_passing  # as given, so config_problems sees a non-bool
         self.run_step_id = run_step_id
-        self.judge_model = judge_model  # None: default_judge_model() when the step runs
+        self.judge_model = judge_model  # None: rubrics_verifier's default, the config's judge model
         self.checks = list(checks) if checks is not None else list(core.CHECK_NAMES)
         self.error_checks = (list(error_checks) if error_checks is not None
                              else [c for c in core.DEFAULT_ERROR_CHECKS if c in self.checks])
         self.rubric_items = list(rubric_items or [])
         self.rubric_persona_sha256 = rubric_persona_sha256
-        self.mark_user_sim_error = mark_user_sim_error
-        self.verifier_id = verifier_id or uuid.uuid4().hex
-        self.judge_timeout_seconds = judge_timeout_seconds or self.DEFAULT_TIMEOUT_SECONDS
+        self._run: Optional[_ThisRun] = None
 
     # ---- settings ----------------------------------------------------------------------------------------------
     def config_problems(self) -> list[str]:
-        return _problems(self.judge_model, self.checks, self.error_checks, self.rubric_items, self.mark_user_sim_error,
-                         self.rubric_persona_sha256)
+        return _problems(self.judge_model, self.checks, self.error_checks, self.rubric_items,
+                         self.fail_task_when_not_passing, self.rubric_persona_sha256)
 
     def task_problems(self, steps: list[TaskStep]) -> list[str]:
-        """The run it judges must be an always_on or prompt_agent step's; unset, the task must have exactly one."""
-        runs = [s for s in steps if s.type in RUN_STEP_TYPES]
-        if self.run_step_id is not None:
-            named = next((s for s in steps if s.id == self.run_step_id), None)
-            if named is not None and named.type not in RUN_STEP_TYPES:
-                return [f"step '{self.id}' ({self.type}) names the user sim of step '{named.id}' ({named.type}); "
-                        "it judges an always_on or prompt_agent step's"]
-            return []
-        if len(runs) > 1:
-            return [f"step '{self.id}' ({self.type}): set run_step_id; this task has {len(runs)} steps it could judge "
-                    f"({sorted(s.id for s in runs)})"]
-        return []
+        """The run it judges must be an always_on or prompt_agent step's, played by a built-in user sim, and come
+        before it; with the gate on, every step that can be the task's reward must depend on it."""
+        from agent_env.task.task import _ancestor_ids, _dependency_ids  # here: the task module imports the steps
+        from agent_env.task_step.task_steps.agent.rate_user_satisfaction import plays_built_in_user_sim, run_step_of
+
+        run, found = run_step_of(self, steps, does="judge")
+        if run is None:
+            return found
+        where = f"{self.type} '{self.id}'"
+        if steps.index(run) > steps.index(self):
+            found.append(f"{where} comes before step '{run.id}', the run it judges; put it after")
+        if self.depends_on is not None and run.id not in {d.task_step_id for d in self.depends_on}:
+            found.append(f"{where}: its depends_on must name '{run.id}', the run it judges, so it runs once that's over")
+        if not plays_built_in_user_sim(run, steps):
+            found.append(f"{where}: the user of {run.type} step '{run.id}' isn't a user sim a deploy_user_sim_agent "
+                         "step deploys; the judge grades only the built-in user sim")
+        if self.fail_task_when_not_passing is True:
+            deps = _dependency_ids(steps)
+            for step in steps:
+                if (step is not self and getattr(step, "verifier_id", None) and getattr(step, "can_be_reward", True)
+                        and self.id not in _ancestor_ids(step.id, deps)):
+                    found.append(f"step '{step.id}' ({step.type}) can be the task's reward but doesn't depend on "
+                                 f"{where}, so a run the user sim spoiled could still be scored; make it depend on "
+                                 f"'{self.id}', or set fail_task_when_not_passing to false to record the verdicts only")
+        return found
 
     def to_dict(self) -> dict:
-        base = super().to_dict()
+        base = TaskStep.to_dict(self)
         base.update(run_step_id=self.run_step_id, judge_model=self.judge_model, checks=self.checks,
                     error_checks=self.error_checks, rubric_items=self.rubric_items,
-                    rubric_persona_sha256=self.rubric_persona_sha256, mark_user_sim_error=self.mark_user_sim_error,
-                    verifier_id=self.verifier_id,
+                    rubric_persona_sha256=self.rubric_persona_sha256,
+                    fail_task_when_not_passing=self.fail_task_when_not_passing, verifier_id=self.verifier_id,
                     judge_timeout_seconds=self.judge_timeout_seconds)
         return base
 
     @classmethod
-    def from_dict(cls, data: dict) -> "UserSimJudgeTaskStep":
-        base = {**cls._base_from_dict(data), "fail_task_on_error": data.get("fail_task_on_error", False)}
-        return cls(**base, run_step_id=data.get("run_step_id"), judge_model=data.get("judge_model"),
-                   checks=data.get("checks"), error_checks=data.get("error_checks"),
-                   rubric_items=data.get("rubric_items"), rubric_persona_sha256=data.get("rubric_persona_sha256"),
-                   mark_user_sim_error=data.get("mark_user_sim_error", False),
+    def from_dict(cls, data: dict) -> "UserSimJudge":
+        if "mark_user_sim_error" in data:
+            raise ValueError(
+                f"user_sim_judge '{data.get('id')}': mark_user_sim_error is gone; fail_task_when_not_passing (on by "
+                "default) takes its place: a run whose user sim slipped in a way that could change the grade fails "
+                "the task, so it is run again. Remove mark_user_sim_error, and set fail_task_when_not_passing to "
+                "false to record the verdicts only.")
+        return cls(**cls._base_from_dict(data), run_step_id=data.get("run_step_id"),
+                   judge_model=data.get("judge_model"), checks=data.get("checks"),
+                   error_checks=data.get("error_checks"), rubric_items=data.get("rubric_items"),
+                   rubric_persona_sha256=data.get("rubric_persona_sha256"),
+                   fail_task_when_not_passing=data.get("fail_task_when_not_passing", True),
                    verifier_id=data.get("verifier_id"), judge_timeout_seconds=data.get("judge_timeout_seconds"))
-
-    def _settings(self, context: TaskStepContext) -> dict:
-        """This run's settings: a run's ``step_params`` for this step override the stored ones."""
-        over = self.step_param_overrides(context)
-        model = over.get("judge_model", self.judge_model)
-        checks = list(over.get("checks", self.checks))
-        error_checks = list(over["error_checks"]) if "error_checks" in over else (
-            [c for c in self.error_checks if c in checks] if "checks" in over else list(self.error_checks))
-        items = over.get("rubric_items", self.rubric_items)
-        persona = over.get("rubric_persona_sha256", self.rubric_persona_sha256)
-        mark = over.get("mark_user_sim_error", self.mark_user_sim_error)
-        problems = _problems(model, checks, error_checks, items, mark, persona)
-        if problems:
-            raise ValueError(f"user_sim_judge '{self.id}': " + "; ".join(problems))
-        return {"model": model or default_judge_model(), "checks": checks, "error_checks": error_checks,
-                "mark": mark, "items": [core.RubricItem.from_dict(i) for i in items], "rubric_persona_sha256": persona}
 
     # ---- the run -----------------------------------------------------------------------------------------------
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
-        settings = self._settings(context)
+        context = await self._grade(context)
+        error = context.metadata["verifications"][self.verifier_id]["user_sim_error"]
+        if error.get("fails_task"):
+            raise VerifierNotPassingError(
+                f"user_sim_judge '{self.id}': the user sim slipped in a way that could change the assistant's grade "
+                f"({', '.join(error['because'])}), so the run doesn't count; run it again")
+        return context
+
+    async def _grade(self, context: TaskStepContext) -> TaskStepContext:
+        problems = self.config_problems()
+        if problems:
+            raise ValueError(f"user_sim_judge '{self.id}': " + "; ".join(problems))
+        items = [core.RubricItem.from_dict(i) for i in self.rubric_items]
         kind, step_id = self._find_run(context)
         response = _prompt_response(context, step_id)
-        entry: dict[str, Any] = {"run_step_id": step_id, "run_kind": kind, "judge_model": settings["model"],
-                                 "checks_run": settings["checks"], "error_checks": settings["error_checks"],
-                                 "rubric_items": [i.to_dict() for i in settings["items"]],
-                                 "mark_user_sim_error": settings["mark"]}
-        items = settings["items"]
+        model = (context.metadata.get("user_overrides") or {}).get("judge_model") or self.default_model
+        entry: dict[str, Any] = {"run_step_id": step_id, "run_kind": kind, "judge_model": model}
         record = (context.metadata.get(ALWAYS_ON_KEY) or {}).get(step_id) if kind == ALWAYS_ON else None
         error_type = (record or {}).get("error_type") or (response.error_type if response else None)
+        skipped = None
         if error_type:
-            entry.update(skipped=f"the run ended with error_type={error_type}")
+            skipped = f"the run ended with error_type={error_type}"
         elif kind == CHAT and not (context.metadata.get(READS_KEY) or {}).get(step_id):
-            entry.update(skipped="the user sim never read: the run has no user_sim_reads")
+            skipped = "the user sim never read: the run has no user_sim_reads"
         else:
             run, about = await asyncio.to_thread(_read_run, kind, step_id, record, context)
-            entry["user_sim"], entry["instructions"] = about["user_sim"], about["instructions"]
-            if settings["rubric_persona_sha256"] is not None and items:
+            entry.update(user_sim=about["user_sim"], instructions=about["instructions"])
+            if self.rubric_persona_sha256 is not None and items:
                 us = (context.metadata.get(USER_SIMS_KEY) or {}).get(about["user_sim"]) or {}
-                entry["rubric_persona"] = _rubric_persona(settings["rubric_persona_sha256"], us.get("persona_sha256"))
+                entry["rubric_persona"] = _rubric_persona(self.rubric_persona_sha256, us.get("persona_sha256"))
                 if entry["rubric_persona"]["status"] == "mismatch":
                     items = []
-            context.record_model("user sim judge", self.id, settings["model"])
-            unknown = (entry.get("rubric_persona") or {}).get("status") == "unknown"
-            result = await core.judge_run(
-                run, model=settings["model"], checks=settings["checks"], items=items,
-                error_checks=settings["error_checks"], complete=self._complete(context),
-                lines_unusable=LINE_UNCHECKED if unknown else "")
-            result.pop("model", None)  # the entry's judge_model
-            entry.update(result)
-        if "skipped" in entry:
-            logger.warning(f"user_sim_judge '{self.id}': skipped, {entry['skipped']}")
-            entry["user_sim_error"] = dict(core.NOT_JUDGED)
-        entry["user_sim_error"].update(self._mark(entry, settings["mark"], response))
-        context.metadata.setdefault(JUDGE_KEY, {})[self.verifier_id] = entry
-        error = entry["user_sim_error"]
-        logger.info(f"user_sim_judge '{self.id}': {kind} '{step_id}' user_sim_error={error['value']} "
-                    f"({', '.join(error['because'] + error['unknown']) or 'no check'}), marked={error['marked']}; "
-                    + ", ".join(f"{k}={v['verdict']}" for k, v in (entry.get("checks") or {}).items()))
+            graded = [t.n for t in run.turns if t.graded]
+            entry.update(graded_turns=graded, turns=len(run.turns), notes=list(run.notes))
+            if not graded:
+                skipped = "no graded turns"
+            elif response is None:
+                raise StepContextError(f"user_sim_judge '{self.id}': step '{step_id}' left no prompt response")
+        if skipped:
+            logger.warning(f"user_sim_judge '{self.id}': skipped, {skipped}")
+            context.metadata.setdefault("verifications", {})[self.verifier_id] = {
+                **self._entry_format_fields(), "results": [], "score": None, **entry, "skipped": skipped,
+                "user_sim_error": {**core.NOT_JUDGED, "fails_task": False}}
+            return context
+
+        unusable = LINE_UNCHECKED if (entry.get("rubric_persona") or {}).get("status") == "unknown" else ""
+        plan = core.plan_run(run, checks=self.checks, items=items, error_checks=self.error_checks,
+                             lines_unusable=unusable)
+        judge = copy.copy(self)  # this run's own copy: the step is shared by every run of the task
+        judge.prompt_id, judge._run = response.prompt_id, _ThisRun(plan=plan, text=core.run_text(run))
+        if plan.criteria:
+            await RubricsVerifierTaskStep._grade(judge, context)
+        else:  # nothing for a model: only rows settled without one
+            judge._write_entries(context, [], {}, unjudged=plan.unjudged)
+        self._finish(context.metadata["verifications"][self.verifier_id], entry, judge._run)
         return context
+
+    def _finish(self, written: dict, entry: dict, this: _ThisRun) -> None:
+        """The written entry with its rows in the plan's order and shape, the run's verdict, and the run's details."""
+        rows = core.finish_rows(written["results"], this.plan)
+        error = core.user_sim_error(rows)
+        error["fails_task"] = False
+        if error["value"] == "yes":
+            if self.fail_task_when_not_passing is not True:
+                error["not_failing"] = NOT_FAILING_OFF
+            elif not (entry.get("instructions") or {}).get("matches"):
+                error["not_failing"] = NOT_FAILING_UNCONFIRMED
+            else:
+                error["fails_task"] = True
+        written.update(results=rows, score=0.0 if any(r.get("result") is False for r in rows) else 1.0, **entry,
+                       user_sim_error=error, calls=this.calls, usage=core.usage_total(this.usage),
+                       cost=round(this.cost, 6))
+        if error["value"] == "unknown":
+            written["flag"] = FLAG_UNDECIDED
+        logger.info(f"user_sim_judge '{self.id}': {entry['run_kind']} '{entry['run_step_id']}' user_sim_error="
+                    f"{error['value']} ({', '.join(error['because'] + error['unknown']) or 'no row'}), fails_task="
+                    f"{error['fails_task']}; " + ", ".join(f"{r['id']}={r['verdict']}" for r in rows))
 
     def _find_run(self, context: TaskStepContext) -> tuple[str, str]:
         """The kind of run and its step id: ``run_step_id``'s, else the run's only always_on or chat run."""
@@ -264,73 +374,70 @@ class UserSimJudgeTaskStep(TaskStep):
                                f"built-in user sim ({sorted(s for _, s in runs)})")
         return runs[0]
 
-    def _mark(self, entry: dict, mark: bool, response: Optional[PromptResponse]) -> dict:
-        """With ``mark`` on, a user sim error marks the run's prompt response, so graders after this step skip it."""
-        error = entry["user_sim_error"]
-        if error["value"] != "yes":
-            return {"marked": False}
-        if not mark:
-            return {"marked": False, "not_marked": "mark_user_sim_error is off: verdicts are recorded only"}
-        if not (entry.get("instructions") or {}).get("matches"):
-            return {"marked": False, "not_marked": "the judge's copy of the user sim's instructions isn't confirmed "
-                                                   "to be the one it ran with"}
-        if response is None:
-            return {"marked": False, "not_marked": f"step '{entry['run_step_id']}' left no prompt response"}
-        response.error_type = USER_SIM_ERROR
-        response.error_message = response.error_message or (
-            "The user sim judge found a user sim error: " + ", ".join(error["because"]))
-        return {"marked": True}
+    # ---- rubrics_verifier's hooks, on the run's own copy ---------------------------------------------------------
+    def _this(self) -> _ThisRun:
+        if self._run is None:
+            raise RuntimeError(f"user_sim_judge '{self.id}': the judge's hooks run only on a run's own copy of the step")
+        return self._run
 
-    def _complete(self, context: TaskStepContext) -> core.Complete:
-        """One judge call through LiteLLM, with the key and base the run's overrides name (as rubrics_verifier's
-        judge), the run's two shared parts marked for Anthropic's prompt cache."""
-        overrides = context.metadata.get("user_overrides", {})
-        timeout, retries = self.judge_timeout_seconds, self.DEFAULT_MAX_RETRIES
+    def _resolved_criteria(self, context: TaskStepContext) -> list[dict]:
+        return [dict(c) for c in self._this().plan.criteria]
 
-        async def complete(model: str, system: str, parts: list[str], schema: dict) -> dict:
-            import litellm
+    async def judge_trajectory_content(self, context: TaskStepContext, prompt_response: PromptResponse) -> str:
+        return self._this().text
 
-            from agent_env.config import get_config
-            from agent_env.config.model import ModelParam
+    async def unjudged_rows(self, context: TaskStepContext, prompt_response: PromptResponse) -> list[dict]:
+        return list(self._this().plan.unjudged)
 
-            config = get_config()
-            call = config.resolve_model_call(
-                model,
-                default_api_key=config.resolve_reference(overrides.get("judge_litellm_api_key")
-                                                         or overrides.get("litellm_api_key")),
-                base_override=overrides.get("judge_litellm_base_url") or overrides.get("litellm_base_url"))
-            cache = _anthropic(model)
-            content = [{"type": "text", "text": p, **({"cache_control": {"type": "ephemeral"}} if cache and i < 2
-                                                      else {})}
-                       for i, p in enumerate(parts) if p]
-            kwargs = dict(model=model, messages=[{"role": "system", "content": system},
-                                                 {"role": "user", "content": content}],
-                          timeout=timeout, **call.client_kwargs())
-            kwargs[ModelParam.RESPONSE_FORMAT] = {"type": "json_schema", "json_schema": {
-                "name": "user_sim_check", "schema": schema, "strict": True}}
-            last: Optional[Exception] = None
-            for attempt in range(1, retries + 1):
-                try:
-                    response = await litellm.acompletion(**kwargs)
-                    usage = getattr(response, "usage", None)
-                    hidden = getattr(response, "_hidden_params", None) or {}
-                    return {"text": response.choices[0].message.content or "",
-                            "usage": usage.model_dump() if hasattr(usage, "model_dump") else dict(usage or {}),
-                            "cost": hidden.get("response_cost")}
-                except Exception as e:
-                    last = e
-                    logger.warning(f"user_sim_judge: {model} call {attempt}/{retries} failed: {type(e).__name__}: {e}")
-            raise RuntimeError(f"{model} failed after {retries} attempts") from last
+    def _criteria_batches(self, criteria: list[dict], size: Optional[int]) -> list[list[dict]]:
+        """One call per check, with the task items riding with it, then the calls that ask only items."""
+        out, start = [], 0
+        for n in self._this().plan.batches:
+            out.append(criteria[start:start + n])
+            start += n
+        return out
 
-        return complete
+    async def _prompt_llm_judge(self, eval_prompt: str, *, model: str, context: TaskStepContext,
+                                image_blocks: Optional[list[dict]] = None, system: Optional[str] = None,
+                                cached_prefix: Optional[str] = None) -> dict:
+        """rubrics_verifier's call, with the system message and everything up to the end of the run marked for the
+        prompt cache. The run's first call goes alone, so the others read the run from the cache."""
+        this = self._this()
+        end = eval_prompt.find(this.text)
+        head = eval_prompt[:end + len(this.text)] if end >= 0 else None
 
+        async def call() -> dict:
+            got = await super(UserSimJudge, self)._prompt_llm_judge(
+                eval_prompt, model=model, context=context, image_blocks=image_blocks, system=SYSTEM,
+                cached_prefix=head)
+            this.calls += 1
+            this.usage.append(got.get("usage"))
+            this.cost += got.get("cost") or 0.0
+            return got
 
-def _anthropic(model: str) -> bool:
-    m = model.lower()
-    return m.startswith(("anthropic/", "bedrock/", "vertex_ai/")) and "claude" in m or m.startswith("claude")
+        if this.first is None:
+            this.first = asyncio.Event()
+            try:
+                return await call()
+            finally:
+                this.first.set()
+        await this.first.wait()
+        return await call()
+
+    async def _run_judge_with_output_retries(self, *, criteria: list[dict], **kwargs: Any
+                                             ) -> tuple[list[dict], int, list[dict], Optional[str]]:
+        """rubrics_verifier's answer retries; a call still without a usable answer leaves its criteria undecided
+        (``error``) rather than failing the step: an unknown never fails the task."""
+        try:
+            return await super()._run_judge_with_output_retries(criteria=criteria, **kwargs)
+        except (ValueError, RuntimeError) as e:
+            error = (f"no usable answer after {self.DEFAULT_MAX_RETRIES} tries: {type(e).__name__}: "
+                     f"{str(e)[:ERROR_SHOWN_CHARS]}")
+            logger.warning(f"user_sim_judge '{self.id}': {len(criteria)} criteria undecided, {error}")
+            return [core.undecided_row(c, error) for c in criteria], 0, [], None
 
 
-def _problems(model: Any, checks: Any, error_checks: Any, items: Any, mark: Any,
+def _problems(model: Any, checks: Any, error_checks: Any, items: Any, gate: Any,
               rubric_persona: Any = None) -> list[str]:
     out = []
     if rubric_persona is not None and not (isinstance(rubric_persona, str)
@@ -339,8 +446,8 @@ def _problems(model: Any, checks: Any, error_checks: Any, items: Any, mark: Any,
                    f"{rubric_persona!r}")
     if model is not None and (not isinstance(model, str) or not model.strip()):
         out.append("judge_model must be a model name")
-    if not isinstance(mark, bool):
-        out.append("mark_user_sim_error must be true or false")
+    if not isinstance(gate, bool):
+        out.append("fail_task_when_not_passing must be true or false")
     if not isinstance(checks, list) or not all(isinstance(c, str) for c in checks):
         out.append(f"checks must be a list from {list(core.CHECK_NAMES)}")
     else:
@@ -351,14 +458,20 @@ def _problems(model: Any, checks: Any, error_checks: Any, items: Any, mark: Any,
             out.append("checks is empty and there are no rubric_items: nothing to judge")
     if not isinstance(error_checks, list) or not all(isinstance(c, str) for c in error_checks):
         out.append("error_checks must be a list of check names")
-    elif isinstance(checks, list):
-        not_run = sorted(set(error_checks) - set(checks))
-        if not_run:
-            out.append(f"error_checks names checks that don't run: {not_run}")
+    else:
+        if isinstance(checks, list):
+            not_run = sorted(set(error_checks) - set(checks))
+            if not_run:
+                out.append(f"error_checks names checks that don't run: {not_run}")
+        if "style" in error_checks:
+            out.append("error_checks can't name style: its rows are recorded only (weight 0), never a user sim error")
     if not isinstance(items, list):
         out.append("rubric_items must be a list of {id, family, kind, check, ...}")
     else:
         out += core.item_problems(items)
+        out += [f"rubric_items[{i}] ({item['id']}): id '{item['id']}' is a check's name; give the item another id"
+                for i, item in enumerate(items) if isinstance(item, dict) and isinstance(item.get("id"), str)
+                and item["id"] in core.CHECKS]
         if rubric_persona is None:
             out += [f"rubric_items[{i}] ({item.get('id')}): a line item needs rubric_persona_sha256, so its tag is "
                     "graded only on runs of the persona it was written for"

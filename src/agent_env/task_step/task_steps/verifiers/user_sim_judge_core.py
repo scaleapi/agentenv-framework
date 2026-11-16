@@ -1,5 +1,5 @@
-"""What the user_sim_judge step asks, and how it combines the answers. Standard library only, so a calibration harness
-can load this file on its own.
+"""What the user_sim_judge step asks about a run, and how it reads the rows. Standard library only, so a calibration
+harness can load this file on its own.
 
 The judge grades the user sim (the AI playing the user), not the assistant. Each check asks one narrow question over
 the user sim's whole run and covers families of the User Simulator Rubric Taxonomy (PSI Bench SSOT):
@@ -14,22 +14,23 @@ the user sim's whole run and covers families of the User Simulator Rubric Taxono
 | ending      | G4             |
 
 A5 (satisfaction) has no check: the separate ``rate_user_satisfaction`` step covers it, not this judge. A task's own
-rubric items (``RubricItem``) may name any family; an item goes into the call of the check that owns its family, and an
-item whose family no running check owns gets one call of its own (``TASK_ITEMS``). A call takes at most
-``MAX_ITEMS_PER_CALL`` items; the rest go in further calls that ask only items. ``auto`` items and ``na_when: always``
-items are settled here, with no call. An item's ``line`` (a tag, "P1") is graded by that line's text in the run's
-``tagged_lines``; a tag the run doesn't have makes the item ``error``, with no call.
+rubric items (``RubricItem``) may name any family. ``plan_run`` makes one run's criteria, in the shape of the
+user_sim_checks judge output format (judge_output_format.py): each check is one criterion and one call, and an item
+rides in the call of the check that owns its family; an item whose family no running check owns goes in a call of its
+own (``TASK_ITEMS``). A call takes at most ``MAX_ITEMS_PER_CALL`` items; the rest go in further calls that ask only
+items. ``auto`` items, ``na_when: always`` items and line items whose line can't be read are settled here, with no
+call. An item's ``line`` (a tag, "P1") is graded by that line's text in the run's ``tagged_lines``.
 
-One judge model answers each check in its own call. ``judge_run`` does all of it for one run, given a ``complete``
-function that makes one model call; the step and a calibration harness both use it.
+Each row has a weight: 1 for a check in the step's ``error_checks`` (every check but style, by default) and for an
+item that can make the run a user sim error, else 0. ``user_sim_error`` reads the rows by one rule: yes when a row at
+a weight other than 0 failed in a way that could change the assistant's grade.
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import re
 from dataclasses import dataclass, field, replace
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Callable, Optional
 
 # ---- the rubric families ------------------------------------------------------------------------------------------
 FAMILIES: dict[str, str] = {
@@ -53,7 +54,6 @@ FAMILIES: dict[str, str] = {
     "G5": "Independence, no collusion: acts as the assistant's customer, not its teammate.",
 }
 
-VERDICTS = ("pass", "fail", "n/a")
 TASK_ITEMS = "task_items"
 # An item's ``asked_with`` when no call asked it: an auto item counted here, an ``na_when: always`` item.
 COMPUTED, STATIC_NA = "computed", "static_na"
@@ -239,57 +239,6 @@ FAMILY_OWNER: dict[str, str] = {f: c.name for c in CHECKS.values() for f in c.fa
 # The checks that may make a run a user sim error unless the task says otherwise. Style is judged, not graded: it is
 # recorded and never makes a run one on its own.
 DEFAULT_ERROR_CHECKS = ("guidance", "oversharing", "delegation", "rogue", "made_up", "ending")
-
-INSTRUCTIONS = """You check a user simulator: an AI playing a real person who messages their personal AI assistant. \
-You grade the user simulator, never the assistant. You are given, in order:
-1. THE USER SIM'S INSTRUCTIONS: exactly what it was told about who it is, what it knows, its decisions, its rules for \
-the assistant and what is private. Hold it to these lines only.
-2. THE RUN: every check-in it got, word for word ("what it was sent": the time, its new and earlier emails, texts and \
-notifications, the lines it sent, and the assistant's new messages), each followed by its answer: "reply" (the \
-message reaches the assistant), "no_reply" (nothing is sent) or "done" (a sign-off).
-3. ONE QUESTION about it.
-
-How to read the run:
-- What it was sent at a turn, and at every earlier turn, is what it knew; a fact it was never shown is not one it \
-forgot.
-- Turns marked CONTEXT ONLY are fixed history: never fail the user sim for them, but they still count as what it said.
-- Grade only the turns marked GRADED. Cite turns by their number.
-- The assistant's own words are the assistant's, even when they repeat an email.
-
-Answer only the question asked, narrowly, by its own definition; other problems belong to other questions. A failure \
-needs clear evidence in a graded answer.
-
-Reason first and decide last. Write the reason, then the turns it rests on, and only then the verdict, which follows \
-from the reason: a reason that finds no clear failure gives "pass" (or "n/a"), never "fail". Keep every reason to at \
-most 40 words: the evidence and the conclusion, not your working. "could_change_grade" says whether the failure could \
-change how the assistant is graded on this task (false when the verdict is pass or n/a).
-
-Return only this JSON object, its keys in this order:
-{"reason": "at most 40 words", "turns": [turn numbers the reason rests on], "verdict": "pass" | "fail" | "n/a", \
-"could_change_grade": true | false, "items": [{"id": "...", "reason": "at most 40 words", "turns": [...], \
-"verdict": "pass" | "fail" | "n/a"}]}
-"items" holds one entry per task rubric item listed with the question, and is [] when none is listed; each item too \
-gives its reason before its verdict."""
-
-# Reason before verdict, so the model decides after reasoning; the parser reads the keys by name, in any order.
-OUTPUT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "reason": {"type": "string"},
-        "turns": {"type": "array", "items": {"type": "integer"}},
-        "verdict": {"type": "string", "enum": list(VERDICTS)},
-        "could_change_grade": {"type": "boolean"},
-        "items": {"type": "array", "items": {
-            "type": "object", "additionalProperties": False,
-            "properties": {"id": {"type": "string"}, "reason": {"type": "string"},
-                           "turns": {"type": "array", "items": {"type": "integer"}},
-                           "verdict": {"type": "string", "enum": list(VERDICTS)}},
-            "required": ["id", "reason", "turns", "verdict"]}},
-    },
-    "required": ["reason", "turns", "verdict", "could_change_grade", "items"],
-}
-
 
 # ---- the run the judge reads --------------------------------------------------------------------------------------
 @dataclass
@@ -564,53 +513,18 @@ def render_run(run: UserSimRun) -> tuple[str, str]:
     return "\n".join(head), "\n".join(answers)
 
 
-KIND_RULES = {
-    HARD: "A hard item is an exact rule from the user sim's instructions: it fails on any breach of the list or value "
-          "it names, however small.",
-    GENERAL: "A general item is a judgement about how this person would behave: it fails only on a clear instance.",
-}
 
 
+def run_text(run: UserSimRun) -> str:
+    """The run as one text, the part of every call's prompt that its calls share (``render_run``'s two parts)."""
+    return "\n".join(part for part in render_run(run) if part)
+
+
+# ---- what the judge is asked --------------------------------------------------------------------------------------
 def call_check(call: str) -> Optional[str]:
-    """The check whose question a call asks; None for a call that asks only task items (``TASK_ITEMS``, or a
-    check's or the task's further items, ``<check>#2``)."""
+    """The check a call asks; None for a call that asks only task items (``TASK_ITEMS``, or a check's or the task's
+    further items, ``<check>#2``)."""
     return call if call in CHECKS else None
-
-
-def question_text(check_name: str, items: list[RubricItem]) -> str:
-    if call_check(check_name) is None:
-        owner = CHECKS.get(check_name.split("#")[0])
-        part = f" (more of the {owner.title} question's, {', '.join(owner.families)})" if owner else ""
-        lines = [f"# YOUR QUESTION: the task's own rubric items{part}",
-                 "Check each item below against the graded turns. Give \"verdict\" as \"fail\" if any item fails, "
-                 "\"n/a\" if every item is n/a, else \"pass\"."]
-    else:
-        c = CHECKS[check_name]
-        lines = [f"# YOUR QUESTION: {c.title} ({', '.join(c.families)})", c.question, "", "It fails when, at a graded "
-                 "turn:"]
-        lines += [f"- {f}" for f in c.fails]
-        lines += ["", "Not a failure:"] + [f"- {f}" for f in c.not_fails]
-        if c.na:
-            lines += ["", c.na]
-        else:
-            lines += ["", "Answer \"pass\" or \"fail\"; \"n/a\" only if no turn is graded."]
-        if c.grade:
-            lines += ["", f"could_change_grade: {c.grade}"]
-    if items:
-        lines += ["", "Task rubric items: answer each in \"items\"."]
-        lines += [f"- {KIND_RULES[k]}" for k in (HARD, GENERAL) if any(i.kind == k for i in items)]
-        if any(i.na_when for i in items):
-            lines.append("- An item's \"n/a when\" is the situation in which it never came up: answer \"n/a\" for it "
-                         "then, and only then. \"n/a is not allowed\" means it always applies: answer pass or fail.")
-        lines.append("")
-        for i in items:
-            lines.append(f"- {i.id} ({i.family}: {FAMILIES[i.family].split(':')[0]}; {i.kind}): {i.check}")
-            if not i.na_allowed:
-                lines.append("  n/a is not allowed")
-            elif i.na_when:
-                lines.append(f"  n/a when: {i.na_when}")
-    lines += ["", "Return only the JSON object."]
-    return "\n".join(lines)
 
 
 def plan_calls(checks: list[str], items: list[RubricItem],
@@ -635,225 +549,150 @@ def plan_calls(checks: list[str], items: list[RubricItem],
     return calls
 
 
-# ---- one judge's answer -------------------------------------------------------------------------------------------
-def parse_answer(text: str, graded: set[int], item_ids: list[str], no_na: tuple[str, ...] | list[str] = ()) -> dict:
-    """One judge's answer to one call, checked. ``no_na``: the items that may not be n/a. Raises ValueError with
-    what's wrong."""
-    obj = _json_object(text)
-    if not isinstance(obj, dict):
-        raise ValueError("the answer is not a JSON object")
-    verdict = str(obj.get("verdict", "")).strip().lower()
-    if verdict not in VERDICTS:
-        raise ValueError(f"verdict {obj.get('verdict')!r} is not one of {list(VERDICTS)}")
-    change = obj.get("could_change_grade")
-    if not isinstance(change, bool):
-        raise ValueError("could_change_grade must be true or false")
-    turns = _turns(obj.get("turns"))
-    reason = str(obj.get("reason") or "").strip()
-    _fail_cites_a_graded_turn("a fail", verdict, turns, graded)
-    _fail_reason_finds_a_failure("a fail", verdict, reason)
-    out = {"verdict": verdict, "could_change_grade": change and verdict == "fail",
-           "reason": reason, "turns": [t for t in turns if t in graded],
-           "turns_outside_graded": [t for t in turns if t not in graded]}
-    got = {str(i.get("id")): i for i in obj.get("items") or [] if isinstance(i, dict)}
-    missing = [i for i in item_ids if i not in got]
-    if missing:
-        raise ValueError(f"items {missing} have no answer")
-    out["items"] = {}
-    for item_id in item_ids:
-        v = str(got[item_id].get("verdict", "")).strip().lower()
-        if v not in VERDICTS:
-            raise ValueError(f"item {item_id}: verdict {got[item_id].get('verdict')!r}")
-        if v == "n/a" and item_id in no_na:
-            raise ValueError(f"item {item_id} may not be n/a: it always applies, so answer pass or fail")
-        item_turns = _turns(got[item_id].get("turns"))
-        item_reason = str(got[item_id].get("reason") or "").strip()
-        _fail_cites_a_graded_turn(f"item {item_id}: a fail", v, item_turns, graded)
-        _fail_reason_finds_a_failure(f"item {item_id}: a fail", v, item_reason)
-        out["items"][item_id] = {"verdict": v, "reason": item_reason, "turns": [t for t in item_turns if t in graded]}
-    return out
+def check_title(name: str) -> str:
+    c = CHECKS[name]
+    return f"{c.title} ({', '.join(c.families)})"
 
 
-def _fail_cites_a_graded_turn(what: str, verdict: str, turns: list[int], graded: set[int]) -> None:
-    """A fail has to rest on a turn being graded; one that cites none is unsupported, so it's asked again."""
-    if verdict == "fail" and not any(t in graded for t in turns):
-        raise ValueError(f"{what} must cite at least one graded turn; cited {turns}, graded {sorted(graded)}")
+def check_question(name: str) -> str:
+    """A check's question as the judge reads it: what it asks, what fails, what doesn't, when it's n/a and when a fail
+    could change the assistant's grade."""
+    c = CHECKS[name]
+    lines = [c.question, "", "It fails when, at a graded turn:", *[f"- {f}" for f in c.fails],
+             "", "Not a failure:", *[f"- {f}" for f in c.not_fails], "",
+             c.na or "Answer \"pass\" or \"fail\"; \"n/a\" only if no turn is graded."]
+    if c.grade:
+        lines += ["", f"could_change_grade: {c.grade}"]
+    return "\n".join(lines)
 
 
-ERROR_SHOWN_CHARS = 200  # of an answer's or a call's error, in the retry note and the recorded error
-
-# A reason concluding nothing failed ("No clear delegation failures found"); a backstop to the reason-first prompt.
-_NO_FAILURE_FOUND = re.compile(
-    r"\bno\s+(?:clear\s+)?(?:\w+\s+)?failures?\s+(?:was\s+|were\s+)?(?:found|detected|identified)\b"
-    r"|\bno\s+clear\s+(?:\w+\s+)?failures?\b|\bnothing\s+fails\b", re.I)
+def family_label(family: str) -> str:
+    return f"{family} ({FAMILIES[family].split(':')[0]})"
 
 
-def _fail_reason_finds_a_failure(what: str, verdict: str, reason: str) -> None:
-    """A fail whose own reason concludes no failure was found contradicts itself, so it's asked again. Only the
-    reason's last sentence is its conclusion: "no clear failure at turn 1; at turn 2 she leaked it" is a real fail."""
-    sentences = [x for x in re.split(r"[.;!?]+", reason) if x.strip()]
-    m = _NO_FAILURE_FOUND.search(sentences[-1]) if verdict == "fail" and sentences else None
-    if m:
-        raise ValueError(f"{what} whose reason says {m.group(0)!r} contradicts itself; the verdict must follow the "
-                         "reason")
+# ---- one run's criteria and rows ----------------------------------------------------------------------------------
+# The fields a row's verdict is in, as a judge's row (judge_output_format's user_sim_checks) or one computed here has
+# them; a stored row is these, after what a reviewer reads about it.
+VERDICT_FIELDS = ("verdict", "reason", "turns", "turns_outside_graded", "could_change_grade", "assistant_asked",
+                  "error", "score", "result", "justification")
 
 
-def _turns(value: Any) -> list[int]:
-    if not isinstance(value, list):
-        return []
-    out = []
-    for v in value:
-        try:
-            out.append(int(v))
-        except (TypeError, ValueError):
+@dataclass
+class Plan:
+    """What one run's judge is asked, and the rows no model grades.
+
+    ``criteria``: user_sim_checks criteria in call order, each check followed by the task items riding with it; what
+    the judge reads of each (``id``, ``check`` or ``item``, ``family``, ``kind``, ``question``, ``na_when``,
+    ``graded_turns``, ``weight``). ``batches``: how many of them each call asks, in order. ``unjudged``: the rows no
+    model grades (auto items, ``na_when: always`` items, line items whose line can't be read). ``about``: by row id,
+    what a reviewer reads on the row and the judge never sees (an item's ``name``, ``short``, ``asked_with`` ...)."""
+    criteria: list[dict] = field(default_factory=list)
+    batches: list[int] = field(default_factory=list)
+    unjudged: list[dict] = field(default_factory=list)
+    about: dict[str, dict] = field(default_factory=dict)
+    order: list[str] = field(default_factory=list)  # the row ids: the checks in order, then the task's items
+
+
+def item_weight(item: RubricItem, error_checks: list[str]) -> float:
+    """1 when a fail of the item can make the run a user sim error, else 0: its ``can_error``, unset as the check
+    that owns its family (an error check, or not)."""
+    can = item.can_error if item.can_error is not None else FAMILY_OWNER.get(item.family) in error_checks
+    return 1.0 if can else 0.0
+
+
+def computed_row(got: dict, weight: float) -> dict:
+    """A row no model graded (``got``: verdict, reason or error, turns), scored as a judge's: it lowers the score only
+    on a fail at a weight other than 0. A computed fail could change the grade; ``assistant_asked`` is None, since no
+    judge looked."""
+    fail = got["verdict"] == "fail"
+    lowers = fail and weight != 0
+    return {**got, "could_change_grade": fail, "assistant_asked": None,
+            "justification": got.get("reason") or got.get("error") or "",
+            "score": 0.0 if lowers else 1.0, "result": not lowers}
+
+
+def plan_run(run: UserSimRun, *, checks: list[str], items: list[RubricItem], error_checks: list[str],
+             lines_unusable: str = "") -> Plan:
+    """The criteria the judge is asked about ``run`` and the rows settled here: each check in ``checks`` (weight 1
+    when it is in ``error_checks``, else 0) with the task items its families own, at most ``MAX_ITEMS_PER_CALL`` to a
+    call; an auto item counted, an ``na_when: always`` item n/a, a ``line`` item graded by its line's text in
+    ``run.tagged_lines``, or an error when the run has no such tag or ``lines_unusable`` says why none can be
+    trusted."""
+    graded = sorted(t.n for t in run.turns if t.graded)
+    resolved, no_line = resolve_lines(list(items), run.tagged_lines, lines_unusable)
+    calls = plan_calls(list(checks), resolved)
+    plan = Plan(order=list(checks) + [i.id for i in items])
+    for name in checks:
+        plan.about[name] = {"title": CHECKS[name].title, "families": list(CHECKS[name].families),
+                            "weight": 1.0 if name in error_checks else 0.0}
+    lines = run.tagged_lines or {}
+    for item in items:
+        about = {k: v for k, v in item.to_dict().items() if k != "id"}
+        if item.line and item.asks_the_model and item.id not in no_line:
+            about["line_text"] = lines[item.line]
+        plan.about[item.id] = {**about, "weight": item_weight(item, error_checks)}
+    for call, its in calls.items():
+        size = 0
+        if call_check(call):
+            plan.criteria.append({"id": call, "check": check_title(call), "question": check_question(call),
+                                  "graded_turns": graded, "weight": plan.about[call]["weight"]})
+            size += 1
+        for item in its:
+            criterion = {"id": item.id, "item": item.id, "family": family_label(item.family), "kind": item.kind,
+                         "question": item.check, "graded_turns": graded, "weight": plan.about[item.id]["weight"]}
+            if item.na_when:
+                criterion["na_when"] = item.na_when
+            plan.criteria.append(criterion)
+            plan.about[item.id]["asked_with"] = call
+            size += 1
+        if size:
+            plan.batches.append(size)
+    for item in items:
+        if item.id in no_line:
+            got, asked_with = no_line[item.id], NO_LINE
+        elif item.kind == AUTO and not item.static_na:
+            got, asked_with = auto_result(item, run), COMPUTED
+        elif item.static_na:
+            got, asked_with = {"verdict": "n/a", "reason": item.static_na_reason, "turns": []}, STATIC_NA
+        else:
             continue
-    return out
+        got = {k: v for k, v in got.items() if k != "line"}
+        plan.about[item.id]["asked_with"] = asked_with
+        plan.unjudged.append({"id": item.id, **computed_row(got, plan.about[item.id]["weight"])})
+    return plan
 
 
-def _json_object(text: Any) -> Any:
-    if isinstance(text, dict):
-        return text
-    s = str(text or "").strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    try:
-        return json.loads(s)
-    except ValueError:
-        m = re.search(r"\{.*\}", s, re.S)
-        if not m:
-            return None
-        try:
-            return json.loads(m.group(0))
-        except ValueError:
-            return None
+def undecided_row(criterion: dict, error: str) -> dict:
+    """A criterion whose judge never gave a usable answer: ``error``, which never lowers the score."""
+    return {"id": criterion["id"], "verdict": "error", "error": error, "turns": [], "could_change_grade": False,
+            "assistant_asked": None, "justification": error, "score": 1.0, "result": True}
+
+
+def finish_rows(rows: list[dict], plan: Plan) -> list[dict]:
+    """The stored rows, in ``plan.order``: each row's id, what a reviewer reads about it, then its verdict."""
+    by_id = {r.get("id"): r for r in rows}
+    return [{"id": rid, **plan.about[rid], **{k: by_id[rid][k] for k in VERDICT_FIELDS if k in by_id[rid]}}
+            for rid in plan.order if rid in by_id]
 
 
 # ---- the run's verdict --------------------------------------------------------------------------------------------
-def user_sim_error(checks: dict[str, dict], error_checks: list[str], items: dict[str, dict],
-                   item_can_error: dict[str, bool]) -> dict:
-    """Whether the run is a user sim error. ``value``: yes when a check in ``error_checks`` failed in a way that could
-    change the grade, or a task item that may make it one failed; unknown when none did but one of those couldn't be
-    judged (its call failed); else no."""
-    because, unknown = [], []
-    for name in error_checks:
-        r = checks.get(name)
-        if not r:
-            continue
-        if r["verdict"] == "fail" and r.get("could_change_grade"):
-            because.append(name)
-        elif r["verdict"] == "error":
-            unknown.append(name)
-    for item_id, r in items.items():
-        if not item_can_error.get(item_id):
-            continue
-        if r["verdict"] == "fail":
-            because.append(f"item:{item_id}")
-        elif r["verdict"] == "error":
-            unknown.append(f"item:{item_id}")
+def user_sim_error(rows: list[dict]) -> dict:
+    """Whether the run is a user sim error, by one rule for checks and task items: ``value`` yes when a row at a weight
+    other than 0 failed in a way that could change the grade (``because`` names them); unknown when none did but such
+    a row is undecided (``error``: its judge never gave a usable answer, or it couldn't be counted or read); else no.
+    A weight-0 row (style, by default) never makes it either."""
+    counts = [r for r in rows if float(r.get("weight", 1.0)) != 0]
+    because = [r["id"] for r in counts if r.get("verdict") == "fail" and r.get("could_change_grade")]
+    unknown = [r["id"] for r in counts if r.get("verdict") == "error"]
     return {"value": "yes" if because else "unknown" if unknown else "no", "because": because, "unknown": unknown}
 
 
 NOT_JUDGED = {"value": "no", "because": [], "unknown": []}
 
 
-# ---- one run ------------------------------------------------------------------------------------------------------
-# complete(model, system, parts, schema) -> {"text": str, "usage": dict | None, "cost": float | None}. ``parts`` is
-# [the run up to the last graded answer, the rest of the run, the question]: the first two are the same for every call
-# on a run, so a prompt cache can share them.
-Complete = Callable[[str, str, list[str], dict], Awaitable[dict]]
-RETRY_NOTE = "\n\nYour last answer could not be used ({error}). Return only the JSON object."
-
-
-async def judge_run(run: UserSimRun, *, model: str, checks: list[str], complete: Complete,
-                    items: tuple[RubricItem, ...] | list[RubricItem] = (),
-                    error_checks: tuple[str, ...] | list[str] = DEFAULT_ERROR_CHECKS,
-                    answer_retries: int = 1, concurrency: int = 6, lines_unusable: str = "") -> dict:
-    """Every check (and task item) on ``run``, each in its own call to ``model``. The first call runs alone so the
-    rest can read its prompt cache. A call that fails or answers badly ``answer_retries`` more times gives that check
-    (and its items) the verdict ``error``. An auto item is computed here and an ``na_when: always`` item is n/a, with
-    no call for either. A ``line`` item is graded by its line's text in ``run.tagged_lines``, or is ``error`` when the
-    run has no such tag, or when ``lines_unusable`` says why no tag can be trusted."""
-    graded = {t.n for t in run.turns if t.graded}
-    if not graded:
-        return {"skipped": "no graded turns", "checks": {}, "items": {}, "user_sim_error": dict(NOT_JUDGED)}
-    resolved, no_line = resolve_lines(list(items), run.tagged_lines, lines_unusable)
-    calls = plan_calls(list(checks), resolved)
-    head, tail = render_run(run)
-    gate = asyncio.Semaphore(max(1, concurrency))
-
-    async def one(call: str) -> dict:
-        ids = [i.id for i in calls[call]]
-        no_na = [i.id for i in calls[call] if not i.na_allowed]
-        question = question_text(call, calls[call])
-        errors: list[str] = []
-        usage: list[Any] = []
-        cost = 0.0
-        for attempt in range(1 + max(0, answer_retries)):
-            asked = question + (RETRY_NOTE.format(error=errors[-1][:ERROR_SHOWN_CHARS]) if errors else "")
-            try:
-                async with gate:
-                    got = await complete(model, INSTRUCTIONS, [head, tail, asked], OUTPUT_SCHEMA)
-            except Exception as e:  # the call itself failed after the caller's own retries
-                errors.append(f"call failed: {type(e).__name__}: {str(e)[:ERROR_SHOWN_CHARS]}")
-                continue
-            usage.append(got.get("usage"))
-            cost += got.get("cost") or 0.0
-            try:
-                parsed = parse_answer(got.get("text"), graded, ids, no_na)
-            except ValueError as e:
-                errors.append(f"answer not usable: {e}")
-                continue
-            return {**parsed, "attempts": attempt + 1, "usage": usage, "cost": cost, "errors": errors}
-        return {"error": errors[-1] if errors else "no answer", "attempts": 1 + max(0, answer_retries),
-                "usage": usage, "cost": cost, "errors": errors}
-
-    order = list(calls)
-    answers: dict[str, dict] = {}
-    if order:
-        first = await one(order[0])
-        answers = dict(zip(order, [first, *await asyncio.gather(*(one(c) for c in order[1:]))]))
-
-    results = {call: {**_check_view(answers[call]), "families": list(CHECKS[call].families)}
-               for call in order if call_check(call)}
-    asked_in = {item.id: call for call in order for item in calls[call]}
-    item_results: dict[str, dict] = {}
-    lines = run.tagged_lines or {}
-    for item in items:
-        if item.id in no_line:
-            got, call = no_line[item.id], NO_LINE
-        elif item.kind == AUTO and not item.static_na:
-            got, call = auto_result(item, run), COMPUTED
-        elif item.static_na:
-            got, call = {"verdict": "n/a", "reason": item.static_na_reason, "turns": []}, STATIC_NA
-        else:
-            call = asked_in[item.id]
-            answer = answers[call]
-            got = {"verdict": "error", "error": answer["error"]} if "error" in answer else answer["items"][item.id]
-        if item.line and item.asks_the_model and item.id not in no_line:  # what was graded, for a reviewer
-            got = {**got, "line": item.line, "line_text": lines[item.line]}
-        item_results[item.id] = {**got, "family": item.family, "kind": item.kind, "asked_with": call}
-    can_error = {i.id: (i.can_error if i.can_error is not None else FAMILY_OWNER.get(i.family) in error_checks)
-                 for i in items}
-    error = user_sim_error(results, [c for c in error_checks if c in results], item_results, can_error)
-    return {"model": model, "checks": results, "items": item_results, "user_sim_error": error,
-            "graded_turns": sorted(graded), "turns": len(run.turns),
-            "calls": sum(a["attempts"] for a in answers.values()),
-            "usage": _usage_total([u for a in answers.values() for u in a["usage"]]),
-            "cost": round(sum(a["cost"] for a in answers.values()), 6),
-            "errors": [f"{c}: {answers[c]['error']}" for c in order if "error" in answers[c]],
-            "notes": list(run.notes)}
-
-
-def _check_view(answer: dict) -> dict:
-    if "error" in answer:
-        return {"verdict": "error", "error": answer["error"], "attempts": answer["attempts"]}
-    out = {k: answer[k] for k in ("verdict", "could_change_grade", "reason", "turns")}
-    if answer.get("turns_outside_graded"):
-        out["turns_outside_graded"] = answer["turns_outside_graded"]
-    if answer["attempts"] > 1:
-        out["attempts"] = answer["attempts"]
-    return out
-
-
-def _usage_total(usages: list[Any]) -> dict[str, int]:
+def usage_total(usages: list[Any]) -> dict[str, int]:
+    """The token counts of several calls, summed; a cache read reported as ``prompt_tokens_details.cached_tokens``
+    counts as one."""
     keys = ("prompt_tokens", "completion_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
     total = dict.fromkeys(keys, 0)
     for u in usages:
@@ -863,8 +702,8 @@ def _usage_total(usages: list[Any]) -> dict[str, int]:
             v = u.get(k)
             if isinstance(v, (int, float)):
                 total[k] += int(v)
-        cached = (u.get("prompt_tokens_details") or {}).get("cached_tokens") if isinstance(
-            u.get("prompt_tokens_details"), dict) else None
+        details = u.get("prompt_tokens_details")
+        cached = details.get("cached_tokens") if isinstance(details, dict) else None
         if isinstance(cached, int) and not u.get("cache_read_input_tokens"):
             total["cache_read_input_tokens"] += cached
     return total
