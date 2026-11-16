@@ -146,6 +146,10 @@ class SyncEnvClockTaskStep(TaskStep):
                                    "deploy it in a multi env, whose gateway it follows") from e
         state = await deployed.invoke(EXT_CLOCK_URI, "state", timeout=self.timeout_seconds)
         env_get_time_url = state.get("env_get_time_url")
+        if self.timezone is not None and state.get("time_zone") != self.timezone:
+            logger.warning(f"sync_env_clock env={self.env_id}: its gateway's clock didn't take time zone "
+                           f"{self.timezone!r}, so get_time answers agents in UTC alone; a gateway image from before "
+                           "time_zone does that: put the gateway env again (agent-env env gateway put)")
 
         synced, skipped = [], []
         for server in await self._backing_servers(deployed):
@@ -162,7 +166,8 @@ class SyncEnvClockTaskStep(TaskStep):
             "env_get_time_url": env_get_time_url, "synced": synced, "skipped": skipped,
         }
         if self.timezone is not None:
-            configuration.update(timezone=self.timezone, armed_at=self.armed_virtual_time)
+            configuration.update(timezone=self.timezone, armed_at=self.armed_virtual_time,
+                                 get_time_zone=state.get("time_zone"))
         context.metadata.setdefault("clock_configurations", []).append(configuration)
         logger.info(f"sync_env_clock env={self.env_id}: armed rate={self.virtual_seconds_per_real_second}; "
                     f"synced={[s['service'] for s in synced]} skipped={[s['service'] for s in skipped]}")
