@@ -116,17 +116,18 @@ def test_the_agent_s_thinking_is_kept_when_it_was_recorded_and_an_empty_block_is
         ("thinking", "Ask before paying $855."), ("text", "Asking the user.")]
 
 
-def test_the_psi_harness_s_reasoning_on_an_llm_span_comes_before_that_call_s_text():
+def test_an_llm_span_s_reasoning_parts_come_in_order_before_that_call_s_text_and_an_empty_one_is_dropped():
     spans = [{"name": "ChatCompletion", "start_time": "1", "attributes": {
         "openinference.span.kind": "LLM",
         "llm.output_messages.0.message.role": "assistant",
         "llm.output_messages.0.message.content": "I'll ask Nina first.",
-        "psi.reasoning": json.dumps([{"type": "thinking", "thinking": ""},
-                                     {"type": "thinking", "thinking": "Paying $855 needs her OK."}])}}]
+        "gen_ai.output.messages": json.dumps([{"role": "assistant", "finish_reason": "stop", "parts": [
+            {"type": "reasoning", "content": ""}, {"type": "reasoning", "content": "Paying $855 needs her OK."},
+            {"type": "reasoning", "content": "So ask."}, {"type": "text", "content": "I'll ask Nina first."}]}])}}]
 
     events = [(e["type"], e["text"]) for e in turn_events(json.dumps(spans)).events if e["type"] != "final"]
 
-    assert events == [("thinking", "Paying $855 needs her OK."), ("text", "I'll ask Nina first.")]
+    assert events == [("thinking", "Paying $855 needs her OK.\nSo ask."), ("text", "I'll ask Nina first.")]
 
 
 def test_a_responses_api_llm_span_s_text_and_reasoning_are_read():
@@ -135,7 +136,9 @@ def test_a_responses_api_llm_span_s_text_and_reasoning_are_read():
         "llm.output_messages.0.message.role": "assistant",
         "llm.output_messages.0.message.contents.0.message_content.type": "text",
         "llm.output_messages.0.message.contents.0.message_content.text": "Booked for Friday.",
-        "psi.reasoning": json.dumps([{"type": "thinking", "thinking": "She said Friday works."}])}}]
+        "gen_ai.output.messages": json.dumps([{"role": "assistant", "finish_reason": "stop", "parts": [
+            {"type": "reasoning", "content": "She said Friday works."},
+            {"type": "text", "content": "Booked for Friday."}]}])}}]
 
     events = [(e["type"], e["text"]) for e in turn_events(json.dumps(spans)).events if e["type"] != "final"]
 
@@ -173,80 +176,100 @@ def test_the_compactor_rubrics_verifier_uses_still_reads_tool_spans_the_same_way
     assert files == [] and trajectory_filter.tool_span_io(span) == ("email_send", {"to": "a@b"}, {"ok": True})
 
 
-def _v3(name: str) -> list[dict]:
-    """A recorded wake of the PSI neutral harness v3 (redacted from a real smoke run): it starts with a compaction."""
-    return json.loads((RECORDED / f"turn_otel_v3_compaction_{name}.json").read_text())
+def _v5(name: str) -> list[dict]:
+    """A recorded wake of the PSI neutral harness v5 (redacted from a fake-model run): it starts with a compaction."""
+    return json.loads((RECORDED / f"turn_otel_v5_compaction_{name}.json").read_text())
 
 
-def test_a_v3_compaction_wake_keeps_the_assistant_s_words_and_makes_the_harness_s_parts_notes():
-    spans = _v3("claude")
-    summary = next(s["attributes"]["psi.compaction.summary"] for s in spans if s["name"] == "psi.compaction")
+def _summary(spans: list[dict]) -> str:
+    span = next(s for s in spans if s["name"] == "harness.compaction")
+    return json.loads(span["attributes"]["gen_ai.output.messages"])[0]["parts"][0]["content"]
+
+
+def test_a_v5_compaction_wake_keeps_the_assistant_s_words_and_makes_the_harness_s_parts_notes():
+    spans = _v5("claude")
+    summary = _summary(spans)
 
     traj = turn_events(json.dumps(spans))
     events = traj.events
 
     assert traj.agent_labels is True
     assert [(e["type"], e.get("step")) for e in events] == [
-        ("note", "pre_compaction_save"), ("tool_call", "pre_compaction_save"), ("tool_call", "pre_compaction_save"),
-        ("text", "pre_compaction_save"), ("note", None), ("note", "after_compaction"), ("thinking", None),
-        ("text", None)]
+        ("note", "pre_compaction_save"), ("thinking", "pre_compaction_save"), ("text", "pre_compaction_save"),
+        ("tool_call", "pre_compaction_save"), ("thinking", "pre_compaction_save"), ("text", "pre_compaction_save"),
+        ("note", None), ("note", "after_compaction"),
+        ("thinking", None), ("text", None), ("tool_call", None), ("thinking", None), ("text", None)]
     save, compaction, after = (e["text"] for e in events if e["type"] == "note")
     assert save.startswith("Message the harness sent the assistant (step pre_compaction_save; not from the user):\n"
                            "[Harness: older history is about to be summarized")
-    assert compaction.startswith("Compaction summary (written by the harness from the model's own summary turn;")
-    assert ("; wakes 1–2 are now in the summary; wakes 3–5 kept word for word; this wake started 8.694 s late "
-            "(real time) waiting for it):") in compaction
+    assert compaction == ("Compaction summary (written by the harness from the model's own summary turn; it replaces "
+                          "the older history the model sees; wakes 1–3 are now in the summary; wakes 4–5 kept word for "
+                          f"word):\n{summary}")
     assert next(e for e in events if "compaction" in e)["compaction"] == {
-        "wakes_summarized": 2, "wakes_kept": 3, "first_kept_wake": 3, "waited_s": 8.694}
-    assert compaction.endswith(summary.strip()) and after.startswith(
-        "Message the harness sent the assistant (step after_compaction; re-sent by the harness, it repeats the "
-        "user's earlier words):\n[Harness: older history was summarized")
-    # The summary turn is the harness's model call: neither its text nor its reasoning is the assistant's.
+        "wakes_summarized": 3, "wakes_kept": 2, "first_kept_wake": 4}
+    assert after.startswith("Message the harness sent the assistant (step after_compaction; re-sent by the harness, "
+                            "it repeats the user's earlier words):\n[Harness: older history was summarized")
+    # The summary call is the harness's (agent "harness", under no tool call): neither its text nor its reasoning is
+    # the assistant's, though its OpenInference output still holds the summary as text.
     own = [e["text"] for e in events if e["type"] in ("text", "thinking")]
-    assert not any(summary[:200] in t or "checking the schedule" in t for t in own)
-    assert own[-1].startswith("Got today's digest, and nothing in it needs action.")
-    assert [c["tool"] for c in _calls(traj)] == ["memory_add", "memory_add"]
+    assert not any(summary in t or "step 12" in t for t in own)
+    assert [c["tool"] for c in _calls(traj)] == ["memory_add", "slow_search"]
 
 
-def test_a_compaction_with_no_end_time_comes_after_its_save_turn_and_without_a_first_kept_wake_gives_counts():
-    spans = _v3("claude")
-    span = next(s for s in spans if s["name"] == "psi.compaction")
-    del span["end_time"], span["attributes"]["psi.compaction.first_kept_wake"]
+def test_a_compaction_with_no_end_time_comes_after_its_save_turn_and_its_numbers_and_errors_are_said():
+    spans = _v5("claude")
+    span = next(s for s in spans if s["name"] == "harness.compaction")
+    del span["end_time"], span["attributes"]["harness.compaction.first_kept_wake"]
+    span["attributes"].update({"harness.compaction.next_wake_waited_s": 8.694,
+                               "harness.compaction.save_error": "APITimeoutError: timed out"})
 
     events = turn_events(json.dumps(spans)).events
 
     kinds = [(e["type"], e.get("step")) for e in events]
-    assert kinds.index(("note", None)) == kinds.index(("text", "pre_compaction_save")) + 1
+    assert kinds.index(("note", None)) == len(kinds) - 1 - kinds[::-1].index(("text", "pre_compaction_save")) + 1
     compaction = next(e["text"] for e in events if "compaction" in e)
-    assert "; 2 wakes summarized; the last 3 kept word for word; this wake started 8.694 s late" in compaction
+    assert ("; 3 wakes summarized; the last 2 kept word for word; the save turn before it failed: APITimeoutError: "
+            "timed out; this wake started 8.694 s late (real time) waiting for it):") in compaction
 
 
-def test_a_v3_gpt_save_turn_keeps_its_reasoning_and_memory_calls_marked_as_the_harness_s_step():
-    events = turn_events(json.dumps(_v3("gpt"))).events
+def test_a_v5_gpt_save_turn_keeps_its_reasoning_and_calls_marked_as_the_harness_s_step():
+    events = turn_events(json.dumps(_v5("gpt"))).events
 
     save = [e for e in events if e.get("step") == "pre_compaction_save" and e["type"] != "note"]
-    assert [(e["type"], e.get("tool")) for e in save] == [
-        ("thinking", None), ("tool_call", "memory_view"), ("tool_call", "memory_replace"), ("text", None)]
-    assert save[1]["result"].startswith("1. HOA approval")
-    assert [e["text"] for e in events if e["type"] == "text"] == [
-        "Saved the key details and pending items to my profile.", "Received—no action taken on the inbox digest."]
+    assert [(e["type"], e.get("tool"), e.get("text")) for e in save] == [
+        ("thinking", None, "GPT reasoning 10."), ("tool_call", "memory_add", None),
+        ("thinking", None, "GPT reasoning 11."), ("text", None, "Done (11).")]
+    assert [e["text"] for e in events if e["type"] == "text"] == ["Done (11).", "Done (14)."]
 
 
-def test_a_helper_agent_s_spans_carry_its_id():
-    spans = [s for s in _v3("claude") if s["attributes"].get("psi.turn") == "pre_compaction_save"
-             and s["attributes"].get("openinference.span.kind") in ("LLM", "TOOL")]
-    for s in spans:
-        s["attributes"].pop("psi.turn")
-        s["attributes"].update({"psi.agent.kind": "subagent", "psi.agent.id": "sub-002",
-                                "psi.agent.delegate_span_id": "0x1", "gen_ai.agent.name": "helper"})
+def test_a_helper_agent_s_spans_are_named_by_its_agent_and_the_call_that_started_it():
+    spans = _v5("claude")
+    delegate = next(s for s in spans if s["name"] == "slow_search")
+    helper = [s for s in spans if s["name"] == "generation" and s["start_time"] > delegate["start_time"]]
+    for s in helper:
+        s["parent_id"] = delegate["context"]["span_id"]
+        s["attributes"]["gen_ai.agent.name"] = "researcher"
 
     events = turn_events(json.dumps(spans)).events
 
-    assert [(e["type"], e.get("subagent")) for e in events] == [
-        ("tool_call", "sub-002"), ("tool_call", "sub-002"), ("text", "sub-002")]
+    assert [(e["type"], e.get("subagent")) for e in events if e.get("subagent")] == [
+        ("thinking", f"researcher@{delegate['context']['span_id']}"), ("text", f"researcher@{delegate['context']['span_id']}")]
 
 
-def test_spans_without_psi_agent_labels_read_as_before():
+def test_a_failed_wake_s_message_is_a_note_in_its_step():
+    span = {"name": "harness.message", "start_time": "1", "attributes": {
+        "gen_ai.agent.name": "harness", "gen_ai.main_agent.name": "Orchestrator",
+        "harness.message.purpose": "failed_wake",
+        "harness.message.text": "[Harness: your last wake ended with an error before it finished (TimeoutError).]"}}
+
+    [note] = turn_events(json.dumps([span])).events
+
+    assert note == {"type": "note", "step": "failed_wake", "text": (
+        "Message the harness sent the assistant (step failed_wake; not from the user):\n"
+        "[Harness: your last wake ended with an error before it finished (TimeoutError).]")}
+
+
+def test_spans_without_agent_labels_read_as_before():
     events = turn_events((RECORDED / "turn_otel_wake4.json").read_bytes()).events
 
     assert not any("step" in e or "subagent" in e for e in events)

@@ -12,7 +12,7 @@ call that runs out of time is tried once more, at most 3 batches run at once, an
 helper agents, no web, no writes, no messaging other agents. An always_on step's prompt takes this verifier, never a
 plain rubrics_verifier, and this verifier only an always_on step's prompt: a task that pairs them otherwise is refused when it loads.
 
-For a run of the PSI neutral harness v3 (its trajectories carry psi.agent.* labels), the judge is told the compaction
+For a run of the PSI neutral harness with compaction (its spans name their agent, gen_ai.agent.name), the judge is told the compaction
 summary is the assistant's own and graded as its own, and, with a per-criterion format, says for each failed criterion
 whether it traces to context a compaction lost (``context_loss`` on the row; the entry counts them): reported next to
 the score, never changing it. Every entry also says what the run records of the assistant's harness
@@ -101,7 +101,7 @@ follow-ups before you decide.
 from the user, the user simulator or contacts are never the assistant's. Order events by their pretend time ("at"), \
 not by where they sit in the files.
 - You have Bash and Read only: no web, no other agents, and nothing to change.{gaps}{harness}"""
-# Added to _FILES_NOTE for a run whose trajectories say which agent made each step (the PSI harness v3: compaction,
+# Added to _FILES_NOTE for a run whose trajectories say which agent made each step (the PSI harness's: compaction,
 # memory, helpers), where these lines appear; a run without them gets the note as before.
 _HARNESS_NOTE = """
 - "harness_note" lines are from the harness that runs the assistant, never from the assistant or the user: a message \
@@ -122,7 +122,7 @@ _CONTEXT_LOSS_NOTE = """
 assistant no longer had because of a compaction (a fact that was in a summarized wake but not in the summary, or that \
 the summary got wrong), else false; and "context_loss_evidence": which compaction note (file:line) and which earlier \
 wake held the fact, or "" when false. This is reported next to the score and never changes it."""
-# The per-criterion row fields a judge of a v3 run may add, and the formats whose rows take them.
+# The per-criterion row fields a judge of such a run may add, and the formats whose rows take them.
 CONTEXT_LOSS_FIELDS = {"context_loss": {"type": "boolean"}, "context_loss_evidence": {"type": "string"}}
 _CONTEXT_LOSS_FORMATS = frozenset({JudgeOutputFormat.RUBRIC_BINARY, JudgeOutputFormat.RUBRIC_PARTIAL})
 # Whether the run being graded (this task's context) has the harness's agent labels and a per-criterion format, so its
@@ -213,7 +213,7 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
 
     async def _grade(self, context: TaskStepContext) -> TaskStepContext:
         """rubrics_verifier's grade; then, for a staged run, what each judge call read of it (``judge_reads``); for a
-        run of the PSI harness v3, how many failed criteria the judge traced to a compaction (``context_loss``); and
+        run with agent labels (the PSI harness's), how many failed criteria the judge traced to a compaction (``context_loss``); and
         for every run, the assistant's harness as the run records it (``assistant_harness``)."""
         token = _CONTEXT_LOSS_RUN.set(False)
         try:
@@ -233,7 +233,7 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
         return context
 
     def _spec(self) -> JudgeOutputFormatSpec:
-        """rubrics_verifier's format; for a v3 run (``_CONTEXT_LOSS_RUN``), its rows also take ``context_loss`` and
+        """rubrics_verifier's format; for a run with agent labels (``_CONTEXT_LOSS_RUN``), its rows also take ``context_loss`` and
         ``context_loss_evidence``."""
         spec = super()._spec()
         return _with_context_loss(spec) if _CONTEXT_LOSS_RUN.get() else spec
@@ -450,18 +450,17 @@ def context_loss(results: list[dict]) -> dict:
 
 
 def harness_settings(raw: str) -> dict:
-    """The settings an assistant's harness reports in its trace: the PSI neutral harness's ``psi.config.*`` (or, from
-    its first version, ``harness.config.*``) attributes on its usage span, without the prefix. Nothing for a trace
-    with none (another harness, another format)."""
+    """The settings an assistant's harness reports in its trace: the PSI neutral harness's ``harness.config.*``
+    attributes on its ``harness.usage`` span, without the prefix. Nothing for a trace with none (another harness,
+    another format)."""
+    prefix = "harness.config."
     try:
         spans = json.loads(raw)
     except ValueError:
         return {}
-    for prefix in ("psi.config.", "harness.config."):
-        for span in spans if isinstance(spans, list) else []:
-            attrs = span.get("attributes") if isinstance(span, dict) else None
-            found = {k[len(prefix):]: v for k, v in (attrs or {}).items() if k.startswith(prefix)} if isinstance(
-                attrs, dict) else {}
-            if found:
-                return found
+    for span in spans if isinstance(spans, list) else []:
+        attrs = span.get("attributes") if isinstance(span, dict) else None
+        found = {k[len(prefix):]: v for k, v in attrs.items() if k.startswith(prefix)} if isinstance(attrs, dict) else {}
+        if found:
+            return found
     return {}
