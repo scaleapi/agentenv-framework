@@ -46,7 +46,7 @@ metadata under its ``agent_name``. The ``always_on`` step names it with ``user_s
   closing wake, with the step's wrap-up line and the last-turn notice, and the run ends with end reason time_budget.
 - End reasons: end_time, user_done (one sitting), max_wakes, time_budget, finished_nothing_pending or stuck (nothing
   can wake the agent, with nothing pending or with something still pending), agent_turn_failed, agent_turn_timeout,
-  user_sim_error, step_error. With no end_time, a world that only repeats ends the run too (``IDLE_JUMPS_MAX``, in the
+  user_sim_error, user_sim_invalid, step_error. With no end_time, a world that only repeats ends the run too (``IDLE_JUMPS_MAX``, in the
   loop's docstring), so a recurring trigger that never wakes the agent can't move the clock forever. What was still pending is recorded (``pending_at_end``): replies held, messages the user
   never read, user lines and alerts never delivered, the agent's checks not yet due, contact replies in progress.
 - Graders read what the user saw. The prompt response is every message_user text in order, each with its pretend
@@ -62,6 +62,12 @@ metadata under its ``agent_name``. The ``always_on`` step names it with ``user_s
   being when the reply reached the agent, so checks built on those records grade the run instead of skipping it. A
   reply that never reached it (her last read's, or one still held at the end) has ``delivered`` false and no
   ``user_reads_at``.
+- ``user_sim_gate`` (user_sim_gate.py) checks each answer the user sim would send before the agent gets it. One that
+  reads as the assistant's is held back and the user sim, told why in its session, answers again, up to the gate's
+  ``max_rewrites``; each read's event records the checks (``user_sim_gate``: verdicts, rewrites, the first message).
+  An answer that still fails is never delivered and ends the run (user_sim_invalid, also recorded in
+  ``metadata["user_sim_invalid"][step_id]``): with ``on_fail`` "fail" it sets ``error_type`` too, so verifiers skip
+  the run; "end" ends it plainly; "send" delivers it anyway. Her last read's answer, never delivered, isn't checked.
 - The run's metadata keeps a summary in ``metadata["always_on"][step_id]`` (small enough for a running job to report
   back); the full timeline goes to the object store, at the summary's ``object_url``.
 - An always_on_agent_verifier (``verifiers/always_on_agent_verifier.py``) grades the step's prompt from the user's chat
@@ -114,6 +120,7 @@ from agent_env.task_step.task_steps.agent import user_sim_versions
 from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import USER_SIMS_KEY
 from agent_env.task_step.task_steps.notification_delivery import delivered_parts, label_time, take_due
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
+from agent_env.task_step.task_steps.user_sim_gate import judge_call_config, run_gate
 from agent_env.task_step.task_steps.agent.user_sim_common import iso as _iso, person_of, task_zone, utc as _utc
 
 logger = logging.getLogger(__name__)
@@ -171,6 +178,7 @@ END_NOTES = {
     "agent_turn_failed": "The assistant's turn failed.",
     "agent_turn_timeout": "The assistant's turn timed out.",
     "user_sim_error": "The user simulator failed.",
+    "user_sim_invalid": "The user simulator's answer still read as the assistant's after its rewrites.",
     "step_error": "The run stopped on an error.",
 }
 # The run's metadata keeps a summary; the full timeline goes to the object store. When storing fails, the summary keeps
@@ -207,6 +215,8 @@ TURN_TEXT_TOTAL_CHARS = 400_000
 # ==================================================================================================================
 class AlwaysOnTaskStep(PromptAgentTaskStep):
     type: ClassVar[str] = "always_on"
+    # Its own loop checks each user-sim answer before the agent gets it (_Run._gate, with user_sim_gate.run_gate).
+    USER_SIM_GATE_SUPPORTED: ClassVar[Optional[bool]] = True
     entity_refs = ()
     field_scopes = {k: v for k, v in PromptAgentTaskStep.field_scopes.items() if k != "user_model"}
 
@@ -321,13 +331,14 @@ class AlwaysOnTaskStep(PromptAgentTaskStep):
             base[k] = getattr(self, k)
         for k in self._OWN:
             base[k] = getattr(self, k)
+        if self.user_sim_gate is not None:
+            base["user_sim_gate"] = self.user_sim_gate.to_dict()
         return base
 
     @classmethod
     def from_dict(cls, data: dict) -> AlwaysOnTaskStep:
         fields = {k: data[k] for k in cls._PROMPT_FIELDS if k in data and data[k] is not None}
         own = {k: data[k] for k in cls._OWN if k in data and data[k] is not None}
-        # Passed on so the constructor refuses it, as it does a step built in code, rather than dropping it unread.
         if data.get("user_sim_gate") is not None:
             fields["user_sim_gate"] = data["user_sim_gate"]
         return cls(**cls._base_from_dict(data), retry_config=data.get("retry_config"), **fields, **own)
@@ -374,6 +385,10 @@ class _Run:
         self.held: list[dict] = []            # user replies held for their response time: {deliver_at, text}
         self.you_sent: list[dict] = []        # the user's own lines since their last read: {at, text}
         self.history: list[dict] = []         # every read and its answer, for the plug-in
+        # The conversation as the user-sim gate reads it, (role, text); and the gate's judge settings, set up once.
+        self.gate_history: list[tuple[str, str]] = []
+        self.gate_call_config = None
+        self.gate_setup_error: Optional[str] = None
         self.replies = 0
         self.gave_up = False
         self.final_sent = False
@@ -1005,6 +1020,8 @@ class _Run:
     async def _open(self) -> None:
         """The opening wake: the user's request, with what came due for the agent."""
         self.you_sent.append(dict(self.opening))
+        if self.opening.get("text"):
+            self.gate_history.append(("user", self.opening["text"]))
         opened_at = _utc(self.opening["at"])
         await self._chat_user(self._opening_parts(lambda text: self._chat_part(opened_at, text, kind="opening")))
         due = await take_due(self.notification_envs, self.recipient) if self.notification_envs else []
@@ -1491,6 +1508,13 @@ class _Run:
         except TimeoutError:  # the plug-in ran past the read's cap: a user sim error, as a failed ask is
             ans = {"outcome": "no_reply", "message": ""}
             calls.append({"text": None, "structured": None, "error": f"the read ran past its cap ({cap:.0f}s)"})
+        self.gate_history += [("assistant", m["text"]) for m in seen]
+        gate_record = None
+        if (self.step.user_sim_gate is not None and not last and ans.get("outcome") in ("reply", "done")
+                and (ans.get("message") or "").strip() and not (calls and calls[-1].get("error"))):
+            ans, gate_record = await self._gate(ans, ask)
+        if ans.get("outcome") in ("reply", "done") and (ans.get("message") or "").strip():
+            self.gate_history.append(("user", ans["message"]))
         self.history.append({"read": read, "answer": ans})
         mode = self.read_mode
         latency = self._latency(mode)
@@ -1505,7 +1529,8 @@ class _Run:
                          user_sim_trajectory_urls=[c.get("trajectory_url") for c in calls],
                          user_sim_turns=ans.get("turns", len(calls)), shown=ans.get("shown"),
                          past_turn_cap=ans.get("past_turn_cap"), last_read=last,
-                         retried=ans.get("retried"), first_answer=ans.get("first_answer"))
+                         retried=ans.get("retried"), first_answer=ans.get("first_answer"),
+                         **({"user_sim_gate": gate_record} if gate_record else {}))
         outcome = ans.get("outcome")
         said = (ans.get("message") or "").strip()
         hook = {"hook": HOOK_NAME, "turn": self.wakes, "read_at": _iso(now),
@@ -1540,6 +1565,58 @@ class _Run:
                 self.end_reason = "user_done"
         if calls and calls[-1].get("error") and not last:
             self.end_reason = self.end_reason or "user_sim_error"
+
+    async def _gate(self, ans: dict, ask) -> tuple[dict, dict]:
+        """The user sim's answer after the user-sim gate (user_sim_gate.py): each failing message is held back and the
+        user sim, told why through ``ask`` in its session, answers again, up to the gate's limit. Returns the answer to
+        use and the gate's record for the read. A message that still fails is never delivered: the answer becomes a
+        no_reply, and the run ends ("user_sim_invalid"; an error, so verifiers skip it, when ``on_fail`` is "fail"),
+        unless ``on_fail`` is "send"."""
+        gate = self.step.user_sim_gate
+        if self.gate_call_config is None and self.gate_setup_error is None and gate.judge_model:
+            try:
+                self.gate_call_config = judge_call_config(gate, self.ctx.metadata.get("user_overrides", {}))
+            except Exception as e:  # as in prompt_agent: the patterns' verdict stands, with the error on it
+                self.gate_setup_error = f"judge setup: {type(e).__name__}: {e}"[: gate.RECORDED_ERROR_CHARS]
+                logger.warning(f"always_on: user-sim gate {self.gate_setup_error}; using patterns only")
+        latest = {"ans": ans}
+        verdicts: list[dict] = []
+        rewrites: list[dict] = []
+
+        async def rewrite(note: str) -> Optional[str]:
+            got = await ask(note)
+            new = user_sim_versions.parse(got["structured"] if isinstance(got.get("structured"), dict)
+                                          else got.get("text"))
+            rewrites.append({**{k: new.get(k) for k in ("outcome", "message", "used", "schema_errors")},
+                             "user_sim_error": got.get("error")})
+            if got.get("error"):  # read() ends the run on it (user_sim_error), as on any failed ask
+                latest["ans"] = {**ans, "outcome": "no_reply", "message": "", "used": None}
+                return None
+            latest["ans"] = {**ans, **new}
+            said = (new.get("message") or "").strip()
+            return said if new.get("outcome") in ("reply", "done") and said else None
+
+        def on_verdict(attempt: int, text: str, verdict) -> None:
+            verdicts.append({"attempt": attempt, "chars": len(text), **verdict.to_dict()})
+            if not verdict.passed:
+                logger.warning(f"always_on wake {self.wakes}: user-sim answer failed the gate (attempt {attempt + 1}/"
+                               f"{gate.max_rewrites + 1}): {'; '.join(verdict.reasons())[:300]}")
+
+        outcome = await run_gate(gate, ans["message"], self.gate_history, rewrite, call_config=self.gate_call_config,
+                                 judge_unavailable=self.gate_setup_error, on_verdict=on_verdict)
+        record = {"verdicts": verdicts, "rewrites": rewrites, "invalid": outcome.invalid}
+        if rewrites:
+            record["first_message"] = ans["message"]
+        if not outcome.invalid:
+            return latest["ans"], record
+        reasons = outcome.reasons()
+        self.ctx.metadata.setdefault("user_sim_invalid", {})[self.step.id] = {"wake": self.wakes, "reasons": reasons}
+        if gate.on_fail == "fail":
+            self.error = (f"user-sim answer at wake {self.wakes} still reads as the assistant's after "
+                          f"{gate.max_rewrites} rewrite(s): {'; '.join(reasons)[:500]}")
+            self.error_type = "user_sim_invalid"
+        self.end_reason = self.end_reason or "user_sim_invalid"
+        return {**latest["ans"], "outcome": "no_reply", "message": "", "used": None}, record
 
     async def _ask_user_sim(self, text: str, deadline: float) -> dict:
         """One user sim turn on ``text``, cut off at its time limit and grace or at the read's ``deadline``

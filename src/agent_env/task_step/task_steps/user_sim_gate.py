@@ -12,8 +12,10 @@ Two checks, either of which can fail a message:
 - ``judge_model``: one model call that reads the last turns and the candidate message and says whether
   the message is written as the user.
 
-Opt in with ``user_sim_gate`` on a ``prompt_agent`` step that has a user-sim (a step type that runs its own
-conversation loop applies the gate with ``run_gate``, and sets ``USER_SIM_GATE_SUPPORTED``)::
+Opt in with ``user_sim_gate`` on a ``prompt_agent`` step whose user is a user-sim agent-env deployed: a peer
+user-sim, or the built-in one deploy_user_sim_agent deploys, whose rewrite is parsed as its own answer. ``always_on``
+applies it to each of the built-in user-sim's answers. A step type that runs its own conversation loop applies the gate
+with ``run_gate``, and sets ``USER_SIM_GATE_SUPPORTED``::
 
     {"judge_model": "<a small, fast model>", "max_rewrites": 2, "on_fail": "fail"}
 """

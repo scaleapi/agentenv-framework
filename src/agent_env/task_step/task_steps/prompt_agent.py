@@ -650,8 +650,8 @@ class PromptAgentTaskStep(TaskStep):
             opening_text="\n".join(p.get("text", "") for p in initial_parts if p.get("kind") == "text"),
             built_in=sim,
         )
-        if self.user_sim_gate is not None and (not is_user_sim or sim is not None):
-            logger.warning(f"prompt_agent '{self.id}': user_sim_gate is set but the user side isn't a peer user-sim "
+        if self.user_sim_gate is not None and not is_user_sim:
+            logger.warning(f"prompt_agent '{self.id}': user_sim_gate is set but the user side isn't a user-sim "
                            "agent-env deployed; no message is checked")
         # Set by a user's done with a message: the agent answers it, then the conversation ends for this reason.
         end_after: Optional[str] = None
@@ -1171,6 +1171,13 @@ class _UserSide:
             # no trigger fired -> fall through to the LLM user-sim for this turn (hybrid)
         if self._built_in is not None:
             answer = await self._built_in.ask(number, _agent_text(solver_message, agent_parts), self._ask_built_in)
+            if self._gate is not None and "message" in answer:
+                kept = answer.get("end_after")
+
+                async def rewrite_built_in(note: str) -> dict:
+                    return await self._built_in.rewrite(number, note, self._ask_built_in, kept)
+
+                answer = await self._gated(number, answer, rewrite_built_in)
             self._end_after = answer.get("end_after")
             return answer
         return await self._ask_peer(number, agent_parts)
@@ -1236,10 +1243,15 @@ class _UserSide:
         answer = await self._send_to_peer(number, agent_parts)
         if self._gate is None or "end" in answer:
             return answer
-        return await self._gated(number, answer)
 
-    async def _gated(self, number: int, answer: dict) -> dict:
-        """Check the user-sim's message; ask for a rewrite while it fails, up to the gate's limit (``run_gate``)."""
+        async def rewrite_peer(note: str) -> dict:
+            return await self._send_to_peer(number, [{"kind": "text", "text": note}])
+
+        return await self._gated(number, answer, rewrite_peer)
+
+    async def _gated(self, number: int, answer: dict, ask_rewrite) -> dict:
+        """Check the user-sim's message; while it fails, ask for a rewrite with ``ask_rewrite(note)``, which returns an
+        answer shaped as ``ask``'s, up to the gate's limit (``run_gate``)."""
         gate = self._gate
         if self._gate_call_config is None and self._gate_judge_setup_error is None and gate.judge_model:
             # Judge setup (its key, its endpoint) can fail as the judge call can: like a call, it never takes the
@@ -1252,7 +1264,7 @@ class _UserSide:
         latest = {"answer": answer}
 
         async def rewrite(note: str) -> Optional[str]:
-            reply = await self._send_to_peer(number, [{"kind": "text", "text": note}])
+            reply = await ask_rewrite(note)
             latest["answer"] = reply
             return None if "end" in reply else _text_of(reply["message"])
 
@@ -1386,6 +1398,37 @@ class _BuiltInUserSim:
                 logger.info(f"Turn {number} user sim: reply {self.replies} of max_replies {self._max_replies}")
                 return {"message": [{"kind": "text", "text": ans["message"]}], "end_after": "user_gave_up"}
             return {"message": [{"kind": "text", "text": ans["message"]}]}
+        if outcome == "done" and said:
+            return {"message": [{"kind": "text", "text": ans["message"]}], "end_after": "user_done"}
+        return {"end": "user_done" if outcome == "done" else "user_no_reply"}
+
+    async def rewrite(self, number: int, note: str, ask_user_sim, end_after: Optional[str]) -> dict:
+        """The user's answer again, after the user-sim gate held its message back with ``note``, in the same session;
+        shaped as ``ask``'s. ``end_after`` is the held message's (its last reply before max_replies, say), which a reply
+        keeps. The read's record keeps what the user sim first answered and lists each rewrite under ``gate_rewrites``."""
+        got = await ask_user_sim(note)
+        ans = user_sim_versions.parse(got["structured"] if isinstance(got.get("structured"), dict) else got.get("text"))
+        error = got.get("error")
+        rewrite = {k: ans.get(k) for k in ("outcome", "message", "used", "schema_errors")}
+        rewrite.update(user_sim_error=error, user_sim_trajectory_url=got.get("trajectory_url"))
+        reads = self._context.metadata.get("user_sim_reads", {}).get(self._step.id) or []
+        if reads:
+            reads[-1].setdefault("gate_rewrites", []).append(rewrite)
+        outcome, said = ans.get("outcome"), (ans.get("message") or "").strip()
+        if self.history:
+            held = self.history[-1]["answer"]
+            if held.get("outcome") == "reply" and (held.get("message") or "").strip() and not (
+                    outcome == "reply" and said and not error):
+                self.replies -= 1  # the held reply was counted toward max_replies, and this answer isn't one
+            # What the user is shown later counts this answer as hers: the one that reached the agent.
+            self.history[-1]["answer"] = {**held, **ans}
+        logger.info(f"Turn {number} user sim rewrite: outcome={outcome} error={error}")
+        if error:
+            self.error = error
+            return {"end": "user_sim_error"}
+        if outcome == "reply" and said:
+            return {"message": [{"kind": "text", "text": ans["message"]}],
+                    **({"end_after": end_after} if end_after == "user_gave_up" else {})}
         if outcome == "done" and said:
             return {"message": [{"kind": "text", "text": ans["message"]}], "end_after": "user_done"}
         return {"end": "user_done" if outcome == "done" else "user_no_reply"}

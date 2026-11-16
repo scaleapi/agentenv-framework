@@ -144,16 +144,17 @@ def test_a_step_type_that_replaces_the_conversation_refuses_the_gate_unless_it_a
     assert PromptAgentTaskStep.applies_user_sim_gate() and not OwnLoop.applies_user_sim_gate()
 
 
-def test_a_saved_always_on_step_with_the_gate_is_refused_as_one_built_in_code_is():
-    import pytest
+def test_an_always_on_step_keeps_its_gate_through_the_step_dict():
     from agent_env.task_step.task_steps.always_on import AlwaysOnTaskStep
 
-    step = AlwaysOnTaskStep("week", None, user_sim="user-sim", prompt_id="ask", agent_name="solver")
-    saved = {**step.to_dict(), "user_sim_gate": {}}
+    step = AlwaysOnTaskStep("week", None, user_sim="user-sim", prompt_id="ask", agent_name="solver",
+                            user_sim_gate={"max_rewrites": 1, "on_fail": "end"})
+    again = AlwaysOnTaskStep.from_dict(step.to_dict())
 
-    with pytest.raises(ValueError, match="AlwaysOnTaskStep 'week': user_sim_gate is applied by prompt_agent's own"):
-        AlwaysOnTaskStep.from_dict(saved)
-    assert AlwaysOnTaskStep.from_dict(step.to_dict()).user_sim_gate is None
+    assert again.user_sim_gate == step.user_sim_gate and again.user_sim_gate.on_fail == "end"
+    plain = AlwaysOnTaskStep("week", None, user_sim="user-sim", prompt_id="ask", agent_name="solver")
+    assert "user_sim_gate" not in plain.to_dict()
+    assert AlwaysOnTaskStep.from_dict(plain.to_dict()).user_sim_gate is None
 
 
 def test_a_judge_that_couldnt_be_set_up_isnt_called_and_the_patterns_verdict_stands():

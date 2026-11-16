@@ -16,7 +16,8 @@ from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import USER_SIMS
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from agent_env.task_step.task_steps.verifiers.agent_prompt_response_verifier import AgentPromptResponseVerifierTaskStep
 from tst.unit.task_step.test_deploy_user_sim_agent import HANNAH, _published, _step as _deploy_step
-from tst.unit.task_step.test_prompt_agent_user_side import AGENT, HANG, HUMAN, USER, Peers, _stored, exchange, text
+from tst.unit.task_step.test_prompt_agent_user_side import (
+    _SWAP, AGENT, HANG, HUMAN, USER, Peers, _stored, exchange, text)
 
 pytestmark = pytest.mark.usefixtures("local_stores")
 
@@ -411,3 +412,61 @@ async def test_agent_triggers_registered_for_the_built_in_user_are_refused_befor
                                          "user sim aren't supported yet"):
         await _step().execute(ctx)
     assert "user_sim_reads" not in ctx.metadata
+
+
+# ---- the user-sim gate ----------------------------------------------------------------------------------------------
+def _gated(turns: int = 3, **gate) -> PromptAgentTaskStep:
+    return _step(turns=turns, user_sim_gate={"patterns": True, **gate})
+
+
+def _to(peers: Peers, ctx: TaskStepContext, url: str) -> list[str]:
+    sent = [r for r in peers.requests(ctx) if r[2] and r[2].get("method") == "message/send"]
+    return [r[2]["params"]["message"]["parts"][0]["text"] for r in sent if r[1].startswith(url)]
+
+
+@pytest.mark.asyncio
+async def test_the_gate_holds_back_a_built_in_users_answer_that_reads_as_the_assistants_and_she_answers_again(
+        monkeypatch):
+    peers = Peers(monkeypatch, {AGENT: [text("draft one"), text("draft two"), text("you're welcome")],
+                                USER: [said("reply", _SWAP), said("reply", "do those numbers hold up?", "D1"),
+                                       said("done", "great, thanks")]})
+    ctx = await _context(monkeypatch)
+
+    await _gated().execute(ctx)
+
+    to_user, to_agent = _to(peers, ctx, USER), _to(peers, ctx, AGENT)
+    assert to_user[1].startswith("[Conversation system note, not from the assistant.] Your last message was not sent")
+    assert to_agent == ["plan my parents' visit", "do those numbers hold up?", "great, thanks"]  # no swap reached it
+    verdicts = ctx.metadata["user_sim_gate"]["talk"]
+    assert [(v["turn"], v["attempt"], v["passed"]) for v in verdicts] == [(1, 0, False), (1, 1, True), (2, 0, True)]
+    first = _reads(ctx)[0]
+    assert first["message"] == _SWAP          # the read keeps what she first answered, for whoever grades her
+    assert [(r["outcome"], r["message"], r["used"]) for r in first["gate_rewrites"]] == [
+        ("reply", "do those numbers hold up?", "D1")]
+    assert "user_sim_invalid" not in ctx.metadata
+
+
+@pytest.mark.asyncio
+async def test_a_built_in_users_answer_that_still_fails_ends_the_run_and_fails_the_step(monkeypatch):
+    peers = Peers(monkeypatch, {AGENT: [text("draft one")], USER: [said("reply", _SWAP)] * 3})
+    ctx = await _context(monkeypatch)
+
+    with pytest.raises(RuntimeError, match=r"user_sim_gate: user-sim message at turn 1 still reads as the assistant's"):
+        await _gated().execute(ctx)
+
+    assert [v["passed"] for v in ctx.metadata["user_sim_gate"]["talk"]] == [False, False, False]
+    assert ctx.metadata["user_sim_invalid"]["talk"]["turn"] == 1
+    assert len(_reads(ctx)[0]["gate_rewrites"]) == 2
+    assert _to(peers, ctx, AGENT) == ["plan my parents' visit"]   # nothing she wrote reached the agent
+
+
+@pytest.mark.asyncio
+async def test_a_rewrite_that_says_nothing_ends_the_conversation_as_her_no_reply(monkeypatch):
+    peers = Peers(monkeypatch, {AGENT: [text("draft one")], USER: [said("reply", _SWAP), said("no_reply")]})
+    ctx = await _context(monkeypatch)
+
+    await _gated().execute(ctx)
+
+    assert _to(peers, ctx, AGENT) == ["plan my parents' visit"]
+    assert "user_sim_invalid" not in ctx.metadata
+    assert [(v["attempt"], v["passed"]) for v in ctx.metadata["user_sim_gate"]["talk"]] == [(0, False)]
