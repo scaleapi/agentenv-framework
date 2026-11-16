@@ -386,3 +386,19 @@ def test_a_judge_that_names_its_tools_otherwise_keeps_them_and_the_log_says_so(c
     for card in (_judge_card("exec_command", "apply_patch"), _judge_card("bash", "read", "edit"), {}):
         assert verifier.judge_agent_config(card) == {"peer_tools": False}
     assert "doesn't offer ['Bash', 'Read'] as built-in tools" in caplog.text
+
+
+def test_the_files_note_explains_harness_lines_only_for_a_run_whose_trajectories_carry_agent_labels():
+    from agent_env.task_step.task_steps.verifiers.always_on_agent_verifier import _FILES_NOTE, _files_note
+    from agent_env.task_step.task_steps.verifiers.always_on_staging import StagedRun
+
+    files = {"index.md": "", "wakes/wake_001.jsonl": ""}
+    plain = _files_note("/s", StagedRun(files, {}))
+    v3 = _files_note("/s", StagedRun(files, {"agent_labeled_trajectories": 2}))
+
+    assert plain.endswith("no web, no other agents, and nothing to change.") and "harness_note" not in plain
+    assert v3.startswith(plain) and _FILES_NOTE.endswith("{gaps}{harness}")
+    for rule in ('"harness_note" lines are from the harness that runs the assistant, never from the assistant or the '
+                 'user', '"step": "pre_compaction_save"', "memory_* and history_* calls are the assistant's own notes",
+                 'Lines with "subagent" are from a helper agent', 'Harness notes have no "at": read them in file order'):
+        assert rule in v3

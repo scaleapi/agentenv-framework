@@ -37,12 +37,15 @@ class TurnEvents:
     """``events`` in turn order, each ``{"type": "text", "text"}``, ``{"type": "tool_call", "tool", "id", "input",
     "result", "error"}`` (``result`` absent when none came back), ``{"type": "prompt", "text"}`` (the turn's input,
     when the format records it), ``{"type": "note", "text"}`` (a message the harness put in the turn; a compaction's
-    also has ``compaction``, its counts: ``wakes_summarized``, ``wakes_kept``, ``next_wake_waited_s``) or
-    ``{"type": "final", "text", "error"}``; for an unknown format, ``{"type": "raw", "event"}`` per stored item."""
+    also has ``compaction``, what its span recorded: ``wakes_summarized``, ``wakes_kept``, ``first_kept_wake``,
+    ``waited_s``) or ``{"type": "final", "text", "error"}``; for an unknown format, ``{"type": "raw", "event"}`` per
+    stored item. ``agent_labels``: its spans say which agent made each (``psi.agent.kind``, the PSI harness v3), so
+    the harness's own tools (memory_*, history_*) are told apart from the apps'."""
 
     format: str
     events: list[dict]
     raw_bytes: int
+    agent_labels: bool = False
 
 
 def turn_events(raw: bytes | str) -> TurnEvents:
@@ -55,7 +58,8 @@ def turn_events(raw: bytes | str) -> TurnEvents:
             "utf-8", errors="replace")}], size)
     fmt = trajectory_format(items)
     if fmt == OTEL:
-        return TurnEvents(fmt, _otel_events(items), size)
+        return TurnEvents(fmt, _otel_events(items), size,
+                          agent_labels=any(_KIND in (e.get("attributes") or {}) for e in items))
     if fmt == CLAUDE_CODE:
         return TurnEvents(fmt, _claude_code_events(items), size)
     if fmt == GEMINI:
@@ -145,6 +149,8 @@ _KIND = "psi.agent.kind"
 _HARNESS = "harness"
 _COMPACTION = "psi.compaction"
 _HARNESS_MESSAGE = "psi.harness_message"
+_SAVE = "pre_compaction_save"
+_AFTER = "after_compaction"
 
 
 def _otel_events(spans: list[dict]) -> list[dict]:
@@ -154,6 +160,9 @@ def _otel_events(spans: list[dict]) -> list[dict]:
     model calls (``psi.agent.kind = harness``: the compaction summary) are not the assistant's words, so they are left
     out; the compaction (at its end, once the summary is written) and each message the harness sent are notes."""
     timed: list[tuple[str, int, dict]] = []
+    # A compaction with no end time goes after the save turn before it.
+    save_end = max((str(s.get("end_time") or s.get("start_time") or "") for s in spans
+                    if (s.get("attributes") or {}).get("psi.turn") == _SAVE), default="")
     for i, span in enumerate(spans):
         start = str(span.get("start_time") or "")
         attrs = span.get("attributes") or {}
@@ -168,8 +177,9 @@ def _otel_events(spans: list[dict]) -> list[dict]:
             continue
         operation = attrs.get("gen_ai.operation.name")
         if operation == _COMPACTION:
-            timed.append((str(span.get("end_time") or start), i, {"type": "note", "text": _compaction_note(attrs),
-                                                                  "compaction": _compaction_facts(attrs)}))
+            facts = _compaction_facts(attrs)
+            timed.append((str(span.get("end_time") or max(start, save_end)), i,
+                          {"type": "note", "text": _compaction_note(attrs, facts), "compaction": facts}))
             continue
         if operation == _HARNESS_MESSAGE:
             timed.append((start, i, {"type": "note", "text": _harness_message_note(attrs), **tag}))
@@ -201,33 +211,55 @@ def _agent_tag(attrs: dict) -> dict:
 
 
 def _compaction_facts(attrs: dict) -> dict:
-    """A ``psi.compaction`` span's counts that it recorded: wakes summarized and kept, and how late (real seconds) the
-    next wake started."""
-    return {key: attrs[f"psi.compaction.{key}"] for key in ("wakes_summarized", "wakes_kept", "next_wake_waited_s")
-            if attrs.get(f"psi.compaction.{key}") is not None}
+    """What a ``psi.compaction`` span recorded: the wakes it summarized and kept (the harness's wake numbers, from the
+    first kept one), and how late (real seconds) the wake it came before started (``waited_s``, the span's
+    ``next_wake_waited_s``)."""
+    named = {"wakes_summarized": "wakes_summarized", "wakes_kept": "wakes_kept", "first_kept_wake": "first_kept_wake",
+             "waited_s": "next_wake_waited_s"}
+    return {key: attrs[f"psi.compaction.{attr}"] for key, attr in named.items()
+            if attrs.get(f"psi.compaction.{attr}") is not None}
 
 
-def _compaction_note(attrs: dict) -> str:
-    """A ``psi.compaction`` span as a note: how much it summarized, how late it made the next wake, and the summary."""
-    facts = []
-    if attrs.get("psi.compaction.wakes_summarized") is not None:
-        facts.append(f"{attrs['psi.compaction.wakes_summarized']} wakes summarized")
-    if attrs.get("psi.compaction.wakes_kept") is not None:
-        facts.append(f"the last {attrs['psi.compaction.wakes_kept']} kept word for word")
-    if attrs.get("psi.compaction.next_wake_waited_s") is not None:
-        facts.append(f"the next wake started {attrs['psi.compaction.next_wake_waited_s']} s late (real time) "
-                     "waiting for it")
+def _wakes(first: int, last: int) -> str:
+    return f"wake {first}" if first == last else f"wakes {first}–{last}"
+
+
+def compaction_words(facts: dict) -> list[str]:
+    """A compaction's ``facts`` (a note's ``compaction``) in words: which wakes are now in the summary and which were
+    kept word for word (by number when the span named the first kept wake, else as counts), and how late this wake
+    started waiting for it."""
+    words = []
+    first, kept = facts.get("first_kept_wake"), facts.get("wakes_kept")
+    if isinstance(first, int) and first > 1:
+        words.append(f"{_wakes(1, first - 1)} {'is' if first == 2 else 'are'} now in the summary")
+        if isinstance(kept, int) and kept > 0:
+            words.append(f"{_wakes(first, first + kept - 1)} kept word for word")
+    else:
+        if facts.get("wakes_summarized") is not None:
+            words.append(f"{facts['wakes_summarized']} wakes summarized")
+        if kept is not None:
+            words.append(f"the last {kept} kept word for word")
+    if facts.get("waited_s") is not None:
+        words.append(f"this wake started {facts['waited_s']} s late (real time) waiting for it")
+    return words
+
+
+def _compaction_note(attrs: dict, facts: dict) -> str:
+    """A ``psi.compaction`` span as a note: which wakes it summarized, how late it made this wake, and the summary."""
     head = ("Compaction summary (written by the harness from the model's own summary turn; it replaces the older "
-            "history the model sees" + "".join(f"; {f}" for f in facts) + ")")
+            "history the model sees" + "".join(f"; {w}" for w in compaction_words(facts)) + ")")
     summary = str(attrs.get("psi.compaction.summary") or "").strip()
     return f"{head}:\n{summary}" if summary else f"{head}: no summary recorded"
 
 
 def _harness_message_note(attrs: dict) -> str:
-    """A ``psi.harness_message`` span as a note: the text the harness put before the model."""
-    step = f"step {attrs['psi.turn']}; " if attrs.get("psi.turn") else ""
-    return f"Message the harness sent the assistant ({step}not from the user):\n" + str(
-        attrs.get("psi.harness_message.text") or "")
+    """A ``psi.harness_message`` span as a note: the text the harness put before the model. The message after a
+    compaction repeats the user's first request word for word: it is the harness's, not a new one from the user."""
+    turn = attrs.get("psi.turn")
+    who = ("re-sent by the harness, it repeats the user's earlier words" if turn == _AFTER
+           else "not from the user")
+    step = f"step {turn}; " if turn else ""
+    return f"Message the harness sent the assistant ({step}{who}):\n" + str(attrs.get("psi.harness_message.text") or "")
 
 
 def _span_text(attrs: dict) -> str:

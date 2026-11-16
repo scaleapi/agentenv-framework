@@ -86,7 +86,18 @@ follow-ups before you decide.
 - Only the assistant's tool calls and its "agent" app changes are its acts. A draft is not a sent message. Messages \
 from the user, the user simulator or contacts are never the assistant's. Order events by their pretend time ("at"), \
 not by where they sit in the files.
-- You have Bash and Read only: no web, no other agents, and nothing to change.{gaps}"""
+- You have Bash and Read only: no web, no other agents, and nothing to change.{gaps}{harness}"""
+# Added to _FILES_NOTE for a run whose trajectories say which agent made each step (the PSI harness v3: compaction,
+# memory, helpers), where these lines appear; a run without them gets the note as before.
+_HARNESS_NOTE = """
+- "harness_note" lines are from the harness that runs the assistant, never from the assistant or the user: a message \
+the harness sent the assistant, or a compaction summary that replaced older history in what the assistant sees.
+- Lines with "step": "pre_compaction_save" are a turn the harness asked for before a compaction. What the assistant \
+wrote there went to the harness, not the user, and it ran before the assistant saw that wake's message.
+- memory_* and history_* calls are the assistant's own notes and its look-ups of past wakes. They count as what it \
+did, but change nothing in any app.
+- Lines with "subagent" are from a helper agent the assistant started.
+- Harness notes have no "at": read them in file order."""
 
 
 class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
@@ -321,4 +332,5 @@ def _files_note(path: str, staged: StagedRun) -> str:
                 "for them only the run's record is there: " + ", ".join(str(n) for n in gaps) + ".") if gaps else ""
     return _FILES_NOTE.format(index=f"{path}/{INDEX_FILE}", first=f"{path}/{wakes[0] if wakes else WAKES_DIR}",
                               last=f"{path}/{wakes[-1] if wakes else WAKES_DIR}", results=f"{path}/{RESULTS_DIR}",
-                              events=f"{path}/{EVENTS_FILE}", triggers=f"{path}/{TRIGGERS_FILE}", gaps=gap_note)
+                              events=f"{path}/{EVENTS_FILE}", triggers=f"{path}/{TRIGGERS_FILE}", gaps=gap_note,
+                              harness=_HARNESS_NOTE if r.get("agent_labeled_trajectories") else "")

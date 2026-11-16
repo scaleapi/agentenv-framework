@@ -182,8 +182,10 @@ def test_a_v3_compaction_wake_keeps_the_assistant_s_words_and_makes_the_harness_
     spans = _v3("claude")
     summary = next(s["attributes"]["psi.compaction.summary"] for s in spans if s["name"] == "psi.compaction")
 
-    events = turn_events(json.dumps(spans)).events
+    traj = turn_events(json.dumps(spans))
+    events = traj.events
 
+    assert traj.agent_labels is True
     assert [(e["type"], e.get("step")) for e in events] == [
         ("note", "pre_compaction_save"), ("tool_call", "pre_compaction_save"), ("tool_call", "pre_compaction_save"),
         ("text", "pre_compaction_save"), ("note", None), ("note", "after_compaction"), ("thinking", None),
@@ -192,14 +194,31 @@ def test_a_v3_compaction_wake_keeps_the_assistant_s_words_and_makes_the_harness_
     assert save.startswith("Message the harness sent the assistant (step pre_compaction_save; not from the user):\n"
                            "[Harness: older history is about to be summarized")
     assert compaction.startswith("Compaction summary (written by the harness from the model's own summary turn;")
-    assert "2 wakes summarized; the last 3 kept word for word; the next wake started 8.694 s late" in compaction
-    assert compaction.endswith(summary.strip()) and after.startswith("Message the harness sent the assistant (step "
-                                                                      "after_compaction; not from the user):")
+    assert ("; wakes 1–2 are now in the summary; wakes 3–5 kept word for word; this wake started 8.694 s late "
+            "(real time) waiting for it):") in compaction
+    assert next(e for e in events if "compaction" in e)["compaction"] == {
+        "wakes_summarized": 2, "wakes_kept": 3, "first_kept_wake": 3, "waited_s": 8.694}
+    assert compaction.endswith(summary.strip()) and after.startswith(
+        "Message the harness sent the assistant (step after_compaction; re-sent by the harness, it repeats the "
+        "user's earlier words):\n[Harness: older history was summarized")
     # The summary turn is the harness's model call: neither its text nor its reasoning is the assistant's.
     own = [e["text"] for e in events if e["type"] in ("text", "thinking")]
     assert not any(summary[:200] in t or "checking the schedule" in t for t in own)
     assert own[-1].startswith("Got today's digest, and nothing in it needs action.")
-    assert [c["tool"] for c in _calls(turn_events(json.dumps(spans)))] == ["memory_add", "memory_add"]
+    assert [c["tool"] for c in _calls(traj)] == ["memory_add", "memory_add"]
+
+
+def test_a_compaction_with_no_end_time_comes_after_its_save_turn_and_without_a_first_kept_wake_gives_counts():
+    spans = _v3("claude")
+    span = next(s for s in spans if s["name"] == "psi.compaction")
+    del span["end_time"], span["attributes"]["psi.compaction.first_kept_wake"]
+
+    events = turn_events(json.dumps(spans)).events
+
+    kinds = [(e["type"], e.get("step")) for e in events]
+    assert kinds.index(("note", None)) == kinds.index(("text", "pre_compaction_save")) + 1
+    compaction = next(e["text"] for e in events if "compaction" in e)
+    assert "; 2 wakes summarized; the last 3 kept word for word; this wake started 8.694 s late" in compaction
 
 
 def test_a_v3_gpt_save_turn_keeps_its_reasoning_and_memory_calls_marked_as_the_harness_s_step():
@@ -232,3 +251,4 @@ def test_spans_without_psi_agent_labels_read_as_before():
 
     assert not any("step" in e or "subagent" in e for e in events)
     assert "note" not in {e["type"] for e in events}
+    assert turn_events((RECORDED / "turn_otel_wake4.json").read_bytes()).agent_labels is False
