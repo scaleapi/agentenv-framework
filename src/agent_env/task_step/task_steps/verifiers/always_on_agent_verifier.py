@@ -16,7 +16,8 @@ For a run of the PSI neutral harness v3 (its trajectories carry psi.agent.* labe
 summary is the assistant's own and graded as its own, and, with a per-criterion format, says for each failed criterion
 whether it traces to context a compaction lost (``context_loss`` on the row; the entry counts them): reported next to
 the score, never changing it. Every entry also says what the run records of the assistant's harness
-(``assistant_harness``: its agent name, its card's name and version, the settings its trace reports).
+(``assistant_harness``: its agent name, its card's name and version and, when its wakes are staged, the settings
+its trace reports).
 """
 
 from __future__ import annotations
@@ -225,7 +226,7 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
             entry["trajectory_staging"]["judge_reads"] = await self._judge_reads(entry)
         if asked:
             entry["context_loss"] = context_loss(entry.get("results") or [])
-        if harness := await self._assistant_harness(context):
+        if harness := await self._assistant_harness(context, staged="trajectory_staging" in entry):
             entry["assistant_harness"] = harness
         return context
 
@@ -235,10 +236,11 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
         spec = super()._spec()
         return _with_context_loss(spec) if _CONTEXT_LOSS_RUN.get() else spec
 
-    async def _assistant_harness(self, context: TaskStepContext) -> dict:
-        """The graded assistant's harness as the run records it: its agent name, its A2A card's name and version, and
-        the settings its trace reports (``harness_settings`` of the last wake's trajectory). What isn't there is left
-        out."""
+    async def _assistant_harness(self, context: TaskStepContext, *, staged: bool) -> dict:
+        """The graded assistant's harness as the run records it: its agent name, its A2A card's name and version, and,
+        for a run whose wakes were ``staged`` (so its trajectories are read anyway), the settings its trace reports
+        (``harness_settings`` of the last wake's trajectory). A run graded without its trajectories has none read.
+        What isn't there is left out."""
         response = next((pr for pr in context.prompt_responses if pr.prompt_id == self.prompt_id), None)
         if response is None:
             return {}
@@ -251,7 +253,7 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
                 out["agent_card"] = card
         urls = [u for u in (response.target_agent_per_turn_trajectory_object_urls or []) if u]
         url = urls[-1] if urls else response.agent_trajectory_object_url
-        if url:
+        if staged and url:
             try:
                 settings = harness_settings(await asyncio.to_thread(self._read_trajectory_text, url))
             except Exception as e:

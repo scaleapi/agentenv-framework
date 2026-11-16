@@ -527,3 +527,21 @@ async def test_the_entry_discloses_what_an_earlier_harness_s_trace_records_and_n
     assert harness["settings"] == {"model": "claude-opus-5-5", "effort": "high", "reasoning": "claude:high",
                                    "role": "assistant", "mcp_tool_timeout_s": 60.0}
     assert "agent_name" not in harness and "agent_card" not in harness
+
+
+@pytest.mark.asyncio
+async def test_a_run_graded_without_its_trajectories_discloses_its_harness_without_reading_one(monkeypatch, tmp_path):
+    rig, ctx = await _run(monkeypatch, tmp_path)
+    ctx.deployed_agents.append(DeployedAgent(agent_name="assistant", api_url="http://a.test",
+                                             a2a_card={"name": "psi-neutral-harness", "version": "3"}))
+    ctx.prompt_responses[0].agent_name = "assistant"
+    verifier = _verifier()
+    _capture(monkeypatch, verifier)
+    reads: list = []
+    monkeypatch.setattr(verifier, "_read_trajectory_text", reads.append)
+
+    await verifier.execute(ctx)
+
+    assert reads == []
+    assert ctx.metadata["verifications"]["rubric"]["assistant_harness"] == {
+        "agent_name": "assistant", "agent_card": {"name": "psi-neutral-harness", "version": "3"}}
