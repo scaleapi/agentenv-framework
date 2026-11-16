@@ -546,6 +546,9 @@ class DeployAgentTaskStep(TaskStep):
             network_policy=deployed.network_policy,
             env_ids=list(self.env_ids),
         ))
+        # An agent deployed while a clock is armed follows it, as sync_env_clock had every agent then.
+        from agent_env.task_step.task_steps.agent_clock import follow_armed_clocks
+        await follow_armed_clocks(context, context.deployed_agents[-1], timeout=60)
         return context
 
     def _model_endpoint(self, context: TaskStepContext) -> dict[str, str]:

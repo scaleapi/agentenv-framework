@@ -17,7 +17,8 @@ def test_every_file_the_image_copies_is_in_the_folder():
     copied = [name for line in re.findall(r"^COPY (?!--from=)(.+) \S+$", DOCKERFILE, re.MULTILINE)
               for name in line.split()]
 
-    assert copied and all((AGENT_DIR / name).is_file() for name in copied), copied
+    assert copied and all((AGENT_DIR / name).is_file() or (name.endswith("/") and (AGENT_DIR / name).is_dir())
+                          for name in copied), copied
     # install.sh and run.sh are install/v1's; a build context pruned to what the Dockerfile reads keeps them so.
     assert {"a2a_server.py", "claude_bridge.py", "kit.py", "tar_changelog.py", "entrypoint.sh", "install.sh", "run.sh"} <= set(copied)
 
@@ -54,5 +55,5 @@ def test_the_image_pins_its_cli_checks_its_checksum_and_keeps_tls_on():
 
 
 def test_the_image_starts_through_cmd_which_modal_passes_its_env_to():
-    assert 'CMD ["/opt/agent/entrypoint.sh"]' in DOCKERFILE
+    assert 'CMD ["/usr/local/bin/start-agent"]' in DOCKERFILE
     assert not re.search(r"^ENTRYPOINT", DOCKERFILE, re.MULTILINE)

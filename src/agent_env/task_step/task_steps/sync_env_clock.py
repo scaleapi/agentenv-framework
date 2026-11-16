@@ -5,6 +5,8 @@ stored env card declares clock/v1, then invokes sync_time on each backing server
 env card lists (``legacy_protocol.backing_servers``) whose own card advertises it, at the route that card gives.
 An env whose card offers no set_time has no gateway clock to arm, as a computer deployed alone, and is refused
 saying to deploy it in a multi env; a record that kept no card is refused saying so.
+Then has every agent registered with the env whose card serves clock/v1 sync_time follow the clock as a computer does
+(``agent_clock``), so every program it runs reads the env's time and later clock writes can wait for it.
 Non-advertisers are skipped when tolerate_missing_sync_time (default True), and websites always. Place right
 before prompt_agent so the virtual timeline starts at agent-start; when setup needs the clock armed, arm it at rate 0
 and start it with set_env_clock_rate right before prompt_agent.
@@ -160,21 +162,44 @@ class SyncEnvClockTaskStep(TaskStep):
             entry = {"service": service, "environment": service, **({} if server.mcp else {"website": True}), **outcome}
             (synced if outcome.get("synced") else skipped).append(entry)
 
+        agents = await self._follow_agents(context, deployed, env_get_time_url)
         configuration = {
             "step_id": self.id, "env_id": self.env_id,
             "virtual_time": self.virtual_time, "virtual_seconds_per_real_second": self.virtual_seconds_per_real_second,
-            "env_get_time_url": env_get_time_url, "synced": synced, "skipped": skipped,
+            "env_get_time_url": env_get_time_url, "synced": synced, "skipped": skipped, "agents": agents,
+            "tolerate_missing_sync_time": self.tolerate_missing_sync_time,
         }
         if self.timezone is not None:
             configuration.update(timezone=self.timezone, armed_at=self.armed_virtual_time,
                                  get_time_zone=state.get("time_zone"))
         context.metadata.setdefault("clock_configurations", []).append(configuration)
         logger.info(f"sync_env_clock env={self.env_id}: armed rate={self.virtual_seconds_per_real_second}; "
-                    f"synced={[s['service'] for s in synced]} skipped={[s['service'] for s in skipped]}")
+                    f"synced={[s['service'] for s in synced]} skipped={[s['service'] for s in skipped]} "
+                    f"agents={[(a['agent'], a['synced']) for a in agents]}")
         if not synced:
             logger.warning(f"sync_env_clock env={self.env_id}: clock armed but NO server synced "
                            f"({[(s['service'], s.get('reason')) for s in skipped]}) — every tool still answers wall time")
         return context
+
+    async def _follow_agents(self, context: TaskStepContext, deployed, env_get_time_url: Optional[str]) -> list[dict]:
+        """Have every agent registered with the env follow its clock (``agent_clock.follow``): one that can't is
+        reported and skipped, or fails the step when ``tolerate_missing_sync_time`` is false, as a server is."""
+        from agent_env.task_step.task_steps.agent_clock import follow
+
+        outcomes = []
+        for agent in context.deployed_agents:
+            if self.env_id not in (agent.env_ids or []):
+                continue
+            outcome = await follow(agent, deployed, env_get_time_url=env_get_time_url, timezone=self.timezone,
+                                   timeout=self.timeout_seconds)
+            if not outcome["synced"]:
+                if not self.tolerate_missing_sync_time:
+                    raise StepContextError(f"agent '{agent.agent_name}' can't follow the clock of env "
+                                           f"'{self.env_id}': {outcome['reason']}")
+                logger.info(f"sync_env_clock: agent '{agent.agent_name}' doesn't follow the clock "
+                            f"({outcome['reason']}); skipping")
+            outcomes.append({"agent": agent.agent_name, **outcome})
+        return outcomes
 
     async def _sync_one(self, deployed, gateway_url: str, service: str, env_get_time_url: Optional[str], mcp: bool = True,
                         tolerate: Optional[bool] = None, server: Optional[BackingServer] = None) -> dict:

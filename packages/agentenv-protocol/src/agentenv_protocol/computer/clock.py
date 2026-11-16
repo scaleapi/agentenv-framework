@@ -82,7 +82,15 @@ async def sync_time(env_get_time_url: str, timezone: Optional[str] = None) -> di
     if timezone is not None and timezone.strip() != zone:
         raise InvalidArgument(f"the task's clock is in {timezone.strip()!r} and this computer's session in {zone!r}; "
                               f"deploy it with computer_settings.timezone = {timezone.strip()!r}")
-    deadline = time.monotonic() + CONNECT_WAIT_S
+    follower = await following("this computer's clock follower")
+    return {"synced": True, "timezone": zone, "env_get_time_url": env_get_time_url, "follower": follower}
+
+
+async def following(whose: str, wait_s: float = CONNECT_WAIT_S) -> dict:
+    """The follower's status once it shows the gateway's current version; TargetUnavailable saying why ``whose``
+    doesn't within ``wait_s``. A computer's ``sync_time`` and an agent's (``agentenv_protocol.a2a_agent.clock``) both answer
+    with it."""
+    deadline = time.monotonic() + wait_s
     while True:
         status, current, unread = follower_status(), None, None
         if status.get("connected") and status.get("url"):
@@ -92,9 +100,7 @@ async def sync_time(env_get_time_url: str, timezone: Optional[str] = None) -> di
                 unread = f"{type(e).__name__}: {e}"[:300]
             status = follower_status()
             if current is not None and status.get("connected") and status.get("version") == current:
-                return {"synced": True, "timezone": zone, "env_get_time_url": env_get_time_url,
-                        "follower": {key: status.get(key) for key in ("name", "url", "version", "armed")}}
+                return {key: status.get(key) for key in ("name", "url", "version", "armed")}
         if time.monotonic() >= deadline:
-            raise TargetUnavailable("this computer's clock follower isn't following the gateway: "
-                                    + _why(status, current, unread))
+            raise TargetUnavailable(f"{whose} isn't following the gateway: " + _why(status, current, unread))
         await asyncio.sleep(0.1)

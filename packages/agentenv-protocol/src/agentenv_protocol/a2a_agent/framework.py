@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import inspect
 import json
 import logging
@@ -39,6 +40,8 @@ from .extensions import (
     SKILL_CONFIG_V1,
     TRAJECTORY_V1,
     TRIGGERS_V1,
+    CLOCK_V1,
+    ClockSyncTimeRequest,
     ContextEventsTrajectoryRequest,
     ContextObjectTrajectoryRequest,
     ContextTrajectoryRequest,
@@ -59,6 +62,8 @@ from .extensions import (
     TriggerRegisterRequest,
     enable,
 )
+from ..computer.errors import ComputerError
+from . import clock as agent_clock
 from .peer_agents import PEER_MCP_PATH, PEER_MCP_SERVER_NAME, PeerAgents
 from .registry import RegisteredOperation, build_registry
 from .staging import STAGING_ENDPOINT, StagingStore, staging_routes
@@ -631,6 +636,7 @@ class _SdkServices:
             (TRIGGERS_V1.uri, "register"): self.triggers_register,
             (TRIGGERS_V1.uri, "decide"): self.triggers_decide,
             (TRIGGERS_V1.uri, "state"): self.triggers_state,
+            (CLOCK_V1.uri, "sync_time"): self.clock_sync_time,
         }
 
     async def agent_config_set(self, request: AgentConfig) -> dict[str, Any]:
@@ -876,6 +882,20 @@ class _SdkServices:
     async def triggers_state(self) -> dict[str, Any]:
         return self.trigger_engine.state()
 
+    async def clock_sync_time(self, request: ClockSyncTimeRequest) -> dict[str, Any]:
+        try:
+            return await agent_clock.sync_time(**request.model_dump())
+        except ComputerError as exc:
+            raise HTTPException(status_code=exc.STATUS, detail=f"{exc.CODE}: {exc}") from exc
+
+
+def _with_clock(definition: _AgentDefinition) -> _AgentDefinition:
+    """``definition`` serving clock/v1 where the agent's image runs the clock follower, so every agent in such an
+    image follows the env's clock with no code of its own; unchanged elsewhere, or where the agent declares it."""
+    if not agent_clock.follows() or any(a.definition.uri == CLOCK_V1.uri for a in definition.extensions):
+        return definition
+    return dataclasses.replace(definition, extensions=(*definition.extensions, ExtensionActivation(CLOCK_V1)))
+
 
 class DefaultExtensionHandlers:
     """Stable access to default implementations of SDK-owned operations."""
@@ -968,6 +988,7 @@ class A2AAgentApplication:
                 "agent instance is already bound to an application; create a new "
                 "agent instance for each application"
             )
+        definition = _with_clock(definition)
         self.agent = agent
         self.definition = definition
         self.rpc_path = _rpc_path(definition.identity.url)

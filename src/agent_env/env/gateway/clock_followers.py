@@ -1,4 +1,5 @@
-"""The followers of the gateway's clock (the computers on it): each long-polls ``/clock/watch`` with the version it
+"""The followers of the gateway's clock (the computers on it, declared at its start, and the agents a run declares
+after it, ``declare``): each long-polls ``/clock/watch`` with the version it
 shows, which is its acknowledgement, and a clock write can wait until every one shows the write's version."""
 from __future__ import annotations
 
@@ -43,6 +44,15 @@ class ClockFollowers:
         self._seen: dict[str, float] = {}
         self._changed = asyncio.Event()
         self._acks = asyncio.Condition()
+
+    def declare(self, name: str, token: str) -> None:
+        """Declare ``name`` a follower, with the read token its watch carries, after the gateway started: an agent the
+        run deploys. Declared again, as a redeploy does, it takes the new token and is waited for afresh."""
+        if not name or not token:
+            raise ClockError("a follower takes a name and a read token")
+        self._tokens[name] = token
+        self._shown[name] = None
+        self._seen.pop(name, None)
 
     def changed(self) -> None:
         """Answer every held watch: the clock has a new version."""

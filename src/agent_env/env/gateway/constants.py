@@ -76,6 +76,7 @@ CLOCK_FOLLOWERS_ENV = "CLOCK_FOLLOWER_TOKENS"
 CONTROL_TOKEN_CHILDREN_ENV = "CONTROL_TOKEN_CHILDREN"
 # The route a clock follower long-polls, with its read token.
 CLOCK_WATCH_PATH = "/clock/watch"
+CLOCK_FOLLOWERS_PATH = "/clock/followers"
 # How long /clock/watch holds a watch naming the current version before answering it unchanged; a follower's request
 # timeout must be longer. The card's watch method advertises it as hold_s.
 CLOCK_WATCH_HOLD_S = 25.0
@@ -187,6 +188,7 @@ CONTROL_ROUTES = frozenset({
     f"/tools/{TOOL_DISABLE_ACTION}", f"/tools/{TOOL_ENABLE_ACTION}",
     "/triggers/register", "/triggers/remove", "/triggers/clear",
     "/notifications/config", "/notifications/take", "/notifications/clear",
+    CLOCK_FOLLOWERS_PATH,
 })
 
 
@@ -249,7 +251,7 @@ GATEWAY_EXTENSIONS = [
     },
     {
         "uri": EXT_CLOCK_URI,
-        "description": "Virtual clock (urn:agentenv:clock/v1): read the gateway's virtual time (wall-clock-derived, rate-scaled) via get_time; set_time/set_rate/advance/clear are the harness control path, each changing the clock's opaque version and, given wait_followers_s, answering 504 naming the followers that don't show it in time (set_rate keeps t0, as advance does, so time triggers keep their marks; rate 0 freezes the clock); a follower follows it through watch, a long poll naming the version it shows and held up to hold_s; state's followers block is diagnostic, not part of the contract.",
+        "description": "Virtual clock (urn:agentenv:clock/v1): read the gateway's virtual time (wall-clock-derived, rate-scaled) via get_time; set_time/set_rate/advance/clear are the harness control path, each changing the clock's opaque version and, given wait_followers_s, answering 504 naming the followers that don't show it in time (set_rate keeps t0, as advance does, so time triggers keep their marks; rate 0 freezes the clock); declare_follower adds a follower after the gateway started (an agent the run deploys), with the read token its watches carry; a follower follows it through watch, a long poll naming the version it shows and held up to hold_s; state's followers block is diagnostic, not part of the contract.",
         "params": {"endpoint": "/clock/time", "methods": {
             "get_time": {"method": "GET", "endpoint": "/clock/time"},
             "set_time": {"method": "PUT", "endpoint": "/clock/set-time", "request": {"type": "object", "properties": {"virtual_time": {"type": "string"}, "virtual_seconds_per_real_second": {"type": "number"}, "time_zone": {"type": "string"}, **_WAIT_FOLLOWERS}, "required": ["virtual_time"]}},
@@ -257,6 +259,7 @@ GATEWAY_EXTENSIONS = [
             "advance": {"method": "PUT", "endpoint": "/clock/advance", "request": {"type": "object", "properties": {"virtual_time": {"type": "string"}, **_WAIT_FOLLOWERS}, "required": ["virtual_time"]}},
             "clear": {"method": "POST", "endpoint": "/clock/clear", "request": {"type": "object", "properties": {**_WAIT_FOLLOWERS}}},
             "state": {"method": "GET", "endpoint": "/clock/state", "request": {"type": "object", "properties": {}}},
+            "declare_follower": {"method": "PUT", "endpoint": CLOCK_FOLLOWERS_PATH, "request": {"type": "object", "properties": {"name": {"type": "string"}, "read_token": {"type": "string"}}, "required": ["name", "read_token"]}},
             "watch": {"method": "GET", "endpoint": CLOCK_WATCH_PATH, "hold_s": CLOCK_WATCH_HOLD_S, "request": {"type": "object", "properties": {"after": {"type": "string"}, "follower": {"type": "string"}}}}}},
         "required": False,
     },
