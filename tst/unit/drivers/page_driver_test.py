@@ -36,6 +36,11 @@ from agentenv_protocol.website_browser.log import TOOL_CALL_HEADER
 
 DRIVER = Path(agent_env.__file__).parent / "drivers" / "envs" / "page" / "driver.py"
 PLAYWRIGHT_MCP = DRIVER.parent / "playwright_mcp.py"
+#: How long the gateway's session owners may take to end once a call gives up on them; a fixed short wait failed on
+#: a busy runner.
+OWNERS_END_WITHIN_S = 5.0
+#: How often the test looks for them meanwhile.
+OWNERS_POLL_S = 0.05
 #: Playwright MCP's tools, each looked at for whether it runs the agent's own code and so is hidden by default: an
 #: upgrade that adds a tool fails here until it's been looked at too.
 REVIEWED_TOOLS = {
@@ -117,10 +122,13 @@ def page(monkeypatch, tmp_path):
     driver = module.PageDriver()
     driver._browser = (tmp_path, CARD)
     driver.sent, driver.headers, driver.served = [], [], {"page/viewport": {"width": 1280, "height": 800}}
+    driver.list_queries = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         op = request.url.path.removeprefix("/agentenv/ext/browser/")
         driver.sent.append((op, json.loads(request.content) if request.content else None))
+        if op == "tabs/list":
+            driver.list_queries.append(request.url.query.decode())
         driver.headers.append(request.headers)
         answer = driver.served.get(op, {})
         return answer if isinstance(answer, httpx.Response) else httpx.Response(200, json=answer)
@@ -269,6 +277,26 @@ async def test_its_page_operations_call_the_browsers_and_a_tab_action_answers_wi
         ("tabs/open", {"url": "https://mail.test/"}), ("tabs/activate", {"tab": "A1"}), ("tabs/close", {"tab": "A1"}),
         ("dialog/answer", {"accept": False}), ("dialog/answer", {"accept": True, "text": "Grace"}),
         ("files/choose", {"paths": ["cv.pdf"]})]
+
+
+@pytest.mark.asyncio
+async def test_on_a_browser_that_leases_contexts_its_tabs_are_every_contexts_and_a_leases_is_acted_on_in_it(page):
+    leases = {**CARD["capabilities"]["extensions"][0]["params"]["methods"],
+              "contexts/lease": {"method": "POST", "endpoint": "/agentenv/ext/browser/contexts/lease"}}
+    page._browser = (page._browser[0], {"name": "chromium", "capabilities": {"extensions": [
+        {"uri": BROWSER, "params": {"methods": leases}}]}})
+    page.served["tabs/list"] = {"tabs": [
+        {"id": "A1", "url": "https://mail.test/", "title": "Inbox", "active": False, "context": None},
+        {"id": "B1", "url": "https://mail.test/", "title": "Bo's inbox", "active": True, "context": "bo"}]}
+
+    listed = await page.tab_action("switch", "B1", None)
+    await page.tab_action("close", "A1", None)
+
+    assert listed == [Tab("A1", "https://mail.test/", "Inbox", False, None),
+                      Tab("B1", "https://mail.test/", "Bo's inbox", True, "bo")]
+    assert [entry for entry in page.sent if entry[0] != "tabs/list"] == [
+        ("tabs/activate", {"tab": "B1", "context": "bo"}), ("tabs/close", {"tab": "A1"})]
+    assert page.list_queries and all(query == "every=true" for query in page.list_queries)
 
 
 @pytest.mark.asyncio
@@ -537,6 +565,15 @@ async def test_a_call_slower_than_its_bound_is_refused_and_its_session_opened_af
     assert first.close.is_set() and not after.isError
 
 
+async def _owners_left(within: float) -> list[asyncio.Task]:
+    """The gateway's session owners still running once they've had ``within`` seconds to end."""
+    deadline = asyncio.get_running_loop().time() + within
+    while (owners := [task for task in asyncio.all_tasks() if task.get_coro().__name__ == "_own"]) and (
+            asyncio.get_running_loop().time() < deadline):
+        await asyncio.sleep(OWNERS_POLL_S)
+    return owners
+
+
 @pytest.mark.asyncio
 async def test_a_call_is_bounded_from_when_it_asks_for_its_session_and_leaves_no_session_half_open(stand_in, monkeypatch):
     module, playwright, endpoints, called = stand_in
@@ -546,8 +583,7 @@ async def test_a_call_is_bounded_from_when_it_asks_for_its_session_and_leaves_no
             waited = await asyncio.wait_for(called("ada"), 10)
         endpoints.append("ws://127.0.0.1:18765/svc/chromium/cdp/wedged-once")
         opening = await asyncio.wait_for(called("bo"), 10)
-        await asyncio.sleep(0.1)
-        owners = [task for task in asyncio.all_tasks() if task.get_coro().__name__ == "_own"]
+        owners = await _owners_left(OWNERS_END_WITHIN_S)
     finally:
         await playwright._stop()
 

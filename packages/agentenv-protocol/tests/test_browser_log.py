@@ -178,6 +178,19 @@ def test_an_action_still_going_after_the_limit_is_written_unfinished_and_its_out
     assert [line["seq"] for line in log.read()["lines"]] == [1, 2, 3]
 
 
+def test_a_read_settling_through_an_entry_writes_the_actions_still_going_up_to_it_unfinished_now(tmp_path):
+    log = BrowserLog(tmp_path / "browser-chromium.jsonl")
+    early = log.begin({"via": "mcp", "tool": "browser_navigate", "acts": True, "tab": "T1"})
+    late = log.begin({"via": "cdp", "method": "Runtime.evaluate", "acts": True, "tab": "T1"})
+
+    read = log.read(settle_through=early["seq"])
+
+    assert [(line["seq"], line["action"]["unfinished"]) for line in read["lines"]] == [(early["seq"], True)]
+    assert read["last"] == early["seq"] and log.read(after=early["seq"])["lines"] == []
+    log.finish(late, ok=True)
+    assert [line["seq"] for line in log.read(after=early["seq"])["lines"]] == [late["seq"]]
+
+
 def test_a_restarted_server_carries_on_the_sequence_on_a_new_line_after_a_partial_one(tmp_path):
     path = tmp_path / "browser-chromium.jsonl"
     path.write_text('{"seq": 1, "at": "t", "reset": {}}\n{"seq": 2, "at": "t", "tab": {}}\n{"seq": 3, "at"')
@@ -266,6 +279,21 @@ async def test_a_move_within_a_document_is_the_commands_that_asked_for_it_and_us
     failed.cancel()
     await asyncio.sleep(0)
     assert await causes.navigated_within("T1") is None
+
+
+@pytest.mark.asyncio
+async def test_a_reload_asked_for_once_a_move_within_a_document_answered_is_left_for_the_navigation_it_makes():
+    causes = browser_log.Causes()
+    moved, reload = {"seq": 3, "via": "agentenv"}, {"seq": 3, "via": "agentenv", "reload": True}
+    answer = asyncio.get_running_loop().create_future()
+    causes.navigating("T1", answer, moved)
+    within = asyncio.ensure_future(causes.navigated_within("T1"))
+    await asyncio.sleep(0)
+    answer.set_result(None)
+    causes.navigates_next("T1", reload)
+
+    assert await within == moved
+    assert await causes.navigated("T1", "L-reload") == reload
 
 
 @pytest.mark.asyncio

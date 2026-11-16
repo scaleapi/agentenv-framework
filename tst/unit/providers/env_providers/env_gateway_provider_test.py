@@ -2591,9 +2591,9 @@ def test_a_one_image_site_runs_alone_on_its_port_up_once_it_answers_and_its_rout
     assert {"mail-website-backend", "shop-website-backend", "shop-website-frontend"} <= set(services)
     assert "mail-website-frontend" not in services
     assert services["mail-website-backend"]["healthcheck"]["test"] == [
-        "CMD-SHELL", "curl -sf -o /dev/null http://localhost:8000/.well-known/agent-env.json"
-                     " || curl -sf -o /dev/null http://localhost:8000/healthz"]
-    assert services["shop-website-backend"]["healthcheck"]["test"][1].endswith("http://localhost:8000/api/health")
+        "CMD-SHELL", env_gateway_provider._http_probe(8000, "/.well-known/agent-env.json", "/healthz")]
+    assert services["shop-website-backend"]["healthcheck"]["test"] == [
+        "CMD-SHELL", env_gateway_provider._http_probe(8000, "/.well-known/agent-env.json", "/api/health")]
     gateway = dict(item.split("=", 1) for item in services[GATEWAY_SERVICE_NAME]["environment"])
     assert gateway["WEBSITE_URLS"] == "mail=http://mail-website-backend:8000,shop=http://shop-website-frontend:80"
     assert gateway["REST_PROXY_URLS"] == "mail=http://mail-website-backend:8000,shop=http://shop-website-backend:8000"
@@ -2646,14 +2646,15 @@ _READY_CARD = {"name": "mail", "capabilities": {"extensions": [{"uri": "urn:agen
 
 
 @pytest.mark.asyncio
-async def test_a_deploy_waits_for_a_site_until_its_cards_ready_says_so_and_never_reads_its_health_path():
-    asked = []
+async def test_a_deploy_waits_for_a_site_until_its_cards_ready_says_so_with_its_token_and_never_reads_its_health_path():
+    asked, sent = [], []
 
     def site(request: httpx.Request) -> httpx.Response:
         asked.append(request.url.path)
         if request.url.path == "/svc/mail/.well-known/agent-env.json":
             return httpx.Response(200, json=_READY_CARD)
         if request.url.path == "/svc/mail/agentenv/ext/website/ready":
+            sent.append(request.headers.get("authorization"))
             ready = asked.count(request.url.path) >= 2
             return httpx.Response(200, json={"ready": ready, "problems": [] if ready else ["seeded"]})
         return httpx.Response(500)
@@ -2661,8 +2662,9 @@ async def test_a_deploy_waits_for_a_site_until_its_cards_ready_says_so_and_never
     with _sites(site):
         await env_gateway_provider._wait_for_websites(
             "http://gw", [WebsiteConfig(backend_image="m", frontend_image=None, environment_name="mail",
-                                        health_path="/healthz")], poll_s=0)
+                                        health_path="/healthz")], headers={"Authorization": "Bearer s3cret"}, poll_s=0)
     assert asked.count("/svc/mail/agentenv/ext/website/ready") == 2 and "/svc/mail/healthz" not in asked
+    assert sent == ["Bearer s3cret"] * 2
 
 
 @pytest.mark.asyncio
@@ -2685,7 +2687,9 @@ async def test_a_site_with_no_ready_on_its_card_is_waited_for_at_its_health_path
 
 
 @pytest.mark.asyncio
-async def test_a_site_that_never_says_it_is_ready_fails_the_deploy_naming_why():
+async def test_a_site_that_never_says_it_is_ready_fails_the_deploy_naming_why(monkeypatch):
+    monkeypatch.setattr(env_gateway_provider, "WEBSITE_READY_MARGIN_S", 0)
+
     def site(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/.well-known/agent-env.json"):
             return httpx.Response(200, json=_READY_CARD)
@@ -2698,7 +2702,9 @@ async def test_a_site_that_never_says_it_is_ready_fails_the_deploy_naming_why():
 
 
 @pytest.mark.asyncio
-async def test_a_site_whose_ready_answers_no_website_readiness_is_never_ready_and_the_deploy_says_so():
+async def test_a_site_whose_ready_answers_no_website_readiness_is_never_ready_and_the_deploy_says_so(monkeypatch):
+    monkeypatch.setattr(env_gateway_provider, "WEBSITE_READY_MARGIN_S", 0)
+
     def site(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/.well-known/agent-env.json"):
             return httpx.Response(200, json=_READY_CARD)
@@ -2878,6 +2884,23 @@ def test_compose_fronts_each_external_child_as_an_mcp_server_and_a_rest_route_by
     assert "CLOCK_FOLLOWER_TOKENS" not in env
 
 
+def test_compose_names_the_children_the_gateway_passes_its_token_on_to_only_when_it_has_one():
+    from agent_env.env.envs.service_db import ServiceDBConfig
+    from agent_env.env.gateway import ExternalChild
+
+    def gateway_env(control_token):
+        rendered = EnvironmentGatewayProvider().create_docker_compose(
+            mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")], gateway_image="agent-gateway",
+            state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
+            state_instance=LocalPostgresStateProvider.default_instance(), control_token=control_token,
+            external_children=(ExternalChild("desktop", "https://desk.example/mcp", "https://desk.example"),
+                               ExternalChild("laptop", "https://lap.example/mcp", "https://lap.example")))
+        return dict(line.split("=", 1) for line in yaml.safe_load(rendered)["services"][GATEWAY_SERVICE_NAME]["environment"])
+
+    assert gateway_env("gw-token")["CONTROL_TOKEN_CHILDREN"] == "desktop,laptop"
+    assert "CONTROL_TOKEN_CHILDREN" not in gateway_env(None)
+
+
 def test_compose_declares_the_children_that_follow_the_clock_by_their_read_tokens_and_logs_none_of_them():
     from agent_env.env.envs.service_db import ServiceDBConfig
     from agent_env.env.gateway import ExternalChild
@@ -2928,8 +2951,8 @@ async def test_a_vm_deploy_starts_its_children_beside_its_services_and_the_gatew
     sandbox.url_from_sandbox = MagicMock(side_effect=lambda url: url.replace("localhost", "host.docker.internal"))
     order, composes = [], []
 
-    async def children(reach):
-        order.append(("children", reach))
+    async def children(reach, control_token):
+        order.append(("children", reach, control_token))
         return [ExternalChild("desktop", "http://localhost:20001/mcp", "http://localhost:20001", "read-desk")]
 
     def compose(**kwargs):
@@ -2953,9 +2976,9 @@ async def test_a_vm_deploy_starts_its_children_beside_its_services_and_the_gatew
             sandbox_provider=MagicMock(create_vm=AsyncMock(return_value=sandbox)),
             mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")], mcp_server_images=[_loadable("mcp-slack")],
             gateway_port=18765, website_configs=None, website_images=None, gateway_mode=GatewayMode.PERFORMANCE, ttl_seconds=60,
-            disk_size_gb=10, children=children)
+            disk_size_gb=10, children=children, control_token="gw-token")
 
-    assert sorted(order[:2]) == [("children", "https://gw.example"), ("up", f"--scale {GATEWAY_SERVICE_NAME}=0")]
+    assert sorted(order[:2]) == [("children", "https://gw.example", "gw-token"), ("up", f"--scale {GATEWAY_SERVICE_NAME}=0")]
     assert order[2:] == [("up", "")]
     assert composes == [(), (ExternalChild("desktop", "http://host.docker.internal:20001/mcp", "http://host.docker.internal:20001",
                                            "read-desk"),)]
@@ -2974,7 +2997,7 @@ async def test_a_vm_deploy_whose_children_or_services_fail_raises_once_both_have
     gp._state_instance = MagicMock()
     ended = []
 
-    async def children(reach):
+    async def children(reach, control_token):
         await asyncio.sleep(0.05)
         ended.append("children")
         if failing == "children":
@@ -3018,8 +3041,8 @@ async def test_container_mode_starts_children_beside_its_servers_and_hands_the_g
             return _FakeSandbox(f"db-{port}", port, f"tcp://db.modal.host:{port}")
         return _FakeSandbox(f"sb-{kwargs['image_name']}-{port}", port, f"https://{kwargs['image_name']}.modal.host")
 
-    async def children(reach):
-        reaches.append(reach)
+    async def children(reach, control_token):
+        reaches.append((reach, control_token))
         return [ExternalChild("desktop", "https://desk.example/mcp", "https://desk.example", "read-desk")]
 
     gateway_env = MagicMock(docker_image_artifact=_image("agent-gateway"))
@@ -3034,10 +3057,55 @@ async def test_container_mode_starts_children_beside_its_servers_and_hands_the_g
         await gp._deploy_via_containers(
             sandbox_provider=provider, mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")],
             mcp_server_images=[_image("mcp-slack")], gateway_port=18765, website_configs=None,
-            gateway_mode=GatewayMode.PERFORMANCE, ttl_seconds=60, disk_size_gb=10, children=children)
+            gateway_mode=GatewayMode.PERFORMANCE, ttl_seconds=60, disk_size_gb=10, children=children,
+            control_token="gw-token")
 
     env = create_calls[-1]["env"]
-    assert reaches == [None]
+    assert reaches == [(None, "gw-token")]
     assert env["INTERNAL_MCP_SERVERS"].split(",")[-1] == "desktop=https://desk.example/mcp"
     assert env["REST_PROXY_URLS"].split(",")[-1] == "desktop=https://desk.example"
     assert env["CLOCK_FOLLOWER_TOKENS"] == "desktop=read-desk"
+    assert env["CONTROL_TOKEN_CHILDREN"] == "desktop"
+
+
+def _run_probe(tmp_path, statuses: dict[str, int]) -> int:
+    """Run the site health probe the way compose does, in a shell that has python3 but no curl, wget or node, against
+    a server that answers each path with its status in ``statuses`` and every other path with 404."""
+    import http.server
+    import os
+    import shutil
+    import subprocess
+    import sys
+    import threading
+
+    from pytest_socket import enable_socket
+
+    enable_socket()
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(statuses.get(self.path, 404))
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("localhost", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "python3").symlink_to(sys.executable)
+    try:
+        probe = env_gateway_provider._http_probe(server.server_port, "/.well-known/agent-env.json", "/api/health")
+        return subprocess.run([shutil.which("sh"), "-c", probe.replace("$$", "$")], timeout=30,
+                              env={**os.environ, "PATH": str(bin_dir)}).returncode
+    finally:
+        server.shutdown()
+
+
+def test_a_site_image_without_curl_passes_its_health_probe_once_its_health_path_answers(tmp_path):
+    assert _run_probe(tmp_path, {"/api/health": 200}) == 0
+
+
+def test_a_site_answering_only_errors_fails_its_health_probe(tmp_path):
+    assert _run_probe(tmp_path, {"/.well-known/agent-env.json": 500, "/api/health": 503}) != 0

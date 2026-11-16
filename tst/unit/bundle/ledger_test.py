@@ -307,6 +307,21 @@ def test_a_task_written_before_it_recorded_its_renamed_ids_is_written_again_with
     assert all(check.unchanged for check in _run(bundle_dir).values())
 
 
+def test_a_task_written_before_its_context_paths_named_the_bundle_s_ids_is_written_again(bundle_dir, monkeypatch):
+    judge = {"id": "judge", "type": "rubrics_verifier", "criteria": [{"id": "c", "description": "d"}],
+             "prompt_id": "p1", "context_facts_for_judge": {"wf-1": "env_trigger_state.tickets.statuses.wf-1"}}
+    (bundle_dir / "tasks" / "t.json").write_text(_steps(judge))
+    with monkeypatch.context() as earlier:
+        earlier.setattr(resolve_module, "sync_context_paths", lambda *args: None)
+        _run(bundle_dir)
+
+    checks = _run(bundle_dir)
+
+    assert checks[f"{ROOT}/t"].reasons == ("config changed",)
+    assert [id for id, check in checks.items() if not check.unchanged] == [f"{ROOT}/t"]
+    assert all(check.unchanged for check in _run(bundle_dir).values())
+
+
 def test_a_new_digest_scheme_rewrites_everything_and_says_only_that(bundle_dir, monkeypatch):
     _run(bundle_dir)
     monkeypatch.setattr("agent_env.bundle.ledger.SCHEME", ledger_module.SCHEME + 1)

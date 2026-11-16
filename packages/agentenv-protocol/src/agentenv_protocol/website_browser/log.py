@@ -74,7 +74,7 @@ ACTING_METHODS: dict[str, tuple[str, ...]] = {
 #: The ``browser/v1`` ops that act; any other reads.
 ACTING_OPS = frozenset({"page/input", "navigate", "history", "tabs/open", "tabs/activate", "tabs/close",
                         "dialog/answer", "files/choose", "cookies/set", "cookies/delete", "local_storage/set",
-                        "local_storage/clear", "sites/set"})
+                        "local_storage/clear", "sites/set", "contexts/lease", "contexts/grant", "contexts/release"})
 #: The ``browser/v1`` ops an agent's calls are never logged for: the logs themselves, and agentenv's own bookkeeping,
 #: a driver's calls that begin and end a tool call's own entry among them.
 UNLOGGED_OPS = frozenset({"log", "network", "record", "calls/begin", "calls/end"})
@@ -400,24 +400,27 @@ class BrowserLog:
         self.write(seq, {kind: body})
         return seq
 
-    def read(self, after: int = 0, limit: int = READ_LIMIT) -> dict:
+    def read(self, after: int = 0, limit: int = READ_LIMIT, settle_through: Optional[int] = None) -> dict:
         """The lines after sequence number ``after``, in order, up to ``limit`` of them and to the last whose every
         earlier line is written or stalled: ``lines``, ``last``, the sequence number of that last one, and ``more``
-        when the limit left some."""
-        complete, picked, more = self._picked(after, limit)
+        when the limit left some. An action begun at or before ``settle_through`` and still going counts as stalled
+        now, as a recording that ends while an action is in flight needs."""
+        complete, picked, more = self._picked(after, limit, settle_through)
         return self._loaded(after, complete, picked, more)
 
-    async def read_async(self, after: int = 0, limit: int = READ_LIMIT) -> dict:
+    async def read_async(self, after: int = 0, limit: int = READ_LIMIT, settle_through: Optional[int] = None) -> dict:
         """``read``, its file read in a thread."""
-        complete, picked, more = self._picked(after, limit)
+        complete, picked, more = self._picked(after, limit, settle_through)
         return await asyncio.to_thread(self._loaded, after, complete, picked, more)
 
-    def _picked(self, after: int, limit: int) -> tuple[int, list[tuple[int, int, int]], bool]:
+    def _picked(self, after: int, limit: int, settle_through: Optional[int] = None
+                ) -> tuple[int, list[tuple[int, int, int]], bool]:
         """Where the lines a read returns are: the last sequence number it may return, and each line's number, offset
         and length, in order."""
         now = time.monotonic()
         for seq, began in list(self._pending.items()):
-            if now - began >= STALLED_S and (begun := self._begun.get(seq)) is not None:
+            settled = settle_through is not None and seq <= settle_through
+            if (settled or now - began >= STALLED_S) and (begun := self._begun.get(seq)) is not None:
                 self._stood_in.add(seq)
                 self.write(seq, {"action": {**begun["action"], "unfinished": True}}, at=begun["at"])
         complete = min(self._pending) - 1 if self._pending else self._seq
@@ -560,12 +563,13 @@ class Causes:
 
     async def navigated_within(self, target: str) -> Optional[dict]:
         """What moved ``target`` within its document, once its navigations in flight have answered: a navigation
-        answered with no loader, else a reload or move in history, which it uses up."""
+        answered with no loader, else a reload or move in history, which it uses up; one asked for after that
+        navigation, as a start tab's reload is, is left for the navigation it makes."""
         if target not in self._same_document and self._navigating.get(target):
             await asyncio.wait(set(self._navigating[target]), timeout=CAUSE_WAIT_S)
-        pending = self._next.pop(target, None)
         if (cause := self._same_document.pop(target, None)) is not None:
             return cause
+        pending = self._next.pop(target, None)
         if pending is not None and pending[1] >= asyncio.get_running_loop().time():
             return pending[0]
         return None

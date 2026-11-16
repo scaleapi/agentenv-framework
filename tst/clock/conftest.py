@@ -1,4 +1,4 @@
-"""The clock tier: agent-env's libfaketime (src/agent_env/computers/clock) built in an Ubuntu 24.04 image with stock
+"""The clock tier: agent-env's libfaketime (src/agent_env/computers/artifacts/ubuntu-24.04/clock) built in an Ubuntu 24.04 image with stock
 0.9.12 beside it and the gate programs, each gate run in a container of that image by harness.py. Needs Docker; the
 image is for the Docker daemon's own arch, and Chrome is the browsers bundle's pinned build for it. Chrome's archive,
 upstream libfaketime's tarball and OpenSSL 1.1.1w's are fetched once into AGENTENV_TEST_CLOCK_CACHE
@@ -18,7 +18,7 @@ import pytest
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
-RECIPE = REPO / "src" / "agent_env" / "computers" / "clock"
+RECIPE = REPO / "src" / "agent_env" / "computers" / "artifacts" / "ubuntu-24.04" / "clock"
 CHROMIUM_APP = REPO / "src" / "agent_env" / "browsers" / "envs" / "chromium" / "chromium.py"
 IMAGE = "agentenv-clock-gates:test"
 #: Tries at the downloads and the image build (its apt-get), which fail now and then on a network's hiccup.

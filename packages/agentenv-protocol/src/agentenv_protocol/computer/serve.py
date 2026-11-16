@@ -1,11 +1,13 @@
 """Serve a computer driver from its file, as a composed computer's program starts it:
 ``python -m agentenv_protocol.computer.serve <file>:<Class>``, run in the driver's folder, serves the class on
-``MCP_PORT``. The file's folder is importable, so it may import its own modules."""
+``MCP_PORT``. The file's folder is importable, so it may import its own modules. The driver runs on real time, so its
+own transfers reach the object store directly, not through the computer's egress proxy (``transfers.direct``)."""
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
+from .. import transfers
 from ._load import load_class
 from .driver import ComputerDriverEnvironment
 
@@ -16,6 +18,7 @@ def main(argv: list[str]) -> None:
     if len(argv) != 1 or ":" not in argv[0]:
         raise SystemExit(USAGE)
     file, _, name = argv[0].partition(":")
+    transfers.direct()
     driver_class(Path(file), name)().serve()
 
 

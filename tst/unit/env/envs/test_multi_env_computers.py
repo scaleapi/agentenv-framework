@@ -38,12 +38,20 @@ from agent_env.task_step.task_steps.browser.base import stored_browsers
 from tst.util.sandbox_providers import mock_provider
 
 GATEWAY = "https://gw.example"
+#: The gateway's control token, which it hands the computers it fronts.
+GATEWAY_TOKEN = "the-gateways"
 
 
-def _record(name: str) -> DeployedSandboxEnv:
+#: A computer's card whose driver serves clock/v1's sync_time: it follows the gateway's clock.
+CLOCK_CARD = {"capabilities": {"extensions": [
+    {"uri": "urn:agentenv:clock/v1", "params": {"methods": {"sync_time": {"method": "POST", "endpoint": "/clock/sync"}}}}]}}
+
+
+def _record(name: str, *, clock: bool = False) -> DeployedSandboxEnv:
     return DeployedSandboxEnv(env_id=f"{name}-computer", env_version=1, env_provider_type="computer", sandbox_id=f"sb-{name}",
                               sandbox_type="modal_vm", environment_card_url=f"https://{name}.example{WELL_KNOWN_PATH}",
-                              mcp_url=f"https://{name}.example/mcp", control_token=f"token-{name}")
+                              mcp_url=f"https://{name}.example/mcp", control_token=f"token-{name}",
+                              environment_card={"name": name, **CLOCK_CARD} if clock else None)
 
 
 class FakeComputer:
@@ -53,11 +61,12 @@ class FakeComputer:
 
     def __init__(self, name: str, *, fails: Exception | None = None, refusal: str | None = None, log: list | None = None,
                  apps: tuple[str, ...] = (), resets: Exception | None = None, routes: Exception | None = None,
-                 loads: Exception | None = None):
+                 loads: Exception | None = None, clock: bool = False):
         self.id, self.version, self.environment_name = f"{name}-computer", 1, name
         self.fails, self.refusal, self.log = fails, refusal, [] if log is None else log
         self.deploys, self.refusals, self._deployed, self.closes = [], [], None, 0
         self.apps, self.reset_fails, self.route_fails, self.load_fails = apps, resets, routes, loads
+        self.clock = clock
 
     def composed_apps(self):
         return [SimpleNamespace(environment_name=app, declaration=SimpleNamespace(browser=False)) for app in self.apps]
@@ -85,6 +94,10 @@ class FakeComputer:
         if self.route_fails:
             raise self.route_fails
 
+    async def follow_clock(self, gateway_url):
+        inspect.signature(ComputerEnv.follow_clock).bind(self, gateway_url)
+        self.log.append(("follows", self.environment_name, gateway_url))
+
     async def reset(self, deployed):
         inspect.signature(ComputerEnv.reset).bind(self, deployed)
         await asyncio.sleep(0.01)
@@ -103,7 +116,7 @@ class FakeComputer:
         await asyncio.sleep(0.01)
         if self.fails:
             raise self.fails
-        self._deployed = _record(self.environment_name)
+        self._deployed = _record(self.environment_name, clock=self.clock)
         self.log.append(("deployed", self.environment_name))
         return self._deployed
 
@@ -275,7 +288,7 @@ def gateway(monkeypatch, local_stores):
     async def deploy(self, env, sandbox_provider, *, children=None, **options):
         made.options.append({**options, "children": children})
         for _ in range(made.tries):
-            made.started.append(await children(GATEWAY) if children else None)
+            made.started.append(await children(GATEWAY, GATEWAY_TOKEN) if children else None)
         if made.fails:
             raise made.fails
         return DeployedGatewayEnv(env_id=env.id, env_version=env.version, gateway_url=GATEWAY, sandbox_id="gw",
@@ -291,7 +304,8 @@ def gateway(monkeypatch, local_stores):
 
 
 @pytest.mark.asyncio
-async def test_deploy_hands_the_gateway_each_computer_deployed_under_its_name_and_records_it(gateway, providers):
+async def test_deploy_hands_the_gateway_each_computer_deployed_under_its_name_with_its_token_and_records_it(gateway,
+                                                                                                          providers):
     desktop, laptop = FakeComputer("desktop"), FakeComputer("laptop")
     attribution = {"project_id": "6a6d2e30b2710a6cf93a6430"}
 
@@ -300,9 +314,10 @@ async def test_deploy_hands_the_gateway_each_computer_deployed_under_its_name_an
         child_envs={"desktop": {"sandbox_type": "modal", "cpu": 4, "env_params": {"form": "container"}}})
 
     assert desktop.deploys == [{"ttl_seconds": 600, "attribution": attribution, "tool_prefix": "desktop_", "reach": GATEWAY,
-                                "sites_later": False, "sandbox_type": "modal", "cpu": 4, "env_params": {"form": "container"}}]
+                                "sites_later": False, "control_token": GATEWAY_TOKEN, "sandbox_type": "modal", "cpu": 4,
+                                "env_params": {"form": "container"}}]
     assert laptop.deploys == [{"ttl_seconds": 600, "attribution": attribution, "tool_prefix": "laptop_", "reach": GATEWAY,
-                               "sites_later": False, "sandbox_type": "modal_vm"}]
+                               "sites_later": False, "control_token": GATEWAY_TOKEN, "sandbox_type": "modal_vm"}]
     assert gateway.started == [[ExternalChild("desktop", "https://desktop.example/mcp", "https://desktop.example"),
                                 ExternalChild("laptop", "https://laptop.example/mcp", "https://laptop.example")]]
     assert deployed.child_envs == {name: dataclasses.asdict(_record(name)) for name in ("desktop", "laptop")}
@@ -315,9 +330,19 @@ async def test_deploy_hands_the_gateway_each_computer_deployed_under_its_name_an
 def test_a_computer_whose_card_follows_a_clock_hands_the_gateway_its_control_token_as_its_read_token():
     from agent_env.env.envs._multi_computers import _clock_read_token
 
-    following = dataclasses.replace(_record("desktop"), environment_card={"name": "desktop", "capabilities": {"extensions": [
-        {"uri": "urn:agentenv:clock/v1", "params": {"methods": {"sync_time": {"method": "POST", "endpoint": "/clock/sync"}}}}]}})
-    assert (_clock_read_token(following), _clock_read_token(_record("laptop"))) == ("token-desktop", None)
+    assert (_clock_read_token(_record("desktop", clock=True)), _clock_read_token(_record("laptop"))) == (
+        "token-desktop", None)
+
+
+@pytest.mark.asyncio
+async def test_once_the_gateway_is_up_each_computer_whose_card_follows_the_clock_follows_the_gateways(gateway, providers):
+    log = gateway.log
+    desktop, laptop = FakeComputer("desktop", log=log, clock=True), FakeComputer("laptop", log=log)
+
+    deployed = await _multi(desktop, laptop).deploy()
+
+    assert [entry for entry in log if entry[0] == "follows"] == [("follows", "desktop", GATEWAY)]
+    assert set(deployed.child_envs) == {"desktop", "laptop"}
 
 
 @pytest.mark.asyncio
@@ -906,7 +931,7 @@ async def test_a_browser_computer_deploys_as_a_computer_child_routing_the_sites_
         sandbox_type="modal_vm", child_envs={"chromium": {"sandbox_type": "modal", "cpu": 2, "memory_mb": 4096}})
 
     assert chromium.deploys == [{"ttl_seconds": 10800, "attribution": None, "tool_prefix": "chromium_",
-                                 "reach": GATEWAY, "sites_later": True,
+                                 "reach": GATEWAY, "sites_later": True, "control_token": GATEWAY_TOKEN,
                                  "live_hosts": ("github.test", "api.github.test"),
                                  "sandbox_type": "modal", "cpu": 2, "memory_mb": 4096,
                                  "env_params": {"site_routing": True}}]

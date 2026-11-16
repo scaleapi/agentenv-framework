@@ -32,6 +32,7 @@ const STEP_COLORS: Record<string, string> = {
   register_env_triggers: '#0d9488',
   register_agent_triggers: '#c026d3',
   sync_env_clock: '#0891b2',
+  set_env_clock_rate: '#0891b2',
 };
 
 const DEFAULT_COLOR = '#6b7280';

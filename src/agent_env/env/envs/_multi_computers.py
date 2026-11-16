@@ -13,10 +13,9 @@ from urllib.parse import urlsplit
 
 from agentenv_protocol.computer import tool_prefix_problem
 
-from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, Env
-from agent_env.env.envs.computer.utils import sites
+from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, Env, gateway_url_of
+from agent_env.env.envs.computer.utils import clock as computer_clock, sites
 from agent_env.env.gateway import ExternalChild
-from agent_env.env.gateway.constants import EXT_CLOCK_URI
 from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider, get_env_sandbox_provider
 
 if TYPE_CHECKING:
@@ -97,7 +96,7 @@ def routes_later(entry: Optional[dict]) -> bool:
 def _clock_read_token(record: DeployedEnv) -> str | None:
     """The read token a computer's clock watch carries when its card says it's a clock follower (``clock/v1``'s
     ``sync_time``): for now its control token, which a token of its own can replace without the gateway knowing."""
-    return record.control_token if record.supports(EXT_CLOCK_URI, "sync_time") else None
+    return record.control_token if computer_clock.follows(record) else None
 
 
 def refusal(computer: ComputerEnv, entry: dict, sandbox_type: str | None, websites: Mapping[str, str]) -> str | None:
@@ -191,9 +190,10 @@ class Computers:
 
     def deployer(self, child_envs: Optional[dict], *, sandbox_type: str | None, ttl_seconds: int,
                  attribution: Optional[Attribution], websites: Mapping[str, str], live_hosts: Iterable[str] = ()
-                 ) -> Callable[[Optional[str]], Awaitable[list[ExternalChild]]]:
+                 ) -> Callable[[Optional[str], Optional[str]], Awaitable[list[ExternalChild]]]:
         """The gateway's ``children``: every computer deployed as its child_envs entry says, its tools served under its
-        name and ``_``, and its network allowing ``reach``, the gateway's address when the gateway has one yet, and the
+        name and ``_``, its framework-only routes taking ``control_token``, the gateway's, which the gateway passes on to
+        them, and its network allowing ``reach``, the gateway's address when the gateway has one yet, and the
         ``live_hosts`` of the multi env's live websites; then each as the gateway fronts it. A computer routing the multi env's ``websites`` (their environment names by env id)
         boots with its boot apps held, for ``finish`` to route them once the gateway is up. A gateway deploy tried again
         deploys them again, after closing the earlier try's."""
@@ -205,14 +205,14 @@ class Computers:
                 routing = entry["env_params"]["site_routing"]
                 self._routes[name] = None if routing is True else [websites[env_id] for env_id in routing]
 
-        async def deploy(reach: Optional[str]) -> list[ExternalChild]:
+        async def deploy(reach: Optional[str], control_token: Optional[str]) -> list[ExternalChild]:
             nonlocal tries
             if tries:
                 await self.close()
             tries += 1
             results = await asyncio.gather(*(env.deploy(
                 ttl_seconds=ttl_seconds, attribution=attribution, tool_prefix=f"{env.environment_name}_",
-                reach=reach or "", sites_later=env.environment_name in self._routes,
+                reach=reach or "", sites_later=env.environment_name in self._routes, control_token=control_token,
                 **({"live_hosts": live} if live else {}),
                 **deploy_options((child_envs or {}).get(env.environment_name), sandbox_type))
                 for env in self.every), return_exceptions=True)
@@ -228,7 +228,8 @@ class Computers:
         """Once the gateway is up, before ``deployed``, the multi env's record, is registered: each computer that routes
         the multi env's websites, those its ``site_routing`` names or all, has its start tabs checked against their
         names as the cards declare them and the live hosts (``start_tab_problems``), then routes them once they're
-        ready and launches its held apps; then each computer's own record is kept in ``deployed`` (``record``)."""
+        ready and launches its held apps; each computer whose card says it follows the clock has its follower follow
+        the gateway's; then each computer's own record is kept in ``deployed`` (``record``)."""
         if self._routes:
             # Selected by the name each website is served as, its environment_name, which its card's name needn't be.
             routed = {name: await sites.deployed_sites([deployed], services=only) for name, only in self._routes.items()}
@@ -243,6 +244,10 @@ class Computers:
             await each(self._owner, "route its sites", [(f"computer {env.environment_name!r}",
                                                       env.route_sites(routed[env.environment_name]))
                                                      for env in self.every if env.environment_name in routed])
+        if (gateway := gateway_url_of(deployed)) and (following := [
+                env for env in self.every if env._deployed is not None and computer_clock.follows(env._deployed)]):
+            await each(self._owner, "follow the gateway's clock", [(f"computer {env.environment_name!r}",
+                                                                    env.follow_clock(gateway)) for env in following])
         self.record(deployed)
 
     def record(self, deployed: DeployedEnv) -> None:

@@ -114,8 +114,7 @@ def _deploy_step_of(deployed_env: DeployedEnv) -> Optional[str]:
 def bound_deployment(
     context: TaskStepContext, env_id: str, *, env_step_id: Optional[str], step_id: str,
 ) -> Optional[DeployedEnv]:
-    """The deployment of `env_id` that the agent deployed by step `step_id` is bound to, by `env_step_id`, or None if
-    it isn't deployed here."""
+    """The deployment of `env_id` that step `step_id` acts on, by `env_step_id`, or None if it isn't deployed here."""
     matches = [d for d in context.deployed_envs if d.env_id == env_id]
     if env_step_id is not None:
         # A filter, not a hint: an unmatched id is an error, never a substitute.
@@ -123,15 +122,15 @@ def bound_deployment(
         named = [d for d in matches if _deploy_step_of(d) == env_step_id]
         if matches and not named:
             raise RuntimeError(
-                f"deploy_agent '{step_id}': env_step_id '{env_step_id}' names no deployment of "
+                f"step '{step_id}': env_step_id '{env_step_id}' names no deployment of "
                 f"env '{env_id}' (deployed by: {[_deploy_step_of(d) for d in matches]})"
             )
         matches = named
     if len(matches) > 1:
         raise RuntimeError(
-            f"deploy_agent '{step_id}': {len(matches)} deployments of env '{env_id}' "
+            f"step '{step_id}': {len(matches)} deployments of env '{env_id}' "
             f"(deployed by: {[_deploy_step_of(d) for d in matches]}). Set env_step_id "
-            "to the deploy_env step this agent should bind to."
+            "to the deploy_env step this step should act on."
         )
     return matches[0] if matches else None
 

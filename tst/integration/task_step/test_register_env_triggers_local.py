@@ -163,9 +163,11 @@ async def test_a_reply_waits_its_delay_and_hours_and_its_writes_name_the_fire(it
 
     paced = [e for e in state["events"] if e["kind"] in ("delayed", "deferred", "action_ok")]
     assert [e["kind"] for e in paced] == ["delayed", "deferred", "action_ok"]
-    delayed, deferred, _ = paced
+    _, deferred, _ = paced
     assert deferred["until"] == "2026-10-14T09:00:00Z"
-    assert (_virtual(deferred) - _virtual(delayed)).total_seconds() >= 120
+    detected = next(e for e in state["events"] if e["kind"] == "detected" and e["trigger_id"] == "bob-hears-solver")
+    # The delay runs from the provoking call, read as it's detected, whose stamp can trail that reading a little at 60x.
+    assert (_virtual(deferred) - _virtual(detected)).total_seconds() >= 119
     calls = [e for e in trajectory if e.get("event_type") == "tool_call"]
     cause = [{"trigger_id": "bob-hears-solver", "action_index": 0, "fire": 1}]
     assert ("list_items", "default", None) in [(e["tool_call"]["function_name"], e["role"], e.get("caused_by"))

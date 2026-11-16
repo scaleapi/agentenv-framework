@@ -24,6 +24,10 @@ from agent_env.env.published_images import (
     published_digest,
     published_disk,
     release_digests,
+    released_computers,
+    released_image,
+    released_index,
+    released_lock,
     write_release_digests,
 )
 from agent_env.store.image_store.registry_api import NoSuchImageError
@@ -198,3 +202,51 @@ def test_a_disk_forms_tag_is_of_its_boot_recipe_its_bases_sources_and_the_disk_t
     assert published_disk(sources) is None
     served[disk.ref()] = _DIGEST
     assert published_disk(sources) == f"{disk.ref()}@{_DIGEST}" and published_disk("sha256:" + "0" * 64) is None
+
+
+def _computer(arch: str, digest: str) -> dict:
+    return {"key": "sha256:" + digest[-1] * 64, "image": f"{REGISTRY}/agentenv-chromium@{digest}",
+            "lock": {"inputs": "sha256:" + digest[-1] * 63 + "f", "arch": arch, "apt": [], "wheels": {}, "downloads": {}}}
+
+
+def test_the_record_of_released_computers_finds_each_lock_image_and_index_and_an_install_without_one_finds_none(
+        tmp_path):
+    arches = {"amd64": _computer("amd64", "sha256:" + "1" * 64), "arm64": _computer("arm64", "sha256:" + "2" * 64)}
+    index = f"{REGISTRY}/agentenv-chromium:index-{'a' * 64}@sha256:{'b' * 64}"
+    path = tmp_path / "published_images.json"
+    write_release_digests({}, path, [{"env": "@local/agentenv-framework/browsers/chromium", "form": "container",
+                                      "index": index, "arches": arches}])
+
+    assert released_lock(arches["arm64"]["lock"]["inputs"], path) == arches["arm64"]["lock"]
+    assert released_image(arches["amd64"]["key"], path) == arches["amd64"]["image"]
+    assert released_index({arch: built["image"] for arch, built in arches.items()}, path) == index
+    assert released_index({"amd64": arches["amd64"]["image"]}, path) is None
+    assert released_lock("sha256:" + "0" * 64, path) is None and released_image("sha256:" + "0" * 64, path) is None
+    assert release_digests(path) == {}
+    assert released_computers(tmp_path / "none.json") == []
+
+
+def test_a_record_of_released_computers_may_name_a_registry_by_its_port(tmp_path):
+    repository = "localhost:5001/agentenv-chromium"
+    arches = {"amd64": {**_computer("amd64", "sha256:" + "1" * 64), "image": f"{repository}@sha256:{'1' * 64}"}}
+    path = tmp_path / "published_images.json"
+    write_release_digests({}, path, [{"env": "chromium", "form": "container", "arches": arches,
+                                      "index": f"{repository}:index-{'a' * 64}@sha256:{'b' * 64}"}])
+
+    assert released_image(arches["amd64"]["key"], path) == f"{repository}@sha256:{'1' * 64}"
+
+
+@pytest.mark.parametrize("computers", [
+    [{"env": "chromium", "form": "disk", "index": "x", "arches": {}}],
+    [{"env": "chromium", "form": "container", "index": f"ghcr.io/scaleapi/agentenv-chromium:i@sha256:{'b' * 64}",
+      "arches": {"amd64": {**_computer("amd64", "sha256:" + "1" * 64), "image": "ghcr.io/x:latest"}}}],
+    [{"env": "chromium", "form": "container", "index": f"ghcr.io/scaleapi/agentenv-chromium:i@sha256:{'b' * 64}",
+      "arches": {"arm64": _computer("amd64", "sha256:" + "1" * 64)}}],
+    "not a list",
+], ids=["not-a-container", "an-image-by-tag", "another-arch-lock", "not-a-list"])
+def test_a_record_of_released_computers_that_isnt_one_is_refused(tmp_path, computers):
+    path = tmp_path / "published_images.json"
+    path.write_text(json.dumps({"images": [], "computers": computers}))
+
+    with pytest.raises(ValueError, match="isn't a record of released computers"):
+        released_computers(path)

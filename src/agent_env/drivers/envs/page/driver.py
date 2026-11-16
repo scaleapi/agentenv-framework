@@ -285,12 +285,20 @@ class PageDriver(ComputerDriverEnvironment):
 
     @tabs
     async def tab_action(self, action, tab, url) -> list[Tab]:
+        """The tab action, on every context's tabs when the browser leases contexts: a tab in a lease is switched to
+        or closed in it, and the tabs after it each name their context, the screen's the active one."""
+        _, card = await self._found()
+        every = client.find_extension_method(card, BROWSER, "contexts/lease") is not None
         if action == "open":
             await self._call("tabs/open", {"url": url} if url else {})
         elif action in ("switch", "close"):
-            await self._call("tabs/activate" if action == "switch" else "tabs/close", {"tab": tab})
-        listed = (await self._call("tabs/list"))["tabs"]
-        return [Tab(t["id"], t["url"], t["title"], t["active"]) for t in listed]
+            context = next((t.get("context") for t in await self._tabs(every) if t["id"] == tab), None)
+            await self._call("tabs/activate" if action == "switch" else "tabs/close",
+                             {"tab": tab, **({"context": context} if context else {})})
+        return [Tab(t["id"], t["url"], t["title"], t["active"], t.get("context")) for t in await self._tabs(every)]
+
+    async def _tabs(self, every: bool) -> list[dict]:
+        return (await self._call("tabs/list", {"every": True} if every else None))["tabs"]
 
     @dialog
     async def answer_dialog(self, accept, text) -> None:
@@ -323,7 +331,8 @@ class PageDriver(ComputerDriverEnvironment):
         try:
             async with _http(folder) as http:
                 answer = await http.request(method["method"], method["endpoint"], headers=_tool_call() if credited else {},
-                                            **({"json": params} if method["method"] != "GET" else {}))
+                                            **({"json": params} if method["method"] != "GET" else
+                                               {"params": params} if params else {}))
         except (httpx.HTTPError, OSError) as e:
             raise DeviceUnavailable(_ended(folder) or f"the browser's server isn't answering: {type(e).__name__}: {e}"
                                     ) from None

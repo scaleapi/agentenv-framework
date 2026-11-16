@@ -39,7 +39,9 @@ class BrowserConnectCdpTaskStep(BrowserStep):
     """Hand the agent ``agent_name`` a CDP address to the website browser ``browser`` in the env ``env_id``, the
     env's only one when unnamed: added to its cdp-config/v1 as ``name``, with every tool the env serves hidden from
     its role unless ``keep_tools``. The address is the browser's own for that agent, as its sandbox reaches it; for a
-    browser in one of a multi env's computers, the multi env's gateway's, which relays it to the browser."""
+    browser in one of a multi env's computers, the multi env's gateway's, which relays it to the browser. With a
+    ``context``, a lease's label granted to the agent, the address is scoped to that lease, which the agent sees as
+    the browser's default context, and ends with it."""
 
     type: ClassVar[str] = "browser_connect_cdp"
     entity_refs = (EntityRef.env("env_id"),)
@@ -55,8 +57,10 @@ class BrowserConnectCdpTaskStep(BrowserStep):
         keep_tools: bool = False,
         depends_on: Optional[list[TaskStepDependency]] = None,
         fail_task_on_error: bool = True,
+        context: Optional[str] = None,
     ):
-        super().__init__(id, version, env_id, browser, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
+        super().__init__(id, version, env_id, browser, depends_on=depends_on, fail_task_on_error=fail_task_on_error,
+                         context=context)
         self.agent_name = agent_name or TaskStep.DEFAULT_AGENT_NAME
         self.name = name
         self.keep_tools = keep_tools
@@ -74,7 +78,7 @@ class BrowserConnectCdpTaskStep(BrowserStep):
 
     @classmethod
     def from_dict(cls, data: dict) -> BrowserConnectCdpTaskStep:
-        return cls(**cls._browser_from_dict(data), agent_name=data.get("agent_name"),
+        return cls(**cls._in_context_from_dict(data), agent_name=data.get("agent_name"),
                    name=data.get("name") or DEFAULT_NAME, keep_tools=data.get("keep_tools", False))
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
@@ -85,10 +89,14 @@ class BrowserConnectCdpTaskStep(BrowserStep):
         if cdp_config is None or not agent.a2a_url:
             raise RuntimeError(f"agent {agent.agent_name!r} can't take a CDP address: its card has no "
                                f"{A2AAgent.EXT_CDP_CONFIG}")
+        if self.context_label is not None and not _takes(card, "context"):
+            raise RuntimeError(f"the website browser {browser or deployed.env_id!r} scopes no CDP address to a lease: "
+                               "rebuild it on a newer agentenv-framework-protocol")
         base, theirs = _env_urls(env, agent)
-        asked = {"user": agent.agent_name, **({"origin": theirs} if _takes_origin(card) else {})}
-        address = (await self._call(context, "cdp", asked, CDP_TIMEOUT_S) if deployed.env_id == self.env_id
-                   else await _cdp_at_gateway(env, deployed, card, asked))
+        asked = {"user": agent.agent_name, **({"origin": theirs} if _takes(card, "origin") else {}),
+                 **({"context": self.context_label} if self.context_label is not None else {})}
+        address = (await self._call(context, "cdp", asked, CDP_TIMEOUT_S, in_context=False)
+                   if deployed.env_id == self.env_id else await _cdp_at_gateway(env, deployed, card, asked))
         http_url = _rebased(address["http_url"], base, theirs)
         ws_url = _rebased(address["ws_url"], _ws(base), _ws(theirs))
         async with httpx.AsyncClient(timeout=ADD_TIMEOUT_S) as client:
@@ -101,13 +109,15 @@ class BrowserConnectCdpTaskStep(BrowserStep):
         if hidden:
             await env.invoke(DISABLE_TOOL_EXTENSION_URI, DISABLE, {"role": role, "tools": hidden})
         logger.info(f"agent {agent.agent_name!r} has {self.name!r}, a CDP address to {browser or 'the env'} in env "
-                    f"{env.env_id!r}" + (f"; the env's tools are hidden from role {role!r}" if hidden else ""))
+                    f"{env.env_id!r}" + (f", scoped to the lease {self.context_label!r}" if self.context_label else "")
+                    + (f"; the env's tools are hidden from role {role!r}" if hidden else ""))
         # The agent's cdp-config now holds this address under its name, so it replaces any connection recorded so.
         records = context.metadata.setdefault(CONNECTIONS_KEY, [])
         records[:] = [record for record in records
                       if (record["agent_name"], record["name"]) != (self.agent_name, self.name)] + [{
             "step_id": self.id, "env_id": self.env_id, "agent_name": self.agent_name, "browser": browser,
-            "name": self.name, "keep_tools": self.keep_tools, "role": role, "tools_hidden": hidden}]
+            "name": self.name, "keep_tools": self.keep_tools, "role": role, "tools_hidden": hidden,
+            **({"context": self.context_label} if self.context_label is not None else {})}]
         return context
 
 
@@ -158,10 +168,11 @@ def _env_urls(deployed: DeployedEnv, agent: DeployedAgent) -> tuple[str, str]:
     return base, theirs.rstrip("/")
 
 
-def _takes_origin(card: dict) -> bool:
-    """Whether the browser's cdp takes an origin: one composed before it did refuses any it doesn't know."""
+def _takes(card: dict, field: str) -> bool:
+    """Whether the browser's cdp takes ``field``, an origin or a context: one composed before it did refuses any it
+    doesn't know."""
     method = find_extension_method(card, BROWSER, "cdp") or {}
-    return "origin" in method.get("request", {}).get("properties", {})
+    return field in method.get("request", {}).get("properties", {})
 
 
 def _rebased(url: str, base: str, theirs: str) -> str:

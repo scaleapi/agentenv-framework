@@ -42,6 +42,7 @@ from typing import Any, NamedTuple
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 import httpx
+from mcp.types import INVALID_REQUEST
 from starlette.requests import HTTPConnection, Request
 from starlette.responses import Response, StreamingResponse
 from starlette.types import Receive, Scope, Send
@@ -104,7 +105,7 @@ async def forward(request: Request, base_url: str, *, role: str, timeout: httpx.
         return await _done(_json_response({"error": str(e)}, 400), on_done)
     content = await request.body()  # /svc and /website request bodies are small (JSON-RPC, forms)
     headers = upstream_headers(request, role, withheld=withheld, site_names=site_names)
-    if mcp_server and request.method == "POST" and is_child_mcp_path(request.path_params.get("path", ""), mcp_endpoint):
+    if mcp_server and request.method == "POST" and reaches_child_mcp(request, base_url, mcp_endpoint):
         # The gateway is the trust boundary for identity: a child's proxied MCP endpoint stays reachable, but the
         # role in its JSON-RPC `_meta` is the gateway's to write, like the header above.
         content = stamp_jsonrpc_role(content, role)
@@ -261,16 +262,40 @@ def route_prefix(request: HTTPConnection) -> str:
 def is_child_mcp_path(decoded_rest: str, endpoint: str = "mcp") -> bool:
     """Whether a /svc/{service}/{path} remainder reaches the backing server's MCP endpoint (`endpoint`, `mcp` unless
     its card declares another, or anything under it), judged after dot-segment normalisation, since httpx collapses
-    `x/../mcp` to `/mcp` on the way upstream.
+    `x/../mcp` to `/mcp` on the way upstream, and ignoring case, as some servers' routing does.
 
-    >>> [is_child_mcp_path(p) for p in ("mcp", "mcp/", "mcp/x", "x/../mcp", "./mcp", "/mcp", "mcpx", "agentenv", "")]
-    [True, True, True, True, True, True, False, False, False]
-    >>> [is_child_mcp_path(p, "/tools/mcp/") for p in ("tools/mcp", "tools/x/../mcp", "mcp")]
-    [True, True, False]
+    >>> [is_child_mcp_path(p) for p in ("mcp", "mcp/", "mcp/x", "x/../mcp", "./mcp", "/mcp", "MCP", "mcpx", "agentenv", "")]
+    [True, True, True, True, True, True, True, False, False, False]
+    >>> [is_child_mcp_path(p, "/tools/mcp/") for p in ("tools/mcp", "tools/x/../mcp", "Tools/Mcp", "mcp")]
+    [True, True, True, False]
     """
-    normalized = posixpath.normpath("/" + decoded_rest.lstrip("/"))
-    at = posixpath.normpath("/" + endpoint.strip("/"))
+    normalized = posixpath.normpath("/" + decoded_rest.lstrip("/")).lower()
+    at = posixpath.normpath("/" + endpoint.strip("/")).lower()
     return normalized == at or normalized.startswith(at + "/")
+
+
+def reaches_child_mcp(request: HTTPConnection, base_url: str, endpoint: str = "mcp") -> bool:
+    """Whether a /svc request reaches the MCP endpoint of the backing server at ``base_url`` (:func:`reaches`)."""
+    return reaches(base_url, request.scope["raw_path"], request.scope["path"], request.path_params.get("path", ""), endpoint)
+
+
+def reaches(base_url: str, raw_path: bytes, decoded_path: str, decoded_rest: str, endpoint: str) -> bool:
+    """Whether a /svc request whose routed remainder is ``decoded_rest`` reaches ``endpoint`` of the backing server at
+    ``base_url`` (:func:`is_child_mcp_path`): by that remainder, or by the path the server receives, the base's path and
+    the raw remainder forwarded, its dot segments removed by httpx and then decoded. They differ when an encoded slash
+    sits beside a dot segment (``public%2Fx/../mcp`` reaches ``/mcp``) or a dot segment climbs into a base's path
+    (``../prefix/mcp`` reaches base ``/prefix``'s ``/mcp``). ``endpoint`` is decoded as both paths are. False for a
+    request-target forward() refuses."""
+    endpoint = unquote(endpoint)
+    if is_child_mcp_path(decoded_rest, endpoint):
+        return True
+    try:
+        raw_rest = raw_remainder(raw_path, decoded_path, decoded_rest) if decoded_rest else b""
+        sent = httpx.URL(f"{base_url.rstrip('/')}/{raw_rest.decode('latin-1')}").path
+        base = httpx.URL(base_url).path.rstrip("/")
+    except (ValueError, httpx.InvalidURL):
+        return False
+    return is_child_mcp_path(sent, f"{base}/{endpoint.lstrip('/')}")
 
 
 def stamp_jsonrpc_role(body: bytes, role: str) -> bytes:
@@ -296,6 +321,37 @@ def stamp_jsonrpc_role(body: bytes, role: str) -> bytes:
             params["_meta"] = meta
             stamped = True
     return json.dumps(parsed).encode() if stamped else body
+
+
+def called_tools(body: bytes) -> list[str] | None:
+    """The tool each JSON-RPC ``tools/call`` request in `body` (one request or a batch) names; None for a body that is
+    not JSON.
+
+    >>> called_tools(b'[{"method": "tools/call", "params": {"name": "a"}}, {"method": "tools/list", "params": {}}]')
+    ['a']
+    >>> called_tools(b"not json") is None
+    True
+    """
+    try:
+        parsed = json.loads(body)
+    except ValueError:
+        return None
+    return [item["params"]["name"] for item in (parsed if isinstance(parsed, list) else [parsed])
+            if isinstance(item, dict) and item.get("method") == "tools/call" and isinstance(item.get("params"), dict)
+            and isinstance(item["params"].get("name"), str)]
+
+
+def tool_call_refusal(body: bytes, message: str) -> Response:
+    """The gateway's answer to a child MCP POST it won't forward: one request gets the tool error the gateway's own
+    ``/mcp`` gives, and a batch, or a body that is not JSON, is refused whole as an invalid request."""
+    try:
+        parsed = json.loads(body)
+    except ValueError:
+        parsed = None
+    if isinstance(parsed, dict):
+        return _json_response({"jsonrpc": "2.0", "id": parsed.get("id"),
+                               "result": {"content": [{"type": "text", "text": message}], "isError": True}}, 200)
+    return _json_response({"jsonrpc": "2.0", "id": None, "error": {"code": INVALID_REQUEST, "message": message}}, 400)
 
 
 def raw_remainder(raw_path: bytes, decoded_path: str, decoded_rest: str) -> bytes:

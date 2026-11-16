@@ -1,6 +1,6 @@
 name: Clock gates
 
-# agent-env's libfaketime (src/agent_env/computers/clock), the library every computer's session programs load to read
+# agent-env's libfaketime (src/agent_env/computers/artifacts/ubuntu-24.04/clock), the library every computer's session programs load to read
 # universe time, built with stock 0.9.12 beside it in an Ubuntu 24.04 image and run through tst/clock's gates on x86_64
 # and arm64: every wait API in C, Python, Java and Node at several rates, jumps, cancelled waits, timerfd duplicates,
 # condvar and semaphore stress, the waits again with futex_waitv refused, a stalled writer and a dead one, torn page
@@ -10,7 +10,7 @@ name: Clock gates
 on:
   pull_request:
     paths:
-      - "src/agent_env/computers/clock/**"
+      - "src/agent_env/computers/artifacts/ubuntu-24.04/clock/**"
       - "src/agent_env/browsers/envs/chromium/chromium.py"
       - "tst/clock/**"
       - ".github/workflows/clock.yml"
@@ -52,7 +52,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.AGENTENV_TEST_CLOCK_CACHE }}
-          key: clock-downloads-${{ matrix.arch }}-${{ hashFiles('src/agent_env/browsers/envs/chromium/chromium.py', 'src/agent_env/computers/clock/build.sh', 'tst/clock/conftest.py') }}
+          key: clock-downloads-${{ matrix.arch }}-${{ hashFiles('src/agent_env/browsers/envs/chromium/chromium.py', 'src/agent_env/computers/artifacts/ubuntu-24.04/clock/build.sh', 'tst/clock/conftest.py') }}
       - name: Clock gates
         run: .venv/bin/python -m pytest tst/clock -rA --timeout=2400 --junitxml=junit-clock-${{ matrix.arch }}.xml
       - name: No skips
