@@ -14,8 +14,8 @@ stored timeline and each wake's trajectory: one file per wake, one event per lin
   by wake and call (or line); the line keeps a preview. Lines longer than LINE_CHARS are split there, nothing dropped.
 - ``events.jsonl``: every line of every wake, and the run's start and end. ``triggers.jsonl``: every trigger firing.
 - ``index.md``: a block per wake with its time, what woke it, the user's message, its write actions (tool and key
-  arguments; never the harness's own memory and history tools) and messages with the ``file:line`` they're at, and
-  its errors.
+  arguments; never the harness's own memory and history tools) and messages with the ``file:line`` they're at, a
+  compaction the harness ran before its turn, and its errors.
 """
 
 from __future__ import annotations
@@ -56,7 +56,7 @@ _NOT_ACTIONS = frozenset({"message_user", "stay_quiet"})
 _INTERNAL = re.compile(r"^(?:memory|history)_")
 # A line's fields that say what and where it is; ``fit`` moves only the others.
 _IDENTITY = frozenset({"event", "wake", "at", "call", "turn", "tool", "kind", "state", "outcome", "phase", "by",
-                       "step", "subagent"})
+                       "step", "subagent", "compaction"})
 
 
 @dataclass(frozen=True)
@@ -232,7 +232,8 @@ class _Stager:
                 lines.append(_line("assistant_thinking", w.n, turn=which, step=e.get("step"), text=e["text"],
                                    subagent=e.get("subagent")))
             elif kind == "note":
-                lines.append(_line("harness_note", w.n, turn=which, step=e.get("step"), text=e["text"]))
+                lines.append(_line("harness_note", w.n, turn=which, step=e.get("step"), compaction=e.get("compaction"),
+                                   text=e["text"]))
             elif kind == "raw":
                 lines.append(_line("trajectory_item", w.n, turn=which, item=e["event"]))
         staged = sum(len(_dumps(line).encode()) for line in lines) + side
@@ -372,6 +373,8 @@ def _index_block(w: _Wake, path: str, lines: list[dict], by_changes: bool, run_c
                        f"({path}:{i})")
         elif event == "nudge":
             out.append(f"- nudged after closing text; then {line.get('outcome')} ({path}:{i})")
+        elif event == "harness_note" and line.get("compaction") is not None:
+            out.append(f"- {_compaction_line(line['compaction'])} ({path}:{i})")
         elif event == "app_change":
             changes["by the assistant" if line.get("by") == "agent" else "by others" if line.get("by")
                     else "with no known actor"] += 1
@@ -385,6 +388,18 @@ def _index_block(w: _Wake, path: str, lines: list[dict], by_changes: bool, run_c
     if untold:
         out.append(f"- {untold} of the assistant's app changes name no tool (made through a website, say)")
     return "\n".join(out)
+
+
+def _compaction_line(facts: dict) -> str:
+    """index.md's words for a compaction the harness ran before the wake's turn, from its note's counts."""
+    counts = []
+    if facts.get("wakes_summarized") is not None:
+        counts.append(f"{facts['wakes_summarized']} wakes summarized")
+    if facts.get("wakes_kept") is not None:
+        counts.append(f"the last {facts['wakes_kept']} kept word for word")
+    if facts.get("next_wake_waited_s") is not None:
+        counts.append(f"this wake started {facts['next_wake_waited_s']} s late (real time) waiting for it")
+    return "compaction by the harness, before this wake's turn" + (": " + "; ".join(counts) if counts else "")
 
 
 def _index(stager: _Stager, blocks: list[str], start: list[dict], end: list[dict],

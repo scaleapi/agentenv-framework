@@ -36,7 +36,8 @@ _OUTPUT_TEXT = re.compile(r"^llm\.output_messages\.(\d+)\.message\.(?:content|co
 class TurnEvents:
     """``events`` in turn order, each ``{"type": "text", "text"}``, ``{"type": "tool_call", "tool", "id", "input",
     "result", "error"}`` (``result`` absent when none came back), ``{"type": "prompt", "text"}`` (the turn's input,
-    when the format records it), ``{"type": "note", "text"}`` (a message the harness put in the turn) or
+    when the format records it), ``{"type": "note", "text"}`` (a message the harness put in the turn; a compaction's
+    also has ``compaction``, its counts: ``wakes_summarized``, ``wakes_kept``, ``next_wake_waited_s``) or
     ``{"type": "final", "text", "error"}``; for an unknown format, ``{"type": "raw", "event"}`` per stored item."""
 
     format: str
@@ -167,7 +168,8 @@ def _otel_events(spans: list[dict]) -> list[dict]:
             continue
         operation = attrs.get("gen_ai.operation.name")
         if operation == _COMPACTION:
-            timed.append((str(span.get("end_time") or start), i, {"type": "note", "text": _compaction_note(attrs)}))
+            timed.append((str(span.get("end_time") or start), i, {"type": "note", "text": _compaction_note(attrs),
+                                                                  "compaction": _compaction_facts(attrs)}))
             continue
         if operation == _HARNESS_MESSAGE:
             timed.append((start, i, {"type": "note", "text": _harness_message_note(attrs), **tag}))
@@ -196,6 +198,13 @@ def _agent_tag(attrs: dict) -> dict:
     if attrs.get("psi.turn"):
         tag["step"] = str(attrs["psi.turn"])
     return tag
+
+
+def _compaction_facts(attrs: dict) -> dict:
+    """A ``psi.compaction`` span's counts that it recorded: wakes summarized and kept, and how late (real seconds) the
+    next wake started."""
+    return {key: attrs[f"psi.compaction.{key}"] for key in ("wakes_summarized", "wakes_kept", "next_wake_waited_s")
+            if attrs.get(f"psi.compaction.{key}") is not None}
 
 
 def _compaction_note(attrs: dict) -> str:

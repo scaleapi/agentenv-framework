@@ -364,3 +364,17 @@ def test_judge_reads_does_not_count_a_wake_the_agent_read_back_with_history_read
     judge = turn_events(json.dumps(_judge(("Read", {"file_path": "/tmp/r/wakes/wake_004.jsonl"}, wake4))))
 
     assert judge_reads(judge)["wakes_opened"] == [4]
+
+
+def test_the_index_has_a_line_for_a_compaction_pointing_at_its_note(run):
+    staged = stage_run(*_v3_run(run))
+    index = staged.files[INDEX_FILE]
+
+    block = index[index.index("## Wake 4 "):]
+    line = next(line for line in block.splitlines() if line.startswith("- compaction"))
+    assert line.startswith("- compaction by the harness, before this wake's turn: 6 wakes summarized; the last 3 kept "
+                           "word for word; this wake started 33.917 s late (real time) waiting for it (")
+    path, n = line.rsplit("(", 1)[1].rstrip(")").split(":")
+    note = _lines(staged.files, path)[int(n) - 1]
+    assert note["event"] == "harness_note" and note["compaction"] == {
+        "wakes_summarized": 6, "wakes_kept": 3, "next_wake_waited_s": 33.917}
