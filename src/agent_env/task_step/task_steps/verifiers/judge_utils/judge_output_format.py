@@ -1282,10 +1282,13 @@ follows from the reason: a reason that finds no clear failure gives "pass" (or "
 reason to at most 40 words: the evidence and the conclusion, not your working.
 - "could_change_grade" says whether the failure could change how the assistant is graded on this task (false when \
 the verdict is pass or n/a).
+- "assistant_asked" is true when the assistant asked for or invited the behaviour you graded (e.g. asked the user \
+to write a message or to give a fact it should look up); false otherwise. Give it on every result, false when \
+nothing was asked; it is recorded only and doesn't change the verdict.
 
 Return only this JSON object, with one result per criterion, each result's keys in this order:
 {"results": [{"id": "the criterion's id", "reason": "at most 40 words", "turns": [turn numbers the reason rests on], \
-"verdict": "pass" | "fail" | "n/a", "could_change_grade": true | false}]}"""
+"verdict": "pass" | "fail" | "n/a", "could_change_grade": true | false, "assistant_asked": true | false}]}"""
 
 _USER_SIM_CRITERIA = """
 
@@ -1322,8 +1325,9 @@ def _user_sim_checks_output_format() -> dict:
                             "turns": {"type": "array", "items": {"type": "integer"}},
                             "verdict": {"type": "string", "enum": list(USER_SIM_VERDICTS)},
                             "could_change_grade": {"type": "boolean"},
+                            "assistant_asked": {"type": "boolean"},
                         },
-                        "required": ["id", "reason", "turns", "verdict", "could_change_grade"],
+                        "required": ["id", "reason", "turns", "verdict", "could_change_grade", "assistant_asked"],
                         "additionalProperties": False,
                     },
                 },
@@ -1390,8 +1394,8 @@ def _never_gates(criterion: dict) -> bool:
 def _user_sim_row(item: dict, criterion: dict) -> tuple[dict | None, list[str]]:
     """One result checked against its criterion: ``(row, [])``, or ``(None, problems)`` naming the row. The row
     lowers the score (score 0.0, result false) only on a fail with could_change_grade, and never at weight 0;
-    ``verdict`` and ``could_change_grade`` keep what the judge said either way. An ``assistant_asked`` bool (the
-    assistant asked for the behaviour) is kept when the judge gives one; it doesn't change the score."""
+    ``verdict`` and ``could_change_grade`` keep what the judge said either way. ``assistant_asked`` (the assistant
+    asked for or invited the behaviour) is required and recorded only: it never changes the score or a gate."""
     rid = item.get("id")
     problems = []
     verdict = str(item.get("verdict", "")).strip().lower()
@@ -1400,6 +1404,9 @@ def _user_sim_row(item: dict, criterion: dict) -> tuple[dict | None, list[str]]:
     change = item.get("could_change_grade")
     if not isinstance(change, bool):
         problems.append(f"{rid}: could_change_grade must be true or false")
+    asked = item.get("assistant_asked")
+    if not isinstance(asked, bool):
+        problems.append(f"{rid}: assistant_asked must be true or false")
     if verdict == "n/a" and str(criterion.get("na_when") or "").strip().lower() == _USER_SIM_NA_NEVER:
         problems.append(f"{rid} may not be n/a: it always applies, so answer pass or fail")
     turns = _cited_turns(item.get("turns"))
@@ -1419,13 +1426,11 @@ def _user_sim_row(item: dict, criterion: dict) -> tuple[dict | None, list[str]]:
     lowers = change and not _never_gates(criterion)
     row = {**criterion, "id": rid, "reason": reason,
            "turns": [t for t in turns if graded is None or t in graded],
-           "verdict": verdict, "could_change_grade": change,
+           "verdict": verdict, "could_change_grade": change, "assistant_asked": asked,
            "justification": reason, "score": 0.0 if lowers else 1.0, "result": not lowers}
     outside = [t for t in turns if graded is not None and t not in graded]
     if outside:
         row["turns_outside_graded"] = outside
-    if isinstance(item.get("assistant_asked"), bool):
-        row["assistant_asked"] = item["assistant_asked"]
     return row, []
 
 
@@ -1434,7 +1439,7 @@ def diagnose_user_sim_checks_response(
 ) -> tuple[list[dict] | None, JudgeResponseDiscrepancy | None]:
     """Parse a user_sim_checks judge response into rows, or a discrepancy for the correction prompt: no JSON
     object, the wrong row set, or a row the user sim judge can't use (its verdict or could_change_grade invalid, an
-    n/a where ``na_when`` is never, a fail citing no graded turn, a fail whose reason concludes nothing failed)."""
+    n/a where ``na_when`` is never, an assistant_asked that isn't true or false, a fail citing no graded turn, a fail whose reason concludes nothing failed)."""
     parsed = _user_sim_json(response_text)
     if parsed is None:
         return None, _parse_failure_discrepancy(criteria, "the answer is not a JSON object")
@@ -1511,6 +1516,7 @@ def format_user_sim_checks_correction(
         '- "verdict": "pass", "fail" or "n/a", following from the reason: a reason that finds no clear failure is '
         'never "fail"',
         '- "could_change_grade": true or false',
+        '- "assistant_asked": true when the assistant asked for or invited the behaviour you graded, else false',
         "",
         "## Your Previous Response",
         truncated,
@@ -1529,7 +1535,7 @@ class JudgeOutputFormat(str, Enum):
     # trajectory_mistakes-shaped entry from the findings.
     RUBRIC_EVIDENCE_WITH_MISTAKES = "rubric_evidence_with_mistakes"
     # Grades the user sim (the AI playing the user), not the assistant: per criterion a reason, the turns it cites, a
-    # pass / fail / n/a verdict and could_change_grade; a row lowers the score only on a fail that could change the grade.
+    # pass / fail / n/a verdict, could_change_grade and assistant_asked (recorded only); a row lowers the score only on a fail that could change the grade.
     USER_SIM_CHECKS = "user_sim_checks"
 
 

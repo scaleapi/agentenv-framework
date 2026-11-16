@@ -50,9 +50,9 @@ def _criteria(*ids: str, graded=(1, 2), **extra) -> list[dict]:
 
 
 def _row(cid="c1", *, verdict="pass", turns=(), could_change_grade=False, reason="Answered what was asked.",
-         **extra) -> dict:
+         assistant_asked=False, **extra) -> dict:
     return {"id": cid, "reason": reason, "turns": list(turns), "verdict": verdict,
-            "could_change_grade": could_change_grade, **extra}
+            "could_change_grade": could_change_grade, "assistant_asked": assistant_asked, **extra}
 
 
 def _answer(*rows: dict) -> str:
@@ -111,7 +111,7 @@ def test_the_judge_reasons_first_and_the_verdict_follows_the_reason():
     assert 'a reason that finds no clear failure gives "pass" (or "n/a"), never "fail"' in prompt
     shape = prompt.split("Return only this JSON object")[1]
     assert (shape.index('"id"') < shape.index('"reason"') < shape.index('"turns"') < shape.index('"verdict"')
-            < shape.index('"could_change_grade"'))
+            < shape.index('"could_change_grade"') < shape.index('"assistant_asked"'))
 
 
 def test_the_judge_is_told_how_to_read_the_run_and_the_criteria_fields():
@@ -120,20 +120,23 @@ def test_the_judge_is_told_how_to_read_the_run_and_the_criteria_fields():
                  '"graded_turns"', "The assistant's own words are the assistant's",
                  'A "hard" item is an exact rule', 'A "general" item is a judgement',
                  '"na_when": "never" means it always applies',
-                 '"could_change_grade" says whether the failure could change how the assistant is graded'):
+                 '"could_change_grade" says whether the failure could change how the assistant is graded',
+                 '"assistant_asked" is true when the assistant asked for or invited the behaviour you graded (e.g. '
+                 'asked the user to write a message or to give a fact it should look up); false otherwise',
+                 "false when nothing was asked; it is recorded only and doesn't change the verdict"):
         assert told in prompt, told
 
 
 # ---- schema -------------------------------------------------------------------------------------------------------
-def test_each_row_gives_its_reason_first_then_turns_verdict_and_could_change_grade():
+def test_each_row_gives_its_reason_first_then_turns_verdict_could_change_grade_and_assistant_asked():
     schema = SPEC.output_format
     assert schema["type"] == "json_schema" and schema["schema"]["required"] == ["results"]
     row = schema["schema"]["properties"]["results"]["items"]
-    order = ["id", "reason", "turns", "verdict", "could_change_grade"]
+    order = ["id", "reason", "turns", "verdict", "could_change_grade", "assistant_asked"]
     assert list(row["properties"]) == order == row["required"]
     assert row["properties"]["verdict"]["enum"] == ["pass", "fail", "n/a"]
     assert row["properties"]["turns"] == {"type": "array", "items": {"type": "integer"}}
-    assert row["properties"]["could_change_grade"] == {"type": "boolean"}
+    assert row["properties"]["could_change_grade"] == row["properties"]["assistant_asked"] == {"type": "boolean"}
     assert row["additionalProperties"] is False and schema["schema"]["additionalProperties"] is False
 
 
@@ -152,7 +155,8 @@ def test_an_answer_is_read_into_rows_with_turns_kept_to_the_graded_ones():
 
 
 def test_the_parser_reads_the_keys_in_any_order_and_tolerates_a_fence_or_text_around_the_object():
-    flipped = {"could_change_grade": True, "verdict": "FAIL ", "turns": [2], "reason": "Leaked the allergy.", "id": "c1"}
+    flipped = {"assistant_asked": False, "could_change_grade": True, "verdict": "FAIL ", "turns": [2],
+               "reason": "Leaked the allergy.", "id": "c1"}
     for text in (json.dumps({"results": [flipped]}), "```json\n" + _answer(flipped) + "\n```",
                  "Here is my answer:\n" + _answer(flipped) + "\nDone."):
         rows, discrepancy = diagnose_user_sim_checks_response(text, _criteria("c1"))
@@ -171,12 +175,17 @@ def test_an_answer_that_is_not_a_json_object_or_has_the_wrong_rows_is_asked_agai
     assert (discrepancy.missing_ids, discrepancy.duplicate_ids, discrepancy.unknown_ids) == (["c2"], ["c1"], ["c9"])
 
 
-def test_a_verdict_or_could_change_grade_out_of_range_is_asked_again():
+def test_a_verdict_could_change_grade_or_assistant_asked_out_of_range_is_asked_again():
+    missing = _row("c4")
+    del missing["assistant_asked"]
     rows, discrepancy = diagnose_user_sim_checks_response(
-        _answer(_row("c1", verdict="maybe"), _row("c2", could_change_grade="yes")), _criteria("c1", "c2"))
+        _answer(_row("c1", verdict="maybe"), _row("c2", could_change_grade="yes"), _row("c3", assistant_asked="no"),
+                missing), _criteria("c1", "c2", "c3", "c4"))
     assert rows is None
     assert discrepancy.row_problems == ["c1: verdict 'maybe' is not one of ['pass', 'fail', 'n/a']",
-                                        "c2: could_change_grade must be true or false"]
+                                        "c2: could_change_grade must be true or false",
+                                        "c3: assistant_asked must be true or false",
+                                        "c4: assistant_asked must be true or false"]
 
 
 def test_a_fail_that_cites_no_graded_turn_is_asked_again_and_a_pass_needs_none():
@@ -239,13 +248,17 @@ def test_every_unusable_row_is_named_in_one_go():
     assert str(discrepancy) == "; ".join(discrepancy.row_problems)
 
 
-def test_assistant_asked_is_kept_when_given_and_never_changes_the_score():
-    rows, discrepancy = diagnose_user_sim_checks_response(
-        _answer(_fail("c1", assistant_asked=True), _row("c2", assistant_asked="yes"), _row("c3")),
-        _criteria("c1", "c2", "c3"))
-    assert discrepancy is None
-    assert rows[0]["assistant_asked"] is True and rows[0]["score"] == 0.0
-    assert "assistant_asked" not in rows[1] and "assistant_asked" not in rows[2]
+def test_assistant_asked_is_recorded_on_every_row_and_never_changes_the_score_or_a_gate():
+    criteria = _criteria("c1", "c2", "c3")
+    for asked in (True, False):
+        rows, discrepancy = diagnose_user_sim_checks_response(
+            _answer(_fail("c1", assistant_asked=asked), _fail("c2", could_change_grade=False, assistant_asked=asked),
+                    _row("c3", assistant_asked=asked)), criteria)
+        assert discrepancy is None and [r["assistant_asked"] for r in rows] == [asked] * 3
+        assert [(r["score"], r["result"]) for r in rows] == [(0.0, False), (1.0, True), (1.0, True)]
+        for aggregator in ScoreAggregator:
+            assert aggregate_score(rows, aggregator) == aggregate_score(
+                [{**r, "assistant_asked": not asked} for r in rows], aggregator)
 
 
 def test_parse_response_never_turns_an_unusable_answer_into_fails():
@@ -262,7 +275,8 @@ def test_the_correction_prompt_names_each_problem_and_asks_for_the_row_shape_aga
     assert prompt.startswith("EVAL\n\n## Correction Required")
     assert "- c1: a fail must cite at least one graded turn; cited [99], graded [1]" in prompt
     assert "exactly 2 objects" in prompt and "Required criterion ids (in any order): c1, c2" in prompt
-    for field in ('"id"', '"reason": at most 40 words', '"turns"', '"verdict"', '"could_change_grade"'):
+    for field in ('"id"', '"reason": at most 40 words', '"turns"', '"verdict"', '"could_change_grade"',
+                  '"assistant_asked": true when the assistant asked for or invited the behaviour you graded'):
         assert f"- {field}" in prompt
     assert '"score"' not in prompt and '"justification"' not in prompt
     assert prompt.endswith("## Your Previous Response\n" + previous)
@@ -293,6 +307,12 @@ def test_a_row_lowers_the_score_only_on_a_fail_that_could_change_the_grade():
     assert _score(_fail("c1"), _row("c2"), _row("c3"), criteria=criteria) == pytest.approx(2 / 3)
     rows, _ = diagnose_user_sim_checks_response(_answer(_fail("c1", could_change_grade=False)), _criteria("c1"))
     assert (rows[0]["verdict"], rows[0]["score"], rows[0]["result"]) == ("fail", 1.0, True)
+
+
+def test_a_task_item_follows_the_same_rule_as_a_check():
+    criteria = [*_criteria("guidance"), *_criteria("a1_call_rae", family="A1", kind="hard")]
+    assert _score(_row("guidance"), _fail("a1_call_rae", could_change_grade=False), criteria=criteria) == 1.0
+    assert _score(_row("guidance"), _fail("a1_call_rae"), criteria=criteria) == 0.5
 
 
 def test_a_weight_0_row_is_recorded_but_never_gates():
