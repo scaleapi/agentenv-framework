@@ -662,6 +662,21 @@ def test_retry_tries_again_a_push_ghcr_refuses_while_another_platform_creates_th
             in capsys.readouterr().out)
 
 
+def test_retry_tries_again_an_index_ghcr_refuses_while_its_first_image_creates_the_package(script, monkeypatch, capsys):
+    """A computer app's first index pushes both its images at once, as v0.9.1545's chromium did."""
+    denied = ("ERROR: copy sha256:a84f from localhost:5000/agentenv-computers@sha256:a84f to "
+              "ghcr.io/scaleapi/agentenv-chromium:index-b4f4: failed commit on ref \"manifest-sha256:a84f\": "
+              "unexpected status from PUT request to "
+              "https://ghcr.io/v2/scaleapi/agentenv-chromium/manifests/sha256:a84f: 403 Forbidden\n"
+              "denied: permission_denied: write_package\n")
+    runs, waits = _attempts(script, monkeypatch, [(denied, 1), ("pushed\n", 0)])
+
+    assert _run(script, monkeypatch, "retry", "docker", "buildx", "imagetools", "create", "-t", "index", "a", "b") == 0
+
+    assert len(runs) == 2 and waits == [script._RETRY_WAITS_SECONDS[0]]
+    assert "::warning::GHCR doesn't let this repository write yet the package" in capsys.readouterr().out
+
+
 def test_retry_doesnt_try_again_a_denied_command_that_isnt_a_push(script, monkeypatch, capsys):
     runs, waits = _attempts(script, monkeypatch, [("denied: permission_denied: write_package\n", 1)])
 
