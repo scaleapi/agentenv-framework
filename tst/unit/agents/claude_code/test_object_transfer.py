@@ -140,7 +140,7 @@ def test_a_snapshot_saves_and_loads_through_grants(monkeypatch, tmp_path, agent,
         json={"context_id": "ctx-1", "objects": {"trajectory": write_grant("snap/trajectory"), "workspace": write_grant("snap/workspace")}},
     ).json()
 
-    assert set(saved) == {"context_id", "objects"} and saved["context_id"] == "ctx-1"
+    assert set(saved) == {"context_id", "objects", "stats"} and saved["context_id"] == "ctx-1"
     assert store.objects["snap/trajectory"] == conversation
     assert saved["objects"]["workspace"]["size_bytes"] == len(store.objects["snap/workspace"])
     with tarfile.open(fileobj=io.BytesIO(store.objects["snap/workspace"]), mode="r:gz") as archive:
