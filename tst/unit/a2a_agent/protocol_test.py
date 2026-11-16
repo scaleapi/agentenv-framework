@@ -115,17 +115,18 @@ def test_sdk_success_round_trips_through_platform_parser():
     assert parsed.tool_call_count == 3
 
 
-def test_sdk_failure_round_trips_through_platform_parser():
+@pytest.mark.parametrize("error_type", ["infra_error", "model_key_budget", "model_key_auth"])
+def test_sdk_failure_round_trips_through_platform_parser(error_type):
     result = TaskResult.failure(
         "provider_rate_limited",
         "The provider is temporarily unavailable",
-        error_type="infra_error",
+        error_type=error_type,
     )
 
     parsed = TerminalResponse.from_message(_sdk_terminal_message(result))
 
     assert parsed.response_text == "The provider is temporarily unavailable"
-    assert parsed.error_type == "infra_error"
+    assert parsed.error_type == error_type
     assert parsed.error_code == "provider_rate_limited"
     assert parsed.error_message == "The provider is temporarily unavailable"
 

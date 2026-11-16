@@ -1148,6 +1148,8 @@ def test_task_result_builder_validates_and_factories_share_it() -> None:
     )
     assert infra_failure.error is not None
     assert infra_failure.error.error_type == "infra_error"
+    for key_error in ("model_key_budget", "model_key_auth"):
+        assert TaskResult.failure("cli_error", "refused", error_type=key_error).error.error_type == key_error
     with pytest.raises(ValueError, match="error_type"):
         TaskResult.failure("cli_error", "failed", error_type="custom")  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="unexpected keyword argument 'details'"):
