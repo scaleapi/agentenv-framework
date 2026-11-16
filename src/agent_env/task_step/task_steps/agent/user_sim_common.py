@@ -5,6 +5,17 @@ from datetime import datetime, timezone
 from typing import Optional
 
 
+# What a user-sim turn cut short by a transient API error is resumed with, for an agent that takes `resume_prompt`
+# (prompt_agent's peer user sim, and the user deploy_user_sim_agent deploys).
+# An agent's own resume prompt asks it to finish the request it was given; a user-sim's request is the agent's reply,
+# so that prompt has it carry on as the agent.
+USER_SIM_RESUME_PROMPT = (
+    "Your previous turn was interrupted by a transient API error before you sent your message. You are still the "
+    "user. Write the user's next message, as you were about to; the assistant's last reply above is what you are "
+    "answering."
+)
+
+
 def person_of(us: dict) -> dict:
     """The user a deploy_user_sim_agent record describes, as the user sim's ``answer`` takes them; the caller adds the
     run's ``time_zone``, ``opening`` and ``done_ends_run``."""

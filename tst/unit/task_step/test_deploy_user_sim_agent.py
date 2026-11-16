@@ -18,6 +18,7 @@ from agent_env.a2a_agent import protocol
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps import always_on as ao
 from agent_env.task_step.task_steps.agent import user_sim_versions
+from agent_env.task_step.task_steps.agent.user_sim_common import USER_SIM_RESUME_PROMPT
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import USER_SIMS_KEY, DeployUserSimAgentTaskStep
 from tst.unit.task_step.always_on_harness import USER_SIM, Rig
@@ -94,6 +95,22 @@ async def test_the_prompt_set_on_the_user_s_agent_is_the_tested_one_byte_for_byt
     assert [a.agent_name for a in context.deployed_agents] == ["hannah"]
     assert context.deployed_agents[0].env_ids == []  # no env tools unless the task gives some
     assert context.metadata["models"]["user simulator"]["user"] == "sim-model"
+
+
+@pytest.mark.asyncio
+async def test_a_user_whose_card_takes_a_resume_prompt_is_sent_the_one_that_keeps_it_the_user(monkeypatch):
+    # An agent's own resume prompt asks it to finish its request; a user sim's request is the assistant's reply.
+    deploy = _Deploy(monkeypatch, _config_card("name", "model", "system_prompt", "output_format", "resume_prompt"))
+    context = await deploy.run(_step())
+    assert deploy.fields("resume_prompt") == [USER_SIM_RESUME_PROMPT]
+    assert "resume_prompt" in context.metadata[USER_SIMS_KEY]["hannah"]["setup"]["accepted_fields"]
+
+
+@pytest.mark.asyncio
+async def test_a_user_whose_card_takes_no_resume_prompt_is_sent_none(monkeypatch):
+    deploy = _Deploy(monkeypatch)
+    await deploy.run(_step())
+    assert deploy.fields("resume_prompt") == []
 
 
 @pytest.mark.asyncio

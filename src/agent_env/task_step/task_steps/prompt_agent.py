@@ -42,7 +42,7 @@ from agent_env.task_step.task_step import RetryConfig, TaskStep, TaskStepDepende
 from agent_env.task_step.task_steps.notification_delivery import delivered_parts, next_message, take_due
 from agent_env.task_step.task_steps.post_turn_hooks import PostTurnHooks, run_post_turn_hooks, validate_hook_specs
 from agent_env.task_step.task_steps.agent import user_sim_versions
-from agent_env.task_step.task_steps.agent.user_sim_common import iso, person_of, task_zone, utc
+from agent_env.task_step.task_steps.agent.user_sim_common import USER_SIM_RESUME_PROMPT, iso, person_of, task_zone, utc
 from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import (
     agent_error_text,
     fetch_container_logs,
@@ -116,15 +116,6 @@ def _file_uris(parts: list[dict]) -> list[str]:
 
 # The decide body that asks a user agent to record nothing when no agent trigger fires.
 _QUIET_DECIDE = ("turn", "solver_message", "context_id", "env_triggers", "record_unfired")
-
-# What a user-sim turn cut short by a transient API error is resumed with, for an agent that takes `resume_prompt`.
-# An agent's own resume prompt asks it to finish the request it was given; a user-sim's request is the agent's reply,
-# so that prompt has it carry on as the agent.
-USER_SIM_RESUME_PROMPT = (
-    "Your previous turn was interrupted by a transient API error before you sent your message. You are still the "
-    "user. Write the user's next message, as you were about to; the assistant's last reply above is what you are "
-    "answering."
-)
 
 _DEFAULT_USER_SIM_OUTPUT_FORMAT: dict[str, Any] = {
     "type": "json_schema",
