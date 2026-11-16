@@ -214,3 +214,57 @@ def test_the_stand_in_ends_a_tunnel_whose_server_stopped_reading_instead_of_wait
     assert ended is not None and ended < 15, ended
     [logged] = _logged(capsys.readouterr().out, "connection")
     assert logged["host"] == "site.test" and logged["bytes_sent"] > 0
+
+
+@contextlib.contextmanager
+def _egress(refuse: bool = False):
+    """A stand-in for the base's egress proxy on loopback: each ``CONNECT`` head it reads recorded, then refused with
+    a 403, or established and the request inside answered with ``OK``. Yields its URL and the heads it read."""
+    server, heads = socket.create_server(("127.0.0.1", 0)), []
+
+    def tunnel(conn):
+        with conn:
+            head = b""
+            while not head.endswith(b"\r\n\r\n"):
+                head += conn.recv(1)
+            heads.append(head)
+            if refuse:
+                conn.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+                return
+            conn.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+            conn.recv(65536)
+            conn.sendall(OK)
+
+    _accepting(server, tunnel)
+    try:
+        yield f"http://127.0.0.1:{server.getsockname()[1]}", heads
+    finally:
+        server.close()
+
+
+def test_with_an_egress_proxy_a_public_host_goes_through_it_and_a_private_one_straight_to_it(monkeypatch, capsys):
+    with _egress() as (url, heads), _serving(monkeypatch) as proxy:
+        monkeypatch.setenv(proxy.module.EGRESS_PROXY_ENV, url)
+        tunnelled = _ask(proxy.port, b"CONNECT site.test:443 HTTP/1.1\r\nHost: site.test:443\r\n\r\n",
+                         then=b"GET / HTTP/1.1\r\nHost: site.test\r\n\r\n")
+        forwarded = _ask(proxy.port, b"GET http://site.test/a HTTP/1.1\r\nHost: site.test\r\n\r\n")
+        private = _ask(proxy.port, b"GET http://10.0.0.1/ HTTP/1.1\r\nHost: x\r\n\r\n")
+
+    assert tunnelled.startswith(b"HTTP/1.1 200 Connection established") and tunnelled.endswith(b"hello"), tunnelled
+    assert forwarded.startswith(b"HTTP/1.1 200 OK") and private.startswith(b"HTTP/1.1 200 OK"), (forwarded, private)
+    assert [head.split(b"\r\n")[0] for head in heads] == [b"CONNECT site.test:443 HTTP/1.1", b"CONNECT site.test:80 HTTP/1.1"]
+    assert proxy.opened == [("10.0.0.1", 80)]
+    logged = _logged(capsys.readouterr().out, "connection")
+    assert [(entry["host"], entry["address"]) for entry in logged] == [
+        ("site.test", GITHUB), ("site.test", GITHUB), ("10.0.0.1", "10.0.0.1")]
+
+
+def test_a_tunnel_the_egress_proxy_refuses_is_a_502_naming_its_answer(monkeypatch, capsys):
+    with _egress(refuse=True) as (url, heads), _serving(monkeypatch) as proxy:
+        monkeypatch.setenv(proxy.module.EGRESS_PROXY_ENV, url)
+        answer = _ask(proxy.port, b"CONNECT site.test:443 HTTP/1.1\r\nHost: site.test:443\r\n\r\n")
+
+    assert answer.startswith(b"HTTP/1.1 502 ") and b"site.test:443 didn't answer" in answer, answer
+    assert len(heads) == 1 and proxy.opened == []
+    (failed,) = _logged(capsys.readouterr().out, "failed")
+    assert failed["reason"] == "no answer" and "403 Forbidden" in failed["error"], failed

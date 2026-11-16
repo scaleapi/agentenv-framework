@@ -443,6 +443,81 @@ async def test_the_forward_port_tunnels_a_live_sites_host_straight_to_it_and_sen
     assert all(entry["bytes_sent"] > 0 and entry["bytes_received"] > 0 and entry["duration_s"] >= 0 for entry in logged)
 
 
+class Egress:
+    """The base's egress proxy as the site proxy sees it: each ``CONNECT`` head it reads recorded, then refused with a
+    403, or established and the request inside answered with ``hello``."""
+
+    def __init__(self, refuse=False):
+        self.heads, self.refuse = [], refuse
+
+    async def __aenter__(self):
+        self.server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
+        self.url = f"http://127.0.0.1:{self.server.sockets[0].getsockname()[1]}"
+        return self
+
+    async def __aexit__(self, *exc):
+        self.server.close()
+
+    async def _handle(self, reader, writer):
+        self.heads.append(await reader.readuntil(b"\r\n\r\n"))
+        if self.refuse:
+            writer.write(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+        else:
+            writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
+            await reader.readuntil(b"\r\n\r\n")
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello")
+        await writer.drain()
+        writer.close()
+
+
+@pytest.mark.asyncio
+async def test_with_an_egress_proxy_a_public_live_host_goes_through_it_and_a_private_one_straight_to_it(
+        tmp_path, monkeypatch, capsys):
+    addresses = {"github.com": ["140.82.112.3"], "intranet.example": ["10.0.0.5"]}
+
+    async def resolve(host, port):
+        return addresses[host]
+
+    monkeypatch.setattr(site_proxy, "resolve", resolve)
+    async with Upstream() as upstream, Upstream() as live, Egress() as egress:
+        monkeypatch.setenv(site_proxy.EGRESS_PROXY_ENV, egress.url)
+        config, _ = _config(tmp_path, upstream.port)
+        config.direct = ["github.com", "intranet.example"]
+        with _live_hosts_at(monkeypatch, live.port) as opened:
+            async with _forward_port(config) as port:
+                public = await _exchange(port, b"GET http://github.com/a HTTP/1.1\r\nHost: github.com\r\n\r\n")
+                public[3][1].close()
+                private = await _exchange(port, b"GET http://intranet.example/b HTTP/1.1\r\n"
+                                                b"Host: intranet.example\r\n\r\n")
+                private[3][1].close()
+                await asyncio.sleep(0.3)  # each connection is logged as it ends
+
+    assert (public[0], public[2], private[0], private[2]) == ("HTTP/1.1 200 OK", b"hello", "HTTP/1.1 200 OK", b"hello")
+    assert [head.split(b"\r\n")[0] for head in egress.heads] == [b"CONNECT github.com:80 HTTP/1.1"]
+    assert opened == [("intranet.example", 80)] and [request[0] for request in live.requests] == ["GET /b HTTP/1.1"]
+    logged = _logged(capsys.readouterr().err, "connection")
+    assert [(entry["host"], entry["address"]) for entry in logged] == [
+        ("github.com", "140.82.112.3"), ("intranet.example", "127.0.0.1")]
+
+
+@pytest.mark.asyncio
+async def test_a_live_host_the_egress_proxy_refuses_is_a_502_naming_its_answer(tmp_path, monkeypatch, capsys):
+    async def resolve(host, port):
+        return ["140.82.112.3"]
+
+    monkeypatch.setattr(site_proxy, "resolve", resolve)
+    async with Upstream() as upstream, Egress(refuse=True) as egress:
+        monkeypatch.setenv(site_proxy.EGRESS_PROXY_ENV, egress.url)
+        config, _ = _config(tmp_path, upstream.port)
+        config.direct = ["github.com"]
+        async with _forward_port(config) as port:
+            answer = await _exchange(port, b"CONNECT github.com:443 HTTP/1.1\r\nHost: github.com:443\r\n\r\n")
+
+    assert answer[0] == "HTTP/1.1 502 Bad Gateway" and answer[2] == b"github.com:443 didn't answer\n"
+    [failed] = _logged(capsys.readouterr().err, "failed")
+    assert failed["reason"] == "no answer" and "403 Forbidden" in failed["error"], failed
+
+
 @pytest.mark.asyncio
 async def test_a_live_host_that_doesnt_answer_in_time_is_a_502_and_logged(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(site_proxy, "UPSTREAM_TIMEOUT_S", 0.5)

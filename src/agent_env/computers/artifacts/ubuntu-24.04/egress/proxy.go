@@ -37,7 +37,7 @@ type Proxy struct {
 	probes  probes
 }
 
-func serveForever() error {
+func serveForever(listen string) error {
 	leaves, err := LoadLeaves(Folder)
 	if err != nil {
 		return fmt.Errorf("the CA (has boot run?): %w", err)
@@ -52,12 +52,12 @@ func serveForever() error {
 	}
 	universe := NewUniverse(ClockPage)
 	go universe.Poll()
-	ln, err := net.Listen("tcp", Listen)
+	ln, err := net.Listen("tcp", listen)
 	if err != nil {
 		return err
 	}
 	p := &Proxy{Leaves: leaves, Universe: universe, Roots: pool, Log: jsonLines(os.Stdout)}
-	p.Log(map[string]any{"event": "serving", "listen": Listen, "uid": os.Getuid(), "pid": os.Getpid()})
+	p.Log(map[string]any{"event": "serving", "listen": listen, "uid": os.Getuid(), "pid": os.Getpid()})
 	return p.Serve(ln)
 }
 

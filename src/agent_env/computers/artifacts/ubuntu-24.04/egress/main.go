@@ -1,8 +1,9 @@
 // egress: the computer's explicit egress proxy, on real time, for the session's programs, which run on the universe's.
 //
 // It runs as its own user, agentenv-egress, a uid the clock library leaves on real time, under root's supervisord, and
-// serves CONNECT and absolute-form HTTP on 127.0.0.1:3128. Session programs reach it through HTTP(S)_PROXY and
-// ALL_PROXY; nothing redirects or filters, so it needs no NET_ADMIN and works on any provider.
+// serves CONNECT and absolute-form HTTP on 127.0.0.1:3128, or the address --listen names. Session programs reach it
+// through HTTP(S)_PROXY and ALL_PROXY, or a proxy of the base's own that hands it their connections; nothing
+// redirects or filters, so it needs no NET_ADMIN and works on any provider.
 //
 // A TLS connection is spliced (the client's bytes relayed untouched) when the clock is unarmed, or when every universe
 // a client may check against lies inside the site's real certificate by more than Margin either side. Otherwise it is
@@ -11,7 +12,8 @@
 // own ClientHello, so the site sees the client's fingerprint and ALPN offer either way.
 //
 //	egress boot    as root at the computer's start: the CA, minted once, its key this user's alone, trusted everywhere
-//	egress serve   as agentenv-egress: serve, one JSON line per connection on stdout
+//	egress serve   as agentenv-egress: serve, one JSON line per connection on stdout; --listen HOST:PORT for another
+//	               address than Listen
 package main
 
 import (
@@ -81,12 +83,30 @@ func main() {
 			os.Exit(1)
 		}
 	case "serve":
-		if err := serveForever(); err != nil {
+		listen, err := serveListen(os.Args[2:])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "egress serve:", err)
+			os.Exit(2)
+		}
+		if err := serveForever(listen); err != nil {
 			fmt.Fprintln(os.Stderr, "egress serve:", err)
 			os.Exit(1)
 		}
 	default:
-		fmt.Fprintf(os.Stderr, "usage: egress boot|serve, not %q\n", command)
+		fmt.Fprintf(os.Stderr, "usage: egress boot|serve [--listen HOST:PORT], not %q\n", command)
 		os.Exit(2)
+	}
+}
+
+// serveListen is the address serve listens on: Listen, or the one --listen names, as a base whose own proxy already
+// holds Listen gives it one of its own.
+func serveListen(args []string) (string, error) {
+	switch {
+	case len(args) == 0:
+		return Listen, nil
+	case len(args) == 2 && args[0] == "--listen" && args[1] != "":
+		return args[1], nil
+	default:
+		return "", fmt.Errorf("usage: egress serve [--listen HOST:PORT], not %q", args)
 	}
 }
