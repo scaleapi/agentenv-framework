@@ -413,13 +413,16 @@ jobs:
           docker run --detach --name registry --publish 5000:5000 \
             --volume "$RUNNER_TEMP/computers/registry:/var/lib/registry" mirror.gcr.io/library/registry:2
           timeout 30 sh -c 'until curl -sf http://localhost:5000/v2/ >/dev/null; do sleep 1; done'
-      # The runner context is a step's, not a job's.
+      # The runner context is a step's, not a job's. Its resolve can ask PyPI for the protocol moments after the
+      # protocol job published it, before PyPI's index lists it, so it's tried again, each time in fresh stores.
       - name: Compose and probe
         env:
           XDG_STATE_HOME: ${{ runner.temp }}/state
         run: |
-          "$RUNNER_TEMP/venv/bin/python" .github/scripts/release_computers.py compose "$ARCH" \
-            "$RUNNER_TEMP/computers/composed"
+          # shellcheck disable=SC2016 # each try's sh expands them
+          python3 .github/scripts/infra_build.py retry sh -c 'rm -rf "$XDG_STATE_HOME" &&
+            "$RUNNER_TEMP/venv/bin/python" .github/scripts/release_computers.py compose "$ARCH" \
+            "$RUNNER_TEMP/computers/composed"'
       - name: Stop the local registry
         run: docker stop registry
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

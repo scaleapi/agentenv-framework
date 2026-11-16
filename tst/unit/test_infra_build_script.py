@@ -613,6 +613,18 @@ def test_retry_tries_again_while_pypi_doesnt_list_the_protocol_a_build_installs(
             in capsys.readouterr().out)
 
 
+def test_retry_tries_again_while_pypi_doesnt_list_the_protocol_a_computers_compose_resolves(script, monkeypatch):
+    """release_computers.py's compose of chromium resolves the protocol its release just published, as v0.9.1543's
+    did."""
+    missing = ("container/arm64: failed at resolve: resolving the packages failed: ERROR: No matching distribution "
+               "found for agentenv-framework-protocol==0.1.558 (39 s)\n")
+    runs, waits = _attempts(script, monkeypatch, [(missing, 1), ("composed chromium for linux/arm64\n", 0)])
+
+    assert _run(script, monkeypatch, "retry", "sh", "-c", "compose") == 0
+
+    assert len(runs) == 2 and waits == [script._RETRY_WAITS_SECONDS[0]]
+
+
 def test_retry_tries_again_while_pypi_doesnt_list_the_protocol_floor_a_build_names(script, monkeypatch, capsys):
     """The Playwright MCP browser's recorder names a protocol floor, which its release may be the first to publish."""
     missing = "ERROR: No matching distribution found for agentenv-framework-protocol[computer]>=0.1.382\n"
