@@ -147,7 +147,7 @@ def test_request_and_response_contracts(codex):
         "save": {
             "method": "POST",
             "request": {"required": ["context_id", "objects"]},
-            "response": {"required": ["context_id", "objects"]},
+            "response": {"required": ["context_id", "objects"], "optional": ["stats"]},
         },
         "load": {
             "method": "PUT",

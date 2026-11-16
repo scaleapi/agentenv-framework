@@ -102,7 +102,7 @@ def test_request_and_response_contracts(app):
     }
     assert methods["urn:agentenv:snapshot/v1"] == {
         "save": {"method": "POST", "request": {"required": ["context_id", "objects"]},
-                 "response": {"required": ["context_id", "objects"]}},
+                 "response": {"required": ["context_id", "objects"], "optional": ["stats"]}},
         "load": {"method": "PUT", "request": {"required": ["objects"], "optional": ["target_context_id"]},
                  "response": {"required": ["context_id"]}},
     }

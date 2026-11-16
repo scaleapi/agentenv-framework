@@ -1481,7 +1481,7 @@ def test_handler_advertises_the_canonical_request_model() -> None:
     assert set(params) == {"endpoint", "methods"}
     methods = params["methods"]
     assert methods["save"]["request"] == {"required": ["context_id", "objects"]}
-    assert methods["save"]["response"] == {"required": ["context_id", "objects"]}
+    assert methods["save"]["response"] == {"required": ["context_id", "objects"], "optional": ["stats"]}
     assert methods["load"]["request"] == {
         "required": ["objects"],
         "optional": ["target_context_id"],

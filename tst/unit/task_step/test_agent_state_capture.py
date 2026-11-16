@@ -372,3 +372,60 @@ def test_a_foreign_bucket_raises_rather_than_writing_to_the_configured_one(monke
     # silently writes to the configured bucket under the same key path.
     with pytest.raises(ValueError, match="not in the configured bucket"):
         mod.upload_trajectory([], "s3://someone-elses-bucket/traj/")
+
+
+def _events(caplog, event: str) -> list:
+    return [record for record in caplog.records if getattr(record, "event", None) == event]
+
+
+@pytest.mark.asyncio
+async def test_a_completed_save_logs_the_workspace_size_and_where_its_time_went(monkeypatch, caplog):
+    rec = install_capture_stubs(monkeypatch)
+    rec.save_body = {
+        "context_id": "ctx-1",
+        "objects": {"trajectory": {"size_bytes": 10}, "workspace": {"size_bytes": 7_000_000}},
+        "stats": {"file_count": 12, "archive_seconds": 3.5, "upload_seconds": 8.25},
+    }
+    caplog.set_level("INFO", logger=mod.__name__)
+
+    await _capture(timeout_seconds=45)
+
+    (record,) = _events(caplog, "snapshot_save_completed")
+    assert (record.agent_name, record.context_id, record.timeout_seconds) == ("solver", "ctx-1", 45)
+    assert (record.workspace_archive_bytes, record.file_count) == (7_000_000, 12)
+    assert (record.archive_seconds, record.upload_seconds) == (3.5, 8.25)
+    assert record.elapsed_seconds >= 0
+
+
+@pytest.mark.asyncio
+async def test_a_completed_save_from_an_agent_that_reports_no_stats_logs_its_size(monkeypatch, caplog):
+    rec = install_capture_stubs(monkeypatch)
+    rec.save_body = {
+        "context_id": "ctx-1",
+        "objects": {"trajectory": {"size_bytes": 10}, "workspace": {"size_bytes": 900}},
+    }
+    caplog.set_level("INFO", logger=mod.__name__)
+
+    await _capture()
+
+    (record,) = _events(caplog, "snapshot_save_completed")
+    assert record.workspace_archive_bytes == 900
+    assert (record.file_count, record.archive_seconds, record.upload_seconds) == (None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_a_timed_out_save_logs_how_long_it_waited_and_still_raises(monkeypatch, caplog):
+    install_capture_stubs(monkeypatch)
+
+    async def _stalled(self, method, url, **kwargs):
+        raise httpx.ReadTimeout("")
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", _stalled)
+
+    with pytest.raises(httpx.ReadTimeout):
+        await _capture(timeout_seconds=45)
+
+    (record,) = _events(caplog, "snapshot_save_timeout")
+    assert (record.agent_name, record.context_id, record.timeout_seconds) == ("solver", "ctx-1", 45)
+    assert record.elapsed_seconds >= 0
+    assert record.workspace_max_bytes == 5 * 1024**3
