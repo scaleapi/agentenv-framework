@@ -352,15 +352,33 @@ def test_a_v5_wake_s_harness_parts_are_marked_and_come_before_the_wake_s_input_a
     assert staged.record["agent_labeled_trajectories"] == 1
 
 
-def test_a_memory_call_is_an_ordinary_tool_call_in_the_index(run):
-    with_log = stage_run(*_v5_run(run)).files[INDEX_FILE]
-    without_log = stage_run(*_v5_run(copy.deepcopy(run), keep_changes=False)).files[INDEX_FILE]
+@pytest.mark.parametrize("keep_changes", [True, False])
+def test_a_tool_the_harness_provides_is_internal_and_never_an_action(run, keep_changes):
+    staged = stage_run(*_v5_run(run, keep_changes))
+
+    index = staged.files[INDEX_FILE]
+    assert "memory_add" not in index[index.index("## Wake 4 "):]
+    [call] = [line for line in _lines(staged.files, "wakes/wake_004.jsonl")
+              if line["event"] == "tool_call" and line["tool"] == "memory_add"]
+    assert call["internal"] is True and call["step"] == "pre_compaction_save"
+
+
+def test_an_unmarked_tool_of_the_same_name_is_read_as_before(run):
+    def unmarked(r, keep_changes):
+        timeline, turns = _v5_run(copy.deepcopy(r), keep_changes)
+        for e in turns[_url(timeline, 4)].events:
+            e.pop("internal", None)
+        return stage_run(timeline, turns)
+
+    with_log = unmarked(run, True).files[INDEX_FILE]
+    without_log = unmarked(run, False)
 
     # No app change names memory_add, so with change logs it is a possible action; without them, an action.
     assert "- possible action (no app change names this tool): memory_add fact=Saved before summary. " in with_log[
         with_log.index("## Wake 4 "):]
-    assert "- action: memory_add fact=Saved before summary. " in without_log[without_log.index("## Wake 4 "):]
-    assert "never actions" not in with_log + without_log
+    index = without_log.files[INDEX_FILE]
+    assert "- action: memory_add fact=Saved before summary. " in index[index.index("## Wake 4 "):]
+    assert not any(line.get("internal") for line in _lines(without_log.files, "wakes/wake_004.jsonl"))
 
 
 def test_judge_reads_does_not_count_a_wake_the_agent_read_back_with_history_read(run):

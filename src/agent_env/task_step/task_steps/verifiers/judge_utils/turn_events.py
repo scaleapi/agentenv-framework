@@ -35,7 +35,7 @@ _OUTPUT_TEXT = re.compile(r"^llm\.output_messages\.(\d+)\.message\.(?:content|co
 @dataclass(frozen=True)
 class TurnEvents:
     """``events`` in turn order, each ``{"type": "text", "text"}``, ``{"type": "tool_call", "tool", "id", "input",
-    "result", "error"}`` (``result`` absent when none came back), ``{"type": "prompt", "text"}`` (the turn's input,
+    "result", "error"}`` (``result`` absent when none came back; ``internal`` for a tool the harness provides itself), ``{"type": "prompt", "text"}`` (the turn's input,
     when the format records it), ``{"type": "note", "text"}`` (a message the harness put in the turn; a compaction's
     also has ``compaction``, what its span recorded: ``wakes_summarized``, ``wakes_kept``, ``first_kept_wake``,
     ``waited_s``) or ``{"type": "final", "text", "error"}``; for an unknown format, ``{"type": "raw", "event"}`` per
@@ -200,6 +200,8 @@ def _otel_events(spans: list[dict]) -> list[dict]:
             prompt = parse_json_attr(attrs.get("gen_ai.prompt", "{}"))
             call = _call(str((prompt.get("tool") if isinstance(prompt, dict) else None) or tool), None, tool_input)
             _settle(call, output, (span.get("status") or {}).get("status_code") == "ERROR")
+            if attrs.get("harness.tool") is True:   # a tool the harness provides itself (its notes, past wakes)
+                call["internal"] = True
             timed.append((start, i, {**call, **tag}))
             continue
         if span.get("name") == _COMPACTION:

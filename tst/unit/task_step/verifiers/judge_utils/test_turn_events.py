@@ -213,7 +213,7 @@ def test_a_v5_compaction_wake_keeps_the_assistant_s_words_and_makes_the_harness_
     # the assistant's, though its OpenInference output still holds the summary as text.
     own = [e["text"] for e in events if e["type"] in ("text", "thinking")]
     assert not any(summary in t or "step 12" in t for t in own)
-    assert [c["tool"] for c in _calls(traj)] == ["memory_add", "slow_search"]
+    assert [(c["tool"], c.get("internal")) for c in _calls(traj)] == [("memory_add", True), ("slow_search", None)]
 
 
 def test_a_compaction_with_no_end_time_comes_after_its_save_turn_and_its_numbers_and_errors_are_said():

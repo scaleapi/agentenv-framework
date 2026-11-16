@@ -59,7 +59,7 @@ _SAVE_STEP = "pre_compaction_save"
 _BEFORE_WAKE_STEPS = frozenset({_SAVE_STEP, "after_compaction", "failed_wake"})
 # A line's fields that say what and where it is; ``fit`` moves only the others.
 _IDENTITY = frozenset({"event", "wake", "at", "call", "turn", "tool", "kind", "state", "outcome", "phase", "by",
-                       "step", "subagent", "compaction"})
+                       "step", "subagent", "compaction", "internal"})
 
 
 @dataclass(frozen=True)
@@ -260,7 +260,8 @@ class _Stager:
         name = re.sub(r"[^A-Za-z0-9_.-]", "_", _short_tool(e["tool"]))[:60]
         stem = f"{RESULTS_DIR}/wake_{w.n:0{self.width}d}_call_{w.call_count:03d}_{name}"
         line = _line("tool_call", w.n, call=w.call_count, turn=which, step=e.get("step"), tool=e["tool"],
-                     subagent=e.get("subagent"), input=e.get("input"), error=e.get("error"))
+                     subagent=e.get("subagent"), internal=e.get("internal"), input=e.get("input"),
+                     error=e.get("error"))
         if "result" in e:
             line["result"] = e["result"]
         else:
@@ -364,8 +365,11 @@ def _index_block(w: _Wake, path: str, lines: list[dict], by_changes: bool, run_c
     for i, line in enumerate(lines, 1):
         event = line["event"]
         tool = line.get("tool") or ""
-        writes = _short_tool(tool) in changing if by_changes else is_write_action(tool)
-        guessed = by_changes and not writes and _short_tool(tool) not in run_changing and is_write_action(tool)
+        # A tool the harness provides itself ("internal": its notes, its look-ups of past wakes) changes no app.
+        own = bool(line.get("internal"))
+        writes = not own and (_short_tool(tool) in changing if by_changes else is_write_action(tool))
+        guessed = (by_changes and not own and not writes and _short_tool(tool) not in run_changing
+                   and is_write_action(tool))
         if event == "tool_call" and (writes or guessed):
             action = _cut(f"{_short_tool(tool)} {_key_args(line.get('input', line.get('input_preview')))}", ACTION_CHARS)
             kind = "possible action (no app change names this tool)" if guessed else "action"

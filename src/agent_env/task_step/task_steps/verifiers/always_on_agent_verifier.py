@@ -108,8 +108,8 @@ _HARNESS_NOTE = """
 the harness sent the assistant, or a compaction summary that replaced older history in what the assistant sees.
 - Lines with "step": "pre_compaction_save" are a turn the harness asked for before a compaction. What the assistant \
 wrote there went to the harness, not the user, and it ran before the assistant saw that wake's message.
-- memory_* and history_* calls are the assistant's own notes and its look-ups of past wakes. They count as what it \
-did, but change nothing in any app.
+- Tool calls marked "internal" are tools the harness itself provides (notes, look-ups of past wakes). They count as \
+what the assistant did, but they change nothing in any app.
 - Lines with "subagent" are from a helper agent the assistant started.
 - Harness notes have no "at": read them in file order.
 - A compaction summary is the assistant's own summary of its history: its own model wrote it. If the summary lost or \

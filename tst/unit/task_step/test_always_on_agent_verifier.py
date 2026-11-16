@@ -399,7 +399,9 @@ def test_the_files_note_explains_harness_lines_only_for_a_run_whose_trajectories
     assert plain.endswith("no web, no other agents, and nothing to change.") and "harness_note" not in plain
     assert labelled.startswith(plain) and _FILES_NOTE.endswith("{gaps}{harness}")
     for rule in ('"harness_note" lines are from the harness that runs the assistant, never from the assistant or the '
-                 'user', '"step": "pre_compaction_save"', "memory_* and history_* calls are the assistant's own notes",
+                 'user', '"step": "pre_compaction_save"',
+                 'Tool calls marked "internal" are tools the harness itself provides (notes, look-ups of past wakes). '
+                 'They count as what the assistant did, but they change nothing in any app.',
                  'Lines with "subagent" are from a helper agent', 'Harness notes have no "at": read them in file order'):
         assert rule in labelled
 
