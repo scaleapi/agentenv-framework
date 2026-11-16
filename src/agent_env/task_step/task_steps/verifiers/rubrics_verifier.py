@@ -22,6 +22,9 @@ from agent_env.config import get_config
 from agent_env.config.model import ModelParam
 from agent_env.providers.sandbox_providers.sandbox import into_container
 from agent_env.task_step.context import (
+    MODEL_KEY_ERROR_TYPES,
+    ModelKeyCause,
+    ModelKeyUnusable,
     PromptResponse,
     StepContextError,
     TaskStepContext,
@@ -269,6 +272,21 @@ _UNSUPPORTED_TERMS = (
     "cannot be used",
     "incompatible",
 )
+
+
+_BUDGET_MARKERS = ("budget has been exceeded", "exceededbudget", "budget_exceeded")
+
+
+def _model_key_refusal(exc: Exception) -> Optional[ModelKeyCause]:
+    """Whether a LiteLLM error says the endpoint refused the key itself. Parsed here, once, so the retry loop
+    branches on a cause and never on message text. Any other failure, including a 429 rate limit, returns None."""
+    status = getattr(exc, "status_code", None)
+    text = str(exc).lower()
+    if type(exc).__name__ == "BudgetExceededError" or any(marker in text for marker in _BUDGET_MARKERS):
+        return "budget"
+    if status == 401 or type(exc).__name__ == "AuthenticationError":
+        return "auth"
+    return None
 
 
 def _looks_like_response_format_error(exc: Exception) -> bool:
@@ -1252,6 +1270,12 @@ class RubricsVerifierTaskStep(TaskStep):
                 return {"response": content, "trajectory_object_url": None}
             except Exception as exc:
                 last_exc = exc
+                if (cause := _model_key_refusal(exc)) is not None:
+                    logger.error(
+                        f"LLM judge for verifier '{self.verifier_id}' refused its model key "
+                        f"({cause}, {type(exc).__name__}); not retrying"
+                    )
+                    raise ModelKeyUnusable(cause, "judge") from None
                 if image_blocks and use_response_format and _looks_like_response_format_error(exc):
                     logger.warning(
                         f"Multimodal judge call with json_schema failed for verifier "
@@ -1334,6 +1358,8 @@ class RubricsVerifierTaskStep(TaskStep):
         status_msg = (result.get("status") or {}).get("message") or {}
         tr = protocol.TerminalResponse.from_message(status_msg)
         if state == "failed":
+            if tr.error_type in MODEL_KEY_ERROR_TYPES:
+                raise ModelKeyUnusable(MODEL_KEY_ERROR_TYPES[tr.error_type], "judge")
             sandbox_id = getattr(judge_agent, "sandbox_id", None)
             logger.error(
                 "Judge A2A task %s failed (verifier=%s sandbox=%s error_type=%s exception=%s). "

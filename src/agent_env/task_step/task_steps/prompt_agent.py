@@ -35,7 +35,14 @@ from agent_env.env.gateway.constants import (
 )
 from agent_env.store import DuplicateKeyError, get_config
 from agent_env.store.object_store import ObjectStore
-from agent_env.task_step.context import DeployedAgent, PromptResponse, StepContextError, TaskStepContext
+from agent_env.task_step.context import (
+    MODEL_KEY_ERROR_TYPES,
+    DeployedAgent,
+    ModelKeyUnusable,
+    PromptResponse,
+    StepContextError,
+    TaskStepContext,
+)
 from agent_env.entity.refs import EntityRef
 from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import RetryConfig, TaskStep, TaskStepDependency
@@ -826,6 +833,8 @@ class PromptAgentTaskStep(TaskStep):
         ))
 
         if final_state == TaskState.failed:
+            if final_terminal.error_type in MODEL_KEY_ERROR_TYPES:
+                raise ModelKeyUnusable(MODEL_KEY_ERROR_TYPES[final_terminal.error_type], "agent")
             detail_parts = []
             if final_terminal.error_type:
                 detail_parts.append(f"error_type={final_terminal.error_type}")
