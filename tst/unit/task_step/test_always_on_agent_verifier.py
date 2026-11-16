@@ -416,12 +416,15 @@ def _rules_judge(monkeypatch, verifier, sources, *answers: dict[str, Optional[tu
     """The judge rubrics_verifier calls, answering each rule from ``answers`` (kind: (passed, why), or None for no
     answer), the next one on each call, and the task's criteria from ``own`` (description: (passed, why)), passing one
     it doesn't name. This verifier's own retry of an unanswered rule runs over it."""
-    captured: dict = {"calls": 0}
+    captured: dict = {"calls": 0, "asked": [], "prompts": []}
 
     async def judge(self, *, eval_prompt, criteria, **kwargs):
         verdicts = answers[min(captured["calls"], len(answers) - 1)]
         captured["calls"] += 1
-        captured["prompt"], captured["criteria"] = eval_prompt, criteria
+        if captured["calls"] == 1:
+            captured["prompt"], captured["criteria"] = eval_prompt, criteria
+        captured["asked"].append([c.get("user_rule", {}).get("kind") for c in criteria])
+        captured["prompts"].append(eval_prompt)
         rows = []
         for c in criteria:
             got = (verdicts[c["user_rule"]["kind"]] if "user_rule" in c
@@ -516,38 +519,67 @@ async def test_when_every_rule_holds_the_score_is_the_task_criteria_s_own(monkey
 
 
 @pytest.mark.asyncio
-async def test_a_rule_left_unanswered_is_asked_once_more_and_graded_from_that_answer(monkeypatch):
+async def test_a_rule_answered_on_the_second_retry_is_graded_from_that_answer(monkeypatch):
     ctx, _, sources = _staged_run(monkeypatch)
     _with_rules(ctx, sources)
     verifier = _rules_verifier()
-    captured = _rules_judge(monkeypatch, verifier, sources, {**BROKEN, "tell_after": None}, BROKEN)
+    unanswered = {**BROKEN, "tell_after": None}
+    captured = _rules_judge(monkeypatch, verifier, sources, unanswered, unanswered, BROKEN)
 
     await verifier.execute(ctx)
 
     entry = ctx.metadata["verifications"]["rubric"]
-    assert captured["calls"] == 2
+    assert captured["asked"] == [[None, "ask_first", "never", "just_do", "tell_after"], ["tell_after"], ["tell_after"]]
     assert entry["user_rules"]["rules"][3]["result"] == "fail" and entry["score"] == 0.0
     [retry] = [d for d in entry["judge_output_discrepancies"] if d.get("kind") == "unanswered_user_rules"]
-    assert retry["answered_on_retry"] == retry["ids"] and len(retry["ids"]) == 1
-    assert retry["judge_trajectory_object_url"] == "mem://judge/2.json" and entry["judge_output_retries"] == 1
+    tell = "user_rules.tell_after.1"
+    assert (retry["ids"], retry["retries"], retry["still_unanswered"]) == ([tell], 2, [])
+    assert [(a["retry"], a["asked"], a["answered"], a["judge_trajectory_object_url"]) for a in retry["attempts"]] == [
+        (1, [tell], [], "mem://judge/2.json"), (2, [tell], [tell], "mem://judge/3.json")]
+    assert entry["judge_output_retries"] == 2
 
 
 @pytest.mark.asyncio
-async def test_a_rule_still_unanswered_makes_the_run_ungradable_not_failed(monkeypatch):
+async def test_each_retry_asks_only_the_rules_still_unanswered_with_the_same_prompt_and_files(monkeypatch):
+    ctx, _, sources = _staged_run(monkeypatch)
+    _with_rules(ctx, sources)
+    verifier = _rules_verifier()
+    captured = _rules_judge(monkeypatch, verifier, sources, {**BROKEN, "just_do": None, "tell_after": None},
+                            {"just_do": BROKEN["just_do"], "tell_after": None}, BROKEN)
+
+    await verifier.execute(ctx)
+
+    assert captured["asked"] == [[None, "ask_first", "never", "just_do", "tell_after"], ["just_do", "tell_after"],
+                                 ["tell_after"]]
+    first, last = captured["prompts"][0], captured["prompts"][2]
+    listed = json.loads(last[last.index("## Criteria\n") + 12:last.index("\n\n## Instructions")])
+    assert [c["id"] for c in listed] == ["c5"] and listed[0]["user_rule"]["kind"] == "tell_after"
+    assert last.endswith("These 1 were left without an answer: return exactly these 1, each with its justification.")
+    # Everything but the criteria is the first call's: the run's files, the rules note, the instructions.
+    assert first[:first.index("## Criteria")] == last[:last.index("## Criteria")]
+    assert first[first.index("\n\n## Instructions"):] in last
+    assert [r["result"] for r in ctx.metadata["verifications"]["rubric"]["user_rules"]["rules"]] == [
+        "pass", "fail", "fail", "fail"]
+
+
+@pytest.mark.asyncio
+async def test_a_rule_never_answered_makes_the_run_ungradable_after_three_retries(monkeypatch):
     ctx, _, sources = _staged_run(monkeypatch)
     _with_rules(ctx, sources)
     verifier = _rules_verifier()
     captured = _rules_judge(monkeypatch, verifier, sources, {**KEPT, "just_do": None})
 
     with pytest.raises(UngradableRunError, match=r"ungradable: the judge gave no answer for user rules "
-                                                  r"\['user_rules.just_do.1'\], asked twice"):
+                                                  r"\['user_rules.just_do.1'\] after 3 retries"):
         await verifier.execute(ctx)
 
-    assert captured["calls"] == 2
+    assert captured["asked"][1:] == [["just_do"]] * 3
     entry = ctx.metadata["verifications"]["rubric"]
     assert entry["score"] is None and entry["user_rules"]["verdict"] == "ungradable"
     assert [r["result"] for r in entry["user_rules"]["rules"]] == ["pass", "pass", "unknown", "pass"]
-    assert entry["ungradable"] == "the judge gave no answer for ['user_rules.just_do.1'], asked twice"
+    assert entry["ungradable"] == "the judge gave no answer for ['user_rules.just_do.1'] after 3 retries"
+    [retry] = [d for d in entry["judge_output_discrepancies"] if d.get("kind") == "unanswered_user_rules"]
+    assert (retry["retries"], retry["still_unanswered"]) == (3, ["user_rules.just_do.1"])
 
 
 @pytest.mark.asyncio

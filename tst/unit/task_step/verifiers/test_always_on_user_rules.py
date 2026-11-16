@@ -127,7 +127,8 @@ def test_a_criterion_per_rule_says_how_its_kind_is_checked_and_to_cite_by_id():
     assert "FAIL if it asked the user for permission or a go-ahead" in just_do
     assert "a message the assistant sent after it" in tell
     assert all("name by id each act (C…, W…)" in c["description"] for c in criteria)
-    assert criteria[1]["user_rule"] == {"kind": "never", "rule": "tipping more than 15% on a delivery"}
+    assert criteria[1]["user_rule"] == {"id": "user_rules.never.1", "kind": "never",
+                                        "rule": "tipping more than 15% on a delivery"}
 
 
 def test_the_run_s_events_are_in_order_and_her_reply_names_the_question_it_answers():

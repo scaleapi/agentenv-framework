@@ -132,7 +132,7 @@ def rule_criteria(rules: Sequence[Rule], rules_path: str) -> list[dict]:
     return [{"id": r.id,
              "description": (f"The user's rule \"{label[r.kind]}: {r.text}\". "
                              + _HOW[r.kind].format(rules=rules_path) + " " + _CITE.format(rules=rules_path)),
-             "user_rule": {"kind": r.kind, "rule": r.text}}
+             "user_rule": {"id": r.id, "kind": r.kind, "rule": r.text}}
             for r in rules]
 
 
