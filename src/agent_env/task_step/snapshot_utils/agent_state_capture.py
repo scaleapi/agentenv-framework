@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
 from dataclasses import dataclass
 from collections.abc import Mapping
@@ -19,6 +20,7 @@ from agentenv_protocol.a2a_agent import ObjectSnapshotSaveResponse
 
 from agent_env.a2a_agent import A2AAgent
 from agent_env.a2a_agent.object_transfer import (
+    DEFAULT_SNAPSHOT_WORKSPACE_MAX_BYTES,
     SNAPSHOT_TRAJECTORY_OBJECT_NAME,
     SNAPSHOT_WORKSPACE_OBJECT_NAME,
     FetchedTrajectory,
@@ -97,15 +99,51 @@ async def capture_workspace(
         capture_prefix=capture_prefix,
         sandbox_type=sandbox_type,
     )
-    await invoke_transfer(
-        a2a_url + save_path,
-        call,
-        verb="POST",
-        operation="snapshot save",
-        timeout=timeout_seconds,
-        response_model=ObjectSnapshotSaveResponse,
-        store=store,
-        headers=headers,
+    started = time.monotonic()
+    try:
+        saved: ObjectSnapshotSaveResponse = await invoke_transfer(
+            a2a_url + save_path,
+            call,
+            verb="POST",
+            operation="snapshot save",
+            timeout=timeout_seconds,
+            response_model=ObjectSnapshotSaveResponse,
+            store=store,
+            headers=headers,
+        )
+    except httpx.TimeoutException:
+        elapsed = time.monotonic() - started
+        logger.error(
+            "Snapshot save timed out: agent=%s context_id=%s after %.1fs (budget %ss)",
+            agent_name, a2a_context_id, elapsed, timeout_seconds,
+            extra={
+                "event": "snapshot_save_timeout",
+                "agent_name": agent_name,
+                "context_id": a2a_context_id,
+                "elapsed_seconds": round(elapsed, 1),
+                "timeout_seconds": timeout_seconds,
+                # The agent hasn't answered, so the workspace's size is unknown; this is its cap.
+                "workspace_max_bytes": DEFAULT_SNAPSHOT_WORKSPACE_MAX_BYTES,
+            },
+        )
+        raise
+    elapsed = time.monotonic() - started
+    workspace_bytes = saved.objects.workspace.size_bytes if saved.objects.workspace else None
+    stats = saved.stats
+    logger.info(
+        "Snapshot save completed: agent=%s context_id=%s workspace_bytes=%s in %.1fs",
+        agent_name, a2a_context_id, workspace_bytes, elapsed,
+        extra={
+            "event": "snapshot_save_completed",
+            "agent_name": agent_name,
+            "context_id": a2a_context_id,
+            "elapsed_seconds": round(elapsed, 1),
+            "timeout_seconds": timeout_seconds,
+            "workspace_archive_bytes": workspace_bytes,
+            "file_count": stats.file_count if stats else None,
+            "archive_seconds": stats.archive_seconds if stats else None,
+            "upload_seconds": stats.upload_seconds if stats else None,
+        },
     )
 
     # The agent's answer is only a claim: a snapshot missing either object cannot be restored.

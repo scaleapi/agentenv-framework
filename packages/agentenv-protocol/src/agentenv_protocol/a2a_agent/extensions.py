@@ -276,9 +276,18 @@ class SnapshotUploadedObjects(ExtensionResponse):
     workspace: Uploaded | None = None
 
 
+class SnapshotSaveStats(ExtensionResponse):
+    """Where a save spent its time, so the caller can log it: the agent's own logs may never leave its sandbox."""
+
+    file_count: int = Field(ge=0)
+    archive_seconds: float = Field(ge=0)
+    upload_seconds: float = Field(ge=0)
+
+
 class ObjectSnapshotSaveResponse(ExtensionResponse):
     context_id: str
     objects: SnapshotUploadedObjects
+    stats: SnapshotSaveStats | None = None
 
 
 class ObjectSnapshotLoadResponse(ExtensionResponse):
