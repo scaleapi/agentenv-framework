@@ -1,9 +1,11 @@
 """The composer: a computer env's base, driver and apps built into one image for each form and arch, on a builder the
 put's sandbox provider gives (``builder``), tagged in the env's image store by a key of everything that goes into it, so
-an image of that key, built for any env and on any builder, is reused. A disk form is made from its arch's container
-once that has built: its root filesystem as the disk's, on the base disk's EFI system partition, by a build that runs
-only on the builder's own platform. A VM bundle, macOS's, is composed on a Mac: its base's booted, given each layer
-over ssh and kept on that Mac by a name of its key (``vm_bundle``).
+an image of that key, built for any env and on any builder, is reused. An app agent-env's release published composed,
+chromium, is pulled from where it published it instead: its wheel records the lock it composed from and the key it
+took, so a build of the same inputs finds it, without resolving or building (``_released``). A disk form is made from
+its arch's container once that has built: its root filesystem as the disk's, on the base disk's EFI system partition,
+by a build that runs only on the builder's own platform. A VM bundle, macOS's, is composed on a Mac: its base's
+booted, given each layer over ssh and kept on that Mac by a name of its key (``vm_bundle``).
 Each result is recorded in the env's metadata as it finishes (``composed``), and the arches that built are written as
 the env's computer, a ``computer`` artifact over an index of their images."""
 
@@ -52,7 +54,8 @@ from agent_env.env.envs.computer.utils import (
 )
 from agent_env.env.envs.computer.utils.composed import BUILT, REPOSITORY, Record, failed, mirror_tag, now, stale
 from agent_env.env.envs.computer.utils.install import Install, for_os, platform_of
-from agent_env.env.published_images import DISK, DISK_TOOLS_IMAGE, published_disk, published_pinned
+from agent_env.env.published_images import (
+    DISK, DISK_TOOLS_IMAGE, published_disk, published_pinned, released_image, released_index, released_lock)
 from agent_env.providers.sandbox_providers.host_images import platform_tag
 from agent_env.store.ids import derive_id
 from agent_env.store.image_store.image_contents import image_config, labels
@@ -633,6 +636,17 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
             return held[0]
 
         inputs = packages.inputs_digest(wants, context, base_identity, arch)
+        settings, context_digest = _build_settings(env, base), _digest(context)
+
+        def keyed(lock: packages.Lock | None) -> tuple[str, str]:
+            dockerfile = _dockerfile(source, layers, base, settings, lock)
+            return dockerfile, _key(base=base_identity, dockerfile=dockerfile, context=context_digest,
+                                    lock=lock.digest() if lock is not None else None, form=form, arch=arch,
+                                    format=FORMAT)
+
+        if inputs is not None and (published := _released(inputs, keyed, arch, pair, progress)) is not None:
+            attempt.key = published["key"]
+            return published
         lock = packages.stored(inputs, env.stored_id) if inputs is not None else None
         if inputs is not None and lock is None:
             attempt.stage = "resolve"
@@ -641,9 +655,8 @@ def _built(env: ComputerEnv, base: ComputerArtifact, driver: ComputerDriverEnv, 
             lock, fetched = packages.resolve(inputs, wants, resolving, source, arch, env.stored_id)
             progress.at(pair, "resolved", f"resolved {len(fetched)} files and stored them")
             attempt.stage = "build"
-        dockerfile = _dockerfile(source, layers, base, _build_settings(env, base), lock)
-        key = attempt.key = _key(base=base_identity, dockerfile=dockerfile, context=_digest(context),
-                                 lock=lock.digest() if lock is not None else None, form=form, arch=arch, format=FORMAT)
+        dockerfile, key = keyed(lock)
+        attempt.key = key
         store, ref, pinned = _stored(env, key)
         if pinned is not None:
             progress.at(pair, "reusing", "reusing the image of the same key, built earlier")
@@ -790,6 +803,31 @@ def _stored(env: ComputerEnv, key: str) -> tuple[ImageStore, str, str | None]:
         return store, ref, None
     logger.info(f"copied {tag} from the computer image mirror {mirror}")
     return store, ref, pin_if_served(ref, store.auth(ref))
+
+
+def _released(inputs: str, keyed: Callable[[packages.Lock], tuple[str, str]], arch: str, pair: str,
+              progress: _Progress) -> dict | None:
+    """The image agent-env's release published of a build of ``inputs``, which it resolved to the lock its wheel
+    records: found by the key ``keyed`` gives a build under that lock, so it's what this build would make, and recorded
+    there by its digest, which a sandbox pulls anonymously. None when the release published none, a build here differs,
+    or the registry won't give it, so it's composed as before."""
+    if (shipped := released_lock(inputs)) is None:
+        return None
+    _, key = keyed(packages.Lock.model_validate(shipped))
+    if (image := released_image(key)) is None:
+        logger.info(f"{pair}: agent-env's release resolved these packages, but a build here differs from its build, "
+                    "so it's composed")
+        return None
+    try:
+        kept = labels(image, arch, None)
+    except (ValueError, OSError) as e:
+        logger.warning(f"{pair}: agent-env's release published it as {image}, which can't be pulled, so it's composed: "
+                       f"{e}")
+        return None
+    progress.at(pair, "reusing", f"reusing the image agent-env's release published, {image}")
+    return {"status": "unverified", "key": key, "image": image, "reused": True, "published": True,
+            "emulated": kept.get(EMULATED_LABEL) == "true", "lock": inputs,
+            "installed": json.loads(kept.get(INSTALLED_LABEL, "{}")), "built_at": now()}
 
 
 def _image_store(env: ComputerEnv) -> ImageStore:
@@ -1128,13 +1166,41 @@ def _written(env: ComputerEnv, base: ComputerArtifact, arches: list[str], config
 
 
 def _joined(env: ComputerEnv, name: str, what: str, images: dict[str, str], arches: list[str]) -> DockerImageArtifact:
-    """``images`` of ``arches`` joined into one index in the env's image store, signed in to it, as an image artifact."""
+    """``images`` of ``arches`` joined into one index in the env's image store, signed in to it, as an image artifact:
+    the index agent-env's release published when those are the images it published, and an image of it among others
+    copied into the store first, since an index names images in its own repository."""
+    if (released := released_index({arch: images[arch] for arch in arches})) is not None:
+        try:
+            return DockerImageArtifact.put_ref(derive_id(env.stored_id, name),
+                                               description=f"{env.stored_id}'s {what}", image_name=released)
+        except (ValueError, OSError) as e:
+            logger.warning(f"{env.stored_id}: agent-env's release published its index as {released}, which can't be "
+                           f"read, so one is joined in its store: {e}")
     store = get_config().get_image_store_for(env.stored_id)
+    images = {arch: _in_store(store, images[arch]) for arch in arches}
     index = store.image_ref(REPOSITORY, "index-" + hashlib.sha256(
         ",".join(images[arch] for arch in arches).encode()).hexdigest())
     write_index(index, {f"linux/{arch}": images[arch] for arch in arches}, store.auth(index))
     return DockerImageArtifact.put_ref(derive_id(env.stored_id, name), description=f"{env.stored_id}'s {what}",
                                        image_name=index)
+
+
+def _in_store(store: ImageStore, image: str) -> str:
+    """``image``, pinned, as the store holds it: itself when it's in the store's repository, else copied there under a
+    tag of its digest, which the copy keeps."""
+    digest = image.rpartition("@")[2]
+    ref = store.image_ref(REPOSITORY, f"released-{digest.removeprefix('sha256:')}")
+    if _repository(image) == _repository(ref):
+        return image
+    if pin_if_served(ref, store.auth(ref)) is None:
+        copy_image(image, ref, None, store.auth(ref))
+    return f"{ref}@{digest}"
+
+
+def _repository(ref: str) -> str:
+    """``ref``'s registry and repository, without its tag or digest; a registry's port isn't a tag."""
+    name = ref.partition("@")[0]
+    return name[:name.rfind(":")] if name.rfind(":") > name.rfind("/") else name
 
 
 def _digest(folder: Path) -> str:

@@ -6,6 +6,7 @@ from __future__ import annotations
 import ast
 import base64
 import configparser
+import hashlib
 import json
 import subprocess
 import sys
@@ -14,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from agent_env.env import bootstrap
-from agent_env.env.published_images import DISK_IMAGES, REGISTRY, write_release_digests
+from agent_env.env.published_images import DISK_IMAGES, REGISTRY, released_computers, write_release_digests
 from tst.util.scripts import SCRIPTS, load_script
 
 REPO = SCRIPTS.parents[1]
@@ -285,6 +286,148 @@ def test_verify_record_refuses_an_image_recorded_twice(script, monkeypatch, tmp_
     assert _run(script, monkeypatch, "verify-record", str(path)) == 1
 
     assert f"records {record['images'][0]['repository'].split('/')[-1]} more than once" in capsys.readouterr().out
+
+
+CHROMIUM = "@local/agentenv-framework/browsers/chromium"
+CHROMIUM_REPOSITORY = f"{REGISTRY}/agentenv-chromium"
+_AMD64, _ARM64, _ARM64_COMPOSED, _INDEX = ("sha256:" + c * 64 for c in "1234")
+_LOCAL = "localhost:5000/agentenv-computers"
+_IMAGES = {"amd64": f"{CHROMIUM_REPOSITORY}@{_AMD64}", "arm64": f"{CHROMIUM_REPOSITORY}@{_ARM64}"}
+_COMPUTER_INDEX = f"{CHROMIUM_REPOSITORY}:index-" + hashlib.sha256(
+    ",".join(_IMAGES[arch] for arch in ("amd64", "arm64")).encode()).hexdigest()
+
+
+def _lock(arch: str) -> dict:
+    return {"inputs": "sha256:" + "c" * 64, "arch": arch, "apt": [], "wheels": {}, "downloads": {}}
+
+
+def _composed(folder: Path, changes: dict | None = None, arches=("amd64", "arm64")) -> Path:
+    """What release_computers.py compose writes for each arch: chromium in the local registry under its key, amd64's a
+    manifest, arm64's an index of its platform's manifest and an attestation, with ``changes`` by arch."""
+    for arch in arches:
+        key, digest = ("a" if arch == "amd64" else "b") * 64, _AMD64 if arch == "amd64" else _ARM64_COMPOSED
+        entry = {"env": CHROMIUM, "form": "container", "arch": arch, "key": f"sha256:{key}",
+                 "image": f"{_LOCAL}:{key}@{digest}", "lock": _lock(arch)}
+        (folder / f"{arch}.json").write_text(json.dumps([{**entry, **(changes or {}).get(arch, {})}]))
+    return folder
+
+
+def _computer_registry(served: dict[str, str], created: list, children: set[str] | None = None):
+    """Docker as the registries answer: ``served`` as ``_docker`` serves it, the local registry's composed images, and
+    the agentenv-chromium index, served once created, of ``children``, by default the two images it was made of."""
+    published = _docker(served)
+    raws = {f"{_LOCAL}@{_AMD64}": {"mediaType": "application/vnd.oci.image.manifest.v1+json"},
+            f"{_LOCAL}@{_ARM64_COMPOSED}": {"mediaType": "application/vnd.oci.image.index.v1+json", "manifests": [
+                {"digest": _ARM64, "platform": {"os": "linux", "architecture": "arm64"}},
+                {"digest": "sha256:" + "9" * 64, "platform": {"os": "unknown", "architecture": "unknown"}}]}}
+
+    def run(command, **kw):
+        if command[:5] != ["docker", "buildx", "imagetools", "inspect", _COMPUTER_INDEX] and command[5:] != ["--raw"]:
+            return published(command, **kw)
+        ref = command[4]
+        if ref == _COMPUTER_INDEX and not created:
+            return subprocess.CompletedProcess(command, 1, "", f"ERROR: {ref}: not found\n")
+        if command[5:] == ["--raw"]:
+            raw = raws.get(ref) or (ref == _COMPUTER_INDEX and {"manifests": [
+                {"digest": digest} for digest in sorted(children or {_AMD64, _ARM64})]})
+            return subprocess.CompletedProcess(command, 0 if raw else 1, json.dumps(raw) if raw else "", "")
+        return subprocess.CompletedProcess(command, 0, json.dumps({"digest": _INDEX}), "")
+    return run
+
+
+def test_publish_computers_joins_each_apps_platform_manifests_into_one_index_and_records_it(script, monkeypatch,
+                                                                                           tmp_path, workflow):
+    created = []
+    monkeypatch.setattr(script.subprocess, "run", _computer_registry({}, created))
+    monkeypatch.setattr(script.subprocess, "Popen", lambda argv, **kw: (created.append(argv), _Process("", 0))[1])
+    folder = _composed(tmp_path)
+
+    assert _run(script, monkeypatch, "publish-computers", str(folder)) == 0
+
+    assert created == [["docker", "buildx", "imagetools", "create", "-t", _COMPUTER_INDEX,
+                        "--annotation", "index:org.opencontainers.image.source=https://github.com/scaleapi/agentenv-framework",
+                        "--annotation", "index:org.opencontainers.image.revision=c0ffee",
+                        f"{_LOCAL}@{_AMD64}", f"{_LOCAL}@{_ARM64}"]]
+    computers = json.loads((folder / "computers.json").read_text())
+    assert computers == [{"env": CHROMIUM, "form": "container", "index": f"{_COMPUTER_INDEX}@{_INDEX}", "arches": {
+        arch: {"key": f"sha256:{('a' if arch == 'amd64' else 'b') * 64}", "image": _IMAGES[arch], "lock": _lock(arch)}
+        for arch in ("amd64", "arm64")}}]
+    record = tmp_path / "published_images.json"
+    write_release_digests({}, record, computers)
+    assert released_computers(record) == computers
+
+
+@pytest.mark.parametrize("changes, arches, problem", [
+    ({"arm64": {"env": "@local/agentenv-framework/browsers/other"}}, ("amd64", "arm64"),
+     "isn't an app a release publishes"),
+    ({"amd64": {"key": "sha256:" + "f" * 64}}, ("amd64", "arm64"), "isn't an app a release publishes"),
+    ({"arm64": {"lock": _lock("amd64")}}, ("amd64", "arm64"), "isn't an app a release publishes"),
+    ({"amd64": {"more": 1}}, ("amd64", "arm64"), "isn't an app's env, form, arch, key, image and lock"),
+    ({}, ("amd64",), "arm64.json isn't a list of composed apps"),
+], ids=["another-app", "not-under-its-key", "another-arch-lock", "more", "an-arch-missing"])
+def test_publish_computers_refuses_what_a_compose_didnt_write_and_pushes_nothing(script, monkeypatch, tmp_path,
+                                                                               workflow, capsys, changes, arches,
+                                                                               problem):
+    calls = []
+    monkeypatch.setattr(script.subprocess, "run", _docker({}, calls))
+
+    assert _run(script, monkeypatch, "publish-computers", str(_composed(tmp_path, changes, arches))) == 1
+
+    assert problem in capsys.readouterr().out and calls == []
+
+
+def test_publish_computers_refuses_an_index_that_doesnt_name_exactly_its_images(script, monkeypatch, tmp_path,
+                                                                              workflow, capsys):
+    created = []
+    monkeypatch.setattr(script.subprocess, "run", _computer_registry({}, created, children={_AMD64}))
+    monkeypatch.setattr(script.subprocess, "Popen", lambda argv, **kw: (created.append(argv), _Process("", 0))[1])
+    folder = _composed(tmp_path)
+
+    assert _run(script, monkeypatch, "publish-computers", str(folder)) == 1
+
+    assert f"and not an index of exactly ['{_AMD64}', '{_ARM64}']" in capsys.readouterr().out
+    assert not (folder / "computers.json").exists()
+
+
+def _computers_record(tmp_path, arches=None) -> Path:
+    path = tmp_path / "published_images.json"
+    write_release_digests({image.ref(): _DIGEST for image in bootstrap.PUBLISHED_IMAGES}, path, [
+        {"env": CHROMIUM, "form": "container", "index": f"{_COMPUTER_INDEX}@{_INDEX}", "arches": arches or {
+            arch: {"key": "sha256:" + "a" * 64, "image": image, "lock": _lock(arch)} for arch, image in _IMAGES.items()}}])
+    return path
+
+
+@pytest.mark.parametrize("children, problem", [
+    (None, None),
+    ({_AMD64}, f"{_COMPUTER_INDEX} doesn't name exactly the images recorded for {CHROMIUM}'s arches"),
+], ids=["served", "another-index"])
+def test_verify_record_checks_each_composed_computers_index_and_its_images(script, monkeypatch, tmp_path, capsys,
+                                                                          children, problem):
+    served = {image.ref(): _DIGEST for image in bootstrap.PUBLISHED_IMAGES}
+    monkeypatch.setattr(script.subprocess, "run", _computer_registry(served, [True], children))
+
+    code = _run(script, monkeypatch, "verify-record", str(_computers_record(tmp_path)))
+
+    out = capsys.readouterr().out
+    assert (code, problem in out if problem else "::error::" not in out) == (1 if problem else 0, True), out
+
+
+def test_verify_record_refuses_a_composed_computer_recorded_in_another_repository(script, monkeypatch, tmp_path,
+                                                                                 capsys):
+    monkeypatch.setattr(script.subprocess, "run", _docker({image.ref(): _DIGEST for image in bootstrap.PUBLISHED_IMAGES}))
+    arches = {arch: {"key": "sha256:" + "a" * 64, "image": f"ghcr.io/someone/thing@{_AMD64}", "lock": _lock(arch)}
+              for arch in ("amd64", "arm64")}
+
+    assert _run(script, monkeypatch, "verify-record", str(_computers_record(tmp_path, arches))) == 1
+
+    assert (f"{CHROMIUM}'s arches aren't ['amd64', 'arm64'], each a key, an image by digest in {CHROMIUM_REPOSITORY}"
+            in capsys.readouterr().out)
+
+
+def test_each_computer_app_a_release_composes_is_published_in_a_package_named_for_it(script):
+    composing = load_script("release_computers.py")
+
+    assert script.COMPUTERS == {env: f"agentenv-{alias}" for alias, env in composing.APPS.items()}
 
 
 @pytest.mark.parametrize("name, expected", [

@@ -282,6 +282,21 @@ async def test_a_move_within_a_document_is_the_commands_that_asked_for_it_and_us
 
 
 @pytest.mark.asyncio
+async def test_a_reload_asked_for_once_a_move_within_a_document_answered_is_left_for_the_navigation_it_makes():
+    causes = browser_log.Causes()
+    moved, reload = {"seq": 3, "via": "agentenv"}, {"seq": 3, "via": "agentenv", "reload": True}
+    answer = asyncio.get_running_loop().create_future()
+    causes.navigating("T1", answer, moved)
+    within = asyncio.ensure_future(causes.navigated_within("T1"))
+    await asyncio.sleep(0)
+    answer.set_result(None)
+    causes.navigates_next("T1", reload)
+
+    assert await within == moved
+    assert await causes.navigated("T1", "L-reload") == reload
+
+
+@pytest.mark.asyncio
 async def test_a_move_back_with_nowhere_to_go_leaves_no_cause_behind(tmp_path):
     pipe = Pipe()
     control = BrowserControl(pipe, "agent", (1280, 800))

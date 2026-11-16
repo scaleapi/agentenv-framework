@@ -4,8 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, EnvCapabilityUnsupported
-from agent_env.env.gateway.constants import EXT_CLOCK_URI
+from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, DeployedSandboxEnv
+from agent_env.env.gateway.constants import EXT_CLOCK_URI, WELL_KNOWN_PATH
 from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.task_step.task_steps import sync_env_clock as mod
 from agent_env.task_step.task_steps.sync_env_clock import SyncEnvClockTaskStep, resolve_virtual_time
@@ -106,15 +106,6 @@ async def test_execute_syncs_each_child_env_through_the_stored_card(monkeypatch)
     ]
     assert json.loads(sent[0].content) == {"virtual_time": T0, "virtual_seconds_per_real_second": 1.0}
     assert [s["service"] for s in context.metadata["clock_configurations"][0]["synced"]] == ["email"]
-
-
-@pytest.mark.asyncio
-async def test_execute_raises_before_any_request_when_the_card_lacks_set_time(monkeypatch):
-    sent = _mock_http(monkeypatch)
-    record = _carded({"name": "gw", "capabilities": {"extensions": []}, "children_environments": []})
-    with pytest.raises(EnvCapabilityUnsupported, match="does not offer 'set_time' on urn:agentenv:clock/v1"):
-        await _step().execute(TaskStepContext(deployed_envs=[record]))
-    assert sent == []
 
 
 @pytest.mark.asyncio
@@ -359,16 +350,35 @@ def test_without_a_zone_virtual_time_is_passed_through_untouched():
 
 @pytest.mark.asyncio
 async def test_execute_arms_the_gateway_at_the_local_instant_and_tells_every_server_the_zone(monkeypatch):
-    sent = _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL})
+    sent = _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL, "time_zone": "America/New_York"})
     monkeypatch.setattr("agent_env.env.env.Env.get", lambda *a, **k: SimpleNamespace(environment_name="email"))
     context = TaskStepContext(deployed_envs=[_carded(await _composed_card({"mcp-email": [_ZONE_EXT]}))])
 
     await _zoned().execute(context)
 
-    assert json.loads(sent[0].content)["virtual_time"] == "2026-01-01T17:00:00Z"
+    assert json.loads(sent[0].content) == {"virtual_time": "2026-01-01T17:00:00Z", "virtual_seconds_per_real_second": 1.0,
+                                           "time_zone": "America/New_York"}  # get_time answers in it too
     assert json.loads(sent[2].content) == {"env_get_time_url": CLOCK_URL, "timezone": "America/New_York"}
     cfg = context.metadata["clock_configurations"][0]
     assert (cfg["timezone"], cfg["virtual_time"], cfg["armed_at"]) == ("America/New_York", "2026-01-01T12:00:00", "2026-01-01T17:00:00Z")
+    assert cfg["get_time_zone"] == "America/New_York"
+
+
+@pytest.mark.asyncio
+async def test_a_gateway_that_didnt_take_the_zone_is_named_in_a_warning_and_the_record_and_the_step_goes_on(
+        monkeypatch, caplog):
+    """An older gateway image answers the arm without keeping time_zone, so get_time answers in UTC alone: the step
+    still arms and syncs, as it did with that gateway before, and says why get_time won't give the user's clock."""
+    _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL})
+    monkeypatch.setattr("agent_env.env.env.Env.get", lambda *a, **k: SimpleNamespace(environment_name="email"))
+    context = TaskStepContext(deployed_envs=[_carded(await _composed_card({"mcp-email": [_ZONE_EXT]}))])
+
+    with caplog.at_level("WARNING"):
+        await _zoned().execute(context)
+
+    assert context.metadata["clock_configurations"][0]["get_time_zone"] is None
+    assert "its gateway's clock didn't take time zone 'America/New_York', so get_time answers agents in UTC alone" in (
+        caplog.text)
 
 
 @pytest.mark.asyncio
@@ -464,6 +474,31 @@ async def test_a_multi_envs_computer_is_synced_at_its_own_address_with_its_own_c
     assert set(syncs) == {f"{_CARD}/svc/mcp-email/agentenv/ext/sync_time", "https://desk.example/agentenv/ext/sync_time"}
     assert {k: syncs["https://desk.example/agentenv/ext/sync_time"].get(k) for k in computer.control_headers} == \
         computer.control_headers
+
+
+@pytest.mark.asyncio
+async def test_an_env_with_no_gateway_clock_as_a_computer_deployed_alone_is_refused_saying_to_deploy_it_in_a_multi_env(
+        monkeypatch):
+    sent = _mock_http(monkeypatch)
+    alone = DeployedSandboxEnv(env_id="e1", env_version=1, sandbox_id="sb-desk", control_token="desk-token",
+                               environment_card_url=f"https://desk.example{WELL_KNOWN_PATH}",
+                               environment_card={"name": "desktop", "url": "/agentenv",
+                                                 "capabilities": {"extensions": [_CLOCK_EXT]}})
+
+    with pytest.raises(StepContextError, match="has no clock to arm") as refused:
+        await _step().execute(TaskStepContext(deployed_envs=[alone]))
+
+    assert "deploy it in a multi env" in str(refused.value) and sent == []
+
+
+@pytest.mark.asyncio
+async def test_a_record_that_kept_no_card_is_refused_saying_so_not_told_to_deploy_a_multi_env(monkeypatch):
+    sent = _mock_http(monkeypatch)
+
+    with pytest.raises(StepContextError, match="its deploy record keeps no env card") as refused:
+        await _step().execute(TaskStepContext(deployed_envs=[_cardless()]))
+
+    assert "multi env" not in str(refused.value) and sent == []
 
 
 def test_a_padded_zone_is_stored_and_sent_stripped():

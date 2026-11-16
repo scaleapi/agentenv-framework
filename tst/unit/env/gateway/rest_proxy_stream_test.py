@@ -531,6 +531,20 @@ async def _post_rpc(gw: Gateway, payload, role: str, path: str = "/svc/mcp-svc/m
 
 
 @pytest.mark.asyncio
+async def test_a_server_whose_mcp_endpoint_is_elsewhere_has_the_role_stamped_there_and_not_at_mcp(monkeypatch):
+    up = _Upstream([b"{}"])
+    up.install(monkeypatch)
+    gw = Gateway(host="127.0.0.1", port=0, server_name="t", rest_proxy_urls={"mcp-svc": UPSTREAM},
+                 internal_mcp_servers=[InternalMCPServer(name="svc", mcp_url=f"{UPSTREAM}/rpc")])
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}).encode()
+    for path in ("/svc/mcp-svc/rpc", "/svc/mcp-svc/mcp"):
+        await _call(gw, path, method="POST", body=body, headers={
+            "AgentEnv-Role": "alice@example.com", "content-type": "application/json", "content-length": str(len(body))})
+    assert [json.loads(r.content)["params"].get("_meta") for r in up.requests] == [
+        {AGENT_ENV_ROLE_META_KEY: "alice@example.com"}, None]
+
+
+@pytest.mark.asyncio
 async def test_a_tool_disabled_for_the_caller_is_refused_as_mcp_refuses_it_and_never_reaches_the_child(monkeypatch):
     up = _Upstream([b"{}"])
     up.install(monkeypatch)

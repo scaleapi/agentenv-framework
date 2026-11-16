@@ -20,7 +20,10 @@ alone only; `locale`; `time_zone`; and
 (`apps = [{ env = "chromium", settings = { start_urls = ["https://example.test/"] } }]`), and a deploy overrides any of
 them (`env_params.app_settings = {chromium = {start_urls = [...]}}`). Its data is its profile, `~/.config/chromium`, which
 the image has none of, so each deploy and each reset starts with a clean one. Name it from another bundle as `chromium`,
-the alias `aliases.toml` gives it, or by its id, `@local/agentenv-framework/browsers/chromium`. A multi env names it as
+the alias `aliases.toml` gives it, or by its id, `@local/agentenv-framework/browsers/chromium`. Each release publishes
+it composed, so a compose of it from a released wheel, on any machine, pulls that image by digest from
+`ghcr.io/scaleapi/agentenv-chromium` rather than resolving its packages and building it (its record says
+`published`); a changed `chromium`, a checkout or another base composes it as before. A multi env names it as
 its website browser with `browser_envs = ["chromium"]`, in place of the run's `playwright-mcp`: it then deploys on a
 sandbox of its own beside the multi env's computers, sized by the deploy step's `child_envs.chromium`, its tools served
 under `chromium_`, routing the multi env's synthetic sites through the gateway, its network its own env's, as any

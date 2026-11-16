@@ -1,7 +1,7 @@
 """Where and how a computer env's pairs build: this machine's Docker, natively or emulated, or a VM of the put's
 sandbox provider, each arch on the first link of a chain that runs it natively; what builds when emulation is off
-or no link can build; a VM the provider loses; the VM's shell helper; and what a put says as it goes. Docker,
-the registry and the VMs are faked."""
+or no link can build; a VM the provider loses; pulls of a base taking turns; the VM's shell helper; and what a put says
+as it goes. Docker, the registry and the VMs are faked."""
 
 import hashlib
 import io
@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tarfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -25,6 +26,8 @@ from agent_env.cli import cli
 from agent_env.env import Env
 from agent_env.env.envs.computer.utils import builder, composer, layers_in_image, packages
 from agent_env.env.envs.computer.utils.composer import Composing
+from agent_env.providers.sandbox_providers import host_images
+from agent_env.store.local_state import holding_locks
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
 from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
@@ -162,6 +165,58 @@ def test_one_deadline_bounds_a_resolve_from_its_containers_pull_to_its_output_an
 
     assert now[0] == 60 and ran[-1] == ["docker", "rm", "--force", ran[0][3]]
     assert failed.value.log == "Pulling from acme/base"
+
+
+#: How long a fake pull of the base takes: long enough that pulls not taking turns would overlap.
+PULL_S = 0.2
+
+
+def test_a_resolves_pull_of_its_base_takes_turns_with_a_platform_checks_and_a_deploys(tmp_path, monkeypatch):
+    """A compose resolves one arch in a container of the base as it checks the other's with another, each pulled when
+    Docker lacks the base, and two pulls of one image at once left Docker's containerd image store without layers of
+    it, which every container of it then failed on."""
+    base, digest = "ghcr.io/acme/base:1", "sha256:" + "b" * 64
+    pulling, ran, most = [], [], []
+
+    def docker(command, **kwargs):
+        if f"{base}@{digest}" in command and command[1] in ("create", "run", "pull"):
+            pulling.append(command[1])
+            most.append(len(pulling))
+            time.sleep(PULL_S)
+            pulling.remove(command[1])
+            ran.append(command[1])
+        if command[1] == "cp" and command[3] == str(tmp_path / "work" / builder.RESOLVED / "out"):
+            (Path(command[3]) / "result.json").write_text(json.dumps({"apt": [], "wheels": {}}))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    _, local = _resolving(tmp_path, monkeypatch, docker)
+    deployed = DockerImageArtifact(id="base-image", version=1, description="", image_name=base, image_digest=digest)
+    builder._runs_here.cache_clear()
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        calls = [pool.submit(local.resolve, {"apt": [], "python": []}, f"{base}@{digest}", "amd64", 60),
+                 pool.submit(builder._runs_here, "linux/arm64", f"{base}@{digest}"),
+                 pool.submit(host_images.pull, deployed)]
+        results = [call.result() for call in calls]
+    builder._runs_here.cache_clear()
+
+    assert results == [{"apt": [], "wheels": {}}, True, None]
+    assert sorted(ran) == ["create", "pull", "run"] and max(most) == 1
+
+
+def test_a_resolve_waiting_for_another_pull_of_its_base_gives_up_at_its_own_timeout(tmp_path, monkeypatch):
+    ran = []
+
+    def docker(command, **kwargs):
+        ran.append(command[1])
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    _, local = _resolving(tmp_path, monkeypatch, docker)
+    started = time.monotonic()
+    with holding_locks([host_images.pull_lock("base")]), \
+            pytest.raises(builder.ResolveError, match="resolving took over 1 s, waiting for another pull of base"):
+        local.resolve({"apt": [], "python": []}, "base", "amd64", 1)
+
+    assert 1 <= time.monotonic() - started < 5 and ran == ["rm"]
 
 
 def _resolving(tmp_path, monkeypatch, docker):

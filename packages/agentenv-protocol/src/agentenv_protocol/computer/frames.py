@@ -72,7 +72,6 @@ class Frame:
             height=self.height,
             display=DisplayData(width=self.display.width, height=self.display.height, scale=self.display.scale),
             parent_frame_id=self.parent_id,
-            captured_at=self.captured_at.isoformat().replace("+00:00", "Z"),
             page=_page_data(self.page),
         )
 

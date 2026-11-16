@@ -53,14 +53,14 @@ async def test_a_multi_env_deploys_restores_loads_and_tears_down_on_local_compos
         assert isinstance(restored, MultiEnv) and restored._sandbox.work_dir == work_dir
         await restored.load_environment_universe_artifact(_items_universe(uid))
         base_url = await legacy_protocol.v1_base_url(deployed, deployed.gateway_url, "items")
-        assert (await protocol_v1.get_data(base_url)).model_dump()["parts"][0]["data"] == {"items": ["snap-x", "snap-y"]}
+        assert (await protocol_v1.get_data(base_url, headers=deployed.control_headers)).model_dump()["parts"][0]["data"] == {"items": ["snap-x", "snap-y"]}
         slack_state = f"{legacy_protocol.environment_base_url(deployed.gateway_url, 'slack')}/export-state"
         assert len(httpx.get(slack_state, timeout=30).json()["channels"]) == 10
 
         # A multi env without computers resets its servers, each as it resets alone, and fails if one doesn't.
         await ResetEnvTaskStep(id="reset", version=None, env_id=env.id, fail_task_on_error=True).execute(
             TaskStepContext(deployed_envs=[deployed]))
-        assert (await protocol_v1.get_data(base_url)).model_dump()["parts"][0]["data"] == {"items": []}
+        assert (await protocol_v1.get_data(base_url, headers=deployed.control_headers)).model_dump()["parts"][0]["data"] == {"items": []}
         assert httpx.get(slack_state, timeout=30).json()["channels"] == []
 
         await restored.close()

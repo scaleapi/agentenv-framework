@@ -1194,17 +1194,36 @@ are the profile's template. The base class adds:
     The server keeps each token in memory and only its SHA-256, with its user and base address, in
     `.agentenv/cdp-tokens.json`, which code in the computer's session can read but not use; an address
     outlives a relaunch of the browser and of the server, and the computer's reset ends it.
-- **`browser-recording/v1`** on its card, framework-only, with `max_duration_s`, `max_frames` and `frames`:
-  `start {request_id, upload, frames?}` records under the write namespace grant `upload`, a start again with the
-  same `request_id` answering the recording it began; `end {recording_id, upload?, reason?}` ends it, under a fresh
-  grant when one is given, and answers its manifest; `end_all {reason?}` ends every open one. With `frames`, a frame
-  is a JPEG of the tab an agent last acted in, else of the active tab: one at the start, one after each burst of an
-  agent's acting entries (CDP commands and MCP calls, not agentenv's own) has gone quiet for 0.5 s and its tab's page
-  has loaded (up to 5 s), and one at the end, each uploaded as it's taken under `<recording_id>/frames/` and keyed in
-  the manifest to the entries it follows (`after`); a frame it couldn't take is in the manifest with its `error`. At
-  the end it uploads the log's lines since its start, actions and tab events, as `log.jsonl`, and `manifest.json`
-  (`BrowserRecordingManifest`). `start_browser_recording` and `end_browser_recording` run it, registering the frames,
-  log and manifest as one file artifact universe, and the end fails the run when its log or a frame is missing.
+- **`browser-recording/v1`** on its card, framework-only: one recording per context, a lease's or the default
+  one's. Its params name what it records (`video`, `frames`, `network`, `context`) and its limits (`fps`,
+  `max_duration_s`, `max_frames`, `max_open`, `max_children`, `max_objects`).
+  `start {request_id, upload, context?, fps?, network?, frames?, max_edge?}` records the lease `context` names, else
+  the default context, under the write namespace grant `upload`, a start again with the same `request_id` answering
+  the recording it began; `end {recording_id, upload?, reason?}` ends it, under a fresh grant when one is given, and
+  answers its manifest (`BrowserRecordingManifest`); `end_all {reason?}` ends every open one. A recording has:
+  - **a video** of the tab its context's agent is on, at `fps` (10 by default, 15 at most), encoded as
+    `computer-recording/v1`'s is and uploaded a segment at a time under `<recording_id>/video/`. It follows the tab an
+    agent last acted on in that context (CDP commands and MCP calls, not agentenv's own), a tab that one opens as
+    soon as it opens, and once it closes the tab followed before it, else the context's newest; it's blank while the
+    context has no tab. The browser's own connection screencasts that tab, and captures it instead while it sends no
+    frame, as a tab behind another in its window does; `video.followed` says which tab showed when, and how.
+  - **its log**: at the end, the lines of its context since its start, actions and tab events on its tabs and a
+    scoped connection's actions on none, as `log.jsonl`.
+  - **the network log**, by default when the browser keeps one, as a browser alone does and one in a desktop
+    computer doesn't (`network` false leaves it out, true refuses a browser with none): the browser's whole log at
+    the end as `network.har`, so the start tabs' loads are in it, every context's requests among them; the manifest
+    marks it browser-wide, with the log lines written while it ran (`during`) and the leases open meanwhile.
+  - **frames**, with `frames` (off by default): a JPEG of the tab the video follows at the start, after each burst of
+    an agent's acting entries has gone quiet for 0.5 s and its page has loaded (up to 5 s), and at the end, under
+    `<recording_id>/frames/`, keyed to the entries it follows (`after`); a frame it couldn't take is kept with its
+    `error`.
+  - **children**: a context an agent makes over an address scoped to the recorded context is recorded with it, its
+    own video, log and frames under `<recording_id>/contexts/<label>/`, until its context or the recording ends.
+  A lease's recording ends with the lease (`context_ended`). The server encodes with PyAV and Pillow, which agentenv's
+  chromium installs through its own requirements; an app without them refuses a start. `start_browser_recording` and
+  `end_browser_recording` run it, registering everything it uploaded as one file artifact universe, and the end fails
+  the run when any of it is missing. The page driver's `computer-recording/v1` is a different recording: the page tab
+  as pixel tools see it, across contexts.
 - **Its CDP relay**, at those addresses: `json/version` and `json/list` (also with a trailing slash,
   and `json`) answered from the browser, since a browser on a pipe has none, with its WebSocket at the
   address the client reached it at; and `devtools/browser`, where each WebSocket connection gets a
