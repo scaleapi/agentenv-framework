@@ -99,7 +99,7 @@ class Tools:
                                         identity=identity, parent=parent, origin=(box[0], box[1]))
             summary = f"Cropped {frame.id}: {frame.width}×{frame.height} of {parent.id} at ({box[0]}, {box[1]})"
         result = ScreenshotResult(summary=summary, **frame.result().model_dump())
-        return send(result, frame.encode(format, quality))
+        return send(result, frame.encode(format, quality), frame.captured_at)
 
     @tool(annotations=_INPUT)
     async def computer_click(
@@ -242,7 +242,7 @@ class Tools:
         frame = await self._computer.capture(self.caller_identity(ctx))
         return send(WaitResult(summary=f"{summary}, then captured {frame.id}{frame.note()}", waited_ms=ms,
                                frame=frame.result()),
-                    frame.encode())
+                    frame.encode(), frame.captured_at)
 
     @tool(annotations=_INPUT)
     async def computer_pointer_move(
@@ -405,7 +405,8 @@ class Tools:
                 "switch": f"Switched to tab {tab}", "close": f"Closed tab {tab}"}[action]
 
         def listed(result: InputResult, tabs: Any) -> TabsResult:
-            rows = [TabData(tab=t.id, url=t.url, title=t.title, active=t.active) for t in tabs or []]
+            rows = [TabData(tab=t.id, url=t.url, title=t.title, active=t.active, context=t.context)
+                    for t in tabs or []]
             active = next((row for row in rows if row.active), None)
             shown = f', the active one "{active.title}" ({active.url})' if active is not None else ""
             return TabsResult(**{**result.model_dump(), "summary": f"{verb}; {len(rows)} open{shown}"

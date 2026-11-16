@@ -47,9 +47,9 @@ TOKEN = "s3cret"
 
 @linux()
 class Echo(ComputerAppEnvironment):
-    """An app whose own server echoes what a WebSocket sends it until "bye", which it closes with 4001; answers with
-    the headers it got and the size of what it was sent; and streams 20 MB, its first MB at once and the rest once
-    ``released``."""
+    """An app whose own server echoes what a WebSocket sends it until "bye", which it closes with 4001 and a reason;
+    answers with the headers it got and the size of what it was sent; and streams 20 MB, its first MB at once and the
+    rest once ``released``."""
 
     agent_routes = ("/raw/",)
 
@@ -104,7 +104,7 @@ class Echo(ComputerAppEnvironment):
                                               "authorization": websocket.headers.get("authorization")}))
         while (message := await websocket.receive())["type"] != "websocket.disconnect":
             if message.get("text") == "bye":
-                await websocket.close(code=4001)
+                await websocket.close(code=4001, reason="you said bye")
                 return
             await (websocket.send_text(message["text"]) if message.get("text") is not None
                    else websocket.send_bytes(message["bytes"][::-1]))
@@ -178,7 +178,7 @@ async def test_a_websocket_through_svc_reaches_the_app_both_ways_until_it_closes
             opened = await socket.recv()
 
     assert hello == {"forwarded": "/svc/echo", "authorization": None} and subprotocol == "cdp"
-    assert (text, data) == ("Page.navigate", b"\x03\x02\x01") and closed.value.rcvd.code == 4001
+    assert (text, data) == ("Page.navigate", b"\x03\x02\x01") and (closed.value.rcvd.code, closed.value.rcvd.reason) == (4001, "you said bye")
     assert refused == [403, 403, 403] and malformed == [b"HTTP/1.1 403 Forbidden", b"HTTP/1.1 403 Forbidden"]
     assert raw == "/raw/a%3Fb" and opened == "/raw/open"
 

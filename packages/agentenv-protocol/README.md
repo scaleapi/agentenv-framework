@@ -544,6 +544,53 @@ class GitHub(WebsiteEnvironment):
 - **The run:** a run that deploys a live site is marked live. The deploy record says `live`, and the run's metadata lists
   its live sites with `reproducible: false`, because the real site may change between runs.
 
+A third-party site is an app someone else wrote, such as a web store, that serves its own pages, wrapped so agentenv
+deploys it like any site. `ForwardingSite` runs in the app's container beside it: it answers the card, the data plane
+and `website/v1` itself, and forwards every other request to the app.
+
+```python
+from agentenv_protocol.website import ForwardingSite, session_state, website
+
+
+@website(domains=["store.localhost"], builtin_routes=False, clock="real", ready_timeout_s=600)
+class Store(ForwardingSite):
+    upstream = "http://127.0.0.1:80"      # the app, in the same container
+    ready_path = "/admin"                 # ready once the app answers this below 500
+    sign_in_headers = ("X-Auto-Login",)   # only the site's own calls send these; logged with values removed
+
+    @session_state
+    async def signed_in(self, user: str | None) -> dict:
+        answer = await self.ask_app("/admin", headers={"X-Auto-Login": "..."})
+        ...                               # return the cookies the app answered with
+```
+
+- **Forwarding:** a request goes to the app as it came: its method, the site's own path with its encoding intact (an
+  escaped `/` stays escaped, and a forwarded prefix is taken off), its query, the `Host` the browser named and its
+  body, streamed, with no header or cookie of the forwarder's own. The hop-by-hop headers and `sign_in_headers` stay
+  behind. The answer comes back as the app gave it, streamed and still encoded, a redirect unfollowed, but a cookie
+  the app ties to one of the site's names (`Domain`) comes back the host's alone, as agentenv sets a sign-in's
+  cookies, so a sign-in replaces the app's session cookie rather than setting a second one beside it. An app not
+  answering is a 502 (`upstream_unavailable`). It forwards HTTP alone, and refuses a WebSocket with close code 1011.
+- **`builtin_routes=False`** serves none of agentenv's own site routes, so `/api/session` reaches the app too, and the
+  card names no `session_path` or `session_cookie`. Any `WebsiteEnvironment` may set it.
+- **`clock="real"`** declares a site that keeps real time, as an app that reads the system clock does: its card serves
+  no `clock/v1`, its `website/v1` params say `clock: "real"` (`WEBSITE_CLOCK_PARAM`), its answers carry no
+  `X-Universe-Now`, and `sync_env_clock` passes it over. The conformance check skips its two clock checks.
+  `@website` refuses `clock_patch` with it, since there's no universe time to put in a page.
+- **Its data plane:** the app keeps its own data, so the site serves `data/get` alone, which exports nothing. It takes
+  no load and can't reset: agentenv's reset passes over a card serving no `data/reset`, and the conformance check
+  passes a card serving `data/get` alone once `data/get` answers.
+- **Its session:** `@session_state` signs the browser in with whatever cookies the app sets, for example from one
+  server-side request carrying a sign-in header, which `sign_in_headers` then keeps the browser from sending. The
+  card names them too (`WEBSITE_SIGN_IN_HEADERS_PARAM`), so should a browser's request carry one, the browser's
+  network log, and so `network.har`, keeps it with its value taken out.
+- **Its own calls:** `ask_app(path, method=..., headers=..., content=...)` asks the app as the site does, under its
+  first name as `Host`, through the forwarder's client, which keeps no cookie and follows no redirect. Its session
+  and ready checks use it, as `ForwardingSite`'s own ready check does.
+- **Its names:** an app with a fixed base URL answers any other `Host` with a redirect to its own name. A browser
+  reaches it by that name alone, the site proxy naming it, and the conformance check's `any_host` passes `/` redirecting
+  to one of the card's `domains` as it does `/` serving HTML.
+
 ## Computer drivers
 
 A computer driver is what runs inside a computer an agent uses through screenshots and input. Write
@@ -960,7 +1007,8 @@ are the profile's template. The base class adds:
   `notifications`, `deny` (the default), which answers a page's prompt for it, or `ask`; and `dialogs`, who
   answers a page's JavaScript dialogs: `agent` (the default), or agentenv, accepting (`accept`, a `prompt()`
   with its default text) or dismissing (`dismiss`) each. Either way agentenv leaves a page that asks before
-  it's left (`beforeunload`), so none of its answers blocks a navigation.
+  it's left (`beforeunload`), so none of its answers blocks a navigation. And `network`, on by default, whether
+  `data/get` exports its network log and `browser/v1` `network` reads it.
 - **The flags agentenv owns**, after the subclass's command and before `about:blank`, the one tab its command line
   opens: its profile, its
   HTTP cache under `~/.cache` (`--disk-cache-dir`), `--remote-debugging-pipe`, `--no-first-run`,
@@ -1000,7 +1048,61 @@ are the profile's template. The base class adds:
   and, completed, its size and sha256; and `dialogs`, each with its type, message, default text, answer
   and who gave it.
   `hidden_page()` gives agentenv a page of its own for reading state, in no window and never in the record.
-- **`browser/v1`** on its card: `chromium` (its `version`), `clock: "real"` and, alone, `window`; and
+- **Its log**, `self.log`, a `BrowserLog` (`agentenv_protocol.website_browser.log`): one entry for each action agents take on it
+  and an event each time a tab opens, navigates or closes. Its server writes it, the one writer, to
+  `/var/log/agentenv/browser-<name>.jsonl` (its own `.agentenv/` folder when that can't be written), one JSON object a
+  line with its `seq` and `at` and one of `action`, `tab`, `outcome` or `reset`. A line's number is taken when what it
+  records begins and the line written when it ends, so `log {after}` returns lines in order up to the last whose every
+  earlier line is written (`last`), and `last` never moves back. An action still going after 60 s is written by the
+  next read as `unfinished`, so it holds back nothing after it, and once it ends an `outcome` line names it (`entry`)
+  with what it ended with. A relayed connection's commands reach the browser in the order they came. The file lasts the
+  computer's boot, a restarted server carrying on the sequence and the
+  browser's own reset (`data/reset`) being a line. A computer's `reset_env` boots it afresh, with a new log, so a task
+  that needs the one before takes it first, with `snapshot_env`.
+  - **An action** is a CDP command through the relay (`via: "cdp"`, `who` the connection's user, its `connection`
+    number, `method`, and the tab its session is on), an op a driver makes for an agent's MCP tool call (`via: "mcp"`,
+    `who` the caller's role, `tool`, `call`, `op`), an agent's MCP tool call a driver serves through a CDP user's
+    connections, such as Playwright MCP's (`via: "mcp"`, `who`, `tool`, `call`, with no `op`, between `calls/begin`
+    and `calls/end`), or an acting op agentenv makes itself (`via: "agentenv"`). A CDP command of a user with such a
+    call open names it, `for` its entry, or `for` a list of entries when several are open; the call's entry takes
+    the tab its commands acted on, and keeps what it typed only once each typing command of its own found no
+    password field focused. Each
+    carries `tab`, `url`, `ok` and, failed, `error`, and is marked `acts` or not by its method or op
+    (`log.acts`, `ACTING_OPS`): input, navigation, tab commands, `Runtime.evaluate` and `callFunctionOn`, DOM
+    writes, faked responses, and viewport and cookie changes act; the rest read. An acting entry keeps its `params`
+    (and a tool call's `args`) with what could carry a secret taken out: text typed while a password field has focus,
+    as its length; cookie and header values; the values of URL query keys that name a credential; a request's body;
+    and each string past 2 KB cut, with its length and sha256. A reading entry keeps none.
+  - **A tab event** (`opened`, `navigated`, `closed`) says what caused it: `by: "command"` with the `entry`, `via` and
+    `who` of the command that asked for it, and its `for`, matched exactly by the target a new tab's command answers with and the
+    loader a navigation's does; `by: "agentenv"`; `exit` or `stop`; or `by: "page"`, with the `after` of the latest
+    acting entry on its tab (its opener's, for a popup), for a click that follows a link, a redirect or a page script.
+  - A driver passes an agent's tool call to the browser in the `AgentEnv-Tool-Call` header (`tool_call_header`), with
+    the caller's `AgentEnv-Role`; the page driver sends it on every call it makes for a tool. `data/get` writes the log
+    beside `browser-state.json` as `browser-log.jsonl`, which `data/add` passes over.
+- **Its network log** is the one the proxy it goes out through keeps, in the file `AGENTENV_NETWORK_LOG` names
+  (`website_browser.network`): on a browser alone routing sites, the shared site proxy's,
+  `/etc/agentenv/sites/network.jsonl`, which root keeps and the session user reads; else the base's stand-in's,
+  `/var/log/agentenv/network.jsonl`. One JSON object a line, numbered (`seq`) and timed (`at`) as it's written, a
+  proxy started again numbering after the file's last: an `open` line once a request has gone upstream or a tunnel
+  has opened, and an `end` line, naming the same `id`, once it's answered and done or has failed. The shared site
+  proxy keeps each exchange whole: the request as the browser sent it, its headers, the values of the sign-in headers
+  a site declares as `<removed>`, and its body up to 10 MB; the answer as the browser got it, its status, its headers
+  and, for text, JSON, forms, XML and scripts, its body up to 1 MB, as it came, in base64, any other type's size and
+  sha256 alone; a WebSocket's messages and bytes each way; and each tunnel to a live host, refusal and failure. The
+  stand-in, which decrypts nothing, keeps each connection: its host, port, address and bytes each way, and a plain
+  request's method and URL. A browser on a computer with a desktop has none, since no proxy logs for it and nothing
+  names one. When it has one and its `network` setting is on, `data/get` writes it as HAR 1.2, `network.har`,
+  which `data/add` passes over: an entry
+  for each request and tunnel in the order they started, one still going marked `_open`, bodies decoded from gzip and
+  deflate, and br and zstd with the `app` extra's `brotli` and `zstandard`, up to 1 MB, and agentenv's own fields
+  named with `_`: `_tunnel`, `_websocket`, `_failed`, `_refused`, `_truncated`, `_sha256`.
+- **`browser/v1`** on its card: `chromium` (its `version`), `clock: "real"` and, alone, `window`; `log {after}`
+  (GET), framework-only, its log's lines after `after`; `network {after}` (GET), framework-only, its network log's
+  lines after `after`, 500 at most and `more` when a read left some; `calls/begin {user, acts?, within_s?}`,
+  framework-only, sent with the tool-call header, which begins the entry of an agent's tool call that `user`'s CDP
+  connections serve and answers its `entry`, and `calls/end {entry, ok, error?}`, which ends it, a call not ended within
+  `within_s` (600 s by default) written as never said to have ended; and
   `record` (GET), framework-only, which returns that record with `launches`, the app server's log of each
   launch (with its cause: `boot`, `server_restart`, `launch`, `data/add` or `data/reset`), each stop it made
   and each exit it didn't, with its exit `code` or the `signal` that ended it, since the computer booted.
@@ -1092,6 +1194,36 @@ are the profile's template. The base class adds:
     The server keeps each token in memory and only its SHA-256, with its user and base address, in
     `.agentenv/cdp-tokens.json`, which code in the computer's session can read but not use; an address
     outlives a relaunch of the browser and of the server, and the computer's reset ends it.
+- **`browser-recording/v1`** on its card, framework-only: one recording per context, a lease's or the default
+  one's. Its params name what it records (`video`, `frames`, `network`, `context`) and its limits (`fps`,
+  `max_duration_s`, `max_frames`, `max_open`, `max_children`, `max_objects`).
+  `start {request_id, upload, context?, fps?, network?, frames?, max_edge?}` records the lease `context` names, else
+  the default context, under the write namespace grant `upload`, a start again with the same `request_id` answering
+  the recording it began; `end {recording_id, upload?, reason?}` ends it, under a fresh grant when one is given, and
+  answers its manifest (`BrowserRecordingManifest`); `end_all {reason?}` ends every open one. A recording has:
+  - **a video** of the tab its context's agent is on, at `fps` (10 by default, 15 at most), encoded as
+    `computer-recording/v1`'s is and uploaded a segment at a time under `<recording_id>/video/`. It follows the tab an
+    agent last acted on in that context (CDP commands and MCP calls, not agentenv's own), a tab that one opens as
+    soon as it opens, and once it closes the tab followed before it, else the context's newest; it's blank while the
+    context has no tab. The browser's own connection screencasts that tab, and captures it instead while it sends no
+    frame, as a tab behind another in its window does; `video.followed` says which tab showed when, and how.
+  - **its log**: at the end, the lines of its context since its start, actions and tab events on its tabs and a
+    scoped connection's actions on none, as `log.jsonl`.
+  - **the network log**, by default when the browser keeps one, as a browser alone does and one in a desktop
+    computer doesn't (`network` false leaves it out, true refuses a browser with none): the browser's whole log at
+    the end as `network.har`, so the start tabs' loads are in it, every context's requests among them; the manifest
+    marks it browser-wide, with the log lines written while it ran (`during`) and the leases open meanwhile.
+  - **frames**, with `frames` (off by default): a JPEG of the tab the video follows at the start, after each burst of
+    an agent's acting entries has gone quiet for 0.5 s and its page has loaded (up to 5 s), and at the end, under
+    `<recording_id>/frames/`, keyed to the entries it follows (`after`); a frame it couldn't take is kept with its
+    `error`.
+  - **children**: a context an agent makes over an address scoped to the recorded context is recorded with it, its
+    own video, log and frames under `<recording_id>/contexts/<label>/`, until its context or the recording ends.
+  A lease's recording ends with the lease (`context_ended`). The server encodes with PyAV and Pillow, which agentenv's
+  chromium installs through its own requirements; an app without them refuses a start. `start_browser_recording` and
+  `end_browser_recording` run it, registering everything it uploaded as one file artifact universe, and the end fails
+  the run when any of it is missing. The page driver's `computer-recording/v1` is a different recording: the page tab
+  as pixel tools see it, across contexts.
 - **Its CDP relay**, at those addresses: `json/version` and `json/list` (also with a trailing slash,
   and `json`) answered from the browser, since a browser on a pipe has none, with its WebSocket at the
   address the client reached it at; and `devtools/browser`, where each WebSocket connection gets a

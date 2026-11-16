@@ -27,6 +27,7 @@ from agent_env.bundle.installed import find_bundle
 from agent_env.cli import cli
 from agent_env.config import configure, reset_config
 from agent_env.config.paths import state_root
+from agent_env.providers.sandbox_providers.host_images import present
 from agent_env.providers.sandbox_providers.local_docker.provider import (
     LocalSandboxProvider,
     local_sandbox_ids,
@@ -36,6 +37,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import reset_sandbox
 from agent_env.store import Filter, LocalSqliteDocumentStore
 from agent_env.store.routing import namespace_routing
 from agent_env.task import Task
+from tst.integration.utils.registry import REGISTRY_IMAGE
 from tst.util.capabilities import skip_without_gnu_stat
 
 pytestmark = pytest.mark.integration
@@ -45,8 +47,8 @@ SHIPPED = Path(agent_env.__file__).parent / "examples" / "hello"
 
 @pytest.fixture
 def bundle(monkeypatch, tmp_path):
-    """A copy of the shipped hello, with an eval. It isn't called hello, since a folder wins over an installed
-    bundle of the same name. Whatever ran, no sandbox work folder may be left behind."""
+    """A copy of the shipped hello, with an eval. It isn't called hello, since a folder named like an installed
+    bundle is refused. Whatever ran, no sandbox work folder may be left behind."""
     sandboxes = tmp_path / "sandboxes"
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -254,13 +256,26 @@ def test_a_signal_mid_run_marks_the_run_cancelled_tears_it_down_and_stops_its_co
     assert not _alive(int(nap.read_text()))
 
 
-def test_a_run_killed_outright_leaves_its_sandboxes_under_its_root_for_a_supervisor_to_terminate(bundle, tmp_path):
+@pytest.fixture(scope="module")
+def held_image():
+    """The image the tests' throwaway registries run, which the workflow pulls before the tests, under a name pinned to
+    its digest, so a local sandbox starts a container of it pulling nothing: a pull from a public registry at the test's
+    time failed whenever ECR Public refused the runner's anonymous pulls."""
+    if not present(REGISTRY_IMAGE):
+        subprocess.run(["docker", "pull", "--quiet", REGISTRY_IMAGE], check=True, capture_output=True)
+    inspected = subprocess.run(["docker", "image", "inspect", "--format", "{{json .RepoDigests}}", REGISTRY_IMAGE],
+                               check=True, capture_output=True, text=True)
+    return json.loads(inspected.stdout)[0]
+
+
+def test_a_run_killed_outright_leaves_its_sandboxes_under_its_root_for_a_supervisor_to_terminate(bundle, tmp_path,
+                                                                                                 held_image):
     napping = tmp_path / "napping"
     (napping / "tasks").mkdir(parents=True)
     (napping / "tasks/nap.json").write_text(json.dumps([
         {"id": "box", "type": "deploy_sandbox", "sandbox_name": "box", "sandbox_mode": "vm", "sandbox_type": "local"},
         {"id": "web", "type": "deploy_sandbox", "sandbox_name": "web", "sandbox_mode": "container",
-         "sandbox_type": "local", "image": "public.ecr.aws/nginx/nginx:stable-alpine", "port": 80},
+         "sandbox_type": "local", "image": held_image, "port": 5000},
         {"id": "nap", "type": "verify_sandbox", "sandbox_name": "box", "base_dir": "/app", "verifier_id": "nap",
          "depends_on": ["box", "web"], "criteria": [{"type": "bash_cmd_succeeds", "criterion": "naps",
                                                     "bash_cmd": 'sleep 300 & echo $! > "$HOME/nap.pid"; wait'}]},

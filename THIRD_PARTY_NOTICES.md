@@ -2,8 +2,8 @@
 
 This project is licensed under the Apache License, Version 2.0, but depends on third-party
 software identified below. These dependencies are installed separately from the Python Package
-Index and imported at runtime. Third-party source code is not incorporated into or statically
-linked with the source repository.
+Index and imported at runtime. Apart from agent-env's changes to libfaketime, described below, third-party
+source code is not incorporated into or statically linked with the source repository.
 
 Each third-party component remains subject to its applicable license. Copyright notices, license
 files, source-code offers, and other materials accompanying each component form part of its
@@ -2543,6 +2543,34 @@ Platform-specific native binaries that npm installs for the machine running the 
 | @next/swc-linux-x64-musl | 15.5.25 | MIT |
 | @next/swc-win32-arm64-msvc | 15.5.25 | MIT |
 | @next/swc-win32-x64-msvc | 15.5.25 | MIT |
+
+## libfaketime
+
+`src/agent_env/computers/artifacts/ubuntu-24.04/clock/` holds agent-env's changes to [libfaketime](https://github.com/wolfcw/libfaketime)
+0.9.12: `libfaketime.patch`, `agentenv_clock_page.c` and `agentenv_clock_waits.c`. Being derived from libfaketime,
+those three files are licensed as it is, under the GNU General Public License version 2 (`GPL-2.0-only`); the folder's
+`COPYING` is that license's text. libfaketime's own source is not in the repository: the folder's `build.sh` downloads
+upstream's v0.9.12 tarball, checks its sha256 and applies the changes, and the library it builds runs inside computers.
+The folder's other files, like the rest of the repository, are licensed under the Apache License, Version 2.0.
+
+- Source: <https://github.com/wolfcw/libfaketime/tree/v0.9.12>
+- License: GPL-2.0-only
+
+## The egress proxy's Go modules
+
+`src/agent_env/computers/artifacts/ubuntu-24.04/egress/` is agent-env's egress proxy, a Go program the base
+computer's Dockerfile builds, statically linked with the Go standard library and the modules below. Their source is
+not in the repository: the folder's `go.sum` pins each, the build downloads them, and the program runs inside
+computers.
+
+| Module | Version | License |
+| --- | --- | --- |
+| Go standard library | 1.26.11 | BSD-3-Clause |
+| github.com/refraction-networking/utls | v1.8.2 | BSD-3-Clause |
+| golang.org/x/crypto | v0.36.0 | BSD-3-Clause |
+| golang.org/x/sys | v0.31.0 | BSD-3-Clause |
+| github.com/andybalholm/brotli | v1.0.6 | MIT |
+| github.com/klauspost/compress | v1.17.4 | BSD-3-Clause (a few packages the proxy doesn't link are Apache-2.0 or MIT) |
 
 ## License texts
 

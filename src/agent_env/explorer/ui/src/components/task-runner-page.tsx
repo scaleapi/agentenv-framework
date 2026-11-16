@@ -11,7 +11,10 @@ import {
   workflowIdOf,
   type RunOptions,
 } from '../lib/task-runner-run';
-import { selectFinalScore } from '../lib/verifier-classification';
+import {
+  isRubricsVerifierStep,
+  selectFinalScore,
+} from '../lib/verifier-classification';
 import { BACKEND_URL, apiFetch } from './shared';
 import { StepsPipeline } from './steps-pipeline';
 import { TaskInstanceViewer, type TaskStepRef } from './task-instance-viewer';
@@ -263,7 +266,7 @@ export function TaskRunnerPage({
     }));
   }, [task]);
 
-  const rubricsStep = taskSteps.find(s => s.type === 'rubrics_verifier') as
+  const rubricsStep = taskSteps.find(isRubricsVerifierStep) as
     | Record<string, unknown>
     | undefined;
   const rubricsCriteria = rubricsStep?.criteria as

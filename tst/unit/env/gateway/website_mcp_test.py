@@ -198,3 +198,11 @@ async def test_the_gateway_serves_a_sites_tools_and_its_route_refuses_the_sites_
     assert site.orders == [{"item": "milk", "by": "alice@example.com"}, {"item": "eggs", "by": "bob@example.com"}]
     assert browsing.status_code == 404
     assert data.json()["result"]["parts"][0]["data"]["orders"][0]["item"] == "milk"
+
+
+def test_each_sites_names_are_read_from_their_variable_and_a_malformed_entry_is_refused():
+    assert entrypoint_module.parse_site_names(" shop=shop.test|*.shop.test , docs=docs.test,") == {
+        "shop": ("shop.test", "*.shop.test"), "docs": ("docs.test",)}
+    assert entrypoint_module.parse_site_names("") == {}
+    with pytest.raises(ValueError, match="WEBSITE_NAMES entry: 'shop.test'"):
+        entrypoint_module.parse_site_names("shop.test")

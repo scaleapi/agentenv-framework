@@ -312,21 +312,25 @@ def test_the_cli_dry_runs_an_installed_bundle_by_name_and_writes_nothing(site, m
     assert not local_stores.local_namespace_document_store().path.exists()
 
 
-def test_a_folder_wins_over_an_installed_name_and_a_folder_that_isnt_a_bundle_names_it(site, monkeypatch, tmp_path,
-                                                                                       quiet_logs, local_stores):
+def test_a_name_that_is_both_a_folder_here_and_an_installed_bundle_is_refused_until_spelled_out(
+        site, monkeypatch, tmp_path, quiet_logs, local_stores):
     _package(site, "demo_bundles", ["hello"])
     _registered(monkeypatch, _ep("hello", "demo_bundles"))
     monkeypatch.chdir(tmp_path)
     (tmp_path / "hello").mkdir()
-    assert locate_bundle("hello") == (Path("hello"), None, None)
-    assert locate_bundle("./elsewhere") == (Path("./elsewhere"), None, None)
-    assert locate_bundle("demo-bundles/hello") == (site / "demo_bundles" / "hello", "@local/demo-bundles/hello", None)
+    (tmp_path / "demo-bundles" / "hello").mkdir(parents=True)
+    (tmp_path / "plain").mkdir()
+    for name in ("hello", "demo-bundles/hello"):
+        with pytest.raises(BundleError, match=f"'{name}' is both a folder here and the installed bundle demo-bundles/hello"):
+            locate_bundle(name)
+    assert locate_bundle("./hello") == (Path("./hello"), None, None)
+    assert locate_bundle("plain") == (Path("plain"), None, None)
 
     result = CliRunner().invoke(cli, ["run", "hello"])
 
     assert result.exit_code == 1
-    assert "not a bundle" in result.output
-    assert "an installed bundle is also named 'hello': run it with agent-env run demo-bundles/hello" in result.output
+    assert "run agent-env run ./hello for the folder or agent-env run demo-bundles/hello for the bundle" in result.output
+    (tmp_path / "demo-bundles" / "hello").rmdir()
     assert CliRunner().invoke(cli, ["run", "demo-bundles/hello"]).exit_code == 0
 
 
@@ -418,5 +422,5 @@ def test_a_home_typo_or_a_qualified_folder_prints_one_line(site, monkeypatch, tm
     shadowed = CliRunner().invoke(cli, ["run", "demo-bundles/hello"])
 
     assert typo.exit_code == 1 and typo.output.startswith("Error: ~nosuchuser_zz/hello: ") and "Traceback" not in typo.output
-    assert shadowed.exit_code == 1 and "not a bundle" in shadowed.output
-    assert "an installed bundle is also named" not in shadowed.output
+    assert shadowed.exit_code == 1 and "Traceback" not in shadowed.output
+    assert "is both a folder here and the installed bundle demo-bundles/hello" in shadowed.output

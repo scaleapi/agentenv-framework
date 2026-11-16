@@ -5,6 +5,7 @@ import inspect
 import pytest
 
 from agent_env.artifact.registry import get_artifact_registry
+from agent_env.entity.paths import PATH, field_sites
 from agent_env.entity.refs import EntityKind, EntityRef, default_agent_refs, parse_toml_ref, ref_sites
 from agent_env.task_step.registry import _builtin_registry
 from agent_env.task_step.snapshot_utils.snapshot_series import SnapshotConfig
@@ -14,6 +15,7 @@ from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
+from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
 from agent_env.task_step.task_steps.register_agent_triggers import (
     RegisterAgentTriggersStep,
     _env_trigger_conditions,
@@ -194,6 +196,30 @@ def test_a_subclass_is_undeclared_until_it_declares():
     assert Variant.entity_refs is None
     assert Declared.entity_refs == (EntityRef.env("env_id"),)
     assert DeployEnvTaskStep.entity_refs[0].version_field == "env_version"
+
+
+@pytest.mark.parametrize("step_type,cls", BUILTINS)
+def test_builtin_context_paths_name_real_fields(step_type, cls):
+    for path in cls.context_paths:
+        assert PATH.fullmatch(path), f"{step_type}: {path} isn't dotted keys"
+        assert path.split(".")[0].removesuffix("[]").removesuffix("{}") in _params(cls), (
+            f"{step_type}: {path} names no constructor parameter")
+
+
+def test_a_subclass_declares_no_context_paths_until_it_declares():
+    class Variant(RubricsVerifierTaskStep):
+        type = "rubrics_verifier_variant"
+
+    assert Variant.context_paths == ()
+    assert RubricsVerifierTaskStep.context_paths == ("context_facts_for_judge{}",)
+
+
+def test_a_path_s_last_braces_or_brackets_reach_each_value_or_element():
+    step = {"facts": {"a": "x.y", "b": None}, "ids": ["p", None, "q"], "one": "z"}
+
+    assert [(where, key) for where, _, key in field_sites(step, "facts{}")] == [("facts.a", "a")]
+    assert [(where, key) for where, _, key in field_sites(step, "ids[]")] == [("ids[0]", 0), ("ids[2]", 2)]
+    assert [(where, key) for where, _, key in field_sites(step, "one")] == [("one", "one")]
 
 
 @pytest.mark.parametrize("bad", [

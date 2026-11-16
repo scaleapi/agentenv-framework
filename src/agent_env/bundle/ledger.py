@@ -104,12 +104,14 @@ class Ledger:
         """Compare ``write`` with the latest version the ledger records for it. ``needs`` holds, by (store, id),
         the version each earlier write it needs left or, in a dry run, would leave; an env or agent is hashed with
         them, so one written anew rewrites it too."""
-        stored = self._stored_version(write)
+        stored_doc = self._stored(write)
+        stored = stored_doc["version"] if stored_doc else None
         digest = self.digest(write, needs)
         if digest is None:
             untracked = ("its inputs aren't tracked yet, so it is written every run",)
             return Check(write, None, None, untracked, stored, needs)
-        orphan = self._orphan(write, stored, digest)
+        stale = _predates_entity_ids(write, stored_doc)
+        orphan = None if stale else self._orphan(write, stored, digest)
         if orphan is not None:
             return Check(write, digest, orphan, ("written by an interrupted run that didn't record it",), stored, needs,
                          adopted=True)
@@ -122,6 +124,8 @@ class Ledger:
             reasons.append("new" if row is None else f"its v{recorded} is not in the store")
         elif stored != recorded:
             reasons.append(f"the store's latest, v{stored}, wasn't recorded by this bundle")
+        elif stale:
+            reasons.append("its stored version doesn't record the ids the bundle gave what it names")
         if row is not None:
             reasons.extend(_changes(row, digest))
         return Check(write, digest, None if reasons else recorded, tuple(reasons), stored, needs)
@@ -214,9 +218,9 @@ class Ledger:
     def _latest(self, store: str, id: str) -> dict | None:
         return self._find(id, self.collection, Filter.of(store=store, id=id, status="done"))
 
-    def _stored_version(self, write: Write) -> int | None:
-        doc = self._find(write.id, _COLLECTIONS[write.kind.store], Filter.of(id=write.id))
-        return doc["version"] if doc else None
+    def _stored(self, write: Write) -> dict | None:
+        """The store's latest version of ``write``'s entity."""
+        return self._find(write.id, _COLLECTIONS[write.kind.store], Filter.of(id=write.id))
 
     def _find(self, entity_id: str, collection: str, filter: Filter) -> dict | None:
         """The highest version matching ``filter`` in ``entity_id``'s store, read without creating a local store."""
@@ -350,3 +354,9 @@ def _file_sha256(path: Path) -> str:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _predates_entity_ids(write: Write, stored: dict | None) -> bool:
+    """Whether the store's latest version of task ``write``, written before tasks recorded them, lacks the entity_ids
+    its bundle gives it now, so reusing it would leave its runs naming those entities as written."""
+    return write.kind is BundleKind.TASK and stored is not None and (stored.get("entity_ids") or {}) != write.source.entity_ids

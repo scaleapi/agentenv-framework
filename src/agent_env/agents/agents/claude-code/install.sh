@@ -75,7 +75,8 @@ if ! on 'for shell in bash zsh; do command -v "$shell" >/dev/null && exit 0; don
 fi
 
 sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
-fetch() { curl -fsSL --retry 3 "$1" -o "$2"; }
+# One more go when curl fails: --retry passes over some transient failures, such as a reset HTTP/2 stream (exit 92).
+fetch() { curl -fsSL --retry 3 "$1" -o "$2" || { sleep 2; curl -fsSL --retry 3 "$1" -o "$2"; }; }
 checked() {  # checked FILE SHA256: FILE is what was published, or the install stops
   [ "$(sha256 "$1")" = "$2" ] || { echo "$(basename "$1") doesn't match its published checksum" >&2; exit 1; }
 }

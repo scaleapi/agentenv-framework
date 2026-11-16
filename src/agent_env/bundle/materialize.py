@@ -164,7 +164,8 @@ def materialize(
             raise BundleError(problems)
         for write in tasks:
             through_ledger(write, lambda: Task.put(id=write.id, steps=built[write.id].steps,
-                                                   requires=write.requires).version)
+                                                   requires=write.requires,
+                                                   entity_ids=built[write.id].entity_ids).version)
         for write in evals:
             through_ledger(write, lambda: _write_eval(plan, write, written))
     return Materialization(plan, tuple(done[_key(write)] for write in plan.writes), tuple(unchecked), tuple(left))
@@ -418,7 +419,8 @@ def _build(write: Write, plan: Plan, written: Mapping[tuple[str, str], Materiali
     """The task ``write`` puts: as resolved, or given what was ``written``, with each reference that takes a version
     naming the one it reads."""
     steps = write.source.config if written is None else pinned_steps(plan, write, written)
-    return Task(id=write.id, version=None, steps=[build_step(step) for step in steps])
+    return Task(id=write.id, version=None, steps=[build_step(step) for step in steps],
+                entity_ids=write.source.entity_ids)
 
 
 def pinned_steps(plan: Plan, write: Write, written: Mapping[tuple[str, str], Materialized]) -> list[dict]:

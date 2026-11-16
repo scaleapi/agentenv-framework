@@ -235,9 +235,9 @@ def test_a_plain_venv_uses_its_pip_else_uv_pip(tmp_path, monkeypatch):
     without_pip = _env(VIRTUALENV, tmp_path, has_pip=False)
     monkeypatch.setattr(_installers.shutil, "which", lambda name: "/bin/uv" if name == "uv" else None)
 
-    assert add_plan(with_pip, ["agentenv-browser"]).commands == ((str(PY), "-m", "pip", "install", "agentenv-browser"),)
+    assert add_plan(with_pip, ["agentenv-browser"]).commands == ((str(PY), "-P", "-m", "pip", "install", "agentenv-browser"),)
     assert remove_plan(with_pip, ["agentenv-browser"]).commands == (
-        (str(PY), "-m", "pip", "uninstall", "-y", "agentenv-browser"),)
+        (str(PY), "-P", "-m", "pip", "uninstall", "-y", "agentenv-browser"),)
     assert add_plan(without_pip, ["agentenv-browser"]).commands == (
         ("uv", "pip", "install", "--python", str(PY), "agentenv-browser"),)
 
@@ -295,7 +295,7 @@ class _Fake(_plugin_changes.Tools):
 
     def _run(self, command, cwd):
         self.commands.append(command)
-        return 1 if command[:4] in self._fail or command[:3] in self._fail else 0
+        return 1 if any(command[:len(prefix)] == prefix for prefix in self._fail) else 0
 
     def _snapshot(self, python):
         return self._snapshots.pop(0) if len(self._snapshots) > 1 else self._snapshots[0]
@@ -328,7 +328,7 @@ def test_add_installs_verifies_and_reports(venv, invoke):
     result = invoke(["add", "agentenv-browser", "--yes"], tools)
 
     assert result.exit_code == 0, result.output
-    assert tools.commands == [(str(PY), "-m", "pip", "install", "agentenv-browser")]
+    assert tools.commands == [(str(PY), "-P", "-m", "pip", "install", "agentenv-browser")]
     assert "+ agentenv-browser 1.0.0" in result.output
     assert "agentenv-browser: envs browser active" in result.output
 
@@ -343,7 +343,7 @@ def test_add_of_a_package_that_is_not_a_plugin_is_rolled_back(venv, invoke, core
 
     assert result.exit_code == 1
     assert "not an agent-env plugin" in result.output
-    assert (str(PY), "-m", "pip", "uninstall", "-y", "six") in tools.commands
+    assert (str(PY), "-P", "-m", "pip", "uninstall", "-y", "six") in tools.commands
     assert "Restored." in result.output
 
 
@@ -359,8 +359,8 @@ def test_add_whose_plugin_does_not_take_effect_is_rolled_back_unless_kept(venv, 
 
     assert result.exit_code == kept_result.exit_code == 1
     assert "browser is conflict" in result.output
-    assert rolled.commands[-1] == (str(PY), "-m", "pip", "uninstall", "-y", "agentenv-browser")
-    assert kept.commands == [(str(PY), "-m", "pip", "install", "agentenv-browser")]
+    assert rolled.commands[-1] == (str(PY), "-P", "-m", "pip", "uninstall", "-y", "agentenv-browser")
+    assert kept.commands == [(str(PY), "-P", "-m", "pip", "install", "agentenv-browser")]
     assert "Kept as installed (--keep)." in kept_result.output
 
 
@@ -428,13 +428,13 @@ def test_an_upgrade_the_plugin_caused_is_reverted_too(venv, invoke):
 
     assert "~ agentenv-framework 0.9.1 -> 0.9.2 (agent-env itself)" in result.output
     assert tools.commands[-2:] == [
-        (str(PY), "-m", "pip", "uninstall", "-y", "agentenv-browser"),
-        (str(PY), "-m", "pip", "install", "--no-deps", "agentenv-framework==0.9.1"),
+        (str(PY), "-P", "-m", "pip", "uninstall", "-y", "agentenv-browser"),
+        (str(PY), "-P", "-m", "pip", "install", "--no-deps", "agentenv-framework==0.9.1"),
     ]
 
 
 def test_a_failed_installer_run_restores_the_environment(venv, invoke):
-    tools = _Fake([CORE], fail=[(str(PY), "-m", "pip", "install")])
+    tools = _Fake([CORE], fail=[(str(PY), "-P", "-m", "pip", "install")])
 
     result = invoke(["add", "agentenv-browser", "--yes"], tools)
 
@@ -500,7 +500,7 @@ def test_a_uv_project_rollback_restores_pyproject_and_lock_and_the_packages(tmp_
     result = invoke(["add", "six", "--yes"], tools)
 
     assert "+dependencies = ['six']" in result.output
-    assert tools.commands[-1] == (str(PY), "-m", "pip", "uninstall", "-y", "six")
+    assert tools.commands[-1] == (str(PY), "-P", "-m", "pip", "uninstall", "-y", "six")
     assert {p: p.read_bytes() for p in before} == before
 
 
@@ -521,7 +521,7 @@ def test_remove_uninstalls_a_plugin_and_confirms_it_is_gone(venv, invoke):
     result = invoke(["remove", "agentenv-browser", "--yes"], tools)
 
     assert result.exit_code == 0, result.output
-    assert tools.commands == [(str(PY), "-m", "pip", "uninstall", "-y", "agentenv-browser")]
+    assert tools.commands == [(str(PY), "-P", "-m", "pip", "uninstall", "-y", "agentenv-browser")]
     assert "Removed." in result.output
 
 
@@ -637,6 +637,16 @@ def test_the_real_snapshot_reads_this_interpreter():
     assert all({"name", "version", "requires", "entry_points"} <= set(d) for d in installed.values())
 
 
+def test_the_snapshot_runs_no_module_from_the_current_folder(tmp_path, monkeypatch):
+    ran = tmp_path / "ran"
+    (tmp_path / "packaging.py").write_text(f"open({str(ran)!r}, 'w').close()\n")
+    monkeypatch.chdir(tmp_path)
+
+    installed = _plugin_changes.snapshot(Path(sys.executable))
+
+    assert "agentenv-framework" in installed and not ran.exists()
+
+
 def test_a_receipt_round_trips_its_own_install(tmp_path):
     prefix = tmp_path / "tool"
     _receipt(prefix, '[tool]\nrequirements = [{ name = "agentenv-framework" }, { name = "agentenv-platform" }]\n')
@@ -728,7 +738,7 @@ def test_an_interrupted_add_restores_the_environment(venv, invoke):
 
     def interrupted(command, cwd):
         tools.commands.append(command)
-        if command[3] == "install":
+        if command[4] == "install":
             raise KeyboardInterrupt
         return 0
     tools.run = interrupted
@@ -737,7 +747,7 @@ def test_an_interrupted_add_restores_the_environment(venv, invoke):
 
     assert result.exit_code == 130
     assert "Interrupted; restoring" in result.output
-    assert tools.commands[-1] == (str(PY), "-m", "pip", "uninstall", "-y", "agentenv-browser")
+    assert tools.commands[-1] == (str(PY), "-P", "-m", "pip", "uninstall", "-y", "agentenv-browser")
 
 
 def test_adding_what_is_already_installed_changes_nothing_and_succeeds(venv, invoke):
@@ -747,7 +757,7 @@ def test_adding_what_is_already_installed_changes_nothing_and_succeeds(venv, inv
 
     assert result.exit_code == 0, result.output
     assert "Nothing changed" in result.output
-    assert tools.commands == [(str(PY), "-m", "pip", "install", "agentenv-browser")]
+    assert tools.commands == [(str(PY), "-P", "-m", "pip", "install", "agentenv-browser")]
 
 
 def test_a_rollback_reinstalls_each_package_from_where_it_came_from(venv, invoke):
@@ -763,7 +773,7 @@ def test_a_rollback_reinstalls_each_package_from_where_it_came_from(venv, invoke
 
     invoke(["add", "agentenv-grader", "--yes"], tools)
 
-    assert tools.commands[-1] == (str(PY), "-m", "pip", "install", "--no-deps",
+    assert tools.commands[-1] == (str(PY), "-P", "-m", "pip", "install", "--no-deps",
                                   "agentenv-framework @ file:///w/agentenv_framework-0.9.1-py3-none-any.whl",
                                   "-e", "/src/browser")
 
@@ -865,7 +875,7 @@ def test_a_check_that_fails_after_the_installer_ran_still_rolls_back(venv, invok
 
     assert result.exit_code == 1
     assert "could not finish the change" in result.output
-    assert tools.commands[-1] == (str(PY), "-m", "pip", "uninstall", "-y", "agentenv-browser")
+    assert tools.commands[-1] == (str(PY), "-P", "-m", "pip", "uninstall", "-y", "agentenv-browser")
 
 
 @pytest.mark.parametrize("command, planner", [(["add", "agentenv-browser", "--yes"], "add_plan"),
@@ -1010,8 +1020,8 @@ def test_a_bare_spec_that_builds_as_agent_env_itself_is_rolled_back(venv, invoke
 
     assert result.exit_code == 1
     assert "a spec built as agent-env itself, which `plugin add` does not replace" in result.output
-    assert (str(PY), "-m", "pip", "uninstall", "-y", "agentenv-browser") in tools.commands
-    assert tools.commands[-1] == (str(PY), "-m", "pip", "install", "--no-deps", "agentenv-framework==0.9.1")
+    assert (str(PY), "-P", "-m", "pip", "uninstall", "-y", "agentenv-browser") in tools.commands
+    assert tools.commands[-1] == (str(PY), "-P", "-m", "pip", "install", "--no-deps", "agentenv-framework==0.9.1")
 
 
 def test_a_plugin_that_needs_a_newer_agent_env_from_the_index_is_added(venv, invoke):

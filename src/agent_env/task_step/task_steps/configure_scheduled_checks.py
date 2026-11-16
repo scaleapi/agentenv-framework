@@ -18,7 +18,7 @@ import httpx
 from agent_env.env.gateway.constants import EXT_NOTIFICATIONS_URI
 from agent_env.env.gateway.notifications import DEFAULT_MAX_ACTIVE, DEFAULT_MIN_INTERVAL
 from agent_env.entity.refs import EntityRef
-from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)
@@ -77,7 +77,7 @@ class ConfigureScheduledChecksTaskStep(TaskStep):
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         deployed = next((d for d in context.deployed_envs if d.env_id == self.env_id), None)
         if deployed is None:
-            raise RuntimeError(f"Env '{self.env_id}' not found in context.deployed_envs")
+            raise StepContextError(f"Env '{self.env_id}' not found in context.deployed_envs")
         if not deployed.supports(EXT_NOTIFICATIONS_URI, "config"):
             raise RuntimeError(f"Env '{self.env_id}' runs a gateway without {EXT_NOTIFICATIONS_URI}; redeploy it on a "
                                "gateway image that has it.")

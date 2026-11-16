@@ -135,7 +135,8 @@ def test_a_retried_install_replaces_the_agent_an_earlier_attempt_left_running_in
     """The first turn fails, and its retry installs again into the same container, on the same port, while the
     first install's agent still runs there."""
     endpoint.respond = tool_then_answer("Bash", {"command": f"cat notes.txt; pwd; {READ_SKILL}"})
-    endpoint.fail_next(Fault("status", status=400))
+    # A 403, which the CLI never resends; a 400 it resends without some of its betas.
+    endpoint.fail_next(Fault("status", status=403))
     bundle = _bundle(state / "bundle", "debian")
     task = bundle / "tasks/install.json"
     steps = json.loads(task.read_text())
@@ -190,7 +191,8 @@ def test_a_retried_host_install_stops_the_agent_an_earlier_attempt_started(monke
     """install_agent empties its work dir before each attempt, so the first install's agent must live outside it:
     found there, it is stopped, rather than keeping the port the retry's agent needs."""
     endpoint.respond = tool_then_answer("Bash", {"command": f"echo {NOTES}; {READ_SKILL}"})
-    endpoint.fail_next(Fault("status", status=400))
+    # A 403, which the CLI never resends; a 400 it resends without some of its betas.
+    endpoint.fail_next(Fault("status", status=403))
     bundle = _bundle(state / "bundle", None, agents=("helper",))
     task = bundle / "tasks/install.json"
     steps = json.loads(task.read_text())

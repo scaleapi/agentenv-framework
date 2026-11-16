@@ -38,6 +38,9 @@ from agentenv_protocol.computer.app import COMPUTER_APP, FAILURE, SOCKET  # noqa
 from agentenv_protocol.computer.platform import Platform  # noqa: E402
 from agentenv_protocol.types import CONTROL_TOKEN_ENV, DATA_OBJECTS_EXTENSION_URI, WELL_KNOWN_PATH  # noqa: E402
 
+#: How long each app's ready check takes in the readiness test: asked at once, the driver's status takes about
+#: this long, and one after another three times as long.
+APP_SETTLES_S = 2.0
 
 
 @linux(launch=Launch(command=["mail"], window={"class": "Mail"}, ready=Ready(window=True, timeout_s=30)))
@@ -300,7 +303,7 @@ async def test_the_drivers_readiness_asks_every_apps_server_at_once(desktop, mon
     class Settling(ComputerAppEnvironment):
         @ready_check
         async def settled(self):
-            await asyncio.sleep(1)
+            await asyncio.sleep(APP_SETTLES_S)
             return True
 
     with tempfile.TemporaryDirectory(dir="/tmp", prefix="apps-") as root:
@@ -308,14 +311,14 @@ async def test_the_drivers_readiness_asks_every_apps_server_at_once(desktop, mon
         async with contextlib.AsyncExitStack() as stack:
             for name in ("mail", "music", "sync"):
                 await stack.enter_async_context(_serving(Settling(), Path(root) / name, monkeypatch))
-            started = time.monotonic()
             async with http_client(FakeDriver()) as http:
+                started = time.monotonic()
                 status = (await http.get("/agentenv/ext/computer-ready/status")).json()
-            took = time.monotonic() - started
+                took = time.monotonic() - started
 
     assert [check for check in status["checks"] if check["name"].startswith("app ")] == [
         {"name": f"app {name}", "ok": True, "detail": "ready"} for name in ("mail", "music", "sync")]
-    assert status["ready"] is True and took < 2.5
+    assert status["ready"] is True and took < 2 * APP_SETTLES_S, took
 
 
 @linux(paths=["Mail"])

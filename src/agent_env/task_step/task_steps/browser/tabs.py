@@ -29,8 +29,9 @@ class BrowserOpenTabTaskStep(BrowserStep):
 
     def __init__(self, id: str, version: Optional[int], env_id: str, url: str, background: bool = False,
                  browser: Optional[str] = None, depends_on: Optional[list[TaskStepDependency]] = None,
-                 fail_task_on_error: bool = True):
-        super().__init__(id, version, env_id, browser, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
+                 fail_task_on_error: bool = True, context: Optional[str] = None):
+        super().__init__(id, version, env_id, browser, depends_on=depends_on, fail_task_on_error=fail_task_on_error,
+                         context=context)
         self.url, self.background = url, background
 
     def config_problems(self) -> list[str]:
@@ -44,7 +45,7 @@ class BrowserOpenTabTaskStep(BrowserStep):
 
     @classmethod
     def from_dict(cls, data: dict) -> BrowserOpenTabTaskStep:
-        return cls(**cls._browser_from_dict(data), url=data["url"], background=data.get("background", False))
+        return cls(**cls._in_context_from_dict(data), url=data["url"], background=data.get("background", False))
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         params = {"url": self.url, **({"background": True} if self.background else {})}
@@ -64,8 +65,10 @@ class _TabAtUrlStep(BrowserStep):
     did: ClassVar[str]
 
     def __init__(self, id: str, version: Optional[int], env_id: str, url: str, browser: Optional[str] = None,
-                 depends_on: Optional[list[TaskStepDependency]] = None, fail_task_on_error: bool = True):
-        super().__init__(id, version, env_id, browser, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
+                 depends_on: Optional[list[TaskStepDependency]] = None, fail_task_on_error: bool = True,
+                 context: Optional[str] = None):
+        super().__init__(id, version, env_id, browser, depends_on=depends_on, fail_task_on_error=fail_task_on_error,
+                         context=context)
         self.url = url
 
     def config_problems(self) -> list[str]:
@@ -76,7 +79,7 @@ class _TabAtUrlStep(BrowserStep):
 
     @classmethod
     def from_dict(cls, data: dict) -> _TabAtUrlStep:
-        return cls(**cls._browser_from_dict(data), url=data["url"])
+        return cls(**cls._in_context_from_dict(data), url=data["url"])
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
         tabs = (await self._call(context, "tabs/list", {}))["tabs"]

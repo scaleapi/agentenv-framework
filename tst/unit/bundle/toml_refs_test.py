@@ -14,6 +14,7 @@ from agent_env.artifact.store import ArtifactStore
 from agent_env.bundle import parse_bundle
 from agent_env.bundle.authoring import AuthoringContext
 from agent_env.bundle.parse import _EVAL_KEYS, CONFIG_FILES
+from agent_env.env.env import Env
 from agent_env.env.envs.computer.env import ComputerEnv
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.envs.multi_env import MultiEnv
@@ -58,6 +59,8 @@ _STAND_INS = {  # what a load returns for each type a from_toml asks for
     # A computer's name is its tool prefix, too short for a sentinel; it deploys as it would alone, which isn't checked here.
     ComputerEnv: lambda id: MagicMock(spec=ComputerEnv, id=id, type=ComputerEnv.type, version=1, environment_name="desktop",
                                       **{"deploy_refusal.return_value": None}),
+    # A multi env's browser_envs takes any website browser env: an MCP server env serving one stands in.
+    Env: lambda id: MCPServerEnv(id, 1, docker_image_artifact=_image(f"{id}-image"), environment_name=id),
 }
 
 

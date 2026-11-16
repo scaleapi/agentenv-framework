@@ -71,16 +71,19 @@ def test_health_reports_the_resolved_backends(client):
     assert body["runner"] == "local"
 
 
-def test_guard_blocks_cross_site_and_foreign_hosts(client):
-    # The actual attack: a page you visit while `up` runs makes a cross-site POST
-    # that would dispatch a run. The browser tags it Sec-Fetch-Site: cross-site and
-    # the guard refuses it before any side effect (CORS withholds the response, not
-    # the request — so CORS alone would not stop this).
-    assert client.post("/api/v1/tasks/t1/run", headers={"sec-fetch-site": "cross-site"}).status_code == 403
-    assert client.get("/api/v1/artifacts", headers={"sec-fetch-site": "cross-site"}).status_code == 403
-    # The explorer's own same-origin UI, and curl / the agent-env CLI (no Sec-Fetch-Site),
-    # are unaffected.
+def test_guard_admits_only_the_explorers_own_pages_and_loopback_hosts(client):
+    # The attack: a page you visit while `up` runs makes a request that would dispatch a run. The guard refuses it before
+    # any side effect (CORS withholds the response, not the request), from another site and from another loopback port,
+    # which browsers tag same-site, since the local providers publish env sites and consoles there.
+    for site in ("cross-site", "same-site"):
+        assert client.post("/api/v1/tasks/t1/run", headers={"sec-fetch-site": site}).status_code == 403
+        assert client.get("/api/v1/artifacts", headers={"sec-fetch-site": site}).status_code == 403
+    # A browser that sends no Fetch Metadata is judged by its Origin.
+    assert client.post("/api/v1/tasks/t1/run", headers={"origin": "http://127.0.0.1:18765"}).status_code == 403
+    # The explorer's own UI, a typed URL, and curl or the agent-env CLI (no Fetch Metadata, no Origin) are unaffected.
     assert client.get("/api/v1/artifacts", headers={"sec-fetch-site": "same-origin"}).status_code == 200
+    assert client.get("/api/v1/artifacts", headers={"sec-fetch-site": "none"}).status_code == 200
+    assert client.get("/api/v1/artifacts", headers={"origin": "http://localhost"}).status_code == 200
     assert client.get("/api/v1/artifacts").status_code == 200
     # A non-loopback Host is refused (DNS-rebinding defense; the bind is loopback-only).
     assert client.get("/api/v1/artifacts", headers={"host": "evil.example"}).status_code == 421
@@ -378,11 +381,10 @@ def test_start_runs_caps_the_batch_size(client, monkeypatch):
     assert client.post("/api/v1/tasks/t1/runs", json={"version": 1, "count": 1}).status_code == 200
 
 
-def test_cors_default_is_loopback_only(client):
-    foreign = client.get("/health", headers={"Origin": "http://evil.example"})
-    assert "access-control-allow-origin" not in {k.lower() for k in foreign.headers}
-    local = client.get("/health", headers={"Origin": "http://localhost:3000"})
-    assert local.headers.get("access-control-allow-origin") == "http://localhost:3000"
+def test_cors_default_lets_no_other_origin_read_a_response(client):
+    for origin in ("http://evil.example", "http://localhost:3000", "http://127.0.0.1:18765"):
+        response = client.get("/health", headers={"Origin": origin})
+        assert "access-control-allow-origin" not in {k.lower() for k in response.headers}
 
 
 def test_run_groups_are_not_truncated_at_500(client):
@@ -863,26 +865,31 @@ def test_content_forwards_the_stored_content_encoding(client):
     assert response.content == b"hello"
 
 
-def test_content_sandboxes_active_types(client, tmp_path):
-    """HTML/SVG artifacts get CSP sandbox; inert types (png/json) do not.
+def test_content_sandboxes_every_type_but_the_passive_ones(client, tmp_path):
+    """Only a type a browser shows without running anything is served unsandboxed, and then under a scriptless policy:
+    an agent chooses an object's type and name, and Atom, RSS, XSL or multipart documents run script as HTML does.
 
     This is also the guard that the app-wide baseline headers in ``create_app`` do not
-    layer over the byte proxy: blanketing them here would both weaken ``sandbox`` on an
-    active type and add a misleading policy to a passive one.
+    layer over the byte proxy: blanketing them here would weaken ``sandbox`` on an active type.
     """
     from agent_env.config import set_object_store
     from agent_env.store.object_store.local.store import LocalFilesystemObjectStore
 
     store = LocalFilesystemObjectStore(str(tmp_path / "obj"))
     set_object_store(store)
-    html_url = store.put("out/report.html", b"<h1>hi</h1>", content_type="text/html")
-    png_url = store.put("out/plot.png", b"\x89PNG", content_type="image/png")
-
-    html = client.get("/api/v1/objects/content", params={"object_url": html_url})
-    assert html.headers.get("content-security-policy") == "sandbox"
-
-    png = client.get("/api/v1/objects/content", params={"object_url": png_url})
-    assert "content-security-policy" not in png.headers
+    sandboxed, passive = "sandbox; frame-ancestors 'self'", "script-src 'none'; frame-ancestors 'self'"
+    cases = {
+        "report.html": ("text/html", sandboxed), "feed.atom": ("application/atom+xml", sandboxed),
+        "feed.rss": ("application/rss+xml", sandboxed), "style.xsl": ("text/xsl", sandboxed),
+        "stream.mjpg": ("multipart/x-mixed-replace", sandboxed), "logo.svg": ("image/svg+xml", sandboxed),
+        "blob.bin": ("application/octet-stream", sandboxed),
+        "plot.png": ("image/png", passive), "data.json": ("application/json", passive),
+        "paper.pdf": ("application/pdf", passive), "notes.txt": ("text/plain; charset=utf-8", passive),
+    }
+    for name, (content_type, policy) in cases.items():
+        url = store.put(f"out/{name}", b"<x/>", content_type=content_type)
+        served = client.get("/api/v1/objects/content", params={"object_url": url})
+        assert served.headers.get("content-security-policy") == policy, name
 
 
 def test_baseline_security_headers_on_app_responses(client):

@@ -14,7 +14,8 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import urlsplit
 
-from ..computer.errors import DeviceUnavailable, InvalidArgument
+from .log import ACTOR, KEY_FIELDS, TYPING_METHODS, BrowserLog, Causes, caused, log_time, redact_url
+from ..computer.errors import DeviceUnavailable, InvalidArgument, TargetUnavailable
 from .devtools import DevToolsError, DevToolsPipe
 from .shapes import (ClosedTab, Cookie, CookieToSet, Dialog, Download, OpenTab, OriginStorage, StartTab, StorageItem,
                      origin_of)
@@ -32,6 +33,8 @@ PIN_TIMEOUT_S = 10.0
 ARRIVAL_POLL_S = 0.05
 #: How long a start tab on a site the env doesn't serve may take to load before it's left loading.
 LIVE_START_TAB_TIMEOUT_S = 30.0
+#: How long a start tab's move within its document may take to land after the browser answers it, before its reload.
+MOVE_WITHIN_S = 5.0
 #: How a start tab settled.
 LOADED, FAILED, TIMED_OUT = "loaded", "failed", "timed_out"
 #: How much of a download each read hashes.
@@ -43,6 +46,23 @@ PAGES = [{"type": "page"}]
 #: The CDP input a computer's page driver may send to the active tab, and how long its screenshot may take.
 PAGE_INPUT = frozenset({"Input.dispatchMouseEvent", "Input.dispatchKeyEvent", "Input.insertText"})
 CAPTURE_TIMEOUT_S, UNNAVIGATED_CAPTURE_TIMEOUT_S = 3.0, 1.0
+#: A frame's quality as a JPEG, which is a fifth to a tenth of the PNG's size.
+FRAME_QUALITY = 80
+#: How long a frame's capture may go unanswered before a second capture is sent: Chrome answers a capture of a tab
+#: behind the active one only once another capture of it arrives, and then answers both.
+NUDGE_S = 0.5
+#: How long a frame may take to capture, longer than a screenshot an agent waits on, since a frame is taken in the
+#: background: a page too busy to paint, or between documents mid-navigation, gets this long to show, a capture the
+#: browser refused for the moment asked again every ``FRAME_RETRY_S``.
+FRAME_CAPTURE_S = 10.0
+FRAME_RETRY_S = 0.25
+#: What the browser says of a capture refused for the moment: while a navigation swaps the tab's document, or once the
+#: session it was asked on is gone, as when the tab closes or the browser attaches it anew.
+FOR_THE_MOMENT = ("Not attached to an active page", "Unable to capture screenshot", "Session with given id not found")
+#: How often a wait for a tab to load looks again.
+LOAD_POLL_S = 0.1
+#: A screencast's frames: JPEG at this quality, every frame the tab paints.
+SCREENCAST = {"format": "jpeg", "quality": FRAME_QUALITY, "everyNthFrame": 1}
 #: Where an agent's files to upload are, and where downloads land, under the session user's home.
 UPLOADS = "Uploads"
 DOWNLOADS = "Downloads"
@@ -53,6 +73,24 @@ SERVED_PAGE = base64.b64encode(b"<!doctype html>").decode()
 LEAVING, ARRIVED = "window.__agentenvLeft = true", "window.__agentenvLeft ? '' : location.origin"
 #: Hostnames a secure cookie is sent to over http, as browsers treat them.
 LOCAL_HOSTS = ("localhost", "127.0.0.1", "[::1]")
+#: Whether the focused element is a password field, through shadow roots and frames of the page's own origin; a frame
+#: of another origin can't be looked into.
+PASSWORD_FOCUSED = """(() => {
+  let element = document.activeElement;
+  for (;;) {
+    if (element && element.shadowRoot && element.shadowRoot.activeElement) element = element.shadowRoot.activeElement;
+    else if (element && (element.tagName === 'IFRAME' || element.tagName === 'FRAME')) {
+      try { element = element.contentDocument.activeElement; } catch (e) { return false; }
+    } else break;
+  }
+  return !!element && element.tagName === 'INPUT' && (element.type || '').toLowerCase() === 'password';
+})()"""
+#: How long the password-field check waits on a page.
+PASSWORD_CHECK_TIMEOUT_S = 2.0
+
+
+class _TabGone(Exception):
+    """The tab a capture was asked of went away while the capture was waiting: the browser answers it never."""
 
 
 class BrowserControl:
@@ -72,6 +110,10 @@ class BrowserControl:
         self.dialog_log: list[dict] = []
         self._sessions: dict[str, str] = {}
         self._hidden: set[str] = set()
+        #: What each page of agentenv's own open now sets as it closes, with its context, None for the default one; and
+        #: the contexts being disposed, once per disposal under way, which open no more (``disposing``).
+        self._hidden_pages: dict[asyncio.Event, Optional[str]] = {}
+        self._disposing: list[str] = []
         self._closing: set[str] = set()
         self._open_dialogs: dict[str, dict] = {}
         self._answering: set[str] = set()
@@ -79,18 +121,42 @@ class BrowserControl:
         #: front.
         self._choosers: dict[str, dict] = {}
         self._front: Optional[str] = None
+        #: The tab agentenv last brought to the front in any context, which the page's operations follow.
+        self._page_front: Optional[str] = None
+        #: The tab each frame its pages navigated is in, by the frame's id, as a download names the frame it began in.
+        self._frame_tabs: dict[str, str] = {}
         #: Each tab's latest capture, which shows while a dialog keeps its page from painting; and, by session, what
         #: input sent there waits on to learn a dialog opened.
         self._shots: dict[str, str] = {}
+        #: Each tab's latest frame, the image and its format, which a frame shows again while a dialog keeps it from
+        #: painting.
+        self._frames: dict[str, tuple[str, str]] = {}
         self._dialog_opened: dict[str, asyncio.Event] = {}
         self._pinned: dict[str, asyncio.Event] = {}
         self._tasks: set[asyncio.Future] = set()
-        #: Each start tab loading, by its session.
+        #: Each start tab loading, by its session; and each tab whose page has committed and not yet loaded.
         self._loading: dict[str, _StartLoad] = {}
+        self._page_loading: set[str] = set()
         #: Every http and https origin a page or frame it follows loaded since this server started, and the sessions
         #: of agentenv's own pages whose requests it answers itself.
         self.origins: set[str] = set()
         self._serving: set[str] = set()
+        #: Every context the browser has had but its default one, by its id, with its lease's label, as agentenv
+        #: leased or recorded them, which keeps their tabs, origins and downloads out of the default context's after
+        #: they end; each one's origins seen, and the tab agentenv last brought to the front in it.
+        self.other_contexts: dict[str, str] = {}
+        self.context_origins: dict[str, set[str]] = {}
+        self._context_fronts: dict[str, str] = {}
+        #: Each screencast agentenv runs, by its session, and what hears its frames, each JPEG's bytes.
+        self._screencasts: dict[str, list[Callable[[bytes], None]]] = {}
+        #: What hears of each tab opening and closing: the event and the tab's record.
+        self.on_tab: list[Callable[[str, dict], None]] = []
+        #: The browser's log, where its tab events go, and the commands in flight that cause them.
+        self.log: Optional[BrowserLog] = None
+        self.causes = Causes()
+        #: Which other context's downloads folder a path is in, as the browser's contexts tell it.
+        self.download_folders: Optional[Callable[[str], Optional[str]]] = None
+        self._launching = False
         devtools.listen(self._event)
 
     async def attach(self) -> None:
@@ -98,7 +164,11 @@ class BrowserControl:
         this one has or opens attached, and its downloads reported, which go where its own policies say, as Chrome
         downloads unattended: into ``~/Downloads``, a name downloaded again kept beside the first."""
         self.ended(STOP)
-        await self.devtools.call("Target.setDiscoverTargets", {"discover": True, "filter": PAGES})
+        self._launching = True
+        try:
+            await self.devtools.call("Target.setDiscoverTargets", {"discover": True, "filter": PAGES})
+        finally:
+            self._launching = False
         await self.devtools.call("Target.setAutoAttach", {"autoAttach": True,
                                                           "waitForDebuggerOnStart": self.viewport is not None,
                                                           "flatten": True, "filter": PAGES})
@@ -108,8 +178,16 @@ class BrowserControl:
         """The browser is gone, ``how`` it ended: its open tabs are closed by that, and its sessions with them."""
         now = _now()
         self.closed_tabs += [{**tab, "closed_at": now, "closed_by": how} for tab in self.tabs.values()]
+        if self.log is not None:
+            for tab in self.tabs.values():
+                self.log.note("tab", {"event": "closed", "id": tab["id"], "url": redact_url(tab["url"]), "by": how})
+        ended = list(self.tabs.values())
         self.tabs.clear()
         self._sessions.clear()
+        self._screencasts.clear()
+        for tab in ended:
+            self._heard("closed", tab)
+        self._frame_tabs.clear()
         self._open_dialogs.clear()
         self._choosers.clear()
         self._shots.clear()
@@ -120,31 +198,129 @@ class BrowserControl:
             load.settled.set()
 
     async def close_tab(self, target: str) -> None:
-        """Close the tab ``target``, which the record says agentenv closed."""
+        """Close the tab ``target``, which the record says agentenv closed, and the log says who asked."""
         self._closing.add(target)
+        self.causes.closing(target, _cause())
         await self.devtools.call("Target.closeTarget", {"targetId": target})
 
-    async def tab_list(self) -> list[dict]:
-        """The open tabs in opened order, each with its URL and title now and whether it's active."""
-        await self._refresh()
-        active = await self.active_tab()
-        return [OpenTab(**tab, active=tab["id"] == active).model_dump() for tab in self.tabs.values()]
+    async def create_target(self, params: dict) -> str:
+        """A new tab, ``Target.createTarget`` with ``params``, which the log says who asked for; its id."""
+        landed = asyncio.get_running_loop().create_future()
+        self.causes.creating(landed, _cause())
+        try:
+            target = (await self.devtools.call("Target.createTarget", params))["targetId"]
+        except BaseException:
+            landed.cancel()
+            raise
+        landed.set_result(target)
+        return target
 
-    async def open_tab(self, url: Optional[str] = None, background: bool = False) -> str:
-        """A new tab at ``url``, else blank, brought to the front, or with ``background`` behind the active tab, which
-        stays active, brought back only if the new tab took its place; its id. Alone, it opens blank and goes to
-        ``url`` once it's held to the window's size, so its page loads at that size."""
-        active = await self.active_tab() if background else None
+    async def _navigate(self, target: str, method: str, params: dict, session: str) -> dict:
+        """``Page.navigate`` of ``target`` on ``session``, which the log says who asked for; its answer."""
+        landed = asyncio.get_running_loop().create_future()
+        self.causes.navigating(target, landed, _cause())
+        try:
+            answer = await self.devtools.call(method, params, session_id=session)
+        except BaseException:
+            landed.cancel()
+            raise
+        if answer.get("errorText"):
+            landed.cancel()
+        else:
+            landed.set_result(answer.get("loaderId"))
+        return answer
+
+    def url_of(self, target: Optional[str]) -> Optional[str]:
+        """The URL of the open tab ``target`` as the log keeps it; None for one it doesn't know."""
+        tab = self.tabs.get(target) if target else None
+        return redact_url(tab["url"]) if tab is not None else None
+
+    async def password_focused(self, target: str) -> bool:
+        """Whether a password field has focus in the tab ``target``, so what is typed there isn't logged; True when it
+        can't be told, as for a tab it has no session on."""
+        session = next((s for s, t in self._sessions.items() if t == target), None)
+        if session is None:
+            return True
+        try:
+            answer = await self.devtools.call("Runtime.evaluate", {"expression": PASSWORD_FOCUSED,
+                                                                   "returnByValue": True, "silent": True},
+                                              session_id=session, timeout_s=PASSWORD_CHECK_TIMEOUT_S)
+            return answer["result"]["value"] is not False
+        except (ConnectionError, DevToolsError, asyncio.TimeoutError, KeyError, TypeError):
+            return True
+
+    def _acted_on(self, target: Optional[str]) -> None:
+        """The tab the op under way acts on or reads, for its entry; an acting op's becomes that tab's latest."""
+        actor = ACTOR.get()
+        if actor is None or target is None:
+            return
+        actor["tab"] = target
+        if actor.get("acts") and self.log is not None and self.log.last_acting.get(target, 0) < actor["seq"]:
+            self.log.last_acting[target] = actor["seq"]
+
+    def in_context(self, context_id: Optional[str], wanted: Optional[str]) -> bool:
+        """Whether something of the browser context ``context_id`` is the context ``wanted``'s: a leased one's own,
+        else the default context's, which has whatever no other context does."""
+        return context_id == wanted if wanted else context_id not in self.other_contexts
+
+    async def tab_list(self, context: Optional[str] = None, *, every: bool = False) -> list[dict]:
+        """The open tabs of the context ``context``, the browser's id for a leased one, else of the default context,
+        each with whether it's its context's active tab; or with ``every`` all of them, the page's tab the active one;
+        in opened order, each with its URL and title now and its context."""
+        await self._refresh()
+        if every:
+            page = await self.page_tab()
+            return [OpenTab(**tab, active=tab["id"] == page, context=self.label_of(tab)).model_dump()
+                    for tab in self.tabs.values()]
+        active = await self.active_tab(context)
+        return [OpenTab(**tab, active=tab["id"] == active, context=self.label_of(tab)).model_dump()
+                for tab in self.tabs.values() if self.in_context(tab.get("context_id"), context)]
+
+    def context_of_frame(self, frame: object) -> Optional[str]:
+        """The context of the tab the frame ``frame`` is in, a tab's own frame among them; None for one it hasn't
+        seen."""
+        tab = self._frame_tabs.get(frame, frame) if isinstance(frame, str) else None
+        return self.tabs.get(tab, {}).get("context_id") if tab is not None else None
+
+    def context_of_tab(self, target: object) -> Optional[str]:
+        """The context of the tab ``target``, open or closed since the record started; None for the default context's,
+        or one it hasn't seen."""
+        if (tab := self.tabs.get(target) if isinstance(target, str) else None) is not None:
+            return tab.get("context_id")
+        return next((tab.get("context_id") for tab in reversed(self.closed_tabs) if tab["id"] == target), None)
+
+    def session_of(self, target: Optional[str]) -> Optional[str]:
+        """The session of agentenv's own on the tab ``target``, None for one it isn't attached to."""
+        return next((session for session, tab in self._sessions.items() if tab == target), None) if target else None
+
+    def label_of(self, entry: dict) -> Optional[str]:
+        """The label of the lease a tab or download was in, None for the default context."""
+        return self.other_contexts.get(entry.get("context_id"))
+
+    def context_ids(self) -> list[str]:
+        """The other contexts with a tab open now, in the order their first opened."""
+        return list(dict.fromkeys(tab["context_id"] for tab in self.tabs.values()
+                                  if tab.get("context_id") in self.other_contexts))
+
+    async def open_tab(self, url: Optional[str] = None, background: bool = False,
+                       context: Optional[str] = None) -> str:
+        """A new tab at ``url``, else blank, in the context ``context``, the browser's id for a leased one, else the
+        default, brought to the front, or with ``background`` behind its context's active tab, which stays active,
+        brought back only if the new tab took its place; its id. Alone, it opens blank and goes to ``url`` once it's
+        held to the window's size, so its page loads at that size."""
+        active = await self.active_tab(context) if background else None
         held = self.viewport is not None and url
         start = "about:blank" if held else url or "about:blank"
-        target = (await self.devtools.call("Target.createTarget", {"url": start, "background": background}))["targetId"]
+        target = await self.create_target({"url": start, "background": background,
+                                           **({"browserContextId": context} if context else {})})
+        self._acted_on(target)
         if held:
             await asyncio.wait_for(self._pinned.setdefault(target, asyncio.Event()).wait(), PIN_TIMEOUT_S)
             session = next(s for s, t in self._sessions.items() if t == target)
-            await self.devtools.call("Page.navigate", {"url": url}, session_id=session)
+            await self._navigate(target, "Page.navigate", {"url": url}, session)
         if not background:
             await self._bring_to_front(target)
-        elif active is not None and active in self.tabs and await self.active_tab() == target:
+        elif active is not None and active in self.tabs and await self.active_tab(context) == target:
             await self._bring_to_front(active)
         return target
 
@@ -156,13 +332,14 @@ class BrowserControl:
         as ``site_of`` names them, an error status is too, or once it has been waited on ``own_timeout_s`` on such a
         site, else ``live_timeout_s``. Each tab's outcome, in order, kept though the browser has gone and the first
         can't come to the front. A page already loaded doesn't read cookies set after it, so a tab a load signed in
-        shows it only once it loads again."""
+        shows it only once it loads again: a tab already on its URL's document, as a hash-routed page, is reloaded
+        there, since going to the URL alone only moves within the document (``_start_navigation``)."""
         if not urls:
             return []
-        targets = list(self.tabs)[:len(urls)] or [await self._first_tab()]
+        targets = [target for target, tab in self.tabs.items()
+                   if self.in_context(tab.get("context_id"), None)][:len(urls)] or [await self._first_tab()]
         while len(targets) < len(urls):
-            targets.append((await self.devtools.call("Target.createTarget",
-                                                     {"url": "about:blank", "background": True}))["targetId"])
+            targets.append(await self.create_target({"url": "about:blank", "background": True}))
         for target in targets:
             await asyncio.wait_for(self._pinned.setdefault(target, asyncio.Event()).wait(), PIN_TIMEOUT_S)
         loading = []
@@ -187,7 +364,8 @@ class BrowserControl:
     async def _start_load(self, target: str, url: str, site: Optional[str]) -> _StartLoad:
         """The tab ``target`` sent to ``url``, its navigation followed by what the browser says of it. The browser
         answers a navigation once it commits, which a page that never answers never does, so its answer is awaited
-        apart, for as long as the tab is."""
+        apart, for as long as the tab is, and a navigation that stays in the tab's document is followed by a reload
+        (``_start_navigation``)."""
         session = next((s for s, t in self._sessions.items() if t == target), None)
         if session is None:
             raise DeviceUnavailable(f"the browser's tab {target} has no session to load a start tab in")
@@ -198,10 +376,42 @@ class BrowserControl:
             load.error = f"{type(e).__name__}: {e}"
             load.check()
             return load
-        load.navigating = asyncio.ensure_future(self.devtools.request("Page.navigate", {"url": url},
-                                                                      session_id=session))
+        load.navigating = asyncio.ensure_future(self._start_navigation(target, load, session))
         load.navigating.add_done_callback(load.answered)
         return load
+
+    async def _start_navigation(self, target: str, load: _StartLoad, session: str) -> dict:
+        """``load``'s tab sent to its URL, which the log says who asked for: the browser's answer. A tab already on the
+        URL's document, as a hash-routed page is, only moves within it, which loads nothing and names no loader, so the
+        page wouldn't read what a load just set: it's reloaded there once the move has landed, which the browser
+        answers before it does (else the reload loads where the tab was), the load taking its main frame's first
+        document after for its own, and the log that navigation for the reload."""
+        cause, landed = _cause(), asyncio.get_running_loop().create_future()
+        self.causes.navigating(target, landed, cause)
+        try:
+            answer = await self.devtools.request("Page.navigate", {"url": load.url}, session_id=session)
+        except BaseException:
+            landed.cancel()
+            raise
+        result = answer.get("result") or {}
+        if "error" in answer or result.get("errorText"):
+            landed.cancel()
+            return answer
+        landed.set_result(result.get("loaderId"))
+        if result.get("loaderId"):
+            return answer
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(load.moved.wait(), MOVE_WITHIN_S)
+        load.reloading = True
+        self.causes.navigates_next(target, cause)
+        try:
+            reloaded = await self.devtools.request("Page.reload", {}, session_id=session)
+        except BaseException:
+            self.causes.navigated_nowhere(target, cause)
+            raise
+        if "error" in reloaded:
+            self.causes.navigated_nowhere(target, cause)
+        return reloaded
 
     async def _settled(self, target: str, load: _StartLoad, timeout_s: float) -> dict:
         """``load``'s outcome once it settles, or once it has been waited on ``timeout_s``."""
@@ -227,11 +437,12 @@ class BrowserControl:
                         load_ms=round((asyncio.get_running_loop().time() - load.started) * 1000), site=load.site,
                         outcome=outcome).model_dump()
 
-    async def replace_tabs(self, tabs: list) -> None:
-        """``tabs``, each with its ``url`` and whether it's ``active``, opened in order in place of the tabs open now,
-        the active one, else the first, in front. The new ones open before the old close, so the window stays."""
-        before = list(self.tabs)
-        opened = [await self.open_tab(tab.url) for tab in tabs]
+    async def replace_tabs(self, tabs: list, context: Optional[str] = None) -> None:
+        """``tabs``, each with its ``url`` and whether it's ``active``, opened in order in place of the tabs open now
+        in the context ``context``, else the default one, the active one, else the first, in front. The new ones open
+        before the old close, so the window stays."""
+        before = [target for target, tab in self.tabs.items() if self.in_context(tab.get("context_id"), context)]
+        opened = [await self.open_tab(tab.url, context=context) for tab in tabs]
         for target in before:
             await self.close_tab(target)
         if opened:
@@ -244,28 +455,45 @@ class BrowserControl:
         self.closed_tabs, self.dialog_log = [], []
         self.downloads.clear()
         self.origins.clear()
+        self.context_origins.clear()
+        self._context_fronts.clear()
+        self.other_contexts.clear()
 
-    async def activate(self, target: str) -> None:
-        """The open tab ``target`` brought to the front, the active one."""
-        self._open(target)
+    async def activate(self, target: str, context: Optional[str] = None) -> None:
+        """The open tab ``target`` of the context ``context``, else of the default one, brought to the front, its
+        context's active one."""
+        self._open(target, context)
+        self._acted_on(target)
         await self._bring_to_front(target)
 
-    async def close(self, target: str) -> None:
-        """The open tab ``target`` closed, which the record says agentenv closed."""
-        self._open(target)
+    async def close(self, target: str, context: Optional[str] = None) -> None:
+        """The open tab ``target`` of the context ``context``, else of the default one, closed, which the record says
+        agentenv closed."""
+        self._open(target, context)
+        self._acted_on(target)
         await self.close_tab(target)
+
+    def closing_context(self, context: str) -> None:
+        """The context ``context`` about to end, its tabs closing with it, which the record says agentenv closed."""
+        for target, tab in self.tabs.items():
+            if tab.get("context_id") == context:
+                self._closing.add(target)
+                self.causes.closing(target, _cause())
 
     async def navigate(self, url: str) -> None:
         """The active tab opened at ``url``; InvalidArgument, with the browser's reason, when it can't."""
-        answer = await self.devtools.call("Page.navigate", {"url": url}, session_id=await self.active_session())
+        session = await self.active_session()
+        self._acted_on(target := self._sessions[session])
+        answer = await self._navigate(target, "Page.navigate", {"url": url}, session)
         if error := answer.get("errorText"):
             raise InvalidArgument(f"the browser couldn't open {url}: {error}")
 
     async def history(self, direction: str) -> None:
         """The active tab's page reloaded, or the one before or after it in its history opened."""
         session = await self.active_session()
+        self._acted_on(target := self._sessions[session])
         if direction == "reload":
-            await self.devtools.call("Page.reload", {}, session_id=session)
+            await self._moves(target, "Page.reload", {}, session)
             return
         if direction not in ("back", "forward"):
             raise InvalidArgument(f"direction is back, forward or reload, not {direction!r}")
@@ -273,12 +501,24 @@ class BrowserControl:
         index = history["currentIndex"] + (-1 if direction == "back" else 1)
         if not 0 <= index < len(history["entries"]):
             raise InvalidArgument(f"the active tab has no page to go {direction} to")
-        await self.devtools.call("Page.navigateToHistoryEntry", {"entryId": history["entries"][index]["id"]},
-                                 session_id=session)
+        await self._moves(target, "Page.navigateToHistoryEntry", {"entryId": history["entries"][index]["id"]},
+                          session)
+
+    async def _moves(self, target: str, method: str, params: dict, session: str) -> None:
+        """A reload or move in history of ``target``, whose next navigation the log says the op under way caused,
+        unless it fails."""
+        cause = _cause()
+        self.causes.navigates_next(target, cause)
+        try:
+            await self.devtools.call(method, params, session_id=session)
+        except BaseException:
+            self.causes.navigated_nowhere(target, cause)
+            raise
 
     async def answer_dialog(self, accept: bool, text: Optional[str] = None) -> None:
         """The dialog open on the active tab answered, as the agent's answer; InvalidArgument with none open."""
-        active = await self.active_tab()
+        active = await self.page_tab()
+        self._acted_on(active)
         session = next((s for s, dialog in self._open_dialogs.items() if dialog["tab"] == active), None)
         if session is None:
             raise InvalidArgument("no dialog is open on the page")
@@ -288,7 +528,8 @@ class BrowserControl:
     async def choose_files(self, paths: list[str]) -> None:
         """The file chooser open on the active tab given ``paths``, files in the session user's ``~/Uploads``;
         InvalidArgument for one outside it or missing, for several where it takes one, or with no chooser open."""
-        active = await self.active_tab()
+        active = await self.page_tab()
+        self._acted_on(active)
         session = next((s for s in self._choosers if self._sessions.get(s) == active), None)
         if session is None:
             raise InvalidArgument("no file chooser is open on the page")
@@ -311,9 +552,10 @@ class BrowserControl:
     async def state(self) -> dict:
         """The active tab's id, URL and title now, and the dialog and file chooser open on it."""
         await self._refresh()
-        active = await self.active_tab()
+        active = await self.page_tab()
         if active is None:
             raise DeviceUnavailable("the browser has no tab open")
+        self._acted_on(active)
         return self._state_of(active)
 
     def _state_of(self, target: str) -> dict:
@@ -326,40 +568,76 @@ class BrowserControl:
             state["file_chooser"] = {"multiple": chooser["multiple"]}
         return state
 
-    def _open(self, target: str) -> None:
-        if target not in self.tabs:
-            raise InvalidArgument(f"no tab {target} is open; list the tabs for their ids")
+    def _open(self, target: str, context: Optional[str] = None) -> None:
+        if target not in self.tabs or not self.in_context(self.tabs[target].get("context_id"), context):
+            raise InvalidArgument(f"no tab {target} is open in that context; list its tabs for their ids" if context
+                                  else f"no tab {target} is open; list the tabs for their ids")
 
     async def _bring_to_front(self, target: str) -> None:
         await self.devtools.call("Target.activateTarget", {"targetId": target})
         if (session := next((s for s, t in self._sessions.items() if t == target), None)) is not None:
             with contextlib.suppress(DevToolsError):
                 await self.devtools.call("Page.bringToFront", session_id=session)
-        self._front = target
+        if (context := self.tabs.get(target, {}).get("context_id")) in self.other_contexts:
+            self._context_fronts[context] = target
+        else:
+            self._front = target
+        self._page_front = target
 
     @contextlib.asynccontextmanager
-    async def hidden_page(self, url: str = "about:blank") -> AsyncIterator[str]:
-        """A page of agentenv's own for reading state, in no window and never in the record; its session's id. It's
-        closed after."""
-        target = (await self.devtools.call("Target.createTarget",
-                                           {"url": url, "hidden": True, "background": True}))["targetId"]
-        self._hidden.add(target)
-        self.tabs.pop(target, None)
+    async def hidden_page(self, url: str = "about:blank", context: Optional[str] = None) -> AsyncIterator[str]:
+        """A page of agentenv's own for reading state, in the context ``context``, else the default one, in no window
+        and never in the record; its session's id. It's closed after, before its context is disposed;
+        TargetUnavailable for a context being disposed."""
+        if context in self._disposing:
+            raise TargetUnavailable(f"the context {self.other_contexts.get(context, context)!r} is being disposed")
+        closed = asyncio.Event()
+        self._hidden_pages[closed] = context
         try:
-            yield (await self.devtools.call("Target.attachToTarget", {"targetId": target, "flatten": True}))["sessionId"]
+            target = (await self.devtools.call("Target.createTarget", {
+                "url": url, "hidden": True, "background": True, **_in(context)}))["targetId"]
+            self._hidden.add(target)
+            self.tabs.pop(target, None)
+            try:
+                attached = await self.devtools.call("Target.attachToTarget", {"targetId": target, "flatten": True})
+                yield attached["sessionId"]
+            finally:
+                with contextlib.suppress(ConnectionError, DevToolsError):
+                    await self.devtools.call("Target.closeTarget", {"targetId": target})
         finally:
-            with contextlib.suppress(ConnectionError, DevToolsError):
-                await self.devtools.call("Target.closeTarget", {"targetId": target})
+            del self._hidden_pages[closed]
+            closed.set()
 
-    async def active_tab(self) -> Optional[str]:
-        """The tab a dialog is open on, whose page it blocks from saying; else the visible tab whose page has focus, as
-        a hidden tab's page that had input still says it has; else the one agentenv last brought to the front, else the
-        first visible one: CDP has no event for a tab made active."""
-        if dialogs := [dialog["tab"] for dialog in self._open_dialogs.values() if dialog["tab"] in self.tabs]:
+    @contextlib.asynccontextmanager
+    async def disposing(self, context: str) -> AsyncIterator[None]:
+        """The context ``context`` disposed within: from its start no page of agentenv's own opens in it, and it waits
+        for those open there to close, as Chromium crashes disposing a context that holds a hidden page."""
+        self._disposing.append(context)
+        try:
+            for closed in [closed for closed, of in self._hidden_pages.items() if of == context]:
+                await closed.wait()
+            yield
+        finally:
+            self._disposing.remove(context)
+
+    async def active_tab(self, context: Optional[str] = None) -> Optional[str]:
+        """The active tab of the context ``context``, else of the default one, as ``page_tab`` picks among its tabs."""
+        ours = {target for target, tab in self.tabs.items() if self.in_context(tab.get("context_id"), context)}
+        return await self._active_among(ours, self._context_fronts.get(context) if context else self._front)
+
+    async def page_tab(self) -> Optional[str]:
+        """The tab the page's operations act on, in whichever context it is: the tab a dialog is open on, whose page
+        it blocks from saying; else the visible tab whose page has focus, as a hidden tab's page that had input still
+        says it has; else the one agentenv last brought to the front, else the first visible one: CDP has no event for
+        a tab made active."""
+        return await self._active_among(set(self.tabs), self._page_front)
+
+    async def _active_among(self, ours: set[str], front: Optional[str]) -> Optional[str]:
+        if dialogs := [dialog["tab"] for dialog in self._open_dialogs.values() if dialog["tab"] in ours]:
             return dialogs[-1]
         visible = None
         for session, target in list(self._sessions.items()):
-            if target not in self.tabs:
+            if target not in ours:
                 continue
             try:
                 state = (await self.devtools.call(
@@ -372,39 +650,41 @@ class BrowserControl:
                 return target
             if state[0] == "visible" and visible is None:
                 visible = target
-        return self._front if self._front in self.tabs else visible
+        return front if front in ours else visible
 
     async def record(self) -> dict:
         """The record ``since`` it started: open ``tabs``, each with its URL and title now and whether it's ``active``,
         ``closed_tabs``, ``downloads`` and ``dialogs``."""
-        return {"since": self.since, "tabs": await self.tab_list(),
-                "closed_tabs": [ClosedTab(**tab).model_dump() for tab in self.closed_tabs],
-                "downloads": self.download_list(), "dialogs": [Dialog(**dialog).model_dump() for dialog in self.dialog_log]}
+        return {"since": self.since, "tabs": await self.tab_list(every=True),
+                "closed_tabs": [ClosedTab(**tab, context=self.label_of(tab)).model_dump() for tab in self.closed_tabs],
+                "downloads": self.download_list(every=True), "dialogs": [Dialog(**dialog).model_dump() for dialog in self.dialog_log]}
 
-    async def cookies(self, urls: Optional[list[str]] = None) -> list[dict]:
-        """The default context's cookies, or those a request to any of ``urls`` would send, as Playwright picks them."""
+    async def cookies(self, urls: Optional[list[str]] = None, context: Optional[str] = None) -> list[dict]:
+        """The cookies of the context ``context``, the browser's id for a leased one, else of the default context, or
+        those a request to any of ``urls`` would send, as Playwright picks them."""
         cookies = [Cookie(**{field: raw[field] for field in Cookie.model_fields if field in raw})
-                   for raw in (await self.devtools.call("Storage.getCookies"))["cookies"]]
+                   for raw in (await self.devtools.call("Storage.getCookies", _in(context)))["cookies"]]
         return [cookie.model_dump(exclude_none=True) for cookie in cookies
                 if not urls or any(_sent(cookie, url) for url in urls)]
 
-    async def set_cookies(self, cookies: list[CookieToSet]) -> None:
-        """``cookies`` set in the default context at once, a ``max_age`` turned into an expiry on this machine's clock,
-        which the browser's cookies are judged by; InvalidArgument when the browser refuses one, which sets none."""
+    async def set_cookies(self, cookies: list[CookieToSet], context: Optional[str] = None) -> None:
+        """``cookies`` set at once in the context ``context``, else the default one, a ``max_age`` turned into an
+        expiry on this machine's clock, which the browser's cookies are judged by; InvalidArgument when the browser
+        refuses one, which sets none."""
         try:
             await self.devtools.call("Storage.setCookies", {"cookies": [_cdp_cookie(cookie, time.time())
-                                                                        for cookie in cookies]})
+                                                                        for cookie in cookies], **_in(context)})
         except DevToolsError as e:
             raise InvalidArgument(f"the browser refused the cookies, so it set none of them: {e}")
 
     async def delete_cookies(self, name: Optional[str] = None, domain: Optional[str] = None,
-                             path: Optional[str] = None) -> int:
-        """Every cookie of the default context with all of ``name``, ``domain`` and ``path`` given, every cookie with
-        none given, deleted; how many."""
-        gone = [cookie for cookie in await self.cookies() if (name is None or cookie["name"] == name)
+                             path: Optional[str] = None, context: Optional[str] = None) -> int:
+        """Every cookie of the context ``context``, else of the default one, with all of ``name``, ``domain`` and
+        ``path`` given, every cookie with none given, deleted; how many."""
+        gone = [cookie for cookie in await self.cookies(context=context) if (name is None or cookie["name"] == name)
                 and (domain is None or cookie["domain"] == domain) and (path is None or cookie["path"] == path)]
         if gone:
-            async with self.hidden_page() as session:
+            async with self.hidden_page(context=context) as session:
                 for cookie in gone:
                     await self.devtools.call("Network.deleteCookies", {
                         "name": cookie["name"], "domain": cookie["domain"], "path": cookie["path"],
@@ -412,11 +692,14 @@ class BrowserControl:
                         session_id=session)
         return len(gone)
 
-    async def local_storage(self, origins: Optional[list[str]] = None) -> list[dict]:
-        """The local storage of each of ``origins``, else of every origin it has seen, as ``storageState`` has it."""
-        wanted = _origins(origins) if origins is not None else sorted(self.origins)
-        found = []
-        async with self._at_origins() as visit:
+    async def local_storage(self, origins: Optional[list[str]] = None, context: Optional[str] = None) -> list[dict]:
+        """The local storage of the context ``context``, else of the default one, of each of ``origins``, else of
+        every origin it has seen there, as ``storageState`` has it."""
+        wanted = _origins(origins) if origins is not None else sorted(self.origins_of(context))
+        found: list[dict] = []
+        if not wanted:
+            return found
+        async with self._at_origins(context) as visit:
             for asked in wanted:
                 session, origin = await visit(asked)
                 entries = (await self.devtools.call("DOMStorage.getDOMStorageItems", {"storageId": _storage(origin)},
@@ -425,41 +708,59 @@ class BrowserControl:
                                                                         for name, value in entries]).model_dump())
         return found
 
-    async def set_local_storage(self, origins: list[OriginStorage]) -> None:
-        """Each origin's items set in its local storage, beside those it has."""
-        async with self._at_origins() as visit:
+    async def set_local_storage(self, origins: list[OriginStorage], context: Optional[str] = None) -> None:
+        """Each origin's items set in its local storage in the context ``context``, else the default one, beside
+        those it has."""
+        if not origins:
+            return
+        async with self._at_origins(context) as visit:
             for origin in origins:
                 session, named = await visit(origin.origin)
                 for item in origin.localStorage:
                     await self.devtools.call("DOMStorage.setDOMStorageItem", {
                         "storageId": _storage(named), "key": item.name, "value": item.value}, session_id=session)
 
-    async def clear_local_storage(self, origins: Optional[list[str]] = None) -> list[str]:
-        """The local storage of each of ``origins``, else of every origin it has seen, cleared; those origins."""
-        wanted, cleared = _origins(origins) if origins is not None else sorted(self.origins), []
-        async with self._at_origins() as visit:
+    async def clear_local_storage(self, origins: Optional[list[str]] = None,
+                                  context: Optional[str] = None) -> list[str]:
+        """The local storage of the context ``context``, else of the default one, of each of ``origins``, else of
+        every origin it has seen there, cleared; those origins."""
+        wanted = _origins(origins) if origins is not None else sorted(self.origins_of(context))
+        cleared: list[str] = []
+        if not wanted:
+            return cleared
+        async with self._at_origins(context) as visit:
             for asked in wanted:
                 session, origin = await visit(asked)
                 await self.devtools.call("DOMStorage.clear", {"storageId": _storage(origin)}, session_id=session)
                 cleared.append(origin)
         return cleared
 
-    def download_list(self) -> list[dict]:
-        return [Download(**download).model_dump() for download in self.downloads.values()]
+    def download_list(self, context: Optional[str] = None, *, every: bool = False) -> list[dict]:
+        """The downloads of the context ``context``, else of the default one, or with ``every`` of all of them."""
+        return [Download(**download, context=self.label_of(download)).model_dump()
+                for download in self.downloads.values()
+                if every or self.in_context(download.get("context_id"), context)]
 
-    def download(self, guid: str) -> dict:
-        """The download ``guid``; InvalidArgument for one it hasn't seen."""
-        if guid not in self.downloads:
-            raise InvalidArgument(f"no download {guid} has begun; list the downloads for their guids")
-        return Download(**self.downloads[guid]).model_dump()
+    def download(self, guid: str, context: Optional[str] = None) -> dict:
+        """The download ``guid`` of the context ``context``, else of the default one; InvalidArgument for one it
+        hasn't seen there."""
+        if guid not in self.downloads or not self.in_context(self.downloads[guid].get("context_id"), context):
+            raise InvalidArgument(f"no download {guid} has begun in that context; list its downloads for their guids"
+                                  if context else f"no download {guid} has begun; list the downloads for their guids")
+        return Download(**self.downloads[guid], context=self.label_of(self.downloads[guid])).model_dump()
+
+    def origins_of(self, context: Optional[str]) -> set[str]:
+        """The origins seen in the context ``context``, the browser's id for a leased one, else in the default one."""
+        return self.context_origins.setdefault(context, set()) if context else self.origins
 
     @contextlib.asynccontextmanager
-    async def _at_origins(self) -> AsyncIterator[Callable[[str], Awaitable[tuple[str, str]]]]:
+    async def _at_origins(self, context: Optional[str] = None
+                          ) -> AsyncIterator[Callable[[str], Awaitable[tuple[str, str]]]]:
         """A page of agentenv's own, ``visit``, that goes to an origin and returns its session and the origin as the
         browser names it, once it's that origin's page. agentenv serves it the document, and a service worker of the
         origin is bypassed, so the site gets no request and runs no script: CDP reaches an origin's local storage only
         through a page of that origin."""
-        async with self.hidden_page() as session:
+        async with self.hidden_page(context=context) as session:
             self._serving.add(session)
             try:
                 await self.devtools.call("Network.enable", session_id=session)
@@ -478,7 +779,7 @@ class BrowserControl:
                         if asyncio.get_running_loop().time() > deadline:
                             raise DeviceUnavailable(f"a page of {origin} didn't open within {PIN_TIMEOUT_S:g} s")
                         await asyncio.sleep(ARRIVAL_POLL_S)
-                    self.origins.add(named)
+                    self.origins_of(context).add(named)
                     return session, named
 
                 yield visit
@@ -487,7 +788,7 @@ class BrowserControl:
 
     async def active_session(self) -> str:
         """The session of the active tab, else of the first open one; DeviceUnavailable with no tab open."""
-        active = await self.active_tab() or next(iter(self.tabs), None)
+        active = await self.page_tab() or next(iter(self.tabs), None)
         session = next((session for session, target in self._sessions.items() if target == active), None)
         if session is None:
             raise DeviceUnavailable("the browser has no tab open")
@@ -504,9 +805,173 @@ class BrowserControl:
         active meanwhile."""
         session = await self.active_session()
         target = self._sessions[session]
+        self._acted_on(target)
         png = await self._capture(session)
         await self._refresh(target)
         return {**({"png": png} if png is not None else {"blank": True}), "page": self._state_of(target)}
+
+    async def frame(self, target: Optional[str], load_wait_s: float, context: Optional[str] = None,
+                    within: bool = False) -> tuple[str, str, Optional[str], Optional[str]]:
+        """A frame of the tab ``target``, else, for none or one that's gone, of the active tab, with ``within`` the
+        active tab of the context ``context``, else of the default one: once its page has loaded, waiting up to
+        ``load_wait_s``, a JPEG of it as it shows, within ``FRAME_CAPTURE_S``, or, with a dialog keeping it from
+        painting, the frame it last took, else its last capture, a PNG; a tab that closes while its page loads is the
+        active tab's. The image base64, its format and the tab and its URL; DeviceUnavailable with no tab open, or for
+        one that paints nothing in time."""
+
+        async def active_session() -> str:
+            if not within:
+                return await self.active_session()
+            if (found := self.session_of(await self.active_tab(context))) is None:
+                raise DeviceUnavailable("the context has no tab open")
+            return found
+
+        session = self.session_of(target)
+        if session is None:
+            session = await active_session()
+        target = self._sessions[session]
+        deadline = asyncio.get_running_loop().time() + load_wait_s
+        while target in self._page_loading and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(LOAD_POLL_S)
+        if session not in self._sessions:
+            session = await active_session()
+            target = self._sessions[session]
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + FRAME_CAPTURE_S
+        while True:
+            if session in self._open_dialogs:
+                return self._held_frame(target)
+            try:
+                shot = await self._nudged_capture(session, deadline - loop.time())
+                break
+            except asyncio.TimeoutError:
+                raise DeviceUnavailable(f"the tab painted nothing within {FRAME_CAPTURE_S:g} s") from None
+            except DevToolsError as e:
+                if not any(why in str(e) for why in FOR_THE_MOMENT) or loop.time() + FRAME_RETRY_S >= deadline:
+                    raise DeviceUnavailable(f"the tab couldn't be captured: {e}") from None
+            except _TabGone:
+                if loop.time() + FRAME_RETRY_S >= deadline:
+                    raise DeviceUnavailable(f"the tab went away while its frame was taken, {FRAME_CAPTURE_S:g} s in all"
+                                            ) from None
+            except ConnectionError as e:
+                raise DeviceUnavailable(f"the tab couldn't be captured: {e}") from None
+            await asyncio.sleep(FRAME_RETRY_S)
+            while session not in self._sessions:
+                try:
+                    session = self.session_of(target) or await active_session()
+                except DeviceUnavailable:
+                    if loop.time() + FRAME_RETRY_S >= deadline:
+                        raise
+                    await asyncio.sleep(FRAME_RETRY_S)
+            target = self._sessions[session]
+        self._frames[target] = shot["data"], "jpg"
+        return shot["data"], "jpg", target, self.url_of(target)
+
+    async def capture_tab(self, target: str) -> Optional[bytes]:
+        """The tab ``target`` as it shows now, a JPEG's bytes, or with a dialog keeping it from painting the frame it
+        last took; None when it can't be had within ``FRAME_CAPTURE_S``, as for a tab that's gone or never painted. Of
+        that tab alone, as a recording of its context wants it."""
+        if (session := self.session_of(target)) is None:
+            return None
+        if session in self._open_dialogs:
+            held = self._frames.get(target)
+            return base64.b64decode(held[0]) if held is not None and held[1] == "jpg" else None
+        try:
+            shot = await self._nudged_capture(session, FRAME_CAPTURE_S)
+        except (asyncio.TimeoutError, ConnectionError, DevToolsError, _TabGone):
+            return None
+        self._frames[target] = shot["data"], "jpg"
+        return base64.b64decode(shot["data"])
+
+    async def visible(self, target: str) -> bool:
+        """Whether the tab ``target`` shows in its window, as a tab behind another doesn't; False when it can't be told.
+        A visible tab's screencast sends a frame each time it paints, so one that sends none is still."""
+        if (session := self.session_of(target)) is None:
+            return False
+        try:
+            answer = await self.devtools.call("Runtime.evaluate", {"expression": "document.visibilityState",
+                                                                   "returnByValue": True}, session_id=session,
+                                              timeout_s=ACTIVE_CHECK_TIMEOUT_S)
+            return answer["result"]["value"] == "visible"
+        except (ConnectionError, DevToolsError, asyncio.TimeoutError, KeyError, TypeError):
+            return False
+
+    async def screencast(self, target: str, heard: Callable[[bytes], None], max_edge: Optional[int] = None
+                         ) -> Optional[str]:
+        """``heard`` told each frame the tab ``target`` paints, a JPEG's bytes, on a screencast of agentenv's own
+        session on it, which one screencast serves for everything that follows the tab; its session, None for a tab it
+        isn't attached to or that won't screencast."""
+        if (session := self.session_of(target)) is None:
+            return None
+        hearing = self._screencasts.setdefault(session, [])
+        hearing.append(heard)
+        if len(hearing) == 1:
+            options = {**SCREENCAST, **({"maxWidth": max_edge, "maxHeight": max_edge} if max_edge else {})}
+            try:
+                await self.devtools.call("Page.startScreencast", options, session_id=session)
+            except (ConnectionError, DevToolsError, asyncio.TimeoutError):
+                self._screencasts.pop(session, None)
+                return None
+        return session
+
+    async def unscreencast(self, session: str, heard: Callable[[bytes], None]) -> None:
+        """``heard`` no longer told the frames of the screencast on ``session``, which stops once nothing hears it."""
+        hearing = self._screencasts.get(session)
+        if hearing is None or heard not in hearing:
+            return
+        hearing.remove(heard)
+        if not hearing:
+            self._screencasts.pop(session, None)
+            with contextlib.suppress(ConnectionError, DevToolsError, asyncio.TimeoutError):
+                await self.devtools.call("Page.stopScreencast", session_id=session)
+
+    def _on_Page_screencastFrame(self, params: dict, session: Optional[str]) -> None:
+        if isinstance(ack := params.get("sessionId"), int):
+            self._spawn(self.devtools.call("Page.screencastFrameAck", {"sessionId": ack}, session_id=session))
+        try:
+            data = base64.b64decode(params.get("data") or "")
+        except ValueError:
+            return
+        for heard in list(self._screencasts.get(session, ())):
+            heard(data)
+
+    def _held_frame(self, target: str) -> tuple[str, str, Optional[str], Optional[str]]:
+        """The frame of a tab a dialog keeps from painting: the one it last took, else its last capture, a PNG;
+        DeviceUnavailable for a tab with neither."""
+        if (earlier := self._frames.get(target)) is None and (shot := self._shots.get(target)) is not None:
+            earlier = shot, "png"
+        if earlier is None:
+            raise DeviceUnavailable("a dialog keeps the tab from painting and it had no capture before it")
+        return *earlier, target, self.url_of(target)
+
+    async def _nudged_capture(self, session: str, timeout_s: float) -> dict:
+        """The tab's JPEG from the first of its captures to answer: a second follows one unanswered after ``NUDGE_S``,
+        since a tab behind the active one answers only then, all within ``timeout_s``; _TabGone once the tab's session
+        is gone with none answered, as a closed tab's captures never are."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_s
+
+        def capture() -> asyncio.Future:
+            return asyncio.ensure_future(self.devtools.call("Page.captureScreenshot", {
+                "format": "jpeg", "quality": FRAME_QUALITY, "optimizeForSpeed": True}, session_id=session,
+                timeout_s=max(0.0, deadline - loop.time())))
+
+        captures = {capture()}
+        try:
+            done, _ = await asyncio.wait(captures, timeout=NUDGE_S)
+            if not done:
+                captures.add(capture())
+            while True:
+                done, captures = await asyncio.wait(captures, timeout=FRAME_RETRY_S, return_when=asyncio.FIRST_COMPLETED)
+                if answers := [c.result() for c in done if c.exception() is None]:
+                    return answers[0]
+                if not captures:
+                    raise next(iter(done)).exception()
+                if session not in self._sessions:
+                    raise _TabGone()
+        finally:
+            for pending in captures:
+                pending.cancel()
 
     async def _capture(self, session: str) -> Optional[str]:
         """The tab's page as it shows now; with a dialog open on it, which keeps it from painting, the last it took."""
@@ -531,8 +996,12 @@ class BrowserControl:
         if refused := [event.get("method") for event in events if event.get("method") not in PAGE_INPUT]:
             raise InvalidArgument(f"page input takes {', '.join(sorted(PAGE_INPUT))}, not {refused}")
         session = await self.active_session()
+        self._acted_on(target := self._sessions.get(session))
+        actor = ACTOR.get()
         opened = self._dialog_opened.setdefault(session, asyncio.Event())
         for event in events:
+            if actor is not None and target is not None and actor["password"] is not True and _types(event):
+                actor["password"] = await self.password_focused(target)
             if self.dialogs == AGENT and session in self._open_dialogs:
                 return
             opened.clear()
@@ -577,26 +1046,82 @@ class BrowserControl:
         if info.get("type") == "page" and info["targetId"] not in self._hidden and info["targetId"] not in self.tabs:
             self.tabs[info["targetId"]] = {"id": info["targetId"], "url": info.get("url", ""),
                                            "title": info.get("title", ""), "opened_at": _now(),
-                                           "opener": info.get("openerId")}
-            self._saw(info.get("url", ""))
+                                           "opener": info.get("openerId"), "context_id": info.get("browserContextId")}
+            self._saw(info.get("url", ""), info.get("browserContextId"))
+            if self.log is not None:
+                self._spawn(self._log_opened(self.log.reserve(), log_time(), info["targetId"], info.get("url", ""),
+                                             info.get("openerId"), self._launching))
+            self._heard("opened", self.tabs[info["targetId"]])
+
+    async def _log_opened(self, seq: int, at: str, target: str, url: str, opener: Optional[str],
+                          launching: bool) -> None:
+        """The tab ``target`` opened, in the log as ``seq``, once the commands in flight that may have opened it have
+        answered: by the command that did, by agentenv as the browser launched, else by its page, its opener's."""
+        cause = None
+        try:
+            cause = {"via": "agentenv"} if launching else await self.causes.opened(target)
+        finally:
+            self.log.write(seq, {"tab": {"event": "opened", "id": target, "url": redact_url(url),
+                                         **({"opener": opener} if opener else {}),
+                                         **caused(cause, self.log, opener or target)}}, at=at)
+
+    async def _log_navigated(self, seq: int, at: str, target: str, url: str, loader: Optional[str] | bool) -> None:
+        """The tab ``target`` navigated to ``url``, in the log as ``seq``, once its navigations in flight have
+        answered: by the command whose loader it is, else by its page; with ``loader`` False, within its
+        document."""
+        cause = None
+        try:
+            cause = await (self.causes.navigated(target, loader) if loader is not False else
+                           self.causes.navigated_within(target))
+        finally:
+            self.log.write(seq, {"tab": {"event": "navigated", "id": target, "url": redact_url(url),
+                                         **({"within_document": True} if loader is False else {}),
+                                         **caused(cause, self.log, target)}}, at=at)
 
     def _on_Target_targetInfoChanged(self, params: dict, session: Optional[str]) -> None:
         info = params["targetInfo"]
         if (tab := self.tabs.get(info["targetId"])) is not None:
             tab.update(url=info.get("url", tab["url"]), title=info.get("title", tab["title"]))
-            self._saw(tab["url"])
+            self._saw(tab["url"], tab.get("context_id"))
 
     def _on_Page_frameNavigated(self, params: dict, session: Optional[str]) -> None:
         if session in self._sessions:
-            self._saw(params.get("frame", {}).get("url", ""))
+            self._saw(params.get("frame", {}).get("url", ""),
+                      self.tabs.get(self._sessions[session], {}).get("context_id"))
+            if isinstance(frame_id := params.get("frame", {}).get("id"), str):
+                self._frame_tabs[frame_id] = self._sessions[session]
         frame = params.get("frame", {})
+        if not frame.get("parentId") and (target := self._sessions.get(session)) is not None:
+            self._page_loading.add(target)
+        if self.log is not None and not frame.get("parentId") and (target := self._sessions.get(session)) in self.tabs:
+            self._spawn(self._log_navigated(self.log.reserve(), log_time(), target, frame.get("url", ""),
+                                            frame.get("loaderId")))
         if (load := self._loading.get(session)) is not None and not frame.get("parentId") and frame.get("loaderId"):
+            if load.reloading and load.loader is None:
+                load.loader = frame["loaderId"]
             load.commits.append(frame["loaderId"])
             load.check()
+
+    def _on_Page_frameAttached(self, params: dict, session: Optional[str]) -> None:
+        """A frame attached to a page of one of its tabs, kept as that tab's: a cross-origin one goes on in a process
+        of its own, whose navigations its tab's page doesn't hear of."""
+        if session in self._sessions and isinstance(frame := params.get("frameId"), str):
+            self._frame_tabs[frame] = self._sessions[session]
+
+    def _on_Page_navigatedWithinDocument(self, params: dict, session: Optional[str]) -> None:
+        """A tab's page moving to another URL of its document, a fragment or its history API: a command's, when one
+        asked for it, else its page's; a start tab's move before its reload."""
+        target = self._sessions.get(session)
+        if (load := self._loading.get(session)) is not None and params.get("frameId") == target:
+            load.moved.set()
+        if self.log is not None and target in self.tabs and params.get("frameId") == target:
+            self._spawn(self._log_navigated(self.log.reserve(), log_time(), target, params.get("url", ""), False))
 
     def _on_Network_requestWillBeSent(self, params: dict, session: Optional[str]) -> None:
         if (load := self._loading.get(session)) is not None and params.get("type") == "Document":
             load.requests[params["requestId"]] = params.get("loaderId", "")
+            if load.reloading and load.loader is None and params.get("frameId") == self._sessions.get(session):
+                load.loader = params.get("loaderId") or None
 
     def _on_Network_responseReceived(self, params: dict, session: Optional[str]) -> None:
         if (load := self._loading.get(session)) is not None and params.get("type") == "Document" and \
@@ -617,15 +1142,26 @@ class BrowserControl:
                 "responseHeaders": [{"name": "Content-Type", "value": "text/html"}], "body": SERVED_PAGE},
                 session_id=session))
 
-    def _saw(self, url: str) -> None:
+    def _saw(self, url: str, context: Optional[str] = None) -> None:
+        """An origin a page loaded, kept by its context's id, so a context recorded after it has it too, and for the
+        default context unless it's another's."""
         if (origin := origin_of(url)) is not None:
-            self.origins.add(origin)
+            if context:
+                self.context_origins.setdefault(context, set()).add(origin)
+            if context not in self.other_contexts:
+                self.origins.add(origin)
 
     def _on_Target_targetDestroyed(self, params: dict, session: Optional[str]) -> None:
         target = params["targetId"]
         if (tab := self.tabs.pop(target, None)) is not None:
             self.closed_tabs.append({**tab, "closed_at": _now(),
                                      "closed_by": AGENTENV if target in self._closing else UNKNOWN})
+            if self.log is not None:
+                self.log.note("tab", {"event": "closed", "id": target, "url": redact_url(tab["url"]),
+                                      **caused(self.causes.closed(target), self.log, target)})
+            self._heard("closed", tab)
+        else:
+            self.causes.closed(target)
         self._closing.discard(target)
         self._hidden.discard(target)
 
@@ -653,15 +1189,20 @@ class BrowserControl:
                     self._pinned.setdefault(target, asyncio.Event()).set()
 
     def _on_Target_detachedFromTarget(self, params: dict, session: Optional[str]) -> None:
+        self._screencasts.pop(params["sessionId"], None)
         if (target := self._sessions.pop(params["sessionId"], None)) is not None:
             self._shots.pop(target, None)
+            self._frames.pop(target, None)
+            self._frame_tabs = {frame: tab for frame, tab in self._frame_tabs.items() if tab != target}
             self._pinned.pop(target, None)
+            self._page_loading.discard(target)
         self._choosers.pop(params["sessionId"], None)
         self._dialog_opened.pop(params["sessionId"], None)
 
     def _on_Page_loadEventFired(self, params: dict, session: Optional[str]) -> None:
         self._choosers.pop(session, None)
         if (target := self._sessions.get(session)) is not None:
+            self._page_loading.discard(target)
             self._spawn(self._refresh(target))
         if (load := self._loading.get(session)) is not None and load.commits:
             load.loaded.add(load.commits[-1])
@@ -695,9 +1236,10 @@ class BrowserControl:
         self._answering.discard(session)
 
     def _on_Browser_downloadWillBegin(self, params: dict, session: Optional[str]) -> None:
+        tab = self._frame_tabs.get(params.get("frameId"), params.get("frameId"))
         self.downloads[params["guid"]] = {"guid": params["guid"], "url": params.get("url", ""),
                                           "filename": params.get("suggestedFilename", ""), "state": "inProgress",
-                                          "started_at": _now()}
+                                          "started_at": _now(), "context_id": self.tabs.get(tab, {}).get("context_id")}
 
     def _on_Browser_downloadProgress(self, params: dict, session: Optional[str]) -> None:
         if (download := self.downloads.get(params["guid"])) is None:
@@ -708,9 +1250,16 @@ class BrowserControl:
                 download["ended_at"] = _now()
                 return
             download["path"] = params["filePath"]
+            if (context := self.saved_in(params["filePath"])) is not None:
+                download["context_id"] = context
             self._spawn(self._hashed(download, Path(params["filePath"])))
         elif params["state"] == "canceled":
             download["ended_at"] = _now()
+
+    def saved_in(self, path: str) -> Optional[str]:
+        """The other context whose downloads folder ``path`` is in, as each lease's downloads go to their own; None
+        for any other path. Set by the browser's contexts."""
+        return self.download_folders(path) if self.download_folders is not None else None
 
     async def _hashed(self, download: dict, path: Path) -> None:
         try:
@@ -718,6 +1267,13 @@ class BrowserControl:
             download.update(size=size, sha256=sha256)
         finally:
             download["ended_at"] = _now()
+
+    def _heard(self, event: str, tab: dict) -> None:
+        for hook in self.on_tab:
+            try:
+                hook(event, tab)
+            except Exception as e:
+                logger.warning(f"what hears of the browser's tabs: {type(e).__name__}: {e}")
 
     def _spawn(self, work: Awaitable) -> None:
         task = asyncio.ensure_future(work)
@@ -736,7 +1292,9 @@ class _StartLoad:
     commits in order, the loads that fired after a commit, and its documents' requests, final responses and failures.
     Its document is the last its main frame committed from its own navigation on, which a page that sends itself
     elsewhere before it loads replaces. It's ``settled`` once its navigation or its document has failed, its document
-    has loaded or, on one of the env's ``site``, answered an error."""
+    has loaded or, on one of the env's ``site``, answered an error. A ``reloading`` one's navigation stayed in its
+    document and was followed by a reload, whose answer names no loader either: its loader is its main frame's first
+    document request or commit after, so a reload that fails before it commits fails the load."""
     session: str
     url: str
     site: Optional[str]
@@ -750,6 +1308,8 @@ class _StartLoad:
     failures: dict[str, str] = field(default_factory=dict)
     settled: asyncio.Event = field(default_factory=asyncio.Event)
     navigating: Optional[asyncio.Future] = None
+    reloading: bool = False
+    moved: asyncio.Event = field(default_factory=asyncio.Event)
 
     def answered(self, navigating: asyncio.Future) -> None:
         """The browser's answer to its navigation: its loader, or why it couldn't navigate."""
@@ -763,7 +1323,7 @@ class _StartLoad:
                 self.error = str(answer["error"].get("message", answer["error"]))
             else:
                 self.error = answer.get("result", {}).get("errorText") or None
-                self.loader = answer.get("result", {}).get("loaderId")
+                self.loader = answer.get("result", {}).get("loaderId") or self.loader
         self.check()
 
     def current(self) -> Optional[str]:
@@ -780,6 +1340,18 @@ class _StartLoad:
         if document in self.failures or document in self.loaded or (
                 self.site is not None and status is not None and status >= 400):
             self.settled.set()
+
+
+def _types(event: dict) -> bool:
+    """Whether a page input event types something."""
+    return event.get("method") in TYPING_METHODS and any(field in (event.get("params") or {}) for field in KEY_FIELDS)
+
+
+def _cause() -> dict:
+    """Who the control's command is for: the op under way, else agentenv itself."""
+    actor = ACTOR.get()
+    return {"seq": actor["seq"], "via": actor["via"], "who": actor.get("who")} if actor is not None else \
+        {"via": "agentenv"}
 
 
 def _size_and_sha256(path: Path) -> tuple[int, str]:
@@ -799,6 +1371,11 @@ def _origins(origins: list[str]) -> list[str]:
         return [origin_of(origin, strict=True) for origin in origins]
     except ValueError as e:
         raise InvalidArgument(str(e))
+
+
+def _in(context: Optional[str]) -> dict:
+    """The parameter naming the browser context ``context`` to a command, none for the default context."""
+    return {"browserContextId": context} if context else {}
 
 
 def _storage(origin: str) -> dict:

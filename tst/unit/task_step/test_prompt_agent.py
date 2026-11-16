@@ -31,6 +31,7 @@ from agent_env.task_step.task_steps.prompt_agent import (
     PromptAgentTaskStep,
     _duplicates_prompt_text,
     _parse_structured_output,
+    is_prompt_step,
 )
 from tst.util.fake_a2a import FakeA2AAgents
 
@@ -267,5 +268,17 @@ async def test_sdk_agent_on_the_local_store_still_records_its_trajectory(monkeyp
     assert trajectory_requests == [{"task_id": "task-1"}]
     assert store.get_object_key(uri).startswith("prompt_agent_trajectories/trajectory-")
     assert json.loads(store.get(uri)) == [{"type": "echo", "output": "Echo: hi"}]
+
+
+def test_a_prompt_step_is_a_prompt_agent_or_a_subclass_whether_a_step_or_its_config():
+    class _Unregistered(PromptAgentTaskStep):
+        type = "unregistered_prompt"
+
+    assert is_prompt_step({"type": "prompt_agent"}) and is_prompt_step({"type": "always_on"})
+    assert is_prompt_step(SimpleNamespace(type="always_on"))
+    assert is_prompt_step(_Unregistered(id="p", version=None, prompt="hi"))
+    assert not is_prompt_step({"type": "deploy_agent"})
+    assert not is_prompt_step({"type": "deploy_user_sim_agent"})
+    assert not is_prompt_step({"type": "no_such_step"}) and not is_prompt_step({})
 
 

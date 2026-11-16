@@ -25,7 +25,7 @@ from agent_env.artifact.artifacts.file_artifact_universe import FileArtifactUniv
 from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, DeployedSandboxEnv, EnvNeedsSandbox
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox
 from agent_env.providers.sandbox_providers.sandbox import Sandbox, VmSandbox
-from agent_env.task_step.context import DeployedAgent, DeployedSandbox, TaskStepContext
+from agent_env.task_step.context import DeployedAgent, DeployedSandbox, StepContextError, TaskStepContext
 from agent_env.task_step.task_steps import run_code as _run_code_module
 from tst.unit.computer_home import CARD, TOKEN, Computer
 from tst.unit.event_loop_probe import on_event_loop
@@ -296,19 +296,19 @@ _CARD_URL = "https://abc.modal.host/.well-known/agent-env.json"
 @pytest.mark.parametrize("deployed,expected", [
     (DeployedGatewayEnv(env_id="gw", env_version=1, sandbox_id="sb", gateway_url="https://abc.modal.host",
                         environment_card_url=_CARD_URL, environment_card={"name": "gw"}),
-     {"id": "gw", "url": "http://127.0.0.1:18765", "mcp_url": "http://127.0.0.1:18765/mcp"}),
+     {"id": "gw", "url": "http://127.0.0.1:18765", "mcp_url": "http://127.0.0.1:18765/mcp", "headers": {}}),
     (DeployedSandboxEnv(env_id="srv", env_version=1, sandbox_id="sb", env_provider_type="server",
                         environment_card_url=_CARD_URL, environment_card={"name": "srv"}),
-     {"id": "srv", "url": "http://127.0.0.1:18765", "mcp_url": "http://127.0.0.1:18765/mcp"}),
+     {"id": "srv", "url": "http://127.0.0.1:18765", "mcp_url": "http://127.0.0.1:18765/mcp", "headers": {}}),
     # a plugin's env, whose card puts its MCP endpoint elsewhere
     (DeployedSandboxEnv(env_id="plug", env_version=1, sandbox_id="sb", env_provider_type="a-plugins",
                         environment_card_url=_CARD_URL,
                         environment_card={"name": "plug",
                                           "additionalInterfaces": [{"transport": "mcp", "url": "/v2/mcp"}]}),
-     {"id": "plug", "url": "http://127.0.0.1:18765", "mcp_url": "http://127.0.0.1:18765/v2/mcp"}),
+     {"id": "plug", "url": "http://127.0.0.1:18765", "mcp_url": "http://127.0.0.1:18765/v2/mcp", "headers": {}}),
     # a record from before the card, which kept only its MCP URL
     (DeployedSandboxEnv(env_id="old", env_version=1, sandbox_id="sb", mcp_url="https://abc.modal.host/mcp"),
-     {"id": "old", "url": None, "mcp_url": "http://127.0.0.1:18765/mcp"}),
+     {"id": "old", "url": None, "mcp_url": "http://127.0.0.1:18765/mcp", "headers": {}}),
 ])
 def test_an_envs_address_and_mcp_endpoint_come_from_its_card_whatever_deployed_it(deployed, expected):
     sandbox = _ContainerEnvSandbox({18765: "https://abc.modal.host"})
@@ -328,11 +328,11 @@ def _written_input(sandbox):
 
 
 @pytest.mark.asyncio
-async def test_a_script_on_an_envs_host_gets_the_envs_address_and_mcp_endpoint_as_that_host_reaches_them():
+async def test_a_script_on_an_envs_host_gets_the_envs_address_and_mcp_endpoint_as_that_host_reaches_them_and_its_token():
     ctx = _make_context(with_agent=False)
     ctx.deployed_envs[0] = DeployedGatewayEnv(
         env_id="env-x", env_version=1, sandbox_id="sb-env", gateway_url="https://abc.modal.host",
-        environment_card_url=_CARD_URL, environment_card={"name": "env-x"},
+        environment_card_url=_CARD_URL, environment_card={"name": "env-x"}, control_token="s3cret",
     )
     with _sandbox([(0, "", ""), (0, "2", ""), (0, "{}", "")], agent_mode=False) as sandbox:
         sandbox.tunnel_urls = {18765: "https://abc.modal.host"}
@@ -340,6 +340,7 @@ async def test_a_script_on_an_envs_host_gets_the_envs_address_and_mcp_endpoint_a
 
     assert _written_input(sandbox)["env"] == {
         "id": "env-x", "url": "http://127.0.0.1:18765", "mcp_url": "http://127.0.0.1:18765/mcp",
+        "headers": {"Authorization": "Bearer s3cret"},
     }
 
 
@@ -362,7 +363,7 @@ async def test_a_script_for_an_env_in_a_container_sandbox_runs_in_that_container
         ctx = await _step(env_id="env-x").execute(ctx)
 
     assert ctx.metadata["script_results"]["run-code-1"] == {
-        "id": "env-x", "url": "http://127.0.0.1:18765", "mcp_url": "http://127.0.0.1:18765/mcp",
+        "id": "env-x", "url": "http://127.0.0.1:18765", "mcp_url": "http://127.0.0.1:18765/mcp", "headers": {},
     }
     assert not any(command[0] in ("sudo", "docker") for command in sandbox.commands)
 
@@ -492,7 +493,7 @@ async def test_sandbox_target_honors_the_sandboxs_type():
 
 @pytest.mark.asyncio
 async def test_sandbox_target_names_a_sandbox_the_run_never_deployed():
-    with pytest.raises(RuntimeError, match="^Sandbox 'ghost' not found in context.deployed_sandboxes$"):
+    with pytest.raises(StepContextError, match="^Sandbox 'ghost' not found in context.deployed_sandboxes$"):
         await _step(sandbox_name="ghost")._sandbox_target(_sandbox_context())
 
 

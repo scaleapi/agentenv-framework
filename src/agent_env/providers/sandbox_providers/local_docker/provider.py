@@ -308,6 +308,33 @@ class LocalSandbox(VmSandbox):
         """Whether create_container started ``container_name`` for this sandbox, not an agent placed on it."""
         return (self._work_dir / _CONTAINER_MODE_MARKER).exists()
 
+    async def exit_status(self) -> Optional[int]:
+        """The exit status of the container it was made to run, a computer's or the launcher booting a disk, once it
+        has exited; None while it runs, when it runs none, or when Docker doesn't say."""
+        if not self.owns_container:
+            return None
+        try:
+            state = await asyncio.to_thread(docker, "container", "inspect", "--format",
+                                            "{{.State.Status}} {{.State.ExitCode}}", self.container_name,
+                                            timeout=_DOCKER_QUERY_SECONDS)
+        except (DockerFailed, subprocess.TimeoutExpired):
+            return None
+        status, _, code = state.partition(" ")
+        return int(code) if status in ("exited", "dead") else None
+
+    async def output_tail(self, lines: int) -> list[str]:
+        """The last ``lines`` lines that container wrote, its output's and its errors' together as Docker logged them,
+        with no order kept between the two; none when it runs none, or when Docker doesn't say."""
+        if not self.owns_container:
+            return []
+        try:
+            done = await asyncio.to_thread(subprocess.run, ["docker", "logs", "--tail", str(lines), self.container_name],
+                                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                           timeout=_DOCKER_QUERY_SECONDS)
+        except subprocess.TimeoutExpired:
+            return []
+        return done.stdout.decode(errors="replace").splitlines() if done.returncode == 0 else []
+
     @property
     def work_dir(self) -> Path:
         return self._work_dir
