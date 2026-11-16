@@ -4,6 +4,8 @@ made it, each of the user sim's replies with the agent's message it answered, an
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from agent_env.task_step.task_steps import always_on as ao
@@ -212,10 +214,10 @@ async def test_her_last_read_s_reply_is_marked_undelivered(monkeypatch, tmp_path
 
 
 @pytest.mark.asyncio
-async def test_one_read_of_the_changelog_keeps_at_most_its_cap_and_counts_the_rest(monkeypatch, tmp_path):
+async def test_one_read_of_the_changelog_keeps_every_change_whole(monkeypatch, tmp_path):
     def agent(n, texts, rig):
-        for i in range(ao.CHANGES_KEPT_PER_READ + 50):
-            rig.app_write("rows", f"sync {i}", trigger_id="mirror")
+        for i in range(250):
+            rig.app_write("rows", f"sync {i} " + "x" * 400, trigger_id="mirror")
         rig.quiet()
         return ""
 
@@ -225,6 +227,7 @@ async def test_one_read_of_the_changelog_keeps_at_most_its_cap_and_counts_the_re
     ctx = await rig.run(rig.step())
 
     [event] = rig.events(ctx, "app_changes")
-    assert event["count"] == ao.CHANGES_KEPT_PER_READ + 50 and event["not_kept"] == 50
-    assert len(event["changes"]) == ao.CHANGES_KEPT_PER_READ
-    assert rig.record(ctx)["counts"]["app_changes"]["by_others"] == ao.CHANGES_KEPT_PER_READ + 50
+    assert event["count"] == 250 and len(event["changes"]) == 250 and "not_kept" not in event
+    assert event["changes"][-1]["summary"] == "sync 249 " + "x" * 400
+    assert rig.record(ctx)["counts"]["app_changes"]["by_others"] == 250
+    assert '"changes"' not in json.dumps(rig.record(ctx)) and len(json.dumps(rig.record(ctx))) < 10_000
