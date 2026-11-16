@@ -38,6 +38,8 @@ from agent_env.task_step.task_steps.browser.base import stored_browsers
 from tst.util.sandbox_providers import mock_provider
 
 GATEWAY = "https://gw.example"
+#: The gateway's control token, which it hands the computers it fronts.
+GATEWAY_TOKEN = "the-gateways"
 
 
 #: A computer's card whose driver serves clock/v1's sync_time: it follows the gateway's clock.
@@ -286,7 +288,7 @@ def gateway(monkeypatch, local_stores):
     async def deploy(self, env, sandbox_provider, *, children=None, **options):
         made.options.append({**options, "children": children})
         for _ in range(made.tries):
-            made.started.append(await children(GATEWAY) if children else None)
+            made.started.append(await children(GATEWAY, GATEWAY_TOKEN) if children else None)
         if made.fails:
             raise made.fails
         return DeployedGatewayEnv(env_id=env.id, env_version=env.version, gateway_url=GATEWAY, sandbox_id="gw",
@@ -302,7 +304,8 @@ def gateway(monkeypatch, local_stores):
 
 
 @pytest.mark.asyncio
-async def test_deploy_hands_the_gateway_each_computer_deployed_under_its_name_and_records_it(gateway, providers):
+async def test_deploy_hands_the_gateway_each_computer_deployed_under_its_name_with_its_token_and_records_it(gateway,
+                                                                                                          providers):
     desktop, laptop = FakeComputer("desktop"), FakeComputer("laptop")
     attribution = {"project_id": "6a6d2e30b2710a6cf93a6430"}
 
@@ -311,9 +314,10 @@ async def test_deploy_hands_the_gateway_each_computer_deployed_under_its_name_an
         child_envs={"desktop": {"sandbox_type": "modal", "cpu": 4, "env_params": {"form": "container"}}})
 
     assert desktop.deploys == [{"ttl_seconds": 600, "attribution": attribution, "tool_prefix": "desktop_", "reach": GATEWAY,
-                                "sites_later": False, "sandbox_type": "modal", "cpu": 4, "env_params": {"form": "container"}}]
+                                "sites_later": False, "control_token": GATEWAY_TOKEN, "sandbox_type": "modal", "cpu": 4,
+                                "env_params": {"form": "container"}}]
     assert laptop.deploys == [{"ttl_seconds": 600, "attribution": attribution, "tool_prefix": "laptop_", "reach": GATEWAY,
-                               "sites_later": False, "sandbox_type": "modal_vm"}]
+                               "sites_later": False, "control_token": GATEWAY_TOKEN, "sandbox_type": "modal_vm"}]
     assert gateway.started == [[ExternalChild("desktop", "https://desktop.example/mcp", "https://desktop.example"),
                                 ExternalChild("laptop", "https://laptop.example/mcp", "https://laptop.example")]]
     assert deployed.child_envs == {name: dataclasses.asdict(_record(name)) for name in ("desktop", "laptop")}
@@ -927,7 +931,7 @@ async def test_a_browser_computer_deploys_as_a_computer_child_routing_the_sites_
         sandbox_type="modal_vm", child_envs={"chromium": {"sandbox_type": "modal", "cpu": 2, "memory_mb": 4096}})
 
     assert chromium.deploys == [{"ttl_seconds": 10800, "attribution": None, "tool_prefix": "chromium_",
-                                 "reach": GATEWAY, "sites_later": True,
+                                 "reach": GATEWAY, "sites_later": True, "control_token": GATEWAY_TOKEN,
                                  "live_hosts": ("github.test", "api.github.test"),
                                  "sandbox_type": "modal", "cpu": 2, "memory_mb": 4096,
                                  "env_params": {"site_routing": True}}]

@@ -154,7 +154,7 @@ class ComputerRuntime:
             result.summary = f"{result.summary}; the screenshot after it failed ({e.code}: {e.message})"
             return send(result)
         result.summary, result.frame = f"{result.summary}, then captured {new.id}{new.note()}", new.result()
-        return send(result, new.encode())
+        return send(result, new.encode(), new.captured_at)
 
     async def _hold_for(self, ms: int, keys: list[str]) -> None:
         """Keep ``keys`` down for ``ms``, then release them, also when the call is cancelled meanwhile."""

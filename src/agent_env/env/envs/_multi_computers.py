@@ -190,9 +190,10 @@ class Computers:
 
     def deployer(self, child_envs: Optional[dict], *, sandbox_type: str | None, ttl_seconds: int,
                  attribution: Optional[Attribution], websites: Mapping[str, str], live_hosts: Iterable[str] = ()
-                 ) -> Callable[[Optional[str]], Awaitable[list[ExternalChild]]]:
+                 ) -> Callable[[Optional[str], Optional[str]], Awaitable[list[ExternalChild]]]:
         """The gateway's ``children``: every computer deployed as its child_envs entry says, its tools served under its
-        name and ``_``, and its network allowing ``reach``, the gateway's address when the gateway has one yet, and the
+        name and ``_``, its framework-only routes taking ``control_token``, the gateway's, which the gateway passes on to
+        them, and its network allowing ``reach``, the gateway's address when the gateway has one yet, and the
         ``live_hosts`` of the multi env's live websites; then each as the gateway fronts it. A computer routing the multi env's ``websites`` (their environment names by env id)
         boots with its boot apps held, for ``finish`` to route them once the gateway is up. A gateway deploy tried again
         deploys them again, after closing the earlier try's."""
@@ -204,14 +205,14 @@ class Computers:
                 routing = entry["env_params"]["site_routing"]
                 self._routes[name] = None if routing is True else [websites[env_id] for env_id in routing]
 
-        async def deploy(reach: Optional[str]) -> list[ExternalChild]:
+        async def deploy(reach: Optional[str], control_token: Optional[str]) -> list[ExternalChild]:
             nonlocal tries
             if tries:
                 await self.close()
             tries += 1
             results = await asyncio.gather(*(env.deploy(
                 ttl_seconds=ttl_seconds, attribution=attribution, tool_prefix=f"{env.environment_name}_",
-                reach=reach or "", sites_later=env.environment_name in self._routes,
+                reach=reach or "", sites_later=env.environment_name in self._routes, control_token=control_token,
                 **({"live_hosts": live} if live else {}),
                 **deploy_options((child_envs or {}).get(env.environment_name), sandbox_type))
                 for env in self.every), return_exceptions=True)

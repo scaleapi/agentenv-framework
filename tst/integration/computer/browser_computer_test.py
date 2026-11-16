@@ -74,12 +74,21 @@ import agent_env
 from agent_env.a2a_agent import conversation_store
 from agent_env.artifact import Artifact
 from agent_env.artifact.artifacts.file import FileArtifact
-from agent_env.config import get_config
+from agent_env.artifact.store import reset_artifact_store
+from agent_env.bundle import parse_bundle
+from agent_env.bundle.installed import installed_bundles
+from agent_env.bundle.materialize import materialize
+from agent_env.bundle.plan import plan_bundle
+from agent_env.bundle.resolve import resolve_bundle
+from agent_env.config import configure, get_config
 from agent_env.env import Env
 from agent_env.env.env import DeployedEnv
-from agent_env.env.envs.computer.utils import inside
+from agent_env.env import published_images
+from agent_env.env.envs.computer.utils import inside, packages
+from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.store import get_env_store
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
+from agent_env.store.image_store.registry_api import copy_image, pin_digest, write_index
 from agent_env.store.object_store.local.grant_server import grant_server
 from agent_env.store.object_store.local.tls import LocalCA, local_ca
 from agent_env.store.routing import namespace_routing
@@ -93,6 +102,7 @@ from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
 from tst.integration.computer.browser_contexts import check_browser_contexts
+from tst.integration.computer.browser_recorded import check_recorded_contexts
 from tst.integration.computer.browser_scoped import check_scoped_addresses
 from tst.integration.computer.browser_data import SITE as DATA_SITE, check_browser_data, check_browser_data_under_chaos
 from tst.integration.computer.browser_steps import check_browser_steps
@@ -490,6 +500,27 @@ async def test_an_address_scoped_to_a_lease_sees_it_alone_as_the_default_and_end
                 cdp_clients)
         finally:
             report = await teardown_run(context)
+
+    assert not report.failed
+
+
+@pytest.mark.asyncio
+async def test_each_context_is_recorded_alone_its_video_following_its_agent_while_agents_act_on_all_at_once(
+        browser_computer, cdp_clients):
+    with namespace_routing():
+        deployed = await Env.get(browser_computer.id).deploy()
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            await _ready(deployed)
+            card = (await _get(deployed, "/.well-known/agent-env.json")).json()
+            app = next(child for child in card["children_environments"] if child["name"] == "chromium")
+            await check_recorded_contexts(
+                deployed, browser_computer.id,
+                lambda op: deployed.environment_url + protocol_v1.find_extension_method(app, BROWSER, op)["endpoint"],
+                cdp_clients)
+        finally:
+            report = await teardown_run(context)
+            grant_server(None, None).close()
 
     assert not report.failed
 
@@ -1302,7 +1333,7 @@ async def test_a_browser_recording_frames_each_burst_of_an_agents_actions_keyed_
         context = TaskStepContext(instance_id=f"run-{uuid.uuid4().hex[:8]}", deployed_envs=[deployed])
         try:
             context = await StartBrowserRecordingTaskStep(id="start", version=None, env_id=browser_computer.id,
-                                                          name="run").execute(context)
+                                                          name="run", frames=True).execute(context)
             await _mcp(deployed, _type_hello)
             await _mcp(deployed, lambda session: _called(session, "browser_navigate", {"url": DATA_PAGE}))
             context = await EndBrowserRecordingTaskStep(id="end", version=None, name="run").execute(context)
@@ -1335,7 +1366,7 @@ async def test_a_browser_recording_frames_a_cdp_agents_own_tab_behind_the_active
         context = TaskStepContext(instance_id=f"run-{uuid.uuid4().hex[:8]}", deployed_envs=[deployed])
         try:
             context = await StartBrowserRecordingTaskStep(id="start", version=None, env_id=browser_computer.id,
-                                                          name="behind").execute(context)
+                                                          name="behind", frames=True).execute(context)
             tab = await _cdp_agent_acts_behind((await _cdp(deployed, "pi"))["ws_url"])
             active = [t for t in (await _browser_op(deployed, "tabs/list", {}))["tabs"] if t.get("active")]
             context = await EndBrowserRecordingTaskStep(id="end", version=None, name="behind",
@@ -1382,7 +1413,7 @@ async def test_a_browser_recording_that_ends_while_an_agents_command_is_in_fligh
         context = TaskStepContext(instance_id=f"run-{uuid.uuid4().hex[:8]}", deployed_envs=[deployed])
         try:
             context = await StartBrowserRecordingTaskStep(id="start", version=None, env_id=browser_computer.id,
-                                                          name="flight").execute(context)
+                                                          name="flight", frames=True).execute(context)
             ws_url = (await _cdp(deployed, "pi"))["ws_url"]
             async with _cdp_calls(ws_url, reply_s=300) as waiting, _cdp_calls(ws_url) as call:
                 target = await _page_target(call)
@@ -1416,7 +1447,7 @@ async def test_a_browser_recording_frames_the_active_tab_when_the_agents_tab_clo
         context = TaskStepContext(instance_id=f"run-{uuid.uuid4().hex[:8]}", deployed_envs=[deployed])
         try:
             context = await StartBrowserRecordingTaskStep(id="start", version=None, env_id=browser_computer.id,
-                                                          name="closing").execute(context)
+                                                          name="closing", frames=True).execute(context)
             async with _cdp_calls((await _cdp(deployed, "pi"))["ws_url"]) as call:
                 tab = (await call("Target.createTarget", {"url": BEHIND[0]}))["result"]["targetId"]
                 session = (await call("Target.attachToTarget", {"targetId": tab, "flatten": True}))["result"]["sessionId"]
@@ -1701,3 +1732,62 @@ async def _browser_op(browser: DeployedEnv, op: str, params: dict) -> dict:
     assert find_extension_method(app, BROWSER, op) is not None, op
     return await invoke_extension(browser.environment_url, app, BROWSER, params, 60, method=op,
                                   headers=browser.control_headers)
+
+
+#: Where the local registry stands in for the repository a release publishes composed computers in.
+RELEASED = "localhost:5000/agentenv-released"
+
+
+@pytest.mark.asyncio
+async def test_a_compose_of_chromium_from_a_release_record_pulls_its_image_and_the_browser_boots_from_it(
+        browser_computer, tmp_path):
+    """A release publishes chromium composed, and its wheel records each arch's lock, key and image, here in the local
+    registry: chromium composed again in fresh stores, with that record as the install's, takes the image by digest
+    rather than resolving its packages or building it, and a deploy of it boots that image."""
+    with namespace_routing():
+        pairs = {arch: built for arch, built in browser_computer.metadata["composed"]["container"].items()
+                 if built.get("status") in ("ready", "unverified")}
+        locks = {arch: json.loads(packages.stored(built["lock"], browser_computer.stored_id).model_dump_json())
+                 for arch, built in pairs.items()}
+    released = {}
+    for arch, built in pairs.items():
+        copy_image(built["image"], f"{RELEASED}:{arch}", None, None)
+        released[arch] = f"{RELEASED}@{built['image'].rpartition('@')[2]}"
+    write_index(f"{RELEASED}:index", {f"linux/{arch}": image for arch, image in released.items()}, None)
+    record = tmp_path / "published_images.json"
+    published_images.write_release_digests({}, record, [{
+        "env": browser_computer.id, "form": "container", "index": pin_digest(f"{RELEASED}:index", None),
+        "arches": {arch: {"key": pairs[arch]["key"], "image": released[arch], "lock": locks[arch]} for arch in pairs}}])
+    (tmp_path / "bundle" / "tasks").mkdir(parents=True)
+    (tmp_path / "bundle" / "tasks" / "chromium.json").write_text(
+        json.dumps([{"id": "env", "type": "deploy_env", "env_id": "chromium"}]))
+    told = []
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(published_images, "RELEASE_FILE", record)
+        patch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+        configure()
+        reset_artifact_store()
+        try:
+            with namespace_routing():
+                materialize(plan_bundle(resolve_bundle(parse_bundle(tmp_path / "bundle")), installed=installed_bundles,
+                                        default_agents=False), composing=Composing(on_progress=told.append))
+                composed_now = Env.get(browser_computer.id).metadata["composed"]["container"]
+                deployed = await Env.get(browser_computer.id).deploy()
+                context = TaskStepContext(deployed_envs=[deployed])
+                try:
+                    booted = deployed.metadata["computer"]["image"]
+                    tabs = (await _record(deployed))["tabs"]
+                finally:
+                    report = await teardown_run(context)
+        finally:
+            reset_artifact_store()
+    configure()
+    reset_artifact_store()
+
+    print(json.dumps({"told": told, "composed": {arch: {k: v for k, v in built.items() if k != "probe"}
+                                                 for arch, built in composed_now.items()}}, indent=1, default=str))
+    assert {arch: (built["image"], built["published"], built["reused"]) for arch, built in composed_now.items()
+            if arch in released} == {arch: (image, True, True) for arch, image in released.items()}
+    assert composed_now[ARCH]["status"] == "ready"
+    assert not [line for line in told if "resolving" in line or "building the image" in line], told
+    assert booted == released[ARCH] and tabs and not report.failed

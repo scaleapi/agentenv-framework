@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
 import httpx
+from agentenv_protocol.client import control_headers
 from agentenv_protocol.website import (
     SESSION_SECRET_ENV,
     SITE_READY_TIMEOUT_S,
@@ -35,6 +36,7 @@ from agent_env.env.env import DeployedGatewayEnv, _mcp_url
 from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT, ExternalChild, GatewayMode
 from agent_env.env.gateway.constants import (
     CLOCK_FOLLOWERS_ENV,
+    CONTROL_TOKEN_CHILDREN_ENV,
     DEFAULT_MCP_SERVER_NAME,
     GATEWAY_PROVIDER_HEADERS_ENV,
     STATE_TOOL_NAME_CLASHES_KEY,
@@ -547,6 +549,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         gateway_env.append(f"      - SERVICE_DB_URL={state_provider.base_url(state_instance)}")
         gateway_env.extend(f"      - {key}={value}" for key, value in control_environment(control_token).items())
         gateway_env.extend(f"      - {key}={value}" for key, value in clock_followers_environment(external_children).items())
+        gateway_env.extend(f"      - {key}={value}"
+                           for key, value in control_token_children_environment(external_children, control_token).items())
         if provider_headers := sandbox_request_header_names():
             gateway_env.append(f"      - {GATEWAY_PROVIDER_HEADERS_ENV}={','.join(provider_headers)}")
         publish = host_port or (lambda port: port)
@@ -658,13 +662,14 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         attribution: Optional[Attribution] = None,
         artifact_id: str | None = None,
         artifact_version: int | None = None,
-        children: "Callable[[Optional[str]], Awaitable[list[ExternalChild]]] | None" = None,
+        children: "Callable[[Optional[str], Optional[str]], Awaitable[list[ExternalChild]]] | None" = None,
     ) -> DeployedGatewayEnv:
         """A gateway in front of the env, with the state store it acquires (local Postgres by default); returns the record.
 
         A MultiEnv's gateway fronts its MCP servers and websites, a WebsiteEnv's its website, and any other env's its one MCP server.
         ``children`` starts the env's children that run on sandboxes of their own, given the gateway's address where it's
-        known before the gateway starts, and returns them; the gateway starts once they have, fronting them too.
+        known before the gateway starts and the gateway's control token, which their framework-only routes take and the
+        gateway passes on to them alone, and returns them; the gateway starts once they have, fronting them too.
         """
         from agent_env.config import get_config, service_db_env_id
         from agent_env.env.env import Env
@@ -806,7 +811,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         existing_sandbox: Sandbox | None = None,
         sidecars: list[SidecarConfig] | None = None,
         mcp_server_name: str | None = None,
-        children: "Callable[[Optional[str]], Awaitable[list[ExternalChild]]] | None" = None,
+        children: "Callable[[Optional[str], Optional[str]], Awaitable[list[ExternalChild]]] | None" = None,
         website_browser: "MCPServerEnv | None | object" = _THE_RUNS,
         control_token: str | None = None,
     ) -> DeployedGateway:
@@ -921,7 +926,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             # Everything but the gateway, beside the children; then the gateway, which waits for every child it fronts.
             # Both run to the end before either's failure is raised, so no child is still starting when the deploy closes.
             up, started = await asyncio.gather(self._compose_up(sandbox, f"--scale {GATEWAY_SERVICE_NAME}=0"),
-                                               children(sandbox.tunnel_urls.get(gateway_port)), return_exceptions=True)
+                                               children(sandbox.tunnel_urls.get(gateway_port), control_token),
+                                               return_exceptions=True)
             for result in (up, started):
                 if isinstance(result, BaseException):
                     raise result
@@ -983,7 +989,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         if card is None:
             raise RuntimeError("Tunnel did not become ready in time")
         if website_configs:
-            await _wait_for_websites(gateway_url, website_configs)
+            await _wait_for_websites(gateway_url, website_configs, headers=control_headers(control_token))
             card = await self._wait_for_tunnel(gateway_url, timeout=120) or card
         card_read_at_utc = datetime.now(timezone.utc).isoformat()
         await self._refuse_tool_name_clashes(gateway_url)
@@ -1016,7 +1022,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         memory_mb: int | None = None,
         attribution: Optional[Attribution] = None,
         mcp_server_name: str | None = None,
-        children: "Callable[[Optional[str]], Awaitable[list[ExternalChild]]] | None" = None,
+        children: "Callable[[Optional[str], Optional[str]], Awaitable[list[ExternalChild]]] | None" = None,
         control_token: str | None = None,
     ) -> DeployedGateway:
         from agent_env.env.env import Env
@@ -1073,7 +1079,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             ]
             aux_coros = [self._provision_sidecar(deploy, spec) for spec in sidecar_specs]
             # The children start beside them; the gateway, created last, has no address to give them.
-            child_coros = [children(None)] if children is not None else []
+            child_coros = [children(None, control_token)] if children is not None else []
             all_results = await asyncio.gather(*mcp_coros, *aux_coros, *child_coros, return_exceptions=True)
             external: list[ExternalChild] = []
 
@@ -1123,6 +1129,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 "MCP_SERVER_NAME": mcp_server_name or DEFAULT_MCP_SERVER_NAME,
                 **control_environment(control_token),
                 **clock_followers_environment(external),
+                **control_token_children_environment(external, control_token),
                 **({GATEWAY_PROVIDER_HEADERS_ENV: ",".join(names)} if (names := sandbox_request_header_names()) else {}),
             }
             gateway_sb = await sandbox_provider.create_container(
@@ -1457,7 +1464,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         mcp_server_name: str | None = None,
         control_token: str | None = None,
         attribution: Optional[Attribution] = None,
-        children: "Callable[[Optional[str]], Awaitable[list[ExternalChild]]] | None" = None,
+        children: "Callable[[Optional[str], Optional[str]], Awaitable[list[ExternalChild]]] | None" = None,
         website_browser: "MCPServerEnv | None | object" = _THE_RUNS,
     ) -> DeployedGateway:
         """One gateway deploy on one (unchained) sandbox provider: a VM on one that creates VMs, else a container per
@@ -1767,6 +1774,13 @@ def clock_followers_environment(children: Iterable[ExternalChild]) -> dict[str, 
     return {CLOCK_FOLLOWERS_ENV: followers} if followers else {}
 
 
+def control_token_children_environment(children: Iterable[ExternalChild], control_token: str | None) -> dict[str, str]:
+    """The children the gateway passes its control token on to: every child it fronts on a sandbox of its own, each
+    deployed with that token (``children``)."""
+    names = ",".join(child.name for child in children) if control_token else ""
+    return {CONTROL_TOKEN_CHILDREN_ENV: names} if names else {}
+
+
 def _frontend_urls(gateway_url: str, website_configs: Optional[list[WebsiteConfig]]) -> Optional[dict[str, str]]:
     """Each synthetic site's page route through the gateway, by its environment name; None with none, as when every
     site is live."""
@@ -1802,8 +1816,10 @@ class WebsiteContractError(RuntimeError):
 
 
 async def _wait_for_websites(gateway_url: str, website_configs: list[WebsiteConfig], *,
-                             timeout_s: float = WEBSITE_READY_TIMEOUT_S, poll_s: float = WEBSITE_READY_POLL_S) -> None:
-    """Wait until each site is ready, as its card says through ``/svc/<name>/``: by ``website/v1``'s ``ready``, or,
+                             headers: dict[str, str] | None = None, timeout_s: float = WEBSITE_READY_TIMEOUT_S,
+                             poll_s: float = WEBSITE_READY_POLL_S) -> None:
+    """Wait until each site is ready, as its card says through ``/svc/<name>/``, asked with the gateway's control
+    ``headers``, since its data plane takes them: by ``website/v1``'s ``ready``, or,
     for a card without it or a site serving none, by its stored health path answering 200, which is deprecated.
     A site whose answer says how long it may take (``timeout_s``) is waited that long, or its own ``ready_timeout_s``
     if longer, and ``WEBSITE_READY_MARGIN_S``; any other its ``ready_timeout_s`` and the margin, or ``timeout_s`` if
@@ -1817,7 +1833,7 @@ async def _wait_for_websites(gateway_url: str, website_configs: list[WebsiteConf
     warned: set[str] = set()
     while waiting:
         for name, wc in list(waiting.items()):
-            ready, why[name], declared = await _website_ready(f"{gateway_url}/svc/{name}", wc.health_path)
+            ready, why[name], declared = await _website_ready(f"{gateway_url}/svc/{name}", wc.health_path, headers=headers)
             if declared is not None:
                 limit[name] = max(declared, own[name]) + WEBSITE_READY_MARGIN_S
             if ready is None and name not in warned:
@@ -1835,7 +1851,8 @@ async def _wait_for_websites(gateway_url: str, website_configs: list[WebsiteConf
         await asyncio.sleep(poll_s)
 
 
-async def _website_ready(base_url: str, health_path: str) -> tuple[Optional[bool], str, Optional[float]]:
+async def _website_ready(base_url: str, health_path: str, *,
+                         headers: dict[str, str] | None = None) -> tuple[Optional[bool], str, Optional[float]]:
     """Whether the site at ``base_url`` is ready, why not, and how long it says it may take: True or False by the
     ``WebsiteReadiness`` its card's ``website/v1`` ``ready`` answers, as the protocol's ``website_readiness`` reads it,
     an answer that isn't one False; with no card or no ``ready`` on it, None once its health path answers 200 and False
@@ -1843,7 +1860,7 @@ async def _website_ready(base_url: str, health_path: str) -> tuple[Optional[bool
     async with httpx.AsyncClient() as client:
         try:
             card = _card_of(await client.get(base_url + WELL_KNOWN_PATH, timeout=10), base_url)
-            readiness = None if card is None else await website_readiness(base_url, card, timeout=10)
+            readiness = None if card is None else await website_readiness(base_url, card, timeout=10, headers=headers)
             if readiness is not None:
                 return readiness.ready, "" if readiness.ready else _not_ready_why(readiness), readiness.timeout_s
             health = await client.get(base_url + health_path, timeout=10)
