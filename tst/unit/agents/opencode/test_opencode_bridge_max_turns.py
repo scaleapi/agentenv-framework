@@ -1,5 +1,7 @@
-"""A turn's ``max_turns`` bounds its tool calls: the CLI is killed once that many have finished, as codex's is."""
+"""A turn's ``max_turns`` bounds its steps, OpenCode's model requests: once the last step it allows asks for another,
+the CLI is killed and the turn fails in Claude Code's words."""
 import asyncio
+import itertools
 import json
 import os
 import shlex
@@ -11,38 +13,63 @@ from tst.unit.agents.opencode.agent import opencode_bridge
 from tst.unit.agents.opencode.fake_cli import FakeCLI
 
 SESSION = "ses_limit"
+LIMIT_ERROR = "Reached maximum number of turns ({})"
+_part_ids = itertools.count()
 
 
 def _jsonl(*events: dict) -> bytes:
     return "".join(json.dumps(event) + "\n" for event in events).encode()
 
 
-def tool_use(call_id: str, status: str = "completed") -> dict:
-    return {"type": "tool_use", "sessionID": SESSION,
-            "part": {"type": "tool", "callID": call_id, "tool": "bash", "state": {"status": status}}}
+def _event(etype: str, ptype: str, **part) -> dict:
+    return {"type": etype, "sessionID": SESSION,
+            "part": {"id": f"prt_{next(_part_ids)}", "sessionID": SESSION, "type": ptype, **part}}
 
 
-def step_finish(reason: str) -> dict:
-    return {"type": "step_finish", "sessionID": SESSION, "part": {"type": "step-finish", "reason": reason}}
+def step(*tool_calls: str, answer: str | None = None, reason: str | None = None) -> list[dict]:
+    """One step's events as `opencode run` prints them: its tools' results, then its end, which asks for another step
+    when it made tool calls."""
+    return [
+        _event("step_start", "step-start"),
+        *(_event("tool_use", "tool", callID=call, tool="bash", state={"status": "completed"}) for call in tool_calls),
+        *([_event("text", "text", text=answer)] if answer else []),
+        _event("step_finish", "step-finish", reason=reason or ("tool-calls" if tool_calls else "stop")),
+    ]
 
 
-def text(answer: str) -> dict:
-    return {"type": "text", "sessionID": SESSION, "part": {"type": "text", "text": answer}}
+class _Reads:
+    """A CLI's stdout handing out ``chunks`` one read at a time, then ending, or staying open as a CLI still running."""
+
+    def __init__(self, chunks: list[bytes], *, hang: bool) -> None:
+        self.chunks = list(chunks)
+        self.hang = hang
+
+    async def read(self, _n: int = -1) -> bytes:
+        if self.chunks:
+            return self.chunks.pop(0)
+        if self.hang:
+            await asyncio.Event().wait()
+        return b""
 
 
-def test_prompt_agents_max_turns_survives_negotiation_with_the_card(oc):
-    negotiated = A2AAgent.negotiate_agent_config(oc.card, {"model": "provider/model", "max_turns": 200})
-
-    assert negotiated.fields["max_turns"] == 200
+# Ways the CLI's output can arrive. The final step is its last three events: its start, its answer and its end.
+SPLITS = {
+    "in-one-read": lambda events: [_jsonl(*events)],
+    "a-read-per-event": lambda events: [_jsonl(event) for event in events],
+    "final-step-in-its-own-read": lambda events: [_jsonl(*events[:-3]), _jsonl(*events[-3:])],
+    "lines-split-across-reads": lambda events: [
+        data[start:start + 7] for data in [_jsonl(*events)] for start in range(0, len(data), 7)],
+}
 
 
 @pytest.fixture
 def cli(monkeypatch):
-    """Runs a turn against a FakeCLI printing ``events``; the CLI is the run's second value."""
+    """Runs a turn against a FakeCLI whose stdout hands out ``chunks``; the CLI is the run's second value."""
     monkeypatch.setattr(opencode_bridge, "_context_xdg", lambda _context: {})
 
-    async def run(events, *, hang=False, **kwargs):
-        proc = FakeCLI(_jsonl(*events), hang=hang)
+    async def run(chunks, *, hang=False, **kwargs):
+        proc = FakeCLI(hang=hang)
+        proc.stdout = _Reads(chunks, hang=hang)
 
         async def spawn(*_cmd, **_kwargs):
             return proc
@@ -55,45 +82,69 @@ def cli(monkeypatch):
     return run
 
 
+def test_prompt_agents_max_turns_survives_negotiation_with_the_card(oc):
+    negotiated = A2AAgent.negotiate_agent_config(oc.card, {"model": "provider/model", "max_turns": 200})
+
+    assert negotiated.fields["max_turns"] == 200
+
+
 @pytest.mark.asyncio
-async def test_a_turn_limit_stops_the_cli_once_that_many_tool_calls_finish_in_claude_codes_words(cli):
-    result, proc = await cli([tool_use("c1"), step_finish("tool-calls"), tool_use("c2")], hang=True, max_turns=2)
+@pytest.mark.parametrize("reason", ["tool-calls", "unknown"])
+async def test_the_cli_is_stopped_once_its_last_allowed_step_asks_for_another_in_claude_codes_words(cli, reason):
+    events = [*step("c1"), *step("c2", reason=reason)]
+
+    result, proc = await cli([_jsonl(*events)], hang=True, max_turns=2)
 
     assert proc.killed
-    assert (result.error, result.error_code, result.tool_call_count) == ("Reached maximum number of turns (2)", None, 2)
-    assert result.session_id == SESSION
-    assert len(result.trajectory) == 3
+    assert (result.error, result.error_code) == (LIMIT_ERROR.format(2), None)
+    assert (result.tool_call_count, result.session_id, result.trajectory) == (2, SESSION, events)
 
 
 @pytest.mark.asyncio
-async def test_a_turn_that_completes_past_its_limit_in_one_read_fails(cli):
-    result, _ = await cli([tool_use("c1"), tool_use("c2"), text("done"), step_finish("stop")], max_turns=1)
-
-    assert (result.error, result.tool_call_count) == ("Reached maximum number of turns (1)", 2)
-
-
-@pytest.mark.asyncio
-async def test_a_turn_that_ends_within_its_limit_completes(cli):
-    result, proc = await cli([tool_use("c1"), step_finish("tool-calls"), tool_use("c2"), step_finish("tool-calls"),
-                              text("done"), step_finish("stop")], max_turns=2)
+@pytest.mark.parametrize("split", SPLITS.values(), ids=SPLITS.keys())
+async def test_a_turn_that_answers_on_its_last_allowed_step_completes_however_its_output_is_read(cli, split):
+    result, proc = await cli(split([*step("c1"), *step("c2"), *step(answer="done")]), max_turns=3)
 
     assert not proc.killed
     assert (result.error, result.response, result.tool_call_count) == (None, "done", 2)
 
 
 @pytest.mark.asyncio
-async def test_a_tool_call_seen_in_several_states_counts_once_toward_the_limit(cli):
-    result, proc = await cli([tool_use("c1", "error"), tool_use("c1"), text("done"), step_finish("stop")],
-                             max_turns=1)
+@pytest.mark.parametrize("split", SPLITS.values(), ids=SPLITS.keys())
+async def test_a_turn_that_needs_a_step_past_its_limit_fails_however_its_output_is_read(cli, split):
+    result, _ = await cli(split([*step("c1"), *step("c2"), *step(answer="done")]), max_turns=2)
 
-    assert not proc.killed
-    assert (result.error, result.tool_call_count) == (None, 1)
+    assert result.error == LIMIT_ERROR.format(2)
 
 
 @pytest.mark.asyncio
-async def test_without_a_limit_the_turn_runs_every_tool_call(cli):
-    events = [event for n in range(5) for event in (tool_use(f"c{n}"), step_finish("tool-calls"))]
-    result, proc = await cli([*events, text("done"), step_finish("stop")])
+async def test_a_steps_parallel_tool_calls_count_as_one_turn(cli):
+    result, proc = await cli([_jsonl(*step("c1", "c2", "c3"), *step(answer="done"))], max_turns=2)
+
+    assert not proc.killed
+    assert (result.error, result.tool_call_count) == (None, 3)
+
+
+@pytest.mark.asyncio
+async def test_a_step_reported_twice_counts_once(cli):
+    first = step("c1")
+    result, _ = await cli([_jsonl(*first, first[-1], *step(answer="done"))], max_turns=2)
+
+    assert result.error is None
+
+
+@pytest.mark.asyncio
+async def test_a_last_allowed_step_that_ends_the_turn_another_way_is_not_the_limit(cli):
+    result, _ = await cli([_jsonl(*step(answer="cut off", reason="length"))], max_turns=1)
+
+    assert result.error is not None
+    assert result.error != LIMIT_ERROR.format(1)
+
+
+@pytest.mark.asyncio
+async def test_without_a_limit_the_turn_runs_every_step(cli):
+    events = [event for n in range(5) for event in step(f"c{n}")]
+    result, proc = await cli([_jsonl(*events, *step(answer="done"))])
 
     assert not proc.killed
     assert (result.error, result.tool_call_count) == (None, 5)
@@ -101,15 +152,15 @@ async def test_without_a_limit_the_turn_runs_every_tool_call(cli):
 
 @pytest.mark.asyncio
 async def test_a_turn_stopped_at_its_limit_skips_the_output_format_check(cli):
-    result, _ = await cli([tool_use("c1")], hang=True, max_turns=1,
+    result, _ = await cli([_jsonl(*step("c1"))], hang=True, max_turns=1,
                           output_format={"type": "json_schema", "schema": {"type": "object"}})
 
-    assert (result.error, result.structured_output) == ("Reached maximum number of turns (1)", None)
+    assert (result.error, result.structured_output) == (LIMIT_ERROR.format(1), None)
 
 
 def test_a_turn_limit_kills_a_real_cli_and_returns_without_waiting_for_it(monkeypatch, tmp_path):
     pid_file = tmp_path / "pid"
-    lines = _jsonl(tool_use("c1"), step_finish("tool-calls"), tool_use("c2")).decode()
+    lines = _jsonl(*step("c1"), *step("c2")).decode()
     script = f"echo $$ > {pid_file}; printf %s {shlex.quote(lines)}; exec sleep 600"
     spawn = asyncio.create_subprocess_exec
 
@@ -122,6 +173,6 @@ def test_a_turn_limit_kills_a_real_cli_and_returns_without_waiting_for_it(monkey
     result = asyncio.run(asyncio.wait_for(
         opencode_bridge.run_opencode(prompt="p", context_id="limit-test", timeout_s=60, max_turns=2), 10))
 
-    assert (result.error, result.tool_call_count) == ("Reached maximum number of turns (2)", 2)
+    assert (result.error, result.tool_call_count) == (LIMIT_ERROR.format(2), 2)
     with pytest.raises(ProcessLookupError):
         os.kill(int(pid_file.read_text()), 0)

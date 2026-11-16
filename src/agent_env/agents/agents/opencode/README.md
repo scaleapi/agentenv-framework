@@ -29,7 +29,7 @@ disk:
 
 | Extension | Implementation |
 |---|---|
-| `agent-config/v1` | `OpenCodeConfig`: `model`, `effort` (the provider's `reasoningEffort`), `system_prompt`, `output_format` (a JSON schema the answer is checked against), `project_id`, `task_id`, `timeout_seconds` (1800 by default), `max_turns` (the tool calls a task may make: the CLI is killed once that many finish, and the task fails with `Reached maximum number of turns (N)`, as codex's does), `builtin_tools` (below) |
+| `agent-config/v1` | `OpenCodeConfig`: `model`, `effort` (the provider's `reasoningEffort`), `system_prompt`, `output_format` (a JSON schema the answer is checked against), `project_id`, `task_id`, `timeout_seconds` (1800 by default), `max_turns` (the steps, model requests, a task may make, as Claude Code's `--max-turns`: once the last one asks for another, the CLI is killed and the task fails with `Reached maximum number of turns (N)`. OpenCode v1's own `steps` limit isn't used, since it doesn't stop a model that keeps calling tools), `builtin_tools` (below) |
 | `mcp-config/v1` | SDK default; each server passed to the task's CLI |
 | `skill-config/v1` | inline and bundle skills installed as `$XDG_CONFIG_HOME/opencode/skills/<name>/`, where OpenCode finds them |
 | `trajectory/v1` | the task's `opencode run --format json` events, live while it runs (format `opencode-events/1`) |

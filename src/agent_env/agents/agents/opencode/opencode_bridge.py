@@ -436,9 +436,9 @@ async def run_opencode(
     exactly the events of the returned trajectory, in order. ``builtin_tools`` selects the CLI's own tools, as
     ``_permission`` describes; the tools of ``mcp_servers`` stay offered with any selection.
 
-    ``max_turns`` bounds the turn's tool calls, as codex's bridge does: the CLI has no limit of its own that it
-    enforces, so it is killed once that many tool calls have finished. Each tool call is one model request when the
-    model makes no parallel calls."""
+    ``max_turns`` bounds the turn's steps, OpenCode's model requests, as ``--max-turns`` bounds Claude Code's: once
+    the last step it allows asks for another, the CLI is killed and the turn fails. OpenCode v1's own ``steps`` limit
+    only asks the model to stop, and still offers it every tool (anomalyco/opencode#55921)."""
     model = model or DEFAULT_MODEL
     attribution = _attribution_headers(project_id, task_id)
     if attribution:
@@ -498,7 +498,7 @@ async def run_opencode(
     parser = _EventParser(event_callback)
 
     def at_turn_limit() -> bool:
-        return max_turns is not None and not parser.completed and len(parser.tool_calls) >= max_turns
+        return max_turns is not None and parser.needs_step_past(max_turns)
 
     try:
         stderr = await asyncio.wait_for(_stream_cli(proc, prompt.encode(), parser.on_line, at_turn_limit),
@@ -524,9 +524,7 @@ async def run_opencode(
         _RUNNING.discard(proc)
 
     result = parser.result(stderr, proc.returncode)
-    # Over the limit, or stopped at it. A turn can complete past it when its events arrive in one read.
-    if max_turns is not None and (result.tool_call_count > max_turns
-                                  or (result.tool_call_count == max_turns and not parser.completed)):
+    if at_turn_limit():
         # Claude Code's words, which callers already read as the turn limit.
         result.error = f"Reached maximum number of turns ({max_turns})"
         result.error_code = None
@@ -609,12 +607,17 @@ def _parse_events(stdout: bytes, stderr: bytes, returncode: int | None) -> Openc
     return parser.result(stderr, returncode)
 
 
+# The step-finish reasons after which OpenCode's loop makes another model request; any other reason ends the turn.
+_CONTINUING_STEP_REASONS = frozenset({"tool-calls", "unknown"})
+
+
 class _EventParser:
     """Parse the `--format json` JSONL event stream one line at a time.
 
     Events carry a `type` and (for content) a `part`. We accumulate assistant
-    `text` parts as the response, count `tool` parts as tool calls, and note
-    the session id wherever it appears. The whole event list is the trajectory,
+    `text` parts as the response, count `tool` parts as tool calls and
+    `step-finish` parts as steps, and note the session id wherever it
+    appears. The whole event list is the trajectory,
     and each event is handed to ``event_callback`` as it is parsed.
     """
 
@@ -623,6 +626,8 @@ class _EventParser:
         self.trajectory: list[dict] = []
         self.text_chunks: list[str] = []
         self.tool_calls: set[str] = set()
+        self.steps: set[str] = set()
+        self.last_step_continues = False
         self.session_id: str | None = None
         self.completed = False
         self.event_errors: list[str] = []
@@ -705,11 +710,20 @@ class _EventParser:
             call_id = (part or event).get("callID") or (part or event).get("id") or f"tool-{len(self.tool_calls)}"
             self.tool_calls.add(str(call_id))
         elif etype == "step_finish" or ptype == "step-finish":
-            if (part or event).get("reason") == "stop":
+            reason = (part or event).get("reason")
+            self.steps.add(str((part or event).get("id") or f"step-{len(self.steps)}"))
+            self.last_step_continues = reason in _CONTINUING_STEP_REASONS
+            if reason == "stop":
                 self.completed = True
 
         if self._event_callback is not None:
             self._event_callback(event)
+
+    def needs_step_past(self, max_steps: int) -> bool:
+        """Whether the turn has needed a model request past ``max_steps``: more steps finished, or the last step it
+        allows asked for another. Decided at a step's end, so how the CLI's output is split into reads can't change
+        it."""
+        return len(self.steps) > max_steps or (len(self.steps) == max_steps and self.last_step_continues)
 
     def result(self, stderr: bytes, returncode: int | None) -> OpencodeResult:
         # A turn is successful once OpenCode emits a terminal step_finish{reason:stop}.
