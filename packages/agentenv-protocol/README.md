@@ -1818,7 +1818,7 @@ optional field, `|` an alternative request):
 | trajectory `get` | `{task_id}` \| `{context_id}` | `{trajectory}` |
 | | `{task_id \| context_id, objects: {trajectory: WriteObject}}` | `{objects: {trajectory: Uploaded}}` |
 | | `{task_id \| context_id, after, limit?}` | `{context_id, task_id, state, format, events, next, has_more}` |
-| snapshot `save` | `{context_id, objects: {trajectory: WriteObject, workspace?: WriteObject}}` | `{context_id, objects: {trajectory: Uploaded, workspace?: Uploaded}}` |
+| snapshot `save` | `{context_id, objects: {trajectory: WriteObject, workspace?: WriteObject}}` | `{context_id, objects: {trajectory: Uploaded, workspace?: Uploaded}, stats?: {file_count, archive_seconds, upload_seconds}}` |
 | snapshot `load` | `{objects: {trajectory: ReadObject, workspace?: ReadObject}, target_context_id?}` | `{context_id}` |
 | `enable-changelog` | `{write_namespace: WriteNamespaceGrant, roots?}` | `{roots}` |
 | `apply-changelog` | `{increments: [{sequence, object: ReadObject}], resume_conversation?, target_context_id?}` | `{count, context_id?}` |
@@ -1827,7 +1827,9 @@ A bundle contains a root `SKILL.md`; its paths are unique, normalized and
 relative, and their `max_bytes` sum to at most `max_total_bytes`. An uploaded
 trajectory is the JSON encoding of the trajectory value. Snapshot objects are
 opaque `application/octet-stream` in the runtime's own format; when AgentEnv
-sends a workspace grant, the agent uploads the workspace. A changelog agent
+sends a workspace grant, the agent uploads the workspace. A save may add
+`stats`, the archived file count and the seconds it spent archiving and
+uploading, so the caller can log them; it is optional. A changelog agent
 names each increment under the namespace root by its absolute zero-based
 tool-call position, six digits plus an optional extension (`000042.tar`);
 positions are unique but may be sparse, and apply receives them in increasing
