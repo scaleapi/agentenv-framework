@@ -83,13 +83,13 @@ async def test_the_judge_grades_from_the_chat_and_the_run_wake_by_wake_not_the_t
     await verifier.execute(ctx)
 
     prompt = captured["prompt"]
-    assert "[Mon Nov 9, 2:00 PM UTC] Casa Jacarandas is $855. Book it?" in prompt and "PRIVATE" not in prompt
+    assert "[Mon Nov 9, 9:00 AM EST] Casa Jacarandas is $855. Book it?" in prompt and "PRIVATE" not in prompt
     conversation = prompt[prompt.index("## Conversation"):prompt.index("## Trigger firings")]
     assert "Linda: yes please" in conversation and "[End of run" in conversation
     wakes = prompt[prompt.index("## The run, wake by wake"):]
-    assert "- Wake 2 · Mon Nov 9, 2:00 PM UTC · woken by the user's reply · sent the user 1 message" in wakes
+    assert "- Wake 2 · Mon Nov 9, 9:00 AM EST · woken by the user's reply · sent the user 1 message" in wakes
     assert "  - it changed: INSERT public.bookings row 1 (request 855 USD)" in wakes
-    assert "- Wake 3 · Tue Nov 10, 2:00 PM UTC · woken by an alert (noor 30)" in wakes
+    assert "- Wake 3 · Tue Nov 10, 9:00 AM EST · woken by an alert (noor 30)" in wakes
     assert "## How the run ended\nNothing could wake the assistant again, and nothing was pending." in wakes
     assert ctx.metadata["verifications"]["rubric"]["score"] == 1
     assert verifier.to_dict() == stored  # the step, shared by concurrent rollouts, is untouched
@@ -145,6 +145,12 @@ async def test_a_prompt_no_always_on_step_made_is_refused_when_it_is_graded(monk
 
     with pytest.raises(RuntimeError, match="is not an always_on step's prompt.*grade it with rubrics_verifier"):
         await verifier.execute(ctx)
+
+
+def test_the_wake_by_wake_text_is_in_the_run_s_zone_though_its_kept_tail_lost_the_start():
+    record = {"time_zone": "America/Denver", "timeline_tail": [
+        {"event": "wake", "n": 30, "virtual_time": "2027-02-06T00:30:00Z", "woke_by": ["user_reply"]}]}
+    assert "- Wake 30 · Fri Feb 5, 5:30 PM MST · woken by" in ao.render_for_judge(record)
 
 
 def test_the_wake_by_wake_text_says_when_the_record_is_unreadable():

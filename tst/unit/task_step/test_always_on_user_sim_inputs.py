@@ -225,7 +225,7 @@ async def test_c2_c4_a_reply_or_a_done_reaches_the_agent_after_her_reply_time(mo
 
     [read] = rig.events(ctx, "user_sim_read")
     assert read["virtual_time"] == "2026-11-09T14:00:00Z" and read["deliver_at"] == "2026-11-09T16:30:00Z"
-    assert _woken_by_user(rig)[-1] == "[Mon Nov 9, 4:30 PM UTC] Linda: blue, thanks!"
+    assert _woken_by_user(rig)[-1] == "[Mon Nov 9, 11:30 AM EST] Linda: blue, thanks!"
     assert rig.events(ctx, "wake")[1]["virtual_time"] == "2026-11-09T16:30:00Z"
 
 

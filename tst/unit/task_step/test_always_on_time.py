@@ -20,13 +20,13 @@ async def test_wakes_carry_the_task_s_time_on_each_line_and_no_date_line(monkeyp
     rig.triggers(rig.notify_at("sam", "2026-11-10T14:00:00Z", "Sam: shh", channel="noor 30"))
     ctx = await rig.run(rig.step(system_prompt=PROMPT))
 
-    assert [texts[0] for texts in rig.sent] == ["[Mon Nov 9, 2:00 PM UTC] Linda: sort the cdmx weekend",
-                                                "[Tue Nov 10, 2:00 PM UTC · noor 30] Sam: shh"]
+    assert [texts[0] for texts in rig.sent] == ["[Mon Nov 9, 9:00 AM EST] Linda: sort the cdmx weekend",
+                                                "[Tue Nov 10, 9:00 AM EST · noor 30] Sam: shh"]
     assert rig.parts[0][0]["metadata"]["agentenv"]["opening"] is True
     sources = {p.get("metadata", {}).get("agentenv", {}).get("source") for parts in rig.parts for p in parts}
     assert "time" not in sources
     assert not any("computer's clock" in t for texts in rig.sent for t in texts)
-    assert rig.events(ctx, "wake")[1]["parts_text"].startswith("[Tue Nov 10, 2:00 PM UTC · noor 30]")
+    assert rig.events(ctx, "wake")[1]["parts_text"].startswith("[Tue Nov 10, 9:00 AM EST · noor 30]")
 
 
 @pytest.mark.asyncio

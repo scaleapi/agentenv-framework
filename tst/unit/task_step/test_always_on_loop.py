@@ -50,7 +50,7 @@ async def test_a_notify_alert_wakes_the_agent_labelled_with_its_time_and_channel
 
     assert _woke(ctx, rig) == [("2026-11-09T14:00:00Z", ["user_request"]),
                                ("2026-11-10T14:00:00Z", ["notification:noor 30"])]
-    assert "[Tue Nov 10, 2:00 PM UTC · noor 30] Sam: she suspects nothing" in rig.sent[1]
+    assert "[Tue Nov 10, 9:00 AM EST · noor 30] Sam: she suspects nothing" in rig.sent[1]
     assert rig.record(ctx)["end_reason"] == "finished_nothing_pending"
 
 
@@ -62,7 +62,7 @@ async def test_a_scripted_user_line_reaches_the_agent_as_the_user_and_counts_as_
     ctx = await rig.run(rig.step())
 
     assert _woke(ctx, rig)[1] == ("2026-11-10T15:00:00Z", ["user_says"])
-    assert "[Tue Nov 10, 3:00 PM UTC] Linda: also find a dinner spot" in rig.sent[1]
+    assert "[Tue Nov 10, 10:00 AM EST] Linda: also find a dinner spot" in rig.sent[1]
     [read] = rig.reads
     assert [s["text"] for s in read["you_sent"]] == ["sort the cdmx weekend", "also find a dinner spot"]
     assert [e["text"] for e in rig.events(ctx, "scripted_user_line")] == ["also find a dinner spot"]
@@ -81,7 +81,7 @@ async def test_the_agent_s_scheduled_check_moves_the_clock_and_wakes_it(monkeypa
     ctx = await rig.run(rig.step())
 
     assert _woke(ctx, rig)[1] == ("2026-11-12T13:00:00Z", ["notification:your scheduled check"])
-    assert "[Thu Nov 12, 1:00 PM UTC · your scheduled check] book La Ola when it opens" in rig.sent[1]
+    assert "[Thu Nov 12, 8:00 AM EST · your scheduled check] book La Ola when it opens" in rig.sent[1]
     assert [j["to"] for j in rig.events(ctx, "clock_jump")] == ["2026-11-12T13:00:00Z"]
 
 
@@ -96,7 +96,7 @@ async def test_a_reply_is_held_for_the_reply_time_then_wakes_the_agent(monkeypat
     assert read["virtual_time"] == "2026-11-09T14:00:00Z" and read["mode"] == "work"
     assert read["deliver_at"] == "2026-11-09T16:30:00Z"
     assert _woke(ctx, rig)[1] == ("2026-11-09T16:30:00Z", ["user_reply"])
-    assert "[Mon Nov 9, 4:30 PM UTC] Linda: the blue one" in rig.sent[1]
+    assert "[Mon Nov 9, 11:30 AM EST] Linda: the blue one" in rig.sent[1]
 
 
 @pytest.mark.asyncio
@@ -223,7 +223,7 @@ async def test_done_ends_a_one_sitting_run_after_the_agent_s_turn_on_her_sign_of
     ctx = await rig.run(rig.step())
 
     assert rig.record(ctx)["end_reason"] == "user_done" and len(rig.sent) == 2
-    assert "[Mon Nov 9, 2:00 PM UTC] Linda: thanks!" in rig.sent[1]
+    assert "[Mon Nov 9, 9:00 AM EST] Linda: thanks!" in rig.sent[1]
     assert len(rig.reads) == 1 and rig.events(ctx, "user_sim_read")[0]["ends_run"] is True
 
 
