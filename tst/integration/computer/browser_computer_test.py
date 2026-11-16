@@ -251,7 +251,8 @@ async def test_its_tools_see_and_drive_the_page_that_is_its_screen(browser_compu
     assert clicked["c"] == 1 and doubled["d"] == 1 and typed["v"] == "Hello, World!" and replaced["v"] == "x"
     assert "C-a" in replaced["k"] and "Enter" in entered["k"] and scrolled["y"] >= 300
     assert after.getpixel((200, 150)) != (255, 0, 0)
-    assert json.loads(listening) == [3128, 18765] and x_server.strip() == "Xvfb"
+    # The stand-in site proxy, the egress proxy it hands live sites to, and the driver.
+    assert json.loads(listening) == [3128, 3130, 18765] and x_server.strip() == "Xvfb"
     assert "--headless" not in command and "--window-size=1280,800" in command
     assert "--enable-unsafe-swiftshader" in command
     assert not report.failed

@@ -60,7 +60,7 @@ async def _page_now(browser: DeployedEnv) -> float:
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         tabs = (await _browser_op(browser, "tabs/list", {}))["tabs"]
-        tab = next((tab for tab in tabs if tab["id"] == opened["tab"]["id"]), None)
+        tab = next((tab for tab in tabs if tab["id"] == opened["tab"]), None)
         if tab and (tab.get("title") or "").startswith("now "):
             await _browser_op(browser, "tabs/close", {"tab": tab["id"]})
             return int(tab["title"].split()[1]) / 1000
