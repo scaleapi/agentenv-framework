@@ -793,10 +793,6 @@ class RubricsVerifierTaskStep(TaskStep):
             if grade_up_to_turn is not None:
                 run_context = run_context.as_of(grade_up_to_turn)
         extra_sections = await self.judge_prompt_sections(context, stored_response)
-        trajectory_content = await self.judge_trajectory_content(context, stored_response)
-        if trajectory_content is not None and self.use_trajectory:
-            raise RuntimeError(f"Verifier '{self.verifier_id}': judge_trajectory_content stands in for the recorded "
-                               "trajectory, so it needs use_trajectory=False.")
 
         per_turn_uris = [u for u in (prompt_response.target_agent_per_turn_trajectory_object_urls or []) if u]
         if self.use_trajectory and not (per_turn_uris or prompt_response.agent_trajectory_object_url):
@@ -808,10 +804,6 @@ class RubricsVerifierTaskStep(TaskStep):
         use_agent_judge_override = overrides.get("use_agent_judge")
         use_agent_judge = use_agent_judge_override if use_agent_judge_override is not None else self.use_agent_judge
         criteria = self._resolved_criteria(context)
-        unjudged = [dict(row) for row in await self.unjudged_rows(context, stored_response)]
-        if clashing := {row.get("id") for row in unjudged} & {c.get("id") for c in criteria}:
-            raise RuntimeError(f"Verifier '{self.verifier_id}': unjudged_rows gave rows with a criterion's id: "
-                               f"{sorted(map(str, clashing))}")
         # The judge sees/echoes short keys (c1..cN), not UUIDs; frame labels use them too, hence before compaction.
         criteria_for_judge, real_by_short = _to_short_keyed_criteria(criteria)
         apply_filter_override = overrides.get("apply_trajectory_filter")
@@ -872,6 +864,16 @@ class RubricsVerifierTaskStep(TaskStep):
                 f"Verifier '{self.verifier_id}': output_format={fmt} needs per-criterion frames, "
                 "but this run's trajectory filter attached none (user_overrides.apply_trajectory_filter=False?)."
             )
+
+        # The subclass hooks run once the run is known not to be skipped, and before any judge is deployed.
+        trajectory_content = await self.judge_trajectory_content(context, stored_response)
+        if trajectory_content is not None and self.use_trajectory:
+            raise RuntimeError(f"Verifier '{self.verifier_id}': judge_trajectory_content stands in for the recorded "
+                               "trajectory, so it needs use_trajectory=False.")
+        unjudged = [dict(row) for row in await self.unjudged_rows(context, stored_response)]
+        if clashing := {row.get("id") for row in unjudged} & {c.get("id") for c in criteria}:
+            raise RuntimeError(f"Verifier '{self.verifier_id}': unjudged_rows gave rows with a criterion's id: "
+                               f"{sorted(map(str, clashing))}")
 
         auto_deployed_judge = None
         staged: Optional[StagedTrajectory] = None
@@ -1042,6 +1044,10 @@ class RubricsVerifierTaskStep(TaskStep):
             if sorted(batched_ids) != sorted(position) or (len(batches) > 1 and not all(batches)):
                 raise RuntimeError(f"Verifier '{self.verifier_id}': _criteria_batches must put every criterion in "
                                    "exactly one batch, and leave no batch empty")
+            if len(batches) > 1 and not self._spec().batchable:
+                # Batches merge by concatenating rows, which drops a format's one-per-call reasoning, checks and mistakes.
+                raise RuntimeError(f"Verifier '{self.verifier_id}': _criteria_batches gave {len(batches)} batches, but "
+                                   f"output_format={self.output_format.value} is graded in one judge call.")
             concurrency = asyncio.Semaphore(batch_concurrency or self.DEFAULT_JUDGE_BATCH_CONCURRENCY)
 
             async def grade(batch: list[dict]) -> tuple[list[dict], int, list[dict], Optional[str]]:
