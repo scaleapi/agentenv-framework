@@ -337,12 +337,10 @@ class JudgeTimeoutError(TimeoutError):
         self.trajectory_object_url = trajectory_object_url
 
 
-# A harness that ran out of its own time limit says so in its error code (``<harness>.timeout``, as OpenHands and
-# pydantic-ai do) or, when its code doesn't (Claude Code's ``cli_error``), in its message: "timed out after Ns". That
-# phrase only, since a model API call that timed out ("The operation timed out") is not the judge running out.
-_TIMEOUT_CODE = re.compile(r"(^|\.)timeout$")
-_UNSPECIFIC_CODES = frozenset({None, "", "cli_error"})
-_TIMED_OUT_MESSAGE = re.compile(r"\btimed out after \d+")
+# With timeout retries on, the judge is allowed this much longer than the poll waits, so it never stops itself first:
+# the poll's deadline (which cancels the task) is the one sign that it ran out of time, whatever the harness names its
+# own timeout. More than a poll interval plus a request; the judge's own limit stays behind it as a backstop.
+_JUDGE_TIMEOUT_MARGIN_SECONDS = 60
 
 
 async def _terminate_auto_deployed_judge(judge: Any) -> None:
@@ -357,16 +355,6 @@ async def _terminate_auto_deployed_judge(judge: Any) -> None:
         logger.info(f"Terminated auto-deployed judge sandbox {judge.sandbox_id}")
     except Exception as e:
         logger.warning(f"Failed to terminate auto-deployed judge sandbox: {e}")
-
-
-def _judge_ran_out_of_time(tr: Any) -> bool:
-    """Whether a failed judge task failed by running out of its time limit: its error code first, its message only
-    when the code doesn't tell."""
-    if tr.error_code and _TIMEOUT_CODE.search(tr.error_code):
-        return True
-    if tr.error_code not in _UNSPECIFIC_CODES:
-        return False
-    return bool(_TIMED_OUT_MESSAGE.search(" ".join(filter(None, [tr.error_message, tr.response_text]))))
 
 
 def _image_count(blocks: list[dict]) -> int:
@@ -1371,7 +1359,8 @@ class RubricsVerifierTaskStep(TaskStep):
             "effort": judge_effort,
             "max_thinking_tokens": judge_max_thinking_tokens,
             "output_format": self._spec().output_format,
-            "timeout_seconds": self.judge_timeout_seconds,
+            "timeout_seconds": (self.judge_timeout_seconds + _JUDGE_TIMEOUT_MARGIN_SECONDS
+                                if self.judge_timeout_retries is not None else self.judge_timeout_seconds),
             "max_turns": self.judge_max_turns,
             "task_id": context.metadata.get("task_id"),
             **self.judge_agent_config(),
@@ -1431,9 +1420,6 @@ class RubricsVerifierTaskStep(TaskStep):
         state = result["status"]["state"]
         status_msg = (result.get("status") or {}).get("message") or {}
         tr = protocol.TerminalResponse.from_message(status_msg)
-        if state == "failed" and self.judge_timeout_retries is not None and _judge_ran_out_of_time(tr):
-            raise await self._judge_timed_out(agent_error_text(tr.error_message, tr.response_text) or "timed out",
-                                              judge_a2a_url, judge_agent_card, task_id, judge_agent)
         if state == "failed":
             sandbox_id = getattr(judge_agent, "sandbox_id", None)
             logger.error(

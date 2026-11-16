@@ -84,9 +84,9 @@ async def test_a_timed_out_call_is_tried_again_and_its_trajectory_kept(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_a_failed_turn_that_ran_out_of_time_counts_too_and_the_last_one_fails_with_its_trajectory(monkeypatch):
+async def test_the_last_timeout_fails_with_its_trajectory(monkeypatch):
     verifier = _verifier(judge_timeout_retries=1)
-    _judge(monkeypatch, verifier, ["failed:cli_error:claude CLI timed out after 60s", "poll-timeout"])
+    _judge(monkeypatch, verifier, ["poll-timeout", "poll-timeout"])
 
     with pytest.raises(JudgeTimeoutError, match=re.escape("its trajectory so far: mem://judge/task-2.json")) as raised:
         await _grade(verifier)
@@ -96,31 +96,36 @@ async def test_a_failed_turn_that_ran_out_of_time_counts_too_and_the_last_one_fa
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", [
-    "failed:cli_error:claude CLI timed out after 60s",   # Claude Code: its message
-    "failed::claude CLI timed out after 60s",            # a harness that sends no code
-    "failed:openhands.timeout:did not finish in 60s",    # a harness whose code says so
-])
-async def test_a_timeout_the_code_or_else_the_message_tells_is_retried(monkeypatch, failure):
-    verifier = _verifier(judge_timeout_retries=1)
-    _judge(monkeypatch, verifier, [failure, ANSWER])
-
-    results, _, discrepancies, _ = await _grade(verifier)
-
-    assert results[0]["score"] == 1.0 and discrepancies[0]["kind"] == "judge_timeout"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("failure", [
+    "failed:cli_error:claude CLI exited with code 1: MCP request timed out after 30000ms",
+    "failed:openhands.timeout:did not finish in 60s",
     "failed:cli_error:the CLI crashed",
-    "failed:cli_error:API Error: The operation timed out.",
-    "failed:pi.model_error:the model timed out after 30s",
 ])
-async def test_another_failure_is_not_retried(monkeypatch, failure):
+async def test_a_judge_task_that_fails_before_the_deadline_is_not_retried_whatever_it_says(monkeypatch, failure):
+    """Only the poll's own deadline means the judge ran out of time: the judge is given longer than the poll waits."""
     verifier = _verifier(judge_timeout_retries=1)
-    _judge(monkeypatch, verifier, [failure, ANSWER])
+    fetched = _judge(monkeypatch, verifier, [failure, ANSWER])
 
     with pytest.raises(RuntimeError, match="Judge A2A task failed"):
         await _grade(verifier)
+    assert fetched == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retries,sent", [(None, 60), (1, 120)])
+async def test_with_retries_the_judge_is_allowed_a_margin_past_the_poll_s_deadline(monkeypatch, retries, sent):
+    posted: list[dict] = []
+
+    async def post(url, payload):
+        posted.append(payload)
+
+    monkeypatch.setattr(protocol, "post_agent_config", post)
+    card = {"capabilities": {"extensions": [{"uri": A2AAgent.EXT_AGENT_CONFIG, "params": {
+        "endpoint": "/ext/agent-config", "methods": {"set": {"request": {"supported": ["model", "timeout_seconds"]}}}}}]}}
+    await _verifier(judge_timeout_retries=retries)._configure_judge_a2a(
+        judge_a2a_url="http://judge.test", judge_agent_card=card, model="m", judge_effort=None,
+        judge_max_thinking_tokens=None, context=TaskStepContext())
+
+    assert posted == [{"model": "m", "timeout_seconds": sent}]
 
 
 def test_judge_timeout_retries_and_max_turns_round_trip_and_are_left_out_unset():
