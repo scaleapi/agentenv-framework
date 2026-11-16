@@ -237,6 +237,23 @@ def test_what_a_registry_can_rate_limit_is_tried_again():
     assert JOBS["infra-build"]["strategy"]["max-parallel"] <= 4
 
 
+def test_the_folders_a_computers_compose_writes_are_made_before_docker_mounts_one():
+    """Docker makes a missing folder it mounts root's, and the compose then can't write its record beside it, as
+    v0.9.1544's couldn't."""
+    (start,) = [run for run in _runs("computer-build") if "--name registry" in run]
+
+    made = 'mkdir -p "$RUNNER_TEMP/computers/registry" "$RUNNER_TEMP/computers/composed"'
+    assert made in start and start.index(made) < start.index("docker run")
+
+
+def test_the_computers_compose_is_tried_again_in_fresh_stores_while_pypi_doesnt_list_the_protocol():
+    """Its resolve asks PyPI for the protocol the release published moments earlier, as v0.9.1543's did, too soon."""
+    (compose,) = [run for run in _runs("computer-build") if "release_computers.py compose" in run]
+    tried = "python3 .github/scripts/infra_build.py retry sh -c 'rm -rf \"$XDG_STATE_HOME\" &&"
+
+    assert tried in compose and compose.index(tried) < compose.index("release_computers.py compose")
+
+
 def test_every_infra_image_pins_its_bases_by_digest_and_dependabot_bumps_them():
     """A release rebuilds an image only when its sources change, so a base behind a bare tag never picks up its
     fixes; pinned, the pin is a source, and Dependabot bumping it is what rebuilds and republishes the image. A base a
