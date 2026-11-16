@@ -178,8 +178,17 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
             entry["trajectory_staging"]["judge_reads"] = await self._judge_reads(entry)
         return context
 
-    def judge_agent_config(self) -> dict:
-        return {"builtin_tools": {"only": list(JUDGE_TOOLS)}, "peer_tools": False}
+    def judge_agent_config(self, judge_agent_card: dict) -> dict:
+        """No messaging other agents, and, when the judge's card offers them by these names (Claude Code's), only
+        Bash and Read of its own tools. Another harness names its tools differently and would refuse Claude Code's
+        names, so its own tools are left as they are, and the log says so."""
+        config: dict = {"peer_tools": False}
+        if set(JUDGE_TOOLS) <= _builtin_tool_names(judge_agent_card):
+            config["builtin_tools"] = {"only": list(JUDGE_TOOLS)}
+        else:
+            logger.warning("Verifier '%s': the judge agent doesn't offer %s as built-in tools, so its own tools aren't "
+                           "narrowed to them", self.verifier_id, list(JUDGE_TOOLS))
+        return config
 
     def _record(self, context: TaskStepContext, prompt_response: PromptResponse) -> dict:
         record = (context.metadata.get(ALWAYS_ON_KEY) or {}).get(prompt_response.step_id)
@@ -274,6 +283,34 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
             except Exception as e:
                 out.append({**call, "unreadable": f"{type(e).__name__}: {str(e)[:200]}"})
         return out
+
+
+def _builtin_tool_names(card: dict) -> set[str]:
+    """The built-in tool names a judge's card lets a caller select: the names its agent-config schema lists for
+    ``builtin_tools``."""
+    from agent_env.a2a_agent import A2AAgent
+
+    ext = A2AAgent.find_extension(card or {}, A2AAgent.EXT_AGENT_CONFIG) or {}
+    schema = ((((ext.get("params") or {}).get("methods") or {}).get("set") or {}).get("request") or {}).get("schema") or {}
+    defs = schema.get("$defs") or {}
+    names: set[str] = set()
+    seen: set[str] = set()
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            ref = node.get("$ref")
+            if isinstance(ref, str) and ref.startswith("#/$defs/") and ref not in seen:
+                seen.add(ref)
+                walk(defs.get(ref.rsplit("/", 1)[-1]))
+            names.update(v for v in node.get("enum") or [] if isinstance(v, str))
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk((schema.get("properties") or {}).get("builtin_tools"))
+    return names
 
 
 def _files_note(path: str, staged: StagedRun) -> str:
