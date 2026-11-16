@@ -286,9 +286,11 @@ def _publish_computers(folder: Path) -> int:
         images = {arch: f"{repository}@{digest}" for arch, digest in digests.items()}
         index = f"{repository}:index-" + hashlib.sha256(
             ",".join(images[arch] for arch in COMPUTER_ARCHES).encode()).hexdigest()
-        if (code := _exists(index)) == 2:
-            return 1
-        if code == 1:
+        served, error = _served(index)
+        # GHCR may refuse a token a package before its first push, which a release's first of an app is.
+        if served is None and ": not found" not in error:
+            print(f"::warning::{index} is taken as unpublished, since the registry won't say: {error}")
+        if served is None:
             source = f"https://github.com/{os.environ['GITHUB_REPOSITORY']}"
             created = _tried_again(lambda: _streamed([
                 "docker", "buildx", "imagetools", "create", "-t", index,
