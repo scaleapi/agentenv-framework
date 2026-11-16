@@ -351,7 +351,8 @@ class Gateway:
                     {"ok": False, "error": f"'{GET_TIME_TOOL_NAME}' is already registered by a backing server"}, 409)
 
             def arm(body: dict) -> dict:
-                state = self._clock.set_time(body.get("virtual_time"), body.get("virtual_seconds_per_real_second"))
+                state = self._clock.set_time(body.get("virtual_time"), body.get("virtual_seconds_per_real_second"),
+                                             body.get("time_zone"))
                 self._register_get_time_tool()
                 return state
 

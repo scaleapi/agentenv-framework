@@ -22,10 +22,11 @@ GET_TIME_TOOL_DESCRIPTION = (
     "your own assumption about today's date. Call this tool and derive from its value every "
     "absolute date, time or timestamp you pass to another tool, and every relative phrase you "
     'resolve ("today", "this week", "overdue", "the last 30 days"). current_time is in UTC, as '
-    "are the dates and times the other tools here take, so derive those from current_time. If you "
-    "have been told your user's IANA time zone, you can pass it as time_zone to also get "
-    "local_time, the same instant in that zone, for telling your user the time in their own "
-    "terms; it does not change the dates you pass to tools. A date taken from any other "
+    "are the dates and times the other tools here take, so derive those from current_time. When "
+    "this environment has a home time zone, your user's, the result also has time_zone and "
+    "local_time, the same instant in that zone: what your user's own clock shows, for telling them "
+    "the time in their own terms. Pass time_zone to get local_time in another IANA zone instead. "
+    "Neither changes the dates you pass to tools. A date taken from any other "
     "source can silently match no records on a read, or file a record at the wrong time on a "
     "write. Time advances while you work, so re-read this before each write rather than reusing "
     "an earlier value. Inside a raw SQL or free-form query string, prefer the literal date this "
@@ -36,8 +37,9 @@ _SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {"time_zone": {
         "type": "string",
-        "description": "An IANA time zone name, such as \"America/New_York\" or \"Asia/Tokyo\". The result then "
-                       "also has time_zone and local_time, the same instant with that zone's UTC offset.",
+        "description": "An IANA time zone name, such as \"America/New_York\" or \"Asia/Tokyo\", instead of the "
+                       "environment's own: the result's time_zone and local_time are then the same instant with that "
+                       "zone's UTC offset.",
     }},
     "additionalProperties": False,
 }
@@ -64,6 +66,7 @@ def build_get_time_tool(clock: Clock, make_arg_model: Callable[[str, dict], Any]
     """Built by hand: ToolManager.add_tool only warns on a collision and would silently shadow this."""
 
     async def get_time(time_zone: str | None = None) -> dict[str, str] | CallToolResult:
+        time_zone = time_zone if time_zone is not None else clock.time_zone
         if time_zone is None:
             return read_time(clock)
         zone = _zone(time_zone)

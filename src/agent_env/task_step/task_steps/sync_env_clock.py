@@ -80,7 +80,8 @@ class SyncEnvClockTaskStep(TaskStep):
         1 real s -> 1 virtual day). For ~V virtual seconds over an ~R-real-second task, pass V/R.
 
         timezone = optional IANA name. Unset keeps today's behaviour. Set, a wall-clock virtual_time is local time in
-        that zone, and every synced server is told the zone (a server that cannot take it fails the step)."""
+        that zone, the gateway's clock is armed in it, so its get_time answers in it too, and every synced server is
+        told the zone (a server that cannot take it fails the step)."""
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
         if not isinstance(virtual_time, str):
             raise ValueError("virtual_time must be an RFC3339 string")
@@ -131,7 +132,8 @@ class SyncEnvClockTaskStep(TaskStep):
             raise StepContextError(f"Env '{self.env_id}' not found in context.deployed_envs")
         try:
             await deployed.invoke(EXT_CLOCK_URI, "set_time",
-                                  {"virtual_time": self.armed_virtual_time, "virtual_seconds_per_real_second": self.virtual_seconds_per_real_second},
+                                  {"virtual_time": self.armed_virtual_time, "virtual_seconds_per_real_second": self.virtual_seconds_per_real_second,
+                                   **({"time_zone": self.timezone} if self.timezone else {})},
                                   timeout=self.timeout_seconds)
         except httpx.HTTPStatusError as e:
             raise RuntimeError(f"clock arm failed (HTTP {e.response.status_code}): {e.response.text}") from e

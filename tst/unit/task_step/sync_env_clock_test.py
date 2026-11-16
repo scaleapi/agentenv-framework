@@ -356,7 +356,8 @@ async def test_execute_arms_the_gateway_at_the_local_instant_and_tells_every_ser
 
     await _zoned().execute(context)
 
-    assert json.loads(sent[0].content)["virtual_time"] == "2026-01-01T17:00:00Z"
+    assert json.loads(sent[0].content) == {"virtual_time": "2026-01-01T17:00:00Z", "virtual_seconds_per_real_second": 1.0,
+                                           "time_zone": "America/New_York"}  # get_time answers in it too
     assert json.loads(sent[2].content) == {"env_get_time_url": CLOCK_URL, "timezone": "America/New_York"}
     cfg = context.metadata["clock_configurations"][0]
     assert (cfg["timezone"], cfg["virtual_time"], cfg["armed_at"]) == ("America/New_York", "2026-01-01T12:00:00", "2026-01-01T17:00:00Z")
