@@ -16,6 +16,7 @@ from agentenv_protocol import EnvironmentTool  # noqa: E402
 from agentenv_protocol.computer import ComputerSettings, InvalidArgument, OutOfBounds  # noqa: E402
 from agentenv_protocol.computer.frames import FrameStore  # noqa: E402
 from agentenv_protocol.computer.operations import Display  # noqa: E402
+from agentenv_protocol.computer.results import CAPTURED_AT_META  # noqa: E402
 from agentenv_protocol.computer.spaces import check_space, frame_point  # noqa: E402
 
 
@@ -97,12 +98,13 @@ async def test_setting_the_default_space_rewrites_the_descriptions_on_fastmcp():
         card = (await http.get("/.well-known/agent-env.json")).json()
     async with fastmcp.Client(app) as client:
         listed = {t.name: t for t in await client.list_tools()}
-        await client.call_tool("computer_screenshot", {})
+        shot = await client.call_tool("computer_screenshot", {})
         clicked = await client.call_tool("computer_click", {"x": 500, "y": 500})
     card_click = next(t for t in card["capabilities"]["tools"] if t["name"] == "computer_click")
     assert "norm space by default: 0 to 1000" in listed["computer_click"].description
     assert card_click["description"] == listed["computer_click"].description
     assert clicked.structured_content["summary"].startswith("Clicked left at (500, 500) (norm 1000) in f1")
+    assert shot.meta[CAPTURED_AT_META].endswith("Z") and "captured_at" not in shot.structured_content
 
 
 @pytest.mark.asyncio
