@@ -237,6 +237,15 @@ def test_what_a_registry_can_rate_limit_is_tried_again():
     assert JOBS["infra-build"]["strategy"]["max-parallel"] <= 4
 
 
+def test_the_folders_a_computers_compose_writes_are_made_before_docker_mounts_one():
+    """Docker makes a missing folder it mounts root's, and the compose then can't write its record beside it, as
+    v0.9.1544's couldn't."""
+    (start,) = [run for run in _runs("computer-build") if "--name registry" in run]
+
+    made = 'mkdir -p "$RUNNER_TEMP/computers/registry" "$RUNNER_TEMP/computers/composed"'
+    assert made in start and start.index(made) < start.index("docker run")
+
+
 def test_the_computers_compose_is_tried_again_in_fresh_stores_while_pypi_doesnt_list_the_protocol():
     """Its resolve asks PyPI for the protocol the release published moments earlier, as v0.9.1543's did, too soon."""
     (compose,) = [run for run in _runs("computer-build") if "release_computers.py compose" in run]
