@@ -12,6 +12,7 @@ from typing import Optional
 
 import pytest
 
+from agent_env.a2a_agent import A2AAgent
 from agent_env.config import get_config
 from agent_env.providers.sandbox_providers import sandbox_provider
 from agent_env.task.task import Task
@@ -366,13 +367,30 @@ def test_use_trajectory_with_the_agent_judge_loads_and_round_trips_with_its_defa
     assert verifier.use_trajectory and verifier.use_agent_judge
     assert (verifier.judge_timeout_seconds, verifier.judge_timeout_retries, verifier.judge_max_turns) == (2400, 1, 400)
     assert verifier.DEFAULT_JUDGE_BATCH_CONCURRENCY == 3 and verifier.judge_batch_size is None
-    assert verifier.judge_agent_config() == {"builtin_tools": {"only": ["Bash", "Read"]}, "peer_tools": False}
+    assert verifier.judge_agent_config(_judge_card("Bash", "Read", "Edit")) == {
+        "builtin_tools": {"only": ["Bash", "Read"]}, "peer_tools": False}
     assert AlwaysOnAgentVerifier.from_dict(verifier.to_dict()).to_dict() == verifier.to_dict()
     task_set = _verifier(judge_timeout_seconds=1000, judge_timeout_retries=0, judge_batch_size=6)
     assert (task_set.judge_timeout_seconds, task_set.judge_timeout_retries, task_set.judge_batch_size) == (1000, 0, 6)
     plain = RubricsVerifierTaskStep(id="j", version=1, criteria=CRITERIA, prompt_id="ask")
     assert (plain.judge_timeout_seconds, plain.judge_timeout_retries, plain.judge_max_turns,
-            plain.judge_agent_config()) == (1000, None, None, {})
+            plain.judge_agent_config({})) == (1000, None, None, {})
+
+
+def _judge_card(*tools: str) -> dict:
+    """A judge's card whose agent-config takes builtin_tools naming ``tools``, as a harness's schema lists them."""
+    schema = {"properties": {"builtin_tools": {"anyOf": [{"$ref": "#/$defs/Tools"}, {"type": "null"}]}},
+              "$defs": {"Tools": {"properties": {"only": {"anyOf": [{"items": {"enum": list(tools)}, "type": "array"},
+                                                                    {"type": "null"}]}}}}}
+    return {"capabilities": {"extensions": [{"uri": A2AAgent.EXT_AGENT_CONFIG, "params": {"methods": {"set": {
+        "request": {"supported": ["builtin_tools", "peer_tools"], "schema": schema}}}}}]}}
+
+
+def test_a_judge_that_names_its_tools_otherwise_keeps_them_and_the_log_says_so(caplog):
+    verifier = _verifier(use_agent_judge=True)
+    for card in (_judge_card("exec_command", "apply_patch"), _judge_card("bash", "read", "edit"), {}):
+        assert verifier.judge_agent_config(card) == {"peer_tools": False}
+    assert "doesn't offer ['Bash', 'Read'] as built-in tools" in caplog.text
 
 
 # ---- grade_user_rules: the user sim's rules, graded from the run's events in order -----------------------------------
