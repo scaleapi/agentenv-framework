@@ -253,10 +253,12 @@ async def test_trajectory_content_beside_a_recorded_trajectory_is_refused():
         await v.execute(ctx)
 
 
-def test_the_rubric_binary_and_partial_formats_alone_are_batchable_and_all_check_bulk_verdicts():
+def test_only_formats_whose_rows_stand_alone_are_batchable():
     assert {f for f, spec in JUDGE_OUTPUT_FORMAT_REGISTRY.items() if spec.batchable} == {
-        JudgeOutputFormat.RUBRIC_BINARY, JudgeOutputFormat.RUBRIC_PARTIAL}
-    assert all(spec.checks_bulk_verdicts for spec in JUDGE_OUTPUT_FORMAT_REGISTRY.values())
+        JudgeOutputFormat.RUBRIC_BINARY, JudgeOutputFormat.RUBRIC_PARTIAL, JudgeOutputFormat.USER_SIM_CHECKS}
+    # user_sim_checks alone skips the bulk-verdict check: a short pass reason is normal there.
+    assert {f for f, spec in JUDGE_OUTPUT_FORMAT_REGISTRY.items() if not spec.checks_bulk_verdicts} == {
+        JudgeOutputFormat.USER_SIM_CHECKS}
 
 
 def _with_spec(**fields) -> type[RubricsVerifierTaskStep]:

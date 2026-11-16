@@ -1651,6 +1651,10 @@ JUDGE_OUTPUT_FORMAT_REGISTRY: dict[JudgeOutputFormat, JudgeOutputFormatSpec] = {
         parse_response=_parse_user_sim_checks_response,
         diagnose_response=diagnose_user_sim_checks_response,
         format_correction_prompt=format_user_sim_checks_correction,
+        # Each row stands alone (no per-call reasoning, checks or mistakes), so a judge may ask its rows over several
+        # calls; and a short pass reason is normal here, so bulk verdicts aren't flagged.
+        batchable=True,
+        checks_bulk_verdicts=False,
     ),
 }
 

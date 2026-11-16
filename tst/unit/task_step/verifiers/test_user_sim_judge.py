@@ -213,9 +213,13 @@ def test_rubric_items_are_checked_when_the_task_loads():
 def test_an_answer_is_checked_and_its_turns_kept_to_the_graded_ones():
     criteria = _plan(_run(("reply", "a"), ("reply", "b"), ("reply", "c"), graded={3}), checks=["made_up"]).criteria
     rows, problem = diagnose_user_sim_checks_response(json.dumps({"results": [
-        {"id": "made_up", **FAIL(turns=[2, 3, "x"])}]}), criteria)
+        {"id": "made_up", **FAIL(turns=[2, 3])}]}), criteria)
     assert problem is None and (rows[0]["verdict"], rows[0]["turns"], rows[0]["turns_outside_graded"]) == (
         "fail", [3], [2])
+    rows, problem = diagnose_user_sim_checks_response(json.dumps({"results": [
+        {"id": "made_up", **FAIL(turns=[3, "x"])}]}), criteria)  # a turn that isn't a number is sent back
+    assert rows is None and problem.row_problems == ["made_up: turns must be a list of turn numbers; ['x'] are not "
+                                                     "whole numbers"]
     rows, _ = diagnose_user_sim_checks_response(json.dumps({"results": [
         {"id": "made_up", **PASS(could_change_grade=True)}]}), criteria)
     assert rows[0]["could_change_grade"] is False  # a pass can't change the grade
