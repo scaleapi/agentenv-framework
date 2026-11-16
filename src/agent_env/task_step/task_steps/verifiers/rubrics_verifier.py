@@ -713,9 +713,9 @@ class RubricsVerifierTaskStep(TaskStep):
         as they are."""
         return None
 
-    def judge_agent_config(self) -> dict:
-        """Settings an override adds to what the agent judge is configured with (its card's agent-config extension
-        takes only the ones it supports). None here."""
+    def judge_agent_config(self, judge_agent_card: dict) -> dict:
+        """Settings an override adds to what the agent judge is configured with, given the judge's card (its
+        agent-config extension takes only the ones it supports). None here."""
         return {}
 
     def _resolved_criteria(self, context: TaskStepContext) -> list[dict]:
@@ -1363,7 +1363,7 @@ class RubricsVerifierTaskStep(TaskStep):
                                 if self.judge_timeout_retries is not None else self.judge_timeout_seconds),
             "max_turns": self.judge_max_turns,
             "task_id": context.metadata.get("task_id"),
-            **self.judge_agent_config(),
+            **self.judge_agent_config(judge_agent_card),
         }
         desired_config = {k: v for k, v in desired_config.items() if v is not None}
         config_ext = A2AAgent.find_extension(judge_agent_card, A2AAgent.EXT_AGENT_CONFIG)
@@ -1371,7 +1371,7 @@ class RubricsVerifierTaskStep(TaskStep):
         if config_ext and desired_config:
             supported = (config_ext.get("params") or {}).get("methods", {}).get("set", {}).get("request", {}).get("supported", [])
             config_payload = {k: v for k, v in desired_config.items() if k in supported}
-            if unsupported := sorted(set(self.judge_agent_config()) - set(supported)):
+            if unsupported := sorted(set(self.judge_agent_config(judge_agent_card)) - set(supported)):
                 logger.warning("Verifier '%s': the judge agent doesn't take %s; it runs without them",
                                self.verifier_id, unsupported)
             if config_payload:

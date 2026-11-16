@@ -149,7 +149,7 @@ async def test_judge_agent_config_extras_go_to_a_judge_that_takes_them(monkeypat
     monkeypatch.setattr(protocol, "post_agent_config", post)
 
     class Extra(RubricsVerifierTaskStep):
-        def judge_agent_config(self) -> dict:
+        def judge_agent_config(self, judge_agent_card: dict) -> dict:
             return {"builtin_tools": {"disable": ["Agent"]}, "effort_level": "high"}
 
     card = {"capabilities": {"extensions": [{"uri": A2AAgent.EXT_AGENT_CONFIG, "params": {
