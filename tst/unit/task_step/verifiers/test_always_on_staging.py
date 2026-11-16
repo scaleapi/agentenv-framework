@@ -399,3 +399,16 @@ def test_the_index_has_a_line_for_a_compaction_naming_its_wakes_and_pointing_at_
     note = _lines(staged.files, path)[int(n) - 1]
     assert note["event"] == "harness_note" and note["compaction"] == {
         "wakes_summarized": 6, "wakes_kept": 3, "first_kept_wake": 7, "waited_s": 33.917}
+
+
+def test_judge_reads_counts_no_wake_0_from_a_glob_over_the_wake_files():
+    # Two real judge calls (Tree Removal, Silent Week, Nov 13 re-grade): globs whose prefix "wake_0" names no wake.
+    judge = turn_events(json.dumps(_judge(
+        ("Bash", {"command": "cd /tmp/always_on_run/0cf1e88465f5; grep -n '5550148' wakes/wake_00[1-4].jsonl | "
+                             "cut -c1-300 | head; grep -n 'assistant_thinking' wakes/wake_004.jsonl | cut -c1-2500 | "
+                             "head -3"}, "wakes/wake_004.jsonl:9:{\"event\": \"assistant_thinking\", \"wake\": 4}"),
+        ("Bash", {"command": "cd /tmp/always_on_run/b9e9bfc715ed; grep -o '\"note\": \"Routine sweep[^\"]*\"' "
+                             "wakes/wake_001.jsonl | head -1; grep -il \"storynest\" wakes/wake_0*.jsonl | head"},
+         "wakes/wake_009.jsonl"))))
+
+    assert judge_reads(judge)["wakes_opened"] == [1, 4]

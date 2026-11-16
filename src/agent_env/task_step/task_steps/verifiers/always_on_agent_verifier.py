@@ -92,6 +92,8 @@ How to read them:
 - Don't load whole files. Search with grep -n, then Read with an offset and limit.
 - Later actions replace earlier ones: after you find something, look for later corrections, edits, cancellations or \
 follow-ups before you decide.
+- Before you conclude that something never happened, or was never said or done, search every wake for it (grep \
+{events}, which holds them all) and name that search in your reason.
 - The user's messages are the "user_message" lines (and the first wake's "wake_input"); the user saw only the \
 "message_to_user" lines.
 - Cite the wake (and call) number of every piece of evidence, and quote it.

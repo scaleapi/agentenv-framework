@@ -501,7 +501,9 @@ def _wrapped(text: str) -> str:
                      for line in text.split("\n") for i in range(0, max(len(line), 1), LINE_CHARS))
 
 
-_WAKE_NAME = re.compile(r"wake_(\d+)")
+# A wake file or a result file of one (wake_012.jsonl, wake_012_call_004_…, wake_012_line_003_…); not a glob's prefix
+# (wake_0*.jsonl, wake_00[1-4].jsonl), which names no wake.
+_WAKE_NAME = re.compile(r"wake_(\d+)(?=\.jsonl|_call_|_line_)")
 # A shell loop over wake numbers (``for w in 080 075; do … wake_$w.jsonl``): the numbers it names.
 _WAKE_LOOP = re.compile(r"\bfor\s+(\w+)\s+in\s+([\d\s]+?)\s*;")
 # A glob or directory walk that takes every wake file at once.
@@ -537,7 +539,7 @@ def judge_reads(judge: TurnEvents) -> dict:
             result = _CALL_INPUT.sub("", result if isinstance(result, str) else _dumps(result))
             wakes |= {int(n) for n in _WAKE_FIELD.findall(result)}
     text = " ".join(_dumps(c.get("input")) for c in calls)
-    return {"tool_calls": len(calls), "wakes_opened": sorted(wakes), "read_all_wakes": every,
+    return {"tool_calls": len(calls), "wakes_opened": sorted(n for n in wakes if n >= 1), "read_all_wakes": every,
             "read_index": INDEX_FILE in text, "searched_events": EVENTS_FILE in text,
             "read_triggers": TRIGGERS_FILE in text,
             "helpers_started": sum(1 for c in calls if _short_tool(c["tool"]) in _HELPER_TOOLS)}

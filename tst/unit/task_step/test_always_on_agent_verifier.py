@@ -545,3 +545,13 @@ async def test_a_run_graded_without_its_trajectories_discloses_its_harness_witho
     assert reads == []
     assert ctx.metadata["verifications"]["rubric"]["assistant_harness"] == {
         "agent_name": "assistant", "agent_card": {"name": "psi-neutral-harness", "version": "3"}}
+
+
+def test_the_files_note_asks_for_a_search_of_every_wake_before_a_claim_that_something_never_happened():
+    from agent_env.task_step.task_steps.verifiers.always_on_agent_verifier import _files_note
+    from agent_env.task_step.task_steps.verifiers.always_on_staging import StagedRun
+
+    note = _files_note("/s", StagedRun({"wakes/wake_001.jsonl": ""}, {}))
+
+    assert ("- Before you conclude that something never happened, or was never said or done, search every wake for it "
+            "(grep /s/events.jsonl, which holds them all) and name that search in your reason.") in note
