@@ -1,5 +1,6 @@
 """Unit tests for SyncEnvClockTaskStep — round-trip + the per-server sync_time fan-out (mocked)."""
 import json
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -106,6 +107,36 @@ async def test_execute_syncs_each_child_env_through_the_stored_card(monkeypatch)
     ]
     assert json.loads(sent[0].content) == {"virtual_time": T0, "virtual_seconds_per_real_second": 1.0}
     assert [s["service"] for s in context.metadata["clock_configurations"][0]["synced"]] == ["email"]
+
+
+@pytest.mark.asyncio
+async def test_execute_warns_that_the_playwright_mcp_website_browser_shows_real_time(monkeypatch, caplog):
+    _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL})
+    env = SimpleNamespace(mcp_server_envs=[SimpleNamespace(environment_name="email"),
+                                           SimpleNamespace(environment_name="playwright-mcp")], website_envs=[])
+    monkeypatch.setattr("agent_env.env.env.Env.get", lambda *a, **k: env)
+    context = TaskStepContext(deployed_envs=[_carded(await _composed_card({"mcp-email": [_CLOCK_EXT],
+                                                                            "mcp-playwright-mcp": []}))])
+
+    with caplog.at_level(logging.WARNING, logger="agent_env.task_step.task_steps.sync_env_clock"):
+        await _step().execute(context)
+
+    record = context.metadata["clock_configurations"][0]
+    assert [(entry["service"], entry["reason"]) for entry in record["skipped"]] == [("playwright-mcp", "not_advertised")]
+    [warned] = [r.getMessage() for r in caplog.records if "website browser" in r.getMessage()]
+    assert "playwright-mcp" in warned and 'browser_envs = ["chromium"]' in warned
+
+
+@pytest.mark.asyncio
+async def test_execute_gives_no_website_browser_warning_without_playwright_mcp(monkeypatch, caplog):
+    _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL})
+    monkeypatch.setattr("agent_env.env.env.Env.get", lambda *a, **k: SimpleNamespace(environment_name="email"))
+    context = TaskStepContext(deployed_envs=[_carded(await _composed_card({"mcp-email": [_CLOCK_EXT]}))])
+
+    with caplog.at_level(logging.WARNING, logger="agent_env.task_step.task_steps.sync_env_clock"):
+        await _step().execute(context)
+
+    assert not [r for r in caplog.records if "website browser" in r.getMessage()]
 
 
 @pytest.mark.asyncio
