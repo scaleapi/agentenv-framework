@@ -113,6 +113,7 @@ async def test_an_agent_on_a_computer_sets_off_triggers_and_wakes_for_world_even
 
                 await call("desktop_computer_screenshot")
                 await call("desktop_computer_click", {"x": 5, "y": 5})
+                after_click = await status("sees-the-flag")
                 await call("items_add_item", {"item": "FLAG"}, role="harness")
                 after_unwatched_write = await status("sees-the-flag")
                 await call("desktop_computer_wait", {"seconds": 1})
@@ -143,7 +144,8 @@ async def test_an_agent_on_a_computer_sets_off_triggers_and_wakes_for_world_even
 
     assert not report.failed
     assert {"desktop_computer_click", "schedule_check", "list_items"} <= tools, sorted(tools)
-    assert (after_unwatched_write, after_read_only_call, after_input_call) == ("armed", "armed", "fired")
+    assert (after_click, after_unwatched_write, after_read_only_call, after_input_call) == (
+        "armed", "armed", "armed", "fired")
     detected = {e["trigger_id"]: e["provoking"] for e in state["events"] if e["kind"] == "detected"}
     assert (detected["sees-a-click"]["tool"], detected["sees-a-click"]["role"]) == ("desktop_computer_click", AGENT)
     assert detected["sees-the-flag"]["tool"] == "desktop_computer_pointer_move"
