@@ -14,6 +14,7 @@ from agent_env.task_step.task_steps.verifiers.judge_utils.judge_output_format im
     JUDGE_OUTPUT_FORMAT_REGISTRY,
     JudgeOutputFormat,
     JudgeOutputFormatSpec,
+    ResultRows,
 )
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
 from tst.unit.task_step.verifiers.test_rubrics_verifier_judge_batches import (
@@ -21,6 +22,14 @@ from tst.unit.task_step.verifiers.test_rubrics_verifier_judge_batches import (
     _fake_judge,
     _graded,
     _prompted_ids,
+)
+from tst.unit.task_step.verifiers.test_rubrics_verifier_per_criterion import (
+    _NO_SCREENSHOTS,
+    CRITERIA,
+    _capture_judge,
+    _ctx,
+    _filter,
+    _passing_rows,
 )
 
 CHECKS = [{"id": "asked", "title": "Asked for the booking", "check": "asked"},
@@ -131,6 +140,76 @@ async def test_a_skipped_run_holds_no_unjudged_rows():
     await v.execute(ctx)
 
     assert [r["id"] for r in ctx.metadata["verifications"]["vt"]["results"]] == ["prompt_error"]
+
+
+class _HooksCalled(RubricsVerifierTaskStep):
+    calls: list[str] = []
+
+    async def judge_trajectory_content(self, context: TaskStepContext, prompt_response: PromptResponse) -> None:
+        self.calls.append("judge_trajectory_content")
+
+    async def unjudged_rows(self, context: TaskStepContext, prompt_response: PromptResponse) -> list[dict]:
+        self.calls.append("unjudged_rows")
+        return [{"id": "auto-asked", "result": True, "score": 1.0}]
+
+
+def _evidence_step(cls: type[RubricsVerifierTaskStep], **kw) -> RubricsVerifierTaskStep:
+    params = dict(id="verify", version=1, criteria=CRITERIA, prompt_id="p1", use_agent_judge=False,
+                  use_trajectory=True, trajectory_filter=_filter(), verifier_id="vid",
+                  output_format=JudgeOutputFormat.RUBRIC_EVIDENCE,
+                  grading_policy_prompt="Type every value in full; never accept an autocomplete suggestion.")
+    params.update(kw)
+    return cls(**params)
+
+
+@pytest.mark.asyncio
+async def test_a_run_skipped_for_want_of_screenshots_never_calls_the_hooks(monkeypatch):
+    v = _evidence_step(_HooksCalled)
+    v.calls = []
+    _capture_judge(monkeypatch, v, lambda criteria: pytest.fail("the judge must not be called"))
+    monkeypatch.setattr(v, "_read_trajectory_text", lambda uri: _NO_SCREENSHOTS)
+    ctx = _ctx()
+
+    await v.execute(ctx)
+
+    assert v.calls == []
+    assert [r["id"] for r in ctx.metadata["verifications"]["vid"]["results"]] == ["no_screenshots"]
+
+
+class _OnePerCriterion(RubricsVerifierTaskStep):
+    def _criteria_batches(self, criteria: list[dict], size: Optional[int]) -> list[list[dict]]:
+        return [[c] for c in criteria]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fmt", [JudgeOutputFormat.RUBRIC_EVIDENCE, JudgeOutputFormat.RUBRIC_EVIDENCE_WITH_MISTAKES])
+async def test_a_subclass_cannot_split_a_format_graded_in_one_call(monkeypatch, fmt):
+    v = _evidence_step(_OnePerCriterion, output_format=fmt)
+    captured = _capture_judge(monkeypatch, v, _passing_rows)
+    ctx = _ctx()
+
+    with pytest.raises(RuntimeError, match=rf"_criteria_batches gave 2 batches, but output_format={fmt.value} is "
+                                           "graded in one judge call"):
+        await v.execute(ctx)
+    assert "eval_prompt" not in captured and "verifications" not in ctx.metadata
+
+
+@pytest.mark.asyncio
+async def test_a_subclass_keeping_one_batch_grades_a_format_graded_in_one_call(monkeypatch):
+    class OneBatch(RubricsVerifierTaskStep):
+        def _criteria_batches(self, criteria: list[dict], size: Optional[int]) -> list[list[dict]]:
+            return [list(reversed(criteria))]
+
+    v = _evidence_step(OneBatch)
+    _capture_judge(monkeypatch, v, lambda criteria: ResultRows(
+        _passing_rows(criteria), reasoning="Both shown on screen.", checks=[{"id": "typed", "passed": True}]))
+    ctx = _ctx()
+
+    await v.execute(ctx)
+
+    entry = ctx.metadata["verifications"]["vid"]
+    assert entry["score"] == 1.0 and entry["reasoning"] == "Both shown on screen."
+    assert entry["checks"] == [{"id": "typed", "passed": True}]
 
 
 class _RunInline(RubricsVerifierTaskStep):
