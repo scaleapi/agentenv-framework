@@ -833,6 +833,10 @@ class PromptAgentTaskStep(TaskStep):
             # As always_on marks it: verifiers skip the run instead of grading the agent's latest draft as its answer.
             error_type = "user_sim_error"
             final_error_for_response = final_error_for_response or f"The user simulator failed: {sim.error}"
+        if not error_type and user_side.gate_failure is not None:
+            # The conversation was cut off by the gate: verifiers skip it rather than grade the agent's latest draft.
+            error_type = "user_sim_invalid"
+            final_error_for_response = final_error_for_response or f"user_sim_gate: {user_side.gate_failure}"
         context.prompt_responses.append(PromptResponse(
             prompt_id=self.prompt_id,
             response=final_terminal.response_text,
@@ -1172,10 +1176,8 @@ class _UserSide:
         if self._built_in is not None:
             answer = await self._built_in.ask(number, _agent_text(solver_message, agent_parts), self._ask_built_in)
             if self._gate is not None and "message" in answer:
-                kept = answer.get("end_after")
-
                 async def rewrite_built_in(note: str) -> dict:
-                    return await self._built_in.rewrite(number, note, self._ask_built_in, kept)
+                    return await self._built_in.rewrite(number, note, self._ask_built_in)
 
                 answer = await self._gated(number, answer, rewrite_built_in)
             self._end_after = answer.get("end_after")
@@ -1402,10 +1404,10 @@ class _BuiltInUserSim:
             return {"message": [{"kind": "text", "text": ans["message"]}], "end_after": "user_done"}
         return {"end": "user_done" if outcome == "done" else "user_no_reply"}
 
-    async def rewrite(self, number: int, note: str, ask_user_sim, end_after: Optional[str]) -> dict:
+    async def rewrite(self, number: int, note: str, ask_user_sim) -> dict:
         """The user's answer again, after the user-sim gate held its message back with ``note``, in the same session;
-        shaped as ``ask``'s. ``end_after`` is the held message's (its last reply before max_replies, say), which a reply
-        keeps. The read's record keeps what the user sim first answered and lists each rewrite under ``gate_rewrites``."""
+        shaped as ``ask``'s. It replaces the held answer in the reply count, so ``max_replies`` holds whichever answer is
+        sent. The read's record keeps what the user sim first answered and lists each rewrite under ``gate_rewrites``."""
         got = await ask_user_sim(note)
         ans = user_sim_versions.parse(got["structured"] if isinstance(got.get("structured"), dict) else got.get("text"))
         error = got.get("error")
@@ -1417,9 +1419,9 @@ class _BuiltInUserSim:
         outcome, said = ans.get("outcome"), (ans.get("message") or "").strip()
         if self.history:
             held = self.history[-1]["answer"]
-            if held.get("outcome") == "reply" and (held.get("message") or "").strip() and not (
-                    outcome == "reply" and said and not error):
-                self.replies -= 1  # the held reply was counted toward max_replies, and this answer isn't one
+            # ask counted the held answer if it was a reply; count this one in its place.
+            held_counted = held.get("outcome") == "reply" and bool((held.get("message") or "").strip())
+            self.replies += int(outcome == "reply" and bool(said) and not error) - int(held_counted)
             # What the user is shown later counts this answer as hers: the one that reached the agent.
             self.history[-1]["answer"] = {**held, **ans}
         logger.info(f"Turn {number} user sim rewrite: outcome={outcome} error={error}")
@@ -1427,8 +1429,10 @@ class _BuiltInUserSim:
             self.error = error
             return {"end": "user_sim_error"}
         if outcome == "reply" and said:
-            return {"message": [{"kind": "text", "text": ans["message"]}],
-                    **({"end_after": end_after} if end_after == "user_gave_up" else {})}
+            if self._max_replies and self.replies >= int(self._max_replies):
+                logger.info(f"Turn {number} user sim: reply {self.replies} of max_replies {self._max_replies}")
+                return {"message": [{"kind": "text", "text": ans["message"]}], "end_after": "user_gave_up"}
+            return {"message": [{"kind": "text", "text": ans["message"]}]}
         if outcome == "done" and said:
             return {"message": [{"kind": "text", "text": ans["message"]}], "end_after": "user_done"}
         return {"end": "user_done" if outcome == "done" else "user_no_reply"}

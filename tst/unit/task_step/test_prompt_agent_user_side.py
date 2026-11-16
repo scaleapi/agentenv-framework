@@ -539,6 +539,7 @@ async def test_a_message_that_still_fails_after_its_rewrites_ends_the_run_and_fa
     assert _stored(ctx, peers)["status"] == "closed"
     assert [m["role"] for m in _stored(ctx, peers)["messages"]] == ["user", "agent"]   # nothing more was sent
     assert ctx.prompt_responses[-1].response == "draft one"                            # the run kept its record
+    assert ctx.prompt_responses[-1].error_type == "user_sim_invalid"                  # which verifiers skip
 
 
 @pytest.mark.asyncio
