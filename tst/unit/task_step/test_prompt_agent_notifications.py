@@ -156,7 +156,7 @@ async def test_labels_are_in_the_zone_sync_env_clock_gave_the_world_and_name_it(
     peers = GatewayQueue(monkeypatch, {AGENT: [text("one"), text("two")], USER: [sim("ok"), sim("bye", done=True)]})
     _alder_and_ivy_due(peers)
     ctx = _ctx()
-    ctx.metadata["clock_configurations"] = [{"step_id": "clock", "timezone": "America/Los_Angeles"}]
+    ctx.metadata["clock_configurations"] = [_arm("env", "America/Los_Angeles")]
 
     await _step().execute(ctx)
 
@@ -175,14 +175,22 @@ def test_a_label_reads_the_time_in_its_zone_and_names_the_zone(at, zone, label):
 
 
 def test_lines_take_the_one_zone_the_world_was_given_and_utc_without_one_or_with_several():
-    assert labels_zone([{"env_id": "a", "timezone": "America/Denver"}, {"env_id": "b"}]) == "America/Denver"
+    assert labels_zone([_arm("a", "America/Denver"), _arm("b")]) == "America/Denver"
     assert labels_zone([]) == "UTC"
-    assert labels_zone([{"env_id": "a", "timezone": "America/Denver"}, {"env_id": "b", "timezone": "Europe/Paris"}]) == "UTC"
+    assert labels_zone([_arm("a", "America/Denver"), _arm("b", "Europe/Paris")]) == "UTC"
 
 
-def test_an_env_armed_again_in_another_zone_is_labelled_in_the_zone_it_was_armed_in_last():
-    assert labels_zone([{"env_id": "office", "timezone": "America/Los_Angeles"},
-                        {"env_id": "office", "timezone": "America/Denver"}]) == "America/Denver"
+def _arm(env_id: str, zone: str | None = None) -> dict:
+    """A clock configuration as sync_env_clock records an arm."""
+    return {"step_id": "clock", "env_id": env_id, "env_get_time_url": "http://gateway/clock/time",
+            **({"timezone": zone} if zone else {})}
+
+
+def test_an_env_armed_again_is_labelled_in_the_zone_of_its_latest_arm_and_a_rate_change_keeps_it():
+    rate_change = {"step_id": "running", "env_id": "office", "virtual_seconds_per_real_second": 1.0}
+    assert labels_zone([_arm("office", "America/Los_Angeles"), _arm("office", "America/Denver")]) == "America/Denver"
+    assert labels_zone([_arm("office", "America/Denver"), rate_change]) == "America/Denver"
+    assert labels_zone([_arm("office", "America/Denver"), _arm("office")]) == "UTC"
 
 
 @pytest.mark.asyncio
