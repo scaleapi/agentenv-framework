@@ -50,6 +50,20 @@ def _finished(job: str) -> str:
     return f"""contains(fromJSON('["success", "skipped"]'), needs.{job}.result)"""
 
 
+# What a job's own env can read; a step's can read the runner too (docs.github.com, "Context availability").
+_JOB_ENV_CONTEXTS = {"github", "inputs", "matrix", "needs", "secrets", "strategy", "vars"}
+
+
+@pytest.mark.parametrize("path", sorted((REPO / ".github" / "workflows").glob("*.yml")), ids=lambda path: path.name)
+def test_a_jobs_own_env_reads_only_the_contexts_a_job_has(path):
+    """GitHub refuses the whole workflow file otherwise, so a release tag starts no run at all."""
+    jobs = yaml.safe_load(path.read_text()).get("jobs", {})
+    read = {(name, context) for name, body in jobs.items() for value in (body.get("env") or {}).values()
+            for context in re.findall(r"\$\{\{[^}]*?\b([a-z_]+)\.", str(value))}
+
+    assert {(name, context) for name, context in read if context not in _JOB_ENV_CONTEXTS} == set()
+
+
 @pytest.mark.parametrize("job", sorted(JOBS))
 def test_a_job_that_installs_agent_env_holds_no_token_that_writes(job):
     """Then a dependency's code never runs where a token can push an image, publish to PyPI or edit the repository."""
