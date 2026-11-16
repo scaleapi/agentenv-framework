@@ -27,7 +27,8 @@ COMPUTERS_REPOSITORY = f"{REGISTRY}/agentenv-computers"
 # The release workflow writes this into the wheels it publishes; a checkout, or a wheel built elsewhere, has none.
 RELEASE_FILE = Path(__file__).with_name("published_images.json")
 _DIGEST = re.compile(r"^sha256:[a-f0-9]{64}$")
-_PINNED = re.compile(r"^[a-z0-9./_-]+(:[A-Za-z0-9._-]+)?@sha256:[a-f0-9]{64}$")
+# An image by digest, tagged or not, its registry's port allowed.
+_PINNED = re.compile(r"^[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)+(:[A-Za-z0-9._-]+)?@sha256:[a-f0-9]{64}$")
 # Short, so a network that drops requests doesn't hold up a run's checks for long.
 _LOOKUP_TIMEOUT_SECONDS = 10
 _SERVED: dict[str, str] = {}  # the digest the registry served each ref under, which never changes: no tag is moved

@@ -226,6 +226,16 @@ def test_the_record_of_released_computers_finds_each_lock_image_and_index_and_an
     assert released_computers(tmp_path / "none.json") == []
 
 
+def test_a_record_of_released_computers_may_name_a_registry_by_its_port(tmp_path):
+    repository = "localhost:5001/agentenv-computers"
+    arches = {"amd64": {**_computer("amd64", "sha256:" + "1" * 64), "image": f"{repository}@sha256:{'1' * 64}"}}
+    path = tmp_path / "published_images.json"
+    write_release_digests({}, path, [{"env": "chromium", "form": "container", "arches": arches,
+                                      "index": f"{repository}:index-{'a' * 64}@sha256:{'b' * 64}"}])
+
+    assert released_image(arches["amd64"]["key"], path) == f"{repository}@sha256:{'1' * 64}"
+
+
 @pytest.mark.parametrize("computers", [
     [{"env": "chromium", "form": "disk", "index": "x", "arches": {}}],
     [{"env": "chromium", "form": "container", "index": f"ghcr.io/scaleapi/agentenv-computers:i@sha256:{'b' * 64}",
