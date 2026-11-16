@@ -430,10 +430,15 @@ async def run_opencode(
     builtin_tools: OpenCodeTools | None = None,
     event_callback: Callable[[dict], None] | None = None,
     workspace: str = "/app",
+    max_turns: int | None = None,
 ) -> OpencodeResult:
     """Run one `opencode run` turn in ``workspace``. ``event_callback`` gets each JSON event as the CLI prints it:
     exactly the events of the returned trajectory, in order. ``builtin_tools`` selects the CLI's own tools, as
-    ``_permission`` describes; the tools of ``mcp_servers`` stay offered with any selection."""
+    ``_permission`` describes; the tools of ``mcp_servers`` stay offered with any selection.
+
+    ``max_turns`` bounds the turn's tool calls, as codex's bridge does: the CLI has no limit of its own that it
+    enforces, so it is killed once that many tool calls have finished. Each tool call is one model request when the
+    model makes no parallel calls."""
     model = model or DEFAULT_MODEL
     attribution = _attribution_headers(project_id, task_id)
     if attribution:
@@ -491,8 +496,13 @@ async def run_opencode(
     ))
     _RUNNING.add(proc)
     parser = _EventParser(event_callback)
+
+    def at_turn_limit() -> bool:
+        return max_turns is not None and not parser.completed and len(parser.tool_calls) >= max_turns
+
     try:
-        stderr = await asyncio.wait_for(_stream_cli(proc, prompt.encode(), parser.on_line), timeout=timeout_s)
+        stderr = await asyncio.wait_for(_stream_cli(proc, prompt.encode(), parser.on_line, at_turn_limit),
+                                        timeout=timeout_s)
     except asyncio.CancelledError:
         _kill_cli(proc)
         await _reap(proc)
@@ -514,6 +524,12 @@ async def run_opencode(
         _RUNNING.discard(proc)
 
     result = parser.result(stderr, proc.returncode)
+    # Over the limit, or stopped at it. A turn can complete past it when its events arrive in one read.
+    if max_turns is not None and (result.tool_call_count > max_turns
+                                  or (result.tool_call_count == max_turns and not parser.completed)):
+        # Claude Code's words, which callers already read as the turn limit.
+        result.error = f"Reached maximum number of turns ({max_turns})"
+        result.error_code = None
     if output_format is not None and result.error is None:
         try:
             structured_output = json.loads(result.response)
@@ -530,12 +546,14 @@ async def run_opencode(
 _STDOUT_READ_BYTES = 64 * 1024
 
 
-async def _stream_cli(proc, stdin_data: bytes, on_line: Callable[[str], None]) -> bytes:
+async def _stream_cli(proc, stdin_data: bytes, on_line: Callable[[str], None],
+                      stop: Callable[[], bool] = lambda: False) -> bytes:
     """``proc.communicate(stdin_data)``, handing ``on_line`` each stdout line as it arrives.
 
     Lines are split as ``stdout.decode(errors="replace").splitlines()`` splits
     the whole output, so they are the same lines; a line has no length limit,
-    as with ``communicate``. Returns stderr once the CLI has exited."""
+    as with ``communicate``. Returns stderr once the CLI has exited, or, once
+    ``stop`` holds after a read, kills the CLI and returns no stderr."""
 
     async def feed_stdin() -> None:
         try:
@@ -562,6 +580,10 @@ async def _stream_cli(proc, stdin_data: bytes, on_line: Callable[[str], None]) -
                     on_line(line)
                 pieces = []
             pieces.append(rest)
+            if stop():
+                _kill_cli(proc)
+                await _reap(proc)
+                return b""
         for line in b"".join(pieces).decode(errors="replace").splitlines():
             on_line(line)
         await stdin_task

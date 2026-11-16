@@ -139,6 +139,8 @@ class OpenCodeConfig(AgentConfig):
     project_id: str | None = None
     task_id: str | None = None
     timeout_seconds: int = Field(default=1800, gt=0)
+    # Tool calls a turn may make; see run_opencode.
+    max_turns: int | None = None
     # Which of the CLI's own tools it may use. With any selection, the tools of the MCP servers agent-env gives it stay.
     builtin_tools: OpenCodeTools | None = None
 
@@ -384,6 +386,7 @@ class OpenCodeAgent(DurableSessionRefs, AgentEnvAgent):
                         builtin_tools=request.config.builtin_tools,
                         event_callback=record,
                         workspace=str(WORKSPACE_DIR),
+                        max_turns=request.config.max_turns,
                     )
             except Exception:
                 logger.exception("OpenCode invocation failed")
