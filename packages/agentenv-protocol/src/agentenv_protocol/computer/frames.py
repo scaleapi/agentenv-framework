@@ -6,7 +6,6 @@ import io
 import math
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 
 from PIL import Image as PILImage
 
@@ -32,7 +31,6 @@ class Frame:
     origin: tuple[int, int]
     root_size: tuple[int, int]
     parent_id: str | None
-    captured_at: datetime
     inputs: tuple = field(repr=False)
     #: The page it shows, on a computer whose screen is a website browser's active tab.
     page: PageState | None = None
@@ -72,7 +70,6 @@ class Frame:
             height=self.height,
             display=DisplayData(width=self.display.width, height=self.display.height, scale=self.display.scale),
             parent_frame_id=self.parent_id,
-            captured_at=self.captured_at.isoformat().replace("+00:00", "Z"),
             page=_page_data(self.page),
         )
 
@@ -116,7 +113,6 @@ class FrameStore:
             origin=(parent.origin[0] + origin[0], parent.origin[1] + origin[1]) if parent is not None else (0, 0),
             root_size=parent.root_size if parent is not None else image.size,
             parent_id=parent.id if parent is not None else None,
-            captured_at=parent.captured_at if parent is not None else datetime.now(timezone.utc),
             inputs=parent.inputs if parent is not None else inputs,
             page=parent.page if parent is not None else page,
         )

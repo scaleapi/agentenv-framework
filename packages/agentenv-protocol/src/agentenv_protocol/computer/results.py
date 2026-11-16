@@ -36,12 +36,13 @@ class PageData(BaseModel):
 
 
 class FrameData(BaseModel):
+    """A frame as an agent sees it. When it was captured isn't part of it: the driver keeps real time, which in a
+    computer on the universe's clock would tell the agent the real date."""
     frame_id: str
     width: int
     height: int
     display: DisplayData
     parent_frame_id: Optional[str] = None
-    captured_at: str
     page: Optional[PageData] = None
 
 

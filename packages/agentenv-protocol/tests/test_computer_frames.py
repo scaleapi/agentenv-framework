@@ -29,7 +29,8 @@ async def test_a_screenshot_is_a_native_frame_with_its_geometry():
     data = first.structuredContent
     assert data["frame_id"] == "f1" and (data["width"], data["height"]) == (1280, 800)
     assert data["display"] == {"width": 1280, "height": 800, "scale": 1.0} and "parent_frame_id" not in data
-    assert data["captured_at"].endswith("Z") and data["summary"] == "Captured f1: 1280×800 of the 1280×800 display"
+    assert data["summary"] == "Captured f1: 1280×800 of the 1280×800 display"
+    assert "captured_at" not in data  # the driver's real time, which would tell an agent the real date
     assert first.content[0].text == data["summary"] and first.content[1].mimeType == "image/png"
     assert _image(first).size == (1280, 800)
     assert second.structuredContent["frame_id"] == "f2" and second.content[1].mimeType == "image/jpeg"
@@ -56,14 +57,9 @@ async def test_a_region_is_a_native_crop_whose_points_map_back_exactly():
     assert crop.structuredContent["parent_frame_id"] == "f1" and (crop.structuredContent["width"],
                                                                    crop.structuredContent["height"]) == (300, 100)
     assert crop.structuredContent["summary"] == "Cropped f2: 300×100 of f1 at (600, 400)"
-    assert crop.structuredContent["captured_at"] == (await _captured_at(driver, "f1"))
     assert _image(crop).getpixel((100, 50))[:3] == (1, 2, 3)
     assert nested.structuredContent["parent_frame_id"] == "f2" and _image(nested).getpixel((0, 0))[:3] == (1, 2, 3)
     assert not clicked.isError and driver.screen.log[-1][1:3] == (701, 451)
-
-
-async def _captured_at(driver: FakeDriver, frame_id: str) -> str:
-    return driver._computer.frames.get(frame_id, "default").result().captured_at
 
 
 @pytest.mark.asyncio
