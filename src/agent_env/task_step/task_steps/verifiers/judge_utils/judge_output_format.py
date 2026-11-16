@@ -1259,6 +1259,12 @@ class JudgeOutputFormatSpec:
     # Rows carry `frame` / `evidence_status`, so the per-criterion grounding asks the judge to cite them; a format
     # with this set needs the labelled per-criterion frames (the verifier enforces the configuration).
     cites_evidence: bool = False
+    # Rows are one per criterion, so judge_batch_size may split the criteria into calls whose rows merge by
+    # concatenation. A format with a per-call block (reasoning, checks, mistakes) or whole-run rows leaves it off.
+    batchable: bool = False
+    # Batched rows are checked for bulk verdicts (shared or short justifications) and retried with a correction. A
+    # format whose rows may rightly share a short reason turns it off.
+    checks_bulk_verdicts: bool = True
 
 
 JUDGE_OUTPUT_FORMAT_REGISTRY: dict[JudgeOutputFormat, JudgeOutputFormatSpec] = {
@@ -1270,6 +1276,7 @@ JUDGE_OUTPUT_FORMAT_REGISTRY: dict[JudgeOutputFormat, JudgeOutputFormatSpec] = {
         parse_response=_parse_rubric_binary_response,
         diagnose_response=diagnose_rubric_binary_response,
         format_correction_prompt=format_judge_correction_prompt,
+        batchable=True,
     ),
     JudgeOutputFormat.RUBRIC_PARTIAL: JudgeOutputFormatSpec(
         output_format=_rubric_score_output_format(),
@@ -1279,6 +1286,7 @@ JUDGE_OUTPUT_FORMAT_REGISTRY: dict[JudgeOutputFormat, JudgeOutputFormatSpec] = {
         parse_response=_parse_rubric_partial_response,
         diagnose_response=diagnose_rubric_partial_response,
         format_correction_prompt=format_partial_judge_correction_prompt,
+        batchable=True,
     ),
     JudgeOutputFormat.RUBRIC_EVIDENCE: JudgeOutputFormatSpec(
         output_format=_rubric_evidence_output_format(),
