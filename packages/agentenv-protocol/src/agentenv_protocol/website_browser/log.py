@@ -563,12 +563,13 @@ class Causes:
 
     async def navigated_within(self, target: str) -> Optional[dict]:
         """What moved ``target`` within its document, once its navigations in flight have answered: a navigation
-        answered with no loader, else a reload or move in history, which it uses up."""
+        answered with no loader, else a reload or move in history, which it uses up; one asked for after that
+        navigation, as a start tab's reload is, is left for the navigation it makes."""
         if target not in self._same_document and self._navigating.get(target):
             await asyncio.wait(set(self._navigating[target]), timeout=CAUSE_WAIT_S)
-        pending = self._next.pop(target, None)
         if (cause := self._same_document.pop(target, None)) is not None:
             return cause
+        pending = self._next.pop(target, None)
         if pending is not None and pending[1] >= asyncio.get_running_loop().time():
             return pending[0]
         return None

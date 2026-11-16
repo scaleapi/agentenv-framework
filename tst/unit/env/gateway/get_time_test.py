@@ -9,6 +9,7 @@ import re
 from datetime import datetime
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from mcp.shared.memory import create_connected_server_and_client_session
 from mcp.types import Tool as MCPTool
@@ -289,13 +290,41 @@ async def test_a_time_the_zone_cannot_show_is_a_tool_error_naming_it(gw, now, zo
         200, {"content": [{"type": "text", "text": message}], "isError": True, "changelog_id": None})
 
 
-def test_the_description_keeps_tool_dates_in_utc_and_offers_a_zone_only_to_an_agent_told_one():
+def test_the_description_keeps_tool_dates_in_utc_and_gives_the_users_clock_when_their_zone_is_known():
     assert ("current_time is in UTC, as are the dates and times the other tools here take, so derive those from "
             "current_time.") in GET_TIME_TOOL_DESCRIPTION
-    assert ("If you have been told your user's IANA time zone, you can pass it as time_zone to also get "
-            "local_time") in GET_TIME_TOOL_DESCRIPTION
-    assert "it does not change the dates you pass to tools" in GET_TIME_TOOL_DESCRIPTION
+    assert ("The result also has time_zone and local_time when your user's time zone is known: the same instant on "
+            "their clock") in GET_TIME_TOOL_DESCRIPTION
+    assert "Neither changes the dates you pass to tools" in GET_TIME_TOOL_DESCRIPTION
     assert not re.search(r"[A-Z][a-z]+/[A-Z]", GET_TIME_TOOL_DESCRIPTION)
+    assert "home time zone" not in GET_TIME_TOOL_DESCRIPTION  # no setup words: a clock tool says the time
+
+
+def test_a_clock_armed_in_a_zone_answers_in_it_with_no_argument_and_in_one_asked_for_instead(gw):
+    """A task's clock armed in its users' zone (sync_env_clock's timezone): an agent that asks no zone still learns the
+    time on its user's clock, which an agent once took UTC for, scheduling a "morning" check at 00:32 in Denver."""
+    gw._clock.set_time("2027-02-06T00:32:00Z", 0, time_zone="America/Denver")
+    gw._register_get_time_tool()
+
+    assert _call(gw) == {"current_time": "2027-02-06T00:32:00Z", "time_zone": "America/Denver",
+                         "local_time": "2027-02-05T17:32:00-07:00"}
+    assert asyncio.run(_tools(gw)[GET_TIME_TOOL_NAME].fn(time_zone="Asia/Tokyo")) == {
+        "current_time": "2027-02-06T00:32:00Z", "time_zone": "Asia/Tokyo", "local_time": "2027-02-06T09:32:00+09:00"}
+
+
+@pytest.mark.asyncio
+async def test_the_arm_route_takes_the_zone_which_the_state_shows_and_a_re_arm_or_clear_drops(gw):
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=gw._asgi_app()), base_url="http://gw") as client:
+        armed = (await client.put("/clock/set-time", json={"virtual_time": T, "time_zone": "America/Denver"})).json()
+        unknown = await client.put("/clock/set-time", json={"virtual_time": T, "time_zone": "Mars/Olympus_Mons"})
+        kept = (await client.get("/clock/state")).json()
+        rearmed = (await client.put("/clock/set-time", json={"virtual_time": T})).json()
+        await client.put("/clock/set-time", json={"virtual_time": T, "time_zone": "America/Denver"})
+        await client.post("/clock/clear", json={})
+        cleared = gw._clock.time_zone
+
+    assert armed["time_zone"] == kept["time_zone"] == "America/Denver" and unknown.status_code == 400
+    assert "time_zone" not in rearmed and cleared is None
 
 
 @pytest.mark.asyncio

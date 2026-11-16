@@ -2,7 +2,9 @@
 disk forms, for linux/amd64 and linux/arm64: one per Dockerfile, built from the Dockerfile's folder. Each is tagged by
 its build context's content, and an image built over other published images by theirs too, so an install holding the
 same sources finds the image built from them; a release wheel also records the digest its release published under each
-tag."""
+tag. A release also publishes the computer apps it ships composed, each in a package named for it, chromium's in
+``agentenv-chromium``, and its wheel records each pair's key, image and lock (``released_computers``), so a compose of
+the same inputs pulls it."""
 
 from __future__ import annotations
 
@@ -11,7 +13,7 @@ import json
 import logging
 import re
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,6 +26,8 @@ REGISTRY = "ghcr.io/scaleapi"
 # The release workflow writes this into the wheels it publishes; a checkout, or a wheel built elsewhere, has none.
 RELEASE_FILE = Path(__file__).with_name("published_images.json")
 _DIGEST = re.compile(r"^sha256:[a-f0-9]{64}$")
+# An image by digest, tagged or not, its registry's port allowed.
+_PINNED = re.compile(r"^[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)+(:[A-Za-z0-9._-]+)?@sha256:[a-f0-9]{64}$")
 # Short, so a network that drops requests doesn't hold up a run's checks for long.
 _LOOKUP_TIMEOUT_SECONDS = 10
 _SERVED: dict[str, str] = {}  # the digest the registry served each ref under, which never changes: no tag is moved
@@ -153,10 +157,54 @@ def release_digests(path: Path = RELEASE_FILE) -> dict[str, str]:
     return digests
 
 
-def write_release_digests(digests: Mapping[str, str], path: Path = RELEASE_FILE) -> None:
-    """Record ``digests`` (``repository:tag`` to digest) as ``release_digests`` reads them."""
+def write_release_digests(digests: Mapping[str, str], path: Path = RELEASE_FILE,
+                          computers: Sequence[dict] = ()) -> None:
+    """Record ``digests`` (``repository:tag`` to digest) as ``release_digests`` reads them, and ``computers`` as
+    ``released_computers`` reads them."""
     images = []
     for ref, digest in sorted(digests.items()):
         repository, _, tag = ref.rpartition(":")
         images.append({"repository": repository, "tag": tag, "digest": digest})
-    path.write_text(json.dumps({"images": images}, indent=2) + "\n")
+    path.write_text(json.dumps({"images": images, **({"computers": list(computers)} if computers else {})},
+                               indent=2) + "\n")
+
+
+def released_computers(path: Path | None = None) -> list[dict]:
+    """The computer apps the release published composed, as its wheel records them: each one's installed env id, its
+    form, its index in the package it's published in, and for each arch, the key it was composed under, its image
+    there by digest and the lock it was composed from. Empty when the install records none. Raises ValueError when
+    the record of them isn't such a list. ``path`` is the record, by default the one the install carries."""
+    path = path or RELEASE_FILE
+    if not path.is_file():
+        return []
+    try:
+        computers = json.loads(path.read_text()).get("computers", [])
+        for computer in computers:
+            if not (isinstance(computer["env"], str) and computer["form"] == "container"
+                    and _PINNED.match(computer["index"]) and computer["arches"]):
+                raise ValueError(f"{computer!r} isn't a composed computer's env, form, index and arches")
+            for arch, built in computer["arches"].items():
+                if not (_DIGEST.match(built["key"]) and _PINNED.match(built["image"])
+                        and isinstance(built["lock"].get("inputs"), str) and built["lock"].get("arch") == arch):
+                    raise ValueError(f"{computer['env']}'s {arch} isn't a key, an image by digest and its lock")
+    except (ValueError, KeyError, TypeError, AttributeError) as e:
+        raise ValueError(f"{path} isn't a record of released computers: {type(e).__name__}: {e}") from e
+    return computers
+
+
+def released_lock(inputs: str, path: Path | None = None) -> dict | None:
+    """The lock the release composed a computer app's pair from when it was resolved from ``inputs``, or None."""
+    return next((built["lock"] for computer in released_computers(path) for built in computer["arches"].values()
+                 if built["lock"]["inputs"] == inputs), None)
+
+
+def released_image(key: str, path: Path | None = None) -> str | None:
+    """The image, by digest, the release published composed under ``key``, or None."""
+    return next((built["image"] for computer in released_computers(path) for built in computer["arches"].values()
+                 if built["key"] == key), None)
+
+
+def released_index(images: Mapping[str, str], path: Path | None = None) -> str | None:
+    """The index the release published of exactly ``images``, by arch, or None."""
+    return next((computer["index"] for computer in released_computers(path)
+                 if {arch: built["image"] for arch, built in computer["arches"].items()} == dict(images)), None)

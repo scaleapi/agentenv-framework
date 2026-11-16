@@ -36,12 +36,16 @@ _OUTPUT_TEXT = re.compile(r"^llm\.output_messages\.(\d+)\.message\.(?:content|co
 class TurnEvents:
     """``events`` in turn order, each ``{"type": "text", "text"}``, ``{"type": "tool_call", "tool", "id", "input",
     "result", "error"}`` (``result`` absent when none came back), ``{"type": "prompt", "text"}`` (the turn's input,
-    when the format records it), ``{"type": "note", "text"}`` (a message the harness put in the turn) or
-    ``{"type": "final", "text", "error"}``; for an unknown format, ``{"type": "raw", "event"}`` per stored item."""
+    when the format records it), ``{"type": "note", "text"}`` (a message the harness put in the turn; a compaction's
+    also has ``compaction``, what its span recorded: ``wakes_summarized``, ``wakes_kept``, ``first_kept_wake``,
+    ``waited_s``) or ``{"type": "final", "text", "error"}``; for an unknown format, ``{"type": "raw", "event"}`` per
+    stored item. ``agent_labels``: its spans say which agent made each (``psi.agent.kind``, the PSI harness v3), so
+    the harness's own tools (memory_*, history_*) are told apart from the apps'."""
 
     format: str
     events: list[dict]
     raw_bytes: int
+    agent_labels: bool = False
 
 
 def turn_events(raw: bytes | str) -> TurnEvents:
@@ -54,7 +58,8 @@ def turn_events(raw: bytes | str) -> TurnEvents:
             "utf-8", errors="replace")}], size)
     fmt = trajectory_format(items)
     if fmt == OTEL:
-        return TurnEvents(fmt, _otel_events(items), size)
+        return TurnEvents(fmt, _otel_events(items), size,
+                          agent_labels=any(_KIND in (e.get("attributes") or {}) for e in items))
     if fmt == CLAUDE_CODE:
         return TurnEvents(fmt, _claude_code_events(items), size)
     if fmt == GEMINI:
@@ -137,31 +142,124 @@ def _settle(call: dict, result: Any, error: bool) -> None:
 
 
 # ---- OTel ------------------------------------------------------------------------------------------------------------
+# The PSI neutral harness (v3) labels every span with who made it: ``psi.agent.kind`` is ``main``, ``subagent`` (a
+# helper, named by ``psi.agent.id``) or ``harness`` (the harness itself, its compaction summary call included);
+# ``psi.turn`` names a turn the harness asked for (``pre_compaction_save``).
+_KIND = "psi.agent.kind"
+_HARNESS = "harness"
+_COMPACTION = "psi.compaction"
+_HARNESS_MESSAGE = "psi.harness_message"
+_SAVE = "pre_compaction_save"
+_AFTER = "after_compaction"
+
+
 def _otel_events(spans: list[dict]) -> list[dict]:
     """Tool spans (``execute_tool``) and the model's text, in start order; the conversation every model span repeats
-    (``llm.input_messages.*``), tool lists and token counts are left out."""
+    (``llm.input_messages.*``), tool lists and token counts are left out. A helper's events carry ``subagent`` (its
+    ``psi.agent.id``) and those of a turn the harness asked for carry ``step`` (its ``psi.turn``). The harness's own
+    model calls (``psi.agent.kind = harness``: the compaction summary) are not the assistant's words, so they are left
+    out; the compaction (at its end, once the summary is written) and each message the harness sent are notes."""
     timed: list[tuple[str, int, dict]] = []
+    # A compaction with no end time goes after the save turn before it.
+    save_end = max((str(s.get("end_time") or s.get("start_time") or "") for s in spans
+                    if (s.get("attributes") or {}).get("psi.turn") == _SAVE), default="")
     for i, span in enumerate(spans):
         start = str(span.get("start_time") or "")
+        attrs = span.get("attributes") or {}
+        tag = _agent_tag(attrs)
         if is_tool_span(span):
             tool, tool_input, output = tool_span_io(span)
             # Harnesses that name every tool span generically ("execute_tool") carry the real name in the prompt.
-            prompt = parse_json_attr((span.get("attributes") or {}).get("gen_ai.prompt", "{}"))
+            prompt = parse_json_attr(attrs.get("gen_ai.prompt", "{}"))
             call = _call(str((prompt.get("tool") if isinstance(prompt, dict) else None) or tool), None, tool_input)
             _settle(call, output, (span.get("status") or {}).get("status_code") == "ERROR")
-            timed.append((start, i, call))
+            timed.append((start, i, {**call, **tag}))
             continue
-        attrs = span.get("attributes") or {}
+        operation = attrs.get("gen_ai.operation.name")
+        if operation == _COMPACTION:
+            facts = _compaction_facts(attrs)
+            timed.append((str(span.get("end_time") or max(start, save_end)), i,
+                          {"type": "note", "text": _compaction_note(attrs, facts), "compaction": facts}))
+            continue
+        if operation == _HARNESS_MESSAGE:
+            timed.append((start, i, {"type": "note", "text": _harness_message_note(attrs), **tag}))
+            continue
+        if attrs.get(_KIND) == _HARNESS:
+            continue
         thinking = _span_thinking(attrs)
         if thinking:
-            timed.append((start, i, {"type": "thinking", "text": thinking}))
+            timed.append((start, i, {"type": "thinking", "text": thinking, **tag}))
         text = _span_text(attrs)
         if text:
-            timed.append((start, i, {"type": "text", "text": text}))
+            timed.append((start, i, {"type": "text", "text": text, **tag}))
     timed.sort(key=lambda t: (t[0], t[1]))
     events = [e for _, _, e in timed]
     events += [{"type": "final", "text": e["text"], "error": False} for e in extract_final_response(spans)]
     return events
+
+
+def _agent_tag(attrs: dict) -> dict:
+    """What an event from a span with these attributes carries to say who made it and in which step: ``subagent``
+    for a helper's, ``step`` for a turn the harness asked for. Nothing for a span with no ``psi.*`` labels."""
+    tag: dict = {}
+    if attrs.get(_KIND) == "subagent":
+        tag["subagent"] = str(attrs.get("psi.agent.id") or attrs.get("psi.agent.delegate_span_id")
+                              or attrs.get("gen_ai.agent.name") or "subagent")
+    if attrs.get("psi.turn"):
+        tag["step"] = str(attrs["psi.turn"])
+    return tag
+
+
+def _compaction_facts(attrs: dict) -> dict:
+    """What a ``psi.compaction`` span recorded: the wakes it summarized and kept (the harness's wake numbers, from the
+    first kept one), and how late (real seconds) the wake it came before started (``waited_s``, the span's
+    ``next_wake_waited_s``)."""
+    named = {"wakes_summarized": "wakes_summarized", "wakes_kept": "wakes_kept", "first_kept_wake": "first_kept_wake",
+             "waited_s": "next_wake_waited_s"}
+    return {key: attrs[f"psi.compaction.{attr}"] for key, attr in named.items()
+            if attrs.get(f"psi.compaction.{attr}") is not None}
+
+
+def _wakes(first: int, last: int) -> str:
+    return f"wake {first}" if first == last else f"wakes {first}–{last}"
+
+
+def compaction_words(facts: dict) -> list[str]:
+    """A compaction's ``facts`` (a note's ``compaction``) in words: which wakes are now in the summary and which were
+    kept word for word (by number when the span named the first kept wake, else as counts), and how late this wake
+    started waiting for it."""
+    words = []
+    first, kept = facts.get("first_kept_wake"), facts.get("wakes_kept")
+    if isinstance(first, int) and first > 1:
+        words.append(f"{_wakes(1, first - 1)} {'is' if first == 2 else 'are'} now in the summary")
+        if isinstance(kept, int) and kept > 0:
+            words.append(f"{_wakes(first, first + kept - 1)} kept word for word")
+    else:
+        if facts.get("wakes_summarized") is not None:
+            words.append(f"{facts['wakes_summarized']} wakes summarized")
+        if kept is not None:
+            words.append(f"the last {kept} kept word for word")
+    if facts.get("waited_s") is not None:
+        words.append(f"this wake started {facts['waited_s']} s late (real time) waiting for it")
+    return words
+
+
+def _compaction_note(attrs: dict, facts: dict) -> str:
+    """A ``psi.compaction`` span as a note: which wakes it summarized, how late it made this wake, and the summary."""
+    head = ("Compaction summary (written by the harness from the model's own summary turn; it replaces the older "
+            "history the model sees" + "".join(f"; {w}" for w in compaction_words(facts)) + ")")
+    summary = str(attrs.get("psi.compaction.summary") or "").strip()
+    return f"{head}:\n{summary}" if summary else f"{head}: no summary recorded"
+
+
+def _harness_message_note(attrs: dict) -> str:
+    """A ``psi.harness_message`` span as a note: the text the harness put before the model. The message after a
+    compaction repeats the user's first request word for word: it is the harness's, not a new one from the user."""
+    turn = attrs.get("psi.turn")
+    who = ("re-sent by the harness, it repeats the user's earlier words" if turn == _AFTER
+           else "not from the user")
+    step = f"step {turn}; " if turn else ""
+    return f"Message the harness sent the assistant ({step}{who}):\n" + str(attrs.get("psi.harness_message.text") or "")
 
 
 def _span_text(attrs: dict) -> str:

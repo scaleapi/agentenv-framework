@@ -3,14 +3,19 @@ stored timeline and each wake's trajectory: one file per wake, one event per lin
 
 - ``wakes/wake_NNN.jsonl``: what woke the assistant (``woke``, the user's messages in full ``user_message``, the full
   text it was sent ``wake_input``), then its turn's tool calls with their inputs and results (``tool_call``), its
-  own text (``assistant_text``) and its thinking when the trajectory recorded it (``assistant_thinking``), then the rest of the wake in time order (``app_change`` for every change,
-  ``turn_end`` with its closing reply, ``message_to_user``, a ``nudge`` and its calls, the user's reads). A turn's
-  trajectory is matched to its wake by the timeline's ``trajectory_url``; one that's missing is a line saying so.
+  own text (``assistant_text``) and its thinking when the trajectory recorded it (``assistant_thinking``), what the
+  harness put in the turn (``harness_note``: a compaction summary, a message it sent the assistant), then the rest
+  of the wake in time order (``app_change`` for every change, ``turn_end`` with its closing reply,
+  ``message_to_user``, a ``nudge`` and its calls, the user's reads). A turn's
+  trajectory is matched to its wake by the timeline's ``trajectory_url``; one that's missing is a line saying so. A
+  helper agent's lines carry ``subagent``; those of a turn the harness asked for carry ``step`` (the PSI harness's
+  ``pre_compaction_save``, where only its memory and history tools work).
 - ``wakes/results/``: what is too long for a line to be read whole (a tool's input or result, a long message), named
   by wake and call (or line); the line keeps a preview. Lines longer than LINE_CHARS are split there, nothing dropped.
 - ``events.jsonl``: every line of every wake, and the run's start and end. ``triggers.jsonl``: every trigger firing.
 - ``index.md``: a block per wake with its time, what woke it, the user's message, its write actions (tool and key
-  arguments) and messages with the ``file:line`` they're at, and its errors.
+  arguments; never the harness's own memory and history tools) and messages with the ``file:line`` they're at, a
+  compaction the harness ran before its turn, and its errors.
 """
 
 from __future__ import annotations
@@ -24,7 +29,7 @@ from typing import Any, Mapping, Optional, Sequence
 
 from agent_env.task_step.task_steps.always_on import BULKY_EVENT_FIELDS, woke_by_text
 from agent_env.task_step.task_steps.notification_delivery import label_time
-from agent_env.task_step.task_steps.verifiers.judge_utils.turn_events import UNKNOWN, TurnEvents
+from agent_env.task_step.task_steps.verifiers.judge_utils.turn_events import UNKNOWN, TurnEvents, compaction_words
 from agent_env.task_step.task_steps.verifiers.run_context import Firing
 
 WAKES_DIR = "wakes"
@@ -46,8 +51,17 @@ _DROPPED = frozenset({*BULKY_EVENT_FIELDS, "real_time", "real_elapsed_s", "user_
 _READS = re.compile(r"(?:^|_)(get|list|search|read|find|whoami|snapshot|view|query|lookup|fetch|navigate|wait|hover|"
                     r"resize|tabs|screenshot|console|network|time)(?:_|$)")
 _NOT_ACTIONS = frozenset({"message_user", "stay_quiet"})
+# The PSI harness's own tools (memory_view, memory_add, memory_replace, memory_remove, history_search, history_read):
+# its notes and its log of past wakes, which touch nothing in the apps, so in a trajectory whose spans say which agent
+# made each (the harness v3's) they are never actions.
+_INTERNAL = re.compile(r"^(?:memory|history)_")
+# A turn the harness asked for before a compaction (only its memory and history tools work in it), and the message it
+# sends after one; they, and the compaction, come before the wake's input reaches the assistant.
+_SAVE_STEP = "pre_compaction_save"
+_BEFORE_WAKE_STEPS = frozenset({_SAVE_STEP, "after_compaction"})
 # A line's fields that say what and where it is; ``fit`` moves only the others.
-_IDENTITY = frozenset({"event", "wake", "at", "call", "turn", "tool", "kind", "state", "outcome", "phase", "by"})
+_IDENTITY = frozenset({"event", "wake", "at", "call", "turn", "tool", "kind", "state", "outcome", "phase", "by",
+                       "step", "subagent", "compaction"})
 
 
 @dataclass(frozen=True)
@@ -64,12 +78,15 @@ class _Wake:
     at: Optional[str] = None
     woke_by: list[str] = field(default_factory=list)
     head: list[dict] = field(default_factory=list)
+    before: list[dict] = field(default_factory=list)  # what the harness ran before the wake's input (a compaction)
     calls: list[dict] = field(default_factory=list)
     body: list[dict] = field(default_factory=list)
     call_count: int = 0
 
     def lines(self) -> list[dict]:
-        return self.head + self.calls + self.body
+        """In the order they happened: what woke the assistant, then anything the harness ran before the assistant saw
+        the wake's input, then the input, its turn and the rest of the wake."""
+        return self.head[:1] + self.before + self.head[1:] + self.calls + self.body
 
 
 def stage_run(timeline: Sequence[dict], turns: Mapping[str, Optional[TurnEvents]], *,
@@ -105,6 +122,12 @@ def _short_tool(tool: str) -> str:
     return tool.rsplit("__", 1)[-1]
 
 
+def is_internal_tool(tool: str) -> bool:
+    """Whether ``tool`` has the name of one of the PSI harness's own (its notes and its log of past wakes); it is the
+    harness's only in a trajectory with ``agent_labels``."""
+    return bool(_INTERNAL.match(_short_tool(tool)))
+
+
 def is_write_action(tool: str) -> bool:
     name = _short_tool(tool)
     return name not in _NOT_ACTIONS and not _READS.search(name.lower())
@@ -135,6 +158,8 @@ class _Stager:
         self.not_compacted: list[dict] = []
         self.unrecorded_changes = 0
         self.by_changes = False  # whether the run recorded app changes, so write actions are read from them
+        self.internal: set[int] = set()  # ids of the tool_call lines of the harness's own tools
+        self.labelled = 0  # trajectories whose spans say which agent made each (``TurnEvents.agent_labels``)
 
     def wake(self, n: Optional[int]) -> _Wake:
         n = n or self.current
@@ -168,9 +193,19 @@ class _Stager:
                 w.body.append(_line("app_changes_not_recorded", w.n, count=event["not_kept"], phase=event.get("phase")))
         elif kind == "agent_turn_end":
             w = self.wake(event.get("n"))
-            w.calls += self.turn(w, event.get("trajectory_url"), "turn")
+            lines = self.turn(w, event.get("trajectory_url"), "turn")
+            first = next((i for i, line in enumerate(lines) if line.get("step") not in _BEFORE_WAKE_STEPS
+                          and "compaction" not in line), len(lines))
+            w.before += lines[:first]
+            w.calls += lines[first:]
+            # The harness counts its save turn's calls in the turn's; they are counted apart.
+            saved = sum(1 for line in lines if line["event"] == "tool_call" and line.get("step") == _SAVE_STEP)
+            calls = event.get("tool_calls")
+            if saved:
+                calls = sum(1 for line in lines if line["event"] == "tool_call" and line.get("step") != _SAVE_STEP)
             w.body.append(_line("turn_end", w.n, at=at, state=event.get("state"), closing_reply=event.get("plain_reply"),
-                                tool_calls=event.get("tool_calls"), messages_to_user=event.get("messages_to_user"),
+                                tool_calls=calls, save_turn_tool_calls=saved or None,
+                                messages_to_user=event.get("messages_to_user"),
                                 stay_quiet_calls=event.get("stay_quiet_calls") or None,
                                 virtual_seconds=event.get("virtual_seconds")))
         elif kind == "nudge":
@@ -201,20 +236,26 @@ class _Stager:
             self.unreadable.append(w.n)
             return [_line("trajectory_unreadable", w.n, turn=which)]
         self.formats[events.format] += 1
+        self.labelled += events.agent_labels
         lines, side = [], 0
         for e in events.events:
             kind = e["type"]
             if kind == "tool_call":
                 w.call_count += 1
                 line, written = self.call(w, e, which)
+                if events.agent_labels and is_internal_tool(e["tool"]):
+                    self.internal.add(id(line))
                 lines.append(line)
                 side += written
             elif kind == "text":
-                lines.append(_line("assistant_text", w.n, turn=which, text=e["text"], subagent=e.get("subagent")))
+                lines.append(_line("assistant_text", w.n, turn=which, step=e.get("step"), text=e["text"],
+                                   subagent=e.get("subagent")))
             elif kind == "thinking":
-                lines.append(_line("assistant_thinking", w.n, turn=which, text=e["text"], subagent=e.get("subagent")))
+                lines.append(_line("assistant_thinking", w.n, turn=which, step=e.get("step"), text=e["text"],
+                                   subagent=e.get("subagent")))
             elif kind == "note":
-                lines.append(_line("harness_note", w.n, turn=which, text=e["text"]))
+                lines.append(_line("harness_note", w.n, turn=which, step=e.get("step"), compaction=e.get("compaction"),
+                                   text=e["text"]))
             elif kind == "raw":
                 lines.append(_line("trajectory_item", w.n, turn=which, item=e["event"]))
         staged = sum(len(_dumps(line).encode()) for line in lines) + side
@@ -229,8 +270,8 @@ class _Stager:
         """The call's line; while it is longer than LINE_CHARS its longer of input and result goes to a file."""
         name = re.sub(r"[^A-Za-z0-9_.-]", "_", _short_tool(e["tool"]))[:60]
         stem = f"{RESULTS_DIR}/wake_{w.n:0{self.width}d}_call_{w.call_count:03d}_{name}"
-        line = _line("tool_call", w.n, call=w.call_count, turn=which, tool=e["tool"], subagent=e.get("subagent"),
-                     input=e.get("input"), error=e.get("error"))
+        line = _line("tool_call", w.n, call=w.call_count, turn=which, step=e.get("step"), tool=e["tool"],
+                     subagent=e.get("subagent"), input=e.get("input"), error=e.get("error"))
         if "result" in e:
             line["result"] = e["result"]
         else:
@@ -284,7 +325,8 @@ class _Stager:
         # A tool no app change names anywhere in the run may be an app that keeps no change log: its writes are
         # guessed from their names, labelled as such, so they aren't left out of the index.
         run_changing = set().union(*(_changing_tools(lines) for _, _, lines in index_blocks))
-        index_blocks = [_index_block(w, path, lines, self.by_changes, run_changing) for w, path, lines in index_blocks]
+        index_blocks = [_index_block(w, path, lines, self.by_changes, run_changing, self.internal)
+                        for w, path, lines in index_blocks]
         self.files[EVENTS_FILE] = "".join(_dumps(line) + "\n" for line in everything)
         self.files[TRIGGERS_FILE] = _triggers(firings, unavailable, self.wakes)
         self.files[INDEX_FILE] = _index(self, index_blocks, start, end, firings)
@@ -294,7 +336,8 @@ class _Stager:
                         "raw_bytes": self.raw_bytes, "staged_bytes": self.staged_bytes}
         for key, value in (("missing_trajectories", self.missing), ("unreadable_trajectories", self.unreadable),
                            ("not_compacted", self.not_compacted),
-                           ("app_changes_not_recorded", self.unrecorded_changes)):
+                           ("app_changes_not_recorded", self.unrecorded_changes),
+                           ("agent_labeled_trajectories", self.labelled)):
             if value:
                 record[key] = value
         return StagedRun(self.files, record)
@@ -311,15 +354,17 @@ def _changing_tools(lines: list[dict]) -> set[str]:
             for a in line.get("actors") or [] if a.get("tool")}
 
 
-def _index_block(w: _Wake, path: str, lines: list[dict], by_changes: bool, run_changing: set[str]) -> str:
+def _index_block(w: _Wake, path: str, lines: list[dict], by_changes: bool, run_changing: set[str],
+                 internal: set[int]) -> str:
     """The wake's block. With ``by_changes`` its write actions are the calls of a tool that made one of the wake's app
     changes, and calls of a tool no app change in the run names (``run_changing``) whose name has no read word are
     "possible actions"; else (a run whose apps keep no change log) every call whose name has no read word is an action
-    (``is_write_action``)."""
-    calls = sum(1 for line in lines if line["event"] == "tool_call")
+    (``is_write_action``). The harness's own tools' calls (``internal``, by line id) are never actions."""
+    calls = sum(1 for line in lines if line["event"] == "tool_call" and line.get("step") != _SAVE_STEP)
+    saved = sum(1 for line in lines if line["event"] == "tool_call" and line.get("step") == _SAVE_STEP)
     changing = _changing_tools(lines)
     out = [f"## Wake {w.n} · {label_time(w.at)} · woken by {woke_by_text(w.woke_by)} · {path} "
-           f"({len(lines)} lines, {calls} tool calls)"]
+           f"({len(lines)} lines, {calls} tool calls{f', plus {saved} in the harness save turn' if saved else ''})"]
     users = [(i, line) for i, line in enumerate(lines, 1) if line["event"] == "user_message"]
     for i, line in users:
         out.append(f"- the user ({label_time(line.get('at'))}): \"{_cut(_text(line, 'text'), INDEX_TEXT_CHARS)}\" "
@@ -332,8 +377,10 @@ def _index_block(w: _Wake, path: str, lines: list[dict], by_changes: bool, run_c
     for i, line in enumerate(lines, 1):
         event = line["event"]
         tool = line.get("tool") or ""
-        writes = _short_tool(tool) in changing if by_changes else is_write_action(tool)
-        guessed = by_changes and not writes and _short_tool(tool) not in run_changing and is_write_action(tool)
+        own = id(line) in internal
+        writes = not own and (_short_tool(tool) in changing if by_changes else is_write_action(tool))
+        guessed = (by_changes and not own and not writes and _short_tool(tool) not in run_changing
+                   and is_write_action(tool))
         if event == "tool_call" and (writes or guessed):
             action = _cut(f"{_short_tool(tool)} {_key_args(line.get('input', line.get('input_preview')))}", ACTION_CHARS)
             kind = "possible action (no app change names this tool)" if guessed else "action"
@@ -354,6 +401,8 @@ def _index_block(w: _Wake, path: str, lines: list[dict], by_changes: bool, run_c
                        f"({path}:{i})")
         elif event == "nudge":
             out.append(f"- nudged after closing text; then {line.get('outcome')} ({path}:{i})")
+        elif event == "harness_note" and line.get("compaction") is not None:
+            out.append(f"- {_compaction_line(line['compaction'])} ({path}:{i})")
         elif event == "app_change":
             changes["by the assistant" if line.get("by") == "agent" else "by others" if line.get("by")
                     else "with no known actor"] += 1
@@ -367,6 +416,12 @@ def _index_block(w: _Wake, path: str, lines: list[dict], by_changes: bool, run_c
     if untold:
         out.append(f"- {untold} of the assistant's app changes name no tool (made through a website, say)")
     return "\n".join(out)
+
+
+def _compaction_line(facts: dict) -> str:
+    """index.md's words for a compaction the harness ran before the wake's turn, from its note's ``compaction``."""
+    words = compaction_words(facts)
+    return "compaction by the harness, before this wake's turn" + (": " + "; ".join(words) if words else "")
 
 
 def _index(stager: _Stager, blocks: list[str], start: list[dict], end: list[dict],
@@ -390,6 +445,9 @@ def _index(stager: _Stager, blocks: list[str], start: list[dict], end: list[dict
              "nothing." if stager.by_changes else
              "Actions below are the assistant's tool calls whose tool name has no read word (get, list, search, …): "
              "this run's apps kept no change log, so this is a guess from the name."]
+    if stager.internal:
+        lines[-1] += (" Calls of the harness's own memory_* and history_* tools (the assistant's notes and its log of "
+                      "past wakes) touch no app and are never actions; they are in the wake files.")
     gaps = sorted(set(stager.missing) | set(stager.unreadable))
     if gaps:
         lines += ["", "Wakes whose tool calls are not here (their trajectory is missing or unreadable): "
@@ -443,19 +501,25 @@ def _wrapped(text: str) -> str:
                      for line in text.split("\n") for i in range(0, max(len(line), 1), LINE_CHARS))
 
 
-_WAKE_NAME = re.compile(r"wake_(\d+)")
+# A wake file or a result file of one (wake_012.jsonl, wake_012_call_004_…, wake_012_line_003_…); not a glob's prefix
+# (wake_0*.jsonl, wake_00[1-4].jsonl), which names no wake.
+_WAKE_NAME = re.compile(r"wake_(\d+)(?=\.jsonl|_call_|_line_)")
 # A shell loop over wake numbers (``for w in 080 075; do … wake_$w.jsonl``): the numbers it names.
 _WAKE_LOOP = re.compile(r"\bfor\s+(\w+)\s+in\s+([\d\s]+?)\s*;")
 # A glob or directory walk that takes every wake file at once.
 _ALL_WAKES = re.compile(r"wake_\*|wakes/\*|os\.walk|rglob|listdir")
 _WAKE_FIELD = re.compile(r'"wake":\s*(\d+)')
+# A call's input as a staged line holds it: one with a ``wake`` argument (the PSI harness's history_read) names a wake
+# the agent read back, not one the judge opened.
+_CALL_INPUT = re.compile(r'"input":\s*\{[^{}]*\}')
 _HELPER_TOOLS = frozenset({"Agent", "Task", "Workflow"})
 
 
 def judge_reads(judge: TurnEvents) -> dict:
     """What a judge's trajectory shows it read of the staged run, whichever tool it read with (Read, Grep, or Bash
     running grep, sed or python): the wakes its calls named (a file, a result file, a shell loop's numbers) or whose
-    events came back in a result (``"wake": N``; a result of reading index.md, which names every wake, doesn't count),
+    events came back in a result (``"wake": N``; a result of reading index.md, which names every wake, doesn't count,
+    nor does a staged call's input such as history_read's ``{"wake": N}``),
     whether one call took every wake file at once (``read_all_wakes``), whether it read index.md or searched
     events.jsonl / triggers.jsonl, and any helper agent it started."""
     calls = [e for e in judge.events if e["type"] == "tool_call"]
@@ -472,9 +536,10 @@ def judge_reads(judge: TurnEvents) -> dict:
             # A text result (Grep's lines, several events.jsonl lines) is searched as it is: serializing it would
             # escape its quotes.
             result = call.get("result")
-            wakes |= {int(n) for n in _WAKE_FIELD.findall(result if isinstance(result, str) else _dumps(result))}
+            result = _CALL_INPUT.sub("", result if isinstance(result, str) else _dumps(result))
+            wakes |= {int(n) for n in _WAKE_FIELD.findall(result)}
     text = " ".join(_dumps(c.get("input")) for c in calls)
-    return {"tool_calls": len(calls), "wakes_opened": sorted(wakes), "read_all_wakes": every,
+    return {"tool_calls": len(calls), "wakes_opened": sorted(n for n in wakes if n >= 1), "read_all_wakes": every,
             "read_index": INDEX_FILE in text, "searched_events": EVENTS_FILE in text,
             "read_triggers": TRIGGERS_FILE in text,
             "helpers_started": sum(1 for c in calls if _short_tool(c["tool"]) in _HELPER_TOOLS)}

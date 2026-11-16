@@ -30,7 +30,7 @@ from agentenv_protocol.website_browser.log import REDACTED, TOOL_CALL_HEADER, Br
 from agentenv_protocol.computer import Launch, Platform, Ready, app, computer_app, linux  # noqa: E402
 from agentenv_protocol.computer.app import APP_SETTINGS_ENV  # noqa: E402
 from agentenv_protocol.computer.app_runtime import AppReadiness  # noqa: E402
-from agentenv_protocol.computer.errors import DeviceUnavailable, InvalidArgument  # noqa: E402
+from agentenv_protocol.computer.errors import DeviceUnavailable, InvalidArgument, TargetUnavailable  # noqa: E402
 from agentenv_protocol.website_browser import SITE_PROXY_ENV, WebsiteBrowserEnvironment  # noqa: E402
 
 FORWARDED = {"x-forwarded-host": "computer.test:443", "x-forwarded-proto": "https",
@@ -110,6 +110,39 @@ class ContextPipe(Pipe):
             self.made += 1
             return {"result": {"browserContextId": f"A{self.made}"}}
         return await super().request(method, params, session_id=session_id, answered=answered)
+
+
+class PagesPipe(ContextPipe):
+    """A ContextPipe on which agentenv's own pages are ``H<n>``, keeping in ``ended``, in order, each page agentenv
+    closes and each context an agent disposes."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.pages, self.ended = 0, []
+
+    async def call(self, method, params=None, *, session_id=None, timeout_s=None):
+        if method == "Target.createTarget":
+            self.pages += 1
+            return {"targetId": f"H{self.pages}"}
+        if method == "Target.attachToTarget":
+            return {"sessionId": f"s-{params['targetId']}"}
+        if method == "Target.closeTarget":
+            self.ended.append(("closed", params["targetId"]))
+        return await super().call(method, params, session_id=session_id, timeout_s=timeout_s)
+
+    async def request(self, method, params=None, *, session_id=None, answered=None):
+        if method == "Target.disposeBrowserContext":
+            self.ended.append(("disposed", params["browserContextId"]))
+        return await super().request(method, params, session_id=session_id, answered=answered)
+
+
+class DetachPipe(PagesPipe):
+    """A PagesPipe that keeps in ``ended`` each session the relay detaches too."""
+
+    async def call(self, method, params=None, *, session_id=None, timeout_s=None):
+        if method == "Target.detachFromTarget":
+            self.ended.append(("detached", params["sessionId"]))
+        return await super().call(method, params, session_id=session_id, timeout_s=timeout_s)
 
 
 class ScopePipe(ContextPipe):
@@ -396,6 +429,59 @@ async def test_a_context_an_agent_makes_is_its_lease_keeping_downloads_in_its_fo
     assert "the context 'buyer' is the task's" in tasks["error"]["message"] and "result" in ended
     assert while_bob == ["buyer", "agent-bob-1"] and [lease.label for lease in contexts] == ["buyer"]
     assert [entry["did"] for entry in relay.connections[0]["guarded"]] == ["changed", "refused"]
+
+
+@pytest.mark.asyncio
+async def test_an_agents_dispose_waits_for_agentenvs_own_page_in_its_context_which_takes_no_new_one_meanwhile(
+        tmp_path):
+    pipe = PagesPipe()
+    control = BrowserControl(pipe, "agent")
+    contexts = Contexts(pipe, control, home=lambda: tmp_path)
+    async with _relay(pipe=pipe, contexts=contexts, control=control) as (_, relay, base):
+        async with connect(f"{base}/ada") as ada, connect(f"{base}/ada") as again:
+            for n in (1, 2):
+                await _ask(ada, {"id": n, "method": "Target.createBrowserContext", "params": {}})
+            async with control.hidden_page(context="A1"):
+                await ada.send(json.dumps({"id": 3, "method": "Target.disposeBrowserContext",
+                                           "params": {"browserContextId": "A1"}}))
+                for _ in range(500):
+                    if "A1" in control._disposing:
+                        break
+                    await asyncio.sleep(0.01)
+                with pytest.raises(TargetUnavailable, match="the context 'agent-ada-1' is being disposed"):
+                    async with control.hidden_page(context="A1"):
+                        pass
+                other = await _ask(again, {"id": 1, "method": "Target.disposeBrowserContext",
+                                           "params": {"browserContextId": "A2"}})
+                held = list(pipe.ended)
+            disposed = json.loads(await asyncio.wait_for(ada.recv(), 5))
+
+    assert held == [("disposed", "A2")] and "result" in other
+    assert pipe.ended == [("disposed", "A2"), ("closed", "H1"), ("disposed", "A1")]
+    assert disposed["id"] == 3 and "result" in disposed and list(contexts) == [] and control._disposing == []
+
+
+@pytest.mark.asyncio
+async def test_a_connection_ending_waits_for_agentenvs_own_page_in_a_context_it_made_to_end_on_detach(tmp_path):
+    pipe = DetachPipe()
+    control = BrowserControl(pipe, "agent")
+    contexts = Contexts(pipe, control, home=lambda: tmp_path)
+    async with _relay(pipe=pipe, contexts=contexts, control=control) as (_, relay, base):
+        async with control.hidden_page(context="A1"):
+            async with connect(f"{base}/ada") as ada:
+                await _ask(ada, {"id": 1, "method": "Target.createBrowserContext", "params": {"disposeOnDetach": True}})
+            for _ in range(500):
+                if "A1" in control._disposing:
+                    break
+                await asyncio.sleep(0.01)
+            held = [event for event in pipe.ended if event[0] == "detached"]
+        for _ in range(500):
+            if any(event[0] == "detached" for event in pipe.ended):
+                break
+            await asyncio.sleep(0.01)
+
+    assert held == [] and [event[0] for event in pipe.ended] == ["closed", "detached"]
+    assert list(contexts) == [] and control._disposing == []
 
 
 @pytest.mark.asyncio

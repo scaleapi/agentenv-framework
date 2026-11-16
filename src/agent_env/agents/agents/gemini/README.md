@@ -38,5 +38,6 @@ CLI by its last segment, and the proxy translates its generate calls to `/v1/cha
 | `install/v1` | `install.sh`, into a task container (as root, the CLI working in `/workspace`) or onto a `vm` sandbox's Linux host: Node and uv checked against their checksums, the CLI from `package-lock.json` and the agent's requirements in a Python of its own, which the target's own Node and Python are never replaced by; the model's commands get the agent's where the target has none. Node's builds need glibc |
 | `triggers/v1` | SDK default |
 
-The image is `python:3.11-slim` with Node, the CLI and the agent, running as the `agent` user; the CLI's state is in
+The image is `python:3.11-slim` with Node, the CLI, the agent and the Python packages `model-requirements.txt` pins for
+the model's scripts, running as the `agent` user; the CLI's state is in
 `/home/agent/.gemini` (`GEMINI_CLI_HOME`) whatever the uid.

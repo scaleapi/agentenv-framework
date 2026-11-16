@@ -181,16 +181,27 @@ async def test_a_turn_gets_the_sdks_peer_tools_with_its_registered_servers(monke
 @pytest.mark.asyncio
 async def test_the_turns_config_and_workspace_reach_the_cli(oc, turns, folders):
     config = {"model": "provider/model", "effort": "high", "system_prompt": "be brief", "project_id": "p-1",
-              "task_id": "t-1", "role": "solver", "timeout_seconds": 42}
+              "task_id": "t-1", "role": "solver", "timeout_seconds": 42, "max_turns": 45}
     async with oc.client() as client:
         assert (await client.post("/ext/agent-config", json=config)).status_code == 200
         await oc.send(client, "go")
 
     (call,) = turns.calls
     assert {key: call[key] for key in ("prompt", "model", "effort", "system_prompt", "project_id", "task_id", "role",
-                                       "timeout_s", "workspace")} == {
+                                       "timeout_s", "workspace", "max_turns")} == {
         "prompt": "go", "model": "provider/model", "effort": "high", "system_prompt": "be brief",
-        "project_id": "p-1", "task_id": "t-1", "role": "solver", "timeout_s": 42, "workspace": str(folders)}
+        "project_id": "p-1", "task_id": "t-1", "role": "solver", "timeout_s": 42, "workspace": str(folders),
+        "max_turns": 45}
+
+
+@pytest.mark.asyncio
+async def test_a_turn_stopped_at_its_limit_fails_with_the_limit_as_its_error(oc, turns):
+    turns.answer = lambda kwargs: result(response="", error="Reached maximum number of turns (3)", session_id="ses_1")
+    async with oc.client() as client:
+        task = await oc.send(client, "go")
+
+    assert (task["status"]["state"], task["status"]["message"]["parts"][0]["text"]) == (
+        "failed", "Reached maximum number of turns (3)")
 
 
 @pytest.mark.asyncio

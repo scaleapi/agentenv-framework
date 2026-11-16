@@ -33,9 +33,9 @@ def gateway(tmp_path, monkeypatch):
     monkeypatch.setattr(ClockFollowers, "WATCH_S", HELD_S)
     made = []
 
-    def make(followers=TOKENS) -> Gateway:
+    def make(followers=TOKENS, control_token=None) -> Gateway:
         made.append(Gateway(host="127.0.0.1", port=0, server_name="unit", internal_mcp_servers=[],
-                            clock_followers=followers))
+                            clock_followers=followers, control_token=control_token))
         return made[-1]
 
     yield make
@@ -182,6 +182,20 @@ async def test_a_watch_acknowledges_only_with_its_computers_token(gateway, monke
         state = (await client.get("/clock/state")).json()
     assert answered.status_code == 200
     assert state["followers"] == {"laptop": {"version": None, "seen_s_ago": None}}
+
+
+@pytest.mark.asyncio
+async def test_a_computer_whose_token_is_the_gateways_own_acknowledges_with_it(gateway):
+    """A multi env's computers boot with its gateway's control token, which their watches carry as their read token."""
+    gw = gateway({"desktop": "the-gateways"}, control_token="the-gateways")
+    async with _client(gw) as client:
+        follower = asyncio.create_task(_follow(client, "desktop", "the-gateways"))
+        try:
+            await _until_shown(gw, "desktop")
+            answer = await client.put("/clock/set-time", json={"virtual_time": T0, "wait_followers_s": 5})
+        finally:
+            follower.cancel()
+    assert answer.status_code == 200, answer.json()
 
 
 @pytest.mark.asyncio

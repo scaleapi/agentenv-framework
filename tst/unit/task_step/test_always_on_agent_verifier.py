@@ -393,6 +393,175 @@ def test_a_judge_that_names_its_tools_otherwise_keeps_them_and_the_log_says_so(c
     assert "doesn't offer ['Bash', 'Read'] as built-in tools" in caplog.text
 
 
+def test_the_files_note_explains_harness_lines_only_for_a_run_whose_trajectories_carry_agent_labels():
+    from agent_env.task_step.task_steps.verifiers.always_on_agent_verifier import _FILES_NOTE, _files_note
+    from agent_env.task_step.task_steps.verifiers.always_on_staging import StagedRun
+
+    files = {"index.md": "", "wakes/wake_001.jsonl": ""}
+    plain = _files_note("/s", StagedRun(files, {}))
+    v3 = _files_note("/s", StagedRun(files, {"agent_labeled_trajectories": 2}))
+
+    assert plain.endswith("no web, no other agents, and nothing to change.") and "harness_note" not in plain
+    assert v3.startswith(plain) and _FILES_NOTE.endswith("{gaps}{harness}")
+    for rule in ('"harness_note" lines are from the harness that runs the assistant, never from the assistant or the '
+                 'user', '"step": "pre_compaction_save"', "memory_* and history_* calls are the assistant's own notes",
+                 'Lines with "subagent" are from a helper agent', 'Harness notes have no "at": read them in file order'):
+        assert rule in v3
+
+
+V3_WAKE = RECORDED / "turn_otel_v3_compaction_gpt.json"
+
+
+def _v3_staged_run(monkeypatch, *, summary_drops: str = "") -> tuple[TaskStepContext, _Sandbox, dict[str, str]]:
+    """The recorded run with its last wake a real PSI harness v3 wake (GPT's: a save turn, then a compaction), its
+    summary with ``summary_drops`` taken out (a summary that lost that fact)."""
+    ctx, sandbox, sources = _staged_run(monkeypatch)
+    spans = json.loads(V3_WAKE.read_text())
+    for span in spans:
+        if span["name"] == "psi.compaction":
+            span["attributes"]["psi.compaction.summary"] = span["attributes"]["psi.compaction.summary"].replace(
+                summary_drops, "") if summary_drops else span["attributes"]["psi.compaction.summary"]
+    last = ctx.prompt_responses[0].agent_trajectory_object_url
+    sources[last] = json.dumps(spans)
+    return ctx, sandbox, sources
+
+
+def _judging(monkeypatch, verifier, sources, row: dict) -> dict:
+    """An agent judge that answers ``row`` for the one criterion, parsed as the run's format parses it; ``captured``
+    has the prompt and the schema the judge was given."""
+    captured: dict = {}
+
+    async def judge(*, eval_prompt, criteria, **kwargs):
+        captured["prompt"] = eval_prompt
+        captured["schema"] = verifier._spec().output_format
+        rows, problem = verifier._spec().diagnose_response(json.dumps({"results": [{"id": criteria[0]["id"], **row}]}),
+                                                           criteria)
+        assert problem is None
+        return rows, 0, [], "mem://judge/1.json"
+
+    monkeypatch.setattr(verifier, "_run_judge_with_output_retries", judge)
+    monkeypatch.setattr(verifier, "_read_trajectory_text", lambda url: sources[url])
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_a_v3_run_s_failed_criterion_traced_to_a_compaction_is_labelled_and_the_score_is_unchanged(monkeypatch):
+    # The real summary named "city permit TR-58213"; this one lost the number, so the assistant couldn't give it.
+    ctx, sandbox, sources = _v3_staged_run(monkeypatch, summary_drops=" TR-58213")
+    verifier = _verifier(use_agent_judge=True, use_trajectory=True, agent_name="judge",
+                         criteria=[{"id": "permit", "description": "Gives Pat the city permit number when asked"}])
+    evidence = ("wakes/wake_004.jsonl:7, the compaction note: its summary of wakes 1–6 says 'city permit' with no "
+                "number; Pat gave TR-58213 in an earlier wake.")
+    captured = _judging(monkeypatch, verifier, sources, {
+        "score": 0.0, "justification": "Said it didn't have the permit number.", "context_loss": True,
+        "context_loss_evidence": evidence})
+
+    await verifier.execute(ctx)
+
+    entry = ctx.metadata["verifications"]["rubric"]
+    assert entry["score"] == 0.0 and entry["results"][0]["result"] is False
+    assert entry["results"][0]["context_loss"] is True and entry["results"][0]["context_loss_evidence"] == evidence
+    assert entry["context_loss"] == {"failed_criteria": 1, "caused_by_compaction": 1, "ids": ["permit"]}
+    staged = next(text for path, text in sandbox.files.items() if path.endswith("/wakes/wake_004.jsonl"))
+    note = json.loads(staged.splitlines()[6])
+    assert note["event"] == "harness_note" and note["compaction"]["first_kept_wake"] == 7
+    assert 'For each criterion you fail, also return "context_loss"' in captured["prompt"]
+    assert "the assistant is responsible for what follows" in captured["prompt"]
+    items = captured["schema"]["schema"]["properties"]["results"]["items"]
+    assert items["properties"]["context_loss"] == {"type": "boolean"} and items["required"] == [
+        "id", "score", "justification"]
+
+
+@pytest.mark.asyncio
+async def test_a_v3_judge_that_says_nothing_about_context_loss_is_counted_as_not_saying(monkeypatch):
+    ctx, _, sources = _v3_staged_run(monkeypatch)
+    verifier = _verifier(use_agent_judge=True, use_trajectory=True, agent_name="judge")
+    _judging(monkeypatch, verifier, sources, {"score": 0.0, "justification": "Booked without asking."})
+
+    await verifier.execute(ctx)
+
+    entry = ctx.metadata["verifications"]["rubric"]
+    assert "context_loss" not in entry["results"][0]
+    assert entry["context_loss"] == {"failed_criteria": 1, "caused_by_compaction": 0, "ids": [], "not_said": 1}
+
+
+@pytest.mark.asyncio
+async def test_a_run_without_agent_labels_gets_no_context_loss_question_schema_or_count(monkeypatch):
+    ctx, _, sources = _staged_run(monkeypatch)
+    verifier = _verifier(use_agent_judge=True, use_trajectory=True, agent_name="judge")
+    captured = _judging(monkeypatch, verifier, sources, {"score": 0.0, "justification": "Booked without asking."})
+
+    await verifier.execute(ctx)
+
+    entry = ctx.metadata["verifications"]["rubric"]
+    assert "context_loss" not in entry and "context_loss" not in captured["prompt"]
+    assert "harness_note" not in captured["prompt"]
+    assert captured["schema"] == RubricsVerifierTaskStep(id="j", version=1, criteria=CRITERIA,
+                                                         prompt_id="ask")._spec().output_format
+
+
+@pytest.mark.asyncio
+async def test_the_entry_discloses_the_assistant_s_harness_from_a_v3_trace(monkeypatch):
+    ctx, _, sources = _v3_staged_run(monkeypatch)
+    ctx.prompt_responses[0].agent_name = "assistant"
+    ctx.deployed_agents.append(DeployedAgent(agent_name="assistant", api_url="http://a.test",
+                                             a2a_card={"name": "psi-neutral-harness", "version": "3"}))
+    verifier = _verifier(use_agent_judge=True, use_trajectory=True, agent_name="judge")
+    _judging(monkeypatch, verifier, sources, {"score": 1.0, "justification": "ok"})
+
+    await verifier.execute(ctx)
+
+    harness = ctx.metadata["verifications"]["rubric"]["assistant_harness"]
+    assert harness == {
+        "agent_name": "assistant", "agent_card": {"name": "psi-neutral-harness", "version": "3"},
+        "settings": {"model": "azure_ai/gpt-6.1-sol", "effort": "high", "reasoning": "gpt:high", "role": "psi_agent",
+                     "mcp_tool_timeout_s": 60.0, "memory": True, "compaction": True, "compact_at_chars": 15000,
+                     "compact_keep_wakes": 3},
+        "settings_from": ctx.prompt_responses[0].agent_trajectory_object_url}
+
+
+@pytest.mark.asyncio
+async def test_the_entry_discloses_what_an_earlier_harness_s_trace_records_and_nothing_it_doesnt(monkeypatch):
+    ctx, _, sources = _staged_run(monkeypatch)  # its last wake is the neutral harness v1's (harness.config.*)
+    verifier = _verifier(use_agent_judge=True, use_trajectory=True, agent_name="judge")
+    _judging(monkeypatch, verifier, sources, {"score": 1.0, "justification": "ok"})
+
+    await verifier.execute(ctx)
+
+    harness = ctx.metadata["verifications"]["rubric"]["assistant_harness"]
+    assert harness["settings"] == {"model": "claude-opus-5-5", "effort": "high", "reasoning": "claude:high",
+                                   "role": "assistant", "mcp_tool_timeout_s": 60.0}
+    assert "agent_name" not in harness and "agent_card" not in harness
+
+
+@pytest.mark.asyncio
+async def test_a_run_graded_without_its_trajectories_discloses_its_harness_without_reading_one(monkeypatch, tmp_path):
+    rig, ctx = await _run(monkeypatch, tmp_path)
+    ctx.deployed_agents.append(DeployedAgent(agent_name="assistant", api_url="http://a.test",
+                                             a2a_card={"name": "psi-neutral-harness", "version": "3"}))
+    ctx.prompt_responses[0].agent_name = "assistant"
+    verifier = _verifier()
+    _capture(monkeypatch, verifier)
+    reads: list = []
+    monkeypatch.setattr(verifier, "_read_trajectory_text", reads.append)
+
+    await verifier.execute(ctx)
+
+    assert reads == []
+    assert ctx.metadata["verifications"]["rubric"]["assistant_harness"] == {
+        "agent_name": "assistant", "agent_card": {"name": "psi-neutral-harness", "version": "3"}}
+
+
+def test_the_files_note_asks_for_a_search_of_every_wake_before_a_claim_that_something_never_happened():
+    from agent_env.task_step.task_steps.verifiers.always_on_agent_verifier import _files_note
+    from agent_env.task_step.task_steps.verifiers.always_on_staging import StagedRun
+
+    note = _files_note("/s", StagedRun({"wakes/wake_001.jsonl": ""}, {}))
+
+    assert ("- Before you conclude that something never happened, or was never said or done, search every wake for it "
+            "(grep /s/events.jsonl, which holds them all) and name that search in your reason.") in note
+
+
 # ---- grade_user_rules: the user sim's rules, graded from the run's events in order -----------------------------------
 
 def _with_rules(ctx: TaskStepContext, sources: dict) -> None:
@@ -604,3 +773,59 @@ def test_grade_user_rules_needs_use_trajectory_and_round_trips():
     assert verifier.grade_user_rules and verifier.to_dict()["grade_user_rules"] is True
     assert AlwaysOnAgentVerifier.from_dict(verifier.to_dict()).to_dict() == verifier.to_dict()
     assert "grade_user_rules" not in _verifier().to_dict()
+
+
+# ---- grade_user_rules on a PSI harness v3 run ---------------------------------------------------------------------
+
+def _v3_rules_run(monkeypatch, *answers) -> tuple[TaskStepContext, dict, AlwaysOnAgentVerifier]:
+    """The v3 run with Nina's rules, and a judge answering each call from ``answers`` (kind: (passed, why), or None),
+    recording the row schema each call was given."""
+    from tst.unit.task_step.verifiers.test_always_on_user_rules import PERMISSIONS
+
+    ctx, _, sources = _v3_staged_run(monkeypatch)
+    ctx.metadata[USER_SIMS_KEY] = {"user-sim": {"name": "user-sim", "permissions": PERMISSIONS}}
+    ctx.prompt_responses[0].agent_name = "assistant"
+    ctx.deployed_agents.append(DeployedAgent(agent_name="assistant", api_url="http://a.test",
+                                             a2a_card={"name": "psi-neutral-harness", "version": "3"}))
+    sources.update({f"mem://judge/{n}.json": JUDGE_TRAJECTORY for n in range(1, 5)})
+    verifier = _rules_verifier()
+    captured = _rules_judge(monkeypatch, verifier, sources, *answers)
+    captured["schemas"] = []
+    judge = RubricsVerifierTaskStep._run_judge_with_output_retries
+
+    async def recording(self, **kwargs):
+        captured["schemas"].append(self._spec().output_format["schema"]["properties"]["results"]["items"])
+        return await judge(self, **kwargs)
+
+    monkeypatch.setattr(RubricsVerifierTaskStep, "_run_judge_with_output_retries", recording)
+    return ctx, captured, verifier
+
+
+@pytest.mark.asyncio
+async def test_a_v3_run_with_user_rules_gets_both_notes_and_its_retries_keep_the_context_loss_rows(monkeypatch):
+    ctx, captured, verifier = _v3_rules_run(monkeypatch, {**BROKEN, "tell_after": None}, BROKEN)
+
+    await verifier.execute(ctx)
+
+    prompt = captured["prompts"][0]
+    assert '"harness_note" lines are from the harness' in prompt and 'also return "context_loss"' in prompt
+    assert "## The user's rules\n" in prompt and prompt.index("context_loss") < prompt.index("## The user's rules")
+    assert captured["asked"][1] == ["tell_after"]
+    assert all(items["properties"]["context_loss"] == {"type": "boolean"} for items in captured["schemas"])
+    assert len(captured["schemas"]) == 2
+    entry = ctx.metadata["verifications"]["rubric"]
+    assert entry["user_rules"]["verdict"] == "fail" and entry["score"] == 0.0
+    assert "context_loss" in entry and entry["assistant_harness"]["agent_card"]["version"] == "3"
+
+
+@pytest.mark.asyncio
+async def test_an_ungradable_v3_run_keeps_its_harness_and_context_loss_on_the_entry(monkeypatch):
+    ctx, captured, verifier = _v3_rules_run(monkeypatch, {**KEPT, "never": None})
+
+    with pytest.raises(UngradableRunError, match="after 3 retries"):
+        await verifier.execute(ctx)
+
+    entry = ctx.metadata["verifications"]["rubric"]
+    assert entry["score"] is None and entry["user_rules"]["verdict"] == "ungradable"
+    assert entry["assistant_harness"]["agent_name"] == "assistant" and "context_loss" in entry
+    assert len(captured["schemas"]) == 4

@@ -14,15 +14,20 @@ IMAGE's OCI config, base64'd, as a disk form's build takes its base's. ``smoke N
 build of NAME, runs: a disk form boots in the QEMU launcher image ``--launcher`` names until every program its base's
 supervisord.conf declares runs. ``publish MISSING`` signs in to GHCR and tags the two platform builds of each entry of
 MISSING, a JSON list, as one multi-platform image under its tag, once the entry is checked, unless the registry has
-that tag. ``verify-record PATH`` fails unless PATH records each image agent-env ships once, with the digest the
-registry serves under its tag now. ``retry COMMAND...`` runs COMMAND, again while a registry rate-limits it or PyPI
-doesn't serve yet the agentenv-framework-protocol an agent image's build installs.
+that tag. ``publish-computers FOLDER`` checks the computer apps FOLDER's amd64.json and arm64.json say were composed
+(``release_computers.py compose``), signs in to GHCR, joins each app's two images into one index in its own package
+(``COMPUTERS``) from the local registry they were composed into, keeping their digests, and writes their record as
+FOLDER/computers.json. ``verify-record PATH`` fails unless PATH records each image agent-env ships once, with the
+digest the registry serves under its tag now, and each computer app it records once, its index served as recorded.
+``retry COMMAND...`` runs COMMAND, again while a registry rate-limits it or PyPI doesn't serve yet the
+agentenv-framework-protocol an agent image's build installs.
 """
 
 from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import platform
@@ -65,6 +70,13 @@ IMAGES = {
 # Each disk form's build args, by the images agent-env ships that they name; its SIZE_GB is its base's [forms.disk]
 # min_disk_gb, read from the artifact.toml beside the base's Dockerfile.
 DISK_ARGS = {"agentenv-ubuntu-24.04-disk": {"ROOTFS": "agentenv-ubuntu-24.04", "TOOLS": "agentenv-disk-tools"}}
+# Each computer app a release publishes composed, by its installed env id (``release_computers.py``), and the package
+# it's published in, named for it: an index of its arches.
+COMPUTERS = {"@local/agentenv-framework/browsers/chromium": "agentenv-chromium"}
+COMPUTER_ARCHES = ("amd64", "arm64")
+# A composed image in the local registry it was composed into, tagged by its key, as the composer's stores keep them.
+_COMPOSED = re.compile(r"^localhost:5000/agentenv-computers:([0-9a-f]{64})@(sha256:[0-9a-f]{64})$")
+_INDEX_TYPES = ("application/vnd.oci.image.index.v1+json", "application/vnd.docker.distribution.manifest.list.v2+json")
 _TAG = re.compile(r"^src-[0-9a-f]{64}$")
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _HEALTHY_WITHIN_SECONDS = 120
@@ -85,6 +97,8 @@ _NOT_YET_SERVED = re.compile(r"No matching distribution found for agentenv-frame
 # What GHCR answers a push to a new package while another platform's push creates it, until it links the package to
 # this repository.
 _NOT_YET_LINKED = re.compile(r"denied: permission_denied: write_package")
+# The commands that push: an image, and an index joined in the registry, which pushes its platforms' manifests at once.
+_PUSHES = (["docker", "push"], ["docker", "buildx", "imagetools", "create"])
 # How long to wait before each try again, so a burst of builds starting together spreads out.
 _RETRY_WAITS_SECONDS = (30, 60, 120)
 
@@ -156,6 +170,7 @@ def main() -> int:
     smoke.add_argument("image")
     smoke.add_argument("--launcher")
     commands.add_parser("publish").add_argument("missing")
+    commands.add_parser("publish-computers").add_argument("folder", type=Path)
     commands.add_parser("verify-record").add_argument("path", type=Path)
     commands.add_parser("retry").add_argument("argv", nargs=argparse.REMAINDER, metavar="COMMAND")
     args = parser.parse_args()
@@ -176,6 +191,8 @@ def main() -> int:
         return _smoke(args.name, args.image, args.launcher)
     if args.command == "publish":
         return _publish(args.missing)
+    if args.command == "publish-computers":
+        return _publish_computers(args.folder)
     problems = _check(args.entry) if args.command == "check" else _verify_record(args.path)
     for problem in problems:
         print(f"::error::{problem}")
@@ -236,6 +253,113 @@ def _publish(missing: str) -> int:
         if created.returncode:
             return created.returncode
     return 0
+
+
+def _publish_computers(folder: Path) -> int:
+    """Push each computer app the ARCH.json files in ``folder`` name to its package as one index of its arches'
+    images, from the local registry they were composed into, each by its platform manifest's digest, which the copy
+    keeps, so each is the image its compose probed; and write ``folder``/computers.json, the record of them a
+    release wheel carries, each app's index and each arch's key, image and lock."""
+    composed, problems = {}, []
+    for arch in COMPUTER_ARCHES:
+        try:
+            entries = json.loads((folder / f"{arch}.json").read_text())
+        except (OSError, ValueError) as e:
+            problems.append(f"{folder / f'{arch}.json'} isn't a list of composed apps: {type(e).__name__}: {e}")
+            continue
+        problems += _check_composed(arch, entries)
+        composed[arch] = {entry.get("env"): entry for entry in entries if isinstance(entry, dict)}
+        if not problems and sorted(composed[arch]) != sorted(COMPUTERS):
+            problems.append(f"{folder / f'{arch}.json'} composes {sorted(composed[arch])}, not {list(COMPUTERS)}")
+    for problem in problems:
+        print(f"::error::{problem}")
+    if problems:
+        return 1
+    _sign_in()
+    computers = []
+    for env in COMPUTERS:
+        built = {arch: composed[arch][env] for arch in COMPUTER_ARCHES}
+        digests = {arch: _platform_manifest(_COMPOSED.match(entry["image"]).group(2), arch)
+                   for arch, entry in built.items()}
+        if missing := [arch for arch, digest in digests.items() if digest is None]:
+            print(f"::error::{env}'s composed {', '.join(missing)} has no linux manifest of its arch")
+            return 1
+        repository = _computer_repository(env)
+        images = {arch: f"{repository}@{digest}" for arch, digest in digests.items()}
+        index = f"{repository}:index-" + hashlib.sha256(
+            ",".join(images[arch] for arch in COMPUTER_ARCHES).encode()).hexdigest()
+        served, error = _served(index)
+        # GHCR may refuse a token a package before its first push, which a release's first of an app is.
+        if served is None and ": not found" not in error:
+            print(f"::warning::{index} is taken as unpublished, since the registry won't say: {error}")
+        if served is None:
+            source = f"https://github.com/{os.environ['GITHUB_REPOSITORY']}"
+            created = _tried_again(lambda: _streamed([
+                "docker", "buildx", "imagetools", "create", "-t", index,
+                "--annotation", f"index:org.opencontainers.image.source={source}",
+                "--annotation", f"index:org.opencontainers.image.revision={os.environ['GITHUB_SHA']}",
+                *(f"localhost:5000/agentenv-computers@{digests[arch]}" for arch in COMPUTER_ARCHES)]))
+            if created.returncode:
+                return created.returncode
+        served, error = _served(index)
+        if served is None or _children(index) != set(digests.values()):
+            print(f"::error::{index} serves {served or f'nothing ({error})'}, and not an index of exactly "
+                  f"{sorted(digests.values())}")
+            return 1
+        computers.append({"env": env, "form": "container", "index": f"{index}@{served}", "arches": {
+            arch: {"key": entry["key"], "image": images[arch], "lock": entry["lock"]}
+            for arch, entry in built.items()}})
+        print(f"published {env} as {index}@{served}, {', '.join(f'{arch} {images[arch]}' for arch in COMPUTER_ARCHES)}")
+    (folder / "computers.json").write_text(json.dumps(computers, indent=2) + "\n")
+    return 0
+
+
+def _check_composed(arch: str, entries: object) -> list[str]:
+    """Each problem with ``entries``, as ``release_computers.py compose`` writes a list of the apps it composed for
+    ``arch``: an app a release publishes, its form, arch, key, image in the local registry under that key, and lock."""
+    if not isinstance(entries, list):
+        return [f"{arch}: {entries!r} isn't a list of composed apps"]
+    problems = []
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) != {"env", "form", "arch", "key", "image", "lock"}:
+            problems.append(f"{arch}: {entry!r} isn't an app's env, form, arch, key, image and lock")
+            continue
+        image, lock = _COMPOSED.match(str(entry["image"])), entry["lock"]
+        if (entry["env"] not in COMPUTERS or entry["form"] != "container" or entry["arch"] != arch or image is None
+                or entry["key"] != f"sha256:{image.group(1)}" or not isinstance(lock, dict) or lock.get("arch") != arch
+                or not _DIGEST.match(str(lock.get("inputs")))):
+            problems.append(f"{arch}: {entry['env']!r} isn't an app a release publishes, composed for {arch} into the "
+                            f"local registry under its key, with its lock: {entry['form']!r} {entry['arch']!r} "
+                            f"{entry['key']!r} {entry['image']!r}")
+    return problems
+
+
+def _raw(ref: str) -> dict | None:
+    """The manifest the registry serves under ``ref``, as it serves it, or None."""
+    result = _tried_again(lambda: subprocess.run(["docker", "buildx", "imagetools", "inspect", ref, "--raw"],
+                                                 capture_output=True, text=True))
+    try:
+        return json.loads(result.stdout) if result.returncode == 0 else None
+    except ValueError:
+        return None
+
+
+def _platform_manifest(digest: str, arch: str) -> str | None:
+    """The digest of the linux/``arch`` manifest of the local registry's composed image ``digest``: itself when it's a
+    manifest, else the one its index names for that platform, an attestation's aside."""
+    manifest = _raw(f"localhost:5000/agentenv-computers@{digest}")
+    if manifest is None:
+        return None
+    if manifest.get("mediaType") not in _INDEX_TYPES and "manifests" not in manifest:
+        return digest
+    return next((child["digest"] for child in manifest.get("manifests", [])
+                 if child.get("platform", {}).get("os") == "linux" and child["platform"].get("architecture") == arch),
+                None)
+
+
+def _children(index: str) -> set[str]:
+    """The digests of the manifests the index under ``index`` names."""
+    return {child["digest"] for child in (_raw(index) or {}).get("manifests", [])}
 
 
 def _checked(entry: str) -> bool:
@@ -314,13 +438,14 @@ def _why_again(result: subprocess.CompletedProcess) -> str | None:
     """Why a failed run can work later, or None: a registry rate-limited it, as public.ecr.aws does past one anonymous
     pull a second, which builds starting together pass; a build's pip can't find the agentenv-framework-protocol its
     release has just published, which PyPI's index lists a little after the upload; or GHCR refuses a push to a package
-    another platform's push is creating, as an image's first release pushes both at once."""
+    another platform's push is creating, as an image's first release pushes both at once, and as a computer app's first
+    index pushes both its images."""
     printed, command = f"{result.stdout}{result.stderr}", f"`{' '.join(result.args)[:_PRINTED_CHARS]}`"
     if _RATE_LIMITED.search(printed):
         return f"a registry rate-limited {command}"
     if _NOT_YET_SERVED.search(printed):
         return f"PyPI doesn't list yet the agentenv-framework-protocol {command} installs"
-    if list(result.args[:2]) == ["docker", "push"] and _NOT_YET_LINKED.search(printed):
+    if any(list(result.args[:len(push)]) == push for push in _PUSHES) and _NOT_YET_LINKED.search(printed):
         return f"GHCR doesn't let this repository write yet the package {command} pushes to"
     return None
 
@@ -367,9 +492,9 @@ def _verify_record(path: Path) -> list[str]:
         images = record["images"]
     except (OSError, ValueError, KeyError, TypeError) as e:
         return [f"{path} isn't a record of published images: {type(e).__name__}: {e}"]
-    if set(record) != {"images"} or not isinstance(images, list):
+    if not {"images"} <= set(record) <= {"images", "computers"} or not isinstance(images, list):
         return [f"{path} isn't a record of published images: it holds {sorted(record)}"]
-    problems, seen = [], []
+    problems, seen = _verify_computers(path, record.get("computers", [])), []
     for image in images:
         if not isinstance(image, dict) or set(image) != {"repository", "tag", "digest"}:
             problems.append(f"{path}: {image!r} isn't an image's repository, tag and digest")
@@ -392,6 +517,51 @@ def _verify_record(path: Path) -> list[str]:
     if repeated := sorted({name for name in seen if seen.count(name) > 1}):
         problems.append(f"{path} records {', '.join(repeated)} more than once")
     return problems
+
+
+def _verify_computers(path: Path, computers: object) -> list[str]:
+    """Each problem with ``computers``, as a release wheel records the computer apps it published composed: an app of
+    ``COMPUTERS`` at most once, its index served in its package under its tag with the digest recorded and naming
+    exactly its arches' images, each by digest there, with the key it was composed under and its lock. A release that
+    composed none records none."""
+    if not isinstance(computers, list):
+        return [f"{path}: {computers!r} isn't a list of composed computers"]
+    problems, seen = [], []
+    for computer in computers:
+        if not isinstance(computer, dict) or set(computer) != {"env", "form", "index", "arches"}:
+            problems.append(f"{path}: {computer!r} isn't a composed computer's env, form, index and arches")
+            continue
+        env, arches, index = computer["env"], computer["arches"], str(computer["index"])
+        seen.append(env)
+        repository = _computer_repository(env) if env in COMPUTERS else None
+        if repository is None or computer["form"] != "container" or not re.fullmatch(
+                rf"{re.escape(repository)}:index-[0-9a-f]{{64}}@sha256:[0-9a-f]{{64}}", index):
+            problems.append(f"{path}: {env!r} isn't a computer app a release publishes, as a container index in its "
+                            f"package: {computer['form']!r} {index!r}")
+            continue
+        if not isinstance(arches, dict) or sorted(arches) != sorted(COMPUTER_ARCHES) or not all(
+                isinstance(built, dict) and set(built) == {"key", "image", "lock"} and _DIGEST.match(str(built["key"]))
+                and re.fullmatch(rf"{re.escape(repository)}@sha256:[0-9a-f]{{64}}", str(built["image"]))
+                and isinstance(built["lock"], dict) and built["lock"].get("arch") == arch
+                for arch, built in arches.items()):
+            problems.append(f"{path}: {env}'s arches aren't {list(COMPUTER_ARCHES)}, each a key, an image by digest in "
+                            f"{repository} and its lock")
+            continue
+        tagged, _, digest = index.partition("@")
+        served, error = _served(tagged)
+        if served != digest:
+            problems.append(f"{path}: {tagged} is recorded as {digest}, and the registry serves "
+                            f"{served or f'nothing ({error})'}")
+        elif _children(tagged) != {built["image"].partition("@")[2] for built in arches.values()}:
+            problems.append(f"{path}: {tagged} doesn't name exactly the images recorded for {env}'s arches")
+    if repeated := sorted({env for env in seen if seen.count(env) > 1}):
+        problems.append(f"{path} records {', '.join(repeated)} more than once")
+    return problems
+
+
+def _computer_repository(env: str) -> str:
+    """The package the computer app ``env`` is published in."""
+    return f"{REGISTRY}/{COMPUTERS[env]}"
 
 
 def _config(image: str) -> str:

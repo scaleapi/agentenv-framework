@@ -30,6 +30,7 @@ from agentenv_protocol.tool_access import DISABLE_TOOL_EXTENSION_URI, ENABLE_TOO
 from agentenv_protocol.website_browser import BROWSER
 from click.testing import CliRunner
 
+from agent_env.artifact.artifacts import docker_image
 from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.artifacts.environment import EnvironmentArtifact
@@ -41,11 +42,13 @@ from agent_env.cli import cli
 from agent_env.config import get_config
 from agent_env.env import Env
 from agent_env.env import env as env_module
+from agent_env.env import published_images
 from agent_env.env.env import DeployedEnv, EnvCapabilityUnsupported
 from agent_env.env.envs.computer.utils import (boot, builder, composed, composer, gate, inside, packages, params,
                                                probing, resolve_in_base)
 from agent_env.env.envs.computer.utils import sites as computer_sites
 from agent_env.env.envs.computer.utils.composer import Composing
+from agent_env.store.image_store import registry_api
 from agent_env.store.image_store.registry_api import RegistryRefusedError
 from agent_env.env.envs.computer.utils.probing import _probe
 from agent_env.env.envs.computer.env import COMPUTER_TOOLS, ComputerEnv
@@ -819,6 +822,109 @@ def test_a_computer_image_mirror_that_cant_be_read_leaves_the_image_to_be_built(
     built = Env.get(second.id).metadata["composed"]["container"]
     assert len(docker.builds) == 4 and not any(r["reused"] for r in built.values()) and copied == []
     assert f"the computer image mirror {MIRROR} couldn't give" in caplog.text
+
+
+RELEASED = "ghcr.io/scaleapi/agentenv-chromium"
+
+
+def _released(env, docker, tmp_path, monkeypatch, arches=("amd64", "arm64"), key=None, digest=None):
+    """Record ``env``'s composed ``arches`` as a release wheel records the computers it published, each image in the
+    released repository by the digest it was composed under (``digest`` in its place when given), with its key
+    (``key``) and the lock it was composed from, joined as one index the registry serves; and take that record as the
+    install's. Each arch's released image, and the index."""
+    pairs = Env.get(env.id).metadata["composed"]["container"]
+    record = {arch: {"key": key or pairs[arch]["key"],
+                     "image": f"{RELEASED}@{digest or pairs[arch]['image'].rpartition('@')[2]}",
+                     "lock": json.loads(packages.stored(pairs[arch]["lock"], env.id).model_dump_json())}
+              for arch in arches}
+    index = f"{RELEASED}:index-{'a' * 64}@" + docker.registry.index(**{
+        arch: pairs[arch]["image"].rpartition("@")[2] for arch in arches})
+    path = tmp_path / "published_images.json"
+    path.write_text(json.dumps({"images": [], "computers": [
+        {"env": env.id, "form": "container", "index": index, "arches": record}]}))
+    monkeypatch.setattr(published_images, "RELEASE_FILE", path)
+    serving = docker.registry.pin_digest
+    monkeypatch.setattr(docker_image, "pin_digest", lambda ref, auth: ref if ref.startswith(RELEASED) and "@" in ref
+                        else serving(ref, auth))
+    return {arch: built["image"] for arch, built in record.items()}, index
+
+
+def test_a_compose_of_what_the_release_published_pulls_its_image_without_resolving_or_building(base, driver, docker,
+                                                                                            tmp_path, monkeypatch):
+    released, index = _released(_put(base, driver), docker, tmp_path, monkeypatch)
+    builds, resolved, told = len(docker.builds), len(docker.resolved), []
+
+    second = _put(base, driver, id="@local/~/kit/other", environment_name="other",
+                  composing=Composing(on_progress=told.append))
+
+    pairs = Env.get(second.id).metadata["composed"]["container"]
+    assert len(docker.builds) == builds and len(docker.resolved) == resolved
+    assert {arch: (r["image"], r["published"], r["reused"], r["status"]) for arch, r in pairs.items()} == {
+        arch: (image, True, True, "ready" if arch == "arm64" else "unverified") for arch, image in released.items()}
+    assert f"container/arm64: reusing the image agent-env's release published, {released['arm64']}" in told
+    assert not [line for line in told if "resolving" in line or "building" in line]
+    assert ComputerArtifact.get(f"{second.id}__computer").image().image_name == index
+
+
+def test_a_release_record_of_another_key_or_an_image_the_registry_wont_give_leaves_the_compose_as_before(
+        base, driver, docker, tmp_path, monkeypatch, caplog):
+    first = _put(base, driver)
+    _released(first, docker, tmp_path, monkeypatch, key="sha256:" + "c" * 64)
+    other = _put(base, driver, id="@local/~/kit/other", environment_name="other")
+    unserved, _ = _released(first, docker, tmp_path, monkeypatch, digest="sha256:" + "d" * 64)
+
+    with caplog.at_level(logging.WARNING, logger=composer.__name__):
+        third = _put(base, driver, id="@local/~/kit/third", environment_name="third")
+
+    for env in (other, third):
+        pairs = Env.get(env.id).metadata["composed"]["container"]
+        assert all(r["reused"] and not r.get("published") for r in pairs.values())
+    assert f"agent-env's release published it as {unserved['arm64']}, which can't be pulled" in caplog.text
+
+
+def test_a_released_index_the_registry_wont_give_is_joined_in_the_store_instead(base, driver, docker, tmp_path,
+                                                                                  monkeypatch, caplog):
+    released, index = _released(_put(base, driver), docker, tmp_path, monkeypatch)
+    serving = docker.registry.pin_digest
+
+    def pin(ref, auth):
+        if ref == index:
+            raise registry_api.NoSuchImageError(f"{ref}: ghcr.io has no such image")
+        return ref if ref.startswith(RELEASED) and "@" in ref else serving(ref, auth)
+
+    monkeypatch.setattr(docker_image, "pin_digest", pin)
+    monkeypatch.setattr(composer, "copy_image", lambda source, target, source_auth, target_auth: (
+        docker.registry.tags.__setitem__(target, source.rpartition("@")[2])))
+
+    with caplog.at_level(logging.WARNING, logger=composer.__name__):
+        second = _put(base, driver, id="@local/~/kit/other", environment_name="other")
+
+    pairs = Env.get(second.id).metadata["composed"]["container"]
+    assert all(pairs[arch]["image"] == image and pairs[arch]["published"] for arch, image in released.items())
+    assert ComputerArtifact.get(f"{second.id}__computer").image().image_name.startswith(
+        f"localhost:5000/{composed.REPOSITORY}:index-")
+    assert f"agent-env's release published its index as {index}, which can't be read" in caplog.text
+
+
+def test_an_arch_the_release_published_beside_one_composed_here_joins_an_index_in_the_store(base, driver, docker,
+                                                                                          tmp_path, monkeypatch):
+    released, _ = _released(_put(base, driver), docker, tmp_path, monkeypatch, arches=("arm64",))
+    copied, joined = [], {}
+    monkeypatch.setattr(composer, "copy_image", lambda source, target, source_auth, target_auth: (
+        copied.append((source, target)), docker.registry.tags.__setitem__(target, source.rpartition("@")[2])))
+    monkeypatch.setattr(composer, "write_index", lambda index, images, auth: (
+        joined.update({index: images}), docker.joined(index, images, auth)))
+
+    second = _put(base, driver, id="@local/~/kit/other", environment_name="other")
+
+    pairs = Env.get(second.id).metadata["composed"]["container"]
+    digest = released["arm64"].rpartition("@")[2]
+    in_store = f"localhost:5000/{composed.REPOSITORY}:released-{digest.removeprefix('sha256:')}"
+    assert pairs["arm64"]["image"] == released["arm64"] and pairs["arm64"]["published"]
+    assert not pairs["amd64"].get("published") and copied == [(released["arm64"], in_store)]
+    index = ComputerArtifact.get(f"{second.id}__computer").image().image_name
+    assert joined == {index.partition("@")[0]: {"linux/amd64": pairs["amd64"]["image"],
+                                                "linux/arm64": f"{in_store}@{digest}"}}
 
 
 def test_builds_of_one_env_at_once_keep_each_others_pairs_and_a_failure_doesnt_replace_a_built_one(base, driver,

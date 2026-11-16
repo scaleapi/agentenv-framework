@@ -12,6 +12,13 @@ call that runs out of time is tried once more, at most 3 batches run at once, an
 helper agents, no web, no writes, no messaging other agents. An always_on step's prompt takes this verifier, never a
 plain rubrics_verifier, and this verifier only an always_on step's prompt: a task that pairs them otherwise is refused when it loads.
 
+For a run of the PSI neutral harness v3 (its trajectories carry psi.agent.* labels), the judge is told the compaction
+summary is the assistant's own and graded as its own, and, with a per-criterion format, says for each failed criterion
+whether it traces to context a compaction lost (``context_loss`` on the row; the entry counts them): reported next to
+the score, never changing it. Every entry also says what the run records of the assistant's harness
+(``assistant_harness``: its agent name, its card's name and version and, when its wakes are staged, the settings
+its trace reports).
+
 With ``grade_user_rules`` (off by default; it needs use_trajectory) the judge also grades the user's rules, the user
 sim's ``persona.permissions``: one criterion per rule (``always_on_user_rules``), graded from ``rules.md``, which lists
 every app change the assistant made, every write call no app change recorded, every message it sent the user and
@@ -21,18 +28,20 @@ calls no app's change log recorded. The score is the task's own criteria aggrega
 0 when an ask_first or never rule failed, and SCORE_RULE_PENALTY less for each just_do or tell_after rule broken. A
 judge call that leaves rules unanswered is asked again, up to RULE_RETRIES times, each time for only the rules still
 unanswered, with the same prompt and files; a rule unanswered after that makes the run ungradable (a half-finished
-grade is never reported): the
-entry has no score and the step raises UngradableRunError, as a judge that can't answer at all does, so the run is
+grade is never reported): the entry has no score and the step raises UngradableRunError, as a judge that can't answer at all does, so the run is
 left out rather than failed. A run whose timeline can't be read is refused rather than graded without its rules.
 """
 
 from __future__ import annotations
 
 import asyncio
+import copy
+import dataclasses
 import json
 import logging
 import re
 import uuid
+from contextvars import ContextVar
 from typing import Any, ClassVar, Optional
 
 from agent_env.providers.sandbox_providers.sandbox import into_container
@@ -66,6 +75,7 @@ from agent_env.task_step.task_steps.verifiers.always_on_staging import (
 )
 from agent_env.task_step.task_steps.verifiers.judge_utils.judge_output_format import (
     JudgeOutputFormat,
+    JudgeOutputFormatSpec,
     get_judge_output_format_spec,
 )
 from agent_env.task_step.task_steps.verifiers.judge_utils.turn_events import TurnEvents, turn_events
@@ -110,13 +120,42 @@ How to read them:
 - Don't load whole files. Search with grep -n, then Read with an offset and limit.
 - Later actions replace earlier ones: after you find something, look for later corrections, edits, cancellations or \
 follow-ups before you decide.
+- Before you conclude that something never happened, or was never said or done, search every wake for it (grep \
+{events}, which holds them all) and name that search in your reason.
 - The user's messages are the "user_message" lines (and the first wake's "wake_input"); the user saw only the \
 "message_to_user" lines.
 - Cite the wake (and call) number of every piece of evidence, and quote it.
 - Only the assistant's tool calls and its "agent" app changes are its acts. A draft is not a sent message. Messages \
 from the user, the user simulator or contacts are never the assistant's. Order events by their pretend time ("at"), \
 not by where they sit in the files.
-- You have Bash and Read only: no web, no other agents, and nothing to change.{gaps}"""
+- You have Bash and Read only: no web, no other agents, and nothing to change.{gaps}{harness}"""
+# Added to _FILES_NOTE for a run whose trajectories say which agent made each step (the PSI harness v3: compaction,
+# memory, helpers), where these lines appear; a run without them gets the note as before.
+_HARNESS_NOTE = """
+- "harness_note" lines are from the harness that runs the assistant, never from the assistant or the user: a message \
+the harness sent the assistant, or a compaction summary that replaced older history in what the assistant sees.
+- Lines with "step": "pre_compaction_save" are a turn the harness asked for before a compaction. What the assistant \
+wrote there went to the harness, not the user, and it ran before the assistant saw that wake's message.
+- memory_* and history_* calls are the assistant's own notes and its look-ups of past wakes. They count as what it \
+did, but change nothing in any app.
+- Lines with "subagent" are from a helper agent the assistant started.
+- Harness notes have no "at": read them in file order.
+- A compaction summary is the assistant's own summary of its history: its own model wrote it. If the summary lost or \
+got wrong something the assistant needed, the assistant is responsible for what follows, the same as for any other \
+mistake. Grade it normally."""
+# Added after _HARNESS_NOTE when the judge's rows are scored per criterion (rubric_binary, rubric_partial): its schema
+# then takes the two fields (``_with_context_loss``).
+_CONTEXT_LOSS_NOTE = """
+- For each criterion you fail, also return "context_loss": true when the failure traces to information the \
+assistant no longer had because of a compaction (a fact that was in a summarized wake but not in the summary, or that \
+the summary got wrong), else false; and "context_loss_evidence": which compaction note (file:line) and which earlier \
+wake held the fact, or "" when false. This is reported next to the score and never changes it."""
+# The per-criterion row fields a judge of a v3 run may add, and the formats whose rows take them.
+CONTEXT_LOSS_FIELDS = {"context_loss": {"type": "boolean"}, "context_loss_evidence": {"type": "string"}}
+_CONTEXT_LOSS_FORMATS = frozenset({JudgeOutputFormat.RUBRIC_BINARY, JudgeOutputFormat.RUBRIC_PARTIAL})
+# Whether the run being graded (this task's context) has the harness's agent labels and a per-criterion format, so its
+# judge is asked for context loss: set by stage_trajectory, read by _spec, per run (one step serves concurrent runs).
+_CONTEXT_LOSS_RUN: ContextVar[bool] = ContextVar("always_on_context_loss_run", default=False)
 _RULES_NOTE = """
 
 ## The user's rules
@@ -253,15 +292,30 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
         return await super().execute(context)
 
     async def _grade(self, context: TaskStepContext) -> TaskStepContext:
-        """rubrics_verifier's grade; then, for a staged run, what each judge call read of it (``judge_reads``), and
-        with grade_user_rules the rules' results and the verdict they set."""
-        context = await super()._grade(context)
-        entry = (context.metadata.get("verifications") or {}).get(self.verifier_id) or {}
+        """rubrics_verifier's grade; then, for a staged run, what each judge call read of it (``judge_reads``); for a
+        run of the PSI harness v3, how many failed criteria the judge traced to a compaction (``context_loss``); for
+        every run, the assistant's harness as the run records it (``assistant_harness``); and with grade_user_rules,
+        the rules' results and the verdict they set, last, so an ungradable run's entry has all the rest when
+        UngradableRunError is raised."""
+        token = _CONTEXT_LOSS_RUN.set(False)
+        try:
+            context = await super()._grade(context)
+            asked = _CONTEXT_LOSS_RUN.get()
+        finally:
+            _CONTEXT_LOSS_RUN.reset(token)
+        entry = (context.metadata.get("verifications") or {}).get(self.verifier_id)
+        if entry is None:
+            return context
+        staged_rules = None
         if "trajectory_staging" in entry:
-            staged = entry["trajectory_staging"].pop(_EVENTS_KEY, None)
+            staged_rules = entry["trajectory_staging"].pop(_EVENTS_KEY, None)
             entry["trajectory_staging"]["judge_reads"] = await self._judge_reads(entry)
-            if self.grade_user_rules and staged is not None:
-                self._grade_rules(context, entry, staged)
+        if asked:
+            entry["context_loss"] = context_loss(entry.get("results") or [])
+        if harness := await self._assistant_harness(context, staged="trajectory_staging" in entry):
+            entry["assistant_harness"] = harness
+        if self.grade_user_rules and staged_rules is not None:
+            self._grade_rules(context, entry, staged_rules)
         return context
 
     async def _run_judge_with_output_retries(self, **kwargs: Any) -> tuple[list[dict], int, list[dict], Optional[str]]:
@@ -336,6 +390,41 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
             raise UngradableRunError(f"Verifier '{self.verifier_id}': ungradable: the judge gave no answer for user "
                                      f"rules {unanswered} after {RULE_RETRIES} retries")
 
+    def _spec(self) -> JudgeOutputFormatSpec:
+        """rubrics_verifier's format; for a v3 run (``_CONTEXT_LOSS_RUN``), its rows also take ``context_loss`` and
+        ``context_loss_evidence``."""
+        spec = super()._spec()
+        return _with_context_loss(spec) if _CONTEXT_LOSS_RUN.get() else spec
+
+    async def _assistant_harness(self, context: TaskStepContext, *, staged: bool) -> dict:
+        """The graded assistant's harness as the run records it: its agent name, its A2A card's name and version, and,
+        for a run whose wakes were ``staged`` (so its trajectories are read anyway), the settings its trace reports
+        (``harness_settings`` of the last wake's trajectory). A run graded without its trajectories has none read.
+        What isn't there is left out."""
+        response = next((pr for pr in context.prompt_responses if pr.prompt_id == self.prompt_id), None)
+        if response is None:
+            return {}
+        out: dict = {}
+        if response.agent_name:
+            out["agent_name"] = response.agent_name
+            agent = next((a for a in context.deployed_agents if a.agent_name == response.agent_name), None)
+            card = {k: (agent.a2a_card or {}).get(k) for k in ("name", "version")} if agent else {}
+            if card := {k: v for k, v in card.items() if v}:
+                out["agent_card"] = card
+        urls = [u for u in (response.target_agent_per_turn_trajectory_object_urls or []) if u]
+        url = urls[-1] if urls else response.agent_trajectory_object_url
+        if staged and url:
+            try:
+                settings = harness_settings(await asyncio.to_thread(self._read_trajectory_text, url))
+            except Exception as e:
+                logger.warning("Verifier '%s': the assistant's harness settings could not be read from %s (%s: %s)",
+                               self.verifier_id, url, type(e).__name__, e)
+                settings = {}
+            if settings:
+                out["settings"] = settings
+                out["settings_from"] = url
+        return out
+
     def judge_agent_config(self, judge_agent_card: dict) -> dict:
         """No messaging other agents, and, when the judge's card offers them by these names (Claude Code's), only
         Bash and Read of its own tools. Another harness names its tools differently and would refuse Claude Code's
@@ -388,8 +477,10 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
         run = run_context or await load_run_context(context, prompt_response)
         staged = await asyncio.to_thread(stage_run, timeline, turns, firings=run.firings_read(),
                                          unavailable=run.unavailable)
+        _CONTEXT_LOSS_RUN.set(bool(staged.record.get("agent_labeled_trajectories"))
+                              and self.output_format in _CONTEXT_LOSS_FORMATS)
         path = f"{STAGING_DIR}/{uuid.uuid4().hex[:12]}"
-        note = _files_note(path, staged)
+        note = _files_note(path, staged, context_loss=_CONTEXT_LOSS_RUN.get())
         if self.grade_user_rules:
             events = rule_events(timeline)
             writes, unchecked = unlogged_writes(staged.files, events)
@@ -485,7 +576,7 @@ def _builtin_tool_names(card: dict) -> set[str]:
     return names
 
 
-def _files_note(path: str, staged: StagedRun) -> str:
+def _files_note(path: str, staged: StagedRun, *, context_loss: bool = False) -> str:
     r = staged.record
     wakes = sorted(name for name in staged.files if name.startswith(f"{WAKES_DIR}/wake_"))
     gaps = sorted(set(r.get("missing_trajectories", [])) | set(r.get("unreadable_trajectories", [])))
@@ -493,4 +584,55 @@ def _files_note(path: str, staged: StagedRun) -> str:
                 "for them only the run's record is there: " + ", ".join(str(n) for n in gaps) + ".") if gaps else ""
     return _FILES_NOTE.format(index=f"{path}/{INDEX_FILE}", first=f"{path}/{wakes[0] if wakes else WAKES_DIR}",
                               last=f"{path}/{wakes[-1] if wakes else WAKES_DIR}", results=f"{path}/{RESULTS_DIR}",
-                              events=f"{path}/{EVENTS_FILE}", triggers=f"{path}/{TRIGGERS_FILE}", gaps=gap_note)
+                              events=f"{path}/{EVENTS_FILE}", triggers=f"{path}/{TRIGGERS_FILE}", gaps=gap_note,
+                              harness=(_HARNESS_NOTE + (_CONTEXT_LOSS_NOTE if context_loss else ""))
+                              if r.get("agent_labeled_trajectories") else "")
+
+
+def _with_context_loss(spec: JudgeOutputFormatSpec) -> JudgeOutputFormatSpec:
+    """``spec`` whose per-criterion rows also take the optional ``CONTEXT_LOSS_FIELDS`` (rubric_binary's and
+    rubric_partial's rows keep every field the judge returns, so nothing else changes)."""
+    output_format = copy.deepcopy(spec.output_format)
+    output_format["schema"]["properties"]["results"]["items"]["properties"].update(CONTEXT_LOSS_FIELDS)
+    return dataclasses.replace(spec, output_format=output_format)
+
+
+def context_loss(results: list[dict]) -> dict:
+    """The run's count of failed criteria and of those the judge traced to a compaction, with their ids. A passed
+    criterion's context-loss fields are dropped (they mean nothing there); a failed one's are kept, ``context_loss``
+    as a bool; a failed one the judge said nothing about is counted in ``not_said``."""
+    failed, caused, not_said = 0, [], 0
+    for row in results:
+        if row.get("result"):
+            row.pop("context_loss", None)
+            row.pop("context_loss_evidence", None)
+            continue
+        failed += 1
+        if "context_loss" not in row:
+            not_said += 1
+            continue
+        row["context_loss"] = row["context_loss"] is True or str(row["context_loss"]).lower() == "true"
+        if row["context_loss"]:
+            caused.append(row.get("id"))
+    out = {"failed_criteria": failed, "caused_by_compaction": len(caused), "ids": caused}
+    if not_said:
+        out["not_said"] = not_said
+    return out
+
+
+def harness_settings(raw: str) -> dict:
+    """The settings an assistant's harness reports in its trace: the PSI neutral harness's ``psi.config.*`` (or, from
+    its first version, ``harness.config.*``) attributes on its usage span, without the prefix. Nothing for a trace
+    with none (another harness, another format)."""
+    try:
+        spans = json.loads(raw)
+    except ValueError:
+        return {}
+    for prefix in ("psi.config.", "harness.config."):
+        for span in spans if isinstance(spans, list) else []:
+            attrs = span.get("attributes") if isinstance(span, dict) else None
+            found = {k[len(prefix):]: v for k, v in (attrs or {}).items() if k.startswith(prefix)} if isinstance(
+                attrs, dict) else {}
+            if found:
+                return found
+    return {}
