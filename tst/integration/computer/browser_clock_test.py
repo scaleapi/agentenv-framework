@@ -129,7 +129,10 @@ async def test_a_multi_envs_browser_computer_shows_the_universe_through_a_jump_a
             report = await teardown_run(context)
 
     assert kept["name"] == "chromium" and kept["watch_url"].endswith("/clock/watch"), kept
-    assert [entry["service"] for entry in synced if entry.get("service") == "chromium"] == ["chromium"], synced
+    # The browser computer's driver serves sync_time, and its follower follows the gateway under the computer's name.
+    followers = [(entry["service"], entry["result"]["follower"]["name"], entry["result"]["follower"]["armed"])
+                 for entry in synced if "follower" in (entry.get("result") or {})]
+    assert followers == [("chromium-driver", "chromium", True)], synced
     assert all(abs(skew) < MAX_SKEW_S for skew in skews.values()), skews
     assert loaded == {"synthetic": True, "live": True}, loaded
     # Two years back, github.com's certificate isn't valid yet, so the egress proxy hands the browser one that is.
