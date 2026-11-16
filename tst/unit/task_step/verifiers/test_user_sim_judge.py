@@ -9,6 +9,7 @@ import hashlib
 import json
 from dataclasses import replace
 
+import httpx
 import litellm
 import pytest
 
@@ -16,7 +17,7 @@ from agent_env.config.model import ModelConfig
 from agent_env.openenv.reward import reward_of
 from agent_env.store import LocalSecretStore
 from agent_env.task import Task
-from agent_env.task_step.context import PromptResponse, TaskStepContext, VerifierNotPassingError
+from agent_env.task_step.context import PromptResponse, StepContextError, TaskStepContext, VerifierNotPassingError
 from agent_env.task_step.registry import _builtin_registry
 from agent_env.task_step.task_step import TaskStepDependency
 from agent_env.task_step.task_steps import always_on as ao
@@ -112,7 +113,8 @@ class FakeModel:
 
 def _step(fake: FakeModel, monkeypatch, **kw) -> usj.UserSimJudge:
     monkeypatch.setattr(RubricsVerifierTaskStep, "_prompt_llm_judge", fake)
-    return usj.UserSimJudge("judge_user_sim", None, **{"judge_model": JUDGE, "verifier_id": "usj", **kw})
+    return usj.UserSimJudge("judge_user_sim", None, **{"run_step_id": "talk", "judge_model": JUDGE, "verifier_id": "usj",
+                                                       **kw})
 
 
 def _entry(ctx: TaskStepContext) -> dict:
@@ -123,8 +125,9 @@ def _rows(entry: dict) -> dict[str, dict]:
     return {r["id"]: r for r in entry["results"]}
 
 
-def _verdicts(entry: dict) -> dict[str, str]:
-    return {r["id"]: r["verdict"] for r in entry["results"]}
+def _verdicts(entry: dict, *ids: str) -> dict[str, str]:
+    """Each row's verdict, or only those of ``ids``."""
+    return {r["id"]: r["verdict"] for r in entry["results"] if not ids or r["id"] in ids}
 
 
 def _run(*answers: tuple[str, str], graded=None) -> core.UserSimRun:
@@ -236,7 +239,7 @@ def test_a_fail_that_clears_one_turn_and_fails_another_is_kept():
 @pytest.mark.asyncio
 async def test_the_judge_writes_its_reason_before_its_verdict_within_the_word_limit(monkeypatch):
     fake = FakeModel()
-    await _judge(_run(("reply", "x")), fake, monkeypatch, checks=["rogue"])
+    await _judge(_run(("reply", "x")), fake, monkeypatch)
     prompt = fake.calls[0]["prompt"]
     assert "Reason first and decide last." in prompt and "at most 40 words" in prompt
     assert prompt.index("# THE USER SIM'S INSTRUCTIONS") < prompt.index("# THE CRITERIA")  # the run first
@@ -291,16 +294,16 @@ async def test_a_failure_that_can_t_change_the_grade_doesn_t_make_a_user_sim_err
 @pytest.mark.asyncio
 async def test_a_bad_answer_is_asked_again_and_a_check_whose_call_fails_is_undecided(monkeypatch):
     fake = FakeModel({"guidance": ["not json", FAIL()], "rogue": [RuntimeError("503")]})
-    entry = await _judge(_run(("reply", "you pick")), fake, monkeypatch, checks=["guidance", "rogue"])
-    assert _verdicts(entry) == {"guidance": "fail", "rogue": "error"} and entry["judge_output_retries"] == 1
+    entry = await _judge(_run(("reply", "you pick")), fake, monkeypatch)
+    assert _verdicts(entry, "guidance", "rogue") == {"guidance": "fail", "rogue": "error"}
+    assert entry["judge_output_retries"] == 1
     retry = fake.asked("guidance")[1]["prompt"]
     assert "## Correction Required" in retry and "the answer is not a JSON object" in retry
     assert _rows(entry)["rogue"]["error"] == "no usable answer after 4 tries: RuntimeError: 503"
     assert (_rows(entry)["rogue"]["score"], _rows(entry)["rogue"]["assistant_asked"]) == (1.0, None)
     assert entry["user_sim_error"]["value"] == "yes"
     assert (entry["user_sim_error"]["because"], entry["user_sim_error"]["unknown"]) == (["guidance"], ["rogue"])
-    alone = await _judge(_run(("reply", "x")), FakeModel({"rogue": [RuntimeError("503")]}), monkeypatch,
-                         checks=["rogue"])
+    alone = await _judge(_run(("reply", "x")), FakeModel({"rogue": [RuntimeError("503")]}), monkeypatch)
     assert (alone["user_sim_error"]["value"], alone["user_sim_error"]["unknown"]) == ("unknown", ["rogue"])
     assert alone["flag"] == "user sim judge undecided" and alone["score"] == 1.0
 
@@ -310,10 +313,10 @@ async def test_a_broken_answer_is_asked_again_up_to_3_times_then_the_run_is_flag
         monkeypatch):
     assert usj.UserSimJudge.DEFAULT_MAX_RETRIES == 4  # the first ask and 3 corrections
     fake = FakeModel({"made_up": ["not json"] * 5})
-    entry = await _judge(_run(("reply", "x")), fake, monkeypatch, checks=["made_up"], fail_task_when_not_passing=True)
+    entry = await _judge(_run(("reply", "x")), fake, monkeypatch, fail_task_when_not_passing=True)
     assert len(fake.asked("made_up")) == 4
     assert all("## Correction Required" in c["prompt"] for c in fake.asked("made_up")[1:])
-    assert _verdicts(entry) == {"made_up": "error"} and _rows(entry)["made_up"]["error"].startswith(
+    assert _verdicts(entry, "made_up") == {"made_up": "error"} and _rows(entry)["made_up"]["error"].startswith(
         "no usable answer after 4 tries: ValueError: ")
     assert entry["user_sim_error"] == {"value": "unknown", "because": [], "unknown": ["made_up"], "fails_task": False}
     assert entry["flag"] == "user sim judge undecided"  # and execute didn't raise
@@ -322,13 +325,12 @@ async def test_a_broken_answer_is_asked_again_up_to_3_times_then_the_run_is_flag
 @pytest.mark.asyncio
 async def test_a_fail_citing_only_ungraded_turns_is_asked_again(monkeypatch):
     fake = FakeModel({"made_up": [FAIL(turns=[99]), FAIL(turns=[1])]})
-    entry = await _judge(_run(("reply", "dad's allergic to shellfish")), fake, monkeypatch, checks=["made_up"])
+    entry = await _judge(_run(("reply", "dad's allergic to shellfish")), fake, monkeypatch)
     assert _rows(entry)["made_up"]["verdict"] == "fail" and _rows(entry)["made_up"]["turns"] == [1]
     assert entry["judge_output_retries"] == 1 and entry["user_sim_error"]["value"] == "yes"
-    assert "a fail must cite at least one graded turn; cited [99], graded [1]" in fake.calls[1]["prompt"]
-    never = await _judge(_run(("reply", "x")), FakeModel({"made_up": [FAIL(turns=[99])] * 4}), monkeypatch,
-                         checks=["made_up"])
-    assert _verdicts(never) == {"made_up": "error"} and "cited [99]" in _rows(never)["made_up"]["error"]
+    assert "a fail must cite at least one graded turn; cited [99], graded [1]" in fake.asked("made_up")[1]["prompt"]
+    never = await _judge(_run(("reply", "x")), FakeModel({"made_up": [FAIL(turns=[99])] * 4}), monkeypatch)
+    assert _verdicts(never, "made_up") == {"made_up": "error"} and "cited [99]" in _rows(never)["made_up"]["error"]
     assert never["user_sim_error"]["value"] == "unknown"
 
 
@@ -341,8 +343,7 @@ SAYS_NO_FAILURE = ("Hannah flagged it anyway which is fine. No clear failure fou
 async def test_a_fail_whose_reason_says_no_clear_failure_found_is_asked_again(monkeypatch):
     fake = FakeModel({"guidance": [FAIL(reason=SAYS_NO_FAILURE[0]), PASS(reason="No clear failure found.")],
                       "oversharing": FAIL()})
-    entry = await _judge(_run(("reply", "dad's allergic to shellfish fyi")), fake, monkeypatch,
-                         checks=["guidance", "oversharing"])
+    entry = await _judge(_run(("reply", "dad's allergic to shellfish fyi")), fake, monkeypatch)
     assert (_rows(entry)["guidance"]["verdict"], _rows(entry)["guidance"]["reason"]) == (
         "pass", "No clear failure found.")
     retry = fake.asked("guidance")[1]["prompt"]
@@ -350,21 +351,20 @@ async def test_a_fail_whose_reason_says_no_clear_failure_found_is_asked_again(mo
     # The ordinary fail is answered once and alone makes the run a user sim error.
     assert len(fake.asked("oversharing")) == 1 and entry["user_sim_error"]["because"] == ["oversharing"]
     for reason in SAYS_NO_FAILURE:
-        never = await _judge(_run(("reply", "x")), FakeModel({"delegation": [FAIL(reason=reason)] * 4}), monkeypatch,
-                             checks=["delegation"])
-        assert _verdicts(never) == {"delegation": "error"} and never["user_sim_error"]["value"] == "unknown"
+        never = await _judge(_run(("reply", "x")), FakeModel({"delegation": [FAIL(reason=reason)] * 4}), monkeypatch)
+        assert _verdicts(never, "delegation") == {"delegation": "error"} and never["user_sim_error"]["value"] == "unknown"
 
 
 @pytest.mark.asyncio
 async def test_a_task_item_fail_citing_no_graded_turn_is_asked_again(monkeypatch):
     items = [{"id": "rating", "family": "A5", "check": "rates the trip 2 or lower", "can_error": True}]
     fake = FakeModel({"rating": [FAIL(turns=[99]), FAIL(turns=[1])]})
-    entry = await _judge(_run(("done", "5 stars")), fake, monkeypatch, checks=[], rubric_items=items)
+    entry = await _judge(_run(("done", "5 stars")), fake, monkeypatch, rubric_items=items)
     assert _rows(entry)["rating"]["verdict"] == "fail" and _rows(entry)["rating"]["turns"] == [1]
-    assert entry["user_sim_error"]["because"] == ["rating"] and len(fake.calls) == 2
+    assert entry["user_sim_error"]["because"] == ["rating"] and len(fake.asked("rating")) == 2
     never = await _judge(_run(("done", "5 stars")), FakeModel({"rating": [FAIL(turns=[])] * 4}), monkeypatch,
-                         checks=[], rubric_items=items)
-    assert _verdicts(never) == {"rating": "error"} and "a fail must cite" in _rows(never)["rating"]["error"]
+                         rubric_items=items)
+    assert _verdicts(never, "rating") == {"rating": "error"} and "a fail must cite" in _rows(never)["rating"]["error"]
     assert (never["user_sim_error"]["value"], never["user_sim_error"]["unknown"]) == ("unknown", ["rating"])
 
 
@@ -386,8 +386,8 @@ async def test_task_items_get_their_own_rows_and_one_rule_says_which_make_a_user
     assert [r["id"] for r in entry["results"]] == [*core.CHECK_NAMES, "leak", "rating", "tone"]
     # The rule is the checks' rule: an item's fail that couldn't change the grade is no user sim error.
     mild = await _judge(_run(("done", "thx bye")), FakeModel({"rating": FAIL(change=False)}), monkeypatch,
-                        checks=[], rubric_items=items[1:2])
-    assert _verdicts(mild) == {"rating": "fail"} and mild["user_sim_error"]["value"] == "no"
+                        rubric_items=items[1:2])
+    assert _verdicts(mild, "rating") == {"rating": "fail"} and mild["user_sim_error"]["value"] == "no"
 
 
 @pytest.mark.asyncio
@@ -398,9 +398,8 @@ async def test_the_ending_check_asks_when_it_signed_off_and_a_grade_changing_fai
     assert "ending" in core.DEFAULT_ERROR_CHECKS
     for answer, verdict, error in ((FAIL(turns=[1]), "fail", "yes"), (PASS(), "pass", "no"),
                                    (NA(reason="never said done"), "n/a", "no")):
-        entry = await _judge(_run(("done", "ok thx bye")), FakeModel({"ending": answer}), monkeypatch,
-                             checks=["ending"])
-        assert _verdicts(entry) == {"ending": verdict} and _rows(entry)["ending"]["families"] == ["G4"]
+        entry = await _judge(_run(("done", "ok thx bye")), FakeModel({"ending": answer}), monkeypatch)
+        assert _verdicts(entry, "ending") == {"ending": verdict} and _rows(entry)["ending"]["families"] == ["G4"]
         assert entry["user_sim_error"]["value"] == error
 
 
@@ -443,8 +442,7 @@ async def test_style_never_gates(monkeypatch):
                          FakeModel({"style": FAIL(change=True)}), monkeypatch, fail_task_when_not_passing=True)
     assert _rows(entry)["style"]["verdict"] == "fail" and _rows(entry)["style"]["could_change_grade"] is True
     assert entry["user_sim_error"]["value"] == "no" and entry["score"] == 1.0
-    [problem] = usj.UserSimJudge("s", None, error_checks=["guidance", "style"]).config_problems()
-    assert problem == "error_checks can't name style: its rows are recorded only (weight 0), never a user sim error"
+    assert _rows(entry)["style"]["weight"] == 0.0 and "style" not in core.DEFAULT_ERROR_CHECKS
 
 
 @pytest.mark.asyncio
@@ -509,7 +507,7 @@ async def test_on_an_always_on_run_the_judge_reads_what_the_user_sim_got_and_sai
     fake = FakeModel({"guidance": FAIL(turns=[2])})
 
     with pytest.raises(VerifierNotPassingError, match=r"\(guidance\)"):
-        await _step(fake, monkeypatch).execute(ctx)
+        await _step(fake, monkeypatch, run_step_id="week").execute(ctx)
 
     run_text = fake.run_text()
     assert "<instructions>\n" + prompt.strip() + "\n</instructions>" in run_text  # the very prompt it ran with
@@ -538,7 +536,7 @@ async def test_without_the_stored_timeline_the_judge_reads_the_tail_and_is_told_
     record["timeline_tail"] = [{k: v for k, v in e.items() if k not in ("input", "read")} for e in timeline]
     fake = FakeModel()
 
-    await _step(fake, monkeypatch, checks=["made_up"]).execute(ctx)
+    await _step(fake, monkeypatch, run_step_id="week").execute(ctx)
 
     head = fake.calls[0]["cached_prefix"]
     assert "Note: the run's full record wasn't stored" in head and "### What it was sent\n(not recorded)" in head
@@ -566,7 +564,7 @@ async def test_a_run_that_ended_in_an_error_is_not_judged(monkeypatch, tmp_path)
     rig.record(ctx)["error_type"] = "agent_turn_failed"
     fake = FakeModel()
 
-    await _step(fake, monkeypatch).execute(ctx)
+    await _step(fake, monkeypatch, run_step_id="week").execute(ctx)
 
     assert fake.calls == [] and _entry(ctx)["skipped"] == "the run ended with error_type=agent_turn_failed"
     assert _entry(ctx)["user_sim_error"] == {"value": "no", "because": [], "unknown": [], "fails_task": False}
@@ -580,11 +578,10 @@ async def test_a_run_s_judge_model_override_chooses_the_model_as_for_every_judge
     ctx.metadata["user_overrides"] = {"judge_model": "other"}
     fake = FakeModel()
 
-    await _step(fake, monkeypatch, checks=["rogue"]).execute(ctx)
+    await _step(fake, monkeypatch, run_step_id="week").execute(ctx)
 
-    assert {(n, c["model"]) for c in fake.calls for n in c["names"]} == {("rogue", "other")}
+    assert {c["model"] for c in fake.calls} == {"other"} and len(fake.calls) == 7
     assert _entry(ctx)["judge_model"] == "other" and ctx.metadata["models"]["judge"]["judge_user_sim"] == "other"
-    assert list(_rows(_entry(ctx))) == ["rogue"]
 
 
 # ---- the step on a prompt_agent chat run --------------------------------------------------------------------------
@@ -603,7 +600,7 @@ async def test_on_a_chat_run_the_judge_reads_each_stored_read_and_the_prompt_it_
     us = ctx.metadata[USER_SIMS_KEY]["hannah"]
     fake = FakeModel({"style": FAIL(turns=[2], change=False)})
 
-    await _step(fake, monkeypatch, run_step_id="talk").execute(ctx)
+    await _step(fake, monkeypatch).execute(ctx)
 
     run_text = fake.run_text()
     shown = run_text.split("<instructions>\n")[1].split("\n</instructions>")[0] + "\n"
@@ -671,18 +668,20 @@ async def test_a_chat_run_that_ended_in_an_error_or_where_the_user_sim_never_rea
 
     ctx.prompt_responses[-1].error_type = None
     ctx.metadata.pop("user_sim_reads")
-    await _step(fake, monkeypatch, run_step_id="talk").execute(ctx)
+    await _step(fake, monkeypatch).execute(ctx)
     assert fake.calls == [] and _entry(ctx)["skipped"] == "the user sim never read: the run has no user_sim_reads"
 
 
-def test_without_run_step_id_the_run_must_have_one_run_to_judge():
+def test_the_run_is_the_one_run_step_id_names():
     ctx = TaskStepContext()
     ctx.metadata = {"always_on": {"week": {}}, "user_sim_reads": {"talk": [{}]}}
-    with pytest.raises(RuntimeError, match=r"set run_step_id; this run has 2 runs .*\['talk', 'week'\]"):
-        usj.UserSimJudge("j", None)._find_run(ctx)
-    with pytest.raises(RuntimeError, match="step 'nope' left no run to judge"):
+    with pytest.raises(StepContextError, match="step 'nope' left no run to judge"):
         usj.UserSimJudge("j", None, run_step_id="nope")._find_run(ctx)
     assert usj.UserSimJudge("j", None, run_step_id="talk")._find_run(ctx) == ("prompt_agent", "talk")
+    assert usj.UserSimJudge("j", None, run_step_id="week")._find_run(ctx) == ("always_on", "week")
+    # A one-turn chat ends before its user sim reads: it leaves a response and no reads, and is skipped, not refused.
+    ctx.prompt_responses.append(PromptResponse(prompt_id="ask1", response="done", step_id="one-turn"))
+    assert usj.UserSimJudge("j", None, run_step_id="one-turn")._find_run(ctx) == ("prompt_agent", "one-turn")
 
 
 # ---- the judge's calls, through litellm -----------------------------------------------------------------------------
@@ -725,7 +724,7 @@ async def _judge_through_litellm(monkeypatch, run, **kw) -> dict:
     ctx = TaskStepContext()
     ctx.prompt_responses.append(PromptResponse(prompt_id="ask", response="all set", step_id="talk"))
     ctx.metadata["user_sim_reads"] = {"talk": [{}]}
-    await usj.UserSimJudge("judge_user_sim", None, verifier_id="usj", **kw).execute(ctx)
+    await usj.UserSimJudge("judge_user_sim", None, run_step_id="talk", verifier_id="usj", **kw).execute(ctx)
     return _entry(ctx)
 
 
@@ -735,10 +734,9 @@ async def test_a_claude_judge_gets_the_system_message_and_the_run_marked_for_the
     calls = _litellm_answers(monkeypatch, _all_pass)
     run = _run(("reply", "ok"))
 
-    entry = await _judge_through_litellm(monkeypatch, run, judge_model="anthropic/claude-sonnet-4-6",
-                                         checks=["guidance", "rogue"])
+    entry = await _judge_through_litellm(monkeypatch, run, judge_model="anthropic/claude-sonnet-4-6")
 
-    assert len(calls) == 2 and entry["user_sim_error"]["value"] == "no" and entry["calls"] == 2
+    assert len(calls) == 7 and entry["user_sim_error"]["value"] == "no" and entry["calls"] == 7
     for call in calls:
         system, user = call["messages"]
         assert system == {"role": "system", "content": usj.SYSTEM}
@@ -750,18 +748,78 @@ async def test_a_claude_judge_gets_the_system_message_and_the_run_marked_for_the
     assert entry["usage"]["prompt_tokens"] > 0 and entry["cost"] > 0
 
 
+_GPT = dict(llm_provider="openai", model="openai/gpt-4o")
+_RESPONSE = httpx.Response(400, request=httpx.Request("POST", "https://judge.invalid/v1/chat/completions"))
+FLAKY = {
+    "timeout": litellm.Timeout("timed out", **_GPT),
+    "rate limit": litellm.RateLimitError("slow down", **_GPT),
+    "service unavailable": litellm.ServiceUnavailableError("503", **_GPT),
+    "internal server error": litellm.InternalServerError("500", **_GPT),
+    "bad gateway": litellm.BadGatewayError("502", **_GPT),
+    "connection": litellm.APIConnectionError("connection reset", **_GPT),
+}
+SETUP = {
+    "auth": litellm.AuthenticationError("invalid api key", **_GPT),
+    "permission": litellm.PermissionDeniedError("no access to this model", response=_RESPONSE, **_GPT),
+    "unknown model": litellm.NotFoundError("model not found", **_GPT),
+    "bad request": litellm.BadRequestError("LLM Provider NOT provided", **_GPT),
+    "unprocessable": litellm.UnprocessableEntityError("unprocessable", response=_RESPONSE, **_GPT),
+    "budget": litellm.BudgetExceededError(current_cost=10.0, max_budget=5.0),
+}
+
+
 @pytest.mark.asyncio
-async def test_a_model_call_that_keeps_failing_is_tried_as_rubrics_verifier_tries_it_and_left_undecided(
-        monkeypatch, litellm_config):
-    calls = _litellm_answers(monkeypatch, lambda kwargs: RuntimeError("503 from the judge"))
+@pytest.mark.parametrize("error", list(FLAKY.values()), ids=list(FLAKY))
+async def test_a_flaky_model_call_is_tried_as_rubrics_verifier_tries_it_and_left_undecided(monkeypatch, litellm_config,
+                                                                                            error):
+    calls = _litellm_answers(monkeypatch, lambda kwargs: error)
 
-    entry = await _judge_through_litellm(monkeypatch, _run(("reply", "ok")), judge_model="openai/gpt-4o",
-                                         checks=["rogue"])
+    entry = await _judge_through_litellm(monkeypatch, _run(("reply", "ok")), judge_model="openai/gpt-4o")
 
-    assert len(calls) == usj.UserSimJudge.DEFAULT_MAX_RETRIES
-    assert _verdicts(entry) == {"rogue": "error"} and "LLM judge failed after 4 attempts" in _rows(entry)["rogue"][
-        "error"]
-    assert entry["flag"] == "user sim judge undecided" and entry["user_sim_error"]["fails_task"] is False
+    assert len(calls) == 7 * usj.UserSimJudge.DEFAULT_MAX_RETRIES  # every check, each call tried 4 times
+    assert set(_verdicts(entry).values()) == {"error"}
+    assert _rows(entry)["rogue"]["error"].startswith(f"no usable answer after 4 tries: {type(error).__name__}: ")
+    # Nothing decided at all: the flag says to look at the judge's setup, and still nothing fails.
+    assert entry["flag"] == "the judge couldn't decide any check \u2014 check its setup"
+    assert entry["user_sim_error"]["value"] == "unknown" and entry["user_sim_error"]["fails_task"] is False
+
+
+@pytest.mark.asyncio
+async def test_one_undecided_check_among_decided_ones_is_flagged_undecided(monkeypatch, litellm_config):
+    def answer(kwargs):
+        content = kwargs["messages"][-1]["content"]
+        prompt = "".join(b["text"] for b in content) if isinstance(content, list) else content
+        rogue = any(c.get("check") == core.check_title("rogue") for c in _criteria_of(prompt))
+        return litellm.RateLimitError("slow down", **_GPT) if rogue else _all_pass(kwargs)
+
+    _litellm_answers(monkeypatch, answer)
+    entry = await _judge_through_litellm(monkeypatch, _run(("reply", "ok")), judge_model="openai/gpt-4o")
+    assert _verdicts(entry, "rogue", "guidance") == {"rogue": "error", "guidance": "pass"}
+    assert entry["flag"] == "user sim judge undecided"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", list(SETUP.values()), ids=list(SETUP))
+async def test_a_judge_that_can_t_reach_its_model_fails_the_run_at_once(monkeypatch, litellm_config, error):
+    calls = _litellm_answers(monkeypatch, lambda kwargs: error)
+
+    with pytest.raises(usj.JudgeSetupError, match=f"^the user sim judge can't reach its model: {type(error).__name__}: "):
+        await _judge_through_litellm(monkeypatch, _run(("reply", "ok")), judge_model="openai/gpt-4o")
+
+    assert len(calls) == usj.UserSimJudge.DEFAULT_MAX_RETRIES  # only the run's first call was made
+
+
+@pytest.mark.asyncio
+async def test_a_judge_with_no_key_or_config_fails_the_run_at_once(monkeypatch, litellm_config):
+    from agent_env.config import get_config
+    from agent_env.config.errors import ConfigError
+
+    def missing(*args, **kwargs):
+        raise ConfigError("no LiteLLM key is configured for the judge")
+
+    monkeypatch.setattr(get_config(), "resolve_model_call", missing)
+    with pytest.raises(usj.JudgeSetupError, match="can't reach its model: ConfigError: no LiteLLM key is configured"):
+        await _judge_through_litellm(monkeypatch, _run(("reply", "ok")), judge_model="openai/gpt-4o")
 
 
 # ---- the instructions, rebuilt as deploy_user_sim_agent wrote them ---------------------------------------------------
@@ -817,34 +875,65 @@ async def test_a_text_only_opening_rebuilds_as_before(monkeypatch):
 # ---- settings -----------------------------------------------------------------------------------------------------
 def test_settings_are_checked_and_round_trip():
     assert _builtin_registry()["user_sim_judge"] is usj.UserSimJudge
-    step = usj.UserSimJudge("s", None, run_step_id="week", judge_model=JUDGE, checks=["guidance", "style"],
-                            error_checks=["guidance"], fail_task_when_not_passing=False,
+    step = usj.UserSimJudge("s", None, run_step_id="week", judge_model=JUDGE, fail_task_when_not_passing=False,
+                            judge_timeout_seconds=300,
                             rubric_items=[{"id": "leak", "family": "G1", "text": "never mentions the ring"}])
     assert step.config_problems() == []
     again = usj.UserSimJudge.from_dict(json.loads(json.dumps(step.to_dict())))
     assert again.to_dict() == step.to_dict()
-    assert {"prompt_id", "criteria", "output_format", "use_trajectory", "default_model"}.isdisjoint(step.to_dict())
-    problems = usj.UserSimJudge("s", None, checks=["guidance", "vibes"], error_checks=["rogue"], judge_model=" ",
-                                fail_task_when_not_passing="yes",
+    own = set(step.to_dict()) - {"id", "type", "version", "fail_task_on_error"}
+    assert own == set(usj.SETTINGS) == {"run_step_id", "rubric_items", "rubric_persona_sha256", "judge_model",
+                                        "judge_timeout_seconds", "fail_task_when_not_passing", "verifier_id"}
+    problems = usj.UserSimJudge("s", None, run_step_id="week", judge_model=" ", fail_task_when_not_passing="yes",
                                 rubric_items=[{"id": "x", "family": "Q1", "text": "y"},
                                               {"id": "rogue", "family": "G3", "check": "stays the user"}]
                                 ).config_problems()
-    assert any("unknown checks ['vibes']" in p for p in problems)
-    assert any("error_checks names checks that don't run: ['rogue']" in p for p in problems)
     assert any("judge_model must be a model name" in p for p in problems) and any("family 'Q1'" in p for p in problems)
     assert any("fail_task_when_not_passing must be true or false" in p for p in problems)
     assert "rubric_items[1] (rogue): id 'rogue' is a check's name; give the item another id" in problems
-    assert usj.UserSimJudge("s", None, checks=["style"]).error_checks == []  # the error checks that run
 
 
 @pytest.mark.asyncio
 async def test_settings_with_problems_stop_the_step_before_it_judges(monkeypatch):
-    with pytest.raises(ValueError, match=r"user_sim_judge 'judge_user_sim': checks has unknown checks \['vibes'\]"):
-        await _judge(_run(("reply", "x")), FakeModel(), monkeypatch, checks=["vibes"])
+    with pytest.raises(ValueError, match=r"user_sim_judge 'judge_user_sim': judge_model must be a model name"):
+        await _judge(_run(("reply", "x")), FakeModel(), monkeypatch, judge_model=" ")
+
+
+STORED = {"id": "s", "type": "user_sim_judge", "run_step_id": "week"}
+
+
+def test_a_task_without_run_step_id_is_refused_when_it_loads():
+    for missing in ({"id": "s", "type": "user_sim_judge"}, {**STORED, "run_step_id": None}, {**STORED, "run_step_id": " "}):
+        with pytest.raises(ValueError, match="user_sim_judge 's': run_step_id is required: name the always_on or "
+                                             "prompt_agent step whose user sim it judges"):
+            usj.UserSimJudge.from_dict(missing)
+
+
+def test_checks_and_error_checks_are_refused_when_the_task_loads():
+    for given, named in (({"checks": ["guidance"]}, "checks"), ({"error_checks": []}, "error_checks"),
+                         ({"checks": list(core.CHECK_NAMES), "error_checks": ["rogue"]}, "checks and error_checks")):
+        with pytest.raises(ValueError, match=f"user_sim_judge 's': {named} can't be set: the judge always asks all "
+                                             "seven checks, and every check but style can fail a run"):
+            usj.UserSimJudge.from_dict({**STORED, **given})
+
+
+def test_a_rubrics_verifier_setting_the_judge_fixes_is_refused_unless_it_has_the_fixed_value():
+    for key, value in (("use_trajectory", True), ("output_format", "rubric_binary"), ("judge_batch_size", 3),
+                       ("use_agent_judge", True), ("criteria", [{"id": "c1"}]), ("prompt_id", "ask"),
+                       ("default_model", "x"), ("score_aggregator", "weighted_average"), ("grade_up_to_turn", 2)):
+        with pytest.raises(ValueError, match=f"user_sim_judge 's': {key} can't be set on the user sim judge, which "
+                                             f"fixes it \\({key}="):
+            usj.UserSimJudge.from_dict({**STORED, key: value})
+    with pytest.raises(ValueError, match="use_trajectory, judge_batch_size can't be set .* fixes them .*Remove them; "
+                                         "its settings are run_step_id, rubric_items"):
+        usj.UserSimJudge.from_dict({**STORED, "use_trajectory": True, "judge_batch_size": 3})
+    same = usj.UserSimJudge.from_dict({**STORED, **{k: usj.PINNED[k] for k in (
+        "use_trajectory", "use_agent_judge", "output_format", "judge_batch_size", "criteria")}})
+    assert same.config_problems() == []  # the fixed value itself is fine
 
 
 def test_by_default_it_fails_the_task_on_a_slip_and_judges_with_the_verifiers_default_model(monkeypatch):
-    step = usj.UserSimJudge.from_dict({"id": "s", "type": "user_sim_judge"})
+    step = usj.UserSimJudge.from_dict(STORED)
     assert (step.fail_task_when_not_passing, step.fail_task_on_error, step.judge_model) == (True, True, None)
     assert (step.use_trajectory, step.use_agent_judge, step.output_format) == (
         False, False, JudgeOutputFormat.USER_SIM_CHECKS)
@@ -859,9 +948,9 @@ def test_by_default_it_fails_the_task_on_a_slip_and_judges_with_the_verifiers_de
 
     fake = Config()
     monkeypatch.setattr("agent_env.task_step.task_steps.verifiers.rubrics_verifier.get_config", lambda: fake)
-    assert usj.UserSimJudge("s", None).default_model == "claude-sonnet-4-6"
+    assert usj.UserSimJudge("s", None, run_step_id="week").default_model == "claude-sonnet-4-6"
     fake.role = "anthropic/claude-opus-4-8"
-    assert usj.UserSimJudge("s", None).default_model == "anthropic/claude-opus-4-8"
+    assert usj.UserSimJudge("s", None, run_step_id="week").default_model == "anthropic/claude-opus-4-8"
 
 
 # ---- the load checks ----------------------------------------------------------------------------------------------
@@ -878,14 +967,13 @@ def _grader(**kw) -> RubricsVerifierTaskStep:
                                  criteria=[{"id": "c1", "description": "booked it"}], **kw)
 
 
-def test_the_task_must_say_which_run_and_its_user_must_be_a_built_in_user_sim():
+def test_its_run_must_be_a_run_step_the_judge_follows_and_its_user_a_built_in_user_sim():
     deploy, week = _user_sim_steps()
-    judge = usj.UserSimJudge("j", None)
+    judge = usj.UserSimJudge("j", None, run_step_id="week")
     assert judge.task_problems([deploy, week, judge]) == []
-    talk = _chat_step()
-    [two] = judge.task_problems([deploy, week, talk, judge])
-    assert two == ("user_sim_judge 'j': the task has several always_on and prompt_agent steps (week, talk); set "
-                   "run_step_id to the one to judge")
+    assert judge.task_problems([deploy, week, _chat_step(), judge]) == []  # it names its run, so another doesn't matter
+    [nowhere] = usj.UserSimJudge("j", None, run_step_id="nope").task_problems([deploy, week])
+    assert nowhere == "user_sim_judge 'j': run_step_id 'nope' names no step of the task"
     other = AgentPromptResponseVerifierTaskStep("grade", None, prompt_id="ask")
     [named] = usj.UserSimJudge("j", None, run_step_id="grade").task_problems([deploy, week, other])
     assert "run_step_id 'grade' is a agent_prompt_response_verifier step; name the always_on or prompt_agent step to " \
@@ -894,13 +982,13 @@ def test_the_task_must_say_which_run_and_its_user_must_be_a_built_in_user_sim():
     assert "the user of always_on step 'week' isn't a user sim a deploy_user_sim_agent step deploys" in outside
     [early] = judge.task_problems([deploy, judge, week])
     assert early == "user_sim_judge 'j' comes before step 'week', the run it judges; put it after"
-    loose = usj.UserSimJudge("j", None, depends_on=[TaskStepDependency("deploy-u")])
+    loose = usj.UserSimJudge("j", None, run_step_id="week", depends_on=[TaskStepDependency("deploy-u")])
     assert "its depends_on must name 'week'" in loose.task_problems([deploy, week, loose])[0]
 
 
 def test_with_the_gate_on_every_step_that_can_be_the_reward_must_depend_on_the_judge():
     deploy, week = _user_sim_steps()
-    judge = usj.UserSimJudge("judge", None, depends_on=[TaskStepDependency("week")])
+    judge = usj.UserSimJudge("judge", None, run_step_id="week", depends_on=[TaskStepDependency("week")])
     after = [TaskStepDependency("judge")]
     assert judge.task_problems([deploy, week, judge, _grader(depends_on=after)]) == []
     assert judge.task_problems([deploy, week, judge, _grader()]) == []  # no depends_on: every step before it
@@ -909,21 +997,21 @@ def test_with_the_gate_on_every_step_that_can_be_the_reward_must_depend_on_the_j
                      "user_sim_judge 'judge', so a run the user sim spoiled could still be scored; make it depend on "
                      "'judge', or set fail_task_when_not_passing to false to record the verdicts only")
     assert judge.task_problems([deploy, week, _grader(), judge]) == [skips]  # before it, so not after it
-    off = usj.UserSimJudge("judge", None, fail_task_when_not_passing=False)
+    off = usj.UserSimJudge("judge", None, run_step_id="week", fail_task_when_not_passing=False)
     assert off.task_problems([deploy, week, _grader(), off]) == []
     with pytest.raises(ValueError, match="can be the task's reward but doesn't depend on user_sim_judge 'judge'"):
         Task("t", None, [deploy, week, _grader(), judge])
     assert Task("t", None, [deploy, week, judge, _grader(depends_on=after)])  # an always_on task takes it
 
 
-def test_a_task_that_sets_mark_user_sim_error_or_turns_off_fail_task_on_error_with_the_gate_is_refused():
+def test_a_task_that_sets_mark_user_sim_error_or_turns_off_fail_task_on_error_is_refused():
     with pytest.raises(ValueError, match="mark_user_sim_error is gone; fail_task_when_not_passing .* takes its place"):
-        usj.UserSimJudge.from_dict({"id": "s", "type": "user_sim_judge", "mark_user_sim_error": False})
-    with pytest.raises(ValueError, match="user_sim_judge 's': fail_task_when_not_passing .* needs fail_task_on_error"):
-        usj.UserSimJudge.from_dict({"id": "s", "type": "user_sim_judge", "fail_task_on_error": False})
-    quiet = usj.UserSimJudge.from_dict({"id": "s", "type": "user_sim_judge", "fail_task_on_error": False,
-                                        "fail_task_when_not_passing": False})
-    assert (quiet.fail_task_on_error, quiet.fail_task_when_not_passing) == (False, False)
+        usj.UserSimJudge.from_dict({**STORED, "mark_user_sim_error": False})
+    for gate in (True, False):  # with the gate off too: a judge that fails has to fail the task
+        with pytest.raises(ValueError, match="user_sim_judge 's': fail_task_on_error can't be false"):
+            usj.UserSimJudge.from_dict({**STORED, "fail_task_on_error": False, "fail_task_when_not_passing": gate})
+    quiet = usj.UserSimJudge.from_dict({**STORED, "fail_task_on_error": True, "fail_task_when_not_passing": False})
+    assert (quiet.fail_task_on_error, quiet.fail_task_when_not_passing) == (True, False)
 
 
 # ---- task rubric items in usersim.yaml's shape ----------------------------------------------------------------------
@@ -972,7 +1060,7 @@ def test_the_craftweb_item_round_trips_and_is_asked_as_written():
     assert CALL_RAE["name"] not in json.dumps(plan.criteria) and CALL_RAE["short"] not in json.dumps(plan.criteria)
     assert (plan.about["a1_call_rae"]["name"], plan.about["a1_call_rae"]["short"]) == (CALL_RAE["name"],
                                                                                      CALL_RAE["short"])
-    step = usj.UserSimJudge("s", None, rubric_items=[CALL_RAE, HER_LENGTH, SATISFACTION],
+    step = usj.UserSimJudge("s", None, run_step_id="week", rubric_items=[CALL_RAE, HER_LENGTH, SATISFACTION],
                             rubric_persona_sha256=OTHER_PERSONA)
     again = usj.UserSimJudge.from_dict(json.loads(json.dumps(step.to_dict())))
     assert step.config_problems() == [] and again.to_dict() == step.to_dict()
@@ -994,7 +1082,7 @@ def test_the_old_text_field_still_loads_as_the_check_and_kind_defaults_to_genera
     [item] = _items(old)
     assert (item.family, item.kind, item.check) == ("G1", "general", "never mentions the ring")
     assert item.to_dict() == {"id": "leak", "family": "G1", "kind": "general", "check": "never mentions the ring"}
-    assert usj.UserSimJudge("s", None, rubric_items=[old]).config_problems() == []
+    assert usj.UserSimJudge("s", None, run_step_id="week", rubric_items=[old]).config_problems() == []
     [both] = core.item_problems([{**old, "check": "never mentions the ring"}])
     assert both == "rubric_items[0] (leak): give check or text, not both (text is the old name of check)"
 
@@ -1016,8 +1104,8 @@ async def test_an_auto_item_is_counted_on_the_graded_answers_with_no_model_call(
             "what she says before you confirm anything.")
     run = _run(("reply", TESS[0]), ("no_reply", ""), ("reply", over), ("reply", TESS[1]))
     fake = FakeModel()
-    entry = await _judge(run, fake, monkeypatch, checks=[], rubric_items=[HER_LENGTH])
-    assert fake.calls == [] and entry["calls"] == 0
+    entry = await _judge(run, fake, monkeypatch, rubric_items=[HER_LENGTH])
+    assert all("f2_her_length" not in c["names"] for c in fake.calls) and entry["calls"] == len(fake.calls) == 7
     assert _rows(entry)["f2_her_length"] == {
         "id": "f2_her_length", "family": "F2", "kind": "auto", "name": "As short as her real texts",
         "check": "Every reply is at most 25 words.", "metric": "max_words", "max": 25, "asked_with": "computed",
@@ -1032,7 +1120,7 @@ async def test_an_auto_item_is_counted_on_the_graded_answers_with_no_model_call(
     context_only = _unjudged(_plan(_run(("reply", over), ("reply", TESS[1]), graded={2}), [length], checks=[]))
     assert context_only["f2_her_length"]["verdict"] == "pass"
     assert _unjudged(_plan(_run(("no_reply", "")), [length], checks=[]))["f2_her_length"]["verdict"] == "n/a"
-    # With the checks running, the auto item is in no call; one that can_error makes the run a user sim error.
+    # One that can_error makes the run a user sim error.
     fake = FakeModel()
     entry = await _judge(_run(("reply", over)), fake, monkeypatch, rubric_items=[{**HER_LENGTH, "can_error": True}])
     assert all("f2_her_length" not in c["names"] for c in fake.calls) and len(fake.calls) == 7
@@ -1103,28 +1191,26 @@ def test_an_auto_item_counts_sentences_simply():
 @pytest.mark.asyncio
 async def test_na_when_always_is_n_a_with_its_reason_and_no_call(monkeypatch):
     fake = FakeModel()
-    entry = await _judge(_run(("done", "thx")), fake, monkeypatch, checks=[], rubric_items=[SATISFACTION])
+    entry = await _judge(_run(("done", "thx")), fake, monkeypatch, rubric_items=[SATISFACTION])
     row = _rows(entry)["a5_satisfaction"]
-    assert fake.calls == [] and (row["verdict"], row["reason"], row["asked_with"]) == (
+    assert len(fake.calls) == 7 and not fake.asked("a5_satisfaction") and (row["verdict"], row["reason"], row["asked_with"]) == (
         "n/a", SATISFACTION["static_na_reason"], "static_na")
-    fake = FakeModel()
-    await _judge(_run(("done", "thx")), fake, monkeypatch, rubric_items=[SATISFACTION])
-    assert all("a5_satisfaction" not in c["names"] for c in fake.calls)
 
 
 @pytest.mark.asyncio
 async def test_na_when_never_doesn_t_allow_an_n_a_so_one_is_asked_again(monkeypatch):
     fake = FakeModel({"g5_no_silent_fix": [NA(), PASS(reason="she gave her call")]})
     entry = await _judge(_run(("reply", "your call on the dates, just not oct 31")), fake, monkeypatch,
-                         checks=["rogue"], rubric_items=[NO_SILENT_FIX])
-    assert _rows(entry)["g5_no_silent_fix"]["verdict"] == "pass" and len(fake.calls) == 2
-    assert "may not be n/a: it always applies, so answer pass or fail" in fake.calls[1]["prompt"]
+                         rubric_items=[NO_SILENT_FIX])
+    asked = fake.asked("g5_no_silent_fix")
+    assert _rows(entry)["g5_no_silent_fix"]["verdict"] == "pass" and len(asked) == 2
+    assert "may not be n/a: it always applies, so answer pass or fail" in asked[1]["prompt"]
     never = await _judge(_run(("reply", "x")), FakeModel({"g5_no_silent_fix": [NA()] * 4}), monkeypatch,
-                         checks=["rogue"], rubric_items=[NO_SILENT_FIX])
-    assert _verdicts(never) == {"rogue": "error", "g5_no_silent_fix": "error"}  # the call's rows are undecided
+                         rubric_items=[NO_SILENT_FIX])
+    assert _verdicts(never, "rogue", "g5_no_silent_fix") == {"rogue": "error", "g5_no_silent_fix": "error"}
     # Where n/a is allowed, it stands.
     got = await _judge(_run(("reply", "x")), FakeModel({"a1_call_rae": NA(reason="Rae never came up")}), monkeypatch,
-                       checks=["guidance"], rubric_items=[CALL_RAE])
+                       rubric_items=[CALL_RAE])
     assert _rows(got)["a1_call_rae"]["verdict"] == "n/a"
 
 
@@ -1145,11 +1231,12 @@ def test_a_big_rubric_is_split_over_calls_of_at_most_the_cap():
 async def test_split_items_get_their_rows_and_the_check_is_asked_once(monkeypatch):
     items = [{"id": f"g1_{n}", "family": "G1", "check": f"never states fact {n}"} for n in range(14)]
     fake = FakeModel({"g1_13": FAIL()})
-    entry = await _judge(_run(("reply", "x")), fake, monkeypatch, checks=["oversharing"], rubric_items=items)
-    assert [len(c["names"]) for c in fake.calls] == [13, 2] and fake.calls[0]["names"][0] == "oversharing"
-    assert "These are criteria 14–15 of 15" in fake.calls[1]["prompt"]
+    entry = await _judge(_run(("reply", "x")), fake, monkeypatch, rubric_items=items)
+    split = [c for c in fake.calls if any(n.startswith("g1_") for n in c["names"])]
+    assert [len(c["names"]) for c in split] == [13, 2] and split[0]["names"][0] == "oversharing"
+    assert len(fake.asked("oversharing")) == 1 and "These are criteria 15–16 of 21" in split[1]["prompt"]
     assert _rows(entry)["g1_13"]["asked_with"] == "oversharing#2" and _rows(entry)["g1_13"]["verdict"] == "fail"
-    assert [r["id"] for r in entry["results"]] == ["oversharing", *[f"g1_{n}" for n in range(14)]]  # the task's order
+    assert [r["id"] for r in entry["results"]] == [*core.CHECK_NAMES, *[f"g1_{n}" for n in range(14)]]
     assert entry["user_sim_error"]["because"] == ["g1_13"]  # G1's owner, oversharing, is an error check
 
 
@@ -1182,12 +1269,13 @@ def test_each_bad_item_is_refused_when_the_task_loads_with_a_clear_error():
     for item, error in cases:
         problems = core.item_problems([item])
         assert any(error in p for p in problems), (item, problems)
-        assert any(error in p for p in usj.UserSimJudge("s", None, rubric_items=[item]).config_problems())
+        assert any(error in p for p in usj.UserSimJudge("s", None, run_step_id="week",
+                                                        rubric_items=[item]).config_problems())
     dup = core.item_problems([CALL_RAE, {**CALL_RAE, "family": "A3"}])
     assert dup == ["rubric_items[1] (a1_call_rae): id 'a1_call_rae' is used twice"]
     for bad in (7, "3f1c", "A" * 64):
         assert any("rubric_persona_sha256 must be a persona fingerprint" in p for p in usj.UserSimJudge(
-            "s", None, rubric_items=[CALL_RAE], rubric_persona_sha256=bad).config_problems())
+            "s", None, run_step_id="week", rubric_items=[CALL_RAE], rubric_persona_sha256=bad).config_problems())
 
 
 def test_an_auto_item_loads_with_no_na_when_or_with_always():
@@ -1228,7 +1316,7 @@ async def test_items_for_this_persona_or_a_run_with_no_fingerprint_are_graded(mo
     if not recorded:
         del us["persona_sha256"]  # a run from before the step recorded it
 
-    await _step(FakeModel(), monkeypatch, checks=["style"], rubric_items=[HER_LENGTH],
+    await _step(FakeModel(), monkeypatch, rubric_items=[HER_LENGTH],
                 rubric_persona_sha256=fingerprint).execute(ctx)
 
     entry = _entry(ctx)
@@ -1237,7 +1325,7 @@ async def test_items_for_this_persona_or_a_run_with_no_fingerprint_are_graded(mo
     if not recorded:
         assert entry["rubric_persona"]["run"] is None and "graded as written" in entry["rubric_persona"]["note"]
     # Without a rubric_persona_sha256 nothing is compared.
-    await _step(FakeModel(), monkeypatch, checks=["style"], rubric_items=[HER_LENGTH]).execute(ctx)
+    await _step(FakeModel(), monkeypatch, rubric_items=[HER_LENGTH]).execute(ctx)
     assert "rubric_persona" not in _entry(ctx) and _rows(_entry(ctx))["f2_her_length"]["verdict"] == "pass"
 
 
@@ -1263,9 +1351,9 @@ async def test_a_line_item_is_graded_by_that_line_s_text_from_the_run_and_record
     [item] = _items(ENGAGEMENT)
     assert item.to_dict() == ENGAGEMENT and item.check == ""
     fake = FakeModel({"g1_engagement": FAIL()})
-    entry = await _judge(_lined_run({"W1": "Hannah.", "P1": RING}), fake, monkeypatch, checks=["oversharing"],
+    entry = await _judge(_lined_run({"W1": "Hannah.", "P1": RING}), fake, monkeypatch,
                          rubric_items=[ENGAGEMENT], rubric_persona_sha256=OTHER_PERSONA)
-    assert fake.calls[0]["criteria"][1]["question"] == f"Follows its instruction P1: {RING}"
+    assert fake.asked("g1_engagement")[0]["criteria"][1]["question"] == f"Follows its instruction P1: {RING}"
     row = _rows(entry)["g1_engagement"]
     assert (row["line"], row["line_text"], row["asked_with"], row["verdict"], row["kind"]) == (
         "P1", RING, "oversharing", "fail", "hard")
@@ -1311,9 +1399,9 @@ def test_a_line_item_is_refused_with_a_check_on_an_auto_item_or_without_the_pers
     [no_check] = core.item_problems([{"id": "a", "family": "A1"}])
     assert no_check == ("rubric_items[0] (a): a general item needs a check (the text the judge applies) or a line (a "
                         "tag of the user sim's instructions, like P1)")
-    assert usj.UserSimJudge("s", None, rubric_items=[ENGAGEMENT],
+    assert usj.UserSimJudge("s", None, run_step_id="week", rubric_items=[ENGAGEMENT],
                             rubric_persona_sha256=OTHER_PERSONA).config_problems() == []
-    assert usj.UserSimJudge("s", None, rubric_items=[ENGAGEMENT]).config_problems() == [
+    assert usj.UserSimJudge("s", None, run_step_id="week", rubric_items=[ENGAGEMENT]).config_problems() == [
         "rubric_items[0] (g1_engagement): a line item needs rubric_persona_sha256, so its tag is graded only on runs "
         "of the persona it was written for"]
 
@@ -1325,10 +1413,10 @@ async def test_on_a_run_a_line_item_reads_the_deploy_record_s_tagged_lines(monke
     us = ctx.metadata[USER_SIMS_KEY]["hannah"]
     fake = FakeModel()
 
-    await _step(fake, monkeypatch, checks=["oversharing"], rubric_items=[ENGAGEMENT],
+    await _step(fake, monkeypatch, rubric_items=[ENGAGEMENT],
                 rubric_persona_sha256=us["persona_sha256"]).execute(ctx)
 
-    [call] = fake.calls
+    [call] = fake.asked("g1_engagement")
     assert call["criteria"][1]["question"] == f"Follows its instruction P1: {us['tagged_lines']['P1']}"
     row = _rows(_entry(ctx))["g1_engagement"]
     assert (row["line"], row["line_text"], row["asked_with"]) == ("P1", us["tagged_lines"]["P1"], "oversharing")
@@ -1341,11 +1429,11 @@ async def test_on_a_run_with_no_persona_fingerprint_a_line_item_is_an_error(monk
     del ctx.metadata[USER_SIMS_KEY]["hannah"]["persona_sha256"]
     fake = FakeModel()
 
-    await _step(fake, monkeypatch, checks=["oversharing"], rubric_items=[ENGAGEMENT, HER_LENGTH],
+    await _step(fake, monkeypatch, rubric_items=[ENGAGEMENT, HER_LENGTH],
                 rubric_persona_sha256=OTHER_PERSONA).execute(ctx)
 
     rows = _rows(_entry(ctx))
     assert rows["g1_engagement"]["verdict"] == "error" and rows["f2_her_length"]["verdict"] == "pass"
     assert rows["g1_engagement"]["error"] == "line P1 can't be graded: " + usj.LINE_UNCHECKED
-    assert fake.calls[0]["names"] == ["oversharing"]
+    assert not fake.asked("g1_engagement") and len(fake.calls) == 7
     assert _entry(ctx)["user_sim_error"]["value"] == "unknown" and _entry(ctx)["flag"] == "user sim judge undecided"
