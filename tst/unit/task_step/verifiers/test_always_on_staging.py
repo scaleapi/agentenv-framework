@@ -15,6 +15,7 @@ from agent_env.task_step.task_steps.verifiers.always_on_staging import (
     INDEX_FILE,
     LINE_CHARS,
     TRIGGERS_FILE,
+    is_write_action,
     judge_reads,
     stage_run,
 )
@@ -316,3 +317,50 @@ def test_judge_reads_tells_one_pass_over_every_wake_file():
 
     reads = judge_reads(judge)
     assert reads["read_all_wakes"] is True and reads["wakes_opened"] == [1] and reads["helpers_started"] == 1
+
+
+def _v3_run(run, keep_changes: bool = True):
+    """The recorded run with wake 4's turn a real PSI neutral harness v3 wake: a compaction, its save turn's memory
+    calls, the harness's messages."""
+    timeline, turns = run
+    if not keep_changes:
+        timeline = [e for e in timeline if e["event"] != "app_changes"]
+    turns[_url(timeline, 4)] = turn_events((RECORDED / "turn_otel_v3_compaction_gpt.json").read_text())
+    return timeline, turns
+
+
+def test_a_v3_wake_s_harness_notes_and_save_turn_are_lines_marked_as_the_harness_s(run):
+    staged = stage_run(*_v3_run(run))
+
+    wake4 = _lines(staged.files, "wakes/wake_004.jsonl")
+    notes = [line for line in wake4 if line["event"] == "harness_note"]
+    assert [line.get("step") for line in notes] == ["pre_compaction_save", None, "after_compaction"]
+    compaction = notes[1]
+    assert compaction.get("text_preview", compaction.get("text")).startswith("Compaction summary (written by the harness")
+    calls = [line for line in wake4 if line["event"] == "tool_call"]
+    assert [(c["tool"], c.get("step")) for c in calls] == [("memory_view", "pre_compaction_save"),
+                                                          ("memory_replace", "pre_compaction_save")]
+    said = [line for line in wake4 if line["event"] == "assistant_text"]
+    assert [line.get("step") for line in said] == ["pre_compaction_save", None]
+
+
+@pytest.mark.parametrize("keep_changes", [True, False])
+def test_the_harness_s_memory_and_history_calls_are_never_actions(run, keep_changes):
+    index = stage_run(*_v3_run(run, keep_changes)).files[INDEX_FILE]
+
+    block = index[index.index("## Wake 4 "):]
+    assert "memory_" not in block and "(2 tool calls)" not in block
+    assert "touch no app and are never actions; they are in the wake files." in index
+    assert is_write_action("memory_add") is False and is_write_action("history_read") is False
+    assert is_write_action("gcal_create_event") is True
+
+
+def test_judge_reads_does_not_count_a_wake_the_agent_read_back_with_history_read(run):
+    timeline, turns = _v3_run(run)
+    events = turns[_url(timeline, 4)]
+    view = next(e for e in events.events if e["type"] == "tool_call")
+    events.events.append({**view, "tool": "history_read", "input": {"wake": 2}, "result": "wake 2 (Mon Mar 2) …"})
+    wake4 = stage_run(timeline, turns).files["wakes/wake_004.jsonl"]
+    judge = turn_events(json.dumps(_judge(("Read", {"file_path": "/tmp/r/wakes/wake_004.jsonl"}, wake4))))
+
+    assert judge_reads(judge)["wakes_opened"] == [4]

@@ -1,0 +1,740 @@
+[
+ {
+  "name": "psi.harness_message",
+  "context": {
+   "trace_id": "0x435a20033ec1fd98a5055fbf0674ae6d",
+   "span_id": "0x25ff38271bee3a8c",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": null,
+  "start_time": "2026-11-16T18:40:41.021649Z",
+  "end_time": "2026-11-16T18:40:41.021724Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "gen_ai.operation.name": "psi.harness_message",
+   "gen_ai.agent.name": "harness",
+   "psi.agent.kind": "harness",
+   "psi.harness_message.text": "[Harness: older history is about to be summarized to save space.] Save anything you will need later to your profile now, with memory_add or memory_replace: the user's rules and preferences, deadlines, what you agreed or did (with ids), and what is still pending. Only the memory and history tools work during this step. Reply with a short line when you're done.",
+   "psi.turn": "pre_compaction_save"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "psi.compaction",
+  "context": {
+   "trace_id": "0x30d58874e05ae6ea98d55222088d027a",
+   "span_id": "0xdab7affc87d180ab",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": null,
+  "start_time": "2026-11-16T18:40:41.020720Z",
+  "end_time": "2026-11-16T18:41:17.984119Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "gen_ai.operation.name": "psi.compaction",
+   "gen_ai.agent.name": "harness",
+   "psi.agent.kind": "harness",
+   "psi.compaction.chars_before": 20376,
+   "psi.compaction.wakes_kept": 3,
+   "psi.compaction.summary": "1. The user's rules and preferences (word for word where they are stated).\n\"Here's today's inbox digest, nothing needs action unless I say so:\"\nInbox digests are informational; no action was taken on them.\n\n2. Deadlines and dates.\nHOA approval for Pat’s house tree work must be in by March 14, stated Mon Mar 2, 9:00 AM UTC. No approval receipt was reported through Tue Mar 3, 6:00 PM UTC.\n\n3. What was done: bookings, purchases, messages sent, changes made, each with its ids, amounts and who it involved.\nSaved profile facts about the HOA deadline, inbox no-action rule, Dana Whitfield’s sign-off, Oakline Tree Care’s price, city permit TR-58213, and arborist Lena Okafor.\nAt Pat’s requests on Mon Mar 2, 1:00 PM UTC and Tue Mar 3, 1:00 PM UTC, ran the flight search tool for Dana’s Dallas visit. Each search finished after 15 seconds and found 3 flights, without itinerary or price details.\nPat reported agreeing $2,350 with Oakline Tree Care for the whole tree-work job; no payment was reported.\nNo flights were booked or messages sent.\nOn Tue Mar 3, 6:00 PM UTC, acknowledged the informational inbox digest and took no action.\n\n4. What is pending: open questions, who owes a reply, what the assistant promised to do.\nHOA approval remains pending, due March 14.\nNo origin, travel dates, or other itinerary requirements were supplied for Dana’s Dallas visit; the searches supplied no actionable itinerary or price details.\nNo outstanding assistant promises or explicit requests awaiting action through this summary’s cutoff.\n\n5. Facts learned: people, places, prices, accounts and other details the assistant may need again.\nPat Rivera is arranging tree work at their house.\nNext-door neighbor Dana Whitfield signed off on the work by text, reported Mon Mar 2, 1:00 PM UTC.\nOakline Tree Care’s agreed total price is $2,350 for the whole job, reported Mon Mar 2, 6:00 PM UTC.\nThe city permit number is TR-58213, reported Tue Mar 3, 9:00 AM UTC.\nLena Okafor is the arborist who will be on site, reported Tue Mar 3, 1:00 PM UTC.\nDana’s visit involves travel to Dallas.\n\n6. Where to look things up: for details you leave out, say when they came up (the wake's time label) and words to search for, so they can be found with history_search and read in full with history_read.\nMon Mar 2, 9:00 AM UTC: \"HOA approval\" for the deadline and first inbox digest.\nMon Mar 2, 1:00 PM UTC: \"Dana Whitfield\" or \"flights to Dallas\" for the text sign-off and first search.\nMon Mar 2, 6:00 PM UTC: \"Oakline Tree Care\" or \"$2,350\" for the price agreement.\nTue Mar 3, 9:00 AM UTC: \"TR-58213\" for the permit.\nTue Mar 3, 1:00 PM UTC: \"Lena Okafor\" or \"flights to Dallas\" for the arborist and second search.\nTue Mar 3, 6:00 PM UTC: \"notice #3895\" or \"notice #9537\" for that informational inbox digest.",
+   "psi.compaction.chars_after": 17009,
+   "psi.compaction.wakes_summarized": 6,
+   "psi.compaction.first_kept_wake": 7,
+   "psi.compaction.seconds": 36.963,
+   "psi.compaction.next_wake_waited_s": 33.917
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "psi.harness_message",
+  "context": {
+   "trace_id": "0xfbb67b3d83af6c6474269fd69d1e9c54",
+   "span_id": "0x76bc16711b41df60",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": null,
+  "start_time": "2026-11-16T18:41:17.984244Z",
+  "end_time": "2026-11-16T18:41:17.984291Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "gen_ai.operation.name": "psi.harness_message",
+   "gen_ai.agent.name": "harness",
+   "psi.agent.kind": "harness",
+   "psi.harness_message.text": "[Harness: older history was summarized to save space. Below are the user's first request word for word, the summary, and your profile. Every earlier wake can still be found with history_search and read with history_read.]\n\n## The user's first request (word for word)\n[Mon Mar 2, 9:00 AM UTC · user] HOA approval for the tree work has to be in by March 14.\n\nHere's today's inbox digest, nothing needs action unless I say so:\n- From Patagonia: notice #4313. for you review this can confirm for thanks for being account reminder confirm when review for ready confirm thanks attendance update for account schedule this member member update when member review for this schedule confirm confirm statement can account reminder details for details this a a this schedule attendance attendance for.\n- From Amazon: notice #7038. attendance online this confirm is changed details event changed order week attendance member this confirm being can when schedule changed you confirm changed ready ready reminder for online details reminder.\n- From Dr. Kim's office: notice #1124. order event order review details this please you for changed a thanks reminder order order thanks week schedule see update Your update when attendance online a changed reminder order see reminder order confirm is is event you statement can confirm week ready Your.\n- From Neighborhood Watch: notice #6376. see review thanks please you changed account changed Your being online details reminder review for account schedule you this see a statement update see can please for a reminder when details review review changed.\n- From Lumen Fiber: notice #3391. account confirm event being reminder being attendance schedule update when event schedule for a being review being when see thanks for a attendance see update a.\n- From City of Ashford: notice #6229. Your details member this for being is schedule account event reminder member is week ready review Your can event confirm event online thanks statement for account when a is event reminder week for reminder can please online order see order a ready is see account ready changed statement update member.\n- From Spotify: notice #2825. order event for you review is this reminder is please review details statement a week when order account changed schedule confirm confirm please event being week order changed event week update attendance reminder this details for being for member a details Your member member changed being account when for this order confirm a review Your review update.\n- From Neighborhood Watch: notice #9345. thanks see member schedule for a Your is confirm event Your member attendance statement when reminder account thanks event you being member is changed changed a account this reminder a you see review a statement review thanks being online changed this is statement online statement can can member for.\n- From Costco: notice #5255. ready update being for member week thanks attendance schedule Your see please Your changed is online Your a see is is is ready being week online a order changed schedule this see ready statement see online for you is this.\n\n## Summary of wakes 1 to 6, as of Tue Mar 3, 6:00 PM UTC\n1. The user's rules and preferences (word for word where they are stated).\n\"Here's today's inbox digest, nothing needs action unless I say so:\"\nInbox digests are informational; no action was taken on them.\n\n2. Deadlines and dates.\nHOA approval for Pat’s house tree work must be in by March 14, stated Mon Mar 2, 9:00 AM UTC. No approval receipt was reported through Tue Mar 3, 6:00 PM UTC.\n\n3. What was done: bookings, purchases, messages sent, changes made, each with its ids, amounts and who it involved.\nSaved profile facts about the HOA deadline, inbox no-action rule, Dana Whitfield’s sign-off, Oakline Tree Care’s price, city permit TR-58213, and arborist Lena Okafor.\nAt Pat’s requests on Mon Mar 2, 1:00 PM UTC and Tue Mar 3, 1:00 PM UTC, ran the flight search tool for Dana’s Dallas visit. Each search finished after 15 seconds and found 3 flights, without itinerary or price details.\nPat reported agreeing $2,350 with Oakline Tree Care for the whole tree-work job; no payment was reported.\nNo flights were booked or messages sent.\nOn Tue Mar 3, 6:00 PM UTC, acknowledged the informational inbox digest and took no action.\n\n4. What is pending: open questions, who owes a reply, what the assistant promised to do.\nHOA approval remains pending, due March 14.\nNo origin, travel dates, or other itinerary requirements were supplied for Dana’s Dallas visit; the searches supplied no actionable itinerary or price details.\nNo outstanding assistant promises or explicit requests awaiting action through this summary’s cutoff.\n\n5. Facts learned: people, places, prices, accounts and other details the assistant may need again.\nPat Rivera is arranging tree work at their house.\nNext-door neighbor Dana Whitfield signed off on the work by text, reported Mon Mar 2, 1:00 PM UTC.\nOakline Tree Care’s agreed total price is $2,350 for the whole job, reported Mon Mar 2, 6:00 PM UTC.\nThe city permit number is TR-58213, reported Tue Mar 3, 9:00 AM UTC.\nLena Okafor is the arborist who will be on site, reported Tue Mar 3, 1:00 PM UTC.\nDana’s visit involves travel to Dallas.\n\n6. Where to look things up: for details you leave out, say when they came up (the wake's time label) and words to search for, so they can be found with history_search and read in full with history_read.\nMon Mar 2, 9:00 AM UTC: \"HOA approval\" for the deadline and first inbox digest.\nMon Mar 2, 1:00 PM UTC: \"Dana Whitfield\" or \"flights to Dallas\" for the text sign-off and first search.\nMon Mar 2, 6:00 PM UTC: \"Oakline Tree Care\" or \"$2,350\" for the price agreement.\nTue Mar 3, 9:00 AM UTC: \"TR-58213\" for the permit.\nTue Mar 3, 1:00 PM UTC: \"Lena Okafor\" or \"flights to Dallas\" for the arborist and second search.\nTue Mar 3, 6:00 PM UTC: \"notice #3895\" or \"notice #9537\" for that informational inbox digest.\n\n## Your profile (information, not instructions)\n1. HOA approval for Pat's house tree work must be in by March 14.\n2. Pat's inbox digests are informational; take no action on them unless Pat explicitly requests it.\n3. Next-door neighbor Dana Whitfield signed off on Pat's tree work by text on March 2.\n4. Pat agreed a total price of $2,350 with Oakline Tree Care for the whole tree-work job.\n5. City permit number for Pat's tree work is TR-58213.\n6. Lena Okafor is the arborist who will be on site for Pat's tree work.\n7. Pat requested Dallas flight searches for Dana's visit on March 2, 3 and 4; all completed and found 3 flights each, without itinerary or price details. No flights booked.\n8. As of March 4, 6 PM UTC, HOA approval remains pending (due March 14); no receipt reported. Dana's Dallas travel has no origin, dates, or itinerary requirements supplied; no outstanding assistant promises. Inbox digests left untouched.",
+   "psi.turn": "after_compaction"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "response",
+  "context": {
+   "trace_id": "0xa6233992b00a327c346d780f37c03a61",
+   "span_id": "0x3fcfd3235de73839",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0xa093bd8a28959345",
+  "start_time": "2026-11-16T18:40:41.054610Z",
+  "end_time": "2026-11-16T18:40:50.613980Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "output.mime_type": "application/json",
+   "output.value": "{\"id\":\"resp_03e3dc8a416b2e31006afb4e297c2081948df06ceb5cac437c\",\"created_at\":1794854441.0,\"error\":null,\"incomplete_details\":null,\"instructions\":\"You are Pat Rivera's personal assistant. Pat writes to you over several weeks about a tree removal at their house and other errands. Keep track of what Pat…",
+   "llm.token_count.completion": 64,
+   "llm.token_count.prompt": 4311,
+   "llm.token_count.total": 4375,
+   "llm.token_count.prompt_details.cache_read": 4213,
+   "llm.token_count.completion_details.reasoning": 48,
+   "llm.output_messages.0.message.role": "assistant",
+   "llm.output_messages.0.message.tool_calls.0.tool_call.id": "call_Z59wq3alRh1pW7CJDe9r6WXm",
+   "llm.output_messages.0.message.tool_calls.0.tool_call.function.name": "memory_view",
+   "llm.input_messages.0.message.role": "system",
+   "llm.input_messages.0.message.content": "You are Pat Rivera's personal assistant. Pat writes to you over several weeks about a tree removal at their house and other errands. Keep track of what Pat tells you; use your tools when they help. Re…",
+   "llm.model_name": "gpt-6.1-sol",
+   "input.mime_type": "application/json",
+   "input.value": "[{\"role\": \"user\", \"content\": \"[Harness: older history was summarized to save space. Below are the user's first request word for word, the summary, and your profile. Every earlier wake can still be found with history_search and read with history_read.]\\n\\n## The user's first request (word for word)\\n…",
+   "openinference.span.kind": "LLM",
+   "psi.reasoning": "[{\"type\": \"thinking\", \"thinking\": \"**Evaluating memory accuracy**\\n\\nI need to check my memory, maybe there's already enough stored. I only want to look at the tools and memory history. I want to ensure things are accurate up to March 4. Memory 8 appears to be correct, but I could confirm that by using memory_view. If needed, I might replace 8 with the same, but more precise information regarding any missing details. It's essential for me to keep everything accurate!\"}]",
+   "gen_ai.agent.name": "Orchestrator",
+   "psi.agent.kind": "main",
+   "psi.turn": "pre_compaction_save"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "memory_view",
+  "context": {
+   "trace_id": "0xa6233992b00a327c346d780f37c03a61",
+   "span_id": "0xd333411dd58b59c8",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0xa093bd8a28959345",
+  "start_time": "2026-11-16T18:40:50.621174Z",
+  "end_time": "2026-11-16T18:40:50.623202Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "tool.name": "memory_view",
+   "input.value": "{}",
+   "input.mime_type": "application/json",
+   "output.value": "1. HOA approval for Pat's house tree work must be in by March 14.\n2. Pat's inbox digests are informational; take no action on them unless Pat explicitly requests it.\n3. Next-door neighbor Dana Whitfield signed off on Pat's tree work by text on March 2.\n4. Pat agreed a total price of $2,350 with Oakl…",
+   "openinference.span.kind": "TOOL",
+   "gen_ai.operation.name": "execute_tool",
+   "gen_ai.tool.name": "memory_view",
+   "gen_ai.prompt": "{\"input\": {}}",
+   "gen_ai.completion": "{\"output\": \"1. HOA approval for Pat's house tree work must be in by March 14.\\n2. Pat's inbox digests are informational; take no action on them unless Pat explicitly requests it.\\n3. Next-door neighbor Dana Whitfield signed off on Pat's tree work by text on March 2.\\n4. Pat agreed a total price of $2,350 with Oakline Tree Care for the whole tree-work job.\\n5. City permit number for Pat's tree work is TR-58213.\\n6. Lena Okafor is the arborist who will be on site for Pat's tree work.\\n7. Pat requested Dallas flight searches for Dana's visit on March 2, 3 and 4; all completed and found 3 flights each, without itinerary or price details. No flights booked.\\n8. As of March 4, HOA approval remains pending (due March 14); no receipt reported. Dallas flight searches have no origin, travel dates, or itinerary requirements supplied; no outstanding assistant promises.\"}",
+   "gen_ai.agent.name": "Orchestrator",
+   "psi.agent.kind": "main",
+   "psi.turn": "pre_compaction_save"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "turn",
+  "context": {
+   "trace_id": "0xa6233992b00a327c346d780f37c03a61",
+   "span_id": "0xa093bd8a28959345",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x5627e0ab75be7948",
+  "start_time": "2026-11-16T18:40:41.027388Z",
+  "end_time": "2026-11-16T18:40:50.624263Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "openinference.span.kind": "CHAIN",
+   "gen_ai.agent.name": "Orchestrator",
+   "psi.agent.kind": "main",
+   "psi.turn": "pre_compaction_save"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "response",
+  "context": {
+   "trace_id": "0xa6233992b00a327c346d780f37c03a61",
+   "span_id": "0xd0e8382c06ec79c6",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0xde797d65374e4806",
+  "start_time": "2026-11-16T18:40:50.628342Z",
+  "end_time": "2026-11-16T18:40:55.021140Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "output.mime_type": "application/json",
+   "output.value": "{\"id\":\"resp_03e3dc8a416b2e31006afb4e32f3dc81948217aa063d9e1760\",\"created_at\":1794854451.0,\"error\":null,\"incomplete_details\":null,\"instructions\":\"You are Pat Rivera's personal assistant. Pat writes to you over several weeks about a tree removal at their house and other errands. Keep track of what Pat…",
+   "llm.token_count.completion": 72,
+   "llm.token_count.prompt": 4591,
+   "llm.token_count.total": 4663,
+   "llm.token_count.prompt_details.cache_read": 4308,
+   "llm.token_count.completion_details.reasoning": 0,
+   "llm.output_messages.0.message.role": "assistant",
+   "llm.output_messages.0.message.tool_calls.0.tool_call.id": "call_69c2heuBU7p9tTGbqnynxII5",
+   "llm.output_messages.0.message.tool_calls.0.tool_call.function.name": "memory_replace",
+   "llm.output_messages.0.message.tool_calls.0.tool_call.function.arguments": "{\"line\":8,\"fact\":\"As of March 4, 6 PM UTC, HOA approval remains pending (due March 14); no receipt reported. Dana's Dallas travel has no origin, dates, or itinerary requirements supplied; no outstanding assistant promises. Inbox digests left untouched.\"}",
+   "llm.input_messages.0.message.role": "system",
+   "llm.input_messages.0.message.content": "You are Pat Rivera's personal assistant. Pat writes to you over several weeks about a tree removal at their house and other errands. Keep track of what Pat tells you; use your tools when they help. Re…",
+   "llm.model_name": "gpt-6.1-sol",
+   "input.mime_type": "application/json",
+   "input.value": "[{\"role\": \"user\", \"content\": \"[Harness: older history was summarized to save space. Below are the user's first request word for word, the summary, and your profile. Every earlier wake can still be found with history_search and read with history_read.]\\n\\n## The user's first request (word for word)\\n…",
+   "openinference.span.kind": "LLM",
+   "gen_ai.agent.name": "Orchestrator",
+   "psi.agent.kind": "main",
+   "psi.turn": "pre_compaction_save"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "memory_replace",
+  "context": {
+   "trace_id": "0xa6233992b00a327c346d780f37c03a61",
+   "span_id": "0x7cf2e4ced9d9d580",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0xde797d65374e4806",
+  "start_time": "2026-11-16T18:40:55.028875Z",
+  "end_time": "2026-11-16T18:40:55.031245Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "tool.name": "memory_replace",
+   "input.value": "{\"line\":8,\"fact\":\"As of March 4, 6 PM UTC, HOA approval remains pending (due March 14); no receipt reported. Dana's Dallas travel has no origin, dates, or itinerary requirements supplied; no outstanding assistant promises. Inbox digests left untouched.\"}",
+   "input.mime_type": "application/json",
+   "output.value": "Replaced fact 8.",
+   "openinference.span.kind": "TOOL",
+   "gen_ai.operation.name": "execute_tool",
+   "gen_ai.tool.name": "memory_replace",
+   "gen_ai.prompt": "{\"input\": {\"line\": 8, \"fact\": \"As of March 4, 6 PM UTC, HOA approval remains pending (due March 14); no receipt reported. Dana's Dallas travel has no origin, dates, or itinerary requirements supplied; no outstanding assistant promises. Inbox digests left untouched.\"}}",
+   "gen_ai.completion": "{\"output\": \"Replaced fact 8.\"}",
+   "gen_ai.agent.name": "Orchestrator",
+   "psi.agent.kind": "main",
+   "psi.turn": "pre_compaction_save"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "turn",
+  "context": {
+   "trace_id": "0xa6233992b00a327c346d780f37c03a61",
+   "span_id": "0xde797d65374e4806",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x5627e0ab75be7948",
+  "start_time": "2026-11-16T18:40:50.625407Z",
+  "end_time": "2026-11-16T18:40:55.032285Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "openinference.span.kind": "CHAIN",
+   "gen_ai.agent.name": "Orchestrator",
+   "psi.agent.kind": "main",
+   "psi.turn": "pre_compaction_save"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "response",
+  "context": {
+   "trace_id": "0xa6233992b00a327c346d780f37c03a61",
+   "span_id": "0x20f5c9e772b51eb9",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0xcfd0206d99a7c665",
+  "start_time": "2026-11-16T18:40:55.036438Z",
+  "end_time": "2026-11-16T18:40:58.482165Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "output.mime_type": "application/json",
+   "output.value": "{\"id\":\"resp_03e3dc8a416b2e31006afb4e3769f88194a770714c1e3c8fc8\",\"created_at\":1794854455.0,\"error\":null,\"incomplete_details\":null,\"instructions\":\"You are Pat Rivera's personal assistant. Pat writes to you over several weeks about a tree removal at their house and other errands. Keep track of what Pat…",
+   "llm.token_count.completion": 15,
+   "llm.token_count.prompt": 4680,
+   "llm.token_count.total": 4695,
+   "llm.token_count.prompt_details.cache_read": 4588,
+   "llm.token_count.completion_details.reasoning": 0,
+   "llm.output_messages.0.message.role": "assistant",
+   "llm.output_messages.0.message.contents.0.message_content.type": "text",
+   "llm.output_messages.0.message.contents.0.message_content.text": "Saved the key details and pending items to my profile.",
+   "llm.input_messages.0.message.role": "system",
+   "llm.input_messages.0.message.content": "You are Pat Rivera's personal assistant. Pat writes to you over several weeks about a tree removal at their house and other errands. Keep track of what Pat tells you; use your tools when they help. Re…",
+   "llm.model_name": "gpt-6.1-sol",
+   "input.mime_type": "application/json",
+   "input.value": "[{\"role\": \"user\", \"content\": \"[Harness: older history was summarized to save space. Below are the user's first request word for word, the summary, and your profile. Every earlier wake can still be found with history_search and read with history_read.]\\n\\n## The user's first request (word for word)\\n…",
+   "openinference.span.kind": "LLM",
+   "gen_ai.agent.name": "Orchestrator",
+   "psi.agent.kind": "main",
+   "psi.turn": "pre_compaction_save"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "turn",
+  "context": {
+   "trace_id": "0xa6233992b00a327c346d780f37c03a61",
+   "span_id": "0xcfd0206d99a7c665",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x5627e0ab75be7948",
+  "start_time": "2026-11-16T18:40:55.033402Z",
+  "end_time": "2026-11-16T18:40:58.489455Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "openinference.span.kind": "CHAIN",
+   "gen_ai.agent.name": "Orchestrator",
+   "psi.agent.kind": "main",
+   "psi.turn": "pre_compaction_save"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "Orchestrator",
+  "context": {
+   "trace_id": "0xa6233992b00a327c346d780f37c03a61",
+   "span_id": "0x5627e0ab75be7948",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0xccf3c17383be9e29",
+  "start_time": "2026-11-16T18:40:41.026767Z",
+  "end_time": "2026-11-16T18:40:58.491685Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "graph.node.id": "Orchestrator",
+   "openinference.span.kind": "AGENT",
+   "gen_ai.agent.name": "Orchestrator",
+   "psi.agent.kind": "main",
+   "psi.turn": "pre_compaction_save"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "Agent workflow",
+  "context": {
+   "trace_id": "0xa6233992b00a327c346d780f37c03a61",
+   "span_id": "0xccf3c17383be9e29",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0xdc5811ae65e6b646",
+  "start_time": "2026-11-16T18:40:41.023368Z",
+  "end_time": "2026-11-16T18:40:58.492052Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "openinference.span.kind": "CHAIN",
+   "gen_ai.agent.name": "Orchestrator",
+   "psi.agent.kind": "main",
+   "psi.turn": "pre_compaction_save"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "Agent workflow",
+  "context": {
+   "trace_id": "0xa6233992b00a327c346d780f37c03a61",
+   "span_id": "0xdc5811ae65e6b646",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": null,
+  "start_time": "2026-11-16T18:40:41.022453Z",
+  "end_time": "2026-11-16T18:40:58.492302Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "openinference.span.kind": "AGENT",
+   "gen_ai.agent.name": "Orchestrator",
+   "psi.agent.kind": "main",
+   "psi.turn": "pre_compaction_save"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "response",
+  "context": {
+   "trace_id": "0x201cb1fcbb3ac182fdb2be42c94b135b",
+   "span_id": "0x9fe4936f8e778187",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0xb4cfd2d881d0a929",
+  "start_time": "2026-11-16T18:40:58.499791Z",
+  "end_time": "2026-11-16T18:41:17.973473Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "output.mime_type": "application/json",
+   "output.value": "{\"id\":\"resp_03e3dc8a416b2e31006afb4e3acb708194a97f20d8effb60c5\",\"created_at\":1794854459.0,\"error\":null,\"incomplete_details\":null,\"instructions\":\"You are Pat Rivera's personal assistant. Pat writes to you over several weeks about a tree removal at their house and other errands. Keep track of what Pat…",
+   "llm.token_count.completion": 933,
+   "llm.token_count.prompt": 4535,
+   "llm.token_count.total": 5468,
+   "llm.token_count.prompt_details.cache_read": 4213,
+   "llm.token_count.completion_details.reasoning": 201,
+   "llm.output_messages.0.message.role": "assistant",
+   "llm.output_messages.0.message.contents.0.message_content.type": "text",
+   "llm.output_messages.0.message.contents.0.message_content.text": "1. The user's rules and preferences (word for word where they are stated).\n\"Here's today's inbox digest, nothing needs action unless I say so:\"\nInbox digests are informational; no action was taken on them.\n\n2. Deadlines and dates.\nHOA approval for Pat’s house tree work must be in by March 14, stated Mon Mar 2, 9:00 AM UTC. No approval receipt was reported through Tue Mar 3, 6:00 PM UTC.\n\n3. What was done: bookings, purchases, messages sent, changes made, each with its ids, amounts and who it involved.\nSaved profile facts about the HOA deadline, inbox no-action rule, Dana Whitfield’s sign-off, Oakline Tree Care’s price, city permit TR-58213, and arborist Lena Okafor.\nAt Pat’s requests on Mon Mar 2, 1:00 PM UTC and Tue Mar 3, 1:00 PM UTC, ran the flight search tool for Dana’s Dallas visit. Each search finished after 15 seconds and found 3 flights, without itinerary or price details.\nPat reported agreeing $2,350 with Oakline Tree Care for the whole tree-work job; no payment was reported.\nNo flights were booked or messages sent.\nOn Tue Mar 3, 6:00 PM UTC, acknowledged the informational inbox digest and took no action.\n\n4. What is pending: open questions, who owes a reply, what the assistant promised to do.\nHOA approval remains pending, due March 14.\nNo origin, travel dates, or other itinerary requirements were supplied for Dana’s Dallas visit; the searches supplied no actionable itinerary or price details.\nNo outstanding assistant promises or explicit requests awaiting action through this summary’s cutoff.\n\n5. Facts learned: people, places, prices, accounts and other details the assistant may need again.\nPat Rivera is arranging tree work at their house.\nNext-door neighbor Dana Whitfield signed off on the work by text, reported Mon Mar 2, 1:00 PM UTC.\nOakline Tree Care’s agreed total price is $2,350 for the whole job, reported Mon Mar 2, 6:00 PM UTC.\nThe city permit number is TR-58213, reported Tue Mar 3, 9:00 AM UTC.\nLena Okafor is the arborist who will be on site, reported Tue Mar 3, 1:00 PM UTC.\nDana’s visit involves travel to Dallas.\n\n6. Where to look things up: for details you leave out, say when they came up (the wake's time label) and words to search for, so they can be found with history_search and read in full with history_read.\nMon Mar 2, 9:00 AM UTC: \"HOA approval\" for the deadline and first inbox digest.\nMon Mar 2, 1:00 PM UTC: \"Dana Whitfield\" or \"flights to Dallas\" for the text sign-off and first search.\nMon Mar 2, 6:00 PM UTC: \"Oakline Tree Care\" or \"$2,350\" for the price agreement.\nTue Mar 3, 9:00 AM UTC: \"TR-58213\" for the permit.\nTue Mar 3, 1:00 PM UTC: \"Lena Okafor\" or \"flights to Dallas\" for the arborist and second search.\nTue Mar 3, 6:00 PM UTC: \"notice #3895\" or \"notice #9537\" for that informational inbox digest.",
+   "llm.input_messages.0.message.role": "system",
+   "llm.input_messages.0.message.content": "You are Pat Rivera's personal assistant. Pat writes to you over several weeks about a tree removal at their house and other errands. Keep track of what Pat tells you; use your tools when they help. Re…",
+   "llm.model_name": "gpt-6.1-sol",
+   "input.mime_type": "application/json",
+   "input.value": "[{\"role\": \"user\", \"content\": \"[Harness: older history was summarized to save space. Below are the user's first request word for word, the summary, and your profile. Every earlier wake can still be found with history_search and read with history_read.]\\n\\n## The user's first request (word for word)\\n…",
+   "openinference.span.kind": "LLM",
+   "gen_ai.agent.name": "Orchestrator",
+   "psi.agent.kind": "harness",
+   "psi.turn": "compaction_summary"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "turn",
+  "context": {
+   "trace_id": "0x201cb1fcbb3ac182fdb2be42c94b135b",
+   "span_id": "0xb4cfd2d881d0a929",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0xac9a07466a81bad8",
+  "start_time": "2026-11-16T18:40:58.497165Z",
+  "end_time": "2026-11-16T18:41:17.980376Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "openinference.span.kind": "CHAIN",
+   "gen_ai.agent.name": "Orchestrator",
+   "psi.agent.kind": "harness",
+   "psi.turn": "compaction_summary"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "Orchestrator",
+  "context": {
+   "trace_id": "0x201cb1fcbb3ac182fdb2be42c94b135b",
+   "span_id": "0xac9a07466a81bad8",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x1ed249ad9d72f960",
+  "start_time": "2026-11-16T18:40:58.496574Z",
+  "end_time": "2026-11-16T18:41:17.982364Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "graph.node.id": "Orchestrator",
+   "openinference.span.kind": "AGENT",
+   "gen_ai.agent.name": "Orchestrator",
+   "psi.agent.kind": "harness",
+   "psi.turn": "compaction_summary"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "Agent workflow",
+  "context": {
+   "trace_id": "0x201cb1fcbb3ac182fdb2be42c94b135b",
+   "span_id": "0x1ed249ad9d72f960",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x9aeb65e7623baaca",
+  "start_time": "2026-11-16T18:40:58.494233Z",
+  "end_time": "2026-11-16T18:41:17.982744Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "openinference.span.kind": "CHAIN",
+   "gen_ai.agent.name": "Orchestrator",
+   "psi.agent.kind": "harness",
+   "psi.turn": "compaction_summary"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "Agent workflow",
+  "context": {
+   "trace_id": "0x201cb1fcbb3ac182fdb2be42c94b135b",
+   "span_id": "0x9aeb65e7623baaca",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": null,
+  "start_time": "2026-11-16T18:40:58.493477Z",
+  "end_time": "2026-11-16T18:41:17.982981Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "openinference.span.kind": "AGENT",
+   "gen_ai.agent.name": "Orchestrator",
+   "psi.agent.kind": "harness",
+   "psi.turn": "compaction_summary"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "mcp_tools",
+  "context": {
+   "trace_id": "0x18ed8ec243adad245ff89fd63af62b34",
+   "span_id": "0xbe1ccf14abae9dff",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x55cf651279da039e",
+  "start_time": "2026-11-16T18:41:18.051912Z",
+  "end_time": "2026-11-16T18:41:18.067983Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "output.value": "[\"slow_search\", \"list_inbox\"]",
+   "output.mime_type": "application/json",
+   "openinference.span.kind": "CHAIN",
+   "gen_ai.agent.name": "Orchestrator",
+   "psi.agent.kind": "main"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "response",
+  "context": {
+   "trace_id": "0x18ed8ec243adad245ff89fd63af62b34",
+   "span_id": "0x963f93fcd319d2b3",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x9dca4397f4405c83",
+  "start_time": "2026-11-16T18:41:18.072463Z",
+  "end_time": "2026-11-16T18:41:20.562383Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "output.mime_type": "application/json",
+   "output.value": "{\"id\":\"resp_03e3dc8a416b2e31006afb4e4e67108194bf35b6255604b08c\",\"created_at\":1794854478.0,\"error\":null,\"incomplete_details\":null,\"instructions\":\"You are Pat Rivera's personal assistant. Pat writes to you over several weeks about a tree removal at their house and other errands. Keep track of what Pat…",
+   "llm.token_count.completion": 14,
+   "llm.token_count.prompt": 4191,
+   "llm.token_count.total": 4205,
+   "llm.token_count.prompt_details.cache_read": 0,
+   "llm.token_count.completion_details.reasoning": 0,
+   "llm.output_messages.0.message.role": "assistant",
+   "llm.output_messages.0.message.contents.0.message_content.type": "text",
+   "llm.output_messages.0.message.contents.0.message_content.text": "Received—no action taken on the inbox digest.",
+   "llm.input_messages.0.message.role": "system",
+   "llm.input_messages.0.message.content": "You are Pat Rivera's personal assistant. Pat writes to you over several weeks about a tree removal at their house and other errands. Keep track of what Pat tells you; use your tools when they help. Re…",
+   "llm.model_name": "gpt-6.1-sol",
+   "input.mime_type": "application/json",
+   "input.value": "[{\"role\": \"user\", \"content\": \"[Harness: older history was summarized to save space. Below are the user's first request word for word, the summary, and your profile. Every earlier wake can still be found with history_search and read with history_read.]\\n\\n## The user's first request (word for word)\\n…",
+   "openinference.span.kind": "LLM",
+   "gen_ai.agent.name": "Orchestrator",
+   "psi.agent.kind": "main"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "turn",
+  "context": {
+   "trace_id": "0x18ed8ec243adad245ff89fd63af62b34",
+   "span_id": "0x9dca4397f4405c83",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x355791a12f6a766f",
+  "start_time": "2026-11-16T18:41:18.070268Z",
+  "end_time": "2026-11-16T18:41:20.568190Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "openinference.span.kind": "CHAIN",
+   "gen_ai.agent.name": "Orchestrator",
+   "psi.agent.kind": "main"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "Orchestrator",
+  "context": {
+   "trace_id": "0x18ed8ec243adad245ff89fd63af62b34",
+   "span_id": "0x355791a12f6a766f",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x55cf651279da039e",
+  "start_time": "2026-11-16T18:41:18.069555Z",
+  "end_time": "2026-11-16T18:41:20.569811Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "graph.node.id": "Orchestrator",
+   "openinference.span.kind": "AGENT",
+   "gen_ai.agent.name": "Orchestrator",
+   "psi.agent.kind": "main"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "Agent workflow",
+  "context": {
+   "trace_id": "0x18ed8ec243adad245ff89fd63af62b34",
+   "span_id": "0x55cf651279da039e",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x649f4512f6489ed0",
+  "start_time": "2026-11-16T18:41:18.049837Z",
+  "end_time": "2026-11-16T18:41:20.570286Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "openinference.span.kind": "CHAIN",
+   "gen_ai.agent.name": "Orchestrator",
+   "psi.agent.kind": "main"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "Agent workflow",
+  "context": {
+   "trace_id": "0x18ed8ec243adad245ff89fd63af62b34",
+   "span_id": "0x649f4512f6489ed0",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": null,
+  "start_time": "2026-11-16T18:41:18.049208Z",
+  "end_time": "2026-11-16T18:41:20.570625Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "openinference.span.kind": "AGENT",
+   "gen_ai.agent.name": "Orchestrator",
+   "psi.agent.kind": "main"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "psi.usage",
+  "context": {
+   "trace_id": "0x18ed8ec243adad245ff89fd63af62b34",
+   "span_id": "0x756040e0b634d566",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": null,
+  "start_time": "2026-11-16T18:41:20.570625Z",
+  "end_time": "2026-11-16T18:41:20.570625Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "gen_ai.operation.name": "psi.usage",
+   "psi.usage.calls": 5,
+   "psi.usage.prompt": 22308,
+   "psi.usage.completion": 1098,
+   "psi.usage.cache_read": 17322,
+   "psi.usage.cache_write": 4971,
+   "psi.usage.reasoning": 249,
+   "psi.usage.thinking_resets": 0,
+   "psi.usage.compactions": 1,
+   "psi.usage.compaction_waited_ms": 33917,
+   "psi.config.model": "azure_ai/gpt-6.1-sol",
+   "psi.config.effort": "high",
+   "psi.config.reasoning": "gpt:high",
+   "psi.config.role": "psi_agent",
+   "psi.config.mcp_tool_timeout_s": 60.0,
+   "gen_ai.agent.name": "harness",
+   "psi.agent.kind": "harness",
+   "psi.config.memory": true,
+   "psi.config.compaction": true,
+   "psi.config.compact_at_chars": 15000,
+   "psi.config.compact_keep_wakes": 3,
+   "psi.usage.history_chars": 20113,
+   "psi.usage.wakes": 10,
+   "psi.usage.profile_facts": 8
+  },
+  "events": [],
+  "links": []
+ }
+]

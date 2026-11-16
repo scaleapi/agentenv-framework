@@ -3,14 +3,19 @@ stored timeline and each wake's trajectory: one file per wake, one event per lin
 
 - ``wakes/wake_NNN.jsonl``: what woke the assistant (``woke``, the user's messages in full ``user_message``, the full
   text it was sent ``wake_input``), then its turn's tool calls with their inputs and results (``tool_call``), its
-  own text (``assistant_text``) and its thinking when the trajectory recorded it (``assistant_thinking``), then the rest of the wake in time order (``app_change`` for every change,
-  ``turn_end`` with its closing reply, ``message_to_user``, a ``nudge`` and its calls, the user's reads). A turn's
-  trajectory is matched to its wake by the timeline's ``trajectory_url``; one that's missing is a line saying so.
+  own text (``assistant_text``) and its thinking when the trajectory recorded it (``assistant_thinking``), what the
+  harness put in the turn (``harness_note``: a compaction summary, a message it sent the assistant), then the rest
+  of the wake in time order (``app_change`` for every change, ``turn_end`` with its closing reply,
+  ``message_to_user``, a ``nudge`` and its calls, the user's reads). A turn's
+  trajectory is matched to its wake by the timeline's ``trajectory_url``; one that's missing is a line saying so. A
+  helper agent's lines carry ``subagent``; those of a turn the harness asked for carry ``step`` (the PSI harness's
+  ``pre_compaction_save``, where only its memory and history tools work).
 - ``wakes/results/``: what is too long for a line to be read whole (a tool's input or result, a long message), named
   by wake and call (or line); the line keeps a preview. Lines longer than LINE_CHARS are split there, nothing dropped.
 - ``events.jsonl``: every line of every wake, and the run's start and end. ``triggers.jsonl``: every trigger firing.
 - ``index.md``: a block per wake with its time, what woke it, the user's message, its write actions (tool and key
-  arguments) and messages with the ``file:line`` they're at, and its errors.
+  arguments; never the harness's own memory and history tools) and messages with the ``file:line`` they're at, and
+  its errors.
 """
 
 from __future__ import annotations
@@ -46,8 +51,12 @@ _DROPPED = frozenset({*BULKY_EVENT_FIELDS, "real_time", "real_elapsed_s", "user_
 _READS = re.compile(r"(?:^|_)(get|list|search|read|find|whoami|snapshot|view|query|lookup|fetch|navigate|wait|hover|"
                     r"resize|tabs|screenshot|console|network|time)(?:_|$)")
 _NOT_ACTIONS = frozenset({"message_user", "stay_quiet"})
+# The PSI harness's own tools (memory_view, memory_add, memory_replace, memory_remove, history_search, history_read):
+# its notes and its log of past wakes, which touch nothing in the apps, so they are never actions.
+_INTERNAL = re.compile(r"^(?:memory|history)_")
 # A line's fields that say what and where it is; ``fit`` moves only the others.
-_IDENTITY = frozenset({"event", "wake", "at", "call", "turn", "tool", "kind", "state", "outcome", "phase", "by"})
+_IDENTITY = frozenset({"event", "wake", "at", "call", "turn", "tool", "kind", "state", "outcome", "phase", "by",
+                       "step", "subagent"})
 
 
 @dataclass(frozen=True)
@@ -105,9 +114,14 @@ def _short_tool(tool: str) -> str:
     return tool.rsplit("__", 1)[-1]
 
 
+def is_internal_tool(tool: str) -> bool:
+    """Whether ``tool`` is one of the harness's own (its notes and its log of past wakes), not an app's."""
+    return bool(_INTERNAL.match(_short_tool(tool)))
+
+
 def is_write_action(tool: str) -> bool:
     name = _short_tool(tool)
-    return name not in _NOT_ACTIONS and not _READS.search(name.lower())
+    return name not in _NOT_ACTIONS and not is_internal_tool(name) and not _READS.search(name.lower())
 
 
 def _key_args(tool_input: Any) -> str:
@@ -135,6 +149,7 @@ class _Stager:
         self.not_compacted: list[dict] = []
         self.unrecorded_changes = 0
         self.by_changes = False  # whether the run recorded app changes, so write actions are read from them
+        self.internal_calls = 0  # calls of the harness's own tools (``is_internal_tool``)
 
     def wake(self, n: Optional[int]) -> _Wake:
         n = n or self.current
@@ -206,15 +221,18 @@ class _Stager:
             kind = e["type"]
             if kind == "tool_call":
                 w.call_count += 1
+                self.internal_calls += is_internal_tool(e["tool"])
                 line, written = self.call(w, e, which)
                 lines.append(line)
                 side += written
             elif kind == "text":
-                lines.append(_line("assistant_text", w.n, turn=which, text=e["text"], subagent=e.get("subagent")))
+                lines.append(_line("assistant_text", w.n, turn=which, step=e.get("step"), text=e["text"],
+                                   subagent=e.get("subagent")))
             elif kind == "thinking":
-                lines.append(_line("assistant_thinking", w.n, turn=which, text=e["text"], subagent=e.get("subagent")))
+                lines.append(_line("assistant_thinking", w.n, turn=which, step=e.get("step"), text=e["text"],
+                                   subagent=e.get("subagent")))
             elif kind == "note":
-                lines.append(_line("harness_note", w.n, turn=which, text=e["text"]))
+                lines.append(_line("harness_note", w.n, turn=which, step=e.get("step"), text=e["text"]))
             elif kind == "raw":
                 lines.append(_line("trajectory_item", w.n, turn=which, item=e["event"]))
         staged = sum(len(_dumps(line).encode()) for line in lines) + side
@@ -229,8 +247,8 @@ class _Stager:
         """The call's line; while it is longer than LINE_CHARS its longer of input and result goes to a file."""
         name = re.sub(r"[^A-Za-z0-9_.-]", "_", _short_tool(e["tool"]))[:60]
         stem = f"{RESULTS_DIR}/wake_{w.n:0{self.width}d}_call_{w.call_count:03d}_{name}"
-        line = _line("tool_call", w.n, call=w.call_count, turn=which, tool=e["tool"], subagent=e.get("subagent"),
-                     input=e.get("input"), error=e.get("error"))
+        line = _line("tool_call", w.n, call=w.call_count, turn=which, step=e.get("step"), tool=e["tool"],
+                     subagent=e.get("subagent"), input=e.get("input"), error=e.get("error"))
         if "result" in e:
             line["result"] = e["result"]
         else:
@@ -332,7 +350,7 @@ def _index_block(w: _Wake, path: str, lines: list[dict], by_changes: bool, run_c
     for i, line in enumerate(lines, 1):
         event = line["event"]
         tool = line.get("tool") or ""
-        writes = _short_tool(tool) in changing if by_changes else is_write_action(tool)
+        writes = (_short_tool(tool) in changing if by_changes else is_write_action(tool)) and not is_internal_tool(tool)
         guessed = by_changes and not writes and _short_tool(tool) not in run_changing and is_write_action(tool)
         if event == "tool_call" and (writes or guessed):
             action = _cut(f"{_short_tool(tool)} {_key_args(line.get('input', line.get('input_preview')))}", ACTION_CHARS)
@@ -390,6 +408,9 @@ def _index(stager: _Stager, blocks: list[str], start: list[dict], end: list[dict
              "nothing." if stager.by_changes else
              "Actions below are the assistant's tool calls whose tool name has no read word (get, list, search, …): "
              "this run's apps kept no change log, so this is a guess from the name."]
+    if stager.internal_calls:
+        lines[-1] += (" Calls of the harness's own memory_* and history_* tools (the assistant's notes and its log of "
+                      "past wakes) touch no app and are never actions; they are in the wake files.")
     gaps = sorted(set(stager.missing) | set(stager.unreadable))
     if gaps:
         lines += ["", "Wakes whose tool calls are not here (their trajectory is missing or unreadable): "
@@ -449,13 +470,17 @@ _WAKE_LOOP = re.compile(r"\bfor\s+(\w+)\s+in\s+([\d\s]+?)\s*;")
 # A glob or directory walk that takes every wake file at once.
 _ALL_WAKES = re.compile(r"wake_\*|wakes/\*|os\.walk|rglob|listdir")
 _WAKE_FIELD = re.compile(r'"wake":\s*(\d+)')
+# A call's input as a staged line holds it: one with a ``wake`` argument (the PSI harness's history_read) names a wake
+# the agent read back, not one the judge opened.
+_CALL_INPUT = re.compile(r'"input":\s*\{[^{}]*\}')
 _HELPER_TOOLS = frozenset({"Agent", "Task", "Workflow"})
 
 
 def judge_reads(judge: TurnEvents) -> dict:
     """What a judge's trajectory shows it read of the staged run, whichever tool it read with (Read, Grep, or Bash
     running grep, sed or python): the wakes its calls named (a file, a result file, a shell loop's numbers) or whose
-    events came back in a result (``"wake": N``; a result of reading index.md, which names every wake, doesn't count),
+    events came back in a result (``"wake": N``; a result of reading index.md, which names every wake, doesn't count,
+    nor does a staged call's input such as history_read's ``{"wake": N}``),
     whether one call took every wake file at once (``read_all_wakes``), whether it read index.md or searched
     events.jsonl / triggers.jsonl, and any helper agent it started."""
     calls = [e for e in judge.events if e["type"] == "tool_call"]
@@ -472,7 +497,8 @@ def judge_reads(judge: TurnEvents) -> dict:
             # A text result (Grep's lines, several events.jsonl lines) is searched as it is: serializing it would
             # escape its quotes.
             result = call.get("result")
-            wakes |= {int(n) for n in _WAKE_FIELD.findall(result if isinstance(result, str) else _dumps(result))}
+            result = _CALL_INPUT.sub("", result if isinstance(result, str) else _dumps(result))
+            wakes |= {int(n) for n in _WAKE_FIELD.findall(result)}
     text = " ".join(_dumps(c.get("input")) for c in calls)
     return {"tool_calls": len(calls), "wakes_opened": sorted(wakes), "read_all_wakes": every,
             "read_index": INDEX_FILE in text, "searched_events": EVENTS_FILE in text,
