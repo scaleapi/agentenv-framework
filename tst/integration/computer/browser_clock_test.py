@@ -25,7 +25,7 @@ from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
 from agent_env.task_step.task_steps.sync_env_clock import SyncEnvClockTaskStep
-from tst.integration.computer.browser_computer_test import _browser_op
+from tst.integration.computer.browser_computer_test import _browser_op, _cdp, _cdp_agent_loads
 from tst.integration.computer.browser_multi_env_test import MULTI_CHROMIUM, shop  # noqa: F401 - shop is a fixture
 from tst.integration.computer.computer_clock_test import _gateway, _iso, _now, _universe_now, _write
 from tst.integration.computer.conftest import computer_container
@@ -40,7 +40,6 @@ CLOCK_PAGE = "data:text/html," + urllib.parse.quote(
 MAX_SKEW_S = 3.0
 LIVE = "https://github.com/"
 SHOP = "https://shop.test/api/health"
-LOAD_S = 90
 
 
 @pytest.fixture(scope="module")
@@ -77,16 +76,19 @@ async def _skew(deployed, browser) -> float:
     return page - (_universe_now(state) + rate * (read - real_then))
 
 
-async def _loads(browser: DeployedEnv, url: str, title: str) -> object:
-    """True once a tab opened at ``url`` shows ``title`` in its own, else the tabs last listed."""
-    await _browser_op(browser, "tabs/open", {"url": url})
-    deadline, tabs = time.monotonic() + LOAD_S, []
-    while time.monotonic() < deadline:
-        tabs = (await _browser_op(browser, "tabs/list", {}))["tabs"]
-        if any(tab["url"].startswith(url) and title in (tab.get("title") or "") for tab in tabs):
-            return True
-        await asyncio.sleep(1)
-    return tabs
+async def _load_all(browser: DeployedEnv, pages: dict[str, str]) -> dict[str, object]:
+    """Each of ``pages`` loaded at once over CDP, each in a tab of its own: the seconds it took when it loaded with no
+    error and shows its word, case and all, in its title or text, else what the browser showed."""
+    cdp = (await _cdp(browser, "clock"))["ws_url"]
+
+    async def load(url: str, word: str) -> object:
+        started = time.monotonic()
+        seen = (await _cdp_agent_loads(cdp, [url]))[url]
+        if not seen["error"] and seen.get("ready") == "complete" and word in f"{seen.get('title')} {seen.get('text')}":
+            return round(time.monotonic() - started, 1)
+        return f"not loaded: {seen['error']!r} {seen.get('title')!r}"
+
+    return dict(zip(pages, await asyncio.gather(*(load(url, word) for url, word in pages.items()))))
 
 
 def _egress_rows(sandbox_id: str) -> list[dict]:
@@ -115,7 +117,7 @@ async def test_a_multi_envs_browser_computer_shows_the_universe_through_a_jump_a
                                        virtual_time=_iso(universe)).execute(context)
             synced = context.metadata["clock_configurations"][-1]["synced"]
             skews = {"armed two years back": await _skew(deployed, browser)}
-            loaded = {"synthetic": await _loads(browser, SHOP, ""), "live": await _loads(browser, LIVE, "GitHub")}
+            loaded = await _load_all(browser, {SHOP: "{", LIVE: "GitHub"})
             # Read before the reset, which boots the browser a fresh container.
             live = [row for row in _egress_rows(browser.sandbox_id) if row.get("host") == "github.com"]
 
@@ -134,7 +136,7 @@ async def test_a_multi_envs_browser_computer_shows_the_universe_through_a_jump_a
                  for entry in synced if "follower" in (entry.get("result") or {})]
     assert followers == [("chromium-driver", "chromium", True)], synced
     assert all(abs(skew) < MAX_SKEW_S for skew in skews.values()), skews
-    assert loaded == {"synthetic": True, "live": True}, loaded
+    assert all(isinstance(seconds, float) for seconds in loaded.values()), loaded
     # Two years back, github.com's certificate isn't valid yet, so the egress proxy hands the browser one that is.
     assert any(row.get("mode") == "intercept" and row.get("decision") == "outside" for row in live), live[-6:]
     assert not report.failed
@@ -149,13 +151,13 @@ async def test_alone_the_browser_computer_keeps_real_time_and_its_live_sites_pas
         try:
             read = time.time()
             page = await _page_now(deployed)
-            loaded = await _loads(deployed, "https://example.com/", "Example Domain")
+            loaded = await _load_all(deployed, {"https://example.com/": "Example Domain"})
             rows = [row for row in _egress_rows(deployed.sandbox_id) if row.get("host") == "example.com"]
         finally:
             report = await teardown_run(context)
 
     assert abs(page - read) < MAX_SKEW_S, (page, read)
-    assert loaded is True, loaded
+    assert all(isinstance(seconds, float) for seconds in loaded.values()), loaded
     # Unarmed, the egress proxy relays the browser's TLS to the site untouched.
     assert rows and all((row["mode"], row["decision"]) == ("splice", "real") for row in rows), rows
     assert not report.failed
