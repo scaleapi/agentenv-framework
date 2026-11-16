@@ -1,0 +1,1 @@
+agentenv-framework-protocol[computer,x11]>=0.1.469
