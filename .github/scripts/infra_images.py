@@ -25,8 +25,7 @@ from pathlib import Path
 
 from agent_env.env.bootstrap import PLAYWRIGHT_MCP_DOCKERFILE, PUBLISHED_IMAGES
 from agent_env.env.published_images import (
-    BUNDLE_IMAGES, COMPUTERS_REPOSITORY, DISK_IMAGES, REGISTRY, PublishedImage, released_computers,
-    write_release_digests)
+    BUNDLE_IMAGES, DISK_IMAGES, REGISTRY, PublishedImage, released_computers, write_release_digests)
 from agent_env.store.image_store.oci_registry_credentials import RegistryAuth
 from agent_env.store.image_store.registry_api import NoSuchImageError, RegistryRefusedError, pin_digest
 
@@ -100,7 +99,8 @@ def _warn_unless_public(computers: list[dict]) -> None:
     which a new package's first push leaves it as: GHCR makes a package private until its admin makes it public, and an
     install that can't pull it builds the image, or composes the computer, instead."""
     refs = [(image.name, image.ref()) for image in PUBLISHED_IMAGES]
-    refs += [(COMPUTERS_REPOSITORY.rpartition("/")[2], computer["index"]) for computer in computers]
+    refs += [(computer["index"].partition("@")[0].rpartition(":")[0].rpartition("/")[2], computer["index"])
+             for computer in computers]
     for name, ref in refs:
         try:
             pin_digest(ref, None)

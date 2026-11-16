@@ -205,14 +205,14 @@ def test_a_disk_forms_tag_is_of_its_boot_recipe_its_bases_sources_and_the_disk_t
 
 
 def _computer(arch: str, digest: str) -> dict:
-    return {"key": "sha256:" + digest[-1] * 64, "image": f"{published_images.COMPUTERS_REPOSITORY}@{digest}",
+    return {"key": "sha256:" + digest[-1] * 64, "image": f"{REGISTRY}/agentenv-chromium@{digest}",
             "lock": {"inputs": "sha256:" + digest[-1] * 63 + "f", "arch": arch, "apt": [], "wheels": {}, "downloads": {}}}
 
 
 def test_the_record_of_released_computers_finds_each_lock_image_and_index_and_an_install_without_one_finds_none(
         tmp_path):
     arches = {"amd64": _computer("amd64", "sha256:" + "1" * 64), "arm64": _computer("arm64", "sha256:" + "2" * 64)}
-    index = f"{published_images.COMPUTERS_REPOSITORY}:index-{'a' * 64}@sha256:{'b' * 64}"
+    index = f"{REGISTRY}/agentenv-chromium:index-{'a' * 64}@sha256:{'b' * 64}"
     path = tmp_path / "published_images.json"
     write_release_digests({}, path, [{"env": "@local/agentenv-framework/browsers/chromium", "form": "container",
                                       "index": index, "arches": arches}])
@@ -227,7 +227,7 @@ def test_the_record_of_released_computers_finds_each_lock_image_and_index_and_an
 
 
 def test_a_record_of_released_computers_may_name_a_registry_by_its_port(tmp_path):
-    repository = "localhost:5001/agentenv-computers"
+    repository = "localhost:5001/agentenv-chromium"
     arches = {"amd64": {**_computer("amd64", "sha256:" + "1" * 64), "image": f"{repository}@sha256:{'1' * 64}"}}
     path = tmp_path / "published_images.json"
     write_release_digests({}, path, [{"env": "chromium", "form": "container", "arches": arches,
@@ -238,9 +238,9 @@ def test_a_record_of_released_computers_may_name_a_registry_by_its_port(tmp_path
 
 @pytest.mark.parametrize("computers", [
     [{"env": "chromium", "form": "disk", "index": "x", "arches": {}}],
-    [{"env": "chromium", "form": "container", "index": f"ghcr.io/scaleapi/agentenv-computers:i@sha256:{'b' * 64}",
+    [{"env": "chromium", "form": "container", "index": f"ghcr.io/scaleapi/agentenv-chromium:i@sha256:{'b' * 64}",
       "arches": {"amd64": {**_computer("amd64", "sha256:" + "1" * 64), "image": "ghcr.io/x:latest"}}}],
-    [{"env": "chromium", "form": "container", "index": f"ghcr.io/scaleapi/agentenv-computers:i@sha256:{'b' * 64}",
+    [{"env": "chromium", "form": "container", "index": f"ghcr.io/scaleapi/agentenv-chromium:i@sha256:{'b' * 64}",
       "arches": {"arm64": _computer("amd64", "sha256:" + "1" * 64)}}],
     "not a list",
 ], ids=["not-a-container", "an-image-by-tag", "another-arch-lock", "not-a-list"])

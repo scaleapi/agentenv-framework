@@ -824,7 +824,7 @@ def test_a_computer_image_mirror_that_cant_be_read_leaves_the_image_to_be_built(
     assert f"the computer image mirror {MIRROR} couldn't give" in caplog.text
 
 
-RELEASED = "ghcr.io/scaleapi/agentenv-computers"
+RELEASED = "ghcr.io/scaleapi/agentenv-chromium"
 
 
 def _released(env, docker, tmp_path, monkeypatch, arches=("amd64", "arm64"), key=None, digest=None):

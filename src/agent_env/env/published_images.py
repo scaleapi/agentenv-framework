@@ -2,8 +2,9 @@
 disk forms, for linux/amd64 and linux/arm64: one per Dockerfile, built from the Dockerfile's folder. Each is tagged by
 its build context's content, and an image built over other published images by theirs too, so an install holding the
 same sources finds the image built from them; a release wheel also records the digest its release published under each
-tag. A release also publishes the computer apps it ships composed, chromium's, in ``COMPUTERS_REPOSITORY``, and its
-wheel records each pair's key, image and lock (``released_computers``), so a compose of the same inputs pulls it."""
+tag. A release also publishes the computer apps it ships composed, each in a package named for it, chromium's in
+``agentenv-chromium``, and its wheel records each pair's key, image and lock (``released_computers``), so a compose of
+the same inputs pulls it."""
 
 from __future__ import annotations
 
@@ -22,8 +23,6 @@ from agent_env.utils.docker.context import BuildContext
 logger = logging.getLogger(__name__)
 
 REGISTRY = "ghcr.io/scaleapi"
-#: Where a release publishes the computer apps it ships, composed: one index each, a platform per arch.
-COMPUTERS_REPOSITORY = f"{REGISTRY}/agentenv-computers"
 # The release workflow writes this into the wheels it publishes; a checkout, or a wheel built elsewhere, has none.
 RELEASE_FILE = Path(__file__).with_name("published_images.json")
 _DIGEST = re.compile(r"^sha256:[a-f0-9]{64}$")
@@ -172,9 +171,9 @@ def write_release_digests(digests: Mapping[str, str], path: Path = RELEASE_FILE,
 
 def released_computers(path: Path | None = None) -> list[dict]:
     """The computer apps the release published composed, as its wheel records them: each one's installed env id, its
-    form, its index in ``COMPUTERS_REPOSITORY``, and for each arch, the key it was composed under, its image there by
-    digest and the lock it was composed from. Empty when the install records none. Raises ValueError when the record of
-    them isn't such a list. ``path`` is the record, by default the one the install carries."""
+    form, its index in the package it's published in, and for each arch, the key it was composed under, its image
+    there by digest and the lock it was composed from. Empty when the install records none. Raises ValueError when
+    the record of them isn't such a list. ``path`` is the record, by default the one the install carries."""
     path = path or RELEASE_FILE
     if not path.is_file():
         return []

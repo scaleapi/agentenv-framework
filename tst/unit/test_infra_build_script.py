@@ -15,8 +15,7 @@ from pathlib import Path
 import pytest
 
 from agent_env.env import bootstrap
-from agent_env.env.published_images import (
-    COMPUTERS_REPOSITORY, DISK_IMAGES, REGISTRY, released_computers, write_release_digests)
+from agent_env.env.published_images import DISK_IMAGES, REGISTRY, released_computers, write_release_digests
 from tst.util.scripts import SCRIPTS, load_script
 
 REPO = SCRIPTS.parents[1]
@@ -290,10 +289,11 @@ def test_verify_record_refuses_an_image_recorded_twice(script, monkeypatch, tmp_
 
 
 CHROMIUM = "@local/agentenv-framework/browsers/chromium"
+CHROMIUM_REPOSITORY = f"{REGISTRY}/agentenv-chromium"
 _AMD64, _ARM64, _ARM64_COMPOSED, _INDEX = ("sha256:" + c * 64 for c in "1234")
 _LOCAL = "localhost:5000/agentenv-computers"
-_IMAGES = {"amd64": f"{COMPUTERS_REPOSITORY}@{_AMD64}", "arm64": f"{COMPUTERS_REPOSITORY}@{_ARM64}"}
-_COMPUTER_INDEX = f"{COMPUTERS_REPOSITORY}:index-" + hashlib.sha256(
+_IMAGES = {"amd64": f"{CHROMIUM_REPOSITORY}@{_AMD64}", "arm64": f"{CHROMIUM_REPOSITORY}@{_ARM64}"}
+_COMPUTER_INDEX = f"{CHROMIUM_REPOSITORY}:index-" + hashlib.sha256(
     ",".join(_IMAGES[arch] for arch in ("amd64", "arm64")).encode()).hexdigest()
 
 
@@ -314,7 +314,7 @@ def _composed(folder: Path, changes: dict | None = None, arches=("amd64", "arm64
 
 def _computer_registry(served: dict[str, str], created: list, children: set[str] | None = None):
     """Docker as the registries answer: ``served`` as ``_docker`` serves it, the local registry's composed images, and
-    the agentenv-computers index, served once created, of ``children``, by default the two images it was made of."""
+    the agentenv-chromium index, served once created, of ``children``, by default the two images it was made of."""
     published = _docker(served)
     raws = {f"{_LOCAL}@{_AMD64}": {"mediaType": "application/vnd.oci.image.manifest.v1+json"},
             f"{_LOCAL}@{_ARM64_COMPOSED}": {"mediaType": "application/vnd.oci.image.index.v1+json", "manifests": [
@@ -420,7 +420,14 @@ def test_verify_record_refuses_a_composed_computer_recorded_in_another_repositor
 
     assert _run(script, monkeypatch, "verify-record", str(_computers_record(tmp_path, arches))) == 1
 
-    assert f"{CHROMIUM}'s arches aren't ['amd64', 'arm64'], each a key, an image by digest in" in capsys.readouterr().out
+    assert (f"{CHROMIUM}'s arches aren't ['amd64', 'arm64'], each a key, an image by digest in {CHROMIUM_REPOSITORY}"
+            in capsys.readouterr().out)
+
+
+def test_each_computer_app_a_release_composes_is_published_in_a_package_named_for_it(script):
+    composing = load_script("release_computers.py")
+
+    assert script.COMPUTERS == {env: f"agentenv-{alias}" for alias, env in composing.APPS.items()}
 
 
 @pytest.mark.parametrize("name, expected", [

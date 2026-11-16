@@ -108,8 +108,8 @@ def test_write_records_the_digest_served_under_every_tag(script, monkeypatch, tm
 def test_write_records_the_composed_computers_it_is_handed_beside_the_images(script, monkeypatch, tmp_path):
     _registry(script, monkeypatch, {})
     computers = [{"env": "@local/agentenv-framework/browsers/chromium", "form": "container",
-                  "index": f"ghcr.io/scaleapi/agentenv-computers:index-{'a' * 64}@sha256:{'b' * 64}", "arches": {
-                      arch: {"key": "sha256:" + "c" * 64, "image": f"ghcr.io/scaleapi/agentenv-computers@sha256:{c * 64}",
+                  "index": f"ghcr.io/scaleapi/agentenv-chromium:index-{'a' * 64}@sha256:{'b' * 64}", "arches": {
+                      arch: {"key": "sha256:" + "c" * 64, "image": f"ghcr.io/scaleapi/agentenv-chromium@sha256:{c * 64}",
                              "lock": {"inputs": "sha256:" + "d" * 64, "arch": arch}}
                       for arch, c in (("amd64", "1"), ("arm64", "2"))}}]
     handed, path = tmp_path / "computers.json", tmp_path / "published_images.json"

@@ -15,9 +15,9 @@ build of NAME, runs: a disk form boots in the QEMU launcher image ``--launcher``
 supervisord.conf declares runs. ``publish MISSING`` signs in to GHCR and tags the two platform builds of each entry of
 MISSING, a JSON list, as one multi-platform image under its tag, once the entry is checked, unless the registry has
 that tag. ``publish-computers FOLDER`` checks the computer apps FOLDER's amd64.json and arm64.json say were composed
-(``release_computers.py compose``), signs in to GHCR, joins each app's two images into one index in
-``COMPUTERS_REPOSITORY`` from the local registry they were composed into, keeping their digests, and writes their record
-as FOLDER/computers.json. ``verify-record PATH`` fails unless PATH records each image agent-env ships once, with the
+(``release_computers.py compose``), signs in to GHCR, joins each app's two images into one index in its own package
+(``COMPUTERS``) from the local registry they were composed into, keeping their digests, and writes their record as
+FOLDER/computers.json. ``verify-record PATH`` fails unless PATH records each image agent-env ships once, with the
 digest the registry serves under its tag now, and each computer app it records once, its index served as recorded.
 ``retry COMMAND...`` runs COMMAND, again while a registry rate-limits it or PyPI doesn't serve yet the
 agentenv-framework-protocol an agent image's build installs.
@@ -70,15 +70,12 @@ IMAGES = {
 # Each disk form's build args, by the images agent-env ships that they name; its SIZE_GB is its base's [forms.disk]
 # min_disk_gb, read from the artifact.toml beside the base's Dockerfile.
 DISK_ARGS = {"agentenv-ubuntu-24.04-disk": {"ROOTFS": "agentenv-ubuntu-24.04", "TOOLS": "agentenv-disk-tools"}}
-# Each computer app a release publishes composed, by its installed env id (``release_computers.py``), into one
-# repository, an index of each one's arches.
-COMPUTERS = ("@local/agentenv-framework/browsers/chromium",)
-COMPUTERS_REPOSITORY = f"{REGISTRY}/agentenv-computers"
+# Each computer app a release publishes composed, by its installed env id (``release_computers.py``), and the package
+# it's published in, named for it: an index of its arches.
+COMPUTERS = {"@local/agentenv-framework/browsers/chromium": "agentenv-chromium"}
 COMPUTER_ARCHES = ("amd64", "arm64")
-# A composed image in the local registry it was composed into, tagged by its key.
+# A composed image in the local registry it was composed into, tagged by its key, as the composer's stores keep them.
 _COMPOSED = re.compile(r"^localhost:5000/agentenv-computers:([0-9a-f]{64})@(sha256:[0-9a-f]{64})$")
-_COMPUTER_IMAGE = re.compile(rf"^{re.escape(COMPUTERS_REPOSITORY)}@sha256:[0-9a-f]{{64}}$")
-_COMPUTER_INDEX = re.compile(rf"^{re.escape(COMPUTERS_REPOSITORY)}:index-[0-9a-f]{{64}}@sha256:[0-9a-f]{{64}}$")
 _INDEX_TYPES = ("application/vnd.oci.image.index.v1+json", "application/vnd.docker.distribution.manifest.list.v2+json")
 _TAG = re.compile(r"^src-[0-9a-f]{64}$")
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -257,9 +254,9 @@ def _publish(missing: str) -> int:
 
 
 def _publish_computers(folder: Path) -> int:
-    """Push each computer app the ARCH.json files in ``folder`` name to ``COMPUTERS_REPOSITORY`` as one index of its
-    arches' images, from the local registry they were composed into, each by its platform manifest's digest, which the
-    copy keeps, so each is the image its compose probed; and write ``folder``/computers.json, the record of them a
+    """Push each computer app the ARCH.json files in ``folder`` name to its package as one index of its arches'
+    images, from the local registry they were composed into, each by its platform manifest's digest, which the copy
+    keeps, so each is the image its compose probed; and write ``folder``/computers.json, the record of them a
     release wheel carries, each app's index and each arch's key, image and lock."""
     composed, problems = {}, []
     for arch in COMPUTER_ARCHES:
@@ -285,8 +282,9 @@ def _publish_computers(folder: Path) -> int:
         if missing := [arch for arch, digest in digests.items() if digest is None]:
             print(f"::error::{env}'s composed {', '.join(missing)} has no linux manifest of its arch")
             return 1
-        images = {arch: f"{COMPUTERS_REPOSITORY}@{digest}" for arch, digest in digests.items()}
-        index = f"{COMPUTERS_REPOSITORY}:index-" + hashlib.sha256(
+        repository = _computer_repository(env)
+        images = {arch: f"{repository}@{digest}" for arch, digest in digests.items()}
+        index = f"{repository}:index-" + hashlib.sha256(
             ",".join(images[arch] for arch in COMPUTER_ARCHES).encode()).hexdigest()
         if (code := _exists(index)) == 2:
             return 1
@@ -518,9 +516,9 @@ def _verify_record(path: Path) -> list[str]:
 
 def _verify_computers(path: Path, computers: object) -> list[str]:
     """Each problem with ``computers``, as a release wheel records the computer apps it published composed: an app of
-    ``COMPUTERS`` at most once, its index served under its tag with the digest recorded and naming exactly its arches'
-    images, each by digest, with the key it was composed under and its lock. A release that composed none records
-    none."""
+    ``COMPUTERS`` at most once, its index served in its package under its tag with the digest recorded and naming
+    exactly its arches' images, each by digest there, with the key it was composed under and its lock. A release that
+    composed none records none."""
     if not isinstance(computers, list):
         return [f"{path}: {computers!r} isn't a list of composed computers"]
     problems, seen = [], []
@@ -530,16 +528,19 @@ def _verify_computers(path: Path, computers: object) -> list[str]:
             continue
         env, arches, index = computer["env"], computer["arches"], str(computer["index"])
         seen.append(env)
-        if env not in COMPUTERS or computer["form"] != "container" or not _COMPUTER_INDEX.match(index):
-            problems.append(f"{path}: {env!r} isn't a computer app a release publishes, as a container index in "
-                            f"{COMPUTERS_REPOSITORY}: {computer['form']!r} {index!r}")
+        repository = _computer_repository(env) if env in COMPUTERS else None
+        if repository is None or computer["form"] != "container" or not re.fullmatch(
+                rf"{re.escape(repository)}:index-[0-9a-f]{{64}}@sha256:[0-9a-f]{{64}}", index):
+            problems.append(f"{path}: {env!r} isn't a computer app a release publishes, as a container index in its "
+                            f"package: {computer['form']!r} {index!r}")
             continue
         if not isinstance(arches, dict) or sorted(arches) != sorted(COMPUTER_ARCHES) or not all(
                 isinstance(built, dict) and set(built) == {"key", "image", "lock"} and _DIGEST.match(str(built["key"]))
-                and _COMPUTER_IMAGE.match(str(built["image"])) and isinstance(built["lock"], dict)
-                and built["lock"].get("arch") == arch for arch, built in arches.items()):
+                and re.fullmatch(rf"{re.escape(repository)}@sha256:[0-9a-f]{{64}}", str(built["image"]))
+                and isinstance(built["lock"], dict) and built["lock"].get("arch") == arch
+                for arch, built in arches.items()):
             problems.append(f"{path}: {env}'s arches aren't {list(COMPUTER_ARCHES)}, each a key, an image by digest in "
-                            f"{COMPUTERS_REPOSITORY} and its lock")
+                            f"{repository} and its lock")
             continue
         tagged, _, digest = index.partition("@")
         served, error = _served(tagged)
@@ -551,6 +552,11 @@ def _verify_computers(path: Path, computers: object) -> list[str]:
     if repeated := sorted({env for env in seen if seen.count(env) > 1}):
         problems.append(f"{path} records {', '.join(repeated)} more than once")
     return problems
+
+
+def _computer_repository(env: str) -> str:
+    """The package the computer app ``env`` is published in."""
+    return f"{REGISTRY}/{COMPUTERS[env]}"
 
 
 def _config(image: str) -> str:

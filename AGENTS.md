@@ -489,7 +489,7 @@ image's digest. Run by hand on `main`, the workflow publishes the images alone.
 A release also publishes `chromium` composed (`.github/scripts/release_computers.py`), a new image every release since
 its venv pins the protocol the release ships: once the protocol and the base computers are published, it's composed
 from the release's own wheels on a runner of each platform, probed, and joined as one index in
-`ghcr.io/scaleapi/agentenv-computers` by the digests the probe booted; the wheel records each arch's key, image and
+`ghcr.io/scaleapi/agentenv-chromium` by the digests the probe booted; the wheel records each arch's key, image and
 lock (`published_images.released_computers`), so an install's compose of the same inputs pulls it rather than
 resolving and building. A failure there ships the release without it, and an install composes it as before.
 Its jobs that run agent-env (`.github/scripts/infra_images.py`) hold no token that writes; the jobs that push

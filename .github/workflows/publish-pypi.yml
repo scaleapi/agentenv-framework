@@ -428,9 +428,9 @@ jobs:
           retention-days: 1
 
   # Each composed app's two images, from the local registries computer-build composed them into, joined as one index
-  # in agentenv-computers by their digests, so each is the image its compose probed; and the record of them for the
-  # wheel. It installs nothing, holding the token that pushes. A release whose composed computers fail ships without
-  # them, and an install composes them as before, so these two jobs never hold a release back.
+  # in the app's package, agentenv-<app>, by their digests, so each is the image its compose probed; and the record of
+  # them for the wheel. It installs nothing, holding the token that pushes. A release whose composed computers fail
+  # ships without them, and an install composes them as before, so these two jobs never hold a release back.
   computer-publish:
     needs: [main-ci, computer-build]
     if: >-
@@ -454,7 +454,7 @@ jobs:
           docker run --detach --name registry --publish 5000:5000 \
             --volume "$RUNNER_TEMP/computers/registry:/var/lib/registry" mirror.gcr.io/library/registry:2
           timeout 30 sh -c 'until curl -sf http://localhost:5000/v2/ >/dev/null; do sleep 1; done'
-      - name: Join each app's images as one index in agentenv-computers
+      - name: Join each app's images as one index in its package
         env:
           GHCR_TOKEN: ${{ github.token }}
         run: python3 .github/scripts/infra_build.py publish-computers "$RUNNER_TEMP/computers/composed"
