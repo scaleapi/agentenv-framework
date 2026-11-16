@@ -18,6 +18,7 @@ from functools import partial
 from pathlib import Path
 from typing import Literal
 
+from agentenv_protocol.a2a_agent import TaskErrorType
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from kit import in_thread_to_its_end
@@ -148,6 +149,8 @@ class ClaudeResult:
     structured_output: dict | None = None
     # How many `claude -p` runs the turn took; more than one means it was resumed.
     attempts: int = 1
+    # The failure's type for agent-env, when the CLI's terminal `result` names a cause that isn't the agent's.
+    error_type: TaskErrorType | None = None
 
 
 def _attribution_headers(project_id: str | None, task_id: str | None) -> dict[str, str]:
@@ -277,6 +280,25 @@ def _resumable_api_failure(result: ClaudeResult) -> str | None:
     if event.get("terminal_reason") in _RESUMABLE_TERMINAL_REASONS:
         return text
     return text if any(marker in text.lower() for marker in _RESUMABLE_API_ERROR_MARKERS) else None
+
+
+# The CLI copies the endpoint's error body `type` into `api_error_type`: LiteLLM sends budget_exceeded and auth_error,
+# Anthropic authentication_error and permission_error.
+_KEY_AUTH_ERROR_TYPES = frozenset({"auth_error", "authentication_error", "permission_error"})
+_KEY_AUTH_STATUSES = frozenset({401, 403})
+
+
+def _key_error_type(trajectory: list[dict]) -> TaskErrorType | None:
+    """model_key_budget or model_key_auth when the endpoint refused the run's key, else None."""
+    event = _terminal_result(trajectory)
+    if event is None or not event.get("is_error"):
+        return None
+    kind = event.get("api_error_type")
+    if kind == "budget_exceeded":
+        return "model_key_budget"
+    if kind in _KEY_AUTH_ERROR_TYPES or _status(event.get("api_error_status")) in _KEY_AUTH_STATUSES:
+        return "model_key_auth"
+    return None
 
 
 def _endpoint_hint(trajectory: list[dict]) -> str | None:
@@ -756,7 +778,9 @@ async def _spawn_claude(
 
     err: str | None = None
     detail: str | None = None
+    error_type: TaskErrorType | None = None
     if proc.returncode != 0:
+        error_type = _key_error_type(trajectory)
         err = (f"claude CLI was killed by signal {-proc.returncode}" if proc.returncode < 0
                else f"claude CLI exited with code {proc.returncode}")
         detail = _cli_error_text(trajectory) or _stderr_tail(stderr.decode(errors="replace"))
@@ -770,7 +794,7 @@ async def _spawn_claude(
 
     return ClaudeResult(response=final_response or "", tool_call_count=tool_count,
                         session_id=cli_session_id or session_id, trajectory=trajectory, error=err,
-                        error_detail=detail, structured_output=structured_output)
+                        error_detail=detail, structured_output=structured_output, error_type=error_type)
 
 
 _TAGS_HEADER = "x-litellm-tags"
