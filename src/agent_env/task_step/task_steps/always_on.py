@@ -5,9 +5,11 @@ The ``deploy_user_sim_agent`` step (``deploy_user_sim_agent.py``, which document
 deploys the agent that plays the user, with its system prompt and model set, and records the user in the run's
 metadata under its ``agent_name``. The ``always_on`` step names it with ``user_sim`` and runs the loop:
 
-- The first wake is the user's request. Each wake opens with what came due for the agent on notifications/v1 (a
-  trigger's ``notify``, a scheduled check), labelled ``[time · channel]``, then the user's own messages, each labelled
-  with its time; while the task's clock is set, the agent can read it with the gateway's ``get_time``.
+- The first wake is the user's request, with the files its opening attaches in their place (its timeline ``wake``
+  event names them in ``files``, by ``name`` and ``uri``). Each wake opens with what came due for the agent on
+  notifications/v1 (a trigger's ``notify``, a scheduled check), labelled ``[time · channel]``, then the user's own
+  messages, each labelled with its time; while the task's clock is set, the agent can read it with the gateway's
+  ``get_time``.
 - Only what the agent sends with the gateway's ``message_user`` tool (user-chat/v1) reaches the user; its plain reply
   goes to the log. Each wake should end with ``message_user`` or ``stay_quiet``: one that ends with closing text and
   neither gets one ``nudge`` turn. ``stay_quiet`` and the nudge are on unless the task turns them off; the rule itself is
@@ -63,10 +65,11 @@ metadata under its ``agent_name``. The ``always_on`` step names it with ``user_s
   reply that never reached it (her last read's, or one still held at the end) has ``delivered`` false and no
   ``user_reads_at``.
 - The run's metadata keeps a summary in ``metadata["always_on"][step_id]`` (small enough for a running job to report
-  back); the full timeline goes to the object store, at the summary's ``object_url``.
+  back); the full timeline goes to the object store, at the summary's ``object_url``. Its ``user_sim`` names the user
+  sim's session (``context_id``), which rate_user_satisfaction asks in once the run is over.
 - An always_on_agent_verifier (``verifiers/always_on_agent_verifier.py``) grades the step's prompt from the user's chat
-  and the run's context, the run wake by wake among it (``render_for_judge``); a plain rubrics_verifier on it is
-  refused when the task loads.
+  and the run's context, the run wake by wake among it (``render_for_judge``), and, with use_trajectory, every wake's
+  tool calls staged as files; a plain rubrics_verifier on it is refused when the task loads.
 - The agent: the message_user rules go in its system prompt when the step sets one and the agent's card takes it,
   else on its first wake; its session is the step's ``context_id`` when set, as prompt_agent's is, else the run's own.
 - When the step ends it puts back the gateway settings it changed for the run (the user chat's roles and stay_quiet,
@@ -115,6 +118,7 @@ from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import USER_SIMS
 from agent_env.task_step.task_steps.notification_delivery import delivered_parts, label_time, take_due
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from agent_env.task_step.task_steps.agent.user_sim_common import iso as _iso, person_of, task_zone, utc as _utc
+from agent_env.task_step.task_steps.agent.user_sim_common import attached, file_name, for_agent, recorded_opening
 
 logger = logging.getLogger(__name__)
 
@@ -179,10 +183,6 @@ END_NOTES = {
 # wrote them, so checks that read its reply times (user_reads_at) grade a run on this step.
 HOOK_RECORDS_KEY = "post_turn_hooks"
 HOOK_NAME = "always_on"
-CHANGE_SUMMARY_CHARS = 200
-# The app changes one read of an env's changelog keeps in the timeline; the rest are counted (counts.app_changes counts
-# them all, by who made them).
-CHANGES_KEPT_PER_READ = 200
 TIMELINE_TAIL = 20
 # With no end_time, the run ends once this many clock jumps in a row have been to repeating triggers' marks alone (see
 # the loop's docstring): the world can go on ticking, but nothing in it has woken the agent.
@@ -488,7 +488,8 @@ class _Run:
             raise ValueError(f"always_on: the user sim '{step.user_sim}' has no opening_prompt, the user's first "
                              "message; give the deploy_user_sim_agent step one")
         now = await self.now()
-        self.opening = {"at": _iso(now), "text": self._effective_prompt()}
+        files = attached(self._prompt_parts())
+        self.opening = {"at": _iso(now), "text": self._effective_prompt(), **({"files": files} if files else {})}
         self.person["opening"] = self.opening
         t0 = await self._t0() or now
         self.end = _end_instant(step.end_time, t0) if step.end_time else None
@@ -1122,19 +1123,19 @@ class _Run:
 
     def _prompt_parts(self) -> list[dict]:
         """The user's first message, the user sim's opening, as A2A parts, its seed applied."""
-        return self.step._apply_seed([{"kind": "text", "text": self.us["opening"]}], self.ctx.metadata.get("seed", {}))
+        return self.step._apply_seed(recorded_opening(self.us), self.ctx.metadata.get("seed", {}))
 
     def _effective_prompt(self) -> str:
         return "\n".join(p.get("text", "") for p in self._prompt_parts() if p.get("kind") == "text")
 
     def _opening_parts(self, labelled) -> list[dict]:
         """The prompt as the opening wake and the user's chat carry it: its text as one labelled line from the user
-        (``labelled(text)``), where its first text part was, and every other part (a file, data) as it is, in the
-        prompt's order, as prompt_agent sends them."""
+        (``labelled(text)``), where its first text part was, and every file part as it is, in the prompt's order, as
+        prompt_agent sends them, without the description that is for the user sim."""
         out, text = [], self._effective_prompt()
         for part in self._prompt_parts():
             if part.get("kind") != "text":
-                out.append(part)
+                out.append(for_agent(part))
             elif text is not None:
                 out.append(labelled(text))
                 text = None
@@ -1252,8 +1253,12 @@ class _Run:
         def record() -> None:
             self.per_turn_parts.append(self._kept_parts(parts))
 
+        # The files a wake carries (the opening's), by name and address; their descriptions are the user sim's.
+        files = [{"name": file_name(p), "uri": (p.get("file") or {}).get("uri")}
+                 for p in parts if p.get("kind") == "file"]
         self.log("wake", n=self.wakes, virtual_time=_iso(sent_at), woke_by=woke_by, notifications=notifications or [],
-                 last=last, parts_text="\n".join(p.get("text", "") for p in parts if p.get("kind") == "text"))
+                 last=last, parts_text="\n".join(p.get("text", "") for p in parts if p.get("kind") == "text"),
+                 **({"files": files} if files else {}))
         t = time.time()
         try:
             task_id, result = await self._agent_turn(parts, msg_id, record)
@@ -1410,9 +1415,8 @@ class _Run:
             self.change_cursors[env_id] = (env, cursor)
             if rows:
                 changes = [self._change(env_id, row, phase) for row in rows]
-                more = len(changes) - CHANGES_KEPT_PER_READ
                 self.log("app_changes", wake=self.wakes, phase=phase, env_id=env_id, count=len(changes),
-                         changes=changes[:CHANGES_KEPT_PER_READ], **({"not_kept": more} if more > 0 else {}))
+                         changes=changes)
 
     def _change(self, env_id: str, row: dict, phase: str) -> dict:
         actors = [{k: v for k, v in a.items() if k in ("kind", "role", "tool", "trigger_id", "request", "caused_by",
@@ -1421,11 +1425,8 @@ class _Run:
         mine = any(a.get("role") == self.recipient and a.get("kind") in ("tool_call", "request") for a in actors)
         by = "agent" if mine else "others" if actors else None
         self.change_counts["by_agent" if mine else "by_others" if actors else "no_actor"] += 1
-        summary = row.get("summary")
-        if isinstance(summary, str) and len(summary) > CHANGE_SUMMARY_CHARS:
-            summary = summary[:CHANGE_SUMMARY_CHARS] + "…"
         return {"env_id": env_id, "id": row.get("id"), "table": f"{row.get('schema_name')}.{row.get('table_name')}",
-                "op": row.get("operation"), "row_id": row.get("row_id"), "summary": summary,
+                "op": row.get("operation"), "row_id": row.get("row_id"), "summary": row.get("summary"),
                 "at": row.get("timestamp"), "by": by, "wake": self.wakes, "phase": phase, "actors": actors}
 
     async def _take_messages(self) -> tuple[list[dict], list[dict]]:
@@ -1685,7 +1686,8 @@ class _Run:
         record = {"step_id": step.id, "end_reason": self.end_reason, "end_note": self.end_note, "error": self.error,
                   "error_type": self.error_type, "counts": counts,
                   "user_sim": {"name": step.user_sim, "version": self.version,
-                               "agent_name": self.us.get("agent_name"), **self.user_setup},
+                               "agent_name": self.us.get("agent_name"), "context_id": self.user_context_id,
+                               **self.user_setup},
                   "end_time": _iso(self.end) if self.end else None, "time_zone": self.zone,
                   "multi_day": self.multi_day, "real_seconds": round(time.time() - self.t0_real, 1),
                   "timeline_events": len(self.timeline), "pending_at_end": _bounded(self.pending)}
@@ -1737,27 +1739,44 @@ class _Run:
 # What a judge reads of the run beyond the user's chat (always_on_agent_verifier, for an always_on step's prompt).
 JUDGE_CHANGES_PER_WAKE = 10
 JUDGE_WAKES = 300
+JUDGE_SUMMARY_CHARS = 200  # of an app change's summary in the wake-by-wake text; the stored timeline has it whole
 _WOKE_BY = {"user_request": "the user's request", "user_reply": "the user's reply", "user_says": "a user message",
             "final": "the user's final line", "step:final": "the end of the job"}
+
+
+def stored_timeline(record: dict) -> list[dict]:
+    """The run's timeline from the object store (``record["object_url"]``), else the record's tail; raises when the
+    stored one can't be read."""
+    if not record.get("object_url"):
+        return record.get("timeline_tail") or []
+    url = record["object_url"]
+    return json.loads(get_config().get_object_store_at(url).get(url))["timeline"]
+
+
+def woke_by_text(woke_by: list[str]) -> str:
+    """What woke the agent, in words: "the user's reply, an alert (Gmail)"."""
+    return ", ".join(_WOKE_BY.get(w, f"an alert ({w.split(':', 1)[1]})" if w.startswith("notification:") else w)
+                     for w in woke_by or []) or "nothing named"
 
 
 def render_for_judge(record: dict) -> str:
     """The run wake by wake for a judge: each wake's pretend time, what woke the agent, how much it sent the user and
     its tool calls, and the app changes made around it, the agent's own marked; then how the run ended and what was
-    still pending. From the stored timeline at ``record["object_url"]`` (else the record's tail)."""
-    timeline = record.get("timeline_tail") or []
-    if record.get("object_url"):
-        try:
-            url = record["object_url"]
-            timeline = json.loads(get_config().get_object_store_at(url).get(url))["timeline"]
-        except Exception as e:
-            return f"## The run, wake by wake\n(The run's record could not be read: {type(e).__name__}: {e})"
+    still pending. From the stored timeline at ``record["object_url"]`` (else the record's tail). What it leaves out
+    (changes past JUDGE_CHANGES_PER_WAKE, wakes past JUDGE_WAKES, changes a run recorded before every change was
+    kept) it says."""
+    try:
+        timeline = stored_timeline(record)
+    except Exception as e:
+        return f"## The run, wake by wake\n(The run's record could not be read: {type(e).__name__}: {e})"
     turns = {e["n"]: e for e in timeline if e["event"] == "agent_turn_end"}
     nudges = {e["wake"]: e for e in timeline if e["event"] == "nudge"}
     changes: dict[int, list[dict]] = {}
+    unrecorded: dict[int, int] = {}
     for e in timeline:
         if e["event"] == "app_changes":
             changes.setdefault(e["wake"], []).extend(e.get("changes") or [])
+            unrecorded[e["wake"]] = unrecorded.get(e["wake"], 0) + (e.get("not_kept") or 0)
     lines = ["## The run, wake by wake",
              "The assistant ran only when something woke it. Each wake below gives its pretend time, what woke it, how "
              "many messages it sent the user (their text is in the conversation) and its tool calls, then the app "
@@ -1767,15 +1786,14 @@ def render_for_judge(record: dict) -> str:
     wakes = [e for e in timeline if e["event"] == "wake"]
     for wake in wakes[:JUDGE_WAKES]:
         n = wake["n"]
-        woke = ", ".join(_WOKE_BY.get(w, f"an alert ({w.split(':', 1)[1]})" if w.startswith("notification:") else w)
-                         for w in wake.get("woke_by") or []) or "nothing named"
         turn = turns.get(n) or {}
         sent = (turn.get("messages_to_user") or 0) + (nudges.get(n, {}).get("messages_to_user") or 0)
         calls = f" · {turn['tool_calls']} tool calls" if turn.get("tool_calls") is not None else ""
         state = f" · its turn {turn['state']}" if turn.get("state") not in (None, "completed", "TaskState.completed") \
             else ""
-        lines.append(f"- Wake {n} · {label_time(wake.get('virtual_time'))} · woken by {woke} · sent the user "
-                     f"{sent} message{'s' if sent != 1 else ''}{calls}{state}")
+        lines.append(f"- Wake {n} · {label_time(wake.get('virtual_time'))} · woken by "
+                     f"{woke_by_text(wake.get('woke_by'))} · sent the user {sent} message{'s' if sent != 1 else ''}"
+                     f"{calls}{state}")
         made = changes.get(n, [])
         for c in made[:JUDGE_CHANGES_PER_WAKE]:
             if c.get("by") == "agent":
@@ -1784,10 +1802,13 @@ def render_for_judge(record: dict) -> str:
                 who = f"{_actor(c)} changed ({c.get('phase')})"
             else:
                 who = f"no known actor changed ({c.get('phase')})"
-            summary = f" ({c['summary']})" if c.get("summary") else ""
+            text = c.get("summary") or ""
+            summary = f" ({text[:JUDGE_SUMMARY_CHARS]}{'…' if len(text) > JUDGE_SUMMARY_CHARS else ''})" if text else ""
             lines.append(f"  - {who}: {c.get('op')} {c.get('table')} row {c.get('row_id')}{summary}")
         if len(made) > JUDGE_CHANGES_PER_WAKE:
             lines.append(f"  - and {len(made) - JUDGE_CHANGES_PER_WAKE} more changes")
+        if unrecorded.get(n):
+            lines.append(f"  - and {unrecorded[n]} changes the run didn't record")
     if len(wakes) > JUDGE_WAKES:
         lines.append(f"(and {len(wakes) - JUDGE_WAKES} more wakes)")
     pending = {kind: v.get("count", 0) for kind, v in (record.get("pending_at_end") or {}).items()

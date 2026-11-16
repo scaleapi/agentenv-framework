@@ -74,12 +74,21 @@ import agent_env
 from agent_env.a2a_agent import conversation_store
 from agent_env.artifact import Artifact
 from agent_env.artifact.artifacts.file import FileArtifact
-from agent_env.config import get_config
+from agent_env.artifact.store import reset_artifact_store
+from agent_env.bundle import parse_bundle
+from agent_env.bundle.installed import installed_bundles
+from agent_env.bundle.materialize import materialize
+from agent_env.bundle.plan import plan_bundle
+from agent_env.bundle.resolve import resolve_bundle
+from agent_env.config import configure, get_config
 from agent_env.env import Env
 from agent_env.env.env import DeployedEnv
-from agent_env.env.envs.computer.utils import inside
+from agent_env.env import published_images
+from agent_env.env.envs.computer.utils import inside, packages
+from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.store import get_env_store
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
+from agent_env.store.image_store.registry_api import copy_image, pin_digest, write_index
 from agent_env.store.object_store.local.grant_server import grant_server
 from agent_env.store.object_store.local.tls import LocalCA, local_ca
 from agent_env.store.routing import namespace_routing
@@ -1723,3 +1732,62 @@ async def _browser_op(browser: DeployedEnv, op: str, params: dict) -> dict:
     assert find_extension_method(app, BROWSER, op) is not None, op
     return await invoke_extension(browser.environment_url, app, BROWSER, params, 60, method=op,
                                   headers=browser.control_headers)
+
+
+#: Where the local registry stands in for the repository a release publishes composed computers in.
+RELEASED = "localhost:5000/agentenv-released"
+
+
+@pytest.mark.asyncio
+async def test_a_compose_of_chromium_from_a_release_record_pulls_its_image_and_the_browser_boots_from_it(
+        browser_computer, tmp_path):
+    """A release publishes chromium composed, and its wheel records each arch's lock, key and image, here in the local
+    registry: chromium composed again in fresh stores, with that record as the install's, takes the image by digest
+    rather than resolving its packages or building it, and a deploy of it boots that image."""
+    with namespace_routing():
+        pairs = {arch: built for arch, built in browser_computer.metadata["composed"]["container"].items()
+                 if built.get("status") in ("ready", "unverified")}
+        locks = {arch: json.loads(packages.stored(built["lock"], browser_computer.stored_id).model_dump_json())
+                 for arch, built in pairs.items()}
+    released = {}
+    for arch, built in pairs.items():
+        copy_image(built["image"], f"{RELEASED}:{arch}", None, None)
+        released[arch] = f"{RELEASED}@{built['image'].rpartition('@')[2]}"
+    write_index(f"{RELEASED}:index", {f"linux/{arch}": image for arch, image in released.items()}, None)
+    record = tmp_path / "published_images.json"
+    published_images.write_release_digests({}, record, [{
+        "env": browser_computer.id, "form": "container", "index": pin_digest(f"{RELEASED}:index", None),
+        "arches": {arch: {"key": pairs[arch]["key"], "image": released[arch], "lock": locks[arch]} for arch in pairs}}])
+    (tmp_path / "bundle" / "tasks").mkdir(parents=True)
+    (tmp_path / "bundle" / "tasks" / "chromium.json").write_text(
+        json.dumps([{"id": "env", "type": "deploy_env", "env_id": "chromium"}]))
+    told = []
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(published_images, "RELEASE_FILE", record)
+        patch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+        configure()
+        reset_artifact_store()
+        try:
+            with namespace_routing():
+                materialize(plan_bundle(resolve_bundle(parse_bundle(tmp_path / "bundle")), installed=installed_bundles,
+                                        default_agents=False), composing=Composing(on_progress=told.append))
+                composed_now = Env.get(browser_computer.id).metadata["composed"]["container"]
+                deployed = await Env.get(browser_computer.id).deploy()
+                context = TaskStepContext(deployed_envs=[deployed])
+                try:
+                    booted = deployed.metadata["computer"]["image"]
+                    tabs = (await _record(deployed))["tabs"]
+                finally:
+                    report = await teardown_run(context)
+        finally:
+            reset_artifact_store()
+    configure()
+    reset_artifact_store()
+
+    print(json.dumps({"told": told, "composed": {arch: {k: v for k, v in built.items() if k != "probe"}
+                                                 for arch, built in composed_now.items()}}, indent=1, default=str))
+    assert {arch: (built["image"], built["published"], built["reused"]) for arch, built in composed_now.items()
+            if arch in released} == {arch: (image, True, True) for arch, image in released.items()}
+    assert composed_now[ARCH]["status"] == "ready"
+    assert not [line for line in told if "resolving" in line or "building the image" in line], told
+    assert booted == released[ARCH] and tabs and not report.failed

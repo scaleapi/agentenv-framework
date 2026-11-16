@@ -99,7 +99,7 @@ class Tools:
                                         identity=identity, parent=parent, origin=(box[0], box[1]))
             summary = f"Cropped {frame.id}: {frame.width}×{frame.height} of {parent.id} at ({box[0]}, {box[1]})"
         result = ScreenshotResult(summary=summary, **frame.result().model_dump())
-        return send(result, frame.encode(format, quality))
+        return send(result, frame.encode(format, quality), frame.captured_at)
 
     @tool(annotations=_INPUT)
     async def computer_click(
@@ -242,7 +242,7 @@ class Tools:
         frame = await self._computer.capture(self.caller_identity(ctx))
         return send(WaitResult(summary=f"{summary}, then captured {frame.id}{frame.note()}", waited_ms=ms,
                                frame=frame.result()),
-                    frame.encode())
+                    frame.encode(), frame.captured_at)
 
     @tool(annotations=_INPUT)
     async def computer_pointer_move(

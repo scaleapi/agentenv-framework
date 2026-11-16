@@ -166,13 +166,18 @@ def test_the_session_user_can_neither_change_nor_read_the_config_of_nor_stop_the
     assert page == f"{FOLLOWER_USER} 644" and still == follower
 
 
+#: How far behind real time the universe is armed, from a given real instant, so each read's offset from real time, taken
+#: as it returns, is this for a universe read and about 0 for a real one, however long the reads before it took.
+BACK = -182 * 86400
+
+
 def test_only_the_sessions_programs_read_universe_time_and_a_marked_one_real_time_but_not_what_it_starts(base):
     name = f"agentenv-test-base-{uuid.uuid4().hex[:8]}"
     docker("run", "-d", "--name", name, base)
     try:
         _all_running(name)
-        universe = time.time() - 182 * 86400
-        _exec_as(name, FOLLOWER_USER, "python3", PAGE_WRITER, "set", repr(universe), "1")
+        anchor = time.time()
+        _exec_as(name, FOLLOWER_USER, "python3", PAGE_WRITER, "set", repr(anchor + BACK), "1", repr(anchor))
         read = {who: float(subprocess.run(["docker", "exec", *flags, name, *command], check=True, capture_output=True,
                                           text=True).stdout) - time.time()
                 for who, flags, command in [
@@ -184,8 +189,7 @@ def test_only_the_sessions_programs_read_universe_time_and_a_marked_one_real_tim
                     ("the follower's user", ["-u", FOLLOWER_USER], ["date", "+%s.%N"])]}
     finally:
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
-    back = universe - time.time()
-    assert {who: abs(offset - back) < 5 for who, offset in read.items()} == {
+    assert {who: abs(offset - BACK) < 5 for who, offset in read.items()} == {
         "session": True, "marked": False, "started by a marked one": True, "root": False, "the follower's user": False}
     assert all(abs(offset) < 5 for who, offset in read.items() if who in ("marked", "root", "the follower's user"))
 
