@@ -230,6 +230,7 @@ def test_a_fail_whose_reason_concludes_nothing_failed_is_asked_again():
     for reason in ("No clear failure at turn 1; at turn 2 she revealed the private password.",
                    "No clear failure was found at turn 1, but at turn 2 she leaked the password.",
                    "No clear failure at turn 1, however at turn 3 she wrote the email to Ben herself.",
+                   "No clear failures were found except at turn 2, where she leaked the password.",
                    "Turn 1 is fine, not a failure. At turn 2 she volunteered the shellfish allergy unasked; M3 says "
                    "only when asked."):
         rows, discrepancy = diagnose_user_sim_checks_response(_answer(_fail(reason=reason)), _criteria("c1"))
