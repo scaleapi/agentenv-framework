@@ -89,6 +89,14 @@ records named it, isn't deployed: a deploy that boots its form composes it again
 a put do, and its record says `by another composer` until then. So upgrading agent-env never boots a computer composed
 the old way.
 
+A computer app a release publishes composed, `chromium`, needs no build: the wheel records the lock each arch was
+composed from and the key it took (`published_images.released_computers`), so a compose of the same inputs takes that
+lock rather than resolving one, finds its key in the record, and records the image the release published, pulled by
+its digest from `ghcr.io/scaleapi/agentenv-chromium`, as `reused` and `published`, then probes it as any reuse is
+probed. The computer is written over the index the release published of its arches; an arch it composed here beside
+one the release published is joined in the env's own store, the released one copied there first. A record of another
+key, an image the registry won't give, or a checkout's compose, which stages the protocol's source, composes as before.
+
 Its settings reach the computer as environment variables, `AGENTENV_SETTING_<NAME>`, read as it starts:
 
 | Setting | Default | What it does |
