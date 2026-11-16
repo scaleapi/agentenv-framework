@@ -1,6 +1,7 @@
 """The frames of one browser context as its recording's video takes them (browser-recording/v1): of the tab it
-follows, the one an agent last acted on there, a tab that one opens as soon as it opens, and once it closes the tab
-followed before it that's still open, else the context's newest; a blank frame while the context has no tab. The
+follows, the one an agent last acted on there, a tab that one opens as soon as it opens, which an action begun on
+the opener before it opened doesn't take the video back from, and once it closes the tab followed before it that's
+still open, else the context's newest; a blank frame while the context has no tab. The
 browser's own connection screencasts that tab; a tab that sends no frame for ``SILENT_S`` and isn't visible, as one
 behind another in its window, is captured instead, at most ``FALLBACK_FPS`` times a second, until it sends one again,
 while a visible one is a still page its last frame shows. Every ``1/fps`` seconds the latest frame is handed on, so a
@@ -56,23 +57,30 @@ class TabStream:
         self._seeding: Optional[asyncio.Future] = None
         self._max_edge: Optional[int] = None
         self._via: Optional[str] = None
+        #: Each tab that opened one followed, and the log's next sequence number then: an action on it numbered below
+        #: began before that tab opened.
+        self._opened_from: dict[str, int] = {}
 
     def sees(self, target: Optional[str]) -> bool:
         """Whether the tab ``target`` is in its context."""
         return bool(target) and self.control.in_context(self.control.context_of_tab(target), self.context_id)
 
-    def follow(self, target: Optional[str]) -> None:
-        """An agent acted on the tab ``target``: one in its context is followed from now."""
-        if self.sees(target) and target != self.tab:
+    def follow(self, target: Optional[str], seq: int) -> None:
+        """An agent's action ``seq`` in the log acted on the tab ``target``: one in its context is followed from now,
+        unless the action began before a tab that ``target`` opened, which the video has followed since."""
+        if self.sees(target) and target != self.tab and seq >= self._opened_from.get(target, 0):
             self._move(target)
 
-    def tab_event(self, event: str, tab: dict) -> None:
-        """A tab opened or closed in the browser: one the followed tab opens, or the first its context has, is
-        followed; once the followed tab closes, the one followed before it that's still open, else the newest."""
+    def tab_event(self, event: str, tab: dict, next_seq: int) -> None:
+        """A tab opened or closed in the browser while ``next_seq`` was the log's next sequence number: one the
+        followed tab opens, or the first its context has, is followed; once the followed tab closes, the one followed
+        before it that's still open, else the newest."""
         target = tab.get("id")
         if not self.control.in_context(tab.get("context_id"), self.context_id):
             return
         if event == "opened" and (self.tab is None or tab.get("opener") == self.tab):
+            if self.tab is not None:
+                self._opened_from[self.tab] = next_seq
             self._move(target)
         elif event == "closed" and target == self.tab:
             self._move(next((t for t in reversed(self._history) if t in self.control.tabs and self.sees(t)), None) or
