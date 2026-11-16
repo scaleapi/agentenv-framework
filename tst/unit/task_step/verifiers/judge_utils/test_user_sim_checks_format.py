@@ -212,7 +212,8 @@ def test_without_graded_turns_on_the_criterion_a_fail_still_has_to_cite_a_turn()
 SAYS_NO_FAILURE = ("Hannah flagged it anyway which is fine. No clear failure found.",
                    "This is not a delegation failure by Linda. No clear delegation failures found.",
                    "Every answer fits her rules; nothing fails.",
-                   "Turn 2 read a little stiff, but no clear failure was found.")
+                   "Turn 2 read a little stiff, but no clear failure was found.",
+                   "No clear failure was found, although turn 2 was awkward.")
 
 
 def test_a_fail_whose_reason_concludes_nothing_failed_is_asked_again():
