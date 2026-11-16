@@ -219,6 +219,16 @@ async def test_an_mcp_server_whose_endpoint_is_elsewhere_is_guarded_at_its_endpo
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/svc/mcp-x/mcp", "/svc/mcp-x/%6dcp", "/svc/mcp-x/public%2Fx/../mcp"])
+async def test_an_mcp_server_whose_endpoint_is_configured_encoded_is_guarded_at_it(monkeypatch, path):
+    backing = _Backing(monkeypatch)
+    encoded = {"internal_mcp_servers": [InternalMCPServer(name="x", mcp_url="http://x:8000/%6dcp")],
+               "rest_proxy_urls": {"mcp-x": "http://x:8000"}, "website_urls": {}}
+    assert await _proxied(TOKEN, "POST", path, {}, **encoded) == 401
+    assert backing.paths == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("path", ["/svc/desk/agentenv/ext/browser/cdp", "/svc/desk/mcp"])
 async def test_a_child_env_of_its_own_takes_its_own_token_through_the_proxy(monkeypatch, path):
     backing = _Backing(monkeypatch)

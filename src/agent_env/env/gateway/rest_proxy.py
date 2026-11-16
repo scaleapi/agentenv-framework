@@ -284,7 +284,9 @@ def reaches(base_url: str, raw_path: bytes, decoded_path: str, decoded_rest: str
     ``base_url`` (:func:`is_child_mcp_path`): by that remainder, or by the path the server receives, the base's path and
     the raw remainder forwarded, its dot segments removed by httpx and then decoded. They differ when an encoded slash
     sits beside a dot segment (``public%2Fx/../mcp`` reaches ``/mcp``) or a dot segment climbs into a base's path
-    (``../prefix/mcp`` reaches base ``/prefix``'s ``/mcp``). False for a request-target forward() refuses."""
+    (``../prefix/mcp`` reaches base ``/prefix``'s ``/mcp``). ``endpoint`` is decoded as both paths are. False for a
+    request-target forward() refuses."""
+    endpoint = unquote(endpoint)
     if is_child_mcp_path(decoded_rest, endpoint):
         return True
     try:
