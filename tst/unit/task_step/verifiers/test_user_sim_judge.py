@@ -792,6 +792,24 @@ async def test_an_auto_item_can_t_pass_an_answer_the_record_kept_only_the_start_
     assert (await _judge(over, FakeModel(), checks=[], items=[length]))["items"]["f2_her_length"]["verdict"] == "fail"
 
 
+def test_a_reply_still_waiting_when_the_run_ended_is_flagged_as_never_delivered():
+    timeline = [
+        {"event": "user_sim_read", "outcome": "reply", "message": "fri at 7 works", "virtual_time": "2026-11-19T14:00:00Z",
+         "deliver_at": "2026-11-19T14:20:00Z"},
+        {"event": "user_reply_delivered", "virtual_time": "2026-11-19T14:20:00Z", "text": "fri at 7 works"},
+        {"event": "user_sim_read", "outcome": "reply", "message": "dad can't do stairs",
+         "virtual_time": "2026-11-19T21:00:00Z", "deliver_at": "2026-11-20T08:05:00Z"},
+        {"event": "user_sim_read", "outcome": "no_reply", "message": "", "virtual_time": "2026-11-20T07:00:00Z"},
+    ]
+    reads = usj._with_delivery(timeline, timeline)
+    assert [r["held"] for r in reads] == [False, True, False]
+    assert usj.FLAG_HELD in usj._turn(2, reads[1]).flags and usj.FLAG_HELD not in usj._turn(1, reads[0]).flags
+    # The last read's reply is flagged as such, not twice.
+    last = {**timeline[2], "last_read": True}
+    flags = usj._turn(2, usj._with_delivery([last], [last])[0]).flags
+    assert usj.FLAG_LAST in flags and usj.FLAG_HELD not in flags
+
+
 def test_from_the_tail_the_check_ins_it_dropped_are_counted():
     tail = [{"event": "user_sim_read", "outcome": "reply", "message": "sounds good"}] * 2
     reads, notes, missing = usj._always_on_reads({"timeline_tail": tail, "counts": {"user_sim_reads": 5}})

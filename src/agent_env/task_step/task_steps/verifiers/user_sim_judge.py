@@ -100,6 +100,7 @@ FALLBACK_JUDGE_MODEL = "claude-sonnet-4-6"  # rubrics_verifier's, when the confi
 USER_SIM_ERROR = "user_sim_error"
 FLAG_ASSISTANT = "this answer looks like the assistant's (very long, or markdown)"
 FLAG_LAST = "after the run's last wake: this answer never reached the assistant"
+FLAG_HELD = "its reply was still waiting to be delivered when the run ended: it never reached the assistant"
 # always_on.ASSISTANT_LIKE_MESSAGE_CHARS: a chat run's reads carry no flag of their own, so it's computed the same way.
 ASSISTANT_LIKE_MESSAGE_CHARS = 1200
 SCHEMA_ERRORS_SHOWN_CHARS = 300  # of a malformed answer's schema errors, in the judge's turn note
@@ -427,7 +428,7 @@ def _always_on_reads(record: dict) -> tuple[list[dict], list[str], int]:
     if record.get("object_url"):
         try:
             timeline = _load(record["object_url"])["timeline"]
-            return [e for e in timeline if e.get("event") == "user_sim_read"], [], 0
+            return _with_delivery(timeline, timeline), [], 0
         except Exception as e:
             note = (f"the run's stored record could not be read ({type(e).__name__}); only its last events, without "
                     "what the user sim was sent, are shown")
@@ -435,16 +436,25 @@ def _always_on_reads(record: dict) -> tuple[list[dict], list[str], int]:
         note = "the run's full record wasn't stored; only its last events, without what the user sim was sent, are shown"
     from agent_env.task_step.task_steps.always_on import PENDING_TEXT_CHARS
 
+    tail = record.get("timeline_tail") or []
     reads = []
-    for e in record.get("timeline_tail") or []:
-        if e.get("event") == "user_sim_read":
-            message = e.get("message") or ""  # the tail keeps each string's first PENDING_TEXT_CHARS, then "…"
-            reads.append({**e, "message_cut": len(message) == PENDING_TEXT_CHARS + 1 and message.endswith("…")})
+    for e in _with_delivery(tail, tail):
+        message = e.get("message") or ""  # the tail keeps each string's first PENDING_TEXT_CHARS, then "…"
+        reads.append({**e, "message_cut": len(message) == PENDING_TEXT_CHARS + 1 and message.endswith("…")})
     total = (record.get("counts") or {}).get("user_sim_reads")
     missing = total - len(reads) if isinstance(total, int) and not isinstance(total, bool) and total > len(reads) else 0
     notes = [note] + ([f"the first {missing} of the run's {total} check-ins aren't kept, so they aren't shown"]
                       if missing else [])
     return reads, notes, missing
+
+
+def _with_delivery(reads_from: list[dict], timeline: list[dict]) -> list[dict]:
+    """The ``user_sim_read`` events, each reply marked ``held`` when no ``user_reply_delivered`` event carries it (its
+    ``virtual_time`` is the reply's ``deliver_at``): it was still waiting when the run ended. A delivery comes after its
+    read, so a tail that has the read has its delivery too."""
+    delivered = {e.get("virtual_time") for e in timeline if e.get("event") == "user_reply_delivered"}
+    return [{**e, "held": bool(e.get("deliver_at")) and not e.get("last_read") and e["deliver_at"] not in delivered}
+            for e in reads_from if e.get("event") == "user_sim_read"]
 
 
 def _chat_reads(summaries: list[dict]) -> tuple[list[dict], list[str]]:
@@ -498,6 +508,8 @@ def _turn(n: int, e: dict) -> core.Turn:
         flags.append(f"the user sim agent failed at this check-in: {str(e['user_sim_error'])[:USER_SIM_ERROR_SHOWN_CHARS]}")
     if e.get("last_read"):
         flags.append(FLAG_LAST)
+    elif e.get("held"):
+        flags.append(FLAG_HELD)
     when = e.get("virtual_time") or (e.get("read") or {}).get("time")
     return core.Turn(n=n, outcome=e.get("outcome") or "no_reply", message=e.get("message") or "",
                      input=e.get("input"), flags=flags, time=None if e.get("input") or not when else f"{when} UTC",
