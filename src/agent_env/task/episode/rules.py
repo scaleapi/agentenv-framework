@@ -167,6 +167,9 @@ UNAFFECTED = frozenset({
     "agent_prompt_response_verifier", "verify_mcp_env_assessment",
     # It skips an agent that isn't deployed.
     "teardown_sandboxes",
+    # It talks only to a user sim deploy_user_sim_agent deployed (its load check), which that step's check keeps from
+    # being played from outside.
+    "rate_user_satisfaction",
     # They act on an outside agent's proxy, in its sandbox, as on the agent; install_agent installs the proxy in its place.
     "add_skills", "install_agent", "load_artifact", "run_code", "verify_sandbox",
 })

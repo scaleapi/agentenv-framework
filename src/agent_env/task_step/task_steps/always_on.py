@@ -5,9 +5,11 @@ The ``deploy_user_sim_agent`` step (``deploy_user_sim_agent.py``, which document
 deploys the agent that plays the user, with its system prompt and model set, and records the user in the run's
 metadata under its ``agent_name``. The ``always_on`` step names it with ``user_sim`` and runs the loop:
 
-- The first wake is the user's request. Each wake opens with what came due for the agent on notifications/v1 (a
-  trigger's ``notify``, a scheduled check), labelled ``[time · channel]``, then the user's own messages, each labelled
-  with its time; while the task's clock is set, the agent can read it with the gateway's ``get_time``.
+- The first wake is the user's request, with the files its opening attaches in their place (its timeline ``wake``
+  event names them in ``files``, by ``name`` and ``uri``). Each wake opens with what came due for the agent on
+  notifications/v1 (a trigger's ``notify``, a scheduled check), labelled ``[time · channel]``, then the user's own
+  messages, each labelled with its time; while the task's clock is set, the agent can read it with the gateway's
+  ``get_time``.
 - Only what the agent sends with the gateway's ``message_user`` tool (user-chat/v1) reaches the user; its plain reply
   goes to the log. Each wake should end with ``message_user`` or ``stay_quiet``: one that ends with closing text and
   neither gets one ``nudge`` turn. ``stay_quiet`` and the nudge are on unless the task turns them off; the rule itself is
@@ -63,7 +65,8 @@ metadata under its ``agent_name``. The ``always_on`` step names it with ``user_s
   reply that never reached it (her last read's, or one still held at the end) has ``delivered`` false and no
   ``user_reads_at``.
 - The run's metadata keeps a summary in ``metadata["always_on"][step_id]`` (small enough for a running job to report
-  back); the full timeline goes to the object store, at the summary's ``object_url``.
+  back); the full timeline goes to the object store, at the summary's ``object_url``. Its ``user_sim`` names the user
+  sim's session (``context_id``), which rate_user_satisfaction asks in once the run is over.
 - An always_on_agent_verifier (``verifiers/always_on_agent_verifier.py``) grades the step's prompt from the user's chat
   and the run's context, the run wake by wake among it (``render_for_judge``); a plain rubrics_verifier on it is
   refused when the task loads.
@@ -115,6 +118,7 @@ from agent_env.task_step.task_steps.agent.deploy_user_sim_agent import USER_SIMS
 from agent_env.task_step.task_steps.notification_delivery import delivered_parts, label_time, take_due
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from agent_env.task_step.task_steps.agent.user_sim_common import iso as _iso, person_of, task_zone, utc as _utc
+from agent_env.task_step.task_steps.agent.user_sim_common import attached, file_name, for_agent, recorded_opening
 
 logger = logging.getLogger(__name__)
 
@@ -488,7 +492,8 @@ class _Run:
             raise ValueError(f"always_on: the user sim '{step.user_sim}' has no opening_prompt, the user's first "
                              "message; give the deploy_user_sim_agent step one")
         now = await self.now()
-        self.opening = {"at": _iso(now), "text": self._effective_prompt()}
+        files = attached(self._prompt_parts())
+        self.opening = {"at": _iso(now), "text": self._effective_prompt(), **({"files": files} if files else {})}
         self.person["opening"] = self.opening
         t0 = await self._t0() or now
         self.end = _end_instant(step.end_time, t0) if step.end_time else None
@@ -1122,19 +1127,19 @@ class _Run:
 
     def _prompt_parts(self) -> list[dict]:
         """The user's first message, the user sim's opening, as A2A parts, its seed applied."""
-        return self.step._apply_seed([{"kind": "text", "text": self.us["opening"]}], self.ctx.metadata.get("seed", {}))
+        return self.step._apply_seed(recorded_opening(self.us), self.ctx.metadata.get("seed", {}))
 
     def _effective_prompt(self) -> str:
         return "\n".join(p.get("text", "") for p in self._prompt_parts() if p.get("kind") == "text")
 
     def _opening_parts(self, labelled) -> list[dict]:
         """The prompt as the opening wake and the user's chat carry it: its text as one labelled line from the user
-        (``labelled(text)``), where its first text part was, and every other part (a file, data) as it is, in the
-        prompt's order, as prompt_agent sends them."""
+        (``labelled(text)``), where its first text part was, and every file part as it is, in the prompt's order, as
+        prompt_agent sends them, without the description that is for the user sim."""
         out, text = [], self._effective_prompt()
         for part in self._prompt_parts():
             if part.get("kind") != "text":
-                out.append(part)
+                out.append(for_agent(part))
             elif text is not None:
                 out.append(labelled(text))
                 text = None
@@ -1252,8 +1257,12 @@ class _Run:
         def record() -> None:
             self.per_turn_parts.append(self._kept_parts(parts))
 
+        # The files a wake carries (the opening's), by name and address; their descriptions are the user sim's.
+        files = [{"name": file_name(p), "uri": (p.get("file") or {}).get("uri")}
+                 for p in parts if p.get("kind") == "file"]
         self.log("wake", n=self.wakes, virtual_time=_iso(sent_at), woke_by=woke_by, notifications=notifications or [],
-                 last=last, parts_text="\n".join(p.get("text", "") for p in parts if p.get("kind") == "text"))
+                 last=last, parts_text="\n".join(p.get("text", "") for p in parts if p.get("kind") == "text"),
+                 **({"files": files} if files else {}))
         t = time.time()
         try:
             task_id, result = await self._agent_turn(parts, msg_id, record)
@@ -1685,7 +1694,8 @@ class _Run:
         record = {"step_id": step.id, "end_reason": self.end_reason, "end_note": self.end_note, "error": self.error,
                   "error_type": self.error_type, "counts": counts,
                   "user_sim": {"name": step.user_sim, "version": self.version,
-                               "agent_name": self.us.get("agent_name"), **self.user_setup},
+                               "agent_name": self.us.get("agent_name"), "context_id": self.user_context_id,
+                               **self.user_setup},
                   "end_time": _iso(self.end) if self.end else None, "time_zone": self.zone,
                   "multi_day": self.multi_day, "real_seconds": round(time.time() - self.t0_real, 1),
                   "timeline_events": len(self.timeline), "pending_at_end": _bounded(self.pending)}

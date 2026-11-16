@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -97,6 +98,30 @@ async def test_the_prompt_set_on_the_user_s_agent_is_the_tested_one_byte_for_byt
 
 
 @pytest.mark.asyncio
+async def test_the_record_keeps_each_tag_s_line_so_an_old_used_resolves_after_the_persona_is_reordered(monkeypatch):
+    record = await _published(monkeypatch, _step())
+    seen = record["tagged_lines"]
+    # Every tag the prompt shows, each with its line as the prompt shows it.
+    assert list(seen) == re.findall(r"^  ([A-Z]\d+) ", PROMPT, re.M)
+    assert all(f"  {tag:<4}{line.split(chr(10))[0]}" in PROMPT for tag, line in seen.items())
+    decisions = HANNAH["description"]["decisions"]
+    assert seen["D9"] == decisions[8]
+    assert seen["W2"] == f'Earlier you texted the assistant:\n"{PERSON["opening"]["text"]}"'
+    used = "D9"  # what the user sim answered in that run
+
+    # The task writer later reorders the decisions and adds one at the top: D9 now names another line.
+    edited = {**HANNAH, "description": {**HANNAH["description"],
+                                        "decisions": ["Anything over $600 for the weekend: ask you first.",
+                                                      *reversed(decisions)]}}
+    now = (await _published(monkeypatch, _step(persona=edited)))["tagged_lines"]
+    assert now["D9"] != decisions[8]
+    # The old run's record still resolves its used to the line its user sim saw.
+    assert seen[used] == decisions[8]
+    # Recording the map leaves the prompt as tested.
+    assert record["prompt_sha256"] == hashlib.sha256(PROMPT.encode()).hexdigest()
+
+
+@pytest.mark.asyncio
 async def test_a_one_sitting_user_gets_the_done_is_a_sign_off_line(monkeypatch):
     deploy = _Deploy(monkeypatch)
     await deploy.run(_step(multi_day=False))
@@ -150,6 +175,8 @@ def test_the_step_round_trips_and_holds_no_system_prompt():
     ({"persona": {**HANNAH, "description": None}}, "description must be an object of sections"),
     ({"persona": {**HANNAH, "description": {"who_you_are": ["Linda."], "events": ["Tue"]}}},
      "unknown sections ['events']"),
+    ({"persona": {**HANNAH, "description": {"who_you_are": ["Linda."], "never_supply": ["Her card number."]}}},
+     "put facts the assistant should find in what_to_look_up, and secrets in keep_private"),
     ({"persona": {**HANNAH, "permissions": {"maybe": ["book it"]}}}, "permissions has unknown kinds ['maybe']"),
     ({"persona": {**HANNAH, "keep_private": "her age"}}, "keep_private must be a list of non-empty lines"),
     ({"persona": {**HANNAH, "schedule": ["07:30", "23:30"]}}, "schedule must be an object"),
