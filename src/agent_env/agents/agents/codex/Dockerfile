@@ -18,8 +18,8 @@ COPY package.json package-lock.json ./
 RUN npm ci --ignore-scripts --omit=dev --no-audit --no-fund --loglevel=error && npm cache clean --force \
     && ln -s /opt/agent/node_modules/.bin/codex /usr/local/bin/codex \
     && ln -s /opt/agent/node_modules/.bin/mcp-remote /usr/local/bin/mcp-remote
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt model-requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt -r model-requirements.txt
 # install.sh and run.sh are install/v1's: in the image, so they stay in its build context.
 COPY a2a_server.py codex_bridge.py codex_config.py codex_kit.py entrypoint.sh install.sh run.sh ./
 # The CLI's cwd, /app, and its state, fixed so neither follows the uid: Modal runs the image as root.
