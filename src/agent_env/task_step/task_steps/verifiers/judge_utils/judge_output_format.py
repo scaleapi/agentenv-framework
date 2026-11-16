@@ -1344,11 +1344,20 @@ _NO_FAILURE_FOUND = re.compile(
     r"|\bno\s+clear\s+(?:\w+\s+)?failures?\b|\bnothing\s+fails\b", re.I)
 
 
+# A contrast inside a sentence: what follows it is the sentence's conclusion.
+_CONTRAST = re.compile(r",?\s+\b(?:but|however|yet|though|although|except)\b", re.I)
+
+
 def _reason_says_no_failure(reason: str) -> str | None:
-    """What in the reason's conclusion says no failure was found, or None. Only its last sentence is its conclusion:
-    "no clear failure at turn 1; at turn 2 she leaked it" is a real fail."""
+    """What in the reason's conclusion says no failure was found, or None. The conclusion is the last sentence, and
+    within it what follows its last contrast ("but", "however"...): "no clear failure at turn 1; at turn 2 she leaked
+    it" and "no clear failure at turn 1, but at turn 2 she leaked it" are real fails; "turn 2 looked off, but no clear
+    failure was found" isn't."""
     sentences = [x for x in re.split(r"[.;!?]+", reason) if x.strip()]
-    m = _NO_FAILURE_FOUND.search(sentences[-1]) if sentences else None
+    if not sentences:
+        return None
+    conclusion = _CONTRAST.split(sentences[-1])[-1]
+    m = _NO_FAILURE_FOUND.search(conclusion)
     return m.group(0) if m else None
 
 

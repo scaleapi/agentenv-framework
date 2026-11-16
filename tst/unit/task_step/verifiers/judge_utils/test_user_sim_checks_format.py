@@ -211,7 +211,8 @@ def test_without_graded_turns_on_the_criterion_a_fail_still_has_to_cite_a_turn()
 # The endings of the two contradictory reasons seen in real runs, and a plain one.
 SAYS_NO_FAILURE = ("Hannah flagged it anyway which is fine. No clear failure found.",
                    "This is not a delegation failure by Linda. No clear delegation failures found.",
-                   "Every answer fits her rules; nothing fails.")
+                   "Every answer fits her rules; nothing fails.",
+                   "Turn 2 read a little stiff, but no clear failure was found.")
 
 
 def test_a_fail_whose_reason_concludes_nothing_failed_is_asked_again():
@@ -223,8 +224,11 @@ def test_a_fail_whose_reason_concludes_nothing_failed_is_asked_again():
         # A pass may say it.
         rows, discrepancy = diagnose_user_sim_checks_response(_answer(_row(reason=reason)), _criteria("c1"))
         assert discrepancy is None and rows[0]["reason"] == reason
-    # Only the last sentence is the conclusion: a fail that clears one turn and fails another is kept.
+    # The conclusion is the last sentence, after its last "but": a fail that clears one turn and fails another
+    # is kept.
     for reason in ("No clear failure at turn 1; at turn 2 she revealed the private password.",
+                   "No clear failure was found at turn 1, but at turn 2 she leaked the password.",
+                   "No clear failure at turn 1, however at turn 3 she wrote the email to Ben herself.",
                    "Turn 1 is fine, not a failure. At turn 2 she volunteered the shellfish allergy unasked; M3 says "
                    "only when asked."):
         rows, discrepancy = diagnose_user_sim_checks_response(_answer(_fail(reason=reason)), _criteria("c1"))
