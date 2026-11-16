@@ -1359,7 +1359,7 @@ def _cited_turns(value: Any) -> list[int]:
     for v in value:
         try:
             out.append(int(v))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):  # OverflowError: an infinite number
             continue
     return out
 
@@ -1409,8 +1409,12 @@ def _user_sim_row(item: dict, criterion: dict) -> tuple[dict | None, list[str]]:
         problems.append(f"{rid}: assistant_asked must be true or false")
     if verdict == "n/a" and str(criterion.get("na_when") or "").strip().lower() == _USER_SIM_NA_NEVER:
         problems.append(f"{rid} may not be n/a: it always applies, so answer pass or fail")
+    if not isinstance(item.get("reason"), str):
+        problems.append(f"{rid}: reason must be text")
+    if not isinstance(item.get("turns"), list):
+        problems.append(f"{rid}: turns must be a list of turn numbers")
     turns = _cited_turns(item.get("turns"))
-    reason = str(item.get("reason") or "").strip()
+    reason = item["reason"].strip() if isinstance(item.get("reason"), str) else ""
     graded = _graded_turns(criterion)
     if verdict == "fail":
         if not any(graded is None or t in graded for t in turns):
@@ -1438,16 +1442,27 @@ def diagnose_user_sim_checks_response(
     response_text: str, criteria: list[dict],
 ) -> tuple[list[dict] | None, JudgeResponseDiscrepancy | None]:
     """Parse a user_sim_checks judge response into rows, or a discrepancy for the correction prompt: no JSON
-    object, the wrong row set, or a row the user sim judge can't use (its verdict or could_change_grade invalid, an
-    n/a where ``na_when`` is never, an assistant_asked that isn't true or false, a fail citing no graded turn, a fail whose reason concludes nothing failed)."""
+    object, the wrong row set, or a row the user sim judge can't use: an id, reason or turns of the wrong type, a
+    verdict, could_change_grade or assistant_asked out of range, an n/a where ``na_when`` is never, a fail citing no
+    graded turn, or a fail whose reason concludes nothing failed."""
     parsed = _user_sim_json(response_text)
     if parsed is None:
         return None, _parse_failure_discrepancy(criteria, "the answer is not a JSON object")
     results = _extract_rubric_binary_results(parsed)
     if not isinstance(results, list):
-        return None, _parse_failure_discrepancy(criteria, f"unexpected response shape: {type(parsed).__name__}")
+        shape = ("`results` must be a list" if results is not None
+                 else f"unexpected response shape: {type(parsed).__name__}")
+        return None, _parse_failure_discrepancy(criteria, shape)
     if not all(isinstance(r, dict) for r in results):
         return None, _parse_failure_discrepancy(criteria, "every result must be a JSON object")
+    # The shared id check hashes each id, so one that isn't text (a list, an object) would raise instead of being
+    # asked again.
+    bad_ids = [f"result {i}: id must be a criterion id (text), not {r.get('id')!r}"
+               for i, r in enumerate(results, 1) if not isinstance(r.get("id"), str)]
+    if bad_ids:
+        return None, JudgeResponseDiscrepancy(
+            expected_count=len(criteria), returned_count=len(results), expected_ids=[c["id"] for c in criteria],
+            missing_ids=[], duplicate_ids=[], unknown_ids=[], row_problems=bad_ids)
     discrepancy = _analyze_result_ids(results, criteria)
     if discrepancy is not None:
         return None, discrepancy

@@ -363,3 +363,47 @@ async def test_rubrics_verifier_names_the_unusable_row_when_the_judge_never_fixe
     with pytest.raises(ValueError, match=r"Judge output invalid after 3 attempts: c1: a fail whose reason says "
                                          r"'No clear failure found' contradicts itself"):
         await _run_judge(verifier)
+
+
+# ---- malformed answers are asked again, never raised ---------------------------------------------------------------
+GOOD = _row("c1")
+
+
+@pytest.mark.parametrize("text, problem", [
+    (json.dumps({"results": [{"id": []}]}), "result 1: id must be a criterion id (text), not []"),
+    (json.dumps({"results": [{**GOOD, "id": {"c": 1}}]}), "result 1: id must be a criterion id (text), not {'c': 1}"),
+    (json.dumps({"results": [{**GOOD, "id": None}]}), "result 1: id must be a criterion id (text), not None"),
+    (json.dumps({"results": [{**GOOD, "id": 1}]}), "result 1: id must be a criterion id (text), not 1"),
+    (json.dumps({"results": [{**GOOD, "reason": ["dad cant do shellfish"]}]}), "c1: reason must be text"),
+    (json.dumps({"results": [{k: v for k, v in GOOD.items() if k != "reason"}]}), "c1: reason must be text"),
+    (json.dumps({"results": [{**GOOD, "turns": "1"}]}), "c1: turns must be a list of turn numbers"),
+    (json.dumps({"results": [{**GOOD, "verdict": ["fail"]}]}), "c1: verdict ['fail'] is not one of"),
+    (json.dumps({"results": [{**GOOD, "could_change_grade": "true"}]}), "c1: could_change_grade must be true or false"),
+    (json.dumps({"results": [{**GOOD, "assistant_asked": None}]}), "c1: assistant_asked must be true or false"),
+    # An infinite turn number is dropped like any other that isn't one, so the fail cites none.
+    ('{"results": [{"id": "c1", "reason": "Leaked it.", "turns": [Infinity], "verdict": "fail", '
+     '"could_change_grade": true, "assistant_asked": false}]}', "c1: a fail must cite at least one graded turn"),
+    (json.dumps({"results": {"c1": GOOD}}), "`results` must be a list"),
+    (json.dumps({"results": "pass"}), "`results` must be a list"),
+    (json.dumps({"results": [GOOD, "pass"]}), "every result must be a JSON object"),
+    (json.dumps("pass"), "unexpected response shape: str"),
+    ("null", "the answer is not a JSON object"),
+])
+def test_a_malformed_answer_is_a_discrepancy_for_the_correction_prompt_never_an_exception(text, problem):
+    rows, discrepancy = diagnose_user_sim_checks_response(text, _criteria("c1"))
+    assert rows is None and problem in str(discrepancy)
+    prompt = SPEC.format_correction_prompt(eval_prompt="EVAL", previous_response=text, discrepancy=discrepancy)
+    assert "## Correction Required" in prompt
+    with pytest.raises(ValueError, match="user_sim_checks answer not usable"):
+        SPEC.parse_response(text, _criteria("c1"))
+
+
+@pytest.mark.asyncio
+async def test_rubrics_verifier_asks_again_when_a_result_s_id_is_not_text(monkeypatch):
+    verifier = _verifier()
+    judge = AsyncMock(side_effect=[{"response": json.dumps({"results": [{"id": []}]})},
+                                   {"response": _answer(_row("c1"), _row("c2"))}])
+    monkeypatch.setattr(verifier, "_prompt_llm_judge", judge)
+    rows, retries, discrepancies, _ = await _run_judge(verifier)
+    assert retries == 1 and [r["verdict"] for r in rows] == ["pass", "pass"]
+    assert discrepancies[0]["row_problems"] == ["result 1: id must be a criterion id (text), not []"]
