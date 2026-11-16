@@ -290,13 +290,14 @@ async def test_a_time_the_zone_cannot_show_is_a_tool_error_naming_it(gw, now, zo
         200, {"content": [{"type": "text", "text": message}], "isError": True, "changelog_id": None})
 
 
-def test_the_description_keeps_tool_dates_in_utc_and_gives_the_users_own_clock_when_the_environment_has_one():
+def test_the_description_keeps_tool_dates_in_utc_and_gives_the_users_clock_when_their_zone_is_known():
     assert ("current_time is in UTC, as are the dates and times the other tools here take, so derive those from "
             "current_time.") in GET_TIME_TOOL_DESCRIPTION
-    assert ("When this environment has a home time zone, your user's, the result also has time_zone and local_time, "
-            "the same instant in that zone: what your user's own clock shows") in GET_TIME_TOOL_DESCRIPTION
+    assert ("The result also has time_zone and local_time when your user's time zone is known: the same instant on "
+            "their clock") in GET_TIME_TOOL_DESCRIPTION
     assert "Neither changes the dates you pass to tools" in GET_TIME_TOOL_DESCRIPTION
     assert not re.search(r"[A-Z][a-z]+/[A-Z]", GET_TIME_TOOL_DESCRIPTION)
+    assert "home time zone" not in GET_TIME_TOOL_DESCRIPTION  # no setup words: a clock tool says the time
 
 
 def test_a_clock_armed_in_a_zone_answers_in_it_with_no_argument_and_in_one_asked_for_instead(gw):
