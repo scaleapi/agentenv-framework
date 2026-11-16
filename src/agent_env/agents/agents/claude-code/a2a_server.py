@@ -16,6 +16,7 @@ import shutil
 import stat
 import tarfile
 import tempfile
+import time
 import uuid
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
@@ -580,19 +581,24 @@ class ClaudeCodeAgent(DurableSessionRefs, AgentEnvAgent):
         os.close(jsonl_fd)
         archive_path, snapshot_jsonl_path = Path(raw_archive_path), Path(raw_jsonl_path)
         try:
+            started = time.monotonic()
             file_count, bytes_written = await asyncio.to_thread(_build_workspace_archive, archive_path)
+            archived = time.monotonic()
             await asyncio.to_thread(snapshot_jsonl_path.write_bytes, jsonl_bytes)
             uploaded = {"trajectory": _answer(await upload(request.objects.trajectory, snapshot_jsonl_path))}
             if request.objects.workspace is not None:
                 uploaded["workspace"] = _answer(await upload(request.objects.workspace, archive_path))
+            stats = {"file_count": file_count, "archive_seconds": round(archived - started, 3),
+                     "upload_seconds": round(time.monotonic() - archived, 3)}
         except FileNotFoundError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         finally:
             archive_path.unlink(missing_ok=True)
             snapshot_jsonl_path.unlink(missing_ok=True)
         logger.info(f"Snapshot saved: context_id={context_id} session_id={session_id} files={file_count} "
-                    f"bytes={bytes_written}")
-        return ObjectSnapshotSaveResponse.model_validate({"context_id": context_id, "objects": uploaded})
+                    f"bytes={bytes_written} archive_seconds={stats['archive_seconds']} "
+                    f"upload_seconds={stats['upload_seconds']}")
+        return ObjectSnapshotSaveResponse.model_validate({"context_id": context_id, "objects": uploaded, "stats": stats})
 
     @extension(SNAPSHOT_V1.load)
     async def load_snapshot(self, request: ObjectSnapshotLoadRequest) -> ObjectSnapshotLoadResponse:

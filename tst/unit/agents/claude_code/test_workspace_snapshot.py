@@ -144,13 +144,16 @@ def test_save_trims_an_incomplete_tail_takes_no_lock_and_uploads_the_bundle(monk
     monkeypatch.setattr(claude_bridge, "SESSION_JSONL_DIR", session_dir)
     agent.set_session_ref_for_context("ctx-1", session_id)
     uploads: list[dict] = []
+    clock = [100.0]
 
     async def _upload(target, source):
         body = source.read_bytes()
         uploads.append({"target": target, "path": source, "body": body})
+        clock[0] += 2.5
         return Uploaded(size_bytes=len(body), sha256=hashlib.sha256(body).hexdigest())
 
     monkeypatch.setattr(a2a_server, "upload", _upload)
+    monkeypatch.setattr(a2a_server.time, "monotonic", lambda: clock[0])
     request = a2a_server.ObjectSnapshotSaveRequest.model_validate(
         {"context_id": "ctx-1", "objects": {"trajectory": write_grant("snap/trajectory"), "workspace": write_grant("snap/workspace")}}
     )
@@ -176,6 +179,7 @@ def test_save_trims_an_incomplete_tail_takes_no_lock_and_uploads_the_bundle(monk
             "trajectory": {"size_bytes": len(uploads[0]["body"]), "sha256": hashlib.sha256(uploads[0]["body"]).hexdigest()},
             "workspace": {"size_bytes": len(uploads[1]["body"]), "sha256": hashlib.sha256(uploads[1]["body"]).hexdigest()},
         },
+        "stats": {"file_count": 3, "archive_seconds": 0.0, "upload_seconds": 5.0},
     }
     assert all(not upload["path"].exists() for upload in uploads)
 
