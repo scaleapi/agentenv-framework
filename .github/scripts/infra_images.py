@@ -9,9 +9,10 @@ doesn't exist yet, so the first publish can start. ``--only infra`` lists only t
 only the images that install the protocol, the agents' and the website browser's, which a release builds after it
 publishes the protocol, as their protocol floor may name it, and ``--only disks`` the base computers' disk forms, built
 over their published images. ``write PATH`` records the digest the registry serves under every
-image's tag as a release wheel carries them, and fails if any is missing. ``public`` warns about each image a user, who
-pulls anonymously, can't. The registry is read with ``GHCR_TOKEN`` (as ``GITHUB_ACTOR``) when it's set, anonymously
-otherwise, and always anonymously by ``public``.
+image's tag as a release wheel carries them, and fails if any is missing; with ``--computers FILE``, the composed
+computers ``infra_build.py publish-computers`` wrote there too. ``public`` warns about each image a user, who pulls
+anonymously, can't, and each composed computer's index the record ``--record`` names. The registry is read with
+``GHCR_TOKEN`` (as ``GITHUB_ACTOR``) when it's set, anonymously otherwise, and always anonymously by ``public``.
 """
 
 from __future__ import annotations
@@ -23,7 +24,9 @@ import sys
 from pathlib import Path
 
 from agent_env.env.bootstrap import PLAYWRIGHT_MCP_DOCKERFILE, PUBLISHED_IMAGES
-from agent_env.env.published_images import BUNDLE_IMAGES, DISK_IMAGES, REGISTRY, PublishedImage, write_release_digests
+from agent_env.env.published_images import (
+    BUNDLE_IMAGES, COMPUTERS_REPOSITORY, DISK_IMAGES, REGISTRY, PublishedImage, released_computers,
+    write_release_digests)
 from agent_env.store.image_store.oci_registry_credentials import RegistryAuth
 from agent_env.store.image_store.registry_api import NoSuchImageError, RegistryRefusedError, pin_digest
 
@@ -42,8 +45,10 @@ def main() -> int:
     plan = commands.add_parser("plan")
     plan.add_argument("--missing", action="store_true")
     plan.add_argument("--only", choices=sorted(_GROUPS))
-    commands.add_parser("write").add_argument("path", type=Path)
-    commands.add_parser("public")
+    write = commands.add_parser("write")
+    write.add_argument("path", type=Path)
+    write.add_argument("--computers", type=Path)
+    commands.add_parser("public").add_argument("--record", type=Path)
     args = parser.parse_args()
     if args.command == "plan":
         images = _GROUPS[args.only] if args.only else PUBLISHED_IMAGES
@@ -51,14 +56,16 @@ def main() -> int:
                           if not args.missing or _published_digest(image) is None]))
         return 0
     if args.command == "public":
-        _warn_unless_public()
+        _warn_unless_public(released_computers(args.record) if args.record else [])
         return 0
     digests = {image.ref(): _digest(image) for image in PUBLISHED_IMAGES}
     if missing := sorted(ref for ref, digest in digests.items() if digest is None):
         print(f"::error::the registry has no image under {', '.join(missing)}")
         return 1
-    write_release_digests(digests, args.path)
-    print(f"recorded {len(digests)} published images in {args.path}")
+    computers = json.loads(args.computers.read_text()) if args.computers else []
+    write_release_digests(digests, args.path, computers)
+    released_computers(args.path)
+    print(f"recorded {len(digests)} published images and {len(computers)} composed computers in {args.path}")
     return 0
 
 
@@ -88,17 +95,20 @@ def _published_digest(image: PublishedImage) -> str | None:
         return None
 
 
-def _warn_unless_public() -> None:
-    """A warning for each image an anonymous pull doesn't get, which a new package's first push leaves it as: GHCR makes
-    a package private until its admin makes it public, and an install that can't pull it builds the image instead."""
-    for image in PUBLISHED_IMAGES:
+def _warn_unless_public(computers: list[dict]) -> None:
+    """A warning for each image, and each composed computer's index in ``computers``, an anonymous pull doesn't get,
+    which a new package's first push leaves it as: GHCR makes a package private until its admin makes it public, and an
+    install that can't pull it builds the image, or composes the computer, instead."""
+    refs = [(image.name, image.ref()) for image in PUBLISHED_IMAGES]
+    refs += [(COMPUTERS_REPOSITORY.rpartition("/")[2], computer["index"]) for computer in computers]
+    for name, ref in refs:
         try:
-            pin_digest(image.ref(), None)
+            pin_digest(ref, None)
         except ValueError as e:
             why = str(e).split(": ", 1)[-1].split(";")[0]  # what the registry answered, without the ref
-            settings = f"https://github.com/orgs/{REGISTRY.split('/')[1]}/packages/container/{image.name}/settings"
-            print(f"::warning title={image.name} isn't public::{image.ref()}: {why}. Make the package public at "
-                  f"{settings}; until then an install can't pull it and builds the image instead.")
+            settings = f"https://github.com/orgs/{REGISTRY.split('/')[1]}/packages/container/{name}/settings"
+            print(f"::warning title={name} isn't public::{ref}: {why}. Make the package public at "
+                  f"{settings}; until then an install can't pull it and builds it instead.")
 
 
 def _auth() -> RegistryAuth | None:
