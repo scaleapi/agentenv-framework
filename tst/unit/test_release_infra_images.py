@@ -50,6 +50,33 @@ def _finished(job: str) -> str:
     return f"""contains(fromJSON('["success", "skipped"]'), needs.{job}.result)"""
 
 
+# What a job's own env can read; a step's can read the runner too (docs.github.com, "Context availability").
+_JOB_ENV_CONTEXTS = {"github", "inputs", "matrix", "needs", "secrets", "strategy", "vars"}
+
+
+def _job_env_contexts(jobs: dict) -> set[tuple[str, str]]:
+    """Each (job, context) a job's own env reads: in each of its expressions, with their quoted strings left out, every
+    name that opens a property path, not one that follows a dot or is part of a hyphened id (``needs.infra-plan``)."""
+    return {(name, context) for name, body in jobs.items() for value in (body.get("env") or {}).values()
+            for expression in re.findall(r"\$\{\{(.*?)\}\}", str(value))
+            for context in re.findall(r"(?<![\w.-])([A-Za-z_][\w-]*)\.", re.sub(r"'[^']*'", "''", expression))}
+
+
+def test_every_context_an_expression_reads_is_found_however_it_is_written():
+    jobs = {"j": {"env": {"A": "${{ needs.build.outputs.path || runner.temp }}", "B": "${{ format('{0}.x', vars.y) }}",
+                          "C": "plain.text ${{ matrix.arch }}", "D": "${{ needs.infra-plan.outputs.missing }}"}}}
+
+    assert _job_env_contexts(jobs) == {("j", "needs"), ("j", "runner"), ("j", "vars"), ("j", "matrix")}
+
+
+@pytest.mark.parametrize("path", sorted((REPO / ".github" / "workflows").glob("*.yml")), ids=lambda path: path.name)
+def test_a_jobs_own_env_reads_only_the_contexts_a_job_has(path):
+    """GitHub refuses the whole workflow file otherwise, so a release tag starts no run at all."""
+    read = _job_env_contexts(yaml.safe_load(path.read_text()).get("jobs", {}))
+
+    assert {(name, context) for name, context in read if context not in _JOB_ENV_CONTEXTS} == set()
+
+
 @pytest.mark.parametrize("job", sorted(JOBS))
 def test_a_job_that_installs_agent_env_holds_no_token_that_writes(job):
     """Then a dependency's code never runs where a token can push an image, publish to PyPI or edit the repository."""
