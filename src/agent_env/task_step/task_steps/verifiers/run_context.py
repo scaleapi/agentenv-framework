@@ -105,6 +105,11 @@ class Run:
         return tuple(f for f in self._firings
                      if (trigger_id is None or f.trigger_id == trigger_id) and (source is None or f.source == source))
 
+    def firings_read(self) -> tuple[Firing, ...]:
+        """Every firing of the logs that could be read, oldest first, whichever couldn't (``unavailable`` names
+        those)."""
+        return self._firings
+
     def firing(self, trigger_id: str, *, env: Optional[str] = None) -> Optional[Firing]:
         """The first firing of ``trigger_id``, or None if it never fired."""
         return next(iter(self.firings(trigger_id, env=env)), None)
