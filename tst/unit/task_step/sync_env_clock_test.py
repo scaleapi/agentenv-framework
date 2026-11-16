@@ -350,16 +350,35 @@ def test_without_a_zone_virtual_time_is_passed_through_untouched():
 
 @pytest.mark.asyncio
 async def test_execute_arms_the_gateway_at_the_local_instant_and_tells_every_server_the_zone(monkeypatch):
-    sent = _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL})
+    sent = _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL, "time_zone": "America/New_York"})
     monkeypatch.setattr("agent_env.env.env.Env.get", lambda *a, **k: SimpleNamespace(environment_name="email"))
     context = TaskStepContext(deployed_envs=[_carded(await _composed_card({"mcp-email": [_ZONE_EXT]}))])
 
     await _zoned().execute(context)
 
-    assert json.loads(sent[0].content)["virtual_time"] == "2026-01-01T17:00:00Z"
+    assert json.loads(sent[0].content) == {"virtual_time": "2026-01-01T17:00:00Z", "virtual_seconds_per_real_second": 1.0,
+                                           "time_zone": "America/New_York"}  # get_time answers in it too
     assert json.loads(sent[2].content) == {"env_get_time_url": CLOCK_URL, "timezone": "America/New_York"}
     cfg = context.metadata["clock_configurations"][0]
     assert (cfg["timezone"], cfg["virtual_time"], cfg["armed_at"]) == ("America/New_York", "2026-01-01T12:00:00", "2026-01-01T17:00:00Z")
+    assert cfg["get_time_zone"] == "America/New_York"
+
+
+@pytest.mark.asyncio
+async def test_a_gateway_that_didnt_take_the_zone_is_named_in_a_warning_and_the_record_and_the_step_goes_on(
+        monkeypatch, caplog):
+    """An older gateway image answers the arm without keeping time_zone, so get_time answers in UTC alone: the step
+    still arms and syncs, as it did with that gateway before, and says why get_time won't give the user's clock."""
+    _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL})
+    monkeypatch.setattr("agent_env.env.env.Env.get", lambda *a, **k: SimpleNamespace(environment_name="email"))
+    context = TaskStepContext(deployed_envs=[_carded(await _composed_card({"mcp-email": [_ZONE_EXT]}))])
+
+    with caplog.at_level("WARNING"):
+        await _zoned().execute(context)
+
+    assert context.metadata["clock_configurations"][0]["get_time_zone"] is None
+    assert "its gateway's clock didn't take time zone 'America/New_York', so get_time answers agents in UTC alone" in (
+        caplog.text)
 
 
 @pytest.mark.asyncio

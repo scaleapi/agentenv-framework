@@ -80,7 +80,8 @@ class SyncEnvClockTaskStep(TaskStep):
         1 real s -> 1 virtual day). For ~V virtual seconds over an ~R-real-second task, pass V/R.
 
         timezone = optional IANA name. Unset keeps today's behaviour. Set, a wall-clock virtual_time is local time in
-        that zone, and every synced server is told the zone (a server that cannot take it fails the step)."""
+        that zone, the gateway's clock is armed in it, so its get_time answers in it too, and every synced server is
+        told the zone (a server that cannot take it fails the step)."""
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
         if not isinstance(virtual_time, str):
             raise ValueError("virtual_time must be an RFC3339 string")
@@ -131,7 +132,8 @@ class SyncEnvClockTaskStep(TaskStep):
             raise StepContextError(f"Env '{self.env_id}' not found in context.deployed_envs")
         try:
             await deployed.invoke(EXT_CLOCK_URI, "set_time",
-                                  {"virtual_time": self.armed_virtual_time, "virtual_seconds_per_real_second": self.virtual_seconds_per_real_second},
+                                  {"virtual_time": self.armed_virtual_time, "virtual_seconds_per_real_second": self.virtual_seconds_per_real_second,
+                                   **({"time_zone": self.timezone} if self.timezone else {})},
                                   timeout=self.timeout_seconds)
         except httpx.HTTPStatusError as e:
             raise RuntimeError(f"clock arm failed (HTTP {e.response.status_code}): {e.response.text}") from e
@@ -144,6 +146,10 @@ class SyncEnvClockTaskStep(TaskStep):
                                    "deploy it in a multi env, whose gateway it follows") from e
         state = await deployed.invoke(EXT_CLOCK_URI, "state", timeout=self.timeout_seconds)
         env_get_time_url = state.get("env_get_time_url")
+        if self.timezone is not None and state.get("time_zone") != self.timezone:
+            logger.warning(f"sync_env_clock env={self.env_id}: its gateway's clock didn't take time zone "
+                           f"{self.timezone!r}, so get_time answers agents in UTC alone; a gateway image from before "
+                           "time_zone does that: put the gateway env again (agent-env env gateway put)")
 
         synced, skipped = [], []
         for server in await self._backing_servers(deployed):
@@ -160,7 +166,8 @@ class SyncEnvClockTaskStep(TaskStep):
             "env_get_time_url": env_get_time_url, "synced": synced, "skipped": skipped,
         }
         if self.timezone is not None:
-            configuration.update(timezone=self.timezone, armed_at=self.armed_virtual_time)
+            configuration.update(timezone=self.timezone, armed_at=self.armed_virtual_time,
+                                 get_time_zone=state.get("time_zone"))
         context.metadata.setdefault("clock_configurations", []).append(configuration)
         logger.info(f"sync_env_clock env={self.env_id}: armed rate={self.virtual_seconds_per_real_second}; "
                     f"synced={[s['service'] for s in synced]} skipped={[s['service'] for s in skipped]}")
