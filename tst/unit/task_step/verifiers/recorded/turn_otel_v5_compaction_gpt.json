@@ -1,0 +1,771 @@
+[
+ {
+  "name": "harness.message",
+  "context": {
+   "trace_id": "0xf1da2c351be284fb478c52070c739ccb",
+   "span_id": "0x7e424ac463ab85dc",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": null,
+  "start_time": "2026-11-16T23:37:24.860829Z",
+  "end_time": "2026-11-16T23:37:24.860911Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "gen_ai.agent.name": "harness",
+   "harness.message.text": "[Harness: older history is about to be summarized to save space.] Save anything you will need later to your profile now, with memory_add or memory_replace: the user's rules and preferences, deadlines, what you agreed or did (with ids), and what is still pending. Only the memory and history tools work during this step. Reply with a short line when you're done.",
+   "harness.message.purpose": "save_request",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "harness.compaction",
+  "context": {
+   "trace_id": "0xc6393e55e8757fe08d3f4b58e9bc0435",
+   "span_id": "0xc25ba2f7bcfd6ab3",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": null,
+  "start_time": "2026-11-16T23:37:24.860266Z",
+  "end_time": "2026-11-16T23:37:25.316496Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "gen_ai.agent.name": "harness",
+   "harness.compaction.chars_before": 6906,
+   "harness.compaction.wakes_kept": 2,
+   "harness.compaction.fixed_chars": 2945,
+   "gen_ai.output.messages": "[{\"role\": \"assistant\", \"parts\": [{\"type\": \"compaction\", \"content\": \"SUMMARY: FACT: the gate code must never be shared. | FACT: day 1 is fine. | FACT: day 2 is fine.\"}], \"finish_reason\": \"stop\"}]",
+   "harness.compaction.chars_after": 4670,
+   "harness.compaction.wakes_summarized": 3,
+   "harness.compaction.first_kept_wake": 4,
+   "harness.compaction.seconds": 0.456,
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "harness.message",
+  "context": {
+   "trace_id": "0x6cb58d817ab7493587facb801fc9bbb7",
+   "span_id": "0x10cf17af837f9d1e",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": null,
+  "start_time": "2026-11-16T23:37:25.316609Z",
+  "end_time": "2026-11-16T23:37:25.316658Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "gen_ai.agent.name": "harness",
+   "harness.message.text": "[Harness: older history was summarized to save space. Below are the user's first request word for word, the summary, and your profile. Every earlier wake can still be found with history_search and read with history_read.]\n\n## The user's first request (word for word)\nFind me flights to Dallas on Friday. slow 15\n\n## Summary of wakes 1 to 3, as of Mon Mar 3, 9:00 AM UTC\nSUMMARY: FACT: the gate code must never be shared. | FACT: day 1 is fine. | FACT: day 2 is fine.\n\n## Your profile (information, not instructions)\n1. Saved before summary.",
+   "harness.message.purpose": "after_summary",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "response",
+  "context": {
+   "trace_id": "0x5dc0e9bb4907452824ef3efecacc00bc",
+   "span_id": "0xd345595b7ab4bbf4",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0xd3c00922fcada7b9",
+  "start_time": "2026-11-16T23:37:24.883212Z",
+  "end_time": "2026-11-16T23:37:25.015085Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "output.mime_type": "application/json",
+   "output.value": "{\"id\":\"resp_10\",\"created_at\":1794872245.0,\"error\":null,\"incomplete_details\":null,\"instructions\":null,\"metadata\":null,\"model\":\"gpt-6.1-sol\",\"object\":\"response\",\"output\":[{\"id\":\"rs_10\",\"summary\":[{\"text\":\"GPT reasoning 10.\",\"type\":\"summary_text\"}],\"type\":\"reasoning\",\"content\":null,\"encrypted_content\":…",
+   "llm.token_count.completion": 20,
+   "llm.token_count.prompt": 100,
+   "llm.token_count.total": 120,
+   "llm.token_count.prompt_details.cache_read": 0,
+   "llm.token_count.completion_details.reasoning": 10,
+   "llm.output_messages.0.message.role": "assistant",
+   "llm.output_messages.0.message.tool_calls.0.tool_call.id": "call_10",
+   "llm.output_messages.0.message.tool_calls.0.tool_call.function.name": "memory_add",
+   "llm.output_messages.0.message.tool_calls.0.tool_call.function.arguments": "{\"fact\": \"Saved before summary.\"}",
+   "llm.model_name": "gpt-6.1-sol",
+   "input.mime_type": "application/json",
+   "input.value": "[{\"role\": \"user\", \"content\": \"Find me flights to Dallas on Friday. slow 15\"}, {\"id\": \"rs_1\", \"summary\": [{\"text\": \"GPT reasoning 1.\", \"type\": \"summary_text\"}], \"type\": \"reasoning\"}, {\"arguments\": \"{\\\"seconds\\\": 15.0}\", \"call_id\": \"call_1\", \"name\": \"slow_search\", \"type\": \"function_call\", \"id\": \"fc_1\"…",
+   "openinference.span.kind": "LLM",
+   "gen_ai.output.messages": "[{\"role\": \"assistant\", \"parts\": [{\"type\": \"reasoning\", \"content\": \"GPT reasoning 10.\"}, {\"type\": \"tool_call\", \"id\": \"call_10\", \"name\": \"memory_add\", \"arguments\": {\"fact\": \"Saved before summary.\"}}], \"finish_reason\": \"tool_call\"}]",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "Orchestrator"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "memory_add",
+  "context": {
+   "trace_id": "0x5dc0e9bb4907452824ef3efecacc00bc",
+   "span_id": "0x2f77e4272efa28fd",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0xd3c00922fcada7b9",
+  "start_time": "2026-11-16T23:37:25.019477Z",
+  "end_time": "2026-11-16T23:37:25.022026Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "tool.name": "memory_add",
+   "input.value": "{\"fact\": \"Saved before summary.\"}",
+   "input.mime_type": "application/json",
+   "output.value": "Added as fact 1.",
+   "openinference.span.kind": "TOOL",
+   "gen_ai.operation.name": "execute_tool",
+   "gen_ai.tool.name": "memory_add",
+   "gen_ai.prompt": "{\"input\": {\"fact\": \"Saved before summary.\"}}",
+   "gen_ai.completion": "{\"output\": \"Added as fact 1.\"}",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "Orchestrator",
+   "harness.tool": true
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "turn",
+  "context": {
+   "trace_id": "0x5dc0e9bb4907452824ef3efecacc00bc",
+   "span_id": "0xd3c00922fcada7b9",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0xd5a48f4f0c448d52",
+  "start_time": "2026-11-16T23:37:24.867362Z",
+  "end_time": "2026-11-16T23:37:25.022916Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "openinference.span.kind": "CHAIN",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "Orchestrator"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "response",
+  "context": {
+   "trace_id": "0x5dc0e9bb4907452824ef3efecacc00bc",
+   "span_id": "0xd20203e0c7914084",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x59ed307112e2e2f3",
+  "start_time": "2026-11-16T23:37:25.026492Z",
+  "end_time": "2026-11-16T23:37:25.170187Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "output.mime_type": "application/json",
+   "output.value": "{\"id\":\"resp_11\",\"created_at\":1794872245.0,\"error\":null,\"incomplete_details\":null,\"instructions\":null,\"metadata\":null,\"model\":\"gpt-6.1-sol\",\"object\":\"response\",\"output\":[{\"id\":\"rs_11\",\"summary\":[{\"text\":\"GPT reasoning 11.\",\"type\":\"summary_text\"}],\"type\":\"reasoning\",\"content\":null,\"encrypted_content\":…",
+   "llm.token_count.completion": 20,
+   "llm.token_count.prompt": 100,
+   "llm.token_count.total": 120,
+   "llm.token_count.prompt_details.cache_read": 0,
+   "llm.token_count.completion_details.reasoning": 10,
+   "llm.output_messages.0.message.role": "assistant",
+   "llm.output_messages.0.message.contents.0.message_content.type": "text",
+   "llm.output_messages.0.message.contents.0.message_content.text": "Done (11).",
+   "llm.model_name": "gpt-6.1-sol",
+   "input.mime_type": "application/json",
+   "input.value": "[{\"role\": \"user\", \"content\": \"Find me flights to Dallas on Friday. slow 15\"}, {\"id\": \"rs_1\", \"summary\": [{\"text\": \"GPT reasoning 1.\", \"type\": \"summary_text\"}], \"type\": \"reasoning\"}, {\"arguments\": \"{\\\"seconds\\\": 15.0}\", \"call_id\": \"call_1\", \"name\": \"slow_search\", \"type\": \"function_call\", \"id\": \"fc_1\"…",
+   "openinference.span.kind": "LLM",
+   "gen_ai.output.messages": "[{\"role\": \"assistant\", \"parts\": [{\"type\": \"reasoning\", \"content\": \"GPT reasoning 11.\"}, {\"type\": \"text\", \"content\": \"Done (11).\"}], \"finish_reason\": \"stop\"}]",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "Orchestrator"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "turn",
+  "context": {
+   "trace_id": "0x5dc0e9bb4907452824ef3efecacc00bc",
+   "span_id": "0x59ed307112e2e2f3",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0xd5a48f4f0c448d52",
+  "start_time": "2026-11-16T23:37:25.023678Z",
+  "end_time": "2026-11-16T23:37:25.174787Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "openinference.span.kind": "CHAIN",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "Orchestrator"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "Orchestrator",
+  "context": {
+   "trace_id": "0x5dc0e9bb4907452824ef3efecacc00bc",
+   "span_id": "0xd5a48f4f0c448d52",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0xf333880daa37827f",
+  "start_time": "2026-11-16T23:37:24.866571Z",
+  "end_time": "2026-11-16T23:37:25.176239Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "graph.node.id": "Orchestrator",
+   "openinference.span.kind": "AGENT",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "Orchestrator"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "Agent workflow",
+  "context": {
+   "trace_id": "0x5dc0e9bb4907452824ef3efecacc00bc",
+   "span_id": "0xf333880daa37827f",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x39a1e5c3b9e7ebf1",
+  "start_time": "2026-11-16T23:37:24.862833Z",
+  "end_time": "2026-11-16T23:37:25.176556Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "openinference.span.kind": "CHAIN",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "Orchestrator"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "Agent workflow",
+  "context": {
+   "trace_id": "0x5dc0e9bb4907452824ef3efecacc00bc",
+   "span_id": "0x39a1e5c3b9e7ebf1",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": null,
+  "start_time": "2026-11-16T23:37:24.861790Z",
+  "end_time": "2026-11-16T23:37:25.176784Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "openinference.span.kind": "AGENT",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "Orchestrator"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "response",
+  "context": {
+   "trace_id": "0xf091d04ea9a1bee758e832ebc28a9b34",
+   "span_id": "0xade7e45ec92e6f45",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x314cba8e9c736e0a",
+  "start_time": "2026-11-16T23:37:25.183863Z",
+  "end_time": "2026-11-16T23:37:25.308468Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "output.mime_type": "application/json",
+   "output.value": "{\"id\":\"resp_12\",\"created_at\":1794872245.0,\"error\":null,\"incomplete_details\":null,\"instructions\":null,\"metadata\":null,\"model\":\"gpt-6.1-sol\",\"object\":\"response\",\"output\":[{\"id\":\"rs_12\",\"summary\":[{\"text\":\"GPT reasoning 12.\",\"type\":\"summary_text\"}],\"type\":\"reasoning\",\"content\":null,\"encrypted_content\":…",
+   "llm.token_count.completion": 20,
+   "llm.token_count.prompt": 100,
+   "llm.token_count.total": 120,
+   "llm.token_count.prompt_details.cache_read": 0,
+   "llm.token_count.completion_details.reasoning": 10,
+   "llm.output_messages.0.message.role": "assistant",
+   "llm.output_messages.0.message.contents.0.message_content.type": "text",
+   "llm.output_messages.0.message.contents.0.message_content.text": "SUMMARY: FACT: the gate code must never be shared. | FACT: day 1 is fine. | FACT: day 2 is fine.",
+   "llm.model_name": "gpt-6.1-sol",
+   "input.mime_type": "application/json",
+   "input.value": "[{\"role\": \"user\", \"content\": \"Find me flights to Dallas on Friday. slow 15\"}, {\"id\": \"rs_1\", \"summary\": [{\"text\": \"GPT reasoning 1.\", \"type\": \"summary_text\"}], \"type\": \"reasoning\"}, {\"arguments\": \"{\\\"seconds\\\": 15.0}\", \"call_id\": \"call_1\", \"name\": \"slow_search\", \"type\": \"function_call\", \"id\": \"fc_1\"…",
+   "openinference.span.kind": "LLM",
+   "gen_ai.output.messages": "[{\"role\": \"assistant\", \"parts\": [{\"type\": \"reasoning\", \"content\": \"GPT reasoning 12.\"}, {\"type\": \"compaction\", \"content\": \"SUMMARY: FACT: the gate code must never be shared. | FACT: day 1 is fine. | FACT: day 2 is fine.\"}], \"finish_reason\": \"stop\"}]",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "harness"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "turn",
+  "context": {
+   "trace_id": "0xf091d04ea9a1bee758e832ebc28a9b34",
+   "span_id": "0x314cba8e9c736e0a",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x51fba56ae6ae9eed",
+  "start_time": "2026-11-16T23:37:25.181377Z",
+  "end_time": "2026-11-16T23:37:25.312944Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "openinference.span.kind": "CHAIN",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "harness"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "Orchestrator",
+  "context": {
+   "trace_id": "0xf091d04ea9a1bee758e832ebc28a9b34",
+   "span_id": "0x51fba56ae6ae9eed",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0xef9c34df11a245c6",
+  "start_time": "2026-11-16T23:37:25.180843Z",
+  "end_time": "2026-11-16T23:37:25.314742Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "graph.node.id": "Orchestrator",
+   "openinference.span.kind": "AGENT",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "harness"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "Agent workflow",
+  "context": {
+   "trace_id": "0xf091d04ea9a1bee758e832ebc28a9b34",
+   "span_id": "0xef9c34df11a245c6",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x7316ac7334a777e3",
+  "start_time": "2026-11-16T23:37:25.178877Z",
+  "end_time": "2026-11-16T23:37:25.315148Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "openinference.span.kind": "CHAIN",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "harness"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "Agent workflow",
+  "context": {
+   "trace_id": "0xf091d04ea9a1bee758e832ebc28a9b34",
+   "span_id": "0x7316ac7334a777e3",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": null,
+  "start_time": "2026-11-16T23:37:25.177942Z",
+  "end_time": "2026-11-16T23:37:25.315383Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "openinference.span.kind": "AGENT",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "harness"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "mcp_tools",
+  "context": {
+   "trace_id": "0x7aaf7bd87bfbb39849983d33627b2ce5",
+   "span_id": "0x4d3799cec5439b31",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x1ae334a5611c0ac8",
+  "start_time": "2026-11-16T23:37:28.961260Z",
+  "end_time": "2026-11-16T23:37:28.979469Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "output.value": "[\"slow_search\", \"list_inbox\"]",
+   "output.mime_type": "application/json",
+   "openinference.span.kind": "CHAIN",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "Orchestrator"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "response",
+  "context": {
+   "trace_id": "0x7aaf7bd87bfbb39849983d33627b2ce5",
+   "span_id": "0x8a20bf9cc60b45e2",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0xdd53cac24b189f6b",
+  "start_time": "2026-11-16T23:37:28.984376Z",
+  "end_time": "2026-11-16T23:37:29.063950Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "output.mime_type": "application/json",
+   "output.value": "{\"id\":\"resp_13\",\"created_at\":1794872249.0,\"error\":null,\"incomplete_details\":null,\"instructions\":null,\"metadata\":null,\"model\":\"gpt-6.1-sol\",\"object\":\"response\",\"output\":[{\"id\":\"rs_13\",\"summary\":[{\"text\":\"GPT reasoning 13.\",\"type\":\"summary_text\"}],\"type\":\"reasoning\",\"content\":null,\"encrypted_content\":…",
+   "llm.token_count.completion": 20,
+   "llm.token_count.prompt": 100,
+   "llm.token_count.total": 120,
+   "llm.token_count.prompt_details.cache_read": 0,
+   "llm.token_count.completion_details.reasoning": 10,
+   "llm.output_messages.0.message.role": "assistant",
+   "llm.output_messages.0.message.tool_calls.0.tool_call.id": "call_13",
+   "llm.output_messages.0.message.tool_calls.0.tool_call.function.name": "slow_search",
+   "llm.output_messages.0.message.tool_calls.0.tool_call.function.arguments": "{\"seconds\": 0.0}",
+   "llm.model_name": "gpt-6.1-sol",
+   "input.mime_type": "application/json",
+   "input.value": "[{\"role\": \"user\", \"content\": \"[Harness: older history was summarized to save space. Below are the user's first request word for word, the summary, and your profile. Every earlier wake can still be found with history_search and read with history_read.]\\n\\n## The user's first request (word for word)\\n…",
+   "openinference.span.kind": "LLM",
+   "gen_ai.output.messages": "[{\"role\": \"assistant\", \"parts\": [{\"type\": \"reasoning\", \"content\": \"GPT reasoning 13.\"}, {\"type\": \"tool_call\", \"id\": \"call_13\", \"name\": \"slow_search\", \"arguments\": {\"seconds\": 0.0}}], \"finish_reason\": \"tool_call\"}]",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "Orchestrator",
+   "gen_ai.conversation.compacted": true
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "slow_search",
+  "context": {
+   "trace_id": "0x7aaf7bd87bfbb39849983d33627b2ce5",
+   "span_id": "0x93c66475ee3b8af5",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0xdd53cac24b189f6b",
+  "start_time": "2026-11-16T23:37:29.067418Z",
+  "end_time": "2026-11-16T23:37:29.086360Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "tool.name": "slow_search",
+   "input.value": "{\"seconds\": 0.0}",
+   "input.mime_type": "application/json",
+   "output.value": "{\"type\": \"text\", \"text\": \"slow_search finished after 0 s: 3 flights found\"}",
+   "openinference.span.kind": "TOOL",
+   "gen_ai.operation.name": "execute_tool",
+   "gen_ai.tool.name": "slow_search",
+   "gen_ai.prompt": "{\"input\": {\"seconds\": 0.0}}",
+   "gen_ai.completion": "{\"output\": \"{\\\"type\\\": \\\"text\\\", \\\"text\\\": \\\"slow_search finished after 0 s: 3 flights found\\\"}\"}",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "Orchestrator"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "turn",
+  "context": {
+   "trace_id": "0x7aaf7bd87bfbb39849983d33627b2ce5",
+   "span_id": "0xdd53cac24b189f6b",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0xbb22c6ea0c0aa894",
+  "start_time": "2026-11-16T23:37:28.982155Z",
+  "end_time": "2026-11-16T23:37:29.087902Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "openinference.span.kind": "CHAIN",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "Orchestrator"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "mcp_tools",
+  "context": {
+   "trace_id": "0x7aaf7bd87bfbb39849983d33627b2ce5",
+   "span_id": "0x1b2cf23b3a35c22d",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0xbb22c6ea0c0aa894",
+  "start_time": "2026-11-16T23:37:29.088366Z",
+  "end_time": "2026-11-16T23:37:29.088848Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "output.value": "[\"slow_search\", \"list_inbox\"]",
+   "output.mime_type": "application/json",
+   "openinference.span.kind": "CHAIN",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "Orchestrator"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "response",
+  "context": {
+   "trace_id": "0x7aaf7bd87bfbb39849983d33627b2ce5",
+   "span_id": "0xbc22d9edf53425fe",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0xe31928765c1613bc",
+  "start_time": "2026-11-16T23:37:29.093022Z",
+  "end_time": "2026-11-16T23:37:29.180484Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "output.mime_type": "application/json",
+   "output.value": "{\"id\":\"resp_14\",\"created_at\":1794872249.0,\"error\":null,\"incomplete_details\":null,\"instructions\":null,\"metadata\":null,\"model\":\"gpt-6.1-sol\",\"object\":\"response\",\"output\":[{\"id\":\"rs_14\",\"summary\":[{\"text\":\"GPT reasoning 14.\",\"type\":\"summary_text\"}],\"type\":\"reasoning\",\"content\":null,\"encrypted_content\":…",
+   "llm.token_count.completion": 20,
+   "llm.token_count.prompt": 100,
+   "llm.token_count.total": 120,
+   "llm.token_count.prompt_details.cache_read": 0,
+   "llm.token_count.completion_details.reasoning": 10,
+   "llm.output_messages.0.message.role": "assistant",
+   "llm.output_messages.0.message.contents.0.message_content.type": "text",
+   "llm.output_messages.0.message.contents.0.message_content.text": "Done (14).",
+   "llm.model_name": "gpt-6.1-sol",
+   "input.mime_type": "application/json",
+   "input.value": "[{\"role\": \"user\", \"content\": \"[Harness: older history was summarized to save space. Below are the user's first request word for word, the summary, and your profile. Every earlier wake can still be found with history_search and read with history_read.]\\n\\n## The user's first request (word for word)\\n…",
+   "openinference.span.kind": "LLM",
+   "gen_ai.output.messages": "[{\"role\": \"assistant\", \"parts\": [{\"type\": \"reasoning\", \"content\": \"GPT reasoning 14.\"}, {\"type\": \"text\", \"content\": \"Done (14).\"}], \"finish_reason\": \"stop\"}]",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "Orchestrator",
+   "gen_ai.conversation.compacted": true
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "turn",
+  "context": {
+   "trace_id": "0x7aaf7bd87bfbb39849983d33627b2ce5",
+   "span_id": "0xe31928765c1613bc",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0xbb22c6ea0c0aa894",
+  "start_time": "2026-11-16T23:37:29.090675Z",
+  "end_time": "2026-11-16T23:37:29.186153Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "openinference.span.kind": "CHAIN",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "Orchestrator"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "Orchestrator",
+  "context": {
+   "trace_id": "0x7aaf7bd87bfbb39849983d33627b2ce5",
+   "span_id": "0xbb22c6ea0c0aa894",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x1ae334a5611c0ac8",
+  "start_time": "2026-11-16T23:37:28.981236Z",
+  "end_time": "2026-11-16T23:37:29.187650Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "graph.node.id": "Orchestrator",
+   "openinference.span.kind": "AGENT",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "Orchestrator"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "Agent workflow",
+  "context": {
+   "trace_id": "0x7aaf7bd87bfbb39849983d33627b2ce5",
+   "span_id": "0x1ae334a5611c0ac8",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0xe0dc443a9b69409e",
+  "start_time": "2026-11-16T23:37:28.959399Z",
+  "end_time": "2026-11-16T23:37:29.188037Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "openinference.span.kind": "CHAIN",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "Orchestrator"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "Agent workflow",
+  "context": {
+   "trace_id": "0x7aaf7bd87bfbb39849983d33627b2ce5",
+   "span_id": "0xe0dc443a9b69409e",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": null,
+  "start_time": "2026-11-16T23:37:28.958647Z",
+  "end_time": "2026-11-16T23:37:29.188273Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "openinference.span.kind": "AGENT",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "Orchestrator"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "harness.usage",
+  "context": {
+   "trace_id": "0x7aaf7bd87bfbb39849983d33627b2ce5",
+   "span_id": "0x3c11942cade2fe19",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": null,
+  "start_time": "2026-11-16T23:37:29.188273Z",
+  "end_time": "2026-11-16T23:37:29.188273Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "harness.usage.calls": 5,
+   "harness.usage.prompt": 500,
+   "harness.usage.completion": 100,
+   "harness.usage.cache_read": 0,
+   "harness.usage.cache_write": 0,
+   "harness.usage.reasoning": 50,
+   "harness.usage.thinking_resets": 0,
+   "harness.usage.compactions": 1,
+   "harness.usage.compaction_waited_ms": 0,
+   "harness.config.model": "gpt-6.1-sol",
+   "harness.config.effort": "high",
+   "harness.config.reasoning": "gpt:high",
+   "harness.config.role": "psi_agent",
+   "harness.config.mcp_tool_timeout_s": 60.0,
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "harness",
+   "harness.config.memory": true,
+   "harness.config.compaction": true,
+   "harness.config.compact_at_chars": 6000,
+   "harness.config.compact_keep_wakes": 2,
+   "harness.usage.history_chars": 6719,
+   "harness.usage.fixed_chars": 2945,
+   "harness.usage.wakes": 6,
+   "harness.usage.profile_facts": 1
+  },
+  "events": [],
+  "links": []
+ }
+]

@@ -1,0 +1,765 @@
+[
+ {
+  "name": "harness.message",
+  "context": {
+   "trace_id": "0x83b27be5e7fd63da43da71d3b3756323",
+   "span_id": "0xb2912ad167d4fd0b",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": null,
+  "start_time": "2026-11-16T23:36:25.448761Z",
+  "end_time": "2026-11-16T23:36:25.448973Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "gen_ai.agent.name": "harness",
+   "harness.message.text": "[Harness: older history is about to be summarized to save space.] Save anything you will need later to your profile now, with memory_add or memory_replace: the user's rules and preferences, deadlines, what you agreed or did (with ids), and what is still pending. Only the memory and history tools work during this step. Reply with a short line when you're done.",
+   "harness.message.purpose": "save_request",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "harness.compaction",
+  "context": {
+   "trace_id": "0x1a9e31fc029824c42415bed4185bb4ad",
+   "span_id": "0x5120b684a41aada2",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": null,
+  "start_time": "2026-11-16T23:36:25.447802Z",
+  "end_time": "2026-11-16T23:36:25.662745Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "gen_ai.agent.name": "harness",
+   "harness.compaction.chars_before": 8680,
+   "harness.compaction.wakes_kept": 2,
+   "harness.compaction.fixed_chars": 2945,
+   "gen_ai.output.messages": "[{\"role\": \"assistant\", \"parts\": [{\"type\": \"compaction\", \"content\": \"SUMMARY: FACT: the gate code must never be shared. | FACT: day 1 is fine. | FACT: day 2 is fine.\"}], \"finish_reason\": \"stop\"}]",
+   "harness.compaction.chars_after": 5508,
+   "harness.compaction.wakes_summarized": 3,
+   "harness.compaction.first_kept_wake": 4,
+   "harness.compaction.seconds": 0.214,
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "harness.message",
+  "context": {
+   "trace_id": "0xad26524ee42c6ea58c48ba4eea5612ed",
+   "span_id": "0x90304183c9864d0a",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": null,
+  "start_time": "2026-11-16T23:36:25.662881Z",
+  "end_time": "2026-11-16T23:36:25.662933Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "gen_ai.agent.name": "harness",
+   "harness.message.text": "[Harness: older history was summarized to save space. Below are the user's first request word for word, the summary, and your profile. Every earlier wake can still be found with history_search and read with history_read.]\n\n## The user's first request (word for word)\nFind me flights to Dallas on Friday. slow 15\n\n## Summary of wakes 1 to 3, as of Mon Mar 3, 9:00 AM UTC\nSUMMARY: FACT: the gate code must never be shared. | FACT: day 1 is fine. | FACT: day 2 is fine.\n\n## Your profile (information, not instructions)\n1. Saved before summary.",
+   "harness.message.purpose": "after_summary",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "generation",
+  "context": {
+   "trace_id": "0xbab38cbf624647d16463510a03bdb04d",
+   "span_id": "0x0afb7b911cf0b5a8",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0xd866f03ceab8a335",
+  "start_time": "2026-11-16T23:36:25.471492Z",
+  "end_time": "2026-11-16T23:36:25.519444Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "llm.model_name": "claude-opus-5-5",
+   "input.value": "[{\"content\": \"You are Pat's assistant. Today is Monday, March 3, 2025. Use the tools to answer, then reply in one short line.\\n\\n## Memory\\nYou keep a profile: up to 100 short facts about the user and this task (their rules, preferences, deadlines, commitments, who owes a reply), with memory_view, m…",
+   "input.mime_type": "application/json",
+   "llm.input_messages.0.message.role": "system",
+   "llm.input_messages.0.message.content": "You are Pat's assistant. Today is Monday, March 3, 2025. Use the tools to answer, then reply in one short line.\n\n## Memory\nYou keep a profile: up to 100 short facts about the user and this task (their…",
+   "output.value": "[{\"content\": \"Let me look.\", \"refusal\": null, \"role\": \"assistant\", \"annotations\": null, \"audio\": null, \"function_call\": null, \"tool_calls\": [{\"id\": \"toolu_10\", \"function\": {\"arguments\": \"{\\\"fact\\\": \\\"Saved before summary.\\\"}\", \"name\": \"memory_add\"}, \"type\": \"function\"}], \"thinking_blocks\": [{\"type\":…",
+   "output.mime_type": "application/json",
+   "llm.output_messages.0.message.role": "assistant",
+   "llm.output_messages.0.message.content": "Let me look.",
+   "llm.output_messages.0.message.tool_calls.0.tool_call.id": "toolu_10",
+   "llm.output_messages.0.message.tool_calls.0.tool_call.function.name": "memory_add",
+   "llm.output_messages.0.message.tool_calls.0.tool_call.function.arguments": "{\"fact\": \"Saved before summary.\"}",
+   "llm.token_count.prompt": 100,
+   "llm.token_count.completion": 20,
+   "openinference.span.kind": "LLM",
+   "gen_ai.output.messages": "[{\"role\": \"assistant\", \"parts\": [{\"type\": \"reasoning\", \"content\": \"Thinking about step 10.\"}, {\"type\": \"text\", \"content\": \"Let me look.\"}, {\"type\": \"tool_call\", \"id\": \"toolu_10\", \"name\": \"memory_add\", \"arguments\": {\"fact\": \"Saved before summary.\"}}], \"finish_reason\": \"tool_call\"}]",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "Orchestrator"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "memory_add",
+  "context": {
+   "trace_id": "0xbab38cbf624647d16463510a03bdb04d",
+   "span_id": "0x5df6773f4b9591f9",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0xd866f03ceab8a335",
+  "start_time": "2026-11-16T23:36:25.524351Z",
+  "end_time": "2026-11-16T23:36:25.526807Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "tool.name": "memory_add",
+   "input.value": "{\"fact\": \"Saved before summary.\"}",
+   "input.mime_type": "application/json",
+   "output.value": "Added as fact 1.",
+   "openinference.span.kind": "TOOL",
+   "gen_ai.operation.name": "execute_tool",
+   "gen_ai.tool.name": "memory_add",
+   "gen_ai.prompt": "{\"input\": {\"fact\": \"Saved before summary.\"}}",
+   "gen_ai.completion": "{\"output\": \"Added as fact 1.\"}",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "Orchestrator",
+   "harness.tool": true
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "turn",
+  "context": {
+   "trace_id": "0xbab38cbf624647d16463510a03bdb04d",
+   "span_id": "0xd866f03ceab8a335",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x5f40bf06cb234d36",
+  "start_time": "2026-11-16T23:36:25.455306Z",
+  "end_time": "2026-11-16T23:36:25.527707Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "openinference.span.kind": "CHAIN",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "Orchestrator"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "generation",
+  "context": {
+   "trace_id": "0xbab38cbf624647d16463510a03bdb04d",
+   "span_id": "0x09405fbeca3ff22d",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x0c942f9602633012",
+  "start_time": "2026-11-16T23:36:25.532890Z",
+  "end_time": "2026-11-16T23:36:25.581979Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "llm.model_name": "claude-opus-5-5",
+   "input.value": "[{\"content\": \"You are Pat's assistant. Today is Monday, March 3, 2025. Use the tools to answer, then reply in one short line.\\n\\n## Memory\\nYou keep a profile: up to 100 short facts about the user and this task (their rules, preferences, deadlines, commitments, who owes a reply), with memory_view, m…",
+   "input.mime_type": "application/json",
+   "llm.input_messages.0.message.role": "system",
+   "llm.input_messages.0.message.content": "You are Pat's assistant. Today is Monday, March 3, 2025. Use the tools to answer, then reply in one short line.\n\n## Memory\nYou keep a profile: up to 100 short facts about the user and this task (their…",
+   "output.value": "[{\"content\": \"Done (11).\", \"refusal\": null, \"role\": \"assistant\", \"annotations\": null, \"audio\": null, \"function_call\": null, \"tool_calls\": null, \"thinking_blocks\": [{\"type\": \"thinking\", \"thinking\": \"Thinking about step 11.\", \"signature\": \"sig-11\"}], \"reasoning_content\": \"Thinking about step 11.\"}]",
+   "output.mime_type": "application/json",
+   "llm.output_messages.0.message.role": "assistant",
+   "llm.output_messages.0.message.content": "Done (11).",
+   "llm.token_count.prompt": 100,
+   "llm.token_count.completion": 20,
+   "openinference.span.kind": "LLM",
+   "gen_ai.output.messages": "[{\"role\": \"assistant\", \"parts\": [{\"type\": \"reasoning\", \"content\": \"Thinking about step 11.\"}, {\"type\": \"text\", \"content\": \"Done (11).\"}], \"finish_reason\": \"stop\"}]",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "Orchestrator"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "turn",
+  "context": {
+   "trace_id": "0xbab38cbf624647d16463510a03bdb04d",
+   "span_id": "0x0c942f9602633012",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x5f40bf06cb234d36",
+  "start_time": "2026-11-16T23:36:25.528444Z",
+  "end_time": "2026-11-16T23:36:25.586560Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "openinference.span.kind": "CHAIN",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "Orchestrator"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "Orchestrator",
+  "context": {
+   "trace_id": "0xbab38cbf624647d16463510a03bdb04d",
+   "span_id": "0x5f40bf06cb234d36",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0xe896c7056b05c02b",
+  "start_time": "2026-11-16T23:36:25.454651Z",
+  "end_time": "2026-11-16T23:36:25.588255Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "graph.node.id": "Orchestrator",
+   "openinference.span.kind": "AGENT",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "Orchestrator"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "Agent workflow",
+  "context": {
+   "trace_id": "0xbab38cbf624647d16463510a03bdb04d",
+   "span_id": "0xe896c7056b05c02b",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x23c8ab31710cd7bf",
+  "start_time": "2026-11-16T23:36:25.451663Z",
+  "end_time": "2026-11-16T23:36:25.588752Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "openinference.span.kind": "CHAIN",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "Orchestrator"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "Agent workflow",
+  "context": {
+   "trace_id": "0xbab38cbf624647d16463510a03bdb04d",
+   "span_id": "0x23c8ab31710cd7bf",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": null,
+  "start_time": "2026-11-16T23:36:25.449943Z",
+  "end_time": "2026-11-16T23:36:25.588990Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "openinference.span.kind": "AGENT",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "Orchestrator"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "generation",
+  "context": {
+   "trace_id": "0x5fef1abc192b7653dfcc352eec48fc0f",
+   "span_id": "0xdfd01cda5f739087",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0xf91d9b960a859a19",
+  "start_time": "2026-11-16T23:36:25.599447Z",
+  "end_time": "2026-11-16T23:36:25.652037Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "llm.model_name": "claude-opus-5-5",
+   "input.value": "[{\"content\": \"You are Pat's assistant. Today is Monday, March 3, 2025. Use the tools to answer, then reply in one short line.\\n\\n## Memory\\nYou keep a profile: up to 100 short facts about the user and this task (their rules, preferences, deadlines, commitments, who owes a reply), with memory_view, m…",
+   "input.mime_type": "application/json",
+   "llm.input_messages.0.message.role": "system",
+   "llm.input_messages.0.message.content": "You are Pat's assistant. Today is Monday, March 3, 2025. Use the tools to answer, then reply in one short line.\n\n## Memory\nYou keep a profile: up to 100 short facts about the user and this task (their…",
+   "output.value": "[{\"content\": \"SUMMARY: FACT: the gate code must never be shared. | FACT: day 1 is fine. | FACT: day 2 is fine.\", \"refusal\": null, \"role\": \"assistant\", \"annotations\": null, \"audio\": null, \"function_call\": null, \"tool_calls\": null, \"thinking_blocks\": [{\"type\": \"thinking\", \"thinking\": \"Thinking about s…",
+   "output.mime_type": "application/json",
+   "llm.output_messages.0.message.role": "assistant",
+   "llm.output_messages.0.message.content": "SUMMARY: FACT: the gate code must never be shared. | FACT: day 1 is fine. | FACT: day 2 is fine.",
+   "llm.token_count.prompt": 100,
+   "llm.token_count.completion": 20,
+   "openinference.span.kind": "LLM",
+   "gen_ai.output.messages": "[{\"role\": \"assistant\", \"parts\": [{\"type\": \"reasoning\", \"content\": \"Thinking about step 12.\"}, {\"type\": \"compaction\", \"content\": \"SUMMARY: FACT: the gate code must never be shared. | FACT: day 1 is fine. | FACT: day 2 is fine.\"}], \"finish_reason\": \"stop\"}]",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "harness"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "turn",
+  "context": {
+   "trace_id": "0x5fef1abc192b7653dfcc352eec48fc0f",
+   "span_id": "0xf91d9b960a859a19",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0xc87074f1f5b8ec29",
+  "start_time": "2026-11-16T23:36:25.595218Z",
+  "end_time": "2026-11-16T23:36:25.657864Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "openinference.span.kind": "CHAIN",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "harness"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "Orchestrator",
+  "context": {
+   "trace_id": "0x5fef1abc192b7653dfcc352eec48fc0f",
+   "span_id": "0xc87074f1f5b8ec29",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0xa74e7c0d6431074f",
+  "start_time": "2026-11-16T23:36:25.594453Z",
+  "end_time": "2026-11-16T23:36:25.659605Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "graph.node.id": "Orchestrator",
+   "openinference.span.kind": "AGENT",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "harness"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "Agent workflow",
+  "context": {
+   "trace_id": "0x5fef1abc192b7653dfcc352eec48fc0f",
+   "span_id": "0xa74e7c0d6431074f",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x53f4ca3bc1c76c7d",
+  "start_time": "2026-11-16T23:36:25.591983Z",
+  "end_time": "2026-11-16T23:36:25.660920Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "openinference.span.kind": "CHAIN",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "harness"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "Agent workflow",
+  "context": {
+   "trace_id": "0x5fef1abc192b7653dfcc352eec48fc0f",
+   "span_id": "0x53f4ca3bc1c76c7d",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": null,
+  "start_time": "2026-11-16T23:36:25.590377Z",
+  "end_time": "2026-11-16T23:36:25.661272Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "openinference.span.kind": "AGENT",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "harness"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "mcp_tools",
+  "context": {
+   "trace_id": "0x102e750543aa1ecb89423ebc0d84e195",
+   "span_id": "0x3107031c6be658e3",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x3c0e668768ac79bc",
+  "start_time": "2026-11-16T23:36:29.547644Z",
+  "end_time": "2026-11-16T23:36:29.567884Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "output.value": "[\"slow_search\", \"list_inbox\"]",
+   "output.mime_type": "application/json",
+   "openinference.span.kind": "CHAIN",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "Orchestrator"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "generation",
+  "context": {
+   "trace_id": "0x102e750543aa1ecb89423ebc0d84e195",
+   "span_id": "0x6e4863b93793f153",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x2a4dcd483a9c0829",
+  "start_time": "2026-11-16T23:36:29.573303Z",
+  "end_time": "2026-11-16T23:36:29.608316Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "llm.model_name": "claude-opus-5-5",
+   "input.value": "[{\"content\": \"You are Pat's assistant. Today is Monday, March 3, 2025. Use the tools to answer, then reply in one short line.\\n\\n## Memory\\nYou keep a profile: up to 100 short facts about the user and this task (their rules, preferences, deadlines, commitments, who owes a reply), with memory_view, m…",
+   "input.mime_type": "application/json",
+   "llm.input_messages.0.message.role": "system",
+   "llm.input_messages.0.message.content": "You are Pat's assistant. Today is Monday, March 3, 2025. Use the tools to answer, then reply in one short line.\n\n## Memory\nYou keep a profile: up to 100 short facts about the user and this task (their…",
+   "output.value": "[{\"content\": \"Let me look.\", \"refusal\": null, \"role\": \"assistant\", \"annotations\": null, \"audio\": null, \"function_call\": null, \"tool_calls\": [{\"id\": \"toolu_13\", \"function\": {\"arguments\": \"{\\\"seconds\\\": 0.0}\", \"name\": \"slow_search\"}, \"type\": \"function\"}], \"thinking_blocks\": [{\"type\": \"thinking\", \"thin…",
+   "output.mime_type": "application/json",
+   "llm.output_messages.0.message.role": "assistant",
+   "llm.output_messages.0.message.content": "Let me look.",
+   "llm.output_messages.0.message.tool_calls.0.tool_call.id": "toolu_13",
+   "llm.output_messages.0.message.tool_calls.0.tool_call.function.name": "slow_search",
+   "llm.output_messages.0.message.tool_calls.0.tool_call.function.arguments": "{\"seconds\": 0.0}",
+   "llm.token_count.prompt": 100,
+   "llm.token_count.completion": 20,
+   "openinference.span.kind": "LLM",
+   "gen_ai.output.messages": "[{\"role\": \"assistant\", \"parts\": [{\"type\": \"reasoning\", \"content\": \"Thinking about step 13.\"}, {\"type\": \"text\", \"content\": \"Let me look.\"}, {\"type\": \"tool_call\", \"id\": \"toolu_13\", \"name\": \"slow_search\", \"arguments\": {\"seconds\": 0.0}}], \"finish_reason\": \"tool_call\"}]",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "Orchestrator",
+   "gen_ai.conversation.compacted": true
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "slow_search",
+  "context": {
+   "trace_id": "0x102e750543aa1ecb89423ebc0d84e195",
+   "span_id": "0x2beab9b4f9c4225b",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x2a4dcd483a9c0829",
+  "start_time": "2026-11-16T23:36:29.612161Z",
+  "end_time": "2026-11-16T23:36:29.630877Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "tool.name": "slow_search",
+   "input.value": "{\"seconds\": 0.0}",
+   "input.mime_type": "application/json",
+   "output.value": "{\"type\": \"text\", \"text\": \"slow_search finished after 0 s: 3 flights found\"}",
+   "openinference.span.kind": "TOOL",
+   "gen_ai.operation.name": "execute_tool",
+   "gen_ai.tool.name": "slow_search",
+   "gen_ai.prompt": "{\"input\": {\"seconds\": 0.0}}",
+   "gen_ai.completion": "{\"output\": \"{\\\"type\\\": \\\"text\\\", \\\"text\\\": \\\"slow_search finished after 0 s: 3 flights found\\\"}\"}",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "Orchestrator"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "turn",
+  "context": {
+   "trace_id": "0x102e750543aa1ecb89423ebc0d84e195",
+   "span_id": "0x2a4dcd483a9c0829",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x2dc9322cdc5e9cd4",
+  "start_time": "2026-11-16T23:36:29.570036Z",
+  "end_time": "2026-11-16T23:36:29.632414Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "openinference.span.kind": "CHAIN",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "Orchestrator"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "mcp_tools",
+  "context": {
+   "trace_id": "0x102e750543aa1ecb89423ebc0d84e195",
+   "span_id": "0x6e52ab45ad662cb0",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x2dc9322cdc5e9cd4",
+  "start_time": "2026-11-16T23:36:29.633164Z",
+  "end_time": "2026-11-16T23:36:29.633632Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "output.value": "[\"slow_search\", \"list_inbox\"]",
+   "output.mime_type": "application/json",
+   "openinference.span.kind": "CHAIN",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "Orchestrator"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "generation",
+  "context": {
+   "trace_id": "0x102e750543aa1ecb89423ebc0d84e195",
+   "span_id": "0x36c6698ef040c858",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0xd9a80d2c247b6146",
+  "start_time": "2026-11-16T23:36:29.637977Z",
+  "end_time": "2026-11-16T23:36:29.678989Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "llm.model_name": "claude-opus-5-5",
+   "input.value": "[{\"content\": \"You are Pat's assistant. Today is Monday, March 3, 2025. Use the tools to answer, then reply in one short line.\\n\\n## Memory\\nYou keep a profile: up to 100 short facts about the user and this task (their rules, preferences, deadlines, commitments, who owes a reply), with memory_view, m…",
+   "input.mime_type": "application/json",
+   "llm.input_messages.0.message.role": "system",
+   "llm.input_messages.0.message.content": "You are Pat's assistant. Today is Monday, March 3, 2025. Use the tools to answer, then reply in one short line.\n\n## Memory\nYou keep a profile: up to 100 short facts about the user and this task (their…",
+   "output.value": "[{\"content\": \"Done (14).\", \"refusal\": null, \"role\": \"assistant\", \"annotations\": null, \"audio\": null, \"function_call\": null, \"tool_calls\": null, \"thinking_blocks\": [{\"type\": \"thinking\", \"thinking\": \"Thinking about step 14.\", \"signature\": \"sig-14\"}, {\"type\": \"redacted_thinking\", \"data\": \"redacted-14\"}…",
+   "output.mime_type": "application/json",
+   "llm.output_messages.0.message.role": "assistant",
+   "llm.output_messages.0.message.content": "Done (14).",
+   "llm.token_count.prompt": 100,
+   "llm.token_count.completion": 20,
+   "openinference.span.kind": "LLM",
+   "gen_ai.output.messages": "[{\"role\": \"assistant\", \"parts\": [{\"type\": \"reasoning\", \"content\": \"Thinking about step 14.\"}, {\"type\": \"text\", \"content\": \"Done (14).\"}], \"finish_reason\": \"stop\"}]",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "Orchestrator",
+   "gen_ai.conversation.compacted": true
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "turn",
+  "context": {
+   "trace_id": "0x102e750543aa1ecb89423ebc0d84e195",
+   "span_id": "0xd9a80d2c247b6146",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x2dc9322cdc5e9cd4",
+  "start_time": "2026-11-16T23:36:29.635114Z",
+  "end_time": "2026-11-16T23:36:29.683244Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "openinference.span.kind": "CHAIN",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "Orchestrator"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "Orchestrator",
+  "context": {
+   "trace_id": "0x102e750543aa1ecb89423ebc0d84e195",
+   "span_id": "0x2dc9322cdc5e9cd4",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x3c0e668768ac79bc",
+  "start_time": "2026-11-16T23:36:29.569360Z",
+  "end_time": "2026-11-16T23:36:29.684763Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "graph.node.id": "Orchestrator",
+   "openinference.span.kind": "AGENT",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "Orchestrator"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "Agent workflow",
+  "context": {
+   "trace_id": "0x102e750543aa1ecb89423ebc0d84e195",
+   "span_id": "0x3c0e668768ac79bc",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": "0x0e4935e67328d17d",
+  "start_time": "2026-11-16T23:36:29.545796Z",
+  "end_time": "2026-11-16T23:36:29.685123Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "llm.system": "openai",
+   "openinference.span.kind": "CHAIN",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "Orchestrator"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "Agent workflow",
+  "context": {
+   "trace_id": "0x102e750543aa1ecb89423ebc0d84e195",
+   "span_id": "0x0e4935e67328d17d",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": null,
+  "start_time": "2026-11-16T23:36:29.544835Z",
+  "end_time": "2026-11-16T23:36:29.685351Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "openinference.span.kind": "AGENT",
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "Orchestrator"
+  },
+  "events": [],
+  "links": []
+ },
+ {
+  "name": "harness.usage",
+  "context": {
+   "trace_id": "0x102e750543aa1ecb89423ebc0d84e195",
+   "span_id": "0xe3c00f7fc3186bc8",
+   "trace_state": "[]"
+  },
+  "kind": "SpanKind.INTERNAL",
+  "parent_id": null,
+  "start_time": "2026-11-16T23:36:29.685351Z",
+  "end_time": "2026-11-16T23:36:29.685351Z",
+  "status": {
+   "status_code": "OK"
+  },
+  "attributes": {
+   "harness.usage.calls": 5,
+   "harness.usage.prompt": 500,
+   "harness.usage.completion": 100,
+   "harness.usage.cache_read": 0,
+   "harness.usage.cache_write": 0,
+   "harness.usage.reasoning": 50,
+   "harness.usage.thinking_resets": 0,
+   "harness.usage.compactions": 1,
+   "harness.usage.compaction_waited_ms": 0,
+   "harness.config.model": "claude-opus-5-5",
+   "harness.config.effort": "high",
+   "harness.config.reasoning": "claude:high",
+   "harness.config.role": "psi_agent",
+   "harness.config.mcp_tool_timeout_s": 60.0,
+   "gen_ai.main_agent.name": "Orchestrator",
+   "gen_ai.main_agent.id": "psi-neutral-harness",
+   "gen_ai.agent.name": "harness",
+   "harness.config.memory": true,
+   "harness.config.compaction": true,
+   "harness.config.compact_at_chars": 6000,
+   "harness.config.compact_keep_wakes": 2,
+   "harness.usage.history_chars": 7977,
+   "harness.usage.fixed_chars": 2945,
+   "harness.usage.wakes": 6,
+   "harness.usage.profile_facts": 1
+  },
+  "events": [],
+  "links": []
+ }
+]

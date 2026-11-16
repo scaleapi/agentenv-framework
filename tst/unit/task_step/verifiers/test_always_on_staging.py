@@ -318,18 +318,18 @@ def test_judge_reads_tells_one_pass_over_every_wake_file():
     assert reads["read_all_wakes"] is True and reads["wakes_opened"] == [1] and reads["helpers_started"] == 1
 
 
-def _v3_run(run, keep_changes: bool = True):
-    """The recorded run with wake 4's turn a real PSI neutral harness v3 wake: a compaction, its save turn's memory
-    calls, the harness's messages."""
+def _v5_run(run, keep_changes: bool = True):
+    """The recorded run with wake 4's turn a PSI neutral harness v5 wake (GPT's, from a fake-model run): a save turn,
+    a compaction, the harness's messages, then the wake's own turn."""
     timeline, turns = run
     if not keep_changes:
         timeline = [e for e in timeline if e["event"] != "app_changes"]
-    turns[_url(timeline, 4)] = turn_events((RECORDED / "turn_otel_v3_compaction_gpt.json").read_text())
+    turns[_url(timeline, 4)] = turn_events((RECORDED / "turn_otel_v5_compaction_gpt.json").read_text())
     return timeline, turns
 
 
-def test_a_v3_wake_s_harness_parts_are_marked_and_come_before_the_wake_s_input_as_they_happened(run):
-    staged = stage_run(*_v3_run(run))
+def test_a_v5_wake_s_harness_parts_are_marked_and_come_before_the_wake_s_input_as_they_happened(run):
+    staged = stage_run(*_v5_run(run))
 
     wake4 = _lines(staged.files, "wakes/wake_004.jsonl")
     order = [(line["event"], line.get("step"), line.get("tool")) for line in wake4
@@ -338,46 +338,51 @@ def test_a_v3_wake_s_harness_parts_are_marked_and_come_before_the_wake_s_input_a
     assert order == [
         ("woke", None, None),
         ("harness_note", "pre_compaction_save", None), ("assistant_thinking", "pre_compaction_save", None),
-        ("tool_call", "pre_compaction_save", "memory_view"), ("tool_call", "pre_compaction_save", "memory_replace"),
+        ("tool_call", "pre_compaction_save", "memory_add"), ("assistant_thinking", "pre_compaction_save", None),
         ("assistant_text", "pre_compaction_save", None),
         ("harness_note", None, None), ("harness_note", "after_compaction", None),
         *[(e, None, None) for e in ("user_message", "wake_input") if any(line["event"] == e for line in wake4)],
+        ("assistant_thinking", None, None), ("tool_call", None, "slow_search"), ("assistant_thinking", None, None),
         ("assistant_text", None, None), ("turn_end", None, None)]
     compaction = next(line for line in wake4 if "compaction" in line)
     assert compaction.get("text_preview", compaction.get("text")).startswith("Compaction summary (written by the harness")
     turn_end = next(line for line in wake4 if line["event"] == "turn_end")
-    assert turn_end["tool_calls"] == 0 and turn_end["save_turn_tool_calls"] == 2
-    assert f"({len(wake4)} lines, 0 tool calls, plus 2 in the harness save turn)" in staged.files[INDEX_FILE]
+    assert turn_end["tool_calls"] == 1 and turn_end["save_turn_tool_calls"] == 1
+    assert f"({len(wake4)} lines, 1 tool calls, plus 1 in the harness save turn)" in staged.files[INDEX_FILE]
     assert staged.record["agent_labeled_trajectories"] == 1
 
 
 @pytest.mark.parametrize("keep_changes", [True, False])
-def test_the_harness_s_memory_and_history_calls_are_never_actions(run, keep_changes):
-    index = stage_run(*_v3_run(run, keep_changes)).files[INDEX_FILE]
-
-    block = index[index.index("## Wake 4 "):]
-    assert not [line for line in block.splitlines() if "action:" in line] and "memory_" not in block
-    assert "touch no app and are never actions; they are in the wake files." in index
-
-
-def test_a_memory_tool_in_a_trajectory_without_agent_labels_is_an_app_s_and_can_be_an_action(run):
-    timeline, turns = run
-    timeline = [e for e in timeline if e["event"] != "app_changes"]
-    spans = [s for s in json.loads((RECORDED / "turn_otel_v3_compaction_gpt.json").read_text())
-             if s["attributes"].get("gen_ai.tool.name") == "memory_replace"]
-    for s in spans:
-        s["attributes"] = {k: v for k, v in s["attributes"].items() if not k.startswith(("psi.", "gen_ai.agent"))}
-    turns[_url(timeline, 4)] = turn_events(json.dumps(spans))
-
-    staged = stage_run(timeline, turns)
+def test_a_tool_the_harness_provides_is_internal_and_never_an_action(run, keep_changes):
+    staged = stage_run(*_v5_run(run, keep_changes))
 
     index = staged.files[INDEX_FILE]
-    assert "- action: memory_replace line=8" in index[index.index("## Wake 4 "):]
-    assert "never actions" not in index and "agent_labeled_trajectories" not in staged.record
+    assert "memory_add" not in index[index.index("## Wake 4 "):]
+    [call] = [line for line in _lines(staged.files, "wakes/wake_004.jsonl")
+              if line["event"] == "tool_call" and line["tool"] == "memory_add"]
+    assert call["internal"] is True and call["step"] == "pre_compaction_save"
+
+
+def test_an_unmarked_tool_of_the_same_name_is_read_as_before(run):
+    def unmarked(r, keep_changes):
+        timeline, turns = _v5_run(copy.deepcopy(r), keep_changes)
+        for e in turns[_url(timeline, 4)].events:
+            e.pop("internal", None)
+        return stage_run(timeline, turns)
+
+    with_log = unmarked(run, True).files[INDEX_FILE]
+    without_log = unmarked(run, False)
+
+    # No app change names memory_add, so with change logs it is a possible action; without them, an action.
+    assert "- possible action (no app change names this tool): memory_add fact=Saved before summary. " in with_log[
+        with_log.index("## Wake 4 "):]
+    index = without_log.files[INDEX_FILE]
+    assert "- action: memory_add fact=Saved before summary. " in index[index.index("## Wake 4 "):]
+    assert not any(line.get("internal") for line in _lines(without_log.files, "wakes/wake_004.jsonl"))
 
 
 def test_judge_reads_does_not_count_a_wake_the_agent_read_back_with_history_read(run):
-    timeline, turns = _v3_run(run)
+    timeline, turns = _v5_run(run)
     events = turns[_url(timeline, 4)]
     view = next(e for e in events.events if e["type"] == "tool_call")
     events.events.append({**view, "tool": "history_read", "input": {"wake": 2}, "result": "wake 2 (Mon Mar 2) …"})
@@ -388,17 +393,17 @@ def test_judge_reads_does_not_count_a_wake_the_agent_read_back_with_history_read
 
 
 def test_the_index_has_a_line_for_a_compaction_naming_its_wakes_and_pointing_at_its_note(run):
-    staged = stage_run(*_v3_run(run))
+    staged = stage_run(*_v5_run(run))
     index = staged.files[INDEX_FILE]
 
     block = index[index.index("## Wake 4 "):]
     line = next(line for line in block.splitlines() if line.startswith("- compaction"))
-    assert line.startswith("- compaction by the harness, before this wake's turn: wakes 1–6 are now in the summary; "
-                           "wakes 7–9 kept word for word; this wake started 33.917 s late (real time) waiting for it (")
+    assert line.startswith("- compaction by the harness, before this wake's turn: wakes 1–3 are now in the summary; "
+                           "wakes 4–5 kept word for word (")
     path, n = line.rsplit("(", 1)[1].rstrip(")").split(":")
     note = _lines(staged.files, path)[int(n) - 1]
     assert note["event"] == "harness_note" and note["compaction"] == {
-        "wakes_summarized": 6, "wakes_kept": 3, "first_kept_wake": 7, "waited_s": 33.917}
+        "wakes_summarized": 3, "wakes_kept": 2, "first_kept_wake": 4}
 
 
 def test_judge_reads_counts_no_wake_0_from_a_glob_over_the_wake_files():

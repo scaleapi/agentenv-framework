@@ -9,12 +9,13 @@ stored timeline and each wake's trajectory: one file per wake, one event per lin
   ``message_to_user``, a ``nudge`` and its calls, the user's reads). A turn's
   trajectory is matched to its wake by the timeline's ``trajectory_url``; one that's missing is a line saying so. A
   helper agent's lines carry ``subagent``; those of a turn the harness asked for carry ``step`` (the PSI harness's
-  ``pre_compaction_save``, where only its memory and history tools work).
+  ``pre_compaction_save``, where only its memory and history tools work; ``after_compaction`` and ``failed_wake``
+  for its messages).
 - ``wakes/results/``: what is too long for a line to be read whole (a tool's input or result, a long message), named
   by wake and call (or line); the line keeps a preview. Lines longer than LINE_CHARS are split there, nothing dropped.
 - ``events.jsonl``: every line of every wake, and the run's start and end. ``triggers.jsonl``: every trigger firing.
 - ``index.md``: a block per wake with its time, what woke it, the user's message, its write actions (tool and key
-  arguments; never the harness's own memory and history tools) and messages with the ``file:line`` they're at, a
+  arguments) and messages with the ``file:line`` they're at, a
   compaction the harness ran before its turn, and its errors.
 """
 
@@ -51,17 +52,14 @@ _DROPPED = frozenset({*BULKY_EVENT_FIELDS, "real_time", "real_elapsed_s", "user_
 _READS = re.compile(r"(?:^|_)(get|list|search|read|find|whoami|snapshot|view|query|lookup|fetch|navigate|wait|hover|"
                     r"resize|tabs|screenshot|console|network|time)(?:_|$)")
 _NOT_ACTIONS = frozenset({"message_user", "stay_quiet"})
-# The PSI harness's own tools (memory_view, memory_add, memory_replace, memory_remove, history_search, history_read):
-# its notes and its log of past wakes, which touch nothing in the apps, so in a trajectory whose spans say which agent
-# made each (the harness v3's) they are never actions.
-_INTERNAL = re.compile(r"^(?:memory|history)_")
-# A turn the harness asked for before a compaction (only its memory and history tools work in it), and the message it
-# sends after one; they, and the compaction, come before the wake's input reaches the assistant.
+# A turn the harness asked for before a compaction (only its memory and history tools work in it), the message it
+# sends after one and the one after a failed wake; they, and the compaction, come before the wake's input reaches the
+# assistant.
 _SAVE_STEP = "pre_compaction_save"
-_BEFORE_WAKE_STEPS = frozenset({_SAVE_STEP, "after_compaction"})
+_BEFORE_WAKE_STEPS = frozenset({_SAVE_STEP, "after_compaction", "failed_wake"})
 # A line's fields that say what and where it is; ``fit`` moves only the others.
 _IDENTITY = frozenset({"event", "wake", "at", "call", "turn", "tool", "kind", "state", "outcome", "phase", "by",
-                       "step", "subagent", "compaction"})
+                       "step", "subagent", "compaction", "internal"})
 
 
 @dataclass(frozen=True)
@@ -122,12 +120,6 @@ def _short_tool(tool: str) -> str:
     return tool.rsplit("__", 1)[-1]
 
 
-def is_internal_tool(tool: str) -> bool:
-    """Whether ``tool`` has the name of one of the PSI harness's own (its notes and its log of past wakes); it is the
-    harness's only in a trajectory with ``agent_labels``."""
-    return bool(_INTERNAL.match(_short_tool(tool)))
-
-
 def is_write_action(tool: str) -> bool:
     name = _short_tool(tool)
     return name not in _NOT_ACTIONS and not _READS.search(name.lower())
@@ -158,7 +150,6 @@ class _Stager:
         self.not_compacted: list[dict] = []
         self.unrecorded_changes = 0
         self.by_changes = False  # whether the run recorded app changes, so write actions are read from them
-        self.internal: set[int] = set()  # ids of the tool_call lines of the harness's own tools
         self.labelled = 0  # trajectories whose spans say which agent made each (``TurnEvents.agent_labels``)
 
     def wake(self, n: Optional[int]) -> _Wake:
@@ -243,8 +234,6 @@ class _Stager:
             if kind == "tool_call":
                 w.call_count += 1
                 line, written = self.call(w, e, which)
-                if events.agent_labels and is_internal_tool(e["tool"]):
-                    self.internal.add(id(line))
                 lines.append(line)
                 side += written
             elif kind == "text":
@@ -271,7 +260,8 @@ class _Stager:
         name = re.sub(r"[^A-Za-z0-9_.-]", "_", _short_tool(e["tool"]))[:60]
         stem = f"{RESULTS_DIR}/wake_{w.n:0{self.width}d}_call_{w.call_count:03d}_{name}"
         line = _line("tool_call", w.n, call=w.call_count, turn=which, step=e.get("step"), tool=e["tool"],
-                     subagent=e.get("subagent"), input=e.get("input"), error=e.get("error"))
+                     subagent=e.get("subagent"), internal=e.get("internal"), input=e.get("input"),
+                     error=e.get("error"))
         if "result" in e:
             line["result"] = e["result"]
         else:
@@ -325,8 +315,7 @@ class _Stager:
         # A tool no app change names anywhere in the run may be an app that keeps no change log: its writes are
         # guessed from their names, labelled as such, so they aren't left out of the index.
         run_changing = set().union(*(_changing_tools(lines) for _, _, lines in index_blocks))
-        index_blocks = [_index_block(w, path, lines, self.by_changes, run_changing, self.internal)
-                        for w, path, lines in index_blocks]
+        index_blocks = [_index_block(w, path, lines, self.by_changes, run_changing) for w, path, lines in index_blocks]
         self.files[EVENTS_FILE] = "".join(_dumps(line) + "\n" for line in everything)
         self.files[TRIGGERS_FILE] = _triggers(firings, unavailable, self.wakes)
         self.files[INDEX_FILE] = _index(self, index_blocks, start, end, firings)
@@ -354,12 +343,11 @@ def _changing_tools(lines: list[dict]) -> set[str]:
             for a in line.get("actors") or [] if a.get("tool")}
 
 
-def _index_block(w: _Wake, path: str, lines: list[dict], by_changes: bool, run_changing: set[str],
-                 internal: set[int]) -> str:
+def _index_block(w: _Wake, path: str, lines: list[dict], by_changes: bool, run_changing: set[str]) -> str:
     """The wake's block. With ``by_changes`` its write actions are the calls of a tool that made one of the wake's app
     changes, and calls of a tool no app change in the run names (``run_changing``) whose name has no read word are
     "possible actions"; else (a run whose apps keep no change log) every call whose name has no read word is an action
-    (``is_write_action``). The harness's own tools' calls (``internal``, by line id) are never actions."""
+    (``is_write_action``)."""
     calls = sum(1 for line in lines if line["event"] == "tool_call" and line.get("step") != _SAVE_STEP)
     saved = sum(1 for line in lines if line["event"] == "tool_call" and line.get("step") == _SAVE_STEP)
     changing = _changing_tools(lines)
@@ -377,7 +365,8 @@ def _index_block(w: _Wake, path: str, lines: list[dict], by_changes: bool, run_c
     for i, line in enumerate(lines, 1):
         event = line["event"]
         tool = line.get("tool") or ""
-        own = id(line) in internal
+        # A tool the harness provides itself ("internal": its notes, its look-ups of past wakes) changes no app.
+        own = bool(line.get("internal"))
         writes = not own and (_short_tool(tool) in changing if by_changes else is_write_action(tool))
         guessed = (by_changes and not own and not writes and _short_tool(tool) not in run_changing
                    and is_write_action(tool))
@@ -445,9 +434,6 @@ def _index(stager: _Stager, blocks: list[str], start: list[dict], end: list[dict
              "nothing." if stager.by_changes else
              "Actions below are the assistant's tool calls whose tool name has no read word (get, list, search, …): "
              "this run's apps kept no change log, so this is a guess from the name."]
-    if stager.internal:
-        lines[-1] += (" Calls of the harness's own memory_* and history_* tools (the assistant's notes and its log of "
-                      "past wakes) touch no app and are never actions; they are in the wake files.")
     gaps = sorted(set(stager.missing) | set(stager.unreadable))
     if gaps:
         lines += ["", "Wakes whose tool calls are not here (their trajectory is missing or unreadable): "
