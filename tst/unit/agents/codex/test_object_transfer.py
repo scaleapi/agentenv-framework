@@ -120,7 +120,7 @@ def test_card_offers_only_the_object_forms(codex):
     }
     snapshot = _methods(codex, "urn:agentenv:snapshot/v1")
     assert snapshot["save"]["request"] == {"required": ["context_id", "objects"]}
-    assert snapshot["save"]["response"] == {"required": ["context_id", "objects"]}
+    assert snapshot["save"]["response"] == {"required": ["context_id", "objects"], "optional": ["stats"]}
     assert snapshot["load"]["request"] == {"required": ["objects"], "optional": ["target_context_id"]}
     assert snapshot["load"]["response"] == {"required": ["context_id"]}
     assert "enable-changelog" not in snapshot and "apply-changelog" not in snapshot
