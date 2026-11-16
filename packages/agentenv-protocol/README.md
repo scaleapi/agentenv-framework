@@ -1378,7 +1378,8 @@ Expected execution failures are returned as `TaskResult.failure(code, message)`
 and become failed A2A tasks with `error_type`, `error_code`, and `error_message`
 in the terminal message. `error_type` is the platform classification
 (`agent_error` by default, or explicitly `infra_error` for a retryable
-infrastructure failure); `error_code` preserves the author's machine-readable
+infrastructure failure, `model_key_budget` for a model key out of budget, or
+`model_key_auth` for a model key the endpoint rejects); `error_code` preserves the author's machine-readable
 code. An exception escaping `run()`, an invalid return value, or a
 result-mapping failure is logged with a correlation ID and reported as an
 `infra_error` with code `framework.unhandled_exception`; raw exception text is
