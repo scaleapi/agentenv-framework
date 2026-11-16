@@ -508,7 +508,7 @@ class ClaudeCodeAgent(DurableSessionRefs, AgentEnvAgent):
             data["cli_attempts"] = result.attempts
         builder = TaskResult.builder()
         if result.error:
-            builder.failed("cli_error", result.error[:_ERROR_MESSAGE_LIMIT])
+            builder.failed("cli_error", result.error[:_ERROR_MESSAGE_LIMIT], error_type=result.error_type or "agent_error")
         else:
             builder.succeeded()
         return (
