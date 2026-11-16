@@ -144,7 +144,7 @@ def test_each_row_gives_its_reason_first_then_turns_verdict_could_change_grade_a
 def test_an_answer_is_read_into_rows_with_turns_kept_to_the_graded_ones():
     criteria = _criteria("c1", "c2", graded=[2], family="G1")
     rows, discrepancy = diagnose_user_sim_checks_response(
-        _answer(_fail("c1", turns=[1, 2, "x"]), _row("c2", could_change_grade=True)), criteria)
+        _answer(_fail("c1", turns=[1, 2]), _row("c2", could_change_grade=True)), criteria)
     assert discrepancy is None
     fail, ok = rows
     assert (fail["verdict"], fail["turns"], fail["turns_outside_graded"]) == ("fail", [2], [1])
@@ -380,9 +380,16 @@ GOOD = _row("c1")
     (json.dumps({"results": [{**GOOD, "verdict": ["fail"]}]}), "c1: verdict ['fail'] is not one of"),
     (json.dumps({"results": [{**GOOD, "could_change_grade": "true"}]}), "c1: could_change_grade must be true or false"),
     (json.dumps({"results": [{**GOOD, "assistant_asked": None}]}), "c1: assistant_asked must be true or false"),
-    # An infinite turn number is dropped like any other that isn't one, so the fail cites none.
+    # A turn that isn't a whole number is sent back, never read as a turn: true and 1.9 are not turn 1.
     ('{"results": [{"id": "c1", "reason": "Leaked it.", "turns": [Infinity], "verdict": "fail", '
-     '"could_change_grade": true, "assistant_asked": false}]}', "c1: a fail must cite at least one graded turn"),
+     '"could_change_grade": true, "assistant_asked": false}]}',
+     "c1: turns must be a list of turn numbers; [inf] are not whole numbers"),
+    (json.dumps({"results": [{**_fail("c1"), "turns": [True]}]}),
+     "c1: turns must be a list of turn numbers; [True] are not whole numbers"),
+    (json.dumps({"results": [{**_fail("c1"), "turns": [1.9]}]}),
+     "c1: turns must be a list of turn numbers; [1.9] are not whole numbers"),
+    (json.dumps({"results": [{**GOOD, "turns": [1, "2"]}]}),
+     "c1: turns must be a list of turn numbers; ['2'] are not whole numbers"),
     (json.dumps({"results": {"c1": GOOD}}), "`results` must be a list"),
     (json.dumps({"results": "pass"}), "`results` must be a list"),
     (json.dumps({"results": [GOOD, "pass"]}), "every result must be a JSON object"),
@@ -396,6 +403,21 @@ def test_a_malformed_answer_is_a_discrepancy_for_the_correction_prompt_never_an_
     assert "## Correction Required" in prompt
     with pytest.raises(ValueError, match="user_sim_checks answer not usable"):
         SPEC.parse_response(text, _criteria("c1"))
+
+
+@pytest.mark.asyncio
+async def test_a_fail_citing_true_or_1_9_is_asked_again_and_the_corrected_answer_grades(monkeypatch):
+    """Turn 1 is graded, so ``true`` or ``1.9`` read as turn 1 would silently fail c1 on a turn never cited."""
+    verifier = _verifier()
+    judge = AsyncMock(side_effect=[{"response": _answer({**_fail("c1"), "turns": [True]}, _row("c2"))},
+                                   {"response": _answer({**_fail("c1"), "turns": [1.9]}, _row("c2"))},
+                                   {"response": _answer(_row("c1"), _row("c2"))}])
+    monkeypatch.setattr(verifier, "_prompt_llm_judge", judge)
+    rows, retries, discrepancies, _ = await _run_judge(verifier)
+    assert retries == 2 and [r["verdict"] for r in rows] == ["pass", "pass"]
+    assert [d["row_problems"] for d in discrepancies] == [
+        ["c1: turns must be a list of turn numbers; [True] are not whole numbers"],
+        ["c1: turns must be a list of turn numbers; [1.9] are not whole numbers"]]
 
 
 @pytest.mark.asyncio

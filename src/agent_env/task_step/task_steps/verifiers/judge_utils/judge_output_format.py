@@ -1364,6 +1364,11 @@ def _cited_turns(value: Any) -> list[int]:
     return out
 
 
+def _is_turn_number(value: Any) -> bool:
+    """A whole number, as the schema asks: ``true`` and ``1.9`` are not turn 1."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def _graded_turns(criterion: dict) -> set[int] | None:
     value = criterion.get("graded_turns")
     return set(_cited_turns(value)) if isinstance(value, list) else None
@@ -1411,13 +1416,18 @@ def _user_sim_row(item: dict, criterion: dict) -> tuple[dict | None, list[str]]:
         problems.append(f"{rid} may not be n/a: it always applies, so answer pass or fail")
     if not isinstance(item.get("reason"), str):
         problems.append(f"{rid}: reason must be text")
-    if not isinstance(item.get("turns"), list):
+    raw_turns = item.get("turns")
+    turns_ok = isinstance(raw_turns, list) and all(_is_turn_number(t) for t in raw_turns)
+    if not isinstance(raw_turns, list):
         problems.append(f"{rid}: turns must be a list of turn numbers")
-    turns = _cited_turns(item.get("turns"))
+    elif not turns_ok:
+        problems.append(f"{rid}: turns must be a list of turn numbers; "
+                        f"{[t for t in raw_turns if not _is_turn_number(t)]} are not whole numbers")
+    turns = raw_turns if turns_ok else []
     reason = item["reason"].strip() if isinstance(item.get("reason"), str) else ""
     graded = _graded_turns(criterion)
     if verdict == "fail":
-        if not any(graded is None or t in graded for t in turns):
+        if turns_ok and not any(graded is None or t in graded for t in turns):
             problems.append(f"{rid}: a fail must cite at least one graded turn; cited {turns}"
                             + (f", graded {sorted(graded)}" if graded is not None else ""))
         said = _reason_says_no_failure(reason)
