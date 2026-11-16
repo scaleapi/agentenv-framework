@@ -15,6 +15,7 @@ from PIL import Image as PILImage  # noqa: E402
 
 from agentenv_protocol import ROLE_META_KEY  # noqa: E402
 from agentenv_protocol.computer.frames import KEEP  # noqa: E402
+from agentenv_protocol.computer.results import CAPTURED_AT_META  # noqa: E402
 
 
 def _image(result) -> PILImage.Image:
@@ -31,6 +32,7 @@ async def test_a_screenshot_is_a_native_frame_with_its_geometry():
     assert data["display"] == {"width": 1280, "height": 800, "scale": 1.0} and "parent_frame_id" not in data
     assert data["summary"] == "Captured f1: 1280×800 of the 1280×800 display"
     assert "captured_at" not in data  # the driver's real time, which would tell an agent the real date
+    assert first.meta[CAPTURED_AT_META].endswith("Z")  # kept for whoever lines frames up with a recording
     assert first.content[0].text == data["summary"] and first.content[1].mimeType == "image/png"
     assert _image(first).size == (1280, 800)
     assert second.structuredContent["frame_id"] == "f2" and second.content[1].mimeType == "image/jpeg"
@@ -50,13 +52,14 @@ async def test_a_region_is_a_native_crop_whose_points_map_back_exactly():
     driver = FakeDriver(FakeScreen(1280, 800))
     driver.screen.paint(700, 450, (1, 2, 3))
     async with mcp_session(driver) as session:
-        await session.call_tool("computer_screenshot", {})
+        first_at = (await session.call_tool("computer_screenshot", {})).meta[CAPTURED_AT_META]
         crop = await session.call_tool("computer_screenshot", {"region": [600, 400, 900, 500]})
         nested = await session.call_tool("computer_screenshot", {"region": [100, 50, 200, 100], "frame_id": "f2"})
         clicked = await session.call_tool("computer_click", {"x": 1, "y": 1, "frame_id": "f3"})
     assert crop.structuredContent["parent_frame_id"] == "f1" and (crop.structuredContent["width"],
                                                                    crop.structuredContent["height"]) == (300, 100)
     assert crop.structuredContent["summary"] == "Cropped f2: 300×100 of f1 at (600, 400)"
+    assert crop.meta[CAPTURED_AT_META] == first_at  # a crop was captured when its frame was
     assert _image(crop).getpixel((100, 50))[:3] == (1, 2, 3)
     assert nested.structuredContent["parent_frame_id"] == "f2" and _image(nested).getpixel((0, 0))[:3] == (1, 2, 3)
     assert not clicked.isError and driver.screen.log[-1][1:3] == (701, 451)
