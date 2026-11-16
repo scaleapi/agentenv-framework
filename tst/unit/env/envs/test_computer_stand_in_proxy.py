@@ -255,8 +255,9 @@ def test_with_an_egress_proxy_a_public_host_goes_through_it_and_a_private_one_st
     assert [head.split(b"\r\n")[0] for head in heads] == [b"CONNECT site.test:443 HTTP/1.1", b"CONNECT site.test:80 HTTP/1.1"]
     assert proxy.opened == [("10.0.0.1", 80)]
     logged = _logged(capsys.readouterr().out, "connection")
-    assert [(entry["host"], entry["address"]) for entry in logged] == [
-        ("site.test", GITHUB), ("site.test", GITHUB), ("10.0.0.1", "10.0.0.1")]
+    # Through the egress proxy a connection names the proxy, which decides which of the site's addresses it dials.
+    assert [(entry["host"], entry["address"], entry.get("via")) for entry in logged] == [
+        ("site.test", "127.0.0.1", "egress"), ("site.test", "127.0.0.1", "egress"), ("10.0.0.1", "10.0.0.1", None)]
 
 
 def test_a_tunnel_the_egress_proxy_refuses_is_a_502_naming_its_answer(monkeypatch, capsys):

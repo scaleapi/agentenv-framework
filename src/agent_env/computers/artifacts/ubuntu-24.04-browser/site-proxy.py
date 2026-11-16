@@ -11,7 +11,8 @@ each numbered after the last the file holds. Seeing no request inside a tunnel, 
 
 With ``AGENTENV_EGRESS_PROXY`` naming the base's egress proxy, a host every address of which is public goes through
 it, as a ``CONNECT`` tunnel, so a live site loads at any universe date; a private or loopback one, which the egress
-proxy refuses, still goes straight to it."""
+proxy refuses, still goes straight to it. Such a connection's lines name the proxy's address, ``"via": "egress"``:
+which of the site's addresses the proxy dials is its to decide, and its own log names it."""
 import http.server
 import ipaddress
 import itertools
@@ -207,7 +208,8 @@ class Proxy(http.server.BaseHTTPRequestHandler):
                 last = error
             else:
                 upstream.settimeout(IDLE_S)
-                return upstream, addresses[0]
+                record["via"] = "egress"
+                return upstream, egress[0]
             addresses = []
         for address in addresses:
             if (left := deadline - time.monotonic()) <= 0:
@@ -261,7 +263,8 @@ class Proxy(http.server.BaseHTTPRequestHandler):
         finally:
             upstream.close()
             _note("end", {"id": key, "ended": _stamp(), "bytes_sent": sent, "bytes_received": received})
-            log(connection={"host": host, "port": port, "address": address, "bytes_sent": sent,
+            log(connection={"host": host, "port": port, "address": address,
+                            **({"via": opening["via"]} if "via" in opening else {}), "bytes_sent": sent,
                             "bytes_received": received,
                             "started": _when(started),
                             "duration_s": round(time.monotonic() - began, 3)})

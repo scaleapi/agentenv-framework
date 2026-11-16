@@ -460,10 +460,12 @@ async def resolve(host: str, port: int) -> list[str]:
     return list(dict.fromkeys(info[4][0] for info in found))
 
 
-async def open_live(host: str, port: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter, str]:
-    """A connection to ``host``, a live site's, at ``port``, and the address it reached: through the base's egress
-    proxy (``AGENTENV_EGRESS_PROXY``) when it names one and every address ``host`` resolves to is public, the only
-    destinations that proxy takes, else straight to it."""
+async def open_live(host: str, port: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter, str, Optional[str]]:
+    """A connection to ``host``, a live site's, at ``port``, the address it reached and what it went through: the
+    base's egress proxy (``AGENTENV_EGRESS_PROXY``, ``"egress"``) when it names one and every address ``host`` resolves
+    to is public, the only destinations that proxy takes, else nothing, straight to it (None). Through the egress proxy
+    the address is the proxy's own, since which of the site's addresses it dials is the proxy's to decide, after the
+    browser's TLS hello: its own log names that one."""
     egress = urlsplit(os.environ.get(EGRESS_PROXY_ENV) or "")
     if egress.hostname:
         addresses = await resolve(host, port)
@@ -483,9 +485,9 @@ async def open_live(host: str, port: int) -> tuple[asyncio.StreamReader, asyncio
             except BaseException:
                 writer.close()
                 raise
-            return reader, writer, addresses[0]
+            return reader, writer, (writer.get_extra_info("peername") or (egress.hostname,))[0], "egress"
     reader, writer = await asyncio.open_connection(host, port, limit=HEAD_LIMIT)
-    return reader, writer, (writer.get_extra_info("peername") or ("",))[0]
+    return reader, writer, (writer.get_extra_info("peername") or ("",))[0], None
 
 
 def direct_head(start: str, headers: list[tuple[str, str]]) -> bytes:
@@ -720,7 +722,7 @@ class SiteProxy:
         attempt together, which is logged (``log_event``) and ends ``record`` in the network log."""
         asked = time.time()
         try:
-            up_reader, up_writer, address = await asyncio.wait_for(open_live(host, port), UPSTREAM_TIMEOUT_S)
+            up_reader, up_writer, address, via = await asyncio.wait_for(open_live(host, port), UPSTREAM_TIMEOUT_S)
         except (OSError, asyncio.TimeoutError) as e:
             unresolved = isinstance(e, socket.gaierror)
             reason = "doesn't resolve" if unresolved else "no answer"
@@ -731,6 +733,8 @@ class SiteProxy:
             writer.write(simple_response("502 Bad Gateway", f"{host} doesn't resolve\n" if unresolved else
                                          f"{host}:{port} didn't answer\n", FAILED))
             return None
+        if via:
+            record["via"] = via
         return up_reader, up_writer, address
 
     async def _direct(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, host: str, port: int) -> None:
@@ -750,7 +754,8 @@ class SiteProxy:
             await asyncio.gather(splice(reader, up_writer, sent), splice(up_reader, writer, received))
         finally:
             self._note("end", {"id": key, "ended": stamp(), "bytes_sent": sent.bytes, "bytes_received": received.bytes})
-            log_event(connection={"host": host, "port": port, "address": address, "bytes_sent": sent.bytes,
+            log_event(connection={"host": host, "port": port, "address": address,
+                                  **({"via": tunnel["via"]} if "via" in tunnel else {}), "bytes_sent": sent.bytes,
                                   "bytes_received": received.bytes, "started": when(wall),
                                   "duration_s": round(time.monotonic() - began, 3)})
 
@@ -836,7 +841,8 @@ class SiteProxy:
                 ended["response"]["body"] = kept.record()
             alone = {} if noted else {**record, "request": sent_request(), "started": started, "address": address}
             self._note("end", {**ended, "ended": stamp(), **alone})
-            log_event(connection={"host": host, "port": port, "address": address, "bytes_sent": sent.bytes,
+            log_event(connection={"host": host, "port": port, "address": address,
+                                  **({"via": record["via"]} if "via" in record else {}), "bytes_sent": sent.bytes,
                                   "bytes_received": received.bytes, "started": when(wall),
                                   "duration_s": round(time.monotonic() - began, 3)})
             up_writer.close()

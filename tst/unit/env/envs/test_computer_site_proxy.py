@@ -496,8 +496,9 @@ async def test_with_an_egress_proxy_a_public_live_host_goes_through_it_and_a_pri
     assert [head.split(b"\r\n")[0] for head in egress.heads] == [b"CONNECT github.com:80 HTTP/1.1"]
     assert opened == [("intranet.example", 80)] and [request[0] for request in live.requests] == ["GET /b HTTP/1.1"]
     logged = _logged(capsys.readouterr().err, "connection")
-    assert [(entry["host"], entry["address"]) for entry in logged] == [
-        ("github.com", "140.82.112.3"), ("intranet.example", "127.0.0.1")]
+    # Through the egress proxy a connection names the proxy, which decides which of the site's addresses it dials.
+    assert [(entry["host"], entry["address"], entry.get("via")) for entry in logged] == [
+        ("github.com", "127.0.0.1", "egress"), ("intranet.example", "127.0.0.1", None)]
 
 
 @pytest.mark.asyncio
