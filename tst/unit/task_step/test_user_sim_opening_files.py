@@ -175,7 +175,7 @@ async def test_always_on_sends_the_files_on_the_first_wake_in_their_place_and_th
     later = {"kind": "text", "text": "the hotels i looked at are in the sheet"}
     ctx = await rig.run(_always_on(), await _always_on_context(monkeypatch, rig, [*OPENING[:2], later, SHORTLIST]))
 
-    line = f"[Mon Nov 16, 3:50 PM UTC] Hannah: {TEXT}\n{later['text']}"
+    line = f"[Mon Nov 16, 7:50 AM PST] Hannah: {TEXT}\n{later['text']}"
     opening = rig.parts[0]
     assert [p.get("text") for p in opening if p.get("kind") == "text"].count(line) == 1
     at = next(i for i, p in enumerate(opening) if p.get("text") == line)
@@ -206,7 +206,7 @@ async def test_always_on_with_a_text_only_opening_sends_and_shows_only_the_text(
     assert {p.get("kind") for p in rig.parts[0]} == {"text"}
     assert all("files" not in w for w in rig.events(ctx, "wake"))
     [first_turn, *_] = [m for m in rig.chat(ctx) if m["role"] == "user"]
-    assert first_turn["texts"] == [f"[Mon Nov 16, 3:50 PM UTC] Hannah: {TEXT}"]
+    assert first_turn["texts"] == [f"[Mon Nov 16, 7:50 AM PST] Hannah: {TEXT}"]
     [call] = rig.user_calls
     assert f"\nYOU SENT YOUR AI ASSISTANT:\n  [7:50 AM] {TEXT}\n\nNEW FROM" in call["parts"][0]["text"]
 

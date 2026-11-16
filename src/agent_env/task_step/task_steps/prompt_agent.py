@@ -39,7 +39,7 @@ from agent_env.task_step.context import DeployedAgent, PromptResponse, StepConte
 from agent_env.entity.refs import EntityRef
 from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import RetryConfig, TaskStep, TaskStepDependency
-from agent_env.task_step.task_steps.notification_delivery import delivered_parts, next_message, take_due
+from agent_env.task_step.task_steps.notification_delivery import delivered_parts, labels_zone, next_message, take_due
 from agent_env.task_step.task_steps.post_turn_hooks import PostTurnHooks, run_post_turn_hooks, validate_hook_specs
 from agent_env.task_step.task_steps.agent import user_sim_versions
 from agent_env.task_step.task_steps.agent.user_sim_common import iso, person_of, task_zone, utc
@@ -614,6 +614,7 @@ class PromptAgentTaskStep(TaskStep):
         # What comes due for the agent's role on these envs (notifications/v1) opens its next message.
         notification_envs = [d for d in context.deployed_envs if d.supports(EXT_NOTIFICATIONS_URI, "take")]
         recipient = agent.role or DEFAULT_ROLE
+        zone = built_in[1] if built_in else labels_zone(context.metadata.get("clock_configurations") or [])
         final_terminal = protocol.TerminalResponse(response_text="")
         # Each turn's terminal reports only that turn's tool calls, so the conversation's count is
         # their sum. None until a turn reports one, so agents that don't report it stay None.
@@ -752,7 +753,7 @@ class PromptAgentTaskStep(TaskStep):
                 # The conversation goes on: what came due for the agent goes first, the user side's reply after it.
                 # An answer that ended it, or the last turn, takes nothing, so what is due stays queued on the env.
                 due = await take_due(notification_envs, recipient) if notification_envs else []
-                current_user_parts = next_message(delivered_parts(due), answer["message"])
+                current_user_parts = next_message(delivered_parts(due, zone), answer["message"])
                 end_after = answer.get("end_after")
                 if not current_user_parts:  # a hook said nothing ([]) and nothing came due
                     logger.info(f"Turn {turn+1}: nothing to send the agent; ending multi-turn (nothing_to_send)")

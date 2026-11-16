@@ -14,7 +14,7 @@ from agent_env.env.gateway.clock import Clock
 from agent_env.env.gateway.constants import EXT_NOTIFICATIONS_URI
 from agent_env.env.gateway.notifications import Notifications
 from agent_env.task_step.task_steps import notification_delivery
-from agent_env.task_step.task_steps.notification_delivery import delivered_line, next_message
+from agent_env.task_step.task_steps.notification_delivery import delivered_line, label_time, labels_zone, next_message
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from tst.unit.task_step.test_prompt_agent_post_turn_hooks import EnvPeers, _env, _hook
 from tst.unit.task_step.test_prompt_agent_user_side import AGENT, ENV, USER, _USER_SIM_CARD, _context, sim, text
@@ -140,7 +140,7 @@ async def test_the_last_turn_takes_nothing(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_labels_are_in_utc_and_say_so(monkeypatch):
+async def test_labels_are_in_utc_and_say_so_when_the_task_names_no_zone(monkeypatch):
     peers = GatewayQueue(monkeypatch, {AGENT: [text("one"), text("two")], USER: [sim("ok"), sim("bye", done=True)]})
     _alder_and_ivy_due(peers)
     ctx = _ctx()
@@ -149,6 +149,35 @@ async def test_labels_are_in_utc_and_say_so(monkeypatch):
 
     assert [p["text"] for p in _to_agent(ctx)[1]] == [f"[Mon Feb 1, 11:00 PM UTC · your scheduled check] {ALDER}",
                                                       f"[Mon Feb 1, 11:10 PM UTC · Curbfinch alert] {IVY}", "ok"]
+
+
+@pytest.mark.asyncio
+async def test_labels_are_in_the_zone_sync_env_clock_gave_the_world_and_name_it(monkeypatch):
+    peers = GatewayQueue(monkeypatch, {AGENT: [text("one"), text("two")], USER: [sim("ok"), sim("bye", done=True)]})
+    _alder_and_ivy_due(peers)
+    ctx = _ctx()
+    ctx.metadata["clock_configurations"] = [{"step_id": "clock", "timezone": "America/Los_Angeles"}]
+
+    await _step().execute(ctx)
+
+    assert [p["text"] for p in _to_agent(ctx)[1]] == [f"[Mon Feb 1, 3:00 PM PST · your scheduled check] {ALDER}",
+                                                      f"[Mon Feb 1, 3:10 PM PST · Curbfinch alert] {IVY}", "ok"]
+
+
+@pytest.mark.parametrize("at, zone, label", [
+    ("2027-02-06T00:30:00Z", "America/Denver", "Fri Feb 5, 5:30 PM MST"),
+    ("2027-07-01T00:30:00Z", "America/Denver", "Wed Jun 30, 6:30 PM MDT"),
+    ("2027-02-06T00:30:00Z", "America/Sao_Paulo", "Fri Feb 5, 9:30 PM UTC-03"),
+    ("2027-02-06T00:30:00Z", "UTC", "Sat Feb 6, 12:30 AM UTC"),
+], ids=["standard-time", "daylight-time", "a-zone-named-by-its-offset", "utc"])
+def test_a_label_reads_the_time_in_its_zone_and_names_the_zone(at, zone, label):
+    assert label_time(at, zone) == label
+
+
+def test_lines_take_the_one_zone_the_world_was_given_and_utc_without_one_or_with_several():
+    assert labels_zone([{"step_id": "a", "timezone": "America/Denver"}, {"step_id": "b"}]) == "America/Denver"
+    assert labels_zone([]) == "UTC"
+    assert labels_zone([{"timezone": "America/Denver"}, {"timezone": "Europe/Paris"}]) == "UTC"
 
 
 @pytest.mark.asyncio
