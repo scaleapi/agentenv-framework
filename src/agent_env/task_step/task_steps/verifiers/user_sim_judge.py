@@ -163,6 +163,7 @@ USER_SIMS_KEY = "user_sims"  # deploy_user_sim_agent.USER_SIMS_KEY
 ALWAYS_ON, CHAT = "always_on", "prompt_agent"
 SYSTEM = ("You grade a user simulator: an AI playing a real person who messages their personal AI assistant. You "
           "grade the user sim, never the assistant.")
+COST_DECIMALS = 6  # the entry keeps the judge's cost to a millionth of a dollar
 FLAG_UNDECIDED = "user sim judge undecided"
 FLAG_NONE_DECIDED = "the judge couldn't decide any check — check its setup"
 # The judge's own settings: what a task may set on it, beyond every step's (id, type, version, depends_on ...).
@@ -387,7 +388,7 @@ class UserSimJudge(RubricsVerifierTaskStep):
                 error["fails_task"] = True
         written.update(results=rows, score=0.0 if any(r.get("result") is False for r in rows) else 1.0, **entry,
                        user_sim_error=error, calls=this.calls, usage=core.usage_total(this.usage),
-                       cost=round(this.cost, 6))
+                       cost=round(this.cost, COST_DECIMALS))
         if error["value"] == "unknown":
             judged = [r for r in rows if r["id"] in core.CHECKS]
             written["flag"] = FLAG_NONE_DECIDED if judged and all(r["verdict"] == "error" for r in judged) \
