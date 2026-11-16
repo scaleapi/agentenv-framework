@@ -2,12 +2,16 @@
 answers is what its schema says."""
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal, Optional
 
 from mcp.types import CallToolResult, ImageContent, TextContent
 from pydantic import BaseModel
 
 from .operations import Effect
+
+#: The ``_meta`` key of a tool answer that carries a frame: when the driver captured it, in real time (RFC 3339, UTC).
+CAPTURED_AT_META = "agentenv.io/capturedAt"
 
 
 class DisplayData(BaseModel):
@@ -36,12 +40,14 @@ class PageData(BaseModel):
 
 
 class FrameData(BaseModel):
+    """A frame as an agent sees it. When it was captured isn't part of it: the driver keeps real time, which in a
+    computer on the universe's clock would tell the agent the real date; the tool's answer carries it in its ``_meta``
+    (``CAPTURED_AT_META``) for the callers that line frames up with a recording."""
     frame_id: str
     width: int
     height: int
     display: DisplayData
     parent_frame_id: Optional[str] = None
-    captured_at: str
     page: Optional[PageData] = None
 
 
@@ -118,10 +124,14 @@ class PointerListResult(BaseModel):
     pointers: list[PointerData]
 
 
-def send(result: BaseModel, image: tuple[str, str] | None = None) -> CallToolResult:
+def send(result: BaseModel, image: tuple[str, str] | None = None,
+         captured_at: datetime | None = None) -> CallToolResult:
     """A result as a tool answers: the summary as the text block, then the image (base64, MIME type) when there is
-    one, and the result as structured content with its unset fields left out."""
+    one, and the result as structured content with its unset fields left out; when its frame was ``captured_at``,
+    that real time in its ``_meta``, which a client doesn't show its model."""
     content: list = [TextContent(type="text", text=result.summary)]
     if image is not None:
         content.append(ImageContent(type="image", data=image[0], mimeType=image[1]))
-    return CallToolResult(content=content, structuredContent=result.model_dump(mode="json", exclude_none=True))
+    meta = {CAPTURED_AT_META: captured_at.isoformat().replace("+00:00", "Z")} if captured_at is not None else None
+    return CallToolResult(content=content, structuredContent=result.model_dump(mode="json", exclude_none=True),
+                          _meta=meta)

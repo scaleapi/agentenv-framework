@@ -2687,7 +2687,9 @@ async def test_a_site_with_no_ready_on_its_card_is_waited_for_at_its_health_path
 
 
 @pytest.mark.asyncio
-async def test_a_site_that_never_says_it_is_ready_fails_the_deploy_naming_why():
+async def test_a_site_that_never_says_it_is_ready_fails_the_deploy_naming_why(monkeypatch):
+    monkeypatch.setattr(env_gateway_provider, "WEBSITE_READY_MARGIN_S", 0)
+
     def site(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/.well-known/agent-env.json"):
             return httpx.Response(200, json=_READY_CARD)
@@ -2700,7 +2702,9 @@ async def test_a_site_that_never_says_it_is_ready_fails_the_deploy_naming_why():
 
 
 @pytest.mark.asyncio
-async def test_a_site_whose_ready_answers_no_website_readiness_is_never_ready_and_the_deploy_says_so():
+async def test_a_site_whose_ready_answers_no_website_readiness_is_never_ready_and_the_deploy_says_so(monkeypatch):
+    monkeypatch.setattr(env_gateway_provider, "WEBSITE_READY_MARGIN_S", 0)
+
     def site(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/.well-known/agent-env.json"):
             return httpx.Response(200, json=_READY_CARD)
@@ -2880,6 +2884,23 @@ def test_compose_fronts_each_external_child_as_an_mcp_server_and_a_rest_route_by
     assert "CLOCK_FOLLOWER_TOKENS" not in env
 
 
+def test_compose_names_the_children_the_gateway_passes_its_token_on_to_only_when_it_has_one():
+    from agent_env.env.envs.service_db import ServiceDBConfig
+    from agent_env.env.gateway import ExternalChild
+
+    def gateway_env(control_token):
+        rendered = EnvironmentGatewayProvider().create_docker_compose(
+            mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")], gateway_image="agent-gateway",
+            state_provider=LocalPostgresStateProvider(service_db_config=ServiceDBConfig()),
+            state_instance=LocalPostgresStateProvider.default_instance(), control_token=control_token,
+            external_children=(ExternalChild("desktop", "https://desk.example/mcp", "https://desk.example"),
+                               ExternalChild("laptop", "https://lap.example/mcp", "https://lap.example")))
+        return dict(line.split("=", 1) for line in yaml.safe_load(rendered)["services"][GATEWAY_SERVICE_NAME]["environment"])
+
+    assert gateway_env("gw-token")["CONTROL_TOKEN_CHILDREN"] == "desktop,laptop"
+    assert "CONTROL_TOKEN_CHILDREN" not in gateway_env(None)
+
+
 def test_compose_declares_the_children_that_follow_the_clock_by_their_read_tokens_and_logs_none_of_them():
     from agent_env.env.envs.service_db import ServiceDBConfig
     from agent_env.env.gateway import ExternalChild
@@ -2930,8 +2951,8 @@ async def test_a_vm_deploy_starts_its_children_beside_its_services_and_the_gatew
     sandbox.url_from_sandbox = MagicMock(side_effect=lambda url: url.replace("localhost", "host.docker.internal"))
     order, composes = [], []
 
-    async def children(reach):
-        order.append(("children", reach))
+    async def children(reach, control_token):
+        order.append(("children", reach, control_token))
         return [ExternalChild("desktop", "http://localhost:20001/mcp", "http://localhost:20001", "read-desk")]
 
     def compose(**kwargs):
@@ -2955,9 +2976,9 @@ async def test_a_vm_deploy_starts_its_children_beside_its_services_and_the_gatew
             sandbox_provider=MagicMock(create_vm=AsyncMock(return_value=sandbox)),
             mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")], mcp_server_images=[_loadable("mcp-slack")],
             gateway_port=18765, website_configs=None, website_images=None, gateway_mode=GatewayMode.PERFORMANCE, ttl_seconds=60,
-            disk_size_gb=10, children=children)
+            disk_size_gb=10, children=children, control_token="gw-token")
 
-    assert sorted(order[:2]) == [("children", "https://gw.example"), ("up", f"--scale {GATEWAY_SERVICE_NAME}=0")]
+    assert sorted(order[:2]) == [("children", "https://gw.example", "gw-token"), ("up", f"--scale {GATEWAY_SERVICE_NAME}=0")]
     assert order[2:] == [("up", "")]
     assert composes == [(), (ExternalChild("desktop", "http://host.docker.internal:20001/mcp", "http://host.docker.internal:20001",
                                            "read-desk"),)]
@@ -2976,7 +2997,7 @@ async def test_a_vm_deploy_whose_children_or_services_fail_raises_once_both_have
     gp._state_instance = MagicMock()
     ended = []
 
-    async def children(reach):
+    async def children(reach, control_token):
         await asyncio.sleep(0.05)
         ended.append("children")
         if failing == "children":
@@ -3020,8 +3041,8 @@ async def test_container_mode_starts_children_beside_its_servers_and_hands_the_g
             return _FakeSandbox(f"db-{port}", port, f"tcp://db.modal.host:{port}")
         return _FakeSandbox(f"sb-{kwargs['image_name']}-{port}", port, f"https://{kwargs['image_name']}.modal.host")
 
-    async def children(reach):
-        reaches.append(reach)
+    async def children(reach, control_token):
+        reaches.append((reach, control_token))
         return [ExternalChild("desktop", "https://desk.example/mcp", "https://desk.example", "read-desk")]
 
     gateway_env = MagicMock(docker_image_artifact=_image("agent-gateway"))
@@ -3036,13 +3057,15 @@ async def test_container_mode_starts_children_beside_its_servers_and_hands_the_g
         await gp._deploy_via_containers(
             sandbox_provider=provider, mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")],
             mcp_server_images=[_image("mcp-slack")], gateway_port=18765, website_configs=None,
-            gateway_mode=GatewayMode.PERFORMANCE, ttl_seconds=60, disk_size_gb=10, children=children)
+            gateway_mode=GatewayMode.PERFORMANCE, ttl_seconds=60, disk_size_gb=10, children=children,
+            control_token="gw-token")
 
     env = create_calls[-1]["env"]
-    assert reaches == [None]
+    assert reaches == [(None, "gw-token")]
     assert env["INTERNAL_MCP_SERVERS"].split(",")[-1] == "desktop=https://desk.example/mcp"
     assert env["REST_PROXY_URLS"].split(",")[-1] == "desktop=https://desk.example"
     assert env["CLOCK_FOLLOWER_TOKENS"] == "desktop=read-desk"
+    assert env["CONTROL_TOKEN_CHILDREN"] == "desktop"
 
 
 def _run_probe(tmp_path, statuses: dict[str, int]) -> int:
