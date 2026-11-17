@@ -147,14 +147,17 @@ def _same(a: Any, b: Any) -> bool:
     return " ".join(str(a or "").split()) == " ".join(str(b or "").split())
 
 
-def rule_events(timeline: Sequence[dict]) -> list[dict]:
+def rule_events(timeline: Sequence[dict], opening_text: Optional[str] = None) -> list[dict]:
     """The run's changes by the assistant, messages to the user and messages from the user, in the order they happened.
 
     Each is ``{"id", "kind": "change" | "message" | "user", "wake", "at", "text"}`` plus: a change's ``table``, ``op``,
     ``row_id``, ``tool``, ``env_id``, ``change_id`` and ``actor_known``; a user message's ``source`` (opening, reply,
     scripted), and a reply's ``reply_to`` (the M id it answers, None when the run couldn't tell), ``matched_by`` and
     ``delivered`` (False for one that never reached the assistant). A change with no known actor is listed, flagged:
-    it may be the assistant's. A user line is placed in the wake it woke."""
+    it may be the assistant's. A user line is placed in the wake it woke.
+
+    ``opening_text`` is the user's opening request as sent (``PromptResponse.prompt_text``). The first wake's text
+    also carries due notifications and reminders, which are not the user's words, so it is used only without it."""
     events: list[dict] = []
     counts = {"change": 0, "message": 0, "user": 0}
     prefix = {"change": "C", "message": "M", "user": "U"}
@@ -181,7 +184,8 @@ def rule_events(timeline: Sequence[dict]) -> list[dict]:
         if kind == "wake":
             current = e["n"]
             if "user_request" in (e.get("woke_by") or []):
-                add("user", wake=current, at=e.get("virtual_time"), text=e.get("parts_text") or "", source="opening")
+                add("user", wake=current, at=e.get("virtual_time"), text=opening_text or e.get("parts_text") or "",
+                    source="opening")
             for w in waiting:
                 add("user", wake=current, **w)
             waiting = []

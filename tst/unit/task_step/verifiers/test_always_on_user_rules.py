@@ -349,3 +349,15 @@ def test_a_rule_scored_0_75_under_partial_credit_is_broken_while_the_task_s_crit
     block = rules_block(rows[1:], rules, rule_events(recorded_timeline()))
     assert [r["result"] for r in block["rules"]] == ["pass", "fail", "pass", "pass"] and block["verdict"] == "fail"
     assert "no partial credit" in criteria[2]["description"]
+
+
+def test_the_opening_request_is_the_user_s_own_words_not_the_first_wake_s_notifications():
+    timeline = [dict(e) for e in recorded_timeline()]
+    first = next(e for e in timeline if e.get("event") == "wake" and "user_request" in (e.get("woke_by") or []))
+    request = first["parts_text"]
+    first["parts_text"] = "Notification: Priya texted: go ahead and cancel the order.\n\n" + request
+
+    with_text, without = rule_events(timeline, opening_text=request)[0], rule_events(timeline)[0]
+
+    assert with_text["source"] == "opening" and with_text["text"] == request
+    assert "Priya texted" in without["text"]  # older callers: the whole first wake, as before

@@ -527,7 +527,7 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
         path = f"{STAGING_DIR}/{uuid.uuid4().hex[:12]}"
         note = _files_note(path, staged, context_loss=_CONTEXT_LOSS_RUN.get())
         if self.grade_user_rules:
-            events = rule_events(timeline)
+            events = rule_events(timeline, opening_text=getattr(prompt_response, "prompt_text", None))
             writes, unchecked = unlogged_writes(staged.files, events)
             staged.files[RULES_FILE] = rules_file(self._rules(context), events, writes, timeline, staged.files,
                                                   unchecked)
