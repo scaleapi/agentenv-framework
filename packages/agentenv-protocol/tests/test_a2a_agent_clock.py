@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import threading
 import time
 
 import pytest
@@ -44,6 +45,24 @@ def _status(image, **status) -> None:
     (image / "status.json").write_text(json.dumps(status))
 
 
+def _follows_the_next_config(image, **status) -> threading.Thread:
+    """A follower that, as the real one, writes its status once it reads a config other than the one it had."""
+    config = image / "follower.json"
+    before = config.read_bytes() if config.exists() else None
+
+    def run() -> None:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if config.exists() and config.read_bytes() != before:
+                _status(image, **status)
+                return
+            time.sleep(0.01)
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread
+
+
 def _app(**declared):
     @a2a_agent(identity=AgentIdentity(name="clocked", description="test", version="1"), **declared)
     class Agent(AgentEnvAgent):
@@ -74,7 +93,8 @@ def test_an_agent_in_an_image_without_the_follower_serves_no_clock(image, monkey
 
 
 def test_sync_time_writes_the_followers_config_sets_the_zone_and_answers_once_it_follows(image):
-    _status(image, connected=True, url="http://gw/clock/watch", name="agent-solver", version="b:3", armed=True)
+    _follows_the_next_config(image, connected=True, url="http://gw/clock/watch", name="agent-solver", version="b:3",
+                             armed=True)
     with _app() as client:
         answer = client.post("/ext/clock/sync-time", json={**REQUEST, "timezone": "America/Chicago"})
 
@@ -91,7 +111,7 @@ def test_sync_time_writes_the_followers_config_sets_the_zone_and_answers_once_it
 
 
 def test_a_follower_behind_the_gateway_is_named(image):
-    _status(image, connected=True, url="http://gw/clock/watch", version="b:2")
+    _follows_the_next_config(image, connected=True, url="http://gw/clock/watch", name="agent-solver", version="b:2")
     with _app() as client:
         answer = client.post("/ext/clock/sync-time", json=REQUEST)
 
@@ -113,3 +133,26 @@ def test_a_zone_that_isnt_one_is_refused(image):
         answer = client.post("/ext/clock/sync-time", json={**REQUEST, "timezone": "Mars/Olympus"})
 
     assert answer.status_code == 400 and "IANA" in answer.text and os.environ["TZ"] == "UTC"
+
+
+@pytest.mark.parametrize("before", [
+    {"url": "http://old-gw/clock/watch", "name": "agent-solver"},  # another gateway: it may answer the same version
+    {"url": "http://gw/clock/watch", "name": "agent-solver"},  # this one, under the token the config replaced
+])
+def test_what_the_follower_showed_of_its_config_before_never_passes_for_the_new_one(image, before):
+    _status(image, connected=True, version="b:3", armed=True, **before)
+    with _app() as client:
+        answer = client.post("/ext/clock/sync-time", json=REQUEST)
+
+    assert answer.status_code == 404
+    assert "still shows the config it had" in answer.text
+
+
+def test_the_config_it_already_follows_resent_answers_from_its_status(image):
+    with _app() as client:
+        _follows_the_next_config(image, connected=True, url="http://gw/clock/watch", name="agent-solver",
+                                 version="b:3")
+        assert client.post("/ext/clock/sync-time", json=REQUEST).status_code == 200
+        answer = client.post("/ext/clock/sync-time", json=REQUEST)  # the follower writes nothing anew
+
+    assert answer.status_code == 200, answer.text

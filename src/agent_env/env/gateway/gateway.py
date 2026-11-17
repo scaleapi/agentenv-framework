@@ -401,6 +401,17 @@ class Gateway:
                 return self._json_response({"ok": False, "error": str(e)}, 400)
             return self._json_response({"ok": True, "followers": self._clock_followers.state()}, 200)
 
+        @self._mcp.custom_route(CLOCK_FOLLOWERS_PATH, methods=["DELETE"])
+        async def clock_retire_follower(request: Request) -> Response:
+            try:
+                body = await request.json()
+            except Exception:
+                return self._json_response({"ok": False, "error": "Invalid JSON body"}, 400)
+            if not isinstance(body, dict) or not isinstance(body.get("name"), str) or not body["name"]:
+                return self._json_response({"ok": False, "error": "body must be a JSON object naming the follower"}, 400)
+            retired = self._clock_followers.retire(body["name"])
+            return self._json_response({"ok": True, "retired": retired, "followers": self._clock_followers.state()}, 200)
+
         @self._mcp.custom_route("/clock/time", methods=["GET"])
         async def clock_time(request: Request) -> Response:
             try:

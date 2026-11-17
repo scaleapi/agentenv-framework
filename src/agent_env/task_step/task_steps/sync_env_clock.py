@@ -193,14 +193,14 @@ class SyncEnvClockTaskStep(TaskStep):
     async def _follow_agents(self, context: TaskStepContext, deployed, env_get_time_url: Optional[str]) -> list[dict]:
         """Have every agent registered with the env follow its clock (``agent_clock.follow``): one that can't is
         reported and skipped, or fails the step under ``require_agent_clock``."""
-        from agent_env.task_step.task_steps.agent_clock import follow
+        from agent_env.task_step.task_steps.agent_clock import follow_in
 
         outcomes = []
         for agent in context.deployed_agents:
             if self.env_id not in (agent.env_ids or []):
                 continue
-            outcome = await follow(agent, deployed, env_get_time_url=env_get_time_url, timezone=self.timezone,
-                                   timeout=self.timeout_seconds)
+            outcome = await follow_in(context, agent, deployed, env_get_time_url=env_get_time_url,
+                                      timezone=self.timezone, timeout=self.timeout_seconds)
             if not outcome["synced"]:
                 if self.require_agent_clock:
                     raise StepContextError(f"agent '{agent.agent_name}' can't follow the clock of env "

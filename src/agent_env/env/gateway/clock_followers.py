@@ -1,5 +1,5 @@
 """The followers of the gateway's clock (the computers on it, declared at its start, and the agents a run declares
-after it, ``declare``): each long-polls ``/clock/watch`` with the version it
+after it, ``declare``, and retires when it tears one down, ``retire``): each long-polls ``/clock/watch`` with the version it
 shows, which is its acknowledgement, and a clock write can wait until every one shows the write's version."""
 from __future__ import annotations
 
@@ -42,6 +42,7 @@ class ClockFollowers:
         self._tokens = dict(tokens)
         self._shown: dict[str, int | None] = dict.fromkeys(self._tokens)
         self._seen: dict[str, float] = {}
+        self._declared: set[str] = set()
         self._changed = asyncio.Event()
         self._acks = asyncio.Condition()
 
@@ -50,9 +51,23 @@ class ClockFollowers:
         run deploys. Declared again, as a redeploy does, it takes the new token and is waited for afresh."""
         if not name or not token:
             raise ClockError("a follower takes a name and a read token")
+        if name in self._tokens and name not in self._declared:
+            raise ClockError(f"{name!r} is a follower this gateway started with, which a declaration doesn't replace")
         self._tokens[name] = token
         self._shown[name] = None
         self._seen.pop(name, None)
+        self._declared.add(name)
+
+    def retire(self, name: str) -> bool:
+        """Stop waiting for ``name``, a follower ``declare`` added, whose agent a run has torn down: its token no
+        longer acknowledges, and no write waits for it or names it. Whether it was one; a follower the gateway started
+        with stays."""
+        if name not in self._declared:
+            return False
+        self._declared.discard(name)
+        for followers in (self._tokens, self._shown, self._seen):
+            followers.pop(name, None)
+        return True
 
     def changed(self) -> None:
         """Answer every held watch: the clock has a new version."""

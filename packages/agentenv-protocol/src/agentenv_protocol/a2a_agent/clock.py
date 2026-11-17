@@ -26,20 +26,29 @@ def follows() -> bool:
     return follower.follows()
 
 
-def write_config(watch_url: str, name: str, read_token: str) -> None:
+def write_config(watch_url: str, name: str, read_token: str) -> int:
     """The follower's config, written beside its place and renamed into it, so the follower, which reads it every
-    quarter second, never reads half of one; readable by this user and the follower's group alone."""
+    quarter second, never reads half of one; readable by this user and the follower's group alone. When it was
+    written (``st_mtime_ns``), which a status must postdate to be of this config; 0 when the config was this one
+    already, which the follower goes on following without writing its status anew."""
     path = Path(follower.CONFIG)
+    raw = json.dumps({"watch_url": watch_url, "name": name, "token": read_token}).encode()
+    try:
+        if path.read_bytes() == raw:
+            return 0
+    except OSError:
+        pass
     staged = path.with_name(f"{path.name}.{uuid.uuid4().hex}")
     fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o640)
     try:
-        with os.fdopen(fd, "w") as f:
-            json.dump({"watch_url": watch_url, "name": name, "token": read_token}, f)
+        with os.fdopen(fd, "wb") as f:
+            f.write(raw)
         os.chmod(staged, 0o640)
         os.replace(staged, path)
     except BaseException:
         staged.unlink(missing_ok=True)
         raise
+    return path.stat().st_mtime_ns
 
 
 def set_zone(timezone: str) -> str:
@@ -59,7 +68,7 @@ async def sync_time(env_get_time_url: str, timezone: str | None = None, watch_ur
                     name: str | None = None, read_token: str | None = None) -> dict:
     """``clock/v1``'s ``sync_time`` on an agent: the follower configured to follow the gateway at ``watch_url`` as
     ``name`` with ``read_token``, the task's ``timezone`` set for what this server starts, and an answer once the
-    follower shows the gateway's version. ``env_get_time_url`` is taken as every server takes it and not used: the
+    follower shows the gateway's version for that config, never what it showed of one before. ``env_get_time_url`` is taken as every server takes it and not used: the
     follower reads the gateway's watch, not its time."""
     if not follows():
         raise TargetUnavailable("this agent's image doesn't run the clock follower")
@@ -69,6 +78,6 @@ async def sync_time(env_get_time_url: str, timezone: str | None = None, watch_ur
                               + (", ".join(k for k, v in (("watch_url", watch_url), ("name", name),
                                                           ("read_token", read_token)) if v) or "none of them"))
     zone = set_zone(timezone) if timezone is not None else os.environ.get("TZ") or "UTC"
-    write_config(watch_url, name, read_token)
-    shown = await follower.following("this agent's clock follower")
+    written = write_config(watch_url, name, read_token)
+    shown = await follower.following("this agent's clock follower", follower.CONNECT_WAIT_S, url=watch_url, name=name, since_ns=written)
     return {"synced": True, "timezone": zone, "env_get_time_url": env_get_time_url, "follower": shown}

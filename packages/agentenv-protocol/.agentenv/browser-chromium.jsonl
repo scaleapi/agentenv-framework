@@ -1,0 +1,15 @@
+{"seq": 1, "at": "2026-11-17T00:08:55.941Z", "tab": {"event": "opened", "id": "L1", "url": "https://shop.test/", "by": "page"}}
+{"seq": 2, "at": "2026-11-17T00:08:55.978Z", "tab": {"event": "opened", "id": "D1", "url": "https://shop.test/", "by": "page"}}
+{"seq": 3, "at": "2026-11-17T00:08:55.978Z", "tab": {"event": "opened", "id": "L1", "url": "https://shop.test/", "by": "page"}}
+{"seq": 4, "at": "2026-11-17T00:09:25.887Z", "tab": {"event": "opened", "id": "L1", "url": "https://shop.test/", "by": "page"}}
+{"seq": 5, "at": "2026-11-17T00:09:25.924Z", "tab": {"event": "opened", "id": "D1", "url": "https://shop.test/", "by": "page"}}
+{"seq": 6, "at": "2026-11-17T00:09:25.924Z", "tab": {"event": "opened", "id": "L1", "url": "https://shop.test/", "by": "page"}}
+{"seq": 7, "at": "2026-11-17T00:10:10.264Z", "tab": {"event": "opened", "id": "D1", "url": "https://shop.test/", "by": "page"}}
+{"seq": 8, "at": "2026-11-17T00:10:10.264Z", "tab": {"event": "opened", "id": "L1", "url": "https://shop.test/", "by": "page"}}
+{"seq": 9, "at": "2026-11-17T00:10:10.282Z", "tab": {"event": "opened", "id": "L1", "url": "https://shop.test/", "by": "page"}}
+{"seq": 10, "at": "2026-11-17T00:12:10.519Z", "tab": {"event": "opened", "id": "D1", "url": "https://shop.test/", "by": "page"}}
+{"seq": 11, "at": "2026-11-17T00:12:10.519Z", "tab": {"event": "opened", "id": "L1", "url": "https://shop.test/", "by": "page"}}
+{"seq": 12, "at": "2026-11-17T00:12:10.536Z", "tab": {"event": "opened", "id": "L1", "url": "https://shop.test/", "by": "page"}}
+{"seq": 13, "at": "2026-11-17T00:35:20.724Z", "tab": {"event": "opened", "id": "D1", "url": "https://shop.test/", "by": "page"}}
+{"seq": 14, "at": "2026-11-17T00:35:20.724Z", "tab": {"event": "opened", "id": "L1", "url": "https://shop.test/", "by": "page"}}
+{"seq": 15, "at": "2026-11-17T00:35:20.741Z", "tab": {"event": "opened", "id": "L1", "url": "https://shop.test/", "by": "page"}}

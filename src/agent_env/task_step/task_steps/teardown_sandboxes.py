@@ -27,6 +27,7 @@ from agent_env.task.teardown import (
     tear_down,
 )
 from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.task_steps.agent_clock import retire_followers
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)
@@ -85,6 +86,8 @@ class TeardownSandboxesTaskStep(TaskStep):
             logger.warning(f"teardown_sandboxes: not deployed in this run, skipping: {', '.join(missing)}")
         already = set(context.metadata.get(TORN_DOWN_KEY) or [])
         await before_teardown(context, LAST_DRAIN_SECONDS, agent_names=self.agent_names)
+        # Before the agents go: a gateway still running keeps waiting for a follower until it's told it's gone.
+        await retire_followers(context, self.agent_names)
         report = await tear_down(context, sandboxes, envs, timeout=TERMINATE_TIMEOUT_SECONDS)
         for sandbox, why in report.failed:
             logger.warning(f"teardown_sandboxes: {sandbox.sandbox_id}: {why}"[:300])

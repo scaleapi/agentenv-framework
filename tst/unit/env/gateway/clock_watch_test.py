@@ -79,13 +79,15 @@ def test_the_card_offers_every_clock_method_with_the_waits_bound_and_the_watchs_
     assert {name: (m["method"], m["endpoint"]) for name, m in methods.items()} == {
         "get_time": ("GET", "/clock/time"), "set_time": ("PUT", "/clock/set-time"), "set_rate": ("PUT", "/clock/set-rate"),
         "advance": ("PUT", "/clock/advance"), "clear": ("POST", "/clock/clear"), "state": ("GET", "/clock/state"),
-        "declare_follower": ("PUT", "/clock/followers"), "watch": ("GET", "/clock/watch")}
+        "declare_follower": ("PUT", "/clock/followers"), "retire_follower": ("DELETE", "/clock/followers"),
+        "watch": ("GET", "/clock/watch")}
     assert all(methods[name]["request"]["properties"]["wait_followers_s"] == wait
                for name in ("set_time", "set_rate", "advance", "clear"))
     assert methods["set_rate"]["request"]["required"] == ["virtual_seconds_per_real_second"]
     assert methods["set_time"]["request"]["required"] == ["virtual_time"]
     assert set(methods["watch"]["request"]["properties"]) == {"after", "follower"}
     assert methods["declare_follower"]["request"]["required"] == ["name", "read_token"]
+    assert methods["retire_follower"]["request"]["required"] == ["name"]
     assert methods["watch"]["hold_s"] == CLOCK_WATCH_HOLD_S == ClockFollowers.WATCH_S == 25.0
 
 
@@ -481,10 +483,38 @@ async def test_declaring_a_follower_takes_a_name_and_a_read_token(gateway, body)
 
 
 @pytest.mark.asyncio
-async def test_only_the_envs_control_token_declares_a_follower(gateway):
+async def test_only_the_envs_control_token_declares_or_retires_a_follower(gateway):
     gw = gateway(followers={}, control_token="control")
+    control = {"Authorization": "Bearer control"}
     async with _client(gw) as client:
         refused = await client.put("/clock/followers", json={"name": "agent-solver", "read_token": "t"})
-        taken = await client.put("/clock/followers", json={"name": "agent-solver", "read_token": "t"},
-                                 headers={"Authorization": "Bearer control"})
-    assert (refused.status_code, taken.status_code) == (401, 200)
+        taken = await client.put("/clock/followers", json={"name": "agent-solver", "read_token": "t"}, headers=control)
+        kept = await client.request("DELETE", "/clock/followers", json={"name": "agent-solver"})
+        retired = await client.request("DELETE", "/clock/followers", json={"name": "agent-solver"}, headers=control)
+    assert (refused.status_code, taken.status_code, kept.status_code, retired.status_code) == (401, 200, 401, 200)
+
+
+@pytest.mark.asyncio
+async def test_a_retired_agent_is_no_longer_waited_for_or_named_and_its_token_acknowledges_nothing(gateway):
+    gw = gateway(followers={})
+    async with _client(gw) as client:
+        await client.put("/clock/followers", json={"name": "agent-solver", "read_token": "token-agent"})
+        retired = await client.request("DELETE", "/clock/followers", json={"name": "agent-solver"})
+        started = time.monotonic()
+        written = await client.put("/clock/set-time", json={"virtual_time": T0, "wait_followers_s": 5})
+        waited = time.monotonic() - started
+        assert gw._clock_followers.follower_for("agent-solver", "token-agent") is None
+    assert retired.status_code == 200 and retired.json() == {"ok": True, "retired": True, "followers": {}}
+    assert written.status_code == 200 and waited < 1, (written.text, waited)
+
+
+@pytest.mark.asyncio
+async def test_a_follower_the_gateway_started_with_is_neither_retired_nor_redeclared(gateway):
+    gw = gateway(followers={"laptop": "token-laptop"})
+    async with _client(gw) as client:
+        retired = await client.request("DELETE", "/clock/followers", json={"name": "laptop"})
+        redeclared = await client.put("/clock/followers", json={"name": "laptop", "read_token": "mine"})
+        unknown = await client.request("DELETE", "/clock/followers", json={"name": "agent-gone"})
+    assert retired.json()["retired"] is False and unknown.json()["retired"] is False
+    assert redeclared.status_code == 400 and "started with" in redeclared.text
+    assert gw._clock_followers.follower_for("laptop", "token-laptop") == "laptop"
