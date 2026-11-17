@@ -36,6 +36,7 @@ from agent_env.env.env import DeployedGatewayEnv, _mcp_url
 from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT, ExternalChild, GatewayMode
 from agent_env.env.gateway.constants import (
     CLOCK_FOLLOWERS_ENV,
+    COMPUTERS_ENV,
     CONTROL_TOKEN_CHILDREN_ENV,
     DEFAULT_MCP_SERVER_NAME,
     GATEWAY_PROVIDER_HEADERS_ENV,
@@ -551,6 +552,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         gateway_env.extend(f"      - {key}={value}" for key, value in clock_followers_environment(external_children).items())
         gateway_env.extend(f"      - {key}={value}"
                            for key, value in control_token_children_environment(external_children, control_token).items())
+        gateway_env.extend(f"      - {key}={value}" for key, value in computers_environment(external_children).items())
         if provider_headers := sandbox_request_header_names():
             gateway_env.append(f"      - {GATEWAY_PROVIDER_HEADERS_ENV}={','.join(provider_headers)}")
         publish = host_port or (lambda port: port)
@@ -1130,6 +1132,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 **control_environment(control_token),
                 **clock_followers_environment(external),
                 **control_token_children_environment(external, control_token),
+                **computers_environment(external),
                 **({GATEWAY_PROVIDER_HEADERS_ENV: ",".join(names)} if (names := sandbox_request_header_names()) else {}),
             }
             gateway_sb = await sandbox_provider.create_container(
@@ -1779,6 +1782,13 @@ def control_token_children_environment(children: Iterable[ExternalChild], contro
     deployed with that token (``children``)."""
     names = ",".join(child.name for child in children) if control_token else ""
     return {CONTROL_TOKEN_CHILDREN_ENV: names} if names else {}
+
+
+def computers_environment(children: Iterable[ExternalChild]) -> dict[str, str]:
+    """The gateway's computers: every child it fronts on a sandbox of its own (``children``), a multi env's computers,
+    with or without a control token."""
+    names = ",".join(child.name for child in children)
+    return {COMPUTERS_ENV: names} if names else {}
 
 
 def _frontend_urls(gateway_url: str, website_configs: Optional[list[WebsiteConfig]]) -> Optional[dict[str, str]]:

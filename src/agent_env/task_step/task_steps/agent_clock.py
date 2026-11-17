@@ -72,7 +72,8 @@ async def follow(agent: DeployedAgent, env: DeployedEnv, *, env_get_time_url: Op
     """Have ``agent`` follow ``env``'s gateway clock. ``{"synced": False, "reason": ...}`` for an agent that can't:
     its card serves no ``sync_time`` (``not_advertised``) or one without the follower's fields
     (``no_follower_fields``), or the gateway takes no followers after it starts (``gateway_takes_no_followers``); raises
-    for one that serves it and fails, or can't take the task's zone, as for a server."""
+    for one that serves it and fails, having retired the follower it declared, or can't take the task's zone, as for
+    a server."""
     method, path = _sync_time(agent)
     if method is None:
         return {"synced": False, "reason": "not_advertised"}
@@ -90,12 +91,30 @@ async def follow(agent: DeployedAgent, env: DeployedEnv, *, env_get_time_url: Op
     body = {"env_get_time_url": env_get_time_url or "", "watch_url": watch_url_for(agent, env), "name": name,
             "read_token": token, **({"timezone": timezone} if timezone is not None else {})}
     url = (agent.a2a_url or agent.api_url).rstrip("/") + path
-    async with httpx.AsyncClient() as client:
-        answer = await client.post(url, json=body, timeout=timeout, headers=sandbox_request_headers_for_url(url))
-    if answer.status_code >= 400:
-        raise RuntimeError(f"agent '{agent.agent_name}' doesn't follow the clock of env '{env.env_id}' "
-                           f"(HTTP {answer.status_code}): {answer.text[:ERROR_TEXT_CHARS]}")
-    return {"synced": True, "follower": name, "result": answer.json()}
+    try:
+        async with httpx.AsyncClient() as client:
+            answer = await client.post(url, json=body, timeout=timeout, headers=sandbox_request_headers_for_url(url))
+    except httpx.HTTPError as e:
+        why = f"({type(e).__name__}): {e}"
+    else:
+        if answer.status_code < 400:
+            return {"synced": True, "follower": name, "result": answer.json()}
+        why = f"(HTTP {answer.status_code}): {answer.text}"
+    # Declared and not following: the gateway would wait for it on every later write, and nothing records it to retire.
+    await _retire(env, name, timeout=RETIRE_TIMEOUT_S)
+    raise RuntimeError(f"agent '{agent.agent_name}' doesn't follow the clock of env '{env.env_id}' "
+                       f"{why[:ERROR_TEXT_CHARS]}")
+
+
+async def _retire(env: DeployedEnv, follower: str, *, timeout: float) -> bool:
+    """Have ``env``'s gateway stop waiting for ``follower``; whether it did. Best-effort: a gateway that's gone or
+    takes no retirement is logged."""
+    try:
+        await env.invoke(EXT_CLOCK_URI, "retire_follower", {"name": follower}, timeout=timeout)
+    except Exception as e:  # noqa: BLE001 - best-effort: a teardown or a failed sync goes on either way
+        logger.warning(f"env {env.env_id}'s gateway didn't retire follower {follower!r}: {type(e).__name__}: {e}"[:300])
+        return False
+    return True
 
 
 def _slot(agent_name: str) -> str:
@@ -173,11 +192,7 @@ async def retire_followers(context: TaskStepContext, agent_names, *, timeout: fl
         env = next((d for d in context.deployed_envs if d.env_id == record["env_id"]), None)
         if env is None:
             continue
-        try:
-            await env.invoke(EXT_CLOCK_URI, "retire_follower", {"name": record["follower"]}, timeout=timeout)
-        except Exception as e:  # noqa: BLE001 - best-effort, as the rest of a teardown
-            logger.warning(f"env {env.env_id}'s gateway didn't retire follower {record['follower']!r}: "
-                           f"{type(e).__name__}: {e}"[:300])
+        if not await _retire(env, record["follower"], timeout=timeout):
             continue
         del following[_slot(name)]
         retired.append(record["follower"])

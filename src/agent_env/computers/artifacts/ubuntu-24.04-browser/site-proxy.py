@@ -7,8 +7,14 @@ asked for) for one that couldn't open.
 
 It also keeps the browser's network log, in the file ``AGENTENV_NETWORK_LOG`` names, in the shared site proxy's lines:
 an ``open`` line when a connection opens and an ``end`` line, naming the same ``id``, when it ends or fails to open,
-each numbered after the last the file holds. Seeing no request inside a tunnel, it keeps each at connection level."""
+each numbered after the last the file holds. Seeing no request inside a tunnel, it keeps each at connection level.
+
+With ``AGENTENV_EGRESS_PROXY`` naming the base's egress proxy, a host every address of which is public goes through
+it, as a ``CONNECT`` tunnel, so a live site loads at any universe date; a private or loopback one, which the egress
+proxy refuses, still goes straight to it. Such a connection's lines name the proxy's address, ``"via": "egress"``:
+which of the site's addresses the proxy dials is its to decide, and its own log names it."""
 import http.server
+import ipaddress
 import itertools
 import json
 import os
@@ -26,6 +32,9 @@ CONNECT_TIMEOUT_S = 30
 IDLE_S = 300
 HOP = {"connection", "keep-alive", "proxy-connection", "proxy-authorization"}
 NETWORK_LOG_ENV, NETWORK_LOG = "AGENTENV_NETWORK_LOG", "/var/log/agentenv/network.jsonl"
+EGRESS_PROXY_ENV = "AGENTENV_EGRESS_PROXY"
+#: The longest answer head the egress proxy may send a ``CONNECT``, in bytes.
+EGRESS_HEAD_LIMIT = 16 << 10
 NUMBERED = re.compile(rb'^\{"seq":(\d+),"at":"[^"]*","(open|end)":\{"id":"([^"]*)"')
 RESTARTED = {"reason": "the proxy restarted", "error": "it was in flight when the proxy that carried it stopped"}
 
@@ -100,6 +109,44 @@ def _error(error: BaseException) -> str:
     return f"{type(error).__name__}: {error}".removesuffix(": ")
 
 
+def _egress() -> tuple[str, int] | None:
+    """The egress proxy's address, as ``AGENTENV_EGRESS_PROXY`` names it, or None in a base with none."""
+    url = urllib.parse.urlsplit(os.environ.get(EGRESS_PROXY_ENV) or "")
+    return (url.hostname, url.port or 80) if url.hostname else None
+
+
+def _public(addresses: list[str]) -> bool:
+    """Whether every one of ``addresses`` is public, the only destinations the egress proxy takes."""
+    return bool(addresses) and all(ipaddress.ip_address(address.split("%", 1)[0]).is_global for address in addresses)
+
+
+class EgressRefused(ConnectionError):
+    """The egress proxy's answer to a ``CONNECT`` that isn't established, as it gave it."""
+
+
+def _through_egress(egress: tuple[str, int], host: str, port: int, timeout: float) -> socket.socket:
+    """A ``CONNECT`` tunnel to ``host`` at ``port`` through the egress proxy at ``egress``, established; it raises
+    ``EgressRefused`` with the proxy's status line when the proxy won't open one."""
+    authority = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+    tunnel = socket.create_connection(egress, timeout=timeout)
+    try:
+        tunnel.sendall(f"CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n".encode("latin-1"))
+        head = b""
+        while not head.endswith(b"\r\n\r\n"):
+            if len(head) >= EGRESS_HEAD_LIMIT:
+                raise EgressRefused("the egress proxy's answer has no end to its head")
+            if not (byte := tunnel.recv(1)):
+                raise EgressRefused("the egress proxy closed the tunnel before answering it")
+            head += byte
+        status = head.split(b"\r\n", 1)[0].decode("latin-1", "replace")
+        if status.split(" ", 2)[1:2] != ["200"]:
+            raise EgressRefused(f"the egress proxy answered {status!r}")
+    except BaseException:
+        tunnel.close()
+        raise
+    return tunnel
+
+
 class Proxy(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -155,7 +202,19 @@ class Proxy(http.server.BaseHTTPRequestHandler):
             self._answer(502, f"{host} doesn't resolve\n")
             return None
         last = None
-        for address in dict.fromkeys(info[4][0] for info in found):
+        addresses = list(dict.fromkeys(info[4][0] for info in found))
+        if (egress := _egress()) is not None and _public(addresses):
+            if (left := deadline - time.monotonic()) > 0:
+                try:
+                    upstream = _through_egress(egress, host, port, left)
+                except OSError as error:
+                    last = error
+                else:
+                    upstream.settimeout(IDLE_S)
+                    record["via"] = "egress"
+                    return upstream, egress[0]
+            addresses = []
+        for address in addresses:
             if (left := deadline - time.monotonic()) <= 0:
                 break
             try:
@@ -207,7 +266,8 @@ class Proxy(http.server.BaseHTTPRequestHandler):
         finally:
             upstream.close()
             _note("end", {"id": key, "ended": _stamp(), "bytes_sent": sent, "bytes_received": received})
-            log(connection={"host": host, "port": port, "address": address, "bytes_sent": sent,
+            log(connection={"host": host, "port": port, "address": address,
+                            **({"via": opening["via"]} if "via" in opening else {}), "bytes_sent": sent,
                             "bytes_received": received,
                             "started": _when(started),
                             "duration_s": round(time.monotonic() - began, 3)})

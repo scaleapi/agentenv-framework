@@ -891,9 +891,11 @@ class _SdkServices:
 
 def _with_clock(definition: _AgentDefinition) -> _AgentDefinition:
     """``definition`` serving clock/v1 where the agent's image runs the clock follower, so every agent in such an
-    image follows the env's clock with no code of its own; unchanged elsewhere, or where the agent declares it."""
+    image follows the env's clock with no code of its own, and takes back the task's zone if it restarted mid-run;
+    unchanged elsewhere, or where the agent declares it."""
     if not agent_clock.follows() or any(a.definition.uri == CLOCK_V1.uri for a in definition.extensions):
         return definition
+    agent_clock.restore_zone()  # a server restarted mid-run takes back the task's zone
     return dataclasses.replace(definition, extensions=(*definition.extensions, ExtensionActivation(CLOCK_V1)))
 
 

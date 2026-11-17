@@ -104,7 +104,7 @@ def test_sync_time_writes_the_followers_config_sets_the_zone_and_answers_once_it
                                           "armed": True}}
     config = image / "follower.json"
     assert json.loads(config.read_text()) == {"watch_url": "http://gw/clock/watch", "name": "agent-solver",
-                                              "token": "token"}
+                                              "token": "token", "timezone": "America/Chicago"}
     assert stat.S_IMODE(config.stat().st_mode) == 0o640
     assert os.environ["TZ"] == "America/Chicago" and time.strftime("%Z") in {"CST", "CDT"}
     assert [p.name for p in image.iterdir() if p.name.startswith("follower.json.")] == []
@@ -156,3 +156,26 @@ def test_the_config_it_already_follows_resent_answers_from_its_status(image):
         answer = client.post("/ext/clock/sync-time", json=REQUEST)  # the follower writes nothing anew
 
     assert answer.status_code == 200, answer.text
+
+
+def test_a_server_restarted_mid_run_takes_back_the_tasks_zone(image, monkeypatch):
+    _follows_the_next_config(image, connected=True, url="http://gw/clock/watch", name="agent-solver", version="b:3")
+    with _app() as client:
+        assert client.post("/ext/clock/sync-time", json={**REQUEST, "timezone": "America/Chicago"}).status_code == 200
+    monkeypatch.setenv("TZ", "UTC")  # the restarted server's environment: the image's, without the task's zone
+    time.tzset()
+
+    with _app() as client:  # starting it again, as supervisord does after the server dies
+        assert client.get("/.well-known/agent.json").status_code == 200
+
+    assert os.environ["TZ"] == "America/Chicago" and time.strftime("%Z") in {"CST", "CDT"}
+
+
+@pytest.mark.parametrize("config", ['{"watch_url": "u", "name": "n", "token": "t"}', '{"timezone": "Mars/Olympus"}',
+                                    "not json", None])
+def test_a_server_starting_without_a_saved_zone_keeps_its_own(image, monkeypatch, config):
+    if config is not None:
+        (image / "follower.json").write_text(config)
+    with _app() as client:
+        assert client.get("/.well-known/agent.json").status_code == 200
+    assert os.environ["TZ"] == "UTC"

@@ -18,8 +18,9 @@ Go toolchain is left in the image. `go.sum` pins its modules, and Dependabot's `
   - it trusts the CA in every certifi bundle and every JDK's store an app brings, naming any that can't take it among
     its warnings, and the computer boots;
   - its report is `/var/log/agentenv-root/egress-boot.log`.
-- `egress serve` runs as `agentenv-egress` under root's supervisord (`../root.conf`), on `127.0.0.1:3128`. The clock
-  library leaves that user on real time.
+- `egress serve` runs as `agentenv-egress` under root's supervisord (`../root.conf`), on `127.0.0.1:3128`, or where
+  `AGENTENV_EGRESS_PROXY` names, as a base whose own proxy holds that address does. The clock library leaves that
+  user on real time.
 - The session's supervisord (`../supervisord.conf`), and a login shell through `agentenv-egress.sh`, point
   `HTTP(S)_PROXY`, `ALL_PROXY`, Java's proxy properties (`JAVA_TOOL_OPTIONS`) and Node's `fetch`
   (`NODE_USE_ENV_PROXY`) at it.

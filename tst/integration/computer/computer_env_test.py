@@ -55,6 +55,8 @@ pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
 ARCH = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}[platform.machine().lower()]
 PORT = 18765
+#: The image a container on this machine's network sends a request from, pinned, from the mirror the test images use.
+PYTHON = "mirror.gcr.io/library/python:3.12-slim@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf"
 READ_NOTE = b"""import json, urllib.request
 def run(input):
     with urllib.request.urlopen(input["env"]["url"] + "/.well-known/agent-env.json", timeout=10) as response:
@@ -279,8 +281,7 @@ def _post_from_a_container(url: str, body: dict) -> int:
               "headers={'Content-Type': 'application/json'})\n"
               "try:\n    print(urllib.request.urlopen(request, timeout=30).status)\n"
               "except urllib.error.HTTPError as e:\n    print(e.code)\n")
-    out = docker("run", "--rm", "--network", "host", "public.ecr.aws/docker/library/python:3.12-slim",
-                 "python", "-c", script, url, json.dumps(body))
+    out = docker("run", "--rm", "--network", "host", PYTHON, "python", "-c", script, url, json.dumps(body))
     return int(out.stdout.decode().strip())
 
 

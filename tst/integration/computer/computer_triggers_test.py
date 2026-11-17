@@ -23,6 +23,7 @@ from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.configure_scheduled_checks import ConfigureScheduledChecksTaskStep
 from agent_env.task_step.task_steps.register_env_triggers import RegisterEnvTriggersStep
 from tst.integration.computer.conftest import CONTAINER, multi_env
+from tst.integration.computer.multi_env_computers_test import _reaches, shop  # noqa: F401  shop is a fixture
 from tst.integration.task_step.test_register_env_triggers_local import _Executor
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
@@ -187,3 +188,36 @@ async def _computer_shows(computer: DeployedEnv, virtual_time: str) -> bool:
         if time.monotonic() > deadline:
             return False
         await asyncio.sleep(0.5)
+
+
+@pytest.mark.asyncio
+async def test_a_computers_browser_requests_take_the_role_driving_it_now(desktop, items, shop):  # noqa: F811
+    routed = {**CONTAINER, "env_params": {"form": "container", "site_routing": True}}
+    health = {"id": "health", "actions": [], "when": {"type": "website", "app": "shop", "method": "GET",
+                                                       "path": {"regex": "^/?api/health$"}, "repeat": True}}
+    with namespace_routing():
+        office = multi_env(items, Env.get(desktop.id), websites=[shop])
+        context = TaskStepContext()
+        try:
+            deployed = await office.deploy(sandbox_type="local", ttl_seconds=1800, child_envs={"desktop": routed})
+            context = TaskStepContext(deployed_envs=[deployed], metadata={})
+            computer = DeployedEnv.from_dict(deployed.child_envs["desktop"])
+            await RegisterEnvTriggersStep(id="seen", version=None, env_id=office.id, triggers=[health],
+                                          watch_roles=["person", "helper"]).execute(context)
+            async with httpx.AsyncClient(base_url=deployed.gateway_url, timeout=120,
+                                         headers=deployed.control_headers) as client:
+                loads = []
+                for role in ("person", "helper"):
+                    moved = await client.post("/step", json={"action": "call_tool", "arguments": {"x": 10, "y": 10},
+                                                             "tool_name": "desktop_computer_pointer_move"},
+                                              headers={AGENT_ENV_ROLE_HEADER: role})
+                    assert moved.status_code == 200, moved.text
+                    loads.append(await _reaches(computer, "https://shop.test/api/health"))
+                await _quiet(client)
+                state = await _triggers(client)
+        finally:
+            report = await teardown_run(context)
+
+    assert not report.failed and loads == ["200", "200"]
+    assert [e["provoking"]["role"] for e in state["events"] if e["kind"] == "detected"] == ["person", "helper"]
+

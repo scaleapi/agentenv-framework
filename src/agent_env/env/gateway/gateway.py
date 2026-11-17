@@ -40,6 +40,7 @@ if TYPE_CHECKING:
 
 # Relative import — gateway runs as a standalone container with no agent_env.*
 from .constants import (
+    AGENT_ENV_COMPUTER_HEADER,
     AGENT_ENV_HIDDEN_BY_DEFAULT_META_KEY,
     AGENT_ENV_ROLE_HEADER,
     AGENT_ENV_ROLE_META_KEY,  # noqa: F401  (the server module serves the whole vocabulary, used in this file or not)
@@ -136,6 +137,12 @@ class ToolNameClash(ValueError):
         super().__init__(f"Duplicate tool name{'s' if len(clashes) > 1 else ''} {tool_name_clashes_text(clashes)}")
 
 
+
+def _read_only(tool: MCPTool) -> bool:
+    """Whether a tool says it only reads (``readOnlyHint``), as a computer's screenshots and waits do."""
+    annotations = getattr(tool, "annotations", None)
+    return annotations is not None and getattr(annotations, "readOnlyHint", None) is True
+
 class Gateway:
     """Gateway that aggregates MCP tools and REST proxies for website backends."""
 
@@ -164,6 +171,7 @@ class Gateway:
         service_db_url: str | None = None,
         control_token: str | None = None,
         control_token_children: Iterable[str] = (),
+        computers: Iterable[str] = (),
         provider_headers: Iterable[str] = (),
         clock_followers: Mapping[str, str] | None = None,
         site_names: dict[str, Iterable[str]] | None = None,
@@ -175,7 +183,9 @@ class Gateway:
         env stores them, the names its card declares standing in for a site's that stores none: a site reached at one
         takes it as its ``Host``. ``list_website_urls`` gives each site `listed_by_name` at its first name, as a browser
         computer opens it, and the others at their ``website_urls``. `control_token_children` are the children its
-        /svc routes pass its control token on to, a multi env's computers, which take it."""
+        /svc routes pass its control token on to, a multi env's computers, which take it. `computers` are its children
+        that are computers, a multi env's: an input call to one's tools makes its caller the role driving it, which the
+        requests its browser sends take."""
         self.host = host
         self.port = port
         self.server_name = server_name
@@ -198,6 +208,12 @@ class Gateway:
         self._service_db_url = service_db_url
         self._control_bearer = f"Bearer {control_token}".encode() if control_token else None
         self._control_token_children = frozenset(control_token_children)
+        self._computers = frozenset(computers)
+        # The computer each computer tool is one of, the computer tools that take input rather than read, and the role
+        # driving each computer now: the last to make an input call to its tools.
+        self._computer_of: dict[str, str] = {}
+        self._input_tools: frozenset[str] = frozenset()
+        self._drivers: dict[str, str] = {}
         self._website_routes: dict[str, list[WebsiteRoute] | None] = {}
         self._db_conn: psycopg2.extensions.connection | None = None
         if service_db_url:
@@ -217,7 +233,7 @@ class Gateway:
 
         self._event_counter = 0
         self._event_lock = asyncio.Lock()
-        self._changes = ChangeAttribution()
+        self._changes = ChangeAttribution(lambda: self._computer_of)
         Path(GATEWAY_TRAJECTORY_FILE).parent.mkdir(parents=True, exist_ok=True)
         self._trajectory_file = open(GATEWAY_TRAJECTORY_FILE, "a")
         atexit.register(self._close_trajectory_file)
@@ -938,10 +954,24 @@ class Gateway:
             logger.exception("Trigger evaluation failed (fail-open)")
             return [], None
 
-    @staticmethod
-    def _request_role(request: HTTPConnection) -> str:
-        """The role the gateway attributes a REST request to: the first AgentEnv-Role header, else the default role."""
-        return request.headers.get(AGENT_ENV_ROLE_HEADER, "").strip() or DEFAULT_ROLE
+    def _request_role(self, request: HTTPConnection) -> str:
+        """The role the gateway attributes a REST request to: the first AgentEnv-Role header; else, from a computer's
+        site proxy (AgentEnv-Computer), the role driving that computer as the request arrived; else the default role.
+        Read once per request, so its forwarding, its write and its triggers name one role, whoever drives after."""
+        known = getattr(request.state, "agentenv_role", None)
+        if known is None:
+            role = request.headers.get(AGENT_ENV_ROLE_HEADER, "").strip()
+            computer = request.headers.get(AGENT_ENV_COMPUTER_HEADER, "").strip()
+            known = role or self._drivers.get(computer) or DEFAULT_ROLE
+            request.state.agentenv_role = known
+        return known
+
+    def _drive(self, role: str, tool_name: str) -> None:
+        """An input call to a computer's tools makes its caller that computer's driver as it starts, so a request the
+        page sends before the call returns is the caller's too. A read (a screenshot, a wait) changes nothing."""
+        if tool_name in self._input_tools:
+            self._drivers[self._computer_of[tool_name]] = role
+
 
     async def _read_trigger_website_routes(self, body: Any) -> None:
         """Read the routes of each website a website trigger in a register `body` names an `op` of, so registration
@@ -1118,6 +1148,7 @@ class Gateway:
         unattributed trigger action), on its child's session (see child_sessions). Discovery is not redone on a
         reconnect; the registered proxies look their child up by URL."""
         meta = caller.meta() if caller is not None else None
+        self._drive(caller.role if caller is not None else DEFAULT_ROLE, tool_name)
         return await self._sessions.call(server_url, tool_name, arguments, meta, timeout=self.TOOL_CALL_TIMEOUT_S)
 
     async def _ensure_tools_discovered(self) -> None:
@@ -1180,6 +1211,10 @@ class Gateway:
             logger.debug(f"Registered proxy tool: {tool.name}")
         for server, tools in listed:
             self._server_tools[server.name] = tools
+        computer_tools = [(server.name, tool) for server, tools in listed if server.name in self._computers
+                          for tool in tools]
+        self._computer_of = {tool.name: computer for computer, tool in computer_tools}
+        self._input_tools = frozenset(tool.name for _, tool in computer_tools if not _read_only(tool))
         self._hidden_by_default = {
             tool.name for _, tools in listed for tool in tools
             if (tool.meta or {}).get(AGENT_ENV_HIDDEN_BY_DEFAULT_META_KEY) is True}
