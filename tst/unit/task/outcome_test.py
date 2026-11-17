@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 
+import httpx
 import pytest
 
 from agent_env.config import set_document_store
@@ -60,6 +61,9 @@ def _chained(outer: BaseException, inner: BaseException, *, explicit: bool = Tru
     (RuntimeError("Server error '502 Bad Gateway' for url 'https://judge.example/v1/chat'"), FailureCause.TRANSIENT),
     (RuntimeError("sandbox command exited with code 137 (OOMKilled)"), FailureCause.TRANSIENT),
     (RuntimeError("Error code: 429 - Too Many Requests"), FailureCause.TRANSIENT),
+    (httpx.ConnectError("All connection attempts failed"), FailureCause.TRANSIENT),
+    (_chained(RuntimeError("agent config not sent"), httpx.ConnectError("[Errno -3] Temporary failure in name resolution")),
+     FailureCause.TRANSIENT),
     (ValueError("rubric item 3 has no criteria"), FailureCause.UNKNOWN),
     (ValueError("judge returned invalid JSON: Expecting value: line 1 column 1"), FailureCause.UNKNOWN),
 ])

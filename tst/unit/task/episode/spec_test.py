@@ -131,6 +131,12 @@ def test_a_turn_timeout_replaces_every_outside_prompts_own_in_whole_seconds(turn
     assert copy.steps[3].to_dict() == {**task.steps[3].to_dict(), "timeout_seconds": deadline}
 
 
+def test_a_turn_timeout_keeps_a_prompts_configured_role():
+    task = _portsim(play={**PLAY, "step_role": "grader"})
+
+    assert EpisodeSpec.from_task(task, turn_timeout=90)._copy.steps[3].step_role == "grader"
+
+
 def test_an_inside_agent_keeps_its_own_steps():
     copy = EpisodeSpec.from_task(_portsim(BOB, ASK_BOB), trainer_agents=["bob"])._copy
 

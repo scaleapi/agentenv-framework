@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
+import httpx
+
 from agent_env.task_step.task_step import StepRole
 
 if TYPE_CHECKING:
@@ -71,10 +73,14 @@ def classify_failure(exc: BaseException) -> FailureCause:
     Matching text is the only option: a judge or agent error crosses A2A and the model proxy as a message string, so its
     original type is gone by the time a step raises.
     """
-    text = "\n".join(f"{type(e).__name__}: {e}" for e in _chain(exc))
+    chain = list(_chain(exc))
+    text = "\n".join(f"{type(e).__name__}: {e}" for e in chain)
     for cause, pattern in _CAUSE_PATTERNS:
         if pattern.search(text):
             return cause
+    # A transport failure (refused, unresolvable, dropped) is one the A2A client itself retries, whatever its message.
+    if any(isinstance(e, httpx.TransportError) for e in chain):
+        return FailureCause.TRANSIENT
     return FailureCause.UNKNOWN
 
 
