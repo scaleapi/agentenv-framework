@@ -167,6 +167,44 @@ files it points to for a message's whole text or a change's tool call."""
 _EVENTS_KEY = "_user_rules_events"
 
 
+# The formats whose rows are one per criterion, which the user's rules are graded as.
+_RULE_FORMATS = frozenset({JudgeOutputFormat.RUBRIC_BINARY, JudgeOutputFormat.RUBRIC_PARTIAL})
+
+
+def _rules_problem(use_trajectory: bool, output_format: JudgeOutputFormat) -> Optional[str]:
+    """Why grade_user_rules can't be set with these settings, or None."""
+    if not use_trajectory:
+        return ("grade_user_rules needs use_trajectory: the rules are graded from the run's events staged as files "
+                "for the agent judge")
+    if output_format not in _RULE_FORMATS:
+        return (f"grade_user_rules needs a format with a row per criterion ({', '.join(sorted(f.value for f in _RULE_FORMATS))}); "
+                f"output_format={output_format.value} has no row for each rule, so every run would be ungradable")
+    return None
+
+
+def _rule_rows_may_be_missing(spec: JudgeOutputFormatSpec) -> JudgeOutputFormatSpec:
+    """``spec`` whose responses may leave out user-rule rows: a response whose only problem is missing rule rows is
+    parsed against the criteria it answered, and each rule it left out gets an unanswered row (score 0, no
+    justification), as a parse failure's stand-in rows are. Any other problem is the format's own."""
+    diagnose = spec.diagnose_response
+
+    def diagnose_with_missing_rules(response: str, criteria: list[dict]):
+        rows, problem = diagnose(response, criteria)
+        rules = {c["id"] for c in criteria if "user_rule" in c}
+        if (problem is None or problem.parse_error or problem.duplicate_ids or problem.unknown_ids
+                or problem.non_finite_score_ids or not problem.missing_ids or not set(problem.missing_ids) <= rules):
+            return rows, problem
+        missing = set(problem.missing_ids)
+        answered_rows, again = diagnose(response, [c for c in criteria if c["id"] not in missing])
+        if again is not None:
+            return rows, problem
+        by_id = {r["id"]: r for r in answered_rows}
+        return [by_id.get(c["id"]) or {**c, "score": 0.0, "result": False, "justification": ""}
+                for c in criteria], None
+
+    return dataclasses.replace(spec, diagnose_response=diagnose_with_missing_rules)
+
+
 class UngradableRunError(RuntimeError):
     """The judge gave no answer for a user rule, asked RULE_RETRIES more times: the run wasn't graded."""
 
@@ -237,9 +275,8 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
         if get_judge_output_format_spec(output_format).cites_evidence:
             raise ValueError(f"{where}: output_format={output_format.value} cites per-criterion screenshots, and an "
                              "always_on step's prompt is graded without its wakes' screenshots")
-        if grade_user_rules and not use_trajectory:
-            raise ValueError(f"{where}: grade_user_rules needs use_trajectory: the rules are graded from the run's "
-                             "events staged as files for the agent judge")
+        if grade_user_rules and (problem := _rules_problem(use_trajectory, output_format)):
+            raise ValueError(f"{where}: {problem}")
         if grade_up_to_turn is not None:
             raise ValueError(f"{where}: grade_up_to_turn can't cut an always_on step's prompt, whose conversation "
                              "turns are not its wakes")
@@ -261,9 +298,8 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
     def from_dict(cls, data: dict) -> AlwaysOnAgentVerifier:
         step = super().from_dict({**data, "use_trajectory": data.get("use_trajectory", False)})
         if data.get("grade_user_rules"):
-            if not step.use_trajectory:
-                raise ValueError(f"{cls.type} '{step.id}': grade_user_rules needs use_trajectory: the rules are "
-                                 "graded from the run's events staged as files for the agent judge")
+            if problem := _rules_problem(step.use_trajectory, step.output_format):
+                raise ValueError(f"{cls.type} '{step.id}': {problem}")
             step.grade_user_rules = True
         return step
 
@@ -391,6 +427,14 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
                                      f"rules {unanswered} after {RULE_RETRIES} retries")
 
     def _spec(self) -> JudgeOutputFormatSpec:
+        """``_context_loss_spec``; with grade_user_rules, a response that leaves out only rule rows is taken with
+        those rows unanswered (``_rule_rows_may_be_missing``), so the rows it did answer are kept and the rules
+        left out go to the rule-only retries instead of the whole batch being asked again."""
+        spec = self._context_loss_spec()
+        # rubrics_verifier's constructor reads the format before this step's own settings are set.
+        return _rule_rows_may_be_missing(spec) if getattr(self, "grade_user_rules", False) else spec
+
+    def _context_loss_spec(self) -> JudgeOutputFormatSpec:
         """rubrics_verifier's format; for a run with agent labels (``_CONTEXT_LOSS_RUN``), its rows also take ``context_loss`` and
         ``context_loss_evidence``."""
         spec = super()._spec()

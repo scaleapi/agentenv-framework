@@ -834,3 +834,82 @@ async def test_an_ungradable_v3_run_keeps_its_harness_and_context_loss_on_the_en
     assert entry["score"] is None and entry["user_rules"]["verdict"] == "ungradable"
     assert entry["assistant_harness"]["agent_name"] == "assistant" and "context_loss" in entry
     assert len(captured["schemas"]) == 4
+
+
+# ---- a judge that leaves a rule's row out, through the real response parser ----------------------------------------
+
+def _leaving_out(monkeypatch, verifier, sources, *left_out: set[str]) -> dict:
+    """An agent judge whose answer goes through rubrics_verifier's own parsing and retries: on each call it answers
+    the criteria the prompt lists, as BROKEN says for a rule, leaving out the rows of the kinds in that call's
+    ``left_out`` (the last set repeats)."""
+    captured: dict = {"asked": []}
+
+    async def configure(**kwargs):
+        return None
+
+    async def invoke(*, eval_prompt, **kwargs):
+        listed = json.loads(eval_prompt[eval_prompt.index("## Criteria\n") + 12:eval_prompt.index("\n\n## Instructions")])
+        skip = left_out[min(len(captured["asked"]), len(left_out) - 1)]
+        captured["asked"].append([c.get("user_rule", {}).get("kind") for c in listed])
+        rows = []
+        for c in listed:
+            kind = c.get("user_rule", {}).get("kind")
+            if kind in skip:
+                continue
+            passed, why = BROKEN[kind] if kind else (True, "Asked before booking: M2.")
+            rows.append({"id": c["id"], "score": float(passed), "justification": why})
+        return {"response": json.dumps({"results": rows}),
+                "trajectory_object_url": f"mem://judge/{len(captured['asked'])}.json"}
+
+    monkeypatch.setattr(verifier, "_configure_judge_a2a", configure)
+    monkeypatch.setattr(verifier, "_invoke_judge_retrying_timeouts", invoke)
+    monkeypatch.setattr(verifier, "_read_trajectory_text", lambda url: sources[url])
+    sources.update({f"mem://judge/{n}.json": JUDGE_TRAJECTORY for n in range(1, 6)})
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_a_rule_row_the_judge_left_out_is_asked_alone_and_the_rows_it_answered_are_kept(monkeypatch):
+    ctx, _, sources = _staged_run(monkeypatch)
+    _with_rules(ctx, sources)
+    verifier = _rules_verifier()
+    captured = _leaving_out(monkeypatch, verifier, sources, {"tell_after"}, {"tell_after"}, set())
+
+    await verifier.execute(ctx)
+
+    assert captured["asked"] == [[None, "ask_first", "never", "just_do", "tell_after"], ["tell_after"], ["tell_after"]]
+    entry = ctx.metadata["verifications"]["rubric"]
+    assert [r["result"] for r in entry["user_rules"]["rules"]] == ["pass", "fail", "fail", "fail"]
+    assert entry["results"][0]["justification"] == "Asked before booking: M2." and entry["score"] == 0.0
+    [retry] = [d for d in entry["judge_output_discrepancies"] if d.get("kind") == "unanswered_user_rules"]
+    assert (retry["ids"], retry["retries"]) == (["user_rules.tell_after.1"], 2)
+
+
+@pytest.mark.asyncio
+async def test_a_rule_row_left_out_every_time_makes_the_run_ungradable_with_the_rest_kept(monkeypatch):
+    ctx, _, sources = _staged_run(monkeypatch)
+    _with_rules(ctx, sources)
+    verifier = _rules_verifier()
+    captured = _leaving_out(monkeypatch, verifier, sources, {"never"})
+
+    with pytest.raises(UngradableRunError, match=r"\['user_rules.never.1'\] after 3 retries"):
+        await verifier.execute(ctx)
+
+    assert captured["asked"][1:] == [["never"]] * 3
+    entry = ctx.metadata["verifications"]["rubric"]
+    assert [r["result"] for r in entry["user_rules"]["rules"]] == ["pass", "unknown", "fail", "fail"]
+    assert entry["results"][0]["result"] is True and entry["score"] is None
+
+
+def test_grade_user_rules_is_refused_with_a_format_that_has_no_row_per_rule():
+    output_format = "trajectory_mistakes"
+    why = "grade_user_rules needs a format with a row per criterion"
+    with pytest.raises(ValueError, match=why):
+        _rules_verifier(output_format=output_format)
+    stored = {"id": "judge", "type": "always_on_agent_verifier", "prompt_id": "ask", "criteria": CRITERIA,
+              "use_trajectory": True, "grade_user_rules": True, "output_format": output_format}
+    with pytest.raises(ValueError, match=why):
+        Task.from_dict({"id": "t", "version": 1, "steps": [stored]})
+    with pytest.raises(ValueError, match=why):
+        AlwaysOnAgentVerifier.from_dict(stored)
+    assert _rules_verifier(output_format="rubric_partial").grade_user_rules

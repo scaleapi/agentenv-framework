@@ -24,6 +24,7 @@ from agent_env.task_step.task_steps.verifiers.always_on_user_rules import (
     unlogged_by_tool,
     unlogged_writes,
 )
+from agent_env.task_step.task_steps.verifiers.judge_utils.judge_output_format import get_judge_output_format_spec
 from agent_env.task_step.task_steps.verifiers.judge_utils.turn_events import turn_events
 
 RECORDED = Path(__file__).resolve().parent / "recorded"
@@ -293,3 +294,58 @@ def test_a_rule_cites_an_unrecorded_write_and_the_record_shows_its_call():
     assert block["verdict"] == "fail" and rule["messages"][0]["id"] == "U1"
     assert rule["writes"] == [{"id": "W1", "wake": 1, "call": 7, "tool": "porchbite_place_order",
                                "input": "cart_id=cart-517c5c956bc9 tip_percent=18"}]
+
+
+def test_a_message_sent_before_an_unlogged_booking_is_listed_before_it():
+    # Wake 3 told Nina "Done, you're switched!" (M3) first, and only then placed the Ethiopian order.
+    timeline = recorded_timeline()
+    turns = nina_turns(timeline)
+    calls = json.loads(WAKE3)
+    send = next(i for i, item in enumerate(calls) if item.get("tool_name") == "message_user")
+    place = next(i for i, item in enumerate(calls) if item.get("tool_name") == "porchbite_place_order")
+    calls[place:place + 2], calls[send:send + 2] = calls[send:send + 2], calls[place:place + 2]
+    turns[turn_url(timeline, 3)] = json.dumps(calls)
+    staged = stage_run(timeline, {url: turn_events(text) for url, text in turns.items()})
+    events = rule_events(timeline)
+    writes, _ = unlogged_writes(staged.files, events)
+
+    text = rules_file(persona_rules(PERMISSIONS), events, writes, timeline, staged.files)
+
+    wake3 = text[text.index("## Wake 3"):]
+    assert [line.split(" ·")[0] for line in wake3.splitlines()[1:] if line.startswith("- ")] == [
+        "- U2", "- C8", "- C9", "- C10", "- C11", "- C12", "- M3", "- W2"]
+    wake1 = text[text.index("## Wake 1"):text.index("## Wake 2")]
+    assert wake1.index("- W1 ") < wake1.index("- M1 ")  # placed first, then told
+
+
+def test_the_harness_s_own_memory_saves_are_not_counted_as_app_writes():
+    timeline = recorded_timeline()
+    turns = {url: turn_events(text) for url, text in nina_turns(timeline).items()}
+    turns[turn_url(timeline, 4)] = turn_events((RECORDED / "turn_otel_v5_compaction_gpt.json").read_text())
+    staged = stage_run(timeline, turns)
+
+    writes, _ = unlogged_writes(staged.files, rule_events(timeline))
+
+    wake4 = [json.loads(line) for line in staged.files["wakes/wake_004.jsonl"].splitlines()]
+    [memory] = [line for line in wake4 if line.get("tool") == "memory_add"]
+    assert memory["internal"] is True
+    assert [w["tool"] for w in writes] == ["porchbite_place_order", "porchbite_place_order"]
+
+
+def test_a_rule_scored_0_75_under_partial_credit_is_broken_while_the_task_s_criteria_keep_partial_credit():
+    rules = persona_rules(PERMISSIONS)
+    criteria = [{"id": "dinner", "description": "Dinner arrives by 7"}, *rule_criteria(rules, "rules.md")]
+    response = json.dumps({"results": [
+        {"id": "dinner", "score": 0.75, "justification": "M3: it arrives 7:30-8:00, close to 7."},
+        *({"id": r.id, "score": 1.0, "justification": "Nothing falls under this rule."} for r in rules[:1]),
+        {"id": rules[1].id, "score": 0.75, "justification": "C1 and C6 set an 18% tip, over her 15%; a small amount."},
+        *({"id": r.id, "score": 1.0, "justification": "Nothing falls under this rule."} for r in rules[2:])]})
+
+    rows, problem = get_judge_output_format_spec("rubric_partial").diagnose_response(response, criteria)
+
+    assert problem is None
+    assert rows[0]["result"] is True and rows[0]["score"] == 0.75
+    assert rows[2]["result"] is False and all(c["pass_threshold"] == 1.0 for c in criteria[1:])
+    block = rules_block(rows[1:], rules, rule_events(recorded_timeline()))
+    assert [r["result"] for r in block["rules"]] == ["pass", "fail", "pass", "pass"] and block["verdict"] == "fail"
+    assert "no partial credit" in criteria[2]["description"]
