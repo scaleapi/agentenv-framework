@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import re
+import types
 
 import pytest
 
@@ -95,16 +96,44 @@ def test_without_the_proxy_or_an_armed_clock_the_cli_goes_out_directly_as_before
     assert not {"HTTPS_PROXY", "NO_PROXY"} & set(claude_bridge.cli_env(environ, clock_armed=armed))
 
 
-@pytest.mark.parametrize("status, armed", [
-    ({"connected": True, "armed": True, "version": "b:3"}, True),
-    ({"connected": True, "armed": False, "version": "b:1"}, False),  # following a gateway whose clock isn't armed
-    ({"connected": False, "armed": True}, False),  # not following: its page holds real time
-    ({"connected": False, "waiting": "no config yet"}, False),
-    (None, False),  # no follower
-    ("not json", False),
+def _clockpage():
+    """The image's clock page writer, whose encoding libfaketime and the egress proxy read too."""
+    # Run from its source, so no __pycache__ lands in clock/, which must stay the computer base's file for file.
+    module = types.ModuleType("clockpage")
+    path = AGENT_DIR / "clock" / "clockpage.py"
+    exec(compile(path.read_text(), str(path), "exec"), module.__dict__)
+    return module
+
+
+def _page(armed: int, seq: int = 2) -> bytes:
+    return _clockpage().encode(seq, 1_900_000_000 * 10**9 if armed else 0, 10**18 if armed else 0, 1.0, armed, 3, 0, 0)
+
+
+@pytest.mark.parametrize("page, armed", [
+    (_page(1), True),
+    (_page(0), False),
+    # A write under way (seq odd) that never finishes: the armed flag it left is the best guess.
+    (_page(1, seq=3), True),
+    (_page(1)[:40], False),  # not a page
+    (b"\0" * 80, False),  # not one yet: no magic
+    (None, False),  # no page: an image without the clock, or install_agent's target
 ])
-def test_the_clock_is_armed_when_the_follower_follows_an_armed_clock(tmp_path, status, armed):
-    path = tmp_path / "status.json"
-    if status is not None:
-        path.write_text(status if isinstance(status, str) else json.dumps(status))
+def test_the_clock_is_armed_when_the_page_libfaketime_reads_says_so(tmp_path, page, armed):
+    path = tmp_path / "agentenv-clock"
+    if page is not None:
+        path.write_bytes(page)
     assert claude_bridge.clock_armed(str(path)) is armed
+
+
+@pytest.mark.parametrize("status", [
+    {"connected": False, "error": "URLError: gateway restarting"},  # the follower lost its gateway
+    {"connected": False, "waiting": "no config yet"},  # the follower restarted, before its config is read
+    {"connected": True, "armed": False, "version": None},  # ... and before its first watch answers
+])
+def test_while_the_follower_reconnects_or_restarts_the_page_still_routes_the_cli_through_the_proxy(tmp_path, status):
+    # The page keeps the last armed clock in both windows, so the CLI reads the env's time and must go through egress.
+    (tmp_path / "status.json").write_text(json.dumps(status))
+    page = tmp_path / "agentenv-clock"
+    page.write_bytes(_page(1))
+    env = claude_bridge.cli_env({claude_bridge.EGRESS_PROXY_ENV: PROXY}, clock_armed=claude_bridge.clock_armed(str(page)))
+    assert env["HTTPS_PROXY"] == PROXY
