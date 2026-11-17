@@ -53,20 +53,42 @@ IDLE_S = 90
 #: How soon a killed follower may be back: supervisord's second, and a remote sandbox's slower start.
 FOLLOWER_BACK_S = 10
 TTL_S = 2400
+#: How far back of now the universe is armed: half a year, as the local clock test arms it.
+ARMED_BACK = timedelta(days=182)
+#: How long a clock write waits for every computer to show it, and how long a call to the gateway may take.
+FOLLOWERS_WAIT_S = 15
+CALL_TIMEOUT_S = 30
+#: How long the reading script inside the computer may run, how many times it reads, keeping the narrowest, and how
+#: long its read of the gateway may take.
+READ_TIMEOUT_S = 120
+READ_ATTEMPTS = 10
+GATEWAY_READ_TIMEOUT_S = 10
+#: How far apart the two readings a rate is measured from are, and how far that rate may be from the clock's: a
+#: fraction of it, or outright when frozen.
+RATE_OVER_S = 3.0
+RATE_TOLERANCE = 0.05
+FROZEN_TOLERANCE = 0.01
+#: How long a killed follower, and a page's time, are waited for, and how often each is looked for.
+FOLLOWER_WAIT_S = 60
+FOLLOWER_POLL_S = 0.5
+PAGE_WAIT_S = 60
+PAGE_POLL_S = 0.25
+#: How far a page's Date.now() may be from the gateway's universe: room for its title's refresh and the reads from here.
+MAX_PAGE_SKEW_S = 3
 #: What core says when a computer's provider runs it as the sandbox itself, which a reset can't replace in place.
 IN_PLACE = "can't be reset in place"
-#: Inside the computer, on real time: the gateway's universe as the computer reaches it at argv[1], between two
-#: readings of real time, then the session's own (``date``, without the real-time marker), between two more, taken up
-#: to ten times, keeping the narrowest; argv[1] "-" reads the session alone. Each bracket's width is printed, so the
-#: caller can say how far the reading may be from the truth.
+#: Inside the computer, on real time: the gateway's universe as the computer reaches it at argv[1], read within
+#: argv[3] seconds, between two readings of real time, then the session's own (``date``, without the real-time marker),
+#: between two more, taken argv[2] times, keeping the narrowest; argv[1] "-" reads the session alone. Each bracket's
+#: width is printed, so the caller can say how far the reading may be from the truth.
 READ = """
 import json, os, subprocess, sys, time, urllib.request
-url = sys.argv[1]
+url, attempts, timeout = sys.argv[1], int(sys.argv[2]), float(sys.argv[3])
 session = {k: v for k, v in os.environ.items() if k != "AGENTENV_REAL_TIME"}
 best = None
-for _ in range(10):
+for _ in range(attempts):
     a = time.time()
-    gateway = json.load(urllib.request.urlopen(url, timeout=10))["virtual_time"] if url != "-" else None
+    gateway = json.load(urllib.request.urlopen(url, timeout=timeout))["virtual_time"] if url != "-" else None
     b = time.time()
     universe = float(subprocess.run(["date", "+%s.%N"], env=session, capture_output=True, text=True, check=True).stdout)
     c = time.time()
@@ -90,19 +112,22 @@ def _at(text: str) -> float:
 
 
 async def _write(deployed, method: str, **params) -> float:
-    """A clock write that waits up to 15 s for every computer to show it; the seconds it took."""
+    """A clock write that waits up to ``FOLLOWERS_WAIT_S`` for every computer to show it; the seconds it took."""
     started = time.monotonic()
-    await deployed.invoke(EXT_CLOCK_URI, method, {**params, "wait_followers_s": 15}, timeout=30)
+    await deployed.invoke(EXT_CLOCK_URI, method, {**params, "wait_followers_s": FOLLOWERS_WAIT_S},
+                          timeout=CALL_TIMEOUT_S)
     return round(time.monotonic() - started, 2)
 
 
 async def _now(deployed) -> datetime:
-    state = await deployed.invoke(EXT_CLOCK_URI, "state", timeout=30)
+    state = await deployed.invoke(EXT_CLOCK_URI, "state", timeout=CALL_TIMEOUT_S)
     return datetime.fromtimestamp(_at(state["virtual_time"]), timezone.utc)
 
 
 async def _reading(computer, time_url: str) -> dict:
-    ran = await inside.run(computer, ["env", "AGENTENV_REAL_TIME=1", "python3", "-c", READ, time_url], timeout_s=120)
+    argv = ["env", "AGENTENV_REAL_TIME=1", "python3", "-c", READ, time_url, str(READ_ATTEMPTS),
+            str(GATEWAY_READ_TIMEOUT_S)]
+    ran = await inside.run(computer, argv, timeout_s=READ_TIMEOUT_S)
     assert ran["exit_code"] == 0, ran
     return json.loads(ran["stdout"])
 
@@ -115,7 +140,7 @@ async def _skew(computer, time_url: str, rate: float) -> tuple[float, float]:
     return round(skew, 3), round(rate * sum(read["widths"]) / 2, 3)
 
 
-async def _rate(computer, over_s: float = 3.0) -> float:
+async def _rate(computer, over_s: float = RATE_OVER_S) -> float:
     """The session clock's rate, from two of its own readings ``over_s`` apart: no gateway read is in it."""
     first = await _reading(computer, "-")
     await asyncio.sleep(over_s)
@@ -135,26 +160,26 @@ async def _kill_follower(computer) -> tuple[list[str], list[str], float]:
     killed = await _followers(computer)
     await channel.run(["kill", "-9", *killed])
     started = time.monotonic()
-    while time.monotonic() - started < 60:
+    while time.monotonic() - started < FOLLOWER_WAIT_S:
         back = await _followers(computer)
         if back and set(back) != set(killed):
             return killed, back, round(time.monotonic() - started, 1)
-        await asyncio.sleep(0.5)
-    return killed, [], 60.0
+        await asyncio.sleep(FOLLOWER_POLL_S)
+    return killed, [], float(FOLLOWER_WAIT_S)
 
 
 async def _page_now(browser: DeployedEnv) -> float:
     """What a fresh page in ``browser`` takes for now, in seconds, from its Date.now()."""
     opened = await _browser_op(browser, "tabs/open", {"url": CLOCK_PAGE})
-    deadline, tabs = time.monotonic() + 60, []
+    deadline, tabs = time.monotonic() + PAGE_WAIT_S, []
     while time.monotonic() < deadline:
         tabs = (await _browser_op(browser, "tabs/list", {}))["tabs"]
         tab = next((tab for tab in tabs if tab["id"] == opened["tab"]), None)
         if tab and (tab.get("title") or "").startswith("now "):
             await _browser_op(browser, "tabs/close", {"tab": tab["id"]})
             return int(tab["title"].split()[1]) / 1000
-        await asyncio.sleep(0.25)
-    raise AssertionError(f"the clock page named no time within 60 s: {tabs}")
+        await asyncio.sleep(PAGE_POLL_S)
+    raise AssertionError(f"the clock page named no time within {PAGE_WAIT_S} s: {tabs}")
 
 
 async def _through_the_steps(env_id: str, child: str, sandbox: str, browser: bool = False) -> dict:
@@ -174,7 +199,7 @@ async def _through_the_steps(env_id: str, child: str, sandbox: str, browser: boo
                               "sandbox_type": own.sandbox_type}
         time_url = kept["watch_url"].removesuffix("/clock/watch") + "/clock/time"
 
-        universe = datetime.now(timezone.utc) - timedelta(days=182)
+        universe = datetime.now(timezone.utc) - ARMED_BACK
         await SyncEnvClockTaskStep(id="clock", version=None, env_id=env_id,
                                    virtual_time=_iso(universe)).execute(context)
         results["synced"] = [(entry["service"], entry["result"]["follower"]["armed"])
@@ -185,7 +210,7 @@ async def _through_the_steps(env_id: str, child: str, sandbox: str, browser: boo
         skews["armed"] = await _skew(own, time_url, 1)
         if browser:
             results["page minus universe s"] = round(await _page_now(own) - _at(
-                (await deployed.invoke(EXT_CLOCK_URI, "state", timeout=30))["virtual_time"]), 1)
+                (await deployed.invoke(EXT_CLOCK_URI, "state", timeout=CALL_TIMEOUT_S))["virtual_time"]), 1)
         for name, by in (("a day on", timedelta(days=1)), ("a week on", timedelta(weeks=1))):
             writes[name] = await _write(deployed, "advance", virtual_time=_iso(await _now(deployed) + by))
             skews[name] = await _skew(own, time_url, 1)
@@ -222,8 +247,8 @@ async def _through_the_steps(env_id: str, child: str, sandbox: str, browser: boo
         skews["after a reset"] = await _skew(own, time_url, 1)
         if browser:
             results["page minus universe s after a reset"] = round(await _page_now(own) - _at(
-                (await deployed.invoke(EXT_CLOCK_URI, "state", timeout=30))["virtual_time"]), 1)
-        state = await deployed.invoke(EXT_CLOCK_URI, "state", timeout=30)
+                (await deployed.invoke(EXT_CLOCK_URI, "state", timeout=CALL_TIMEOUT_S))["virtual_time"]), 1)
+        state = await deployed.invoke(EXT_CLOCK_URI, "state", timeout=CALL_TIMEOUT_S)
         results["shown after a reset"] = state["followers"][kept["name"]]["version"] == state["version"]
         results["reset"] = "done"
     finally:
@@ -236,7 +261,8 @@ async def _through_the_steps(env_id: str, child: str, sandbox: str, browser: boo
 def _assert(results: dict) -> None:
     assert results["synced"] and all(armed for _, armed in results["synced"]), results
     assert all(abs(skew) - error < MAX_SKEW_S for skew, error in results["skews"].values()), results
-    assert abs(results["rates"][RATE] / RATE - 1) < 0.05 and abs(results["rates"]["frozen"]) < 0.01, results
+    assert abs(results["rates"][RATE] / RATE - 1) < RATE_TOLERANCE, results
+    assert abs(results["rates"]["frozen"]) < FROZEN_TOLERANCE, results
     assert results["follower killed, back"] == (True, True) and results["follower back in s"] < FOLLOWER_BACK_S, results
     assert results["reset"] == f"refused: {IN_PLACE}" or results["shown after a reset"], results
     assert results["torn down"], results
@@ -256,8 +282,8 @@ async def test_a_remote_desktop_keeps_to_its_gateways_clock_through_jumps_rates_
 async def test_a_remote_browser_computer_and_its_pages_keep_to_its_gateways_clock(sandbox):
     results = await _through_the_steps(BROWSING, "browser", sandbox, browser=True)
     _assert(results)
-    assert abs(results["page minus universe s"]) < 3, results
-    assert results["reset"] != "done" or abs(results["page minus universe s after a reset"]) < 3, results
+    assert abs(results["page minus universe s"]) < MAX_PAGE_SKEW_S, results
+    assert results["reset"] != "done" or abs(results["page minus universe s after a reset"]) < MAX_PAGE_SKEW_S, results
 
 
 @pytest.mark.skipif(not OFFICE, reason="AGENTENV_CLOCK_CHECK_OFFICE names no multi env")
@@ -273,7 +299,7 @@ async def test_arming_the_clock_of_a_remote_desktop_booted_from_its_disk_is_refu
                                 ).execute(context)
         with pytest.raises(StepContextError) as refused:
             await SyncEnvClockTaskStep(id="clock", version=None, env_id=OFFICE, virtual_time=_iso(
-                datetime.now(timezone.utc) - timedelta(days=182))).execute(context)
+                datetime.now(timezone.utc) - ARMED_BACK)).execute(context)
     finally:
         report = await teardown_run(context)
         print("CLOCK CHECK", json.dumps({"sandbox": sandbox, "refused": refused and str(refused.value)}), flush=True)
