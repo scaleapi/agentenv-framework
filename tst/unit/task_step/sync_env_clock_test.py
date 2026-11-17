@@ -509,29 +509,55 @@ def test_a_padded_zone_is_stored_and_sent_stripped():
     assert s.timezone == "America/New_York" and s.to_dict()["timezone"] == "America/New_York"
 
 
-_EXEC_EXT = {"uri": COMPUTER_EXEC, "params": {"endpoint": "/agentenv/ext/computer-exec", "methods": {"run": {"method": "POST"}}}}
+_EXEC_EXT = {"uri": COMPUTER_EXEC,
+             "params": {"endpoint": "/agentenv/ext/computer-exec", "methods": {"run": {"method": "POST"}}}}
 
 
 def _with_computer(record: DeployedEnv, card: dict) -> DeployedEnv:
     """``record``, a multi env's, with the computer ``desktop`` on a sandbox of its own whose card is ``card``."""
     computer = DeployedSandboxEnv(env_id="desk", env_version=1, sandbox_id="sb-desk", control_token="desk-token",
                                   environment_card_url=f"https://desk.example{WELL_KNOWN_PATH}", environment_card=card)
-    return dataclasses.replace(record, control_token="gateway-token", child_envs={"desktop": dataclasses.asdict(computer)})
+    return dataclasses.replace(record, control_token="gateway-token",
+                               child_envs={"desktop": dataclasses.asdict(computer)})
+
+
+def _office_without_a_computer_clock(card_children: dict) -> dict:
+    """The card of a multi env's computer ``desktop`` that offers computer-exec but no clock, as a disk guest's does."""
+    return {"name": "desktop", "url": "/agentenv", "capabilities": {"extensions": [_EXEC_EXT]}, **card_children}
 
 
 @pytest.mark.asyncio
-async def test_arming_a_multi_env_whose_computer_offers_no_clock_is_refused_naming_it_and_what_to_deploy(monkeypatch):
+async def test_a_multi_envs_computer_that_offers_no_clock_is_skipped_as_tolerated_and_stays_on_real_time(monkeypatch):
+    sent = _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL})
+    record = _with_computer(_carded(await _composed_card({"mcp-email": [_CLOCK_EXT], "desktop": [_EXEC_EXT]})),
+                            _office_without_a_computer_clock({}))
+    env = SimpleNamespace(mcp_server_envs=[SimpleNamespace(environment_name="email")], website_envs=[])
+    context = TaskStepContext(deployed_envs=[record])
+
+    with patch("agent_env.env.env.Env.get", return_value=env):
+        await _step().execute(context)
+
+    configured = context.metadata["clock_configurations"][0]
+    assert [entry["service"] for entry in configured["synced"]] == ["email"]
+    assert [(entry["service"], entry["reason"]) for entry in configured["skipped"]] == [("desktop", "not_advertised")]
+    assert not [request for request in sent if request.url.host == "desk.example"]
+
+
+@pytest.mark.asyncio
+async def test_a_strict_arm_of_a_multi_env_whose_computer_offers_no_clock_is_refused_naming_it_and_what_to_deploy(
+        monkeypatch):
     """As a computer booted from its disk is: its session would stay on real time while the universe moves."""
     sent = _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL})
     record = _with_computer(_carded(await _composed_card({"mcp-email": [_CLOCK_EXT], "desktop": [_EXEC_EXT]})),
-                            {"name": "desktop", "url": "/agentenv", "capabilities": {"extensions": [_EXEC_EXT]}})
+                            _office_without_a_computer_clock({}))
     env = SimpleNamespace(mcp_server_envs=[SimpleNamespace(environment_name="email")], website_envs=[])
 
     with patch("agent_env.env.env.Env.get", return_value=env), pytest.raises(
             StepContextError, match="computer 'desktop' can't follow the universe clock") as refused:
-        await _step().execute(TaskStepContext(deployed_envs=[record]))
+        await _step(tolerate_missing_sync_time=False).execute(TaskStepContext(deployed_envs=[record]))
 
     assert "container form of a base that follows the clock" in str(refused.value)
+    assert "tolerate_missing_sync_time" in str(refused.value)
     assert not [request for request in sent if request.url.host == "desk.example"]
 
 

@@ -6,7 +6,7 @@ how far the reading itself may be off, and it runs at the clock's rate. A browse
 
 A provider whose sandbox is the computer's container itself, as ``modal``'s is, can't reset it in place, which core
 refuses; the check takes that refusal as the reset's outcome. On a provider that boots the desktop from its disk form,
-whose guest follows no clock yet, arming the clock is refused.
+whose guest follows no clock yet, arming the clock skips it, as tolerated by default, and a strict arm refuses it.
 
 It needs a config whose image and object stores the provider reaches, the provider's credentials, and two multi envs
 written there. ``AGENTENV_CLOCK_CHECK_OFFICE`` names one whose computer ``desktop`` is the ubuntu-24.04 desktop, and
@@ -290,18 +290,24 @@ async def test_a_remote_browser_computer_and_its_pages_keep_to_its_gateways_cloc
 @pytest.mark.parametrize("sandbox", [sandbox for sandbox in SANDBOXES
                                      if build_sandbox_provider(sandbox).disk_image_platforms()])
 @pytest.mark.asyncio
-async def test_arming_the_clock_of_a_remote_desktop_booted_from_its_disk_is_refused_naming_it(sandbox):
-    context, refused = TaskStepContext(), None
+async def test_a_remote_desktop_booted_from_its_disk_is_skipped_when_tolerated_and_refused_by_a_strict_arm(sandbox):
+    context, results, refused = TaskStepContext(), {"sandbox": sandbox}, None
     try:
         await DeployEnvTaskStep(id="office", version=None, env_id=OFFICE, sandbox_type=GATEWAY_SANDBOX,
                                 ttl_seconds=TTL_S, child_envs={"desktop": {"sandbox_type": sandbox,
                                                                            "env_params": {"form": "disk"}}}
                                 ).execute(context)
+        universe = _iso(datetime.now(timezone.utc) - ARMED_BACK)
+        await SyncEnvClockTaskStep(id="clock", version=None, env_id=OFFICE, virtual_time=universe).execute(context)
+        results["tolerated"] = [(entry["service"], entry.get("reason"))
+                                for entry in context.metadata["clock_configurations"][-1]["skipped"]]
         with pytest.raises(StepContextError) as refused:
-            await SyncEnvClockTaskStep(id="clock", version=None, env_id=OFFICE, virtual_time=_iso(
-                datetime.now(timezone.utc) - ARMED_BACK)).execute(context)
+            await SyncEnvClockTaskStep(id="strict", version=None, env_id=OFFICE, virtual_time=universe,
+                                       tolerate_missing_sync_time=False).execute(context)
+        results["refused"] = str(refused.value)
     finally:
         report = await teardown_run(context)
-        print("CLOCK CHECK", json.dumps({"sandbox": sandbox, "refused": refused and str(refused.value)}), flush=True)
+        print("CLOCK CHECK", json.dumps(results), flush=True)
 
-    assert "computer 'desktop' can't follow the universe clock" in str(refused.value) and not report.failed
+    assert ("desktop", "not_advertised") in results["tolerated"], results
+    assert "computer 'desktop' can't follow the universe clock" in results["refused"] and not report.failed
