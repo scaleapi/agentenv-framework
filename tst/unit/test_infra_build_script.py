@@ -8,6 +8,7 @@ import base64
 import configparser
 import hashlib
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -64,6 +65,17 @@ def test_its_images_are_the_ones_agent_env_ships(script):
     assert set(script._SMOKES) | {"agentenv-service-db", *script.DISK_ARGS} == set(script.IMAGES)
     assert script.DISK_ARGS == {image.name: {arg: built.name for arg, built in image.args} for image in DISK_IMAGES}
 
+
+
+@pytest.mark.parametrize("name", ["agentenv-ubuntu-24.04", "agentenv-ubuntu-24.04-browser"])
+def test_a_base_computers_smoke_starts_it_as_its_image_does(script, name):
+    """A base's smoke starts it with its image's own CMD, so a change to that start can't leave the release's smoke,
+    which no pull request runs, starting it another way."""
+    dockerfile = (REPO / script.IMAGES[name]).read_text()
+    command = json.loads(re.search(r"^CMD (\[.*\])$", dockerfile, re.MULTILINE).group(1))
+    start = " ".join([Path(command[0]).name, *command[1:]])
+
+    assert script._SMOKES[name][-1].startswith(f"{start} & "), script._SMOKES[name][-1]
 
 def test_check_accepts_every_image_the_plan_lists(script, monkeypatch, capsys):
     plan = load_script("infra_images.py")

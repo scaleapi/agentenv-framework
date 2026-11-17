@@ -141,7 +141,7 @@ _SMOKES = {
                               " done; supervisorctl -c /etc/supervisor/supervisord.conf status; exit 1"],
     "agentenv-ubuntu-24.04-browser": [
         "docker", "run", "--rm", "--entrypoint", "sh", "{image}", "-c",
-        "start-computer & for _ in $(seq 60); do sleep 1;"
+        "start-computer init & for _ in $(seq 60); do sleep 1;"
         " s=$(supervisorctl -c /etc/supervisor/supervisord.conf status);"
         " echo \"$s\" | grep -q ' RUNNING ' && ! echo \"$s\" | grep -qv ' RUNNING ' && exit 0;"
         " done; supervisorctl -c /etc/supervisor/supervisord.conf status; exit 1"],
