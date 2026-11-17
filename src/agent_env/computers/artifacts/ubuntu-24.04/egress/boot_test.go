@@ -86,14 +86,3 @@ func TestAnAppsStoreThatCantTakeTheCAIsNamedAndTheBootGoesOn(t *testing.T) {
 		t.Fatalf("%v", report)
 	}
 }
-
-func TestAnImageNamesItsSessionUserAndLeavesOutTheNSSDatabase(t *testing.T) {
-	if p := defaultBootPaths(); p.SessionUser != SessionUser || p.NSS == nil {
-		t.Fatalf("the base's defaults changed: %q, NSS %v", p.SessionUser, p.NSS != nil)
-	}
-	t.Setenv("AGENTENV_SESSION_USER", "agent")
-	t.Setenv("AGENTENV_EGRESS_NSS", "off")
-	if p := defaultBootPaths(); p.SessionUser != "agent" || p.NSS != nil {
-		t.Fatalf("an agent image's settings weren't taken: %q, NSS %v", p.SessionUser, p.NSS != nil)
-	}
-}

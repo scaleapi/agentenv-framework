@@ -1,6 +1,7 @@
 """Agents on the env's clock: once sync_env_clock has armed it, every agent registered with the env whose card serves
 clock/v1 sync_time is declared at the gateway as a follower with a token of its own and handed the follower's config;
-one that doesn't is reported and skipped, or fails the step when tolerate_missing_sync_time is false; and an agent
+one that doesn't is reported and skipped, even when the env's servers must follow (tolerate_missing_sync_time false),
+or fails the step under require_agent_clock; and an agent
 deploy_agent deploys while the clock is armed follows the same way."""
 import json
 from types import SimpleNamespace
@@ -80,8 +81,11 @@ async def test_an_agent_that_cant_follow_is_reported_and_skipped_or_fails_a_stri
     assert context.metadata["clock_configurations"][0]["agents"] == [{"agent": "solver", "synced": False,
                                                                       "reason": reason}]
     assert [r.url.path for r in sent][3:] == []
+    strict = await _context(_agent(sync_time=sync_time))
+    await _step(tolerate_missing_sync_time=False).execute(strict)
+    assert strict.metadata["clock_configurations"][0]["agents"][0]["synced"] is False
     with pytest.raises(StepContextError, match=f"agent 'solver' can't follow the clock of env 'e1': {reason}"):
-        await _step(tolerate_missing_sync_time=False).execute(await _context(_agent(sync_time=sync_time)))
+        await _step(require_agent_clock=True).execute(await _context(_agent(sync_time=sync_time)))
 
 
 @pytest.mark.asyncio
@@ -124,7 +128,7 @@ async def test_an_agent_deployed_while_the_clock_is_armed_follows_it(monkeypatch
     context = await _context()
     context.metadata["clock_configurations"] = [
         {"step_id": "sync", "env_id": "e1", "virtual_time": T0, "env_get_time_url": CLOCK_URL, "timezone": "Asia/Tokyo",
-         "tolerate_missing_sync_time": True},
+         "require_agent_clock": False},
         {"step_id": "rate", "env_id": "e1", "virtual_seconds_per_real_second": 60, "virtual_time": T0},
     ]
     late = _agent("late")
@@ -145,10 +149,19 @@ async def test_an_agent_deployed_before_any_clock_is_armed_is_left_alone(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_a_late_agent_that_cant_follow_fails_a_deploy_under_a_strict_sync(monkeypatch):
+async def test_a_late_agent_that_cant_follow_fails_a_deploy_only_under_require_agent_clock(monkeypatch):
     _mock_http(monkeypatch)
     context = await _context()
-    context.metadata["clock_configurations"] = [{"env_id": "e1", "env_get_time_url": CLOCK_URL,
-                                                 "tolerate_missing_sync_time": False}]
+    context.metadata["clock_configurations"] = [{"env_id": "e1", "env_get_time_url": CLOCK_URL}]
+    [skipped] = await agent_clock.follow_armed_clocks(context, _agent("late", sync_time=None), timeout=5)
+    assert (skipped["synced"], skipped["reason"]) == (False, "not_advertised")
+    context.metadata["clock_configurations"][0]["require_agent_clock"] = True
     with pytest.raises(StepContextError, match="agent 'late' can't follow the clock of env 'e1': not_advertised"):
         await agent_clock.follow_armed_clocks(context, _agent("late", sync_time=None), timeout=5)
+
+
+def test_require_agent_clock_round_trips_and_is_left_out_when_off():
+    assert "require_agent_clock" not in _step().to_dict()
+    strict = _step(require_agent_clock=True).to_dict()
+    assert strict["require_agent_clock"] is True
+    assert SyncEnvClockTaskStep.from_dict(strict).require_agent_clock is True

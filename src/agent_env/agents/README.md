@@ -34,19 +34,6 @@ turn off becomes `--disallowedTools`, which keeps the CLI's defaults for the res
 `claude_bridge.py`: every tool the pinned CLI has, though which it offers by default depends on the model. A test fails
 when the Dockerfile's `CLAUDE_CODE_VERSION` moves, until `ClaudeCodeTool` and `TOOLS_CLI_VERSION` move with it.
 
-The image follows a task env's clock the way a computer does (FD-5916): it runs the computer base's clock follower
-and egress proxy, copied into `clock/` and `egress/` until the clock library image (FD-5700) ships them, each as its own
-user under root's supervisord (`start-agent`, `root.conf`), with agent-env's libfaketime preloaded for the agent's user.
-The A2A server starts with the real-time marker, so it and its records stay on real time, and serves clock/v1's
-`sync_time`, which the protocol's framework serves on the card of any agent in an image with the follower
-(`agentenv_protocol.a2a_agent.clock`). Once `sync_env_clock` has armed the clock, it declares the agent at the gateway
-as a follower with a read token of its own and calls that `sync_time` with the follower's config, which the server
-writes; `deploy_agent` does the same for an agent it deploys while the clock is armed. From then on the CLI, its own
-"Today's date is" line included, and every command the model runs read the env's time, and a clock write that waits for
-followers waits for the agent. The CLI goes out through the egress proxy, which keeps a live site's TLS working at any
-date the clock shows, and to the env's MCP servers directly. Unarmed, the page holds real time and the proxy relays TLS
-untouched. Started as a user other than root, the image runs the A2A server alone, on real time, as before.
-
 `install_agent` installs it too, into a container a task already runs or onto a `vm` sandbox's Linux host, with
 `install.sh` from its folder: Claude Code's native build for the target's CPU and libc, uv, and the agent's requirements
 in a Python of its own, so the target's Python is left alone. The CLI runs its commands in bash or zsh, so a target with

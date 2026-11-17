@@ -92,7 +92,7 @@ def _armed(context: TaskStepContext, env_id: str) -> Optional[dict]:
 async def follow_armed_clocks(context: TaskStepContext, agent: DeployedAgent, *, timeout: float) -> list[dict]:
     """Have an agent ``deploy_agent`` just deployed follow the clock of each env registered with it that this run has
     armed, as ``sync_env_clock`` has every agent then: one that can't is reported and skipped, or fails the step under
-    that step's ``tolerate_missing_sync_time = False``."""
+    that step's ``require_agent_clock``."""
     outcomes = []
     for env_id in agent.env_ids:
         if (armed := _armed(context, env_id)) is None:
@@ -102,7 +102,7 @@ async def follow_armed_clocks(context: TaskStepContext, agent: DeployedAgent, *,
             continue
         outcome = await follow(agent, env, env_get_time_url=armed.get("env_get_time_url"),
                                timezone=armed.get("timezone"), timeout=timeout)
-        if not outcome["synced"] and not armed.get("tolerate_missing_sync_time", True):
+        if not outcome["synced"] and armed.get("require_agent_clock", False):
             raise StepContextError(f"agent '{agent.agent_name}' can't follow the clock of env '{env_id}': "
                                    f"{outcome['reason']}")
         logger.info(f"agent '{agent.agent_name}' on env {env_id}'s clock: {outcome}")
