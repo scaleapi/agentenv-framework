@@ -40,6 +40,7 @@ if TYPE_CHECKING:
 
 # Relative import — gateway runs as a standalone container with no agent_env.*
 from .constants import (
+    AGENT_ENV_COMPUTER_HEADER,
     AGENT_ENV_HIDDEN_BY_DEFAULT_META_KEY,
     AGENT_ENV_ROLE_HEADER,
     AGENT_ENV_ROLE_META_KEY,  # noqa: F401  (the server module serves the whole vocabulary, used in this file or not)
@@ -135,6 +136,12 @@ class ToolNameClash(ValueError):
         super().__init__(f"Duplicate tool name{'s' if len(clashes) > 1 else ''} {tool_name_clashes_text(clashes)}")
 
 
+
+def _read_only(tool: MCPTool) -> bool:
+    """Whether a tool says it only reads (``readOnlyHint``), as a computer's screenshots and waits do."""
+    annotations = getattr(tool, "annotations", None)
+    return annotations is not None and getattr(annotations, "readOnlyHint", None) is True
+
 class Gateway:
     """Gateway that aggregates MCP tools and REST proxies for website backends."""
 
@@ -197,6 +204,10 @@ class Gateway:
         self._service_db_url = service_db_url
         self._control_bearer = f"Bearer {control_token}".encode() if control_token else None
         self._control_token_children = frozenset(control_token_children)
+        # Each computer's tools (a computer is a child it passes its control token on to), whether each is an input
+        # rather than a read, and the role driving each computer now: the last to make an input call to its tools.
+        self._computer_tools: dict[str, tuple[str, bool]] = {}
+        self._drivers: dict[str, str] = {}
         self._website_routes: dict[str, list[WebsiteRoute] | None] = {}
         self._db_conn: psycopg2.extensions.connection | None = None
         if service_db_url:
@@ -912,10 +923,24 @@ class Gateway:
             logger.exception("Trigger evaluation failed (fail-open)")
             return [], None
 
-    @staticmethod
-    def _request_role(request: HTTPConnection) -> str:
-        """The role the gateway attributes a REST request to: the first AgentEnv-Role header, else the default role."""
-        return request.headers.get(AGENT_ENV_ROLE_HEADER, "").strip() or DEFAULT_ROLE
+    def _request_role(self, request: HTTPConnection) -> str:
+        """The role the gateway attributes a REST request to: the first AgentEnv-Role header; else, from a computer's
+        site proxy (AgentEnv-Computer), the role driving that computer now; else the default role."""
+        role = request.headers.get(AGENT_ENV_ROLE_HEADER, "").strip()
+        return role or self._drivers.get(request.headers.get(AGENT_ENV_COMPUTER_HEADER, "").strip()) or DEFAULT_ROLE
+
+    def _drive(self, role: str, tool_name: str) -> None:
+        """An input call to a computer's tools makes its caller that computer's driver as it starts, so a request the
+        page sends before the call returns is the caller's too. A read (a screenshot, a wait) changes nothing."""
+        computer, is_input = self._computer_tools.get(tool_name, (None, False))
+        if is_input:
+            self._drivers[computer] = role
+
+    def _write_window(self, tool_name: str, before: int | None, after: int | None) -> dict:
+        """A call's write window for changes/v1, or none for a computer's tool: a computer writes the env's data only
+        through its browser's requests, which carry windows of their own, while its calls may run for seconds as
+        others write."""
+        return {} if tool_name in self._computer_tools else {"changelog_id_before": before, "changelog_id": after}
 
     async def _read_trigger_website_routes(self, body: Any) -> None:
         """Read the routes of each website a website trigger in a register `body` names an `op` of, so registration
@@ -1092,6 +1117,7 @@ class Gateway:
         unattributed trigger action), on its child's session (see child_sessions). Discovery is not redone on a
         reconnect; the registered proxies look their child up by URL."""
         meta = caller.meta() if caller is not None else None
+        self._drive(caller.role if caller is not None else DEFAULT_ROLE, tool_name)
         return await self._sessions.call(server_url, tool_name, arguments, meta, timeout=self.TOOL_CALL_TIMEOUT_S)
 
     async def _ensure_tools_discovered(self) -> None:
@@ -1154,6 +1180,8 @@ class Gateway:
             logger.debug(f"Registered proxy tool: {tool.name}")
         for server, tools in listed:
             self._server_tools[server.name] = tools
+        self._computer_tools = {tool.name: (server.name, not _read_only(tool)) for server, tools in listed
+                                if server.name in self._control_token_children for tool in tools}
         self._hidden_by_default = {
             tool.name for _, tools in listed for tool in tools
             if (tool.meta or {}).get(AGENT_ENV_HIDDEN_BY_DEFAULT_META_KEY) is True}
@@ -1277,7 +1305,7 @@ class Gateway:
                 try:
                     result = await self._call_child_tool(server_url, tool_name, arguments, caller=Caller(role=role))
                 except Exception as e:
-                    await self._log_failed_call(tool_call_event_id, changelog_before, e, **source)
+                    await self._log_failed_call(tool_call_event_id, changelog_before, e, tool_name, **source)
                     raise
                 changelog_id = self._query_changelog_id()
 
@@ -1286,8 +1314,7 @@ class Gateway:
                 **source,
                 "tool_call_event_id": tool_call_event_id,
                 "tool_call_result": result.model_dump(mode="json"),
-                "changelog_id_before": changelog_before,
-                "changelog_id": changelog_id,
+                **self._write_window(tool_name, changelog_before, changelog_id),
             })
             barrier_tasks, barrier_timeout_s = self._fire_triggers(role, tool_name, arguments, result)
             await self._await_barriers(barrier_tasks, barrier_timeout_s)
@@ -1502,7 +1529,7 @@ class Gateway:
                 try:
                     result = await self._call_child_tool(server_url, tool_name, kwargs, caller=caller)
                 except Exception as e:
-                    await self._log_failed_call(tool_call_event_id, changelog_before, e)
+                    await self._log_failed_call(tool_call_event_id, changelog_before, e, tool_name)
                     raise
                 changelog_id = self._query_changelog_id()
 
@@ -1510,8 +1537,7 @@ class Gateway:
                 "event_type": "tool_call_result",
                 "tool_call_event_id": tool_call_event_id,
                 "tool_call_result": result.model_dump(mode="json"),
-                "changelog_id_before": changelog_before,
-                "changelog_id": changelog_id,
+                **self._write_window(tool_name, changelog_before, changelog_id),
             })
             return result
 
@@ -1568,12 +1594,12 @@ class Gateway:
             logger.exception("Failed to log tool_call_result for a gateway tool")
 
     async def _log_failed_call(self, tool_call_event_id: str, changelog_before: int | None, error: Exception,
-                               **source: str) -> None:
+                               tool_name: str, **source: str) -> None:
         """Close a failed call's write window, which may hold a write it committed first (fail-open)."""
         try:
             await self._log_event({"event_type": "tool_call_failed", **source, "tool_call_event_id": tool_call_event_id,
                                    "error": f"{type(error).__name__}: {str(error)[:300]}",
-                                   "changelog_id_before": changelog_before, "changelog_id": self._query_changelog_id()})
+                                   **self._write_window(tool_name, changelog_before, self._query_changelog_id())})
         except Exception:
             logger.exception("Failed to log a failed tool call")
 
