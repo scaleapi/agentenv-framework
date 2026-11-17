@@ -273,9 +273,13 @@ Out-of-tree code plugs in either through `config.toml`, as a `module:Class` poin
   in a task's steps, so a MultiEnv's servers or a computer env's driver may name one, and writes the entry naming the
   env's id, the entry pulled in from another bundle as well as the bundle's own. The env `Env.get` gives for an alias answers to the alias's
   id, so a deployment records, and steps look it up by, the id the task names; its metadata writes go to the env the
-  alias names (`Env.stored_id`). An alias names its env only where namespace routing is on. An env store refuses to
-  create an env under an installed env alias's id (`EnvStore.put_document`), so a deployment recorded under an alias
-  always reloads the alias's env; an env stored under such an id before keeps taking versions.
+  alias names (`Env.stored_id`). An alias names its env only where namespace routing is on. There an env store refuses
+  to create an env under an installed env alias's id (`EnvStore.put_document`), so a deployment recorded under an alias
+  always reloads the alias's env; an env stored under such an id before keeps taking versions. A service, with routing
+  off, resolves no alias, so it may hold an env under an alias's id, as the hub holds `chromium` for the tasks that name
+  it. That env shadows the alias wherever that store is read, routing on or off (`Env.get` and the planner read the
+  store first), so a deployment recorded under the alias there before it was written reattaches to it from then on, or
+  isn't found when it lacks that deployment's version.
 - `aliases.toml` gives artifacts aliases too (`[artifacts] "<folder>" = ["<alias>", ...]`; the `computers` bundle
   names its base `ubuntu-24.04`), resolved by the planner wherever env aliases are, as a computer env's `computer` names
   its base. `Artifact.get` reads no alias: the planner rewrites every alias an entry or a task names to its id. An alias may
