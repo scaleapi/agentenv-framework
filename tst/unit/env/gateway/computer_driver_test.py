@@ -15,7 +15,7 @@ from agent_env.env.gateway import InternalMCPServer
 from agent_env.env.gateway import rest_proxy as rest_proxy_module
 from agent_env.env.gateway.caller import Caller
 from agent_env.env.gateway.constants import AGENT_ENV_COMPUTER_HEADER, AGENT_ENV_ROLE_HEADER
-from agent_env.env.gateway.gateway import GATEWAY_TRAJECTORY_FILE, Gateway
+from agent_env.env.gateway.gateway import Gateway
 from tst.unit.env.gateway.changes_test import _Changelog, _http, _RealAsyncClient, _site
 
 MAIL, DESKTOP = "http://mail/mcp", "http://desktop/mcp"
@@ -110,15 +110,13 @@ async def test_a_computers_browser_writes_are_its_drivers_and_its_calls_claim_no
     assert actors == {"world1": [], "d2": [("request", "person")], "d3": [("request", "person")],
                       "d4": [("request", "helper")], "world5": [], "d6": [("request", "carol")],
                       "d7": [("request", "default")], "d8": [("request", "default")], "d9": [("request", "auditor")]}
-    with open(GATEWAY_TRAJECTORY_FILE) as f:
-        results = [json.loads(line) for line in f if '"tool_call_result"' in line]
-    assert not any("changelog_id_before" in e for e in results[-4:])
 
 
 @pytest.mark.asyncio
 async def test_a_trigger_actions_input_on_a_computer_drives_it_as_the_role_it_acts_as(monkeypatch):
     changelog = _Changelog()
-    gw = await _office(changelog, monkeypatch)
+    gw = await _office(changelog, monkeypatch, desktop_effect=lambda name: changelog.write(
+        "messages", f"world{len(changelog.rows) + 1}") if name == TYPE.name else None)
     gw._trigger_engine.register({"watch_roles": ["default"], "triggers": [
         {"id": "nora-types", "when": {"type": "action", "tool": SEND.name},
          "actions": [{"type": "tool", "tool": TYPE.name, "as": "nora", "args": {}}]}]})
@@ -133,5 +131,35 @@ async def test_a_trigger_actions_input_on_a_computer_drives_it_as_the_role_it_ac
     finally:
         await gw._close_child_sessions()
 
-    assert actors["d2"] == [("request", "nora")]
-    assert actors["m1"] == [("tool_call", "default")]
+    assert actors == {"m1": [("tool_call", "default")], "world2": [], "d3": [("request", "nora")]}
+
+
+@pytest.mark.asyncio
+async def test_a_request_keeps_the_role_it_arrived_with_when_someone_else_drives_before_it_ends(monkeypatch):
+    changelog = _Changelog()
+    gw = await _office(changelog, monkeypatch)
+
+    async def ok():
+        yield b'{"ok": true}'
+
+    def website(request: httpx.Request) -> httpx.Response:
+        changelog.write("drafts", f"d{len(changelog.rows) + 1}")
+        gw._drive("helper", TYPE.name)
+        return httpx.Response(201, content=ok())
+
+    transport = _site(website)
+    monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient", lambda **kw: _RealAsyncClient(transport=transport, **kw))
+    gw._trigger_engine.register({"watch_roles": ["person", "helper"], "triggers": [
+        {"id": "drafted", "actions": [], "when": {"type": "website", "app": "mail", "method": "POST",
+                                                  "path": {"regex": "^/?api/drafts$"}, "repeat": True}}]})
+    try:
+        await _step(gw, CLICK, "person")
+        await _post(gw, FROM_DESKTOP)
+        await _post(gw, FROM_DESKTOP)
+        actors = await _actors(gw)
+    finally:
+        await gw._close_child_sessions()
+
+    detected = [e["provoking"]["role"] for e in gw._trigger_engine.state()["events"] if e["kind"] == "detected"]
+    assert detected == ["person", "helper"]
+    assert actors == {"d1": [("request", "person")], "d2": [("request", "helper")]}

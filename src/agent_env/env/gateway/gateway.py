@@ -227,7 +227,7 @@ class Gateway:
 
         self._event_counter = 0
         self._event_lock = asyncio.Lock()
-        self._changes = ChangeAttribution()
+        self._changes = ChangeAttribution(lambda: self._computer_tools)
         Path(GATEWAY_TRAJECTORY_FILE).parent.mkdir(parents=True, exist_ok=True)
         self._trajectory_file = open(GATEWAY_TRAJECTORY_FILE, "a")
         atexit.register(self._close_trajectory_file)
@@ -925,9 +925,15 @@ class Gateway:
 
     def _request_role(self, request: HTTPConnection) -> str:
         """The role the gateway attributes a REST request to: the first AgentEnv-Role header; else, from a computer's
-        site proxy (AgentEnv-Computer), the role driving that computer now; else the default role."""
-        role = request.headers.get(AGENT_ENV_ROLE_HEADER, "").strip()
-        return role or self._drivers.get(request.headers.get(AGENT_ENV_COMPUTER_HEADER, "").strip()) or DEFAULT_ROLE
+        site proxy (AgentEnv-Computer), the role driving that computer as the request arrived; else the default role.
+        Read once per request, so its forwarding, its write and its triggers name one role, whoever drives after."""
+        known = getattr(request.state, "agentenv_role", None)
+        if known is None:
+            role = request.headers.get(AGENT_ENV_ROLE_HEADER, "").strip()
+            computer = request.headers.get(AGENT_ENV_COMPUTER_HEADER, "").strip()
+            known = role or self._drivers.get(computer) or DEFAULT_ROLE
+            request.state.agentenv_role = known
+        return known
 
     def _drive(self, role: str, tool_name: str) -> None:
         """An input call to a computer's tools makes its caller that computer's driver as it starts, so a request the
@@ -936,11 +942,6 @@ class Gateway:
         if is_input:
             self._drivers[computer] = role
 
-    def _write_window(self, tool_name: str, before: int | None, after: int | None) -> dict:
-        """A call's write window for changes/v1, or none for a computer's tool: a computer writes the env's data only
-        through its browser's requests, which carry windows of their own, while its calls may run for seconds as
-        others write."""
-        return {} if tool_name in self._computer_tools else {"changelog_id_before": before, "changelog_id": after}
 
     async def _read_trigger_website_routes(self, body: Any) -> None:
         """Read the routes of each website a website trigger in a register `body` names an `op` of, so registration
@@ -1305,7 +1306,7 @@ class Gateway:
                 try:
                     result = await self._call_child_tool(server_url, tool_name, arguments, caller=Caller(role=role))
                 except Exception as e:
-                    await self._log_failed_call(tool_call_event_id, changelog_before, e, tool_name, **source)
+                    await self._log_failed_call(tool_call_event_id, changelog_before, e, **source)
                     raise
                 changelog_id = self._query_changelog_id()
 
@@ -1314,7 +1315,8 @@ class Gateway:
                 **source,
                 "tool_call_event_id": tool_call_event_id,
                 "tool_call_result": result.model_dump(mode="json"),
-                **self._write_window(tool_name, changelog_before, changelog_id),
+                "changelog_id_before": changelog_before,
+                "changelog_id": changelog_id,
             })
             barrier_tasks, barrier_timeout_s = self._fire_triggers(role, tool_name, arguments, result)
             await self._await_barriers(barrier_tasks, barrier_timeout_s)
@@ -1529,7 +1531,7 @@ class Gateway:
                 try:
                     result = await self._call_child_tool(server_url, tool_name, kwargs, caller=caller)
                 except Exception as e:
-                    await self._log_failed_call(tool_call_event_id, changelog_before, e, tool_name)
+                    await self._log_failed_call(tool_call_event_id, changelog_before, e)
                     raise
                 changelog_id = self._query_changelog_id()
 
@@ -1537,7 +1539,8 @@ class Gateway:
                 "event_type": "tool_call_result",
                 "tool_call_event_id": tool_call_event_id,
                 "tool_call_result": result.model_dump(mode="json"),
-                **self._write_window(tool_name, changelog_before, changelog_id),
+                "changelog_id_before": changelog_before,
+                "changelog_id": changelog_id,
             })
             return result
 
@@ -1594,12 +1597,12 @@ class Gateway:
             logger.exception("Failed to log tool_call_result for a gateway tool")
 
     async def _log_failed_call(self, tool_call_event_id: str, changelog_before: int | None, error: Exception,
-                               tool_name: str, **source: str) -> None:
+                               **source: str) -> None:
         """Close a failed call's write window, which may hold a write it committed first (fail-open)."""
         try:
             await self._log_event({"event_type": "tool_call_failed", **source, "tool_call_event_id": tool_call_event_id,
                                    "error": f"{type(error).__name__}: {str(error)[:300]}",
-                                   **self._write_window(tool_name, changelog_before, self._query_changelog_id())})
+                                   "changelog_id_before": changelog_before, "changelog_id": self._query_changelog_id()})
         except Exception:
             logger.exception("Failed to log a failed tool call")
 
