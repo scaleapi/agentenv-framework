@@ -9,7 +9,7 @@ import httpx
 from agentenv_protocol import METHOD_ADD, METHOD_GET, METHOD_RESET, RPC_PATH
 from agentenv_protocol import client as protocol_v1
 
-from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
@@ -54,7 +54,7 @@ class VerifyCoreEnvironmentProtocolStep(TaskStep):
 
         deployed = next((d for d in context.deployed_envs if d.env_id == self.env_id), None)
         if deployed is None:
-            raise RuntimeError(f"Env '{self.env_id}' not found in context.deployed_envs")
+            raise StepContextError(f"Env '{self.env_id}' not found in context.deployed_envs")
 
         card = None
         try:

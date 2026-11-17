@@ -14,7 +14,7 @@ from agent_env.env.gateway.clock import Clock
 from agent_env.env.gateway.constants import EXT_NOTIFICATIONS_URI
 from agent_env.env.gateway.notifications import Notifications
 from agent_env.task_step.task_steps import notification_delivery
-from agent_env.task_step.task_steps.notification_delivery import delivered_line, next_message
+from agent_env.task_step.task_steps.notification_delivery import delivered_line, label_time, labels_zone, next_message
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from tst.unit.task_step.test_prompt_agent_post_turn_hooks import EnvPeers, _env, _hook
 from tst.unit.task_step.test_prompt_agent_user_side import AGENT, ENV, USER, _USER_SIM_CARD, _context, sim, text
@@ -140,7 +140,7 @@ async def test_the_last_turn_takes_nothing(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_labels_are_in_utc_and_say_so(monkeypatch):
+async def test_labels_are_in_utc_and_say_so_when_the_task_names_no_zone(monkeypatch):
     peers = GatewayQueue(monkeypatch, {AGENT: [text("one"), text("two")], USER: [sim("ok"), sim("bye", done=True)]})
     _alder_and_ivy_due(peers)
     ctx = _ctx()
@@ -149,6 +149,48 @@ async def test_labels_are_in_utc_and_say_so(monkeypatch):
 
     assert [p["text"] for p in _to_agent(ctx)[1]] == [f"[Mon Feb 1, 11:00 PM UTC · your scheduled check] {ALDER}",
                                                       f"[Mon Feb 1, 11:10 PM UTC · Curbfinch alert] {IVY}", "ok"]
+
+
+@pytest.mark.asyncio
+async def test_labels_are_in_the_zone_sync_env_clock_gave_the_world_and_name_it(monkeypatch):
+    peers = GatewayQueue(monkeypatch, {AGENT: [text("one"), text("two")], USER: [sim("ok"), sim("bye", done=True)]})
+    _alder_and_ivy_due(peers)
+    ctx = _ctx()
+    ctx.metadata["clock_configurations"] = [_arm("env", "America/Los_Angeles")]
+
+    await _step().execute(ctx)
+
+    assert [p["text"] for p in _to_agent(ctx)[1]] == [f"[Mon Feb 1, 3:00 PM PST · your scheduled check] {ALDER}",
+                                                      f"[Mon Feb 1, 3:10 PM PST · Curbfinch alert] {IVY}", "ok"]
+
+
+@pytest.mark.parametrize("at, zone, label", [
+    ("2027-02-06T00:30:00Z", "America/Denver", "Fri Feb 5, 5:30 PM MST"),
+    ("2027-07-01T00:30:00Z", "America/Denver", "Wed Jun 30, 6:30 PM MDT"),
+    ("2027-02-06T00:30:00Z", "America/Sao_Paulo", "Fri Feb 5, 9:30 PM UTC-03"),
+    ("2027-02-06T00:30:00Z", "UTC", "Sat Feb 6, 12:30 AM UTC"),
+], ids=["standard-time", "daylight-time", "a-zone-named-by-its-offset", "utc"])
+def test_a_label_reads_the_time_in_its_zone_and_names_the_zone(at, zone, label):
+    assert label_time(at, zone) == label
+
+
+def test_lines_take_the_one_zone_the_world_was_given_and_utc_without_one_or_with_several():
+    assert labels_zone([_arm("a", "America/Denver"), _arm("b")]) == "America/Denver"
+    assert labels_zone([]) == "UTC"
+    assert labels_zone([_arm("a", "America/Denver"), _arm("b", "Europe/Paris")]) == "UTC"
+
+
+def _arm(env_id: str, zone: str | None = None) -> dict:
+    """A clock configuration as sync_env_clock records an arm."""
+    return {"step_id": "clock", "env_id": env_id, "env_get_time_url": "http://gateway/clock/time",
+            **({"timezone": zone} if zone else {})}
+
+
+def test_an_env_armed_again_is_labelled_in_the_zone_of_its_latest_arm_and_a_rate_change_keeps_it():
+    rate_change = {"step_id": "running", "env_id": "office", "virtual_seconds_per_real_second": 1.0}
+    assert labels_zone([_arm("office", "America/Los_Angeles"), _arm("office", "America/Denver")]) == "America/Denver"
+    assert labels_zone([_arm("office", "America/Denver"), rate_change]) == "America/Denver"
+    assert labels_zone([_arm("office", "America/Denver"), _arm("office")]) == "UTC"
 
 
 @pytest.mark.asyncio

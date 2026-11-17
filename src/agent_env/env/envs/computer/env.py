@@ -34,7 +34,7 @@ from agent_env.env.envs._deployment import (
 from agent_env.env.envs.computer import COMPUTER_ENV_TYPE
 from agent_env.env.envs.computer.utils import boot, composer, gate, inside, sites
 from agent_env.env.envs.computer.utils.composed import stale
-from agent_env.env.envs.computer.utils.install import platform_of
+from agent_env.env.envs.computer.utils.install import for_os, platform_of
 from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.envs.computer.utils import params as computer_params
 from agent_env.env.envs.computer.driver_env import ComputerDriverEnv
@@ -190,6 +190,13 @@ class ComputerEnv(Env):
         """The computer app envs composed into the env's computer, each installed under its prefix."""
         return self.apps
 
+    def shm_mb(self) -> int | None:
+        """The shared memory its computer's ``/dev/shm`` needs, in MiB: the most any of its apps' installs on its OS
+        declares, or None when none declares any."""
+        sizes = [size for app in self.composed_apps()
+                 if (size := getattr(for_os(app.install, self.computer.os), "shm_mb", None))]
+        return max(sizes, default=None)
+
     def app_defaults(self) -> dict[str, dict[str, Any]]:
         """Each composed app's default settings, by name: its own env's ``[settings]`` under this env's for it, field by
         field."""
@@ -280,20 +287,31 @@ class ComputerEnv(Env):
                      memory_mb: int | None = None, sandbox_type: str | None = None, env_state_type: str | None = None,
                      env_state_instance_id: str | None = None, *, attribution: Optional[Attribution] = None,
                      env_params: Optional[dict] = None, tool_prefix: str = "", reach: str = "",
-                     sites_later: bool = False) -> DeployedEnv:
+                     sites_later: bool = False, live_hosts: tuple[str, ...] = (),
+                     control_token: Optional[str] = None) -> DeployedEnv:
         """With ``tool_prefix``, its driver serves its tools under it, with ``reach``, a network that restricts its
-        egress allows that URL's host too, and with ``sites_later`` it routes the sites ``env_params.site_routing``
-        reaches when ``route_sites`` gives them: what a multi env gives each of its computers."""
+        egress allows that URL's host too, and the ``live_hosts`` of the run's live websites, with ``sites_later``
+        it routes the sites ``env_params.site_routing`` reaches when ``route_sites`` gives them, and with
+        ``control_token`` its framework-only routes take that token, not one of its own: what a multi env gives each
+        of its computers."""
         return await deploy_through_provider(
             self, environment_name=self.environment_name, ttl_seconds=ttl_seconds, sandbox_type=sandbox_type,
             then=self._give_tools, disk_size_gb=disk_size_gb, gateway_mode=gateway_mode, cpu=cpu, memory_mb=memory_mb,
             env_state_type=env_state_type, env_state_instance_id=env_state_instance_id, attribution=attribution,
-            env_params=env_params, tool_prefix=tool_prefix, reach=reach, sites_later=sites_later)
+            env_params=env_params, tool_prefix=tool_prefix, reach=reach, sites_later=sites_later,
+            live_hosts=tuple(live_hosts), control_token=control_token)
 
     async def route_sites(self, sites: list[dict]) -> None:
         """Route ``sites`` on this computer, deployed with ``sites_later``, launch its held apps and finish its boot;
         its record, and the instance store's, then keep them."""
         await as_builtin(self._env_provider).route_sites(self, self._deployed, sites)
+        if self._deployed.instance_id:
+            update_env_instance_metadata(self._deployed.instance_id, {"computer": self._deployed.metadata["computer"]})
+
+    async def follow_clock(self, gateway_url: str) -> None:
+        """Have this computer, deployed in a multi env whose gateway is at ``gateway_url``, follow that gateway's clock;
+        its record, and the instance store's, then keep the follower's config."""
+        await as_builtin(self._env_provider).follow_clock(self._deployed, gateway_url, self.environment_name)
         if self._deployed.instance_id:
             update_env_instance_metadata(self._deployed.instance_id, {"computer": self._deployed.metadata["computer"]})
 

@@ -365,9 +365,10 @@ def _flag(flag: str, value: Optional[str]) -> tuple[str, ...]:
 
 
 def pip_command(env: Environment, action: str, *args: str) -> tuple[str, ...]:
-    """pip inside the environment when it has one, else `uv pip` aimed at its interpreter."""
+    """pip inside the environment when it has one, run without the current folder on its path, else `uv pip` aimed at
+    its interpreter."""
     if env.has_pip:
-        return (str(env.python), "-m", "pip", action, *(("-y",) if action == "uninstall" else ()), *args)
+        return (str(env.python), "-P", "-m", "pip", action, *(("-y",) if action == "uninstall" else ()), *args)
     if shutil.which("uv"):
         return ("uv", "pip", action, "--python", str(env.python), *args)
     raise InstallerError(f"{env.prefix} has neither pip nor uv to {action} with")

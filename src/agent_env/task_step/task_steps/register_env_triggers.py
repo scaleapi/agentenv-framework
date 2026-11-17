@@ -23,7 +23,7 @@ from agent_env.env.gateway.constants import (
     TRIGGER_WEBSITE,
     TRIGGER_WEBSITE_OP,
 )
-from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 
@@ -131,7 +131,7 @@ class RegisterEnvTriggersStep(TaskStep):
             raise RuntimeError("; ".join(problems))
         deployed = next((d for d in context.deployed_envs if d.env_id == self.env_id), None)
         if deployed is None:
-            raise RuntimeError(f"Env '{self.env_id}' not found in context.deployed_envs")
+            raise StepContextError(f"Env '{self.env_id}' not found in context.deployed_envs")
         body: dict = {"triggers": self.triggers}
         if self.watch_roles is not None:
             body["watch_roles"] = self.watch_roles
@@ -227,7 +227,7 @@ class RegisterEnvTriggersStep(TaskStep):
     def _executor_config(self, context: TaskStepContext, deployed: DeployedEnv, agent_name: str) -> dict:
         agent = next((a for a in context.deployed_agents if a.agent_name == agent_name), None)
         if agent is None:
-            raise RuntimeError(f"Executor agent '{agent_name}' not found in context.deployed_agents")
+            raise StepContextError(f"Executor agent '{agent_name}' not found in context.deployed_agents")
         if not agent.role:
             raise RuntimeError(
                 f"Executor agent '{agent_name}' was deployed without an explicit role; "

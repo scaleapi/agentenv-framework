@@ -134,7 +134,9 @@ class Linux(BaseModel):
     """How a Linux computer installs the app: ``files``, a folder of the app's copied under its prefix; ``packages``,
     the OS's; ``python``, a requirements file in that folder installed into a venv beside them; ``sources``, extra apt
     repositories; ``downloads``, files fetched by URL; ``run``, scripts run once those are in; ``services``, programs
-    its init runs; ``ports``, those it listens on. Everything is fetched once at put, and builds install only that."""
+    its init runs; ``ports``, those it listens on; ``shm_mb``, the shared memory it needs in ``/dev/shm``, in MiB, which
+    a computer of it gets where its sandbox can size it. Everything is fetched once at put, and builds install only
+    that."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -146,6 +148,7 @@ class Linux(BaseModel):
     run: Optional[list[RunScript]] = None
     services: list[Service] = Field(default_factory=list)
     ports: Optional[list[int]] = None
+    shm_mb: Optional[int] = None
 
 
 class Windows(BaseModel):
@@ -349,13 +352,13 @@ def install(os_type: str, spec: BaseModel, *, launch: Optional[Launch] = None, p
 def linux(*, distribution: Optional[str] = None, files: str = ".", packages: Optional[Packages] = None,
           python: Optional[str] = None, sources: Optional[list[AptSource]] = None,
           downloads: Optional[list[Download]] = None, run: Optional[list[RunScript]] = None,
-          services: Optional[list[Service]] = None, ports: Optional[list[int]] = None, launch: Optional[Launch] = None,
-          paths: Optional[list[str]] = None, skill: Optional[str] = None, settings: Optional[type[BaseModel]] = None,
-          build_settings: Optional[type[BaseModel]] = None) -> Callable:
+          services: Optional[list[Service]] = None, ports: Optional[list[int]] = None, shm_mb: Optional[int] = None,
+          launch: Optional[Launch] = None, paths: Optional[list[str]] = None, skill: Optional[str] = None,
+          settings: Optional[type[BaseModel]] = None, build_settings: Optional[type[BaseModel]] = None) -> Callable:
     """``@install`` for Linux, or with ``distribution`` for that distribution alone: how such a computer installs the
     app, ``Linux``'s fields, and what is its own there."""
     spec = Linux(files=files, packages=packages, python=python, sources=sources, downloads=downloads, run=run,
-                 services=services or [], ports=ports)
+                 services=services or [], ports=ports, shm_mb=shm_mb)
     return install(platform_key("linux", distribution), spec, launch=launch, paths=paths, skill=skill,
                    settings=settings, build_settings=build_settings)
 
@@ -535,6 +538,10 @@ class ComputerAppEnvironment(AgentEnvEnvironment):
     @extension(COMPUTER_APP, op="ready", method="GET")
     async def _computer_app_ready(self) -> dict:
         return (await self._computer_app_runtime().readiness()).model_dump()
+
+    def served_asgi(self, asgi: Any) -> Any:
+        """The application its server serves, ``asgi`` as built from its card: a subclass may wrap it."""
+        return asgi
 
     def _computer_app_runtime(self) -> AppRuntime:
         if self._computer_app is None:

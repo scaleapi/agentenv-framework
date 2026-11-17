@@ -258,7 +258,7 @@ class CollectingVm:
 
     async def exec_with_output(self, *args):
         if "stat" in args:
-            return 0, str(len(COLLECTED[args[-1]])), ""
+            return 0, f"81a4:{len(COLLECTED[args[-1]])}", ""
         return 0, "ok", ""
 
     async def exec(self, *args):

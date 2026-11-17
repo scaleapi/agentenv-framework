@@ -31,6 +31,7 @@ class DevToolsPipe:
     def __init__(self) -> None:
         self._ids = itertools.count(1)
         self._waiting: dict[int, asyncio.Future] = {}
+        self._answered: dict[int, Callable[[dict], None]] = {}
         self._writer: Optional[asyncio.WriteTransport] = None
         self._reading: Optional[asyncio.Task] = None
         self._listeners: list[Callable[[dict], None]] = []
@@ -62,18 +63,22 @@ class DevToolsPipe:
             raise DevToolsError(f"{method}: {answered['error'].get('message', answered['error'])}")
         return answered.get("result", {})
 
-    async def request(self, method: str, params: Optional[dict] = None, *, session_id: Optional[str] = None) -> dict:
+    async def request(self, method: str, params: Optional[dict] = None, *, session_id: Optional[str] = None,
+                      answered: Optional[Callable[[dict], None]] = None) -> dict:
         """The browser's whole answer to ``method``, its ``result`` or its ``error``, however long it takes: what a
-        relay passes on as it is."""
-        return await self._answer(method, params, session_id, None)
+        relay passes on as it is. ``answered`` hears it as the pipe reads it, in order with the events before and after
+        it, which the caller, resumed only later, may not be."""
+        return await self._answer(method, params, session_id, None, answered)
 
     async def _answer(self, method: str, params: Optional[dict], session_id: Optional[str],
-                      timeout_s: Optional[float]) -> dict:
+                      timeout_s: Optional[float], answered: Optional[Callable[[dict], None]] = None) -> dict:
         if self._writer is None or self._writer.is_closing():
             raise ConnectionError("no browser is connected over its debugging pipe")
         message_id = next(self._ids)
         answer = asyncio.get_running_loop().create_future()
         self._waiting[message_id] = answer
+        if answered is not None:
+            self._answered[message_id] = answered
         message = {"id": message_id, "method": method, "params": params or {},
                    **({"sessionId": session_id} if session_id else {})}
         self._writer.write(json.dumps(message).encode() + b"\0")
@@ -81,6 +86,7 @@ class DevToolsPipe:
             return await asyncio.wait_for(answer, timeout_s)
         finally:
             self._waiting.pop(message_id, None)
+            self._answered.pop(message_id, None)
 
     def close(self) -> None:
         if self._reading is not None:
@@ -100,6 +106,8 @@ class DevToolsPipe:
                     continue
                 answer = self._waiting.get(message.get("id"))
                 if answer is not None and not answer.done():
+                    if (answered := self._answered.pop(message["id"], None)) is not None:
+                        _heard(answered, message)
                     answer.set_result(message)
         except (asyncio.IncompleteReadError, ConnectionError):
             if self._writer is not None:

@@ -22,7 +22,7 @@ from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.providers.env_providers.constants import GATEWAY_SERVICE_NAMES
 from agent_env.providers.env_providers.env_gateway_provider import EnvironmentGatewayProvider, environment_name_problem
 from agent_env.providers.env_providers.env_provider import _env_provider_class
-from agent_env.utils.card_naming import card_names_in_files
+from agent_env.utils.card_naming import WebsiteSource, card_names_in_files, website_source_in_files
 from agent_env.utils.paths import os_reason
 
 from ._fs import relative, show, with_article
@@ -117,6 +117,23 @@ class AuthoringContext:
         else:
             return None
         return card_names_in_files(build_context_files(self.bundle, self.entry), dockerfile)
+
+    def website_source(self, image_key: str) -> WebsiteSource | None:
+        """What the one ``@website(...)`` class in the source of the image ``image_key`` builds from this folder
+        declares, read as ``card_names`` reads its card's name; None when it names an image, or its source declares
+        none or several."""
+        value = self.entry.config.get(image_key) if isinstance(self.entry.config, dict) else None
+        if value is None:
+            dockerfile = default_dockerfile(image_key)
+        elif isinstance(value, dict) and value.keys() == {"dockerfile"} and isinstance(value["dockerfile"], str):
+            dockerfile = value["dockerfile"]
+        else:
+            return None
+        try:
+            files = build_context_files(self.bundle, self.entry)
+        except BundleError:  # a folder with nothing to build has no source to read
+            return None
+        return website_source_in_files(files, dockerfile)
 
     def accept(self, data: dict, /, **takes: type) -> dict:
         """The keys of ``data`` a type takes, each checked against the type given; any other key but

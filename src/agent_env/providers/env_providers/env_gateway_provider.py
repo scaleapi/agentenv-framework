@@ -5,34 +5,44 @@ from __future__ import annotations
 import asyncio
 import functools
 import json
+import math
 import logging
 import re
 import secrets
 import shlex
 import time
 from collections import Counter
-from dataclasses import dataclass, field
+from collections.abc import Iterable
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
 import httpx
+from agentenv_protocol.client import control_headers
 from agentenv_protocol.website import (
     SESSION_SECRET_ENV,
     SITE_READY_TIMEOUT_S,
     WEBSITE_EXTENSION_URI,
     WEBSITE_READY_OP,
+    WEBSITE_SETTINGS_ENV,
     WebsiteReadiness,
     website_readiness,
 )
 
 from agent_env.artifact.artifacts.docker_image import pull_problem
 from agent_env.attribution import Attribution
+from agent_env.config import get_config
 from agent_env.env.env import DeployedGatewayEnv, _mcp_url
 from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT, ExternalChild, GatewayMode
 from agent_env.env.gateway.constants import (
+    CLOCK_FOLLOWERS_ENV,
+    COMPUTERS_ENV,
+    CONTROL_TOKEN_CHILDREN_ENV,
     DEFAULT_MCP_SERVER_NAME,
     GATEWAY_PROVIDER_HEADERS_ENV,
     STATE_TOOL_NAME_CLASHES_KEY,
+    WEBSITE_LISTED_BY_NAME_ENV,
+    WEBSITE_NAMES_ENV,
     WELL_KNOWN_PATH,
     random_mcp_server_name,
     tool_name_clashes_text,
@@ -45,6 +55,8 @@ from agent_env.env.envs.service_db import (
     DB_WEB_PORT,
     PGWEB_SERVICE_NAME,
 )
+from agent_env.env.envs.computer.utils.boot import control_environment
+from agent_env.env.envs.computer.utils.boot import control_token as new_control_token
 from agent_env.providers.env_providers.constants import (
     AGENT_ENV_WEBSITE_BACKEND_PORT,
     AGENT_ENV_WEBSITE_BACKEND_SUFFIX,
@@ -77,6 +89,7 @@ if TYPE_CHECKING:
 
     from agent_env.artifact import DockerImageArtifact
     from agent_env.env.env import DeployedEnv, Env
+    from agent_env.env.envs.mcp_server import MCPServerEnv
     from agent_env.env.envs.website import WebsiteEnv
     from agent_env.providers.env_state import DatabaseStateProvider, EnvStateInstance, LocalPostgresStoreSpec
 
@@ -88,6 +101,8 @@ _TRAJECTORY_READ_ATTEMPTS = 3
 _ENV_NETWORK = "env-network"
 # The network the website browser shares with the gateway and the sites, and with nothing else in the env.
 _SITES_NETWORK = "website-network"
+# A gateway deploy's website browser when its caller names none: the run's, for one with websites.
+_THE_RUNS = object()
 
 # How much of a service's output a failed deploy's error carries: enough for the end of a traceback.
 _LOG_TAIL_LINES = 30
@@ -137,6 +152,8 @@ class DeployedGateway:
     # The env card the readiness probe read, and when (ISO 8601, UTC).
     environment_card: dict | None = None
     environment_card_read_at_utc: str | None = None
+    # The token the gateway's control routes take, which the record keeps; None for a gateway started without one.
+    control_token: str | None = None
 
 
 @dataclass
@@ -149,6 +166,18 @@ class WebsiteConfig:
     frontend_image: str | None
     environment_name: str
     health_path: str = AGENT_ENV_WEBSITE_HEALTH_PATH
+    # A live site's server serves no pages, so the gateway gives it no site route; ``settings`` are handed to its
+    # server, each ``secret:`` or ``env:`` reference resolved only as the compose file is written.
+    live: bool = False
+    settings: dict = field(default_factory=dict)
+    # How long its server may take from its container starting to ready, which its health check allows before it counts
+    # a failure and the deploy waits, and its server's /dev/shm in MiB; None keeps the gateway's own and Docker's.
+    ready_timeout_s: float | None = None
+    shm_mb: int | None = None
+    # The names its env stores, one of which it takes as its Host when a client reaches it there (its card's stand in
+    # for none), and whether list_website_urls gives it at its first name, as a browser computer opens it.
+    domains: tuple[str, ...] = ()
+    listed_by_name: bool = False
 
 
 @dataclass
@@ -302,6 +331,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         extra_hosts: tuple[str, ...] = (),
         mcp_server_name: str | None = None,
         external_children: tuple[ExternalChild, ...] = (),
+        control_token: str | None = None,
     ) -> str:
         """Generate docker-compose.yml content for a gateway deployment onto a VM/laptop/arbitrary machine.
 
@@ -500,9 +530,15 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 f"{wc.environment_name}=http://{wc.environment_name}-{AGENT_ENV_WEBSITE_FRONTEND_SUFFIX}:80"
                 if wc.frontend_image else
                 f"{wc.environment_name}=http://{wc.environment_name}-{AGENT_ENV_WEBSITE_BACKEND_SUFFIX}:{AGENT_ENV_WEBSITE_BACKEND_PORT}"
-                for wc in website_configs
+                for wc in website_configs if not wc.live
             )
-            gateway_env.append(f"      - WEBSITE_URLS={website_urls}")
+            if website_urls:
+                gateway_env.append(f"      - WEBSITE_URLS={website_urls}")
+            if names := ",".join(f"{wc.environment_name}={'|'.join(wc.domains)}"
+                                 for wc in website_configs if wc.domains and not wc.live):
+                gateway_env.append(f"      - {WEBSITE_NAMES_ENV}={names}")
+            if listed := ",".join(wc.environment_name for wc in website_configs if wc.listed_by_name and not wc.live):
+                gateway_env.append(f"      - {WEBSITE_LISTED_BY_NAME_ENV}={listed}")
             for wc in website_configs:
                 rest_proxy_urls.append(
                     f"{wc.environment_name}=http://{wc.environment_name}-{AGENT_ENV_WEBSITE_BACKEND_SUFFIX}:{AGENT_ENV_WEBSITE_BACKEND_PORT}"
@@ -512,6 +548,11 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             gateway_env.append(f"      - REST_PROXY_URLS={','.join(rest_proxy_urls)}")
         gateway_env.append(f"      - GATEWAY_MODE={gateway_mode.value}")
         gateway_env.append(f"      - SERVICE_DB_URL={state_provider.base_url(state_instance)}")
+        gateway_env.extend(f"      - {key}={value}" for key, value in control_environment(control_token).items())
+        gateway_env.extend(f"      - {key}={value}" for key, value in clock_followers_environment(external_children).items())
+        gateway_env.extend(f"      - {key}={value}"
+                           for key, value in control_token_children_environment(external_children, control_token).items())
+        gateway_env.extend(f"      - {key}={value}" for key, value in computers_environment(external_children).items())
         if provider_headers := sandbox_request_header_names():
             gateway_env.append(f"      - {GATEWAY_PROVIDER_HEADERS_ENV}={','.join(provider_headers)}")
         publish = host_port or (lambda port: port)
@@ -559,14 +600,15 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 f"      - PORT={AGENT_ENV_WEBSITE_BACKEND_PORT}",
                 f"      - {SESSION_SECRET_ENV}={secrets.token_hex(32)}",
                 "      - PYTHONUNBUFFERED=1",
+                *_settings_lines(wc.settings),
                 "    healthcheck:",
-                f'      test: ["CMD-SHELL", "curl -sf -o /dev/null http://localhost:{AGENT_ENV_WEBSITE_BACKEND_PORT}{WELL_KNOWN_PATH}'
-                f' || curl -sf -o /dev/null http://localhost:{AGENT_ENV_WEBSITE_BACKEND_PORT}{wc.health_path}"]',
+                f'      test: ["CMD-SHELL", {json.dumps(_http_probe(AGENT_ENV_WEBSITE_BACKEND_PORT, WELL_KNOWN_PATH, wc.health_path))}]',
                 "      interval: 10s",
                 "      timeout: 5s",
-                "      start_period: 30s",
+                f"      start_period: {_seconds(wc.ready_timeout_s) if wc.ready_timeout_s else '30s'}",
                 "      retries: 3",
-                *_network_lines(_ENV_NETWORK, *([] if wc.frontend_image else sites_network)),
+                *([f"    shm_size: {wc.shm_mb}m"] if wc.shm_mb else []),
+                *_network_lines(_ENV_NETWORK, *([] if wc.frontend_image or wc.live else sites_network)),
                 "",
             ])
             if not wc.frontend_image:
@@ -622,13 +664,14 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         attribution: Optional[Attribution] = None,
         artifact_id: str | None = None,
         artifact_version: int | None = None,
-        children: "Callable[[Optional[str]], Awaitable[list[ExternalChild]]] | None" = None,
+        children: "Callable[[Optional[str], Optional[str]], Awaitable[list[ExternalChild]]] | None" = None,
     ) -> DeployedGatewayEnv:
         """A gateway in front of the env, with the state store it acquires (local Postgres by default); returns the record.
 
         A MultiEnv's gateway fronts its MCP servers and websites, a WebsiteEnv's its website, and any other env's its one MCP server.
         ``children`` starts the env's children that run on sandboxes of their own, given the gateway's address where it's
-        known before the gateway starts, and returns them; the gateway starts once they have, fronting them too.
+        known before the gateway starts and the gateway's control token, which their framework-only routes take and the
+        gateway passes on to them alone, and returns them; the gateway starts once they have, fronting them too.
         """
         from agent_env.config import get_config, service_db_env_id
         from agent_env.env.env import Env
@@ -647,7 +690,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             mcp_server_images=topology.mcp_server_images, website_configs=topology.website_configs,
             website_images=topology.website_images, mcp_server_name=topology.mcp_server_name, gateway_mode=gateway_mode,
             ttl_seconds=ttl_seconds, disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb, attribution=attribution,
-            children=children,
+            children=children, website_browser=topology.website_browser,
+            control_token=new_control_token(),
         )
         return DeployedGatewayEnv(
             env_id=env.id,
@@ -664,6 +708,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             website_frontend_urls=deployed.website_frontend_urls,
             gateway_mode=gateway_mode.value,
             env_state_instance_ids=deployed.env_state_instance_ids,
+            control_token=deployed.control_token,
         )
 
     async def create_gateway(
@@ -686,6 +731,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         mcp_server_name: str | None = None,
         *,
         attribution: Optional[Attribution] = None,
+        control_token: str | None = None,
     ) -> DeployedGateway:
         """Create and start a gateway from explicit topology, for a caller that builds its own record rather than calling ``deploy()``.
 
@@ -699,13 +745,16 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
 
         ``mcp_server_name`` is the name the gateway presents on its card and as its MCP server; drawn as ``env`` +
         4 random digits when the env declares none; the record takes it from the gateway's card.
+
+        ``control_token`` is the token the gateway's control routes take, which the caller's record must keep; without one
+        they stay open.
         """
         return await self._launch(
             sandbox_provider, env_id, state_instance=state_instance, mcp_servers=mcp_servers, mcp_server_images=mcp_server_images,
             gateway_port=gateway_port, website_configs=website_configs, website_images=website_images,
             gateway_mode=gateway_mode, ttl_seconds=ttl_seconds, disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb,
             existing_sandbox=existing_sandbox, sidecars=sidecars, mcp_server_name=mcp_server_name,
-            attribution=attribution,
+            attribution=attribution, control_token=control_token,
         )
 
     async def _launch(self, sandbox_provider: SandboxProvider, env_id: str | None, *, mcp_server_name: str | None = None, **gateway) -> DeployedGateway:
@@ -764,10 +813,12 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         existing_sandbox: Sandbox | None = None,
         sidecars: list[SidecarConfig] | None = None,
         mcp_server_name: str | None = None,
-        children: "Callable[[Optional[str]], Awaitable[list[ExternalChild]]] | None" = None,
+        children: "Callable[[Optional[str], Optional[str]], Awaitable[list[ExternalChild]]] | None" = None,
+        website_browser: "MCPServerEnv | None | object" = _THE_RUNS,
+        control_token: str | None = None,
     ) -> DeployedGateway:
         from agent_env.env.env import Env
-        from agent_env.config import gateway_env_id, get_config, website_browser_env_id
+        from agent_env.config import gateway_env_id, get_config
 
         website_configs = website_configs or []
         website_images = website_images or []
@@ -776,16 +827,10 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         config = get_config()
         gateway_env = Env.get(gateway_env_id(config))
 
-        # Auto-include the website browser's MCP server when websites are present
-        if website_configs:
-            website_browser_env = Env.get(website_browser_env_id(config))
-            browser_server = MCPServerConfig(
-                image=website_browser_env.docker_image_artifact.image_name,
-                environment_name=website_browser_env.environment_name,
-                networks=(_SITES_NETWORK,),
-            )
-            mcp_servers = list(mcp_servers) + [browser_server]
-            mcp_server_images = list(mcp_server_images) + [website_browser_env.docker_image_artifact]
+        if website_browser is _THE_RUNS:
+            website_browser = run_website_browser() if website_configs else None
+        if website_browser is not None:
+            mcp_servers, mcp_server_images = _with_browser(mcp_servers, mcp_server_images, website_browser)
 
         # Local Postgres also preloads its servicedb image set (servicedb + pgweb + db-mcp); an
         # external store has no co-deployed containers, and image pull dominates VM deploy latency.
@@ -857,6 +902,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             host_ips=sandbox.host_ips,
             extra_hosts=sandbox.extra_hosts,
             mcp_server_name=mcp_server_name,
+            control_token=control_token,
         )
         compose_content = compose()
         logger.info(f"Generated docker-compose.yml:\n{_redact_compose_secrets(compose_content)}")
@@ -882,12 +928,13 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             # Everything but the gateway, beside the children; then the gateway, which waits for every child it fronts.
             # Both run to the end before either's failure is raised, so no child is still starting when the deploy closes.
             up, started = await asyncio.gather(self._compose_up(sandbox, f"--scale {GATEWAY_SERVICE_NAME}=0"),
-                                               children(sandbox.tunnel_urls.get(gateway_port)), return_exceptions=True)
+                                               children(sandbox.tunnel_urls.get(gateway_port), control_token),
+                                               return_exceptions=True)
             for result in (up, started):
                 if isinstance(result, BaseException):
                     raise result
-            external = tuple(ExternalChild(child.name, sandbox.url_from_sandbox(child.mcp_url),
-                                           sandbox.url_from_sandbox(child.base_url)) for child in started)
+            external = tuple(replace(child, mcp_url=sandbox.url_from_sandbox(child.mcp_url),
+                                     base_url=sandbox.url_from_sandbox(child.base_url)) for child in started)
             await self._write_file(sandbox, DOCKER_COMPOSE_PATH, compose(external_children=external))
             await self._compose_up(sandbox)
 
@@ -944,29 +991,23 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         if card is None:
             raise RuntimeError("Tunnel did not become ready in time")
         if website_configs:
-            await _wait_for_websites(gateway_url, website_configs)
+            await _wait_for_websites(gateway_url, website_configs, headers=control_headers(control_token))
             card = await self._wait_for_tunnel(gateway_url, timeout=120) or card
         card_read_at_utc = datetime.now(timezone.utc).isoformat()
         await self._refuse_tool_name_clashes(gateway_url)
         mcp_url = _mcp_url(gateway_url, card)
         logger.info(f"MCP endpoint: {mcp_url}")
 
-        # Build frontend URLs proxied through the gateway
-        website_frontend_urls: dict[str, str] | None = None
-        if website_configs:
-            website_frontend_urls = {
-                wc.environment_name: f"{gateway_url}/website/{wc.environment_name}/"
-                for wc in website_configs
-            }
-            for svc_name, url in website_frontend_urls.items():
-                logger.info(f"Website frontend ({svc_name}): {url}")
+        website_frontend_urls = _frontend_urls(gateway_url, website_configs)
+        for svc_name, url in (website_frontend_urls or {}).items():
+            logger.info(f"Website frontend ({svc_name}): {url}")
 
         logger.info(f"Gateway URL: {gateway_url}")
         return DeployedGateway(
             gateway_url=gateway_url, mcp_url=mcp_url, db_web_url=db_web_url, db_mcp_url=db_mcp_url,
             website_frontend_urls=website_frontend_urls, mcp_server_name=mcp_server_name,
             env_state_instance_ids=[state_instance.instance_id],
-            environment_card=card, environment_card_read_at_utc=card_read_at_utc,
+            environment_card=card, environment_card_read_at_utc=card_read_at_utc, control_token=control_token,
         )
 
     async def _deploy_via_containers(
@@ -983,7 +1024,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         memory_mb: int | None = None,
         attribution: Optional[Attribution] = None,
         mcp_server_name: str | None = None,
-        children: "Callable[[Optional[str]], Awaitable[list[ExternalChild]]] | None" = None,
+        children: "Callable[[Optional[str], Optional[str]], Awaitable[list[ExternalChild]]] | None" = None,
+        control_token: str | None = None,
     ) -> DeployedGateway:
         from agent_env.env.env import Env
         from agent_env.config import gateway_env_id, get_config
@@ -1039,7 +1081,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
             ]
             aux_coros = [self._provision_sidecar(deploy, spec) for spec in sidecar_specs]
             # The children start beside them; the gateway, created last, has no address to give them.
-            child_coros = [children(None)] if children is not None else []
+            child_coros = [children(None, control_token)] if children is not None else []
             all_results = await asyncio.gather(*mcp_coros, *aux_coros, *child_coros, return_exceptions=True)
             external: list[ExternalChild] = []
 
@@ -1087,6 +1129,10 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 "GATEWAY_MODE": gateway_mode.value,
                 "SERVICE_DB_URL": self._state_provider.base_url(state_instance),
                 "MCP_SERVER_NAME": mcp_server_name or DEFAULT_MCP_SERVER_NAME,
+                **control_environment(control_token),
+                **clock_followers_environment(external),
+                **control_token_children_environment(external, control_token),
+                **computers_environment(external),
                 **({GATEWAY_PROVIDER_HEADERS_ENV: ",".join(names)} if (names := sandbox_request_header_names()) else {}),
             }
             gateway_sb = await sandbox_provider.create_container(
@@ -1121,6 +1167,7 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 env_state_instance_ids=[state_instance.instance_id],
                 environment_card=card,
                 environment_card_read_at_utc=card_read_at_utc,
+                control_token=control_token,
             )
         except Exception:
             await self.close()
@@ -1418,11 +1465,14 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
         existing_sandbox: Sandbox | None = None,
         sidecars: list[SidecarConfig] | None = None,
         mcp_server_name: str | None = None,
+        control_token: str | None = None,
         attribution: Optional[Attribution] = None,
-        children: "Callable[[Optional[str]], Awaitable[list[ExternalChild]]] | None" = None,
+        children: "Callable[[Optional[str], Optional[str]], Awaitable[list[ExternalChild]]] | None" = None,
+        website_browser: "MCPServerEnv | None | object" = _THE_RUNS,
     ) -> DeployedGateway:
         """One gateway deploy on one (unchained) sandbox provider: a VM on one that creates VMs, else a container per
-        server on its private network."""
+        server on its private network. ``website_browser`` runs among its MCP servers, on the network it shares with
+        the sites; by default the run's (``run_website_browser``) when there are websites, which only a VM runs."""
         from agent_env.providers.env_state import LocalPostgresStateProvider, build_state_provider
 
         # Every attempt starts from the caller's store: a failed attempt's close() cleared it.
@@ -1440,11 +1490,14 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 raise ValueError("existing_sandbox is only supported for VM-mode providers")
             if sidecars:
                 raise NotImplementedError("sidecars are only supported for VM-mode gateway deploys")
+            if website_browser is not _THE_RUNS and website_browser is not None:
+                mcp_servers, mcp_server_images = _with_browser(mcp_servers, mcp_server_images, website_browser)
             return await self._deploy_via_containers(
                 sandbox_provider, mcp_servers, mcp_server_images,
                 gateway_port=gateway_port, website_configs=website_configs, gateway_mode=gateway_mode,
                 ttl_seconds=ttl_seconds, disk_size_gb=disk_size_gb,
-                cpu=cpu, memory_mb=memory_mb, mcp_server_name=mcp_server_name, children=children, **deploy_kwargs,
+                cpu=cpu, memory_mb=memory_mb, mcp_server_name=mcp_server_name, children=children,
+                control_token=control_token, **deploy_kwargs,
             )
         earlier_sandbox = self._sandbox
         try:
@@ -1453,7 +1506,8 @@ class EnvironmentGatewayProvider(_SandboxEnvironmentProvider):
                 gateway_port=gateway_port, website_configs=website_configs, website_images=website_images,
                 gateway_mode=gateway_mode, ttl_seconds=ttl_seconds, disk_size_gb=disk_size_gb,
                 cpu=cpu, memory_mb=memory_mb, existing_sandbox=existing_sandbox, sidecars=sidecars,
-                mcp_server_name=mcp_server_name, children=children, **deploy_kwargs,
+                mcp_server_name=mcp_server_name, children=children, website_browser=website_browser,
+                control_token=control_token, **deploy_kwargs,
             )
         except BaseException:
             await self._terminate_new_sandbox(earlier_sandbox=earlier_sandbox, existing_sandbox=existing_sandbox)
@@ -1547,37 +1601,73 @@ class _GatewayTopology:
     website_images: list[DockerImageArtifact] | None
     mcp_server_name: str | None  # a MultiEnv's name; None draws one
     names_gateway_on_vm: bool  # a MultiEnv's record names its gateway sandbox even on a VM
+    website_browser: "MCPServerEnv | None | object"  # the browser it runs among its MCP servers, or _THE_RUNS
 
 
-def website_config(env: WebsiteEnv) -> WebsiteConfig:
-    """A website env as the gateway runs it: its server image, any deprecated frontend image, and its health path."""
+def website_config(env: WebsiteEnv, *, listed_by_name: bool = False) -> WebsiteConfig:
+    """A website env as the gateway runs it: its server image, any deprecated frontend image, its health path, how long
+    it may take to be ready, its shared memory and the names it stores, listed by its first when ``listed_by_name``."""
     frontend = env.frontend_docker_image_artifact
     return WebsiteConfig(backend_image=env.server_docker_image_artifact.image_name,
                          frontend_image=frontend.image_name if frontend else None,
-                         environment_name=env.environment_name, health_path=env.health_path)
+                         environment_name=env.environment_name, health_path=env.health_path, live=env.live,
+                         settings=dict(env.settings), ready_timeout_s=env.ready_timeout_s, shm_mb=env.shm_mb,
+                         domains=tuple(env.domains), listed_by_name=listed_by_name)
+
+
+def run_website_browser() -> "MCPServerEnv":
+    """The run's website browser (``website_browser_env_id``), which a gateway with websites runs among its MCP servers
+    when its env names none: an MCP server env, as ``playwright-mcp`` is. A browser computer runs on a sandbox of its
+    own, which only a multi env gives it, so one named here is refused."""
+    from agent_env.config import get_config, website_browser_env_id
+    from agent_env.env.env import Env
+    from agent_env.env.envs.computer import COMPUTER_ENV_TYPE
+    from agent_env.env.registry import get_env_registry
+
+    browser = Env.get(website_browser_env_id(get_config()))
+    if isinstance(browser, get_env_registry()[COMPUTER_ENV_TYPE]):
+        raise ValueError(f"the website browser {browser.id!r} is a {browser.type} env, which runs on a sandbox of "
+                         "its own beside a multi env's websites, not among a gateway's MCP servers: deploy the website "
+                         "in a multi env, or name an MCP server env such as playwright-mcp as the browser")
+    return browser
+
+
+def _with_browser(mcp_servers: list[MCPServerConfig], images: list[DockerImageArtifact],
+                  browser: "MCPServerEnv") -> tuple[list[MCPServerConfig], list[DockerImageArtifact]]:
+    """``mcp_servers`` and their ``images`` with the website browser ``browser`` among them, on the network it shares
+    with the gateway and the sites."""
+    server = MCPServerConfig(image=browser.docker_image_artifact.image_name, environment_name=browser.environment_name,
+                             networks=(_SITES_NETWORK,))
+    return [*mcp_servers, server], [*images, browser.docker_image_artifact]
 
 
 def _gateway_topology(env: Env) -> _GatewayTopology:
     """What a gateway fronts for env: a MultiEnv's MCP servers and websites (whatever their own env_provider_type) under its
-    name, a WebsiteEnv's website, or else the env's one MCP server."""
+    name and the website browser it names or the run's, its websites listed by name when that's a browser computer, a
+    WebsiteEnv's website and the run's browser, or else the env's one MCP server."""
     from agent_env.env.envs.multi_env import MultiEnv
     from agent_env.env.envs.website import WebsiteEnv
 
     is_multi = isinstance(env, MultiEnv)
+    by_name = False
     if is_multi:
         servers, websites, name = env.mcp_server_envs, env.website_envs, env.name
+        placed = env.website_browser()
+        browser = _THE_RUNS if placed.runs else placed.server
+        by_name = placed.computer is not None  # it opens the sites at their names, on a sandbox of its own
     elif isinstance(env, WebsiteEnv):
-        servers, websites, name = [], [env], None
+        servers, websites, name, browser = [], [env], None, _THE_RUNS
     else:
-        servers, websites, name = [env], [], None
+        servers, websites, name, browser = [env], [], None, None
     return _GatewayTopology(
         mcp_servers=[MCPServerConfig(image=s.docker_image_artifact.image_name, environment_name=s.environment_name) for s in servers],
         mcp_server_images=[s.docker_image_artifact for s in servers],
-        website_configs=[website_config(w) for w in websites] or None,
+        website_configs=[website_config(w, listed_by_name=by_name) for w in websites] or None,
         website_images=[image for w in websites
                         for image in (w.server_docker_image_artifact, w.frontend_docker_image_artifact) if image] or None,
         mcp_server_name=name,
         names_gateway_on_vm=is_multi,
+        website_browser=browser,
     )
 
 
@@ -1617,6 +1707,7 @@ def _compose_name_problems(mcp_servers: list[MCPServerConfig], website_configs: 
 # rendered compose is logged. Matches the key to the left of the first '=' on an
 # `      - KEY=VALUE` env line.
 _SECRET_ENV_KEY_RE = re.compile(r"^(\s*-\s*)([A-Za-z0-9_]*(?:SECRET|PASSWORD|TOKEN|API_KEY)[A-Za-z0-9_]*)=.*$")
+_SETTINGS_LINE_RE = re.compile(rf'^(\s*-\s*")({WEBSITE_SETTINGS_ENV})=.*$')
 
 
 def _compose_ps_rows(text: str) -> list[dict]:
@@ -1646,16 +1737,81 @@ def _why_down(row: dict) -> str | None:
     return None
 
 
+_PROBE_REQUEST_TIMEOUT_S = 2
+"""Each request of a site's health probe; two paths at most stay inside compose's 5 s check timeout."""
+
+
+def _http_probe(port: int, *paths: str) -> str:
+    """A shell check that passes once any of ``paths`` answers on ``port`` with a success. It fetches each path once,
+    with the first of curl, wget, python3 or node the image has: a site's image is the author's, and many leave curl
+    out. ``$$`` is compose's escape for a ``$`` the shell reads."""
+    t = _PROBE_REQUEST_TIMEOUT_S
+    fetchers = {
+        "curl": f'curl -sf --max-time {t} -o /dev/null "$$1"',
+        "wget": f'wget -q -T {t} -O /dev/null "$$1"',
+        "python3": f"python3 -c 'import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout={t})' \"$$1\"",
+        "node": (f"node -e 'fetch(process.argv[1], {{signal: AbortSignal.timeout({t * 1000})}})"
+                 f".then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))' \"$$1\""),
+    }
+    pick = "el".join(f"if command -v {name} >/dev/null 2>&1; then get() {{ {fetch}; }}; "
+                      for name, fetch in fetchers.items())
+    urls = " ".join(f"http://localhost:{port}{path}" for path in paths)
+    return f"{pick}else exit 1; fi; for u in {urls}; do get \"$$u\" 2>/dev/null && exit 0; done; exit 1"
+
+
 def _network_lines(*networks: str) -> list[str]:
     return ["    networks:", *(f"      - {network}" for network in networks)]
 
 
 def _redact_compose_secrets(compose_content: str) -> str:
-    """Mask secret-valued env lines so the logged compose never carries a live secret."""
+    """Mask secret-valued env lines so the logged compose never carries a live secret, a site's settings among them."""
     return "\n".join(
-        _SECRET_ENV_KEY_RE.sub(r"\1\2=***", line) for line in compose_content.splitlines()
+        _SETTINGS_LINE_RE.sub(r'\1\2=***"', _SECRET_ENV_KEY_RE.sub(r"\1\2=***", line))
+        for line in compose_content.splitlines()
     )
 
+
+def clock_followers_environment(children: Iterable[ExternalChild]) -> dict[str, str]:
+    """The gateway's declared clock followers: each child that is one, by the read token its watch carries."""
+    followers = ",".join(f"{child.name}={child.clock_read_token}" for child in children if child.clock_read_token)
+    return {CLOCK_FOLLOWERS_ENV: followers} if followers else {}
+
+
+def control_token_children_environment(children: Iterable[ExternalChild], control_token: str | None) -> dict[str, str]:
+    """The children the gateway passes its control token on to: every child it fronts on a sandbox of its own, each
+    deployed with that token (``children``)."""
+    names = ",".join(child.name for child in children) if control_token else ""
+    return {CONTROL_TOKEN_CHILDREN_ENV: names} if names else {}
+
+
+def computers_environment(children: Iterable[ExternalChild]) -> dict[str, str]:
+    """The gateway's computers: every child it fronts on a sandbox of its own (``children``), a multi env's computers,
+    with or without a control token."""
+    names = ",".join(child.name for child in children)
+    return {COMPUTERS_ENV: names} if names else {}
+
+
+def _frontend_urls(gateway_url: str, website_configs: Optional[list[WebsiteConfig]]) -> Optional[dict[str, str]]:
+    """Each synthetic site's page route through the gateway, by its environment name; None with none, as when every
+    site is live."""
+    return {wc.environment_name: f"{gateway_url}/website/{wc.environment_name}/"
+            for wc in website_configs or [] if not wc.live} or None
+
+
+def _settings_lines(settings: dict) -> list[str]:
+    """The compose line handing a site its ``settings`` in ``WEBSITE_SETTINGS_ENV``, each ``secret:`` or ``env:``
+    reference resolved, quoted so any value is one YAML string, with each ``$`` doubled so Compose interpolates none;
+    none for a site with none."""
+    if not settings:
+        return []
+    resolved = {name: get_config().resolve_reference(value) for name, value in settings.items()}
+    return [f"      - {json.dumps(f'{WEBSITE_SETTINGS_ENV}={json.dumps(resolved)}'.replace('$', '$$'))}"]
+
+
+
+def _seconds(seconds: float) -> str:
+    """``seconds`` as a compose duration, in whole seconds rounded up, so a health check never allows less."""
+    return f"{math.ceil(seconds)}s"
 
 # Budget for reading the gateway's /state once its card is served: answering it runs tool discovery, one server at a
 # time, if startup's didn't complete.
@@ -1670,22 +1826,26 @@ class WebsiteContractError(RuntimeError):
 
 
 async def _wait_for_websites(gateway_url: str, website_configs: list[WebsiteConfig], *,
-                             timeout_s: float = WEBSITE_READY_TIMEOUT_S, poll_s: float = WEBSITE_READY_POLL_S) -> None:
-    """Wait until each site is ready, as its card says through ``/svc/<name>/``: by ``website/v1``'s ``ready``, or,
+                             headers: dict[str, str] | None = None, timeout_s: float = WEBSITE_READY_TIMEOUT_S,
+                             poll_s: float = WEBSITE_READY_POLL_S) -> None:
+    """Wait until each site is ready, as its card says through ``/svc/<name>/``, asked with the gateway's control
+    ``headers``, since its data plane takes them: by ``website/v1``'s ``ready``, or,
     for a card without it or a site serving none, by its stored health path answering 200, which is deprecated.
-    A site whose answer says how long it may take (``timeout_s``) is waited that long and ``WEBSITE_READY_MARGIN_S``,
-    any other ``timeout_s``. Raises naming each site still not ready, and why, once one is waited past its time, and at
-    once, with ``WebsiteContractError``, for a site that answers its card's path with something that isn't a card."""
+    A site whose answer says how long it may take (``timeout_s``) is waited that long, or its own ``ready_timeout_s``
+    if longer, and ``WEBSITE_READY_MARGIN_S``; any other its ``ready_timeout_s`` and the margin, or ``timeout_s`` if
+    longer. Raises naming each site still not ready, and why, once one is waited past its time, and at once, with
+    ``WebsiteContractError``, for a site that answers its card's path with something that isn't a card."""
     started = time.monotonic()
     waiting = {wc.environment_name: wc for wc in website_configs}
+    own = {wc.environment_name: wc.ready_timeout_s or 0 for wc in website_configs}
     why: dict[str, str] = {}
     limit: dict[str, float] = {}
     warned: set[str] = set()
     while waiting:
         for name, wc in list(waiting.items()):
-            ready, why[name], declared = await _website_ready(f"{gateway_url}/svc/{name}", wc.health_path)
+            ready, why[name], declared = await _website_ready(f"{gateway_url}/svc/{name}", wc.health_path, headers=headers)
             if declared is not None:
-                limit[name] = declared + WEBSITE_READY_MARGIN_S
+                limit[name] = max(declared, own[name]) + WEBSITE_READY_MARGIN_S
             if ready is None and name not in warned:
                 warned.add(name)
                 logger.warning(f"website {name!r} has no {WEBSITE_EXTENSION_URI} {WEBSITE_READY_OP} on its card, so its "
@@ -1695,13 +1855,14 @@ async def _wait_for_websites(gateway_url: str, website_configs: list[WebsiteConf
         if not waiting:
             return
         waited = time.monotonic() - started
-        if any(waited >= limit.get(name, timeout_s) for name in waiting):
+        if any(waited >= limit.get(name, max(timeout_s, own[name] + WEBSITE_READY_MARGIN_S)) for name in waiting):
             raise RuntimeError("websites not ready after %ds: %s" % (
                 waited, "; ".join(f"{name} ({why[name]})" for name in waiting)))
         await asyncio.sleep(poll_s)
 
 
-async def _website_ready(base_url: str, health_path: str) -> tuple[Optional[bool], str, Optional[float]]:
+async def _website_ready(base_url: str, health_path: str, *,
+                         headers: dict[str, str] | None = None) -> tuple[Optional[bool], str, Optional[float]]:
     """Whether the site at ``base_url`` is ready, why not, and how long it says it may take: True or False by the
     ``WebsiteReadiness`` its card's ``website/v1`` ``ready`` answers, as the protocol's ``website_readiness`` reads it,
     an answer that isn't one False; with no card or no ``ready`` on it, None once its health path answers 200 and False
@@ -1709,7 +1870,7 @@ async def _website_ready(base_url: str, health_path: str) -> tuple[Optional[bool
     async with httpx.AsyncClient() as client:
         try:
             card = _card_of(await client.get(base_url + WELL_KNOWN_PATH, timeout=10), base_url)
-            readiness = None if card is None else await website_readiness(base_url, card, timeout=10)
+            readiness = None if card is None else await website_readiness(base_url, card, timeout=10, headers=headers)
             if readiness is not None:
                 return readiness.ready, "" if readiness.ready else _not_ready_why(readiness), readiness.timeout_s
             health = await client.get(base_url + health_path, timeout=10)

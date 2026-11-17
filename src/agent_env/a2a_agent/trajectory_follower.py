@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import Awaitable, Callable
 from contextlib import nullcontext
@@ -71,7 +72,8 @@ async def follow_trajectory(
     events and the last one, until the task has ended and every event is read.
 
     Between reads it waits ``poll_interval_seconds``, or less once ``stop`` is set. Transport errors
-    and 5xx answers are retried with backoff; a task the agent no longer knows (404) ends following."""
+    and 5xx answers are retried with backoff until ``stop`` is set, and end following after it; a
+    task the agent no longer knows (404) ends following."""
     after = 0
     failures = 0
     async with nullcontext(client) if client is not None else httpx.AsyncClient() as http:
@@ -113,11 +115,15 @@ async def follow_trajectory(
                 if page.has_more:
                     continue
             if stop.is_set():
+                if failures:
+                    # The turn has ended, so an agent that stops answering now is gone, not busy: retrying
+                    # would poll a dead address until the step's drain gives up. The step marks the turn's end.
+                    logger.warning("Agent stopped answering after task %s ended; stopped following its trajectory", task_id)
+                    return
                 await asyncio.sleep(_STOPPED_INTERVAL_SECONDS)
                 continue
-            try:
-                await asyncio.wait_for(
-                    stop.wait(), timeout=min(poll_interval_seconds + failures * 5, _MAX_BACKOFF_SECONDS)
-                )
-            except TimeoutError:
-                pass
+            # Not `wait_for`: on 3.11 it drops a cancel that lands as `stop` is set, the step's own
+            # teardown, and the follower then outlives its step.
+            with contextlib.suppress(TimeoutError):
+                async with asyncio.timeout(min(poll_interval_seconds + failures * 5, _MAX_BACKOFF_SECONDS)):
+                    await stop.wait()

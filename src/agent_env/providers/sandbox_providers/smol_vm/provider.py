@@ -10,7 +10,7 @@ import shlex
 import socket
 import uuid
 from urllib.parse import urlsplit
-from typing import ClassVar
+from typing import ClassVar, Optional
 
 try:
     from smol import ConnectOptions, Machine, MachineConfig, PortSpec, ResourceSpec
@@ -208,15 +208,18 @@ kill -0 "$(cat {pid_file})"
         )
         sandbox.extra_hosts = (f"host.docker.internal:{gateway}",)
 
-    def _container_args(self, sandbox: SmolVmSandbox, *, image_name: str, port: int, env: dict[str, str]) -> str:
-        args = super()._container_args(sandbox, image_name=image_name, port=port, env=env)
+    def _container_args(self, sandbox: SmolVmSandbox, *, image_name: str, port: int, env: dict[str, str],
+                        shm_mb: Optional[int] = None) -> str:
+        args = super()._container_args(sandbox, image_name=image_name, port=port, env=env, shm_mb=shm_mb)
         return " ".join(f"--add-host {shlex.quote(entry)}" for entry in sandbox.extra_hosts) + " " + args
 
-    async def _start_container(self, sandbox: SmolVmSandbox, *, image_name: str, port: int, env: dict[str, str]) -> None:
+    async def _start_container(self, sandbox: SmolVmSandbox, *, image_name: str, port: int, env: dict[str, str],
+                               shm_mb: Optional[int] = None) -> None:
         trust_dir = await asyncio.to_thread(local_grant_trust)
         if trust_dir is None:
-            await super()._start_container(sandbox, image_name=image_name, port=port, env=env)
+            await super()._start_container(sandbox, image_name=image_name, port=port, env=env, shm_mb=shm_mb)
             return
-        args = self._container_args(sandbox, image_name=image_name, port=port, env={**LOCAL_TRUST_ENV, **env})
+        args = self._container_args(sandbox, image_name=image_name, port=port, env={**LOCAL_TRUST_ENV, **env},
+                                    shm_mb=shm_mb)
         await sandbox.exec_script(f"docker create {args} > /dev/null")
         await start_trusting(sandbox, sandbox.container_name, trust_dir)

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import base64
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandbox
 from agent_env.task_step.context import DeployedAgent, DeployedSandbox, TaskStepContext
 from agent_env.task_step.task_steps.collect_artifacts import CollectArtifactsTaskStep
+from tst.util.capabilities import skip_without_gnu_stat
 
 FILES = {"caa_10/MODIFICATIONS.md": b"# what changed\n", "caa_10/alignment_x/task.toml": b"schema=1\n"}
 
@@ -49,7 +52,7 @@ class _VmSandbox:
         if "stat" in args:
             path = args[-1]
             rel = path.split("/app/artifact/", 1)[-1]
-            return (0, str(len(FILES[rel])), "") if rel in FILES else (-1, "", "no such file")
+            return (0, f"81a4:{len(FILES[rel])}", "") if rel in FILES else (-1, "", "no such file")
         return 0, "", ""
 
     async def exec(self, *args):
@@ -251,3 +254,76 @@ class TestAgentPathUnchanged:
         step = CollectArtifactsTaskStep(id="collect", version=None, agent_name="solver")
         await step.execute(ctx)
         assert seen.get("called") is True
+
+
+@skip_without_gnu_stat()
+class TestOnThisMachine:
+    """A local sandbox's host is the operator's: no link is read there, and a path the task names is read wherever it
+    is, as before."""
+
+    @staticmethod
+    async def _collect(step, sandbox, ctx=None):
+        uploaded = {}
+        store = MagicMock()
+
+        def put(**kw):
+            with open(kw["file_path"], "rb") as fh:
+                uploaded[kw["object_name"]] = fh.read()
+            return f"s3://bucket/{kw['object_name']}"
+
+        store.put_object_file.side_effect = put
+        provider = MagicMock()
+        provider.close = AsyncMock()
+        ctx = ctx or TaskStepContext()
+        collected, _, hard_failures = await step._collect_items(
+            provider, sandbox, None, step._resolve_items(ctx), ctx, store, "aid", 1,
+        )
+        return set(collected), hard_failures, uploaded
+
+    @pytest.mark.asyncio
+    async def test_a_link_is_refused_and_never_read(self, tmp_path):
+        work = tmp_path / "work"
+        (work / "artifact").mkdir(parents=True)
+        (work / "other").mkdir()
+        (tmp_path / "id_rsa").write_bytes(b"operator secret")
+        (work / "artifact" / "report.md").write_bytes(b"# report")
+        (work / "other" / "notes.md").write_bytes(b"notes")
+        (work / "artifact" / "leak").symlink_to(tmp_path / "id_rsa")
+        (work / "artifact" / "notes").symlink_to(work / "other" / "notes.md")
+        step = CollectArtifactsTaskStep(
+            id="c", version=None, sandbox_name="box", base_path="/app/artifact",
+            artifact_paths=["report.md", "leak", "notes"],
+        )
+        collected, hard_failures, uploaded = await self._collect(step, LocalSandbox(work_dir=work))
+        assert collected == {"report.md"}
+        assert set(hard_failures) == {"/app/artifact/leak", "/app/artifact/notes"}
+        assert b"operator secret" not in uploaded.values()
+
+    @pytest.mark.asyncio
+    async def test_a_path_the_task_names_is_read_wherever_it_is(self, tmp_path):
+        work, host = tmp_path / "work", tmp_path / "host"
+        (work / "artifact").mkdir(parents=True)
+        host.mkdir()
+        (work / "artifact" / "report.md").write_bytes(b"# report")
+        (host / "bundle.zip").write_bytes(b"PK bundle")
+        step = CollectArtifactsTaskStep(
+            id="c", version=None, sandbox_name="box", base_path="/app/artifact",
+            artifact_paths=["report.md", str(host / "bundle.zip")],
+        )
+        collected, hard_failures, uploaded = await self._collect(step, LocalSandbox(work_dir=work))
+        assert (collected, hard_failures) == ({"report.md", str(host / "bundle.zip")}, [])
+        assert uploaded == {"report.md": b"# report", str(host / "bundle.zip").lstrip("/"): b"PK bundle"}
+
+    @pytest.mark.asyncio
+    async def test_a_base_path_the_task_names_on_this_machine_is_read(self, tmp_path):
+        out = tmp_path / "host" / "out"
+        out.mkdir(parents=True)
+        (tmp_path / "id_rsa").write_bytes(b"operator secret")
+        (out / "bundle.zip").write_bytes(b"PK bundle")
+        (out / "leak").symlink_to(tmp_path / "id_rsa")
+        step = CollectArtifactsTaskStep(
+            id="c", version=None, sandbox_name="box", base_path=str(out), artifact_paths=["bundle.zip", "leak"],
+        )
+        collected, hard_failures, uploaded = await self._collect(step, LocalSandbox(work_dir=tmp_path / "work"))
+        assert (collected, hard_failures) == ({"bundle.zip"}, [f"{out}/leak"])
+        assert uploaded == {"bundle.zip": b"PK bundle"}

@@ -19,6 +19,7 @@ from agent_env.store.base import NotFoundError
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step import preflight
+from agent_env.task_step.task_steps.browser.contexts import BrowserLeaseContextTaskStep, BrowserReleaseContextTaskStep
 from agent_env.task_step.task_steps.browser.cookies import BrowserDeleteCookiesTaskStep, BrowserSetCookiesTaskStep
 from agent_env.task_step.task_steps.browser.local_storage import (BrowserClearLocalStorageTaskStep,
                                                                    BrowserSetLocalStorageTaskStep)
@@ -28,7 +29,7 @@ from agent_env.task_step.task_steps.browser.tabs import (BrowserActivateTabTaskS
 _ENV = "http://localhost:41000"
 _PREFIX = "/svc/chromium/agentenv/ext/browser"
 _OPS = ("cookies/set", "cookies/delete", "local_storage/set", "local_storage/clear", "tabs/open", "tabs/list",
-        "tabs/close", "tabs/activate")
+        "tabs/close", "tabs/activate", "contexts/lease", "contexts/grant", "contexts/release")
 _TABS = [{"id": "A", "url": "https://shop.test/", "active": True}, {"id": "B", "url": "https://shop.test/orders?page=2",
                                                                       "active": False}]
 
@@ -100,6 +101,43 @@ async def test_no_tab_or_several_at_a_tab_steps_url_fail_it_naming_the_tabs_open
 
 
 @pytest.mark.asyncio
+async def test_a_lease_step_leases_and_grants_and_a_release_step_ends_it(monkeypatch):
+    sent = _mock(monkeypatch)
+    context = TaskStepContext(deployed_envs=[_env()], metadata={})
+
+    await BrowserLeaseContextTaskStep(id="l", version=None, env_id="computer", label="buyer",
+                                      grants=["ada", "bob"]).execute(context)
+    await BrowserReleaseContextTaskStep(id="r", version=None, env_id="computer", label="buyer").execute(context)
+
+    assert [(request.url.path.removeprefix(f"{_PREFIX}/"), json.loads(request.content)) for request in sent] == [
+        ("contexts/lease", {"label": "buyer"}), ("contexts/grant", {"context": "buyer", "user": "ada"}),
+        ("contexts/grant", {"context": "buyer", "user": "bob"}), ("contexts/release", {"context": "buyer"})]
+    assert context.metadata["browser_steps"] == {
+        "l": {"env_id": "computer", "browser": None, "label": "buyer", "id": "C1", "grants": ["ada", "bob"]},
+        "r": {"env_id": "computer", "browser": None, "label": "buyer", "released": True}}
+
+
+@pytest.mark.asyncio
+async def test_a_step_that_names_a_context_acts_in_it_and_a_browser_that_leases_none_is_refused(monkeypatch):
+    sent = _mock(monkeypatch)
+    context = TaskStepContext(deployed_envs=[_env()], metadata={})
+
+    await BrowserSetCookiesTaskStep(id="s", version=None, env_id="computer", context="buyer", cookies=[
+        {"name": "sid", "value": "ada", "url": "https://shop.test/"}]).execute(context)
+    await BrowserCloseTabTaskStep(id="c", version=None, env_id="computer", url="https://shop.test/",
+                                  context="buyer").execute(context)
+    old = _env(ops=[op for op in _OPS if not op.startswith("contexts/")])
+    with pytest.raises(RuntimeError, match="serves no browser/v1 contexts/lease"):
+        await BrowserOpenTabTaskStep(id="o", version=None, env_id="computer", url="https://shop.test/",
+                                     context="buyer").execute(TaskStepContext(deployed_envs=[old], metadata={}))
+
+    assert json.loads(sent[0].content)["context"] == "buyer"
+    assert sent[1].url.params.get("context") == "buyer" and json.loads(sent[2].content) == {"tab": "A",
+                                                                                           "context": "buyer"}
+    assert len(sent) == 3 and context.metadata["browser_steps"]["c"]["context"] == "buyer"
+
+
+@pytest.mark.asyncio
 async def test_a_browser_whose_card_lacks_the_operation_or_isnt_there_is_refused_before_any_call(monkeypatch):
     sent = _mock(monkeypatch)
     old = _env(ops=[op for op in _OPS if op != "tabs/open"])
@@ -163,6 +201,15 @@ def test_preflight_refuses_an_env_with_no_browser_none_of_its_name_or_several_un
     (BrowserCloseTabTaskStep(id="s", version=None, env_id="computer", url="https://shop.test:port/", browser=""),
      ["step 's': browser, when given, must be a non-empty string",
       "step 's': url 'https://shop.test:port/' isn't a URL: Port could not be cast to integer value as 'port'"]),
+    (BrowserOpenTabTaskStep(id="s", version=None, env_id="computer", url="https://shop.test/", context="Buyer"),
+     ["step 's': context: a context's label is lowercase letters, digits and '-', not at either end, at most 40 "
+      "characters, not 'Buyer'"]),
+    (BrowserLeaseContextTaskStep(id="s", version=None, env_id="computer", label="agent-ada-1", grants=[""]),
+     ["step 's': label: a label starting 'agent-' names a context an agent made, so a task's can't: 'agent-ada-1'",
+      "step 's': grants, when given, must be a list of agent names"]),
+    (BrowserReleaseContextTaskStep(id="s", version=None, env_id="computer", label=""),
+     ["step 's': label: a context's label is lowercase letters, digits and '-', not at either end, at most 40 "
+      "characters, not ''"]),
 ])
 def test_fields_that_dont_fit_are_config_problems_and_a_cookies_value_never_shows(step, problems):
     found = step.config_problems()
@@ -181,11 +228,15 @@ def test_fields_that_dont_fit_are_config_problems_and_a_cookies_value_never_show
     BrowserOpenTabTaskStep(id="s", version=None, env_id="computer", url="https://shop.test/", background=True),
     BrowserCloseTabTaskStep(id="s", version=None, env_id="computer", url="https://shop.test/"),
     BrowserActivateTabTaskStep(id="s", version=None, env_id="computer", url="https://shop.test/"),
+    BrowserActivateTabTaskStep(id="s", version=None, env_id="computer", url="https://shop.test/", context="buyer"),
+    BrowserLeaseContextTaskStep(id="s", version=None, env_id="computer", label="buyer", grants=["ada"]),
+    BrowserReleaseContextTaskStep(id="s", version=None, env_id="computer", label="buyer"),
 ])
 def test_each_step_is_registered_and_round_trips(step):
     registered = get_task_step_registry()[step.type]
 
     assert registered is type(step) and registered.from_dict(step.to_dict()).to_dict() == step.to_dict()
+    assert ("context" in step.to_dict()) == (getattr(step, "context_label", None) is not None)
 
 
 @pytest.mark.parametrize(("url", "shown"), [
@@ -242,7 +293,9 @@ def _mock(monkeypatch, *, tabs=_TABS) -> list[httpx.Request]:
         sent.append(request)
         op = request.url.path.removeprefix(f"{_PREFIX}/")
         return httpx.Response(200, json={"cookies/delete": {"deleted": 2}, "local_storage/clear": {"origins": []},
-                                         "tabs/open": {"tab": "C"}, "tabs/list": {"tabs": tabs}}.get(op, {}))
+                                         "tabs/open": {"tab": "C"}, "tabs/list": {"tabs": tabs},
+                                         "contexts/lease": {"context": "buyer", "id": "C1"},
+                                         "contexts/release": {"released": True}}.get(op, {}))
 
     monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real(transport=httpx.MockTransport(handle)))
     return sent

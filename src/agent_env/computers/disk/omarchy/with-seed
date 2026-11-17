@@ -1,0 +1,10 @@
+#!/bin/bash
+# with-seed COMMAND...: COMMAND run as the computer's services are, with its build's settings and the deploy's
+# environment, which agentenv-seed wrote this boot from the launcher's seed; a seed this disk can't read stops it, naming
+# why.
+set -euo pipefail
+if [ -f /opt/agentenv/build-environment ]; then
+    . /opt/agentenv/build-environment
+fi
+. /run/agentenv/environment || { echo "with-seed: ${refused:-the deploy's environment couldn't be read}" >&2; exit 1; }
+exec "$@"

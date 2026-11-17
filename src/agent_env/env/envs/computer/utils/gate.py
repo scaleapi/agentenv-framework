@@ -3,8 +3,10 @@ each other and against what the env declares, and every mismatch is named."""
 
 from __future__ import annotations
 
+import functools
 import itertools
 import re
+import zoneinfo
 from collections.abc import Sequence
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
@@ -14,9 +16,9 @@ from agentenv_protocol.computer.platform import Platform, entry_for, supported
 from jsonschema import Draft202012Validator
 
 from agent_env.artifact.artifacts.computer import FORMS, ComputerArtifact, SettingValue
-from agent_env.config.loader import ENV_REF_PREFIX, SECRET_REF_PREFIX
+from agent_env.config.loader import ENV_REF_PREFIX, SECRET_REF_PREFIX, is_bare_reference
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
-from agent_env.env.envs.computer.utils.install import for_os, platform_of
+from agent_env.env.envs.computer.utils.install import Install, for_os, platform_of
 from agent_env.store.image_store.oci_registry_credentials import names_registry
 
 if TYPE_CHECKING:
@@ -67,8 +69,10 @@ def arches(base: ComputerArtifact, driver: ComputerDriverEnv, apps: Sequence[Com
 
 def check_app(base: ComputerArtifact, driver: ComputerDriverEnv, app: ComputerAppEnv, at: str = "app") -> list[str]:
     """Every way ``app`` doesn't fit a composition of ``base`` and ``driver``, each named from ``at``: a platform it
-    doesn't support, no architecture in common, no install for the base's OS, a port the driver listens on too, or on
-    Windows an install step for the session user, as a Windows computer is composed over ssh as its admin."""
+    doesn't support, no architecture in common, no install for the base's OS, a port the driver listens on too, on
+    Omarchy apt's packages (``_apt_on_omarchy``), shared memory, whose size its disk doesn't take yet, or a service as
+    root, as its systemd runs every service as the session user, or on Windows an install step for the session user,
+    as a Windows computer is composed over ssh as its admin."""
     os = base.os
     if not _matching(base, app.declaration.supports):
         named = ", ".join(_shown(platform) for entry in app.declaration.supports for platform in supported(entry))
@@ -80,6 +84,15 @@ def check_app(base: ComputerArtifact, driver: ComputerDriverEnv, app: ComputerAp
         problems.append(f"{at}: {app.id} declares no install for {_os_shown(base)}")
     elif taken := sorted(set(_ports(app, platform_of(os))) & set(_driver_ports(driver, os))):
         problems.append(f"{at}: {app.id} listens on {', '.join(map(str, taken))}, as {driver.id} does")
+    if platform_of(os) == "linux/omarchy":
+        problems += _apt_on_omarchy(app.install, os, at, app.id)
+        install = for_os(app.install, os)
+        if install is not None and install.shm_mb:
+            problems.append(f"{at}: {app.id} asks for {install.shm_mb} MiB of /dev/shm, which an Omarchy computer "
+                            "doesn't size yet: its /dev/shm is systemd's, sized at boot")
+        problems += [f"{at}: {app.id}'s service {service.name!r} runs as root, and {base.id}'s systemd runs every "
+                     f"program as {base.session.user}" for service in (install.services if install else [])
+                     if service.scope == "system"]
     if os.type == "windows" and (session := [step.name for step in app.declaration.install_steps
                                              if step.scope == "session" and (step.os is None or os.type in step.os)]):
         problems.append(f"{at}: {app.id}'s install steps {', '.join(session)} run as the session user, which a Windows "
@@ -169,7 +182,7 @@ def check_app_settings(app: ComputerAppEnv, values: dict[str, Any], at: str, os_
                 else f"{at}.{name}: {app.id} declares no setting {name!r}" for name in values if name not in properties]
     problems += [f"{at}.{name} is a secret, so it takes a {SECRET_REF_PREFIX}KEY or {ENV_REF_PREFIX}NAME reference "
                  "with no ?default, not its value" for name in values if name in secrets
-                 and not (_names_a_secret(values[name]) or values[name] is None and _optional(properties[name]))]
+                 and not (is_bare_reference(values[name]) or values[name] is None and _optional(properties[name]))]
     problems += [f"{at}: {name!r} is a required property" for name in required if name in secrets and name not in values]
     plain = {**schema, "properties": {name: setting for name, setting in properties.items() if name not in secrets},
              "required": [name for name in required if name not in secrets]}
@@ -207,7 +220,7 @@ def check_computer_settings(base: ComputerArtifact, values: Any) -> tuple[dict[s
         if (setting := base.config.get(name)) is None:
             problems.append(f"computer_settings.{name}: {base.id} declares no setting {name!r}")
         elif setting.secret:
-            if _names_a_secret(value):
+            if is_bare_reference(value):
                 checked[name] = value
             else:
                 problems.append(f"computer_settings.{name} is a secret, so it takes a {SECRET_REF_PREFIX}KEY or "
@@ -218,15 +231,17 @@ def check_computer_settings(base: ComputerArtifact, values: Any) -> tuple[dict[s
         elif base.os.type == "windows" and name == "resolution" and value != WINDOWS_DISPLAY:
             problems.append(f"computer_settings.resolution: a Windows computer's display is {WINDOWS_DISPLAY} for now, "
                             f"not {value}")
+        elif name == "timezone" and value not in _time_zones():
+            problems.append(f"computer_settings.timezone: {value!r} isn't an IANA time zone, such as UTC or "
+                            "America/Chicago")
         else:
             checked[name] = value
     return checked, problems
 
 
-def _names_a_secret(value: Any) -> bool:
-    """Whether ``value`` names a secret rather than holding it: a bare reference, as a stored context keeps one."""
-    return (isinstance(value, str) and value.startswith((ENV_REF_PREFIX, SECRET_REF_PREFIX)) and "?" not in value
-            and value not in (ENV_REF_PREFIX, SECRET_REF_PREFIX))
+@functools.cache
+def _time_zones() -> frozenset[str]:
+    return frozenset(zoneinfo.available_timezones())
 
 
 def _platform(base: ComputerArtifact, driver: ComputerDriverEnv) -> list[str]:
@@ -241,10 +256,23 @@ def _platform(base: ComputerArtifact, driver: ComputerDriverEnv) -> list[str]:
     if (install := for_os(driver.install, os)) is None:
         problems.append(f"driver: {driver.id} declares no install for {_os_shown(base)}")
     else:
-        init = base.forms.container.init if base.forms.container is not None else "launchd"
+        form = base.forms.container or base.forms.disk
+        init = form.init if form is not None else "launchd"
         problems += [f"driver: its service {service.name!r} runs as root, and {base.id}'s {init} runs every program as "
                      f"{base.session.user}" for service in install.services if service.scope == "system"]
+        problems += _apt_on_omarchy(driver.install, os, "driver", driver.id)
     return problems
+
+
+def _apt_on_omarchy(installs: dict[str, Install], os: Any, at: str, who: str) -> list[str]:
+    """Why ``who``'s install, of ``installs``, doesn't fit an Omarchy computer: it's its Linux one, as it declares none
+    for linux/omarchy, and names apt's packages or sources, which Omarchy has no apt for, so they'd be left out."""
+    install = for_os(installs, os)
+    if (platform_of(os) != "linux/omarchy" or "linux/omarchy" in installs or install is None
+            or (install.packages is None and not install.sources)):
+        return []
+    return [f"{at}: {who}'s Linux install names apt packages, which an Omarchy computer has no apt for; declare its "
+            "install for linux/omarchy"]
 
 
 def _matching(base: ComputerArtifact, supports: list) -> list[Platform]:

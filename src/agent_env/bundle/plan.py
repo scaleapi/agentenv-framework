@@ -63,14 +63,14 @@ from agent_env.task_step.task_step import TaskStep
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.install_agent import InstallAgentTaskStep
 from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
-from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
+from agent_env.task_step.task_steps.prompt_agent import is_prompt_step, user_sim_agents
 
 from ._fs import fold, relative, with_article
 from .authoring import AuthoringContext, entry_files, staged_build_context
 from .parse import NAMED_BY, Bundle, BundleEntry, BundleError, BundleKind, parse_bundle
 from .variants import Varied
 from .resolve import (BuiltImage, BundleImage, Reference, ResolvedBundle, ResolvedEntry, build_step, entity_class,
-                      resolve_bundle)
+                      resolve_bundle, sync_context_paths)
 
 if TYPE_CHECKING:
     from .installed import InstalledBundle
@@ -920,6 +920,8 @@ class _Planner:
                 if name is None:
                     continue
                 group = ref.where.partition("[")[0]
+                if group == "browser_envs":  # a browser computer runs as a computer, any other browser as an MCP server
+                    group = "computer_envs" if self._is_computer(ref, store_latest) else "mcp_server_envs"
                 named.setdefault(group, set()).add(name)
                 if group == "computer_envs":
                     computers.append(name)
@@ -1028,8 +1030,10 @@ class _Planner:
                 for child in children:
                     if child.kind is not EntityKind.ENV:
                         continue
-                    held = (self._server_names(child, store_latest) if child.where.startswith("computer_envs[") else
-                            {self._environment_name(child, store_latest)})
+                    computer = child.where.startswith("computer_envs[") or (
+                        child.where.startswith("browser_envs[") and self._is_computer(child, store_latest))
+                    held = (self._server_names(child, store_latest) if computer
+                            else {self._environment_name(child, store_latest)})
                     names |= held if held is not None else {None}
             else:
                 names = {self.accepted.get(_key(ref.local), {}).get("environment_name")}
@@ -1044,8 +1048,10 @@ class _Planner:
         except (NotFoundError, ValueError, KeyError, TypeError):
             return None  # reported by the store ref check
         if isinstance(env, MultiEnv):
-            return {*(child.environment_name for child in [*env.mcp_server_envs, *env.website_envs]),
-                    *(name for computer in env.computer_envs
+            browsers = env.browser_envs or []
+            return {*(child.environment_name for child in [*env.mcp_server_envs, *env.website_envs,
+                                                           *(b for b in browsers if not isinstance(b, ComputerEnv))]),
+                    *(name for computer in [*env.computer_envs, *(b for b in browsers if isinstance(b, ComputerEnv))]
                       for name in (computer.environment_name, *(app.environment_name for app in computer.composed_apps())))}
         if isinstance(env, ComputerEnv):
             return {env.environment_name, *(app.environment_name for app in env.composed_apps())}
@@ -1080,6 +1086,13 @@ class _Planner:
         if ref.local is not None:
             return list(self.accepted.get(_key(ref.local), {}).get("domains") or [])
         return list(getattr(self._store_entity(ref, store_latest), "domains", None) or [])
+
+    def _is_computer(self, ref: Reference, store_latest: dict[tuple[EntityKind, str], int] | None) -> bool:
+        """Whether the env ``ref`` names is a computer env, the bundle's own by its type, a store one's as stored."""
+        if isinstance(ref.local, BundleEntry):
+            cls = get_env_registry().get(ref.local.type)
+            return cls is not None and issubclass(cls, ComputerEnv)
+        return isinstance(self._store_entity(ref, store_latest), ComputerEnv)
 
     def _store_entity(self, ref: Reference, store_latest: dict[tuple[EntityKind, str], int] | None) -> Any:
         """The store's entity ``ref`` names at the version the plan read, or None when that's unknown."""
@@ -1206,11 +1219,10 @@ _UNREAD: Any = object()  # the configured default agent, before a task needs it
 
 
 def solver_steps(steps: Any) -> tuple[str, ...]:
-    """The ids of the steps in ``steps``, a task's config, that deploy or install an agent a ``prompt_agent`` step
-    prompts, and not as its user simulator: the solver's."""
-    prompts = [step for step in steps if isinstance(step, dict) and step.get("type") == PromptAgentTaskStep.type]
-    prompted = {step.get("agent_name") or TaskStep.DEFAULT_AGENT_NAME for step in prompts}
-    prompted -= {step.get("user_agent_name") or PromptAgentTaskStep.DEFAULT_USER_AGENT_NAME for step in prompts}
+    """The ids of the steps in ``steps``, a task's config, that deploy or install an agent a step prompts as the agent
+    under test (``is_prompt_step``), and not as its user simulator: the solver's."""
+    prompts = [step for step in steps if isinstance(step, dict) and is_prompt_step(step)]
+    prompted = {step.get("agent_name") or TaskStep.DEFAULT_AGENT_NAME for step in prompts} - user_sim_agents(steps)
     return tuple(step["id"] for step in steps if isinstance(step, dict) and isinstance(step.get("id"), str)
                  and step.get("type") in (DeployAgentTaskStep.type, InstallAgentTaskStep.type)
                  and (step.get("agent_name") or TaskStep.DEFAULT_AGENT_NAME) in prompted)
@@ -1242,6 +1254,8 @@ def _renamed(entry: ResolvedEntry, ids: Mapping[tuple[EntityKind, str], str]) ->
     for site in sites:
         if site.ref.role is RefRole.INPUT and (site.ref.kind, site.value) in ids:
             site.rewrite(ids[site.ref.kind, site.value])
+    if entry.entry.kind is BundleKind.TASK:
+        sync_context_paths(entry.entry.config, config)
     return config
 
 

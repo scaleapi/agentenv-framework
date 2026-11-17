@@ -136,6 +136,69 @@ async def test_default_create_container_mutates_mode_to_container_and_reset_cont
 
 
 @pytest.mark.asyncio
+async def test_a_vms_container_gets_the_shm_asked_for_at_create_and_reset():
+    class _FakeVm(VmSandbox):
+        type = "fake-vm"
+
+        def __init__(self):
+            self.sandbox_id, self.tunnel_urls, self.vnc_url, self.mode = "vm-fake", {}, None, "vm"
+            self.scripts: list[str] = []
+
+        async def terminate(self) -> None:
+            pass
+
+        async def exec_script(self, script: str) -> str:
+            self.scripts.append(script)
+            return ""
+
+    fake_vm = _FakeVm()
+
+    class _VmStyleProvider(SandboxProvider):
+        async def create_vm(self, **kwargs):
+            return fake_vm
+
+        async def create_sandbox(self, **kwargs):
+            raise NotImplementedError
+
+    vm_provider = _VmStyleProvider()
+    await vm_provider.create_container(image_name="img:v1", port=8080, env={}, shm_mb=1024)
+    sized = fake_vm.scripts[-1]
+    await vm_provider.reset_container(fake_vm, image_name="img:v1", port=8080, env={}, shm_mb=1024)
+    await vm_provider.reset_container(fake_vm, image_name="img:v1", port=8080, env={})
+
+    assert sized.startswith("docker run -d ") and " --shm-size 1024m " in sized
+    assert " --shm-size 1024m " in fake_vm.scripts[-3] and "--shm-size" not in fake_vm.scripts[-1]
+
+
+def test_shared_memory_is_on_for_the_default_vm_path_and_off_where_a_class_overrides_create_or_reset_unasked():
+    class Vm(SandboxProvider):
+        async def create_vm(self, **kwargs):
+            raise NotImplementedError
+
+    class ContainerOnly(SandboxProvider):
+        async def create_sandbox(self, **kwargs):
+            raise NotImplementedError
+
+    class OldPlugin(Vm):
+        async def create_container(self, *, image_name, port, env):
+            raise NotImplementedError
+
+    class Declared(Vm):
+        SHARED_MEMORY = True
+
+        async def reset_container(self, sandbox, *, image_name, port, env, shm_mb=None):
+            raise NotImplementedError
+
+    class Inherits(Declared):
+        pass
+
+    assert [cls.SHARED_MEMORY for cls in (Vm, ContainerOnly, OldPlugin, Declared, Inherits)] == [
+        True, False, False, True, True]
+    assert LocalSandboxProvider.SHARED_MEMORY and ModalVmSandboxProvider.SHARED_MEMORY
+    assert ModalSandboxProvider.SHARED_MEMORY
+
+
+@pytest.mark.asyncio
 async def test_a_create_container_cancelled_during_the_pull_terminates_the_vm():
     pulling = asyncio.Event()
 

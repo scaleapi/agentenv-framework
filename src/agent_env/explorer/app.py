@@ -60,6 +60,20 @@ def _host_only(raw: str) -> str:
     return raw.split(":", 1)[0]
 
 
+def _from_another_page(request, allowed_origins: set[str]) -> bool:
+    """Whether a browser sent this request from a page other than the explorer's own. Fetch Metadata says so for
+    anything but ``same-origin`` or a typed URL (``none``); ``same-site`` too, since every loopback port is one site and
+    the local providers publish env sites there. A browser that sends no Fetch Metadata is judged by its Origin. A
+    configured cors_origin is admitted, and curl and the CLI send neither header."""
+    origin = (request.headers.get("origin") or "").rstrip("/").lower()
+    if origin in allowed_origins:
+        return False
+    site = request.headers.get("sec-fetch-site")
+    if site is not None:
+        return site not in ("same-origin", "none")
+    return bool(origin) and origin != f"{request.url.scheme}://{request.url.netloc}".lower()
+
+
 def packaged_ui_dir() -> Optional[str]:
     """The UI shipped inside the wheel (``agent_env/explorer/static``), or None from a source
     checkout with no built ``static/`` — then the explorer is API-only unless ``--ui`` is given."""
@@ -111,7 +125,8 @@ def create_app(static_dir: Optional[str] = None) -> FastAPI:
         redoc_url="/api/redoc",
         openapi_url="/openapi.json",
     )
-    # Loopback-only by default (a no-auth local explorer); an explicit [explorer] cors_origins overrides.
+    # No other origin reads a response by default, other loopback ports included: the local providers publish env
+    # sites, consoles and agent pages there. An explicit [explorer] cors_origins names the ones that may.
     cors = settings["cors_origins"]
     if cors and "*" in cors:
         raise ConfigError(
@@ -121,7 +136,6 @@ def create_app(static_dir: Optional[str] = None) -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors or [],
-        allow_origin_regex=None if cors else r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
         allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["*"],
     )
@@ -145,18 +159,11 @@ def create_app(static_dir: Optional[str] = None) -> FastAPI:
         host = _host_only(request.headers.get("host") or "")
         if host and host not in allowed_hosts:
             return JSONResponse(status_code=421, content={"detail": f"host {host!r} not allowed"})
-        # CSRF: a page you visit while `up` runs can't read our loopback-CORS reply,
-        # but a cross-site *write* already fires. Browsers tag such requests
-        # Sec-Fetch-Site: cross-site (a forbidden header page JS can't set); curl and
-        # the agent-env CLI send none, so only a genuine browser cross-site hit to
-        # /api is refused.
-        if (request.url.path.startswith("/api")
-                and request.headers.get("sec-fetch-site") == "cross-site"
-                and (request.headers.get("origin") or "").rstrip("/").lower() not in allowed_origins):
-            return JSONResponse(status_code=403, content={"detail": "cross-site request refused"})
+        if request.url.path.startswith("/api") and _from_another_page(request, allowed_origins):
+            return JSONResponse(status_code=403, content={"detail": "request from another page refused"})
         response = await call_next(request)
-        # The object byte-proxy picks its own per-content-type policy (CSP: sandbox on
-        # active types, deliberately none on passive ones), so leave it alone entirely
+        # The object byte-proxy picks its own per-content-type policy (CSP sandbox on anything
+        # not plainly passive, a scriptless one on the rest), so leave it alone entirely
         # rather than layering a weaker app policy over it.
         if request.url.path.startswith(f"{API}/objects/"):
             return response

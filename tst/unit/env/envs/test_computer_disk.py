@@ -7,6 +7,7 @@ a VM, its settings in its seed, and a reset boots it afresh. Docker and the regi
 
 import asyncio
 import base64
+import contextlib
 import json
 import threading
 from datetime import datetime
@@ -21,7 +22,8 @@ from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.store import get_artifact_store
 from agent_env.env import Env
 from agent_env.config.runtime import Config
-from agent_env.env.envs.computer.utils import boot, composer, probing
+from agent_env.env.envs.computer.env import ComputerEnv
+from agent_env.env.envs.computer.utils import boot, builder, composer, probing
 from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.published_images import DISK
 from agent_env import providers
@@ -86,6 +88,46 @@ def test_a_disk_is_reused_by_its_key_of_its_containers_key_the_base_disk_and_the
         arch: (r["key"], r["image"], True) for arch, r in first.items()} and after_other == made
     assert all(raised.metadata["composed"]["disk"][arch]["key"] != first[arch]["key"] for arch in first)
     assert len(docker.disk_builds) > made
+
+
+def test_a_disk_is_looked_up_made_and_pushed_holding_a_lock_of_its_key_so_composes_of_it_take_turns(
+        disk_base, driver, docker, monkeypatch):
+    held, events = set(), []
+    real_locks, real_stored = composer.holding_locks, composer._stored
+    real_build, real_push = docker.build_image, docker.push
+
+    @contextlib.contextmanager
+    def holding(ids, on_wait=None):
+        with real_locks(ids, on_wait):
+            held.update(ids)
+            try:
+                yield
+            finally:
+                held.difference_update(ids)
+
+    def stored(env, key):
+        events.append(("looked up", key, set(held)))
+        return real_stored(env, key)
+
+    def build(dockerfile, context, tag, **kw):
+        events.append(("made", tag, set(held)))
+        return real_build(dockerfile, context, tag, **kw)
+
+    def push(tag, ref, store):
+        events.append(("pushed", tag, set(held)))
+        return real_push(tag, ref, store)
+
+    monkeypatch.setattr(composer, "holding_locks", holding)
+    monkeypatch.setattr(composer, "_stored", stored)
+    monkeypatch.setattr(builder, "build_image", build)
+    monkeypatch.setattr(builder, "push_local_image", push)
+
+    disks = Env.get(_put(disk_base, driver).id).metadata["composed"]["disk"]
+
+    for arch, result in disks.items():
+        names = (result["key"], f"agentenv-computer:{result['key'][7:23]}-disk-{arch}")
+        assert [(what, f"linux-disk:{result['key']}" in locks) for what, name, locks in events if name in names] == [
+            ("looked up", True), ("made", True), ("pushed", True)]
 
 
 def test_a_bases_disk_size_is_in_the_key_and_the_build_of_the_disk_made_for_it(disk_base, driver, docker):
@@ -244,7 +286,7 @@ def vms(monkeypatch):
     monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "create_vm", create_vm)
     monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "reset_vm", reset_vm)
     monkeypatch.setattr(local_sandbox, "kvm_platforms", lambda: frozenset({"linux/arm64"}))
-    monkeypatch.setattr(boot, "ready", AsyncMock(side_effect=lambda url, timeout, token, answering=False: {
+    monkeypatch.setattr(boot, "ready", AsyncMock(side_effect=lambda url, timeout, token, answering=False, sandbox=None: {
         **DRIVER_CARD, "name": "desktop"}))
     monkeypatch.setattr(env_computer_provider, "ready", boot.ready)
     monkeypatch.setattr(env_computer_provider, "_require_display", AsyncMock())
@@ -566,6 +608,27 @@ async def test_a_reset_of_a_disk_boots_it_afresh_in_its_vm_with_the_records_sett
     assert kwargs["env"][CONTROL_TOKEN_ENV] == deployed.control_token
     assert kwargs["env"]["AGENTENV_SETTING_RESOLUTION"] == "1600x900"
 
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asks", [1024, None])
+async def test_a_disks_init_is_told_the_shared_memory_its_apps_ask_for_at_boot_and_at_a_reset(disk_base, driver, docker,
+                                                                                            vms, monkeypatch, asks):
+    monkeypatch.setattr(ComputerEnv, "shm_mb", lambda self: asks)
+    env = _put(disk_base, driver, display={"width": 1600, "height": 900})
+    deployed = await Env.get(env.id).deploy(env_params={"form": "disk"})
+    monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "get_sandbox", AsyncMock(
+        return_value=local_sandbox.LocalSandbox(port_map={18765: 20001}, sandbox_id="local-vm1")))
+    monkeypatch.setattr(env_computer_provider, "end_recordings", AsyncMock())
+
+    await ResetEnvTaskStep(id="reset", version=None, env_id=env.id, fail_task_on_error=True).execute(
+        TaskStepContext(deployed_envs=[deployed]))
+
+    ((created,), ((_, reset),)) = vms.created, vms.reset
+    told = {boot.SHM_MB_ENV: str(asks)} if asks else {}
+    assert {key: created["env"][key] for key in created["env"] if key == boot.SHM_MB_ENV} == told
+    assert {key: reset["env"][key] for key in reset["env"] if key == boot.SHM_MB_ENV} == told
+    assert "shm_mb" not in created and deployed.metadata["computer"].get("shm_mb") == asks
 
 def test_a_computer_artifact_takes_a_disk_form_and_reads_its_image(base, docker):
     registry = docker.registry

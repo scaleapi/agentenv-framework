@@ -1804,6 +1804,9 @@ interface TrajectoryViewerProps {
   isInProgress?: boolean;
   // Object URL of this trajectory; only used to lazy-load screenshot-trimmed frames.
   screenshotBaseUri?: string;
+  // An always_on wake: its closing text is the agent's private note, never sent to the user (only message_user texts
+  // are), so it is labelled as such and shown quieter.
+  closingNote?: boolean;
 }
 
 export function TrajectoryViewer({
@@ -1811,6 +1814,7 @@ export function TrajectoryViewer({
   timelineScrollRef,
   isInProgress = false,
   screenshotBaseUri,
+  closingNote = false,
 }: TrajectoryViewerProps) {
   const {
     model,
@@ -2099,16 +2103,37 @@ export function TrajectoryViewer({
           })()}
 
         {finalResponse && (
-          <div className="rounded-lg border border-[var(--border)] bg-[var(--card)] flex-shrink-0">
+          <div
+            className={
+              closingNote
+                ? 'rounded-lg border border-dashed border-[var(--border)] flex-shrink-0'
+                : 'rounded-lg border border-[var(--border)] bg-[var(--card)] flex-shrink-0'
+            }
+          >
             <div
               className="p-3"
               style={{
                 borderLeftWidth: '4px',
-                borderLeftColor: isInProgress ? '#3B82F6' : '#10B981',
+                borderLeftColor: closingNote
+                  ? 'var(--border)'
+                  : isInProgress
+                  ? '#3B82F6'
+                  : '#10B981',
               }}
             >
               <div className="text-[10px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)] mb-2 flex items-center gap-2">
-                {isInProgress ? 'Latest Response' : 'Final Response'}
+                {closingNote ? (
+                  <span>
+                    Closing note{' '}
+                    <span className="normal-case tracking-normal font-normal">
+                      (private, not sent to the user)
+                    </span>
+                  </span>
+                ) : isInProgress ? (
+                  'Latest Response'
+                ) : (
+                  'Final Response'
+                )}
                 {isInProgress && (
                   <span className="inline-flex items-center gap-1 normal-case tracking-normal text-[10px] font-normal text-blue-500">
                     <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" />
@@ -2116,7 +2141,13 @@ export function TrajectoryViewer({
                   </span>
                 )}
               </div>
-              <div className="max-h-48 overflow-y-auto">
+              <div
+                className={
+                  closingNote
+                    ? 'max-h-48 overflow-y-auto text-xs text-[var(--muted-foreground)]'
+                    : 'max-h-48 overflow-y-auto'
+                }
+              >
                 <SimpleMarkdown text={finalResponse} />
               </div>
             </div>

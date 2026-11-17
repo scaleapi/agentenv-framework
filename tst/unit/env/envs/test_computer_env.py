@@ -13,8 +13,8 @@ import json
 import logging
 import re
 import shutil
+import subprocess
 import urllib.parse
-from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -30,6 +30,7 @@ from agentenv_protocol.tool_access import DISABLE_TOOL_EXTENSION_URI, ENABLE_TOO
 from agentenv_protocol.website_browser import BROWSER
 from click.testing import CliRunner
 
+from agent_env.artifact.artifacts import docker_image
 from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.artifact.artifacts.environment import EnvironmentArtifact
@@ -41,11 +42,14 @@ from agent_env.cli import cli
 from agent_env.config import get_config
 from agent_env.env import Env
 from agent_env.env import env as env_module
+from agent_env.env import published_images
 from agent_env.env.env import DeployedEnv, EnvCapabilityUnsupported
 from agent_env.env.envs.computer.utils import (boot, builder, composed, composer, gate, inside, packages, params,
                                                probing, resolve_in_base)
 from agent_env.env.envs.computer.utils import sites as computer_sites
 from agent_env.env.envs.computer.utils.composer import Composing
+from agent_env.store.image_store import registry_api
+from agent_env.store.image_store.registry_api import RegistryRefusedError
 from agent_env.env.envs.computer.utils.probing import _probe
 from agent_env.env.envs.computer.env import COMPUTER_TOOLS, ComputerEnv
 from agent_env.env.envs.computer import app_env
@@ -56,6 +60,7 @@ from agent_env.plugins._bundles import ALIASES_FILE, InstalledBundle, installed_
 from agent_env import providers
 from agent_env.providers.env_providers import env_computer_provider
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import ChainedSandboxProvider
+from agent_env.providers.sandbox_providers.sandbox_provider import SandboxProvider
 from agent_env.providers.env_providers.env_provider import DeployRefused
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
@@ -119,9 +124,24 @@ def test_a_computer_env_is_composed_for_each_arch_and_written_with_the_computer_
     assert composed["arm64"]["lock"].startswith("sha256:") and composed["arm64"]["lock"] != composed["amd64"]["lock"]
     assert arm64["conf"] == (
         "[program:driver-desk-driver]\ncommand=/opt/agentenv/drivers/desk/venv/bin/python -m agentenv_protocol.computer.serve "
-        'driver.py:Desk\ndirectory=/opt/agentenv/drivers/desk\nenvironment=MCP_PORT="18765"\nautorestart=true\n'
+        'driver.py:Desk\ndirectory=/opt/agentenv/drivers/desk\nenvironment=MCP_PORT="18765",AGENTENV_REAL_TIME="1"\n'
+        'autorestart=true\n'
         "redirect_stderr=true\nstdout_logfile=/var/log/agentenv/driver-desk-driver.log\n")
     assert ComputerEnv.from_dict(stored.to_dict()).to_dict() == stored.to_dict()
+
+
+def test_a_base_whose_container_form_starts_as_root_composes_an_image_that_starts_as_root(base, driver, docker):
+    image = base.image()
+    rooted = _base(image, forms={"container": {"image": {"id": image.id, "version": image.version}, "init": "supervisord",
+                                               "input_channel": "env", "start_as": "root"}})
+
+    _put(rooted, driver)
+
+    composed = Env.get("@local/~/kit/desktop").metadata["computer"]
+    assert ComputerArtifact.get(rooted.id, rooted.version).forms.container.start_as == "root"
+    assert ComputerArtifact.get(composed["id"], composed["version"]).forms.container.start_as == "root"
+    assert all(build["dockerfile"].splitlines()[-2] == "USER root" for build in docker.builds)
+    assert "start_as" not in base.model_dump()["forms"]["container"]
 
 
 def test_a_key_covers_its_build_files_executable_bits_and_the_composers_format(base, driver, docker, tmp_path,
@@ -265,6 +285,58 @@ def test_gate_3_probes_a_build_with_its_apps_defaults_as_a_deploy_with_no_env_pa
     assert json.loads(booted[0]["environment"]["AGENTENV_APP_SETTINGS"]) == {"mail": {"signature": "-- Ada",
                                                                                       "theme": "dark"}}
 
+
+
+@pytest.mark.parametrize("asks", [1024, None])
+def test_the_probe_boots_a_build_with_the_shared_memory_its_apps_ask_for_as_a_deploy_does(base, driver, docker,
+                                                                                         tmp_path, monkeypatch, asks):
+    monkeypatch.setenv("MAIL_TOKEN", "t0ken")
+    install = {"python": "requirements.txt", "services": [{"name": "imap", "command": "venv/bin/python imap.py"}],
+               **({"shm_mb": asks} if asks else {})}
+    env = _put(base, driver, compose=False, apps=[_app(base, driver, tmp_path / "mail", compose=False, install=install,
+                                                       defaults={"token": "env:MAIL_TOKEN"})])
+    booted = []
+
+    async def fake_boot(link, **kwargs):
+        booted.append(kwargs)
+        return boot.Booted(sandbox=None, url="http://computer", card=CARD)
+
+    monkeypatch.setattr(boot, "boot", fake_boot)
+    monkeypatch.setattr(boot, "discard", AsyncMock())
+    monkeypatch.setattr(probing, "run_probe", AsyncMock(return_value="report"))
+
+    asyncio.run(_probe([SimpleNamespace()], env, driver, "img"))
+
+    assert booted[0]["shm_mb"] == asks
+
+
+@pytest.mark.asyncio
+async def test_a_boot_asks_for_shared_memory_only_where_its_provider_gives_it_and_logs_where_it_doesnt(monkeypatch,
+                                                                                                    caplog):
+    created, sandbox = [], SimpleNamespace(tunnel_urls={18765: "http://computer"})
+
+    class Gives(SandboxProvider):
+        SHARED_MEMORY = True
+
+        async def create_container(self, **kwargs):
+            created.append(kwargs)
+            return sandbox
+
+    class OldPlugin(SandboxProvider):
+        async def create_container(self, *, image_name, port, env, network_policy=None, disk_size_gb=10, timeout=7200,
+                                   attribution=None):
+            created.append({"image_name": image_name})
+            return sandbox
+
+    monkeypatch.setattr(boot, "ready", AsyncMock(return_value=CARD))
+    with caplog.at_level(logging.INFO, logger="agent_env.env.envs.computer.utils.boot"):
+        for provider in (Gives(), OldPlugin()):
+            await boot.boot(provider, image="img", port=18765, environment={}, token="t", network_policy=None,
+                            timeout=60, attribution=None, shm_mb=1024)
+
+    assert created[0]["shm_mb"] == 1024 and "shm_mb" not in created[1]
+    assert "OldPlugin can't size /dev/shm: the container keeps its default, not the 1024 MiB asked for" in caplog.text
+    assert "Gives can't size" not in caplog.text
 
 @pytest.mark.parametrize("left", [{"status": "building"}, {"status": "unverified", "image": "built", "key": "k"}],
                          ids=["interrupted", "unprobed"])
@@ -681,6 +753,180 @@ def test_env_build_by_an_installed_alias_composes_under_the_id_of_the_env_it_nam
         "@local/acme-kit/kit/desktop__computer").image().image_name])
 
 
+MIRROR = "ghcr.io/org/computers"
+
+
+def _mirrored(docker, monkeypatch, read=None):
+    """Move every composed image out of the env's image store into the computer image mirror, as a fresh runner of CI
+    finds them, and record each copy back: the mirror's refs, read with ``read`` when given."""
+    stored = {ref: digest for ref, digest in docker.registry.tags.items()
+              if f"/{composed.REPOSITORY}:" in ref and ":index-" not in ref}
+    for ref in stored:
+        del docker.registry.tags[ref]
+    mirror = {f"{MIRROR}:{composed.mirror_tag(ref.rpartition(':')[2])}": digest for ref, digest in stored.items()}
+    copied, real = [], composer.pin_if_served
+
+    def pin(ref, auth):
+        if ref.startswith(f"{MIRROR}:"):
+            return read(ref) if read else (f"{ref}@{mirror[ref]}" if ref in mirror else None)
+        return real(ref, auth)
+
+    def copy(source, target, source_auth, target_auth):
+        copied.append((source.partition("@")[0], target))
+        docker.registry.tags[target] = source.rpartition("@")[2]
+
+    monkeypatch.setattr(composer, "pin_if_served", pin)
+    monkeypatch.setattr(composer, "copy_image", copy)
+    monkeypatch.setattr(get_config(), "computer_image_mirror", MIRROR)
+    return stored, copied
+
+
+def test_an_image_the_store_lacks_is_copied_from_the_computer_image_mirror_and_reused_rather_than_built(base, driver,
+                                                                                                        docker,
+                                                                                                        monkeypatch):
+    first = _put(base, driver)
+    stored, copied = _mirrored(docker, monkeypatch)
+
+    second = _put(base, driver, id="@local/~/kit/other", environment_name="other")
+
+    reused = Env.get(second.id).metadata["composed"]["container"]
+    assert len(docker.builds) == 2 and all(r["reused"] for r in reused.values())
+    assert sorted(copied) == sorted((f"{MIRROR}:{composed.mirror_tag(ref.rpartition(':')[2])}", ref) for ref in stored)
+    assert {arch: r["image"] for arch, r in reused.items()} == {
+        arch: r["image"] for arch, r in Env.get(first.id).metadata["composed"]["container"].items()}
+
+
+def test_a_change_to_the_code_that_composes_an_image_misses_the_mirror_and_builds_it(base, driver, docker,
+                                                                                    monkeypatch):
+    _put(base, driver)
+    _, copied = _mirrored(docker, monkeypatch)
+    monkeypatch.setattr(composed, "composition", lambda: "sha256:" + "f" * 64)
+
+    second = _put(base, driver, id="@local/~/kit/other", environment_name="other")
+
+    assert len(docker.builds) == 4 and copied == []
+    assert not any(r["reused"] for r in Env.get(second.id).metadata["composed"]["container"].values())
+
+
+def test_a_computer_image_mirror_that_cant_be_read_leaves_the_image_to_be_built(base, driver, docker, monkeypatch,
+                                                                               caplog):
+    _put(base, driver)
+
+    def refused(ref):
+        raise RegistryRefusedError(f"{ref}: ghcr.io refused to serve it (HTTP 403)")
+
+    _, copied = _mirrored(docker, monkeypatch, read=refused)
+    with caplog.at_level(logging.WARNING, logger=composer.__name__):
+        second = _put(base, driver, id="@local/~/kit/other", environment_name="other")
+
+    built = Env.get(second.id).metadata["composed"]["container"]
+    assert len(docker.builds) == 4 and not any(r["reused"] for r in built.values()) and copied == []
+    assert f"the computer image mirror {MIRROR} couldn't give" in caplog.text
+
+
+RELEASED = "ghcr.io/scaleapi/agentenv-chromium"
+
+
+def _released(env, docker, tmp_path, monkeypatch, arches=("amd64", "arm64"), key=None, digest=None):
+    """Record ``env``'s composed ``arches`` as a release wheel records the computers it published, each image in the
+    released repository by the digest it was composed under (``digest`` in its place when given), with its key
+    (``key``) and the lock it was composed from, joined as one index the registry serves; and take that record as the
+    install's. Each arch's released image, and the index."""
+    pairs = Env.get(env.id).metadata["composed"]["container"]
+    record = {arch: {"key": key or pairs[arch]["key"],
+                     "image": f"{RELEASED}@{digest or pairs[arch]['image'].rpartition('@')[2]}",
+                     "lock": json.loads(packages.stored(pairs[arch]["lock"], env.id).model_dump_json())}
+              for arch in arches}
+    index = f"{RELEASED}:index-{'a' * 64}@" + docker.registry.index(**{
+        arch: pairs[arch]["image"].rpartition("@")[2] for arch in arches})
+    path = tmp_path / "published_images.json"
+    path.write_text(json.dumps({"images": [], "computers": [
+        {"env": env.id, "form": "container", "index": index, "arches": record}]}))
+    monkeypatch.setattr(published_images, "RELEASE_FILE", path)
+    serving = docker.registry.pin_digest
+    monkeypatch.setattr(docker_image, "pin_digest", lambda ref, auth: ref if ref.startswith(RELEASED) and "@" in ref
+                        else serving(ref, auth))
+    return {arch: built["image"] for arch, built in record.items()}, index
+
+
+def test_a_compose_of_what_the_release_published_pulls_its_image_without_resolving_or_building(base, driver, docker,
+                                                                                            tmp_path, monkeypatch):
+    released, index = _released(_put(base, driver), docker, tmp_path, monkeypatch)
+    builds, resolved, told = len(docker.builds), len(docker.resolved), []
+
+    second = _put(base, driver, id="@local/~/kit/other", environment_name="other",
+                  composing=Composing(on_progress=told.append))
+
+    pairs = Env.get(second.id).metadata["composed"]["container"]
+    assert len(docker.builds) == builds and len(docker.resolved) == resolved
+    assert {arch: (r["image"], r["published"], r["reused"], r["status"]) for arch, r in pairs.items()} == {
+        arch: (image, True, True, "ready" if arch == "arm64" else "unverified") for arch, image in released.items()}
+    assert f"container/arm64: reusing the image agent-env's release published, {released['arm64']}" in told
+    assert not [line for line in told if "resolving" in line or "building" in line]
+    assert ComputerArtifact.get(f"{second.id}__computer").image().image_name == index
+
+
+def test_a_release_record_of_another_key_or_an_image_the_registry_wont_give_leaves_the_compose_as_before(
+        base, driver, docker, tmp_path, monkeypatch, caplog):
+    first = _put(base, driver)
+    _released(first, docker, tmp_path, monkeypatch, key="sha256:" + "c" * 64)
+    other = _put(base, driver, id="@local/~/kit/other", environment_name="other")
+    unserved, _ = _released(first, docker, tmp_path, monkeypatch, digest="sha256:" + "d" * 64)
+
+    with caplog.at_level(logging.WARNING, logger=composer.__name__):
+        third = _put(base, driver, id="@local/~/kit/third", environment_name="third")
+
+    for env in (other, third):
+        pairs = Env.get(env.id).metadata["composed"]["container"]
+        assert all(r["reused"] and not r.get("published") for r in pairs.values())
+    assert f"agent-env's release published it as {unserved['arm64']}, which can't be pulled" in caplog.text
+
+
+def test_a_released_index_the_registry_wont_give_is_joined_in_the_store_instead(base, driver, docker, tmp_path,
+                                                                                  monkeypatch, caplog):
+    released, index = _released(_put(base, driver), docker, tmp_path, monkeypatch)
+    serving = docker.registry.pin_digest
+
+    def pin(ref, auth):
+        if ref == index:
+            raise registry_api.NoSuchImageError(f"{ref}: ghcr.io has no such image")
+        return ref if ref.startswith(RELEASED) and "@" in ref else serving(ref, auth)
+
+    monkeypatch.setattr(docker_image, "pin_digest", pin)
+    monkeypatch.setattr(composer, "copy_image", lambda source, target, source_auth, target_auth: (
+        docker.registry.tags.__setitem__(target, source.rpartition("@")[2])))
+
+    with caplog.at_level(logging.WARNING, logger=composer.__name__):
+        second = _put(base, driver, id="@local/~/kit/other", environment_name="other")
+
+    pairs = Env.get(second.id).metadata["composed"]["container"]
+    assert all(pairs[arch]["image"] == image and pairs[arch]["published"] for arch, image in released.items())
+    assert ComputerArtifact.get(f"{second.id}__computer").image().image_name.startswith(
+        f"localhost:5000/{composed.REPOSITORY}:index-")
+    assert f"agent-env's release published its index as {index}, which can't be read" in caplog.text
+
+
+def test_an_arch_the_release_published_beside_one_composed_here_joins_an_index_in_the_store(base, driver, docker,
+                                                                                          tmp_path, monkeypatch):
+    released, _ = _released(_put(base, driver), docker, tmp_path, monkeypatch, arches=("arm64",))
+    copied, joined = [], {}
+    monkeypatch.setattr(composer, "copy_image", lambda source, target, source_auth, target_auth: (
+        copied.append((source, target)), docker.registry.tags.__setitem__(target, source.rpartition("@")[2])))
+    monkeypatch.setattr(composer, "write_index", lambda index, images, auth: (
+        joined.update({index: images}), docker.joined(index, images, auth)))
+
+    second = _put(base, driver, id="@local/~/kit/other", environment_name="other")
+
+    pairs = Env.get(second.id).metadata["composed"]["container"]
+    digest = released["arm64"].rpartition("@")[2]
+    in_store = f"localhost:5000/{composed.REPOSITORY}:released-{digest.removeprefix('sha256:')}"
+    assert pairs["arm64"]["image"] == released["arm64"] and pairs["arm64"]["published"]
+    assert not pairs["amd64"].get("published") and copied == [(released["arm64"], in_store)]
+    index = ComputerArtifact.get(f"{second.id}__computer").image().image_name
+    assert joined == {index.partition("@")[0]: {"linux/amd64": pairs["amd64"]["image"],
+                                                "linux/arm64": f"{in_store}@{digest}"}}
+
+
 def test_builds_of_one_env_at_once_keep_each_others_pairs_and_a_failure_doesnt_replace_a_built_one(base, driver,
                                                                                                     docker,
                                                                                                     monkeypatch):
@@ -872,8 +1118,37 @@ async def test_a_reset_ends_the_envs_recordings_then_boots_a_fresh_container_whe
     assert (kwargs["env"]["AGENTENV_SETTING_TIMEZONE"], kwargs["env"]["ENVIRONMENT_NAME"]) == ("Asia/Tokyo", "desktop")
     assert kwargs["env"][CONTROL_TOKEN_ENV] == deployed.control_token
     env_computer_provider.ready.assert_awaited_once_with(deployed.environment_url, boot.READY_TIMEOUT_S,
-                                                         deployed.control_token, answering=False)
+                                                         deployed.control_token, answering=False, sandbox=sandbox)
     assert boots.calls == [(COMPUTER_RECORDING, "end_all", {"reason": "reset"}), "reset_container", (COMPUTER_DISPLAY, "get", None)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asks", [1024, None])
+async def test_a_computer_boots_with_the_shared_memory_its_apps_ask_for_records_it_and_a_reset_keeps_it(
+        base, driver, docker, boots, monkeypatch, tmp_path, asks):
+    monkeypatch.setenv("MAIL_TOKEN", "t0ken")
+    boots.display = (1280, 800)
+    install = {"python": "requirements.txt", "services": [{"name": "imap", "command": "venv/bin/python imap.py"}],
+               **({"shm_mb": asks} if asks else {})}
+    env = _put(base, driver, apps=[_app(base, driver, tmp_path / "mail", compose=False, install=install,
+                                        defaults={"token": "env:MAIL_TOKEN"})])
+    deployed = await Env.get(env.id).deploy()
+    (sandbox,) = boots.sandboxes
+    resets = []
+
+    async def reset_container(self, sandbox, **kwargs):
+        resets.append(kwargs)
+
+    monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "get_sandbox", AsyncMock(return_value=sandbox))
+    monkeypatch.setattr(local_sandbox.LocalSandboxProvider, "reset_container", reset_container)
+    monkeypatch.setattr(env_computer_provider, "ready", AsyncMock(return_value=DRIVER_CARD))
+
+    await ResetEnvTaskStep(id="reset", version=None, env_id=env.id, fail_task_on_error=True).execute(
+        TaskStepContext(deployed_envs=[deployed]))
+
+    ((booted,), (reset,)) = boots.boots, resets
+    assert booted["shm_mb"] == asks and deployed.metadata["computer"].get("shm_mb") == asks
+    assert reset.get("shm_mb") == asks
 
 
 @pytest.mark.asyncio
@@ -1045,12 +1320,12 @@ async def test_a_computer_with_site_routing_reaches_the_websites_the_run_deploye
     ((sandbox, sites, options),) = routes
     assert sandbox is boots.sandboxes[0]
     assert [site.model_dump() for site in sites] == [{"name": "notes", "url": "http://localhost:8080/website/notes/",
-                                                      "domains": ["notes.test"]}]
-    assert options == {"user": "user", "network": None, "valid_for": timedelta(seconds=3600), "label": "desktop",
-                       "os_type": "linux", "display": "x11"}
+                                                      "domains": ["notes.test"], "sign_in_headers": []}]
+    assert options == {"user": "user", "network": None, "label": "desktop", "os_type": "linux", "display": "x11",
+                       "live_hosts": ()}
     assert boots.boots[0]["environment"][HOLD_BOOT_LAUNCH_ENV] == "1"
     record = context.deployed_envs[-1].metadata["computer"]
-    assert record["sites"] == {"names": {"routes": {"notes": ["notes.test"]}}, "ca": "CA PEM", "valid_for_s": 3600}
+    assert record["sites"] == {"names": {"routes": {"notes": ["notes.test"]}}, "ca": "CA PEM"}
     assert record["env_params"]["site_routing"] is True and record["env_params"]["sites"][0]["name"] == "notes"
 
 
@@ -1068,9 +1343,8 @@ async def test_a_computer_deployed_to_route_its_sites_later_boots_held_and_route
     assert boots.boots[0]["environment"].items() >= computer_sites.TRUST_ENVIRONMENTS["linux"].items()
     ((sandbox, sites, options),) = routes
     assert sandbox is boots.sandboxes[0] and [site.name for site in sites] == ["notes"]
-    assert options["valid_for"] == timedelta(seconds=3600)
     record = deployed.metadata["computer"]
-    assert record["env_params"]["sites"][0]["name"] == "notes" and record["sites"]["valid_for_s"] == 3600
+    assert record["env_params"]["sites"][0]["name"] == "notes" and record["sites"]["ca"] == "CA PEM"
 
 
 @pytest.mark.asyncio
@@ -1292,7 +1566,7 @@ async def test_a_start_tab_on_one_of_the_env_sites_that_didnt_load_fails_the_boo
 
     with pytest.raises(RuntimeError) as failed:
         await env_computer_provider._finish_boot(SimpleNamespace(), record, None,
-                                                 SimpleNamespace(site_routing=False), 0, None)
+                                                 SimpleNamespace(site_routing=False), None)
 
     assert record.metadata["computer"]["start_tabs"] == {"chromium": tabs}
     assert str(failed.value) == (
@@ -1337,8 +1611,8 @@ async def test_a_reset_routes_the_fresh_computer_to_the_same_sites_under_a_ca_of
     await ResetEnvTaskStep(id="reset", version=None, env_id=env.id, fail_task_on_error=True).execute(context)
 
     first, again = routes
-    assert again[0] is sandbox and again[1] == first[1] and again[2]["valid_for"] == timedelta(seconds=3600)
-    assert context.deployed_envs[-1].metadata["computer"]["sites"]["valid_for_s"] == 3600
+    assert again[0] is sandbox and again[1] == first[1] and again[2] == first[2]
+    assert context.deployed_envs[-1].metadata["computer"]["sites"]["ca"] == "CA PEM"
 
 
 @pytest.mark.asyncio
@@ -1480,7 +1754,7 @@ async def test_a_boot_hands_the_computer_its_token_and_one_never_ready_takes_its
                         attribution=None)
 
     assert create.await_args.kwargs["env"] == {"ENVIRONMENT_NAME": "desk", CONTROL_TOKEN_ENV: "t0ken"}
-    assert boot.ready.await_args.args[2] == "t0ken"
+    assert boot.ready.await_args.args[2] == "t0ken" and boot.ready.await_args.kwargs["sandbox"] is sandbox
     sandbox.terminate.assert_awaited_once()
     assert local_sandbox.LocalSandbox.find_work_dir("local-unready") is None
 
@@ -1962,6 +2236,34 @@ def _local(work, context):
     shutil.copytree(context, work / builder.CONTEXT)
     base = SimpleNamespace(image_name="ghcr.io/acme/base:1", pinned_name="ghcr.io/acme/base:1")
     return builder.LocalBuilder("LocalSandboxProvider", work, base, "linux/arm64")
+
+
+def test_a_command_the_resolver_runs_that_fails_ends_it_with_the_commands_code_and_no_traceback(monkeypatch, capsys):
+    """The composer reports the output's last line as the reason: it must be the command's error, apt's ``E:`` line,
+    not a traceback naming the command."""
+    def fail(*_args):
+        raise subprocess.CalledProcessError(100, ["apt-get", "install"])
+
+    monkeypatch.setattr(resolve_in_base, "main", fail)
+
+    with pytest.raises(SystemExit) as exited:
+        resolve_in_base.cli(["request.json", "out"])
+
+    assert exited.value.code == 100
+    assert capsys.readouterr().err == ""
+
+
+def test_a_captured_command_that_fails_has_its_error_printed_last(monkeypatch, capsys):
+    def fail(*_args):
+        raise subprocess.CalledProcessError(2, ["dpkg-deb", "-f"], stderr="dpkg-deb: error: not a Debian archive\n")
+
+    monkeypatch.setattr(resolve_in_base, "main", fail)
+
+    with pytest.raises(SystemExit) as exited:
+        resolve_in_base.cli(["request.json", "out"])
+
+    assert exited.value.code == 2
+    assert capsys.readouterr().err.strip().splitlines()[-1] == "dpkg-deb: error: not a Debian archive"
 
 
 def test_the_resolver_installs_the_apt_packages_it_downloads_before_building_wheels(tmp_path, monkeypatch):

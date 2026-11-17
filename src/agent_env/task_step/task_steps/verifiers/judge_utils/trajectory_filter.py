@@ -221,7 +221,7 @@ def compact_otel_trajectory(
         events.extend(tool_events)
         externalized_files.extend(result_files)
     if trajectory_filter.include_response:
-        events.extend(_extract_final_response(spans))
+        events.extend(extract_final_response(spans))
     events.sort(key=lambda e: e.get("timestamp", ""))
 
     logger.info(
@@ -435,18 +435,10 @@ def _extract_tool_events(
     result_file_counter = 0
 
     for span in spans:
-        attrs = span.get("attributes", {})
-        if attrs.get("gen_ai.operation.name") != "execute_tool":
+        if not is_tool_span(span):
             continue
 
-        tool_name = span.get("name", "")
-        prompt_raw = attrs.get("gen_ai.prompt", "{}")
-        prompt = parse_json_attr(prompt_raw)
-        tool_input = prompt.get("input", {}) if isinstance(prompt, dict) else prompt
-
-        completion_raw = attrs.get("gen_ai.completion", "{}")
-        completion = parse_json_attr(completion_raw)
-        tool_output = completion.get("output", completion) if isinstance(completion, dict) else completion
+        tool_name, tool_input, tool_output = tool_span_io(span)
 
         if include_calls:
             events.append({
@@ -480,7 +472,22 @@ def _extract_tool_events(
     return events, externalized_files
 
 
-def _extract_final_response(spans: list[dict]) -> list[dict]:
+def is_tool_span(span: dict) -> bool:
+    return span.get("attributes", {}).get("gen_ai.operation.name") == "execute_tool"
+
+
+def tool_span_io(span: dict) -> tuple[str, object, object]:
+    """An ``execute_tool`` span's tool name, input and output, as its ``gen_ai.prompt`` / ``gen_ai.completion`` carry
+    them."""
+    attrs = span.get("attributes", {})
+    prompt = parse_json_attr(attrs.get("gen_ai.prompt", "{}"))
+    completion = parse_json_attr(attrs.get("gen_ai.completion", "{}"))
+    return (span.get("name", ""),
+            prompt.get("input", {}) if isinstance(prompt, dict) else prompt,
+            completion.get("output", completion) if isinstance(completion, dict) else completion)
+
+
+def extract_final_response(spans: list[dict]) -> list[dict]:
     """Extract the final response from the conversation root span (gen_ai.operation.name == 'chain')."""
     for span in spans:
         attrs = span.get("attributes", {})

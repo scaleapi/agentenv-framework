@@ -4,10 +4,12 @@ a part certainly undoing what an earlier one installed refused and any other fil
 (``clashes``). Docker, the registry and the VMs are faked."""
 
 import pytest
+from pydantic import ValidationError
 
 from agent_env.env import Env
 from agent_env.env.envs.computer.utils import clashes
 from agent_env.env.envs.computer.utils.composer import Composing
+from agent_env.env.envs.computer.utils.install import MacAppInstall, WindowsAppInstall
 from agent_env.store.base import NotFoundError
 from tst.unit.env.envs._computer import MAIL_SERVER, FakeVmProvider, _app, _put
 
@@ -201,3 +203,33 @@ def test_a_builder_vm_compares_what_each_part_wrote_in_a_container_of_the_image_
     assert not list((tmp_path / "vms").rglob("image.tar"))
 
 
+
+
+def _install(**changes):
+    """The mail app's Linux install, with ``changes``."""
+    return {"python": "requirements.txt", "services": [{"name": "imap", "command": "venv/bin/python imap.py"}],
+            **changes}
+
+
+def test_a_computer_takes_the_most_shared_memory_its_apps_ask_for_and_keeps_it_with_its_computer(base, driver,
+                                                                                                 tmp_path):
+    asking = [_app(base, driver, tmp_path / name, compose=False, name=name, install=_install(**size))
+              for name, size in (("mail", {"shm_mb": 512}), ("chat", {"shm_mb": 1024}), ("notes", {}))]
+    none = [_app(base, driver, tmp_path / "plain", compose=False, name="plain")]
+
+    env, plain = _put(base, driver, apps=asking), _put(base, driver, apps=none, id="@local/~/kit/plain-desktop")
+
+    assert env.shm_mb() == 1024 and Env.get(env.id).metadata["computer"]["shm_mb"] == 1024
+    assert plain.shm_mb() is None and "shm_mb" not in Env.get(plain.id).metadata["computer"]
+
+
+@pytest.mark.parametrize("shm_mb", [0, 65537])
+def test_a_shared_memory_size_out_of_range_is_refused_at_put(base, driver, tmp_path, shm_mb):
+    with pytest.raises(ValueError, match=f"shm_mb is 1 to 65536 MiB, not {shm_mb}"):
+        _app(base, driver, tmp_path / "mail", compose=False, install=_install(shm_mb=shm_mb))
+
+
+@pytest.mark.parametrize("model", [MacAppInstall, WindowsAppInstall])
+def test_shared_memory_is_a_linux_installs_alone(model):
+    with pytest.raises(ValidationError, match="shm_mb"):
+        model.model_validate({"shm_mb": 1024})

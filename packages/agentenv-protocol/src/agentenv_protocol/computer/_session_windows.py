@@ -72,8 +72,9 @@ async def launch(argv: list[str], cwd: Path, env: dict[str, str], fds: Optional[
 
 async def stop(pid: int, timeout_s: float) -> None:
     """End the job the helper ``pid`` holds, every process in it: its windows asked to close, then the job ended after
-    ``timeout_s``, or at once when it has no window to close, and waited on until each process it held has exited and
-    it holds none. No one asks how it exited once it's stopped."""
+    ``timeout_s``, or at once when it has no window to close; once the app's processes have closed, the helper, which
+    leaves when its job holds no process but itself, waited on to leave, the job ended should it not; and waited on
+    until each process it held has exited and it holds none. No one asks how it exited once it's stopped."""
     _reaping.forget(pid)
     job = _win32.open_job(pid)
     if job is None:
@@ -85,7 +86,11 @@ async def stop(pid: int, timeout_s: float) -> None:
         deadline = time.monotonic() + (timeout_s if windows else 0)
         while _app_pids(job, pid) and time.monotonic() < deadline:
             await asyncio.sleep(POLL_S)
-        if _app_pids(job, pid):
+        if not _app_pids(job, pid):
+            deadline = time.monotonic() + ENDED_TIMEOUT_S
+            while _win32.job_pids(job) and time.monotonic() < deadline:
+                await asyncio.sleep(POLL_S)
+        if _win32.job_pids(job):
             ending = _win32.open_processes(_win32.job_pids(job))
             try:
                 _win32.terminate_job(job)

@@ -49,12 +49,14 @@ from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
 from agent_env.task_step.task_steps.run_code import RunCodeTaskStep
 from agent_env.task_step.task_steps.computer.snapshot_computer_env import SnapshotComputerEnvTaskStep
-from tst.integration.computer.conftest import docker
+from tst.integration.computer.conftest import docker, only_session_clock_and_egress, process_owners
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
 ARCH = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}[platform.machine().lower()]
 PORT = 18765
+#: The image a container on this machine's network sends a request from, pinned, from the mirror the test images use.
+PYTHON = "mirror.gcr.io/library/python:3.12-slim@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf"
 READ_NOTE = b"""import json, urllib.request
 def run(input):
     with urllib.request.urlopen(input["env"]["url"] + "/.well-known/agent-env.json", timeout=10) as response:
@@ -89,13 +91,12 @@ async def test_the_image_of_this_machines_arch_boots_as_the_session_user_and_pas
     try:
         url = await _ready(name)
         reports = [await run_probe(url, "full") for _ in range(3)]
-        users = set(subprocess.run(["docker", "exec", name, "ps", "-eo", "user="], capture_output=True, text=True,
-                                   check=True).stdout.split())
+        owners = process_owners(name)
     finally:
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
     for report in reports:
         assert report.passed, [f"{c.check} {c.name}: {c.detail}" for c in report.checks if c.status == "failed"]
-    assert users == {"user"}
+    assert only_session_clock_and_egress(owners)
 
 
 def test_an_env_that_changes_only_its_display_and_name_reuses_the_image(desktop):
@@ -111,6 +112,17 @@ def test_an_env_that_changes_only_its_display_and_name_reuses_the_image(desktop)
     assert results[ARCH]["status"] == "ready" and results[ARCH]["card"]["name"] == "other"
     assert results[ARCH]["installed"] == first[ARCH]["installed"] and results[ARCH]["emulated"] is False
     assert took < 60, took
+
+
+#: A request to an address on the internet, around the egress proxy, and through it, printing the status and the body
+#: it answers.
+DIRECT = "import urllib.request as u; u.build_opener(u.ProxyHandler({})).open('http://1.1.1.1', timeout=5)"
+PROXIED = """import urllib.error, urllib.request
+try:
+    urllib.request.urlopen('http://1.1.1.1', timeout=5)
+except urllib.error.HTTPError as e:
+    print(e.code, e.read().decode())
+"""
 
 
 @pytest.mark.asyncio
@@ -130,7 +142,8 @@ async def test_with_no_network_it_is_reached_reaches_nothing_comes_back_fresh_an
             context = await RunCodeTaskStep(id="read", version=None, env_id=closed.id,
                                             script_artifact_id=script.id).execute(context)
             driver = await Driver.connect(deployed.environment_url, 30, deployed.control_token)
-            egress = await driver.run("python3", "-c", "import urllib.request; urllib.request.urlopen('http://1.1.1.1', timeout=5)")
+            direct = await driver.run("python3", "-c", DIRECT)
+            proxied = await driver.run("python3", "-c", PROXIED)
             await driver.run("sh", "-c", "echo x > Desktop/left.txt")
             context = await SnapshotComputerEnvTaskStep(id="snapshot", version=None, env_id=closed.id,
                                                         snapshot_id=f"{closed.id}-snapshot",
@@ -147,7 +160,9 @@ async def test_with_no_network_it_is_reached_reaches_nothing_comes_back_fresh_an
 
     assert context.metadata["script_results"]["read"] == {"note": "inside\n", "card": "closed"}
     assert snapshot == {"Desktop/left.txt": b"x\n", "Downloads/note.txt": b"inside\n"}
-    assert egress["exit_code"] != 0 and "Network is unreachable" in egress["stderr"], egress
+    # Neither the computer itself nor its egress proxy reaches anything: the proxy answers why.
+    assert direct["exit_code"] != 0 and "Network is unreachable" in direct["stderr"], direct
+    assert proxied["stdout"].startswith("502") and "network is unreachable" in proxied["stdout"], proxied
     assert left["exit_code"] != 0 and (restored["exit_code"], restored["stdout"]) == (0, "x\n"), restored
     assert [s.sandbox_id for s in report.terminated] == [sandbox] and not report.failed
     for listing in (["ps", "-aq", "--filter", f"label=agentenv.sandbox={sandbox}"],
@@ -266,8 +281,7 @@ def _post_from_a_container(url: str, body: dict) -> int:
               "headers={'Content-Type': 'application/json'})\n"
               "try:\n    print(urllib.request.urlopen(request, timeout=30).status)\n"
               "except urllib.error.HTTPError as e:\n    print(e.code)\n")
-    out = docker("run", "--rm", "--network", "host", "public.ecr.aws/docker/library/python:3.12-slim",
-                 "python", "-c", script, url, json.dumps(body))
+    out = docker("run", "--rm", "--network", "host", PYTHON, "python", "-c", script, url, json.dumps(body))
     return int(out.stdout.decode().strip())
 
 

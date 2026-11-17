@@ -3,19 +3,16 @@ Hugging Face Hub dataset."""
 
 from __future__ import annotations
 
-import os
 import shlex
 import time
 import traceback
-from pathlib import Path
 
 import click
 
 from agent_env.bundle import (BundleError, BundleKind, BundleRun, DryRun, Outcome, RunInterrupted, TaskRun, Variant,
                               dry_run_bundle, run_bundle)
 from agent_env.bundle.hub import SOURCE_KEY, HubSource
-from agent_env.bundle.installed import (InstalledBundle, checked, find_bundle, installed_bundles, locate_bundle,
-                                        path_like, run_name)
+from agent_env.bundle.installed import InstalledBundle, checked, installed_bundles, locate_bundle, run_name
 from agent_env.bundle.plan import NotInStore
 from agent_env.bundle.requires import UnmetRequirements
 from agent_env.cli._install_prompt import offer_to_install
@@ -86,7 +83,7 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
 
     --set sets a key of one of the bundle's envs for this run, as its env.toml would: --set
     envs/desktop.driver=cua-driver runs the env in envs/desktop with that driver, and --set
-    envs/desktop.computer=ubuntu-24.04-headless composes it on that base. The envs it changes, the envs and tasks
+    envs/desktop.computer=ubuntu-24.04-browser composes it on that base. The envs it changes, the envs and tasks
     that name them and the evals that name those tasks are written under ids of their own, ending in the settings,
     such as desktop(desktop.driver cua-driver), and compose and reuse their images as any env does, leaving the
     bundle as written. A key or value the env's type refuses, or a run whose tasks deploy no env it changes, is
@@ -126,8 +123,6 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
                             id_root=id_root, keep=keep, emulate=not no_emulate, source=hub.source if hub else None,
                             variant=variant)
     except BundleError as e:
-        if root is not None:
-            _note_an_installed_namesake(e, bundle, root, id_root)
         if isinstance(e, NotInStore) and hub is not None and hub.setup_note:
             e.add_note(hub.setup_note)
         if isinstance(e, UnmetRequirements) and not dry_run:
@@ -146,24 +141,6 @@ def run(ctx: click.Context, bundle: str | None, tasks: tuple[str, ...], evals: t
     if result.failed:
         raise SystemExit(1)
 
-
-
-def _note_an_installed_namesake(error: BundleError, text: str, root: Path, id_root: str | None) -> None:
-    """A folder that isn't a bundle can hide the installed bundle the user meant. The note names it by its
-    qualified name, which only helps when that isn't what was typed and isn't a folder too."""
-    if id_root is not None or path_like(text) or _has_kind_folder(root):
-        return
-    try:
-        found = find_bundle(text)
-    except Exception:
-        return
-    if os.path.isdir(found.qualified):
-        return
-    error.add_note(f"an installed bundle is also named {text!r}: run it with agent-env run {found.qualified}")
-
-
-def _has_kind_folder(root: Path) -> bool:
-    return any(os.path.isdir(root / kind.value) for kind in BundleKind)
 
 
 def _installed() -> tuple[InstalledBundle, ...]:

@@ -54,12 +54,14 @@ class Record:
                 if result.get("status") in BUILT and not stale(result)}
 
     def computer(self, ref: dict | None) -> None:
-        """Record the env's computer, with the images it was written over, the disks' and the VM bundles' apart."""
+        """Record the env's computer, with the images it was written over, the disks' and the VM bundles' apart, and the
+        shared memory its apps need."""
         if ref is not None:
             with self.lock:
-                disks, bundles = self.built("disk"), self.built("vm_bundle")
+                disks, bundles, shm_mb = self.built("disk"), self.built("vm_bundle"), self.env.shm_mb()
                 self.env.merge_metadata({"computer": {**ref, "images": self.built(), **({"disks": disks} if disks else {}),
-                                                      **({"vm_bundles": bundles} if bundles else {})}})
+                                                      **({"vm_bundles": bundles} if bundles else {}),
+                                                      **({"shm_mb": shm_mb} if shm_mb else {})}})
 
     def _merge(self, results: dict[tuple[str, str], dict]) -> None:
         with self.lock:
@@ -113,6 +115,15 @@ def composition() -> str:
             digest.update(f"{folder.name}/{path.relative_to(folder).as_posix()}\0".encode())
             digest.update(hashlib.sha256(path.read_bytes()).digest() + (b"x" if path.stat().st_mode & 0o100 else b"-"))
     return "sha256:" + digest.hexdigest()
+
+
+MIRROR_PREFIX_LENGTH = 16
+
+
+def mirror_tag(key: str) -> str:
+    """The tag of the image of ``key`` in a computer image mirror: the key, under the start of ``composition()``, so a
+    change to the code that composes an image builds it again rather than reuse one the old code built."""
+    return f"{composition().removeprefix('sha256:')[:MIRROR_PREFIX_LENGTH]}-{key.removeprefix('sha256:')}"
 
 
 def _rank(result: dict) -> int:

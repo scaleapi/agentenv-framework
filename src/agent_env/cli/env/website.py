@@ -15,9 +15,10 @@ from agent_env.cli.utils import (
     refuse_unwritable_ids,
     resolve_environment_name,
 )
-from agent_env.utils.card_naming import card_name_from_github, card_name_from_source
+from agent_env.utils.card_naming import card_name_from_github, card_name_from_source, website_source_from_github, website_source_from_source
 from agent_env.utils.docker.build import DEFAULT_BUILD_PLATFORM, build_image
-from agent_env.env.envs.website import WebsiteEnv, domains_problem, health_path_problem
+from agent_env.env.envs.website import (WebsiteEnv, declared_live, domains_problem, health_path_problem, live_problems,
+                                        ready_timeout_problem, shm_problem)
 from agent_env.providers.env_providers.constants import AGENT_ENV_WEBSITE_HEALTH_PATH
 from agent_env.store.ids import derive_id, image_repository
 
@@ -52,6 +53,19 @@ def website():
 @click.option("--domain", "domains", multiple=True,
               help="A name the site is reached by, such as slack.com or *.slack.com (repeatable); without one, the "
                    "names its card declares")
+@click.option("--live/--no-live", "live", default=None,
+              help="A live site: a real one, which the server serves no pages of (default: what its @website(...) says)")
+@click.option("--allow-host", "allow_hosts", multiple=True,
+              help="Another host a live site's pages reach, such as *.githubassets.com (repeatable; default: its "
+                   "@website(...)'s allow_hosts)")
+@click.option("--ready-timeout-s", "ready_timeout_s", type=float, default=None,
+              help="How long the site may take from its server starting to ready, in seconds (default: the gateway's "
+                   "health check and wait)")
+@click.option("--shm-mb", "shm_mb", type=int, default=None,
+              help="The shared memory its server gets in /dev/shm, in MiB (default: Docker's 64 MiB)")
+@click.option("--setting", "setting_pairs", multiple=True,
+              help="A setting its server is handed, KEY=VALUE (repeatable); a secret's value is a secret:KEY or "
+                   "env:NAME reference")
 @environment_name_options
 @env_provider_type_option("What deploys the env: 'gateway' (a gateway in front of the website), or the type of an installed "
                           "agent_env.env_providers plugin", "website")
@@ -71,6 +85,11 @@ def put(
     frontend_docker_context_github_url: str | None,
     health_path: str,
     domains: tuple[str, ...],
+    live: bool | None,
+    allow_hosts: tuple[str, ...],
+    ready_timeout_s: float | None,
+    shm_mb: int | None,
+    setting_pairs: tuple[str, ...],
     environment_name: str | None,
     env_provider_type: str,
     metadata_pairs: tuple[str, ...],
@@ -97,7 +116,9 @@ def put(
         click.echo("Error: --server-image-ref needs --environment-name, which a registry image's card can't give here",
                    err=True)
         sys.exit(1)
-    if problem := health_path_problem(health_path) or domains_problem(list(domains)):
+    if problem := (health_path_problem(health_path) or domains_problem(list(domains))
+                   or (ready_timeout_s is not None and ready_timeout_problem(ready_timeout_s))
+                   or (shm_mb is not None and shm_problem(shm_mb))):
         click.echo(f"Error: {problem}", err=True)
         sys.exit(1)
     if frontend_dockerfile or frontend_dockerfile_github_url:
@@ -111,7 +132,31 @@ def put(
             sys.exit(1)
         key, value = pair.split("=", 1)
         user_metadata[key] = value
-    site = {"health_path": health_path, "domains": list(domains)}
+    settings = {}
+    for pair in setting_pairs:
+        if "=" not in pair:
+            click.echo(f"Error: --setting {pair!r} is KEY=VALUE", err=True)
+            sys.exit(1)
+        key, value = pair.split("=", 1)
+        settings[key] = value
+    if use_github:
+        source = website_source_from_github(backend_dockerfile_github_url, backend_docker_context_github_url,
+                                            github_token=os.environ.get("GITHUB_TOKEN"))
+    elif backend_dockerfile:
+        source = website_source_from_source(backend_dockerfile, backend_docker_context)
+    else:
+        source = None
+    declared, problems = declared_live(source, live=live, domains=list(domains) or None,
+                                       allow_hosts=list(allow_hosts) or None)
+    site = {"health_path": health_path, "domains": list(domains), **declared, "settings": settings,
+            "ready_timeout_s": ready_timeout_s, "shm_mb": shm_mb}
+    problems += live_problems(site["live"], site["domains"], site["allow_hosts"], settings, site["secret_settings"])
+    if problems:
+        click.echo("Error: " + "; ".join(problems), err=True)
+        sys.exit(1)
+    if site["live"]:
+        click.echo(f"A live site at {', '.join(site['domains'])}"
+                   + (f", its pages reaching {', '.join(site['allow_hosts'])}" if site["allow_hosts"] else ""))
 
     if use_github:
         if environment_name is None:

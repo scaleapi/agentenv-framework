@@ -5,7 +5,9 @@
 (``CONTROL_TOKEN_ENV``): the driver checks it in front of the app. Before it serves, it keeps a copy of
 the app's data paths as installed, which a reset puts back; once it serves, it adds the app's launcher and launches a
 boot app (``AppRuntime.start``). A server that can't start, or whose start fails once it serves, writes why to
-``.agentenv/server.failure``, which its computer's driver reports, and exits. Needs the ``app`` extra."""
+``.agentenv/server.failure``, which its computer's driver reports, and exits. It runs on real time, so its own
+transfers reach the object store directly, not through the computer's egress proxy (``transfers.direct``). Needs the
+``app`` extra."""
 from __future__ import annotations
 
 import asyncio
@@ -17,6 +19,7 @@ from pathlib import Path
 
 import uvicorn
 
+from .. import transfers
 from ..types import CONTROL_TOKEN_ENV
 from ._load import load_class
 from .app import FAILURE, ComputerAppEnvironment
@@ -27,6 +30,7 @@ USAGE = "usage: python -m agentenv_protocol.computer.serve_app <file>:<Class>"
 
 def main(argv: list[str]) -> None:
     FAILURE.unlink(missing_ok=True)
+    transfers.direct()
     try:
         _serve(argv)
     except (Exception, SystemExit) as e:
@@ -61,12 +65,13 @@ def _serve(argv: list[str]) -> None:
             started.cancel()
 
     asgi.router.lifespan_context = lifespan
+    served = app.served_asgi(asgi)
     if LOOPBACK:
         listening, token = bind(Path.cwd())
-        server = uvicorn.Server(uvicorn.Config(guarded(asgi, token), log_level="warning"))
+        server = uvicorn.Server(uvicorn.Config(guarded(served, token), log_level="warning"))
         server.run(sockets=[listening])
     else:
-        server = uvicorn.Server(uvicorn.Config(asgi, uds=str(SOCKET), log_level="warning"))
+        server = uvicorn.Server(uvicorn.Config(served, uds=str(SOCKET), log_level="warning"))
         SOCKET.unlink(missing_ok=True)
         server.run()
     if failed:

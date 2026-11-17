@@ -6,7 +6,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, ClassVar, Optional
 from urllib.parse import urlsplit
 
@@ -14,7 +14,8 @@ from agentenv_protocol import client as protocol_v1
 from agentenv_protocol.computer import COMPUTER_DISPLAY, COMPUTER_RECORDING, tool_prefix_problem
 from agentenv_protocol.computer.app import COMPUTER_APP
 from agentenv_protocol.computer.app_runtime import HOLD_BOOT_LAUNCH_ENV
-from agentenv_protocol.website_browser import BROWSER, LOADED, start_tab_why
+from agentenv_protocol.website_browser import BROWSER, BROWSER_RECORDING, LOADED, start_tab_why
+from agentenv_protocol.website_browser.recording import END_S as BROWSER_RECORDING_END_S
 
 from agent_env.artifact.artifacts.computer import ComputerArtifact
 from agent_env.attribution import Attribution
@@ -23,12 +24,12 @@ from agent_env.env.envs.computer.utils import composer
 from agent_env.env.envs.computer.utils import params as computer_params
 from agent_env.env.envs.computer.utils.install import platform_of
 from agent_env.env.envs.computer.utils.probing import probe_first_boot
-from agent_env.env.envs.computer.utils import sites
+from agent_env.env.envs.computer.utils import clock as computer_clock, sites
 from agent_env.env.envs.computer.utils.boot import (
     app_settings_environment,
     boot,
     control_environment,
-    control_token,
+    control_token as new_control_token,
     discard,
     first_native,
     listed,
@@ -38,6 +39,8 @@ from agent_env.env.envs.computer.utils.boot import (
     recorded_app_settings,
     recorded_settings,
     settings_environment,
+    shm_environment,
+    shm_kwargs,
 )
 from agent_env.env.gateway.constants import WELL_KNOWN_PATH
 from agent_env.providers.env_providers.env_provider import DeployRefused, _SandboxEnvironmentProvider
@@ -65,7 +68,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
 
     def __init__(self) -> None:
         super().__init__()
-        self._later: dict[str, tuple[Sandbox, int]] = {}  # each computer booted with sites_later: its sandbox and CA lifetime
+        self._later: dict[str, Sandbox] = {}  # each computer booted with sites_later: its sandbox
 
     async def deploy(
         self,
@@ -81,13 +84,17 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         tool_prefix: str = "",
         reach: str = "",
         sites_later: bool = False,
+        live_hosts: tuple[str, ...] = (),
+        control_token: Optional[str] = None,
     ) -> DeployedSandboxEnv:
         """The env's first ready build, in its base's order of forms and arches (or of ``env_params.form``), that the sandbox
         provider runs natively, booted, once what it boots that no compose started is composed; returns the record once
         the driver is ready with the env's display. With ``tool_prefix``, its driver serves its tools under it; with ``reach``,
-        a URL this process reaches, a network that restricts the computer's egress allows its host too. With
+        a URL this process reaches, a network that restricts the computer's egress allows its host too, and the
+        ``live_hosts`` of the run's live websites. With
         ``sites_later``, a computer routing sites, whose sites aren't up yet, boots with its boot apps held and returns
-        once its driver answers; ``route_sites`` routes them and finishes its boot."""
+        once its driver answers; ``route_sites`` routes them and finishes its boot. With ``control_token``, its
+        framework-only routes take that token (a multi env's own) rather than one of the computer's own."""
         from agent_env.env.envs.computer.env import ComputerEnv
 
         if not isinstance(env, ComputerEnv):
@@ -119,20 +126,27 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
                                 "computer runs inside a launcher container it can't reach; deploy a container form")
         attempt = functools.partial(self._boot, env, builds, params, values, ttl_seconds=ttl_seconds,
                                     disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb, attribution=attribution,
-                                    tool_prefix=tool_prefix, reach=reach, sites_later=sites_later)
+                                    tool_prefix=tool_prefix, reach=reach, sites_later=sites_later,
+                                    live_hosts=tuple(live_hosts), control_token=control_token)
         return await self._run(sandbox_provider, env.id, attempt)
 
     async def route_sites(self, env: ComputerEnv, record: DeployedSandboxEnv, sites: list[dict]) -> None:
         """Route ``sites`` on the computer ``record`` names, which this provider booted with ``sites_later``, launch its
         held apps and finish its boot as a deploy does; its record then keeps them, so a reset routes them again."""
-        sandbox, valid_for_s = self._later.pop(record.sandbox_id)
+        sandbox = self._later.pop(record.sandbox_id)
         computer = record.metadata["computer"]
         params, _, problems = computer_params.checked(env, {**computer["env_params"], "sites": sites})
         if problems:
             raise ValueError(f"{env.id}: " + "; ".join(problems))
         computer["env_params"] = params.model_dump(exclude_defaults=True)
-        if routed := await _finish_boot(env, record, sandbox, params, valid_for_s, computer.get("display")):
+        if routed := await _finish_boot(env, record, sandbox, params, computer.get("display")):
             computer["sites"] = routed
+
+    async def follow_clock(self, record: DeployedSandboxEnv, gateway_url: str, name: str) -> None:
+        """Have the computer ``record`` names follow the clock of the gateway at ``gateway_url`` as ``name``: its
+        follower's config written through the root channel; its record then keeps it, so a reset writes it again."""
+        sandbox = await build_sandbox_provider(record.sandbox_type).get_sandbox(record.sandbox_id)
+        await computer_clock.configure(sandbox, record, gateway_url, name)
 
     async def install_changelog_triggers(self, environment_name: str) -> None:
         """No state store, so no changelog to install."""
@@ -141,7 +155,8 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
                     values: dict, sandbox_provider: SandboxProvider, *, ttl_seconds: int,
                     disk_size_gb: float, cpu: float | None, memory_mb: int | None,
                     attribution: Optional[Attribution], tool_prefix: str = "", reach: str = "",
-                    sites_later: bool = False) -> DeployedSandboxEnv:
+                    sites_later: bool = False, live_hosts: tuple[str, ...] = (),
+                    control_token: Optional[str] = None) -> DeployedSandboxEnv:
         """One attempt on one sandbox provider: the first build it runs natively, booted and readied; its record."""
         from agent_env.env.envs.computer.env import ComputerEnv
 
@@ -162,11 +177,13 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
             build = await probe_first_boot(env, form, arch, sandbox_provider)
             if build["status"] != "ready":
                 raise RuntimeError(f"{env.id}'s {form}/{arch} failed its probe on its first boot: {build['reason']}")
-        computer, name, token = env.computer_artifact(), env.environment_name, control_token()
+        computer, name, token = env.computer_artifact(), env.environment_name, control_token or new_control_token()
         values = _values(computer, values)
         app_settings = recorded_app_settings(env.composed_apps(), computer_params.app_settings(env, params.app_settings),
                                              platform_of(env.computer.os))
-        policy = _reaching(NetworkPolicy.from_dict(env.network) if env.network else None, sandbox_provider, reach)
+        policy = _reaching(NetworkPolicy.from_dict(env.network) if env.network else None, sandbox_provider, reach,
+                           live_hosts)
+        shm_mb = env.shm_mb()
         booted = await boot(
             sandbox_provider, image=build["image"], port=env.driver.port, network_policy=policy, token=token,
             environment=_environment(env, computer, values, params, tool_prefix, sites_later=sites_later),
@@ -174,7 +191,7 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
             attribution=attribution,
             disk_size_gb=disk_size_gb, cpu=cpu, memory_mb=memory_mb,
             ready_s=ready_timeout(env.composed_apps(), platform_of(env.computer.os)), form=form,
-            held=bool(params.site_routing), os_type=env.computer.os.type)
+            held=bool(params.site_routing), platform=platform_of(env.computer.os), shm_mb=shm_mb)
         self._container_sandboxes.append(booted.sandbox)
         self._environment_sandboxes[name] = booted.sandbox
         try:
@@ -190,13 +207,15 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
                     "computer": {"id": env.metadata["computer"]["id"], "version": env.metadata["computer"]["version"]},
                     "port": env.driver.port, "display": values.get("resolution"), "network": env.network,
                     "computer_settings": recorded_settings(computer, values),
+                    **({"live_hosts": list(live_hosts)} if live_hosts else {}),
+                    **({"shm_mb": shm_mb} if shm_mb else {}),
                     **({"app_settings": app_settings} if app_settings else {}),
                     **({"tool_prefix": tool_prefix} if tool_prefix else {}),
                     "env_params": params.model_dump(exclude_defaults=True)}},
             )
             if sites_later:
-                self._later[record.sandbox_id] = (booted.sandbox, ttl_seconds)
-            elif routed := await _finish_boot(env, record, booted.sandbox, params, ttl_seconds, values.get("resolution")):
+                self._later[record.sandbox_id] = booted.sandbox
+            elif routed := await _finish_boot(env, record, booted.sandbox, params, values.get("resolution")):
                 record.metadata["computer"]["sites"] = routed
         except BaseException:
             await discard(booted.sandbox)
@@ -214,34 +233,36 @@ class EnvironmentComputerProvider(_SandboxEnvironmentProvider):
         await end_recordings(deployed, "reset")
         sandbox_provider = build_sandbox_provider(deployed.sandbox_type)
         sandbox = await sandbox_provider.get_sandbox(deployed.sandbox_id)
+        shm_mb = record.get("shm_mb")
         environment = {**_environment(env, computer, values, params, record.get("tool_prefix", "")),
-                       **control_environment(deployed.control_token)}
+                       **control_environment(deployed.control_token),
+                       **shm_environment(record.get("form", "container"), env.computer.os.type, shm_mb)}
         try:
             if record.get("form") in ("disk", "vm_bundle"):
                 await sandbox_provider.reset_vm(sandbox, image=record["image"], env=environment)
             else:
                 await sandbox_provider.reset_container(sandbox, image_name=record["image"], port=env.driver.port,
-                                                       env=environment)
+                                                       env=environment, **shm_kwargs(sandbox_provider, shm_mb))
         except NotImplementedError as e:  # a reset the env supports, which this provider can't carry out
             raise RuntimeError(f"'{env.id}' can't be reset on {type(sandbox_provider).__name__}: {e}") from None
         card = await ready(deployed.environment_url, ready_timeout(env.composed_apps(), platform_of(env.computer.os)),
-                           deployed.control_token, answering=bool(params.site_routing))
+                           deployed.control_token, answering=bool(params.site_routing), sandbox=sandbox)
         _require_name(env, card)
-        valid_for_s = (record.get("sites") or {}).get("valid_for_s", 0)
-        if routed := await _finish_boot(env, deployed, sandbox, params, valid_for_s, values.get("resolution")):
+        if routed := await _finish_boot(env, deployed, sandbox, params, values.get("resolution")):
             record["sites"] = routed
 
 
 async def _finish_boot(env: ComputerEnv, record: DeployedSandboxEnv, sandbox: Sandbox,
-                       params: computer_params.ComputerParams, valid_for_s: int,
-                       resolution: Optional[str]) -> Optional[dict]:
-    """What a deploy and a reset do once the computer's driver answers, in order: with ``site_routing``, the sites
-    routed, each browser handed their names and the held boot apps launched, the computer then ready; then its display
-    checked; then each browser's start tabs read into the record, the boot failing on one on a site of the env's that
-    didn't load. What the record keeps of the routing, or None without it."""
+                       params: computer_params.ComputerParams, resolution: Optional[str]) -> Optional[dict]:
+    """What a deploy and a reset do once the computer's driver answers, in order: the clock follower's config written
+    again when the record keeps one (a reset's); with ``site_routing``, the sites routed, each browser handed their
+    names and the held boot apps launched, the computer then ready; then its display checked; then each browser's start
+    tabs read into the record, the boot failing on one on a site of the env's that didn't load. What the record keeps of
+    the routing, or None without it."""
+    await computer_clock.reconfigure(sandbox, record)
     routed = None
     if params.site_routing:
-        routed = await _route_sites(env, sandbox, params, valid_for_s)
+        routed = await _route_sites(env, sandbox, params, tuple(record.metadata["computer"].get("live_hosts") or ()))
         await _launch_held_apps(env, record, record.environment_url, params.sites)
     await _require_display(record, resolution)
     if start_tabs := await _start_tabs(record):
@@ -251,13 +272,12 @@ async def _finish_boot(env: ComputerEnv, record: DeployedSandboxEnv, sandbox: Sa
 
 
 async def _route_sites(env: ComputerEnv, sandbox: Sandbox, params: computer_params.ComputerParams,
-                       valid_for_s: int) -> dict:
-    """The computer on ``sandbox`` routed to ``params.sites`` under a CA of its own, valid ``valid_for_s``; what its
-    record keeps of it."""
-    routed = await sites.route(sandbox, params.sites, user=env.computer.session.user, network=env.network,
-                               valid_for=timedelta(seconds=valid_for_s), label=env.environment_name,
-                               os_type=env.computer.os.type, display=env.computer.os.display)
-    return {**routed, "valid_for_s": valid_for_s}
+                       live_hosts: tuple[str, ...] = ()) -> dict:
+    """The computer on ``sandbox`` routed to ``params.sites`` under a CA of its own, a browser alone's forward port
+    taking ``live_hosts`` straight to them; what its record keeps of it."""
+    return await sites.route(sandbox, params.sites, user=env.computer.session.user, network=env.network,
+                             label=env.environment_name, os_type=env.computer.os.type,
+                             display=env.computer.os.display, live_hosts=live_hosts)
 
 
 async def _launch_held_apps(env: ComputerEnv, record: DeployedSandboxEnv, url: str,
@@ -324,20 +344,33 @@ def _refuse_failed_start_tabs(record: DeployedSandboxEnv, start_tabs: dict[str, 
 
 
 async def end_recordings(record: DeployedSandboxEnv, reason: str) -> None:
-    """Have the computer's driver end every recording not yet ended, each uploading what's left and its manifest under
-    the grant it was started with, before the computer goes; a driver that doesn't record has none."""
+    """Have the computer's driver, and each browser app on it that records, end every recording not yet ended, each
+    uploading what's left and its manifest under the grant it was started with, before the computer goes; a driver or
+    app that doesn't record has none."""
     try:
         await record.invoke(COMPUTER_RECORDING, "end_all", {"reason": reason}, timeout=_END_RECORDINGS_TIMEOUT_S)
     except EnvCapabilityUnsupported:
-        return
+        pass
     except Exception as e:
         logger.warning(f"'{record.env_id}': its recordings weren't ended before its computer went: {e}")
+    for child in (record.environment_card or {}).get("children_environments") or []:
+        if protocol_v1.find_extension(child, BROWSER_RECORDING) is None:
+            continue
+        try:
+            await record.invoke(BROWSER_RECORDING, "end_all", {"reason": reason}, environment_name=child.get("name"),
+                                timeout=max(_END_RECORDINGS_TIMEOUT_S, BROWSER_RECORDING_END_S))
+        except Exception as e:
+            logger.warning(f"'{record.env_id}': {child.get('name')}'s browser recordings weren't ended before its "
+                           f"computer went: {e}")
 
 
-def _reaching(policy: Optional[NetworkPolicy], sandbox_provider: SandboxProvider, url: str) -> Optional[NetworkPolicy]:
-    """``policy``, also allowing ``url``'s host as the sandbox provider's sandboxes reach it when it lists the hosts allowed."""
+def _reaching(policy: Optional[NetworkPolicy], sandbox_provider: SandboxProvider, url: str,
+              live_hosts: tuple[str, ...] = ()) -> Optional[NetworkPolicy]:
+    """``policy``, also allowing ``url``'s host as the sandbox provider's sandboxes reach it, and ``live_hosts``, when
+    it lists the hosts allowed; a network that allows every host is left as it is."""
     host = urlsplit(sandbox_provider.url_from_sandbox(url)).hostname if url else None
-    return policy.with_hosts([host]) if policy is not None and host else policy
+    hosts = [*([host] if host else []), *live_hosts]
+    return policy.with_hosts(hosts) if policy is not None and hosts else policy
 
 
 def _values(computer: ComputerArtifact, values: dict) -> dict:
