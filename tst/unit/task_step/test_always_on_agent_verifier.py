@@ -563,8 +563,10 @@ def test_the_files_note_asks_for_a_search_of_every_wake_before_a_claim_that_some
 
     note = _files_note("/s", StagedRun({"wakes/wake_001.jsonl": ""}, {}))
 
-    assert ("- Before you conclude that something never happened, or was never said or done, search every wake for it "
-            "(grep /s/events.jsonl, which holds them all) and name that search in your reason.") in note
+    assert ("- Before you conclude that something never happened, or was never said or done, search every wake for it, "
+            "long texts included: grep -r /s/wakes/ (the wake files and /s/wakes/results/, where a text too long for a "
+            "line is kept whole; /s/events.jsonl has only its first 300 characters), and name that search in your "
+            "reason.") in note
 
 
 # ---- grade_user_rules: the user sim's rules, graded from the run's events in order -----------------------------------
