@@ -165,3 +165,125 @@ def test_require_agent_clock_round_trips_and_is_left_out_when_off():
     strict = _step(require_agent_clock=True).to_dict()
     assert strict["require_agent_clock"] is True
     assert SyncEnvClockTaskStep.from_dict(strict).require_agent_clock is True
+
+
+@pytest.mark.asyncio
+async def test_an_agent_follows_the_first_envs_clock_and_another_envs_is_reported_and_skipped(monkeypatch):
+    sent = _mock_http(monkeypatch)
+    context = await _context()  # e1 alone is deployed and armed: whether e0 has been armed yet doesn't matter
+    context.metadata["clock_configurations"] = [{"env_id": "e1", "env_get_time_url": CLOCK_URL}]
+
+    [outcome] = await agent_clock.follow_armed_clocks(context, _agent("late", env_ids=("e0", "e1")), timeout=5)
+
+    assert (outcome["env_id"], outcome["synced"], outcome["reason"], outcome["follows"]) == (
+        "e1", False, "follows_another_env", "e0")
+    assert sent == [] and agent_clock.FOLLOWING_KEY not in context.metadata
+
+
+@pytest.mark.asyncio
+async def test_a_teardown_retires_the_agents_follower_at_each_gateway_it_followed(monkeypatch):
+    from agent_env.task_step.task_steps.teardown_sandboxes import TeardownSandboxesTaskStep
+
+    sent = _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL})
+    _no_servers(monkeypatch)
+    context = await _context(_agent(), _agent("bystander"))
+    await _step().execute(context)
+    del sent[:]
+
+    async def nothing(*a, **k):
+        return SimpleNamespace(terminated=[], failed=[])
+
+    monkeypatch.setattr("agent_env.task_step.task_steps.teardown_sandboxes.before_teardown", nothing)
+    monkeypatch.setattr("agent_env.task_step.task_steps.teardown_sandboxes.tear_down", nothing)
+    await TeardownSandboxesTaskStep(id="down", version=1, agent_names=["solver"]).execute(context)
+
+    assert [(r.method, str(r.url), json.loads(r.content)) for r in sent] == [
+        ("DELETE", f"{_CARD}/clock/followers", {"name": "agent-solver"})]
+    assert context.metadata[agent_clock.FOLLOWING_KEY] == {
+        "bystander": {"agent": "bystander", "env_id": "e1", "follower": "agent-bystander"}}
+    assert agent_clock.followed_env(context, _agent()) is None
+
+
+@pytest.mark.asyncio
+async def test_a_gateway_that_cant_retire_a_follower_doesnt_fail_the_teardown(monkeypatch):
+    _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL})
+    _no_servers(monkeypatch)
+    context = await _context(_agent())
+    await _step().execute(context)
+    methods = next(e for e in context.deployed_envs[0].environment_card["capabilities"]["extensions"]
+                   if e["uri"] == EXT_CLOCK_URI)["params"]["methods"]
+    del methods["retire_follower"]
+
+    assert await agent_clock.retire_followers(context, ["solver"]) == []
+    assert agent_clock.followed_env(context, _agent()) == "e1"
+
+
+def test_a_log_of_an_outcome_leaves_out_the_agents_answer():
+    assert agent_clock.summary({"synced": True, "follower": "agent-solver", "result": {"big": "x" * 10_000}}) == {
+        "synced": True, "follower": "agent-solver"}
+
+
+@pytest.mark.asyncio
+async def test_late_agents_deployed_at_once_each_save_only_their_own_record(monkeypatch):
+    import copy
+
+    from agent_env.task_step.context_ops import build_context_update_ops
+
+    _mock_http(monkeypatch)
+    pre = await _context()
+    pre.metadata["clock_configurations"] = [{"env_id": "e1", "env_get_time_url": CLOCK_URL}]
+    saved = {}
+    for name in ("first", "second"):  # each from the same context, as two deploy_agent steps at once
+        post = copy.deepcopy(pre)
+        await agent_clock.follow_armed_clocks(post, _agent(name), timeout=5)
+        ops = build_context_update_ops(pre, post)
+        saved[name] = {*ops.sets, *ops.add_to_sets, *ops.unsets}
+
+    for name, paths in saved.items():
+        assert paths and all(p.startswith(f"context.metadata.{agent_clock.FOLLOWING_KEY}.{name}") for p in paths), paths
+
+
+@pytest.mark.parametrize("names", [("team.solver", "team_solver", "team%2Esolver"), ("$x", "_x", "%24x")])
+def test_agent_names_that_look_alike_keep_keys_of_their_own(names):
+    slots = [agent_clock._slot(name) for name in names]
+    assert len(set(slots)) == len(names) and not any("." in s or s.startswith("$") for s in slots)
+
+
+@pytest.mark.parametrize("by", ["sandbox_names", "env_ids"])
+@pytest.mark.asyncio
+async def test_an_agent_whose_sandbox_goes_down_by_another_name_is_retired_too(monkeypatch, by):
+    from agent_env.task_step.context import DeployedSandbox
+    from agent_env.task_step.task_steps.teardown_sandboxes import TeardownSandboxesTaskStep
+
+    sent = _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL})
+    _no_servers(monkeypatch)
+    agent = _agent()
+    agent.sandbox_id = "sb-1" if by == "env_ids" else "sb-shared"
+    context = await _context(agent)
+    context.deployed_sandboxes = [DeployedSandbox(sandbox_name="box", sandbox_id="sb-shared", sandbox_mode="container",
+                                                  sandbox_type="local")]
+    await _step().execute(context)
+    del sent[:]
+
+    async def nothing(*a, **k):
+        return SimpleNamespace(terminated=[], failed=[])
+
+    monkeypatch.setattr("agent_env.task_step.task_steps.teardown_sandboxes.before_teardown", nothing)
+    monkeypatch.setattr("agent_env.task_step.task_steps.teardown_sandboxes.tear_down", nothing)
+    named = {"sandbox_names": ["box"]} if by == "sandbox_names" else {"env_ids": ["e1"]}
+    await TeardownSandboxesTaskStep(id="down", version=1, **named).execute(context)
+
+    assert [(r.method, json.loads(r.content)) for r in sent] == [("DELETE", {"name": "agent-solver"})]
+
+
+@pytest.mark.asyncio
+async def test_tearing_down_one_of_two_look_alike_agents_retires_its_own_follower_alone(monkeypatch):
+    sent = _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL})
+    _no_servers(monkeypatch)
+    context = await _context(_agent("team.solver"), _agent("team_solver"))
+    await _step().execute(context)
+    del sent[:]
+
+    assert await agent_clock.retire_followers(context, ["team.solver"]) == ["agent-team.solver"]
+    assert [json.loads(r.content) for r in sent] == [{"name": "agent-team.solver"}]
+    assert agent_clock.followed_env(context, _agent("team_solver")) == "e1"
