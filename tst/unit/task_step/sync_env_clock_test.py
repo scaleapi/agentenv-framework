@@ -1,8 +1,11 @@
 """Unit tests for SyncEnvClockTaskStep — round-trip + the per-server sync_time fan-out (mocked)."""
+import dataclasses
 import json
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
+from agentenv_protocol.computer import COMPUTER_EXEC
 
 from agent_env.env.env import DeployedEnv, DeployedGatewayEnv, DeployedSandboxEnv
 from agent_env.env.gateway.constants import EXT_CLOCK_URI, WELL_KNOWN_PATH
@@ -504,3 +507,48 @@ async def test_a_record_that_kept_no_card_is_refused_saying_so_not_told_to_deplo
 def test_a_padded_zone_is_stored_and_sent_stripped():
     s = _zoned(timezone=" America/New_York ")
     assert s.timezone == "America/New_York" and s.to_dict()["timezone"] == "America/New_York"
+
+
+_EXEC_EXT = {"uri": COMPUTER_EXEC, "params": {"endpoint": "/agentenv/ext/computer-exec", "methods": {"run": {"method": "POST"}}}}
+
+
+def _with_computer(record: DeployedEnv, card: dict) -> DeployedEnv:
+    """``record``, a multi env's, with the computer ``desktop`` on a sandbox of its own whose card is ``card``."""
+    computer = DeployedSandboxEnv(env_id="desk", env_version=1, sandbox_id="sb-desk", control_token="desk-token",
+                                  environment_card_url=f"https://desk.example{WELL_KNOWN_PATH}", environment_card=card)
+    return dataclasses.replace(record, control_token="gateway-token", child_envs={"desktop": dataclasses.asdict(computer)})
+
+
+@pytest.mark.asyncio
+async def test_arming_a_multi_env_whose_computer_offers_no_clock_is_refused_naming_it_and_what_to_deploy(monkeypatch):
+    """As a computer booted from its disk is: its session would stay on real time while the universe moves."""
+    sent = _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL})
+    record = _with_computer(_carded(await _composed_card({"mcp-email": [_CLOCK_EXT], "desktop": [_EXEC_EXT]})),
+                            {"name": "desktop", "url": "/agentenv", "capabilities": {"extensions": [_EXEC_EXT]}})
+    env = SimpleNamespace(mcp_server_envs=[SimpleNamespace(environment_name="email")], website_envs=[])
+
+    with patch("agent_env.env.env.Env.get", return_value=env), pytest.raises(
+            StepContextError, match="computer 'desktop' can't follow the universe clock") as refused:
+        await _step().execute(TaskStepContext(deployed_envs=[record]))
+
+    assert "container form of a base that follows the clock" in str(refused.value)
+    assert not [request for request in sent if request.url.host == "desk.example"]
+
+
+@pytest.mark.asyncio
+async def test_an_app_on_a_multi_envs_computer_that_offers_no_clock_is_skipped_since_it_runs_on_the_computers(
+        monkeypatch):
+    _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL})
+    card = {"name": "desktop", "url": "/agentenv",
+            "capabilities": {"operations": ["data/get"], "extensions": [_CLOCK_EXT, _EXEC_EXT]},
+            "children_environments": [{"name": "notes", "url": "/apps/notes/agentenv",
+                                       "capabilities": {"extensions": []}}]}
+    record = _with_computer(_carded(await _composed_card({"desktop": [_CLOCK_EXT, _EXEC_EXT]})), card)
+    context = TaskStepContext(deployed_envs=[record])
+
+    with patch("agent_env.env.env.Env.get", return_value=SimpleNamespace(mcp_server_envs=[], website_envs=[])):
+        await _step().execute(context)
+
+    configured = context.metadata["clock_configurations"][0]
+    assert [entry["service"] for entry in configured["synced"]] == ["desktop"]
+    assert [(entry["service"], entry["reason"]) for entry in configured["skipped"]] == [("notes", "not_advertised")]
