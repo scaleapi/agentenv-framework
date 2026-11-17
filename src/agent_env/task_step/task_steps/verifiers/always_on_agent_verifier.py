@@ -92,8 +92,9 @@ How to read them:
 - Don't load whole files. Search with grep -n, then Read with an offset and limit.
 - Later actions replace earlier ones: after you find something, look for later corrections, edits, cancellations or \
 follow-ups before you decide.
-- Before you conclude that something never happened, or was never said or done, search every wake for it (grep \
-{events}, which holds them all) and name that search in your reason.
+- Before you conclude that something never happened, or was never said or done, search every wake for it, long \
+texts included: grep -r {wakes}/ (the wake files and {results}/, where a text too long for a line is kept whole; \
+{events} has only its first 300 characters), and name that search in your reason.
 - The user's messages are the "user_message" lines (and the first wake's "wake_input"); the user saw only the \
 "message_to_user" lines.
 - Cite the wake (and call) number of every piece of evidence, and quote it.
@@ -411,7 +412,7 @@ def _files_note(path: str, staged: StagedRun, *, context_loss: bool = False) -> 
     gaps = sorted(set(r.get("missing_trajectories", [])) | set(r.get("unreadable_trajectories", [])))
     gap_note = ("\n- These wakes' tool calls are not in the files (their trajectory is missing or unreadable), so "
                 "for them only the run's record is there: " + ", ".join(str(n) for n in gaps) + ".") if gaps else ""
-    return _FILES_NOTE.format(index=f"{path}/{INDEX_FILE}", first=f"{path}/{wakes[0] if wakes else WAKES_DIR}",
+    return _FILES_NOTE.format(index=f"{path}/{INDEX_FILE}", wakes=f"{path}/{WAKES_DIR}", first=f"{path}/{wakes[0] if wakes else WAKES_DIR}",
                               last=f"{path}/{wakes[-1] if wakes else WAKES_DIR}", results=f"{path}/{RESULTS_DIR}",
                               events=f"{path}/{EVENTS_FILE}", triggers=f"{path}/{TRIGGERS_FILE}", gaps=gap_note,
                               harness=(_HARNESS_NOTE + (_CONTEXT_LOSS_NOTE if context_loss else ""))
