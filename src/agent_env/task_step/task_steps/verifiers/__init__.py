@@ -6,7 +6,7 @@ the LLM judge)."""
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
 from agent_env.task_step.task_steps.verifiers.run_context import EnvClock, Firing, Message, Run, RunRecordUnavailable, Turn
 from agent_env.task_step.task_steps.verifiers.env_outcome_verifier import EnvOutcomeVerifierTaskStep
-from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
+from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep, is_rubrics_verifier
 from agent_env.task_step.task_steps.verifiers.agent_prompt_response_verifier import AgentPromptResponseVerifierTaskStep
 from agent_env.task_step.task_steps.verifiers.run_container_unit_tests_verifier import RunContainerUnitTestsVerifierTaskStep
 from agent_env.task_step.task_steps.verifiers.verify_sandbox import VerifySandboxTaskStep
@@ -27,4 +27,5 @@ __all__ = [
     "Turn",
     "VerifySandboxTaskStep",
     "aggregate_score",
+    "is_rubrics_verifier",
 ]

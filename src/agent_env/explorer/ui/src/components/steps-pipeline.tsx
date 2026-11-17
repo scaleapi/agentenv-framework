@@ -25,12 +25,14 @@ const STEP_COLORS: Record<string, string> = {
   prompt_agent: '#f59e0b',
   collect_artifacts: '#14b8a6',
   rubrics_verifier: '#10b981',
+  always_on_agent_verifier: '#10b981',
   env_outcome_verifier: '#10b981',
   run_code: '#84cc16',
   publish: '#6366f1',
   register_env_triggers: '#0d9488',
   register_agent_triggers: '#c026d3',
   sync_env_clock: '#0891b2',
+  set_env_clock_rate: '#0891b2',
 };
 
 const DEFAULT_COLOR = '#6b7280';

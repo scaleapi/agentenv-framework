@@ -36,6 +36,8 @@ import modal
 from agent_env.providers.sandbox_providers.modal_sandbox import (
     _ModalProcessAdapter,
     _attribution_tags,
+    _ended_output,
+    _last_lines,
     _log_sandbox_started,
     _resolve_app_base_name,
     _terminate_by_id,
@@ -150,9 +152,20 @@ class ModalVmSandbox(VmSandbox):
         self.mode = SANDBOX_MODE_VM
         self.network_policy = network_policy
         self._download_slots = asyncio.Semaphore(max(1, _dl_setting("PARALLEL_FILES", _DL_PARALLEL_FILES)))
+        self._ended: Optional[tuple[list[str], list[str]]] = None
 
     async def terminate(self) -> None:
         await self._sb.terminate.aio()
+
+    async def exit_status(self) -> Optional[int]:
+        return await self._sb.poll.aio()
+
+    async def output_tail(self, lines: int) -> list[str]:
+        """The last ``lines`` lines its main process wrote, a disk's launcher with its guest's console, once it has
+        exited; none while it runs."""
+        if self._ended is None:
+            self._ended = await _ended_output(self._sb)
+        return _last_lines(self._ended, lines)
 
     async def exec(self, *command: str):
         # Modal VM sandboxes run as root and have no `sudo`; the inherited VmSandbox

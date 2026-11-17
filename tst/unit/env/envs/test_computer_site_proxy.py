@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import dataclasses
 import email.message
 import io
 import json
@@ -18,7 +19,6 @@ import subprocess
 import sys
 import time
 import urllib.error
-from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -31,7 +31,8 @@ from websockets.exceptions import InvalidStatus
 from agent_env.env.envs.computer.utils import site_proxy, sites
 from agent_env.env.envs.computer.utils.params import Site as SiteParams
 from agent_env.env.envs.computer.utils.site_proxy import Config, Site, SiteProxy
-from agent_env.env.gateway.constants import AGENT_ENV_SITE_ROOT_HEADER
+from agent_env.env.gateway.constants import (AGENT_ENV_COMPUTER_HEADER, AGENT_ENV_ROLE_HEADER,
+                                          AGENT_ENV_SITE_ROOT_HEADER)
 from agent_env.env.gateway.gateway import Gateway
 from tst.unit.env.envs.test_computer_stand_in_proxy import _ask, _logged
 from tst.unit.env.envs.test_computer_stand_in_proxy import _serving as _stand_in_serving
@@ -83,8 +84,8 @@ async def _body(reader, headers):
 
 
 @contextlib.asynccontextmanager
-async def _proxy(config, scheme="https"):
-    proxy = SiteProxy(config)
+async def _proxy(config, scheme="https", network=None):
+    proxy = SiteProxy(config, network=network)
     context = site_proxy.tls_context(config) if scheme == "https" else None
     server = await asyncio.start_server(lambda r, w: proxy.handle(r, w, scheme), "127.0.0.1", 0, ssl=context)
     try:
@@ -94,8 +95,8 @@ async def _proxy(config, scheme="https"):
 
 
 @contextlib.asynccontextmanager
-async def _forward_port(config):
-    proxy = SiteProxy(config, tls=site_proxy.tls_context(config))
+async def _forward_port(config, network=None):
+    proxy = SiteProxy(config, tls=site_proxy.tls_context(config), network=network)
     server = await asyncio.start_server(proxy.handle_forward, "127.0.0.1", 0)
     try:
         yield server.sockets[0].getsockname()[1]
@@ -121,7 +122,7 @@ async def _exchange(port, request: bytes, *, server_hostname=None, cadata=None, 
 
 
 def _issued(tmp_path, routes):
-    issued = sites.issue(routes, valid_for=timedelta(hours=1), label="test")
+    issued = sites.issue(routes, label="test")
     files = {}
     for name, (cert, key) in issued.leaves.items():
         (tmp_path / f"{name}.crt").write_text(cert)
@@ -178,6 +179,22 @@ async def test_the_providers_headers_go_upstream_in_place_of_the_browsers_and_ne
     ((_, sent, _),) = upstream.requests
     assert sent["cf-access-client-secret"] == "s3cret"
     assert "s3cret" not in json.dumps(headers) and body == b"hello"
+
+
+@pytest.mark.asyncio
+async def test_a_request_names_its_computer_and_no_page_names_a_role_or_another_computer(tmp_path):
+    async with Upstream() as upstream:
+        config, issued = _config(tmp_path, upstream.port)
+        config.sites[0].upstream_headers = {"AgentEnv-Computer": "desktop"}
+        async with _proxy(config) as port:
+            _, _, body, conn = await _exchange(
+                port, b"GET / HTTP/1.1\r\nHost: notes.test\r\nAgentEnv-Role: admin\r\nAgentEnv-Computer: laptop\r\n\r\n",
+                server_hostname="notes.test", cadata=issued.ca_pem)
+            conn[1].close()
+
+    ((_, sent, _),) = upstream.requests
+    assert sent["agentenv-computer"] == "desktop" and "agentenv-role" not in sent and body == b"hello"
+    assert (site_proxy.ROLE_HEADER, site_proxy.COMPUTER_HEADER) == (AGENT_ENV_ROLE_HEADER, AGENT_ENV_COMPUTER_HEADER)
 
 
 async def _serve(app) -> tuple[uvicorn.Server, int]:
@@ -441,6 +458,82 @@ async def test_the_forward_port_tunnels_a_live_sites_host_straight_to_it_and_sen
     assert [(entry["host"], entry["port"], entry["address"]) for entry in logged] == [
         ("github.githubassets.com", 8443, "127.0.0.1"), ("github.com", 80, "127.0.0.1")]
     assert all(entry["bytes_sent"] > 0 and entry["bytes_received"] > 0 and entry["duration_s"] >= 0 for entry in logged)
+
+
+class Egress:
+    """The base's egress proxy as the site proxy sees it: each ``CONNECT`` head it reads recorded, then refused with a
+    403, or established and the request inside answered with ``hello``."""
+
+    def __init__(self, refuse=False):
+        self.heads, self.refuse = [], refuse
+
+    async def __aenter__(self):
+        self.server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
+        self.url = f"http://127.0.0.1:{self.server.sockets[0].getsockname()[1]}"
+        return self
+
+    async def __aexit__(self, *exc):
+        self.server.close()
+
+    async def _handle(self, reader, writer):
+        self.heads.append(await reader.readuntil(b"\r\n\r\n"))
+        if self.refuse:
+            writer.write(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+        else:
+            writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
+            await reader.readuntil(b"\r\n\r\n")
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello")
+        await writer.drain()
+        writer.close()
+
+
+@pytest.mark.asyncio
+async def test_with_an_egress_proxy_a_public_live_host_goes_through_it_and_a_private_one_straight_to_it(
+        tmp_path, monkeypatch, capsys):
+    addresses = {"github.com": ["140.82.112.3"], "intranet.example": ["10.0.0.5"]}
+
+    async def resolve(host, port):
+        return addresses[host]
+
+    monkeypatch.setattr(site_proxy, "resolve", resolve)
+    async with Upstream() as upstream, Upstream() as live, Egress() as egress:
+        monkeypatch.setenv(site_proxy.EGRESS_PROXY_ENV, egress.url)
+        config, _ = _config(tmp_path, upstream.port)
+        config.direct = ["github.com", "intranet.example"]
+        with _live_hosts_at(monkeypatch, live.port) as opened:
+            async with _forward_port(config) as port:
+                public = await _exchange(port, b"GET http://github.com/a HTTP/1.1\r\nHost: github.com\r\n\r\n")
+                public[3][1].close()
+                private = await _exchange(port, b"GET http://intranet.example/b HTTP/1.1\r\n"
+                                                b"Host: intranet.example\r\n\r\n")
+                private[3][1].close()
+                await asyncio.sleep(0.3)  # each connection is logged as it ends
+
+    assert (public[0], public[2], private[0], private[2]) == ("HTTP/1.1 200 OK", b"hello", "HTTP/1.1 200 OK", b"hello")
+    assert [head.split(b"\r\n")[0] for head in egress.heads] == [b"CONNECT github.com:80 HTTP/1.1"]
+    assert opened == [("intranet.example", 80)] and [request[0] for request in live.requests] == ["GET /b HTTP/1.1"]
+    logged = _logged(capsys.readouterr().err, "connection")
+    # Through the egress proxy a connection names the proxy, which decides which of the site's addresses it dials.
+    assert [(entry["host"], entry["address"], entry.get("via")) for entry in logged] == [
+        ("github.com", "127.0.0.1", "egress"), ("intranet.example", "127.0.0.1", None)]
+
+
+@pytest.mark.asyncio
+async def test_a_live_host_the_egress_proxy_refuses_is_a_502_naming_its_answer(tmp_path, monkeypatch, capsys):
+    async def resolve(host, port):
+        return ["140.82.112.3"]
+
+    monkeypatch.setattr(site_proxy, "resolve", resolve)
+    async with Upstream() as upstream, Egress(refuse=True) as egress:
+        monkeypatch.setenv(site_proxy.EGRESS_PROXY_ENV, egress.url)
+        config, _ = _config(tmp_path, upstream.port)
+        config.direct = ["github.com"]
+        async with _forward_port(config) as port:
+            answer = await _exchange(port, b"CONNECT github.com:443 HTTP/1.1\r\nHost: github.com:443\r\n\r\n")
+
+    assert answer[0] == "HTTP/1.1 502 Bad Gateway" and answer[2] == b"github.com:443 didn't answer\n"
+    [failed] = _logged(capsys.readouterr().err, "failed")
+    assert failed["reason"] == "no answer" and "403 Forbidden" in failed["error"], failed
 
 
 @pytest.mark.asyncio
@@ -875,7 +968,7 @@ def test_install_writes_the_sites_files_names_and_trust_then_starts_the_proxy_on
     table = sites.site_table([SiteParams(name="notes", url="http://gw/website/notes/", domains=["notes.test"]),
                               SiteParams(name="chat", url="http://gw/website/chat/", domains=["*.chat.test"]),
                               SiteParams(name="bare", url="http://gw/website/bare/")])
-    issued = sites.issue(table.routes, valid_for=timedelta(hours=1), label="t")
+    issued = sites.issue(table.routes, label="t")
     (folder / "config.json").write_text(json.dumps(sites.proxy_config(table, issued, user=None, os_type="linux",
                                                                       forward_port=True, direct=["github.com"])))
     started = []
@@ -915,6 +1008,47 @@ def test_install_writes_the_sites_files_names_and_trust_then_starts_the_proxy_on
         f"export {name}={value}\n" for name, value in sites.TRUST_ENVIRONMENTS["linux"].items())
 
 
+def test_every_field_of_a_sites_config_is_served_as_given_or_kept_private_and_the_proxy_loads_each():
+    """A site's config entry, with every field proxy_config writes, holds only fields install serves as given or keeps
+    out of what the session user reads; and the proxy's Site takes each served field, and the files and headers made
+    of the private ones, so a field added to one and not the others fails here, not silently."""
+    table = sites.site_table([SiteParams(name="notes", url="http://gw/website/notes/", domains=["notes.test"])])
+    given = sites.proxy_config(table, sites.issue(table.routes, label="t"), user=None, os_type="linux",
+                               forward_port=True, upstream_headers={"notes": {"X-Gateway": "g"}},
+                               sign_in_headers={"notes": ["X-Auto-Login"]})
+    (entry,) = given["sites"]
+    loaded = {f.name for f in dataclasses.fields(site_proxy.Site) if f.init}
+
+    assert set(entry) == set(site_proxy.SERVED_SITE_FIELDS) | set(site_proxy.PRIVATE_SITE_FIELDS), sorted(entry)
+    assert loaded == set(site_proxy.SERVED_SITE_FIELDS) | {"cert", "key", "upstream_headers"}, sorted(loaded)
+
+
+def test_install_keeps_a_sites_sign_in_headers_for_the_proxy_it_starts_whose_network_log_takes_their_values_out(
+        tmp_path, monkeypatch):
+    root, folder = tmp_path / "root", tmp_path / "sites"
+    (root / "etc/ssl/certs").mkdir(parents=True)
+    (root / "etc/ssl/certs/ca-certificates.crt").write_text("PUBLIC ROOTS\n")
+    folder.mkdir()
+    folder.chmod(0o700)
+    table = sites.site_table([SiteParams(name="shop", url="http://gw/website/shop/", domains=["shop.localhost"]),
+                              SiteParams(name="notes", url="http://gw/website/notes/", domains=["notes.test"])])
+    given = sites.proxy_config(table, sites.issue(table.routes, label="t"), user=None, os_type="linux",
+                               forward_port=True, sign_in_headers={"shop": ["X-Auto-Login"]})
+    (folder / "config.json").write_text(json.dumps(given))
+    started = []
+    monkeypatch.setattr(site_proxy, "start", lambda path, log: started.append(Config.load(path)))
+    monkeypatch.setattr(site_proxy, "checks_as", lambda user, path: {"sites": {}, "runtimes": {}})
+    monkeypatch.setattr(site_proxy.shutil, "which", lambda tool: None)
+
+    site_proxy.install(str(folder / "config.json"), site_proxy.Paths(root))
+
+    (config,) = started
+    served = {site.name: site for site in config.sites}
+    assert (served["shop"].sign_in_headers, served["notes"].sign_in_headers) == (["X-Auto-Login"], [])
+    assert site_proxy.logged_headers([("x-auto-login", "admin:test")], served["shop"].sign_in_headers) == [
+        ["x-auto-login", site_proxy.REMOVED]]
+
+
 def test_install_keeps_the_upstream_headers_in_a_file_root_alone_reads_and_serve_json_names_it(tmp_path, monkeypatch):
     root, folder = tmp_path / "root", tmp_path / "sites"
     (root / "etc/ssl/certs").mkdir(parents=True)
@@ -922,7 +1056,7 @@ def test_install_keeps_the_upstream_headers_in_a_file_root_alone_reads_and_serve
     folder.mkdir()
     folder.chmod(0o700)
     table = sites.site_table([SiteParams(name="notes", url="http://gw/website/notes/", domains=["notes.test"])])
-    issued = sites.issue(table.routes, valid_for=timedelta(hours=1), label="t")
+    issued = sites.issue(table.routes, label="t")
     given = sites.proxy_config(table, issued, user=None, os_type="linux", forward_port=False,
                                upstream_headers={"notes": {"CF-Access-Client-Secret": "s3cret"}})
     (folder / "config.json").write_text(json.dumps(given))
@@ -1061,8 +1195,7 @@ def _calls(store: Path) -> list[str]:
 
 def test_every_jdk_trusts_the_ca_an_apt_one_through_the_system_hook_the_rest_by_keytool(tmp_path, monkeypatch):
     issued = sites.issue(sites.site_table([SiteParams(name="notes", url="http://gw/website/notes/",
-                                                      domains=["notes.test"])]).routes, valid_for=timedelta(hours=1),
-                         label="t")
+                                                      domains=["notes.test"])]).routes, label="t")
     fingerprint = site_proxy.sha256_fingerprint(issued.ca_pem)
     ca = tmp_path / "ca.pem"
     ca.write_text(issued.ca_pem)
@@ -1101,8 +1234,7 @@ def test_a_jdk_store_the_ca_isnt_listed_in_after_routing_is_named(tmp_path, monk
     apt.unlink()
     apt.symlink_to(hook)
     issued = sites.issue(sites.site_table([SiteParams(name="notes", url="http://gw/website/notes/",
-                                                      domains=["notes.test"])]).routes, valid_for=timedelta(hours=1),
-                         label="t")
+                                                      domains=["notes.test"])]).routes, label="t")
 
     trusted = site_proxy.trust_java(site_proxy.Paths(root), str(tmp_path / "ca.pem"), issued.ca_pem)
 
@@ -1120,8 +1252,7 @@ def test_each_runtime_loads_the_first_https_site_through_its_own_trust_and_says_
     monkeypatch.delenv("SSL_CERT_FILE", raising=False)
     unset = site_proxy.check_runtimes("https://notes.test/")
     issued = sites.issue(sites.site_table([SiteParams(name="notes", url="http://gw/website/notes/",
-                                                      domains=["notes.test"])]).routes, valid_for=timedelta(hours=1),
-                         label="t")
+                                                      domains=["notes.test"])]).routes, label="t")
     (tmp_path / "bundle.pem").write_text(issued.ca_pem)
     monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "bundle.pem"))
     opened = []
@@ -1153,7 +1284,7 @@ def test_a_wildcard_name_starts_dns_even_when_resolv_conf_names_no_other_nameser
     if resolv is not None:
         (root / "etc/resolv.conf").write_text(resolv)
     table = sites.site_table([SiteParams(name="chat", url="http://gw/website/chat/", domains=["*.chat.test"])])
-    issued = sites.issue(table.routes, valid_for=timedelta(hours=1), label="t")
+    issued = sites.issue(table.routes, label="t")
     (folder / "config.json").write_text(json.dumps(sites.proxy_config(table, issued, user=None, os_type="linux",
                                                                       forward_port=False)))
     started = []
@@ -1225,5 +1356,6 @@ def test_the_proxy_is_standard_library_alone_so_the_bases_own_python_runs_it():
     imported = {line.split()[1].split(".")[0] for line in source.splitlines()
                 if line.startswith(("import ", "from ")) and not line.startswith("from __future__")}
 
-    assert imported <= {"asyncio", "base64", "hashlib", "ipaddress", "json", "os", "pwd", "re", "shutil", "socket", "ssl",
-                        "struct", "subprocess", "sys", "time", "urllib", "dataclasses", "pathlib", "typing"}
+    assert imported <= {"asyncio", "base64", "datetime", "hashlib", "ipaddress", "itertools", "json", "os", "pwd", "re",
+                        "shutil", "socket", "ssl", "struct", "subprocess", "sys", "time", "urllib", "dataclasses",
+                        "pathlib", "typing"}

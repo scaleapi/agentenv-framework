@@ -39,7 +39,7 @@ from mcp.shared.context import RequestContext
 from mcp.types import (CONNECTION_CLOSED, CallToolResult, ElicitRequestParams, ElicitResult, InitializeResult,
                        TextContent)
 
-from agentenv_protocol import EnvironmentTool, ForwardedTool, ToolContext, computer, server_instructions
+from agentenv_protocol import ForwardedTool, ToolContext, computer, server_instructions
 from agentenv_protocol.computer import ComputerSettings, ReadyCheck, computer_driver
 
 logger = logging.getLogger(__name__)
@@ -155,10 +155,9 @@ class CodexComputerUse(OSDriver):
         self._closing: set[asyncio.Task] = set()
 
     def forwarded_tools(self) -> list[ForwardedTool]:
-        return [ForwardedTool(EnvironmentTool(name=t["name"], description=t["description"],
-                                              inputSchema=_one_object(t["inputSchema"])),
-                              functools.partial(self._forward, t["name"]),
-                              {**(t.get("annotations") or {}), **ANNOTATIONS.get(t["name"], {})})
+        return [ForwardedTool.listed({**t, "inputSchema": _one_object(t["inputSchema"]),
+                                      "annotations": {**(t.get("annotations") or {}), **ANNOTATIONS.get(t["name"], {})}},
+                                     functools.partial(self._forward, t["name"]))
                 for t in _manifest()["tools"] if t["name"] in FORWARDED]
 
     @server_instructions

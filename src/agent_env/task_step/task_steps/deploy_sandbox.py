@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, ClassVar, Optional
 from agent_env.artifact.artifacts.docker_image import pull_problem
 from agent_env.providers.sandbox_providers.chained_sandbox_provider import skip_refusing
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy
-from agent_env.task_step.context import DeployedSandbox, TaskStepContext
+from agent_env.task_step.context import DeployedSandbox, StepContextError, TaskStepContext
 from agent_env.entity.scopes import FieldScope
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.attribution import deploy_attribution
@@ -113,7 +113,7 @@ class DeploySandboxTaskStep(TaskStep):
         from agent_env.providers.sandbox_providers.sandbox_provider import build_sandbox_provider, get_sandbox_provider
 
         if any(s.sandbox_name == self.sandbox_name for s in context.deployed_sandboxes):
-            raise RuntimeError(f"Sandbox '{self.sandbox_name}' is already deployed")
+            raise StepContextError(f"Sandbox '{self.sandbox_name}' is already deployed")
 
         user_overrides = context.metadata.get("user_overrides") or {}
         # Moves only deploy_sandbox steps: deploy_env and deploy_agent read env_sandbox and agent_sandbox.

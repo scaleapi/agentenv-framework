@@ -2,8 +2,17 @@ Base computers that come with agent-env, each a `computer` artifact a computer e
 `agent-env run <bundle> --set envs/desktop.computer=ubuntu-24.04-browser` composes a bundle's `desktop` env on
 another of them for one run, the bundle left as written.
 
-`artifacts/ubuntu-24.04/` is Ubuntu 24.04 (`amd64` and `arm64`) with XFCE on Xvfb, D-Bus and AT-SPI. tini starts
-supervisord, which runs every program as the session user, `user` (uid 1000); nothing in it runs as root. Its home
+`artifacts/ubuntu-24.04/` is Ubuntu 24.04 (`amd64` and `arm64`) with XFCE on Xvfb, D-Bus and AT-SPI. It starts as
+root: its init sets the time zone, makes the clock page and boots the egress proxy, then root's supervisord runs the
+clock follower as `agentenv-clock`, the egress proxy as `agentenv-egress` and the session's supervisord as the
+session user, `user` (uid 1000), which runs every session program. Every session program goes out through the
+egress proxy, on `127.0.0.1:3128` and on real time (`egress/`, a Go program the Dockerfile builds and tests): it
+passes a site's TLS through untouched when the universe's date is inside the site's certificate, else verifies the
+site against real time and hands the program a certificate from the computer's own CA, minted at boot, its key the
+proxy's alone, and valid from 1950 to 9999, so a live site loads however far the clock is from now. Its handshake
+with the site is built from the program's own, so the site sees the program's TLS fingerprint either way, and it
+refuses any destination that isn't global. Java and Node's `fetch` reach it by their own settings, which the
+session sets too. Its home
 has a desktop's standard folders (`Desktop`, `Documents`, `Downloads`, `Pictures` and the rest, from `xdg-user-dirs`). Its
 container form's image is built from the folder's `Dockerfile`, and a release publishes it as
 `ghcr.io/scaleapi/agentenv-ubuntu-24.04:src-<hex>`, tagged by its sources, so a run pulls it by digest instead of
@@ -18,7 +27,9 @@ is the browser's `window` setting. supervisord runs every program as the session
 stand-in site proxy on `127.0.0.1:3128`, the browser's only route out when the computer
 routes no sites. It forwards a request or a `CONNECT` tunnel to any host, never decrypting a tunnel and refusing
 nothing: the sandbox's network policy is all that limits it. Every line it writes to `/var/log/agentenv/site-proxy.log`
-is JSON, one per connection and one per connection that fails, in the same shapes as the shared site proxy's. A computer that routes sites names the shared site proxy's forward port,
+is JSON, one per connection and one per connection that fails, in the same shapes as the shared site proxy's. It
+keeps the browser's network log too, in `/var/log/agentenv/network.jsonl`, which `AGENTENV_NETWORK_LOG` names: an
+`open` and an `end` line for each connection, numbered, in the shared site proxy's shapes. A computer that routes sites names the shared site proxy's forward port,
 `127.0.0.1:3129`, to the browser instead: it serves the run's sites, refuses every other host and runs out of the agent's reach. It has a
 container form only. Name it from another bundle as `ubuntu-24.04-browser`, or by its id,
 `@local/agentenv-framework/computers/ubuntu-24.04-browser`. It was `ubuntu-24.04-headless`, a name nothing resolves
@@ -77,6 +88,14 @@ and the protocol's `computer` package. A build an agent-env with other composing
 records named it, isn't deployed: a deploy that boots its form composes it again first, saying so, as `env build` and
 a put do, and its record says `by another composer` until then. So upgrading agent-env never boots a computer composed
 the old way.
+
+A computer app a release publishes composed, `chromium`, needs no build: the wheel records the lock each arch was
+composed from and the key it took (`published_images.released_computers`), so a compose of the same inputs takes that
+lock rather than resolving one, finds its key in the record, and records the image the release published, pulled by
+its digest from `ghcr.io/scaleapi/agentenv-chromium`, as `reused` and `published`, then probes it as any reuse is
+probed. The computer is written over the index the release published of its arches; an arch it composed here beside
+one the release published is joined in the env's own store, the released one copied there first. A record of another
+key, an image the registry won't give, or a checkout's compose, which stages the protocol's source, composes as before.
 
 Its settings reach the computer as environment variables, `AGENTENV_SETTING_<NAME>`, read as it starts:
 

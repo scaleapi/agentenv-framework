@@ -174,6 +174,14 @@ async def test_the_person_s_messages_arrive_at_their_times_once_each(hook, gatew
 
 
 @pytest.mark.asyncio
+async def test_the_person_s_messages_are_labelled_in_the_zone_the_clock_was_armed_in(hook, gateway):
+    gateway._clock.set_time(MONDAY, rate=0, time_zone="America/Chicago")
+    params = {"person_messages": [{"at": "2026-03-03T15:00:00Z", "text": "I'm up"}]}
+    sent = await _turns(hook, _context(), params=params)
+    assert sent == [["[Tue Mar 3, 9:00 AM CST] I'm up"], {"end": "nothing_can_wake_the_agent"}]
+
+
+@pytest.mark.asyncio
 async def test_another_conversation_delivering_a_message_at_the_same_time_does_not_skip_this_one(hook, gateway):
     context = _context()
     context.metadata["post_turn_hooks"] = {"other": [{"hook": "advance-to-next-event", "turn": 1,

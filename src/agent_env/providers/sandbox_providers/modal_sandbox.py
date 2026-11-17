@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import collections
 import contextlib
 import functools
 import hashlib
@@ -59,6 +60,10 @@ _STDIN_CHUNK_BYTES = 8 * 1024 * 1024 - ((8 * 1024 * 1024) % 3)
 _CANCELLED_CREATE_WAIT_SECONDS = 30
 # Terminations started after their create's cancel had gone on, kept so they run to their end.
 _LATE_TERMINATIONS: set[asyncio.Task] = set()
+# How long reading what an ended sandbox's process wrote may take, and how many of the last lines of each of its
+# streams it keeps.
+_OUTPUT_READ_SECONDS, _OUTPUT_KEPT_LINES = 15, 1000
+_LINE_BREAK = re.compile(r"\r\n|\r|\n")
 
 
 async def _terminate_created(sb: modal.Sandbox) -> None:
@@ -126,6 +131,47 @@ async def _resolve_i6pn_address(sb: modal.Sandbox) -> Optional[str]:
     return None
 
 
+async def _ended_output(sb: modal.Sandbox) -> Optional[tuple[list[str], list[str]]]:
+    """The last ``_OUTPUT_KEPT_LINES`` lines of each of the output and the errors of ``sb``'s process, once it has
+    exited, read a chunk at a time so no more than those are held; None while it runs, as Modal hands a sandbox's
+    stream only to its end. Reading that fails or takes past ``_OUTPUT_READ_SECONDS`` keeps what it read."""
+    if await sb.poll.aio() is None:
+        return None
+    output, errors = collections.deque(maxlen=_OUTPUT_KEPT_LINES), collections.deque(maxlen=_OUTPUT_KEPT_LINES)
+    try:
+        async with asyncio.timeout(_OUTPUT_READ_SECONDS):
+            failures = await asyncio.gather(_read_lines(sb.stdout, output), _read_lines(sb.stderr, errors),
+                                            return_exceptions=True)
+    except TimeoutError:
+        failures = [TimeoutError(f"reading took past {_OUTPUT_READ_SECONDS} s")]
+    for failure in failures:
+        if failure is not None:
+            logger.info(f"Couldn't read all the output of Modal sandbox {sb.object_id}: {fmt_exc(failure)}")
+    return list(output), list(errors)
+
+
+async def _read_lines(stream, kept: collections.deque) -> None:
+    """Each line of ``stream``, a sandbox's, into ``kept``, a chunk at a time; blank ones left out."""
+    partial = ""
+    async for chunk in stream:
+        *whole, partial = _LINE_BREAK.split(partial + chunk)
+        kept.extend(line for line in whole if line)
+    if partial:
+        kept.append(partial)
+
+
+def _last_lines(ended: Optional[tuple[list[str], list[str]]], lines: int) -> list[str]:
+    """The last ``lines`` of an ended sandbox's output and errors, ``ended``, its output's then its errors'. Modal keeps
+    no order between the two, so each keeps at least half of them, or all it has, and neither crowds out the other's
+    last lines."""
+    if ended is None:
+        return []
+    output, errors = ended
+    from_errors = min(len(errors), max(lines // 2, lines - len(output)))
+    from_output = min(len(output), lines - from_errors)
+    return output[len(output) - from_output:] + errors[len(errors) - from_errors:]
+
+
 class _ModalStreamAdapter:
     def __init__(self, stream):
         self._stream = stream
@@ -156,6 +202,7 @@ class ModalSandbox(Sandbox):
         self.vnc_url = None
         self.mode = SANDBOX_MODE_CONTAINER
         self.network_policy = network_policy
+        self._ended: Optional[tuple[list[str], list[str]]] = None
 
     @property
     def private_host(self) -> str | None:
@@ -164,6 +211,15 @@ class ModalSandbox(Sandbox):
 
     async def terminate(self) -> None:
         await self._sb.terminate.aio()
+
+    async def exit_status(self) -> Optional[int]:
+        return await self._sb.poll.aio()
+
+    async def output_tail(self, lines: int) -> list[str]:
+        """The last ``lines`` lines its container wrote, once it has exited; none while it runs."""
+        if self._ended is None:
+            self._ended = await _ended_output(self._sb)
+        return _last_lines(self._ended, lines)
 
     async def exec(self, *command: str):
         process = await self._sb.exec.aio(*command, text=False)

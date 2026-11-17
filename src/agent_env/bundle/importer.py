@@ -4,6 +4,7 @@ runs with no store; nothing is written to a store."""
 from __future__ import annotations
 
 import contextlib
+import copy
 import json
 import os
 import re
@@ -52,7 +53,7 @@ from agent_env.bundle.parse import (
 )
 from agent_env.bundle.plan import STORE_GETTERS, check_bundle
 from agent_env.bundle.requires import Providers, Use, detected
-from agent_env.bundle.resolve import resolve_bundle
+from agent_env.bundle.resolve import resolve_bundle, sync_context_paths
 from agent_env.config import get_config
 from agent_env.entity.export import ExportContext, Unwritable, checked_path
 from agent_env.entity.refs import EntityKind, EntityRef, RefRole, RefSite, default_agent_refs, ref_sites
@@ -216,9 +217,11 @@ class _Importer:
         found = []
         for step in steps:
             cls = registry[step["type"]]
-            pruned = prune(step, cls.field_scopes, self.include_scopes)  # first, so no pruned field is written
-            found.append((step, cls, pruned, [site for site in ref_sites(cls.entity_refs or (), step)
-                                              if isinstance(site.value, str) and site.value]))
+            # First, so no pruned field or secret is written, nor read back when paths are synced below.
+            dropped = prune(step, cls.field_scopes, self.include_scopes) + scrub(step)
+            found.append((step, cls, dropped, [site for site in ref_sites(cls.entity_refs or (), step)
+                                               if isinstance(site.value, str) and site.value]))
+        stored = copy.deepcopy(steps)  # as the store holds it, less what's left out, before any id is renamed
         sites = [site for *_, step_sites in found for site in step_sites]
         outputs = _output_names(sites)
         for site in sites:  # each output, and each step that reads it, takes the output's name
@@ -228,9 +231,9 @@ class _Importer:
         for site in sites:
             if site.ref.kind is EntityKind.ENV and site.version is not None:
                 pins.setdefault(_key(site)[1], set()).add(site.version)
-        for step, cls, pruned, step_sites in found:
+        for step, cls, dropped, step_sites in found:
             where = f"{path}: step {step.get('id')!r}"
-            self.dropped += [Dropped(f"{where}: {at}", why) for at, why in pruned + scrub(step)]
+            self.dropped += [Dropped(f"{where}: {at}", why) for at, why in dropped]
             self._need(where, "step type", TASK_STEPS, cls.type, cls)
             if cls.entity_refs is None:
                 self.undeclared.append(f"{where} ({cls.type})")
@@ -238,6 +241,7 @@ class _Importer:
                 if _key(site) not in outputs:  # the run writes an output again, so it's no entity to write here
                     self._ref(site, f"{where}: {site.path}", pins)
             self._default_agents(step, cls.entity_refs or (), where)
+        sync_context_paths(stored, steps)
         self.files[path] = json.dumps(steps, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
         self.tasks.append(ImportedTask(path, task.id, task.version, len(steps)))
         self.declared += task.requires or ()

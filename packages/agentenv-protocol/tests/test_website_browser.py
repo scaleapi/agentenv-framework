@@ -13,6 +13,7 @@ import json
 import os
 import signal
 import sys
+from urllib.parse import urldefrag, urlsplit, urlunsplit
 
 import pytest
 
@@ -517,7 +518,7 @@ class StubDevTools:
         answer = self.answers.get(method, {})
         return answer(params, session_id) if callable(answer) else answer
 
-    async def request(self, method, params=None, *, session_id=None):
+    async def request(self, method, params=None, *, session_id=None, answered=None):
         try:
             return {"result": await self.call(method, params, session_id=session_id)}
         except DevToolsError as e:
@@ -565,7 +566,7 @@ async def test_each_page_it_attaches_to_is_told_to_run_so_a_popup_it_attached_to
     control = BrowserControl(devtools, "agent")
     await control.attach()
     devtools.send("Target.attachedToTarget", {"sessionId": "s-popup", "waitingForDebugger": True, **_page("popup")})
-    await asyncio.sleep(0)
+    await asyncio.sleep(0.01)
 
     assert ("Page.enable", {}, "s-popup") in devtools.calls
     assert ("Runtime.runIfWaitingForDebugger", {}, "s-popup") in devtools.calls
@@ -580,7 +581,7 @@ async def test_alone_each_page_it_attaches_to_is_held_to_its_window_before_it_ru
     control = BrowserControl(devtools, "agent", (1024, 768))
     await control.attach()
     devtools.send("Target.attachedToTarget", {"sessionId": "s-popup", "waitingForDebugger": True, **_page("popup")})
-    await asyncio.sleep(0)
+    await asyncio.sleep(0.01)
 
     sent = [method for method, _, session in devtools.calls if session == "s-popup"]
     assert next(params for method, params, _ in devtools.calls if method == "Target.setAutoAttach")[
@@ -600,22 +601,66 @@ async def test_a_page_it_couldnt_prepare_is_still_told_to_run_so_it_never_stays_
     control = BrowserControl(devtools, "agent", (1024, 768))
     await control.attach()
     devtools.send("Target.attachedToTarget", {"sessionId": "s-popup", "waitingForDebugger": True, **_page("popup")})
+    await asyncio.sleep(0.01)
+
+    assert [method for method, _, session in devtools.calls if session == "s-popup"] == [
+        "Page.enable", "Emulation.setDeviceMetricsOverride", "Page.setInterceptFileChooserDialog",
+        "Runtime.runIfWaitingForDebugger"]
+
+
+class PausedUntilRun(StubDevTools):
+    """A browser whose popup, paused as it opened, answers Page.enable only once it's told to run, as Chromium does a
+    popup a click opened before its first navigation."""
+
+    def __init__(self):
+        super().__init__()
+        self.ran = asyncio.Event()
+
+    async def call(self, method, params=None, *, session_id=None, timeout_s=None):
+        self.calls.append((method, params or {}, session_id))
+        if method == "Runtime.runIfWaitingForDebugger":
+            self.ran.set()
+        elif method == "Page.enable" and session_id == "s-popup":
+            await asyncio.wait_for(self.ran.wait(), timeout_s or 30)
+        return {}
+
+
+@pytest.mark.asyncio
+async def test_a_popup_that_answers_page_enable_only_once_it_runs_is_told_to_run_at_once_held_to_its_window_first():
+    devtools = PausedUntilRun()
+    control = BrowserControl(devtools, "agent", (1024, 768))
+    await control.attach()
+    devtools.send("Target.attachedToTarget", {"sessionId": "s-popup", "waitingForDebugger": True, **_page("popup")})
+    await asyncio.wait_for(devtools.ran.wait(), 1)
     await asyncio.sleep(0)
 
     assert [method for method, _, session in devtools.calls if session == "s-popup"] == [
-        "Page.enable", "Runtime.runIfWaitingForDebugger"]
+        "Page.enable", "Emulation.setDeviceMetricsOverride", "Page.setInterceptFileChooserDialog",
+        "Runtime.runIfWaitingForDebugger"]
 
 
 class Navigating(StubDevTools):
     """A browser whose first tab is ``start`` and whose new tabs are t1, t2, …, each attached as it opens, answering a
     navigation as ``pages`` says by URL: a status and the URL it ends on, then committed and, unless ``no-load``
     follows, loaded, or with ``("redirect", status, url)`` following, sending itself there by script before it loads;
-    ``refused``, a network error; ``silent``, never answered, as a page that never answers isn't; or ``stale``, a load
-    event with no commit."""
+    ``refused``, a network error; ``aborted``, a document request that fails before it commits; ``silent``, never
+    answered, as a page that never answers isn't; or ``stale``, a load event with no commit. A navigation that stays in
+    a tab's document, to a URL with a fragment that differs from where it is (``at``) in its fragment alone, as a
+    browser spells both (``_document``), moves within it and names no loader, as a browser's does; a reload loads where
+    the tab is as a navigation there would, naming no loader either."""
 
-    def __init__(self, pages):
+    #: How long after the browser answers them a move within a document lands, and a reload starts loading.
+    MOVE_LANDS_S, RELOAD_LOADS_S = 0.05, 0.01
+
+    def __init__(self, pages, reload_answers=True):
         super().__init__({"Target.getTargets": {"targetInfos": []}})
-        self.pages, self.opened, self.loaders = pages, 0, 0
+        self.pages, self.opened, self.loaders, self.urls, self.pending = pages, 0, 0, {}, []
+        self.reload_answers = reload_answers
+
+    def at(self, target, url):
+        """The tab ``target`` at ``url``, as the browser tells the control."""
+        self.urls[target] = url
+        self.send("Target.targetInfoChanged", _page(target, url))
 
     async def call(self, method, params=None, *, session_id=None, timeout_s=None):
         if method == "Target.createTarget":
@@ -626,12 +671,42 @@ class Navigating(StubDevTools):
             self.send("Target.attachedToTarget", {"sessionId": f"s-{target}", "waitingForDebugger": True,
                                                   **_page(target)})
             return {"targetId": target}
+        if method == "Page.reload":
+            self.calls.append((method, params, session_id))
+            if not self.reload_answers:
+                await asyncio.Event().wait()
+            self.pending.append(asyncio.ensure_future(self._reload(self.urls[session_id[2:]], session_id)))
+            return {}
         if method != "Page.navigate":
             return await super().call(method, params, session_id=session_id, timeout_s=timeout_s)
         self.calls.append((method, params, session_id))
-        page, target = self.pages[params["url"]], session_id[2:]
+        url, target = params["url"], session_id[2:]
+        if "#" in url and _document(url) == _document(self.urls.get(target, "")):
+            self.pending.append(asyncio.ensure_future(self._move_within(target, url, session_id)))
+            return {"frameId": target}
+        return await self._load(url, session_id)
+
+    async def _move_within(self, target, url, session_id):
+        """A move within a tab's document, which the browser answers before it lands."""
+        await asyncio.sleep(self.MOVE_LANDS_S)
+        self.send("Page.navigatedWithinDocument", {"frameId": target, "url": url}, session_id)
+        self.at(target, url)
+
+    async def _reload(self, url, session_id):
+        """A reload, which the browser answers before it commits."""
+        await asyncio.sleep(self.RELOAD_LOADS_S)
+        await self._load(url, session_id)
+
+    async def _load(self, url, session_id):
+        page, target = self.pages[url], session_id[2:]
+        self.urls[target] = url
         self.loaders += 1
         loader, request = f"L{self.loaders}", f"r{self.loaders}"
+        if page == "aborted":
+            document = {"requestId": request, "loaderId": loader, "type": "Document", "frameId": target}
+            self.send("Network.requestWillBeSent", document, session_id)
+            self.send("Network.loadingFailed", {"requestId": request, "errorText": "net::ERR_ABORTED"}, session_id)
+            return {"frameId": target, "loaderId": loader, "errorText": "net::ERR_ABORTED"}
         if page == "refused":
             return {"frameId": target, "loaderId": loader, "errorText": "net::ERR_CONNECTION_REFUSED"}
         if page == "silent":
@@ -653,6 +728,12 @@ class Navigating(StubDevTools):
         self.send("Network.requestWillBeSent", document, session)
         self.send("Network.responseReceived", {**document, "response": {"status": status, "url": url}}, session)
         self.send("Page.frameNavigated", {"frame": {"id": target, "loaderId": loader, "url": url}}, session)
+
+
+def _document(url):
+    """The document ``url`` names, as a browser spells it: without its fragment, an empty path as "/"."""
+    parts = urlsplit(urldefrag(url)[0])
+    return urlunsplit(parts._replace(path=parts.path or "/"))
 
 
 async def _started(devtools, viewport=(1280, 800)) -> BrowserControl:
@@ -734,6 +815,66 @@ async def test_a_start_page_that_sends_itself_elsewhere_before_it_loads_is_judge
     (tab,) = await control.load_start_tabs(["https://shop.test/"], _shop, own_timeout_s=5)
 
     assert (tab["final_url"], tab["status"], tab["outcome"]) == (final, status, outcome)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("at, url", [("https://shop.test/#/orders", "https://shop.test/#/orders"),
+                                     ("https://shop.test/#/cart", "https://shop.test/#/orders"),
+                                     ("https://shop.test/#/orders", "https://shop.test#/orders")],
+                         ids=["at-its-url", "at-another-route-of-its-page", "at-its-url-spelled-otherwise"])
+async def test_a_start_tab_already_on_its_pages_document_is_reloaded_there_and_loads_again(at, url):
+    devtools = Navigating({url: (200, url)})
+    control = await _started(devtools)
+    devtools.at("start", at)
+
+    (tab,) = await control.load_start_tabs([url], _shop, own_timeout_s=2)
+
+    assert (tab["outcome"], tab["status"], tab["final_url"], tab["error"]) == ("loaded", 200, url, None)
+    assert [(method, params) for method, params, on in devtools.calls if on == "s-start" and method in (
+        "Page.navigate", "Page.reload")] == [("Page.navigate", {"url": url}), ("Page.reload", {})]
+    assert not control._loading
+
+
+@pytest.mark.asyncio
+async def test_a_start_tab_whose_reload_fails_before_it_commits_fails_at_once_naming_why():
+    url = "https://shop.test/#/orders"
+    devtools = Navigating({url: "aborted"})
+    control = await _started(devtools)
+    devtools.at("start", url)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+
+    (tab,) = await control.load_start_tabs([url], _shop, own_timeout_s=2)
+
+    assert (tab["outcome"], tab["error"]) == ("failed", "net::ERR_ABORTED")
+    assert loop.time() - started < 1
+
+
+@pytest.mark.asyncio
+async def test_a_start_tab_whose_reload_never_answers_times_out_and_leaves_no_cause_for_a_later_navigation():
+    url = "https://shop.test/#/orders"
+    devtools = Navigating({url: (200, url)}, reload_answers=False)
+    control = await _started(devtools)
+    devtools.at("start", url)
+
+    (tab,) = await control.load_start_tabs([url], _shop, own_timeout_s=0.5)
+    await asyncio.sleep(0)
+
+    assert tab["outcome"] == "timed_out"
+    assert "start" not in control.causes._next
+
+
+@pytest.mark.asyncio
+async def test_a_start_tab_on_another_page_of_its_site_navigates_and_isnt_reloaded():
+    url = "https://shop.test/#/orders"
+    devtools = Navigating({url: (200, url)})
+    control = await _started(devtools)
+    devtools.at("start", "https://shop.test/account")
+
+    (tab,) = await control.load_start_tabs([url], _shop, own_timeout_s=2)
+
+    assert (tab["outcome"], tab["final_url"]) == ("loaded", url)
+    assert (_sent(devtools, "Page.navigate"), _sent(devtools, "Page.reload")) == ([({"url": url}, "s-start")], [])
 
 
 @pytest.mark.asyncio
@@ -1139,7 +1280,7 @@ async def test_its_control_answers_a_dialog_on_its_pages_session_as_its_setting_
 
     devtools.send("Page.javascriptDialogOpening", {"type": kind, "message": "Sure?", "url": "https://a.test/",
                                                    "defaultPrompt": "yes"}, "s-a")
-    await asyncio.sleep(0)
+    await asyncio.sleep(0.01)
     devtools.send("Page.javascriptDialogClosed", {"result": answer == "accepted"}, "s-a")
 
     assert ("Page.enable", {}, "s-a") in devtools.calls

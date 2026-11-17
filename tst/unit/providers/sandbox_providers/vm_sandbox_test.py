@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import io
 import re
+import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -525,7 +526,7 @@ async def test_write_file_from_text_large_chunks_reconstruct_exactly():
     # The reconstructed base64 must equal the original, byte-for-byte.
     assert _b64_from_chunk_scripts(sandbox.scripts, b64_path) == expected_b64
     # And it's decoded into the real path before the docker cp.
-    assert any(f"base64 -d {b64_path} > " in s for s in sandbox.scripts)
+    assert any(f"base64 -d < {b64_path} > " in s for s in sandbox.scripts)
 
 
 class _CleanupFailingSandbox(VmSandbox):
@@ -760,6 +761,22 @@ async def test_a_load_bounds_how_many_signs_run_at_once():
 
 
 @pytest.mark.asyncio
+async def test_a_file_written_on_the_host_in_chunks_decodes_with_this_machines_own_base64(tmp_path):
+    """The scripts a chunked write runs, run here: a local sandbox's host is this machine, whose base64 may be macOS's,
+    which takes no file argument."""
+    sandbox = _ScriptRecorder()
+    data = bytes(range(256)) * 1024
+    target = tmp_path / "input.bin"
+    await sandbox.write_host_file(data, str(target))
+
+    for script in sandbox.scripts:
+        ran = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+        assert ran.returncode == 0, (script[:80], ran.stderr)
+
+    assert target.read_bytes() == data and not (tmp_path / "input.bin.b64").exists()
+
+
+@pytest.mark.asyncio
 async def test_write_host_file_writes_on_the_host_in_bounded_chunks():
     import base64
 
@@ -771,7 +788,7 @@ async def test_write_host_file_writes_on_the_host_in_bounded_chunks():
     assert not any("docker" in s for s in sandbox.scripts)
     b64_path = "/tmp/agentenv_run_code/input.json.b64"
     assert _b64_from_chunk_scripts(sandbox.scripts, b64_path) == base64.b64encode(data).decode()
-    assert sandbox.scripts[-1] == f"base64 -d {b64_path} > /tmp/agentenv_run_code/input.json && rm -f {b64_path}"
+    assert sandbox.scripts[-1] == f"base64 -d < {b64_path} > /tmp/agentenv_run_code/input.json && rm -f {b64_path}"
 
 
 class _ArgsRecorder(VmSandbox):

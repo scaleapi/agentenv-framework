@@ -9,9 +9,11 @@ prior step", which would serialise the branches and prove nothing.
 """
 
 import contextlib
+import fcntl
 import json
 import socket
 import subprocess
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -34,6 +36,9 @@ from tst.task import journal_invariants as journal
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
 _TST_DATA = Path(__file__).resolve().parents[2] / "data"
+# Test workers share one Docker daemon, and two builds naming the same tag at once can fail with
+# "image ... already exists", so the bootstrap builds take turns.
+_BUILD_LOCK = Path(tempfile.gettempdir()) / "agentenv-test-bootstrap-builds.lock"
 
 
 def _free_port() -> int:
@@ -115,7 +120,9 @@ def _seed_bootstrap_envs():
     from agent_env.env.envs.service_db import ServiceDBEnv
 
     def build(dockerfile: Path, context: Path, tag: str) -> DockerImageArtifact:
-        result = _docker("build", "-f", str(dockerfile), "-t", tag, str(context))
+        with open(_BUILD_LOCK, "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            result = _docker("build", "-f", str(dockerfile), "-t", tag, str(context))
         assert result.returncode == 0, f"build {tag} failed: {result.stderr[-2000:]}"
         return DockerImageArtifact.put(id=tag, description="bootstrap", image_name=tag)
 

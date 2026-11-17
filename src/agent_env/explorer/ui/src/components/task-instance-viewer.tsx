@@ -467,6 +467,18 @@ export function TaskInstanceViewer({
     () => parseTriggerRuntime(metadata),
     [metadata],
   );
+  // always_on steps, by their type or by the run record they write under metadata.always_on[step_id]: a wake's closing
+  // text there is the agent's private note, never sent to the user, which the trajectory viewer labels as such.
+  const alwaysOnStepIds = useMemo(() => {
+    const record = metadata?.always_on;
+    const ids = new Set<string>(
+      record && typeof record === 'object' ? Object.keys(record) : [],
+    );
+    for (const s of taskSteps ?? []) {
+      if (s.type === 'always_on' && s.id) ids.add(s.id);
+    }
+    return ids;
+  }, [metadata, taskSteps]);
   // Authored trigger configs for the badge popovers. Empty when the surface passes slim step refs — popovers then show runtime history only.
   const authoredTriggers = useMemo(
     () => indexAuthoredTriggers(taskSteps),
@@ -955,6 +967,9 @@ export function TaskInstanceViewer({
                           <TrajectoryViewer
                             trajectory={t.state.trajectory}
                             screenshotBaseUri={t.state.objectUrl}
+                            closingNote={
+                              !!t.stepId && alwaysOnStepIds.has(t.stepId)
+                            }
                           />
                         </div>
                       </details>

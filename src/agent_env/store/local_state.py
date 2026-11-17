@@ -45,10 +45,12 @@ def ensure_state_dir(path: Path) -> None:
 
 
 @contextmanager
-def holding_locks(ids: Iterable[str], on_wait: Callable[[], None] | None = None) -> Iterator[None]:
+def holding_locks(ids: Iterable[str], on_wait: Callable[[], None] | None = None,
+                  deadline: float | None = None) -> Iterator[None]:
     """Hold a lock on each of ``ids`` in the per-user state root, so another process writing any of them waits
     here, calling ``on_wait`` first. The locks are taken in one order, so two holders can't each hold one the
-    other waits for."""
+    other waits for. With a ``deadline`` (``time.monotonic()``), a held lock is tried again every ``_LOCK_POLL_S``
+    until then, and TimeoutError raised after."""
     if fcntl is None:
         yield
         return
@@ -65,11 +67,25 @@ def holding_locks(ids: Iterable[str], on_wait: Callable[[], None] | None = None)
                 if on_wait is not None and not waited:
                     on_wait()
                     waited = True
-                fcntl.flock(fds[-1], fcntl.LOCK_EX)
+                if deadline is None:
+                    fcntl.flock(fds[-1], fcntl.LOCK_EX)
+                else:
+                    _lock_by(fds[-1], deadline)
         yield
     finally:
         for fd in fds:
             os.close(fd)
+
+
+def _lock_by(fd: int, deadline: float) -> None:
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("another holder kept the lock past the deadline") from None
+            time.sleep(min(_LOCK_POLL_S, max(deadline - time.monotonic(), 0)))
 
 
 @asynccontextmanager

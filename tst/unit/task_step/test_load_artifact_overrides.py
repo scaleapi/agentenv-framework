@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
 
 
@@ -119,7 +119,7 @@ class TestResolveInputs:
         step = LoadArtifactTaskStep(
             id="load", version=None, agent_name="agent", collected_artifacts_step_id="collect",
         )
-        with pytest.raises(RuntimeError, match="No artifact recorded by step 'collect'"):
+        with pytest.raises(StepContextError, match="No artifact recorded by step 'collect'"):
             step._resolve_inputs(_ctx())
 
 

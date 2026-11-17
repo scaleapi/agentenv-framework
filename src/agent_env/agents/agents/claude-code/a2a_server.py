@@ -57,6 +57,7 @@ from agentenv_protocol.a2a_agent import (
     enable,
     extension,
 )
+from agentenv_protocol.a2a_agent.peer_agents import PEER_MCP_SERVER_NAME
 from agentenv_protocol.transfers import Uploaded, download, upload
 from starlette.applications import Starlette
 from starlette.exceptions import HTTPException
@@ -137,6 +138,8 @@ class ClaudeCodeConfig(AgentConfig):
     max_thinking_tokens: int | None = None
     # Which of the CLI's own tools it may use. With any selection, its MCP servers are only the ones agent-env gives it.
     builtin_tools: ClaudeCodeTools | None = None
+    # Whether a turn gets the SDK's peer_agents MCP tools, to message the task's other agents.
+    peer_tools: bool = True
 
 
 def _rewrite_session_ids(jsonl_text: str, session_id: str) -> tuple[list[str], int]:
@@ -481,7 +484,8 @@ class ClaudeCodeAgent(DurableSessionRefs, AgentEnvAgent):
                 resume=resume,
                 model=cfg.model,
                 allowed_tools=cfg.allowed_tools,
-                mcp_servers=dict(request.mcp_servers),
+                mcp_servers={name: server for name, server in request.mcp_servers.items()
+                             if cfg.peer_tools or name != PEER_MCP_SERVER_NAME},
                 system_prompt=cfg.system_prompt,
                 output_format=cfg.output_format,
                 timeout_s=cfg.timeout_seconds,

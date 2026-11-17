@@ -1,7 +1,10 @@
 """The browser as a computer: agentenv's chromium deployed alone, on the ubuntu-24.04-browser base with no desktop
 and the page driver, whose screen is chromium's active tab, headful on the X server only the browser uses. Gate 3 makes this machine's arch ready with it,
 its input checks and page tools verified on the HTML desk; deployed through the computer provider like any computer,
-its computer_* tools see and drive the page, and its page tools navigate, move in history, answer a dialog, use tabs
+its computer_* tools see and drive the page, Playwright MCP's browser_* tools beside them type into it and answer its
+dialog, each call an entry in the browser's log that its CDP commands and the navigation they cause point at, the two
+that run code hidden until tool access names one, as the installed Playwright MCP lists them, and back after Playwright
+MCP or the driver is killed, and its page tools navigate, move in history, answer a dialog, use tabs
 and upload; the browser's X server runs but no desktop, and nothing listens but the driver and the site proxy; a
 killed app server or driver is started again by supervisord and the computer is ready again; chromium killed fails it
 for good, computer-ready/v1 saying why and the tools answering with it, and so does its X server killed, which takes
@@ -21,20 +24,31 @@ window's size from its first script. Alone, it makes no request of its own, its 
 loads for well over a minute after it's ready, but for one Google account check at launch. Routing sites, it goes out only through the shared site proxy's forward port:
 start tabs on a site over HTTPS and on a .localhost one load through it, an event stream comes through as it's sent,
 any other host and loopback are refused and logged, the session user can't stop the port, killed it comes back, and
-after a reset it serves the sites and refuses the rest again.
+after a reset it serves the sites and refuses the rest again; its network log has each exchange whole, so that
+WebArena-Verified's own loader, reading the network.har its data/get exports, sees an agent's sign-in form, redirect,
+cookie, JSON and multipart as its grader reads them, and the live hosts' tunnels and plain requests beside them; alone,
+it has each connection the base's stand-in made, and each that failed.
+Its log has an entry for every action a CDP agent and an MCP agent take, over CDP, page tools and pixels, with who,
+the tab and its URL and no secret either typed or set, and each tab event names the command that caused it.
 Needs Docker and the local registry on
 localhost:5000, and Node 20 or later and npm for the CDP clients."""
 
 import asyncio
+import base64
 import calendar
+import contextlib
+import gzip
+import http.server
 import itertools
 import json
 import os
 import platform
 import re
 import shlex
+import shutil
 import ssl
 import subprocess
+import threading
 import time
 import urllib.parse
 import uuid
@@ -48,25 +62,48 @@ from PIL import Image
 from websockets.asyncio.client import connect
 
 from agentenv_protocol import client as protocol_v1
+from agentenv_protocol.client import find_extension_method, invoke_extension
 from agentenv_protocol.computer import COMPUTER_PAGE, COMPUTER_READY
 from agentenv_protocol.computer.conformance.client import image
-from agentenv_protocol.website_browser import BROWSER
+from agentenv_protocol.tool_access import ENABLE, ENABLE_TOOL_EXTENSION_URI
+from agentenv_protocol.tool_context import ROLE_HEADER
+from agentenv_protocol.types import uploaded_object_path
+from agentenv_protocol.website_browser import BROWSER, HAR_FILE
 
+import agent_env
 from agent_env.a2a_agent import conversation_store
+from agent_env.artifact import Artifact
 from agent_env.artifact.artifacts.file import FileArtifact
+from agent_env.artifact.store import reset_artifact_store
+from agent_env.bundle import parse_bundle
+from agent_env.bundle.installed import installed_bundles
+from agent_env.bundle.materialize import materialize
+from agent_env.bundle.plan import plan_bundle
+from agent_env.bundle.resolve import resolve_bundle
+from agent_env.config import configure, get_config
 from agent_env.env import Env
-from agent_env.env.envs.computer.utils import inside
+from agent_env.env.env import DeployedEnv
+from agent_env.env import published_images
+from agent_env.env.envs.computer.utils import inside, packages
+from agent_env.env.envs.computer.utils.composer import Composing
 from agent_env.env.store import get_env_store
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
+from agent_env.store.image_store.registry_api import copy_image, pin_digest, write_index
+from agent_env.store.object_store.local.grant_server import grant_server
 from agent_env.store.object_store.local.tls import LocalCA, local_ca
 from agent_env.store.routing import namespace_routing
 from agent_env.task import Task
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.browser.connect_cdp import BrowserConnectCdpTaskStep
+from agent_env.task_step.task_steps.browser.recording import (RECORDINGS_KEY as BROWSER_RECORDINGS,
+                                                             EndBrowserRecordingTaskStep, StartBrowserRecordingTaskStep)
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from agent_env.task_step.task_steps.reset_env import ResetEnvTaskStep
+from tst.integration.computer.browser_contexts import check_browser_contexts
+from tst.integration.computer.browser_recorded import check_recorded_contexts
+from tst.integration.computer.browser_scoped import check_scoped_addresses
 from tst.integration.computer.browser_data import SITE as DATA_SITE, check_browser_data, check_browser_data_under_chaos
 from tst.integration.computer.browser_steps import check_browser_steps
 from tst.integration.computer.browser_state import check_browser_state, check_browser_state_under_chaos
@@ -140,6 +177,16 @@ threading.Thread(target=server.serve_forever, daemon=True).start()
 time.sleep(float(sys.argv[1]))
 """
 SERVE_START_S = 3
+#: Playwright MCP's own tools/list in the computer, from the node and cli.js it's given, as JSON.
+LISTED_TOOLS = """import json, subprocess, sys
+messages = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18",
+             "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}}},
+            {"jsonrpc": "2.0", "method": "notifications/initialized"}, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}]
+out = subprocess.run(sys.argv[1:] + ["--cdp-endpoint", "http://127.0.0.1:9/", "--caps", "vision"], capture_output=True,
+                     input="\\n".join(map(json.dumps, messages)) + "\\n", text=True, timeout=60).stdout
+print(json.dumps(next(r["result"]["tools"] for r in map(json.loads, out.splitlines()) if r.get("id") == 2)))
+"""
+PLAYWRIGHT_MCP_TOOLS = Path(agent_env.__file__).parent / "drivers" / "envs" / "page" / "playwright-mcp-tools.json"
 #: A page that needs no server, so killing the driver, whose child a served site is, leaves it to open.
 DATA_PAGE = "data:text/html,<title>Home</title><h1>Home</h1>"
 #: A page a task's tab steps open, bring to the front and close by its URL.
@@ -213,7 +260,8 @@ async def test_its_tools_see_and_drive_the_page_that_is_its_screen(browser_compu
     assert clicked["c"] == 1 and doubled["d"] == 1 and typed["v"] == "Hello, World!" and replaced["v"] == "x"
     assert "C-a" in replaced["k"] and "Enter" in entered["k"] and scrolled["y"] >= 300
     assert after.getpixel((200, 150)) != (255, 0, 0)
-    assert json.loads(listening) == [3128, 18765] and x_server.strip() == "Xvfb"
+    # The stand-in site proxy, the egress proxy it hands live sites to, and the driver.
+    assert json.loads(listening) == [3128, 3130, 18765] and x_server.strip() == "Xvfb"
     assert "--headless" not in command and "--window-size=1280,800" in command
     assert "--enable-unsafe-swiftshader" in command
     assert not report.failed
@@ -417,6 +465,68 @@ async def test_its_task_steps_set_cookies_and_storage_open_a_tab_behind_and_acti
 
 
 @pytest.mark.asyncio
+async def test_its_contexts_are_leased_by_steps_and_by_agents_each_with_its_own_state_and_end_with_a_reset(
+        browser_computer):
+    with namespace_routing():
+        deployed = await Env.get(browser_computer.id).deploy(
+            env_params={"app_settings": {"chromium": {"start_urls": [DATA_SITE]}}})
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            await _ready(deployed)
+            card = (await _get(deployed, "/.well-known/agent-env.json")).json()
+            app = next(child for child in card["children_environments"] if child["name"] == "chromium")
+            await check_browser_contexts(
+                deployed, browser_computer.id,
+                lambda op: deployed.environment_url + protocol_v1.find_extension_method(app, BROWSER, op)["endpoint"],
+                f"{deployed.environment_url}/svc/chromium", lambda user: _cdp(deployed, user))
+        finally:
+            report = await teardown_run(context)
+
+    assert not report.failed
+
+
+@pytest.mark.asyncio
+async def test_an_address_scoped_to_a_lease_sees_it_alone_as_the_default_and_ends_with_it(browser_computer,
+                                                                                          cdp_clients):
+    with namespace_routing():
+        deployed = await Env.get(browser_computer.id).deploy()
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            await _ready(deployed)
+            card = (await _get(deployed, "/.well-known/agent-env.json")).json()
+            app = next(child for child in card["children_environments"] if child["name"] == "chromium")
+            await check_scoped_addresses(
+                deployed, browser_computer.id,
+                lambda op: deployed.environment_url + protocol_v1.find_extension_method(app, BROWSER, op)["endpoint"],
+                cdp_clients)
+        finally:
+            report = await teardown_run(context)
+
+    assert not report.failed
+
+
+@pytest.mark.asyncio
+async def test_each_context_is_recorded_alone_its_video_following_its_agent_while_agents_act_on_all_at_once(
+        browser_computer, cdp_clients):
+    with namespace_routing():
+        deployed = await Env.get(browser_computer.id).deploy()
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            await _ready(deployed)
+            card = (await _get(deployed, "/.well-known/agent-env.json")).json()
+            app = next(child for child in card["children_environments"] if child["name"] == "chromium")
+            await check_recorded_contexts(
+                deployed, browser_computer.id,
+                lambda op: deployed.environment_url + protocol_v1.find_extension_method(app, BROWSER, op)["endpoint"],
+                cdp_clients)
+        finally:
+            report = await teardown_run(context)
+            grant_server(None, None).close()
+
+    assert not report.failed
+
+
+@pytest.mark.asyncio
 async def test_a_task_pinning_a_version_of_the_browser_passes_preflight_on_it_and_runs_its_steps_through_task_run(
         browser_computer):
     suffix = uuid.uuid4().hex[:8]
@@ -491,6 +601,145 @@ async def test_its_data_calls_take_turns_a_server_restart_takes_a_load_and_with_
             report = await teardown_run(context)
 
     assert not report.failed
+
+
+#: A form whose password field and text field fill the page's top, for typing into either by a click.
+FORM = "data:text/html," + urllib.parse.quote(
+    "<title>form</title><body style='margin:0'><input id=p type=password style='position:absolute;left:0;top:0;"
+    "width:600px;height:80px'><input id=t style='position:absolute;left:0;top:120px;width:600px;height:80px'>")
+#: The secrets the agents send, which the log must never hold, and the text they type that it must.
+SECRETS, TYPED = ("hunter2", "hunter3", "s3cret"), ("standing desk", "oak desk")
+
+
+@pytest.mark.asyncio
+async def test_its_log_has_an_entry_for_every_action_over_cdp_page_tools_and_pixels_with_no_secrets(browser_computer):
+    """M8.19: one task driven over CDP, page tools and pixels has an entry for every action, with its time, who, tab,
+    URL and method or tool, and no secrets; each tab event names the command that caused it."""
+    with namespace_routing():
+        deployed = await Env.get(browser_computer.id).deploy()
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            sent = await _cdp_agent_types((await _cdp(deployed, "ada"))["ws_url"])
+            async with streamablehttp_client(deployed.mcp_url, headers={ROLE_HEADER: "bo"}) as (read, write, _):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    await _tool(session, "computer_navigate", {"url": FORM})
+                    await _shown(session, lambda page: page.get("title") == "form")
+                    await _tool(session, "computer_click", {"x": 300, "y": 40, "space": "frame"})
+                    await _tool(session, "computer_type", {"text": "hunter3"})
+                    await _tool(session, "computer_click", {"x": 300, "y": 160, "space": "frame"})
+                    await _tool(session, "computer_type", {"text": "oak desk"})
+                    await _tool(session, "computer_tabs", {"action": "list"})
+                    shot = await session.call_tool("computer_screenshot", {"space": "frame"})
+            await asyncio.sleep(1)
+            logged = await _browser_log(deployed)
+        finally:
+            report = await teardown_run(context)
+
+    lines = logged["lines"]
+    actions = [line["action"] | {"seq": line["seq"], "at": line["at"]} for line in lines if "action" in line]
+    tab_events = [line["tab"] for line in lines if "tab" in line]
+    by_ada = [action for action in actions if action["via"] == "cdp" and action["who"] == "ada"]
+    by_bo = [action for action in actions if action["via"] == "mcp"]
+    text = json.dumps(logged)
+    assert not shot.isError and [line["seq"] for line in lines] == sorted(line["seq"] for line in lines)
+    assert [action["method"] for action in by_ada] == [method for method, _ in sent], by_ada
+    assert all(action["at"] and action["tab"] == sent[0][1] and isinstance(action["url"], str) for action in by_ada)
+    assert {action["method"]: action["acts"] for action in by_ada} == {
+        "Target.createTarget": True, "Target.attachToTarget": False, "Runtime.evaluate": True, "Input.insertText": True,
+        "Network.setCookie": True, "DOM.getDocument": False, "Page.navigate": True, "Target.closeTarget": True}
+    typed = [action["params"]["text"] for action in by_ada if action["method"] == "Input.insertText"]
+    assert typed == [{"length": 7}, "standing desk"]
+    tools = {action["tool"] for action in by_bo}
+    assert tools == {"computer_navigate", "computer_click", "computer_type", "computer_tabs", "computer_screenshot"}
+    assert all(action["who"] == "bo" and action["at"] and action["op"] and action["call"] for action in by_bo)
+    acting = [action for action in by_bo if action["acts"]]
+    assert all(action["tab"] and isinstance(action["url"], str) for action in acting), acting
+    assert [action["args"]["text"] for action in acting if action["tool"] == "computer_type"] == \
+        [{"length": 7}, "oak desk"]
+    assert any(action["tool"] == "computer_click" and action["op"] == "page/input" and action["params"]["events"]
+               for action in acting)
+    assert not any(secret in text for secret in SECRETS) and all(words in text for words in TYPED)
+    created = next(action for action in by_ada if action["method"] == "Target.createTarget")
+    navigated = next(action for action in by_ada if action["method"] == "Page.navigate")
+    closed = next(action for action in by_ada if action["method"] == "Target.closeTarget")
+    opened_by_bo = next(action for action in by_bo if action["op"] == "navigate")
+    ada_tab = [event for event in tab_events if event["id"] == created["tab"]]
+    assert {"event": "opened", "by": "command", "entry": created["seq"], "via": "cdp", "who": "ada"}.items() <= \
+        ada_tab[0].items(), ada_tab
+    assert any(event["event"] == "navigated" and event.get("entry") == navigated["seq"] for event in ada_tab), ada_tab
+    assert {"event": "closed", "by": "command", "entry": closed["seq"]}.items() <= ada_tab[-1].items(), ada_tab
+    assert any(event["event"] == "navigated" and event.get("entry") == opened_by_bo["seq"] and event["who"] == "bo"
+               for event in tab_events), tab_events
+    assert not report.failed
+
+
+@contextlib.asynccontextmanager
+async def _cdp_calls(ws_url: str, tls: ssl.SSLContext | None = None, reply_s: float = 60):
+    """A CDP connection to ``ws_url``, trusting ``tls`` for a wss address, as its ``call``: a command's whole reply,
+    within ``reply_s``, the events before it skipped."""
+    async with connect(ws_url, max_size=None, open_timeout=60, **({"ssl": tls} if tls else {})) as ws:
+        ids = itertools.count(1)
+
+        async def call(method: str, params: dict, session: str | None = None) -> dict:
+            message_id = next(ids)
+            await ws.send(json.dumps({"id": message_id, "method": method, "params": params,
+                                      **({"sessionId": session} if session else {})}))
+            while (reply := json.loads(await asyncio.wait_for(ws.recv(), reply_s))).get("id") != message_id:
+                pass
+            return reply
+
+        yield call
+
+
+async def _cdp_agent_types(ws_url: str) -> list[tuple[str, str]]:
+    """A CDP agent, ada, that opens the form in a tab of its own, types a password and a search into it, sets a cookie,
+    reads the page, navigates and closes the tab: each command it sent, in order, and the tab, the same for all."""
+    sent: list[str] = []
+    async with _cdp_calls(ws_url) as cdp:
+
+        async def call(method: str, params: dict, session: str | None = None) -> dict:
+            sent.append(method)
+            return await cdp(method, params, session)
+
+        target = (await call("Target.createTarget", {"url": FORM}))["result"]["targetId"]
+        session = (await call("Target.attachToTarget", {"targetId": target, "flatten": True}))["result"]["sessionId"]
+        await asyncio.sleep(1)
+        await call("Runtime.evaluate", {"expression": "document.getElementById('p').focus()"}, session)
+        await call("Input.insertText", {"text": "hunter2"}, session)
+        await call("Runtime.evaluate", {"expression": "document.getElementById('t').focus()"}, session)
+        await call("Input.insertText", {"text": "standing desk"}, session)
+        await call("Network.setCookie", {"name": "sid", "value": "s3cret", "url": "https://shop.test/"}, session)
+        await call("DOM.getDocument", {"depth": 1}, session)
+        await call("Page.navigate", {"url": FORM + "%3C!--again--%3E"}, session)
+        await asyncio.sleep(1)
+        await call("Target.closeTarget", {"targetId": target})
+    return [(method, target) for method in sent]
+
+
+async def _network_log(deployed, after: int = 0) -> dict:
+    card = (await _get(deployed, "/.well-known/agent-env.json")).json()
+    app = next(child for child in card["children_environments"] if child["name"] == "chromium")
+    path = protocol_v1.find_extension_method(app, BROWSER, "network")["endpoint"]
+    return (await _get(deployed, path, headers=deployed.control_headers, params={"after": after})).json()
+
+
+async def _har(deployed) -> bytes:
+    """The browser's network log as its data/get exports it, ``network.har``."""
+    answer = await protocol_v1.get_data(f"{deployed.environment_url}/svc/chromium", timeout=120,
+                                        headers=deployed.control_headers)
+    return next(base64.b64decode(part.file.bytes) for part in answer.parts if uploaded_object_path(part) == HAR_FILE)
+
+
+async def _har_entries(deployed) -> list[dict]:
+    return json.loads(await _har(deployed))["log"]["entries"]
+
+
+async def _browser_log(deployed, after: int = 0) -> dict:
+    card = (await _get(deployed, "/.well-known/agent-env.json")).json()
+    app = next(child for child in card["children_environments"] if child["name"] == "chromium")
+    path = protocol_v1.find_extension_method(app, BROWSER, "log")["endpoint"]
+    return (await _get(deployed, path, headers=deployed.control_headers, params={"after": after})).json()
 
 
 async def _shown(session: ClientSession, holds) -> dict:
@@ -589,20 +838,10 @@ PAGE_SEEN = ("JSON.stringify({ready: document.readyState, title: document.title,
              "text: document.body ? document.body.innerText.slice(0, 200) : ''})")
 
 
-async def _cdp_agent_loads(ws_url: str, urls: list[str]) -> dict:
+async def _cdp_agent_loads(ws_url: str, urls: list[str], tls: ssl.SSLContext | None = None) -> dict:
     """What a CDP agent at ``ws_url`` sees navigating a tab of its own to each of ``urls``, one after another:
-    ``Page.navigate``'s error, if any, and the page once it has loaded."""
-    async with connect(ws_url, max_size=None, open_timeout=60) as ws:
-        ids = itertools.count(1)
-
-        async def call(method: str, params: dict, session: str | None = None) -> dict:
-            message_id = next(ids)
-            await ws.send(json.dumps({"id": message_id, "method": method, "params": params,
-                                      **({"sessionId": session} if session else {})}))
-            while (reply := json.loads(await asyncio.wait_for(ws.recv(), 90))).get("id") != message_id:
-                pass
-            return reply
-
+    ``Page.navigate``'s error, if any, and the page once it has loaded; trusting ``tls`` for a wss address."""
+    async with _cdp_calls(ws_url, tls=tls, reply_s=90) as call:
         target = (await call("Target.createTarget", {"url": "about:blank"}))["result"]["targetId"]
         session = (await call("Target.attachToTarget", {"targetId": target, "flatten": True}))["result"]["sessionId"]
         seen = {}
@@ -716,6 +955,7 @@ async def test_routing_sites_beside_live_ones_its_forward_port_takes_the_live_ho
                 "https://github.com/", "http://github.com/", "https://github.githubassets.com/favicons/favicon.svg",
                 "https://shop.test/alpha", "https://example.com/")}
             tabs = await tabs_of(deployed)
+            entries = await _har_entries(deployed)
         finally:
             report = await teardown_run(context)
 
@@ -725,6 +965,160 @@ async def test_routing_sites_beside_live_ones_its_forward_port_takes_the_live_ho
         "https://shop.test/alpha")), pages
     assert pages["https://example.com/"].startswith("error") and "403" in pages["https://example.com/"], pages
     assert any(tab["url"].startswith("https://github.com/") and "GitHub" in (tab.get("title") or "") for tab in tabs), tabs
+    by_url = {entry["request"]["url"]: entry for entry in entries}
+    assert by_url["https://shop.test/alpha"]["response"]["content"]["text"] == "<title>alpha</title>", by_url.keys()
+    assert by_url["http://github.com/"]["response"]["status"] in (200, 301, 308) and \
+        by_url["http://github.com/"]["request"]["method"] == "GET"
+    github = [entry for entry in entries if entry["request"]["url"] == "https://github.com:443/" and "_open" not in entry]
+    assert any(entry["request"]["method"] == "CONNECT" and entry["response"]["status"] == 200 and
+               entry["_tunnel"]["bytes_received"] > 0 for entry in github), github
+    assert by_url["https://example.com:443/"]["_refused"] == {"reason": "no site of this computer"}
+    assert not report.failed
+
+
+#: A shop's pages under its route: a form that signs in by POST, answered with a redirect that sets a cookie, onto a
+#: cart whose script saves an item as JSON, answered gzipped, then uploads a file as multipart, each answer saying in
+#: the title what came of it.
+SHOP_FORM = ("<title>form</title><form method=post action=/login><input name=user value=amy>"
+             "<input name=note value='caf\u00e9 & tea'><button>go</button></form>").encode()
+SHOP_CART = b"""<title>cart</title><script>
+fetch('/api/items', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                     body: JSON.stringify({name: 'desk', qty: 2})})
+  .then(answer => answer.json()).then(item => {
+    const form = new FormData();
+    form.append('title', 'Trip');
+    form.append('file', new Blob(['notes'], {type: 'text/plain'}), 'a.txt');
+    return fetch('/upload', {method: 'POST', body: form}).then(() => document.title = 'saved ' + item.id);
+  });
+</script>"""
+SAVED = json.dumps({"id": 7, "name": "desk"}).encode()
+#: What WebArena-Verified's own loader reads of each entry of a HAR it grades, as JSON.
+WEBARENA_READS = """import json, sys
+from pathlib import Path
+from webarena_verified.types.tracing import NetworkTrace
+trace = NetworkTrace.from_har(Path(sys.argv[1]))
+print(json.dumps([{"method": e.http_method, "url": e.url, "status": e.request_status, "post_data": e.post_data,
+                   "content": e.response_content, "redirect": e.redirect_url, "cookies": e.response_cookies,
+                   "navigation": e.is_navigation_event, "referer": e.referer} for e in trace.evaluation_events]))
+"""
+WEBARENA_VERIFIED = "webarena-verified==1.2.3"
+
+
+@contextlib.contextmanager
+def _shop_pages():
+    """``SHOP_FORM`` and the rest served on every address of this machine under ``/website/shop/``, at the port it
+    yields."""
+
+    class Shop(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def _send(self, status: int, body: bytes = b"", **headers) -> None:
+            self.send_response(status)
+            for name, value in {"Content-Length": str(len(body)), **headers}.items():
+                self.send_header(name.replace("_", "-"), value)
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            pages = {"/website/shop/form": SHOP_FORM, "/website/shop/cart": SHOP_CART}
+            if (path := self.path.partition("?")[0]) in pages:
+                self._send(200, pages[path], Content_Type="text/html; charset=utf-8")
+            else:
+                self._send(404)
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            if self.path == "/website/shop/login":
+                self._send(303, Location="/website/shop/cart", Set_Cookie="sid=s2; Path=/website/shop/; HttpOnly")
+            elif self.path == "/website/shop/api/items":
+                self._send(201, gzip.compress(SAVED), Content_Type="application/json", Content_Encoding="gzip")
+            else:
+                self._send(204)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("0.0.0.0", 0), Shop)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield server.server_address[1]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+async def _cdp_agent_shops(ws_url: str) -> str:
+    """A CDP agent that opens the shop's form, signs in with a click and waits on the cart to save: the title it ends
+    on."""
+    async with connect(ws_url, max_size=None, open_timeout=60) as ws:
+        ids = itertools.count(1)
+
+        async def call(method: str, params: dict, session: str | None = None) -> dict:
+            message_id = next(ids)
+            await ws.send(json.dumps({"id": message_id, "method": method, "params": params,
+                                      **({"sessionId": session} if session else {})}))
+            while (reply := json.loads(await asyncio.wait_for(ws.recv(), 90))).get("id") != message_id:
+                pass
+            return reply
+
+        async def title() -> str:
+            evaluated = await call("Runtime.evaluate", {"expression": "document.title", "returnByValue": True}, session)
+            return evaluated.get("result", {}).get("result", {}).get("value") or ""
+
+        target = (await call("Target.createTarget", {"url": "https://shop.test/form"}))["result"]["targetId"]
+        session = (await call("Target.attachToTarget", {"targetId": target, "flatten": True}))["result"]["sessionId"]
+        deadline = time.monotonic() + 60
+        while await title() != "form" and time.monotonic() < deadline:
+            await asyncio.sleep(0.5)
+        await call("Runtime.evaluate", {"expression": "document.querySelector('button').click()",
+                                        "userGesture": True}, session)
+        shown = ""
+        while not shown.startswith("saved") and time.monotonic() < deadline:
+            await asyncio.sleep(0.5)
+            shown = await title()
+        return shown
+
+
+@pytest.mark.asyncio
+async def test_routing_sites_its_network_har_has_what_webarena_verifieds_grader_reads(browser_computer, tmp_path):
+    """M8.20: an agent signs in to a site by a form, follows the redirect and saves an item as JSON and a file as
+    multipart; WebArena-Verified's own loader, reading the network.har data/get exports, sees each request's method,
+    URL, form, JSON and multipart fields and referer, each answer's status, redirect, cookie and decoded JSON, and the
+    page loads as navigations."""
+    if shutil.which("uvx") is None:
+        pytest.skip(f"uvx runs {WEBARENA_VERIFIED} in an environment of its own")
+    with _shop_pages() as port, namespace_routing():
+        params = {"site_routing": True,
+                  "sites": [{"name": "shop", "url": f"http://127.0.0.1:{port}/website/shop/", "domains": ["shop.test"]}],
+                  "app_settings": {"chromium": {"start_urls": [DATA_PAGE]}}}
+        deployed = await Env.get(browser_computer.id).deploy(env_params=params)
+        context = TaskStepContext(deployed_envs=[deployed])
+        try:
+            shown = await _cdp_agent_shops((await _cdp(deployed, "ada"))["ws_url"])
+            await asyncio.sleep(1)
+            exported = await _har(deployed)
+            lines = (await _network_log(deployed))["lines"]
+        finally:
+            report = await teardown_run(context)
+
+    (tmp_path / HAR_FILE).write_bytes(exported)
+    read = subprocess.run(["uvx", "--from", WEBARENA_VERIFIED, "python", "-I", "-c", WEBARENA_READS,
+                           str(tmp_path / HAR_FILE)], capture_output=True, text=True, timeout=600)
+    assert read.returncode == 0, read.stderr[-3000:]
+    events = {(event["method"], event["url"]): event for event in json.loads(read.stdout)}
+    assert shown == "saved 7", shown
+    form, login = events[("GET", "https://shop.test/form")], events[("POST", "https://shop.test/login")]
+    cart = events[("GET", "https://shop.test/cart")]
+    saved, uploaded = events[("POST", "https://shop.test/api/items")], events[("POST", "https://shop.test/upload")]
+    assert (form["status"], form["navigation"]) == (200, True), form
+    assert (login["post_data"], login["status"], login["redirect"], login["cookies"]) == (
+        {"user": "amy", "note": "caf\u00e9 & tea"}, 303, "/cart", {"sid": "s2"}), login
+    assert (cart["status"], cart["navigation"], cart["referer"]) == (200, True, "https://shop.test/form"), cart
+    assert (saved["post_data"], saved["status"], saved["content"]) == ({"name": "desk", "qty": 2}, 201,
+                                                                       {"id": 7, "name": "desk"}), saved
+    assert (uploaded["post_data"], uploaded["status"]) == ({"title": "Trip", "file": "notes"}, 204), uploaded
+    assert [line["seq"] for line in lines] == list(range(1, len(lines) + 1))
     assert not report.failed
 
 
@@ -740,6 +1134,8 @@ async def test_alone_on_the_open_web_it_loads_a_public_site_through_its_proxy_an
             through = {url: await _through_port(deployed, url, "http://127.0.0.1:3128") for url in (public, nowhere)}
             seen = await _cdp_agent_loads((await _cdp(deployed, "ada"))["ws_url"], [public])
             logged = _as_root(await _container_of(deployed), "cat /var/log/agentenv/site-proxy.log")
+            lines = (await _network_log(deployed))["lines"]
+            exported = await _har_entries(deployed)
         finally:
             report = await teardown_run(context)
 
@@ -749,6 +1145,13 @@ async def test_alone_on_the_open_web_it_loads_a_public_site_through_its_proxy_an
     github = [entry["connection"] for entry in entries if entry.get("connection", {}).get("host") == "github.com"]
     assert github and all(entry["bytes_received"] > 0 for entry in github), logged[-2000:]
     assert any(entry.get("failed", {}).get("host") == "agentenv-no-such-host.invalid" for entry in entries), logged[-2000:]
+    assert [line["seq"] for line in lines] == list(range(1, len(lines) + 1)), lines[:5]
+    tunnels = [entry for entry in exported if entry["request"]["url"] == "https://github.com:443/"]
+    assert tunnels and all(entry["request"]["method"] == "CONNECT" and entry["_tunnel"]["bytes_received"] > 0
+                           and entry["serverIPAddress"] for entry in tunnels if "_open" not in entry), tunnels
+    assert any(entry["request"]["url"] == "https://agentenv-no-such-host.invalid:443/" and
+               entry.get("_failed", {}).get("reason") == "doesn't resolve" for entry in exported), exported[-5:]
+    assert [entry["startedDateTime"] for entry in exported] == sorted(entry["startedDateTime"] for entry in exported)
     assert not report.failed
 
 
@@ -859,6 +1262,266 @@ async def test_playwright_and_puppeteer_drive_it_through_its_cdp_address_which_a
     assert "error" in after_data_reset["playwright"] and "error" in after_data_reset["puppeteer"], after_data_reset
     assert "error" in after_reset["playwright"] and "error" in after_reset["puppeteer"], after_reset
     assert fresh != ada and not report.failed
+
+
+@pytest.mark.asyncio
+async def test_playwright_mcps_tools_drive_its_page_hide_the_code_tools_and_come_back_after_a_kill(browser_computer):
+    with namespace_routing():
+        deployed = await Env.get(browser_computer.id).deploy(
+            env_params={"app_settings": {"chromium": {"start_urls": [PAGE_URL]}}})
+        context = TaskStepContext(deployed_envs=[deployed])
+        serving = None
+        try:
+            viewport = (await _screenshot(deployed)).size
+            listed = await _tool_names(deployed)
+            typed = await _mcp(deployed, _type_hello)
+            state = await _state(deployed, lambda s: s["v"] == "hello")
+            after_typing = (await _screenshot(deployed)).size
+            serving = asyncio.ensure_future(inside.run(deployed, ["python3", "-c", SERVE_SITE, "900"], timeout_s=960))
+            await asyncio.sleep(SERVE_START_S)
+            confirmed = await _mcp(deployed, _confirm_ask)
+            logged = (await _browser_log(deployed))["lines"]
+            await deployed.invoke(ENABLE_TOOL_EXTENSION_URI, ENABLE, {"role": "default", "tools": ["browser_evaluate"]})
+            shown, evaluated = await _tool_names(deployed), await _mcp(deployed, _evaluate_title)
+            running = (await inside.run(deployed, ["sh", "-c", "ps -eo args | grep -m1 '[@]playwright/mcp/cli.js'"],
+                                        timeout_s=30))["stdout"].split()
+            installed = json.loads((await inside.run(deployed, ["python3", "-c", LISTED_TOOLS, *running[:2]],
+                                                     timeout_s=120))["stdout"])
+            await _kill(deployed, "[@]playwright/mcp/cli.js")
+            after_its_kill = await _mcp(deployed, _snapshot)
+            await _kill(deployed, "[c]omputer.serve driver.py:PageDriver")
+            await _ready(deployed)
+            after_driver_kill = await _mcp(deployed, _snapshot)
+            count = (await inside.run(deployed, ["sh", "-c", "pgrep -fc '[@]playwright/mcp/cli.js'"],
+                                      timeout_s=30))["stdout"].strip()
+            record = await _record(deployed)
+        finally:
+            if serving is not None:
+                serving.cancel()
+            report = await teardown_run(context)
+
+    playwright = {t["name"] for t in json.loads(PLAYWRIGHT_MCP_TOOLS.read_text())["tools"]}
+    assert playwright - {"browser_evaluate", "browser_run_code_unsafe"} <= set(listed), listed
+    assert not {"browser_evaluate", "browser_run_code_unsafe"} & set(listed) and "computer_screenshot" in listed
+    assert "hello" in typed and state["v"] == "hello" and after_typing == viewport
+    assert "confirmed true" in confirmed, confirmed
+    entries = [line for line in logged if "action" in line]
+    calls = {line["action"]["tool"]: line["seq"] for line in entries
+             if line["action"]["via"] == "mcp" and line["action"]["tool"].startswith("browser_")}
+    typing = next(line["action"] for line in entries if line["action"].get("tool") == "browser_type")
+    sent = {line["action"]["method"]: line["action"].get("for") for line in entries
+            if line["action"]["via"] == "cdp" and line["action"]["method"] in ("Page.navigate", "Page.handleJavaScriptDialog")}
+    clicks = {line["action"].get("for") for line in entries if line["action"].get("method") == "Input.dispatchMouseEvent"}
+    navigated = next(line["tab"] for line in logged if line.get("tab", {}).get("url") == SITE)
+    assert {"browser_snapshot", "browser_type", "browser_navigate", "browser_click", "browser_handle_dialog"} <= set(calls)
+    assert (typing["who"], typing["ok"], typing["args"]["text"]) == ("default", True, "hello")
+    assert sent == {"Page.navigate": calls["browser_navigate"], "Page.handleJavaScriptDialog": calls["browser_handle_dialog"]}
+    assert clicks == {calls["browser_click"]}, clicks
+    assert (navigated["who"], navigated["for"]) == ("playwright-mcp", calls["browser_navigate"]), navigated
+    assert "browser_evaluate" in shown and "browser_run_code_unsafe" not in shown and "confirmed true" in evaluated
+    assert installed == json.loads(PLAYWRIGHT_MCP_TOOLS.read_text())["tools"]
+    assert "Page URL" in after_its_kill and "Page URL" in after_driver_kill and count == "1"
+    assert "playwright-mcp" in {connection["user"] for connection in record["cdp_connections"]}
+    assert not report.failed
+
+
+@pytest.mark.asyncio
+async def test_a_browser_recording_frames_each_burst_of_an_agents_actions_keyed_to_its_log_and_ends_on_its_last_page(
+        browser_computer):
+    with namespace_routing():
+        deployed = await Env.get(browser_computer.id).deploy(
+            env_params={"app_settings": {"chromium": {"start_urls": [PAGE_URL]}}})
+        context = TaskStepContext(instance_id=f"run-{uuid.uuid4().hex[:8]}", deployed_envs=[deployed])
+        try:
+            context = await StartBrowserRecordingTaskStep(id="start", version=None, env_id=browser_computer.id,
+                                                          name="run", frames=True).execute(context)
+            await _mcp(deployed, _type_hello)
+            await _mcp(deployed, lambda session: _called(session, "browser_navigate", {"url": DATA_PAGE}))
+            context = await EndBrowserRecordingTaskStep(id="end", version=None, name="run").execute(context)
+        finally:
+            report = await teardown_run(context)
+            grant_server(None, None).close()
+        entry = context.metadata[BROWSER_RECORDINGS]["run"]
+        universe = Artifact.get(entry["artifact"]["id"], version=entry["artifact"]["version"])
+        objects = get_config().get_object_store()
+        files = {name: objects.get(Artifact.get(artifact_id).object_url)
+                 for name, artifact_id in universe.file_artifact_ids.items()}
+
+    manifest = json.loads(files["manifest.json"])
+    log = [json.loads(line) for line in files["log.jsonl"].decode().splitlines()]
+    calls = {line["action"]["tool"]: line["seq"] for line in log if line.get("action", {}).get("via") == "mcp"}
+    frames = manifest["frames"]
+    followed = {seq for frame in frames for seq in frame["after"]}
+    assert not report.failed and (entry["state"], entry["missing_frames"]) == ("ended", 0), entry
+    assert frames[0]["kind"] == "first" and frames[-1]["kind"] == "last" and "action" in {f["kind"] for f in frames}
+    assert {calls["browser_type"], calls["browser_navigate"]} <= followed, (calls, frames)
+    assert frames[-1]["url"].startswith("data:text/html,") and "Home" in urllib.parse.unquote(frames[-1]["url"])
+    assert all(files[frame["path"].replace("/", "-")][:2] == b"\xff\xd8" for frame in frames)
+
+
+@pytest.mark.asyncio
+async def test_a_browser_recording_frames_a_cdp_agents_own_tab_behind_the_active_one(browser_computer):
+    with namespace_routing():
+        deployed = await Env.get(browser_computer.id).deploy(
+            env_params={"app_settings": {"chromium": {"start_urls": [PAGE_URL]}}})
+        context = TaskStepContext(instance_id=f"run-{uuid.uuid4().hex[:8]}", deployed_envs=[deployed])
+        try:
+            context = await StartBrowserRecordingTaskStep(id="start", version=None, env_id=browser_computer.id,
+                                                          name="behind", frames=True).execute(context)
+            tab = await _cdp_agent_acts_behind((await _cdp(deployed, "pi"))["ws_url"])
+            active = [t for t in (await _browser_op(deployed, "tabs/list", {}))["tabs"] if t.get("active")]
+            context = await EndBrowserRecordingTaskStep(id="end", version=None, name="behind",
+                                                        fail_task_on_error=False).execute(context)
+        finally:
+            report = await teardown_run(context)
+            grant_server(None, None).close()
+        entry = context.metadata[BROWSER_RECORDINGS]["behind"]
+        universe = Artifact.get(entry["artifact"]["id"], version=entry["artifact"]["version"])
+        manifest = json.loads(get_config().get_object_store().get(
+            Artifact.get(universe.file_artifact_ids["manifest.json"]).object_url))
+
+    frames = manifest["frames"]
+    assert active and active[0]["id"] != tab, active
+    assert not report.failed and (entry["state"], entry["missing_frames"]) == ("ended", 0), frames
+    assert [f["tab"] for f in frames if f["kind"] == "action"] and frames[-1]["tab"] == tab, frames
+    assert "Own two" in urllib.parse.unquote(frames[-1]["url"]), frames[-1]
+
+
+#: The pages a CDP agent moves between in a tab of its own behind the active one.
+BEHIND = ("data:text/html,<title>Own one</title><h1>Own one</h1>", "data:text/html,<title>Own two</title><h1>Own two</h1>")
+
+
+async def _cdp_agent_acts_behind(ws_url: str) -> str:
+    """A CDP agent, pi, that opens a tab of its own behind the active one and never brings it to the front: it
+    navigates it, changes its page and navigates it again. The tab."""
+    async with _cdp_calls(ws_url) as call:
+        target = (await call("Target.createTarget", {"url": "about:blank", "background": True}))["result"]["targetId"]
+        session = (await call("Target.attachToTarget", {"targetId": target, "flatten": True}))["result"]["sessionId"]
+        await call("Page.navigate", {"url": BEHIND[0]}, session)
+        await asyncio.sleep(2)
+        await call("Runtime.evaluate", {"expression": "document.body.append('typed')"}, session)
+        await asyncio.sleep(2)
+        await call("Page.navigate", {"url": BEHIND[1]}, session)
+        await asyncio.sleep(2)
+    return target
+
+
+@pytest.mark.asyncio
+async def test_a_browser_recording_that_ends_while_an_agents_command_is_in_flight_logs_it_unfinished(browser_computer):
+    with namespace_routing():
+        deployed = await Env.get(browser_computer.id).deploy(
+            env_params={"app_settings": {"chromium": {"start_urls": [PAGE_URL]}}})
+        context = TaskStepContext(instance_id=f"run-{uuid.uuid4().hex[:8]}", deployed_envs=[deployed])
+        try:
+            context = await StartBrowserRecordingTaskStep(id="start", version=None, env_id=browser_computer.id,
+                                                          name="flight", frames=True).execute(context)
+            ws_url = (await _cdp(deployed, "pi"))["ws_url"]
+            async with _cdp_calls(ws_url, reply_s=300) as waiting, _cdp_calls(ws_url) as call:
+                target = await _page_target(call)
+                held = (await waiting("Target.attachToTarget", {"targetId": target, "flatten": True}))["result"]["sessionId"]
+                hanging = asyncio.ensure_future(waiting("Runtime.evaluate", {
+                    "expression": "new Promise((done) => setTimeout(done, 120000))", "awaitPromise": True}, held))
+                await asyncio.sleep(1)
+                session = (await call("Target.attachToTarget", {"targetId": target, "flatten": True}))["result"]["sessionId"]
+                for n in range(3):
+                    await call("Runtime.evaluate", {"expression": f"document.body.append('after {n}')"}, session)
+                context = await EndBrowserRecordingTaskStep(id="end", version=None, name="flight",
+                                                            fail_task_on_error=False).execute(context)
+                hanging.cancel()
+        finally:
+            report = await teardown_run(context)
+            grant_server(None, None).close()
+        entry = context.metadata[BROWSER_RECORDINGS]["flight"]
+        lines = _recorded_log(entry)
+
+    evaluated = [line["action"] for line in lines if (line.get("action") or {}).get("method") == "Runtime.evaluate"
+                 and line["action"].get("who") == "pi"]
+    assert not report.failed and (entry["state"], entry["log_missing"]) == ("ended", 0), entry
+    assert [bool(action.get("unfinished")) for action in evaluated] == [True, False, False, False], evaluated
+
+
+@pytest.mark.asyncio
+async def test_a_browser_recording_frames_the_active_tab_when_the_agents_tab_closes_mid_capture(browser_computer):
+    with namespace_routing():
+        deployed = await Env.get(browser_computer.id).deploy(
+            env_params={"app_settings": {"chromium": {"start_urls": [PAGE_URL]}}})
+        context = TaskStepContext(instance_id=f"run-{uuid.uuid4().hex[:8]}", deployed_envs=[deployed])
+        try:
+            context = await StartBrowserRecordingTaskStep(id="start", version=None, env_id=browser_computer.id,
+                                                          name="closing", frames=True).execute(context)
+            async with _cdp_calls((await _cdp(deployed, "pi"))["ws_url"]) as call:
+                tab = (await call("Target.createTarget", {"url": BEHIND[0]}))["result"]["targetId"]
+                session = (await call("Target.attachToTarget", {"targetId": tab, "flatten": True}))["result"]["sessionId"]
+                await asyncio.sleep(2)
+                await call("Runtime.evaluate", {"expression":
+                           "setTimeout(() => { const t = Date.now(); while (Date.now() - t < 8000) {} }, 200)"}, session)
+                await asyncio.sleep(1.5)
+                await call("Target.closeTarget", {"targetId": tab})
+                await asyncio.sleep(3)
+            context = await EndBrowserRecordingTaskStep(id="end", version=None, name="closing",
+                                                        fail_task_on_error=False).execute(context)
+        finally:
+            report = await teardown_run(context)
+            grant_server(None, None).close()
+        entry = context.metadata[BROWSER_RECORDINGS]["closing"]
+        manifest = _recorded_manifest(entry)
+
+    frames = manifest["frames"]
+    missing = [(frame["index"], frame.get("error")) for frame in frames if not frame["uploaded"]]
+    assert not report.failed and (entry["state"], missing) == ("ended", []), missing
+
+
+async def _page_target(call) -> str:
+    """The first page the browser has open, as a CDP agent finds it."""
+    targets = (await call("Target.getTargets", {}))["result"]["targetInfos"]
+    return next(t["targetId"] for t in targets if t["type"] == "page")
+
+
+def _recorded_manifest(entry: dict) -> dict:
+    universe = Artifact.get(entry["artifact"]["id"], version=entry["artifact"]["version"])
+    return json.loads(get_config().get_object_store().get(Artifact.get(universe.file_artifact_ids["manifest.json"]).object_url))
+
+
+def _recorded_log(entry: dict) -> list[dict]:
+    universe = Artifact.get(entry["artifact"]["id"], version=entry["artifact"]["version"])
+    text = get_config().get_object_store().get(Artifact.get(universe.file_artifact_ids["log.jsonl"]).object_url).decode()
+    return [json.loads(line) for line in text.splitlines() if line.strip()]
+
+
+async def _mcp(deployed, work):
+    """What ``work`` makes of one MCP session on the computer, as a role-less agent opens one."""
+    async with streamablehttp_client(deployed.mcp_url) as (read, write, _):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            return await work(session)
+
+
+async def _called(session: ClientSession, tool: str, arguments: dict) -> str:
+    result = await session.call_tool(tool, arguments)
+    text = "\n".join(part.text for part in result.content if part.type == "text")
+    assert not result.isError, f"{tool}: {text}"
+    return text
+
+
+async def _snapshot(session: ClientSession) -> str:
+    return await _called(session, "browser_snapshot", {})
+
+
+async def _type_hello(session: ClientSession) -> str:
+    ref = re.search(r"textbox \[ref=(\w+)\]", await _snapshot(session)).group(1)
+    return await _called(session, "browser_type", {"target": ref, "text": "hello"})
+
+
+async def _confirm_ask(session: ClientSession) -> str:
+    await _called(session, "browser_navigate", {"url": SITE})
+    ref = re.search(r'button "ask" \[ref=(\w+)\]', await _snapshot(session)).group(1)
+    await session.call_tool("browser_click", {"target": ref})
+    await _called(session, "browser_handle_dialog", {"accept": True})
+    return await _snapshot(session)
+
+
+async def _evaluate_title(session: ClientSession) -> str:
+    return await _called(session, "browser_evaluate", {"function": "() => document.title"})
 
 
 @pytest.mark.asyncio
@@ -1062,3 +1725,70 @@ def _trusting(ca: LocalCA) -> ssl.SSLContext:
 async def _get(deployed, path: str, **kwargs) -> httpx.Response:
     async with httpx.AsyncClient(timeout=30) as http:
         return await http.get(f"{deployed.environment_url}{path}", **kwargs)
+
+
+async def _browser_op(browser: DeployedEnv, op: str, params: dict) -> dict:
+    """``op``'s answer from the browser app on ``browser``, a multi env's browser computer, through its own record."""
+    app = next(child for child in browser.environment_card["children_environments"] if child["name"] == "chromium")
+    assert find_extension_method(app, BROWSER, op) is not None, op
+    return await invoke_extension(browser.environment_url, app, BROWSER, params, 60, method=op,
+                                  headers=browser.control_headers)
+
+
+#: Where the local registry stands in for the repository a release publishes composed computers in.
+RELEASED = "localhost:5000/agentenv-released"
+
+
+@pytest.mark.asyncio
+async def test_a_compose_of_chromium_from_a_release_record_pulls_its_image_and_the_browser_boots_from_it(
+        browser_computer, tmp_path):
+    """A release publishes chromium composed, and its wheel records each arch's lock, key and image, here in the local
+    registry: chromium composed again in fresh stores, with that record as the install's, takes the image by digest
+    rather than resolving its packages or building it, and a deploy of it boots that image."""
+    with namespace_routing():
+        pairs = {arch: built for arch, built in browser_computer.metadata["composed"]["container"].items()
+                 if built.get("status") in ("ready", "unverified")}
+        locks = {arch: json.loads(packages.stored(built["lock"], browser_computer.stored_id).model_dump_json())
+                 for arch, built in pairs.items()}
+    released = {}
+    for arch, built in pairs.items():
+        copy_image(built["image"], f"{RELEASED}:{arch}", None, None)
+        released[arch] = f"{RELEASED}@{built['image'].rpartition('@')[2]}"
+    write_index(f"{RELEASED}:index", {f"linux/{arch}": image for arch, image in released.items()}, None)
+    record = tmp_path / "published_images.json"
+    published_images.write_release_digests({}, record, [{
+        "env": browser_computer.id, "form": "container", "index": pin_digest(f"{RELEASED}:index", None),
+        "arches": {arch: {"key": pairs[arch]["key"], "image": released[arch], "lock": locks[arch]} for arch in pairs}}])
+    (tmp_path / "bundle" / "tasks").mkdir(parents=True)
+    (tmp_path / "bundle" / "tasks" / "chromium.json").write_text(
+        json.dumps([{"id": "env", "type": "deploy_env", "env_id": "chromium"}]))
+    told = []
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(published_images, "RELEASE_FILE", record)
+        patch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+        configure()
+        reset_artifact_store()
+        try:
+            with namespace_routing():
+                materialize(plan_bundle(resolve_bundle(parse_bundle(tmp_path / "bundle")), installed=installed_bundles,
+                                        default_agents=False), composing=Composing(on_progress=told.append))
+                composed_now = Env.get(browser_computer.id).metadata["composed"]["container"]
+                deployed = await Env.get(browser_computer.id).deploy()
+                context = TaskStepContext(deployed_envs=[deployed])
+                try:
+                    booted = deployed.metadata["computer"]["image"]
+                    tabs = (await _record(deployed))["tabs"]
+                finally:
+                    report = await teardown_run(context)
+        finally:
+            reset_artifact_store()
+    configure()
+    reset_artifact_store()
+
+    print(json.dumps({"told": told, "composed": {arch: {k: v for k, v in built.items() if k != "probe"}
+                                                 for arch, built in composed_now.items()}}, indent=1, default=str))
+    assert {arch: (built["image"], built["published"], built["reused"]) for arch, built in composed_now.items()
+            if arch in released} == {arch: (image, True, True) for arch, image in released.items()}
+    assert composed_now[ARCH]["status"] == "ready"
+    assert not [line for line in told if "resolving" in line or "building the image" in line], told
+    assert booted == released[ARCH] and tabs and not report.failed

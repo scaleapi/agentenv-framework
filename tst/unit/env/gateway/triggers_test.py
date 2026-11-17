@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import random
+import re
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -312,7 +314,7 @@ def test_clear_full_reset(engine):
     engine.clear()
     st = engine.state()
     assert st["triggers"] == [] and st["events"] == []
-    assert st["config"] == {"watch_roles": [], "executor_configured": False, "executors": []}
+    assert st["config"] == {"watch_roles": [], "executor_configured": False, "executors": [], "executor_timeouts": []}
     # after clear, config is settable fresh (different watch_roles allowed)
     engine.register({"watch_roles": ["solver"], "triggers": []})
     assert engine.state()["config"]["watch_roles"] == ["solver"]
@@ -455,6 +457,89 @@ async def test_an_executor_write_prompts_only_the_state_triggers_that_list_it(en
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("second_write_holds", [True, False], ids=["it-now-holds", "it-still-doesnt"])
+async def test_a_write_landing_while_a_state_check_runs_has_it_checked_once_more(engine, monkeypatch,
+                                                                                 second_write_holds):
+    """A check that read the state from before a write, while that write's own re-check was asked for, runs again: so
+    the trigger fires as the write that made it hold, and stays armed when nothing does."""
+    reads, slow = [], asyncio.Event()
+    read = TriggerEngine._internal_call
+
+    async def read_then_answer_late_once(self, tool_name, arguments, role=None):
+        result = await read(self, tool_name, arguments, role=role)
+        reads.append(result.content[0].text)
+        if len(reads) == 1:
+            await slow.wait()
+        return result
+
+    monkeypatch.setattr(TriggerEngine, "_internal_call", read_then_answer_late_once)
+    check = {"steps": [{"tool": "gdocs_get_document_text", "args": {"documentId": "doc-1"}, "extract": "text",
+                        "predicate": {"regex": "Budget Fit"}}]}
+    engine.register({"triggers": [{"id": "x", "when": {"type": "state", "check": check}, "actions": []}]})
+    engine.on_tool_call("default", "gdocs_batch_update", {"documentId": "doc-1"}, _result())
+    await asyncio.sleep(0.05)
+    if second_write_holds:
+        engine._test_state["doc_text"] = "Budget Fit: fine."
+    engine.on_tool_call("default", "gdocs_append_text", {"documentId": "doc-1"}, _result())
+    await asyncio.sleep(0.05)
+    slow.set()
+    await asyncio.sleep(0.2)
+
+    assert len(reads) == 2 and "Budget Fit" not in reads[0], reads
+    assert engine._triggers["x"]["status"] == ("fired" if second_write_holds else "armed")
+    assert not engine._triggers["x"]["evaluating"] and engine._triggers["x"]["recheck"] is None
+    detected = [e for e in engine._events if e["kind"] == "detected"]
+    assert [e["provoking"]["tool"] for e in detected] == (["gdocs_append_text"] if second_write_holds else [])
+
+
+@pytest.mark.asyncio
+async def test_a_write_landing_before_a_scheduled_state_check_starts_is_the_one_it_is_detected_as(engine):
+    check = {"steps": [{"tool": "gdocs_get_document_text", "args": {"documentId": "doc-1"}, "extract": "text",
+                        "predicate": {"regex": "Budget Fit"}}]}
+    engine.register({"triggers": [{"id": "x", "when": {"type": "state", "check": check}, "actions": []}]})
+    engine.on_tool_call("default", "gdocs_batch_update", {"documentId": "doc-1"}, _result())
+    engine._test_state["doc_text"] = "Budget Fit: fine."
+    engine.on_tool_call("default", "gdocs_append_text", {"documentId": "doc-1"}, _result())
+    await asyncio.sleep(0.2)
+
+    assert engine._triggers["x"]["status"] == "fired"
+    assert [e["provoking"]["tool"] for e in engine._events if e["kind"] == "detected"] == ["gdocs_append_text"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rechecked", [True, False], ids=["with-a-recheck-asked-for", "on-its-own-check"])
+async def test_a_state_trigger_removed_while_its_check_runs_is_neither_checked_again_nor_detected(engine, monkeypatch,
+                                                                                                 rechecked):
+    reads, slow = [], asyncio.Event()
+    read = TriggerEngine._internal_call
+
+    async def read_then_answer_late_once(self, tool_name, arguments, role=None):
+        result = await read(self, tool_name, arguments, role=role)
+        reads.append(result.content[0].text)
+        if len(reads) == 1:
+            await slow.wait()
+        return result
+
+    monkeypatch.setattr(TriggerEngine, "_internal_call", read_then_answer_late_once)
+    check = {"steps": [{"tool": "gdocs_get_document_text", "args": {"documentId": "doc-1"}, "extract": "text",
+                        "predicate": {"regex": "Budget Fit"}}]}
+    engine.register({"triggers": [{"id": "x", "when": {"type": "state", "check": check}, "actions": []}]})
+    if not rechecked:
+        engine._test_state["doc_text"] = "Budget Fit: fine."
+    engine.on_tool_call("default", "gdocs_batch_update", {"documentId": "doc-1"}, _result())
+    await asyncio.sleep(0.05)
+    engine._test_state["doc_text"] = "Budget Fit: fine."
+    if rechecked:
+        engine.on_tool_call("default", "gdocs_append_text", {"documentId": "doc-1"}, _result())
+    engine.remove({"ids": ["x"]})
+    slow.set()
+    await asyncio.sleep(0.2)
+
+    assert len(reads) == 1, reads
+    assert not [e for e in engine._events if e["kind"] == "detected"]
+
+
+@pytest.mark.asyncio
 async def test_a_delay_waits_its_virtual_time_before_the_action(engine, executor_calls, virtual_time):
     engine.register({"executors": {"bob": {"a2a_url": "http://bob", "role": "bob"}},
                      "triggers": [{"id": "x", "when": {"type": "action", "tool": "t"},
@@ -509,7 +594,7 @@ async def test_a_stochastic_delay_draws_the_same_sequence_from_its_seed(engine, 
         await asyncio.sleep(0.1)
 
     rng = random.Random(7)
-    assert waits == [rng.expovariate(1.0 / 600) for _ in range(3)]
+    assert waits == pytest.approx([rng.expovariate(1.0 / 600) for _ in range(3)])  # each waited to its own mark
     assert len(engine._test_state["slack"]) == 3
 
 
@@ -520,8 +605,8 @@ async def test_a_re_arm_during_one_mark_s_delay_does_not_shorten_the_next(engine
                                                 "args": {"channel": "#c", "text": "hi"}, "delay": "PT90M"}]}]})
     record = TriggerEngine._sleep_virtual
 
-    async def re_arm_a_day_back_after_the_first_wait(self, seconds, generation=None):
-        await record(self, seconds, generation)
+    async def re_arm_a_day_back_after_the_first_wait(self, until, generation=None):
+        await record(self, until, generation)
         if len(virtual_time) == 1:
             self._gw._clock.set_time("2026-10-13T10:30:00Z")
 
@@ -1070,7 +1155,8 @@ async def test_sensor_trigger_and_state_shape(engine):
     assert engine._triggers["sensor"]["status"] == "fired"
     state = engine.state()
     assert "sensor" in {t["id"] for t in state["triggers"]}
-    assert state["config"] == {"watch_roles": ["default"], "executor_configured": False, "executors": []}
+    assert state["config"] == {"watch_roles": ["default"], "executor_configured": False, "executors": [],
+                               "executor_timeouts": []}
     assert state["events"][0]["kind"] == "added"
     assert all("seq" in e and "ts" in e for e in state["events"])
 
@@ -1131,6 +1217,104 @@ async def test_nl_action_via_stub_executor_with_verify(engine):
         assert any(e["kind"] == "verify_ok" for e in engine._events)
     finally:
         server.shutdown()
+
+
+@contextlib.asynccontextmanager
+async def _executor_answering_after(seconds: float):
+    """A loopback executor whose message/send, like a deployed one's, answers only once its task ends `seconds` later;
+    its task polls answer at once. Yields its URL."""
+    from pytest_socket import enable_socket
+
+    enable_socket()  # re-disabled by the autouse fixture's next setup
+    handlers: set[asyncio.Task] = set()
+
+    async def serve(reader, writer):
+        handlers.add(asyncio.current_task())
+        try:
+            while True:  # one connection carries the send and then the polls
+                head = await reader.readuntil(b"\r\n\r\n")
+                req = json.loads(await reader.readexactly(int(re.search(rb"(?i)content-length: *(\d+)", head)[1])))
+                if req["method"] == "message/send":
+                    await asyncio.sleep(seconds)
+                body = json.dumps({"jsonrpc": "2.0", "id": req["id"], "result": {"id": "task-1", "status": {
+                    "state": "completed", "message": {"parts": [{"kind": "text", "text": "replied"}]}}}}).encode()
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s"
+                             % (len(body), body))
+                await writer.drain()
+        except (asyncio.IncompleteReadError, ConnectionError):
+            pass  # the caller hung up
+        finally:
+            writer.close()
+
+    server = await asyncio.start_server(serve, "127.0.0.1", 0)
+    try:
+        yield f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+    finally:
+        server.close()
+        for task in handlers:
+            task.cancel()
+        await asyncio.gather(*handlers, return_exceptions=True)
+
+
+def _reply_then_post(url: str, timeout_seconds: float) -> dict:
+    return {"executor": {"a2a_url": url, "role": "executor", "timeout_seconds": timeout_seconds},
+            "triggers": [{"id": "x", "when": {"type": "action", "tool": "t"},
+                          "actions": [{"type": "nl", "instruction": "reply to the client"},
+                                      {"type": "tool", "tool": "slack_send_message",
+                                       "args": {"channel": "#c", "text": "the client replied"}}]}]}
+
+
+async def _settled(engine, tid: str, within: float = 10) -> None:
+    for _ in range(int(within / 0.05)):
+        if engine._triggers[tid]["status"] not in ("firing", "queued"):
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"trigger {tid!r} still {engine._triggers[tid]['status']} after {within}s")
+
+
+@pytest.mark.asyncio
+async def test_an_executor_slower_than_the_http_timeout_is_waited_out_and_the_later_actions_run(engine, monkeypatch):
+    """FD-5333: a contact slower than 30 s used to fail its fire on a read timeout, though its reply still landed."""
+    monkeypatch.setattr(triggers_module, "_EXECUTOR_HTTP_TIMEOUT_S", 0.2)  # stands in for the 30 s
+    async with _executor_answering_after(1.0) as url:
+        engine.register(_reply_then_post(url, timeout_seconds=10))
+        engine.on_tool_call("default", "t", {}, _result())
+        await asyncio.sleep(0.4)
+        assert engine._triggers["x"]["status"] == "firing"  # past the HTTP timeout, still in flight
+        await _settled(engine, "x")
+
+    assert engine._triggers["x"]["status"] == "fired", engine.state()["events"][-3:]
+    assert [e["action_index"] for e in engine._events if e["kind"] == "action_ok"] == [0, 1]
+    assert engine._test_gw.calls == [("slack_send_message", {"channel": "#c", "text": "the client replied"})]
+
+
+@pytest.mark.asyncio
+async def test_a_reply_that_completes_just_past_the_executor_s_limit_is_kept(engine, monkeypatch):
+    """A deployed executor answers message/send when its task ends; one that ends a moment past the limit used to be
+    cut off by the read timeout, its completed reply dropped."""
+    monkeypatch.setattr(triggers_module, "_EXECUTOR_HTTP_TIMEOUT_S", 0.5)
+    async with _executor_answering_after(1.2) as url:
+        engine.register(_reply_then_post(url, timeout_seconds=1.0))
+        engine.on_tool_call("default", "t", {}, _result())
+        await _settled(engine, "x", within=3)
+
+    assert engine._triggers["x"]["status"] == "fired", engine.state()["events"][-3:]
+    assert engine._test_gw.calls == [("slack_send_message", {"channel": "#c", "text": "the client replied"})]
+
+
+@pytest.mark.asyncio
+async def test_an_executor_slower_than_its_own_timeout_still_fails_the_fire(engine, monkeypatch):
+    monkeypatch.setattr(triggers_module, "_EXECUTOR_HTTP_TIMEOUT_S", 0.2)
+    async with _executor_answering_after(3.0) as url:
+        engine.register(_reply_then_post(url, timeout_seconds=1.0))
+        engine.on_tool_call("default", "t", {}, _result())
+        await asyncio.sleep(0.4)
+        assert engine._triggers["x"]["status"] == "firing"
+        await _settled(engine, "x", within=2.5)
+
+    [failure] = [e for e in engine._events if e["kind"] == "action_failed"]
+    assert (failure["action_index"], failure["detail"]) == (0, "ReadTimeout")
+    assert engine._triggers["x"]["status"] == "armed" and engine._test_gw.calls == []
 
 
 @pytest.mark.asyncio
@@ -1221,7 +1405,7 @@ async def test_waiting_virtual_time_follows_the_clock_rate(engine, monkeypatch, 
     stepped = _SteppedClock(engine, monkeypatch)
     if rate is not None:
         stepped.clock.set_time("2026-10-14T08:00:00Z", rate=rate)
-    await engine._sleep_virtual(virtual_seconds)
+    await engine._sleep_virtual(stepped.clock.elapsed() + virtual_seconds)
     assert stepped.slept == steps
 
 
@@ -1230,7 +1414,7 @@ async def test_waiting_virtual_time_holds_while_frozen_and_follows_a_new_rate(en
     stepped = _SteppedClock(engine, monkeypatch)
     stepped.at[1] = lambda: stepped.clock.set_time("2026-10-14T08:00:00Z", rate=0)  # after 5 unarmed seconds
     stepped.at[3] = lambda: stepped.clock.set_time("2026-10-14T08:00:00Z", rate=4)  # where it froze, now at 4x
-    await engine._sleep_virtual(13)
+    await engine._sleep_virtual(stepped.clock.elapsed() + 13)
     assert stepped.slept == [5.0, 5.0, 5.0, 2.0]
 
 
@@ -1241,7 +1425,7 @@ async def test_waiting_virtual_time_counts_a_re_arm_forward_but_not_back(engine,
     stepped = _SteppedClock(engine, monkeypatch)
     stepped.clock.set_time("2026-10-14T08:00:00Z")
     stepped.at[1] = lambda: stepped.clock.set_time(re_arm_to)  # at 08:00:05: 3 s ahead, or a day back
-    await engine._sleep_virtual(10)
+    await engine._sleep_virtual(stepped.clock.elapsed() + 10)
     assert stepped.slept == steps
 
 
@@ -1250,7 +1434,7 @@ async def test_a_wait_tied_to_a_clock_generation_ends_when_the_clock_moves_on(en
     stepped = _SteppedClock(engine, monkeypatch)
     stepped.clock.set_time("2026-10-14T08:00:00Z")
     stepped.at[1] = stepped.clock.clear
-    await engine._sleep_virtual(3600, generation=stepped.clock.generation)
+    await engine._sleep_virtual(stepped.clock.elapsed() + 3600, generation=stepped.clock.generation)
     assert stepped.slept == [5.0]
 
 
@@ -1298,7 +1482,8 @@ def _fake_waits(engine, monkeypatch, armed_at=None) -> _Waits:
     waited = _Waits()
     waited.advance = lambda seconds: source.__setitem__("t", source["t"] + seconds / clock.rate)
 
-    async def fake_sleep(self, seconds, generation=None):
+    async def fake_sleep(self, until, generation=None):
+        seconds = (until - clock.now()).total_seconds() if isinstance(until, datetime) else until - clock.elapsed()
         waited.append(seconds)
         waited.advance(max(0.0, seconds))
 
@@ -1307,8 +1492,9 @@ def _fake_waits(engine, monkeypatch, armed_at=None) -> _Waits:
 
 
 class _SteppedClock:
-    """The engine's clock on a fake source that asyncio.sleep advances, so the real virtual-time waits run at once;
-    `.at[n]` runs after the n-th sleep."""
+    """The engine's clock on a fake source that the engine's own naps advance, so the real virtual-time waits run at
+    once; `.at[n]` runs after the n-th nap. Only this engine's naps count: the tests share one event loop, where
+    waits other tests left running still sleep."""
 
     def __init__(self, engine, monkeypatch):
         self.t = 0.0
@@ -1316,10 +1502,10 @@ class _SteppedClock:
         self.at: dict = {}
         self.clock = engine._test_gw._clock = Clock(now_fn=lambda: self.t)
 
-        async def fake_sleep(seconds):
+        async def fake_nap(seconds):
             self.slept.append(seconds)
             assert len(self.slept) < 100, "the wait never ended"
             self.t += seconds
             self.at.pop(len(self.slept), lambda: None)()
 
-        monkeypatch.setattr(triggers_module.asyncio, "sleep", fake_sleep)
+        monkeypatch.setattr(engine, "_nap", fake_nap)

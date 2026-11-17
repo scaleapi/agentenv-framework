@@ -367,6 +367,16 @@ def test_an_agent_is_written_from_its_agent_toml_over_a_store_image(bundle_dir):
     assert _summary(_run(bundle_dir))[f"{ROOT}/solver"] == (1, True, ())
 
 
+def test_the_written_task_records_the_ids_its_bundle_gave_what_it_names(bundle_dir):
+    _put_image("claude-image")
+    layout(bundle_dir, {"agents/solver/agent.toml": AGENT_TOML})
+    _steps(bundle_dir, [{"id": "agent", "type": "deploy_agent", "env_ids": [], "a2a_agent_id": "solver"}])
+
+    _run(bundle_dir)
+
+    assert Task.get(f"{ROOT}/t").entity_ids == {"solver": f"{ROOT}/solver"}
+
+
 @pytest.mark.parametrize(("toml", "problem"), [
     ('image = "claude-image"\nowner = "me"\n',
      "agent.toml: unknown key 'owner'; an a2a_agent agent takes image, default_env_vars, metadata, type and id"),

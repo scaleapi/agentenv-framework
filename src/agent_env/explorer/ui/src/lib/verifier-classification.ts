@@ -11,6 +11,21 @@ import {
 // Prefer the stamped `format`; fall back to shape sniffing when it's absent.
 export type VerifierKind = 'aggregate' | 'sandbox' | 'rubric' | 'other';
 
+// Step types that are agent-env's `rubrics_verifier` or a subclass of it (its `is_rubrics_verifier`): a check for the
+// type string would miss `always_on_agent_verifier`, which grades an always_on step's prompt.
+const RUBRICS_VERIFIER_STEP_TYPES: ReadonlySet<string> = new Set([
+  'rubrics_verifier',
+  'always_on_agent_verifier',
+]);
+
+export function isRubricsVerifierStep(
+  step: { type?: unknown } | null | undefined,
+): boolean {
+  return (
+    typeof step?.type === 'string' && RUBRICS_VERIFIER_STEP_TYPES.has(step.type)
+  );
+}
+
 const SANDBOX_CRITERION_TYPES = new Set([
   'probe_file_exists',
   'probe_dir_exists',

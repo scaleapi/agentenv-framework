@@ -407,11 +407,12 @@ async def test_a_screenshot_that_fails_after_the_input_reports_the_input_as_done
 
 @pytest.mark.asyncio
 async def test_the_automatic_release_waits_out_a_busy_queue():
-    driver = FakeDriver(settings=ComputerSettings(max_hold_ms=50, queue_wait_s=0.05))
+    # A hold longer than a loaded runner's round trip lets the drag take the queue first; the drag outlasts the hold.
+    driver = FakeDriver(settings=ComputerSettings(max_hold_ms=300, queue_wait_s=0.05))
     async with mcp_session(driver) as session:
         await _shot(session)
         await session.call_tool("computer_keyboard_down", {"keys": ["Alt"]})
-        driver.slow["drag"] = 0.4
+        driver.slow["drag"] = 1.0
         await session.call_tool("computer_drag", {"path": [[1, 1], [9, 9]]})
         with anyio.fail_after(5):
             while driver.screen.held:

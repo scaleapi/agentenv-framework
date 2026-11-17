@@ -13,7 +13,7 @@ import uuid
 from typing import ClassVar, Optional
 
 from agent_env.config import get_config
-from agent_env.task_step.context import PromptResponse, TaskStepContext
+from agent_env.task_step.context import PromptResponse, StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.verifiers.run_context import load_run_context
@@ -108,7 +108,7 @@ class EnvOutcomeVerifierTaskStep(TaskStep):
 
         deployed = next((d for d in context.deployed_envs if d.env_id == self.env_id), None)
         if deployed is None:
-            raise RuntimeError(f"Env '{self.env_id}' not found in context.deployed_envs")
+            raise StepContextError(f"Env '{self.env_id}' not found in context.deployed_envs")
 
         artifact = FileArtifact.get(self.file_artifact_id, self.file_artifact_version)
         verifier_bytes = await asyncio.to_thread(artifact.load)
@@ -151,7 +151,7 @@ class EnvOutcomeVerifierTaskStep(TaskStep):
             return context.prompt_responses[-1] if context.prompt_responses else None
         prompt_response = next((pr for pr in context.prompt_responses if pr.prompt_id == self.prompt_id), None)
         if prompt_response is None:
-            raise RuntimeError(f"PromptResponse with prompt_id='{self.prompt_id}' not found in context")
+            raise StepContextError(f"PromptResponse with prompt_id='{self.prompt_id}' not found in context")
         return prompt_response
 
 

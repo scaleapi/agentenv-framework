@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentenv-framework"
-version = "0.9.1506"
+version = "0.9.1551"
 description = "SDK and CLI for building, deploying and running agent environments and the tasks that grade agents in them."
 readme = "README.md"
 license = "Apache-2.0"
@@ -161,13 +161,15 @@ dev = [
     "fastmcp>=3.4,<4",  # the standalone-fastmcp mount path of the protocol; <4 keeps mcp 1.x
     "Pillow>=10.4",  # the protocol's computer extra, whose tests the unit tier runs
     "av>=17",  # the protocol's computer extra, whose tests the unit tier runs and which the recording tests decode with
+    "brotli>=1.2",  # the protocol's app extra, which decodes a website browser's network log; its tests import it
+    "zstandard>=0.23",
     "griffelib==2.3.0",  # the plugin API check; exact, since what it reports as a break changes between releases
     "tomli-w==1.2.0",  # the Codex agent's config writer, which only its image installs; its tests import it
     "hypothesis>=6.100",  # the property tests of the judge score parse
     "moto>=5.0.0",
     "psycopg2-binary>=2.9.0",  # the gateway server module's driver; outside its container only the tests import it
     "regex>=2023.12.25",  # the gateway's trigger predicates, matched under a timeout; outside its container only the tests import it
-    "websockets>=13",  # the gateway's WebSocket relay to a website; outside its container only the tests import it
+    "websockets>=15",  # the gateway's WebSocket relay to a website; outside its container only the tests import it
     "pytest>=9.0",
     "pytest-asyncio>=0.23.0",
     "pytest-dependency>=0.6.0",

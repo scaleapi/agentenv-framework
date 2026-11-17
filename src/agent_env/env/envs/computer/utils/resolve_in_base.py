@@ -69,5 +69,18 @@ def _wheels(layer: dict, dest: Path) -> list[str]:
     return sorted(path.name for path in dest.glob("*.whl"))
 
 
+def cli(argv: list[str]) -> None:
+    """``main`` on ``argv``. A command that fails ends it with that command's exit code and no traceback, so the last
+    line of the output, which the composer reports as the reason, is the command's own error (apt's ``E:`` line); one
+    whose output was captured has it printed first."""
+    try:
+        main(*argv)
+    except subprocess.CalledProcessError as e:
+        captured = e.stderr or e.stdout
+        if captured:
+            sys.stderr.write(captured if isinstance(captured, str) else captured.decode(errors="replace"))
+        sys.exit(e.returncode)
+
+
 if __name__ == "__main__":
-    main(*sys.argv[1:])
+    cli(sys.argv[1:])
