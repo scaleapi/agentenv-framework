@@ -5,9 +5,7 @@ stored env card declares clock/v1, then invokes sync_time on each backing server
 env card lists (``legacy_protocol.backing_servers``) whose own card advertises it, at the route that card gives.
 An env whose card offers no set_time has no gateway clock to arm, as a computer deployed alone, and is refused
 saying to deploy it in a multi env; a record that kept no card is refused saying so.
-Non-advertisers are skipped when tolerate_missing_sync_time (default True), and websites always. The Playwright MCP
-website browser follows no clock, so the pages it opens see real time, which a warning says; a task whose pages need
-the universe's date browses with a browser computer, which follows the gateway as a desktop does. Place right
+Non-advertisers are skipped when tolerate_missing_sync_time (default True), and websites always. Place right
 before prompt_agent so the virtual timeline starts at agent-start; when setup needs the clock armed, arm it at rate 0
 and start it with set_env_clock_rate right before prompt_agent.
 """
@@ -24,7 +22,6 @@ import tzdata  # noqa: F401
 from agentenv_protocol import client as protocol_v1
 
 from agent_env.env.env import EnvCapabilityUnsupported
-from agent_env.env.envs.playwright_mcp import PLAYWRIGHT_MCP_ENVIRONMENT_NAME
 from agent_env.env.gateway.constants import EXT_CLOCK_URI
 from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef
@@ -177,10 +174,6 @@ class SyncEnvClockTaskStep(TaskStep):
         if not synced:
             logger.warning(f"sync_env_clock env={self.env_id}: clock armed but NO server synced "
                            f"({[(s['service'], s.get('reason')) for s in skipped]}) — every tool still answers wall time")
-        if any(entry["service"] == PLAYWRIGHT_MCP_ENVIRONMENT_NAME for entry in skipped):
-            logger.warning(f"sync_env_clock env={self.env_id}: its website browser, {PLAYWRIGHT_MCP_ENVIRONMENT_NAME}, "
-                           "follows no clock, so the pages it opens see real time; for pages on the universe's date, "
-                           "give the multi env a browser computer: browser_envs = [\"chromium\"]")
         return context
 
     async def _sync_one(self, deployed, gateway_url: str, service: str, env_get_time_url: Optional[str], mcp: bool = True,
