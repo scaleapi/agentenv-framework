@@ -1,8 +1,8 @@
 """A server env on Modal: its one MCP server in a Modal container, with no gateway.
 
 A load is timed by the size of the payload it staged, measured in the server's container through the deploy's own
-handle and a restored one; and the server's state reads as JSON whether ``data/get`` answers with data or with a file
-bundle. Needs the resolved config to reach Modal; skipped otherwise. The server's image is a build context, which
+handle and a restored one; the server's state reads as JSON whether ``data/get`` answers with data or with a file
+bundle; and a file and a file universe a task loads onto the env land in the server's container. Needs the resolved config to reach Modal; skipped otherwise. The server's image is a build context, which
 Modal builds where it runs.
 """
 
@@ -17,13 +17,14 @@ import modal
 import pytest
 from agentenv_protocol import client as protocol_v1
 
-from agent_env.artifact import DockerImageArtifact, EnvironmentArtifact, FileArtifact
+from agent_env.artifact import DockerImageArtifact, EnvironmentArtifact, FileArtifact, FileArtifactUniverse
 from agent_env.env import legacy_protocol
 from agent_env.env.env import Env
 from agent_env.env.envs.mcp_server import MCPServerEnv
 from agent_env.env.gateway import constants
 from agent_env.task import EpisodeSpec, Task
 from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.task_steps.load_artifact import LoadArtifactTaskStep
 from agent_env.task_step.task_steps.teardown_sandboxes import TeardownSandboxesTaskStep
 from tst.util.capabilities import skip_without_remote_sandbox
 
@@ -57,6 +58,42 @@ async def test_a_modal_load_is_timed_by_its_payload_and_the_servers_state_reads_
         await TeardownSandboxesTaskStep(id="teardown", version=None, env_ids=[env.id]).execute(
             TaskStepContext(deployed_envs=[deployed])
         )
+
+
+@pytest.mark.asyncio
+async def test_files_a_task_loads_onto_a_modal_server_env_land_in_its_container():
+    uid = uuid.uuid4().hex[:8]
+    env = MCPServerEnv.put(id=f"server-items-files-{uid}", docker_image_artifact=_items_context(uid),
+                           environment_name="items", env_provider_type="server")
+    expected = {"note.txt": "a single file\n", "a.txt": "a universe member\n", "sub/b.txt": "a nested member\n"}
+
+    def put_file(name):
+        return FileArtifact.put_bytes(id=f"server-items-files-{name.replace('/', '-')}-{uid}", description=name,
+                                      filename=name.rsplit("/", 1)[-1], content=expected[name].encode(),
+                                      content_type="text/plain")
+
+    note = put_file("note.txt")
+    universe = FileArtifactUniverse.put(id=f"server-items-universe-{uid}",
+                                        file_artifacts={name: put_file(name) for name in ("a.txt", "sub/b.txt")})
+    deployed = await env.deploy(sandbox_type="modal", ttl_seconds=900)
+    context = TaskStepContext(deployed_envs=[deployed])
+    try:
+        await LoadArtifactTaskStep(
+            id="load-docs", version=None, env_id=env.id,
+            artifacts=[{"id": artifact.id, "version": artifact.version} for artifact in (note, universe)],
+        ).execute(context)
+
+        container = (await Env.from_instance_id(deployed.instance_id))._sandbox
+        for name, text in expected.items():
+            assert await container.exec_with_output("cat", f"/tmp/file_artifacts/{name}") == (0, text, "")
+        assert [(e["artifact_type"], e["env_id"], e["destination_path"], e["files"])
+                for e in context.metadata["loaded_file_artifact_universes"]] == [
+            ("file", env.id, "/tmp/file_artifacts", {"note.txt": "/tmp/file_artifacts/note.txt"}),
+            ("file_artifact_universe", env.id, "/tmp/file_artifacts",
+             {"a.txt": "/tmp/file_artifacts/a.txt", "sub/b.txt": "/tmp/file_artifacts/sub/b.txt"}),
+        ]
+    finally:
+        await TeardownSandboxesTaskStep(id="teardown", version=None, env_ids=[env.id]).execute(context)
 
 
 VERIFY_CRATE = """
