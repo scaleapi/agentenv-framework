@@ -124,7 +124,7 @@ class DeployedA2AAgent:
 
     @property
     def control_headers(self) -> dict[str, str]:
-        return protocol_v1.control_headers(self.control_token)
+        return protocol_v1.control_token_headers(self.control_token)
 
 
 @dataclass(frozen=True)

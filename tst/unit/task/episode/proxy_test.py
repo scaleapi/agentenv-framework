@@ -68,17 +68,17 @@ async def test_every_call_carries_the_headers_the_client_was_made_with(monkeypat
     real_client = httpx.AsyncClient
 
     def handle(request: httpx.Request) -> httpx.Response:
-        seen.append(request.headers.get("authorization"))
+        seen.append(request.headers.get("agentenv-control-token"))
         return httpx.Response(200, json={"tools": []})
 
     monkeypatch.setattr(client_module.httpx, "AsyncClient",
                         lambda **kw: real_client(transport=httpx.MockTransport(handle), **kw))
-    client = ProxyClient("http://proxy", CARD, {"Authorization": "Bearer tok"})
+    client = ProxyClient("http://proxy", CARD, {"AgentEnv-Control-Token": "tok"})
 
     await client.claim()
     await client.tools("task-1")
 
-    assert seen == ["Bearer tok", "Bearer tok"]
+    assert seen == ["tok", "tok"]
 
 
 @pytest.mark.asyncio

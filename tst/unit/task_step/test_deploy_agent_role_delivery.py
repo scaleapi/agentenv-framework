@@ -62,7 +62,8 @@ async def test_every_request_to_the_agent_carries_its_control_token_and_the_reco
     context = await wiring.deploy(_card(HEADERS_MCP, ROLE_CONFIG), role="executor")
 
     assert {r.url.path for r in wiring.requests} == {"/ext/mcp-config", "/ext/agent-config"}
-    assert {r.headers.get("authorization") for r in wiring.requests} == {"Bearer tok"}
+    assert {r.headers.get("agentenv-control-token") for r in wiring.requests} == {"tok"}
+    assert not any("authorization" in r.headers for r in wiring.requests)
     assert context.deployed_agents[0].control_token == "tok"
 
 

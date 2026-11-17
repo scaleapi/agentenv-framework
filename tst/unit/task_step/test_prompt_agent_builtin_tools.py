@@ -80,4 +80,4 @@ async def test_each_turns_config_carries_the_agents_control_token(posted, monkey
 
     await PromptAgentTaskStep(id="one", version=None, prompt="one", agent_name="solver").execute(context)
 
-    assert sent == [{"Authorization": "Bearer tok"}]
+    assert sent == [{"AgentEnv-Control-Token": "tok"}]

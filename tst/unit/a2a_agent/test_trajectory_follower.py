@@ -41,14 +41,14 @@ class _Agent:
     def __init__(self, *answers: httpx.Response) -> None:
         self.answers = list(answers)
         self.afters: list[int] = []
-        self.authorizations: list[str | None] = []
+        self.tokens: list[str | None] = []
 
     def client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(transport=httpx.MockTransport(self._answer))
 
     def _answer(self, request: httpx.Request) -> httpx.Response:
         self.afters.append(json.loads(request.content)["after"])
-        self.authorizations.append(request.headers.get("authorization"))
+        self.tokens.append(request.headers.get("agentenv-control-token"))
         return self.answers.pop(0)
 
 
@@ -111,9 +111,9 @@ async def test_every_read_carries_the_headers_it_was_given():
         httpx.Response(200, json=_page(1, [], "completed")),
     )
 
-    await _follow(agent, headers={"Authorization": "Bearer tok"})
+    await _follow(agent, headers={"AgentEnv-Control-Token": "tok"})
 
-    assert agent.authorizations == ["Bearer tok", "Bearer tok"]
+    assert agent.tokens == ["tok", "tok"]
 
 
 @pytest.mark.asyncio

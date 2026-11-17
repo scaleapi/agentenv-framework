@@ -153,7 +153,7 @@ class DeployedAgent:
 
     @property
     def control_headers(self) -> dict[str, str]:
-        return protocol_v1.control_headers(self.control_token)
+        return protocol_v1.control_token_headers(self.control_token)
 
     def url_for(self, sandbox_type: str | None, *, on_host: bool = False) -> str:
         """This agent's A2A URL as an agent on ``sandbox_type`` reaches it, in a container there or, ``on_host``, on

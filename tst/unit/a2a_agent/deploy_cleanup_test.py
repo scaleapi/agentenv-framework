@@ -68,5 +68,5 @@ async def test_each_deploy_is_recorded_with_a_control_token_of_its_own(monkeypat
     second = await agent.deploy(sandbox_type="fake", env_vars=env_vars)
 
     assert first.control_token and second.control_token and first.control_token != second.control_token
-    assert first.control_headers == {"Authorization": f"Bearer {first.control_token}"}
+    assert first.control_headers == {"AgentEnv-Control-Token": first.control_token}
     assert get_a2a_agent_instance_store().get(first.instance_id).control_token == first.control_token
