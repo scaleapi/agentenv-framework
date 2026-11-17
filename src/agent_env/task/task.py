@@ -135,7 +135,10 @@ def substitute_seed_in_steps(steps: list["TaskStep"], seed: dict) -> list["TaskS
     out: list["TaskStep"] = []
     for step in steps:
         data = _sub(step.to_dict())
-        out.append(attach_retry_config(type(step).from_dict(data), data))
+        seeded = attach_retry_config(type(step).from_dict(data), data)
+        if (keep := getattr(seeded, "seeded_from", None)) is not None:  # a step that keeps something as written
+            keep(step)
+        out.append(seeded)
     return out
 
 

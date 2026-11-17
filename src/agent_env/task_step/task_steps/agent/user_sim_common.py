@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -18,6 +20,22 @@ def person_of(us: dict) -> dict:
             "description": us.get("description"), "versions": us.get("versions") or {},
             "output_format": us.get("output_format"),
             "permissions": us.get("permissions"), "keep_private": us.get("keep_private")}
+
+
+def persona_fingerprint(persona: dict, opening_prompt: Any) -> str:
+    """Which user sim a run had: the hex sha256 of who the user is and what they first sent, as written (the seed not
+    filled in). deploy_user_sim_agent records it as ``persona_sha256``, and user_sim_judge grades a rubric written for
+    a fingerprint only on a run that has it. psi-benchmark-tasks's converter computes it too, so the recipe is fixed::
+
+        sha256(json.dumps({"description": persona.get("description"), "permissions": persona.get("permissions"),
+                           "keep_private": persona.get("keep_private"), "opening_prompt": opening_prompt},
+                          sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
+
+    ``opening_prompt`` is the step's as written: its text, or its list of parts."""
+    body = json.dumps({"description": persona.get("description"), "permissions": persona.get("permissions"),
+                       "keep_private": persona.get("keep_private"), "opening_prompt": opening_prompt},
+                      sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
 def task_zone(us: dict, clocks: list[dict], where: str) -> str:
