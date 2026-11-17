@@ -28,6 +28,18 @@ def test_a_stream_that_is_not_json_says_where():
         yatf.parse_events([yatf.dump_event(coding()[0]), {"type": "note"}])
     with pytest.raises(yatf.YatfError):
         yatf.parse_events('{"not": "an array"}\n[1')
+    with pytest.raises(yatf.YatfError, match="not UTF-8"):
+        yatf.parse_events(b'{"text": "\xff"}\n')
+    with pytest.raises(yatf.YatfError, match="NaN isn't JSON"):
+        yatf.parse_events(lines[0].replace('"turn":0', '"turn":NaN'))
+
+
+def test_any_text_an_event_holds_dumps_to_encodable_jsonl():
+    note = {"seq": 0, "id": "0.0", "type": "note", "turn": 0, "actor": "agent", "observer": "agent",
+            "time": {"at": None}, "text": "\ud800 é 漢 🤖 \x00", "later": {"\ude3a": ["\udfff"]}}
+    dumped = yatf.dump_events(yatf.parse_events([note]))
+    assert dumped.isascii() and dumped.encode("utf-8")
+    assert yatf.dump_event(yatf.parse_events(dumped)[0]) == note
 
 
 def test_order_is_turn_then_seq_never_time():

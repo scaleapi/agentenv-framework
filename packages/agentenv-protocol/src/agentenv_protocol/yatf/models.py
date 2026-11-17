@@ -69,15 +69,18 @@ class YatfError(ValueError):
 
 
 class YatfModel(BaseModel):
-    """Keeps fields it doesn't know through a dump (the validator reports them); the strict schema forbids them."""
+    """Keeps fields it doesn't know through a dump (the validator reports them), while the strict schema forbids them.
+    Values are taken as given, never coerced, so whatever parses dumps back exactly."""
 
-    model_config = ConfigDict(extra="allow", protected_namespaces=(), json_schema_extra={"additionalProperties": False})
+    model_config = ConfigDict(extra="allow", strict=True, allow_inf_nan=False, protected_namespaces=(),
+                              json_schema_extra={"additionalProperties": False})
     #: Whether fields this version doesn't name are part of the model's meaning, not unknowns (V11 skips them).
     OPEN: ClassVar[bool] = False
 
 
 class _Open(YatfModel):
-    model_config = ConfigDict(extra="allow", protected_namespaces=(), json_schema_extra={"additionalProperties": True})
+    model_config = ConfigDict(extra="allow", strict=True, allow_inf_nan=False, protected_namespaces=(),
+                              json_schema_extra={"additionalProperties": True})
     OPEN: ClassVar[bool] = True
 
 
@@ -234,7 +237,7 @@ class Metrics(YatfModel):
     cached_tokens: int | None = None
     cache_write_tokens: int | None = None
     reasoning_tokens: int | None = None
-    cost_usd: float | None = None
+    cost_usd: int | float | None = None
     cost_status: CostStatus | None = None
     cost_source: str | None = None
     raw: dict[str, Any] | None = None
@@ -246,7 +249,7 @@ class UsageTotals(YatfModel):
     total_cached_tokens: int | None = None
     total_cache_write_tokens: int | None = None
     total_reasoning_tokens: int | None = None
-    total_cost_usd: float | None = None
+    total_cost_usd: int | float | None = None
     cost_status: CostStatus | None = None
     cost_source: str | None = None
 
@@ -413,7 +416,8 @@ class Note(Event):
 class ExtensionEvent(Event):
     """A ``<namespace>/<name>`` type, such as an adapter's raw native record: readers keep it and may skip it."""
 
-    model_config = ConfigDict(extra="allow", protected_namespaces=(), json_schema_extra={"additionalProperties": True})
+    model_config = ConfigDict(extra="allow", strict=True, allow_inf_nan=False, protected_namespaces=(),
+                              json_schema_extra={"additionalProperties": True})
     OPEN: ClassVar[bool] = True
     type: Annotated[str, WithJsonSchema({"type": "string", "pattern": EXTENSION_TYPE.pattern})]
 
@@ -421,7 +425,8 @@ class ExtensionEvent(Event):
 class UnknownEvent(Event):
     """An event type this version doesn't define: readers keep it, producers may not write it."""
 
-    model_config = ConfigDict(extra="allow", protected_namespaces=(), json_schema_extra={"additionalProperties": True})
+    model_config = ConfigDict(extra="allow", strict=True, allow_inf_nan=False, protected_namespaces=(),
+                              json_schema_extra={"additionalProperties": True})
     OPEN: ClassVar[bool] = True
 
 
@@ -463,5 +468,6 @@ def parse_event(value: Any) -> Event:
 
 
 def dump_event(event: Event) -> dict[str, Any]:
-    """The event as JSON, with exactly the fields it was given, unknown ones included."""
-    return event.model_dump(mode="json", exclude_unset=True)
+    """The event as JSON values, with exactly the fields it was given, unknown ones included. Every field is a JSON
+    type already, so the strings stay as given, a lone surrogate included, for ``json.dumps`` to escape."""
+    return event.model_dump(exclude_unset=True)

@@ -317,8 +317,9 @@ class YatfTurn:
              x: Mapping[str, Any] | None = None) -> StepEvent:
         return self._emit(StepEvent, "step", time, actor, derived_from, x, step=key, source=source,
                           llm_call_count=llm_call_count, model_name=model_name, reasoning_effort=reasoning_effort,
-                          metrics=metrics, stop_reason=stop_reason, provider_ids=provider_ids,
-                          first_token_at=first_token_at, sampling=sampling)
+                          metrics=metrics, stop_reason=stop_reason,
+                          provider_ids=None if provider_ids is None else dict(provider_ids),
+                          first_token_at=first_token_at, sampling=None if sampling is None else dict(sampling))
 
     def tools(self, tools: Iterable[ToolDef | Mapping[str, Any]], *, mode: str = "replace", time: Any = None,
               actor: str | None = None, derived_from: Any = _CURRENT, x: Mapping[str, Any] | None = None) -> Tools:

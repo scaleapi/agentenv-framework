@@ -962,6 +962,9 @@
         "total_cost_usd": {
           "anyOf": [
             {
+              "type": "integer"
+            },
+            {
               "type": "number"
             },
             {
@@ -1420,6 +1423,9 @@
         },
         "cost_usd": {
           "anyOf": [
+            {
+              "type": "integer"
+            },
             {
               "type": "number"
             },
@@ -3221,6 +3227,9 @@
         },
         "total_cost_usd": {
           "anyOf": [
+            {
+              "type": "integer"
+            },
             {
               "type": "number"
             },

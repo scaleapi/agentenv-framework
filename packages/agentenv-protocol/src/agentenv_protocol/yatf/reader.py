@@ -13,16 +13,24 @@ from .models import Event, StepEvent, ToolCall, ToolResult, YatfError, dump_even
 EXAMPLES = ("coding", "multi_agent", "computer_use")
 
 
+def _strict_json(constant: str) -> Any:
+    raise ValueError(f"{constant} isn't JSON")
+
+
 def parse_events(data: str | bytes | Iterable[Mapping[str, Any]]) -> list[Event]:
-    """A stream's events, from a JSON array (as on the wire), JSONL (as stored) or already-parsed objects."""
+    """A stream's events, from a JSON array (as on the wire), JSONL (as stored) or already-parsed objects. JSON is
+    read strictly: UTF-8, with no NaN or Infinity."""
     if isinstance(data, (bytes, bytearray)):
-        data = bytes(data).decode("utf-8")
+        try:
+            data = bytes(data).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise YatfError(f"not UTF-8: {exc}") from exc
     if isinstance(data, str):
         text = data.lstrip("﻿")
         if text.lstrip().startswith("["):
             try:
-                items = json.loads(text)
-            except json.JSONDecodeError as exc:
+                items = json.loads(text, parse_constant=_strict_json)
+            except ValueError as exc:
                 raise YatfError(f"not a JSON array: {exc}") from exc
         else:
             items = []
@@ -30,8 +38,8 @@ def parse_events(data: str | bytes | Iterable[Mapping[str, Any]]) -> list[Event]
                 if not line.strip():
                     continue
                 try:
-                    items.append(json.loads(line))
-                except json.JSONDecodeError as exc:
+                    items.append(json.loads(line, parse_constant=_strict_json))
+                except ValueError as exc:
                     raise YatfError(f"line {number} isn't JSON: {exc}") from exc
     else:
         items = list(data)
@@ -47,11 +55,12 @@ def parse_events(data: str | bytes | Iterable[Mapping[str, Any]]) -> list[Event]
 
 
 def dump_events(events: Iterable[Event], *, jsonl: bool = True) -> str:
-    """Events as JSONL, one per line, or as one JSON array."""
+    """Events as JSONL, one per line, or as one JSON array, ASCII-escaped as the SDK writes native logs, so any text
+    an event holds encodes."""
     dumped = [dump_event(event) for event in events]
     if jsonl:
-        return "".join(json.dumps(item, ensure_ascii=False, separators=(",", ":")) + "\n" for item in dumped)
-    return json.dumps(dumped, ensure_ascii=False, separators=(",", ":"))
+        return "".join(json.dumps(item, separators=(",", ":"), allow_nan=False) + "\n" for item in dumped)
+    return json.dumps(dumped, separators=(",", ":"), allow_nan=False)
 
 
 def ordered(events: Iterable[Event]) -> list[Event]:

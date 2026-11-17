@@ -82,6 +82,22 @@ def test_a_non_event_is_refused(value):
         yatf.parse_event(value)
 
 
+@pytest.mark.parametrize("field,value", [("seq", "5"), ("seq", 5.0), ("seq", True), ("attempt", False),
+                                         ("text", 5), ("is_copied_context", "yes")])
+def test_values_are_taken_as_given_never_coerced(field, value):
+    with pytest.raises(yatf.YatfError):
+        yatf.parse_event({**event("note", text="x"), field: value})
+
+
+def test_a_number_dumps_as_it_was_written_and_nan_is_refused():
+    raw = event("step", source="agent", metrics={"cost_usd": 0, "cost_status": "reported", "prompt_tokens": 3})
+    assert yatf.dump_event(yatf.parse_event(raw))["metrics"]["cost_usd"] == 0
+    assert type(yatf.dump_event(yatf.parse_event(raw))["metrics"]["cost_usd"]) is int
+    raw["metrics"]["cost_usd"] = float("nan")
+    with pytest.raises(yatf.YatfError):
+        yatf.parse_event(raw)
+
+
 @pytest.mark.parametrize("kind,ok", [("claude-code/raw", True), ("codex/item.v2", True), ("yatf/raw", False),
                                      ("delegation", False), ("Claude/raw", False), ("a/b/c", False)])
 def test_extension_types_are_namespaced_outside_yatf(kind, ok):
