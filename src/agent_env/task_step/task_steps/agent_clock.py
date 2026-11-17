@@ -128,6 +128,13 @@ def followed_env(context: TaskStepContext, agent: DeployedAgent) -> Optional[str
     return ((context.metadata.get(FOLLOWING_KEY) or {}).get(_slot(agent.agent_name)) or {}).get("env_id")
 
 
+def torn_down(context: TaskStepContext, agent: DeployedAgent) -> bool:
+    """Whether ``teardown_sandboxes`` took ``agent``'s sandbox down: its record stays in the context, its server is gone."""
+    from agent_env.task.teardown import TORN_DOWN_KEY
+
+    return bool(agent.sandbox_id) and agent.sandbox_id in (context.metadata.get(TORN_DOWN_KEY) or ())
+
+
 def clock_env(agent: DeployedAgent) -> Optional[str]:
     """The one env whose clock ``agent`` follows: the first it's registered with. Fixed by the agent alone, so two
     steps arming two of its envs' clocks at once never both take its one follower."""
