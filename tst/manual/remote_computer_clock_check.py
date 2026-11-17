@@ -14,6 +14,18 @@ written there. ``AGENTENV_CLOCK_CHECK_OFFICE`` names one whose computer ``deskto
 Each multi env deploys on ``AGENTENV_CLOCK_CHECK_GATEWAY_SANDBOX`` (``modal_vm``), its computer on each of
 ``AGENTENV_CLOCK_CHECK_SANDBOXES`` (``modal_vm,modal``).
 
+To write them, register a bundle into those stores with ``agent-env bundle register <folder> --sandbox <provider>``,
+which composes its computers on the provider. Its envs:
+- ``desktop``: ``type = "computer"``, ``computer = "ubuntu-24.04"``, ``driver = "reference"``.
+- ``browser``: ``type = "computer"``, ``computer = "ubuntu-24.04-browser"``, ``driver = "page"``,
+  ``apps = ["chromium"]``.
+- ``office``: ``type = "multi"``, ``computer_envs = ["desktop"]``.
+- ``browsing``: ``type = "multi"``, ``computer_envs = ["browser"]``.
+- Copies of those bases, drivers and app, since registration refuses entities of installed bundles.
+Registration builds each image it writes on this machine, for amd64. The stores need the gateway's and the service-db's
+infra envs too (``agent-env env gateway put --id default``, ``agent-env env service-db put --id default-db``); a VM
+sandbox builds an image from its context when it isn't published or was built for another platform.
+
 Every reading is taken inside the computer: the gateway's universe, read at the address the computer reaches the gateway
 at, as its follower does, and the session's own, each between two readings of real time on the computer's clock. So
 neither this machine's distance from the provider nor its clock is in them."""
@@ -33,6 +45,7 @@ from agent_env.env.envs.computer.utils import inside
 from agent_env.env.envs.computer.utils.sites import RootChannel
 from agent_env.env.gateway.constants import EXT_CLOCK_URI
 from agent_env.providers import build_sandbox_provider
+from agent_env.providers.sandbox_providers.sandbox import VmSandbox
 from agent_env.task.teardown import teardown_run
 from agent_env.task_step.context import StepContextError, TaskStepContext
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
@@ -75,8 +88,8 @@ PAGE_WAIT_S = 60
 PAGE_POLL_S = 0.25
 #: How far a page's Date.now() may be from the gateway's universe: room for its title's refresh and the reads from here.
 MAX_PAGE_SKEW_S = 3
-#: What core says when a computer's provider runs it as the sandbox itself, which a reset can't replace in place.
-IN_PLACE = "can't be reset in place"
+#: The reset's outcome on a provider whose sandbox is the computer's container itself, which core can't replace.
+REFUSED_IN_PLACE = "refused: its sandbox is the container itself"
 #: Inside the computer, on real time: the gateway's universe as the computer reaches it at argv[1], read within
 #: argv[3] seconds, between two readings of real time, then the session's own (``date``, without the real-time marker),
 #: between two more, taken argv[2] times, keeping the narrowest; argv[1] "-" reads the session alone. Each bracket's
@@ -236,13 +249,14 @@ async def _through_the_steps(env_id: str, child: str, sandbox: str, browser: boo
             await _now(deployed) + timedelta(hours=8)))
         skews["after the follower's kill"] = await _skew(own, time_url, 1)
 
-        try:
-            await ResetEnvTaskStep(id="reset", version=None, env_id=env_id, fail_task_on_error=True).execute(context)
-        except RuntimeError as error:
-            if IN_PLACE not in str(error):
-                raise
-            results["reset"] = f"refused: {IN_PLACE}"
+        if not isinstance(await build_sandbox_provider(own.sandbox_type).get_sandbox(own.sandbox_id), VmSandbox):
+            # Only a VM's Docker can replace the computer's container in place (SandboxProvider.reset_container).
+            with pytest.raises(RuntimeError):
+                await ResetEnvTaskStep(id="reset", version=None, env_id=env_id,
+                                       fail_task_on_error=True).execute(context)
+            results["reset"] = REFUSED_IN_PLACE
             return results
+        await ResetEnvTaskStep(id="reset", version=None, env_id=env_id, fail_task_on_error=True).execute(context)
         own = DeployedEnv.from_dict(context.deployed_envs[0].child_envs[child])
         skews["after a reset"] = await _skew(own, time_url, 1)
         if browser:
@@ -264,7 +278,7 @@ def _assert(results: dict) -> None:
     assert abs(results["rates"][RATE] / RATE - 1) < RATE_TOLERANCE, results
     assert abs(results["rates"]["frozen"]) < FROZEN_TOLERANCE, results
     assert results["follower killed, back"] == (True, True) and results["follower back in s"] < FOLLOWER_BACK_S, results
-    assert results["reset"] == f"refused: {IN_PLACE}" or results["shown after a reset"], results
+    assert results["reset"] == REFUSED_IN_PLACE or results["shown after a reset"], results
     assert results["torn down"], results
 
 

@@ -22,7 +22,6 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import httpx
 import tzdata  # noqa: F401
 from agentenv_protocol import client as protocol_v1
-from agentenv_protocol.computer import COMPUTER_EXEC
 
 from agent_env.env.env import EnvCapabilityUnsupported
 from agent_env.env.gateway.constants import EXT_CLOCK_URI
@@ -185,9 +184,8 @@ class SyncEnvClockTaskStep(TaskStep):
         clock/v1; skip a server with no card or no clock/v1 when ``tolerate`` (tolerate_missing_sync_time by default),
         else raise, a multi env's computer saying it can't follow the universe. ``execute`` tolerates every website, so
         one that doesn't follow the clock never fails the step; one that follows it but can't take the task's timezone
-        does, as an MCP server does. ``server`` is the server as the
-        env's card lists it (``legacy_protocol.server_card``); without it, the card is ``service``'s on ``deployed``'s
-        stored card, or read live at its gateway path."""
+        does, as an MCP server does. ``server`` is the server as the env's card lists it (``legacy_protocol.server_card``);
+        without it, the card is ``service``'s on ``deployed``'s stored card, or read live at its gateway path."""
         tolerate = self.tolerate_missing_sync_time if tolerate is None else tolerate
         from agent_env.env import legacy_protocol
 
@@ -203,7 +201,7 @@ class SyncEnvClockTaskStep(TaskStep):
             if tolerate:
                 logger.info(f"sync_env_clock: {service} does not advertise {EXT_CLOCK_URI}; skipping")
                 return {"synced": False, "reason": "not_advertised"}
-            if server is not None and server.record is not None and protocol_v1.find_extension(card, COMPUTER_EXEC):
+            if server is not None and server.is_computer:
                 raise StepContextError(
                     f"computer {service!r} can't follow the universe clock: it offers no {EXT_CLOCK_URI} sync_time, "
                     "as a computer booted from a disk or a VM bundle, or on a base without agent-env's clock, doesn't, "
