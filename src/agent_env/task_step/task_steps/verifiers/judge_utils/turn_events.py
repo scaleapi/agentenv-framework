@@ -287,7 +287,9 @@ def _steps(spans: list[dict], by_id: dict) -> dict[int, str]:
 def _parts(attrs: dict, kind: str) -> list[str]:
     """The ``kind`` parts' contents of a span's ``gen_ai.output.messages``, in order."""
     messages = parse_json_attr(attrs.get(_OUTPUT_MESSAGES, "[]"))
-    return [str(p.get("content") or "") for m in messages if isinstance(messages, list) and isinstance(m, dict)
+    if not isinstance(messages, list):  # null, a number or an object: no parts, and the wake still reads
+        return []
+    return [str(p.get("content") or "") for m in messages if isinstance(m, dict)
             for p in m.get("parts") or [] if isinstance(p, dict) and p.get("type") == kind]
 
 

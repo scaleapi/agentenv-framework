@@ -130,6 +130,19 @@ def test_an_llm_span_s_reasoning_parts_come_in_order_before_that_call_s_text_and
     assert events == [("thinking", "Paying $855 needs her OK.\nSo ask."), ("text", "I'll ask Nina first.")]
 
 
+def test_output_messages_that_aren_t_a_list_add_nothing_and_the_span_still_reads():
+    for bad in ("null", "7", json.dumps({"role": "assistant"})):
+        spans = [{"name": "ChatCompletion", "start_time": "1", "attributes": {
+            "openinference.span.kind": "LLM",
+            "llm.output_messages.0.message.role": "assistant",
+            "llm.output_messages.0.message.content": "Ordered the pie.",
+            "gen_ai.output.messages": bad}}]
+
+        events = [(e["type"], e["text"]) for e in turn_events(json.dumps(spans)).events if e["type"] != "final"]
+
+        assert events == [("text", "Ordered the pie.")], bad
+
+
 def test_a_responses_api_llm_span_s_text_and_reasoning_are_read():
     spans = [{"name": "Response", "start_time": "1", "attributes": {
         "openinference.span.kind": "LLM",
