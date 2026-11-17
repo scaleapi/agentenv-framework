@@ -240,14 +240,16 @@ Out-of-tree code plugs in either through `config.toml`, as a `module:Class` poin
   `[state.providers.<name>]`, `[explorer.plugins]`: one implementation each.
 - `[envs]`, `[artifacts]`, `[task_steps]` with `impls = ["module:Class", ...]`: extra classes for the
   registries. The identity is the class's `type` (a `ClassVar` on envs and steps, the Pydantic `type`
-  default on artifacts); a class that keeps the base default, collides with a registered type, or
-  leaves a method its base requires unimplemented fails at registry build with `ConfigError`.
+  default on artifacts); a class that keeps the base default, collides with a registered type,
+  leaves a method its base requires unimplemented, or is a step type that declares no `entity_refs`
+  (`()` when it holds no ids) fails at registry build with `ConfigError`.
 - For sandbox and state providers the table name must equal the `type` the provider produces,
   because that string is persisted and used to reconnect.
 - Entry points register the same kinds from an installed package, with the entry-point name as the
   registry key: `agent_env.envs`, `agent_env.artifacts`, `agent_env.task_steps`,
   `agent_env.sandbox_providers`, `agent_env.state_providers` and `agent_env.explorer_plugins`. A
-  plugin whose name clashes with a built-in is skipped, a name two plugins claim is left out and
+  plugin whose name clashes with a built-in is skipped, as is a step type that declares no
+  `entity_refs`; a name two plugins claim is left out and
   config cannot take it, and config that registers a plugin's name takes it over.
   `agent-env plugin check` reports each plugin that did not take effect.
 - Bundles install through `agent_env.bundles` entry points (`<name> = "<package>"`, the folder at

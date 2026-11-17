@@ -18,7 +18,8 @@ form when asked to.
 
 Fields that name something else, such as another step's id, are left out. A step type's
 declarations are not inherited, so a subclass declares its own; ``toml_refs`` are, as ``from_toml``
-is.
+is. A step type registers only once it declares ``entity_refs``, ``()`` if it holds no ids, and
+``agent_env.task_step.registry.step_ref_sites`` reads a step's, whether it is a ``TaskStep`` or a step dict.
 
 A step's agent field left unset falls back to the configured default agent (``[agents] default_a2a_agent_id``), so a
 tool reading a step knows which agent it may deploy without being told (``default_agent_refs``).

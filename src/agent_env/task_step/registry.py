@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+from agent_env.entity.refs import RefSite, ref_sites
 from agent_env.plugins import _registration
 
 if TYPE_CHECKING:
@@ -18,12 +19,30 @@ def _get_type(cls: type["TaskStep"]) -> str:
     return cls.type
 
 
+def undeclared_refs(cls: type["TaskStep"]) -> str | None:
+    """Why ``cls`` can't register for want of an ``entity_refs`` declaration, if it can't: tools that read or
+    rewrite a step's ids can't see a type that declares nothing."""
+    if cls.entity_refs is None:
+        return f"{cls.__qualname__} must declare entity_refs, () if it holds no ids"
+    return None
 
 
 def get_task_step_registry() -> dict[str, type["TaskStep"]]:
     from agent_env.config import runtime
 
     return runtime.get_config().task_step_registry()
+
+
+def step_ref_sites(step: Any) -> list[RefSite]:
+    """Every ref ``step``'s type declares that is present in it. ``step`` is a ``TaskStep`` or a step dict,
+    whose ``type`` is looked up in the registry. Raises ValueError for a type that isn't registered."""
+    if isinstance(step, dict):
+        cls, data = get_task_step_registry().get(step.get("type")), step
+        if cls is None:
+            raise ValueError(f"unknown task step type {step.get('type')!r}")
+    else:
+        cls, data = type(step), step.to_dict()
+    return list(ref_sites(cls.entity_refs or (), data))
 
 
 def _builtin_registry() -> dict[str, type["TaskStep"]]:
@@ -193,7 +212,14 @@ def _build_registry(source: Config | None = None) -> dict[str, type["TaskStep"]]
     from agent_env.task_step.task_step import TaskStep
 
     registry = _builtin_registry()
-    validate = _registration.typed_validator(TaskStep, builtins=frozenset(registry), required=_MUST_IMPLEMENT)
+    typed = _registration.typed_validator(TaskStep, builtins=frozenset(registry), required=_MUST_IMPLEMENT)
+
+    def validate(name: str, loaded: object) -> type["TaskStep"]:
+        cls = typed(name, loaded)
+        if problem := undeclared_refs(cls):
+            raise TypeError(problem)
+        return cls
+
     from_plugins = _registration.merge(registry, _registration.TASK_STEPS, validate, source=source)
     _merge_config_toml_steps(registry, source=source, from_plugins=from_plugins)
     return registry
@@ -227,7 +253,7 @@ def _merge_config_toml_steps(
                 f"[task_steps] impl {impl!r} does not define its own 'type' "
                 f"(inherits the base default {TaskStep.type!r}); set a unique 'type' ClassVar"
             )
-        if problem := _registration.unimplemented(cls, TaskStep, _MUST_IMPLEMENT):
+        if problem := _registration.unimplemented(cls, TaskStep, _MUST_IMPLEMENT) or undeclared_refs(cls):
             raise ConfigError(f"[task_steps] impl {impl!r}: {problem}")
         if from_plugins.refuse(cls.type, f"[task_steps] impl {impl!r}"):
             continue

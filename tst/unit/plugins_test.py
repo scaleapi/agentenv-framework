@@ -30,6 +30,7 @@ from agent_env.artifact.artifacts.environment import SeedsEnvironments
 from agent_env.artifact.artifacts.file import FileArtifact
 from agent_env.artifact.store import ArtifactStore
 from agent_env.config import ConfigError, get_config, load_impl, reset_config
+from agent_env.entity.refs import EntityRef
 from agent_env.env.env import DeployedEnv, DeployedSandboxEnv, Env
 from agent_env.env.envs.website import WebsiteEnv
 from agent_env.env.registry import _MUST_IMPLEMENT as _ENV_MUST_IMPLEMENT
@@ -91,6 +92,7 @@ class _UntypedEnv(_Env):
 
 class _PluginStep(_Step):
     type = "plugin_step"
+    entity_refs = ()
 
 
 class _PluginArtifact(Artifact):
@@ -111,6 +113,7 @@ class _SiblingEnv(_Env):
 
 class _SiblingStep(_Step):
     type = "sibling"
+    entity_refs = ()
 
 
 class _SiblingArtifact(Artifact):
@@ -244,6 +247,15 @@ class _BareEnvProvider(EnvironmentProvider):
     type = "bare"
 
 
+class _RefStep(_Step):
+    type = "ref_step"
+    entity_refs = (EntityRef.env("env_id"),)
+
+
+class _UndeclaredStep(_Step):
+    type = "undeclared"
+
+
 class _UnboundStep(_Step):
     type = "unbound"
 
@@ -253,6 +265,7 @@ class _UnboundStep(_Step):
 
 class _StaticStep(_Step):
     type = "static"
+    entity_refs = ()
 
     @staticmethod
     def from_dict(data):
@@ -506,6 +519,17 @@ def test_a_plugin_class_that_leaves_a_required_method_unimplemented_is_skipped(
     assert "bare" not in registry and "sibling" in registry
     assert f"{bare} must implement {missing}" in _registration.failure_note(f"agent_env.{group}", "bare")
     assert sum(f"{bare} must implement {missing}" in m for m in warnings_logged()) == 1
+
+
+def test_a_step_plugin_that_declares_no_entity_refs_is_skipped_and_its_group_loads(monkeypatch):
+    _install(monkeypatch, task_steps=[_EP("undeclared", "_UndeclaredStep"), _EP("plugin_step", "_PluginStep"),
+                                      _EP("ref_step", "_RefStep")])
+
+    registry = get_config().task_step_registry()
+
+    assert "undeclared" not in registry
+    assert registry["plugin_step"] is _PluginStep and registry["ref_step"] is _RefStep
+    assert "_UndeclaredStep must declare entity_refs" in _registration.failure_note(plugins.TASK_STEPS, "undeclared")
 
 
 def test_resolving_a_type_whose_class_is_unimplemented_says_what_it_lacks(monkeypatch):

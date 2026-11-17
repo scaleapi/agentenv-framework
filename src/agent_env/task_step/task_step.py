@@ -89,7 +89,7 @@ class TaskStep(ABC):
     type: ClassVar[str] = "task_step"
     DEFAULT_TTL_SECONDS: ClassVar[int] = 7200
     DEFAULT_AGENT_NAME: ClassVar[str] = "default-agent"
-    # Fields holding env, A2A agent or artifact ids; None means undeclared.
+    # Fields holding env, A2A agent or artifact ids, () for none; None means undeclared, which registration refuses.
     entity_refs: ClassVar[tuple[EntityRef, ...] | None] = None
     # Fields holding paths into a run's context (``context_path_segments``), as dotted keys with ``[]`` / ``{}`` for each
     # element or value; a bundle rewrites the ids in them as it does entity_refs'.

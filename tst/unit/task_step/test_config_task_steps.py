@@ -21,6 +21,7 @@ class _GreetStep(TaskStep):
     """A minimal infra-free custom step: records a greeting in the context."""
 
     type = "greet_test_step"
+    entity_refs = ()
 
     def __init__(self, id, version, message="hi", depends_on=None, fail_task_on_error=True):
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
@@ -44,6 +45,7 @@ class _CollidingStep(TaskStep):
     """Declares a `type` that a built-in already owns."""
 
     type = "prompt_agent"
+    entity_refs = ()
 
     @classmethod
     def from_dict(cls, data: dict) -> "_CollidingStep":
@@ -57,6 +59,7 @@ class _GreetStepDup(TaskStep):
     """A second class claiming the same `type` as _GreetStep."""
 
     type = "greet_test_step"
+    entity_refs = ()
 
     @classmethod
     def from_dict(cls, data: dict) -> "_GreetStepDup":
@@ -71,6 +74,19 @@ class _NoTypeStep(TaskStep):
 
     @classmethod
     def from_dict(cls, data: dict) -> "_NoTypeStep":
+        return cls(**cls._base_from_dict(data))
+
+    async def execute(self, context: TaskStepContext) -> TaskStepContext:
+        return context
+
+
+class _UndeclaredStep(TaskStep):
+    """Leaves `entity_refs` undeclared."""
+
+    type = "undeclared_test_step"
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "_UndeclaredStep":
         return cls(**cls._base_from_dict(data))
 
     async def execute(self, context: TaskStepContext) -> TaskStepContext:
@@ -152,6 +168,16 @@ def test_step_without_own_type_raises(monkeypatch, tmp_path):
     """)
     monkeypatch.setenv("AGENT_ENV_CONFIG", str(cfg))
     with pytest.raises(ConfigError, match="does not define its own 'type'"):
+        registry.get_task_step_registry()
+
+
+def test_step_without_entity_refs_raises(monkeypatch, tmp_path):
+    cfg = _write_config(tmp_path, f"""
+        [task_steps]
+        impls = ["{_HERE}:_UndeclaredStep"]
+    """)
+    monkeypatch.setenv("AGENT_ENV_CONFIG", str(cfg))
+    with pytest.raises(ConfigError, match=r"_UndeclaredStep must declare entity_refs, \(\) if it holds no ids"):
         registry.get_task_step_registry()
 
 
