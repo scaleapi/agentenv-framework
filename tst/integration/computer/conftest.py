@@ -179,12 +179,16 @@ def _composed(root: Path, bundle, env_id: str | None = None):
     patch.undo()
 
 
+#: How many characters of docker's stderr a failed call's error carries: the last, where docker says what failed.
+DOCKER_ERROR_CHARS = 2000
+
+
 def docker(*args: str) -> subprocess.CompletedProcess:
     """``docker`` with ``args``; a failure carries docker's own error, which the exception alone doesn't show."""
     try:
         return subprocess.run(["docker", *args], check=True, capture_output=True)
     except subprocess.CalledProcessError as e:
-        e.add_note(f"docker's stderr: {e.stderr.decode(errors='replace')[-2000:]}")
+        e.add_note(f"docker's stderr: {e.stderr.decode(errors='replace')[-DOCKER_ERROR_CHARS:]}")
         raise
 
 
