@@ -58,15 +58,17 @@ class ClockFollowers:
         self._seen.pop(name, None)
         self._declared.add(name)
 
-    def retire(self, name: str) -> bool:
+    async def retire(self, name: str) -> bool:
         """Stop waiting for ``name``, a follower ``declare`` added, whose agent a run has torn down: its token no
-        longer acknowledges, and no write waits for it or names it. Whether it was one; a follower the gateway started
-        with stays."""
+        longer acknowledges, no write waits for it or names it, and a write waiting for it now answers. Whether it was
+        one; a follower the gateway started with stays."""
         if name not in self._declared:
             return False
-        self._declared.discard(name)
-        for followers in (self._tokens, self._shown, self._seen):
-            followers.pop(name, None)
+        async with self._acks:
+            self._declared.discard(name)
+            for followers in (self._tokens, self._shown, self._seen):
+                followers.pop(name, None)
+            self._acks.notify_all()
         return True
 
     def changed(self) -> None:
@@ -96,11 +98,12 @@ class ClockFollowers:
         if follower is not None:
             count = self._clock().count_of(after)
             async with self._acks:
-                shown = self._shown[follower]
-                if count is not None and (shown is None or count > shown):
-                    self._shown[follower] = count
-                self._seen[follower] = time.monotonic()
-                self._acks.notify_all()
+                if follower in self._shown:  # else retired while its acknowledgement waited for the lock
+                    shown = self._shown[follower]
+                    if count is not None and (shown is None or count > shown):
+                        self._shown[follower] = count
+                    self._seen[follower] = time.monotonic()
+                    self._acks.notify_all()
         if after == self._clock().version:
             try:
                 await asyncio.wait_for(changed.wait(), self.WATCH_S)

@@ -171,18 +171,16 @@ def test_require_agent_clock_round_trips_and_is_left_out_when_off():
 async def test_an_agent_follows_one_envs_clock_and_another_envs_is_reported_and_skipped(monkeypatch):
     sent = _mock_http(monkeypatch)
     context = await _context()
-    context.metadata["clock_configurations"] = [
-        {"env_id": "e0", "env_get_time_url": CLOCK_URL, "agents": [{"agent": "late", "synced": True,
-                                                                    "follower": "agent-late"}]},
-        {"env_id": "e1", "env_get_time_url": CLOCK_URL, "require_agent_clock": False},
-    ]
+    context.metadata["clock_configurations"] = [{"env_id": "e1", "env_get_time_url": CLOCK_URL}]
+    context.metadata[agent_clock.FOLLOWING_KEY] = {"late": {"agent": "late", "env_id": "e0", "follower": "agent-late"}}
 
     [outcome] = await agent_clock.follow_armed_clocks(context, _agent("late", env_ids=("e0", "e1")), timeout=5)
 
     assert (outcome["env_id"], outcome["synced"], outcome["reason"], outcome["follows"]) == (
         "e1", False, "follows_another_env", "e0")
     assert sent == []  # e0 isn't deployed here; e1's gateway is never asked to take the agent
-    assert context.metadata["clock_configurations"][1]["agents"][0]["reason"] == "follows_another_env"
+    assert context.metadata[agent_clock.FOLLOWING_KEY] == {"late": {"agent": "late", "env_id": "e0",
+                                                                    "follower": "agent-late"}}
 
 
 @pytest.mark.asyncio
@@ -204,9 +202,9 @@ async def test_a_teardown_retires_the_agents_follower_at_each_gateway_it_followe
 
     assert [(r.method, str(r.url), json.loads(r.content)) for r in sent] == [
         ("DELETE", f"{_CARD}/clock/followers", {"name": "agent-solver"})]
-    agents = {a["agent"]: a for a in context.metadata["clock_configurations"][0]["agents"]}
-    assert (agents["solver"]["synced"], agents["solver"]["retired"]) == (False, True)
-    assert agents["bystander"]["synced"] is True and agent_clock.followed_env(context, _agent()) is None
+    assert context.metadata[agent_clock.FOLLOWING_KEY] == {
+        "bystander": {"agent": "bystander", "env_id": "e1", "follower": "agent-bystander"}}
+    assert agent_clock.followed_env(context, _agent()) is None
 
 
 @pytest.mark.asyncio
@@ -220,9 +218,33 @@ async def test_a_gateway_that_cant_retire_a_follower_doesnt_fail_the_teardown(mo
     del methods["retire_follower"]
 
     assert await agent_clock.retire_followers(context, ["solver"]) == []
-    assert context.metadata["clock_configurations"][0]["agents"][0]["synced"] is True
+    assert agent_clock.followed_env(context, _agent()) == "e1"
 
 
 def test_a_log_of_an_outcome_leaves_out_the_agents_answer():
     assert agent_clock.summary({"synced": True, "follower": "agent-solver", "result": {"big": "x" * 10_000}}) == {
         "synced": True, "follower": "agent-solver"}
+
+
+@pytest.mark.asyncio
+async def test_late_agents_deployed_at_once_each_save_only_their_own_record(monkeypatch):
+    import copy
+
+    from agent_env.task_step.context_ops import build_context_update_ops
+
+    _mock_http(monkeypatch)
+    pre = await _context()
+    pre.metadata["clock_configurations"] = [{"env_id": "e1", "env_get_time_url": CLOCK_URL}]
+    saved = {}
+    for name in ("first", "second"):  # each from the same context, as two deploy_agent steps at once
+        post = copy.deepcopy(pre)
+        await agent_clock.follow_armed_clocks(post, _agent(name), timeout=5)
+        ops = build_context_update_ops(pre, post)
+        saved[name] = {*ops.sets, *ops.add_to_sets, *ops.unsets}
+
+    for name, paths in saved.items():
+        assert paths and all(p.startswith(f"context.metadata.{agent_clock.FOLLOWING_KEY}.{name}") for p in paths), paths
+
+
+def test_an_agent_name_with_a_dot_keeps_a_key_of_its_own():
+    assert agent_clock._slot("team.solver") == "team_solver" and agent_clock._slot("$x") == "_x"

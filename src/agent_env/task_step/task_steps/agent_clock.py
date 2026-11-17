@@ -6,7 +6,9 @@ gateway knows it by and that token. From then on a clock write that waits for fo
 for the agent too. ``sync_env_clock`` has every agent registered with the env follow once it has armed the clock, and
 ``deploy_agent`` an agent it deploys while the clock is armed. An agent has one follower, so it follows one env's
 clock: the first a run has it follow; another env's is reported and skipped (``follows_another_env``). When
-``teardown_sandboxes`` takes the agent down, ``retire_followers`` has each gateway it followed stop waiting for it."""
+``teardown_sandboxes`` takes the agent down, ``retire_followers`` has the gateway it follows stop waiting for it. Which
+env each agent follows is kept under ``metadata[FOLLOWING_KEY]``, one key per agent, so steps that run at once and
+each save the context never overwrite another's."""
 from __future__ import annotations
 
 import logging
@@ -37,6 +39,8 @@ ERROR_TEXT_CHARS = 600
 LATE_FOLLOW_TIMEOUT_S = 60
 #: How long a teardown gives each gateway to retire an agent's follower.
 RETIRE_TIMEOUT_S = 10
+#: ``metadata`` key of the env each agent follows: ``{slot: {"agent", "env_id", "follower"}}``, one slot per agent.
+FOLLOWING_KEY = "agent_clock_following"
 
 
 def follower_name(agent: DeployedAgent) -> str:
@@ -93,10 +97,15 @@ async def follow(agent: DeployedAgent, env: DeployedEnv, *, env_get_time_url: Op
     return {"synced": True, "follower": name, "result": answer.json()}
 
 
+def _slot(agent_name: str) -> str:
+    """``agent_name`` as a key of its own when the context is saved, where a ``.`` or a leading ``$`` would make one
+    save the whole map."""
+    return agent_name.replace(".", "_").replace("$", "_")
+
+
 def followed_env(context: TaskStepContext, agent: DeployedAgent) -> Optional[str]:
     """The env whose clock ``agent`` follows in this run, if any."""
-    return next((c["env_id"] for c in context.metadata.get("clock_configurations") or []
-                 for a in c.get("agents") or () if a.get("agent") == agent.agent_name and a.get("synced")), None)
+    return ((context.metadata.get(FOLLOWING_KEY) or {}).get(_slot(agent.agent_name)) or {}).get("env_id")
 
 
 async def follow_in(context: TaskStepContext, agent: DeployedAgent, env: DeployedEnv, *,
@@ -106,7 +115,11 @@ async def follow_in(context: TaskStepContext, agent: DeployedAgent, env: Deploye
     followed = followed_env(context, agent)
     if followed is not None and followed != env.env_id:
         return {"synced": False, "reason": "follows_another_env", "follows": followed}
-    return await follow(agent, env, env_get_time_url=env_get_time_url, timezone=timezone, timeout=timeout)
+    outcome = await follow(agent, env, env_get_time_url=env_get_time_url, timezone=timezone, timeout=timeout)
+    if outcome["synced"]:
+        context.metadata.setdefault(FOLLOWING_KEY, {})[_slot(agent.agent_name)] = {
+            "agent": agent.agent_name, "env_id": env.env_id, "follower": outcome["follower"]}
+    return outcome
 
 
 def summary(outcome: dict) -> dict:
@@ -124,7 +137,7 @@ async def follow_armed_clocks(context: TaskStepContext, agent: DeployedAgent, *,
                               timeout: float = LATE_FOLLOW_TIMEOUT_S) -> list[dict]:
     """Have an agent ``deploy_agent`` just deployed follow the clock of each env registered with it that this run has
     armed, as ``sync_env_clock`` has every agent then: one that can't is reported and skipped, or fails the step under
-    that step's ``require_agent_clock``. Each outcome is recorded with that step's, under its ``agents``."""
+    that step's ``require_agent_clock``."""
     outcomes = []
     for env_id in agent.env_ids:
         if (armed := _armed(context, env_id)) is None:
@@ -138,27 +151,28 @@ async def follow_armed_clocks(context: TaskStepContext, agent: DeployedAgent, *,
             raise StepContextError(f"agent '{agent.agent_name}' can't follow the clock of env '{env_id}': "
                                    f"{outcome['reason']}")
         logger.info(f"agent '{agent.agent_name}' on env {env_id}'s clock: {summary(outcome)}")
-        armed.setdefault("agents", []).append({"agent": agent.agent_name, **outcome})
         outcomes.append({"env_id": env_id, "agent": agent.agent_name, **outcome})
     return outcomes
 
 
 async def retire_followers(context: TaskStepContext, agent_names, *, timeout: float = RETIRE_TIMEOUT_S) -> list[str]:
-    """Have each gateway whose clock one of ``agent_names`` follows in this run stop waiting for it, as its agent is
+    """Have the gateway whose clock each of ``agent_names`` follows in this run stop waiting for it, as its agent is
     torn down, so later writes that wait for followers don't wait for it or answer 504 naming it. Best-effort, as a
-    teardown is: a gateway that's gone or takes no retirement is logged. The followers retired."""
-    names, retired = set(agent_names), []
-    for configuration in context.metadata.get("clock_configurations") or []:
-        env = next((d for d in context.deployed_envs if d.env_id == configuration.get("env_id")), None)
-        for outcome in configuration.get("agents") or ():
-            if env is None or outcome.get("agent") not in names or not outcome.get("synced"):
-                continue
-            try:
-                await env.invoke(EXT_CLOCK_URI, "retire_follower", {"name": outcome["follower"]}, timeout=timeout)
-            except Exception as e:  # noqa: BLE001 - best-effort, as the rest of a teardown
-                logger.warning(f"env {env.env_id}'s gateway didn't retire follower {outcome['follower']!r}: "
-                               f"{type(e).__name__}: {e}"[:300])
-                continue
-            outcome["synced"], outcome["retired"] = False, True
-            retired.append(outcome["follower"])
+    teardown is: a gateway that's gone or takes no retirement is logged and its agent left recorded. The followers
+    retired."""
+    following, retired = context.metadata.get(FOLLOWING_KEY) or {}, []
+    for name in agent_names:
+        if (record := following.get(_slot(name))) is None:
+            continue
+        env = next((d for d in context.deployed_envs if d.env_id == record["env_id"]), None)
+        if env is None:
+            continue
+        try:
+            await env.invoke(EXT_CLOCK_URI, "retire_follower", {"name": record["follower"]}, timeout=timeout)
+        except Exception as e:  # noqa: BLE001 - best-effort, as the rest of a teardown
+            logger.warning(f"env {env.env_id}'s gateway didn't retire follower {record['follower']!r}: "
+                           f"{type(e).__name__}: {e}"[:300])
+            continue
+        del following[_slot(name)]
+        retired.append(record["follower"])
     return retired
