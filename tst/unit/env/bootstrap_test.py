@@ -2,6 +2,7 @@
 stores only, once each however many runs ask; pulled from the images published for their sources when every one of a
 kind's is, else built for this host's platform. One built here switches to them once they're published."""
 
+import contextlib
 import re
 from pathlib import Path
 
@@ -67,6 +68,33 @@ def test_each_infra_image_keeps_the_build_context_it_is_built_from(local_stores,
     put("x", platform=None)
 
     assert kept == [(dockerfile.parent, str(dockerfile)) for dockerfile in bootstrap._DOCKERFILES[kind]]
+
+
+@_INFRA_PUTS
+def test_each_infra_image_is_built_holding_this_machines_lock_for_its_tag(local_stores, monkeypatch, kind, put):
+    """Every agent-env process here builds with the one Docker, a run with a state root of its own too, as each test
+    worker's is, and two builds of one tag at once fail with "image ... already exists"."""
+    held, built = [], []
+
+    @contextlib.contextmanager
+    def holding(ids, **kwargs):
+        held.extend(ids)
+        try:
+            yield
+        finally:
+            del held[-len(ids):]
+
+    def keep(id, *, description, image_name, build_context_path=None, dockerfile_path=None, platform=None):
+        return get_artifact_store().put_document(DockerImageArtifact(
+            id=id, description=description, image_name=image_name, tar_gz_s3_url="file:///x.tar.gz"))
+
+    monkeypatch.setattr(bootstrap, "holding_locks", holding)
+    monkeypatch.setattr(bootstrap, "build_image", lambda dockerfile, context, tag, **kwargs: built.append((tag, [*held])))
+    monkeypatch.setattr(bootstrap.DockerImageArtifact, "put", keep)
+
+    put("x", platform=None)
+
+    assert built and all(f"image-build:{tag}" in locks for tag, locks in built), built
 
 
 @pytest.fixture
