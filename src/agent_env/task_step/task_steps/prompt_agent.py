@@ -1261,9 +1261,13 @@ class _UserSide:
             return
         prefix = self._step._trajectory_prefix().rstrip("/") + "/usersim/"
         try:
-            url = await self._step._fetch_trajectory(
-                self._url, traj_ext, user_task_id, prefix, user_a2a_task_id,
-                card=card, sandbox_type=self._user_sim.sandbox_type,
+            # Bounded like _user_sim_trajectory: the next turn waits on this, and the trace is optional.
+            url = await asyncio.wait_for(
+                self._step._fetch_trajectory(
+                    self._url, traj_ext, user_task_id, prefix, user_a2a_task_id,
+                    card=card, sandbox_type=self._user_sim.sandbox_type,
+                ),
+                _USER_SIM_TRAJECTORY_FETCH_SECONDS,
             )
         except Exception as e:
             logger.warning(f"user-sim trajectory fetch at turn {number} failed (continuing): {e}")

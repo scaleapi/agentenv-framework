@@ -496,6 +496,25 @@ async def test_a_failed_user_sim_trajectory_fetch_is_not_recorded_and_the_conver
 
 
 @pytest.mark.asyncio
+async def test_a_user_sim_trajectory_fetch_that_hangs_is_cut_off_and_the_conversation_goes_on(monkeypatch):
+    import asyncio
+    from agent_env.task_step.task_steps import prompt_agent as prompt_agent_module
+
+    async def hanging_fetch(*args, **kwargs):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(PromptAgentTaskStep, "_fetch_trajectory", hanging_fetch)
+    monkeypatch.setattr(prompt_agent_module, "_USER_SIM_TRAJECTORY_FETCH_SECONDS", 0.05)
+    peers = Peers(monkeypatch, {AGENT: [text("draft one"), text("draft two")], USER: [sim("shorter")]})
+    ctx = _context(user_card=_USER_SIM_CARD_WITH_TRAJ)
+
+    await asyncio.wait_for(_step(turns=2).execute(ctx), 10)
+
+    assert peers.requests(ctx)[-2] == send(AGENT, text("shorter"), "<id3>", "<ctx>")
+    assert "usersim_trajectories" not in ctx.metadata
+
+
+@pytest.mark.asyncio
 async def test_a_user_sim_trajectory_fetch_that_stores_nothing_is_not_recorded(monkeypatch):
     async def empty_fetch(*args, **kwargs):
         return None
