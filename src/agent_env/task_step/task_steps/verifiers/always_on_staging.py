@@ -104,6 +104,15 @@ def stage_run(timeline: Sequence[dict], turns: Mapping[str, Optional[TurnEvents]
     return stager.finish(firings, unavailable or {})
 
 
+def _ending(turn: Optional[TurnEvents]) -> tuple[Optional[str], Optional[str]]:
+    """How a turn ended, from its trajectory's last final result: ("failed", its text) when that result is an error,
+    ("completed", its text) otherwise, (None, None) when the trajectory has none or couldn't be read."""
+    final = next((e for e in reversed(turn.events) if e.get("type") == "final"), None) if turn else None
+    if final is None:
+        return None, None
+    return ("failed" if final.get("error") else "completed"), final.get("text")
+
+
 def wake_file(n: int, width: int = 3) -> str:
     return f"{WAKES_DIR}/wake_{n:0{width}d}.jsonl"
 
@@ -203,7 +212,11 @@ class _Stager:
             calls = event.get("tool_calls")
             if saved:
                 calls = sum(1 for line in lines if line["event"] == "tool_call" and line.get("step") != _SAVE_STEP)
-            w.body.append(_line("turn_end", w.n, at=at, state=event.get("state"), closing_reply=event.get("plain_reply"),
+            state, reply = event.get("state"), event.get("plain_reply")
+            if self.by_position and state is None and reply is None:
+                # No timeline recorded how the turn ended: its trajectory's own final result says, error included.
+                state, reply = _ending(self.turns.get(event.get("trajectory_url") or ""))
+            w.body.append(_line("turn_end", w.n, at=at, state=state, closing_reply=reply,
                                 tool_calls=calls, save_turn_tool_calls=saved or None,
                                 messages_to_user=event.get("messages_to_user"),
                                 stay_quiet_calls=event.get("stay_quiet_calls") or None,

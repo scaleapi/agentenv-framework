@@ -442,3 +442,28 @@ def test_turns_staged_by_position_are_named_by_position_and_a_firing_names_no_wa
         "event": "wake_input", "wake": 3, "text": "[Fri Nov 6, 8:00 PM UTC] alert 3"}
     assert _lines(staged.files, TRIGGERS_FILE)[0]["after_wake"] is None
     assert staged.record["turns_by_position"] is True
+
+
+def test_a_turn_staged_by_position_keeps_how_it_ended_failed_included():
+    ok = turn_events(json.dumps([
+        {"type": "system", "subtype": "init", "session_id": "s1", "model": "claude-opus-5-5", "tools": []},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "Booked the 7pm table."}]}},
+        {"type": "result", "subtype": "success", "is_error": False, "result": "Booked the 7pm table."}]))
+    failed = turn_events(json.dumps([
+        {"type": "system", "subtype": "init", "session_id": "s2", "model": "claude-opus-5-5", "tools": []},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "Checking the reservation."}]}},
+        {"type": "result", "subtype": "error_during_execution", "is_error": True,
+         "result": "API Error: 429 Quota exceeded for model claude-opus-5-5"}]))
+    turns = {"u1": ok, "u2": failed}
+    timeline = []
+    for n, url in enumerate(turns, 1):
+        timeline += [{"event": "wake", "n": n, "parts_text": f"alert {n}"},
+                     {"event": "agent_turn_end", "n": n, "trajectory_url": url}]
+
+    staged = stage_run(timeline, turns, by_position=True)
+
+    ends = [next(line for line in _lines(staged.files, f"wakes/wake_00{n}.jsonl") if line["event"] == "turn_end")
+            for n in (1, 2)]
+    assert (ends[0]["state"], ends[0]["closing_reply"]) == ("completed", "Booked the 7pm table.")
+    assert ends[1]["state"] == "failed" and "Quota exceeded" in ends[1]["closing_reply"]
+    assert "- error: its turn ended failed" in staged.files[INDEX_FILE]
