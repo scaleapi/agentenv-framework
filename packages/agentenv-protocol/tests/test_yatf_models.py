@@ -76,6 +76,13 @@ def test_a_dump_writes_only_the_fields_the_event_was_given():
     assert "attempt" not in dumped and "derived_from" not in dumped and dumped["time"] == {"at": None}
 
 
+def test_a_lone_surrogate_may_be_in_a_value_but_not_a_field_name():
+    kept = event("note", text="cut \ud83d", later={"\ud800": ["\udfff"]})
+    assert yatf.dump_event(yatf.parse_event(kept)) == kept
+    with pytest.raises(yatf.YatfError):
+        yatf.parse_event({**event("note", text="x"), "later\ud800": 1})
+
+
 @pytest.mark.parametrize("value", [{"type": "note"}, [], "note", {**event("note", text="x"), "seq": "zero"}])
 def test_a_non_event_is_refused(value):
     with pytest.raises(yatf.YatfError):
