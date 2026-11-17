@@ -88,8 +88,10 @@ class LiveTurn:
         turn_id: str,
         poll_interval_seconds: float,
         previous_turn_id: str | None,
+        headers: Mapping[str, str],
     ) -> None:
         self._endpoint = endpoint
+        self._headers = headers
         self._store = store
         self._prefix_key = prefix_key
         self._turn_id = turn_id
@@ -131,6 +133,7 @@ async def following_live_trajectory(
     turn_id: str,
     *,
     poll_interval_seconds: float,
+    headers: Mapping[str, str],
     previous_turn_id: str | None = None,
 ) -> AsyncIterator[LiveTurn]:
     """Yield the turn whose task is followed once its message is sent; then ``previous_turn_id``'s
@@ -141,7 +144,7 @@ async def following_live_trajectory(
     end the follower did not read is marked ended in the state the body reported, else ``canceled``
     for a cancelled step or ``failed``, so readers do not wait on it. A follower's own failure is
     logged and never fails the turn."""
-    turn = LiveTurn(endpoint, store, prefix_key, turn_id, poll_interval_seconds, previous_turn_id)
+    turn = LiveTurn(endpoint, store, prefix_key, turn_id, poll_interval_seconds, previous_turn_id, headers)
     stopped_as = TrajectoryState.FAILED
 
     try:
@@ -198,6 +201,7 @@ class LiveTurns:
             self._prefix_key,
             turn_id,
             poll_interval_seconds=self._poll_interval_seconds,
+            headers=self._headers,
             previous_turn_id=self._last_sent,
         ) as turn:
             try:

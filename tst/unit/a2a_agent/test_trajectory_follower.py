@@ -285,7 +285,7 @@ async def test_a_failed_turn_stops_its_follower_without_draining_and_marks_it_en
 
     with pytest.raises(type(error)):
         async with following_live_trajectory(
-            _ENDPOINT, store, "prefix/", "turn", poll_interval_seconds=0
+            _ENDPOINT, store, "prefix/", "turn", poll_interval_seconds=0, headers={}
         ) as turn:
             turn.follow("task-1")
             await asyncio.sleep(0.05)
@@ -312,7 +312,7 @@ async def test_a_cancelled_turn_is_marked_ended_after_the_events_it_stored(monke
 
     with pytest.raises(asyncio.CancelledError):
         async with following_live_trajectory(
-            _ENDPOINT, store, "prefix/", "turn", poll_interval_seconds=0
+            _ENDPOINT, store, "prefix/", "turn", poll_interval_seconds=0, headers={}
         ) as turn:
             turn.follow("task-1")
             async with asyncio.timeout(5):
@@ -330,7 +330,7 @@ async def test_a_turn_the_follower_saw_end_keeps_its_state(monkeypatch, tmp_path
 
     with pytest.raises(RuntimeError):
         async with following_live_trajectory(
-            _ENDPOINT, store, "prefix/", "turn", poll_interval_seconds=0
+            _ENDPOINT, store, "prefix/", "turn", poll_interval_seconds=0, headers={}
         ) as turn:
             turn.follow("task-1")
             async with asyncio.timeout(5):
@@ -363,7 +363,7 @@ async def test_a_turn_the_follower_stopped_before_its_end_is_marked_ended_in_the
     _agent_answering(monkeypatch, _page(0, [{"i": 0}, {"i": 1}], "running"), stops_with)
     store = LocalFilesystemObjectStore(str(tmp_path))
 
-    async with following_live_trajectory(_ENDPOINT, store, "prefix/", "turn", poll_interval_seconds=0) as turn:
+    async with following_live_trajectory(_ENDPOINT, store, "prefix/", "turn", poll_interval_seconds=0, headers={}) as turn:
         turn.follow("task-1")
         await _until_stored(store, "prefix/turn/live/00000000-00000002.jsonl")
         turn.ended("completed")
@@ -377,7 +377,7 @@ async def test_a_reported_task_state_ends_the_turn_as_its_trajectory_state(monke
     _agent_answering(monkeypatch, httpx.Response(404, json={"detail": "Unknown task"}))
     store = LocalFilesystemObjectStore(str(tmp_path))
 
-    async with following_live_trajectory(_ENDPOINT, store, "prefix/", "turn", poll_interval_seconds=0) as turn:
+    async with following_live_trajectory(_ENDPOINT, store, "prefix/", "turn", poll_interval_seconds=0, headers={}) as turn:
         turn.follow("task-1")
         turn.ended(task_state)
 

@@ -75,7 +75,7 @@ async def test_each_turns_config_carries_the_agents_control_token(posted, monkey
         sent.append(headers)
 
     monkeypatch.setattr(pa_mod.protocol, "post_agent_config", post_agent_config)
-    context = _context()
+    context = _context(builtin_tools={"disable": "*"})
     context.deployed_agents[0].control_token = "tok"
 
     await PromptAgentTaskStep(id="one", version=None, prompt="one", agent_name="solver").execute(context)

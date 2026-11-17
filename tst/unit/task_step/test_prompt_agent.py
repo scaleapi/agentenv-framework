@@ -151,7 +151,7 @@ def test_fetch_trajectory_prefers_advertised_object_mode(monkeypatch):
     grants_on_loop = []
     client = MagicMock()
 
-    async def post(url, *, json, timeout):
+    async def post(url, *, json, timeout, headers=None):
         sent.update(url=url, json=json, timeout=timeout)
         return SimpleNamespace(
             raise_for_status=lambda: None,

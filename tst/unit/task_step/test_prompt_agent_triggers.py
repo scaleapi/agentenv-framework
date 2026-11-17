@@ -137,7 +137,7 @@ async def test_triggers_state_is_read_at_the_stored_cards_address():
 async def test_decide_request_body_and_parse():
     captured = {}
 
-    async def fake_post(self, url, json, timeout):
+    async def fake_post(self, url, json, timeout, headers=None):
         captured["url"] = url
         captured["json"] = json
         return _resp(200, {"parts": [{"kind": "text", "text": "[Julia]: re-sweep"}], "done": False, "fired": ["re-sweep"]}, "POST")
@@ -154,7 +154,7 @@ async def test_decide_request_body_and_parse():
 
 @pytest.mark.asyncio
 async def test_decide_4xx_raises():
-    async def fake_post(self, url, json, timeout):
+    async def fake_post(self, url, json, timeout, headers=None):
         return _resp(400, {"error": "bad turn"}, "POST")
 
     with patch.object(httpx.AsyncClient, "post", fake_post):

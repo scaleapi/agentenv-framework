@@ -55,7 +55,8 @@ class _Deploy:
         self.posts: list[tuple[str, dict]] = []
         self.agent = MagicMock(metadata={})
         self.agent.close = AsyncMock()
-        self.agent.deploy = AsyncMock(return_value=MagicMock(a2a_url=AGENT_URL, agent_card=card, sandbox_type=None))
+        self.agent.deploy = AsyncMock(return_value=MagicMock(a2a_url=AGENT_URL, agent_card=card, sandbox_type=None,
+                                                                      control_token=None, control_headers={}))
 
         async def post(url, fields, headers=None):
             self.posts.append((url, fields))
