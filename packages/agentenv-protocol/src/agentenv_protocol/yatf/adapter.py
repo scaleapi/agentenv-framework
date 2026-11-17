@@ -4,6 +4,7 @@ an A2A context. It reads only what the run stores (the turn's context, its nativ
 offline replay makes the events the agent served live."""
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, ClassVar, Iterable, Mapping, Sequence, TypeVar
@@ -258,16 +259,18 @@ def _content(content: Iterable[Any] | None, text: str | None) -> list[Any]:
 class YatfTurn:
     """Builds one turn's events. An adapter calls its methods and writes only what the native says; the turn stamps
     ``seq``, ``id``, ``turn``, ``observer``, the actor (the agent's unless given), the attempt and ``derived_from``
-    (the record being handled, unless given). Each method returns the event it emitted. Not thread-safe: records are
-    fed one at a time."""
+    (the record being handled, unless given). Each method returns the event it emitted. Events are kept as JSON text,
+    so what a reader is handed is a copy, and an event that isn't JSON is refused as it's written. Not thread-safe:
+    records are fed one at a time."""
 
     def __init__(self, context: TurnContext, spec: AdapterSpec) -> None:
         self.context = context
         self.spec = spec
         #: The record being handled: capture it to emit an event that comes from it later.
         self.source: DerivedFrom | None = None
-        self._events: list[dict[str, Any]] = []
+        self._events: list[str] = []
         self._drained = 0
+        self._calls = 0
         self._attempt = 1
         self._final_metrics: FinalMetrics | None = None
 
@@ -277,7 +280,7 @@ class YatfTurn:
 
     @property
     def events(self) -> list[dict[str, Any]]:
-        return list(self._events)
+        return [json.loads(text) for text in self._events]
 
     def message(self, *, role: str, step: str | None = None, content: Iterable[Any] | None = None,
                 text: str | None = None, time: Any = None, actor: str | None = None, derived_from: Any = _CURRENT,
@@ -289,8 +292,8 @@ class YatfTurn:
                   opaque: Iterable[Opaque | Mapping[str, Any]] | None = None, time: Any = None,
                   actor: str | None = None, derived_from: Any = _CURRENT,
                   x: Mapping[str, Any] | None = None) -> Reasoning:
-        return self._emit(Reasoning, "reasoning", time, actor, derived_from, x, step=step, visibility=visibility,
-                          text=text, opaque=None if opaque is None else list(opaque))
+        return self._emit(Reasoning, "reasoning", time, actor, derived_from, x, ("text",), step=step,
+                          visibility=visibility, text=text, opaque=None if opaque is None else list(opaque))
 
     def tool_call(self, *, tool_call_id: str, function_name: str, arguments: Any, step: str | None = None,
                   kind: str | None = None, server: str | None = None, executor: str | None = None,
@@ -359,7 +362,7 @@ class YatfTurn:
             raise YatfError(f"{kind!r} isn't an extension type: <namespace>/<name>, outside the yatf namespace")
         if clash := sorted(_ENVELOPE & set(body)):
             raise YatfError(f"an extension body can't set envelope fields: {', '.join(clash)}")
-        return self._emit(ExtensionEvent, kind, time, actor, derived_from, x, **body)
+        return self._emit(ExtensionEvent, kind, time, actor, derived_from, x, tuple(body), **body)
 
     def final_metrics(self, metrics: FinalMetrics | Mapping[str, Any]) -> None:
         """The turn's totals, written into ``turn.end``."""
@@ -372,7 +375,8 @@ class YatfTurn:
     def _emit(self, model: type[Event], event_type: str, time: Any, actor: str | None, derived_from: Any,
               x: Mapping[str, Any] | None, nulls: tuple[str, ...] = (), /, **body: Any) -> Any:
         source = self.source if derived_from is _CURRENT else derived_from
-        envelope: dict[str, Any] = {"seq": len(self._events), "id": f"{self.index}.{len(self._events)}",
+        seq = len(self._events)
+        envelope: dict[str, Any] = {"seq": seq, "id": f"{self.index}.{seq}",
                                     "type": event_type, "turn": self.index, "actor": actor or self.context.actor,
                                     "observer": "agent", "time": _time(time)}
         if self._attempt > 1:
@@ -384,9 +388,13 @@ class YatfTurn:
         fields = {key: value for key, value in body.items() if value is not None or key in nulls}
         try:
             event = model(**envelope, **fields)
+            text = json.dumps(dump_event(event), separators=(",", ":"), allow_nan=False)
         except ValidationError as exc:
             raise YatfError(f"{event_type} event: {exc}") from exc
-        self._events.append(dump_event(event))
+        except (TypeError, ValueError) as exc:
+            raise YatfError(f"{event_type} event isn't JSON: {exc}") from exc
+        self._events.append(text)
+        self._calls += event_type == "tool_call"
         return event
 
     def _start(self) -> None:
@@ -406,10 +414,9 @@ class YatfTurn:
     def _end(self, state: str, final: Sequence[Any] | None, ended_at: str | None) -> None:
         if final is not None:
             self._emit(FinalResponse, "final_response", ended_at, None, None, None, content=list(final))
-        calls = sum(1 for event in self._events if event["type"] == "tool_call")
-        self._emit(TurnEnd, "turn.end", ended_at, None, None, None, state=state, tool_call_count=calls,
+        self._emit(TurnEnd, "turn.end", ended_at, None, None, None, state=state, tool_call_count=self._calls,
                    final_metrics=self._final_metrics)
 
-    def _drain(self) -> list[dict[str, Any]]:
+    def _drain(self) -> list[str]:
         new, self._drained = self._events[self._drained:], len(self._events)
         return new

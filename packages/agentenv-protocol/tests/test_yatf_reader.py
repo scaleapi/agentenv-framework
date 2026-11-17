@@ -32,6 +32,8 @@ def test_a_stream_that_is_not_json_says_where():
         yatf.parse_events(b'{"text": "\xff"}\n')
     with pytest.raises(yatf.YatfError, match="NaN isn't JSON"):
         yatf.parse_events(lines[0].replace('"turn":0', '"turn":NaN'))
+    with pytest.raises(yatf.YatfError, match="event 0: .*isn't a JSON number"):
+        yatf.parse_events(lines[0].replace('"turn":0', '"turn":0,"later":{"n":1e400}'))
 
 
 def test_any_text_an_event_holds_dumps_to_encodable_jsonl():

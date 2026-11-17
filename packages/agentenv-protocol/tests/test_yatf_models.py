@@ -98,6 +98,12 @@ def test_a_number_dumps_as_it_was_written_and_nan_is_refused():
         yatf.parse_event(raw)
 
 
+@pytest.mark.parametrize("later", [float("inf"), [float("-inf")], {"deep": [float("nan")]}])
+def test_a_number_json_cannot_write_is_refused_anywhere_in_an_event(later):
+    with pytest.raises(yatf.YatfError, match="isn't a JSON number"):
+        yatf.parse_event({**event("note", text="x"), "later": later})
+
+
 @pytest.mark.parametrize("kind,ok", [("claude-code/raw", True), ("codex/item.v2", True), ("yatf/raw", False),
                                      ("delegation", False), ("Claude/raw", False), ("a/b/c", False)])
 def test_extension_types_are_namespaced_outside_yatf(kind, ok):

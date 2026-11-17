@@ -3,6 +3,7 @@ reader writes a newer 1.x stream back out unchanged. A producer's strictness liv
 JSON schema generated from these models."""
 from __future__ import annotations
 
+import math
 import re
 from typing import Annotated, Any, ClassVar, Literal, Union
 
@@ -459,8 +460,22 @@ AnyEvent = Annotated[
 _EVENT = TypeAdapter(AnyEvent)
 
 
+def _finite(value: Any) -> None:
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, float) and not math.isfinite(item):
+            raise YatfError(f"not a yatf/1 event: {item} isn't a JSON number")
+        if isinstance(item, dict):
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+
+
 def parse_event(value: Any) -> Event:
-    """One event as its typed model; an unknown type parses as UnknownEvent and a namespaced one as ExtensionEvent."""
+    """One event as its typed model; an unknown type parses as UnknownEvent and a namespaced one as ExtensionEvent.
+    A NaN or infinity anywhere in it is refused, unknown fields included, since JSON can't write one back."""
+    _finite(value)
     try:
         return _EVENT.validate_python(value)
     except ValidationError as exc:

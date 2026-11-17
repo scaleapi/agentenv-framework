@@ -225,6 +225,36 @@ def test_extension_events_are_namespaced_outside_yatf():
         turn.message(role="assistant", content=[{"type": "text"}])
 
 
+def test_explicit_nulls_an_adapter_writes_are_kept():
+    turn = yatf.YatfTurn(context(), Toy.spec)
+    turn.extension("toy-events/marker", {"value": None})
+    turn.raw(None)
+    turn.reasoning(visibility="omitted", step="s1", opaque=[{"kind": "signature", "value": "sig"}])
+    marker, raw, reasoning = turn.events
+    assert "value" in marker and marker["value"] is None
+    assert "record" in raw and raw["record"] is None
+    assert "text" in reasoning and reasoning["text"] is None
+
+
+def test_an_event_that_is_not_json_is_refused_as_it_is_written():
+    turn = yatf.YatfTurn(context(), Toy.spec)
+    for arguments in ({"x": float("inf")}, {"x": {1, 2}}, {"x": b"raw"}):
+        with pytest.raises(yatf.YatfError, match="isn't JSON"):
+            turn.tool_call(tool_call_id="c1", function_name="Bash", arguments=arguments)
+    assert turn.events == []
+    assert turn.note("next").seq == 0
+
+
+def test_what_a_run_hands_out_is_a_copy():
+    run = AdapterRun(Toy)
+    page = run.start_turn(context())
+    page[0]["tampered"] = True
+    page[1]["content"][0]["text"] = "changed"
+    assert "tampered" not in run.events[0] and run.events[1]["content"][0]["text"] == "list files"
+    run.events[0]["also"] = 1
+    assert "also" not in run.events[0]
+
+
 def adapter_class(**declared):
     options = {"native_format": "toy-events/1", "version": "0.1.0", "usage_input_includes_cache": None, **declared}
 

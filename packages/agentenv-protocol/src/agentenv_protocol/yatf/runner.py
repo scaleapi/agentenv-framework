@@ -2,6 +2,7 @@
 it live and the round-trip kit replays it offline, so the same records, fed in the same order, make the same events."""
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -30,7 +31,7 @@ class RecordedTurn:
 
 class AdapterRun:
     """One A2A context's conversion. Each call returns the events it emitted, in order, so a live reader sees them as
-    they come; ``events`` holds every event so far."""
+    they come; ``events`` holds every event so far. Every read is a fresh copy, so a caller can't rewrite history."""
 
     def __init__(self, adapter: type[Adapter]) -> None:
         spec = vars(adapter).get("spec")
@@ -40,13 +41,13 @@ class AdapterRun:
         self._spec = spec
         self._adapter: Adapter | None = None
         self._turn: YatfTurn | None = None
-        self._events: list[dict[str, Any]] = []
+        self._events: list[str] = []
         self._native = 0
         self._aux: dict[str, int] = {}
 
     @property
     def events(self) -> list[dict[str, Any]]:
-        return list(self._events)
+        return [json.loads(text) for text in self._events]
 
     def start_turn(self, context: TurnContext) -> list[dict[str, Any]]:
         """Open a turn: write ``turn.start`` and the inbound message. The context's first turn creates the adapter."""
@@ -107,7 +108,7 @@ class AdapterRun:
     def _drain(self, turn: YatfTurn) -> list[dict[str, Any]]:
         new = turn._drain()
         self._events.extend(new)
-        return new
+        return [json.loads(text) for text in new]
 
 
 def replay(adapter: type[Adapter], turns: Iterable[RecordedTurn]) -> list[dict[str, Any]]:
