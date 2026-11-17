@@ -31,11 +31,12 @@ from agent_env.task_step.task_steps.teardown_sandboxes import TeardownSandboxesT
 from tst.integration.store.local_parallel_deploy_test import _seed_bootstrap_envs
 from tst.integration.task_step.test_prompt_agent_live_trajectory_local import local_registry as local_registry
 from tst.integration.task_step.test_register_env_triggers_local import _deploy_items
+from tst.util.capabilities import AGENT_CLOCK_IMAGE_ENV, skip_without_agent_clock_image
 from tst.util.fake_anthropic import FakeAnthropic, tool_then_answer
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
-IMAGE = os.environ.get("AGENTENV_E2E_CLAUDE_CODE_IMAGE", "")
+IMAGE = os.environ.get(AGENT_CLOCK_IMAGE_ENV, "")
 VIRTUAL = "2031-03-04T05:06:07Z"
 LATER = "2031-03-05T10:00:00Z"
 PAUSED = "2031-03-05T12:00:00Z"
@@ -66,7 +67,7 @@ async def _followers(deployed) -> dict:
     return (await deployed.invoke(EXT_CLOCK_URI, "state", {}, timeout=10)).get("followers") or {}
 
 
-@pytest.mark.skipif(not IMAGE, reason="set AGENTENV_E2E_CLAUDE_CODE_IMAGE to an image built from this branch")
+@skip_without_agent_clock_image()
 @pytest.mark.asyncio
 async def test_the_claude_code_image_follows_the_envs_clock_until_it_is_torn_down(local_registry):
     with FakeAnthropic(host=_host_ips()[-1]) as endpoint:  # where this machine's containers reach it
