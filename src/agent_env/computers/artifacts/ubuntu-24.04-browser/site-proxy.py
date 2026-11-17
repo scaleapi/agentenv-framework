@@ -204,14 +204,15 @@ class Proxy(http.server.BaseHTTPRequestHandler):
         last = None
         addresses = list(dict.fromkeys(info[4][0] for info in found))
         if (egress := _egress()) is not None and _public(addresses):
-            try:
-                upstream = _through_egress(egress, host, port, max(deadline - time.monotonic(), 0.1))
-            except OSError as error:
-                last = error
-            else:
-                upstream.settimeout(IDLE_S)
-                record["via"] = "egress"
-                return upstream, egress[0]
+            if (left := deadline - time.monotonic()) > 0:
+                try:
+                    upstream = _through_egress(egress, host, port, left)
+                except OSError as error:
+                    last = error
+                else:
+                    upstream.settimeout(IDLE_S)
+                    record["via"] = "egress"
+                    return upstream, egress[0]
             addresses = []
         for address in addresses:
             if (left := deadline - time.monotonic()) <= 0:
