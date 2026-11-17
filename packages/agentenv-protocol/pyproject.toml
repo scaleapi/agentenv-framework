@@ -80,6 +80,7 @@ dev = [
     "websockets>=13",  # the computer extra's /svc/<app>/ relay
     "brotli>=1.2",  # the app extra's network.har decoding
     "zstandard>=0.23",
+    "jsonschema>=4.20",  # the yatf tests check events against the strict schema
 ]
 [project.urls]
 Homepage = "https://www.agentenvframework.com"

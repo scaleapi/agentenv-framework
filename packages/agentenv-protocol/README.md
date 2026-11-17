@@ -1917,3 +1917,81 @@ process ends, in a directory of the process's own (or under
 server process owns a staging directory. An agent that doesn't use the SDK can serve the same routes
 and add `{uri: "urn:agentenv:staging/v1", params: {endpoint: "/ext/staging"}}`
 to its card.
+
+## Agent trajectories: yatf/1
+
+`agentenv_protocol.yatf` is yatf/1, the trajectory format an agent serves beside
+its native log: an append-only stream of JSON events, one turn per A2A task,
+that each agent builds from its own native records with an adapter. The spec is
+[`yatf/SPEC.md`](src/agentenv_protocol/yatf/SPEC.md). `yatf-1.schema.json` beside it
+is the strict JSON schema of one event, and `examples/` holds the spec's worked
+examples. The package needs only the protocol's base dependencies.
+
+Reading a stream:
+
+```python
+from agentenv_protocol import yatf
+
+events = yatf.parse_events(text)  # a JSON array, as on the wire, or JSONL, as stored
+for step in yatf.fold_steps(events):  # ATIF-style steps, each call's results regrouped into it
+    print(step.key, step.step.metrics if step.step else None)
+for pair in yatf.pair_tool_calls(events):
+    print(pair.call.function_name, [result.status for result in pair.results])
+```
+
+A reader keeps fields, event types and part types it doesn't know, so
+`yatf.dump_events(events)` writes a newer 1.x stream back out unchanged. The
+order is `(turn, seq)` (`yatf.ordered`), never timestamps.
+
+Writing an adapter: declare an `Adapter` subclass with `@yatf_adapter`, handle
+native records with `@native` methods and aux records with `@aux` methods, and
+write events through the `turn` each handler gets:
+
+```python
+from agentenv_protocol.yatf import Adapter, aux, finish, native, yatf_adapter
+
+
+@yatf_adapter(native_format="my-cli-events/1", version="0.1.0",
+              usage_input_includes_cache=False, tested_with=("2.1.0",))
+class MyCliYatf(Adapter):
+    def __init__(self, turn):
+        self.times = {}
+
+    @aux("session", type="assistant")
+    def session_record(self, record, turn):
+        self.times[record["id"]] = record["timestamp"]
+
+    @native(type="assistant", where={"block.type": "text"})
+    def text(self, record, turn):
+        turn.message(role="assistant", step=record["id"], text=record["block"]["text"],
+                     time=self.times.get(record["id"]))
+
+    @native(type="assistant", where={"block.type": "tool_use"})
+    def tool_use(self, record, turn):
+        block = record["block"]
+        turn.tool_call(tool_call_id=block["id"], function_name=block["name"],
+                       arguments=block["input"], step=record["id"])
+
+    @finish
+    def close(self, turn):
+        self.times = {}
+```
+
+- One instance serves an A2A context across its turns. Per-turn state resets in
+  the `@finish` method.
+- A handler reads only the record it's given and the turn's context. Aux
+  records are fed in by the agent's own code, and the run stores them in the
+  order fed, so replaying a stored turn makes the events served live.
+- The turn stamps `seq`, `id`, `turn`, `observer`, the actor and
+  `derived_from`. To emit an event later than its record arrived, keep
+  `turn.source` and pass it as `derived_from`.
+- Of the handlers that match a record, the one with the most conditions takes
+  it. A native record no handler takes is kept as a `<namespace>/raw` event.
+  An aux record no handler takes is dropped.
+- `from_yatf` converts back. It returns `Native(log, session)`: each turn's
+  native log, for the round trip, and the files the CLI resumes from, or None.
+
+`yatf.AdapterRun` feeds one context's records through an adapter a turn at a
+time. It writes each turn's frame (`turn.start`, the inbound message,
+`final_response`, `turn.end`) and returns the events each call emits.
+`yatf.replay` runs stored turns through it again.

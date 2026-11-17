@@ -1,0 +1,3344 @@
+{
+  "$defs": {
+    "Actor": {
+      "additionalProperties": false,
+      "description": "A participant, declared in ``turn.start`` or an ``actor`` event before any event names it. A sub-agent carries\nits ``parent`` actor and the ``tool_call_id`` that ``spawned_by`` it.",
+      "properties": {
+        "a2a_agent_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "A2A Agent Id"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "agent",
+            "subagent",
+            "user",
+            "user_sim",
+            "human",
+            "peer",
+            "trigger_executor",
+            "env",
+            "judge",
+            "framework"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "model_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Name"
+        },
+        "model_source": {
+          "anyOf": [
+            {
+              "enum": [
+                "configured",
+                "reported",
+                "unknown"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Source"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "parent": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Parent"
+        },
+        "participant": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Participant"
+        },
+        "role": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Role"
+        },
+        "spawned_by": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Spawned By"
+        },
+        "stream": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Stream"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Version"
+        }
+      },
+      "required": [
+        "id",
+        "kind"
+      ],
+      "title": "Actor",
+      "type": "object"
+    },
+    "ActorDeclared": {
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "title": "Actor",
+          "type": "string"
+        },
+        "attempt": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Attempt"
+        },
+        "declared": {
+          "$ref": "#/$defs/Actor"
+        },
+        "derived_from": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DerivedFrom"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "is_copied_context": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Is Copied Context"
+        },
+        "observer": {
+          "enum": [
+            "agent",
+            "gateway",
+            "browser",
+            "framework"
+          ],
+          "title": "Observer",
+          "type": "string"
+        },
+        "seq": {
+          "title": "Seq",
+          "type": "integer"
+        },
+        "step": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Step"
+        },
+        "time": {
+          "$ref": "#/$defs/Time"
+        },
+        "turn": {
+          "title": "Turn",
+          "type": "integer"
+        },
+        "type": {
+          "const": "actor",
+          "title": "Type",
+          "type": "string"
+        },
+        "x": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "X"
+        }
+      },
+      "required": [
+        "seq",
+        "id",
+        "type",
+        "turn",
+        "actor",
+        "observer",
+        "time",
+        "declared"
+      ],
+      "title": "ActorDeclared",
+      "type": "object"
+    },
+    "AdapterInfo": {
+      "additionalProperties": false,
+      "properties": {
+        "lossy": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Lossy"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "version": {
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "title": "AdapterInfo",
+      "type": "object"
+    },
+    "Attempt": {
+      "additionalProperties": false,
+      "description": "A harness retry within the task; later events carry ``attempt`` equal to ``number``.",
+      "properties": {
+        "actor": {
+          "title": "Actor",
+          "type": "string"
+        },
+        "attempt": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Attempt"
+        },
+        "derived_from": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DerivedFrom"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "is_copied_context": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Is Copied Context"
+        },
+        "number": {
+          "title": "Number",
+          "type": "integer"
+        },
+        "observer": {
+          "enum": [
+            "agent",
+            "gateway",
+            "browser",
+            "framework"
+          ],
+          "title": "Observer",
+          "type": "string"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "seq": {
+          "title": "Seq",
+          "type": "integer"
+        },
+        "step": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Step"
+        },
+        "time": {
+          "$ref": "#/$defs/Time"
+        },
+        "turn": {
+          "title": "Turn",
+          "type": "integer"
+        },
+        "type": {
+          "const": "attempt",
+          "title": "Type",
+          "type": "string"
+        },
+        "x": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "X"
+        }
+      },
+      "required": [
+        "seq",
+        "id",
+        "type",
+        "turn",
+        "actor",
+        "observer",
+        "time",
+        "number"
+      ],
+      "title": "Attempt",
+      "type": "object"
+    },
+    "DataPart": {
+      "additionalProperties": false,
+      "description": "A structured A2A part, such as a harness's tool-call count or a structured output.",
+      "properties": {
+        "data": {
+          "title": "Data"
+        },
+        "origin": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Origin"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "type": {
+          "const": "data",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "data"
+      ],
+      "title": "DataPart",
+      "type": "object"
+    },
+    "DerivedFrom": {
+      "additionalProperties": false,
+      "description": "The record an event came from: its position in the turn's stored native log, or in the named aux log.",
+      "properties": {
+        "aux": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Aux"
+        },
+        "index": {
+          "title": "Index",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "index"
+      ],
+      "title": "DerivedFrom",
+      "type": "object"
+    },
+    "ElidedPart": {
+      "additionalProperties": false,
+      "properties": {
+        "elision": {
+          "$ref": "#/$defs/Elision"
+        },
+        "media_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Media Type"
+        },
+        "type": {
+          "const": "elided",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "elision"
+      ],
+      "title": "ElidedPart",
+      "type": "object"
+    },
+    "Elision": {
+      "additionalProperties": false,
+      "description": "Why content is missing, so elided never reads as empty. A redacted secret has its length and no hash.",
+      "properties": {
+        "bytes": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bytes"
+        },
+        "reason": {
+          "enum": [
+            "truncated",
+            "redacted",
+            "digest_only",
+            "evicted",
+            "not_captured",
+            "not_requested"
+          ],
+          "title": "Reason",
+          "type": "string"
+        },
+        "sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sha256"
+        }
+      },
+      "required": [
+        "reason"
+      ],
+      "title": "Elision",
+      "type": "object"
+    },
+    "ErrorEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "title": "Actor",
+          "type": "string"
+        },
+        "attempt": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Attempt"
+        },
+        "code": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Code"
+        },
+        "derived_from": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DerivedFrom"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "error_type": {
+          "enum": [
+            "agent_error",
+            "infra_error"
+          ],
+          "title": "Error Type",
+          "type": "string"
+        },
+        "fatal": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Fatal"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "is_copied_context": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Is Copied Context"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "observer": {
+          "enum": [
+            "agent",
+            "gateway",
+            "browser",
+            "framework"
+          ],
+          "title": "Observer",
+          "type": "string"
+        },
+        "seq": {
+          "title": "Seq",
+          "type": "integer"
+        },
+        "step": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Step"
+        },
+        "time": {
+          "$ref": "#/$defs/Time"
+        },
+        "turn": {
+          "title": "Turn",
+          "type": "integer"
+        },
+        "type": {
+          "const": "error",
+          "title": "Type",
+          "type": "string"
+        },
+        "x": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "X"
+        }
+      },
+      "required": [
+        "seq",
+        "id",
+        "type",
+        "turn",
+        "actor",
+        "observer",
+        "time",
+        "error_type",
+        "message"
+      ],
+      "title": "ErrorEvent",
+      "type": "object"
+    },
+    "ExtensionEvent": {
+      "additionalProperties": true,
+      "description": "A ``<namespace>/<name>`` type, such as an adapter's raw native record: readers keep it and may skip it.",
+      "properties": {
+        "actor": {
+          "title": "Actor",
+          "type": "string"
+        },
+        "attempt": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Attempt"
+        },
+        "derived_from": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DerivedFrom"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "is_copied_context": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Is Copied Context"
+        },
+        "observer": {
+          "enum": [
+            "agent",
+            "gateway",
+            "browser",
+            "framework"
+          ],
+          "title": "Observer",
+          "type": "string"
+        },
+        "seq": {
+          "title": "Seq",
+          "type": "integer"
+        },
+        "step": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Step"
+        },
+        "time": {
+          "$ref": "#/$defs/Time"
+        },
+        "turn": {
+          "title": "Turn",
+          "type": "integer"
+        },
+        "type": {
+          "pattern": "^(?!yatf/)[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$",
+          "title": "Type",
+          "type": "string"
+        },
+        "x": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "X"
+        }
+      },
+      "required": [
+        "seq",
+        "id",
+        "type",
+        "turn",
+        "actor",
+        "observer",
+        "time"
+      ],
+      "title": "ExtensionEvent",
+      "type": "object"
+    },
+    "FinalMetrics": {
+      "additionalProperties": false,
+      "description": "A turn's totals under ATIF's FinalMetrics names. ``basis`` says whether they sum the turn's steps or are what\nthe harness reported; ``total_steps`` counts its ``step`` events.",
+      "properties": {
+        "basis": {
+          "enum": [
+            "steps",
+            "reported"
+          ],
+          "title": "Basis",
+          "type": "string"
+        },
+        "by_actor": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/UsageTotals"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "By Actor"
+        },
+        "by_model": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/UsageTotals"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "By Model"
+        },
+        "cost_source": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cost Source"
+        },
+        "cost_status": {
+          "anyOf": [
+            {
+              "enum": [
+                "reported",
+                "priced",
+                "unpriced"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cost Status"
+        },
+        "includes_subagents": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Includes Subagents"
+        },
+        "partial": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Partial"
+        },
+        "total_cache_write_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Total Cache Write Tokens"
+        },
+        "total_cached_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Total Cached Tokens"
+        },
+        "total_completion_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Total Completion Tokens"
+        },
+        "total_cost_usd": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Total Cost Usd"
+        },
+        "total_prompt_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Total Prompt Tokens"
+        },
+        "total_reasoning_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Total Reasoning Tokens"
+        },
+        "total_steps": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Total Steps"
+        }
+      },
+      "required": [
+        "basis"
+      ],
+      "title": "FinalMetrics",
+      "type": "object"
+    },
+    "FinalResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "title": "Actor",
+          "type": "string"
+        },
+        "attempt": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Attempt"
+        },
+        "content": {
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/TextPart"
+              },
+              {
+                "$ref": "#/$defs/RefPart"
+              },
+              {
+                "$ref": "#/$defs/MediaPart"
+              },
+              {
+                "$ref": "#/$defs/DataPart"
+              },
+              {
+                "$ref": "#/$defs/ElidedPart"
+              },
+              {
+                "description": "A type this version doesn't define: readers keep it, producers may not write it.",
+                "not": {}
+              }
+            ]
+          },
+          "title": "Content",
+          "type": "array"
+        },
+        "derived_from": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DerivedFrom"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "is_copied_context": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Is Copied Context"
+        },
+        "observer": {
+          "enum": [
+            "agent",
+            "gateway",
+            "browser",
+            "framework"
+          ],
+          "title": "Observer",
+          "type": "string"
+        },
+        "seq": {
+          "title": "Seq",
+          "type": "integer"
+        },
+        "step": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Step"
+        },
+        "time": {
+          "$ref": "#/$defs/Time"
+        },
+        "turn": {
+          "title": "Turn",
+          "type": "integer"
+        },
+        "type": {
+          "const": "final_response",
+          "title": "Type",
+          "type": "string"
+        },
+        "x": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "X"
+        }
+      },
+      "required": [
+        "seq",
+        "id",
+        "type",
+        "turn",
+        "actor",
+        "observer",
+        "time",
+        "content"
+      ],
+      "title": "FinalResponse",
+      "type": "object"
+    },
+    "MediaPart": {
+      "additionalProperties": false,
+      "properties": {
+        "origin": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Origin"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "purpose": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Purpose"
+        },
+        "source": {
+          "$ref": "#/$defs/Source"
+        },
+        "type": {
+          "enum": [
+            "image",
+            "audio",
+            "video",
+            "document",
+            "file"
+          ],
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "source"
+      ],
+      "title": "MediaPart",
+      "type": "object"
+    },
+    "Message": {
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "title": "Actor",
+          "type": "string"
+        },
+        "attempt": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Attempt"
+        },
+        "content": {
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/TextPart"
+              },
+              {
+                "$ref": "#/$defs/RefPart"
+              },
+              {
+                "$ref": "#/$defs/MediaPart"
+              },
+              {
+                "$ref": "#/$defs/DataPart"
+              },
+              {
+                "$ref": "#/$defs/ElidedPart"
+              },
+              {
+                "description": "A type this version doesn't define: readers keep it, producers may not write it.",
+                "not": {}
+              }
+            ]
+          },
+          "title": "Content",
+          "type": "array"
+        },
+        "derived_from": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DerivedFrom"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "is_copied_context": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Is Copied Context"
+        },
+        "observer": {
+          "enum": [
+            "agent",
+            "gateway",
+            "browser",
+            "framework"
+          ],
+          "title": "Observer",
+          "type": "string"
+        },
+        "role": {
+          "enum": [
+            "user",
+            "assistant",
+            "system",
+            "developer"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "seq": {
+          "title": "Seq",
+          "type": "integer"
+        },
+        "step": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Step"
+        },
+        "time": {
+          "$ref": "#/$defs/Time"
+        },
+        "turn": {
+          "title": "Turn",
+          "type": "integer"
+        },
+        "type": {
+          "const": "message",
+          "title": "Type",
+          "type": "string"
+        },
+        "x": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "X"
+        }
+      },
+      "required": [
+        "seq",
+        "id",
+        "type",
+        "turn",
+        "actor",
+        "observer",
+        "time",
+        "role",
+        "content"
+      ],
+      "title": "Message",
+      "type": "object"
+    },
+    "Metrics": {
+      "additionalProperties": false,
+      "description": "One step's usage, inclusive as in ATIF: ``prompt_tokens`` counts cache reads and writes, ``completion_tokens``\ncounts reasoning. An unknown count is null or absent, never 0; ``raw`` keeps the native counters.",
+      "properties": {
+        "cache_write_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cache Write Tokens"
+        },
+        "cached_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cached Tokens"
+        },
+        "completion_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Completion Tokens"
+        },
+        "cost_source": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cost Source"
+        },
+        "cost_status": {
+          "anyOf": [
+            {
+              "enum": [
+                "reported",
+                "priced",
+                "unpriced"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cost Status"
+        },
+        "cost_usd": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cost Usd"
+        },
+        "prompt_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Prompt Tokens"
+        },
+        "raw": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Raw"
+        },
+        "reasoning_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reasoning Tokens"
+        }
+      },
+      "title": "Metrics",
+      "type": "object"
+    },
+    "Note": {
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "title": "Actor",
+          "type": "string"
+        },
+        "attempt": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Attempt"
+        },
+        "derived_from": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DerivedFrom"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "is_copied_context": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Is Copied Context"
+        },
+        "observer": {
+          "enum": [
+            "agent",
+            "gateway",
+            "browser",
+            "framework"
+          ],
+          "title": "Observer",
+          "type": "string"
+        },
+        "seq": {
+          "title": "Seq",
+          "type": "integer"
+        },
+        "step": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Step"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "time": {
+          "$ref": "#/$defs/Time"
+        },
+        "turn": {
+          "title": "Turn",
+          "type": "integer"
+        },
+        "type": {
+          "const": "note",
+          "title": "Type",
+          "type": "string"
+        },
+        "x": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "X"
+        }
+      },
+      "required": [
+        "seq",
+        "id",
+        "type",
+        "turn",
+        "actor",
+        "observer",
+        "time",
+        "text"
+      ],
+      "title": "Note",
+      "type": "object"
+    },
+    "Opaque": {
+      "additionalProperties": false,
+      "description": "A provider payload kept byte for byte, such as a thinking signature, for replay.",
+      "properties": {
+        "kind": {
+          "enum": [
+            "signature",
+            "encrypted",
+            "redacted_data"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider"
+        },
+        "value": {
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "value"
+      ],
+      "title": "Opaque",
+      "type": "object"
+    },
+    "Origin": {
+      "additionalProperties": true,
+      "description": "Where a user-side part came from; the part's own metadata (a notification's channel, a peer's id) sits beside\n``kind``.",
+      "properties": {
+        "kind": {
+          "enum": [
+            "framework",
+            "user_sim",
+            "trigger",
+            "notification",
+            "peer",
+            "human"
+          ],
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "Origin",
+      "type": "object"
+    },
+    "Reasoning": {
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "title": "Actor",
+          "type": "string"
+        },
+        "attempt": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Attempt"
+        },
+        "derived_from": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DerivedFrom"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "is_copied_context": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Is Copied Context"
+        },
+        "observer": {
+          "enum": [
+            "agent",
+            "gateway",
+            "browser",
+            "framework"
+          ],
+          "title": "Observer",
+          "type": "string"
+        },
+        "opaque": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/Opaque"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Opaque"
+        },
+        "seq": {
+          "title": "Seq",
+          "type": "integer"
+        },
+        "step": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Step"
+        },
+        "text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Text"
+        },
+        "time": {
+          "$ref": "#/$defs/Time"
+        },
+        "turn": {
+          "title": "Turn",
+          "type": "integer"
+        },
+        "type": {
+          "const": "reasoning",
+          "title": "Type",
+          "type": "string"
+        },
+        "visibility": {
+          "enum": [
+            "raw",
+            "summary",
+            "omitted",
+            "redacted"
+          ],
+          "title": "Visibility",
+          "type": "string"
+        },
+        "x": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "X"
+        }
+      },
+      "required": [
+        "seq",
+        "id",
+        "type",
+        "turn",
+        "actor",
+        "observer",
+        "time",
+        "visibility"
+      ],
+      "title": "Reasoning",
+      "type": "object"
+    },
+    "RefPart": {
+      "additionalProperties": false,
+      "description": "Text over the inline limit: a preview and the full text by reference.",
+      "properties": {
+        "origin": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Origin"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "preview": {
+          "title": "Preview",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/Source"
+        },
+        "type": {
+          "const": "ref",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "preview",
+        "source"
+      ],
+      "title": "RefPart",
+      "type": "object"
+    },
+    "Source": {
+      "additionalProperties": false,
+      "description": "Bytes held by reference: a ``sha256:<hex>`` URL resolved under the run's blob prefix, or an absolute URL.",
+      "properties": {
+        "bytes": {
+          "title": "Bytes",
+          "type": "integer"
+        },
+        "duration_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duration Ms"
+        },
+        "height": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Height"
+        },
+        "media_type": {
+          "title": "Media Type",
+          "type": "string"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "pages": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pages"
+        },
+        "sha256": {
+          "title": "Sha256",
+          "type": "string"
+        },
+        "url": {
+          "title": "Url",
+          "type": "string"
+        },
+        "width": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Width"
+        }
+      },
+      "required": [
+        "url",
+        "media_type",
+        "bytes",
+        "sha256"
+      ],
+      "title": "Source",
+      "type": "object"
+    },
+    "StepEvent": {
+      "additionalProperties": false,
+      "description": "One inference, dispatch or inbound message, under ATIF's step names; the content events that share its\n``step`` key belong to it.",
+      "properties": {
+        "actor": {
+          "title": "Actor",
+          "type": "string"
+        },
+        "attempt": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Attempt"
+        },
+        "derived_from": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DerivedFrom"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "first_token_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "First Token At"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "is_copied_context": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Is Copied Context"
+        },
+        "llm_call_count": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Llm Call Count"
+        },
+        "metrics": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Metrics"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "model_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Name"
+        },
+        "observer": {
+          "enum": [
+            "agent",
+            "gateway",
+            "browser",
+            "framework"
+          ],
+          "title": "Observer",
+          "type": "string"
+        },
+        "provider_ids": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider Ids"
+        },
+        "reasoning_effort": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reasoning Effort"
+        },
+        "sampling": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sampling"
+        },
+        "seq": {
+          "title": "Seq",
+          "type": "integer"
+        },
+        "source": {
+          "enum": [
+            "agent",
+            "user",
+            "system"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "step": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Step"
+        },
+        "stop_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Stop Reason"
+        },
+        "time": {
+          "$ref": "#/$defs/Time"
+        },
+        "turn": {
+          "title": "Turn",
+          "type": "integer"
+        },
+        "type": {
+          "const": "step",
+          "title": "Type",
+          "type": "string"
+        },
+        "x": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "X"
+        }
+      },
+      "required": [
+        "seq",
+        "id",
+        "type",
+        "turn",
+        "actor",
+        "observer",
+        "time",
+        "source"
+      ],
+      "title": "StepEvent",
+      "type": "object"
+    },
+    "TextPart": {
+      "additionalProperties": false,
+      "properties": {
+        "elision": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Elision"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "origin": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Origin"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "type": {
+          "const": "text",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "text"
+      ],
+      "title": "TextPart",
+      "type": "object"
+    },
+    "Time": {
+      "additionalProperties": false,
+      "description": "When an event happened per the native record. ``at`` is always present and null when the native has no time;\n``raw`` is the native string whenever it differs from ``at``.",
+      "properties": {
+        "at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "At"
+        },
+        "duration_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duration Ms"
+        },
+        "end": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "End"
+        },
+        "raw": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Raw"
+        },
+        "start": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Start"
+        },
+        "virtual": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/VirtualTime"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Virtual"
+        }
+      },
+      "required": [
+        "at"
+      ],
+      "title": "Time",
+      "type": "object"
+    },
+    "ToolCall": {
+      "additionalProperties": false,
+      "description": "A tool call; ``arguments`` is any JSON value, and ``arguments_raw`` the native string when it was one.",
+      "properties": {
+        "actor": {
+          "title": "Actor",
+          "type": "string"
+        },
+        "arguments": {
+          "title": "Arguments"
+        },
+        "arguments_raw": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Arguments Raw"
+        },
+        "attempt": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Attempt"
+        },
+        "derived_from": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DerivedFrom"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "env_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Env Id"
+        },
+        "executor": {
+          "anyOf": [
+            {
+              "enum": [
+                "agent",
+                "env",
+                "provider",
+                "client"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Executor"
+        },
+        "function_name": {
+          "title": "Function Name",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "is_copied_context": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Is Copied Context"
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "enum": [
+                "builtin",
+                "mcp",
+                "function",
+                "custom"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Kind"
+        },
+        "observer": {
+          "enum": [
+            "agent",
+            "gateway",
+            "browser",
+            "framework"
+          ],
+          "title": "Observer",
+          "type": "string"
+        },
+        "seq": {
+          "title": "Seq",
+          "type": "integer"
+        },
+        "server": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Server"
+        },
+        "step": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Step"
+        },
+        "time": {
+          "$ref": "#/$defs/Time"
+        },
+        "tool_call_id": {
+          "title": "Tool Call Id",
+          "type": "string"
+        },
+        "turn": {
+          "title": "Turn",
+          "type": "integer"
+        },
+        "type": {
+          "const": "tool_call",
+          "title": "Type",
+          "type": "string"
+        },
+        "x": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "X"
+        }
+      },
+      "required": [
+        "seq",
+        "id",
+        "type",
+        "turn",
+        "actor",
+        "observer",
+        "time",
+        "tool_call_id",
+        "function_name",
+        "arguments"
+      ],
+      "title": "ToolCall",
+      "type": "object"
+    },
+    "ToolDef": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "input_schema": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Input Schema"
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "enum": [
+                "builtin",
+                "mcp",
+                "function",
+                "custom"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Kind"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "server": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Server"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "ToolDef",
+      "type": "object"
+    },
+    "ToolResult": {
+      "additionalProperties": false,
+      "description": "A result answering any earlier call in the context, kept where it arrived.",
+      "properties": {
+        "actor": {
+          "title": "Actor",
+          "type": "string"
+        },
+        "attempt": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Attempt"
+        },
+        "content": {
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/TextPart"
+              },
+              {
+                "$ref": "#/$defs/RefPart"
+              },
+              {
+                "$ref": "#/$defs/MediaPart"
+              },
+              {
+                "$ref": "#/$defs/DataPart"
+              },
+              {
+                "$ref": "#/$defs/ElidedPart"
+              },
+              {
+                "description": "A type this version doesn't define: readers keep it, producers may not write it.",
+                "not": {}
+              }
+            ]
+          },
+          "title": "Content",
+          "type": "array"
+        },
+        "derived_from": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DerivedFrom"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "exit_code": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Exit Code"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "is_copied_context": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Is Copied Context"
+        },
+        "observer": {
+          "enum": [
+            "agent",
+            "gateway",
+            "browser",
+            "framework"
+          ],
+          "title": "Observer",
+          "type": "string"
+        },
+        "seq": {
+          "title": "Seq",
+          "type": "integer"
+        },
+        "source_call_id": {
+          "title": "Source Call Id",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "error",
+            "canceled",
+            "timeout"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "step": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Step"
+        },
+        "time": {
+          "$ref": "#/$defs/Time"
+        },
+        "turn": {
+          "title": "Turn",
+          "type": "integer"
+        },
+        "type": {
+          "const": "tool_result",
+          "title": "Type",
+          "type": "string"
+        },
+        "x": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "X"
+        }
+      },
+      "required": [
+        "seq",
+        "id",
+        "type",
+        "turn",
+        "actor",
+        "observer",
+        "time",
+        "source_call_id",
+        "status",
+        "content"
+      ],
+      "title": "ToolResult",
+      "type": "object"
+    },
+    "Tools": {
+      "additionalProperties": false,
+      "description": "The tools the agent can call from here on: the whole set, or ones added or removed.",
+      "properties": {
+        "actor": {
+          "title": "Actor",
+          "type": "string"
+        },
+        "attempt": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Attempt"
+        },
+        "derived_from": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DerivedFrom"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "is_copied_context": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Is Copied Context"
+        },
+        "mode": {
+          "enum": [
+            "replace",
+            "add",
+            "remove"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "observer": {
+          "enum": [
+            "agent",
+            "gateway",
+            "browser",
+            "framework"
+          ],
+          "title": "Observer",
+          "type": "string"
+        },
+        "seq": {
+          "title": "Seq",
+          "type": "integer"
+        },
+        "step": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Step"
+        },
+        "time": {
+          "$ref": "#/$defs/Time"
+        },
+        "tools": {
+          "items": {
+            "$ref": "#/$defs/ToolDef"
+          },
+          "title": "Tools",
+          "type": "array"
+        },
+        "turn": {
+          "title": "Turn",
+          "type": "integer"
+        },
+        "type": {
+          "const": "tools",
+          "title": "Type",
+          "type": "string"
+        },
+        "x": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "X"
+        }
+      },
+      "required": [
+        "seq",
+        "id",
+        "type",
+        "turn",
+        "actor",
+        "observer",
+        "time",
+        "mode",
+        "tools"
+      ],
+      "title": "Tools",
+      "type": "object"
+    },
+    "TurnEnd": {
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "title": "Actor",
+          "type": "string"
+        },
+        "attempt": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Attempt"
+        },
+        "derived_from": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DerivedFrom"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "final_metrics": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FinalMetrics"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "is_copied_context": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Is Copied Context"
+        },
+        "observer": {
+          "enum": [
+            "agent",
+            "gateway",
+            "browser",
+            "framework"
+          ],
+          "title": "Observer",
+          "type": "string"
+        },
+        "seq": {
+          "title": "Seq",
+          "type": "integer"
+        },
+        "state": {
+          "enum": [
+            "completed",
+            "failed",
+            "canceled"
+          ],
+          "title": "State",
+          "type": "string"
+        },
+        "step": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Step"
+        },
+        "time": {
+          "$ref": "#/$defs/Time"
+        },
+        "tool_call_count": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tool Call Count"
+        },
+        "turn": {
+          "title": "Turn",
+          "type": "integer"
+        },
+        "type": {
+          "const": "turn.end",
+          "title": "Type",
+          "type": "string"
+        },
+        "x": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "X"
+        }
+      },
+      "required": [
+        "seq",
+        "id",
+        "type",
+        "turn",
+        "actor",
+        "observer",
+        "time",
+        "state"
+      ],
+      "title": "TurnEnd",
+      "type": "object"
+    },
+    "TurnStart": {
+      "additionalProperties": false,
+      "description": "Opens a turn, one per A2A task. It names who made the stream and declares the turn's actors.",
+      "properties": {
+        "actor": {
+          "title": "Actor",
+          "type": "string"
+        },
+        "actors": {
+          "items": {
+            "$ref": "#/$defs/Actor"
+          },
+          "title": "Actors",
+          "type": "array"
+        },
+        "adapter": {
+          "$ref": "#/$defs/AdapterInfo"
+        },
+        "attempt": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Attempt"
+        },
+        "context_id": {
+          "title": "Context Id",
+          "type": "string"
+        },
+        "derived_from": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DerivedFrom"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "is_copied_context": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Is Copied Context"
+        },
+        "live": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Live"
+        },
+        "message_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Message Id"
+        },
+        "native_format": {
+          "title": "Native Format",
+          "type": "string"
+        },
+        "observer": {
+          "enum": [
+            "agent",
+            "gateway",
+            "browser",
+            "framework"
+          ],
+          "title": "Observer",
+          "type": "string"
+        },
+        "seq": {
+          "title": "Seq",
+          "type": "integer"
+        },
+        "spec_version": {
+          "title": "Spec Version",
+          "type": "string"
+        },
+        "step": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Step"
+        },
+        "task_id": {
+          "title": "Task Id",
+          "type": "string"
+        },
+        "time": {
+          "$ref": "#/$defs/Time"
+        },
+        "turn": {
+          "title": "Turn",
+          "type": "integer"
+        },
+        "type": {
+          "const": "turn.start",
+          "title": "Type",
+          "type": "string"
+        },
+        "usage_input_includes_cache": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Usage Input Includes Cache"
+        },
+        "x": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "X"
+        }
+      },
+      "required": [
+        "seq",
+        "id",
+        "type",
+        "turn",
+        "actor",
+        "observer",
+        "time",
+        "spec_version",
+        "context_id",
+        "task_id",
+        "native_format",
+        "adapter",
+        "usage_input_includes_cache",
+        "actors"
+      ],
+      "title": "TurnStart",
+      "type": "object"
+    },
+    "UsageTotals": {
+      "additionalProperties": false,
+      "properties": {
+        "cost_source": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cost Source"
+        },
+        "cost_status": {
+          "anyOf": [
+            {
+              "enum": [
+                "reported",
+                "priced",
+                "unpriced"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cost Status"
+        },
+        "total_cache_write_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Total Cache Write Tokens"
+        },
+        "total_cached_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Total Cached Tokens"
+        },
+        "total_completion_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Total Completion Tokens"
+        },
+        "total_cost_usd": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Total Cost Usd"
+        },
+        "total_prompt_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Total Prompt Tokens"
+        },
+        "total_reasoning_tokens": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Total Reasoning Tokens"
+        }
+      },
+      "title": "UsageTotals",
+      "type": "object"
+    },
+    "VirtualTime": {
+      "additionalProperties": false,
+      "properties": {
+        "at": {
+          "title": "At",
+          "type": "string"
+        },
+        "env_id": {
+          "title": "Env Id",
+          "type": "string"
+        },
+        "env_step_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Env Step Id"
+        }
+      },
+      "required": [
+        "env_id",
+        "at"
+      ],
+      "title": "VirtualTime",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/TurnStart"
+    },
+    {
+      "$ref": "#/$defs/Message"
+    },
+    {
+      "$ref": "#/$defs/FinalResponse"
+    },
+    {
+      "$ref": "#/$defs/TurnEnd"
+    },
+    {
+      "$ref": "#/$defs/StepEvent"
+    },
+    {
+      "$ref": "#/$defs/Reasoning"
+    },
+    {
+      "$ref": "#/$defs/ToolCall"
+    },
+    {
+      "$ref": "#/$defs/ToolResult"
+    },
+    {
+      "$ref": "#/$defs/Tools"
+    },
+    {
+      "$ref": "#/$defs/ActorDeclared"
+    },
+    {
+      "$ref": "#/$defs/ErrorEvent"
+    },
+    {
+      "$ref": "#/$defs/Attempt"
+    },
+    {
+      "$ref": "#/$defs/Note"
+    },
+    {
+      "$ref": "#/$defs/ExtensionEvent"
+    },
+    {
+      "description": "A type this version doesn't define: readers keep it, producers may not write it.",
+      "not": {}
+    }
+  ],
+  "title": "yatf/1 event, spec 1.0"
+}
