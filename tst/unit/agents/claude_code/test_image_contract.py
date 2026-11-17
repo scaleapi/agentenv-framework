@@ -46,6 +46,12 @@ def test_the_packages_the_image_gives_the_models_python_are_pinned():
     assert "-r requirements.txt -r model-requirements.txt" in DOCKERFILE
 
 
+def test_the_image_installs_jq_which_the_cli_tells_the_model_to_query_a_saved_mcp_result_with():
+    apt = re.search(r"apt-get install -y --no-install-recommends ([^\\&]+)", DOCKERFILE)
+
+    assert apt and {"jq", "poppler-utils"} <= set(apt.group(1).split()), apt
+
+
 def test_the_image_pins_its_cli_checks_its_checksum_and_keeps_tls_on():
     assert re.search(r"^ARG CLAUDE_CODE_VERSION=\d+\.\d+\.\d+$", DOCKERFILE, re.MULTILINE)
     assert "sha256sum -c" in DOCKERFILE

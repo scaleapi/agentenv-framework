@@ -21,7 +21,8 @@ the folder changes. A run that deploys the agent registers that image when it's 
 pulls it by its digest and builds it from this folder only when it can't, and a provider that runs images by name can
 run it. The CLI's version is the Dockerfile's
 `CLAUDE_CODE_VERSION`. The image gives the scripts the model runs
-`node`, without npm or npx, and the Python packages `model-requirements.txt` pins: boto3, and openpyxl, pypdf,
+`node`, without npm or npx; `jq`, which the CLI tells the model to query an MCP result with when the result is over its
+token cap and saved to a file; and the Python packages `model-requirements.txt` pins: boto3, and openpyxl, pypdf,
 python-docx and python-pptx, which read the .xlsx, .pdf, .docx and .pptx files tasks often give the model. Without them
 a script that opens such a file stops at `ModuleNotFoundError`, and the model spends turns working around it or fails
 the task for a reason that isn't the model's; a sandbox with no network can't install them either. They add about 50 MB,
