@@ -33,6 +33,7 @@ neither this machine's distance from the provider nor its clock is in them."""
 import asyncio
 import json
 import os
+import re
 import time
 import urllib.parse
 from datetime import datetime, timedelta, timezone
@@ -249,9 +250,11 @@ async def _through_the_steps(env_id: str, child: str, sandbox: str, browser: boo
             await _now(deployed) + timedelta(hours=8)))
         skews["after the follower's kill"] = await _skew(own, time_url, 1)
 
-        if not isinstance(await build_sandbox_provider(own.sandbox_type).get_sandbox(own.sandbox_id), VmSandbox):
-            # Only a VM's Docker can replace the computer's container in place (SandboxProvider.reset_container).
-            with pytest.raises(RuntimeError):
+        provider = build_sandbox_provider(own.sandbox_type)
+        if not isinstance(await provider.get_sandbox(own.sandbox_id), VmSandbox):
+            # Only a VM's Docker can replace the computer's container in place (SandboxProvider.reset_container), and
+            # core's refusal names the provider; any other failure of the reset fails the check.
+            with pytest.raises(RuntimeError, match=re.escape(f"can't be reset on {type(provider).__name__}")):
                 await ResetEnvTaskStep(id="reset", version=None, env_id=env_id,
                                        fail_task_on_error=True).execute(context)
             results["reset"] = REFUSED_IN_PLACE
