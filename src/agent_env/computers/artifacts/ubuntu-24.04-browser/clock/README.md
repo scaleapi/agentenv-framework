@@ -6,9 +6,10 @@ server does. Instead each session program loads agent-env's build of [libfaketim
 step with the gateway.
 
 It is part of the ubuntu-24.04 base, which builds the library and the shim from this folder in a stage of its
-Dockerfile, since an image builds only from its own folder. The base starts as root: init sets the zone, makes the clock page and file for the follower's user,
-`agentenv-clock`, and starts root's supervisord (`../root.conf`), which runs the follower (`clock-follower`) as that user
-and the session's supervisord as the session user. The session user can read the clock but neither write, replace nor
+Dockerfile, since an image builds only from its own folder; the ubuntu-24.04-browser base has a copy, which a unit test
+keeps identical. The base starts as root: the root start (`../root/init`) sets the zone, makes the clock page and file
+for the follower's user, `agentenv-clock`, and starts root's supervisord (`../root.conf`), which runs the follower
+(`clock-follower`) as that user and the session's supervisord as the session user. The session user can read the clock but neither write, replace nor
 stop it.
 
 The follower long-polls the gateway's `/clock/watch`, writes each state it answers to the page and acknowledges it with

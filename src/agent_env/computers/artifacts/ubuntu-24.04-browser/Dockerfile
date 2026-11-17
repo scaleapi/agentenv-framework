@@ -14,9 +14,14 @@
 # fake only the session user's, from the clock page the follower writes, which the session user can read but neither
 # write nor replace.
 #
-# The egress proxy (egress/, a copy of ubuntu-24.04's, kept identical the same way), on real time on 127.0.0.1:3130:
-# the site proxies hand it every connection to a public address, so a live site loads at any universe date. Built and
-# tested in a stage of its own, so no Go toolchain is left in the image.
+# The egress proxy (egress/, a copy of ubuntu-24.04's, kept identical the same way), on real time where
+# AGENTENV_EGRESS_PROXY names, 127.0.0.1:3130: the site proxies hand it every connection to a public address, so a live
+# site loads at any universe date. Built and tested in a stage of its own, so no Go toolchain is left in the image. Its
+# agentenv-egress.sh and chromium-policy.json are the desktop's, for session programs that go out through it directly,
+# and unused here.
+#
+# The root start (root/, with root.conf, copies of ubuntu-24.04's kept identical the same way): what installs both and
+# starts them as root before the session.
 FROM public.ecr.aws/docker/library/golang:1.26.11-bookworm@sha256:dc40a13b61304647ed7e5d581d246b86413dfc29d63c6d018310feb93cd98fc0 AS egress
 COPY egress/ /egress/
 RUN cd /egress && go vet ./... && go test -count=1 ./... \
@@ -36,25 +41,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && userdel --remove ubuntu \
     && useradd --create-home --uid 1000 --shell /bin/bash user \
     && runuser -u user -- mkdir -p /home/user/Desktop /home/user/Documents /home/user/Downloads /home/user/Uploads \
-    && useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin agentenv-clock \
-    && useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin agentenv-egress \
-    && mkdir -p /etc/supervisor/conf.d /var/log/agentenv /run/agentenv /var/log/agentenv-root /run/agentenv-root \
-        /usr/local/lib/agentenv-clock /etc/agentenv/clock /usr/local/lib/agentenv-egress \
-    && chmod 0700 /var/log/agentenv-root /run/agentenv-root \
-    && chown root:agentenv-clock /etc/agentenv/clock && chmod 0750 /etc/agentenv/clock \
-    && touch /etc/agentenv/ca.pem \
-    && cp /etc/ssl/certs/ca-certificates.crt /etc/agentenv/ca-bundle.pem \
-    && cp /etc/ssl/certs/ca-certificates.crt /usr/local/lib/agentenv-egress/roots.pem \
+    && mkdir -p /etc/supervisor/conf.d /var/log/agentenv /run/agentenv \
     && chown user:user /var/log/agentenv /run/agentenv
 COPY --from=clock /out/libfaketimeMT.so.1 /out/libtls_realtime.so /usr/local/lib/agentenv-clock/
 COPY clock/clockpage.py clock/clock-follower /usr/local/lib/agentenv-clock/
 COPY clock/clock.conf /etc/agentenv/clock.conf
-RUN sed -i -e "s/^AGENTENV_SESSION_UID=.*/AGENTENV_SESSION_UID=$(id -u user)/" \
-        -e "s/^AGENTENV_CLOCK_PAGE_UID=.*/AGENTENV_CLOCK_PAGE_UID=$(id -u agentenv-clock)/" /etc/agentenv/clock.conf \
-    && chmod 0755 /usr/local/lib/agentenv-clock/clock-follower \
-    && printf '%s\n' /usr/local/lib/agentenv-clock/libfaketimeMT.so.1 /usr/local/lib/agentenv-clock/libtls_realtime.so \
-        > /etc/ld.so.preload
 COPY --from=egress /out/egress /usr/local/lib/agentenv-egress/egress
+COPY root/ /usr/local/lib/agentenv-root/
+RUN sh /usr/local/lib/agentenv-root/install.sh user
 COPY root.conf /etc/supervisor/root.conf
 COPY supervisord.conf /etc/supervisor/supervisord.conf
 COPY start-computer /usr/local/bin/start-computer

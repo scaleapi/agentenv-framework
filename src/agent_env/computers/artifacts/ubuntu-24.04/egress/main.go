@@ -1,8 +1,8 @@
 // egress: the computer's explicit egress proxy, on real time, for the session's programs, which run on the universe's.
 //
 // It runs as its own user, agentenv-egress, a uid the clock library leaves on real time, under root's supervisord, and
-// serves CONNECT and absolute-form HTTP on 127.0.0.1:3128, or the address --listen names. Session programs reach it
-// through HTTP(S)_PROXY and ALL_PROXY, or a proxy of the base's own that hands it their connections; nothing
+// serves CONNECT and absolute-form HTTP on 127.0.0.1:3128, or where AGENTENV_EGRESS_PROXY names. Session programs
+// reach it through HTTP(S)_PROXY and ALL_PROXY, or a proxy of the base's own that hands it their connections; nothing
 // redirects or filters, so it needs no NET_ADMIN and works on any provider.
 //
 // A TLS connection is spliced (the client's bytes relayed untouched) when the clock is unarmed, or when every universe
@@ -12,19 +12,21 @@
 // own ClientHello, so the site sees the client's fingerprint and ALPN offer either way.
 //
 //	egress boot    as root at the computer's start: the CA, minted once, its key this user's alone, trusted everywhere
-//	egress serve   as agentenv-egress: serve, one JSON line per connection on stdout; --listen HOST:PORT for another
-//	               address than Listen
+//	egress serve   as agentenv-egress: serve, one JSON line per connection on stdout
 package main
 
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
+	"strings"
 	"time"
 )
 
 const (
 	Listen         = "127.0.0.1:3128"
+	ProxyEnv       = "AGENTENV_EGRESS_PROXY"
 	EgressUser     = "agentenv-egress"
 	SessionUser    = "user"
 	Folder         = "/etc/agentenv/egress"
@@ -83,7 +85,7 @@ func main() {
 			os.Exit(1)
 		}
 	case "serve":
-		listen, err := serveListen(os.Args[2:])
+		listen, err := serveListen(os.Args[2:], os.Getenv(ProxyEnv))
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "egress serve:", err)
 			os.Exit(2)
@@ -93,20 +95,23 @@ func main() {
 			os.Exit(1)
 		}
 	default:
-		fmt.Fprintf(os.Stderr, "usage: egress boot|serve [--listen HOST:PORT], not %q\n", command)
+		fmt.Fprintf(os.Stderr, "usage: egress boot|serve, not %q\n", command)
 		os.Exit(2)
 	}
 }
 
-// serveListen is the address serve listens on: Listen, or the one --listen names, as a base whose own proxy already
-// holds Listen gives it one of its own.
-func serveListen(args []string) (string, error) {
-	switch {
-	case len(args) == 0:
-		return Listen, nil
-	case len(args) == 2 && args[0] == "--listen" && args[1] != "":
-		return args[1], nil
-	default:
-		return "", fmt.Errorf("usage: egress serve [--listen HOST:PORT], not %q", args)
+// serveListen is the address serve listens on: the host and port of named, the URL a base whose own proxy holds Listen
+// gives its proxies for this one in ProxyEnv, else Listen.
+func serveListen(args []string, named string) (string, error) {
+	if len(args) != 0 {
+		return "", fmt.Errorf("usage: egress serve, not %q", args)
 	}
+	if named == "" {
+		return Listen, nil
+	}
+	u, err := url.Parse(named)
+	if err != nil || u.Scheme != "http" || u.Hostname() == "" || u.Port() == "" || strings.Trim(u.Path, "/") != "" {
+		return "", fmt.Errorf("%s is http://HOST:PORT, not %q", ProxyEnv, named)
+	}
+	return u.Host, nil
 }
