@@ -84,3 +84,58 @@ async def test_an_endpoint_refusing_the_schema_with_images_is_asked_again_withou
     assert json.loads(out["response"]) == _VERDICT
     assert "response_format" in calls[0]
     assert "response_format" not in calls[1]
+
+
+@pytest.mark.asyncio
+async def test_a_default_call_sends_one_user_message_and_returns_its_usage_and_cost(judge, monkeypatch):
+    calls = _answer_with(monkeypatch, json.dumps(_VERDICT))
+
+    out = await judge._prompt_llm_judge("grade it", model="openai/gpt-4o", context=TaskStepContext())
+
+    assert calls[0]["messages"] == [{"role": "user", "content": "grade it"}]
+    assert out["usage"]["total_tokens"] > 0
+    assert isinstance(out["cost"], float) and out["cost"] > 0
+
+
+@pytest.mark.asyncio
+async def test_a_system_message_and_a_shared_prefix_marked_for_the_prompt_cache(judge, monkeypatch):
+    calls = _answer_with(monkeypatch, json.dumps(_VERDICT))
+
+    await judge._prompt_llm_judge("THE RUN\n\nTHE CHECK", model="anthropic/claude-sonnet-4-6",
+                                  context=TaskStepContext(), system="You grade the user sim.",
+                                  cached_prefix="THE RUN\n\n")
+
+    assert calls[0]["messages"] == [
+        {"role": "system", "content": "You grade the user sim."},
+        {"role": "user", "content": [
+            {"type": "text", "text": "THE RUN\n\n", "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": "THE CHECK"},
+        ]},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_shared_prefix_rides_before_the_screenshots(judge, monkeypatch):
+    calls = _answer_with(monkeypatch, json.dumps(_VERDICT))
+
+    await judge._prompt_llm_judge("THE RUN then the check", model="claude-sonnet-4-6", context=TaskStepContext(),
+                                  image_blocks=[_IMAGE], cached_prefix="THE RUN")
+
+    assert calls[0]["messages"][0]["content"] == [
+        {"type": "text", "text": "THE RUN", "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": " then the check"},
+        _IMAGE,
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("model", "prompt"), [
+    ("openai/gpt-4o", "THE RUN then the check"),  # not a Claude model: no cache marks
+    ("anthropic/claude-sonnet-4-6", "a correction, then THE RUN"),  # doesn't start with the prefix
+])
+async def test_a_prefix_that_cant_be_cached_sends_the_prompt_whole(judge, monkeypatch, model, prompt):
+    calls = _answer_with(monkeypatch, json.dumps(_VERDICT))
+
+    await judge._prompt_llm_judge(prompt, model=model, context=TaskStepContext(), cached_prefix="THE RUN")
+
+    assert calls[0]["messages"] == [{"role": "user", "content": prompt}]
