@@ -12,7 +12,7 @@ from agent_env.store import LocalSqliteDocumentStore
 from agent_env.task.outcome import FailureCause, StepRole, classify_failure
 from agent_env.task.store import TASK_INSTANCES_COLLECTION, TaskInstanceStore, set_task_instance_store
 from agent_env.task.task import Task
-from agent_env.task_step.context import TaskStepContext
+from agent_env.task_step.context import TaskStepContext, VerifierNotPassingError
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.task_step.task_steps.collect_artifacts import CollectArtifactsTaskStep
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
@@ -44,16 +44,12 @@ def _chained(outer: BaseException, inner: BaseException, *, explicit: bool = Tru
     (Exception("litellm.BudgetExceededError: Budget has been exceeded! Current cost: 50.54, Max budget: 50.0"),
      FailureCause.KEY_BUDGET),
     (_chained(RuntimeError("LLM judge failed after 3 attempts"), RuntimeError(BUDGET_400)), FailureCause.KEY_BUDGET),
-    (_chained(RuntimeError("LLM judge failed after 3 attempts"), RuntimeError(BUDGET_400), explicit=False),
-     FailureCause.KEY_BUDGET),
     (_chained(TimeoutError("judge timed out"), RuntimeError(BUDGET_400)), FailureCause.KEY_BUDGET),
     (RuntimeError("Error code: 401 - {'error': {'message': 'Authentication Error, Invalid proxy server token passed. "
                   "valid_token=None.', 'type': 'auth_error', 'code': '401'}}"), FailureCause.KEY_AUTH),
     (RuntimeError("Authentication Error: token_not_found_in_db"), FailureCause.KEY_AUTH),
     (RuntimeError("litellm.AuthenticationError: OpenAIException - Incorrect API key provided: sk-...abcd"),
      FailureCause.KEY_AUTH),
-    (RuntimeError("API key has been revoked"), FailureCause.KEY_AUTH),
-    (RuntimeError("Key has expired. Ask the key owner for a new one."), FailureCause.KEY_AUTH),
     (RuntimeError("Server disconnected without sending a response."), FailureCause.TRANSIENT),
     (TimeoutError(), FailureCause.TRANSIENT),
     (ConnectionResetError(104, "Connection reset by peer"), FailureCause.TRANSIENT),
@@ -64,6 +60,28 @@ def _chained(outer: BaseException, inner: BaseException, *, explicit: bool = Tru
     (httpx.ConnectError("All connection attempts failed"), FailureCause.TRANSIENT),
     (_chained(RuntimeError("agent config not sent"), httpx.ConnectError("[Errno -3] Temporary failure in name resolution")),
      FailureCause.TRANSIENT),
+    (RuntimeError("Authentication Error - Expired Key. Key Expiry time 2026-11-01 and current time 2026-11-17"),
+     FailureCause.KEY_AUTH),
+    (RuntimeError("claude CLI exited with code 1: API Error: 400 Budget exceeded for service_identity:litellm-x: "
+                  "spent $50,008.81 of $50,000.00 per 15d (key: x)"), FailureCause.KEY_BUDGET),
+    (RuntimeError("API Error: Request rejected (429) · Rate limited. Retry in 1s."),
+     FailureCause.TRANSIENT),
+    (RuntimeError("codex CLI stalled (attempt 1: unexpected status 408 Request Timeout: request body arrived too slowly)"),
+     FailureCause.TRANSIENT),
+    (VerifierNotPassingError("verifier 'grade' scored 0.5: rows not met: done"), FailureCause.VERDICT),
+    # Text from an env, a tool, a script or a model mentions codes and words the proxy also uses; none of it is ours.
+    (RuntimeError("tool get_account returned HTTP 401 Unauthorized from env MCP server"), FailureCause.UNKNOWN),
+    (RuntimeError("run_code 'reload': exited 1: urllib.error.HTTPError: HTTP Error 401: Unauthorized"),
+     FailureCause.UNKNOWN),
+    (ValueError("rubric row 401 has no criteria"), FailureCause.UNKNOWN),
+    (ValueError("invalid token in template: {{seed}"), FailureCause.UNKNOWN),
+    (AssertionError("expected status 500 to not be returned by create_order"), FailureCause.UNKNOWN),
+    (RuntimeError("judge said: user exceeded the budget for travel"), FailureCause.UNKNOWN),
+    (RuntimeError("review 'review' timed out after 10800s awaiting a decision"), FailureCause.UNKNOWN),
+    # An error raised while handling another, without ``from``, is not caused by it.
+    (_chained(ValueError("rubric item 3 has no criteria"), TimeoutError(), explicit=False), FailureCause.UNKNOWN),
+    (_chained(RuntimeError("LLM judge failed after 3 attempts"), RuntimeError(BUDGET_400), explicit=False),
+     FailureCause.UNKNOWN),
     (ValueError("rubric item 3 has no criteria"), FailureCause.UNKNOWN),
     (ValueError("judge returned invalid JSON: Expecting value: line 1 column 1"), FailureCause.UNKNOWN),
 ])
