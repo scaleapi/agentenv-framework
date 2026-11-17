@@ -141,6 +141,12 @@ CLOCK_PROBE_ZONE = "America/Chicago"
 CLOCK_PROBE_COMMAND = "date +%Y-%m-%dT%H:%M:%S%z"
 CLOCK_PROBE_PROMPT = f"Run exactly one shell command and nothing else: `{CLOCK_PROBE_COMMAND}`. Reply with only its output."
 CLOCK_WAIT_FOLLOWERS_S = 10.0
+#: How much longer than the followers' wait the advance request may take: the gateway answers after it.
+CLOCK_ADVANCE_MARGIN_S = 30
+#: How long one probe turn (the agent running ``date`` through its harness) may take.
+CLOCK_PROBE_TURN_TIMEOUT_S = 180
+#: How much of a failure the validation result keeps as its error.
+CLOCK_ERROR_CHARS = 600
 _CLOCK_STAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{4}")
 _CLOCK_STAMP_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
 
@@ -795,13 +801,13 @@ class A2AAgentValidator:
                 result["readings"].append(await A2AAgentValidator._read_agent_clock(context, f"{task_id}-clock-1", CLOCK_PROBE_TIMES[0]))
                 await env.invoke(EXT_CLOCK_URI, "advance",
                                  {"virtual_time": CLOCK_PROBE_TIMES[1], "wait_followers_s": CLOCK_WAIT_FOLLOWERS_S},
-                                 timeout=int(CLOCK_WAIT_FOLLOWERS_S) + 30)
+                                 timeout=int(CLOCK_WAIT_FOLLOWERS_S) + CLOCK_ADVANCE_MARGIN_S)
                 result["follows_writes"] = True
                 result["readings"].append(await A2AAgentValidator._read_agent_clock(context, f"{task_id}-clock-2", CLOCK_PROBE_TIMES[1]))
             except httpx.HTTPStatusError as e:
-                result["error"] = f"HTTP {e.response.status_code}: {e.response.text}"[:600]
+                result["error"] = f"HTTP {e.response.status_code}: {e.response.text}"[:CLOCK_ERROR_CHARS]
             except Exception as e:  # noqa: BLE001 - recorded as why the agent doesn't follow
-                result["error"] = f"{type(e).__name__}: {e}"[:600]
+                result["error"] = f"{type(e).__name__}: {e}"[:CLOCK_ERROR_CHARS]
             result["supported"] = (result["synced"] and result["follows_writes"] and len(result["readings"]) == 2
                                    and all(r["time"] and r["zone"] for r in result["readings"]))
             log(f"clock/v1: supported={result['supported']} synced={result['synced']} "
@@ -819,7 +825,7 @@ class A2AAgentValidator:
     async def _read_agent_clock(context, prompt_id: str, at: str) -> dict:
         """The agent's ``date``, run through its harness, read against the frozen clock at ``at``."""
         await PromptAgentTaskStep(id=prompt_id, version=None, prompt=CLOCK_PROBE_PROMPT, prompt_id=prompt_id,
-                                  timeout_seconds=180).execute(context)
+                                  timeout_seconds=CLOCK_PROBE_TURN_TIMEOUT_S).execute(context)
         reply = next((p.response or "" for p in context.prompt_responses if p.prompt_id == prompt_id), "")
         return {"prompt_id": prompt_id, **clock_reading(reply, at)}
 
