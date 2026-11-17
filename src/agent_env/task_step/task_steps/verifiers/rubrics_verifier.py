@@ -1515,7 +1515,7 @@ class RubricsVerifierTaskStep(TaskStep):
             judge_agent_card=judge_agent_card,
             a2a_server_task_id=task_id,
             sandbox_type=getattr(judge_agent, "sandbox_type", None),
-            headers=getattr(judge_agent, "control_headers", {}),
+            headers=judge_agent.control_headers,
         )
         return {"response": tr.response_text, "trajectory_object_url": judge_trajectory_url}
 
@@ -1525,7 +1525,7 @@ class RubricsVerifierTaskStep(TaskStep):
         url = await self._fetch_judge_trajectory(judge_a2a_url=judge_a2a_url, judge_agent_card=judge_agent_card,
                                                  a2a_server_task_id=task_id,
                                                  sandbox_type=getattr(judge_agent, "sandbox_type", None),
-                                                 headers=getattr(judge_agent, "control_headers", {}))
+                                                 headers=judge_agent.control_headers)
         logger.warning("Verifier '%s': judge task %s ran out of its %ss (%s); its trajectory so far: %s",
                        self.verifier_id, task_id, self.judge_timeout_seconds, why, url)
         return JudgeTimeoutError(f"Judge A2A task {task_id} ran out of its {self.judge_timeout_seconds}s: {why} "
@@ -1652,7 +1652,7 @@ class RubricsVerifierTaskStep(TaskStep):
                 judge_effort=judge_effort,
                 judge_max_thinking_tokens=judge_max_thinking_tokens,
                 context=context,
-                headers=getattr(judge_agent, "control_headers", {}),
+                headers=judge_agent.control_headers,
             )
 
         for attempt in range(1, self.DEFAULT_MAX_RETRIES + 1):

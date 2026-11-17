@@ -946,7 +946,7 @@ class PromptAgentTaskStep(TaskStep):
         return env_triggers
 
     async def _decide(self, decide_url: str, turn: int, solver_message: str, context_id: str, env_triggers: dict,
-                      headers: Mapping[str, str], **quiet: bool) -> dict:
+                      *, headers: Mapping[str, str], **quiet: bool) -> dict:
         """Call the usersim's /decide for the triggers that should fire this turn."""
         payload = {"turn": turn, "solver_message": solver_message, "context_id": context_id,
                    "env_triggers": env_triggers, **quiet}
@@ -1136,7 +1136,7 @@ class _UserSide:
             env_triggers = await self._step._read_env_triggers(self._context)
             self._record("env_trigger_snapshots", {"turn": number, "envs": env_triggers})
             resp = await self._step._decide(self._decide_url, number, solver_message, self._conversation_id,
-                                            env_triggers, self._user_sim.control_headers)
+                                            env_triggers, headers=self._user_sim.control_headers)
             self._record("agent_trigger_firings", {"turn": number, "fired": resp.get("fired", [])})
             logger.info(f"Turn {number} agent-trigger decide: fired={resp.get('fired', [])} done={resp.get('done')}")
             answer = _trigger_answer(resp)
@@ -1199,7 +1199,7 @@ class _UserSide:
                                "agentenv-framework-protocol whose triggers/v1 decide takes record_unfired")
         env_triggers = await self._step._read_env_triggers(self._context)
         resp = await self._step._decide(self._decide_url, number, solver_message, self._conversation_id, env_triggers,
-                                        self._user_sim.control_headers, record_unfired=False)
+                                        headers=self._user_sim.control_headers, record_unfired=False)
         logger.info(f"Turn {number} agent-trigger decide: fired={resp.get('fired', [])} done={resp.get('done')}")
         answer = _trigger_answer(resp)
         if answer is not None:

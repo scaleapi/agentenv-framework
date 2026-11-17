@@ -49,7 +49,7 @@ class ProxyClient:
     the proxy, over a connection a tunnel dropped say, is tried again, except ``record``'s, which isn't idempotent.
     Answers are read as proxy/v1's models, ignoring fields a newer proxy adds: an agent's protocol isn't pinned."""
 
-    def __init__(self, a2a_url: str, card: dict[str, Any], headers: Mapping[str, str] | None = None):
+    def __init__(self, a2a_url: str, card: dict[str, Any], *, headers: Mapping[str, str] | None = None):
         proxy = A2AAgent.find_extension(card, PROXY_V1.uri)
         if proxy is None:
             raise RuntimeError(f"the agent at {a2a_url} isn't a proxy: its card has no {PROXY_V1.uri}")

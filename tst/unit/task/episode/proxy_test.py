@@ -73,7 +73,7 @@ async def test_every_call_carries_the_headers_the_client_was_made_with(monkeypat
 
     monkeypatch.setattr(client_module.httpx, "AsyncClient",
                         lambda **kw: real_client(transport=httpx.MockTransport(handle), **kw))
-    client = ProxyClient("http://proxy", CARD, {"AgentEnv-Control-Token": "tok"})
+    client = ProxyClient("http://proxy", CARD, headers={"AgentEnv-Control-Token": "tok"})
 
     await client.claim()
     await client.tools("task-1")

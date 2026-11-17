@@ -1,6 +1,7 @@
 """Unit tests for RubricsVerifierTaskStep._fetch_judge_trajectory."""
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -409,6 +410,7 @@ async def test_invoke_judge_a2a_wires_the_captured_trajectory_onto_the_result(mo
         assert judge_a2a_url == "http://judge.example"
         assert a2a_server_task_id == "task-1"
         assert sandbox_type is None
+        assert headers == {"AgentEnv-Control-Token": "tok"}
         return "s3://bucket/judge_trajectories/verifier_id=verifier-test/trajectory-task-1.json"
 
     monkeypatch.setattr(RubricsVerifierTaskStep, "_fetch_judge_trajectory", fake_fetch)
@@ -417,7 +419,7 @@ async def test_invoke_judge_a2a_wires_the_captured_trajectory_onto_the_result(mo
         eval_prompt="evaluate",
         judge_a2a_url="http://judge.example",
         judge_agent_card=_card_with_trajectory_ext(),
-        judge_agent=None,
+        judge_agent=SimpleNamespace(sandbox_id=None, sandbox_type=None, control_headers={"AgentEnv-Control-Token": "tok"}),
     )
 
     assert result == {

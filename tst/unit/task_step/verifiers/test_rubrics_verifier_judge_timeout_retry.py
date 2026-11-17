@@ -55,7 +55,7 @@ def _judge(monkeypatch, verifier, outcomes: list) -> list[str]:
 async def _grade(verifier):
     return await verifier._run_judge_with_output_retries(
         eval_prompt="grade it", criteria=CRITERIA, context=TaskStepContext(), model="m",
-        judge_a2a_url="http://judge.test", judge_agent_card={}, judge_agent=SimpleNamespace(sandbox_id=None),
+        judge_a2a_url="http://judge.test", judge_agent_card={}, judge_agent=SimpleNamespace(sandbox_id=None, control_headers={}),
         judge_effort=None, judge_max_thinking_tokens=None, use_agent_judge=True)
 
 
