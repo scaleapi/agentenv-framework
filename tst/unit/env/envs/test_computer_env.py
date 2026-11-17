@@ -193,6 +193,18 @@ def test_an_env_that_differs_only_in_what_doesnt_change_the_image_reuses_the_one
     assert docker_calls == [("join", index, auth)]
 
 
+def test_the_same_driver_stored_under_another_id_composes_the_same_image(base, driver, docker):
+    first = _put(base, driver)
+    stored_again = ComputerDriverEnv.put(id="@local/~/kit/registered-desk", module=driver.module, files=driver.files,
+                                         declaration=driver.declaration, install=driver.install, port=driver.port)
+    second = _put(base, stored_again, id="@local/~/kit/other", environment_name="other")
+
+    built, reused = (Env.get(env.id).metadata["composed"]["container"] for env in (first, second))
+    assert len(docker.builds) == 2 and all(reused[arch]["reused"] for arch in reused)
+    assert {arch: r["key"] for arch, r in reused.items()} == {arch: r["key"] for arch, r in built.items()}
+    assert all("COPY driver/ /opt/agentenv/drivers/desk/" in build["dockerfile"] for build in docker.builds)
+
+
 @pytest.mark.parametrize("change", ["requirements", "build-setting", "service", "display-read-at-build"])
 def test_what_changes_the_image_changes_its_key_and_builds_it_again(base, driver, docker, tmp_path, monkeypatch,
                                                                     change):

@@ -317,7 +317,7 @@ def _composed_vm_bundle(env: ComputerEnv, base: ComputerArtifact, driver: Comput
         protocol = _stage_protocol(context)
         layer = _stage_driver(context, driver, base, {})
         apps = [(app, _stage_app(context, app, base, {})) for app in env.composed_apps()]
-        parts = [_part(layer, _services(f"driver-{gate.folder_name(driver.id, 'driver')}", layer.install),
+        parts = [_part(layer, _services(f"driver-{gate.driver_folder(driver)}", layer.install),
                        {"MCP_PORT": driver.port}, protocol, False)]
         parts += [_part(staged, dict(zip(gate.programs(app, platform_of(base.os)), [
             f"venv/bin/python -m agentenv_protocol.computer.serve_app {shlex.quote(staged.served)}",
@@ -378,7 +378,7 @@ def _composed_windows_disk(env: ComputerEnv, base: ComputerArtifact, driver: Com
         context = build / "context"
         context.mkdir(parents=True)
         protocol = _stage_protocol(context)
-        layer, name = _stage_driver(context, driver, base, {}), gate.folder_name(driver.id, "driver")
+        layer, name = _stage_driver(context, driver, base, {}), gate.driver_folder(driver)
         driver_prefix = windows_disk.DRIVERS / name
         parts = [_windows_part(layer, driver_prefix, {
             program: windows_disk.argv(command, driver_prefix)
@@ -525,7 +525,7 @@ def _composed_omarchy_disk(env: ComputerEnv, base: ComputerArtifact, driver: Com
         context = build / "context"
         context.mkdir(parents=True)
         protocol = _stage_protocol(context)
-        layer, name = _stage_driver(context, driver, base, {}), gate.folder_name(driver.id, "driver")
+        layer, name = _stage_driver(context, driver, base, {}), gate.driver_folder(driver)
         prefix = omarchy_disk.DRIVERS / name
         parts = [_omarchy_part(layer, prefix, {
             program: omarchy_disk.argv(command, prefix)
@@ -916,9 +916,9 @@ class _Layer:
 def _stage_driver(context: Path, driver: ComputerDriverEnv, base: ComputerArtifact,
                   from_store: dict[str, tuple[str, str]]) -> _Layer:
     """Write the driver's install files under ``context/driver/`` and its supervisord programs beside them, served on
-    its port, its folder under ``DRIVERS`` named for its id's last part, its programs and their file under ``driver-``
+    its port, its folder under ``DRIVERS`` named for the name its class declares (``gate.driver_folder``), its programs and their file under ``driver-``
     as an app's are under ``app-``, so neither ever takes the other's."""
-    install, name = for_os(driver.install, base.os), gate.folder_name(driver.id, "driver")
+    install, name = for_os(driver.install, base.os), gate.driver_folder(driver)
     layer = _Layer("driver", f"{DRIVERS}/{name}", install, f"agentenv-driver-{name}.conf", driver.id)
     _stage(context, layer, f"driver {driver.id}", driver.files, _services(f"driver-{name}", install),
            {"MCP_PORT": driver.port}, from_store)
