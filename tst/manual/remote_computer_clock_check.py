@@ -1,6 +1,7 @@
 """Run explicitly with ``pytest -s tst/manual/remote_computer_clock_check.py``: a computer's universe clock on a remote
-sandbox provider, through the steps ``tst/integration/computer/computer_clock_test.py`` takes on the local one. Armed, a day and a week on, a month back, a rate of 10, frozen, running again, a minute and a half with no
-change, the follower killed, and a reset: the session is within ``MAX_SKEW_S`` of the gateway's universe after each, and
+sandbox provider, through the steps ``tst/integration/computer/computer_clock_test.py`` takes on the local one. Armed,
+a day and a week on, a month back, a rate of 10, frozen, running again, a minute and a half with no change, the
+follower killed, and a reset: the session is within ``MAX_SKEW_S`` of the gateway's universe after each, and
 runs at its rate. A browser computer's pages show it too. A provider whose sandbox is the computer's container itself,
 as ``modal``'s is, can't reset it in place, which core refuses; the check takes that refusal as the reset's outcome. On
 a provider that boots the desktop from its disk form, whose guest follows no clock yet, arming the clock is refused.
@@ -56,7 +57,7 @@ TTL_S = 2400
 IN_PLACE = "can't be reset in place"
 #: Inside the computer, on real time: the gateway's universe as the computer reaches it, between two readings of real
 #: time, then the session's own (``date``, without the real-time marker), between two more; each pair taken again,
-#: up to ten times, until both brackets are narrower than argv[2].
+#: up to ten times, until both brackets are narrower than argv[2], and ``within`` says whether one was.
 READ = """
 import json, os, subprocess, sys, time, urllib.request
 url, widest = sys.argv[1], float(sys.argv[2])
@@ -70,7 +71,7 @@ for _ in range(10):
     if b - a < widest and c - b < widest:
         break
 print(json.dumps({"gateway_at": (a + b) / 2, "gateway": gateway, "session_at": (b + c) / 2, "session": universe,
-                  "widths": [round(b - a, 4), round(c - b, 4)]}))
+                  "widths": [round(b - a, 4), round(c - b, 4)], "within": b - a < widest and c - b < widest}))
 """
 #: A page that names its own Date.now(), in milliseconds, in its title, five times a second.
 CLOCK_PAGE = "data:text/html," + urllib.parse.quote(
@@ -105,7 +106,10 @@ async def _reading(computer, time_url: str, rate: float) -> dict:
     ran = await inside.run(computer, ["env", "AGENTENV_REAL_TIME=1", "python3", "-c", READ, time_url,
                                       str(_widest(rate))], timeout_s=120)
     assert ran["exit_code"] == 0, ran
-    return json.loads(ran["stdout"])
+    read = json.loads(ran["stdout"])
+    assert read["within"], (f"the computer's readings took over {_widest(rate):.3f} s each of ten times, so none is "
+                            f"close enough to tell its skew: the last took {read['widths']}")
+    return read
 
 
 async def _skew(computer, time_url: str, rate: float) -> float:
