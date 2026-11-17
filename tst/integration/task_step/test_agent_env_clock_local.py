@@ -7,7 +7,9 @@ Runs over an image tag built beforehand (AGENTENV_E2E_CLAUDE_CODE_IMAGE), as the
 protocol from PyPI, which has no CLOCK_V1 until a release."""
 
 import asyncio
+import json
 import os
+import re
 import subprocess
 import time
 import uuid
@@ -18,15 +20,18 @@ import pytest
 from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.artifact import DockerImageArtifact
 from agent_env.env.gateway.constants import EXT_CLOCK_URI
+from agent_env.providers.sandbox_providers.local_docker.provider import _host_ips, host_url_for
 from agentenv_protocol.client import ExtensionCallError
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.agent_clock import FOLLOWING_KEY
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
+from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from agent_env.task_step.task_steps.sync_env_clock import SyncEnvClockTaskStep
 from agent_env.task_step.task_steps.teardown_sandboxes import TeardownSandboxesTaskStep
 from tst.integration.store.local_parallel_deploy_test import _seed_bootstrap_envs
 from tst.integration.task_step.test_prompt_agent_live_trajectory_local import local_registry as local_registry
 from tst.integration.task_step.test_register_env_triggers_local import _deploy_items
+from tst.util.fake_anthropic import FakeAnthropic, tool_then_answer
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
@@ -40,6 +45,14 @@ def _in_agent(container: str, *command: str, real_time: bool = False) -> str:
     env = ["-e", "AGENTENV_REAL_TIME=1"] if real_time else []
     return subprocess.run(["docker", "exec", "-u", "agent", *env, container, *command], capture_output=True,
                           text=True, check=True, timeout=30).stdout.strip()
+
+
+def _routes_through_proxy(container: str) -> bool:
+    """Whether the CLI the agent starts now goes out through the egress proxy, as the image's bridge decides."""
+    # The A2A server's environment has the proxy (root.conf); this shell's doesn't, so it's passed as the server has it.
+    return _in_agent(container, "python3", "-c", "import claude_bridge as b; print('HTTPS_PROXY' in b.cli_env("
+                     "{b.EGRESS_PROXY_ENV: 'http://127.0.0.1:3128'}, clock_armed=b.clock_armed()))",
+                     real_time=True) == "True"
 
 
 def _container_of(sandbox_id: str) -> str:
@@ -56,12 +69,19 @@ async def _followers(deployed) -> dict:
 @pytest.mark.skipif(not IMAGE, reason="set AGENTENV_E2E_CLAUDE_CODE_IMAGE to an image built from this branch")
 @pytest.mark.asyncio
 async def test_the_claude_code_image_follows_the_envs_clock_until_it_is_torn_down(local_registry):
+    with FakeAnthropic(host=_host_ips()[-1]) as endpoint:  # where this machine's containers reach it
+        await _follows_until_torn_down(endpoint)
+
+
+async def _follows_until_torn_down(endpoint: FakeAnthropic) -> None:
     _seed_bootstrap_envs()
     env, deployed, _ = await _deploy_items("ccclock")
     uid = uuid.uuid4().hex[:8]
     image = DockerImageArtifact.put(id=f"cc-clock-img-{uid}", description="e2e", image_name=IMAGE)
     agent = A2AAgent.put(id=f"cc-clock-{uid}", docker_image_artifact=image,
-                         default_env_vars={"LITELLM_API_KEY": "unused", "LITELLM_BASE_URL": "http://unused.invalid"})
+                         default_env_vars={"LITELLM_API_KEY": "fake-key",
+                                           # as the agent's container reaches it: on macOS, loopback is the host's
+                                           "LITELLM_BASE_URL": host_url_for(endpoint.url, "local")})
     context = TaskStepContext(deployed_envs=[deployed], deployed_agents=[], metadata={})
     try:
         await DeployAgentTaskStep(id="deploy-solver", version=None, env_ids=[env.id], a2a_agent_id=agent.id,
@@ -69,6 +89,9 @@ async def test_the_claude_code_image_follows_the_envs_clock_until_it_is_torn_dow
                                   sandbox_type="local").execute(context)
         container = _container_of(context.deployed_agents[-1].sandbox_id)
         assert _in_agent(container, "date", "-u", "+%Y") == str(datetime.now(timezone.utc).year)  # not armed: real
+        assert not _routes_through_proxy(container)  # and the CLI goes out directly, as before
+        # The CLI starts under the preloaded library: without its init guard, its first clock read deadlocked.
+        assert "(Claude Code)" in _in_agent(container, "timeout", "30", "claude", "--version")
 
         await SyncEnvClockTaskStep(id="clock", version=None, env_id=env.id, virtual_time=VIRTUAL,
                                    virtual_seconds_per_real_second=0, require_agent_clock=True,
@@ -88,6 +111,17 @@ async def test_the_claude_code_image_follows_the_envs_clock_until_it_is_torn_dow
         print("agent reads:", shown)
         assert shown["date"] == VIRTUAL and shown["python"].startswith("2031-03-04T05:06:07")
         assert shown["real"].startswith(str(datetime.now(timezone.utc).year))
+        assert _routes_through_proxy(container)  # armed: live sites' TLS goes through the proxy, on real time
+
+        # One turn of the real CLI: the date it gives the model and a Bash `date` the model runs are the env's.
+        endpoint.respond = tool_then_answer("Bash", {"command": "date -u +%FT%TZ"}, prefix="the shell said: ")
+        await PromptAgentTaskStep(id="ask", version=None, prompt="What's the date? Run date.", agent_name="solver",
+                                  max_conversation_turns=1).execute(context)
+        bodies = [json.dumps(call.body) for call in endpoint.messages()]
+        dated = {m for body in bodies for m in re.findall(r"Today's date is ([0-9]{4}-[0-9]{2}-[0-9]{2})", body)}
+        print("the CLI's date line:", dated, "Bash date:", endpoint.tool_results())
+        assert dated == {VIRTUAL[:10]}, dated
+        assert any(VIRTUAL in result for result in endpoint.tool_results()), endpoint.tool_results()
 
         # A write that waits for followers waits for the agent, which then shows it at once.
         started = time.monotonic()

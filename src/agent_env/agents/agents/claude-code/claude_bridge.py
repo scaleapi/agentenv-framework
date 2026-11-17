@@ -174,18 +174,32 @@ def _model_headers(raw: str | None) -> dict[str, str]:
     return {str(name): str(value) for name, value in headers.items()}
 
 
-#: Set by the image (root.conf) where the egress proxy runs: the CLI and the model's commands go out through it.
+#: Set by the image (root.conf) where the egress proxy runs: the CLI and the model's commands go out through it
+#: while the agent follows an armed clock.
 EGRESS_PROXY_ENV = "AGENTENV_EGRESS_PROXY"
+#: The clock follower's status, which says whether the clock it follows is armed (agentenv_protocol.computer.clock).
+CLOCK_STATUS = "/run/agentenv-clock/status.json"
 _DIRECT_HOSTS = ("localhost", "127.0.0.1", "::1", "host.docker.internal")
 
 
-def egress_env(environ: Mapping[str, str], direct: Iterable[str] = ()) -> dict[str, str]:
-    """The egress proxy for the CLI and what it starts, where the image runs one (FD-5916): they read the env's time,
-    so a client checking a live site's certificate against it would refuse the site once the clock is months off, and
-    the proxy, on real time, hands it a certificate that holds then. The env's MCP servers (``direct``) are reached
-    directly: the proxy refuses an address that isn't global, as a local or private gateway's is."""
+def clock_armed(status_path: str | None = None) -> bool:
+    """Whether this image's clock follower follows an armed clock, so the CLI started now reads the env's time."""
+    try:
+        status = json.loads(Path(status_path or CLOCK_STATUS).read_text())
+    except (OSError, ValueError):
+        return False
+    return isinstance(status, dict) and bool(status.get("connected")) and bool(status.get("armed"))
+
+
+def egress_env(environ: Mapping[str, str], direct: Iterable[str] = (), *, armed: bool = False) -> dict[str, str]:
+    """The egress proxy for the CLI and what it starts, where the image runs one (FD-5916) and the clock is ``armed``:
+    they read the env's time, so a client checking a live site's certificate against it would refuse the site once
+    the clock is months off, and the proxy, on real time, hands it a certificate that holds then. The env's MCP servers
+    (``direct``) are reached directly: the proxy refuses an address that isn't global, as a local or private gateway's
+    is. Unarmed, the CLI reads real time and goes out directly, as an image without the proxy does, so a model endpoint
+    or mirror at a private address keeps working."""
     proxy = environ.get(EGRESS_PROXY_ENV)
-    if not proxy:
+    if not proxy or not armed:
         return {}
     hosts = ",".join(dict.fromkeys([*_DIRECT_HOSTS, *filter(None, direct)]))
     return {**{name: proxy for base in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY") for name in (base, base.lower())},
@@ -194,7 +208,7 @@ def egress_env(environ: Mapping[str, str], direct: Iterable[str] = ()) -> dict[s
 
 def cli_env(environ: Mapping[str, str], *, model: str | None = None, project_id: str | None = None,
             task_id: str | None = None, max_thinking_tokens: int | None = None,
-            direct_hosts: Iterable[str] = ()) -> dict[str, str]:
+            direct_hosts: Iterable[str] = (), clock_armed: bool = False) -> dict[str, str]:
     """The CLI's environment: this process's, pointed at the endpoint agent-env configured (its key as a bearer
     token, so an API key too would conflict), with the endpoint's headers and the run's attribution, and the model's
     aliases pinned to ``model`` on that endpoint. A variable already set is kept, LITELLM_* too, so a script the model
@@ -223,7 +237,11 @@ def cli_env(environ: Mapping[str, str], *, model: str | None = None, project_id:
     # Older CLIs prepend a changing attribution block to the system prompt on custom base URLs, which defeats the
     # provider's prefix cache.
     env["CLAUDE_CODE_ATTRIBUTION_HEADER"] = "0"
-    env.update(egress_env(environ, direct_hosts))
+    # A model endpoint over plain HTTP has no certificate to check at the env's date, so it's reached directly, as one
+    # at a private address, which the proxy refuses, must be.
+    endpoint = urlsplit(env.get("ANTHROPIC_BASE_URL") or "")
+    model_host = [endpoint.hostname or ""] if endpoint.scheme == "http" else []
+    env.update(egress_env(environ, [*direct_hosts, *model_host], armed=clock_armed))
     return env
 
 
@@ -703,7 +721,7 @@ async def _spawn_claude(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=cli_env(os.environ, model=model, project_id=project_id, task_id=task_id,
-                    max_thinking_tokens=max_thinking_tokens,
+                    max_thinking_tokens=max_thinking_tokens, clock_armed=clock_armed(),
                     direct_hosts=[urlsplit(str(entry.get("url") or "")).hostname or ""
                                   for entry in (mcp_servers or {}).values()]),
         cwd=WORKSPACE_DIR,
