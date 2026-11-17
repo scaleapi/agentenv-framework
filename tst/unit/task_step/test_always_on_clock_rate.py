@@ -33,7 +33,7 @@ async def test_a_slow_contact_reply_between_turns_doesn_t_move_the_clock(monkeyp
     ctx = await rig.run(rig.step(settle_timeout_seconds=0.2))
 
     [_, alerted] = rig.events(ctx, "wake")
-    assert "[Mon Nov 9, 3:00 PM UTC · Gmail · Live Oak Arbor]" in alerted["parts_text"]
+    assert "[Mon Nov 9, 10:00 AM EST · Gmail · Live Oak Arbor]" in alerted["parts_text"]
     assert alerted["virtual_time"].startswith("2026-11-09T15:00:00")
     assert rig.record(ctx)["settings"]["clock"] == {"envs": [{"env_id": "world", "rate": RATE,
                                                               "frozen_between_turns": True}]}

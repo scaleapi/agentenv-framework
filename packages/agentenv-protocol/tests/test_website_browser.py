@@ -566,7 +566,7 @@ async def test_each_page_it_attaches_to_is_told_to_run_so_a_popup_it_attached_to
     control = BrowserControl(devtools, "agent")
     await control.attach()
     devtools.send("Target.attachedToTarget", {"sessionId": "s-popup", "waitingForDebugger": True, **_page("popup")})
-    await asyncio.sleep(0)
+    await asyncio.sleep(0.01)
 
     assert ("Page.enable", {}, "s-popup") in devtools.calls
     assert ("Runtime.runIfWaitingForDebugger", {}, "s-popup") in devtools.calls
@@ -581,7 +581,7 @@ async def test_alone_each_page_it_attaches_to_is_held_to_its_window_before_it_ru
     control = BrowserControl(devtools, "agent", (1024, 768))
     await control.attach()
     devtools.send("Target.attachedToTarget", {"sessionId": "s-popup", "waitingForDebugger": True, **_page("popup")})
-    await asyncio.sleep(0)
+    await asyncio.sleep(0.01)
 
     sent = [method for method, _, session in devtools.calls if session == "s-popup"]
     assert next(params for method, params, _ in devtools.calls if method == "Target.setAutoAttach")[
@@ -601,10 +601,42 @@ async def test_a_page_it_couldnt_prepare_is_still_told_to_run_so_it_never_stays_
     control = BrowserControl(devtools, "agent", (1024, 768))
     await control.attach()
     devtools.send("Target.attachedToTarget", {"sessionId": "s-popup", "waitingForDebugger": True, **_page("popup")})
+    await asyncio.sleep(0.01)
+
+    assert [method for method, _, session in devtools.calls if session == "s-popup"] == [
+        "Page.enable", "Emulation.setDeviceMetricsOverride", "Page.setInterceptFileChooserDialog",
+        "Runtime.runIfWaitingForDebugger"]
+
+
+class PausedUntilRun(StubDevTools):
+    """A browser whose popup, paused as it opened, answers Page.enable only once it's told to run, as Chromium does a
+    popup a click opened before its first navigation."""
+
+    def __init__(self):
+        super().__init__()
+        self.ran = asyncio.Event()
+
+    async def call(self, method, params=None, *, session_id=None, timeout_s=None):
+        self.calls.append((method, params or {}, session_id))
+        if method == "Runtime.runIfWaitingForDebugger":
+            self.ran.set()
+        elif method == "Page.enable" and session_id == "s-popup":
+            await asyncio.wait_for(self.ran.wait(), timeout_s or 30)
+        return {}
+
+
+@pytest.mark.asyncio
+async def test_a_popup_that_answers_page_enable_only_once_it_runs_is_told_to_run_at_once_held_to_its_window_first():
+    devtools = PausedUntilRun()
+    control = BrowserControl(devtools, "agent", (1024, 768))
+    await control.attach()
+    devtools.send("Target.attachedToTarget", {"sessionId": "s-popup", "waitingForDebugger": True, **_page("popup")})
+    await asyncio.wait_for(devtools.ran.wait(), 1)
     await asyncio.sleep(0)
 
     assert [method for method, _, session in devtools.calls if session == "s-popup"] == [
-        "Page.enable", "Runtime.runIfWaitingForDebugger"]
+        "Page.enable", "Emulation.setDeviceMetricsOverride", "Page.setInterceptFileChooserDialog",
+        "Runtime.runIfWaitingForDebugger"]
 
 
 class Navigating(StubDevTools):
@@ -1248,7 +1280,7 @@ async def test_its_control_answers_a_dialog_on_its_pages_session_as_its_setting_
 
     devtools.send("Page.javascriptDialogOpening", {"type": kind, "message": "Sure?", "url": "https://a.test/",
                                                    "defaultPrompt": "yes"}, "s-a")
-    await asyncio.sleep(0)
+    await asyncio.sleep(0.01)
     devtools.send("Page.javascriptDialogClosed", {"result": answer == "accepted"}, "s-a")
 
     assert ("Page.enable", {}, "s-a") in devtools.calls

@@ -312,7 +312,7 @@ class BrowserRecordings:
         if isinstance(target := tab.get("id"), str):
             self.tab_contexts[target] = tab.get("context_id")
         for recording in self.every():
-            recording.stream.tab_event(event, tab)
+            recording.stream.tab_event(event, tab, self.log.next_seq)
 
     def context_of_tab(self, target: object) -> Optional[str]:
         """The context of the tab ``target``, as it opened in, or as the browser's control has it."""
@@ -419,7 +419,7 @@ class _Recording:
         if self.ending or not self.stream.sees(tab):
             return
         if moves:
-            self.stream.follow(tab)
+            self.stream.follow(tab, seq)
         if not self.frames_on:
             return
         self.pending.append(seq)
