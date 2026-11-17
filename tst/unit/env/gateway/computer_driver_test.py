@@ -55,7 +55,7 @@ async def _office(changelog: _Changelog, monkeypatch, desktop_effect=lambda name
     monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient", lambda **kw: _RealAsyncClient(transport=transport, **kw))
     gw = Gateway(host="127.0.0.1", port=0, server_name="t",
                  internal_mcp_servers=[InternalMCPServer("mail", MAIL), InternalMCPServer("desktop", DESKTOP)],
-                 website_urls={"mail": "http://mail-frontend"}, control_token_children=["desktop"])
+                 website_urls={"mail": "http://mail-frontend"}, computers=["desktop"])
     children = {MAIL: _Child([SEND], lambda name: changelog.write("messages", f"m{len(changelog.rows) + 1}")),
                 DESKTOP: _Child([CLICK, TYPE, SCREENSHOT], desktop_effect)}
 

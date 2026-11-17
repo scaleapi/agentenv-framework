@@ -74,6 +74,9 @@ CONTROL_TOKEN_ENV = "AGENTENV_CONTROL_TOKEN"
 CLOCK_FOLLOWERS_ENV = "CLOCK_FOLLOWER_TOKENS"
 # The children the gateway passes its control token on to, comma-separated: a multi env's computers, which boot with it.
 CONTROL_TOKEN_CHILDREN_ENV = "CONTROL_TOKEN_CHILDREN"
+# The gateway's computers, comma-separated: a multi env's, each a child on a sandbox of its own, whose input calls set
+# who drives it, the role its browser's requests take.
+COMPUTERS_ENV = "COMPUTERS"
 # The route a clock follower long-polls, with its read token.
 CLOCK_WATCH_PATH = "/clock/watch"
 # How long /clock/watch holds a watch naming the current version before answering it unchanged; a follower's request
