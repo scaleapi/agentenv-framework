@@ -24,8 +24,11 @@ worked examples in `examples/` are its canonical fixtures.
 - Events are final once appended. A live reader sees the same events as the final read, in the same order.
 - The order is (`turn`, `seq`), never timestamps. `seq` is dense from 0 within each turn.
 - On the wire a stream is a JSON array. In storage it is JSONL, one event per line. JSON is read strictly: UTF-8,
-  with no NaN or Infinity. A field name is valid Unicode, with no lone surrogate, as I-JSON (RFC 7493) requires. A
-  string value may hold one, as a native log that cut an emoji in half can.
+  with no NaN or Infinity.
+- The names of an event's fields, and of the fields of the objects this spec defines (parts, sources, metrics and
+  the like), known to this version or not, are valid Unicode, with no lone surrogate, as I-JSON (RFC 7493) requires.
+  Free JSON, such as a tool call's `arguments`, `x` or a raw native record, may use any key, and any string value may
+  hold a lone surrogate, as a native log that cut an emoji in half can.
 - Values are taken as written, never coerced, so whatever a reader parses it writes back exactly. An integer is a
   JSON integer, with no fraction or exponent: JSON Schema's `integer` also matches `5.0`, but a reader refuses it.
 - The agent SDK writes each turn's **frame**: `turn.start`, the inbound `message`, `final_response` and `turn.end`.

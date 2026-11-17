@@ -77,7 +77,7 @@ def test_a_dump_writes_only_the_fields_the_event_was_given():
 
 
 def test_a_lone_surrogate_may_be_in_a_value_but_not_a_field_name():
-    kept = event("note", text="cut \ud83d", later={"\ud800": ["\udfff"]})
+    kept = event("note", text="cut \ud83d", later={"\ud800": ["\udfff"]}, x={"\udfff": {"\ud800": 1}})
     assert yatf.dump_event(yatf.parse_event(kept)) == kept
     with pytest.raises(yatf.YatfError):
         yatf.parse_event({**event("note", text="x"), "later\ud800": 1})
