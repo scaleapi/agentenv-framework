@@ -460,32 +460,52 @@ async def resolve(host: str, port: int) -> list[str]:
     return list(dict.fromkeys(info[4][0] for info in found))
 
 
+class EgressRefused(ConnectionError):
+    """The egress proxy's answer to a ``CONNECT`` that isn't established, as it gave it."""
+
+
+def egress_proxy() -> Optional[tuple[str, int]]:
+    """The egress proxy's address, as ``AGENTENV_EGRESS_PROXY`` names it, or None in a base with none."""
+    url = urlsplit(os.environ.get(EGRESS_PROXY_ENV) or "")
+    return (url.hostname, url.port or 80) if url.hostname else None
+
+
+def public(addresses: list[str]) -> bool:
+    """Whether every one of ``addresses`` is public, the only destinations the egress proxy takes."""
+    return bool(addresses) and all(ipaddress.ip_address(address.split("%", 1)[0]).is_global for address in addresses)
+
+
+async def through_egress(egress: tuple[str, int], host: str,
+                         port: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    """A ``CONNECT`` tunnel to ``host`` at ``port`` through the egress proxy at ``egress``, established; it raises
+    ``EgressRefused`` with the proxy's status line when the proxy won't open one."""
+    authority = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+    reader, writer = await asyncio.open_connection(*egress, limit=HEAD_LIMIT)
+    try:
+        writer.write(f"CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n".encode("latin-1"))
+        await writer.drain()
+        try:
+            head = await reader.readuntil(b"\r\n\r\n")
+        except asyncio.IncompleteReadError as e:
+            raise EgressRefused("the egress proxy closed the tunnel before answering it") from e
+        except asyncio.LimitOverrunError as e:
+            raise EgressRefused("the egress proxy's answer has no end to its head") from e
+        status = head.split(b"\r\n", 1)[0].decode("latin-1", "replace")
+        if status.split(" ", 2)[1:2] != ["200"]:
+            raise EgressRefused(f"the egress proxy answered {status!r}")
+    except BaseException:
+        writer.close()
+        raise
+    return reader, writer
+
+
 async def open_live(host: str, port: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter, str, Optional[str]]:
     """A connection to ``host``, a live site's, at ``port``, the address it reached and what it went through: the
-    base's egress proxy (``AGENTENV_EGRESS_PROXY``, ``"egress"``) when it names one and every address ``host`` resolves
-    to is public, the only destinations that proxy takes, else nothing, straight to it (None). Through the egress proxy
-    the address is the proxy's own, since which of the site's addresses it dials is the proxy's to decide, after the
-    browser's TLS hello: its own log names that one."""
-    egress = urlsplit(os.environ.get(EGRESS_PROXY_ENV) or "")
-    if egress.hostname:
-        addresses = await resolve(host, port)
-        if addresses and all(ipaddress.ip_address(a.split("%", 1)[0]).is_global for a in addresses):
-            reader, writer = await asyncio.open_connection(egress.hostname, egress.port or 80, limit=HEAD_LIMIT)
-            try:
-                authority = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
-                writer.write(f"CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n".encode("latin-1"))
-                await writer.drain()
-                head = await reader.readuntil(b"\r\n\r\n")
-                status = head.split(b"\r\n", 1)[0].decode("latin-1", "replace")
-                if status.split(" ", 2)[1:2] != ["200"]:
-                    raise ConnectionRefusedError(f"the egress proxy answered {status!r}")
-            except (asyncio.IncompleteReadError, asyncio.LimitOverrunError) as e:
-                writer.close()
-                raise ConnectionResetError("the egress proxy closed the tunnel before answering it") from e
-            except BaseException:
-                writer.close()
-                raise
-            return reader, writer, (writer.get_extra_info("peername") or (egress.hostname,))[0], "egress"
+    base's egress proxy (``"egress"``, the address the proxy's own) when there is one and every address of ``host`` is
+    public, else nothing (None)."""
+    if (egress := egress_proxy()) is not None and public(await resolve(host, port)):
+        reader, writer = await through_egress(egress, host, port)
+        return reader, writer, (writer.get_extra_info("peername") or egress)[0], "egress"
     reader, writer = await asyncio.open_connection(host, port, limit=HEAD_LIMIT)
     return reader, writer, (writer.get_extra_info("peername") or ("",))[0], None
 

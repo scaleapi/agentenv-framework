@@ -120,7 +120,7 @@ def _public(addresses: list[str]) -> bool:
     return bool(addresses) and all(ipaddress.ip_address(address.split("%", 1)[0]).is_global for address in addresses)
 
 
-class EgressRefused(OSError):
+class EgressRefused(ConnectionError):
     """The egress proxy's answer to a ``CONNECT`` that isn't established, as it gave it."""
 
 
@@ -133,7 +133,9 @@ def _through_egress(egress: tuple[str, int], host: str, port: int, timeout: floa
         tunnel.sendall(f"CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n".encode("latin-1"))
         head = b""
         while not head.endswith(b"\r\n\r\n"):
-            if len(head) >= EGRESS_HEAD_LIMIT or not (byte := tunnel.recv(1)):
+            if len(head) >= EGRESS_HEAD_LIMIT:
+                raise EgressRefused("the egress proxy's answer has no end to its head")
+            if not (byte := tunnel.recv(1)):
                 raise EgressRefused("the egress proxy closed the tunnel before answering it")
             head += byte
         status = head.split(b"\r\n", 1)[0].decode("latin-1", "replace")
