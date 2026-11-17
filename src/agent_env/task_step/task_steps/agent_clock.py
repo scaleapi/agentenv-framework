@@ -5,8 +5,9 @@ its ``sync_time`` with the follower's config: the gateway's watch URL as the age
 gateway knows it by and that token. From then on a clock write that waits for followers (``wait_followers_s``) waits
 for the agent too. ``sync_env_clock`` has every agent registered with the env follow once it has armed the clock, and
 ``deploy_agent`` an agent it deploys while the clock is armed. An agent has one follower, so it follows one env's
-clock: the first a run has it follow; another env's is reported and skipped (``follows_another_env``). When
-``teardown_sandboxes`` takes the agent down, ``retire_followers`` has the gateway it follows stop waiting for it. Which
+clock: the first env it's registered with (``clock_env``), whatever order steps arm clocks in, even at once; another
+env's is reported and skipped (``follows_another_env``). When ``teardown_sandboxes`` takes the agent's sandbox down,
+``retire_followers`` has the gateway it follows stop waiting for it. Which
 env each agent follows is kept under ``metadata[FOLLOWING_KEY]``, one key per agent, so steps that run at once and
 each save the context never overwrite another's."""
 from __future__ import annotations
@@ -99,8 +100,8 @@ async def follow(agent: DeployedAgent, env: DeployedEnv, *, env_get_time_url: Op
 
 def _slot(agent_name: str) -> str:
     """``agent_name`` as a key of its own when the context is saved, where a ``.`` or a leading ``$`` would make one
-    save the whole map."""
-    return agent_name.replace(".", "_").replace("$", "_")
+    save the whole map: percent-encoded, ``%`` first, so two names never share a key."""
+    return agent_name.replace("%", "%25").replace(".", "%2E").replace("$", "%24")
 
 
 def followed_env(context: TaskStepContext, agent: DeployedAgent) -> Optional[str]:
@@ -108,13 +109,18 @@ def followed_env(context: TaskStepContext, agent: DeployedAgent) -> Optional[str
     return ((context.metadata.get(FOLLOWING_KEY) or {}).get(_slot(agent.agent_name)) or {}).get("env_id")
 
 
+def clock_env(agent: DeployedAgent) -> Optional[str]:
+    """The one env whose clock ``agent`` follows: the first it's registered with. Fixed by the agent alone, so two
+    steps arming two of its envs' clocks at once never both take its one follower."""
+    return next(iter(agent.env_ids or ()), None)
+
+
 async def follow_in(context: TaskStepContext, agent: DeployedAgent, env: DeployedEnv, *,
                     env_get_time_url: Optional[str], timezone: Optional[str], timeout: float) -> dict:
-    """``follow``, unless ``agent`` already follows another env's clock in this run, whose follower a second one
-    would take over while that gateway still waits for it: reported and skipped (``follows_another_env``)."""
-    followed = followed_env(context, agent)
-    if followed is not None and followed != env.env_id:
-        return {"synced": False, "reason": "follows_another_env", "follows": followed}
+    """``follow`` when ``env`` is the agent's ``clock_env``, recording it; another env's clock, which would take over
+    its follower while that gateway still waits for it, is reported and skipped (``follows_another_env``)."""
+    if env.env_id != clock_env(agent):
+        return {"synced": False, "reason": "follows_another_env", "follows": clock_env(agent)}
     outcome = await follow(agent, env, env_get_time_url=env_get_time_url, timezone=timezone, timeout=timeout)
     if outcome["synced"]:
         context.metadata.setdefault(FOLLOWING_KEY, {})[_slot(agent.agent_name)] = {
@@ -161,7 +167,7 @@ async def retire_followers(context: TaskStepContext, agent_names, *, timeout: fl
     teardown is: a gateway that's gone or takes no retirement is logged and its agent left recorded. The followers
     retired."""
     following, retired = context.metadata.get(FOLLOWING_KEY) or {}, []
-    for name in agent_names:
+    for name in dict.fromkeys(agent_names):
         if (record := following.get(_slot(name))) is None:
             continue
         env = next((d for d in context.deployed_envs if d.env_id == record["env_id"]), None)

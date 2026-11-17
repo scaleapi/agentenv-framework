@@ -168,19 +168,16 @@ def test_require_agent_clock_round_trips_and_is_left_out_when_off():
 
 
 @pytest.mark.asyncio
-async def test_an_agent_follows_one_envs_clock_and_another_envs_is_reported_and_skipped(monkeypatch):
+async def test_an_agent_follows_the_first_envs_clock_and_another_envs_is_reported_and_skipped(monkeypatch):
     sent = _mock_http(monkeypatch)
-    context = await _context()
+    context = await _context()  # e1 alone is deployed and armed: whether e0 has been armed yet doesn't matter
     context.metadata["clock_configurations"] = [{"env_id": "e1", "env_get_time_url": CLOCK_URL}]
-    context.metadata[agent_clock.FOLLOWING_KEY] = {"late": {"agent": "late", "env_id": "e0", "follower": "agent-late"}}
 
     [outcome] = await agent_clock.follow_armed_clocks(context, _agent("late", env_ids=("e0", "e1")), timeout=5)
 
     assert (outcome["env_id"], outcome["synced"], outcome["reason"], outcome["follows"]) == (
         "e1", False, "follows_another_env", "e0")
-    assert sent == []  # e0 isn't deployed here; e1's gateway is never asked to take the agent
-    assert context.metadata[agent_clock.FOLLOWING_KEY] == {"late": {"agent": "late", "env_id": "e0",
-                                                                    "follower": "agent-late"}}
+    assert sent == [] and agent_clock.FOLLOWING_KEY not in context.metadata
 
 
 @pytest.mark.asyncio
@@ -246,5 +243,47 @@ async def test_late_agents_deployed_at_once_each_save_only_their_own_record(monk
         assert paths and all(p.startswith(f"context.metadata.{agent_clock.FOLLOWING_KEY}.{name}") for p in paths), paths
 
 
-def test_an_agent_name_with_a_dot_keeps_a_key_of_its_own():
-    assert agent_clock._slot("team.solver") == "team_solver" and agent_clock._slot("$x") == "_x"
+@pytest.mark.parametrize("names", [("team.solver", "team_solver", "team%2Esolver"), ("$x", "_x", "%24x")])
+def test_agent_names_that_look_alike_keep_keys_of_their_own(names):
+    slots = [agent_clock._slot(name) for name in names]
+    assert len(set(slots)) == len(names) and not any("." in s or s.startswith("$") for s in slots)
+
+
+@pytest.mark.parametrize("by", ["sandbox_names", "env_ids"])
+@pytest.mark.asyncio
+async def test_an_agent_whose_sandbox_goes_down_by_another_name_is_retired_too(monkeypatch, by):
+    from agent_env.task_step.context import DeployedSandbox
+    from agent_env.task_step.task_steps.teardown_sandboxes import TeardownSandboxesTaskStep
+
+    sent = _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL})
+    _no_servers(monkeypatch)
+    agent = _agent()
+    agent.sandbox_id = "sb-1" if by == "env_ids" else "sb-shared"
+    context = await _context(agent)
+    context.deployed_sandboxes = [DeployedSandbox(sandbox_name="box", sandbox_id="sb-shared", sandbox_mode="container",
+                                                  sandbox_type="local")]
+    await _step().execute(context)
+    del sent[:]
+
+    async def nothing(*a, **k):
+        return SimpleNamespace(terminated=[], failed=[])
+
+    monkeypatch.setattr("agent_env.task_step.task_steps.teardown_sandboxes.before_teardown", nothing)
+    monkeypatch.setattr("agent_env.task_step.task_steps.teardown_sandboxes.tear_down", nothing)
+    named = {"sandbox_names": ["box"]} if by == "sandbox_names" else {"env_ids": ["e1"]}
+    await TeardownSandboxesTaskStep(id="down", version=1, **named).execute(context)
+
+    assert [(r.method, json.loads(r.content)) for r in sent] == [("DELETE", {"name": "agent-solver"})]
+
+
+@pytest.mark.asyncio
+async def test_tearing_down_one_of_two_look_alike_agents_retires_its_own_follower_alone(monkeypatch):
+    sent = _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL})
+    _no_servers(monkeypatch)
+    context = await _context(_agent("team.solver"), _agent("team_solver"))
+    await _step().execute(context)
+    del sent[:]
+
+    assert await agent_clock.retire_followers(context, ["team.solver"]) == ["agent-team.solver"]
+    assert [json.loads(r.content) for r in sent] == [{"name": "agent-team.solver"}]
+    assert agent_clock.followed_env(context, _agent("team_solver")) == "e1"
