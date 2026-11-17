@@ -565,10 +565,11 @@ async def test_a_call_slower_than_its_bound_is_refused_and_its_session_opened_af
     assert first.close.is_set() and not after.isError
 
 
-async def _owners_left(within: float) -> list[asyncio.Task]:
-    """The gateway's session owners still running once they've had ``within`` seconds to end."""
+async def _owners_left(within: float, before: set[asyncio.Task]) -> list[asyncio.Task]:
+    """The session owners started since ``before`` still running once they've had ``within`` seconds to end: the
+    loop is shared across the session, so an owner another test left running isn't this test's."""
     deadline = asyncio.get_running_loop().time() + within
-    while (owners := [task for task in asyncio.all_tasks() if task.get_coro().__name__ == "_own"]) and (
+    while (owners := [task for task in asyncio.all_tasks() - before if task.get_coro().__name__ == "_own"]) and (
             asyncio.get_running_loop().time() < deadline):
         await asyncio.sleep(OWNERS_POLL_S)
     return owners
@@ -578,12 +579,13 @@ async def _owners_left(within: float) -> list[asyncio.Task]:
 async def test_a_call_is_bounded_from_when_it_asks_for_its_session_and_leaves_no_session_half_open(stand_in, monkeypatch):
     module, playwright, endpoints, called = stand_in
     monkeypatch.setattr(module, "CALL_BOUND_S", 1.0)
+    before = asyncio.all_tasks()
     try:
         async with playwright._lock:
             waited = await asyncio.wait_for(called("ada"), 10)
         endpoints.append("ws://127.0.0.1:18765/svc/chromium/cdp/wedged-once")
         opening = await asyncio.wait_for(called("bo"), 10)
-        owners = await _owners_left(OWNERS_END_WITHIN_S)
+        owners = await _owners_left(OWNERS_END_WITHIN_S, before)
     finally:
         await playwright._stop()
 
