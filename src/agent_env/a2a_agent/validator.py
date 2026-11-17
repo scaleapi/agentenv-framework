@@ -16,10 +16,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import re
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Callable, Optional, Union
+from zoneinfo import ZoneInfo
 
+import httpx
 from agentenv_protocol.a2a_agent import ObjectChangelogApplyResponse
 
 from agent_env.a2a_agent.object_transfer import (
@@ -32,6 +36,7 @@ from agent_env.a2a_agent.staging import transfer_store
 from agent_env.a2a_agent.a2a_agent import A2AAgent
 from agent_env.bundle.run import _write_bundle
 from agent_env.config import get_config
+from agent_env.env.gateway.constants import EXT_CLOCK_URI
 from agent_env.env.store import get_env_store
 from agent_env.plugins._bundles import ENV_ALIASES, installed_aliases
 from agent_env.store.base import NotFoundError
@@ -60,7 +65,10 @@ from agent_env.task_step.task_steps.a2a_agent_validator.verify_a2a_modalities im
     VIDEO_PROBE_MP4_B64,
     VIDEO_PROBE_PROMPT,
 )
+from agent_env.task_step.task_step import TaskStep
+from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import find_agent_container
+from agent_env.task_step.task_steps.sync_env_clock import SyncEnvClockTaskStep
 
 
 logger = logging.getLogger(__name__)
@@ -125,6 +133,16 @@ MODALITY_PROBES: list[ModalityProbe] = [
         timeout_s=180,
     ),
 ]
+
+#: clock/v1: the validation env's clock is armed frozen at the first time, in the zone, then a write that waits for the
+#: agent moves it to the second; at each, the agent runs the command through its harness and must show that time.
+CLOCK_PROBE_TIMES = ("2031-03-03T23:06:07-06:00", "2031-03-04T23:06:07-06:00")
+CLOCK_PROBE_ZONE = "America/Chicago"
+CLOCK_PROBE_COMMAND = "date +%Y-%m-%dT%H:%M:%S%z"
+CLOCK_PROBE_PROMPT = f"Run exactly one shell command and nothing else: `{CLOCK_PROBE_COMMAND}`. Reply with only its output."
+CLOCK_WAIT_FOLLOWERS_S = 10.0
+_CLOCK_STAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{4}")
+_CLOCK_STAMP_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
 
 
 def write_validation_env(on_progress: Callable[[str], None]) -> None:
@@ -448,6 +466,9 @@ class A2AAgentValidator:
             on_progress=on_progress,
         )
 
+        # clock/v1 after the DAG: arming the validation env's clock moves the clock of every agent that follows it.
+        await A2AAgentValidator._validate_clock(agent, context, task_id=task_id, on_progress=on_progress)
+
         # install/v1: gated on the LIVE deployed card (not the stored one), so it
         # runs identically regardless of whether this agent was validated before.
         await A2AAgentValidator._validate_install(
@@ -744,6 +765,65 @@ class A2AAgentValidator:
                apply_ok=True, roundtrip_ok=roundtrip_ok)
 
     @staticmethod
+    async def _validate_clock(
+        agent: "A2AAgent",
+        context,
+        task_id: str,
+        on_progress: Optional[Callable[[str], None]] = None,
+    ) -> None:
+        """Validate clock/v1 where the live card serves ``sync_time``: the validation env's clock armed frozen with the
+        agent required to follow it, its harness's ``date`` showing that time in the task's zone, a write that waits for
+        the agent acknowledged, and ``date`` showing the time it moved to."""
+        log = on_progress or (lambda _msg: None)
+        main = next((a for a in context.deployed_agents if a.agent_name == TaskStep.DEFAULT_AGENT_NAME), None)
+        env = next((d for d in context.deployed_envs if d.env_id == agent.VALIDATION_ENV_ID), None)
+        advertised = main is not None and A2AAgent.extension_method(main.a2a_card or {}, EXT_CLOCK_URI, "sync_time") is not None
+        result: dict = {"supported": False, "advertised": advertised, "synced": False, "follows_writes": False,
+                        "readings": []}
+        if not advertised or env is None:
+            result["skipped_reason"] = ("clock/v1 sync_time not advertised on live agent card" if not advertised
+                                        else f"validation env {agent.VALIDATION_ENV_ID!r} not deployed")
+            log(f"clock/v1 skipped: {result['skipped_reason']}")
+        else:
+            log("Validating clock/v1: the agent follows the validation env's clock...")
+            try:
+                await SyncEnvClockTaskStep(
+                    id=f"{task_id}-clock", version=None, env_id=env.env_id, virtual_time=CLOCK_PROBE_TIMES[0],
+                    virtual_seconds_per_real_second=0, timezone=CLOCK_PROBE_ZONE, require_agent_clock=True,
+                ).execute(context)
+                result["synced"] = True
+                result["readings"].append(await A2AAgentValidator._read_agent_clock(context, f"{task_id}-clock-1", CLOCK_PROBE_TIMES[0]))
+                await env.invoke(EXT_CLOCK_URI, "advance",
+                                 {"virtual_time": CLOCK_PROBE_TIMES[1], "wait_followers_s": CLOCK_WAIT_FOLLOWERS_S},
+                                 timeout=int(CLOCK_WAIT_FOLLOWERS_S) + 30)
+                result["follows_writes"] = True
+                result["readings"].append(await A2AAgentValidator._read_agent_clock(context, f"{task_id}-clock-2", CLOCK_PROBE_TIMES[1]))
+            except httpx.HTTPStatusError as e:
+                result["error"] = f"HTTP {e.response.status_code}: {e.response.text}"[:600]
+            except Exception as e:  # noqa: BLE001 - recorded as why the agent doesn't follow
+                result["error"] = f"{type(e).__name__}: {e}"[:600]
+            result["supported"] = (result["synced"] and result["follows_writes"] and len(result["readings"]) == 2
+                                   and all(r["time"] and r["zone"] for r in result["readings"]))
+            log(f"clock/v1: supported={result['supported']} synced={result['synced']} "
+                f"follows_writes={result['follows_writes']} readings={[r['shown'] for r in result['readings']]}")
+        try:
+            fresh = A2AAgent.get(agent.id)
+            validated = dict(fresh.metadata.get("validated_a2a_extensions", {}))
+            validated[EXT_CLOCK_URI] = result
+            fresh.update_metadata({**fresh.metadata, "validated_a2a_extensions": validated})
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"clock/v1: failed to persist validated_a2a_extensions: {e}")
+        context.metadata.setdefault("verifications", {})["a2a_clock"] = result
+
+    @staticmethod
+    async def _read_agent_clock(context, prompt_id: str, at: str) -> dict:
+        """The agent's ``date``, run through its harness, read against the frozen clock at ``at``."""
+        await PromptAgentTaskStep(id=prompt_id, version=None, prompt=CLOCK_PROBE_PROMPT, prompt_id=prompt_id,
+                                  timeout_seconds=180).execute(context)
+        reply = next((p.response or "" for p in context.prompt_responses if p.prompt_id == prompt_id), "")
+        return {"prompt_id": prompt_id, **clock_reading(reply, at)}
+
+    @staticmethod
     def _upload_install_test_image_fixture(agent: "A2AAgent"):
         """Upload a minimal Dockerfile as a FileArtifactUniverse so the install
         validator chain has a base task image to layer the agent onto.
@@ -879,3 +959,14 @@ class A2AAgentValidator:
                 await sandbox.terminate()
             except Exception as e:
                 logger.warning(f"Failed to clean up agent sandbox {deployed_agent.sandbox_id}: {e}")
+
+
+def clock_reading(reply: str, at: str, zone: str = CLOCK_PROBE_ZONE) -> dict:
+    """What the agent's ``date`` showed of the frozen clock at ``at``: the first timestamp in ``reply``, whether it is
+    that instant (``time``) and whether it carries ``zone``'s offset then (``zone``)."""
+    expected = datetime.fromisoformat(at).astimezone(ZoneInfo(zone))
+    shown = next(iter(_CLOCK_STAMP.findall(reply or "")), None)
+    seen = datetime.strptime(shown, _CLOCK_STAMP_FORMAT) if shown else None
+    return {"expected": expected.strftime(_CLOCK_STAMP_FORMAT), "shown": shown,
+            "time": seen is not None and seen == expected,
+            "zone": seen is not None and seen.utcoffset() == expected.utcoffset()}
