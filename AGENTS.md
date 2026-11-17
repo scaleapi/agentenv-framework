@@ -275,7 +275,10 @@ Out-of-tree code plugs in either through `config.toml`, as a `module:Class` poin
   id, so a deployment records, and steps look it up by, the id the task names; its metadata writes go to the env the
   alias names (`Env.stored_id`). An alias names its env only where namespace routing is on. An env store refuses to
   create an env under an installed env alias's id (`EnvStore.put_document`), so a deployment recorded under an alias
-  always reloads the alias's env; an env stored under such an id before keeps taking versions.
+  always reloads the alias's env; an env stored under such an id before keeps taking versions. It lets the alias's own
+  env take the id when its metadata says so (`released_alias_metadata(alias)`: the alias, its target's id without the
+  namespace, which an entity outside it may not name, and the agent-env version), which is how a service, resolving no
+  alias, holds `chromium` so a task naming it deploys that env there too.
 - `aliases.toml` gives artifacts aliases too (`[artifacts] "<folder>" = ["<alias>", ...]`; the `computers` bundle
   names its base `ubuntu-24.04`), resolved by the planner wherever env aliases are, as a computer env's `computer` names
   its base. `Artifact.get` reads no alias: the planner rewrites every alias an entry or a task names to its id. An alias may

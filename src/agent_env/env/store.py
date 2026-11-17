@@ -7,11 +7,13 @@ import logging
 import secrets
 import string
 from datetime import datetime, timedelta, timezone
+from importlib.metadata import version as package_version
 from typing import TYPE_CHECKING, Any, Optional, Self, TypeVar
 
 from agent_env.plugins import _registration
-from agent_env.plugins._bundles import ENV_ALIASES, installed_aliases
+from agent_env.plugins._bundles import ENV_ALIASES, BundleAlias, installed_aliases
 from agent_env.store.base import ConcurrentModificationError, NotFoundError
+from agent_env.store.ids import namespace_prefix, parse_namespace
 from agent_env.config import get_config
 from agent_env.store.document_store import (
     AbsentOrNull,
@@ -35,6 +37,32 @@ logger = logging.getLogger(__name__)
 
 ENVS_COLLECTION = "envs"
 ENV_INSTANCES_COLLECTION = "env_instances"
+#: The metadata key that marks an env as the env an installed alias names, stored under the alias's id: what a service,
+#: which resolves no alias, holds so a task naming the alias deploys that env there too.
+RELEASED_ALIAS = "released_alias"
+
+
+def released_alias_metadata(alias: str) -> dict[str, Any]:
+    """The metadata that marks an env as the env the installed env alias ``alias`` names, which the store lets take the
+    alias's id: the alias, its target's id without its namespace, which an entity outside that namespace may not name,
+    and the agent-env version that released it. Raises ValueError for a name that isn't an installed env alias."""
+    named = installed_aliases(table=ENV_ALIASES).target(alias)
+    if named is None:
+        raise ValueError(f"{alias!r} isn't an env alias an installed bundle gives")
+    return {RELEASED_ALIAS: {"alias": alias, "target": _unscoped(named.target_id),
+                             "agent_env_version": package_version("agentenv-framework")}}
+
+
+def _released_as(env: Env, named: BundleAlias) -> bool:
+    """Whether ``env``'s metadata marks it as the env the alias ``named`` names (``released_alias_metadata``)."""
+    mark = (env.metadata or {}).get(RELEASED_ALIAS)
+    return (isinstance(mark, dict) and mark.get("alias") == named.alias
+            and mark.get("target") == _unscoped(named.target_id))
+
+
+def _unscoped(entity_id: str) -> str:
+    namespace = parse_namespace(entity_id)
+    return entity_id.removeprefix(namespace_prefix(namespace)) if namespace else entity_id
 
 
 class EnvQuery(QueryBuilder["Env"]):
@@ -101,8 +129,10 @@ class EnvStore:
         )
         if existing and existing.get("type") != env.type:
             raise ValueError(f"Env id '{env.id}' already exists as type '{existing.get('type')}'; cannot put as type '{env.type}'.")
-        # A deployment recorded under an alias reloads the alias's env, so no env of the store's own starts on its id.
-        if not existing and (named := installed_aliases(table=ENV_ALIASES).target(env.id)) is not None:
+        # A deployment recorded under an alias reloads the alias's env, so no env of the store's own starts on its id
+        # but the alias's own, which a service holds there since it resolves no alias.
+        if (not existing and (named := installed_aliases(table=ENV_ALIASES).target(env.id)) is not None
+                and not _released_as(env, named)):
             raise ValueError(f"env id {env.id!r} is an alias of {named.target_id}, which comes with "
                              f"{named.declared_by}, and a task naming it deploys that env; give this env another id")
         env.version = self._versioned_cache.for_store(store).put(env)
