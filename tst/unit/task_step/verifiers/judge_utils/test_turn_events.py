@@ -282,9 +282,29 @@ def test_a_failed_wake_s_message_is_a_note_in_its_step():
         "[Harness: your last wake ended with an error before it finished (TimeoutError).]")}
 
 
-def test_spans_without_agent_labels_read_as_before():
-    events = turn_events((RECORDED / "turn_otel_wake4.json").read_bytes()).events
+def test_a_harness_wake_with_no_compaction_messages_or_helpers_gets_no_notes_or_marks():
+    # An earlier neutral-harness wake: ``harness.config.*`` and ``harness.usage.*`` labels, but no agent names.
+    traj = turn_events((RECORDED / "turn_otel_wake4.json").read_bytes())
 
-    assert not any("step" in e or "subagent" in e for e in events)
-    assert "note" not in {e["type"] for e in events}
-    assert turn_events((RECORDED / "turn_otel_wake4.json").read_bytes()).agent_labels is False
+    assert not any("step" in e or "subagent" in e for e in traj.events)
+    assert "note" not in {e["type"] for e in traj.events}
+    assert traj.agent_labels is True  # it is a harness's trace: its config labels count
+
+
+def test_a_hand_off_between_agents_without_harness_labels_keeps_both_agents_words():
+    # An OpenAI Agents SDK hand-off: two agents, standard GenAI names only, no ``harness.*`` labels.
+    spans = [
+        {"name": "triage", "start_time": "1", "context": {"span_id": "a"}, "attributes": {
+            "openinference.span.kind": "LLM", "gen_ai.agent.name": "triage", "gen_ai.main_agent.name": "triage",
+            "llm.output_messages.0.message.role": "assistant",
+            "llm.output_messages.0.message.content": "Handing you to billing."}},
+        {"name": "billing", "start_time": "2", "context": {"span_id": "b"}, "attributes": {
+            "openinference.span.kind": "LLM", "gen_ai.agent.name": "billing", "gen_ai.main_agent.name": "triage",
+            "llm.output_messages.0.message.role": "assistant",
+            "llm.output_messages.0.message.content": "Refunded $40 to your card."}}]
+
+    traj = turn_events(json.dumps(spans))
+    texts = [e["text"] for e in traj.events if e["type"] == "text"]
+
+    assert traj.agent_labels is False
+    assert texts == ["Handing you to billing.", "Refunded $40 to your card."]

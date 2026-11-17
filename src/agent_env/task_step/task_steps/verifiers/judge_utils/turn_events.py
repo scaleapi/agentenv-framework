@@ -186,7 +186,10 @@ def _otel_events(spans: list[dict]) -> list[dict]:
     the assistant's, so they are left out. The compaction (at its end, once the summary is written) and each message
     the harness sent are notes."""
     by_id = {_span_id(s): s for s in spans if _span_id(s)}
-    steps = _steps(spans, by_id)
+    # Only a trace that carries a harness's own labels (``harness.*``) gets the harness reading: its summary call
+    # left out and its save turn marked. A plain OpenTelemetry trace, with a hand-off between agents, reads as before.
+    harness = has_agent_labels(spans)
+    steps = _steps(spans, by_id) if harness else {}
     timed: list[tuple[str, int, dict]] = []
     for i, span in enumerate(spans):
         start = str(span.get("start_time") or "")
@@ -215,7 +218,7 @@ def _otel_events(spans: list[dict]) -> list[dict]:
         if span.get("name") == _MESSAGE:
             timed.append((start, i, {"type": "note", "text": _harness_message_note(attrs), **tag}))
             continue
-        if _is_harness_own(span, attrs, by_id):
+        if harness and _is_harness_own(span, attrs, by_id):
             continue
         thinking = _span_thinking(attrs)
         if thinking:
@@ -230,9 +233,11 @@ def _otel_events(spans: list[dict]) -> list[dict]:
 
 
 def has_agent_labels(spans: list[dict]) -> bool:
-    """Whether a trajectory's spans say which agent made each (``gen_ai.agent.name``) or hold the harness's own
-    compaction or messages: the PSI neutral harness's from its fifth version."""
-    return any(isinstance(s, dict) and (_AGENT in (s.get("attributes") or {}) or s.get("name") in (_COMPACTION, _MESSAGE))
+    """Whether a trajectory carries a harness's own labels: a ``harness.compaction`` or ``harness.message`` span, or a
+    ``harness.*`` attribute (``harness.tool``, ``harness.config.*``). The standard ``gen_ai.agent.name`` alone doesn't
+    count, so another OpenTelemetry harness never gets this reading or the notes and fields that go with it."""
+    return any(isinstance(s, dict) and (s.get("name") in (_COMPACTION, _MESSAGE)
+                                        or any(str(k).startswith("harness.") for k in (s.get("attributes") or {})))
                for s in spans)
 
 
