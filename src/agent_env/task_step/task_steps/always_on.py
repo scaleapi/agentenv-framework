@@ -1006,7 +1006,7 @@ class _Run:
         opened_at = _utc(self.opening["at"])
         await self._chat_user(self._opening_parts(lambda text: self._chat_part(opened_at, text, kind="opening")))
         due = await take_due(self.notification_envs, self.recipient) if self.notification_envs else []
-        await self.wake([*delivered_parts(due),
+        await self.wake([*delivered_parts(due, self.zone),
                          *self._opening_parts(lambda text: self._user_part(opened_at, text, opening=True))],
                         woke_by=[f"notification:{d['channel']}" for d in due] + ["user_request"],
                         notifications=[{k: d.get(k) for k in ("at", "channel", "source", "source_id", "to")}
@@ -1144,7 +1144,7 @@ class _Run:
     def _user_part(self, at: datetime, text: str, opening: bool = False) -> dict:
         first = self.person["first"]
         body = re.sub(rf"^\s*{re.escape(first)}\s*:\s*", "", text)
-        return {"kind": "text", "text": f"[{label_time(_iso(at))}] {first}: {body}",
+        return {"kind": "text", "text": f"[{label_time(_iso(at), self.zone)}] {first}: {body}",
                 "metadata": {"agentenv": {"source": "user", "at": _iso(at), "opening": opening}}}
 
     # ---- the graded conversation: the user's chat ----------------------------------------------------------------
@@ -1183,7 +1183,8 @@ class _Run:
         if self.reaction:
             parts.append(_step_part(f"({first} {self.reaction['said']})", "user_reaction"))
             parts[-1]["metadata"]["agentenv"].update(outcome=self.reaction["outcome"], at=self.reaction["at"])
-        parts.append({"kind": "text", "text": f"[End of run · {label_time(_iso(now))}] {self.end_note} (A note from "
+        when = label_time(_iso(now), self.zone)
+        parts.append({"kind": "text", "text": f"[End of run · {when}] {self.end_note} (A note from "
                                               f"the run, not a message from {first}.)",
                       "metadata": {"agentenv": {"source": "end_marker", "end_reason": self.end_reason,
                                                 "at": _iso(now)}}})
@@ -1202,7 +1203,7 @@ class _Run:
         """Wake the agent with what came due for it, then the user's lines and replies in time order, then ``notes``
         (the step's own lines); ``last`` marks the run's last wake."""
         due = await take_due(self.notification_envs, self.recipient) if self.notification_envs else []
-        parts = delivered_parts(due)
+        parts = delivered_parts(due, self.zone)
         user_msgs = sorted([{"at": l["at"] or _iso(now), "text": l["text"], "kind": l.get("source", "user_says"),
                              "trigger_id": l.get("trigger_id")} for l in lines]
                            + [{"at": _iso(r["deliver_at"]), "text": r["text"], "kind": "user_reply",
@@ -1449,7 +1450,7 @@ class _Run:
             sent = {"at": m.get("at"), "text": m["text"], "wake": self.wakes}
             self.unread.append(sent)
             self.all_messages.append(sent)
-            self.chat_pending.append({"kind": "text", "text": f"[{label_time(m.get('at'))}] {m['text']}",
+            self.chat_pending.append({"kind": "text", "text": f"[{label_time(m.get('at'), self.zone)}] {m['text']}",
                                       "metadata": {"agentenv": {"source": "message_user", "at": m.get("at"),
                                                                 "wake": self.wakes}}})
 
@@ -1701,7 +1702,8 @@ class _Run:
         ctx.metadata.setdefault(ALWAYS_ON_KEY, {})[step.id] = record
         # The graded response is the user's whole chat from the agent, each message with its pretend time; never its
         # closing text, which she never saw.
-        self._append_prompt_response("\n\n".join(f"[{label_time(m.get('at'))}] {m['text']}" for m in self.all_messages))
+        self._append_prompt_response("\n\n".join(f"[{label_time(m.get('at'), self.zone)}] {m['text']}"
+                                                   for m in self.all_messages))
 
     async def _store_timeline(self, record: dict) -> None:
         """Store the run's full record, its timeline included, and give ``record`` (what stays in the run's metadata,
@@ -1784,6 +1786,8 @@ def render_for_judge(record: dict) -> str:
              "with no known actor (made outside the env's gateway, such as on a website reached directly), each with "
              "when it was seen. The user saw only the messages the assistant sent."]
     wakes = [e for e in timeline if e["event"] == "wake"]
+    zone = (record.get("time_zone") or next((e.get("time_zone") for e in timeline if e["event"] == "start"), None)
+            or "UTC")  # the record's own, since a tail kept when the store failed may have lost the start
     for wake in wakes[:JUDGE_WAKES]:
         n = wake["n"]
         turn = turns.get(n) or {}
@@ -1791,7 +1795,7 @@ def render_for_judge(record: dict) -> str:
         calls = f" · {turn['tool_calls']} tool calls" if turn.get("tool_calls") is not None else ""
         state = f" · its turn {turn['state']}" if turn.get("state") not in (None, "completed", "TaskState.completed") \
             else ""
-        lines.append(f"- Wake {n} · {label_time(wake.get('virtual_time'))} · woken by "
+        lines.append(f"- Wake {n} · {label_time(wake.get('virtual_time'), zone)} · woken by "
                      f"{woke_by_text(wake.get('woke_by'))} · sent the user {sent} message{'s' if sent != 1 else ''}"
                      f"{calls}{state}")
         made = changes.get(n, [])

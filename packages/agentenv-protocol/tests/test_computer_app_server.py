@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import importlib.util
 import json
 import os
+import re
 import shlex
 import signal
 import socket
@@ -281,18 +283,25 @@ async def test_the_driver_asks_each_apps_server_on_the_socket_in_its_folder(desk
             shown.append({"instance": "music", "class": "Music", "title": "Library"})
             playing = await apps.check(Path(root) / "music")
 
-    assert first == [
+    assert [_seconds_masked(check) for check in first] == [
         ReadyCheck("app broken", False, "its server failed to start: RuntimeError: no mailbox"),
         ReadyCheck("app gone", False, "its server isn't answering yet"),
-        ReadyCheck("app mail", False, "not ready yet, 0 s in: not launched yet; no window with class 'Mail'; "
+        ReadyCheck("app mail", False, "not ready yet, N s in: not launched yet; no window with class 'Mail'; "
                                       "@ready_check inbox_synced returned False"),
         ReadyCheck("app music", True, "its server answers; it launches on demand"),
         ReadyCheck("app sync", True, "ready"),
     ]
     assert late.detail.startswith("not ready after 30 s: not launched yet")
     assert launched == [(["music"], Path.cwd(), {"ENVIRONMENT_NAME": "music"})]
-    assert opened == ReadyCheck("app music", False, "not ready yet, 0 s in: no window with class 'Music'")
+    assert _seconds_masked(opened) == ReadyCheck("app music", False,
+                                                 "not ready yet, N s in: no window with class 'Music'")
     assert playing == ReadyCheck("app music", True, "ready")
+
+
+def _seconds_masked(check: ReadyCheck) -> ReadyCheck:
+    """The check with the seconds it has waited masked: they count real time since its server started or its app
+    launched, which a busy runner stretches past the half second that rounds to 0."""
+    return dataclasses.replace(check, detail=re.sub(r"\d+ s in", "N s in", check.detail))
 
 
 @pytest.mark.asyncio
