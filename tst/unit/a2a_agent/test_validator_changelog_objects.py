@@ -79,6 +79,7 @@ def _context(capture: dict, *apply_variants: list[str]) -> TaskStepContext:
         },
         sandbox_type="local",
         sandbox_id="sandbox-1",
+        control_headers={},
     )
     context = TaskStepContext()
     context.deployed_agents = [apply_agent]

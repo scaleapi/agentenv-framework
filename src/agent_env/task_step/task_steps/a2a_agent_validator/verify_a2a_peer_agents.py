@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import ClassVar, Optional
 
 import httpx
@@ -49,8 +50,8 @@ class VerifyA2APeerAgentsStep(TaskStep):
         extension = A2AAgent.find_extension(deployed.a2a_card or {}, A2AAgent.EXT_PEER_AGENTS)
         extension_advertised = extension is not None
         endpoint = (extension.get("params") or {}).get("endpoint", "/ext/peer-agents") if extension else "/ext/peer-agents"
-        post_ok, list_ok = await self._check_round_trip(a2a_url, endpoint)
-        sidecar_registered = await self._check_sidecar_registered(a2a_url)
+        post_ok, list_ok = await self._check_round_trip(a2a_url, endpoint, deployed.control_headers)
+        sidecar_registered = await self._check_sidecar_registered(a2a_url, deployed.control_headers)
         peer_call_ok, response_excerpt = self._check_peer_call(context)
 
         peer_entry = {
@@ -72,10 +73,10 @@ class VerifyA2APeerAgentsStep(TaskStep):
         return context
 
     @staticmethod
-    async def _check_round_trip(a2a_url: str, endpoint: str) -> tuple[bool, bool]:
+    async def _check_round_trip(a2a_url: str, endpoint: str, headers: Mapping[str, str]) -> tuple[bool, bool]:
         probe = {"peers": [{"name": "probe", "url": "http://example.invalid"}]}
         post_ok = list_ok = False
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=headers) as client:
             try:
                 post_resp = await client.post(f"{a2a_url}{endpoint}", json=probe, timeout=30)
                 post_ok = post_resp.status_code < 400
@@ -86,8 +87,8 @@ class VerifyA2APeerAgentsStep(TaskStep):
         return post_ok, list_ok
 
     @staticmethod
-    async def _check_sidecar_registered(a2a_url: str) -> bool:
-        async with httpx.AsyncClient() as client:
+    async def _check_sidecar_registered(a2a_url: str, headers: Mapping[str, str]) -> bool:
+        async with httpx.AsyncClient(headers=headers) as client:
             resp = await client.get(f"{a2a_url}/ext/mcp-config", timeout=30)
         if resp.status_code >= 400:
             return False

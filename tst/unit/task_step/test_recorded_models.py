@@ -30,7 +30,7 @@ def posted(monkeypatch):
         monkeypatch.setattr(pa_mod.conversation_store, fn, lambda *a, **kw: None)
     configs = {}
 
-    async def post_agent_config(url, fields):
+    async def post_agent_config(url, fields, headers=None):
         configs[url] = fields
 
     async def send(url, parts, message_id, context_id, timeout):
@@ -89,13 +89,13 @@ def _judge() -> RubricsVerifierTaskStep:
                                                 (_card("output_format"), None), ({}, None)],
                          ids=["takes a model", "takes no model", "takes no config"])
 async def test_an_agent_judge_records_the_model_it_took(monkeypatch, card, recorded):
-    async def post_agent_config(url, fields):
+    async def post_agent_config(url, fields, headers=None):
         pass
 
     monkeypatch.setattr(protocol, "post_agent_config", post_agent_config)
     context = TaskStepContext(metadata={"task_id": "t"})
 
     await _judge()._configure_judge_a2a(judge_a2a_url="http://judge", judge_agent_card=card, model="flag-judge",
-                                        judge_effort=None, judge_max_thinking_tokens=None, context=context)
+                                        judge_effort=None, judge_max_thinking_tokens=None, context=context, headers={})
 
     assert context.metadata["models"] == {"judge": {"judge": recorded}}

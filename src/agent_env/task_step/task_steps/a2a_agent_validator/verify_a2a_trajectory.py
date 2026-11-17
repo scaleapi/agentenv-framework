@@ -76,7 +76,7 @@ class VerifyA2ATrajectoryStep(TaskStep):
         # Test inline trajectory retrieval
         inline_ok = False
         try:
-            fetched = await fetch_trajectory(endpoint, {"task_id": task_id})
+            fetched = await fetch_trajectory(endpoint, {"task_id": task_id}, headers=deployed_agent.control_headers)
             if fetched.inline:
                 inline_ok = True
                 logger.info(f"Inline trajectory: OK ({len(fetched.inline)} events)")
@@ -100,7 +100,8 @@ class VerifyA2ATrajectoryStep(TaskStep):
                 upload = await asyncio.to_thread(
                     TrajectoryUpload.to, granting, trajectory_object_url(prefix, name=task_id, store=granting)
                 )
-                await fetch_trajectory(endpoint, {"task_id": task_id}, upload=upload, store=granting)
+                await fetch_trajectory(endpoint, {"task_id": task_id}, upload=upload, store=granting,
+                                       headers=deployed_agent.control_headers)
                 objects_ok = True
                 logger.info("Object trajectory: OK")
             except Exception as e:
