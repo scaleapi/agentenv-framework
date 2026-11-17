@@ -39,6 +39,7 @@
   },
   "attributes": {
    "gen_ai.agent.name": "harness",
+   "harness.compaction.written_by": "assistant",
    "harness.compaction.chars_before": 8680,
    "harness.compaction.wakes_kept": 2,
    "harness.compaction.fixed_chars": 2945,
@@ -733,6 +734,7 @@
    "status_code": "OK"
   },
   "attributes": {
+   "harness.version": "v7",
    "harness.usage.calls": 5,
    "harness.usage.prompt": 500,
    "harness.usage.completion": 100,

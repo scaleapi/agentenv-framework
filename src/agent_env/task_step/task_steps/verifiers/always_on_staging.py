@@ -17,6 +17,9 @@ stored timeline and each wake's trajectory: one file per wake, one event per lin
 - ``index.md``: a block per wake with its time, what woke it, the user's message, its write actions (tool and key
   arguments) and messages with the ``file:line`` they're at, a
   compaction the harness ran before its turn, and its errors.
+
+A run that kept no timeline is staged from one made of its turns by position (``by_position``): each wake file is
+one turn, in the order the turns ran, with the text it was sent and its own events.
 """
 
 from __future__ import annotations
@@ -88,10 +91,14 @@ class _Wake:
 
 
 def stage_run(timeline: Sequence[dict], turns: Mapping[str, Optional[TurnEvents]], *,
-              firings: Sequence[Firing] = (), unavailable: Optional[Mapping[str, str]] = None) -> StagedRun:
+              firings: Sequence[Firing] = (), unavailable: Optional[Mapping[str, str]] = None,
+              by_position: bool = False) -> StagedRun:
     """The run's files: ``turns`` holds each trajectory the timeline names, by its url (None for one that couldn't be
-    read); ``firings`` and ``unavailable`` are the run context's trigger firings and the logs it couldn't read."""
+    read); ``firings`` and ``unavailable`` are the run context's trigger firings and the logs it couldn't read.
+    ``by_position``: the timeline is the run's turns in order, one wake a turn (the run kept none of its own), which
+    index.md and the record (``turns_by_position``) say."""
     stager = _Stager(turns, max((e.get("n") or 0 for e in timeline if e.get("event") == "wake"), default=0))
+    stager.by_position = by_position
     for event in timeline:
         stager.add(event)
     return stager.finish(firings, unavailable or {})
@@ -150,7 +157,9 @@ class _Stager:
         self.not_compacted: list[dict] = []
         self.unrecorded_changes = 0
         self.by_changes = False  # whether the run recorded app changes, so write actions are read from them
+        self.by_position = False  # whether each wake is one turn by position (the run kept no timeline)
         self.labelled = 0  # trajectories whose spans say which agent made each (``TurnEvents.agent_labels``)
+        self.summary_writers: Counter = Counter()  # compactions by who wrote their summary (``written_by``)
 
     def wake(self, n: Optional[int]) -> _Wake:
         n = n or self.current
@@ -243,6 +252,8 @@ class _Stager:
                 lines.append(_line("assistant_thinking", w.n, turn=which, step=e.get("step"), text=e["text"],
                                    subagent=e.get("subagent")))
             elif kind == "note":
+                if e.get("compaction"):
+                    self.summary_writers[e["compaction"]["written_by"]] += 1
                 lines.append(_line("harness_note", w.n, turn=which, step=e.get("step"), compaction=e.get("compaction"),
                                    text=e["text"]))
             elif kind == "raw":
@@ -315,7 +326,8 @@ class _Stager:
         # A tool no app change names anywhere in the run may be an app that keeps no change log: its writes are
         # guessed from their names, labelled as such, so they aren't left out of the index.
         run_changing = set().union(*(_changing_tools(lines) for _, _, lines in index_blocks))
-        index_blocks = [_index_block(w, path, lines, self.by_changes, run_changing) for w, path, lines in index_blocks]
+        index_blocks = [_index_block(w, path, lines, self.by_changes, run_changing, self.by_position)
+                        for w, path, lines in index_blocks]
         self.files[EVENTS_FILE] = "".join(_dumps(line) + "\n" for line in everything)
         self.files[TRIGGERS_FILE] = _triggers(firings, unavailable, self.wakes)
         self.files[INDEX_FILE] = _index(self, index_blocks, start, end, firings)
@@ -326,7 +338,9 @@ class _Stager:
         for key, value in (("missing_trajectories", self.missing), ("unreadable_trajectories", self.unreadable),
                            ("not_compacted", self.not_compacted),
                            ("app_changes_not_recorded", self.unrecorded_changes),
-                           ("agent_labeled_trajectories", self.labelled)):
+                           ("agent_labeled_trajectories", self.labelled),
+                           ("compaction_summaries_written_by", dict(sorted(self.summary_writers.items()))),
+                           ("turns_by_position", self.by_position)):
             if value:
                 record[key] = value
         return StagedRun(self.files, record)
@@ -343,15 +357,18 @@ def _changing_tools(lines: list[dict]) -> set[str]:
             for a in line.get("actors") or [] if a.get("tool")}
 
 
-def _index_block(w: _Wake, path: str, lines: list[dict], by_changes: bool, run_changing: set[str]) -> str:
-    """The wake's block. With ``by_changes`` its write actions are the calls of a tool that made one of the wake's app
-    changes, and calls of a tool no app change in the run names (``run_changing``) whose name has no read word are
-    "possible actions"; else (a run whose apps keep no change log) every call whose name has no read word is an action
-    (``is_write_action``)."""
+def _index_block(w: _Wake, path: str, lines: list[dict], by_changes: bool, run_changing: set[str],
+                 by_position: bool = False) -> str:
+    """The wake's block (``by_position``: the turn's, by its position). With ``by_changes`` its write actions are the
+    calls of a tool that made one of the wake's app changes, and calls of a tool no app change in the run names
+    (``run_changing``) whose name has no read word are "possible actions"; else (a run whose apps keep no change log)
+    every call whose name has no read word is an action (``is_write_action``)."""
     calls = sum(1 for line in lines if line["event"] == "tool_call" and line.get("step") != _SAVE_STEP)
     saved = sum(1 for line in lines if line["event"] == "tool_call" and line.get("step") == _SAVE_STEP)
     changing = _changing_tools(lines)
-    out = [f"## Wake {w.n} · {label_time(w.at)} · woken by {woke_by_text(w.woke_by)} · {path} "
+    head = (f"## Turn {w.n}" if by_position
+            else f"## Wake {w.n} · {label_time(w.at)} · woken by {woke_by_text(w.woke_by)}")
+    out = [f"{head} · {path} "
            f"({len(lines)} lines, {calls} tool calls{f', plus {saved} in the harness save turn' if saved else ''})"]
     users = [(i, line) for i, line in enumerate(lines, 1) if line["event"] == "user_message"]
     for i, line in users:
@@ -408,9 +425,12 @@ def _index_block(w: _Wake, path: str, lines: list[dict], by_changes: bool, run_c
 
 
 def _compaction_line(facts: dict) -> str:
-    """index.md's words for a compaction the harness ran before the wake's turn, from its note's ``compaction``."""
+    """index.md's words for a compaction the harness ran before the wake's turn, from its note's ``compaction``: who
+    wrote its summary, and what it did."""
+    writer = "the assistant's own model" if facts["written_by"] == "assistant" else "the harness"
     words = compaction_words(facts)
-    return "compaction by the harness, before this wake's turn" + (": " + "; ".join(words) if words else "")
+    return (f"compaction by the harness, before this wake's turn, its summary written by {writer}"
+            + (": " + "; ".join(words) if words else ""))
 
 
 def _index(stager: _Stager, blocks: list[str], start: list[dict], end: list[dict],
@@ -419,6 +439,11 @@ def _index(stager: _Stager, blocks: list[str], start: list[dict], end: list[dict
     last = end[0] if end else {}
     width = stager.width
     lines = ["# The run, wake by wake", "",
+             f"{len(stager.wakes)} turns of the assistant, in the order they ran. The run kept no timeline, so each "
+             "wake file is one turn by its position (a nudge's turn is one of its own), not a wake of the run: it has "
+             "the text the turn was sent (\"wake_input\") and the turn's own events, and no times, app changes, "
+             "messages to the user or reads of them (the judge prompt's wake-by-wake record and the user's chat have "
+             "those)." if stager.by_position else
              f"{len(stager.wakes)} wakes, from {label_time(first.get('at'))} to {label_time(last.get('at'))}. "
              f"End: {last.get('note') or '(not recorded)'} (end reason: {last.get('reason')}).",
              "",
@@ -433,7 +458,8 @@ def _index(stager: _Stager, blocks: list[str], start: list[dict], end: list[dict
              "has no read word (get, list, search, …): an app that keeps no change log, or a write that changed "
              "nothing." if stager.by_changes else
              "Actions below are the assistant's tool calls whose tool name has no read word (get, list, search, …): "
-             "this run's apps kept no change log, so this is a guess from the name."]
+             + ("without the run's timeline its app changes aren't here" if stager.by_position
+                else "this run's apps kept no change log") + ", so this is a guess from the name."]
     gaps = sorted(set(stager.missing) | set(stager.unreadable))
     if gaps:
         lines += ["", "Wakes whose tool calls are not here (their trajectory is missing or unreadable): "
@@ -453,13 +479,14 @@ def _index(stager: _Stager, blocks: list[str], start: list[dict], end: list[dict
 
 def _triggers(firings: Sequence[Firing], unavailable: Mapping[str, str], wakes: Mapping[int, _Wake]) -> str:
     """One line per firing, oldest first, with the last wake at or before its pretend time (``after_wake``, 0 before
-    the first); then one per firing log that couldn't be read."""
+    the first; null when no wake has a time, as in a run staged by position); then one per firing log that couldn't
+    be read."""
     starts = sorted((t, n) for n, w in wakes.items() if (t := _instant(w.at)))
     out = []
     for f in sorted(firings, key=lambda f: f.at):
         vt = f.virtual_time.isoformat().replace("+00:00", "Z") if f.virtual_time else None
         when = _instant(f.virtual_time)
-        after = max((n for t, n in starts if when and t <= when), default=0)
+        after = max((n for t, n in starts if when and t <= when), default=0) if starts else None
         out.append(_dumps({"trigger_id": f.trigger_id, "source": f.source, "fired": f.ok, "at": vt,
                            "recorded_at": f.at.isoformat(), "after_wake": after, "provoked_by": f.provoked_by}))
     out += [_dumps({"unavailable": source, "why": why}) for source, why in unavailable.items() if source != "conversation"]

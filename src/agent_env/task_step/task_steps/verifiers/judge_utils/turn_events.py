@@ -37,10 +37,10 @@ class TurnEvents:
     """``events`` in turn order, each ``{"type": "text", "text"}``, ``{"type": "tool_call", "tool", "id", "input",
     "result", "error"}`` (``result`` absent when none came back; ``internal`` for a tool the harness provides itself), ``{"type": "prompt", "text"}`` (the turn's input,
     when the format records it), ``{"type": "note", "text"}`` (a message the harness put in the turn; a compaction's
-    also has ``compaction``, what its span recorded: ``wakes_summarized``, ``wakes_kept``, ``first_kept_wake``,
-    ``waited_s``) or ``{"type": "final", "text", "error"}``; for an unknown format, ``{"type": "raw", "event"}`` per
-    stored item. ``agent_labels``: its spans say which agent made each, or hold the harness's own compaction or
-    messages (``has_agent_labels``)."""
+    also has ``compaction``, what its span recorded: ``written_by``, ``wakes_summarized``, ``wakes_kept``,
+    ``first_kept_wake``, ``waited_s``) or ``{"type": "final", "text", "error"}``; for an unknown format,
+    ``{"type": "raw", "event"}`` per stored item. ``agent_labels``: its spans say which agent made each, or hold the
+    harness's own compaction or messages (``has_agent_labels``)."""
 
     format: str
     events: list[dict]
@@ -48,8 +48,14 @@ class TurnEvents:
     agent_labels: bool = False
 
 
+class TrajectoryFormatError(ValueError):
+    """A trajectory that breaks the labels it carries (a ``harness.compaction`` span that doesn't say who wrote its
+    summary): read any other way it would be misread, so it isn't read."""
+
+
 def turn_events(raw: bytes | str) -> TurnEvents:
-    """The events of one stored turn trajectory (a JSON list, as agent-env stores them)."""
+    """The events of one stored turn trajectory (a JSON list, as agent-env stores them). Raises
+    ``TrajectoryFormatError`` for one that breaks the harness labels it carries."""
     size = len(raw) if isinstance(raw, bytes) else len(raw.encode())
     try:
         items = json.loads(raw)
@@ -145,12 +151,14 @@ def _settle(call: dict, result: Any, error: bool) -> None:
 # ``gen_ai.agent.name`` (the agent that made it, "harness" for the harness's own) and ``gen_ai.main_agent.name`` (the
 # assistant). A model span's ``gen_ai.output.messages`` lists its parts in order: reasoning, text, tool calls (the
 # summary call's text is a ``compaction`` part). The harness's own records are ``harness.*`` spans: the compaction
-# (``harness.compaction``, from the start of the save turn to the end of the summary) and each message it put before
-# the assistant (``harness.message``, with its ``purpose``).
+# (``harness.compaction``, from the start of the save turn to the end of the summary, its ``written_by`` saying who
+# wrote the summary) and each message it put before the assistant (``harness.message``, with its ``purpose``).
 _AGENT = "gen_ai.agent.name"
 _MAIN_AGENT = "gen_ai.main_agent.name"
 _OUTPUT_MESSAGES = "gen_ai.output.messages"
 _COMPACTION = "harness.compaction"
+# Who wrote a compaction's summary (``harness.compaction.written_by``): the assistant's own model, or the harness.
+SUMMARY_WRITERS = ("assistant", "harness")
 _MESSAGE = "harness.message"
 _SAVE = "pre_compaction_save"
 _AFTER = "after_compaction"
@@ -182,14 +190,15 @@ def _otel_events(spans: list[dict]) -> list[dict]:
     """Tool spans (``execute_tool``) and the model's text, in start order; the conversation every model span repeats
     (``llm.input_messages.*``), tool lists and token counts are left out. A helper's events carry ``subagent`` and
     those of a step the harness asked for carry ``step`` (``_steps``). A model span of an agent other than the main
-    one, not nested under a tool call, is the harness's own (the compaction summary): its text and reasoning are not
-    the assistant's, so they are left out. The compaction (at its end, once the summary is written) and each message
-    the harness sent are notes."""
+    one, not nested under a tool call, is the harness's step (the compaction summary call): its text and reasoning are
+    left out, the summary being the compaction note's. The compaction (at its end, once the summary is written) and
+    each message the harness sent are notes. A compaction that doesn't say who wrote its summary (``written_by``, one
+    of ``SUMMARY_WRITERS``) raises ``TrajectoryFormatError``."""
     by_id = {_span_id(s): s for s in spans if _span_id(s)}
     # Only a trace that carries a harness's own labels (``harness.*``) gets the harness reading: its summary call
-    # left out and its save turn marked. A plain OpenTelemetry trace, with a hand-off between agents, reads as before.
+    # left out and its save turn marked. A plain OpenTelemetry trace keeps every agent's words, a hand-off's too.
     harness = has_agent_labels(spans)
-    steps = _steps(spans, by_id) if harness else {}
+    steps = _steps(spans) if harness else {}
     timed: list[tuple[str, int, dict]] = []
     for i, span in enumerate(spans):
         start = str(span.get("start_time") or "")
@@ -208,11 +217,8 @@ def _otel_events(spans: list[dict]) -> list[dict]:
             timed.append((start, i, {**call, **tag}))
             continue
         if span.get("name") == _COMPACTION:
-            # A compaction with no end time goes after the save turn before it.
-            save_end = max((str(s.get("end_time") or s.get("start_time") or "") for j, s in enumerate(spans)
-                            if steps.get(j) == _SAVE and s.get("name") != _MESSAGE), default="")
             facts = _compaction_facts(attrs)
-            timed.append((str(span.get("end_time") or max(start, save_end)), i,
+            timed.append((str(span.get("end_time") or start), i,
                           {"type": "note", "text": _compaction_note(attrs, facts), "compaction": facts}))
             continue
         if span.get("name") == _MESSAGE:
@@ -259,10 +265,11 @@ def _agent_tag(span: dict, attrs: dict, by_id: dict) -> dict:
     return {"subagent": f"{attrs.get('gen_ai.agent.id') or agent}@{_span_id(call)}"}
 
 
-def _steps(spans: list[dict], by_id: dict) -> dict[int, str]:
+def _steps(spans: list[dict]) -> dict[int, str]:
     """The step (by span index) each harness message and each span of a step it asked for is in: a message's own
     (from its ``purpose``), and the save turn's, the main agent's spans that start between the save request and the
-    end of the compaction it came before (or, without that end, the message after the summary or the summary call)."""
+    end of the compaction it came before (the first to end after it: a compaction's span starts with its save turn,
+    just before the request)."""
     steps: dict[int, str] = {}
     order = sorted(range(len(spans)), key=lambda i: str(spans[i].get("start_time") or ""))
     for i in order:
@@ -275,12 +282,8 @@ def _steps(spans: list[dict], by_id: dict) -> dict[int, str]:
         if step != _SAVE:
             continue
         begin = str(span.get("start_time") or "")
-        later = [spans[j] for j in order if str(spans[j].get("start_time") or "") >= begin and j != i]
-        end = next((str(s.get("end_time") or "") for s in later if s.get("name") == _COMPACTION and s.get("end_time")),
-                   None) or next((str(s.get("start_time") or "") for s in later
-                                  if (s.get("name") == _MESSAGE and (s.get("attributes") or {}).get(
-                                      "harness.message.purpose") == "after_summary")
-                                  or _is_harness_own(s, s.get("attributes") or {}, by_id)), "")
+        end = min((str(s.get("end_time")) for s in spans
+                   if s.get("name") == _COMPACTION and str(s.get("end_time") or "") > begin), default="")
         for j in order:
             s, attrs = spans[j], spans[j].get("attributes") or {}
             if (begin <= str(s.get("start_time") or "") < end and attrs.get(_AGENT) and attrs.get(_AGENT) == attrs.get(
@@ -299,13 +302,18 @@ def _parts(attrs: dict, kind: str) -> list[str]:
 
 
 def _compaction_facts(attrs: dict) -> dict:
-    """What a ``harness.compaction`` span recorded: the wakes it summarized and kept (the harness's wake numbers, from
-    the first kept one), how late (real seconds) the wake it came before started (``waited_s``, the span's
-    ``next_wake_waited_s``), and a failed save turn's or compaction's error."""
+    """What a ``harness.compaction`` span recorded: who wrote the summary (``written_by``: "assistant", its own model,
+    or "harness"), the wakes it summarized and kept (the harness's wake numbers, from the first kept one), how late
+    (real seconds) the wake it came before started (``waited_s``, the span's ``next_wake_waited_s``), and a failed save
+    turn's or compaction's error. Raises ``TrajectoryFormatError`` for a span that doesn't say who wrote the summary."""
+    written_by = attrs.get(f"{_COMPACTION}.written_by")
+    if written_by not in SUMMARY_WRITERS:
+        raise TrajectoryFormatError(f"its {_COMPACTION} span has {_COMPACTION}.written_by={written_by!r}, not one of "
+                                    f"{list(SUMMARY_WRITERS)}, so who wrote the compaction summary isn't known")
     named = {"wakes_summarized": "wakes_summarized", "wakes_kept": "wakes_kept", "first_kept_wake": "first_kept_wake",
              "waited_s": "next_wake_waited_s", "save_error": "save_error", "error": "error"}
-    return {key: attrs[f"{_COMPACTION}.{attr}"] for key, attr in named.items()
-            if attrs.get(f"{_COMPACTION}.{attr}") is not None}
+    return {"written_by": written_by, **{key: attrs[f"{_COMPACTION}.{attr}"] for key, attr in named.items()
+                                         if attrs.get(f"{_COMPACTION}.{attr}") is not None}}
 
 
 def _wakes(first: int, last: int) -> str:
@@ -336,11 +344,16 @@ def compaction_words(facts: dict) -> list[str]:
     return words
 
 
+# Who wrote a compaction's summary, as its note says it.
+_WRITTEN_BY = {"assistant": "written by the assistant's own model, in a summary turn the harness asked for",
+               "harness": "written by the harness, not the assistant"}
+
+
 def _compaction_note(attrs: dict, facts: dict) -> str:
-    """A ``harness.compaction`` span as a note: which wakes it summarized, how late it made this wake, and the
-    summary (its ``compaction`` part)."""
-    head = ("Compaction summary (written by the harness from the model's own summary turn; it replaces the older "
-            "history the model sees" + "".join(f"; {w}" for w in compaction_words(facts)) + ")")
+    """A ``harness.compaction`` span as a note: who wrote the summary, which wakes it summarized, how late it made this
+    wake, and the summary (its ``compaction`` part)."""
+    head = (f"Compaction summary ({_WRITTEN_BY[facts['written_by']]}; it replaces the older history the assistant "
+            "sees" + "".join(f"; {w}" for w in compaction_words(facts)) + ")")
     summary = "\n".join(_parts(attrs, "compaction")).strip()
     return f"{head}:\n{summary}" if summary else f"{head}: no summary recorded"
 
