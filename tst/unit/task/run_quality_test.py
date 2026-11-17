@@ -7,7 +7,7 @@ import pytest
 from agent_env.config import set_document_store
 from agent_env.store import LocalSqliteDocumentStore
 from agent_env.store.document_store import Filter
-from agent_env.task.outcome import FailedStep, RunQuality, StepRole, run_quality
+from agent_env.task.outcome import FailedStep, FailureCause, RunQuality, StepRole, run_quality
 from agent_env.task.store import TASK_INSTANCES_COLLECTION, TaskInstance, TaskInstanceStore, set_task_instance_store
 from agent_env.task.task import Task
 from agent_env.task_step.context import TaskStepContext
@@ -36,6 +36,10 @@ def test_open_tolerated_failures_degrade_the_run_most_severe_first():
 @pytest.mark.parametrize("fields", [{"is_fatal": True}, {"retried": True}, {"resolved_by": "regrade:2026-01-02"}])
 def test_a_fatal_retried_or_resolved_failure_does_not_degrade_the_run(fields):
     assert not run_quality([_failed(StepRole.GRADER, **fields)]).degraded
+
+
+def test_a_tolerated_failing_verdict_does_not_degrade_the_run():
+    assert not run_quality([_failed(StepRole.GRADER, cause=FailureCause.VERDICT)]).degraded
 
 
 def test_an_entry_written_before_roles_existed_degrades_as_other():

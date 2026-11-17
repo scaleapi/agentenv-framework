@@ -194,6 +194,10 @@ class RunQuality:
 
 
 def run_quality(failed_steps: Iterable[FailedStep]) -> RunQuality:
-    """A fatal failure fails the run instead, and a retried or resolved one lost nothing."""
-    open_roles = {f.step_role for f in failed_steps if not f.is_fatal and not f.retried and f.resolved_by is None}
+    """A fatal failure fails the run instead, a retried or resolved one lost nothing, and a failing verdict is a grade
+    the run has, not one it lost."""
+    open_roles = {
+        f.step_role for f in failed_steps
+        if not f.is_fatal and not f.retried and f.resolved_by is None and f.cause != FailureCause.VERDICT
+    }
     return RunQuality(tuple(r for r in _SEVERITY if r in open_roles))
