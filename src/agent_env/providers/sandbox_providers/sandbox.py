@@ -360,8 +360,10 @@ class VmSandbox(Sandbox):
             raise RuntimeError(f"Couldn't pull {why}. {e}") from e
 
     async def pull_published(self, artifacts: list) -> list[tuple[Any, str]]:
-        """Pull each image by its digest, concurrently, and tag it with its ``image_name``, which its containers start
-        from; return each the VM couldn't pull, with why, for it to build from its build context instead."""
+        """Pull each image by its digest, concurrently, after logging in to each registry the image store holds
+        credentials for, as ``pull_images`` does, and tag it with its ``image_name``, which its containers start from;
+        return each the VM couldn't pull, with why, for it to build from its build context instead."""
+        await self._log_in([artifact.pinned_name for artifact in artifacts])
         results = await asyncio.gather(*(_pull_published(self, artifact) for artifact in artifacts),
                                        return_exceptions=True)
         unpulled = []
@@ -437,12 +439,7 @@ class VmSandbox(Sandbox):
         the failure back; the command a cancelled exec started keeps running on the VM until it ends or the VM does. A
         network policy restricting egress isn't widened for them: it must allow the registries itself."""
         image_names = list(dict.fromkeys(image_names))
-        store = get_config().get_image_store()
-        one_per_registry = {registry_host_from_ref(image_name): image_name for image_name in reversed(image_names)}
-        for image_name in one_per_registry.values():
-            auth = await asyncio.to_thread(store.auth, image_name)
-            if auth is not None:
-                await self.docker_login(auth)
+        await self._log_in(image_names)
         pulls = [asyncio.ensure_future(_pull(self, image_name)) for image_name in image_names]
         try:
             await asyncio.gather(*pulls)
@@ -451,6 +448,16 @@ class VmSandbox(Sandbox):
                 pull.cancel()
             await asyncio.gather(*pulls, return_exceptions=True)
             raise
+
+    async def _log_in(self, refs: list[str]) -> None:
+        """``docker login`` to each registry of ``refs`` the image store holds credentials for, once per registry,
+        since minting a login can be a network round trip; a registry it holds none for, a public one, is left alone."""
+        store = get_config().get_image_store()
+        one_per_registry = {registry_host_from_ref(ref): ref for ref in reversed(refs)}
+        for ref in one_per_registry.values():
+            auth = await asyncio.to_thread(store.auth, ref)
+            if auth is not None:
+                await self.docker_login(auth)
 
     @staticmethod
     async def _signed_image_urls(artifacts: list) -> list[str | None]:

@@ -423,6 +423,27 @@ async def test_a_published_image_is_pulled_by_its_digest_and_tagged_with_the_nam
 
 
 @pytest.mark.asyncio
+async def test_an_image_in_a_registry_the_store_holds_is_pulled_by_its_digest_after_logging_in_to_it(registry):
+    """A bundle's image, registered by its digest in a private image store, pulls rather than being rebuilt on the VM;
+    the published one beside it, on a registry the store holds nothing for, logs in nowhere."""
+    sandbox = _StdinVm()
+    private = "registry.example/team/items:src-" + "1" * 64
+    pinned = f"{private}@{_GATEWAY_DIGEST}"
+    image = DockerImageArtifact(id="items", version=1, description="d", image_name=private, image_digest=_GATEWAY_DIGEST,
+                                build_context_object_url="s3://bucket/items/build-context.tar.gz",
+                                dockerfile_path="Dockerfile", source_digest="sha256:" + "1" * 64)
+
+    await sandbox.load_docker_images([image, _published()])
+
+    assert sandbox.scripts[:3] == [
+        "mktemp -d",
+        "docker login --username user --password-stdin registry.example < /tmp/tmp.Xq3/password",
+        "rm -rf /tmp/tmp.Xq3",
+    ]
+    assert sorted(sandbox.scripts[3:]) == sorted([f"docker pull {pinned}", f"docker tag {pinned} {private}",
+                                                  f"docker pull {_PINNED}", f"docker tag {_PINNED} {_GATEWAY}"])
+
+@pytest.mark.asyncio
 async def test_a_published_image_the_vm_cant_pull_is_built_from_its_build_context_under_its_name(signing_store,
                                                                                                 no_waits):
     sandbox = _PinnedPullFailsVm("manifest unknown")
