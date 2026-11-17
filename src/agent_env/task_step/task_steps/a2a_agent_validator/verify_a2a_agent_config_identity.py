@@ -46,7 +46,8 @@ class VerifyA2AAgentConfigIdentityStep(TaskStep):
             endpoint = a2a_url + (ext.get("params") or {}).get("endpoint", "/ext/agent-config")
             try:
                 async with httpx.AsyncClient() as client:
-                    (await client.post(endpoint, json={"name": name, "description": desc}, timeout=30)).raise_for_status()
+                    (await client.post(endpoint, json={"name": name, "description": desc},
+                                       headers=deployed.control_headers, timeout=30)).raise_for_status()
                     card_resp = await client.get(f"{a2a_url}/.well-known/agent.json", timeout=30)
                     card_resp.raise_for_status()
                     card = card_resp.json() or {}

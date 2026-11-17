@@ -101,7 +101,7 @@ class VerifyA2ARoleStep(TaskStep):
         logger.info("Round-tripping role=%r through %s", test_role, url)
 
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=10.0, headers=deployed.control_headers) as client:
                 post_resp = await client.post(url, json={"role": test_role})
                 post_resp.raise_for_status()
                 get_resp = await client.get(url)

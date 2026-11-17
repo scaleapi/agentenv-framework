@@ -63,6 +63,25 @@ async def test_a_recorded_model_call_is_never_sent_twice(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_every_call_carries_the_headers_the_client_was_made_with(monkeypatch):
+    seen: list[str | None] = []
+    real_client = httpx.AsyncClient
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("authorization"))
+        return httpx.Response(200, json={"tools": []})
+
+    monkeypatch.setattr(client_module.httpx, "AsyncClient",
+                        lambda **kw: real_client(transport=httpx.MockTransport(handle), **kw))
+    client = ProxyClient("http://proxy", CARD, {"Authorization": "Bearer tok"})
+
+    await client.claim()
+    await client.tools("task-1")
+
+    assert seen == ["Bearer tok", "Bearer tok"]
+
+
+@pytest.mark.asyncio
 async def test_fields_a_newer_proxy_adds_are_ignored():
     turn = {"task_id": "task-1", "context_id": "c", "parts": [{"kind": "text", "text": "Add one.", "lang": "en"}],
             "priority": 1}

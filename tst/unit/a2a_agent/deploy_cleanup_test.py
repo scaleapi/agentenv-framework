@@ -1,11 +1,12 @@
 """``A2AAgent.deploy`` closes the sandbox it created when the deploy fails or is cancelled, so an agent that never
-made it into a run's context doesn't outlive it."""
+made it into a run's context doesn't outlive it. One that succeeds is recorded with a control token of its own."""
 
 import asyncio
 
 import pytest
 
 from agent_env.a2a_agent.a2a_agent import DEFAULT_A2A_PORT, A2AAgent
+from agent_env.a2a_agent.store import get_a2a_agent_instance_store
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.providers.sandbox_providers import sandbox_provider
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER, SandboxProvider
@@ -47,3 +48,25 @@ async def test_a_deploy_that_stops_waiting_for_its_card_closes_its_sandbox(monke
         await deploying
 
     assert sandbox.terminated
+
+
+@pytest.mark.asyncio
+async def test_each_deploy_is_recorded_with_a_control_token_of_its_own(monkeypatch, local_stores):
+    class _Provider(SandboxProvider):
+        async def create_sandbox(self, **_):
+            return _Sandbox()
+
+    async def card(self, url):
+        return {"name": "solver"}
+
+    monkeypatch.setattr(sandbox_provider, "build_sandbox_provider", lambda name: _Provider())
+    monkeypatch.setattr(A2AAgent, "_wait_for_agent_card", card)
+    agent = A2AAgent(id="solver", version=1, docker_image_artifact=DockerImageArtifact(id="img", description="d", image_name="img"))
+    env_vars = {"LITELLM_API_KEY": "k", "LITELLM_BASE_URL": "http://llm"}
+
+    first = await agent.deploy(sandbox_type="fake", env_vars=env_vars)
+    second = await agent.deploy(sandbox_type="fake", env_vars=env_vars)
+
+    assert first.control_token and second.control_token and first.control_token != second.control_token
+    assert first.control_headers == {"Authorization": f"Bearer {first.control_token}"}
+    assert get_a2a_agent_instance_store().get(first.instance_id).control_token == first.control_token

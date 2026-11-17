@@ -303,7 +303,7 @@ class Episode:
 
     async def _attach(self, agent: str, deployed: DeployedAgent) -> None:
         """Claim ``agent``'s proxy and hand out the turns it opens."""
-        proxy = ProxyClient(deployed.a2a_url, deployed.a2a_card or {})
+        proxy = ProxyClient(deployed.a2a_url, deployed.a2a_card or {}, deployed.control_headers)
         self._proxies.append(proxy)
         await proxy.claim()
         self._drains.append(asyncio.create_task(self._drain(agent, proxy)))

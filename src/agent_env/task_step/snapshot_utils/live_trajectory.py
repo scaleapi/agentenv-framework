@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator, Awaitable
+from collections.abc import AsyncIterator, Awaitable, Mapping
 from contextlib import asynccontextmanager
 
 from agentenv_protocol.a2a_agent import TrajectoryState
@@ -112,7 +112,8 @@ class LiveTurn:
         self.followers.append(
             asyncio.create_task(
                 follow_trajectory(
-                    self._endpoint, task_id, sink, poll_interval_seconds=self._poll_interval_seconds, stop=self.stop
+                    self._endpoint, task_id, sink, poll_interval_seconds=self._poll_interval_seconds, stop=self.stop,
+                    headers=self._headers,
                 )
             )
         )
@@ -179,8 +180,10 @@ class LiveTurns:
     """A step's turns, followed one after another: a turn sent after another is named in that one's
     ``next.json``, and ``end`` marks the last turn sent as the step's last."""
 
-    def __init__(self, endpoint: str, store: ObjectStore, prefix_key: str, *, poll_interval_seconds: float) -> None:
+    def __init__(self, endpoint: str, store: ObjectStore, prefix_key: str, *, poll_interval_seconds: float,
+                 headers: Mapping[str, str]) -> None:
         self._endpoint = endpoint
+        self._headers = headers
         self._store = store
         self._prefix_key = prefix_key
         self._poll_interval_seconds = poll_interval_seconds

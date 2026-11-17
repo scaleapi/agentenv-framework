@@ -111,7 +111,7 @@ async def test_no_extension_on_card_skips_the_fetch_entirely(monkeypatch):
 
     uri = await verifier._fetch_judge_trajectory(
         judge_a2a_url="http://judge.example", judge_agent_card={}, a2a_server_task_id="t1",
-        sandbox_type="local",
+        sandbox_type="local", headers={},
     )
     assert uri is None
 
@@ -128,7 +128,7 @@ async def test_extension_without_an_endpoint_skips_the_fetch_without_guessing_on
     card = {"capabilities": {"extensions": [{"uri": A2AAgent.EXT_TRAJECTORY, "params": {}}]}}
     uri = await verifier._fetch_judge_trajectory(
         judge_a2a_url="http://judge.example", judge_agent_card=card, a2a_server_task_id="t1",
-        sandbox_type="local",
+        sandbox_type="local", headers={},
     )
     assert uri is None
 
@@ -160,7 +160,7 @@ async def test_inline_trajectory_gets_uploaded_and_its_url_returned(monkeypatch)
         judge_a2a_url="http://judge.example",
         judge_agent_card=_card_with_trajectory_ext(),
         a2a_server_task_id="t1",
-        sandbox_type="local",
+        sandbox_type="local", headers={},
     )
 
     assert uri == "s3://bucket/judge_trajectories/verifier_id=verifier-test/trajectory-t1.json"
@@ -195,7 +195,7 @@ async def test_a_judge_naming_its_own_trajectory_prefix_yields_no_trajectory(mon
         judge_a2a_url="http://judge.example",
         judge_agent_card=_card_with_trajectory_ext(),
         a2a_server_task_id="t1",
-        sandbox_type="local",
+        sandbox_type="local", headers={},
     )
     assert uri is None
 
@@ -226,7 +226,7 @@ async def test_advertised_object_trajectory_writes_to_the_judge_prefix(monkeypat
         judge_a2a_url="http://judge.example",
         judge_agent_card=_card_with_object_trajectory_ext(),
         a2a_server_task_id="t1",
-        sandbox_type="local",
+        sandbox_type="local", headers={},
     )
 
     assert store.write_grants == [(uri, "application/json", DEFAULT_TRAJECTORY_MAX_BYTES)]
@@ -247,7 +247,7 @@ async def test_the_judge_prefix_is_under_the_fixture_prefix(monkeypatch):
         judge_a2a_url="http://judge.example",
         judge_agent_card=_card_with_object_trajectory_ext(),
         a2a_server_task_id="t1",
-        sandbox_type="local",
+        sandbox_type="local", headers={},
     )
 
     assert uri.startswith("s3://bucket/fx/judge_trajectories/verifier_id=verifier-test/trajectory-")
@@ -275,7 +275,7 @@ async def test_each_call_names_its_trajectory_apart_from_the_judge_task_id(monke
     uris = [
         await verifier._fetch_judge_trajectory(
             judge_a2a_url="http://judge.example", judge_agent_card=card, a2a_server_task_id="t1",
-            sandbox_type="local",
+            sandbox_type="local", headers={},
         )
         for _ in range(2)
     ]
@@ -304,7 +304,7 @@ async def test_a_store_without_grants_asks_an_object_capable_judge_inline(monkey
         judge_a2a_url="http://judge.example",
         judge_agent_card=_card_with_object_trajectory_ext(),
         a2a_server_task_id="t1",
-        sandbox_type="local",
+        sandbox_type="local", headers={},
     )
 
     assert sent == [{"task_id": "t1"}]
@@ -328,7 +328,7 @@ async def test_a_grant_that_cannot_be_issued_is_not_retried(monkeypatch):
         judge_a2a_url="http://judge.example",
         judge_agent_card=_card_with_object_trajectory_ext(),
         a2a_server_task_id="t1",
-        sandbox_type="local",
+        sandbox_type="local", headers={},
     )
 
     assert uri is None
@@ -351,7 +351,7 @@ async def test_a_transport_failure_is_retried_then_swallowed_not_raised(monkeypa
         judge_a2a_url="http://judge.example",
         judge_agent_card=_card_with_trajectory_ext(),
         a2a_server_task_id="t1",
-        sandbox_type="local",
+        sandbox_type="local", headers={},
     )
     assert uri is None
     assert attempts == RubricsVerifierTaskStep.DEFAULT_MAX_RETRIES
@@ -382,7 +382,7 @@ async def test_a_transient_failure_is_retried_until_it_succeeds(monkeypatch):
         judge_a2a_url="http://judge.example",
         judge_agent_card=_card_with_trajectory_ext(),
         a2a_server_task_id="t1",
-        sandbox_type="local",
+        sandbox_type="local", headers={},
     )
     assert uri == "s3://bucket/trajectory.json"
     assert attempts == 2
@@ -404,7 +404,7 @@ async def test_invoke_judge_a2a_wires_the_captured_trajectory_onto_the_result(mo
     monkeypatch.setattr(protocol, "poll_a2a_task", fake_poll)
 
     async def fake_fetch(
-        self, *, judge_a2a_url, judge_agent_card, a2a_server_task_id, sandbox_type
+        self, *, judge_a2a_url, judge_agent_card, a2a_server_task_id, sandbox_type, headers
     ):
         assert judge_a2a_url == "http://judge.example"
         assert a2a_server_task_id == "task-1"

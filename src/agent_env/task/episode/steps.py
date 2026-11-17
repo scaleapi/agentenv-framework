@@ -53,7 +53,8 @@ class _EpisodeAgentStep(TaskStep):
             context.deployed_agents.append(deployed)
             if system_prompt := getattr(self.step, "system_prompt", None):
                 config = A2AAgent.negotiate_agent_config(deployed.a2a_card, {"system_prompt": system_prompt})
-                await protocol.post_agent_config(deployed.a2a_url + config.endpoint, config.fields)
+                await protocol.post_agent_config(deployed.a2a_url + config.endpoint, config.fields,
+                                                 headers=deployed.control_headers)
             return context
         await asyncio.to_thread(write_installed, PROXY_AGENT_ID)
         override = {"a2a_agent_id": PROXY_AGENT_ID} if self.step.type == "deploy_agent" else {PROXY_PARAM: PROXY_AGENT_ID}

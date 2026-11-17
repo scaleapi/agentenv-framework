@@ -66,7 +66,8 @@ def raise_for_extension_status(
         raise httpx.HTTPStatusError(message, request=exc.request, response=response) from exc
 
 
-async def post_agent_config(url: str, payload: dict, timeout_seconds: int = 60) -> None:
+async def post_agent_config(url: str, payload: dict, timeout_seconds: int = 60, *,
+                            headers: Mapping[str, str] | None = None) -> None:
     """POST to an agent's /ext/agent-config endpoint with retry on transient 404/connect errors.
 
     `url` should be the full endpoint URL (a2a_url + endpoint path from the agent card).
@@ -77,7 +78,7 @@ async def post_agent_config(url: str, payload: dict, timeout_seconds: int = 60) 
     for attempt in range(1, max_attempts + 1):
         try:
             async with httpx.AsyncClient() as client:
-                resp = await client.post(url, json=payload, timeout=timeout_seconds)
+                resp = await client.post(url, json=payload, headers=headers, timeout=timeout_seconds)
             if resp.status_code == 404:
                 raise httpx.HTTPStatusError(
                     f"agent-config endpoint not available (404) at {url} after {max_attempts} "

@@ -57,7 +57,7 @@ class _Deploy:
         self.agent.close = AsyncMock()
         self.agent.deploy = AsyncMock(return_value=MagicMock(a2a_url=AGENT_URL, agent_card=card, sandbox_type=None))
 
-        async def post(url, fields):
+        async def post(url, fields, headers=None):
             self.posts.append((url, fields))
 
         monkeypatch.setattr(protocol, "post_agent_config", post)
@@ -350,7 +350,7 @@ async def test_a_card_that_won_t_take_the_model_fails_the_step(monkeypatch):
 async def test_a_failed_model_post_closes_the_agent_and_leaves_no_record(monkeypatch):
     deploy = _Deploy(monkeypatch)
 
-    async def refuse(url, fields):
+    async def refuse(url, fields, headers=None):
         if "model" in fields:
             raise RuntimeError("agent-config refused")
 
@@ -393,7 +393,7 @@ async def test_always_on_runs_the_deployed_user_from_its_opening_and_sets_up_not
               user_texts=['{"outcome": "reply", "message": "blue!", "used": "W1"}'])
     await rig.arm()
     ctx = await _rig_context(monkeypatch, rig)
-    async def post(url, fields):
+    async def post(url, fields, headers=None):
         ctx_posts.append((url, fields))
 
     monkeypatch.setattr(ao.protocol, "post_agent_config", post)

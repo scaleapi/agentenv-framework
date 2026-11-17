@@ -708,6 +708,7 @@ class A2AAgentValidator:
                 timeout=TRANSFER_TIMEOUT_SECONDS,
                 response_model=ObjectChangelogApplyResponse,
                 store=store,
+                headers=apply_agent.control_headers,
             )
             check_changelog_applied(answer, call, agent_name=apply_agent_name)
         except Exception as e:  # noqa: BLE001

@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import secrets
 import threading
+from collections.abc import Mapping
 from typing import Any, TypeVar
 
 import httpx
@@ -48,14 +49,14 @@ class ProxyClient:
     the proxy, over a connection a tunnel dropped say, is tried again, except ``record``'s, which isn't idempotent.
     Answers are read as proxy/v1's models, ignoring fields a newer proxy adds: an agent's protocol isn't pinned."""
 
-    def __init__(self, a2a_url: str, card: dict[str, Any]):
+    def __init__(self, a2a_url: str, card: dict[str, Any], headers: Mapping[str, str] | None = None):
         proxy = A2AAgent.find_extension(card, PROXY_V1.uri)
         if proxy is None:
             raise RuntimeError(f"the agent at {a2a_url} isn't a proxy: its card has no {PROXY_V1.uri}")
         self._endpoints = {operation: a2a_url + A2AAgent.operation(proxy, operation)[1]
                            for operation in PROXY_V1.operations}
         self._token = secrets.token_urlsafe(24)
-        self._client = httpx.AsyncClient(timeout=_CALL_TIMEOUT)
+        self._client = httpx.AsyncClient(timeout=_CALL_TIMEOUT, headers=headers)
 
     async def claim(self) -> None:
         await self._call("claim")

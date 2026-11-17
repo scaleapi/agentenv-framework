@@ -144,7 +144,7 @@ async def test_decide_request_body_and_parse():
 
     with patch.object(httpx.AsyncClient, "post", fake_post):
         out = await _step()._decide("http://sk/ext/triggers/decide", 3, "solver said X",
-                                    "conv-1", {"env-a": {"v6-rate": "fired"}})
+                                    "conv-1", {"env-a": {"v6-rate": "fired"}}, headers={})
 
     assert captured["url"] == "http://sk/ext/triggers/decide"
     assert captured["json"] == {"turn": 3, "solver_message": "solver said X",
@@ -159,7 +159,7 @@ async def test_decide_4xx_raises():
 
     with patch.object(httpx.AsyncClient, "post", fake_post):
         with pytest.raises(RuntimeError, match="agent-trigger /decide failed"):
-            await _step()._decide("http://sk/ext/triggers/decide", 1, "", "c", {})
+            await _step()._decide("http://sk/ext/triggers/decide", 1, "", "c", {}, headers={})
 
 
 # ---- _persist_env_trigger_state ---------------------------------------------
