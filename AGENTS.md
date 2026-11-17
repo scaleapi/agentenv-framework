@@ -154,6 +154,10 @@ Shared:
   in-process `Server`.
 - `_tools.py`: turns an env's tools into typed, documented Python methods from their JSON Schema, as transformers'
   `get_json_schema` reads them.
+- `_episodes.py`, what a helper needs without its trainer installed: `typed_arguments` types a tool call's arguments by
+  the tool's schema (a renderer that writes them as untyped text reads digits as numbers), `next_prompt` writes a later
+  turn's prompt as every helper's model reads it (a system prompt the turn changes, as text before it), and `RunGroup`
+  with `TrainingSteps` names the run group a helper files a group's episodes in, `<run>/train|eval/step-<n>`.
 - `_chat.py`, the rows and episode the Miles and slime helpers share:
   - `write_rows` and its `command` write a server's tasks as `<split>.jsonl` rows of chat `messages` and `metadata`
     (the episode's split, index, task id and tools, and the server it plays on with its deadlines and turn cap).
@@ -168,6 +172,14 @@ Per trainer:
 - `trl.py` (`trl` extra): `AgentEnv(url)` over a server `openenv/` makes, with `dataset` (a row per task) and `factory`
   (TRL's `environment_factory`: a generated class per toolset whose methods are the tools, a background `reset` and an
   owned `get_reward`); `AgentEnv.local(bundle)` serves the bundle in process.
+- `tinker.py` (`tinker` extra, installed into tinker-cookbook's environment): `AgentEnvDatasetBuilder` is `rl.train`'s
+  dataset builder, each rollout an episode played in process on the Episode API rather than through a server, since
+  Tinker samples itself. The turn's tools are rendered by the cookbook's renderer, each sampled message is recorded before
+  its calls run, a reply without a call ends the turn, and the reward follows `openenv/reward.py`. A later turn's new
+  system prompt comes before its prompt (`next_prompt`), a turn that offers other tools than the first fails its
+  rollout, and a task that gives the agent skills is left out. A rollout the cookbook cuts
+  is scored as it is cut, which frees its slot under `max_concurrent_episodes`; a failed episode raises for the
+  cookbook's retry; each group is filed in the run index by `RunGroup`.
 - `harness.py` (`harness` extra): trains a bundle's own agents with TRL's harness rollouts (`HarnessRolloutWorker` with
   `harness_adapter=None`). `AgentEnvSessionFactory` runs each rollout's task as `agent-env run` does: the solver, the
   agent a step prompts, reaches the trainer's vLLM through OpenEnv's capture proxy, which records the tokens TRL trains
