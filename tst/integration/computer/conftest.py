@@ -180,7 +180,12 @@ def _composed(root: Path, bundle, env_id: str | None = None):
 
 
 def docker(*args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["docker", *args], check=True, capture_output=True)
+    """``docker`` with ``args``; a failure carries docker's own error, which the exception alone doesn't show."""
+    try:
+        return subprocess.run(["docker", *args], check=True, capture_output=True)
+    except subprocess.CalledProcessError as e:
+        e.add_note(f"docker's stderr: {e.stderr.decode(errors='replace')[-2000:]}")
+        raise
 
 
 @pytest.fixture
