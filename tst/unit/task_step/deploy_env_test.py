@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from agent_env.env.env import DeployedGatewayEnv, Env
+from agent_env.store.base import NotFoundError
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 
@@ -572,3 +573,65 @@ async def test_execute_refuses_child_envs_for_an_env_whose_deploy_takes_none():
     with patch("agent_env.env.env.Env") as Env, pytest.raises(ValueError, match="have no child envs"):
         Env.get.return_value = env
         await step.execute(TaskStepContext())
+
+
+def _step_params_context(step_params):
+    return TaskStepContext(metadata={"user_overrides": {"step_params": step_params}})
+
+
+@pytest.mark.asyncio
+async def test_execute_deploys_the_env_version_its_step_params_pin():
+    step = DeployEnvTaskStep(id="t-1.deploy_env", version=None, env_id="art-1")
+    with patch("agent_env.env.env.Env") as Env:
+        Env.get.return_value = _fake_env(_deployed_env(None))
+        await step.execute(_step_params_context({"t-1.deploy_env": {"env_version": 3}}))
+    Env.get.assert_called_once_with("art-1", 3)
+
+
+@pytest.mark.asyncio
+async def test_a_step_params_env_version_wins_over_the_stored_one_and_leaves_the_step_as_stored():
+    step = DeployEnvTaskStep(id="t-1.deploy_env", version=None, env_id="art-1", env_version=5)
+    with patch("agent_env.env.env.Env") as Env:
+        Env.get.return_value = _fake_env(_deployed_env(None))
+        await step.execute(_step_params_context({"t-1.deploy_env": {"env_version": 2}}))
+    Env.get.assert_called_once_with("art-1", 2)
+    assert step.env_version == 5
+    assert step.to_dict()["env_version"] == 5
+
+
+@pytest.mark.asyncio
+async def test_a_null_step_params_env_version_deploys_the_latest():
+    step = DeployEnvTaskStep(id="t-1.deploy_env", version=None, env_id="art-1", env_version=2)
+    with patch("agent_env.env.env.Env") as Env:
+        Env.get.return_value = _fake_env(_deployed_env(None))
+        await step.execute(_step_params_context({"t-1.deploy_env": {"env_version": None}}))
+    Env.get.assert_called_once_with("art-1", None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("step_params", [None, {}, {"other": {"env_version": 3}}, {"t-1.deploy_env": {"ttl_seconds": 60}}])
+async def test_execute_deploys_the_stored_env_version_without_a_step_params_one(step_params):
+    step = DeployEnvTaskStep(id="t-1.deploy_env", version=None, env_id="art-1", env_version=2)
+    context = TaskStepContext() if step_params is None else _step_params_context(step_params)
+    with patch("agent_env.env.env.Env") as Env:
+        Env.get.return_value = _fake_env(_deployed_env(None))
+        await step.execute(context)
+    Env.get.assert_called_once_with("art-1", 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("version", ["3", 0, -1, 2.0, True])
+async def test_execute_refuses_a_step_params_env_version_that_is_no_version_before_it_loads_the_env(version):
+    step = DeployEnvTaskStep(id="t-1.deploy_env", version=None, env_id="art-1", env_version=2)
+    with patch("agent_env.env.env.Env") as Env, pytest.raises(ValueError, match="step_overrides 'env_version'"):
+        await step.execute(_step_params_context({"t-1.deploy_env": {"env_version": version}}))
+    Env.get.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_step_params_env_version_the_store_lacks_fails_the_deploy():
+    step = DeployEnvTaskStep(id="t-1.deploy_env", version=None, env_id="art-1", env_version=2)
+    with patch("agent_env.env.env.Env") as Env, pytest.raises(NotFoundError):
+        Env.get.side_effect = NotFoundError("Env art-1 v99 not found")
+        await step.execute(_step_params_context({"t-1.deploy_env": {"env_version": 99}}))
+    Env.get.assert_called_once_with("art-1", 99)

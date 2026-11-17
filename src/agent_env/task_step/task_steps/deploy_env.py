@@ -77,6 +77,18 @@ class DeployEnvTaskStep(TaskStep):
         return (user_overrides.get("env_state_type") or self.env_state_type,
                 user_overrides.get("env_state_instance_id") or self.env_state_instance_id)
 
+    def run_env_version(self, context: TaskStepContext) -> Optional[int]:
+        """The env version a run with ``context`` deploys: this step's ``step_params`` ``env_version`` over its own,
+        None for the latest."""
+        overrides = self.step_param_overrides(context)
+        if "env_version" not in overrides:
+            return self.env_version
+        version = overrides["env_version"]
+        if version is not None and (isinstance(version, bool) or not isinstance(version, int) or version < 1):
+            raise ValueError(f"deploy_env '{self.id}': step_overrides 'env_version' must be a positive integer or null, "
+                             f"got {version!r}")
+        return version
+
     def to_dict(self) -> dict:
         base = super().to_dict()
         base["env_id"] = self.env_id
@@ -157,7 +169,7 @@ class DeployEnvTaskStep(TaskStep):
         if existing is not None:
             raise StepContextError(f"Env '{self.env_id}' is already deployed")
 
-        env = Env.get(self.env_id, self.env_version)
+        env = Env.get(self.env_id, self.run_env_version(context))
         user_overrides = context.metadata.get("user_overrides", {})
         resolved_sandbox_type = user_overrides.get("env_sandbox") or self.sandbox_type
         resolved_env_state_type, resolved_env_state_instance_id = self.run_state(user_overrides)
