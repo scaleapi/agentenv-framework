@@ -97,9 +97,6 @@ class TaskStep(ABC):
     # Each field of a scope other than the task's, by its path in the stored step; any other field is task-scoped. A
     # subclass merges its parent's. Such a field is optional, so a step written out without it still builds and runs.
     field_scopes: ClassVar[Mapping[str, FieldScope]] = {"metadata.attribution": FieldScope.USER}
-    # Whether the score a step records under its ``verifier_id`` can be its task's reward. A step whose score checks the
-    # run rather than grading the agent sets False: ``reward_of`` never picks it, and refuses it as ``reward=``.
-    can_be_reward: ClassVar[bool] = True
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)

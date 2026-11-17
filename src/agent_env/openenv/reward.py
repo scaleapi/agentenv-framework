@@ -9,8 +9,9 @@ from agent_env.task import Task
 
 def reward_of(task: Task, reward: str | Callable[[dict[str, float]], float] | None
                ) -> tuple[Callable[[dict[str, float]], float | None] | None, str | None]:
-    """``task``'s reward as a function of its scores, or why ``reward`` can't make one. Only a step that records a score
-    and ``can_be_reward`` is a candidate; one that can't (its score checks the run) is never picked."""
+    """``task``'s reward as a function of its scores, or why ``reward`` can't make one. A candidate is a step that
+    records a score (it has a ``verifier_id``) unless its class sets ``can_be_reward = False``: its score checks the
+    run rather than grading the agent, so it is never picked, and is refused as ``reward=``."""
     if callable(reward):
         return reward, None
     recording = [step for step in task.steps if getattr(step, "verifier_id", None)]
