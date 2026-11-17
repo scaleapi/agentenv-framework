@@ -362,6 +362,33 @@ def test_the_workspace_archive_stores_bytes_as_they_are_in_a_gzip_stream_older_l
         assert tar.extractfile("notes.txt").read() == text
 
 
+@pytest.mark.parametrize("grant_bytes", [1 << 20, 200_000], ids=["fits-uncompressed", "fits-only-compressed"])
+def test_a_saved_workspace_fits_its_upload_grant(monkeypatch, tmp_path, agent, grant_bytes):
+    workspace, state = _snapshot_roots(monkeypatch, tmp_path)
+    text = b"the same line of source code\n" * 20_000
+    (workspace / "notes.txt").write_bytes(text)
+    session_dir = state / "projects" / "-app"
+    (session_dir / "session-1.jsonl").write_text(json.dumps({"type": "user", "sessionId": "session-1"}) + "\n")
+    monkeypatch.setattr(claude_bridge, "SESSION_JSONL_DIR", session_dir)
+    agent.set_session_ref_for_context("ctx-1", "session-1")
+    uploaded: dict[str, bytes] = {}
+
+    async def _upload(target, source):
+        body = source.read_bytes()
+        assert len(body) <= target.max_bytes
+        uploaded[target.write.url] = body
+        return Uploaded(size_bytes=len(body), sha256=hashlib.sha256(body).hexdigest())
+
+    monkeypatch.setattr(a2a_server, "upload", _upload)
+    request = a2a_server.ObjectSnapshotSaveRequest.model_validate({"context_id": "ctx-1", "objects": {
+        "trajectory": write_grant("snap/trajectory"), "workspace": write_grant("snap/workspace", max_bytes=grant_bytes)}})
+
+    asyncio.run(agent.save_snapshot(request))
+
+    with tarfile.open(fileobj=io.BytesIO(uploaded[request.objects.workspace.write.url]), mode="r:gz") as tar:
+        assert tar.extractfile("notes.txt").read() == text
+
+
 def _recompressed(archive: Path, level: int) -> Path:
     with tarfile.open(archive, mode="r:gz") as source:
         members = [(member, source.extractfile(member).read() if member.isfile() else None)

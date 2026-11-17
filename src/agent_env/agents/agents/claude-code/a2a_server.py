@@ -216,7 +216,7 @@ def _add_workspace_entry(tar: tarfile.TarFile, path: Path, arcname: str, *, stag
     return True
 
 
-def _write_workspace_archive(archive_path: Path, *, stage_sources: bool = False) -> tuple[int, int]:
+def _write_workspace_archive(archive_path: Path, *, compresslevel: int, stage_sources: bool = False) -> tuple[int, int]:
     def add_tree(tar: tarfile.TarFile, source_root: Path, *, archive_prefix: str = "",
                  excluded_top_level: frozenset[str] = frozenset()) -> int:
         count = 0
@@ -241,9 +241,7 @@ def _write_workspace_archive(archive_path: Path, *, stage_sources: bool = False)
                     count += 1
         return count
 
-    # Level 0 stores the bytes in a gzip stream: deflate on one core is the save's bottleneck and gains nothing on
-    # media, and the stream stays one that every agent's loader opens.
-    with tarfile.open(archive_path, mode="w:gz", compresslevel=0, dereference=False) as tar:
+    with tarfile.open(archive_path, mode="w:gz", compresslevel=compresslevel, dereference=False) as tar:
         # The CLI's state goes in as `.claude` from wherever it lives, so a `/app/.claude` isn't added twice.
         file_count = add_tree(tar, WORKSPACE_DIR, excluded_top_level=frozenset({".claude"}))
         if CLAUDE_STATE_DIR.is_dir():
@@ -251,17 +249,27 @@ def _write_workspace_archive(archive_path: Path, *, stage_sources: bool = False)
     return file_count, archive_path.stat().st_size
 
 
-def _build_workspace_archive(archive_path: Path) -> tuple[int, int]:
-    """``/app`` and the CLI's state as a tar in an uncompressed gzip stream on disk, out of the agent's heap; its file
-    count and size. A file that changes while it's read rebuilds the archive with each file staged first, so it can be
-    skipped. Symlinked directories aren't followed."""
+def _build_workspace_archive(archive_path: Path, max_bytes: int | None = None) -> tuple[int, int]:
+    """``/app`` and the CLI's state as a gzip tar on disk, out of the agent's heap; its file count and size. The tar
+    goes in uncompressed (level 0), since deflate on one core is the save's bottleneck and gains nothing on media; an
+    archive over ``max_bytes`` is rebuilt compressed, so a workspace that fit its upload grant compressed still fits.
+    A file that changes while it's read rebuilds the archive with each file staged first, so it can be skipped.
+    Symlinked directories aren't followed."""
     if not WORKSPACE_DIR.is_dir():
         raise FileNotFoundError(f"workspace directory does not exist: {WORKSPACE_DIR}")
-    try:
-        return _write_workspace_archive(archive_path)
-    except OSError:
-        logger.warning("Workspace changed while archiving; rebuilding with staged files")
-        return _write_workspace_archive(archive_path, stage_sources=True)
+
+    def write(compresslevel: int) -> tuple[int, int]:
+        try:
+            return _write_workspace_archive(archive_path, compresslevel=compresslevel)
+        except OSError:
+            logger.warning("Workspace changed while archiving; rebuilding with staged files")
+            return _write_workspace_archive(archive_path, compresslevel=compresslevel, stage_sources=True)
+
+    file_count, size = write(0)
+    if max_bytes is not None and size > max_bytes:
+        logger.info(f"Workspace archive is {size} bytes uncompressed, over the {max_bytes}-byte grant; compressing")
+        file_count, size = write(9)
+    return file_count, size
 
 
 def _read_complete_session_jsonl(path: Path) -> bytes:
@@ -586,11 +594,13 @@ class ClaudeCodeAgent(DurableSessionRefs, AgentEnvAgent):
         os.close(jsonl_fd)
         archive_path, snapshot_jsonl_path = Path(raw_archive_path), Path(raw_jsonl_path)
         try:
-            file_count, bytes_written = await asyncio.to_thread(_build_workspace_archive, archive_path)
+            workspace = request.objects.workspace
+            file_count, bytes_written = await asyncio.to_thread(
+                _build_workspace_archive, archive_path, workspace.max_bytes if workspace is not None else None)
             await asyncio.to_thread(snapshot_jsonl_path.write_bytes, jsonl_bytes)
             uploaded = {"trajectory": _answer(await upload(request.objects.trajectory, snapshot_jsonl_path))}
-            if request.objects.workspace is not None:
-                uploaded["workspace"] = _answer(await upload(request.objects.workspace, archive_path))
+            if workspace is not None:
+                uploaded["workspace"] = _answer(await upload(workspace, archive_path))
         except FileNotFoundError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         finally:
