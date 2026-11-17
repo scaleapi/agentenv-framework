@@ -74,6 +74,9 @@ CONTROL_TOKEN_ENV = "AGENTENV_CONTROL_TOKEN"
 CLOCK_FOLLOWERS_ENV = "CLOCK_FOLLOWER_TOKENS"
 # The children the gateway passes its control token on to, comma-separated: a multi env's computers, which boot with it.
 CONTROL_TOKEN_CHILDREN_ENV = "CONTROL_TOKEN_CHILDREN"
+# The gateway's computers, comma-separated: a multi env's, each a child on a sandbox of its own, whose input calls set
+# who drives it, the role its browser's requests take.
+COMPUTERS_ENV = "COMPUTERS"
 # The route a clock follower long-polls, with its read token.
 CLOCK_WATCH_PATH = "/clock/watch"
 # How long /clock/watch holds a watch naming the current version before answering it unchanged; a follower's request
@@ -162,6 +165,8 @@ GATEWAY_TRAJECTORY_FILE = os.environ.get(
 )
 
 AGENT_ENV_ROLE_HEADER = "AgentEnv-Role"
+# Sent by a computer's site proxy: the computer whose browser made the request, which takes the role driving it now.
+AGENT_ENV_COMPUTER_HEADER = "AgentEnv-Computer"
 # Sent by a computer's site proxy, which serves a website's route at the root of the site's own name.
 AGENT_ENV_SITE_ROOT_HEADER = "AgentEnv-Site-Root"
 GATEWAY_PROVIDER_HEADERS_ENV = "AGENTENV_PROVIDER_REQUEST_HEADERS"

@@ -58,6 +58,10 @@ HOP_BY_HOP = frozenset({"connection", "keep-alive", "proxy-connection", "proxy-a
 SITE_ROOT_HEADER = "AgentEnv-Site-Root"
 FORWARDED = frozenset({"x-forwarded-host", "x-forwarded-proto", "x-forwarded-for", "x-forwarded-port",
                        "x-forwarded-prefix", "forwarded", SITE_ROOT_HEADER.lower()})
+#: Who a request is the gateway's to say: the computer it came from goes upstream from the config alone, and no page
+#: names a role, so its request takes the role driving the computer.
+ROLE_HEADER, COMPUTER_HEADER = "AgentEnv-Role", "AgentEnv-Computer"
+AGENTENV_IDENTITY = frozenset({ROLE_HEADER.lower(), COMPUTER_HEADER.lower()})
 RESPONSE_DROP = frozenset({"connection", "keep-alive", "proxy-connection", "alt-svc"})
 UPSTREAM_HEADERS_FILE = "upstream_headers.json"
 HEAD_LIMIT = 1 << 20
@@ -442,7 +446,8 @@ def upstream_request(method: str, target: str, headers: list[tuple[str, str]], s
         parts = urlsplit(target)
         target = urlunsplit(("", "", parts.path or "/", parts.query, ""))
     provided = {key.lower() for key in site.upstream_headers}
-    kept = [(key, value) for key, value in headers if key.lower() not in HOP_BY_HOP | FORWARDED | provided]
+    kept = [(key, value) for key, value in headers
+            if key.lower() not in HOP_BY_HOP | FORWARDED | AGENTENV_IDENTITY | provided]
     kept += [("Host", site.netloc), ("X-Forwarded-Host", host), ("X-Forwarded-Proto", scheme),
              ("X-Forwarded-For", peer), (SITE_ROOT_HEADER, f"{scheme}://{host}"), *site.upstream_headers.items()]
     kept += [("Connection", "Upgrade"), ("Upgrade", upgrade)] if upgrade else [("Connection", "close")]

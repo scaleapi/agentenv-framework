@@ -44,6 +44,7 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 from agent_env.env.env import Env, EnvCapabilityUnsupported, gateway_url_of
 from agent_env.env.envs.computer.utils.site_proxy import is_local, matches
+from agent_env.env.gateway.constants import AGENT_ENV_COMPUTER_HEADER
 from agent_env.providers.sandbox_providers.local_docker.provider import LOCAL_TRUST_ENV
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, VmSandbox
 from agent_env.store.base import NotFoundError
@@ -457,7 +458,9 @@ async def route(sandbox: Sandbox, sites: list[Site], *, user: Optional[str], net
     from agent_env.providers.sandbox_providers.sandbox_provider import sandbox_request_headers_for_url
 
     issued = issue(table.routes, label=label)
-    upstream_headers = {r.site: sandbox_request_headers_for_url(r.url) for r in table.routes}
+    # Each request names the computer it came from, so the gateway gives it the role driving that computer now.
+    upstream_headers = {r.site: {**sandbox_request_headers_for_url(r.url), AGENT_ENV_COMPUTER_HEADER: label}
+                        for r in table.routes}
     channel = RootChannel(sandbox)
     await channel.private_folder(FOLDER)
     await channel.write(PROXY, _PROXY_SOURCE.read_text())

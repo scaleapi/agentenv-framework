@@ -31,7 +31,8 @@ from websockets.exceptions import InvalidStatus
 from agent_env.env.envs.computer.utils import site_proxy, sites
 from agent_env.env.envs.computer.utils.params import Site as SiteParams
 from agent_env.env.envs.computer.utils.site_proxy import Config, Site, SiteProxy
-from agent_env.env.gateway.constants import AGENT_ENV_SITE_ROOT_HEADER
+from agent_env.env.gateway.constants import (AGENT_ENV_COMPUTER_HEADER, AGENT_ENV_ROLE_HEADER,
+                                          AGENT_ENV_SITE_ROOT_HEADER)
 from agent_env.env.gateway.gateway import Gateway
 from tst.unit.env.envs.test_computer_stand_in_proxy import _ask, _logged
 from tst.unit.env.envs.test_computer_stand_in_proxy import _serving as _stand_in_serving
@@ -178,6 +179,22 @@ async def test_the_providers_headers_go_upstream_in_place_of_the_browsers_and_ne
     ((_, sent, _),) = upstream.requests
     assert sent["cf-access-client-secret"] == "s3cret"
     assert "s3cret" not in json.dumps(headers) and body == b"hello"
+
+
+@pytest.mark.asyncio
+async def test_a_request_names_its_computer_and_no_page_names_a_role_or_another_computer(tmp_path):
+    async with Upstream() as upstream:
+        config, issued = _config(tmp_path, upstream.port)
+        config.sites[0].upstream_headers = {"AgentEnv-Computer": "desktop"}
+        async with _proxy(config) as port:
+            _, _, body, conn = await _exchange(
+                port, b"GET / HTTP/1.1\r\nHost: notes.test\r\nAgentEnv-Role: admin\r\nAgentEnv-Computer: laptop\r\n\r\n",
+                server_hostname="notes.test", cadata=issued.ca_pem)
+            conn[1].close()
+
+    ((_, sent, _),) = upstream.requests
+    assert sent["agentenv-computer"] == "desktop" and "agentenv-role" not in sent and body == b"hello"
+    assert (site_proxy.ROLE_HEADER, site_proxy.COMPUTER_HEADER) == (AGENT_ENV_ROLE_HEADER, AGENT_ENV_COMPUTER_HEADER)
 
 
 async def _serve(app) -> tuple[uvicorn.Server, int]:
