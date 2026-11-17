@@ -302,3 +302,20 @@ async def test_tearing_down_one_of_two_look_alike_agents_retires_its_own_followe
     assert await agent_clock.retire_followers(context, ["team.solver"]) == ["agent-team.solver"]
     assert [json.loads(r.content) for r in sent] == [{"name": "agent-team.solver"}]
     assert agent_clock.followed_env(context, _agent("team_solver")) == "e1"
+
+
+@pytest.mark.asyncio
+async def test_a_later_sync_leaves_an_agent_teardown_took_down_alone(monkeypatch):
+    from agent_env.task.teardown import TORN_DOWN_KEY
+
+    sent = _mock_http(monkeypatch, state={"env_get_time_url": CLOCK_URL})
+    _no_servers(monkeypatch)
+    gone, kept = _agent("gone"), _agent("kept")
+    gone.sandbox_id, kept.sandbox_id = "sb-gone", "sb-kept"
+    context = await _context(gone, kept)
+    context.metadata[TORN_DOWN_KEY] = ["sb-gone"]
+
+    await _step(require_agent_clock=True).execute(context)
+
+    assert [a["agent"] for a in context.metadata["clock_configurations"][0]["agents"]] == ["kept"]
+    assert not any("agent-gone" in (r.content or b"").decode() for r in sent)
