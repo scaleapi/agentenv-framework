@@ -104,22 +104,37 @@ async def test_a_gateway_from_before_followers_after_start_is_reported_and_the_a
 
 
 @pytest.mark.asyncio
-async def test_an_agent_that_serves_sync_time_and_fails_fails_the_step_saying_why(monkeypatch):
+@pytest.mark.parametrize("fails, why", [
+    ("404", "\\(HTTP 404\\): .*isn't following"),
+    ("500", "\\(HTTP 500\\): .*boom"),
+    ("unreachable", "\\(ConnectError\\): .*refused"),
+])
+async def test_an_agent_that_serves_sync_time_and_fails_fails_the_step_and_its_follower_is_retired(monkeypatch, fails,
+                                                                                                   why):
     import httpx
 
-    real = httpx.AsyncClient
+    real, sent = httpx.AsyncClient, []
 
     def handle(request: httpx.Request) -> httpx.Response:
+        sent.append((request.method, request.url.path))
         if request.url.path == "/ext/clock/sync-time":
-            return httpx.Response(404, json={"detail": "target_unavailable: this agent's clock follower isn't following"})
+            if fails == "unreachable":
+                raise httpx.ConnectError("connection refused", request=request)
+            return httpx.Response(int(fails), json={"detail": "target_unavailable: this agent's clock follower isn't "
+                                                              "following" if fails == "404" else "boom"})
         return httpx.Response(200, json={"env_get_time_url": CLOCK_URL} if request.url.path.endswith("/state") else {})
 
     monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real(transport=httpx.MockTransport(handle)))
     _no_servers(monkeypatch)
+    context = await _context(_agent())
 
-    with pytest.raises(RuntimeError, match="agent 'solver' doesn't follow the clock of env 'e1' \\(HTTP 404\\): .*"
-                                           "isn't following"):
-        await _step().execute(await _context(_agent()))
+    with pytest.raises(RuntimeError, match=f"agent 'solver' doesn't follow the clock of env 'e1' {why}"):
+        await _step().execute(context)
+
+    # Declared, then retired: the gateway isn't left waiting for a follower that never watches.
+    assert [(method, "/" + "/".join(path.split("/")[-2:])) for method, path in sent[-3:]] == [
+        ("PUT", "/clock/followers"), ("POST", "/clock/sync-time"), ("DELETE", "/clock/followers")]
+    assert agent_clock.followed_env(context, _agent()) is None
 
 
 @pytest.mark.asyncio
