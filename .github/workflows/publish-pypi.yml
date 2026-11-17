@@ -408,8 +408,10 @@ jobs:
           python3 .github/scripts/infra_build.py retry "$RUNNER_TEMP/venv/bin/python" -m pip install --quiet \
             --index-url https://pypi.org/simple dist/agentenv_framework-*.whl \
             "agentenv-framework-protocol[app]==${protocol}"
+      # The folders first, as Docker makes a missing one it mounts root's, which the compose then can't write in.
       - name: Start the local registry, its storage in a folder handed on
         run: |
+          mkdir -p "$RUNNER_TEMP/computers/registry" "$RUNNER_TEMP/computers/composed"
           docker run --detach --name registry --publish 5000:5000 \
             --volume "$RUNNER_TEMP/computers/registry:/var/lib/registry" mirror.gcr.io/library/registry:2
           timeout 30 sh -c 'until curl -sf http://localhost:5000/v2/ >/dev/null; do sleep 1; done'

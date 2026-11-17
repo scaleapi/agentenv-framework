@@ -229,6 +229,32 @@ async def test_the_video_follows_an_agents_tab_a_popup_it_opens_and_goes_back_wh
 
 
 @pytest.mark.asyncio
+async def test_a_click_that_opens_a_popup_leaves_the_video_on_it_though_the_click_is_answered_after(browser):
+    """The browser opens the popup a click makes before it answers the click, which the log hears of then; an action
+    on the opener begun after it opened takes the video back."""
+    pipe, control, contexts, network, recordings, uploads = browser
+    pipe.open("T3", YELLOW)
+    pipe.focused = "T3"
+    started = await recordings.start("run:a", _grant(), network=False)
+    await asyncio.sleep(0.3)
+    click = recordings.log.begin({"via": "cdp", "who": "ada", "method": "Input.dispatchMouseEvent", "acts": True,
+                                  "tab": "T3"})
+    pipe.open("T4", RED, opener="T3")
+    await asyncio.sleep(0.1)
+    recordings.log.finish(click, ok=True)
+    await asyncio.sleep(0.3)
+    followed_in_the_popup = [seen["tab"] for seen in recordings.every()[0].stream.followed]
+    _acted(recordings.log, "T3")
+    await asyncio.sleep(0.3)
+    manifest = BrowserRecordingManifest.model_validate(await recordings.end(started["recording_id"]))
+
+    assert followed_in_the_popup == ["T3", "T4"]
+    assert [seen.tab for seen in manifest.video.followed] == ["T3", "T4", "T3"]
+    colors = uploads.colors(f"{ROOT}/{manifest.recording_id}")
+    assert colors[0] == "yellow" and "red" in colors and colors[-1] == "yellow", colors
+
+
+@pytest.mark.asyncio
 async def test_a_clients_setup_on_every_page_it_attaches_to_doesnt_move_the_video_and_its_input_does(browser):
     pipe, control, contexts, network, recordings, uploads = browser
     pipe.open("T0", GREEN)

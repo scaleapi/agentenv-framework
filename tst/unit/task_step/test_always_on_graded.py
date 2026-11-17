@@ -52,9 +52,9 @@ async def test_the_graded_response_is_every_message_user_text_in_order_with_its_
     ctx = await rig.run(rig.step())
 
     [response] = ctx.prompt_responses
-    assert response.response == ("[Mon Nov 9, 2:00 PM UTC] blue house or green?\n\n"
-                                 "[Mon Nov 9, 2:00 PM UTC] flights: two options\n\n"
-                                 "[Mon Nov 9, 2:00 PM UTC] booked the blue one")
+    assert response.response == ("[Mon Nov 9, 9:00 AM EST] blue house or green?\n\n"
+                                 "[Mon Nov 9, 9:00 AM EST] flights: two options\n\n"
+                                 "[Mon Nov 9, 9:00 AM EST] booked the blue one")
     assert "PRIVATE" not in response.response and response.error_type is None
     verifier = AgentPromptResponseVerifierTaskStep("check", None, prompt_id="ask", verifier_id="words", criteria=[
         {"type": "response_contains", "needles": ["blue house or green?", "booked the blue one"]}])
@@ -78,10 +78,10 @@ async def test_the_conversation_is_what_she_saw_her_messages_and_the_agent_s_mes
 
     turns = await _turns(ctx)
     assert turns[:3] == [
-        ("[Mon Nov 9, 2:00 PM UTC] Linda: sort the cdmx weekend", "[Mon Nov 9, 2:00 PM UTC] blue house or green?"),
-        ("[Mon Nov 9, 2:00 PM UTC] Linda: blue", "[Mon Nov 9, 2:00 PM UTC] booked it"),
-        ("[Tue Nov 10, 3:00 PM UTC] Linda: any news from Sam?",
-         "[Tue Nov 10, 3:00 PM UTC] Sam says she suspects nothing"),
+        ("[Mon Nov 9, 9:00 AM EST] Linda: sort the cdmx weekend", "[Mon Nov 9, 9:00 AM EST] blue house or green?"),
+        ("[Mon Nov 9, 9:00 AM EST] Linda: blue", "[Mon Nov 9, 9:00 AM EST] booked it"),
+        ("[Tue Nov 10, 10:00 AM EST] Linda: any news from Sam?",
+         "[Tue Nov 10, 10:00 AM EST] Sam says she suspects nothing"),
     ]
     seen = repr(rig.chat(ctx))
     for never_shown in ("PRIVATE", "Sam: shh", "noor 30", ao.WAKE_REMINDER_TEXT, ao.MESSAGE_RULES,
@@ -98,7 +98,7 @@ async def test_messages_sent_on_several_wakes_before_she_answers_are_one_reply_i
     ctx = await rig.run(rig.step())
 
     [first, *_] = await _turns(ctx)
-    assert first[1] == "[Mon Nov 9, 2:00 PM UTC] on it\n[Tue Nov 10, 2:00 PM UTC] Sam is in"
+    assert first[1] == "[Mon Nov 9, 9:00 AM EST] on it\n[Tue Nov 10, 9:00 AM EST] Sam is in"
     assert [p["metadata"]["agentenv"]["wake"] for p in rig.chat(ctx)[1]["parts"]] == [1, 2]
 
 
@@ -112,9 +112,9 @@ async def test_her_done_reaches_the_conversation(monkeypatch, tmp_path):
     ctx = await rig.run(rig.step())
 
     turns = await _turns(ctx)
-    assert turns[1] == ("[Mon Nov 9, 2:00 PM UTC] Linda: thanks!", "[Mon Nov 9, 2:00 PM UTC] glad to help!")
+    assert turns[1] == ("[Mon Nov 9, 9:00 AM EST] Linda: thanks!", "[Mon Nov 9, 9:00 AM EST] glad to help!")
     assert rig.chat(ctx)[2]["parts"][0]["metadata"]["agentenv"]["done"] is True
-    assert turns[-1][0].startswith("[End of run · Mon Nov 9, 2:00 PM UTC] Linda signed off.")
+    assert turns[-1][0].startswith("[End of run · Mon Nov 9, 9:00 AM EST] Linda signed off.")
 
 
 @pytest.mark.asyncio
@@ -142,12 +142,12 @@ async def test_her_reply_to_the_wrap_up_and_the_end_marker_close_the_conversatio
     ctx = await rig.run(rig.step(end_time="P2D", final="send me the rundown"))
 
     turns = await _turns(ctx)
-    assert turns[-2] == ("[Wed Nov 11, 2:00 PM UTC] Linda: send me the rundown",
-                         "[Wed Nov 11, 2:00 PM UTC] RESULT: all booked")
+    assert turns[-2] == ("[Wed Nov 11, 9:00 AM EST] Linda: send me the rundown",
+                         "[Wed Nov 11, 9:00 AM EST] RESULT: all booked")
     last = rig.chat(ctx)[-1]
     assert last["texts"] == [
-        "[Wed Nov 11, 2:00 PM UTC] Linda: you're the best (sent after the assistant's last turn; it never saw this)",
-        "[End of run · Wed Nov 11, 2:00 PM UTC] The run reached its end time. (A note from the run, not a message "
+        "[Wed Nov 11, 9:00 AM EST] Linda: you're the best (sent after the assistant's last turn; it never saw this)",
+        "[End of run · Wed Nov 11, 9:00 AM EST] The run reached its end time. (A note from the run, not a message "
         "from Linda.)"]
     assert last["parts"][-1]["metadata"]["agentenv"] == {"source": "end_marker", "end_reason": "end_time",
                                                          "at": "2026-11-11T14:00:00Z"}
@@ -164,7 +164,7 @@ async def test_a_run_cut_off_by_its_wake_cap_says_so_in_the_conversation(monkeyp
     ctx = await rig.run(rig.step(max_wakes=2))
 
     last = rig.chat(ctx)[-1]
-    assert last["texts"][-1].startswith("[End of run · Mon Nov 9, 2:00 PM UTC] The run was cut off at its cap of 2 "
+    assert last["texts"][-1].startswith("[End of run · Mon Nov 9, 9:00 AM EST] The run was cut off at its cap of 2 "
                                         "wakes.")
     assert "Linda: ok (sent after the assistant's last turn" in last["texts"][0]
 
@@ -183,7 +183,7 @@ async def test_messages_queued_before_the_run_are_not_the_run_s(monkeypatch, tmp
     ctx = await rig.run(rig.step())
 
     [response] = ctx.prompt_responses
-    assert response.response == "[Mon Nov 9, 2:00 PM UTC] on it"
+    assert response.response == "[Mon Nov 9, 9:00 AM EST] on it"
     assert [m["text"] for m in rig.reads[0]["assistant_messages"]] == ["on it"]
     assert [(m["from"], m["text"]) for m in chat.state()["pending"]] == [("other", "from another assistant")]
     [before] = rig.events(ctx, "user_chat_before_run")

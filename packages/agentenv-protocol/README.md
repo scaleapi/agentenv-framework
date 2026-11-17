@@ -1204,7 +1204,8 @@ are the profile's template. The base class adds:
   - **a video** of the tab its context's agent is on, at `fps` (10 by default, 15 at most), encoded as
     `computer-recording/v1`'s is and uploaded a segment at a time under `<recording_id>/video/`. It follows the tab an
     agent last acted on in that context (CDP commands and MCP calls, not agentenv's own), a tab that one opens as
-    soon as it opens, and once it closes the tab followed before it, else the context's newest; it's blank while the
+    soon as it opens, which an action begun on the opener before then, as the click that opened it, doesn't take it
+    back from, and once it closes the tab followed before it, else the context's newest; it's blank while the
     context has no tab. The browser's own connection screencasts that tab, and captures it instead while it sends no
     frame, as a tab behind another in its window does; `video.followed` says which tab showed when, and how.
   - **its log**: at the end, the lines of its context since its start, actions and tab events on its tabs and a

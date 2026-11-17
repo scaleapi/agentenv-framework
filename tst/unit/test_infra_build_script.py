@@ -312,7 +312,8 @@ def _composed(folder: Path, changes: dict | None = None, arches=("amd64", "arm64
     return folder
 
 
-def _computer_registry(served: dict[str, str], created: list, children: set[str] | None = None):
+def _computer_registry(served: dict[str, str], created: list, children: set[str] | None = None,
+                       before: str = "not found"):
     """Docker as the registries answer: ``served`` as ``_docker`` serves it, the local registry's composed images, and
     the agentenv-chromium index, served once created, of ``children``, by default the two images it was made of."""
     published = _docker(served)
@@ -326,7 +327,7 @@ def _computer_registry(served: dict[str, str], created: list, children: set[str]
             return published(command, **kw)
         ref = command[4]
         if ref == _COMPUTER_INDEX and not created:
-            return subprocess.CompletedProcess(command, 1, "", f"ERROR: {ref}: not found\n")
+            return subprocess.CompletedProcess(command, 1, "", f"ERROR: {ref}: {before}\n")
         if command[5:] == ["--raw"]:
             raw = raws.get(ref) or (ref == _COMPUTER_INDEX and {"manifests": [
                 {"digest": digest} for digest in sorted(children or {_AMD64, _ARM64})]})
@@ -355,6 +356,21 @@ def test_publish_computers_joins_each_apps_platform_manifests_into_one_index_and
     record = tmp_path / "published_images.json"
     write_release_digests({}, record, computers)
     assert released_computers(record) == computers
+
+
+def test_publish_computers_creates_an_index_ghcr_wont_say_it_has_before_the_packages_first_push(script, monkeypatch,
+                                                                                               tmp_path, workflow,
+                                                                                               capsys):
+    created = []
+    refused = "denied: requested access to the resource is denied"
+    monkeypatch.setattr(script.subprocess, "run", _computer_registry({}, created, before=refused))
+    monkeypatch.setattr(script.subprocess, "Popen", lambda argv, **kw: (created.append(argv), _Process("", 0))[1])
+
+    assert _run(script, monkeypatch, "publish-computers", str(_composed(tmp_path))) == 0
+
+    out = capsys.readouterr().out
+    assert len(created) == 1 and f"::warning::{_COMPUTER_INDEX} is taken as unpublished" in out
+    assert "::error::" not in out
 
 
 @pytest.mark.parametrize("changes, arches, problem", [
@@ -644,6 +660,21 @@ def test_retry_tries_again_a_push_ghcr_refuses_while_another_platform_creates_th
     assert len(runs) == 2 and waits == [script._RETRY_WAITS_SECONDS[0]]
     assert ("::warning::GHCR doesn't let this repository write yet the package `docker push img` pushes to; trying again in"
             in capsys.readouterr().out)
+
+
+def test_retry_tries_again_an_index_ghcr_refuses_while_its_first_image_creates_the_package(script, monkeypatch, capsys):
+    """A computer app's first index pushes both its images at once, as v0.9.1545's chromium did."""
+    denied = ("ERROR: copy sha256:a84f from localhost:5000/agentenv-computers@sha256:a84f to "
+              "ghcr.io/scaleapi/agentenv-chromium:index-b4f4: failed commit on ref \"manifest-sha256:a84f\": "
+              "unexpected status from PUT request to "
+              "https://ghcr.io/v2/scaleapi/agentenv-chromium/manifests/sha256:a84f: 403 Forbidden\n"
+              "denied: permission_denied: write_package\n")
+    runs, waits = _attempts(script, monkeypatch, [(denied, 1), ("pushed\n", 0)])
+
+    assert _run(script, monkeypatch, "retry", "docker", "buildx", "imagetools", "create", "-t", "index", "a", "b") == 0
+
+    assert len(runs) == 2 and waits == [script._RETRY_WAITS_SECONDS[0]]
+    assert "::warning::GHCR doesn't let this repository write yet the package" in capsys.readouterr().out
 
 
 def test_retry_doesnt_try_again_a_denied_command_that_isnt_a_push(script, monkeypatch, capsys):
