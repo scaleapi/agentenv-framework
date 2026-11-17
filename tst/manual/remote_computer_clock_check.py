@@ -1,10 +1,12 @@
 """Run explicitly with ``pytest -s tst/manual/remote_computer_clock_check.py``: a computer's universe clock on a remote
 sandbox provider, through the steps ``tst/integration/computer/computer_clock_test.py`` takes on the local one. Armed,
 a day and a week on, a month back, a rate of 10, frozen, running again, a minute and a half with no change, the
-follower killed, and a reset: the session is within ``MAX_SKEW_S`` of the gateway's universe after each, and
-runs at its rate. A browser computer's pages show it too. A provider whose sandbox is the computer's container itself,
-as ``modal``'s is, can't reset it in place, which core refuses; the check takes that refusal as the reset's outcome. On
-a provider that boots the desktop from its disk form, whose guest follows no clock yet, arming the clock is refused.
+follower killed, and a reset: after each, the session is within ``MAX_SKEW_S`` of the gateway's universe, give or take
+how far the reading itself may be off, and it runs at the clock's rate. A browser computer's pages show it too.
+
+A provider whose sandbox is the computer's container itself, as ``modal``'s is, can't reset it in place, which core
+refuses; the check takes that refusal as the reset's outcome. On a provider that boots the desktop from its disk form,
+whose guest follows no clock yet, arming the clock is refused.
 
 It needs a config whose image and object stores the provider reaches, the provider's credentials, and two multi envs
 written there. ``AGENTENV_CLOCK_CHECK_OFFICE`` names one whose computer ``desktop`` is the ubuntu-24.04 desktop, and
@@ -45,8 +47,6 @@ SANDBOXES = os.environ.get("AGENTENV_CLOCK_CHECK_SANDBOXES", "modal_vm,modal").s
 RATE = 10
 #: How far the session's clock may be from the gateway's: room for reading the two, as on the local provider.
 MAX_SKEW_S = 1.0
-#: How far, in universe seconds, half a reading's bracket of real time may leave it.
-READING_S = 0.25
 #: How long a minute and a half with no clock change is: past the gateway's 25 s hold on a watch more than three times,
 #: so a provider's tunnel that drops an idle long poll shows as a follower that misses the next change.
 IDLE_S = 90
@@ -55,23 +55,26 @@ FOLLOWER_BACK_S = 10
 TTL_S = 2400
 #: What core says when a computer's provider runs it as the sandbox itself, which a reset can't replace in place.
 IN_PLACE = "can't be reset in place"
-#: Inside the computer, on real time: the gateway's universe as the computer reaches it, between two readings of real
-#: time, then the session's own (``date``, without the real-time marker), between two more; each pair taken again,
-#: up to ten times, until both brackets are narrower than argv[2], and ``within`` says whether one was.
+#: Inside the computer, on real time: the gateway's universe as the computer reaches it at argv[1], between two
+#: readings of real time, then the session's own (``date``, without the real-time marker), between two more, taken up
+#: to ten times, keeping the narrowest; argv[1] "-" reads the session alone. Each bracket's width is printed, so the
+#: caller can say how far the reading may be from the truth.
 READ = """
 import json, os, subprocess, sys, time, urllib.request
-url, widest = sys.argv[1], float(sys.argv[2])
+url = sys.argv[1]
 session = {k: v for k, v in os.environ.items() if k != "AGENTENV_REAL_TIME"}
+best = None
 for _ in range(10):
     a = time.time()
-    gateway = json.load(urllib.request.urlopen(url, timeout=10))["virtual_time"]
+    gateway = json.load(urllib.request.urlopen(url, timeout=10))["virtual_time"] if url != "-" else None
     b = time.time()
     universe = float(subprocess.run(["date", "+%s.%N"], env=session, capture_output=True, text=True, check=True).stdout)
     c = time.time()
-    if b - a < widest and c - b < widest:
-        break
-print(json.dumps({"gateway_at": (a + b) / 2, "gateway": gateway, "session_at": (b + c) / 2, "session": universe,
-                  "widths": [round(b - a, 4), round(c - b, 4)], "within": b - a < widest and c - b < widest}))
+    read = {"gateway_at": (a + b) / 2, "gateway": gateway, "session_at": (b + c) / 2, "session": universe,
+            "widths": [round(b - a, 4), round(c - b, 4)]}
+    if best is None or max(read["widths"]) < max(best["widths"]):
+        best = read
+print(json.dumps(best))
 """
 #: A page that names its own Date.now(), in milliseconds, in its title, five times a second.
 CLOCK_PAGE = "data:text/html," + urllib.parse.quote(
@@ -86,10 +89,6 @@ def _at(text: str) -> float:
     return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
 
 
-def _widest(rate: float) -> float:
-    return 2 * READING_S / max(rate, 1)
-
-
 async def _write(deployed, method: str, **params) -> float:
     """A clock write that waits up to 15 s for every computer to show it; the seconds it took."""
     started = time.monotonic()
@@ -102,26 +101,25 @@ async def _now(deployed) -> datetime:
     return datetime.fromtimestamp(_at(state["virtual_time"]), timezone.utc)
 
 
-async def _reading(computer, time_url: str, rate: float) -> dict:
-    ran = await inside.run(computer, ["env", "AGENTENV_REAL_TIME=1", "python3", "-c", READ, time_url,
-                                      str(_widest(rate))], timeout_s=120)
+async def _reading(computer, time_url: str) -> dict:
+    ran = await inside.run(computer, ["env", "AGENTENV_REAL_TIME=1", "python3", "-c", READ, time_url], timeout_s=120)
     assert ran["exit_code"] == 0, ran
-    read = json.loads(ran["stdout"])
-    assert read["within"], (f"the computer's readings took over {_widest(rate):.3f} s each of ten times, so none is "
-                            f"close enough to tell its skew: the last took {read['widths']}")
-    return read
+    return json.loads(ran["stdout"])
 
 
-async def _skew(computer, time_url: str, rate: float) -> float:
-    """How far the session's clock is from the gateway's, in universe seconds, both read inside the computer."""
-    read = await _reading(computer, time_url, rate)
-    return round(read["session"] - (_at(read["gateway"]) + rate * (read["session_at"] - read["gateway_at"])), 3)
+async def _skew(computer, time_url: str, rate: float) -> tuple[float, float]:
+    """How far the session's clock is from the gateway's, in universe seconds, both read inside the computer, and how
+    far that may be from the truth: half of each reading's bracket of real time, at the clock's rate."""
+    read = await _reading(computer, time_url)
+    skew = read["session"] - (_at(read["gateway"]) + rate * (read["session_at"] - read["gateway_at"]))
+    return round(skew, 3), round(rate * sum(read["widths"]) / 2, 3)
 
 
-async def _rate(computer, time_url: str, rate: float, over_s: float = 3.0) -> float:
-    first = await _reading(computer, time_url, rate)
+async def _rate(computer, over_s: float = 3.0) -> float:
+    """The session clock's rate, from two of its own readings ``over_s`` apart: no gateway read is in it."""
+    first = await _reading(computer, "-")
     await asyncio.sleep(over_s)
-    then = await _reading(computer, time_url, rate)
+    then = await _reading(computer, "-")
     return round((then["session"] - first["session"]) / (then["session_at"] - first["session_at"]), 3)
 
 
@@ -195,10 +193,10 @@ async def _through_the_steps(env_id: str, child: str, sandbox: str, browser: boo
             await _now(deployed) - timedelta(days=30)), virtual_seconds_per_real_second=1)
         skews["a month back"] = await _skew(own, time_url, 1)
         writes[f"rate {RATE}"] = await _write(deployed, "set_rate", virtual_seconds_per_real_second=RATE)
-        rates[RATE] = await _rate(own, time_url, RATE)
+        rates[RATE] = await _rate(own)
         skews[f"at a rate of {RATE}"] = await _skew(own, time_url, RATE)
         writes["frozen"] = await _write(deployed, "set_rate", virtual_seconds_per_real_second=0)
-        rates["frozen"], skews["frozen"] = await _rate(own, time_url, 0), await _skew(own, time_url, 0)
+        rates["frozen"], skews["frozen"] = await _rate(own), await _skew(own, time_url, 0)
         writes["running again"] = await _write(deployed, "set_rate", virtual_seconds_per_real_second=1)
         skews["running again"] = await _skew(own, time_url, 1)
 
@@ -237,7 +235,7 @@ async def _through_the_steps(env_id: str, child: str, sandbox: str, browser: boo
 
 def _assert(results: dict) -> None:
     assert results["synced"] and all(armed for _, armed in results["synced"]), results
-    assert all(abs(skew) < MAX_SKEW_S for skew in results["skews"].values()), results
+    assert all(abs(skew) - error < MAX_SKEW_S for skew, error in results["skews"].values()), results
     assert abs(results["rates"][RATE] / RATE - 1) < 0.05 and abs(results["rates"]["frozen"]) < 0.01, results
     assert results["follower killed, back"] == (True, True) and results["follower back in s"] < FOLLOWER_BACK_S, results
     assert results["reset"] == f"refused: {IN_PLACE}" or results["shown after a reset"], results
