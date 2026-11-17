@@ -9,7 +9,6 @@ from agent_env.env import env as env_module
 from agent_env.env import store as env_store_module
 from agent_env.env.env import Env
 from agent_env.env.envs.mcp_server import MCPServerEnv
-from agent_env.env.store import RELEASED_ALIAS, released_alias_metadata
 from agent_env.plugins._bundles import ALIASES_FILE, InstalledAliases, InstalledBundle, installed_aliases
 from agent_env.store.base import NotFoundError
 from agent_env.store.routing import namespace_routing
@@ -38,10 +37,10 @@ def aliases(bundles, cli_routing):
     """``bundles``, with namespace routing on, as in the CLI."""
 
 
-def _put(env_id, metadata=None):
+def _put(env_id):
     image = get_artifact_store().put_document(DockerImageArtifact(
         id=f"{env_id}/env_image", description="d", image_name="ghcr.io/acme/mail:1", tar_gz_s3_url="s3://b/x"))
-    return MCPServerEnv.put(id=env_id, docker_image_artifact=image, environment_name="mail", metadata=metadata)
+    return MCPServerEnv.put(id=env_id, docker_image_artifact=image, environment_name="mail")
 
 
 def _put_before_the_alias(monkeypatch, env_id):
@@ -128,51 +127,21 @@ def test_an_env_the_store_held_under_an_aliass_id_before_keeps_taking_versions(a
     assert _put("mail").version == 2
 
 
-def test_the_aliass_own_released_env_is_stored_under_its_id_and_a_task_naming_it_there_deploys_it(bundles):
-    """A service resolves no alias, so it holds the env the alias names under the alias's id."""
-    released = _put("mail", released_alias_metadata("mail"))
+def test_a_service_holds_an_env_under_an_installed_aliass_id_and_a_task_naming_it_there_deploys_it(bundles):
+    """A service runs with namespace routing off and resolves no alias, so it holds the env a task names by it."""
+    held = _put("mail")
 
     env = Env.get("mail")
 
-    assert (env.id, env.version, env.stored_id) == ("mail", 1, "mail") and released.version == 1
-    assert env.metadata[RELEASED_ALIAS]["target"] == "agentenv-framework/mail-mcp/mail"
-    assert env.metadata[RELEASED_ALIAS]["alias"] == "mail" and env.metadata[RELEASED_ALIAS]["agent_env_version"]
+    assert (env.id, env.stored_id, env.version) == ("mail", "mail", held.version)
 
 
-def test_where_aliases_resolve_the_stores_released_env_is_the_one_a_task_naming_the_alias_deploys(aliases):
-    _put("mail", released_alias_metadata("mail"))
+def test_where_aliases_resolve_the_env_a_service_holds_under_an_aliass_id_is_the_one_it_names(bundles):
+    """The store's env of an id wins over an alias, so a CLI run against the service's store deploys the same env."""
+    held = _put("mail")
+    with namespace_routing():
+        _put(SHIPPED)
 
-    env = Env.get("mail")
+        env = Env.get("mail")
 
-    assert (env.stored_id, env.metadata[RELEASED_ALIAS]["target"]) == ("mail", "agentenv-framework/mail-mcp/mail")
-
-
-def test_each_version_of_the_aliass_released_env_keeps_its_mark(bundles):
-    _put("mail", released_alias_metadata("mail"))
-
-    assert _put("mail", released_alias_metadata("mail")).version == 2
-    with pytest.raises(ValueError, match=r"env 'mail' is the released env of the alias 'mail', which names "
-                                         rf"{SHIPPED}, so each of its versions carries that mark"):
-        _put("mail")
-    with pytest.raises(ValueError, match="is the released env of the alias 'mail'"):
-        _put("mail", {RELEASED_ALIAS: {"alias": "mail", "target": "acme-kit/kit/a"}})
-    assert Env.get("mail").version == 2
-
-
-@pytest.mark.parametrize("mark", [
-    {"alias": "mail", "target": "acme-kit/kit/a"},
-    {"alias": "helper", "target": "agentenv-framework/mail-mcp/mail"},
-    {"alias": "mail", "target": SHIPPED},
-    {"target": "agentenv-framework/mail-mcp/mail"},
-    "mail",
-])
-def test_an_env_marked_as_another_aliass_or_another_envs_release_is_still_refused_the_aliass_id(bundles, mark):
-    with pytest.raises(ValueError, match="env id 'mail' is an alias of"):
-        _put("mail", {RELEASED_ALIAS: mark})
-
-
-def test_only_an_installed_env_alias_has_a_released_env(bundles):
-    with pytest.raises(ValueError, match="'helper' isn't an env alias an installed bundle gives"):
-        released_alias_metadata("helper")
-    with pytest.raises(ValueError, match="'nothing' isn't an env alias"):
-        released_alias_metadata("nothing")
+    assert (env.stored_id, env.version) == ("mail", held.version)
