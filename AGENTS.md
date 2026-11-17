@@ -277,8 +277,9 @@ Out-of-tree code plugs in either through `config.toml`, as a `module:Class` poin
   create an env under an installed env alias's id (`EnvStore.put_document`), so a deployment recorded under an alias
   always reloads the alias's env; an env stored under such an id before keeps taking versions. It lets the alias's own
   env take the id when its metadata says so (`released_alias_metadata(alias)`: the alias, its target's id without the
-  namespace, which an entity outside it may not name, and the agent-env version), which is how a service, resolving no
-  alias, holds `chromium` so a task naming it deploys that env there too. That env then shadows the alias in that store,
+  namespace, which an entity outside it may not name, and the agent-env version), and refuses a later version of that
+  env without the mark, which is how a service, resolving no alias, holds `chromium` so a task naming it deploys that
+  env there too. That env then shadows the alias in that store,
   as any store env of an alias's id does (`Env.get` and the planner read the store first), so a deployment recorded
   under the alias there before it was written, with routing on, reattaches to it from then on, or isn't found when it
   lacks that deployment's version.

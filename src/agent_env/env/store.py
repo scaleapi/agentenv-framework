@@ -60,6 +60,11 @@ def _released_as(env: Env, named: BundleAlias) -> bool:
             and mark.get("target") == _unscoped(named.target_id))
 
 
+def _marked(document: dict) -> bool:
+    """Whether a stored env's ``document`` is marked as an alias's released env."""
+    return isinstance((document.get("metadata") or {}).get(RELEASED_ALIAS), dict)
+
+
 def _unscoped(entity_id: str) -> str:
     namespace = parse_namespace(entity_id)
     return entity_id.removeprefix(namespace_prefix(namespace)) if namespace else entity_id
@@ -130,9 +135,13 @@ class EnvStore:
         if existing and existing.get("type") != env.type:
             raise ValueError(f"Env id '{env.id}' already exists as type '{existing.get('type')}'; cannot put as type '{env.type}'.")
         # A deployment recorded under an alias reloads the alias's env, so no env of the store's own starts on its id
-        # but the alias's own, which a service holds there since it resolves no alias.
-        if (not existing and (named := installed_aliases(table=ENV_ALIASES).target(env.id)) is not None
-                and not _released_as(env, named)):
+        # but the alias's own, which a service holds there since it resolves no alias, and keeps its mark after.
+        named = installed_aliases(table=ENV_ALIASES).target(env.id) if not existing or _marked(existing) else None
+        if named is not None and not _released_as(env, named):
+            if existing:
+                raise ValueError(f"env {env.id!r} is the released env of the alias {env.id!r}, which names "
+                                 f"{named.target_id}, so each of its versions carries that mark "
+                                 f"(released_alias_metadata({env.id!r})); put this one with it")
             raise ValueError(f"env id {env.id!r} is an alias of {named.target_id}, which comes with "
                              f"{named.declared_by}, and a task naming it deploys that env; give this env another id")
         env.version = self._versioned_cache.for_store(store).put(env)

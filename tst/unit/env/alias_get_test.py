@@ -147,6 +147,18 @@ def test_where_aliases_resolve_the_stores_released_env_is_the_one_a_task_naming_
     assert (env.stored_id, env.metadata[RELEASED_ALIAS]["target"]) == ("mail", "agentenv-framework/mail-mcp/mail")
 
 
+def test_each_version_of_the_aliass_released_env_keeps_its_mark(bundles):
+    _put("mail", released_alias_metadata("mail"))
+
+    assert _put("mail", released_alias_metadata("mail")).version == 2
+    with pytest.raises(ValueError, match=r"env 'mail' is the released env of the alias 'mail', which names "
+                                         rf"{SHIPPED}, so each of its versions carries that mark"):
+        _put("mail")
+    with pytest.raises(ValueError, match="is the released env of the alias 'mail'"):
+        _put("mail", {RELEASED_ALIAS: {"alias": "mail", "target": "acme-kit/kit/a"}})
+    assert Env.get("mail").version == 2
+
+
 @pytest.mark.parametrize("mark", [
     {"alias": "mail", "target": "acme-kit/kit/a"},
     {"alias": "helper", "target": "agentenv-framework/mail-mcp/mail"},
