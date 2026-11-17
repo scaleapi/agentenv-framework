@@ -3,7 +3,7 @@ tool calls run on its turn and its reply ends it with the task's reward, filed i
 system prompt comes before its prompt; a turn with skills is refused; the turn bound ends a turn; a step's logs are
 clipped; a rollout whose first prompt can't be written is abandoned and frees its slot; a rollout the cookbook cuts is
 scored as it is cut, freeing its slot for the rest of its group; a bundle's splits as prepared for a trainer to play;
-and the tasks a dataset plays."""
+the tasks a dataset plays; and its batches, each pass playing every task once."""
 
 import asyncio
 import json
@@ -258,3 +258,19 @@ def test_tasks_that_cant_run_as_an_episode_are_left_out_and_the_rest_rewarded(ca
 def test_a_dataset_whose_tasks_make_no_reward_or_no_episode_is_refused(tasks, reward, refusal):
     with pytest.raises(ValueError, match=refusal):
         tinker.playable(tasks, reward, None)
+
+
+def test_each_pass_plays_every_task_once_its_last_batch_the_tasks_left_over():
+    tasks = tinker.playable([_task(f"task-{n}", ENV, AGENT, PLAY, _verifier("records")) for n in range(10)],
+                            "records", None)
+    settings = tinker._Settings(model_name="policy", renderer_name="stand-in", sandbox=None, max_turns=8,
+                                tool_timeout=5, max_concurrent_episodes=4, max_trajectory_tokens=None,
+                                failed_reward=0.0, tag="dock")
+    dataset = tinker.EpisodeDataset(tasks, settings, group_size=2, groups_per_batch=3, epochs=2, seed=0, shuffle=True,
+                                    run_name="dock-run", steps=tinker.TrainingSteps(), trains=True)
+
+    batches = [[group.name for group in dataset.get_batch(index)] for index in range(len(dataset))]
+
+    assert [len(batch) for batch in batches] == [3, 3, 3, 1] * 2
+    for one_pass in (batches[:4], batches[4:]):
+        assert sorted(name for batch in one_pass for name in batch) == sorted(name for name, _, _ in tasks)

@@ -27,6 +27,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import math
 import random
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -373,8 +374,10 @@ class _Settings:
 
 
 class EpisodeDataset(RLDataset):
-    """A split's tasks in batches of ``groups_per_batch`` groups, shuffled anew each of ``epochs`` passes; a group's
-    episodes are filed under the run, whether they train or evaluate, and the training step that plays them."""
+    """A split's tasks in batches of ``groups_per_batch`` groups, shuffled anew each of ``epochs`` passes, each pass
+    playing every task once: its last batch is the tasks left over, as the cookbook's own RL datasets end a pass. A
+    group's episodes are filed under the run, whether they train or evaluate, and the training step that plays
+    them."""
 
     def __init__(self, tasks: list[tuple[str, EpisodeSpec, Reward]], settings: _Settings, *, group_size: int,
                  groups_per_batch: int, epochs: int, seed: int, shuffle: bool, run_name: str,
@@ -389,7 +392,7 @@ class EpisodeDataset(RLDataset):
         self._epochs = epochs
         self._seed = seed
         self._shuffle = shuffle
-        self._per_epoch = len(tasks) // self._groups_per_batch
+        self._per_epoch = math.ceil(len(tasks) / self._groups_per_batch)
 
     def get_batch(self, index: int) -> Sequence[EnvGroupBuilder]:
         epoch, at = divmod(index, self._per_epoch)
