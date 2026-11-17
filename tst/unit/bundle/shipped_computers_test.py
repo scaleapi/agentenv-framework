@@ -49,9 +49,9 @@ def test_a_task_naming_ubuntu_24_04_writes_the_shipped_base_over_its_folders_ima
         "COPYING", "README.md", "agentenv_clock_page.c", "agentenv_clock_waits.c", "build.sh", "clock-follower",
         "clock.conf", "clockpage.py", "libfaketime.patch", "tls_realtime.c")), *(f"egress/{name}" for name in (
         "README.md", "agentenv-egress.sh", "boot.go", "boot_test.go", "chromium-policy.json", "clock.go",
-        "clock_test.go", "go.mod", "go.sum", "hello.go", "hello_test.go", "leaves.go", "main.go", "proxy.go",
+        "clock_test.go", "go.mod", "go.sum", "hello.go", "hello_test.go", "leaves.go", "main.go", "main_test.go", "proxy.go",
         "proxy_test.go", "testdata/page-armed.hex", "testdata/page-unarmed.hex", "upstream.go")), "root.conf",
-                        "start-desktop", "supervisord.conf", "xfwm4.xml"]
+                        "root/init", "root/install.sh", "start-desktop", "supervisord.conf", "xfwm4.xml"]
     assert computer.metadata["validated_images"]["container"]["arm64"]["status"] == "uninspected"
 
 
@@ -74,9 +74,9 @@ def test_a_task_naming_ubuntu_24_04_after_a_release_writes_the_shipped_base_over
         arch: ("passed", f"{image.image_name}@{index}") for arch in ("amd64", "arm64")}
 
 
-def test_the_start_script_falls_back_to_the_defaults_artifact_toml_declares():
+def test_the_start_script_and_the_root_start_fall_back_to_the_defaults_artifact_toml_declares():
     declared = tomllib.loads((BASE / "artifact.toml").read_text())["config"]
-    script = (BASE / "start-desktop").read_text()
+    script = (BASE / "start-desktop").read_text() + (BASE / "root" / "init").read_text()
     fallbacks = dict(re.findall(r'\$\{AGENTENV_SETTING_([A-Z_]+):-([^}]*)\}', script))
     assert fallbacks == {name.upper(): setting["default"] for name, setting in declared.items()}
 

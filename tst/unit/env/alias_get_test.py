@@ -125,3 +125,23 @@ def test_an_env_the_store_held_under_an_aliass_id_before_keeps_taking_versions(a
     _put_before_the_alias(monkeypatch, "mail")
 
     assert _put("mail").version == 2
+
+
+def test_a_service_holds_an_env_under_an_installed_aliass_id_and_a_task_naming_it_there_deploys_it(bundles):
+    """A service runs with namespace routing off and resolves no alias, so it holds the env a task names by it."""
+    held = _put("mail")
+
+    env = Env.get("mail")
+
+    assert (env.id, env.stored_id, env.version) == ("mail", "mail", held.version)
+
+
+def test_where_aliases_resolve_the_env_a_service_holds_under_an_aliass_id_is_the_one_it_names(bundles):
+    """The store's env of an id wins over an alias, so a CLI run against the service's store deploys the same env."""
+    held = _put("mail")
+    with namespace_routing():
+        _put(SHIPPED)
+
+        env = Env.get("mail")
+
+    assert (env.stored_id, env.version) == ("mail", held.version)

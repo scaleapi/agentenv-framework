@@ -139,9 +139,12 @@ def _image(label: str, artifact_id: str, description: str, dockerfile: Path, ima
 def _build_and_put(label: str, artifact_id: str, description: str, dockerfile: Path, image_name: str, *,
                    platform: str | None, say: Callable[[str], None]) -> DockerImageArtifact:
     """Build ``dockerfile``'s image for ``platform`` from the folder it's in, and write it with that folder as its build
-    context, which a sandbox that can't run its tar.gz builds it from."""
+    context, which a sandbox that can't run its tar.gz builds it from. The build holds this machine's lock for its tag,
+    as a host image's does: a run with a state root of its own builds the same tag with the same Docker, and two builds
+    of one tag at once fail with "image ... already exists"."""
     say(f"Building {label} image from {dockerfile}...")
-    build_image(dockerfile, dockerfile.parent, image_name, platform=platform)
+    with holding_locks([f"image-build:{image_name}"]):
+        build_image(dockerfile, dockerfile.parent, image_name, platform=platform)
     say(f"Creating {label} DockerImageArtifact...")
     artifact = DockerImageArtifact.put(id=artifact_id, description=description, image_name=image_name,
                                        build_context_path=str(dockerfile.parent), dockerfile_path=str(dockerfile))

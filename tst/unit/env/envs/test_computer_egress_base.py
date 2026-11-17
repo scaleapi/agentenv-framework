@@ -1,5 +1,6 @@
 """The ubuntu-24.04 base's egress proxy agrees with the rest of the base and with site routing: its certificates span
-the window routed sites' do, root's supervisord runs it as its own user, init boots it before that supervisord starts,
+the window routed sites' do, root's supervisord runs it as its own user, the root start boots it before that
+supervisord starts,
 every session program trusts its CA through agentenv's trust files as the local provider names them, the session's
 proxy is the address it listens on, a login shell gets the session's settings, and the clock pages its Go reader is
 tested on are the bytes the follower's writer writes."""
@@ -55,7 +56,7 @@ def test_the_egress_ca_spans_the_window_routed_sites_certificates_do():
 def test_roots_supervisord_runs_the_proxy_as_its_own_user_and_init_boots_it_first():
     root = configparser.ConfigParser(interpolation=None)
     root.read_string((BASE / "root.conf").read_text())
-    init = (BASE / "start-desktop").read_text()
+    init = (BASE / "root" / "init").read_text()
 
     assert (root["program:egress"]["command"], root["program:egress"]["user"]) == (
         "/usr/local/lib/agentenv-egress/egress serve", "agentenv-egress")

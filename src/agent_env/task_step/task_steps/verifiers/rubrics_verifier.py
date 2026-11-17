@@ -144,10 +144,6 @@ _BULK_STORED_EXCERPT_CHARS = 200
 _BULK_LOGGED_EXCERPT_CHARS = 80
 
 
-def _criteria_batches(criteria: list[dict], size: int) -> list[list[dict]]:
-    return [criteria[i:i + size] for i in range(0, len(criteria), size)] or [[]]
-
-
 def _bulk_verdicts(rows: list[dict]) -> Optional[dict]:
     """What makes ``rows`` look scripted rather than graded one by one, or None. A judge facing many
     criteria tends to grep for a few keywords and assign the rest a default with a stock justification."""
@@ -276,6 +272,21 @@ def _looks_like_response_format_error(exc: Exception) -> bool:
     return any(s in msg for s in _SCHEMA_TERMS) and any(u in msg for u in _UNSUPPORTED_TERMS)
 
 
+def _caches_prompts(model: str) -> bool:
+    """Whether a judge call to ``model`` marks its shared prefix for the prompt cache: Claude models, by any route."""
+    return "claude" in model.lower()
+
+
+def _usage_and_cost(response: Any) -> dict:
+    """A LiteLLM response's token counts and LiteLLM's price of it in USD, each None when it has none."""
+    usage = getattr(response, "usage", None)
+    usage = usage.model_dump() if hasattr(usage, "model_dump") else usage
+    hidden = getattr(response, "_hidden_params", None)
+    cost = hidden.get("response_cost") if isinstance(hidden, dict) else None
+    return {"usage": usage if isinstance(usage, dict) else None,
+            "cost": float(cost) if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None}
+
+
 def _image_url_block(frame: ImageFrame) -> dict:
     """Adapt a neutral trajectory image to LiteLLM's image block shape."""
     return {
@@ -391,11 +402,6 @@ def _validated_batch_option(name: str, value: Optional[int]) -> Optional[int]:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError(f"{name} must be a positive integer, got {value!r}")
     return value
-
-
-# Formats whose rows are one per criterion, so batches merge by concatenation. The evidence formats carry one
-# reasoning / checks / mistakes block per call and trajectory_mistakes adds whole-run rows, which batches would repeat.
-_BATCHABLE_FORMATS = frozenset({JudgeOutputFormat.RUBRIC_BINARY, JudgeOutputFormat.RUBRIC_PARTIAL})
 
 
 def _unbatchable_format_message(output_format: JudgeOutputFormat) -> str:
@@ -592,7 +598,7 @@ class RubricsVerifierTaskStep(TaskStep):
                 "with use_trajectory=True and a trajectory_filter with compaction_type=screenshot and "
                 "frame_strategy=per_criterion."
             )
-        if self.judge_batch_size is not None and self.output_format not in _BATCHABLE_FORMATS:
+        if self.judge_batch_size is not None and not self._spec().batchable:
             raise ValueError(_unbatchable_format_message(self.output_format))
 
     def _spec(self) -> JudgeOutputFormatSpec:
@@ -704,6 +710,29 @@ class RubricsVerifierTaskStep(TaskStep):
         """Sections a subclass adds to this run's judge prompt, after the run context: an override point, called once
         per run (never for one skipped) with the prompt's stored response. None here."""
         return []
+
+    async def judge_trajectory_content(self, context: TaskStepContext, prompt_response: PromptResponse) -> Optional[str]:
+        """What the judge prompt shows as the run's trajectory (the inline template's ``$trajectory_content``), in place
+        of a recorded trajectory, for a step with ``use_trajectory`` off: an override point, called once per run (never
+        for one skipped) with the prompt's stored response. A subclass that puts the run here, rather than in
+        ``judge_prompt_sections`` after the criteria, keeps it in the part of the prompt each batch shares. None here:
+        the prompt shows the recorded trajectory, or none."""
+        return None
+
+    async def unjudged_rows(self, context: TaskStepContext, prompt_response: PromptResponse) -> list[dict]:
+        """Rows no judge grades, computed from the run or fixed, that the entry holds after the judge's and that are
+        scored with them: an override point, called once per run before the judge (never for one skipped) with the
+        prompt's stored response. Each is shaped as a judge's row (``id``, ``result`` / ``score``, any ``weight``),
+        with an id no criterion has. None here."""
+        return []
+
+    def _criteria_batches(self, criteria: list[dict], size: Optional[int]) -> list[list[dict]]:
+        """The judge calls ``criteria`` are graded in, one batch per call: ``size`` at a time in order, or all in one
+        call when ``size`` is None. An override point: a subclass may group them otherwise, putting every criterion
+        in exactly one non-empty batch. The criteria carry their short ids (c1..cN) and every other field."""
+        if size is None:
+            return [criteria]
+        return [criteria[i:i + size] for i in range(0, len(criteria), size)] or [[]]
 
     async def stage_trajectory(self, context: TaskStepContext, prompt_response: PromptResponse,
                                run_context: Optional[Run], sandbox: Any,
@@ -836,6 +865,16 @@ class RubricsVerifierTaskStep(TaskStep):
                 "but this run's trajectory filter attached none (user_overrides.apply_trajectory_filter=False?)."
             )
 
+        # The subclass hooks run once the run is known not to be skipped, and before any judge is deployed.
+        trajectory_content = await self.judge_trajectory_content(context, stored_response)
+        if trajectory_content is not None and self.use_trajectory:
+            raise RuntimeError(f"Verifier '{self.verifier_id}': judge_trajectory_content stands in for the recorded "
+                               "trajectory, so it needs use_trajectory=False.")
+        unjudged = [dict(row) for row in await self.unjudged_rows(context, stored_response)]
+        if clashing := {row.get("id") for row in unjudged} & {c.get("id") for c in criteria}:
+            raise RuntimeError(f"Verifier '{self.verifier_id}': unjudged_rows gave rows with a criterion's id: "
+                               f"{sorted(map(str, clashing))}")
+
         auto_deployed_judge = None
         staged: Optional[StagedTrajectory] = None
         judge_agent = None
@@ -919,7 +958,7 @@ class RubricsVerifierTaskStep(TaskStep):
                 overrides, "judge_batch_size", self.judge_batch_size))
             batch_concurrency = _validated_batch_option("judge_batch_concurrency", _override_or(
                 overrides, "judge_batch_concurrency", self.judge_batch_concurrency))
-            if batch_size is not None and self.output_format not in _BATCHABLE_FORMATS:
+            if batch_size is not None and not self._spec().batchable:
                 raise RuntimeError(f"Verifier '{self.verifier_id}': {_unbatchable_format_message(self.output_format)}")
             loaded_for_judge: list[dict] = []
             if use_agent_judge and self.agent_name is not None:
@@ -953,6 +992,8 @@ class RubricsVerifierTaskStep(TaskStep):
                     trajectory_inline = compacted.inline_text
                     if trajectory_inline is None and compacted.container_object_url:
                         trajectory_inline = await asyncio.to_thread(self._read_trajectory_text, compacted.container_object_url)
+            if trajectory_content is not None:
+                trajectory_inline = trajectory_content
 
             def eval_prompt_for(batch: list[dict]) -> str:
                 criteria_json = json.dumps([
@@ -965,6 +1006,7 @@ class RubricsVerifierTaskStep(TaskStep):
                         agent_response=prompt_response.response,
                         criteria_json=criteria_json,
                         trajectory_path=trajectory_path,
+                        trajectory_inline=trajectory_inline,
                         loaded_artifacts=loaded_for_judge,
                         context_facts=context_facts,
                         run_context=run_context,
@@ -996,10 +1038,17 @@ class RubricsVerifierTaskStep(TaskStep):
                     prompt += self._PER_ROW_EVIDENCE_NOTE
                 return prompt
 
-            batches = (_criteria_batches(criteria_for_judge, batch_size) if batch_size is not None
-                       else [criteria_for_judge])
-            concurrency = asyncio.Semaphore(batch_concurrency or self.DEFAULT_JUDGE_BATCH_CONCURRENCY)
+            batches = self._criteria_batches(criteria_for_judge, batch_size)
             position = {c["id"]: i for i, c in enumerate(criteria_for_judge, 1)}
+            batched_ids = [c["id"] for batch in batches for c in batch]
+            if sorted(batched_ids) != sorted(position) or (len(batches) > 1 and not all(batches)):
+                raise RuntimeError(f"Verifier '{self.verifier_id}': _criteria_batches must put every criterion in "
+                                   "exactly one batch, and leave no batch empty")
+            if len(batches) > 1 and not self._spec().batchable:
+                # Batches merge by concatenating rows, which drops a format's one-per-call reasoning, checks and mistakes.
+                raise RuntimeError(f"Verifier '{self.verifier_id}': _criteria_batches gave {len(batches)} batches, but "
+                                   f"output_format={self.output_format.value} is graded in one judge call.")
+            concurrency = asyncio.Semaphore(batch_concurrency or self.DEFAULT_JUDGE_BATCH_CONCURRENCY)
 
             async def grade(batch: list[dict]) -> tuple[list[dict], int, list[dict], Optional[str]]:
                 prompt = eval_prompt_for(batch)
@@ -1020,7 +1069,7 @@ class RubricsVerifierTaskStep(TaskStep):
                         use_agent_judge=use_agent_judge,
                         criteria=batch,
                         image_blocks=image_blocks,
-                        reject_bulk_verdicts=batch_size is not None,
+                        reject_bulk_verdicts=batch_size is not None and self._spec().checks_bulk_verdicts,
                     )
 
             if len(batches) == 1:
@@ -1066,15 +1115,16 @@ class RubricsVerifierTaskStep(TaskStep):
             judge_call_fields["graded_up_to_turn"] = grade_up_to_turn
         if staged is not None:
             judge_call_fields["trajectory_staging"] = staged.record
-        self._write_entries(context, verification_results, judge_call_fields)
+        self._write_entries(context, verification_results, judge_call_fields, unjudged=unjudged)
         return context
 
-    def _write_entries(self, context: TaskStepContext, verification_results: list[dict], judge_call_fields: dict) -> None:
+    def _write_entries(self, context: TaskStepContext, verification_results: list[dict], judge_call_fields: dict,
+                       *, unjudged: Sequence[dict] = ()) -> None:
         """Store the rubric entry under ``verifier_id`` and, for rubric_evidence_with_mistakes, the
         trajectory-mistakes entry under ``trajectory_mistakes_key(verifier_id)``; ``judge_call_fields`` (URIs,
         retries) go on both. The mistake rows are built before either entry is written, so a response they
-        cannot be derived from leaves neither behind."""
-        score = aggregate_score(verification_results, self.score_aggregator)
+        cannot be derived from leaves neither behind. ``unjudged`` rows (``unjudged_rows``) join the rubric
+        entry's, after the judge's, and its score; the mistakes entry is the judge's alone."""
         mistake_rows: Optional[list[dict]] = None
         if self._writes_mistakes_entry:
             if not isinstance(verification_results, ResultRows):
@@ -1082,6 +1132,8 @@ class RubricsVerifierTaskStep(TaskStep):
                     f"Verifier '{self.verifier_id}': the judge response carries no mistake findings "
                     f"({type(verification_results).__name__})")
             mistake_rows = trajectory_mistakes_rows_from_evidence(verification_results)
+        verification_results.extend(unjudged)  # in place, so a ResultRows keeps its reasoning and checks
+        score = aggregate_score(verification_results, self.score_aggregator)
         verifications = context.metadata.setdefault("verifications", {})
         verification_entry = {
             **self._entry_format_fields(),
@@ -1274,11 +1326,19 @@ class RubricsVerifierTaskStep(TaskStep):
         model: str,
         context: TaskStepContext,
         image_blocks: Optional[list[dict]] = None,
+        system: Optional[str] = None,
+        cached_prefix: Optional[str] = None,
     ) -> dict:
-        """Direct LiteLLM judge — no agent boot, no tools. Returns {response, trajectory_object_url}.
+        """Direct LiteLLM judge — no agent boot, no tools. Returns {response, trajectory_object_url, usage, cost}:
+        ``usage`` the call's token counts and ``cost`` LiteLLM's price of it in USD, each None when the response
+        has none, for a caller that records them (this step records neither).
 
-        When ``image_blocks`` are provided the user message becomes multimodal
-        (text + images); otherwise it stays a plain string, identical to before."""
+        When ``image_blocks`` are provided the user message becomes multimodal (text + images); otherwise it stays
+        a plain string. ``system`` is sent as a system message first. ``cached_prefix`` is the start of
+        ``eval_prompt`` that each of the run's calls shares: on a Claude model it is sent as its own text block,
+        marked for Anthropic's prompt cache, so the calls after the first read it from the cache; a prompt that
+        doesn't start with it is sent whole. The step's own calls pass neither, so their request is unchanged; a
+        subclass opts in by overriding this and calling it with them."""
         import litellm
 
         from agent_env.config import get_config
@@ -1294,11 +1354,15 @@ class RubricsVerifierTaskStep(TaskStep):
             or overrides.get("litellm_base_url")
             or self.default_model_api_base,
         )
-        user_content = (
-            [{"type": "text", "text": eval_prompt}, *image_blocks]
-            if image_blocks
-            else eval_prompt
-        )
+        text_blocks: list[dict] = [{"type": "text", "text": eval_prompt}]
+        cached = bool(cached_prefix) and eval_prompt.startswith(cached_prefix or "") and _caches_prompts(model)
+        if cached:
+            rest = eval_prompt[len(cached_prefix or ""):]
+            text_blocks = [{"type": "text", "text": cached_prefix, "cache_control": {"type": "ephemeral"}},
+                           *([{"type": "text", "text": rest}] if rest else [])]
+        user_content = [*text_blocks, *(image_blocks or [])] if image_blocks or cached else eval_prompt
+        messages = [*([{"role": "system", "content": system}] if system else []),
+                    {"role": "user", "content": user_content}]
         response_format = {
             "type": "json_schema",
             "json_schema": {
@@ -1316,7 +1380,7 @@ class RubricsVerifierTaskStep(TaskStep):
             try:
                 request_kwargs: dict = dict(
                     model=model,
-                    messages=[{"role": "user", "content": user_content}],
+                    messages=messages,
                     timeout=self.judge_timeout_seconds,
                     **call_config.client_kwargs(),
                 )
@@ -1324,7 +1388,7 @@ class RubricsVerifierTaskStep(TaskStep):
                     request_kwargs[ModelParam.RESPONSE_FORMAT] = response_format
                 response = await litellm.acompletion(**request_kwargs)
                 content = response.choices[0].message.content or ""
-                return {"response": content, "trajectory_object_url": None}
+                return {"response": content, "trajectory_object_url": None, **_usage_and_cost(response)}
             except Exception as exc:
                 last_exc = exc
                 if image_blocks and use_response_format and _looks_like_response_format_error(exc):
@@ -1630,7 +1694,7 @@ class RubricsVerifierTaskStep(TaskStep):
             )
             discrepancy_log.append(discrepancy.to_dict())
             if attempt == self.DEFAULT_MAX_RETRIES:
-                if discrepancy.non_finite_score_ids:
+                if discrepancy.non_finite_score_ids or discrepancy.row_problems:
                     raise ValueError(f"Judge output invalid after {attempt} attempts: {discrepancy}")
                 raise ValueError(
                     f"Judge returned {discrepancy.returned_count} results but expected "

@@ -133,22 +133,7 @@ class RateUserSatisfactionTaskStep(TaskStep):
     # ---- the load check ---------------------------------------------------------------------------------------------
     def _run_step(self, steps: list[TaskStep]) -> tuple[Optional[PromptAgentTaskStep], list[str]]:
         """The step this one rates, or why there's none."""
-        where = f"{self.type} '{self.id}'"
-        if self.run_step_id is not None:
-            run = next((s for s in steps if s.id == self.run_step_id), None)
-            if run is None:
-                return None, [f"{where}: run_step_id '{self.run_step_id}' names no step of the task"]
-            if not isinstance(run, PromptAgentTaskStep):
-                return None, [f"{where}: run_step_id '{self.run_step_id}' is a {run.type} step; name the always_on or "
-                              "prompt_agent step to rate"]
-            return run, []
-        runs = [s for s in steps if isinstance(s, PromptAgentTaskStep)]
-        if not runs:
-            return None, [f"{where}: the task has no always_on or prompt_agent step to rate"]
-        if len(runs) > 1:
-            return None, [f"{where}: the task has several always_on and prompt_agent steps "
-                          f"({', '.join(s.id for s in runs)}); set run_step_id to the one to rate"]
-        return runs[0], []
+        return run_step_of(self, steps)
 
     def task_problems(self, steps: list[TaskStep]) -> list[str]:
         run, found = self._run_step(steps)
@@ -159,8 +144,7 @@ class RateUserSatisfactionTaskStep(TaskStep):
             found.append(f"{where} comes before step '{run.id}', the run it rates; put it after")
         if self.depends_on is not None and run.id not in {d.task_step_id for d in self.depends_on}:
             found.append(f"{where}: its depends_on must name '{run.id}', the run it rates, so it runs once that's over")
-        user = _user_of(run)
-        if user is None or not any(isinstance(s, DeployUserSimAgentTaskStep) and s.agent_name == user for s in steps):
+        if not plays_built_in_user_sim(run, steps):
             found.append(f"{where}: the user of {run.type} step '{run.id}' isn't a user sim a deploy_user_sim_agent "
                          "step deploys; only that user sim can rate the run")
         earlier = next((s for s in steps[:steps.index(self)] if isinstance(s, RateUserSatisfactionTaskStep)
@@ -292,6 +276,34 @@ class RateUserSatisfactionTaskStep(TaskStep):
         except Exception as e:
             logger.warning(f"user sim trajectory fetch failed (continuing): {e}")
             return None
+
+
+# ---- the load check, shared with user_sim_judge ----------------------------------------------------------------------
+def run_step_of(step: TaskStep, steps: list[TaskStep], does: str = "rate") -> tuple[Optional[PromptAgentTaskStep], list[str]]:
+    """The always_on or prompt_agent step ``step`` works on (its ``run_step_id``'s, else the task's only one), or why
+    there's none. ``does`` names what ``step`` does to the run, in the messages."""
+    where = f"{step.type} '{step.id}'"
+    if step.run_step_id is not None:
+        run = next((s for s in steps if s.id == step.run_step_id), None)
+        if run is None:
+            return None, [f"{where}: run_step_id '{step.run_step_id}' names no step of the task"]
+        if not isinstance(run, PromptAgentTaskStep):
+            return None, [f"{where}: run_step_id '{step.run_step_id}' is a {run.type} step; name the always_on or "
+                          f"prompt_agent step to {does}"]
+        return run, []
+    runs = [s for s in steps if isinstance(s, PromptAgentTaskStep)]
+    if not runs:
+        return None, [f"{where}: the task has no always_on or prompt_agent step to {does}"]
+    if len(runs) > 1:
+        return None, [f"{where}: the task has several always_on and prompt_agent steps "
+                      f"({', '.join(s.id for s in runs)}); set run_step_id to the one to {does}"]
+    return runs[0], []
+
+
+def plays_built_in_user_sim(run: PromptAgentTaskStep, steps: list[TaskStep]) -> bool:
+    """Whether ``run``'s user is a user sim a deploy_user_sim_agent step of the task deploys."""
+    user = _user_of(run)
+    return user is not None and any(isinstance(s, DeployUserSimAgentTaskStep) and s.agent_name == user for s in steps)
 
 
 # ---- the run, as the run step recorded it ----------------------------------------------------------------------------

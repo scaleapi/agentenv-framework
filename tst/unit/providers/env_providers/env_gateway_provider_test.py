@@ -2884,7 +2884,7 @@ def test_compose_fronts_each_external_child_as_an_mcp_server_and_a_rest_route_by
     assert "CLOCK_FOLLOWER_TOKENS" not in env
 
 
-def test_compose_names_the_children_the_gateway_passes_its_token_on_to_only_when_it_has_one():
+def test_compose_names_the_gateways_computers_and_passes_its_token_on_to_them_only_when_it_has_one():
     from agent_env.env.envs.service_db import ServiceDBConfig
     from agent_env.env.gateway import ExternalChild
 
@@ -2899,6 +2899,7 @@ def test_compose_names_the_children_the_gateway_passes_its_token_on_to_only_when
 
     assert gateway_env("gw-token")["CONTROL_TOKEN_CHILDREN"] == "desktop,laptop"
     assert "CONTROL_TOKEN_CHILDREN" not in gateway_env(None)
+    assert gateway_env("gw-token")["COMPUTERS"] == gateway_env(None)["COMPUTERS"] == "desktop,laptop"
 
 
 def test_compose_declares_the_children_that_follow_the_clock_by_their_read_tokens_and_logs_none_of_them():
@@ -3066,6 +3067,7 @@ async def test_container_mode_starts_children_beside_its_servers_and_hands_the_g
     assert env["REST_PROXY_URLS"].split(",")[-1] == "desktop=https://desk.example"
     assert env["CLOCK_FOLLOWER_TOKENS"] == "desktop=read-desk"
     assert env["CONTROL_TOKEN_CHILDREN"] == "desktop"
+    assert env["COMPUTERS"] == "desktop"
 
 
 def _run_probe(tmp_path, statuses: dict[str, int]) -> int:
