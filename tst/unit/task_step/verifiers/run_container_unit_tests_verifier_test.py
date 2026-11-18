@@ -487,6 +487,23 @@ def test_a_runs_judge_key_wins_over_its_agent_key_as_in_the_rubrics_verifier(no_
     assert env["LITELLM_API_KEY"] == env["ANTHROPIC_API_KEY"] == "sk-judge"
 
 
+def test_a_runs_judge_key_goes_to_the_judge_endpoint_not_the_agents(no_provider_env):
+    env = _step()._merged_env(_Config(), "modal", {}, {
+        "litellm_api_key": "sk-agent", "litellm_base_url": "https://agent.example",
+        "judge_litellm_api_key": "sk-judge", "judge_litellm_base_url": "https://judge.example"})
+    assert (env["LITELLM_API_KEY"], env["LITELLM_BASE_URL"]) == ("sk-judge", "https://judge.example")
+    # as in the rubrics verifier: a judge key with no judge URL goes to the run's URL
+    env = _step()._merged_env(_Config(), "modal", {}, {
+        "litellm_api_key": "sk-agent", "litellm_base_url": "https://agent.example", "judge_litellm_api_key": "sk-judge"})
+    assert (env["LITELLM_API_KEY"], env["LITELLM_BASE_URL"]) == ("sk-judge", "https://agent.example")
+
+
+def test_a_judge_url_without_a_judge_key_never_moves_the_runs_key(no_provider_env):
+    env = _step()._merged_env(_Config(), "modal", {}, {
+        "litellm_api_key": "sk-agent", "judge_litellm_base_url": "https://judge.example"})
+    assert (env["LITELLM_API_KEY"], env["LITELLM_BASE_URL"]) == ("sk-agent", "https://proxy.example")
+
+
 def test_a_run_key_given_as_a_reference_is_resolved(no_provider_env):
     env = _step()._merged_env(_Config(), "modal", {}, {"litellm_api_key": "env:RESOLVED_sk-ref"})
     assert env["LITELLM_API_KEY"] == "sk-ref"
