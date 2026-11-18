@@ -127,6 +127,22 @@ async def capture_workspace(
             },
         )
         raise
+    except asyncio.CancelledError:
+        # A periodic capture's outer `wait_for` shares this budget and starts first, so
+        # a stalled save usually ends here rather than in httpx's timeout.
+        elapsed = time.monotonic() - started
+        logger.warning(
+            "Snapshot save cancelled: agent=%s context_id=%s after %.1fs (budget %ss)",
+            agent_name, a2a_context_id, elapsed, timeout_seconds,
+            extra={
+                "event": "snapshot_save_cancelled",
+                "agent_name": agent_name,
+                "context_id": a2a_context_id,
+                "elapsed_seconds": round(elapsed, 1),
+                "timeout_seconds": timeout_seconds,
+            },
+        )
+        raise
     elapsed = time.monotonic() - started
     workspace_bytes = saved.objects.workspace.size_bytes if saved.objects.workspace else None
     stats = saved.stats

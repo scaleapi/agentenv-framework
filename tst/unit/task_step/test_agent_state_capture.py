@@ -429,3 +429,21 @@ async def test_a_timed_out_save_logs_how_long_it_waited_and_still_raises(monkeyp
     assert (record.agent_name, record.context_id, record.timeout_seconds) == ("solver", "ctx-1", 45)
     assert record.elapsed_seconds >= 0
     assert record.workspace_max_bytes == 5 * 1024**3
+
+
+@pytest.mark.asyncio
+async def test_a_save_cut_off_by_the_callers_deadline_logs_how_long_it_ran(monkeypatch, caplog):
+    install_capture_stubs(monkeypatch)
+
+    async def _stalled(self, method, url, **kwargs):
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", _stalled)
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(_capture(timeout_seconds=45), timeout=0.2)
+
+    (record,) = _events(caplog, "snapshot_save_cancelled")
+    assert (record.agent_name, record.context_id, record.timeout_seconds) == ("solver", "ctx-1", 45)
+    assert record.elapsed_seconds >= 0
+    assert not _events(caplog, "snapshot_save_timeout")
