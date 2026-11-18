@@ -1044,17 +1044,25 @@ class Gateway:
         """The address ``list_website_urls`` gives each site, at its url behind the gateway: for a site listed by name,
         its first name (``listed_url``), those its env stores, else those its card declares, else, for a site declaring
         none, the ``fallback_name`` its browser's site proxy routes it at, of the name it goes by (``served_names``:
-        its card's, unless two sites' cards give one); else, or while its card can't be read, its url."""
-        cards = {site: await self._site_card(site) for site in self.website_urls if site in self._listed_by_name}
+        its card's, unless two sites' cards give one); else, or while its card can't be read, its url. Cards are read
+        together, and those of sites with stored names only when some site needs a fallback."""
+        by_name = [site for site in self.website_urls if site in self._listed_by_name]
+        cards = await self._site_cards_of([site for site in by_name if site not in self._site_names])
+        if any(card is not None and not card.names for card in cards.values()):
+            cards |= await self._site_cards_of([site for site in by_name if site in self._site_names])
         goes_by = served_names({site: card.name or site for site, card in cards.items() if card is not None})
         listed = []
         for site, url in self.website_urls.items():
             card = cards.get(site)
-            names = self._names(site, card) if site in cards else ()
+            names = self._names(site, card) if site in self._listed_by_name else ()
             if not names and card is not None:
                 names = (fallback_name(goes_by[site]),)
             listed.append(listed_url(names) or url)
         return listed
+
+    async def _site_cards_of(self, sites: list[str]) -> dict[str, SiteCard | None]:
+        """Each of ``sites``' cards (``_site_card``), read at once."""
+        return dict(zip(sites, await asyncio.gather(*(self._site_card(site) for site in sites)), strict=True))
 
     def _backing_keys(self) -> list[str]:
         # rest_proxy_urls entries are the env's backing servers: mcp-<svc> (MCP) + <svc> (website

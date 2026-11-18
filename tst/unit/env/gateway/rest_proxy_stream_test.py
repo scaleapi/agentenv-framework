@@ -858,6 +858,22 @@ async def test_a_site_declaring_no_names_is_listed_at_the_fallback_of_the_name_i
 
 
 @pytest.mark.asyncio
+async def test_list_website_urls_reads_no_card_when_every_site_listed_by_name_stores_its_names(monkeypatch):
+    asked: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        asked.append(str(request.url))
+        return httpx.Response(404)
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient",
+                        lambda **kw: _RealAsyncClient(transport=transport, **kw))
+    gw = _gateway(website_urls={"shop": "http://shop", "notes": "http://notes"},
+                  site_names={"shop": ["shop.test"], "notes": ["notes.localhost"]}, listed_by_name=["shop", "notes"])
+    listed = await gw._mcp._tool_manager.get_tool("list_website_urls").fn()
+    assert (listed, asked) == (["https://shop.test/", "http://notes.localhost/"], [])
+
+
+@pytest.mark.asyncio
 async def test_list_website_urls_gives_a_site_listed_by_name_its_address_while_its_card_cant_be_read(monkeypatch):
     transport = httpx.MockTransport(lambda request: httpx.Response(503))
     monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient",
