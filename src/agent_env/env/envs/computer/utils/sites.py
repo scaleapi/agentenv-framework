@@ -45,7 +45,7 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from agent_env.env.env import Env, EnvCapabilityUnsupported, gateway_url_of
 from agent_env.env.envs.computer.utils.site_proxy import is_local, matches
 from agent_env.env.gateway.constants import AGENT_ENV_COMPUTER_HEADER
-from agent_env.env.gateway.rest_proxy import fallback_name
+from agent_env.env.gateway.rest_proxy import fallback_name, served_names
 from agent_env.providers.sandbox_providers.local_docker.provider import LOCAL_TRUST_ENV
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, VmSandbox
 from agent_env.store.base import NotFoundError
@@ -588,11 +588,9 @@ def serves_websites(record: DeployedEnv) -> bool:
 def _served_names(sites: list[tuple[str, dict]]) -> list[dict]:
     """One env's ``sites``, each with the name it's served as: named by their cards, unless two cards share a name, as
     two websites of one image whose cards name it can; then each is named as it's served, its environment_name, which
-    the env's gateway gives each a route of its own by."""
-    names = [site["name"] for _, site in sites]
-    if len(set(names)) == len(names):
-        return [site for _, site in sites]
-    return [{**site, "name": service} for service, site in sites]
+    the env's gateway gives each a route of its own by (``served_names``, which its gateway lists them by too)."""
+    named = served_names({service: site["name"] for service, site in sites})
+    return [{**site, "name": named[service]} for service, site in sites]
 
 
 def _env_qualified(found: list[tuple[str, dict]]) -> list[dict]:

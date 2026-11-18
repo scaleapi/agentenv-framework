@@ -837,6 +837,27 @@ async def test_list_website_urls_gives_a_site_listed_by_name_at_its_first_name_a
 
 
 @pytest.mark.asyncio
+async def test_a_site_declaring_no_names_is_listed_at_the_fallback_of_the_name_its_card_gives_it_as_a_proxy_routes_it(
+        monkeypatch):
+    named = {"notes": "NotesApp", "left": "Shop", "right": "Shop", "plain": None}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        card = {"capabilities": {"extensions": [{"uri": "urn:agentenv:website/v1", "params": {}}]}}
+        return httpx.Response(200, json={**card, **({"name": name} if (name := named[request.url.host]) else {})})
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient",
+                        lambda **kw: _RealAsyncClient(transport=transport, **kw))
+    gw = _gateway(website_urls={site: f"http://{site}" for site in named}, listed_by_name=list(named))
+    listed = await gw._mcp._tool_manager.get_tool("list_website_urls").fn()
+    # Named by their cards, but for the two cards giving one name, each named as it's served instead.
+    assert listed == ["http://notes.localhost/", "http://left.localhost/", "http://right.localhost/",
+                      "http://plain.localhost/"]
+    gw = _gateway(website_urls={"notes": "http://notes", "plain": "http://plain"}, listed_by_name=["notes", "plain"])
+    assert await gw._mcp._tool_manager.get_tool("list_website_urls").fn() == ["http://notesapp.localhost/",
+                                                                               "http://plain.localhost/"]
+
+
+@pytest.mark.asyncio
 async def test_list_website_urls_gives_a_site_listed_by_name_its_address_while_its_card_cant_be_read(monkeypatch):
     transport = httpx.MockTransport(lambda request: httpx.Response(503))
     monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient",

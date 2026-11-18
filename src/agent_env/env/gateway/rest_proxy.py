@@ -37,7 +37,7 @@ import json
 import logging
 import posixpath
 import re
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from typing import Any, NamedTuple
 from urllib.parse import unquote, urlsplit, urlunsplit
 
@@ -238,6 +238,22 @@ def declared_site_names(card: dict) -> tuple[str, ...]:
         if isinstance(params, dict) and isinstance(params.get("domains"), list):
             return lowered(params["domains"])
     return ()
+
+
+def website_card_name(card: dict) -> str | None:
+    """The name a site's card gives it, as a computer's site proxy names the site: the card's ``name`` when it
+    declares ``website/v1``; None otherwise, and the site goes by the name it's served as."""
+    extensions = (card.get("capabilities") or {}).get("extensions") or []
+    name = card.get("name")
+    declares = any(isinstance(ext, dict) and ext.get("uri") == EXT_WEBSITE_URI for ext in extensions)
+    return name if declares and isinstance(name, str) and name else None
+
+
+def served_names(sites: Mapping[str, str]) -> dict[str, str]:
+    """The name each of one env's sites goes by, by the name it's served as: the name it gives, its card's or else the
+    one it's served as, unless two give one name, and then each the name it's served as."""
+    given = list(sites.values())
+    return dict(sites) if len(set(given)) == len(given) else {served: served for served in sites}
 
 
 def fallback_name(site: str) -> str:
