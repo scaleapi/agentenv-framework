@@ -92,8 +92,8 @@ def test_a_task_trajectory_is_uploaded_through_its_grant_and_kept(monkeypatch, c
 
     body = store.objects["traj/trajectory-t-1.json"]
     assert body == json.dumps(trajectory, separators=(",", ":")).encode()
-    assert result == {"objects": {"trajectory": {"size_bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()}}}
-    assert client.post(TRAJECTORY_PATH, json={"task_id": task_id}).json() == {"trajectory": trajectory}
+    assert result == {"objects": {"trajectory": {"size_bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()}}, "format": a2a_server.TRAJECTORY_FORMAT}
+    assert client.post(TRAJECTORY_PATH, json={"task_id": task_id}).json() == {"trajectory": trajectory, "format": a2a_server.TRAJECTORY_FORMAT}
 
 
 def test_a_context_trajectory_is_uploaded_through_its_grant(monkeypatch, tmp_path, agent, client, store):
