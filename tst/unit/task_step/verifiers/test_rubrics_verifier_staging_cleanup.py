@@ -39,7 +39,8 @@ async def test_a_failed_staging_terminates_the_judge_the_verifier_deployed(monke
             return SimpleNamespace(a2a_url="http://judge.test", sandbox_id="sb-judge", agent_card={}, sandbox_type=None)
 
     config = SimpleNamespace(resolve_reference=lambda v: v, get_litellm_api_key=lambda: "k",
-                             get_litellm_base_url=lambda: "http://llm.test", get_default_a2a_agent_id=lambda: "judge")
+                             get_litellm_base_url=lambda: "http://llm.test", get_default_a2a_agent_id=lambda: "judge",
+                             is_model_endpoint=lambda url: url == "http://llm.test")
     monkeypatch.setattr(agent_env_config, "get_config", lambda: config)
     monkeypatch.setattr(A2AAgent, "get", staticmethod(lambda agent_id: Judge()))
     monkeypatch.setattr(sandbox_provider, "get_agent_sandbox_provider", lambda: Provider())

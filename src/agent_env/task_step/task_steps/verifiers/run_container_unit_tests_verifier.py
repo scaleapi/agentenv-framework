@@ -35,11 +35,11 @@ import shlex
 import tempfile
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, ClassVar, Optional
 
 from agent_env.config import ConfigError, get_config
-from agent_env.config.model import MODEL_HEADERS_ENV
+from agent_env.config.model import MODEL_HEADERS_ENV, no_key_for
 from agent_env.entity.refs import EntityRef
 from agent_env.env.env import require_sandbox
 from agent_env.env.envs.computer.utils import inside
@@ -352,10 +352,22 @@ class RunContainerUnitTestsVerifierTaskStep(VerifierTaskStep):
             )
         return verification
 
+    def model_key_problem(self, extra_env: Optional[Mapping[str, str]] = None) -> Optional[str]:
+        """Why the commands can't be given the configured key: a model URL among ``env_vars`` and ``extra_env``
+        that isn't the configured endpoint, with no key of its own beside it; None when there's none."""
+        given = {**self.env_vars, **(extra_env or {})}
+        for url_name, key_name in (("LITELLM_BASE_URL", "LITELLM_API_KEY"), ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY")):
+            url = given.get(url_name)
+            if url and key_name not in given and not get_config().is_model_endpoint(url):
+                return f"{url_name}: {no_key_for(url, f'{key_name} in the env_vars of the step or its step_params')}"
+        return None
+
     def _merged_env(self, config, sandbox_type: Optional[str], extra_env: dict[str, str]) -> dict[str, str]:
         """The commands' environment: the model endpoint's key and URL from agent-env's config, every sandbox
         provider's container env, ``env_vars`` and this run's ``extra_env``, then the endpoint's headers, its URL as
-        ``sandbox_type``'s containers reach it."""
+        ``sandbox_type``'s containers reach it. A URL other than the configured endpoint needs its key beside it."""
+        if problem := self.model_key_problem(extra_env):
+            raise ConfigError(f"{self.type} '{self.id}': {problem}")
         merged_env: dict[str, str] = {}
         try:
             litellm_key = config.get_litellm_api_key()
