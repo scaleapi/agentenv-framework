@@ -168,7 +168,7 @@ def _skills() -> list[str]:
         version="1.0.0",
     ),
     config=EchoAgentConfig,
-    extensions=(MCP_CONFIG_V1, CDP_CONFIG_V1, enable(TRAJECTORY_V1, live=True), TRIGGERS_V1),
+    extensions=(MCP_CONFIG_V1, CDP_CONFIG_V1, enable(TRAJECTORY_V1, live=True, native=TRAJECTORY_FORMAT), TRIGGERS_V1),
 )
 class EchoAgent(AgentEnvAgent):
     async def run(self, request: TaskRequest[EchoAgentConfig]) -> TaskResult:
