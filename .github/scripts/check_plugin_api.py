@@ -27,6 +27,7 @@ import griffe
 BASES = (
     "agent_env.env.env.Env",
     "agent_env.task_step.task_step.TaskStep",
+    "agent_env.task_step.task_steps.verifiers.verifier.VerifierTaskStep",
     "agent_env.artifact.artifact.Artifact",
     "agent_env.providers.sandbox_providers.sandbox_provider.SandboxProvider",
     "agent_env.providers.env_state.env_state_provider.EnvStateProvider",
@@ -47,6 +48,9 @@ USED = (
     "agent_env.runner.store.ensure_indexes", "agent_env.runner.store.insert_run", "agent_env.runner.store.get_run",
     "agent_env.runner.store.list_runs", "agent_env.runner.store.count_runs", "agent_env.runner.store.active_runs",
     "agent_env.runner.store.set_running", "agent_env.runner.store.mark_terminal",
+    # What a verifier step returns and scores its rows with.
+    "agent_env.task_step.task_steps.verifiers.Verification", "agent_env.task_step.task_steps.verifiers.VerifierStatus",
+    "agent_env.task_step.task_steps.verifiers.ScoreAggregator", "agent_env.task_step.task_steps.verifiers.aggregate_score",
     # What a verify script is handed of the run it grades.
     "agent_env.task_step.task_steps.verifiers.Run", "agent_env.task_step.task_steps.verifiers.Turn",
     "agent_env.task_step.task_steps.verifiers.Message", "agent_env.task_step.task_steps.verifiers.Firing",
