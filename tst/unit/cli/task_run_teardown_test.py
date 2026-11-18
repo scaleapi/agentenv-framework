@@ -6,6 +6,7 @@ import asyncio
 import importlib
 import logging
 import os
+import re
 import signal
 import threading
 import types
@@ -18,7 +19,7 @@ from agent_env.runner import local_runner
 from agent_env.runner import store as run_store
 from agent_env.runner.runner import RunStatus
 from agent_env.task import Task
-from agent_env.task.store import register_task_instance, seed_task_instance_context
+from agent_env.task.store import get_task_instance_store, register_task_instance, seed_task_instance_context
 from agent_env.task.teardown import TORN_DOWN_KEY, RecordedSandbox, TeardownReport
 from agent_env.task_step.context import DeployedSandbox
 
@@ -39,6 +40,7 @@ class _Deploys:
         context.deployed_sandboxes.append(DeployedSandbox(
             sandbox_name="box", sandbox_id=f"sb-{len(self.contexts)}", sandbox_mode="vm", sandbox_type="fake"))
         if instance_id:
+            context.instance_id = instance_id
             register_task_instance("t", 1, 1, instance_id=instance_id)
             seed_task_instance_context(instance_id, context)
         await asyncio.sleep(self.nap)
@@ -121,6 +123,23 @@ def test_keep_holds_a_run_up_until_ctrl_c_then_tears_it_down(monkeypatch, tmp_pa
     assert "Kept up:" in result.output and "sb-1" in result.output
     assert "Holding 1 sandbox up; Ctrl-C tears it down." in result.output
     assert _ids(torn_down) == ["sb-1"]
+
+
+def test_keep_names_the_command_that_finishes_a_teardown_that_left_a_sandbox_up_and_keeps_its_context(
+        monkeypatch, tmp_path, torn_down):
+    async def stuck(context):
+        context.metadata["teardown_tried"] = True
+        sandbox = context.deployed_sandboxes[0]
+        return TeardownReport(failed=((RecordedSandbox(sandbox.sandbox_id, sandbox.sandbox_type, "sandbox"), "stuck"),))
+
+    monkeypatch.setattr(task_run, "teardown_run", stuck)
+
+    result = _invoke(monkeypatch, tmp_path, _Deploys(), "run", "--keep", signal_after=1.0)
+
+    instance = re.search(r"Tear down what's left with:\n  agent-env task teardown --instance (\S+)\n",
+                         result.output).group(1)
+    assert "Couldn't tear down sb-1: stuck" in result.output
+    assert get_task_instance_store().get(instance).context["metadata"]["teardown_tried"] is True
 
 
 def test_keep_still_tears_down_a_run_ctrl_c_cancels(monkeypatch, tmp_path, torn_down):
