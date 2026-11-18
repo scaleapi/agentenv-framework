@@ -89,6 +89,7 @@ class Agent:
 AGENTS = {
     "claude-code": Agent(bridge="claude_bridge", version=("claude", "--version"), shows="(Claude Code)",
                          turn=_claude_turn),
+    "gemini": Agent(bridge="gemini_bridge", version=("gemini", "--version"), shows="0.38.2"),
 }
 
 

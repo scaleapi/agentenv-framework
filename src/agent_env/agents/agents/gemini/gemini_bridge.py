@@ -15,12 +15,14 @@ import logging
 import os
 import re
 import signal
+import struct
 import threading
 import time
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from gemini_config import SYSTEM_SETTINGS_ENV, gemini_home
 
@@ -274,16 +276,85 @@ def model_headers(raw: str | None) -> dict[str, str]:
     return {str(name): str(value) for name, value in headers.items()}
 
 
-def cli_env(environ: Mapping[str, str], *, system_settings: Path, base_url: str | None) -> dict[str, str]:
+#: Set by the image (root.conf) where the egress proxy runs: the CLI and the model's commands go out through it
+#: while the agent follows an armed clock.
+EGRESS_PROXY_ENV = "AGENTENV_EGRESS_PROXY"
+#: The clock page agent-env's libfaketime reads the CLI's time from (clock/clockpage.py, version 2): it keeps the last
+#: armed clock while the follower reconnects or restarts, which the follower's status doesn't say.
+CLOCK_PAGE = "/dev/shm/agentenv-clock"
+_PAGE = struct.Struct("<IIQqqdIIQQqq")  # magic version seq universe_ns anchor_ns rate armed reserved generation check ...
+_PAGE_MAGIC, _PAGE_VERSION, _MASK = 0x4B434541, 2, 0xFFFFFFFFFFFFFFFF
+_DIRECT_HOSTS = ("localhost", "127.0.0.1", "::1", "host.docker.internal")
+
+
+def clock_armed(page_path: str | None = None) -> bool:
+    """Whether the clock page holds an armed clock, so the CLI started now reads the env's time: the page itself,
+    as libfaketime reads it, retried while a write is under way (seq odd) or its check doesn't match."""
+    try:
+        with open(page_path or CLOCK_PAGE, "rb") as page:
+            for _ in range(50):
+                page.seek(0)
+                raw = page.read(_PAGE.size)
+                if len(raw) < _PAGE.size:
+                    return False
+                magic, version, seq, universe, anchor, rate, armed, _, generation, checked, mono_u, mono_a = \
+                    _PAGE.unpack(raw)
+                if magic != _PAGE_MAGIC or version != _PAGE_VERSION:
+                    return False
+                rate_bits = struct.unpack("<Q", struct.pack("<d", rate))[0]
+                expected = (seq ^ (universe & _MASK) ^ (anchor & _MASK) ^ rate_bits ^ armed ^ generation
+                            ^ (mono_u & _MASK) ^ (mono_a & _MASK) ^ 0x9E3779B97F4A7C15) & _MASK
+                if seq % 2 == 0 and checked == expected:
+                    return bool(armed)
+                time.sleep(0.001)
+    except OSError:
+        return False
+    return bool(armed)  # a writer that died mid-write: the next write takes the page up; its armed flag says the most
+
+
+def egress_env(environ: Mapping[str, str], direct: Iterable[str] = (), *, armed: bool = False) -> dict[str, str]:
+    """The egress proxy for the CLI and what it starts, where the image runs one (FD-5916) and the clock is ``armed``:
+    they read the env's time, so a client checking a live site's certificate against it would refuse the site once
+    the clock is months off, and the proxy, on real time, hands it a certificate that holds then. The env's MCP servers
+    (``direct``) are reached directly: the proxy refuses an address that isn't global, as a local or private gateway's
+    is. Unarmed, the CLI reads real time and goes out directly, as an image without the proxy does, so a model endpoint
+    or mirror at a private address keeps working. Hosts the agent was deployed to reach directly (``NO_PROXY``,
+    ``no_proxy``) stay direct."""
+    proxy = environ.get(EGRESS_PROXY_ENV)
+    if not proxy or not armed:
+        return {}
+    configured = [host.strip() for name in ("NO_PROXY", "no_proxy") for host in (environ.get(name) or "").split(",")]
+    hosts = ",".join(dict.fromkeys([*_DIRECT_HOSTS, *filter(None, configured), *filter(None, direct)]))
+    return {**{name: proxy for base in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY") for name in (base, base.lower())},
+            "NO_PROXY": hosts, "no_proxy": hosts, "NODE_USE_ENV_PROXY": "1"}
+
+
+#: The proxy variables the CLI itself reads (its config's proxy): it routes every request it makes through that proxy,
+#: NO_PROXY or not, so its model calls to the attribution proxy on 127.0.0.1 and its MCP servers would meet a proxy
+#: that refuses them.
+_CLI_PROXY_VARS = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")
+
+
+def cli_env(environ: Mapping[str, str], *, system_settings: Path, base_url: str | None,
+            direct_hosts: Iterable[str] = (), clock_armed: bool = False) -> dict[str, str]:
     """The CLI's environment for one run: this process's, with the endpoint's key under the name the CLI reads, its
     model calls sent to ``base_url`` (the attribution proxy, for this run) unless the environment names its own
-    endpoint, and the run's own system settings."""
+    endpoint, and the run's own system settings. On an armed clock (``clock_armed``) the commands the model runs go
+    out through the egress proxy (``egress_env``), by ALL_PROXY alone, and to the env's MCP servers (``direct_hosts``)
+    and a plain-HTTP model endpoint directly; the CLI itself, which would send everything through a proxy it's
+    handed, goes out directly."""
     env = dict(environ)
     if env.get("LITELLM_API_KEY") and not env.get("GEMINI_API_KEY"):
         env["GEMINI_API_KEY"] = env["LITELLM_API_KEY"]
     if base_url and not environ.get("GOOGLE_GEMINI_BASE_URL"):
         env["GOOGLE_GEMINI_BASE_URL"] = base_url
     env[SYSTEM_SETTINGS_ENV] = str(system_settings)
+    # A model endpoint over plain HTTP has no certificate to check at the env's date, so it's reached directly, as one
+    # at a private address, which the proxy refuses, must be.
+    endpoints = (urlsplit(env.get(name) or "") for name in ("GOOGLE_GEMINI_BASE_URL", "LITELLM_BASE_URL"))
+    model_hosts = [endpoint.hostname or "" for endpoint in endpoints if endpoint.scheme == "http"]
+    egress = egress_env(environ, [*direct_hosts, *model_hosts], armed=clock_armed)
+    env.update({name: value for name, value in egress.items() if name not in _CLI_PROXY_VARS})
     return env
 
 

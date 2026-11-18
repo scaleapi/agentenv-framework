@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from a2a.types import AgentSkill
@@ -66,6 +67,7 @@ from gemini_bridge import (
     chats_dir_for_cwd,
     cli_env,
     cli_model,
+    clock_armed,
     detect_format,
     find_session_file,
     gemini_request_to_openai,
@@ -554,7 +556,10 @@ class GeminiAgent(DurableSessionRefs, AgentEnvAgent):
                         attachment_paths=attachment_paths or None,
                         timeout_s=cfg.timeout_seconds,
                         event_callback=lambda event: self._on_event(event, request),
-                        env=cli_env(os.environ, system_settings=settings, base_url=base_url),
+                        env=cli_env(os.environ, system_settings=settings, base_url=base_url,
+                                    clock_armed=clock_armed(),
+                                    direct_hosts=[urlsplit(str(info.get("url") or "")).hostname or ""
+                                                  for info in (request.mcp_servers or {}).values()]),
                         cwd=GEMINI_CWD,
                         other_sessions=lambda: {*self.bound_session_refs(), *self._claimed_sessions} - {own},
                     )
