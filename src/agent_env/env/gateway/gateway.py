@@ -87,6 +87,9 @@ from .rest_proxy import (
     WebsiteRoute,
     declared_site_names,
     called_tools,
+    fallback_name,
+    served_names,
+    website_card_name,
     fetch_child_card,
     forward,
     is_child_mcp_path,
@@ -121,11 +124,13 @@ _STEP_API = {"source": "step_api"}
 
 
 class SiteCard(NamedTuple):
-    """What the gateway keeps from a site's card: the paths it advertises for agentenv, which its route refuses, and
-    the names it declares."""
+    """What the gateway keeps from a site's card: the paths it advertises for agentenv, which its route refuses, the
+    names it declares (hostnames), and the card's own name (``website_card_name``), which needn't be the name the
+    gateway serves the site as."""
 
     reserved: frozenset[str]
     names: tuple[str, ...]
+    card_name: str | None = None
 
 
 class ToolNameClash(ValueError):
@@ -246,7 +251,7 @@ class Gateway:
         if self.website_urls:
             @self._mcp.tool(name="list_website_urls", description="List available website URLs that can be browsed.")
             async def list_website_urls() -> list[str]:
-                return [await self._listed_url(site, url) for site, url in self.website_urls.items()]
+                return await self._listed_urls()
             self._server_tools.setdefault("gateway", []).append(
                 MCPTool(
                     name="list_website_urls",
@@ -1027,7 +1032,8 @@ class Gateway:
         except ValueError:
             card = None
         address = self.website_urls.get(app) or base_url
-        self._site_cards[app] = (SiteCard(site_reserved_paths(card, address), declared_site_names(card))
+        self._site_cards[app] = (SiteCard(site_reserved_paths(card, address), declared_site_names(card),
+                                          website_card_name(card))
                                  if isinstance(card, dict) else SiteCard(frozenset(), ()))
         return self._site_cards[app]
 
@@ -1035,13 +1041,29 @@ class Gateway:
         """The names website ``app`` is reached at: those its env stores, else those its ``card`` declares."""
         return self._site_names.get(app) or (card.names if card else ())
 
-    async def _listed_url(self, site: str, url: str) -> str:
-        """The address ``list_website_urls`` gives ``site``, at ``url`` behind the gateway: for a site listed by name,
-        its first name (``listed_url``), its card read for a site whose env stores none; else, or with none, ``url``."""
-        if site not in self._listed_by_name:
-            return url
-        card = None if site in self._site_names else await self._site_card(site)
-        return listed_url(self._names(site, card)) or url
+    async def _listed_urls(self) -> list[str]:
+        """The address ``list_website_urls`` gives each site, at its url behind the gateway: for a site listed by name,
+        its first name (``listed_url``), those its env stores, else those its card declares, else, for a site declaring
+        none, the ``fallback_name`` its browser's site proxy routes it at, of the name it goes by (``served_names``:
+        its card's, unless two sites' cards give one); else, or while its card can't be read, its url. Cards are read
+        together, and those of sites with stored names only when some site needs a fallback."""
+        by_name = [site for site in self.website_urls if site in self._listed_by_name]
+        cards = await self._site_cards_of([site for site in by_name if site not in self._site_names])
+        if any(card is not None and not card.names for card in cards.values()):
+            cards |= await self._site_cards_of([site for site in by_name if site in self._site_names])
+        goes_by = served_names({site: card.card_name or site for site, card in cards.items() if card is not None})
+        listed = []
+        for site, url in self.website_urls.items():
+            card = cards.get(site)
+            names = self._names(site, card) if site in self._listed_by_name else ()
+            if not names and card is not None:
+                names = (fallback_name(goes_by[site]),)
+            listed.append(listed_url(names) or url)
+        return listed
+
+    async def _site_cards_of(self, sites: list[str]) -> dict[str, SiteCard | None]:
+        """Each of ``sites``' cards (``_site_card``), read at once."""
+        return dict(zip(sites, await asyncio.gather(*(self._site_card(site) for site in sites)), strict=True))
 
     def _backing_keys(self) -> list[str]:
         # rest_proxy_urls entries are the env's backing servers: mcp-<svc> (MCP) + <svc> (website
