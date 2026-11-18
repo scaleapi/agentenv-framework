@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import io
 import json
@@ -386,6 +387,29 @@ def test_a_saved_workspace_fits_its_upload_grant(monkeypatch, tmp_path, agent, g
     asyncio.run(agent.save_snapshot(request))
 
     with tarfile.open(fileobj=io.BytesIO(uploaded[request.objects.workspace.write.url]), mode="r:gz") as tar:
+        assert tar.extractfile("notes.txt").read() == text
+
+
+def test_a_workspace_too_big_for_the_disk_uncompressed_is_saved_compressed(monkeypatch, tmp_path):
+    workspace, _ = _snapshot_roots(monkeypatch, tmp_path)
+    text = b"the same line of source code\n" * 20_000
+    (workspace / "notes.txt").write_bytes(text)
+    archive = tmp_path / "workspace.tar.gz"
+    disk_bytes = 200_000
+    write_archive = a2a_server._write_workspace_archive
+
+    def _write_to_a_small_disk(path, **kwargs):
+        file_count, size = write_archive(path, **kwargs)
+        if size > disk_bytes:
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return file_count, size
+
+    monkeypatch.setattr(a2a_server, "_write_workspace_archive", _write_to_a_small_disk)
+
+    _, bytes_written = a2a_server._build_workspace_archive(archive)
+
+    assert bytes_written <= disk_bytes
+    with tarfile.open(archive, mode="r:gz") as tar:
         assert tar.extractfile("notes.txt").read() == text
 
 

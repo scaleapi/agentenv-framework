@@ -8,6 +8,7 @@ multi-turn conversation threads through ``claude --resume``.
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import logging
 import os
@@ -252,20 +253,28 @@ def _write_workspace_archive(archive_path: Path, *, compresslevel: int, stage_so
 def _build_workspace_archive(archive_path: Path, max_bytes: int | None = None) -> tuple[int, int]:
     """``/app`` and the CLI's state as a gzip tar on disk, out of the agent's heap; its file count and size. The tar
     goes in uncompressed (level 0), since deflate on one core is the save's bottleneck and gains nothing on media; an
-    archive over ``max_bytes`` is rebuilt compressed, so a workspace that fit its upload grant compressed still fits.
-    A file that changes while it's read rebuilds the archive with each file staged first, so it can be skipped.
-    Symlinked directories aren't followed."""
+    archive over ``max_bytes``, or one the disk has no room for, is rebuilt compressed, so a workspace that fit compressed
+    still fits. A file that changes while it's read rebuilds the archive with each file staged first, so it can be
+    skipped. Symlinked directories aren't followed."""
     if not WORKSPACE_DIR.is_dir():
         raise FileNotFoundError(f"workspace directory does not exist: {WORKSPACE_DIR}")
 
     def write(compresslevel: int) -> tuple[int, int]:
         try:
             return _write_workspace_archive(archive_path, compresslevel=compresslevel)
-        except OSError:
+        except OSError as exc:
+            if exc.errno == errno.ENOSPC:
+                raise
             logger.warning("Workspace changed while archiving; rebuilding with staged files")
             return _write_workspace_archive(archive_path, compresslevel=compresslevel, stage_sources=True)
 
-    file_count, size = write(0)
+    try:
+        file_count, size = write(0)
+    except OSError as exc:
+        if exc.errno != errno.ENOSPC:
+            raise
+        logger.warning("No disk space for the uncompressed workspace archive; compressing")
+        return write(9)
     if max_bytes is not None and size > max_bytes:
         logger.info(f"Workspace archive is {size} bytes uncompressed, over the {max_bytes}-byte grant; compressing")
         file_count, size = write(9)
