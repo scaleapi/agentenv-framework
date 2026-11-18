@@ -92,11 +92,24 @@ AGENTS = {
 }
 
 
-def _container_of(sandbox_id: str) -> str:
-    names = subprocess.run(["docker", "ps", "--format", "{{.Names}}"], capture_output=True, text=True,
+def _container_of(sandbox_id: str, *, required: bool = True) -> str | None:
+    """The container behind ``sandbox_id``, stopped or running; None, when not ``required``, for one that's gone."""
+    names = subprocess.run(["docker", "ps", "-a", "--format", "{{.Names}}"], capture_output=True, text=True,
                            check=True).stdout.split()
-    [name] = [n for n in names if sandbox_id in n]
+    found = [n for n in names if sandbox_id in n]
+    if not required and len(found) != 1:
+        return None
+    [name] = found
     return name
+
+
+async def _remove_agents(context: TaskStepContext) -> None:
+    """Remove the agent containers teardown didn't take down; one already gone, or failing to go, is left."""
+    gone = set(context.metadata.get("torn_down_sandbox_ids") or [])
+    for agent in context.deployed_agents:
+        name = agent.sandbox_id and agent.sandbox_id not in gone and _container_of(agent.sandbox_id, required=False)
+        if name:
+            await asyncio.to_thread(subprocess.run, ["docker", "rm", "-f", name], capture_output=True)
 
 
 async def _followers(deployed) -> dict:
@@ -190,9 +203,7 @@ async def _follows_until_torn_down(name: str, spec: Agent, tag: str, endpoint: F
         print(f"advance after teardown answered in {waited:.2f}s")
         assert waited < 5
     finally:
-        await asyncio.gather(*(asyncio.to_thread(subprocess.run, ["docker", "rm", "-f", _container_of(a.sandbox_id)],
-                                                 capture_output=True)
-                               for a in context.deployed_agents if a.sandbox_id
-                               and a.sandbox_id not in (context.metadata.get("torn_down_sandbox_ids") or [])),
-                             return_exceptions=True)
-        await env.close()
+        try:
+            await _remove_agents(context)
+        finally:
+            await env.close()
