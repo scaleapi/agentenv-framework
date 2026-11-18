@@ -152,6 +152,8 @@ def test_totals_sum_the_sub_agents_steps_and_skip_a_count_a_step_lacks():
     assert validate(document) == []
     document["final_metrics"]["total_prompt_tokens"] += 1
     assert [f.where for f in validate(document)] == ["final_metrics.total_prompt_tokens"]
+    sub_step["metrics"]["prompt_tokens"] = None
+    assert "totals" not in _rules(validate(document))
 
 
 def _open_page(name: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, bytes]]:

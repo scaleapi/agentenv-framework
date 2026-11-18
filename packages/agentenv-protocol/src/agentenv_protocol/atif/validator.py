@@ -71,8 +71,8 @@ RULES: dict[str, Rule] = {rule.id: rule for rule in (
     Rule("outside-key", ERROR, WARNING, "No `extra` holds a key outside `agentenv` but `ToolCall.extra.raw_arguments`"),
     Rule("call-id", ERROR, WARNING, "Each `tool_call_id` is unique across the document and its sub-agents"),
     Rule("reference", ERROR, WARNING, "Each `subagent_trajectory_ref` names an embedded sub-agent by `trajectory_id`"),
-    Rule("totals", ERROR, WARNING, "A `final_metrics` total equals its summed model steps, when every one has the "
-                                   "count"),
+    Rule("totals", ERROR, WARNING, "A `final_metrics` total equals the sum over the model steps of the root and its "
+                                   "embedded sub-agents, when every one has the count"),
     Rule("total-steps", ERROR, WARNING, "`final_metrics.total_steps` counts the root's steps, or the root's `notes` "
                                         "explain the difference"),
     Rule("usage", ERROR, WARNING, "A step's cache reads and writes fit within its `prompt_tokens`"),
@@ -166,7 +166,7 @@ def _check(document: Any, found: _Findings, media: Path | Mapping[str, bytes] | 
     _timestamps(document, found)
     saved = parsed.to_json_dict()
     if saved != document:
-        found.add("harbor-save", _difference(document, saved), "Harbor's to_json_dict gives it back changed")
+        found.add("harbor-save", _difference(document, saved), "Harbor's to_json_dict gives this back changed")
     for where, step in _steps(document):
         message = step.get("message")
         if isinstance(message, list) and message and all(
@@ -193,14 +193,16 @@ def validate_live(pages: Sequence[Mapping[str, Any] | None], final: Mapping[str,
         findings.extend(found.items)
         if served is not None and not is_prefix(served[1], page):
             findings.append(Finding("live-prefix", ERROR, f"page {index}: ",
-                                    f"page {served[0]} isn't a prefix of it: {_difference(served[1], page)}"))
+                                    f"page {served[0]} isn't a prefix of it; they first differ at "
+                                    f"{_difference(served[1], page) or 'the document'}"))
         served = (index, page)
     found = _Findings(False, "final: ")
     _check(final, found, media)
     findings.extend(found.items)
     if served is not None and not is_prefix(served[1], final):
         findings.append(Finding("live-prefix", ERROR, "final: ",
-                                f"page {served[0]} isn't a prefix of it: {_difference(served[1], final)}"))
+                                f"page {served[0]} isn't a prefix of it; they first differ at "
+                                f"{_difference(served[1], final) or 'the document'}"))
     return findings
 
 
@@ -329,31 +331,15 @@ def _calls_and_references(document: Mapping[str, Any], found: _Findings) -> None
                     found.add("reference", at, f"no embedded sub-agent has trajectory_id {trajectory_id!r}")
 
 
-def _referenced(document: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-    """The root and every embedded sub-agent its steps reference, directly or through another sub-agent."""
-    subs = {sub.get("trajectory_id"): sub for sub in document.get("subagent_trajectories") or []}
-    out: list[Mapping[str, Any]] = [document]
-    reached: set[Any] = set()
-    for trajectory in out:
-        for step in trajectory.get("steps") or []:
-            for result in _results(step):
-                for ref in result.get("subagent_trajectory_ref") or []:
-                    trajectory_id = ref.get("trajectory_id")
-                    if trajectory_id in subs and trajectory_id not in reached:
-                        reached.add(trajectory_id)
-                        out.append(subs[trajectory_id])
-    return out
-
-
 def _totals(document: Mapping[str, Any], found: _Findings) -> None:
     totals = document.get("final_metrics")
     if not isinstance(totals, Mapping):
         return
-    model_steps = [step.get("metrics") or {} for trajectory in _referenced(document)
+    model_steps = [step.get("metrics") or {} for _, trajectory in _trajectories(document)
                    for step in trajectory.get("steps") or []
                    if step.get("source") == "agent" and step.get("llm_call_count") != 0]
     for count, total in _COUNTS:
-        if total in totals and all(count in metrics for metrics in model_steps):
+        if isinstance(totals.get(total), int) and all(isinstance(m.get(count), int) for m in model_steps):
             expected = sum(metrics[count] for metrics in model_steps)
             if totals[total] != expected:
                 found.add("totals", f"final_metrics.{total}",
@@ -449,20 +435,35 @@ def _timestamps(document: Mapping[str, Any], found: _Findings) -> None:
 
 
 def _unanswered(page: Mapping[str, Any], found: _Findings) -> None:
-    """A page's steps whose calls have no result yet, served before their task ended."""
+    """A page's steps whose calls have no result yet, served before their task ended. A sub-agent's task is its
+    spawning call's, found through the references; one no served step references can't be placed, so isn't checked."""
     ended_steps: set[int] = set()
     offset = 0
     for task in tasks(page):
         if task.state is not None:
             ended_steps.update(range(offset, offset + len(task.steps)))
         offset += len(task.steps)
-    spawner: dict[Any, int] = {}
-    for index, step in enumerate(page.get("steps") or []):
-        for result in _results(step):
-            for ref in result.get("subagent_trajectory_ref") or []:
-                spawner.setdefault(ref.get("trajectory_id"), index)
+    spawner: dict[Any, tuple[Any, int]] = {}
+    for _, trajectory in _trajectories(page):
+        owner = trajectory.get("trajectory_id") if trajectory is not page else None
+        for index, step in enumerate(trajectory.get("steps") or []):
+            for result in _results(step):
+                for ref in result.get("subagent_trajectory_ref") or []:
+                    spawner.setdefault(ref.get("trajectory_id"), (owner, index))
+
+    def root_step(trajectory_id: Any) -> int | None:
+        seen = set()
+        while trajectory_id in spawner and trajectory_id not in seen:
+            seen.add(trajectory_id)
+            trajectory_id, index = spawner[trajectory_id]
+            if trajectory_id is None:
+                return index
+        return None
+
     for prefix, trajectory in _trajectories(page):
-        root_index = None if not prefix else spawner.get(trajectory.get("trajectory_id"))
+        root_index = root_step(trajectory.get("trajectory_id")) if prefix else None
+        if prefix and root_index is None:
+            continue
         for index, step in enumerate(trajectory.get("steps") or []):
             if (index if not prefix else root_index) in ended_steps:
                 continue
@@ -485,7 +486,7 @@ def _difference(a: Any, b: Any, where: str = "") -> str:
     if isinstance(a, Mapping) and isinstance(b, Mapping):
         for key in list(a) + [k for k in b if k not in a]:
             if key not in a or key not in b:
-                return f"{where}.{key}".lstrip(".") + (" is missing" if key not in b else " is added")
+                return f"{where}.{key}".lstrip(".")
             if a[key] != b[key]:
                 return _difference(a[key], b[key], f"{where}.{key}".lstrip("."))
     if isinstance(a, list) and isinstance(b, list):
@@ -493,5 +494,5 @@ def _difference(a: Any, b: Any, where: str = "") -> str:
             if x != y:
                 return _difference(x, y, f"{where}[{index}]")
         if len(a) != len(b):
-            return f"{where} has {len(a)} items, then {len(b)}"
-    return where or "the document"
+            return f"{where}[{min(len(a), len(b))}]"
+    return where

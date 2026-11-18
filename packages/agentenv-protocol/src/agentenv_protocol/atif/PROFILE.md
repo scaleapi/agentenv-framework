@@ -152,7 +152,7 @@ cross-check that reads them; per-part origins, when a reader needs them; and an 
 producer's output to profile 1.0. `reader=True` checks someone else's document for reading instead: what a producer
 must not write only warns, and the document fails only where agentenv couldn't read it. `media` is the folder the
 document's media paths are relative to, the one holding `media/`, or the files by path; without it only the paths' form
-is checked. `validate_live(pages, final)` checks what a live reader was served, page by page, with the final read. On
+is checked. `validate_live(pages, final)` checks what a live reader was served, page by page, with the final read. A sub-agent's task is its spawning call's, found through the references, so an embedded sub-agent that no served step references isn't held to `live-unanswered`. On
 the command line: `python -m agentenv_protocol.atif validate FILE [--media DIR] [--reader]`, which prints each finding
 and exits 1 when one is an error.
 
@@ -167,7 +167,7 @@ and exits 1 when one is an error.
 | `outside-key` | No `extra` holds a key outside `agentenv` but `ToolCall.extra.raw_arguments` | error | warning |
 | `call-id` | Each `tool_call_id` is unique across the document and its sub-agents | error | warning |
 | `reference` | Each `subagent_trajectory_ref` names an embedded sub-agent by `trajectory_id` | error | warning |
-| `totals` | A `final_metrics` total equals its summed model steps, when every one has the count | error | warning |
+| `totals` | A `final_metrics` total equals the sum over the model steps of the root and its embedded sub-agents, when every one has the count | error | warning |
 | `total-steps` | `final_metrics.total_steps` counts the root's steps, or the root's `notes` explain the difference | error | warning |
 | `usage` | A step's cache reads and writes fit within its `prompt_tokens` | error | warning |
 | `media-path` | A media path is `media/<sha256>.<ext>` | error | warning |
