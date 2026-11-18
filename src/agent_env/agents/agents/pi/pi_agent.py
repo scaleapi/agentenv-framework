@@ -29,6 +29,8 @@ from typing import Any, Literal
 from urllib.parse import urlsplit
 
 import httpx
+import ipaddress
+import socket
 from agentenv_protocol.a2a_agent import (
     INSTALL_V1,
     MCP_CONFIG_V1,
@@ -204,6 +206,10 @@ EGRESS_PROXY_ENV = "AGENTENV_EGRESS_PROXY"
 CLOCK_PAGE = "/dev/shm/agentenv-clock"
 _PAGE = struct.Struct("<IIQqqdIIQQqq")  # magic version seq universe_ns anchor_ns rate armed reserved generation check ...
 _PAGE_MAGIC, _PAGE_VERSION, _MASK = 0x4B434541, 2, 0xFFFFFFFFFFFFFFFF
+#: The constant every page's check is salted with (clockpage.check).
+_PAGE_CHECK_SALT = 0x9E3779B97F4A7C15
+#: How often, and how far apart, a read retries a page a write is under way on: 50 ms in all, far longer than a write.
+_PAGE_READ_TRIES, _PAGE_RETRY_S = 50, 0.001
 _DIRECT_HOSTS = ("localhost", "127.0.0.1", "::1", "host.docker.internal")
 
 
@@ -212,7 +218,7 @@ def clock_armed(page_path: str | None = None) -> bool:
     as libfaketime reads it, retried while a write is under way (seq odd) or its check doesn't match."""
     try:
         with open(page_path or CLOCK_PAGE, "rb") as page:
-            for _ in range(50):
+            for _ in range(_PAGE_READ_TRIES):
                 page.seek(0)
                 raw = page.read(_PAGE.size)
                 if len(raw) < _PAGE.size:
@@ -223,13 +229,35 @@ def clock_armed(page_path: str | None = None) -> bool:
                     return False
                 rate_bits = struct.unpack("<Q", struct.pack("<d", rate))[0]
                 expected = (seq ^ (universe & _MASK) ^ (anchor & _MASK) ^ rate_bits ^ armed ^ generation
-                            ^ (mono_u & _MASK) ^ (mono_a & _MASK) ^ 0x9E3779B97F4A7C15) & _MASK
+                            ^ (mono_u & _MASK) ^ (mono_a & _MASK) ^ _PAGE_CHECK_SALT) & _MASK
                 if seq % 2 == 0 and checked == expected:
                     return bool(armed)
-                time.sleep(0.001)
+                time.sleep(_PAGE_RETRY_S)
     except OSError:
         return False
     return bool(armed)  # a writer that died mid-write: the next write takes the page up; its armed flag says the most
+
+
+def _global_host(host: str) -> bool:
+    """Whether ``host`` is a public address, or a name every address of resolves to one: a host the egress proxy
+    reaches. A name that doesn't resolve here is taken as public, for the proxy to resolve."""
+    try:
+        return ipaddress.ip_address(host).is_global
+    except ValueError:
+        pass
+    try:
+        addresses = {info[4][0] for info in socket.getaddrinfo(host, None)}
+    except OSError:
+        return True
+    return all(ipaddress.ip_address(address.split("%")[0]).is_global for address in addresses)
+
+
+def model_direct_hosts(base_url: str | None) -> list[str]:
+    """The model endpoint's host when the CLI reaches it directly on an armed clock: over plain HTTP, which has no
+    certificate to check at the env's date, or at an address that isn't public, which the egress proxy refuses."""
+    endpoint = urlsplit(base_url or "")
+    host = endpoint.hostname or ""
+    return [host] if host and (endpoint.scheme == "http" or not _global_host(host)) else []
 
 
 def egress_env(environ: Mapping[str, str], direct: Iterable[str] = (), *, armed: bool = False) -> dict[str, str]:
@@ -255,8 +283,7 @@ def cli_env(environ: Mapping[str, str], base_url: str, mcp_servers: Mapping[str,
     (``clock_armed``) the egress proxy (``egress_env``). The env's MCP servers, which the CLI calls itself over HTTP
     (mcp.json), are reached directly, and so is a model endpoint over plain HTTP, which has no certificate to check at
     the env's date and, at a private address, the proxy would refuse."""
-    endpoint = urlsplit(base_url)
-    model_host = [endpoint.hostname or ""] if endpoint.scheme == "http" else []
+    model_host = model_direct_hosts(base_url) if clock_armed else []
     mcp_hosts = [urlsplit(str(entry.get("url") or "")).hostname or "" for entry in (mcp_servers or {}).values()]
     return {**environ, **egress_env(environ, [*mcp_hosts, *model_host], armed=clock_armed)}
 
