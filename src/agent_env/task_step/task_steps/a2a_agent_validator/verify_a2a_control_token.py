@@ -10,7 +10,7 @@ import httpx
 from agent_env.a2a_agent import A2AAgent
 from agent_env.entity.refs import EntityRef
 from agent_env.task_step.context import TaskStepContext
-from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_step import StepRole, TaskStep, TaskStepDependency
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +21,7 @@ _REQUEST_TIMEOUT_SECONDS = 30
 
 class VerifyA2AControlTokenStep(TaskStep):
     type: ClassVar[str] = "verify_a2a_control_token"
+    step_role = StepRole.GRADER
     entity_refs = (EntityRef.agent("a2a_agent_id", version_field="a2a_agent_version"),)
 
     def __init__(self, id: str, version: Optional[int], a2a_agent_id: str, a2a_agent_version: Optional[int] = None,
