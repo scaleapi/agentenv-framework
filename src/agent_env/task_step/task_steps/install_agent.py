@@ -29,6 +29,7 @@ import httpx
 from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.config import get_config
+from agent_env.config.model import ModelRole
 from agent_env.entity.scopes import FieldScope
 from agent_env.env.envs.computer.utils.boot import control_token as new_control_token
 from agent_env.providers.sandbox_providers.local_docker.provider import (
@@ -391,7 +392,7 @@ class InstallAgentTaskStep(TaskStep):
             control_token=deployed.control_token,
         ))
 
-        default_model = agent.metadata.get("default_model") or get_config().get_model_for_role("agent")
+        default_model = get_config().resolve_model(ModelRole.SOLVER, agent=agent.metadata.get("default_model")).model
         if default_model and not context.default_agent_model:
             context.default_agent_model = default_model
             logger.info(f"Set context.default_agent_model to '{default_model}'")
