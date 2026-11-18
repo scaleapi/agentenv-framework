@@ -78,10 +78,10 @@ WINDOWS_MEDIA = "windows_media"
 #: Composing an Omarchy computer builds its base from Omarchy's own VM image, which a run fetches into this machine's
 #: cache once, about 4 GB; a test that composes one needs it there already, and KVM, which boots linux/amd64 disks.
 OMARCHY_IMAGE = "omarchy_image"
-#: The agent clock end to end (FD-5916) runs over a Claude Code image built from the branch beforehand, named by
-#: ``AGENTENV_E2E_CLAUDE_CODE_IMAGE``: no CI job builds agent images, and the shipped one installs the protocol from PyPI.
+#: The agent clock end to end (FD-5916) runs over agent images built from the branch beforehand, which
+#: ``AGENTENV_E2E_AGENT_IMAGES`` names one per agent (``claude-code=<tag>,codex=<tag>``): no CI job builds agent images.
 AGENT_CLOCK_IMAGE = "agent_clock_image"
-AGENT_CLOCK_IMAGE_ENV = "AGENTENV_E2E_CLAUDE_CODE_IMAGE"
+AGENT_CLOCK_IMAGES_ENV = "AGENTENV_E2E_AGENT_IMAGES"
 #: The shipped Omarchy base, whose source the capability looks for.
 OMARCHY_ARTIFACT = Path(__file__).parents[2] / "src" / "agent_env" / "computers" / "artifacts" / "omarchy-4.5" / "artifact.toml"
 
@@ -245,10 +245,15 @@ def omarchy_image_is_available() -> bool:
     return "linux/amd64" in LocalSandboxProvider.disk_image_platforms() and source_path(sha256).exists()
 
 
-def skip_without_agent_clock_image() -> pytest.MarkDecorator:
-    """Collection-time ``skipif`` for tests that run over a Claude Code image built with the agent clock."""
-    return pytest.mark.skipif(not os.environ.get(AGENT_CLOCK_IMAGE_ENV),
-                              reason=missing_capability_reason(AGENT_CLOCK_IMAGE))
+def agent_clock_image(agent: str) -> str:
+    """The image ``AGENTENV_E2E_AGENT_IMAGES`` names for ``agent``, or ''."""
+    named = dict(entry.split("=", 1) for entry in os.environ.get(AGENT_CLOCK_IMAGES_ENV, "").split(",") if "=" in entry)
+    return named.get(agent, "").strip()
+
+
+def skip_without_agent_clock_image(agent: str) -> pytest.MarkDecorator:
+    """Collection-time ``skipif`` for a test that runs over ``agent``'s image built with the agent clock."""
+    return pytest.mark.skipif(not agent_clock_image(agent), reason=missing_capability_reason(AGENT_CLOCK_IMAGE))
 
 
 def skip_without_omarchy_image() -> pytest.MarkDecorator:
