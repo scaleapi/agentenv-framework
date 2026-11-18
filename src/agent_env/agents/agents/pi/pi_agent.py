@@ -16,10 +16,12 @@ import os
 import re
 import shutil
 import signal
+import struct
 import tarfile
 import tempfile
+import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -192,6 +194,71 @@ def _mcp_json(
         if headers:
             servers[name]["headers"] = headers
     return {"mcpServers": servers}, env
+
+
+#: Set by the image (root.conf) where the egress proxy runs: the CLI and the model's commands go out through it
+#: while the agent follows an armed clock.
+EGRESS_PROXY_ENV = "AGENTENV_EGRESS_PROXY"
+#: The clock page agent-env's libfaketime reads the CLI's time from (clock/clockpage.py, version 2): it keeps the last
+#: armed clock while the follower reconnects or restarts, which the follower's status doesn't say.
+CLOCK_PAGE = "/dev/shm/agentenv-clock"
+_PAGE = struct.Struct("<IIQqqdIIQQqq")  # magic version seq universe_ns anchor_ns rate armed reserved generation check ...
+_PAGE_MAGIC, _PAGE_VERSION, _MASK = 0x4B434541, 2, 0xFFFFFFFFFFFFFFFF
+_DIRECT_HOSTS = ("localhost", "127.0.0.1", "::1", "host.docker.internal")
+
+
+def clock_armed(page_path: str | None = None) -> bool:
+    """Whether the clock page holds an armed clock, so the CLI started now reads the env's time: the page itself,
+    as libfaketime reads it, retried while a write is under way (seq odd) or its check doesn't match."""
+    try:
+        with open(page_path or CLOCK_PAGE, "rb") as page:
+            for _ in range(50):
+                page.seek(0)
+                raw = page.read(_PAGE.size)
+                if len(raw) < _PAGE.size:
+                    return False
+                magic, version, seq, universe, anchor, rate, armed, _, generation, checked, mono_u, mono_a = \
+                    _PAGE.unpack(raw)
+                if magic != _PAGE_MAGIC or version != _PAGE_VERSION:
+                    return False
+                rate_bits = struct.unpack("<Q", struct.pack("<d", rate))[0]
+                expected = (seq ^ (universe & _MASK) ^ (anchor & _MASK) ^ rate_bits ^ armed ^ generation
+                            ^ (mono_u & _MASK) ^ (mono_a & _MASK) ^ 0x9E3779B97F4A7C15) & _MASK
+                if seq % 2 == 0 and checked == expected:
+                    return bool(armed)
+                time.sleep(0.001)
+    except OSError:
+        return False
+    return bool(armed)  # a writer that died mid-write: the next write takes the page up; its armed flag says the most
+
+
+def egress_env(environ: Mapping[str, str], direct: Iterable[str] = (), *, armed: bool = False) -> dict[str, str]:
+    """The egress proxy for the CLI and what it starts, where the image runs one (FD-5916) and the clock is ``armed``:
+    they read the env's time, so a client checking a live site's certificate against it would refuse the site once
+    the clock is months off, and the proxy, on real time, hands it a certificate that holds then. The env's MCP servers
+    (``direct``) are reached directly: the proxy refuses an address that isn't global, as a local or private gateway's
+    is. Unarmed, the CLI reads real time and goes out directly, as an image without the proxy does, so a model endpoint
+    or mirror at a private address keeps working. Hosts the agent was deployed to reach directly (``NO_PROXY``,
+    ``no_proxy``) stay direct."""
+    proxy = environ.get(EGRESS_PROXY_ENV)
+    if not proxy or not armed:
+        return {}
+    configured = [host.strip() for name in ("NO_PROXY", "no_proxy") for host in (environ.get(name) or "").split(",")]
+    hosts = ",".join(dict.fromkeys([*_DIRECT_HOSTS, *filter(None, configured), *filter(None, direct)]))
+    return {**{name: proxy for base in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY") for name in (base, base.lower())},
+            "NO_PROXY": hosts, "no_proxy": hosts, "NODE_USE_ENV_PROXY": "1"}
+
+
+def cli_env(environ: Mapping[str, str], base_url: str, mcp_servers: Mapping[str, Any] | None = None, *,
+            clock_armed: bool = False) -> dict[str, str]:
+    """The pi CLI's environment, before its run's own variables: this process's, and on an armed clock
+    (``clock_armed``) the egress proxy (``egress_env``). The env's MCP servers, which the CLI calls itself over HTTP
+    (mcp.json), are reached directly, and so is a model endpoint over plain HTTP, which has no certificate to check at
+    the env's date and, at a private address, the proxy would refuse."""
+    endpoint = urlsplit(base_url)
+    model_host = [endpoint.hostname or ""] if endpoint.scheme == "http" else []
+    mcp_hosts = [urlsplit(str(entry.get("url") or "")).hostname or "" for entry in (mcp_servers or {}).values()]
+    return {**environ, **egress_env(environ, [*mcp_hosts, *model_host], armed=clock_armed)}
 
 
 def _prompt_text(parts: Sequence[Any], unattached: Sequence[tuple[Path, str]]) -> str:
@@ -494,7 +561,7 @@ class PiAgent(AgentEnvAgent):
         argv += [f"@{path}" for path in attached]
 
         env = {
-            **os.environ,
+            **cli_env(os.environ, base_url, request.mcp_servers, clock_armed=clock_armed()),
             **mcp_env,
             "PI_CODING_AGENT_DIR": str(agent_dir),
             "PI_OFFLINE": "1",

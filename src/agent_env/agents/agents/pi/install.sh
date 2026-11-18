@@ -2,7 +2,7 @@
 # Installs Node, pi and this agent's Python environment on Debian or Ubuntu, as root. The image build and
 # install/v1 both run it, so an install into a task container matches the image.
 set -eu
-NODE_VERSION=22.19.0
+NODE_VERSION=22.23.3
 PI_VERSION=1.1.0
 here=$(cd "$(dirname "$0")" && pwd)
 
