@@ -81,7 +81,8 @@ def _content(content: Iterable[Any] | None, text: str | None) -> list[Any]:
 class YatfTurn:
     """What a handler writes one turn's events through. It stamps the envelope (``seq``, ``id``, ``turn``,
     ``observer``, the agent's actor, the attempt, ``derived_from``) and keeps each event as JSON text, refusing one
-    that isn't JSON as it's written. Not thread-safe: records are fed one at a time."""
+    that isn't JSON as it's written, and any once the turn has closed. Not thread-safe: records are fed one at a
+    time."""
 
     def __init__(self, context: TurnContext, spec: AdapterSpec, out: list[str] | None = None) -> None:
         self.context = context
@@ -90,6 +91,7 @@ class YatfTurn:
         self.source: DerivedFrom | None = None
         self._out = [] if out is None else out
         self._first = len(self._out)
+        self._last: int | None = None
         self._calls = 0
         self._attempt = 1
         self._final_metrics: FinalMetrics | None = None
@@ -100,8 +102,8 @@ class YatfTurn:
 
     @property
     def events(self) -> list[dict[str, Any]]:
-        """This turn's events so far, as fresh copies."""
-        return [json.loads(text) for text in self._out[self._first:]]
+        """This turn's events so far, and no later turn's, as fresh copies."""
+        return [json.loads(text) for text in self._out[self._first:self._last]]
 
     def message(self, *, role: str, step: str | None = None, content: Iterable[Any] | None = None,
                 text: str | None = None, time: Any = None, actor: str | None = None, derived_from: Any = _CURRENT,
@@ -223,6 +225,8 @@ class YatfTurn:
         """Write one event. A None in ``body`` leaves an optional field out and writes null for a required one or for
         an extension's own key, so whether a null is written follows the model."""
         event_type = body.pop("type", None) or _TYPE_OF[model]
+        if self._last is not None:
+            raise YatfError(f"turn {self.index} is closed: write through the turn the handler is given")
         source = self.source if derived_from is _CURRENT else derived_from
         seq = len(self._out) - self._first
         envelope: dict[str, Any] = {"seq": seq, "id": f"{self.index}.{seq}", "type": event_type, "turn": self.index,
@@ -268,6 +272,7 @@ class YatfTurn:
             self._emit(FinalResponse, {"content": list(final)}, time=ended_at, derived_from=None)
         self._emit(TurnEnd, {"state": state, "tool_call_count": self._calls, "final_metrics": self._final_metrics},
                    time=ended_at, derived_from=None)
+        self._last = len(self._out)
 
 
 @dataclass(frozen=True)

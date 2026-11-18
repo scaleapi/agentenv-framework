@@ -179,6 +179,26 @@ def test_a_live_run_and_a_replay_of_its_records_make_the_same_events():
     assert live == run.events == yatf.replay(Toy, [recorded()])
 
 
+def test_a_closed_turn_keeps_its_own_events_and_takes_no_more():
+    handed = []
+
+    @yatf.yatf_adapter(native_format="toy-events/1", version="0.1.0", usage_input_includes_cache=None)
+    class Keeper(Adapter):
+        @native(type="say")
+        def say(self, record, turn):
+            handed.append(turn)
+            turn.note(record["text"])
+
+    events = yatf.replay(Keeper, [recorded(0, (Fed({"type": "say", "text": "a"}),)),
+                                  recorded(1, (Fed({"type": "say", "text": "b"}),))])
+    first, second = handed
+    assert first.events == [event for event in events if event["turn"] == 0]
+    assert second.events == [event for event in events if event["turn"] == 1]
+    with pytest.raises(yatf.YatfError, match="turn 0 is closed"):
+        first.note("late")
+    assert first.events == [event for event in events if event["turn"] == 0]
+
+
 def test_a_call_still_held_at_turn_end_is_written_without_a_time():
     records = (Fed({"type": "call", "id": "c9", "step": "m9", "name": "Read", "args": {}}),)
     events = yatf.replay(Toy, [recorded(records=records)])
