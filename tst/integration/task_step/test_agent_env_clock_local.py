@@ -16,20 +16,25 @@ import uuid
 from datetime import datetime, timezone
 
 import pytest
+from agentenv_protocol.client import ExtensionCallError
 
 from agent_env.a2a_agent.a2a_agent import A2AAgent
+from agent_env.a2a_agent.clock import FOLLOWING_KEY
 from agent_env.artifact import DockerImageArtifact
 from agent_env.env.gateway.constants import EXT_CLOCK_URI
-from agent_env.providers.sandbox_providers.local_docker.provider import _host_ips, host_url_for
-from agentenv_protocol.client import ExtensionCallError
+from agent_env.providers.sandbox_providers.local_docker.provider import (
+    _host_ips,
+    host_url_for,
+)
 from agent_env.task_step.context import TaskStepContext
-from agent_env.task_step.task_steps.agent_clock import FOLLOWING_KEY
 from agent_env.task_step.task_steps.deploy_agent import DeployAgentTaskStep
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from agent_env.task_step.task_steps.sync_env_clock import SyncEnvClockTaskStep
 from agent_env.task_step.task_steps.teardown_sandboxes import TeardownSandboxesTaskStep
 from tst.integration.store.local_parallel_deploy_test import _seed_bootstrap_envs
-from tst.integration.task_step.test_prompt_agent_live_trajectory_local import local_registry as local_registry
+from tst.integration.task_step.test_prompt_agent_live_trajectory_local import (
+    local_registry as local_registry,
+)
 from tst.integration.task_step.test_register_env_triggers_local import _deploy_items
 from tst.util.capabilities import AGENT_CLOCK_IMAGE_ENV, skip_without_agent_clock_image
 from tst.util.fake_anthropic import FakeAnthropic, tool_then_answer
