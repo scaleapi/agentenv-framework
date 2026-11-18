@@ -34,9 +34,15 @@ GUARDED = [("POST", "/agentenv"), ("POST", "/svc/mcp-svc/agentenv"), ("POST", "/
            ("POST", "/svc/mcp-svc/mcp"), ("GET", "/svc/mcp-svc/mcp/"),
            ("DELETE", "/svc/mcp-svc/./mcp"), ("POST", "/svc/mcp-svc//mcp"), ("POST", "/svc/mcp-svc/public%2Fx/../agentenv"),
            ("POST", "/svc/mcp-svc/public%2Fx/../mcp"), ("POST", "/svc/mcp-svc/public%2Fx/../agentenv/ext/set_acting_user"),
-           ("POST", "/svc/mcp-svc/AgentEnv"), ("POST", "/svc/mcp-svc/MCP")]
+           ("POST", "/svc/mcp-svc/AgentEnv"), ("POST", "/svc/mcp-svc/MCP"),
+           # the older REST routes of a BaseService server, which reset and export what the verifiers grade
+           ("POST", "/svc/mcp-svc/api/reset"), ("GET", "/svc/mcp-svc/./export-state"), ("GET", "/svc/mcp-svc/export-state"),
+           ("GET", "/svc/mcp-svc/export-snapshot"), ("GET", "/svc/mcp-svc/x/../export-snapshot"),
+           ("GET", "/svc/mcp-svc/snapshot-dirty"), ("POST", "/svc/mcp-svc/reset-memory"),
+           ("POST", "/svc/mcp-svc/validate-rows"), ("POST", "/svc/mcp-svc/API/Reset"),
+           ("POST", "/svc/mcp-svc/%61pi/reset")]
 PROXIED_OPEN = [("GET", "/svc/mcp-svc/.well-known/agent-env.json"), ("GET", "/svc/mcp-svc/openapi.yaml"),
-                ("GET", "/svc/mcp-svc/export-state"), ("POST", "/svc/shop/api/orders"), ("POST", "/svc/shop/mcp"),
+                ("POST", "/svc/shop/api/orders"), ("POST", "/svc/shop/api/reset"), ("POST", "/svc/shop/mcp"),
                 ("GET", "/website/shop/index.html")]
 _RealAsyncClient = httpx.AsyncClient
 

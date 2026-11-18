@@ -44,7 +44,7 @@ async def test_reset_uses_rest_on_success(monkeypatch):
     result = await legacy_protocol.reset("http://gw", "email", "/data/seed.json")
 
     assert result == {"ok": True}
-    rest.assert_awaited_once_with("http://gw/svc/mcp-email", "/data/seed.json")
+    rest.assert_awaited_once_with("http://gw/svc/mcp-email", "/data/seed.json", headers=None)
     mcp.assert_not_called()
 
 
@@ -345,3 +345,41 @@ async def test_backing_servers_use_a_records_computers_only_for_its_own_gateway(
     servers = await legacy_protocol.backing_servers(record, "http://another-gw", SimpleNamespace(mcp_server_envs=[], website_envs=[]))
 
     assert [(s.environment_name, s.address, s.record) for s in servers] == [("desktop", "http://another-gw", None)]
+
+
+@pytest.mark.asyncio
+async def test_the_legacy_rest_routes_send_the_deployments_control_token(monkeypatch):
+    seen, real = [], httpx.AsyncClient
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path, request.headers.get("authorization")))
+        return httpx.Response(200, json={"ok": True})
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real(transport=httpx.MockTransport(handle)))
+    deployed = DeployedSandboxEnv(env_id="e", env_version=1, sandbox_id="sb-1",
+                                  environment_card_url=f"http://gw{WELL_KNOWN_PATH}", control_token="t0ken")
+    base = "http://gw/svc/mcp-email"
+
+    assert await legacy_protocol.reset("http://gw", "email", "/data/seed.json", deployed=deployed) == {"ok": True}
+    headers = deployed.control_headers_for(base)
+    await legacy_protocol.add_via_rest(base, "/data/seed.json", headers=headers)
+    await legacy_protocol.export_state("http://gw", "email", headers=headers)
+    assert seen == [("POST", "/svc/mcp-email/api/reset", "Bearer t0ken"), ("POST", "/svc/mcp-email/api/add", "Bearer t0ken"),
+                    ("GET", "/svc/mcp-email/export-state", "Bearer t0ken")]
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_service_state_is_exported_with_the_deployments_control_token(monkeypatch):
+    seen, real = [], httpx.AsyncClient
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.path, request.headers.get("authorization")))
+        if request.url.path.endswith(WELL_KNOWN_PATH):
+            return httpx.Response(404)
+        return httpx.Response(200, json={"emails": []})
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real(transport=httpx.MockTransport(handle)))
+    deployed = DeployedSandboxEnv(env_id="e", env_version=1, sandbox_id="sb-1", control_token="t0ken",
+                                  environment_card_url=f"http://gw{WELL_KNOWN_PATH}")
+    assert await legacy_protocol.service_state(deployed, "http://gw", "email") == {"emails": []}
+    assert seen[-1] == ("/svc/mcp-email/export-state", "Bearer t0ken")

@@ -1852,13 +1852,21 @@ def mcp_endpoints(servers: list[InternalMCPServer], website_urls: dict[str, str]
     return endpoints
 
 
+# The older REST routes a BaseService server serves beside its MCP endpoint, behind the same /svc/mcp-<name>/ proxy:
+# they reset, export and validate the state the verifiers grade, as the data plane's do, so they take the token too.
+LEGACY_DATA_PATHS = ("/api/reset", "/export-state", "/export-snapshot", "/snapshot-dirty", "/reset-memory",
+                     "/validate-rows")
+
+
 def token_paths(servers: list[InternalMCPServer], website_urls: dict[str, str],
                 rest_proxy_urls: dict[str, str]) -> dict[str, tuple[str, ...]]:
     """The paths under /svc/<key>/ that take the gateway's control token, by key: every backing server's data plane,
     extensions included, and an MCP server's own endpoint (``mcp_endpoints``), which skips the gateway's trajectory and
-    triggers. A child env registered under its own name, a computer, takes its own token, so none of its paths are here."""
+    triggers, and for an ``mcp-`` route the older REST routes (``LEGACY_DATA_PATHS``). A child env registered under its
+    own name, a computer, takes its own token, so none of its paths are here."""
     endpoints = mcp_endpoints(servers, website_urls, rest_proxy_urls)
-    return {key: (RPC_PATH, *((endpoints[key],) if key in endpoints else ()))
+    return {key: (RPC_PATH, *((endpoints[key],) if key in endpoints else ()),
+                  *(LEGACY_DATA_PATHS if key.startswith("mcp-") and key not in website_urls else ()))
             for key, base in rest_proxy_urls.items()
             if key in website_urls or route_environment_name(key, base, servers, website=False) != key
             or not any(server.name == key for server in servers)}

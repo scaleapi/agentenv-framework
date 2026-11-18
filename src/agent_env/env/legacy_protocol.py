@@ -209,21 +209,24 @@ async def reset_via_rest(
     mock_data_path: Optional[str] = None,
     timeout: int = 30,
     verify: bool = True,
+    headers: Optional[dict[str, str]] = None,
 ) -> dict:
-    """POST ``{base_url}/api/reset``. Sends the seed path when given. Raises on non-2xx."""
+    """POST ``{base_url}/api/reset``. Sends the seed path when given, and ``headers`` (the deployment's control token,
+    which a gateway that has one takes on this route). Raises on non-2xx."""
     body = {"mock_data_path": mock_data_path} if mock_data_path is not None else None
     async with httpx.AsyncClient(verify=verify) as client:
-        response = await client.post(f"{base_url}/api/reset", json=body, timeout=timeout)
+        response = await client.post(f"{base_url}/api/reset", json=body, timeout=timeout, headers=headers)
         response.raise_for_status()
         result = response.json()
         logger.info(f"load_environment_artifact: REST reset succeeded: {result}")
         return result
 
 
-async def add_via_rest(base_url: str, file_path: str, timeout: int = 120, verify: bool = True) -> dict:
-    """POST ``{base_url}/api/add`` with a backend file path. Raises on non-2xx."""
+async def add_via_rest(base_url: str, file_path: str, timeout: int = 120, verify: bool = True,
+                       headers: Optional[dict[str, str]] = None) -> dict:
+    """POST ``{base_url}/api/add`` with a backend file path, and ``headers``. Raises on non-2xx."""
     async with httpx.AsyncClient(verify=verify) as client:
-        response = await client.post(f"{base_url}/api/add", json={"file_path": file_path}, timeout=timeout)
+        response = await client.post(f"{base_url}/api/add", json={"file_path": file_path}, timeout=timeout, headers=headers)
         response.raise_for_status()
         result = response.json()
         logger.info(f"load_environment_artifact: add response: {result}")
@@ -231,17 +234,23 @@ async def add_via_rest(base_url: str, file_path: str, timeout: int = 120, verify
 
 
 async def export_state(
-    gateway_url: str, environment_name: str, timeout: int = EXPORT_STATE_TIMEOUT_SECONDS, verify: bool = True
+    gateway_url: str, environment_name: str, timeout: int = EXPORT_STATE_TIMEOUT_SECONDS, verify: bool = True,
+    headers: Optional[dict[str, str]] = None,
 ) -> dict:
-    """GET ``/svc/mcp-{name}/export-state`` — the legacy state snapshot for one service."""
-    return await _export_state_at(environment_base_url(gateway_url, environment_name, mcp=True), timeout, verify)
+    """GET ``/svc/mcp-{name}/export-state`` — the legacy state snapshot for one service, with ``headers``."""
+    return await _export_state_at(environment_base_url(gateway_url, environment_name, mcp=True), timeout, verify, headers)
 
 
-async def _export_state_at(base_url: str, timeout: int, verify: bool) -> dict:
+async def _export_state_at(base_url: str, timeout: int, verify: bool, headers: Optional[dict[str, str]] = None) -> dict:
     async with httpx.AsyncClient(verify=verify) as client:
-        response = await client.get(f"{base_url}/export-state", timeout=timeout)
+        response = await client.get(f"{base_url}/export-state", timeout=timeout, headers=headers)
         response.raise_for_status()
         return response.json()
+
+
+def _control_headers(deployed: Optional[DeployedEnv], url: str) -> Optional[dict[str, str]]:
+    """The headers a call to ``url`` sends of ``deployed``'s control token; None when it has none to send."""
+    return (deployed.control_headers_for(url) or None) if deployed is not None else None
 
 
 async def service_state(deployed: Optional[DeployedEnv], gateway_url: Optional[str], environment_name: str) -> dict:
@@ -253,14 +262,16 @@ async def service_state(deployed: Optional[DeployedEnv], gateway_url: Optional[s
     """
     base_url = await v1_base_url(deployed, gateway_url, environment_name, mcp=True)
     if base_url is None:
-        return await export_state(gateway_url, environment_name)
+        return await export_state(gateway_url, environment_name, headers=_control_headers(deployed, environment_base_url(
+            gateway_url or "", environment_name, mcp=True)))
     response = await protocol_v1.get_data(base_url,
                                           headers=deployed.control_headers_for(base_url) if deployed is not None else None)
     if not response.parts:
         return {}
     if isinstance(response.parts[0], DataPart):
         return response.parts[0].data
-    return await _export_state_at(base_url, timeout=EXPORT_STATE_TIMEOUT_SECONDS, verify=True)
+    return await _export_state_at(base_url, timeout=EXPORT_STATE_TIMEOUT_SECONDS, verify=True,
+                                  headers=_control_headers(deployed, base_url))
 
 
 async def offers_tool(mcp_url: str, name: str) -> bool:
@@ -322,11 +333,13 @@ async def reset(
     environment_name: str,
     mock_data_path: str,
     max_retries: int = DEFAULT_MCP_MAX_RETRIES,
+    deployed: Optional[DeployedEnv] = None,
 ) -> Optional[dict]:
-    """Reset an MCP service to a seed: try REST ``/api/reset``, fall back to the MCP tool."""
+    """Reset an MCP service to a seed: try REST ``/api/reset`` (with ``deployed``'s control token), fall back to the
+    MCP tool."""
     base_url = environment_base_url(gateway_url, environment_name, mcp=True)
     try:
-        return await reset_via_rest(base_url, mock_data_path)
+        return await reset_via_rest(base_url, mock_data_path, headers=_control_headers(deployed, base_url))
     except Exception as rest_err:
         # TODO remove MCP tool fallback once all usages of MCP servers are on REST
         logger.info(f"load_environment_artifact: REST reset failed ({type(rest_err).__name__}), falling back to MCP tool")

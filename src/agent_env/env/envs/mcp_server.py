@@ -296,7 +296,8 @@ class MCPServerEnv(Env):
     async def _load_environment_artifact_legacy(self, file_artifact) -> None:
         container_path = await self._copy_artifact_into_container(file_artifact, file_artifact.filename)
         await legacy_protocol.reset(
-            self._gateway_url, self.environment_name, container_path, max_retries=self._MCP_MAX_RETRIES
+            self._gateway_url, self.environment_name, container_path, max_retries=self._MCP_MAX_RETRIES,
+            deployed=self._deployed,
         )
 
     async def validate(self, on_progress: Optional[Callable[[str], None]] = None) -> str:
