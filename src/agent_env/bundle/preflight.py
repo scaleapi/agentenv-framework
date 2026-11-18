@@ -588,8 +588,10 @@ def _provider(spec: str | None, default: Callable[[], SandboxProvider]) -> Sandb
 
 
 def model_endpoint_missing(needed: frozenset[str]) -> tuple[str, str] | None:
-    """The first of the ``needed`` model variables the config can't give, and why; None when it gives them all."""
+    """The first of the ``needed`` model variables the config can't give, and why; None when it gives them all. A
+    ``[model]`` table that doesn't parse raises its own error, which would otherwise read as a missing endpoint."""
     config = get_config()
+    config.get_default_model()
     if ENV_BASE_URL in needed:
         try:
             config.get_litellm_base_url()

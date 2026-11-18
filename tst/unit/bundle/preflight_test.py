@@ -22,6 +22,8 @@ from agent_env.bundle.run import _write_bundle, prepare_bundle
 from agent_env.bundle.resolve import build_step
 from agent_env.cli import cli
 from agent_env.config import get_config
+from agent_env.config.errors import ConfigError
+from agent_env.config.model import ENV_BASE_URL
 from agent_env.config.runtime import Config
 from agent_env.env import Env, GatewayEnv, MCPServerEnv, MultiEnv
 from agent_env.env import bootstrap
@@ -40,6 +42,7 @@ from agent_env.task_step.task_steps.deploy_env import DeployEnvTaskStep
 from agent_env.task_step.task_steps.deploy_sandbox import DeploySandboxTaskStep
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep
 from tst.unit.bundle._support import layout, local_store, shipped_agent
+from tst.util.config import config_with_document
 
 LOCAL = ("localhost:5000/local/img:v1", "file:///state/img-v1.tar.gz")
 REMOTE = ("123456789012.dkr.ecr.us-west-2.amazonaws.com/img:v1", "s3://bucket/img-v1.tar.gz")
@@ -1217,6 +1220,15 @@ def test_an_agent_or_agent_judge_needs_a_model_endpoint_unless_its_step_gives_on
                               "calls the model endpoint, and its API key can't be read: No model API key configured")
     monkeypatch.setenv("LITELLM_API_KEY", "sk-1")
     assert len(dry_run_bundle(bundle_dir, sandbox="local").runs) == 2
+
+
+@pytest.mark.parametrize("model", [{"base_url": "http://models:4000", "roles": {"agent": "a", "solver": "s"}},
+                                   {"base_url": "http://models:4000", "endpoints": {}}], ids=["role-twice", "unknown-key"])
+def test_a_model_table_that_doesn_t_parse_says_why_rather_than_reading_as_a_missing_endpoint(no_model, monkeypatch,
+                                                                                             model):
+    monkeypatch.setattr(preflight_module, "get_config", lambda: config_with_document({"model": model}))
+    with pytest.raises(ConfigError, match="sets both|unknown keys"):
+        MODEL_ENDPOINT_MISSING(frozenset({ENV_BASE_URL}))
 
 
 def test_an_agent_declaring_the_model_variables_itself_needs_no_endpoint_but_its_judge_does(bundle_dir, no_model):
