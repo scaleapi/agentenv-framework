@@ -134,6 +134,18 @@ class BundleSkillRequest(ExtensionRequest):
     skill_bundle: SkillBundle
 
 
+class ClockSyncTimeRequest(ExtensionRequest):
+    """clock/v1's ``sync_time`` on an agent: what every server's takes, ``env_get_time_url`` and ``timezone``, and the
+    config of the follower an agent runs itself, the gateway's watch URL as its sandbox reaches it, the name the
+    gateway knows it by and its read token."""
+
+    env_get_time_url: str
+    timezone: str | None = None
+    watch_url: str | None = None
+    name: str | None = None
+    read_token: str | None = None
+
+
 class SkillAddResponse(ExtensionResponse):
     name: str
 
@@ -1345,6 +1357,25 @@ TRIGGERS_V1 = ExtensionDefinition(
     },
 )
 
+CLOCK_V1 = ExtensionDefinition(
+    uri="urn:agentenv:clock/v1",
+    description=(
+        "Follow the env's clock: the agent's image runs the clock follower, so every program the agent runs reads "
+        "the env's time. Served where the image has the follower."
+    ),
+    endpoint="/ext/clock",
+    core_operations={
+        "sync_time": _op(
+            "sync_time",
+            "POST",
+            "/ext/clock/sync-time",
+            SDK,
+            request_model=ClockSyncTimeRequest,
+            response_required=("synced", "timezone", "follower"),
+        ),
+    },
+)
+
 INSTALL_V1 = ExtensionDefinition(
     uri="urn:agentenv:install/v1",
     description="Declare commands for installing the agent into an existing target.",
@@ -1392,6 +1423,7 @@ STANDARD_EXTENSIONS: Mapping[str, ExtensionDefinition] = MappingProxyType(
             PEER_AGENTS_V1,
             ATTRIBUTION_PROBE_V1,
             TRIGGERS_V1,
+            CLOCK_V1,
             INSTALL_V1,
             PROXY_V1,
         )
