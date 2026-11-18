@@ -52,6 +52,7 @@ from agent_env.bundle.parse import (
     segment_problem,
 )
 from agent_env.bundle.plan import STORE_GETTERS, check_bundle
+from agent_env.bundle.register import REGISTRATIONS
 from agent_env.bundle.requires import Providers, Use, detected
 from agent_env.bundle.resolve import resolve_bundle, sync_context_paths
 from agent_env.config import get_config
@@ -62,14 +63,18 @@ from agent_env.env.env import Env
 from agent_env.env.registry import get_env_registry
 from agent_env.eval import Eval
 from agent_env.plugins import ARTIFACTS, ENVS, TASK_STEPS
+from agent_env.plugins._bundles import AGENT_ALIASES, ARTIFACT_ALIASES, ENV_ALIASES, InstalledAliases, installed_aliases
+from agent_env.store import Filter
 from agent_env.store.base import NotFoundError
 from agent_env.store.ids import LOCAL_PREFIX, is_local_id
+from agent_env.store.routing import configured_store
 from agent_env.store.image_store.oci_registry_credentials import names_registry
 from agent_env.store.image_store.registry_api import pin_digest
 from agent_env.task.task import Task
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.utils.paths import os_reason
 
+_ALIAS_TABLES = {EntityKind.AGENT: AGENT_ALIASES, EntityKind.ENV: ENV_ALIASES, EntityKind.ARTIFACT: ARTIFACT_ALIASES}
 # How long a name taken from an id may be, in bytes; ids are capped far above it, and a longer name helps nobody.
 _MAX_NAME_BYTES = 200
 _DOWNLOADS = 8  # objects downloaded at once
@@ -152,6 +157,9 @@ class _EntityOut(ExportContext):
         if (bundle := self.importer._installed_for(kind, entity.id)) is not None:
             self.importer.floating.append(Floating(self.folder, kind, entity.id, _from_bundle(bundle)))
             return entity.id
+        if (bundle := self.importer._registered_from(kind, entity)) is not None:
+            self.importer.floating.append(Floating(self.folder, kind, entity.id, _registered_from_bundle(bundle)))
+            return entity.id
         local = self.importer.local(kind, entity, self.folder)
         return local if local is not None else {kind.value: entity.id, "version": entity.version}
 
@@ -207,6 +215,7 @@ class _Importer:
         self.jobs: list[ImageJob] = []
         self.providers = Providers()
         self.installed: tuple[InstalledBundle, ...] | None = None
+        self.aliases: dict[str, InstalledAliases] = {}  # the installed bundles' aliases, by aliases.toml table
         if self.dest is not None:
             _check_destination(self.dest)
 
@@ -454,6 +463,9 @@ class _Importer:
         if isinstance(entity, str):
             self.problems.append(f"{where}: {entity}")
             return
+        if (bundle := self._registered_from(kind, entity)) is not None:
+            self._from_installed(site, where, bundle, _registered_from_bundle(bundle))
+            return
         if isinstance(site.key, str) and (why := _not_taken(site, entity)) is not None:
             # The store holds the step as it is, though the step can't read what it names; a folder can't.
             site.rewrite(None)
@@ -535,9 +547,27 @@ class _Importer:
             self.installed = installed_bundles()
         return next((bundle for bundle in self.installed if entity_id.startswith(f"{bundle.id_root}/")), None)
 
-    def _from_installed(self, site: RefSite, where: str, bundle: InstalledBundle) -> None:
+    def _registered_from(self, kind: EntityKind, entity: Any) -> InstalledBundle | None:
+        """The installed bundle ``entity`` comes with when the store holds it under that bundle's alias for it and this
+        version is the one ``bundle register`` wrote from the bundle, as its ledger in the store records: a run writes
+        it from the bundle too. An entity stored under the alias by anything else is the store's own."""
+        table = _ALIAS_TABLES.get(kind)
+        if table is None:
+            return None
+        if self.installed is None:
+            self.installed = installed_bundles()
+        if table not in self.aliases:
+            self.aliases[table] = installed_aliases(self.installed, table)
+        if (claim := self.aliases[table].target(entity.id)) is None:
+            return None
+        registered = configured_store(get_config().get_document_store()).find_one(
+            REGISTRATIONS, Filter.of(store=kind.value, id=entity.id, version=entity.version, status="done",
+                                     bundle=f"installed:{claim.bundle.id_root.removeprefix(LOCAL_PREFIX)}"))
+        return claim.bundle if registered is not None else None
+
+    def _from_installed(self, site: RefSite, where: str, bundle: InstalledBundle, why: str | None = None) -> None:
         """An installed bundle's entity has no fixed version, so it isn't pinned, and a pin the store held is dropped."""
-        why = _from_bundle(bundle)
+        why = why or _from_bundle(bundle)
         if site.version is not None and site.version_key is not None:
             why += f"; the stored pin to v{site.version} is dropped, as such an entity has no fixed version"
         _unpin(site)
@@ -584,6 +614,11 @@ def _names_of(kind: BundleKind) -> str:
 
 def _from_bundle(bundle: InstalledBundle) -> str:
     return f"it comes with the installed bundle {bundle.qualified}, which a run writes it from"
+
+
+def _registered_from_bundle(bundle: InstalledBundle) -> str:
+    return (f"the store holds it under its alias as registered from the installed bundle {bundle.qualified}, which a run "
+            "writes it from")
 
 
 def _kind_of(entity: Any) -> EntityKind:
