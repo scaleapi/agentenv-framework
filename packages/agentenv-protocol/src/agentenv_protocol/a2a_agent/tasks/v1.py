@@ -367,7 +367,8 @@ class Usage:
             for name in (*_USAGE_COUNTERS, "input_includes_cache", "cost_usd")
             if data.get(name) is not None
         }
-        return cls(**known, provider_details=data.get("provider_details") or {})
+        details = data.get("provider_details")
+        return cls(**known, provider_details={} if details is None else details)
 
     @classmethod
     def from_model_response(cls, usage: Mapping[str, Any]) -> "Usage":

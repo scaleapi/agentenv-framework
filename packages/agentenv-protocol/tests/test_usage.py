@@ -53,6 +53,13 @@ def test_from_dict_refuses_what_isnt_a_mapping():
         Usage.from_dict([("input_tokens", 1)])
 
 
+@pytest.mark.parametrize("details", [[], False, 0, "", "x", [("a", 1)]])
+def test_from_dict_refuses_provider_details_that_arent_a_mapping_even_when_empty(details):
+    with pytest.raises(TypeError, match="provider_details must be a mapping"):
+        Usage.from_dict({"input_tokens": 1, "provider_details": details})
+    assert Usage.from_dict({"input_tokens": 1, "provider_details": None}) == Usage(input_tokens=1)
+
+
 @pytest.mark.parametrize("usage", [Usage(cache_read_tokens=0), Usage(cache_write_tokens=3),
                                    Usage(input_includes_cache=False)], ids=["read", "write", "flag"])
 def test_a_usage_with_only_cache_fields_isnt_empty(usage):

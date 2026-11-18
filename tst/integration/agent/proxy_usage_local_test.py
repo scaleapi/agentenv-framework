@@ -47,11 +47,15 @@ async def test_a_turns_recorded_model_calls_reach_the_host_as_the_turns_usage(lo
          "timeout_seconds": 60},
     ]})
     episode = await EpisodeSpec.from_task(task, trainer_agents=["policy"]).start()
-    turn = await episode.next_turn()
-    await turn.record_model_call({"role": "assistant", "content": "Thinking."}, model="policy-model", usage=OPENAI)
-    await turn.record_model_call("Hi.", model="policy-model", usage=ANTHROPIC)
-    await turn.end("Hi.")
-    await episode.result()
+    try:
+        turn = await episode.next_turn()
+        await turn.record_model_call({"role": "assistant", "content": "Thinking."}, model="policy-model",
+                                     usage=OPENAI)
+        await turn.record_model_call("Hi.", model="policy-model", usage=ANTHROPIC)
+        await turn.end("Hi.")
+        await episode.result()
+    finally:
+        await episode.abandon("the test ended")
 
     record = Task.get_instance(episode.id)
     assert record.status == "completed"
