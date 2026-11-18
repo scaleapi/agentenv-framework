@@ -83,7 +83,7 @@ def _clock_helpers(agent: str) -> dict[str, str]:
     """The bridge's clock helpers, as source: the one module in the agent's folder that defines ``egress_env``."""
     [module] = [p for p in (AGENTS_DIR / agent).glob("*.py") if "def egress_env(" in p.read_text()]
     tree = ast.parse(module.read_text())
-    names = {"clock_armed", "egress_env"}
+    names = {"clock_armed", "_global_host", "model_direct_hosts", "egress_env"}
     found = {node.name: ast.unparse(node) for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names}
     assert set(found) == names, (module, sorted(found))
     return found
