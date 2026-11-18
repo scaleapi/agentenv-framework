@@ -1253,6 +1253,45 @@ are the profile's template. The base class adds:
 - **Its skill**: sites by their real names, files to upload in `~/Uploads` and downloads in
   `~/Downloads`, folders it makes.
 
+## Agent trajectories: ATIF
+
+`agentenv_protocol.atif` is the record every agent serves beside its native log, as format `atif/1`:
+[ATIF v1.8](https://github.com/harbor-framework/harbor/blob/main/rfcs/0001-trajectory-format.md), Harbor's Agent
+Trajectory Interchange Format, plus agentenv's optional `extra.agentenv` profile. A document without the profile is
+still correct ATIF that means the same, so Harbor's tools read every document as is. `PROFILE.md` beside the module is
+the profile's spec, and `fixtures/` holds its canonical examples. The package needs only the base dependencies.
+
+- **The models** are Harbor 0.26.0's own, vendored in `atif.models` and changed only in import paths (Harbor is
+  Apache-2.0; its license is beside them). `python scripts/vendor_atif.py <version>` refreshes them.
+- **An adapter** turns an agent's native records into ATIF steps. It's a class declared with `@atif_adapter`, whose
+  `@native`, `@aux` and `@finish` methods write through the typed step builder they're handed:
+
+  ```python
+  from agentenv_protocol.atif import Adapter, atif_adapter, native
+
+  @atif_adapter(native_format="my-cli-events/1", version="0.1.0", usage_input_includes_cache=False)
+  class MyCliAtif(Adapter):
+      @native(type="assistant")
+      def assistant(self, record, turn):
+          turn.message(step=record["id"], text=record["text"])
+          turn.step(key=record["id"], model_name=record["model"], input_tokens=record["in"],
+                    cache_read_tokens=record["cache_read"], output_tokens=record["out"])
+
+      @native(type="tool_result")
+      def result(self, record, turn):
+          turn.tool_result(source_call_id=record["call_id"], text=record["output"])
+  ```
+
+  The builder closes a step when the next one starts, puts every result in its call's step, writes `prompt_tokens`
+  with the cache included, stores media at `media/<sha256>.<ext>`, embeds sub-agents and normalizes timestamps. A
+  record no method takes is counted in the root profile.
+- **The runner** (`AdapterRun`, `replay`) feeds one A2A context's records through one adapter instance, a task at a
+  time. It writes each task's user step from its `TurnContext`, and the final response once, with the task's
+  terminal state on its last step. After every record it gives the live view: closed steps only, so a reader's earlier
+  page is always a prefix of a later one.
+- **Readers** (`load`, `tasks`, `media_paths`, `strip_profile`, `is_prefix`) take any valid ATIF document, with or
+  without the profile, such as a Harbor task's trajectory.json.
+
 ## A2A agent framework
 
 The distribution exposes two unrelated decorators named `extension`:
