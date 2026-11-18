@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import mimetypes
 import re
 from collections import Counter
@@ -53,23 +54,56 @@ def timestamp(value: str | datetime | None) -> str | None:
     if isinstance(value, datetime):
         if value.tzinfo is None:
             raise AtifError(f"{value!r} has no time zone")
-        moment = value.astimezone(timezone.utc)
-        fraction = f".{moment.microsecond:06d}" if moment.microsecond else ""
-        return moment.strftime("%Y-%m-%dT%H:%M:%S") + fraction + "Z"
-    match = _TIME.match(value.strip()) if isinstance(value, str) else None
-    if not match:
-        raise AtifError(f"{value!r} isn't an RFC 3339 time with a zone")
-    date, hours, minutes, seconds, digits, zone = match.groups()
-    zone = "+00:00" if zone in ("Z", "z") else (zone if ":" in zone else f"{zone[:3]}:{zone[3:]}")
-    micro = int((digits + "000000")[:6]) if digits else 0
-    try:
-        moment = datetime.fromisoformat(f"{date}T{hours}:{minutes}:{seconds}.{micro:06d}{zone}").astimezone(timezone.utc)
-    except ValueError as exc:
-        raise AtifError(f"{value!r}: {exc}") from exc
-    text = moment.strftime("%Y-%m-%dT%H:%M:%S")
+        moment, digits = _utc(value, value), "000000" if value.microsecond else ""
+    else:
+        match = _TIME.match(value.strip()) if isinstance(value, str) else None
+        if not match:
+            raise AtifError(f"{value!r} isn't an RFC 3339 time with a zone")
+        date, hours, minutes, seconds, digits, zone = match.groups()
+        digits = digits or ""
+        zone = "+00:00" if zone in ("Z", "z") else (zone if ":" in zone else f"{zone[:3]}:{zone[3:]}")
+        try:
+            parsed = datetime.fromisoformat(f"{date}T{hours}:{minutes}:{seconds}.{int((digits + '000000')[:6]):06d}{zone}")
+        except ValueError as exc:
+            raise AtifError(f"{value!r}: {exc}") from exc
+        moment = _utc(parsed, value)
+    text = (f"{moment.year:04d}-{moment.month:02d}-{moment.day:02d}T{moment.hour:02d}:{moment.minute:02d}:"
+            f"{moment.second:02d}")
     if digits:
         text += f".{moment.microsecond // 1000:03d}" if len(digits) <= 3 else f".{moment.microsecond:06d}"
     return text + "Z"
+
+
+def _utc(moment: datetime, value: Any) -> datetime:
+    try:
+        return moment.astimezone(timezone.utc)
+    except (OverflowError, ValueError) as exc:
+        raise AtifError(f"{value!r} is out of range in UTC: {exc}") from exc
+
+
+def _str(value: Any, what: str, *, optional: bool = True) -> str | None:
+    if value is None and optional:
+        return None
+    if not isinstance(value, str) or not value:
+        raise AtifError(f"{what} is a non-empty string, not {value!r}")
+    return value
+
+
+def _int(value: Any, what: str, *, minimum: int | None = 0) -> int | None:
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or (minimum is not None and value < minimum):
+        floor = f" of {minimum} or more" if minimum is not None else ""
+        raise AtifError(f"{what} is an integer{floor}, not {value!r}")
+    return value
+
+
+def _number(value: Any, what: str) -> float | int | None:
+    if value is None:
+        return None
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
+        raise AtifError(f"{what} is a finite number, not {value!r}")
+    return value
 
 
 def _json(value: Any, what: str) -> Any:
@@ -200,6 +234,15 @@ class Document:
     def start_task(self, context: TurnContext) -> AtifTurn:
         if self._context is not None:
             raise AtifError(f"task {self._context.task_id} is still open")
+        _int(context.index, "TurnContext.index")
+        if context.index is None:
+            raise AtifError("TurnContext.index is the task's turn index")
+        _str(context.context_id, "TurnContext.context_id", optional=False)
+        _str(context.task_id, "TurnContext.task_id", optional=False)
+        for name in ("message_id", "agent_name", "agent_version", "agent_model"):
+            _str(getattr(context, name), f"TurnContext.{name}")
+        started = timestamp(context.started_at)
+        inbound, inbound_media = self.parse_parts(context.inbound, None)
         if self._root is None:
             self._root = _Trajectory(None, _agent(context.agent_name, context.agent_version, context.agent_model))
             self._context_id = context.context_id
@@ -208,8 +251,7 @@ class Document:
         self._context, self._task, self._attempt = context, self._task + 1, 1
         self._task_costs.append(None)
         step = self._start(self._root, "user", None)
-        step.time = timestamp(context.started_at)
-        self._add_parts(step.parts, step.media, context.inbound, None)
+        step.time, step.parts, step.media = started, inbound, inbound_media
         step.profile.update({key: value for key, value in (
             ("context_id", context.context_id), ("task_id", context.task_id), ("message_id", context.message_id),
             ("turn", context.index)) if value is not None})
@@ -224,14 +266,13 @@ class Document:
         root = self._root
         assert root is not None
         if final:
-            parts: list[dict[str, Any]] = []
-            media: dict[str, Any] = {}
-            self._add_parts(parts, media, final, None)
+            parts, media = self.parse_parts(final, None)
+            ended = timestamp(ended_at)
             last = next((s for s in reversed(root.steps) if s.task == self._task and s.source == "agent"), None)
             if last is None or _message(last.parts) != _message(parts):
                 step = self._start(root, "agent", None)
                 step.parts, step.media, step.llm_call_count = parts, media, 0
-                step.time = timestamp(ended_at)
+                step.time = ended
         root.steps[-1].profile["state"] = state
         for trajectory in self._trajs():
             for step in trajectory.steps:
@@ -255,9 +296,10 @@ class Document:
             raise AtifError("no step is open: name the step this belongs to")
         return step
 
-    def call(self, step: _Step, call_id: str, name: str, arguments: Any) -> None:
-        if not isinstance(call_id, str) or not call_id:
-            raise AtifError("tool_call_id is a non-empty string")
+    def prepare_call(self, call_id: Any, name: Any, arguments: Any) -> dict[str, Any]:
+        """A call checked and shaped, before any step is touched."""
+        _str(call_id, "tool_call_id", optional=False)
+        _str(name, "function_name", optional=False)
         if call_id in self._call_home:
             raise AtifError(f"tool_call_id {call_id!r} is already in this document")
         if isinstance(arguments, Mapping):
@@ -266,25 +308,31 @@ class Document:
             raw = _json(arguments, f"{name}'s arguments")
             typed = {} if arguments is None else ({"input": arguments} if isinstance(arguments, str)
                                                   else {"value": raw})
-        step.calls.append({"tool_call_id": call_id, "function_name": name, "arguments": typed, "raw": raw})
-        step.pending.add(call_id)
-        self._call_home[call_id] = (self._owner(step), step)
+        return {"tool_call_id": call_id, "function_name": name, "arguments": typed, "raw": raw}
+
+    def call(self, step: _Step, call: dict[str, Any]) -> None:
+        step.calls.append(call)
+        step.pending.add(call["tool_call_id"])
+        self._call_home[call["tool_call_id"]] = (self._owner(step), step)
 
     def result(self, call_id: str, content: Sequence[Any], status: str, exit_code: int | None,
                at: str | None) -> None:
-        if call_id not in self._call_home:
+        if not isinstance(call_id, str) or call_id not in self._call_home:
             raise AtifError(f"a result for {call_id!r}, which no call in this document made")
+        _int(exit_code, "exit_code", minimum=None)
         if status not in RESULT_STATUSES:
             raise AtifError(f"status {status!r} isn't one of {', '.join(RESULT_STATUSES)}")
         trajectory, home = self._call_home[call_id]
-        parts: list[dict[str, Any]] = []
-        media: dict[str, Any] = {}
-        self._add_parts(parts, media, content, None)
+        if home.ended:
+            raise AtifError(f"call {call_id!r}'s task has ended, so its step is served and can't take a result")
+        if call_id not in home.pending:
+            raise AtifError(f"call {call_id!r} already has its result")
+        parts, media = self.parse_parts(content, None)
         profile: dict[str, Any] = {}
         if status != "ok":
             profile["status"] = status
         if exit_code is not None:
-            profile["exit_code"] = _json(exit_code, "exit_code")
+            profile["exit_code"] = exit_code
         if home.closed:
             opened = trajectory.open
             profile["arrived"] = {key: value for key, value in (
@@ -299,6 +347,10 @@ class Document:
 
     def subagent(self, agent_id: str, spawned_by: str, name: str | None, version: str | None,
                  model_name: str | None) -> None:
+        _str(agent_id, "a sub-agent's id", optional=False)
+        _str(spawned_by, "spawned_by", optional=False)
+        for what, value in (("name", name), ("version", version), ("model_name", model_name)):
+            _str(value, f"a sub-agent's {what}")
         if agent_id in self._subs:
             raise AtifError(f"sub-agent {agent_id!r} is already declared")
         self._subs[agent_id] = _Trajectory(agent_id, _agent(name or agent_id, version, model_name))
@@ -307,6 +359,11 @@ class Document:
     def store(self, data: bytes, media_type: str, info: Mapping[str, Any]) -> Media:
         if not isinstance(data, (bytes, bytearray)):
             raise AtifError("media bytes are bytes")
+        if not isinstance(media_type, str) or "/" not in media_type:
+            raise AtifError(f"a media type is type/subtype, not {media_type!r}")
+        for key in ("width", "height", "duration_ms", "pages"):
+            _int(info.get(key), key)
+        _str(info.get("name"), "a media file's name")
         digest = hashlib.sha256(data).hexdigest()
         extension = _EXTENSIONS.get(media_type) or mimetypes.guess_extension(media_type, strict=False) or ".bin"
         path = f"media/{digest}{extension}"
@@ -324,15 +381,24 @@ class Document:
     def task_cost(self, cost_usd: float, source: str) -> None:
         if source not in COST_SOURCES:
             raise AtifError(f"cost_source {source!r} isn't one of {', '.join(COST_SOURCES)}")
-        self._task_costs[self._task] = (_json(cost_usd, "cost_usd"), source)
+        if self._context is None:
+            raise AtifError("no task is open")
+        if _number(cost_usd, "cost_usd") is None:
+            raise AtifError("cost_usd is a finite number")
+        self._task_costs[self._task] = (cost_usd, source)
 
     def set_attempt(self, number: int) -> None:
-        if not isinstance(number, int) or number < 1:
+        if _int(number, "an attempt number", minimum=1) is None:
             raise AtifError("an attempt number is 1 or more")
         self._attempt = number
 
-    def add_parts(self, step: _Step, content: Sequence[Any] | None, text: str | None) -> None:
-        self._add_parts(step.parts, step.media, content, text)
+    def parse_parts(self, content: Iterable[Any] | None,
+                    text: str | None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Content as ATIF parts and the media details they name, checked, before any step is touched."""
+        parts: list[dict[str, Any]] = []
+        media: dict[str, Any] = {}
+        self._add_parts(parts, media, content, text)
+        return parts, media
 
     # Reading the document
 
@@ -355,6 +421,8 @@ class Document:
             raise AtifError("no task is open")
         if agent is None:
             return self._root
+        if not isinstance(agent, str):
+            raise AtifError(f"agent names a declared sub-agent by its id, not {agent!r}")
         if agent not in self._subs:
             raise AtifError(f"sub-agent {agent!r} isn't declared: call turn.subagent first")
         return self._subs[agent]
@@ -378,6 +446,8 @@ class Document:
             if content is not None:
                 raise AtifError("give content or text, not both")
             content = [text]
+        if content is not None and not isinstance(content, (list, tuple)):
+            raise AtifError(f"content is a list of parts, not {type(content).__name__}")
         for item in content or ():
             if isinstance(item, Media):
                 parts.append(item.part())
@@ -545,9 +615,12 @@ class AtifTurn:
     def message(self, *, step: str, text: str | None = None, content: Sequence[Any] | None = None,
                 time: str | datetime | None = None, agent: str | None = None) -> None:
         """Assistant content in step ``step``: text, Media from ``media``, or ATIF parts."""
-        target = self._doc.step_for(step, agent)
-        self._doc.add_parts(target, content, text)
-        self._touch(target, time)
+        parts, media = self._doc.parse_parts(content, text)
+        when = timestamp(time)
+        target = self._doc.step_for(_key(step), agent)
+        target.parts.extend(parts)
+        target.media.update(media)
+        self._touch(target, when)
 
     def reasoning(self, *, step: str, text: str | None = None, visibility: str = "raw", signature: str | None = None,
                   data: str | None = None, time: str | datetime | None = None, agent: str | None = None) -> None:
@@ -558,17 +631,22 @@ class AtifTurn:
         for name, value in (("text", text), ("signature", signature), ("data", data)):
             if value is not None and not isinstance(value, str):
                 raise AtifError(f"reasoning {name} is a string")
-        target = self._doc.step_for(step, agent)
+        when = timestamp(time)
+        target = self._doc.step_for(_key(step), agent)
+        if target.llm_call_count == 0:
+            raise AtifError("a step with no model call (llm_call_count 0) has no reasoning")
         target.reasoning.append({"text": text, "visibility": visibility, "signature": signature, "data": data})
-        self._touch(target, time)
+        self._touch(target, when)
 
     def tool_call(self, *, step: str, tool_call_id: str, function_name: str, arguments: Any,
                   time: str | datetime | None = None, agent: str | None = None) -> None:
         """A call in step ``step``. Arguments that aren't a JSON object are wrapped as Harbor wraps them (a string as
         ``{"input": ...}``, None as ``{}``, any other value as ``{"value": ...}``) and kept whole in ``raw_arguments``."""
-        target = self._doc.step_for(step, agent)
-        self._doc.call(target, tool_call_id, function_name, arguments)
-        self._touch(target, time)
+        call = self._doc.prepare_call(tool_call_id, function_name, arguments)
+        when = timestamp(time)
+        target = self._doc.step_for(_key(step), agent)
+        self._doc.call(target, call)
+        self._touch(target, when)
 
     def tool_result(self, *, source_call_id: str, text: str | None = None, content: Sequence[Any] | None = None,
                     status: str = "ok", exit_code: int | None = None, time: str | datetime | None = None) -> None:
@@ -587,7 +665,29 @@ class AtifTurn:
         """What one model response cost and produced. Token counts are the native's; ATIF's ``prompt_tokens``
         includes cache reads and writes, so the adapter's ``input_includes_cache`` decides the sum. A cost is
         the harness's or the provider's (``cost_source``), never one agentenv computed."""
-        target = self._doc.step_for(key, agent)
+        _str(model_name, "model_name")
+        _int(llm_call_count, "llm_call_count")
+        if reasoning_effort is not None and not isinstance(reasoning_effort, str):
+            _number(reasoning_effort, "reasoning_effort")
+        if is_copied_context is not None and not isinstance(is_copied_context, bool):
+            raise AtifError(f"is_copied_context is true or false, not {is_copied_context!r}")
+        counts = (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)
+        for value in counts:
+            _int(value, "a token count")
+        _number(cost_usd, "cost_usd")
+        if any(value is not None for value in counts) or cost_usd is not None:
+            if llm_call_count == 0:
+                raise AtifError("a step with no model call (llm_call_count 0) has no usage or cost")
+        prompt_parts = (input_tokens, cache_read_tokens, cache_write_tokens)
+        includes = self.spec.input_includes_cache
+        if any(value is not None for value in prompt_parts) and includes is None:
+            raise AtifError("declare input_includes_cache on @atif_adapter to write prompt tokens")
+        if cost_usd is not None and cost_source not in COST_SOURCES:
+            raise AtifError(f"a cost names its cost_source: one of {', '.join(COST_SOURCES)}")
+        when = timestamp(time)
+        target = self._doc.step_for(_key(key), agent)
+        if llm_call_count == 0 and (target.metrics or target.metrics_profile or target.reasoning):
+            raise AtifError("a step with no model call (llm_call_count 0) has no usage or reasoning, and this one has")
         if model_name is not None:
             target.model_name = model_name
         if reasoning_effort is not None:
@@ -595,17 +695,7 @@ class AtifTurn:
         target.llm_call_count = llm_call_count
         if is_copied_context is not None:
             target.is_copied_context = is_copied_context
-        counts = (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)
-        if any(value is not None for value in counts) or cost_usd is not None:
-            if llm_call_count == 0:
-                raise AtifError("a step with no model call (llm_call_count 0) has no usage or cost")
-            for value in counts:
-                if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 0):
-                    raise AtifError(f"token counts are non-negative integers, not {value!r}")
-        if input_tokens is not None or cache_read_tokens is not None or cache_write_tokens is not None:
-            includes = self.spec.input_includes_cache
-            if includes is None:
-                raise AtifError("declare input_includes_cache on @atif_adapter to write prompt tokens")
+        if any(value is not None for value in prompt_parts):
             prompt = (input_tokens or 0) + (0 if includes else (cache_read_tokens or 0) + (cache_write_tokens or 0))
             target.metrics["prompt_tokens"] = prompt
             if cache_read_tokens is not None:
@@ -615,12 +705,10 @@ class AtifTurn:
         if output_tokens is not None:
             target.metrics["completion_tokens"] = output_tokens
         if cost_usd is not None:
-            if cost_source not in COST_SOURCES:
-                raise AtifError(f"a cost names its cost_source: one of {', '.join(COST_SOURCES)}")
-            target.metrics["cost_usd"] = _json(cost_usd, "cost_usd")
+            target.metrics["cost_usd"] = cost_usd
             target.metrics_profile["cost_source"] = cost_source
-        if time is not None:
-            target.step_time = timestamp(time)
+        if when is not None:
+            target.step_time = when
 
     def task_cost(self, cost_usd: float, *, source: str) -> None:
         """The task's total cost, as the harness or provider reported it, when its steps carry none."""
@@ -632,7 +720,9 @@ class AtifTurn:
         step; a later error on the same step replaces it."""
         if kind not in ERROR_KINDS:
             raise AtifError(f"kind {kind!r} isn't one of {', '.join(ERROR_KINDS)}")
-        target = self._doc.step_for(step, agent) if step is not None else self._doc.open_step(agent)
+        _str(message, "an error's message", optional=False)
+        _str(code, "an error's code")
+        target = self._doc.step_for(_key(step), agent) if step is not None else self._doc.open_step(agent)
         target.profile["error"] = {k: v for k, v in (("kind", kind), ("message", message), ("code", code))
                                    if v is not None}
 
@@ -656,6 +746,12 @@ class AtifTurn:
         """Count a native record nothing handled, by its type, in the root profile."""
         self._doc.count_unmatched(record)
 
-    def _touch(self, step: _Step, time: str | datetime | None) -> None:
-        if step.time is None and time is not None:
-            step.time = timestamp(time)
+    def _touch(self, step: _Step, when: str | None) -> None:
+        if step.time is None and when is not None:
+            step.time = when
+
+
+def _key(key: Any) -> str:
+    if not isinstance(key, str) or not key:
+        raise AtifError(f"a step key is a non-empty string, not {key!r}")
+    return key

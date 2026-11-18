@@ -342,3 +342,99 @@ def test_from_atif_is_each_adapters_own():
     with pytest.raises(NotImplementedError):
         adapter().from_atif({})
     assert Native(log=[{"type": "x"}]).session is None
+
+
+def test_a_time_out_of_range_in_utc_is_refused_and_early_years_keep_four_digits():
+    with pytest.raises(AtifError, match="out of range"):
+        timestamp("0001-01-01T00:00:00+05:00")
+    with pytest.raises(AtifError, match="out of range"):
+        timestamp("9999-12-31T23:59:59-05:00")
+    assert timestamp("0099-01-01T00:00:00Z") == "0099-01-01T00:00:00Z"
+
+
+def test_a_refused_task_start_leaves_no_task_open():
+    run = AdapterRun(adapter())
+    with pytest.raises(AtifError):
+        run.start_task(TurnContext(index=0, context_id="ctx", task_id="t1", started_at="yesterday"))
+    assert run.document() is None
+    run.start_task(CTX)
+    run.end_task()
+
+
+@pytest.mark.parametrize("record", [
+    {"type": "call", "step": "s1", "id": "c1", "args": {}, "name": 3},
+    {"type": "call", "step": ["s1"], "id": "c1"},
+    {"type": "say", "step": "s1", "text": 1.5},
+])
+def test_a_value_of_the_wrong_type_is_refused_without_touching_the_document(record):
+    @atif_adapter(native_format="toy-types/1", version="1", input_includes_cache=None)
+    class Raw(Adapter):
+        @native(type="call")
+        def call(self, r, turn):
+            turn.tool_call(step=r["step"], tool_call_id=r["id"], function_name=r.get("name", "Bash"),
+                           arguments=r.get("args"))
+
+        @native(type="say")
+        def say(self, r, turn):
+            turn.message(step=r["step"], text=r["text"])
+
+    run = AdapterRun(Raw)
+    run.start_task(CTX)
+    before = run.document()
+    with pytest.raises(AtifError):
+        run.native(record)
+    assert run.document() == before
+
+
+@pytest.mark.parametrize("call", [
+    lambda turn: turn.step(key="s1", llm_call_count=[1]),
+    lambda turn: turn.step(key="s1", reasoning_effort=float("nan")),
+    lambda turn: turn.message(step="s1", content=1.5),
+    lambda turn: turn.message(step="s1", text="x", agent={"id": "sub"}),
+    lambda turn: turn.media(b"x", "image/png", pages=1.5),
+    lambda turn: turn.media(b"x", "png"),
+    lambda turn: turn.tool_result(source_call_id="none", text="x"),
+    lambda turn: turn.error(message=""),
+    lambda turn: turn.attempt(True),
+])
+def test_the_builder_refuses_values_atif_or_the_profile_would_not_read(call):
+    @atif_adapter(native_format="toy-call/1", version="1", input_includes_cache=True)
+    class Calls(Adapter):
+        @native(type="go")
+        def go(self, r, turn):
+            turn.message(step="s1", text="open")
+            r["call"](turn)
+
+    run = AdapterRun(Calls)
+    run.start_task(CTX)
+    with pytest.raises(AtifError):
+        run.native({"type": "go", "call": call})
+
+
+def test_a_call_takes_one_result_and_none_once_its_task_has_ended():
+    run = AdapterRun(adapter())
+    run.start_task(CTX)
+    for record in [{"type": "call", "step": "A", "id": "c1"}, {"type": "result", "id": "c1"},
+                   {"type": "call", "step": "B", "id": "c2"}, {"type": "say", "step": "C", "text": "x"}]:
+        run.native(record)
+    served = run.page()
+    with pytest.raises(AtifError, match="already has its result"):
+        run.native({"type": "result", "id": "c1"})
+    run.end_task()
+    served = run.page()
+    run.start_task(TurnContext(index=1, context_id="ctx", task_id="t2", inbound=["more"]))
+    with pytest.raises(AtifError, match="task has ended"):
+        run.native({"type": "result", "id": "c2"})
+    assert run.document()["steps"][:len(served["steps"])] == served["steps"]
+
+
+def test_a_step_with_no_model_call_takes_no_reasoning():
+    @atif_adapter(native_format="toy-zero/1", version="1", input_includes_cache=True)
+    class Zero(Adapter):
+        @native(type="z")
+        def z(self, r, turn):
+            turn.reasoning(step="s1", text="thinking")
+            turn.step(key="s1", llm_call_count=0)
+
+    with pytest.raises(AtifError, match="no model call"):
+        run_task([{"type": "z"}], cls=Zero)
