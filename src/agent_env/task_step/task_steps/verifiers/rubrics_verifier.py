@@ -49,7 +49,15 @@ from agent_env.store.base import NotFoundError
 from agent_env.store.ids import is_local_id
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.verifiers.run_context import Run, load_run_context, render_run_context
-from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
+from agent_env.task_step.task_steps.verifiers.scoring import (
+    DEFAULT_MANDATORY_WEIGHT,
+    DEFAULT_OPTIONAL_WEIGHT,
+    ScoreAggregator,
+    aggregate_score,
+    is_mandatory,
+    mandatory_verdict,
+    rubric_satisfaction_weight_problems,
+)
 from agent_env.task_step.task_steps.sandbox_utils.sandbox_utils import (
     agent_error_text,
     fetch_container_logs,
@@ -108,6 +116,23 @@ def _restore_criterion_ids(results: list[dict], real_by_short: dict[str, str]) -
         real_id = real_by_short.get(row.get("id"))
         if real_id is not None:
             row["id"] = real_id
+
+
+def _criterion_for_judge(criterion: dict) -> dict:
+    """A criterion as the judge prompt shows it: without ``mandatory``, which decides how the row counts, not whether
+    it is met; a negative-weight one also says ``negative``."""
+    shown = {key: value for key, value in criterion.items() if key != "mandatory"}
+    if criterion.get("weight") is not None and criterion["weight"] < 0:
+        shown["negative"] = True
+    return shown
+
+
+def _record_mandatory(rows: list[dict], criteria: list[dict]) -> None:
+    """Set each row's ``mandatory`` to whether its criterion is marked ``mandatory: true``, in place; a row no criterion
+    has (``unjudged_rows``) keeps its own flag, read the same way."""
+    flagged = {criterion.get("id"): is_mandatory(criterion) for criterion in criteria}
+    for row in rows:
+        row["mandatory"] = flagged.get(row.get("id"), is_mandatory(row))
 
 
 _FRAME_LABEL_ID = re.compile(r"\[(c\d+)\]")
@@ -511,11 +536,18 @@ class RubricsVerifierTaskStep(TaskStep):
         judge_batch_concurrency: Optional[int] = None,
         judge_timeout_retries: Optional[int] = None,
         judge_max_turns: Optional[int] = None,
+        mandatory_weight: Optional[float] = None,
+        optional_weight: Optional[float] = None,
         depends_on: Optional[list[TaskStepDependency]] = None,
         fail_task_on_error: bool = True,
         fail_task_when_not_passing: bool = False,
     ):
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
+        # score_aggregator=mandatory_all_pass: what a mandatory and an optional row weigh in the entry's
+        # rubric_satisfaction (``mandatory_verdict``); None is the default (3 and 1). Kept as given, so config_problems
+        # sees a value it refuses.
+        self.mandatory_weight = mandatory_weight
+        self.optional_weight = optional_weight
         if fail_task_when_not_passing and not fail_task_on_error:
             raise ValueError(
                 "fail_task_when_not_passing needs fail_task_on_error: a tolerated failure lets the steps after it "
@@ -561,6 +593,9 @@ class RubricsVerifierTaskStep(TaskStep):
             output_format = JudgeOutputFormat(output_format)
         self.output_format = output_format
         self.verifier_id = verifier_id or uuid.uuid4().hex
+        # Each criterion may set ``mandatory`` (true or false; left out, it's optional): with
+        # score_aggregator=mandatory_all_pass a run passes only when every mandatory criterion does. The judge
+        # never sees the flag; each row records it whenever the aggregator is mandatory_all_pass or a criterion sets it.
         self.criteria = criteria
         self.prompt_id = prompt_id
         # A stored judge always holds a model: its author's, or the one the config names for judges, as for a step
@@ -601,6 +636,40 @@ class RubricsVerifierTaskStep(TaskStep):
         if self.judge_batch_size is not None and not self._spec().batchable:
             raise ValueError(_unbatchable_format_message(self.output_format))
 
+    def config_problems(self) -> list[str]:
+        """A criterion whose ``mandatory`` isn't true or false; with score_aggregator=mandatory_all_pass, no criterion
+        marked mandatory or an unusable mandatory_weight / optional_weight; and either weight set without it."""
+        where = f"{self.type} '{self.id}'"
+        return super().config_problems() + [f"{where}: {p}" for p in self._mandatory_problems(self.criteria)]
+
+    def _mandatory_problems(self, criteria: list[dict]) -> list[str]:
+        """``config_problems``' check of ``mandatory`` and its weights, for the stored criteria or a run's."""
+        problems = [f"criterion {c.get('id')!r}: mandatory must be true or false, got {c['mandatory']!r}"
+                    for c in criteria if "mandatory" in c and not isinstance(c["mandatory"], bool)]
+        if self.score_aggregator is ScoreAggregator.MANDATORY_ALL_PASS:
+            if not any(is_mandatory(c) for c in criteria):
+                problems.append(
+                    f"score_aggregator=mandatory_all_pass passes a run when every criterion marked mandatory: true "
+                    f"passes, and none of its {len(criteria)} criteria is marked (a criterion without the field is "
+                    "optional); mark the ones a run must meet")
+            problems.extend(rubric_satisfaction_weight_problems(self.mandatory_weight, self.optional_weight))
+        elif self.mandatory_weight is not None or self.optional_weight is not None:
+            problems.append("mandatory_weight and optional_weight only apply with score_aggregator=mandatory_all_pass")
+        return problems
+
+    def _records_mandatory(self, criteria: list[dict]) -> bool:
+        """Whether this run's rows carry ``mandatory``: with score_aggregator=mandatory_all_pass, or when a criterion
+        sets the field."""
+        return self.score_aggregator is ScoreAggregator.MANDATORY_ALL_PASS or any("mandatory" in c for c in criteria)
+
+    def _mandatory_verdict(self, rows: list[dict]) -> dict:
+        """``mandatory_verdict`` of the rows, at this step's weights."""
+        return mandatory_verdict(
+            rows,
+            mandatory_weight=DEFAULT_MANDATORY_WEIGHT if self.mandatory_weight is None else float(self.mandatory_weight),
+            optional_weight=DEFAULT_OPTIONAL_WEIGHT if self.optional_weight is None else float(self.optional_weight),
+        )
+
     def _spec(self) -> JudgeOutputFormatSpec:
         return get_judge_output_format_spec(self.output_format)
 
@@ -624,16 +693,21 @@ class RubricsVerifierTaskStep(TaskStep):
         return {"format": JudgeOutputFormat.TRAJECTORY_MISTAKES.value, "source_verifier_id": self.verifier_id}
 
     def _write_skipped_entries(self, context: TaskStepContext, row_id: str, message: str) -> None:
-        """Store a zero-score entry with one row saying why the run was not judged — under ``verifier_id``
-        and, for rubric_evidence_with_mistakes, ``trajectory_mistakes_key(verifier_id)``."""
+        """Store a zero-score entry with one row saying why the run was not judged, marked ``graded: false`` — under
+        ``verifier_id`` and, for rubric_evidence_with_mistakes, ``trajectory_mistakes_key(verifier_id)``. With
+        score_aggregator=mandatory_all_pass the entry also records ``passed: false``, and no ``mandatory_failed`` or
+        ``rubric_satisfaction`` (None): no criterion was graded."""
         def skipped(fields: dict) -> dict:
             return {
                 **fields,
                 "results": [{"id": row_id, "score": 0, "result": False, "message": message}],
                 "score": 0,
+                "graded": False,
             }
         verifications = context.metadata.setdefault("verifications", {})
         verifications[self.verifier_id] = skipped(self._entry_format_fields())
+        if self.score_aggregator is ScoreAggregator.MANDATORY_ALL_PASS:
+            verifications[self.verifier_id].update(passed=False, mandatory_failed=None, rubric_satisfaction=None)
         if self._writes_mistakes_entry:
             verifications[trajectory_mistakes_key(self.verifier_id)] = skipped(self._mistakes_entry_fields())
 
@@ -671,6 +745,10 @@ class RubricsVerifierTaskStep(TaskStep):
             base["judge_max_turns"] = self.judge_max_turns
         if self.fail_task_when_not_passing:
             base["fail_task_when_not_passing"] = True
+        if self.mandatory_weight is not None:
+            base["mandatory_weight"] = self.mandatory_weight
+        if self.optional_weight is not None:
+            base["optional_weight"] = self.optional_weight
         return base
 
     @classmethod
@@ -703,6 +781,8 @@ class RubricsVerifierTaskStep(TaskStep):
             judge_batch_concurrency=data.get("judge_batch_concurrency"),
             judge_timeout_retries=data.get("judge_timeout_retries"),
             judge_max_turns=data.get("judge_max_turns"),
+            mandatory_weight=data.get("mandatory_weight"),
+            optional_weight=data.get("optional_weight"),
             fail_task_when_not_passing=data.get("fail_task_when_not_passing", False),
         )
 
@@ -767,6 +847,10 @@ class RubricsVerifierTaskStep(TaskStep):
         prompt_response = next((pr for pr in context.prompt_responses if pr.prompt_id == self.prompt_id), None)
         if prompt_response is None:
             raise StepContextError(f"PromptResponse with prompt_id='{self.prompt_id}' not found in context")
+        criteria = self._resolved_criteria(context)
+        if problems := self._mandatory_problems(criteria):
+            # The stored criteria are checked when the task loads; a run's own (step_params) only here.
+            raise ValueError(f"Verifier '{self.verifier_id}': " + "; ".join(problems))
         overrides_for_step = self.step_param_overrides(context)
         grade_up_to_turn = (
             _validated_turn(overrides_for_step["grade_up_to_turn"])
@@ -803,7 +887,6 @@ class RubricsVerifierTaskStep(TaskStep):
         # concurrent rollouts, so mutating self would leak the override between them.
         use_agent_judge_override = overrides.get("use_agent_judge")
         use_agent_judge = use_agent_judge_override if use_agent_judge_override is not None else self.use_agent_judge
-        criteria = self._resolved_criteria(context)
         # The judge sees/echoes short keys (c1..cN), not UUIDs; frame labels use them too, hence before compaction.
         criteria_for_judge, real_by_short = _to_short_keyed_criteria(criteria)
         apply_filter_override = overrides.get("apply_trajectory_filter")
@@ -996,10 +1079,7 @@ class RubricsVerifierTaskStep(TaskStep):
                 trajectory_inline = trajectory_content
 
             def eval_prompt_for(batch: list[dict]) -> str:
-                criteria_json = json.dumps([
-                    {**c, "negative": True} if (c.get("weight") is not None and c["weight"] < 0) else c
-                    for c in batch
-                ], indent=2)
+                criteria_json = json.dumps([_criterion_for_judge(c) for c in batch], indent=2)
                 if use_agent_judge:
                     prompt = self._build_eval_prompt(
                         agent_prompt=agent_prompt_text,
@@ -1099,6 +1179,9 @@ class RubricsVerifierTaskStep(TaskStep):
                 _restore_frame_labels(verification_results.checks, real_by_short)
         finally:
             await _terminate_auto_deployed_judge(auto_deployed_judge)
+        if self._records_mandatory(criteria):
+            _record_mandatory(verification_results, criteria)
+            _record_mandatory(unjudged, criteria)
 
         judge_call_fields: dict = {
             **dual_keyed("compact_trajectory_s3_uri", "compact_trajectory_object_url", compacted.compact_object_url),
@@ -1124,7 +1207,9 @@ class RubricsVerifierTaskStep(TaskStep):
         trajectory-mistakes entry under ``trajectory_mistakes_key(verifier_id)``; ``judge_call_fields`` (URIs,
         retries) go on both. The mistake rows are built before either entry is written, so a response they
         cannot be derived from leaves neither behind. ``unjudged`` rows (``unjudged_rows``) join the rubric
-        entry's, after the judge's, and its score; the mistakes entry is the judge's alone."""
+        entry's, after the judge's, and its score; the mistakes entry is the judge's alone. With
+        score_aggregator=mandatory_all_pass the rubric entry also records ``passed``, ``mandatory_failed`` and
+        ``rubric_satisfaction`` (``mandatory_verdict``)."""
         mistake_rows: Optional[list[dict]] = None
         if self._writes_mistakes_entry:
             if not isinstance(verification_results, ResultRows):
@@ -1139,6 +1224,8 @@ class RubricsVerifierTaskStep(TaskStep):
             **self._entry_format_fields(),
             "results": list(verification_results),
             "score": score,
+            **(self._mandatory_verdict(verification_results)
+               if self.score_aggregator is ScoreAggregator.MANDATORY_ALL_PASS else {}),
             **judge_call_fields,
         }
         if isinstance(verification_results, ResultRows):
@@ -1826,10 +1913,12 @@ def is_rubrics_verifier(step_or_config: TaskStep | dict[str, Any]) -> bool:
 
 
 def _raise_unless_passing(verifier_id: str, entry: dict) -> None:
-    """Raise VerifierNotPassingError when the recorded verdict scores below 1.0, naming the rows that weren't met."""
+    """Raise VerifierNotPassingError when the recorded verdict scores below 1.0, naming the rows that weren't met: the
+    mandatory ones that failed, for an entry that records them (score_aggregator=mandatory_all_pass)."""
     if entry["score"] >= 1:
         return
-    unmet = [str(row.get("id")) for row in entry["results"] if row.get("score", 1.0 if row.get("result") else 0.0) < 1]
+    unmet = entry.get("mandatory_failed") or [
+        str(row.get("id")) for row in entry["results"] if row.get("score", 1.0 if row.get("result") else 0.0) < 1]
     raise VerifierNotPassingError(
         f"Verifier '{verifier_id}' isn't passing (score {entry['score']}); rows not met: {unmet}"
     )

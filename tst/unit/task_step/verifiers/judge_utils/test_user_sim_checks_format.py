@@ -327,7 +327,8 @@ def test_a_weight_0_row_is_recorded_but_never_gates():
     style = rows[1]
     assert (style["verdict"], style["could_change_grade"], style["weight"]) == ("fail", True, 0)
     assert (style["score"], style["result"]) == (1.0, True)
-    for aggregator in ScoreAggregator:
+    # mandatory_all_pass scores only rows marked mandatory, which a user sim check never is (the judge pins all_pass).
+    for aggregator in set(ScoreAggregator) - {ScoreAggregator.MANDATORY_ALL_PASS}:
         assert _score(_row("guidance"), _fail("style"), criteria=criteria, aggregator=aggregator) == 1.0
     assert _score(_fail("guidance"), _fail("style"), criteria=criteria) == 0.0
 

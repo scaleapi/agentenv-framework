@@ -95,6 +95,7 @@ class AgentPromptResponseVerifierTaskStep(TaskStep):
                     "message": f"Skipped: prompt had error_type={prompt_response.error_type}",
                 }],
                 "score": 0,
+                "graded": False,  # a skipped run: aggregate_verifiers' fail_task_when_ungraded reads it
             }
             return context
 
