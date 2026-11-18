@@ -109,8 +109,8 @@ raises.
 Raise `AgentEnvError(code, message, *, retryable=False, applied="no", hint=None, status=400)` to
 answer a caller with a code rather than a crash. From an `@extension` method it answers with
 `status` and the body `{"ok": false, "error": {code, message, retryable, applied, hint?}}`; from a
-`@tool` it answers `isError` with `"<code>: <message>"` as the text and the same fields as the
-structured content. `applied` says whether the call's effect happened (`yes`, `no`, or `unknown`
+`@tool` it answers `isError` with `"<code>: <message> (<hint>)"` as the text, the hint left out when
+there is none, and the same fields as the structured content. `applied` says whether the call's effect happened (`yes`, `no`, or `unknown`
 when it may have been delivered before something failed), and callers retry on their own only when
 `retryable` is true and `applied` is `no`. Any other exception in an extension still answers
 `extension_failed` with status 500, now with `applied: "unknown"`. On the client side,

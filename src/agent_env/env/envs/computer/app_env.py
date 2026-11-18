@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from agent_env.bundle.authoring import AuthoringContext
+    from agent_env.entity.export import ExportContext
 
 
 #: What an app deployed alone adds to its name to name its computer.
@@ -170,6 +171,18 @@ class ComputerAppEnv(ComputerEnv):
                            composing=ctx.composing)
         except ValueError as e:
             ctx.refuse([str(e)])
+
+    def to_toml(self, out: ExportContext) -> dict:
+        """The env.toml of a folder holding the app's files, which ``from_toml`` reads back as it."""
+        self.files.to_toml(out)
+        toml = {"type": self.type, "environment_name": self.environment_name, "module": self.module}
+        if self.computer is not None:
+            toml |= {"computer": out.ref(self.computer), "driver": out.ref(self.driver)}
+        if self.build_settings:
+            toml["build_settings"] = dict(self.build_settings)
+        if self.settings:
+            toml["settings"] = dict(self.settings)
+        return toml
 
     @classmethod
     def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:

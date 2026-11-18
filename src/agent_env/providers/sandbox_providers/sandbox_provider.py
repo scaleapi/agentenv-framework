@@ -383,6 +383,7 @@ _BUILTIN_SANDBOX_PROVIDERS: dict[str, str] = {
     "boat": "agent_env.providers.sandbox_providers.boat.provider:BoatSandboxProvider",
     "coreweave": "agent_env.providers.sandbox_providers.coreweave.provider:CoreWeaveSandboxProvider",
     "agent37": "agent_env.providers.sandbox_providers.agent37.provider:Agent37SandboxProvider",
+    "kosa8": "agent_env.providers.sandbox_providers.kosa8.provider:Kosa8SandboxProvider",
     "local": "agent_env.providers.sandbox_providers.local_docker.provider:LocalSandboxProvider",
     "lume": "agent_env.providers.sandbox_providers.lume.provider:LumeSandboxProvider",
 }

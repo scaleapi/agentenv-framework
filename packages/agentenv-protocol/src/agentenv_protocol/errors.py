@@ -9,8 +9,8 @@ Applied = Literal["yes", "no", "unknown"]
 
 class AgentEnvError(Exception):
     """Raised in an extension, answers with ``status`` and these fields as the error body; raised in a tool,
-    answers ``isError`` with ``"<code>: <message>"`` as text and the fields as structured content. Callers retry
-    on their own only when ``retryable`` and ``applied == "no"``."""
+    answers ``isError`` with ``"<code>: <message> (<hint>)"`` as text, since a model reads only the text, and the
+    fields as structured content. Callers retry on their own only when ``retryable`` and ``applied == "no"``."""
 
     def __init__(self, code: str, message: str, *, retryable: bool = False, applied: Applied = "no",
                  hint: str | None = None, status: int = 400) -> None:
