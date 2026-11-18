@@ -320,25 +320,29 @@ def _outside_keys(objects: list[tuple[str, str, Mapping[str, Any]]], found: _Fin
                           f"the profile names no key outside extra.{PROFILE_KEY} here")
 
 
-def _scopes(document: Mapping[str, Any], prefix: str = "", outer: frozenset = frozenset()) -> dict[str, frozenset]:
-    """The sub-agent ids a reference in each trajectory may name: those embedded in it or in a trajectory around it,
-    since the builder embeds every sub-agent in the root while ATIF also lets a sub-agent embed its own."""
-    scope = outer | {sub.get("trajectory_id") for sub in document.get("subagent_trajectories") or []}
-    scopes = {prefix: scope}
-    for index, sub in enumerate(document.get("subagent_trajectories") or []):
-        scopes.update(_scopes(sub, f"{prefix}subagent_trajectories[{index}].", scope))
-    return scopes
+def _resolver(document: Mapping[str, Any], prefix: str = "",
+              outer: Mapping[Any, str] | None = None) -> dict[str, dict[Any, str]]:
+    """For each trajectory, by its path prefix, the sub-agent each id a reference in it names: one embedded in it,
+    else the nearest one embedded around it, by path prefix. ATIF makes an id unique only within its parent's array,
+    and the builder embeds every sub-agent in the root."""
+    subs = list(document.get("subagent_trajectories") or [])
+    visible = {**(outer or {}), **{sub.get("trajectory_id"): f"{prefix}subagent_trajectories[{index}]."
+                                   for index, sub in enumerate(subs)}}
+    out = {prefix: visible}
+    for index, sub in enumerate(subs):
+        out.update(_resolver(sub, f"{prefix}subagent_trajectories[{index}].", visible))
+    return out
 
 
 def _calls_and_references(document: Mapping[str, Any], found: _Findings) -> None:
-    scopes = _scopes(document)
+    resolve = _resolver(document)
     seen: dict[str, str] = {}
     for prefix, trajectory in _trajectories(document):
         for index, step in enumerate(trajectory.get("steps") or []):
-            _step_calls(f"{prefix}steps[{index}]", step, scopes[prefix], seen, found)
+            _step_calls(f"{prefix}steps[{index}]", step, resolve[prefix], seen, found)
 
 
-def _step_calls(where: str, step: Mapping[str, Any], embedded: frozenset, seen: dict[str, str],
+def _step_calls(where: str, step: Mapping[str, Any], embedded: Mapping[Any, str], seen: dict[str, str],
                 found: _Findings) -> None:
     for n, call in enumerate(step.get("tool_calls") or []):
         call_id = call.get("tool_call_id")
@@ -466,25 +470,27 @@ def _unanswered(page: Mapping[str, Any], found: _Findings) -> None:
         if task.state is not None:
             ended_steps.update(range(offset, offset + len(task.steps)))
         offset += len(task.steps)
-    spawner: dict[Any, tuple[Any, int]] = {}
+    resolve = _resolver(page)
+    spawner: dict[str, tuple[str, int]] = {}
     for prefix, trajectory in _trajectories(page):
-        owner = trajectory.get("trajectory_id") if prefix else None
         for index, step in enumerate(trajectory.get("steps") or []):
             for result in _results(step):
                 for ref in result.get("subagent_trajectory_ref") or []:
-                    spawner.setdefault(ref.get("trajectory_id"), (owner, index))
+                    target = resolve[prefix].get(ref.get("trajectory_id"))
+                    if target is not None:
+                        spawner.setdefault(target, (prefix, index))
 
-    def root_step(trajectory_id: Any) -> int | None:
+    def root_step(prefix: str) -> int | None:
         seen = set()
-        while trajectory_id in spawner and trajectory_id not in seen:
-            seen.add(trajectory_id)
-            trajectory_id, index = spawner[trajectory_id]
-            if trajectory_id is None:
+        while prefix in spawner and prefix not in seen:
+            seen.add(prefix)
+            prefix, index = spawner[prefix]
+            if not prefix:
                 return index
         return None
 
     for prefix, trajectory in _trajectories(page):
-        root_index = root_step(trajectory.get("trajectory_id")) if prefix else None
+        root_index = root_step(prefix) if prefix else None
         if prefix and root_index is None:
             continue
         for index, step in enumerate(trajectory.get("steps") or []):

@@ -213,6 +213,42 @@ def test_the_live_check_flags_a_page_serving_a_call_with_no_result_before_its_ta
     assert "live-unanswered" in _rules(errors(validate_live([page], document, media=media)))
 
 
+def _agent(step_id: int, call: str, *, result: bool = True, spawns: str | None = None,
+           profile: dict[str, Any] | None = None) -> dict[str, Any]:
+    step: dict[str, Any] = {"step_id": step_id, "source": "agent", "message": "",
+                            "tool_calls": [{"tool_call_id": call, "function_name": "run", "arguments": {}}]}
+    if result:
+        answer: dict[str, Any] = {"source_call_id": call, "content": "done"}
+        if spawns:
+            answer["subagent_trajectory_ref"] = [{"trajectory_id": spawns}]
+        step["observation"] = {"results": [answer]}
+    if profile:
+        step["extra"] = {"agentenv": profile}
+    return step
+
+
+def _sub(trajectory_id: str, steps: list[dict[str, Any]], **more: Any) -> dict[str, Any]:
+    return {"schema_version": "ATIF-v1.8", "trajectory_id": trajectory_id, "agent": {"name": "a", "version": "1"},
+            "steps": steps, **more}
+
+
+def test_children_that_share_an_id_under_different_parents_keep_their_own_tasks():
+    user = {"step_id": 1, "source": "user", "message": "go", "extra": {"agentenv": {"task_id": "t0", "turn": 0}}}
+    later = {"step_id": 3, "source": "user", "message": "again", "extra": {"agentenv": {"task_id": "t1", "turn": 1}}}
+    page = {"schema_version": "ATIF-v1.8", "session_id": "ctx", "agent": {"name": "a", "version": "1"},
+            "steps": [user, _agent(2, "c0", spawns="A", profile={"state": "completed"}), later,
+                      _agent(4, "c1", spawns="B")],
+            "subagent_trajectories": [
+                _sub("A", [_agent(1, "a0", spawns="worker")],
+                     subagent_trajectories=[_sub("worker", [_agent(1, "w0", result=False)])]),
+                _sub("B", [_agent(1, "b0", spawns="worker")],
+                     subagent_trajectories=[_sub("worker", [_agent(1, "w1", result=False)])]),
+            ]}
+    unanswered = [f.where for f in validate_live([page], page) if f.rule == "live-unanswered"]
+    assert unanswered == ["page 0: subagent_trajectories[1].subagent_trajectories[0].steps[0].tool_calls[0]"]
+    assert "reference" not in _rules(validate(page))
+
+
 def test_a_page_that_serves_nothing_after_serving_steps_breaks_the_live_rule():
     document, page, media = _open_page("coding")
     assert "live-prefix" in _rules(errors(validate_live([page, None], document, media=media)))
