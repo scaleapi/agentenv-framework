@@ -27,6 +27,9 @@ from tst.integration.computer.conftest import (BASE, FOLLOWER_BACK_S, PAGE_WRITE
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
 SUPERVISOR = ["supervisorctl", "-c", "/etc/supervisor/supervisord.conf", "status"]
+#: How long the window manager may take to claim the screen once supervisord has the desktop RUNNING, and how often the
+#: root window is read meanwhile, in seconds.
+WINDOW_MANAGER_S, WINDOW_MANAGER_POLL_S = 60, 0.5
 ARCH = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}[platform.machine().lower()]
 
 
@@ -230,13 +233,13 @@ def _all_running(name: str) -> str:
 def _window_manager(name: str) -> str:
     """The root window's WM check once xfwm4 sets it: supervisord has the desktop RUNNING as its process starts
     (startsecs=0), which then waits for X and starts the XFCE session, which starts xfwm4."""
-    for _ in range(60):
+    deadline = time.monotonic() + WINDOW_MANAGER_S
+    while True:
         wm = subprocess.run(["docker", "exec", name, "xprop", "-root", "_NET_SUPPORTING_WM_CHECK"], capture_output=True,
                             text=True).stdout
-        if "window id #" in wm:
-            break
-        time.sleep(1)
-    return wm
+        if "window id #" in wm or time.monotonic() > deadline:
+            return wm
+        time.sleep(WINDOW_MANAGER_POLL_S)
 
 
 def _exec(name: str, *argv: str) -> str:
