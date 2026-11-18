@@ -125,11 +125,12 @@ _STEP_API = {"source": "step_api"}
 
 class SiteCard(NamedTuple):
     """What the gateway keeps from a site's card: the paths it advertises for agentenv, which its route refuses, the
-    names it declares, and the name it gives the site (``website_card_name``)."""
+    names it declares (hostnames), and the card's own name (``website_card_name``), which needn't be the name the
+    gateway serves the site as."""
 
     reserved: frozenset[str]
     names: tuple[str, ...]
-    name: str | None = None
+    card_name: str | None = None
 
 
 class ToolNameClash(ValueError):
@@ -1050,7 +1051,7 @@ class Gateway:
         cards = await self._site_cards_of([site for site in by_name if site not in self._site_names])
         if any(card is not None and not card.names for card in cards.values()):
             cards |= await self._site_cards_of([site for site in by_name if site in self._site_names])
-        goes_by = served_names({site: card.name or site for site, card in cards.items() if card is not None})
+        goes_by = served_names({site: card.card_name or site for site, card in cards.items() if card is not None})
         listed = []
         for site, url in self.website_urls.items():
             card = cards.get(site)
