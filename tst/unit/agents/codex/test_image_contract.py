@@ -7,10 +7,13 @@ from __future__ import annotations
 import ast
 import json
 import re
+import tomllib
 
 from tst.unit.agents.codex.agent import AGENT_DIR
 
 DOCKERFILE = (AGENT_DIR / "Dockerfile").read_text()
+SOURCES = AGENT_DIR.parents[2]
+SHARED = tomllib.loads((AGENT_DIR / "shared_sources.toml").read_text())
 INSTALL_SH = (AGENT_DIR / "install.sh").read_text()
 
 
@@ -23,11 +26,18 @@ def _copied() -> list[str]:
             for name in line.split()]
 
 
+def _in_context(name: str) -> bool:
+    """Whether the build context has ``name``: from the folder, or under a folder shared_sources.toml takes from
+    agent-env's own sources at that name."""
+    first, _, rest = name.partition("/")
+    path = SOURCES / SHARED[first] / rest if first in SHARED else AGENT_DIR / name
+    return path.is_dir() if name.endswith("/") else path.is_file()
+
+
 def test_every_file_the_image_copies_is_in_the_folder():
     copied = _copied()
 
-    assert copied and all((AGENT_DIR / name).is_file() or (name.endswith("/") and (AGENT_DIR / name).is_dir())
-                          for name in copied), copied
+    assert copied and all(_in_context(name) for name in copied), copied
     # install.sh and run.sh are install/v1's; a build context pruned to what the Dockerfile reads keeps them so.
     assert {"a2a_server.py", "codex_bridge.py", "codex_config.py", "codex_kit.py", "entrypoint.sh", "install.sh",
             "run.sh", "package.json", "package-lock.json"} <= set(copied)
