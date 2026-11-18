@@ -1029,7 +1029,7 @@ async def test_prompt_agent_model_params_reaches_agent(sandbox_provider, multi_e
         # prompt_agent POSTed the negotiated model_params to /ext/agent-config; read it
         # back — it must be present (received) but redacted (never echo provider secrets).
         async with httpx.AsyncClient(timeout=30) as client:
-            agent_cfg = (await client.get(f"{target_url}/ext/agent-config")).json()["config"]
+            agent_cfg = (await client.get(f"{target_url}/ext/agent-config", headers=agent.control_headers)).json()["config"]
         assert agent_cfg.get("model_params") == "***", \
             f"expected received-and-redacted model_params, got {agent_cfg}"
         logger.info("model_params reached the agent and read back redacted")

@@ -84,8 +84,12 @@ async def test_agent_triggers_e2e(agent):
     triggers_url = deployed.a2a_url + endpoint
     decide_url = deployed.a2a_url + methods["decide"]["endpoint"]
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        # 2. Register the full script (every condition type + both actions).
+    # 2. The extension routes take the agent's control token: a call without it is refused before it runs.
+    async with httpx.AsyncClient(timeout=30) as anonymous:
+        assert (await anonymous.post(triggers_url, json=_SCRIPT)).status_code == 401
+
+    async with httpx.AsyncClient(timeout=30, headers=deployed.control_headers) as client:
+        # 3. Register the full script (every condition type + both actions).
         resp = await client.post(triggers_url, json=_SCRIPT)
         resp.raise_for_status()
         body = resp.json()
@@ -93,7 +97,7 @@ async def test_agent_triggers_e2e(agent):
         assert set(body["added"]) == _SCRIPT_IDS
         assert set(body["all"]) >= _SCRIPT_IDS
 
-        # 3. Fail-loud: an unknown when.type rejects the whole batch (HTTP 400).
+        # 4. Fail-loud: an unknown when.type rejects the whole batch (HTTP 400).
         bad = await client.post(triggers_url, json={"triggers": [
             {"when": {"type": "bogus"}, "actions": [{"type": "say", "text": "x"}]}]})
         assert bad.status_code == 400
@@ -108,7 +112,7 @@ async def test_agent_triggers_e2e(agent):
             r.raise_for_status()
             return r.json()
 
-        # 4. Deterministic firing sequence on context c1 (step -> conversational -> env_trigger -> all/end).
+        # 5. Deterministic firing sequence on context c1 (step -> conversational -> env_trigger -> all/end).
         r = await decide(1, "hello", ctx="c1")
         assert r["fired"] == ["open"] and r["done"] is False
         assert r["parts"] == [{"kind": "text", "text": "[PM]: Look into LeapBlock."}]
@@ -123,25 +127,25 @@ async def test_agent_triggers_e2e(agent):
         assert r["fired"] == ["accept"] and r["done"] is True  # all -> say + end
         assert "sending to Arthur" in r["parts"][0]["text"]
 
-        # 5. Turn-regression reset: replaying turn 1 clears c1's fired-set -> `open` re-fires (retry-safe).
+        # 6. Turn-regression reset: replaying turn 1 clears c1's fired-set -> `open` re-fires (retry-safe).
         r = await decide(1, "hello", ctx="c1")
         assert r["fired"] == ["open"]
 
-        # 6. once:false recurrence + the step branch of `any` on a fresh context.
+        # 7. once:false recurrence + the step branch of `any` on a fresh context.
         r = await decide(6, ctx="c2")
         assert r["fired"] == ["nudge"] and r["done"] is False  # any[step >= 6]
         r = await decide(7, ctx="c2")
         assert r["fired"] == ["nudge"]  # once:false -> fires again
 
-        # 7. The conversational branch of `any` (fires on "stuck").
+        # 8. The conversational branch of `any` (fires on "stuck").
         r = await decide(2, "I am stuck", ctx="c3")
         assert "nudge" in r["fired"]
 
-        # 8. decide validates its turn (non-positive -> 400).
+        # 9. decide validates its turn (non-positive -> 400).
         bad_turn = await client.post(decide_url, json={"turn": 0})
         assert bad_turn.status_code == 400
 
-        # 9. State read-back: config + trigger summary + firing log.
+        # 10. State read-back: config + trigger summary + firing log.
         state = (await client.get(triggers_url)).json()
         summary = {t["id"]: t for t in state["triggers"]}
         assert _SCRIPT_IDS <= set(summary)
@@ -155,7 +159,7 @@ async def test_agent_triggers_e2e(agent):
         fired_ids = {e["trigger_id"] for e in state["firing_log"] if e["kind"] == "fired"}
         assert {"open", "answer-format", "re-sweep", "accept", "nudge"} <= fired_ids
 
-    # 10. The real RegisterAgentTriggersStep drives registration against the live agent's card.
+    # 11. The real RegisterAgentTriggersStep drives registration against the live agent's card.
     da = DeployedAgent(
         agent_name="stakeholder",
         api_url=deployed.a2a_url,
