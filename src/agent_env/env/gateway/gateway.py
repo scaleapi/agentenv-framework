@@ -47,6 +47,7 @@ from .constants import (
     AGENT_ENV_SESSION_META_KEY,  # noqa: F401
     CARD_FETCH_TIMEOUT_S,
     CHANGES_PAGE_DEFAULT,
+    CLOCK_FOLLOWERS_PATH,
     CLOCK_WATCH_PATH,
     CHANGES_PAGE_MAX,
     CHILD_DISCOVERY_TIMEOUT_S,
@@ -401,6 +402,31 @@ class Gateway:
             follower = self._clock_followers.follower_for(request.query_params.get("follower"), token)
             await self._clock_followers.watch(request.query_params.get("after", ""), follower)
             return self._json_response({**self._clock.state(), "received": received, "sent": time.time()}, 200)
+
+        @self._mcp.custom_route(CLOCK_FOLLOWERS_PATH, methods=["PUT"])
+        async def clock_declare_follower(request: Request) -> Response:
+            try:
+                body = await request.json()
+            except Exception:
+                return self._json_response({"ok": False, "error": "Invalid JSON body"}, 400)
+            if not isinstance(body, dict):
+                return self._json_response({"ok": False, "error": "body must be a JSON object"}, 400)
+            try:
+                self._clock_followers.declare(str(body.get("name") or ""), str(body.get("read_token") or ""))
+            except ClockError as e:
+                return self._json_response({"ok": False, "error": str(e)}, 400)
+            return self._json_response({"ok": True, "followers": self._clock_followers.state()}, 200)
+
+        @self._mcp.custom_route(CLOCK_FOLLOWERS_PATH, methods=["DELETE"])
+        async def clock_retire_follower(request: Request) -> Response:
+            try:
+                body = await request.json()
+            except Exception:
+                return self._json_response({"ok": False, "error": "Invalid JSON body"}, 400)
+            if not isinstance(body, dict) or not isinstance(body.get("name"), str) or not body["name"]:
+                return self._json_response({"ok": False, "error": "body must be a JSON object naming the follower"}, 400)
+            retired = await self._clock_followers.retire(body["name"])
+            return self._json_response({"ok": True, "retired": retired, "followers": self._clock_followers.state()}, 200)
 
         @self._mcp.custom_route("/clock/time", methods=["GET"])
         async def clock_time(request: Request) -> Response:
