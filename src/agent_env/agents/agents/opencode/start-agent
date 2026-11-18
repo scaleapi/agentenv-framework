@@ -16,4 +16,15 @@ python3 -I /usr/local/lib/agentenv-clock/clockpage.py create agentenv-clock
 AGENTENV_SESSION_USER=agent AGENTENV_EGRESS_NSS=off \
     /usr/local/lib/agentenv-egress/egress boot > /var/log/agentenv-root/egress-boot.log 2>&1 \
     || { cat /var/log/agentenv-root/egress-boot.log >&2; echo "the egress proxy's boot failed" >&2; exit 2; }
+# A provider's own CA bundle stays trusted: Sail, for one, points SSL_CERT_FILE and the like at the bundle it signs
+# model requests under, and root.conf points the server's trust at agent-env's bundles instead, so the provider's goes
+# into them, and into the egress proxy's roots, which carry those requests once the clock is armed.
+for bundle in "${SSL_CERT_FILE:-}" "${REQUESTS_CA_BUNDLE:-}" "${NODE_EXTRA_CA_CERTS:-}" "${CURL_CA_BUNDLE:-}"; do
+    case "$bundle" in ""|/etc/agentenv/*) continue ;; esac
+    [ -r "$bundle" ] || continue
+    for target in /etc/agentenv/ca-bundle.pem /etc/agentenv/ca.pem /usr/local/lib/agentenv-egress/roots.pem; do
+        grep -qxF "# agentenv: $bundle" "$target" 2>/dev/null && continue
+        { printf '\n# agentenv: %s\n' "$bundle"; cat "$bundle"; } >> "$target"
+    done
+done
 exec supervisord -c /etc/agentenv/root.conf

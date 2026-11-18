@@ -170,7 +170,7 @@ def cli_env(context_id: str, environ: Mapping[str, str] = os.environ, *, mcp_ser
     armed clock (``clock_armed``) the CLI goes out through the egress proxy (``egress_env``), reaching the env's MCP
     servers (``mcp_servers``), which it connects to itself, and a plain-HTTP model endpoint directly."""
     model_host = model_direct_hosts(environ.get("LITELLM_BASE_URL")) if clock_armed else []
-    mcp_hosts = [urlsplit(str(info.get("url") or "")).hostname or "" for info in (mcp_servers or {}).values()]
+    mcp_hosts = [url.hostname for url in (urlsplit(str(info.get("url") or "")) for info in (mcp_servers or {}).values()) if url.hostname and url.scheme == "http"]
     return {**environ, **_context_xdg(context_id),
             **egress_env(environ, [*mcp_hosts, *model_host], armed=clock_armed)}
 
