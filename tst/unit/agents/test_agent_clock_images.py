@@ -65,7 +65,7 @@ def test_the_follower_and_the_proxy_run_as_their_own_users_and_the_a2a_server_as
 @pytest.mark.parametrize("agent", CLOCKED)
 def test_the_agents_proxy_reaches_private_networks_where_its_model_endpoint_may_be_and_a_computers_doesnt(agent):
     # The agent's processes reach those directly anyway; its model endpoint, over TLS, goes through the proxy.
-    assert _program(agent, "egress")["environment"] == 'AGENTENV_EGRESS_PRIVATE="allow"'
+    assert 'AGENTENV_EGRESS_PRIVATE="allow"' in _program(agent, "egress")["environment"].split(",")
     base = (SOURCES / "computers" / "artifacts" / "ubuntu-24.04" / "root.conf").read_text()
     assert "AGENTENV_EGRESS_PRIVATE" not in base
 
