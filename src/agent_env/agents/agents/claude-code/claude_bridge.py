@@ -217,11 +217,13 @@ def egress_env(environ: Mapping[str, str], direct: Iterable[str] = (), *, armed:
     the clock is months off, and the proxy, on real time, hands it a certificate that holds then. The env's MCP servers
     (``direct``) are reached directly: the proxy refuses an address that isn't global, as a local or private gateway's
     is. Unarmed, the CLI reads real time and goes out directly, as an image without the proxy does, so a model endpoint
-    or mirror at a private address keeps working."""
+    or mirror at a private address keeps working. Hosts the agent was deployed to reach directly (``NO_PROXY``,
+    ``no_proxy``) stay direct."""
     proxy = environ.get(EGRESS_PROXY_ENV)
     if not proxy or not armed:
         return {}
-    hosts = ",".join(dict.fromkeys([*_DIRECT_HOSTS, *filter(None, direct)]))
+    configured = [host.strip() for name in ("NO_PROXY", "no_proxy") for host in (environ.get(name) or "").split(",")]
+    hosts = ",".join(dict.fromkeys([*_DIRECT_HOSTS, *filter(None, configured), *filter(None, direct)]))
     return {**{name: proxy for base in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY") for name in (base, base.lower())},
             "NO_PROXY": hosts, "no_proxy": hosts, "NODE_USE_ENV_PROXY": "1"}
 

@@ -79,6 +79,17 @@ def test_on_an_armed_clock_the_cli_goes_out_through_the_proxy_and_to_the_envs_se
     assert env["NODE_USE_ENV_PROXY"] == "1"
 
 
+def test_hosts_the_agent_was_deployed_to_reach_directly_stay_direct_on_an_armed_clock():
+    # A private registry the agent's NO_PROXY names worked before the clock was armed; the proxy would refuse it.
+    env = claude_bridge.cli_env({claude_bridge.EGRESS_PROXY_ENV: PROXY, "NO_PROXY": "registry.internal, .corp",
+                                 "no_proxy": "mirror.internal"}, direct_hosts=["gateway"], clock_armed=True)
+
+    hosts = env["NO_PROXY"].split(",")
+    assert env["no_proxy"] == env["NO_PROXY"]
+    assert {"registry.internal", ".corp", "mirror.internal", "gateway", "localhost"} <= set(hosts)
+    assert len(hosts) == len(set(hosts)) and "" not in hosts
+
+
 @pytest.mark.parametrize("base_url, direct", [
     ("http://10.0.0.5:4000", True),  # plain HTTP, private: nothing to check at the env's date, and the proxy refuses it
     ("https://litellm.example.com", False),  # TLS: its certificate is checked through the proxy, on real time

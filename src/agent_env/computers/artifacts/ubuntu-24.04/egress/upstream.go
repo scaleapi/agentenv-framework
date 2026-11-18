@@ -182,11 +182,11 @@ func (p *Proxy) probeAt(dst, sni, verifyName string, hello []byte) (probe, bool)
 	var unanswered dialError
 	switch {
 	case errors.As(err, &unanswered):
-		hit.unreachable, hit.problem = true, truncate(err.Error(), 200)
+		hit.unreachable, hit.problem = true, truncate(err.Error(), problemChars)
 	case err != nil:
-		hit.failed, hit.problem = true, truncate(err.Error(), 200)
+		hit.failed, hit.problem = true, truncate(err.Error(), problemChars)
 	case !found.Verified:
-		hit.problem = truncate(found.VerifyErr, 200)
+		hit.problem = truncate(found.VerifyErr, problemChars)
 	default:
 		hit.from, hit.until, hit.verified = found.NotBefore, found.NotAfter, true
 	}
@@ -259,6 +259,9 @@ func (p *Proxy) dial(dst string) (net.Conn, error) {
 	}
 	return net.DialTimeout("tcp", dst, DialTimeout)
 }
+
+// problemChars is the most of an upstream's error a probe keeps as its problem.
+const problemChars = 200
 
 func truncate(s string, n int) string {
 	if len(s) > n {
