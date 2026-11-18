@@ -45,6 +45,7 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from agent_env.env.env import Env, EnvCapabilityUnsupported, gateway_url_of
 from agent_env.env.envs.computer.utils.site_proxy import is_local, matches
 from agent_env.env.gateway.constants import AGENT_ENV_COMPUTER_HEADER
+from agent_env.env.gateway.rest_proxy import fallback_name
 from agent_env.providers.sandbox_providers.local_docker.provider import LOCAL_TRUST_ENV
 from agent_env.providers.sandbox_providers.sandbox import NetworkPolicy, VmSandbox
 from agent_env.store.base import NotFoundError
@@ -163,13 +164,6 @@ def covers(strong: str, weak: str) -> bool:
     """Whether every host ``weak`` names is one ``strong`` names."""
     return strong == weak or (strong.startswith("*.") and not weak.startswith("*.")
                               and weak.partition(".")[2] == strong[2:])
-
-
-def fallback_name(site: str) -> str:
-    """The name a synthetic site declaring none is reached by: its name on ``.localhost``, lowercase, each ``_`` a
-    ``-``, and no ``-`` at either end of the label (``My_Site`` is ``my-site.localhost``). Two sites it gives one name
-    are refused as any two claiming it."""
-    return f"{site.lower().replace('_', '-')[:63].strip('-')}.localhost"
 
 
 def claims(sites: Iterable[Site], allow_hosts: Iterable[str] = ()) -> list[Claim]:

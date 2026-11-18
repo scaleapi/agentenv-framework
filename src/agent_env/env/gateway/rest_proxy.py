@@ -240,6 +240,13 @@ def declared_site_names(card: dict) -> tuple[str, ...]:
     return ()
 
 
+def fallback_name(site: str) -> str:
+    """The name a synthetic site declaring none is reached by: its name on ``.localhost``, lowercase, each ``_`` a
+    ``-``, and no ``-`` at either end of the label (``My_Site`` is ``my-site.localhost``). Two sites it gives one name
+    are refused as any two claiming it."""
+    return f"{site.lower().replace('_', '-')[:63].strip('-')}.localhost"
+
+
 def listed_url(names: tuple[str, ...]) -> str | None:
     """The address a browser computer opens a site with ``names`` at: its first name that isn't a ``*.`` one, over
     HTTPS but for a ``.localhost`` one, as its site proxy serves them. None with no such name."""

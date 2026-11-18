@@ -87,6 +87,7 @@ from .rest_proxy import (
     WebsiteRoute,
     declared_site_names,
     called_tools,
+    fallback_name,
     fetch_child_card,
     forward,
     is_child_mcp_path,
@@ -1037,11 +1038,14 @@ class Gateway:
 
     async def _listed_url(self, site: str, url: str) -> str:
         """The address ``list_website_urls`` gives ``site``, at ``url`` behind the gateway: for a site listed by name,
-        its first name (``listed_url``), its card read for a site whose env stores none; else, or with none, ``url``."""
+        its first name (``listed_url``), its card read for a site whose env stores none, and ``fallback_name`` for one
+        whose card declares none either, as its browser's site proxy routes it; else, or while its card can't be read,
+        ``url``."""
         if site not in self._listed_by_name:
             return url
         card = None if site in self._site_names else await self._site_card(site)
-        return listed_url(self._names(site, card)) or url
+        names = self._names(site, card) or ((fallback_name(site),) if card is not None else ())
+        return listed_url(names) or url
 
     def _backing_keys(self) -> list[str]:
         # rest_proxy_urls entries are the env's backing servers: mcp-<svc> (MCP) + <svc> (website

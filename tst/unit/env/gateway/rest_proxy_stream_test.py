@@ -826,14 +826,23 @@ async def test_list_website_urls_gives_a_site_listed_by_name_at_its_first_name_a
     transport = _card_site([], {"carded": ["carded.test"]})
     monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient",
                         lambda **kw: _RealAsyncClient(transport=transport, **kw))
-    sites = ("shop", "notes", "wild", "bare", "carded", "other")
+    sites = ("shop", "notes", "wild", "bare", "Old_Notes", "carded", "other")
     gw = _gateway(website_urls={site: f"http://{site}" for site in sites},
                   site_names={"shop": ["*.shop.test", "www.shop.test", "shop.test"], "notes": ["notes.localhost"],
                               "wild": ["*.wild.test"], "other": ["other.test"]},
-                  listed_by_name=["shop", "notes", "wild", "bare", "carded"])
+                  listed_by_name=["shop", "notes", "wild", "bare", "Old_Notes", "carded"])
     listed = await gw._mcp._tool_manager.get_tool("list_website_urls").fn()
-    assert listed == ["https://www.shop.test/", "http://notes.localhost/", "http://wild", "http://bare",
-                      "https://carded.test/", "http://other"]
+    assert listed == ["https://www.shop.test/", "http://notes.localhost/", "http://wild", "http://bare.localhost/",
+                      "http://old-notes.localhost/", "https://carded.test/", "http://other"]
+
+
+@pytest.mark.asyncio
+async def test_list_website_urls_gives_a_site_listed_by_name_its_address_while_its_card_cant_be_read(monkeypatch):
+    transport = httpx.MockTransport(lambda request: httpx.Response(503))
+    monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient",
+                        lambda **kw: _RealAsyncClient(transport=transport, **kw))
+    gw = _gateway(website_urls={"notes": "http://notes"}, listed_by_name=["notes"])
+    assert await gw._mcp._tool_manager.get_tool("list_website_urls").fn() == ["http://notes"]
 
 
 @pytest.mark.asyncio
