@@ -115,6 +115,17 @@ def test_the_outside_agents_deploy_runs_with_a_proxy_unseeded_and_round_trips():
     assert _EpisodeAgentStep.from_dict(agent.to_dict()).to_dict() == agent.to_dict()
 
 
+def test_the_outside_agents_wrapped_deploy_keeps_its_configured_role_and_retry_through_a_round_trip():
+    task = _portsim()
+    agent = EpisodeSpec.from_task(task, seed=SEED)._copy.steps[2]
+    data = agent.to_dict()
+    data["step"] = {**data["step"], "step_role": "grader", "retry_config": {"max_retries": 2, "retry_from_step_id": data["step"]["id"]}}
+
+    wrapped = _EpisodeAgentStep.from_dict(data).step
+
+    assert (wrapped.step_role, wrapped.retry_config.max_retries) == ("grader", 2)
+
+
 def test_without_a_turn_timeout_a_turns_deadline_is_its_prompts_own():
     task = _portsim(play={**PLAY, "timeout_seconds": 30})
 
@@ -129,6 +140,12 @@ def test_a_turn_timeout_replaces_every_outside_prompts_own_in_whole_seconds(turn
 
     assert [step.timeout_seconds for step in copy.steps if step.type == "prompt_agent"] == [deadline, deadline]
     assert copy.steps[3].to_dict() == {**task.steps[3].to_dict(), "timeout_seconds": deadline}
+
+
+def test_a_turn_timeout_keeps_a_prompts_configured_role():
+    task = _portsim(play={**PLAY, "step_role": "grader"})
+
+    assert EpisodeSpec.from_task(task, turn_timeout=90)._copy.steps[3].step_role == "grader"
 
 
 def test_an_inside_agent_keeps_its_own_steps():
