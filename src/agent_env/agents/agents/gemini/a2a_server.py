@@ -433,9 +433,11 @@ async def _vertex_openai_bridge(
                 "or directly onto a task VM (host mode)."
             ),
             install_commands=_INSTALL_COMMANDS,
+            optional_params=["control_token"],
             required_params=["container", "work_dir", "agent_ctx_tar", "a2a_port", *_ENDPOINT_PARAMS],
             install_commands_host=_INSTALL_COMMANDS_HOST,
             a2a_port=8000,
+            optional_params_host=["control_token"],
             required_params_host=["work_dir", "agent_ctx_tar", "a2a_port", "agent_name", *_ENDPOINT_PARAMS],
             workdir_host=_HOST_WORKDIR,
             user_host="root",

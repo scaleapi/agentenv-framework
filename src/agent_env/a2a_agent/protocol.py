@@ -63,6 +63,9 @@ def raise_for_extension_status(
         message = f"{operation} failed with HTTP {response.status_code}"
         if detail:
             message += f": {detail}"
+        if response.status_code == 401:
+            message += " (the agent refused its control token: the record it was sent from has none, or another deployment's)"
+            logger.warning(message)
         raise httpx.HTTPStatusError(message, request=exc.request, response=response) from exc
 
 

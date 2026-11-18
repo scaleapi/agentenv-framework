@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import os
 import time
 from dataclasses import FrozenInstanceError
 from functools import wraps
@@ -44,6 +45,7 @@ from agentenv_protocol.a2a_agent import (
     AgentEnvAgent,
     AgentIdentity,
     AttributionProbeResponse,
+    ControlTokenMiddleware,
     BuiltinTools,
     BundleSkillRequest,
     ContextObjectTrajectoryRequest,
@@ -99,7 +101,12 @@ from agentenv_protocol.a2a_agent.framework import (
     _SdkServices,
     _StandardExecutor,
 )
+from agentenv_protocol import CONTROL_TOKEN_ENV, client as protocol_client
 from pydantic import BaseModel, Field, ValidationError, field_serializer
+from starlette.applications import Starlette
+from starlette.middleware import Middleware
+from starlette.responses import PlainTextResponse
+from starlette.routing import Route
 from starlette.testclient import TestClient
 
 
@@ -3024,3 +3031,60 @@ def test_cancel_stops_a_running_task_and_frees_its_context() -> None:
 
     assert cancelled == ["hang"]
     assert ran == ["hang", "next"]
+
+
+@a2a_agent(identity=AgentIdentity(name="guarded", description="test", version="1"), extensions=(MCP_CONFIG_V1,))
+class _GuardedAgent(AgentEnvAgent):
+    async def run(self, request: TaskRequest) -> TaskResult:
+        return TaskResult.text("ok")
+
+
+def test_a_served_agent_takes_its_control_token_out_of_the_environment_and_its_routes_refuse_calls_without_it(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(CONTROL_TOKEN_ENV, "s3cret")
+
+    with TestClient(_GuardedAgent().create_app()) as agent:
+        left_in_environment = CONTROL_TOKEN_ENV in os.environ
+        refused = [
+            agent.get("/ext/mcp-config", headers=headers).status_code
+            for headers in ({}, protocol_client.control_token_headers("guess"), {"Authorization": "Bearer s3cret"})
+        ]
+        detail = agent.get("/ext/mcp-config").json()["detail"]
+        answered = agent.get("/ext/mcp-config", headers=protocol_client.control_token_headers("s3cret"))
+        still_open = [agent.get(path).status_code for path in ("/health", "/.well-known/agent.json")]
+
+    assert not left_in_environment
+    assert refused == [401, 401, 401] and "AgentEnv-Control-Token" in detail
+    assert answered.status_code == 200 and answered.json() == {"mcp_servers": {}}
+    assert still_open == [200, 200]
+
+
+def test_an_agent_with_no_token_or_not_served_keeps_its_routes_open(monkeypatch) -> None:
+    monkeypatch.setenv(CONTROL_TOKEN_ENV, "s3cret")
+    unserved = TestClient(_GuardedAgent().create_app()).get("/ext/mcp-config").status_code
+    monkeypatch.delenv(CONTROL_TOKEN_ENV)
+
+    with TestClient(_GuardedAgent().create_app()) as agent:
+        tokenless = agent.get("/ext/mcp-config").status_code
+
+    assert unserved == tokenless == 200
+
+
+def test_the_middleware_guards_a_hand_served_agents_extension_routes_but_staging_and_the_peer_tools(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(CONTROL_TOKEN_ENV, "s3cret")
+
+    async def ok(request):
+        return PlainTextResponse("ok")
+
+    paths = ("/ext/agent-config", "/ext/staging/abc", "/ext/peer-agents/mcp", "/health")
+    app = Starlette(routes=[Route(path, ok) for path in paths], middleware=[Middleware(ControlTokenMiddleware)])
+    with TestClient(app) as agent:
+        without = [agent.get(path).status_code for path in paths]
+        with_token = agent.get("/ext/agent-config", headers=protocol_client.control_token_headers("s3cret"))
+        left_in_environment = CONTROL_TOKEN_ENV in os.environ
+
+    assert without == [401, 200, 200, 200]
+    assert with_token.status_code == 200 and not left_in_environment

@@ -64,6 +64,7 @@ from .extensions import (
 )
 from ..computer.errors import ComputerError
 from . import clock as agent_clock
+from .control_token import REFUSAL, carries_control_token, log_refusal, take_control_token
 from .peer_agents import PEER_MCP_PATH, PEER_MCP_SERVER_NAME, PeerAgents
 from .registry import RegisteredOperation, build_registry
 from .staging import STAGING_ENDPOINT, StagingStore, staging_routes
@@ -978,6 +979,25 @@ def _serving_peer_tools(
     return lifespan
 
 
+def _taking_the_control_token(
+    application: "A2AAgentApplication",
+    inner: Callable[[Starlette], AbstractAsyncContextManager] | None,
+) -> Callable[[Starlette], AbstractAsyncContextManager]:
+    """The application's lifespan, ``inner``'s if it has one: serving starts by taking the agent's control token out of
+    the environment, and the extension routes take it from then on. An application that isn't served stays open."""
+
+    @asynccontextmanager
+    async def lifespan(app: Starlette) -> AsyncIterator[Any]:
+        application.control_token = take_control_token() or application.control_token
+        if inner is None:
+            yield None
+        else:
+            async with inner(app) as state:
+                yield state
+
+    return lifespan
+
+
 class A2AAgentApplication:
     """Resolved Agent Card, extension routes, and A2A task executor."""
 
@@ -1088,10 +1108,12 @@ class A2AAgentApplication:
         if self.services.peers is not None:
             routes.append(Route(PEER_MCP_PATH, self.services.peers.app))
             lifespan = _serving_peer_tools(self.services.peers, lifespan)
-        kwargs = {"routes": routes, "middleware": [Middleware(_ServingOnItsPort)]}
-        if lifespan is not None:
-            kwargs["lifespan"] = lifespan
-        self.app = Starlette(**kwargs)
+        self.control_token: str | None = None
+        self.app = Starlette(
+            routes=routes,
+            middleware=[Middleware(_ServingOnItsPort)],
+            lifespan=_taking_the_control_token(self, lifespan),
+        )
 
         try:
             from a2a.server.apps import A2AStarletteApplication
@@ -1158,6 +1180,9 @@ class A2AAgentApplication:
         self, extension_uri: str, operation: RegisteredOperation
     ) -> Callable:
         async def invoke(request: Request) -> JSONResponse:
+            if not carries_control_token(request.headers, self.control_token):
+                log_refusal(request.method, request.url.path, request.client.host if request.client else None)
+                raise HTTPException(status_code=401, detail=REFUSAL)
             try:
                 if operation.definition.method == "GET":
                     payload = dict(request.query_params)

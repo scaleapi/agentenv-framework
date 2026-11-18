@@ -111,6 +111,9 @@ INSTALL_COMMANDS = [
     "LITELLM_API_KEY={litellm_api_key}\n"
     "LITELLM_BASE_URL={litellm_base_url}\n"
     "PI_A2A_ENV",
+    # agent-env's control token for the agent, when the runner hands it one (install/v1 optional_params), the same way.
+    "[ -z \"${{AGENTENV_CONTROL_TOKEN:-}}\" ] || printf 'AGENTENV_CONTROL_TOKEN=%s\\n' \"$AGENTENV_CONTROL_TOKEN\" | "
+    f"{_DOCKER} exec -i {{container}} sh -c 'cat >> {INSTALL_DIR}/{ENV_FILE}'",
     f"{_DOCKER} exec -d -e A2A_PORT={{a2a_port}} {{container}} sh {INSTALL_DIR}/start.sh",
 ]
 
@@ -378,6 +381,7 @@ def _unpack(archive: Path, directory: Path) -> None:
         enable(
             INSTALL_V1,
             install_commands=INSTALL_COMMANDS,
+            optional_params=["control_token"],
             required_params=["container", "agent_ctx_tar", "a2a_port", "litellm_api_key", "litellm_base_url"],
             a2a_port=8000,
         ),

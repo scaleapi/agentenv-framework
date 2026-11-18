@@ -51,9 +51,14 @@ async def test_a_deploy_that_stops_waiting_for_its_card_closes_its_sandbox(monke
 
 
 @pytest.mark.asyncio
-async def test_each_deploy_is_recorded_with_a_control_token_of_its_own(monkeypatch, local_stores):
+async def test_each_deploy_is_recorded_with_a_control_token_of_its_own_which_the_agent_is_handed(
+    monkeypatch, local_stores,
+):
+    handed: list[str | None] = []
+
     class _Provider(SandboxProvider):
-        async def create_sandbox(self, **_):
+        async def create_sandbox(self, *, env, **_):
+            handed.append(env.get("AGENTENV_CONTROL_TOKEN"))
             return _Sandbox()
 
     async def card(self, url):
@@ -62,11 +67,12 @@ async def test_each_deploy_is_recorded_with_a_control_token_of_its_own(monkeypat
     monkeypatch.setattr(sandbox_provider, "build_sandbox_provider", lambda name: _Provider())
     monkeypatch.setattr(A2AAgent, "_wait_for_agent_card", card)
     agent = A2AAgent(id="solver", version=1, docker_image_artifact=DockerImageArtifact(id="img", description="d", image_name="img"))
-    env_vars = {"LITELLM_API_KEY": "k", "LITELLM_BASE_URL": "http://llm"}
+    env_vars = {"LITELLM_API_KEY": "k", "LITELLM_BASE_URL": "http://llm", "AGENTENV_CONTROL_TOKEN": "caller-chosen"}
 
     first = await agent.deploy(sandbox_type="fake", env_vars=env_vars)
     second = await agent.deploy(sandbox_type="fake", env_vars=env_vars)
 
     assert first.control_token and second.control_token and first.control_token != second.control_token
+    assert handed == [first.control_token, second.control_token]
     assert first.control_headers == {"AgentEnv-Control-Token": first.control_token}
     assert get_a2a_agent_instance_store().get(first.instance_id).control_token == first.control_token

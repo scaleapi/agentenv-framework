@@ -88,6 +88,7 @@ from .extensions import (
     extension,
     request_fields,
 )
+from .control_token import ControlTokenMiddleware
 from .framework import (
     A2AAgentApplication,
     AgentEnvAgent,
@@ -155,6 +156,7 @@ __all__ = [
     "TRIGGERS_V1",
     "CLOCK_V1",
     "A2AAgentApplication",
+    "ControlTokenMiddleware",
     "AgentCapabilities",
     "AgentConfig",
     "AgentEnvAgent",
