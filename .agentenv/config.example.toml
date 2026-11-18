@@ -44,6 +44,11 @@ agent_default = "local"   # agents too
 # api_key = "secret:agent37_api_key"  # or "env:AGENT37_API_KEY"
 # region = "us"                       # or "eu", "ap-south"
 
+# Optional kosa8 Cloud microVMs (no extra needed):
+# [sandbox.providers.kosa8.config]
+# api_key = "secret:kosa8_api_key"    # or "env:KOSA8_API_KEY"
+# region = "us"                       # optional: "us", "eu", "us-ash1" or "eu-hel1"
+
 # Optional CoreWeave Sandboxes (install the 'coreweave' extra):
 # [sandbox.providers.coreweave.config]
 # api_key = "secret:cwsandbox_api_key"   # or wandb_api_key, with optional wandb_entity and wandb_project

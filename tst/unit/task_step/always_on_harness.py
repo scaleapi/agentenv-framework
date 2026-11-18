@@ -86,7 +86,7 @@ class Rig:
         monkeypatch.setattr(ao, "send_and_wait", self._send_and_wait)
         monkeypatch.setattr(ao._Run, "_load_plugin", self._load_plugin)
         if takes_config:
-            async def post(url, fields):
+            async def post(url, fields, headers=None):
                 self.configs.append((url, fields))
             monkeypatch.setattr(ao.protocol, "post_agent_config", post)
 

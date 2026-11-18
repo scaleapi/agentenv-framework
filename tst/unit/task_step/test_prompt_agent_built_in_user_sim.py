@@ -236,7 +236,7 @@ async def test_each_user_sim_turn_records_its_trajectory_as_always_on_does(monke
                                                      {"uri": A2AAgent.EXT_TRAJECTORY, "params": {}}]}}
     fetched = []
 
-    async def fetch(self, url, ext, task_id, prefix, name, *, sandbox_type, card=None):
+    async def fetch(self, url, ext, task_id, prefix, name, *, sandbox_type, headers, card=None):
         fetched.append((url, task_id, prefix, sandbox_type))
         return f"{prefix}{name}.json"
 

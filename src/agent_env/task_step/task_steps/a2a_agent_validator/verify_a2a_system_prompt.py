@@ -118,7 +118,8 @@ class VerifyA2ASystemPromptStep(TaskStep):
 
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(config_endpoint, json={"system_prompt": sentinel_prompt})
+                resp = await client.post(config_endpoint, json={"system_prompt": sentinel_prompt},
+                                         headers=deployed.control_headers)
                 resp.raise_for_status()
         except Exception as e:
             self._record(context, {

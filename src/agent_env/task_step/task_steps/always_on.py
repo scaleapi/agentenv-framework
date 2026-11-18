@@ -591,7 +591,8 @@ class _Run:
             desired["model_params"] = model_params
         negotiated = A2AAgent.negotiate_agent_config(card, desired)
         if negotiated:
-            await protocol.post_agent_config(self.target_url + negotiated.endpoint, negotiated.fields)
+            await protocol.post_agent_config(self.target_url + negotiated.endpoint, negotiated.fields,
+                                             headers=self.agent.control_headers)
         ctx.record_model("solver", step.id, negotiated.fields.get("model") if negotiated else None)
         self.rules_in_system_prompt = bool(desired.get("system_prompt") and negotiated
                                            and "system_prompt" in negotiated.fields)
@@ -610,7 +611,8 @@ class _Run:
         user_config = {k: v for k, v in user_config.items() if v is not None}
         negotiated = A2AAgent.negotiate_agent_config(self.user_agent.a2a_card or {}, user_config)
         if negotiated:
-            await protocol.post_agent_config(self.user_url + negotiated.endpoint, negotiated.fields)
+            await protocol.post_agent_config(self.user_url + negotiated.endpoint, negotiated.fields,
+                                             headers=self.user_agent.control_headers)
         accepted = sorted(negotiated.fields) if negotiated else []
         ctx.record_model("user simulator", step.id, negotiated.fields.get("model") if negotiated else None)
         self.user_setup = {"model": self.user_model, "model_from": self.user_model_from,
@@ -1281,7 +1283,8 @@ class _Run:
             try:
                 traj = await asyncio.wait_for(
                     step._fetch_trajectory(self.target_url, traj_ext, task_id, step._trajectory_prefix(), msg_id,
-                                           card=card, sandbox_type=self.agent.sandbox_type), TRAJECTORY_FETCH_SECONDS)
+                                           card=card, sandbox_type=self.agent.sandbox_type,
+                                           headers=self.agent.control_headers), TRAJECTORY_FETCH_SECONDS)
             except Exception as e:
                 logger.warning(f"wake {self.wakes}: trajectory fetch failed (continuing): {e}")
         self.per_turn_trajectory_urls.append(traj)
@@ -1360,7 +1363,8 @@ class _Run:
             try:
                 traj = await asyncio.wait_for(
                     step._fetch_trajectory(self.target_url, traj_ext, task_id, step._trajectory_prefix(), msg_id,
-                                           card=card, sandbox_type=self.agent.sandbox_type), TRAJECTORY_FETCH_SECONDS)
+                                           card=card, sandbox_type=self.agent.sandbox_type,
+                                           headers=self.agent.control_headers), TRAJECTORY_FETCH_SECONDS)
             except Exception as e:
                 logger.warning(f"nudge after wake {self.wakes}: trajectory fetch failed (continuing): {e}")
         self.per_turn_trajectory_urls.append(traj)
@@ -1575,7 +1579,8 @@ class _Run:
                 traj = await asyncio.wait_for(
                     self.step._fetch_trajectory(self.user_url, traj_ext, user_task_id,
                                                 self.step._trajectory_prefix() + "user_sim/", msg_id,
-                                                card=card, sandbox_type=self.user_agent.sandbox_type),
+                                                card=card, sandbox_type=self.user_agent.sandbox_type,
+                                                headers=self.user_agent.control_headers),
                     max(0.0, min(TRAJECTORY_FETCH_SECONDS, deadline - time.monotonic())))
             except Exception as e:
                 logger.warning(f"user sim trajectory fetch failed (continuing): {e}")

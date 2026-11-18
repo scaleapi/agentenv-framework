@@ -109,7 +109,8 @@ def register(folder: Path, tasks: tuple[str, ...], evals: tuple[str, ...], prefi
     registration. The plugin packages the bundle's bundle.toml requires must be installed, as for a run; a folder
     with no bundle.toml that uses plugin packages is given one. An id the store holds already takes a new version,
     whoever wrote it. A store other than this machine's is written only after you confirm, or with --yes. Registering
-    again writes only what changed since."""
+    again writes only what changed since. A computer env whose compose leaves no build a deploy can boot fails the
+    registration once every entity is written, before any task: registering again composes it again."""
     options = {"tasks": tasks, "evals": evals, "prefix": prefix, "sandbox": sandbox, "emulate": not no_emulate}
     click.echo(f"Registering {folder} into:")
     for line in describe_target():

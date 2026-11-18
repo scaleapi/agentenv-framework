@@ -25,6 +25,7 @@ from agent_env.a2a_agent import A2AAgent
 from agent_env.artifact.artifacts.docker_image import DockerImageArtifact
 from agent_env.config import get_config
 from agent_env.entity.scopes import FieldScope
+from agent_env.env.envs.computer.utils.boot import control_token as new_control_token
 from agent_env.providers.sandbox_providers.local_docker.provider import (
     LOCAL_TRUST_DIR,
     LOCAL_TRUST_ENV,
@@ -361,7 +362,7 @@ class InstallAgentTaskStep(TaskStep):
         agent_card = await self._wait_for_agent_card(a2a_url)
         logger.info(f"Agent '{self.agent_name}' reachable at {a2a_url} (card name={agent_card.get('name')})")
 
-        deployed = self._register_instance(agent, a2a_url, ds, agent_card)
+        deployed = self._register_instance(agent, a2a_url, ds, agent_card, new_control_token())
 
         context.deployed_agents.append(DeployedAgent(
             agent_name=self.agent_name,
@@ -373,6 +374,7 @@ class InstallAgentTaskStep(TaskStep):
             instance_id=deployed.instance_id,
             on_host=host_mode,
             installed_container=container,
+            control_token=deployed.control_token,
         ))
 
         default_model = agent.metadata.get("default_model") or get_config().get_model_for_role("agent")
@@ -420,7 +422,7 @@ class InstallAgentTaskStep(TaskStep):
             )
         return HostPlace(workdir.format(agent_name=self.agent_name), user.format(agent_name=self.agent_name))
 
-    def _register_instance(self, agent, a2a_url: str, ds, agent_card: dict):
+    def _register_instance(self, agent, a2a_url: str, ds, agent_card: dict, control_token: str):
         """Register the installed agent in the instance store, same as A2AAgent.deploy(),
         so store-resolving consumers (AddSkillsTaskStep, the a2a-agent CLIs) can find it."""
         from agent_env.a2a_agent.a2a_agent import DeployedA2AAgent
@@ -434,6 +436,7 @@ class InstallAgentTaskStep(TaskStep):
                 sandbox_id=ds.sandbox_id,
                 agent_card=agent_card,
                 sandbox_type=ds.sandbox_type,
+                control_token=control_token,
             ),
             ttl_seconds=self._instance_ttl_seconds(ds),
         )

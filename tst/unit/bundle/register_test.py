@@ -17,6 +17,11 @@ from agent_env.artifact.artifacts.docker_image import DockerImageArtifact, push_
 from agent_env.bundle import BundleError
 from agent_env.bundle import materialize as materialize_module
 from agent_env.bundle import register as register_module
+from agent_env.artifact.artifacts import computer as computer_artifact_module
+from agent_env.env import store as env_store_module
+from agent_env.env.envs.computer.utils import composer as composer_module
+from agent_env.env.envs.computer.utils.composed import composition
+from agent_env.env.published_images import COMPUTER_IMAGES
 from agent_env.bundle.register import REGISTRATIONS, _remote_name, register_bundle
 from agent_env.cli import cli
 from agent_env.config import get_config
@@ -474,15 +479,70 @@ def test_a_registration_that_loses_a_race_for_a_version_fails_rather_than_write_
         Artifact.get("triage-docs", 2)
 
 
-def test_an_installed_env_a_task_names_by_its_alias_is_refused_before_anything_is_written(home):
+def test_an_installed_env_a_task_names_by_its_alias_is_refused_this_machines_own_store_before_anything_is_written(
+        home):
     files = {"tasks/t.json": json.dumps([{"id": "env", "type": "deploy_env", "env_id": "mail"}])}
 
     with pytest.raises(BundleError) as refused:
         register_bundle(layout(home / "triage", files))
 
-    assert "comes with an installed bundle, and only an agent with an alias is registered from one" in \
-        refused.value.problems[0]
+    assert ("comes with an installed bundle, so it registers under its alias 'mail', and this machine's own store "
+            "holds no env under an alias's id; register it into a shared store") in refused.value.problems[0]
     assert get_config().get_document_store().count("envs", Filter()) == 0
+
+
+def test_chromium_registers_into_a_shared_store_with_its_driver_and_base_computer_under_their_aliases(
+        home, composed, monkeypatch):
+    """As promotion registers it into the hub, whose tasks name it `chromium`."""
+    for module in (register_module, env_store_module):
+        monkeypatch.setattr(module, "shared_store", lambda store: True)
+    bases = {image.ref() for image in COMPUTER_IMAGES}
+    monkeypatch.setattr("agent_env.env.published_images._registry_digest", lambda ref: DIGEST if ref in bases else None)
+    monkeypatch.setattr(computer_artifact_module, "_inspect",
+                        lambda image, arches, read: computer_artifact_module._unread(arches, "no registry in a test"))
+    files = {"tasks/t.json": json.dumps([{"id": "env", "type": "deploy_env", "env_id": "chromium"}])}
+
+    registered = register_bundle(layout(home / "triage", files))
+
+    written = {done.write.id for done in registered.materialization.writes}
+    assert written == {"chromium", "page", "ubuntu-24.04-browser", "ubuntu-24.04-browser__forms_container_image",
+                       "triage-t"}
+    step = _steps("triage-t")[0]
+    assert (step["env_id"], step["env_version"]) == ("chromium", 1)
+    chromium = Env.get("chromium")
+    assert (chromium.type, chromium.computer.id, chromium.driver.id) == ("computer_app", "ubuntu-24.04-browser", "page")
+
+
+def test_a_computer_env_whose_compose_leaves_nothing_a_deploy_boots_fails_the_registration_before_its_tasks(
+        home, composed, monkeypatch):
+    """As a builder whose disk filled."""
+    for module in (register_module, env_store_module):
+        monkeypatch.setattr(module, "shared_store", lambda store: True)
+    bases = {image.ref() for image in COMPUTER_IMAGES}
+    monkeypatch.setattr("agent_env.env.published_images._registry_digest", lambda ref: DIGEST if ref in bases else None)
+    monkeypatch.setattr(computer_artifact_module, "_inspect",
+                        lambda image, arches, read: computer_artifact_module._unread(arches, "no registry in a test"))
+
+    def compose(env, pairs=None, composing=None):
+        env.update_metadata({**env.metadata, "composed": {"container": {
+            "amd64": {"status": "failed", "reason": "no space left on device", "composer": composition()},
+            "arm64": {"status": "skipped", "reason": "no link runs linux/arm64 natively", "composer": composition()}}}})
+
+    monkeypatch.setattr(composer_module, "compose", compose)
+    files = {"envs/desktop/env.toml": 'type = "computer"\ncomputer = "ubuntu-24.04"\ndriver = "reference"\n',
+             "tasks/t.json": json.dumps([{"id": "env", "type": "deploy_env", "env_id": "desktop"}])}
+
+    result = CliRunner().invoke(cli, ["bundle", "register", str(layout(home / "desk", files)), "--yes"])
+
+    assert result.exit_code == 1, result.output
+    assert ("envs/desktop: desk-desktop v1 has no build a deploy can boot (container/amd64 failed (no space left on "
+            "device); container/arm64 skipped (no link runs linux/arm64 natively)), so no task was written: register "
+            "again to compose what it left, emulating a skipped arch or on a --sandbox that runs it natively, or "
+            "compose it with agent-env env build --id desk-desktop --version 1 and then register again"
+            ) in result.output
+    assert Env.get("desk-desktop").version == 1
+    with pytest.raises(NotFoundError):
+        Task.get("desk-t")
 
 
 def test_a_write_that_fails_leaves_no_pending_row(home, monkeypatch):

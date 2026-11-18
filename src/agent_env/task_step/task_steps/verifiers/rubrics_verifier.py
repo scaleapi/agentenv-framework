@@ -7,7 +7,7 @@ import json
 import logging
 import re
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, ClassVar, Optional
 
@@ -1414,6 +1414,7 @@ class RubricsVerifierTaskStep(TaskStep):
         judge_effort: Optional[str],
         judge_max_thinking_tokens: Optional[int],
         context: TaskStepContext,
+        headers: Mapping[str, str],
     ) -> None:
         from agent_env.a2a_agent import A2AAgent
         from agent_env.a2a_agent import protocol
@@ -1440,7 +1441,7 @@ class RubricsVerifierTaskStep(TaskStep):
                                self.verifier_id, unsupported)
             if config_payload:
                 endpoint = (config_ext.get("params") or {}).get("endpoint", "/ext/agent-config")
-                await protocol.post_agent_config(judge_a2a_url + endpoint, config_payload)
+                await protocol.post_agent_config(judge_a2a_url + endpoint, config_payload, headers=headers)
                 logger.info(f"Set judge agent config: {list(config_payload.keys())}")
         # What the judge agent took; one that doesn't accept a model grades on its own.
         context.record_model("judge", self.id, config_payload.get("model"))
@@ -1514,6 +1515,7 @@ class RubricsVerifierTaskStep(TaskStep):
             judge_agent_card=judge_agent_card,
             a2a_server_task_id=task_id,
             sandbox_type=getattr(judge_agent, "sandbox_type", None),
+            headers=judge_agent.control_headers,
         )
         return {"response": tr.response_text, "trajectory_object_url": judge_trajectory_url}
 
@@ -1522,7 +1524,8 @@ class RubricsVerifierTaskStep(TaskStep):
         """The error for a judge call that ran out of time, carrying the judge's trajectory so far."""
         url = await self._fetch_judge_trajectory(judge_a2a_url=judge_a2a_url, judge_agent_card=judge_agent_card,
                                                  a2a_server_task_id=task_id,
-                                                 sandbox_type=getattr(judge_agent, "sandbox_type", None))
+                                                 sandbox_type=getattr(judge_agent, "sandbox_type", None),
+                                                 headers=judge_agent.control_headers)
         logger.warning("Verifier '%s': judge task %s ran out of its %ss (%s); its trajectory so far: %s",
                        self.verifier_id, task_id, self.judge_timeout_seconds, why, url)
         return JudgeTimeoutError(f"Judge A2A task {task_id} ran out of its {self.judge_timeout_seconds}s: {why} "
@@ -1550,6 +1553,7 @@ class RubricsVerifierTaskStep(TaskStep):
         judge_agent_card: dict,
         a2a_server_task_id: str,
         sandbox_type: Optional[str],
+        headers: Mapping[str, str],
     ) -> Optional[str]:
         """Best-effort capture of the judge's own reasoning trajectory, via the same
         EXT_TRAJECTORY extension `prompt_agent` uses, keyed by the A2A task id. Retries
@@ -1595,7 +1599,8 @@ class RubricsVerifierTaskStep(TaskStep):
         for attempt in range(1, self.DEFAULT_MAX_RETRIES + 1):
             try:
                 fetched = await fetch_trajectory(
-                    judge_a2a_url + get_path, {"task_id": a2a_server_task_id}, upload=upload, store=store
+                    judge_a2a_url + get_path, {"task_id": a2a_server_task_id}, upload=upload, store=store,
+                    headers=headers,
                 )
                 return await asyncio.to_thread(store_trajectory, fetched, prefix)
             except Exception as exc:
@@ -1647,6 +1652,7 @@ class RubricsVerifierTaskStep(TaskStep):
                 judge_effort=judge_effort,
                 judge_max_thinking_tokens=judge_max_thinking_tokens,
                 context=context,
+                headers=judge_agent.control_headers,
             )
 
         for attempt in range(1, self.DEFAULT_MAX_RETRIES + 1):
