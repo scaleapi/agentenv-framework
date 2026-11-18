@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from agent_env.a2a_agent import A2AAgent
+from agent_env.a2a_agent.a2a_agent import TAKES_CREDENTIALS
 from agent_env.artifact.artifacts.docker_image import PUT_AGAIN, DockerImageArtifact, pull_problem
 from agent_env.config import get_config
 from agent_env.config.errors import ConfigError
@@ -336,15 +337,14 @@ class _Walk:
         if agent_id is None:
             self.default_agent_users.append((where, unnamed))
             agent_id = self._default_agent_id()
-        if needs is None:
-            own = self._agent_env_vars(agent_id, version)
+        if needs is not None:
+            self.model_users.append((where, needs))
+        elif (own := self._agent_model_vars(agent_id, version)) is not None:
             url = url or own.get(ENV_BASE_URL)
             if url and ENV_API_KEY not in given and ENV_API_KEY not in own and not get_config().is_model_endpoint(url):
                 self._problem(where, f"deploys agent {agent_id!r}, but {no_key_for(url)}")
             elif needed := _MODEL_VARS - given - own.keys():
                 self.model_users.append((where, needed))
-        else:
-            self.model_users.append((where, needs))
         image = self._agent_image(agent_id, version)
         taking = self._check(where, provider, accepts, [image] if image else [], vms_load=True)
         if any(link.ON_THIS_MACHINE for link in taking):
@@ -368,14 +368,20 @@ class _Walk:
 
     # What a deploy runs
 
-    def _agent_env_vars(self, agent_id: str, version: int | None) -> dict[str, str]:
-        """The variables the agent ``agent_id`` declares for itself, which a deploy doesn't take from the config."""
+    def _agent_model_vars(self, agent_id: str, version: int | None) -> dict[str, str] | None:
+        """The model variables the agent ``agent_id`` declares for itself, which a deploy doesn't take from the config;
+        None for an agent that takes no model credentials, which a deploy hands none."""
         if (agent := self.agents.get(agent_id)) is not None:
-            return dict(agent.config.get("default_env_vars") or {})
-        try:
-            return dict(A2AAgent.get(agent_id, version).default_env_vars or {})
-        except (NotFoundError, ValueError, KeyError, TypeError):
-            return {}
+            env_vars, metadata = agent.config.get("default_env_vars"), agent.config.get("metadata")
+        else:
+            try:
+                stored = A2AAgent.get(agent_id, version)
+            except (NotFoundError, ValueError, KeyError, TypeError):
+                return {}
+            env_vars, metadata = stored.default_env_vars, stored.metadata
+        if not (metadata or {}).get(TAKES_CREDENTIALS, True):
+            return None
+        return {name: value for name, value in (env_vars or {}).items() if name in _MODEL_VARS}
 
     def _agent_image(self, agent_id: str, version: int | None) -> _Image | None:
         """The image the agent ``agent_id`` runs, or None when the store doesn't hold the agent or can't read it, which

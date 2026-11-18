@@ -1267,6 +1267,18 @@ def test_a_deploy_sending_the_configured_key_to_another_url_is_refused_before_an
         assert prepare_bundle(bundle_dir, tasks=["trained"], sandbox="local", solver_endpoint=True)
 
 
+def test_an_agent_that_takes_no_credentials_needs_no_endpoint_or_key_wherever_its_step_points_it(bundle_dir, no_model):
+    with namespace_routing():
+        A2AAgent.put(id="stored-bare", docker_image_artifact=_image("stored-bare-image"),
+                     metadata={"takes_credentials": False})
+    layout(bundle_dir, {"agents/folder-bare/agent.toml": 'image = { ref = "docker.io/library/python:3.12-slim" }\n\n'
+                                                         '[metadata]\ntakes_credentials = false\n'})
+    _task(bundle_dir, [{**AGENT, "a2a_agent_id": "stored-bare", "litellm_base_url": "http://other:5001"},
+                       {**AGENT, "id": "folder", "a2a_agent_id": "folder-bare"}], name="bare")
+
+    assert [entry.name for entry in dry_run_bundle(bundle_dir, tasks=["bare"], sandbox="local").runs] == ["bare"]
+
+
 def test_an_agent_declaring_the_model_variables_itself_needs_no_endpoint_but_its_judge_does(bundle_dir, no_model):
     with namespace_routing():
         A2AAgent.put(id="echo", docker_image_artifact=_image("echo-image"),
