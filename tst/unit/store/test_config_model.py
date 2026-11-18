@@ -8,7 +8,7 @@ fresh ``Config`` + injected ``LocalSecretStore``.
 
 import pytest
 
-from agent_env.config.model import ModelCallConfig
+from agent_env.config.model import ModelCallConfig, ModelRole
 from agent_env.store import ConfigError, LocalSecretStore
 from agent_env.config import Config
 
@@ -183,3 +183,16 @@ def test_reserved_param_key_fails_loud(tmp_path, monkeypatch, reserved):
     cfg = _cfg(tmp_path, monkeypatch, body)
     with pytest.raises(ConfigError, match="reserved"):
         cfg.get_default_model()
+
+
+_UNSET_FALLBACK = '[model]\ndefault = "env:FD5976_UNSET_MODEL"\n'
+
+
+@pytest.mark.parametrize("layer", ["step_params", "run", "step", "agent"])
+def test_a_model_a_layer_names_doesn_t_read_a_fallback_it_doesn_t_use(tmp_path, monkeypatch, layer):
+    monkeypatch.delenv("FD5976_UNSET_MODEL", raising=False)
+    cfg = _cfg(tmp_path, monkeypatch, _UNSET_FALLBACK)
+
+    assert cfg.resolve_model(ModelRole.SOLVER, **{layer: "m-given"}).model == "m-given"
+    with pytest.raises(ConfigError, match="FD5976_UNSET_MODEL"):
+        cfg.resolve_model(ModelRole.SOLVER)

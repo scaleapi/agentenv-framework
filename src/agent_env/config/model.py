@@ -67,6 +67,9 @@ class ModelSource(StrEnum):
     FALLBACK = "fallback"
 
 
+GIVEN_SOURCES = frozenset({ModelSource.STEP_PARAMS, ModelSource.RUN, ModelSource.STEP, ModelSource.AGENT})
+
+
 @dataclass(frozen=True)
 class ResolvedModel:
     """A role's model for one step and the layer it came from; both None when no layer names one."""
