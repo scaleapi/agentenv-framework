@@ -1,6 +1,7 @@
-"""``bundle init`` writes a computer env into the folder: its base computer with the image it's built from, its driver and
-apps with their files, and the multi env holding it, which a run of the folder writes back as they were stored, with no
-store; a shipped base or driver stays named by its installed id. The composer is replaced by a recorder."""
+"""``bundle init`` writes a computer env into the folder, as an import that leaves nothing in the store must: its base
+computer with the image it's built from, its driver and apps with their files, and the multi env holding it, which a run
+of the folder writes back as they were stored; a shipped base or driver stays named by its installed id. The composer is
+replaced by a recorder."""
 
 import json
 
@@ -11,7 +12,6 @@ from agent_env.bundle.installed import installed_bundles
 from agent_env.bundle.materialize import materialize
 from agent_env.bundle.plan import plan_bundle
 from agent_env.bundle.resolve import resolve_bundle
-from agent_env.entity.scopes import FieldScope
 from agent_env.env import Env
 from agent_env.env.envs.computer.env import ComputerEnv
 from tst.unit.bundle._support import layout, local_builds
@@ -98,7 +98,7 @@ def test_a_computer_env_with_its_own_base_driver_and_apps_reads_back_from_the_fo
     task = _stored(tmp_path / "desk", OWN, OWN_FILES)
     stored = Env.get(task.rsplit("/", 1)[0] + "/desktop")
 
-    imported = import_task(task, tmp_path / "out", include_scopes=[FieldScope.USER])
+    imported = import_task(task, tmp_path / "out")
 
     assert imported.pinned == ()
     assert sorted(entity.folder for entity in imported.written) == [
@@ -122,7 +122,7 @@ def test_a_computer_env_with_its_own_base_driver_and_apps_reads_back_from_the_fo
 def test_a_shipped_base_and_driver_stay_named_by_their_installed_ids(tmp_path, composed):
     task = _stored(tmp_path / "desk", DESKTOP)
 
-    imported = import_task(task, tmp_path / "out", include_scopes=[FieldScope.USER])
+    imported = import_task(task, tmp_path / "out")
 
     assert sorted(entity.folder for entity in imported.written) == ["envs/desktop", "envs/office"]
     assert {(floating.where, floating.id) for floating in imported.floating} >= {
@@ -138,7 +138,7 @@ def test_a_computer_artifact_reads_back_with_its_forms_and_settings(tmp_path, co
     task = _stored(tmp_path / "desk", OWN, OWN_FILES)
     stored = ComputerArtifact.get(task.rsplit("/", 1)[0] + "/base")
 
-    import_task(task, tmp_path / "out", include_scopes=[FieldScope.USER])
+    import_task(task, tmp_path / "out")
 
     toml = (tmp_path / "out" / "artifacts" / "base" / "artifact.toml").read_text()
     assert "validated_images" not in toml
