@@ -89,9 +89,11 @@ INSTALL_COMMANDS: Final[list[str]] = [
     "LITELLM_BASE_URL={litellm_base_url}\n"
     "LITELLM_EXTRA_HEADERS={litellm_extra_headers}\n"
     "OPENHANDS_A2A_ENV",
-    # agent-env's control token for the agent, when the runner hands it one (install/v1 optional_params), the same way.
-    "[ -z \"${{AGENTENV_CONTROL_TOKEN:-}}\" ] || printf 'AGENTENV_CONTROL_TOKEN=%s\\n' \"$AGENTENV_CONTROL_TOKEN\" | "
-    f"{_DOCKER} exec -i {{container}} sh -c 'cat >> {INSTALL_DIR}/{ENV_FILE}'",
+    # agent-env's control token for the agent, which the runner exports when it has one (install/v1 optional_params),
+    # the same way: expanded by the install's shell into the heredoc, empty without one, which leaves the agent open.
+    f"{_DOCKER} exec -i {{container}} sh -c 'cat >> {INSTALL_DIR}/{ENV_FILE}' <<OPENHANDS_A2A_TOKEN\n"
+    "AGENTENV_CONTROL_TOKEN=${{AGENTENV_CONTROL_TOKEN:-}}\n"
+    "OPENHANDS_A2A_TOKEN",
     f"{_DOCKER} exec -d -e A2A_PORT={{a2a_port}} {{container}} sh {INSTALL_DIR}/start.sh",
 ]
 

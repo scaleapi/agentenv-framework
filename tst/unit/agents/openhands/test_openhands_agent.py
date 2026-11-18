@@ -659,7 +659,7 @@ def test_install_extension_is_declared_on_the_card(client: TestClient) -> None:
     [env_file] = [command for command in formatted if "LITELLM_API_KEY" in command]
     assert "LITELLM_API_KEY='sk-secret'" in env_file.splitlines()
     assert install["optional_params"] == ["control_token"]
-    assert formatted[-2].startswith('[ -z "${AGENTENV_CONTROL_TOKEN:-}" ] || printf')
+    assert formatted[-2].splitlines()[1] == "AGENTENV_CONTROL_TOKEN=${AGENTENV_CONTROL_TOKEN:-}"
 
 
 def test_the_card_advertises_the_extensions_agent_env_validates(client: TestClient) -> None:
