@@ -35,7 +35,10 @@ tests, so no Go toolchain is left in the image. `go.sum` pins its modules, and D
   rewritten, then bytes are relayed both ways. An upgrade keeps its `Connection` and `Upgrade` headers; any other
   request closes once answered.
 - **`CONNECT`**: the destination's name is resolved, and the connection is refused unless every address is global
-  (`notGlobal` lists the blocks that aren't). A routed site's name, in the hosts file's `# agentenv sites` block, goes
+  (`notGlobal` lists the blocks that aren't). An agent's image sets `AGENTENV_EGRESS_PRIVATE=allow` for the proxy,
+  which then reaches private networks' addresses too (RFC 1918, RFC 6598's shared space, IPv6 unique local), as the
+  agent's processes do directly anyway, so a model endpoint there is reached on real time; loopback, link-local and the
+  rest stay refused. A computer's proxy doesn't set it. A routed site's name, in the hosts file's `# agentenv sites` block, goes
   to the site proxy there. Bytes that aren't TLS, and a routed site's TLS, are relayed untouched.
 - **TLS, with the clock unarmed**: relayed untouched.
 - **TLS, with the clock armed**: each of the name's addresses is decided by its own probe, a handshake the proxy makes
@@ -63,7 +66,7 @@ the session user's reach. Its fields, each there when it applies:
 |---|---|
 | `t` | When the line was written, in seconds |
 | `client`, `method`, `host`, `port` | Who asked, how, and for what |
-| `allowed`, `dst` | `global` or `routed`, and the address dialled |
+| `allowed`, `dst` | `global`, `private` or `routed`, and the address dialled |
 | `mode` | `pass`, `splice`, `intercept`, `http`, `upgrade` or `refused` |
 | `decision` | `real`, `inside`, `outside`, `unverified`, `probe_failed`, `routed` or `not TLS` |
 | `sni`, `alpn_offered`, `alpn` | The client's server name and protocols, and the one the site picked |

@@ -15,7 +15,7 @@ from typing import ClassVar, Optional
 from agent_env.config import get_config
 from agent_env.task_step.context import PromptResponse, StepContextError, TaskStepContext
 from agent_env.entity.refs import EntityRef
-from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_step import StepRole, TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.verifiers.run_context import load_run_context
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
 
@@ -32,6 +32,7 @@ class EnvOutcomeVerifierTaskStep(TaskStep):
     control token, so its calls reach the env's framework-only routes as written."""
 
     type: ClassVar[str] = "env_outcome_verifier"
+    step_role = StepRole.GRADER
     entity_refs = (
         EntityRef.env("env_id"),
         EntityRef.artifact("file_artifact_id", version_field="file_artifact_version", artifact_type="file"),
@@ -76,8 +77,6 @@ class EnvOutcomeVerifierTaskStep(TaskStep):
         """Store the step. With ``verify_script_file_path`` the script is uploaded as
         ``<id>-verifier-script`` first; otherwise the kwargs name an existing ``file_artifact_id``
         (the shape ``agent-env task create`` builds from JSON)."""
-        from agent_env.task_step.store import get_task_step_store
-
         if verify_script_file_path is not None:
             from agent_env.artifact import FileArtifact
 
@@ -87,8 +86,7 @@ class EnvOutcomeVerifierTaskStep(TaskStep):
                 file_path=verify_script_file_path,
             )
             kwargs.update(file_artifact_id=artifact.id, file_artifact_version=artifact.version)
-        kwargs.setdefault("version", None)
-        return get_task_step_store().put_document(cls(**kwargs))
+        return super().put(**kwargs)
 
     @classmethod
     def from_dict(cls, data: dict) -> EnvOutcomeVerifierTaskStep:

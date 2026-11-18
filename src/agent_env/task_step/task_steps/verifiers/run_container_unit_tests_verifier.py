@@ -51,7 +51,7 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
 )
 from agent_env.store.ids import derive_id, is_local_id, key_segment, validate_local_id
 from agent_env.task_step.context import StepContextError, TaskStepContext, dual_keyed
-from agent_env.task_step.task_step import TaskStep, TaskStepDependency
+from agent_env.task_step.task_step import StepRole, TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.run_code import _DriverTarget
 
 logger = logging.getLogger(__name__)
@@ -87,6 +87,7 @@ _MODEL_URL_KEYS = frozenset({"LITELLM_BASE_URL", "ANTHROPIC_BASE_URL"})
 
 class RunContainerUnitTestsVerifierTaskStep(TaskStep):
     type: ClassVar[str] = "run_container_unit_tests_verifier"
+    step_role = StepRole.GRADER
     entity_refs = (EntityRef.env("env_id"),)
 
     def __init__(

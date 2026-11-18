@@ -41,6 +41,19 @@ def test_put_accepts_an_existing_artifact_reference(monkeypatch):
     assert step.score_aggregator is ScoreAggregator.ALL_PASS and step.version is None
 
 
+def test_put_keeps_a_configured_role_and_retry(monkeypatch):
+    from agent_env.task_step import store as step_store
+
+    class _Store:
+        def put_document(self, instance):
+            return instance
+    monkeypatch.setattr(step_store, "get_task_step_store", lambda: _Store())
+    step = EnvOutcomeVerifierTaskStep.put(id="g", env_id="e", file_artifact_id="f", step_role="other",
+                                          retry_config={"retry_from_step_id": "g"})
+
+    assert step.step_role == "other" and step.retry_config.retry_from_step_id == "g"
+
+
 def test_put_with_a_script_path_uploads_then_stores(monkeypatch, tmp_path):
     from agent_env import artifact as artifact_mod
     from agent_env.task_step import store as step_store
