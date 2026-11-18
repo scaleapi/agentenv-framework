@@ -537,25 +537,25 @@ def _link(containers=(), disks=()):
     return link
 
 
-_DEPLOYS_ON = {"docker": _link(["amd64"]), "vms": _link(disks=["amd64"]),
-               "chain": SimpleNamespace(links=(_link(["amd64"]), _link(disks=["amd64"])))}
+_SANDBOXES = {"docker": _link(["amd64"]), "vms": _link(disks=["amd64"]),
+              "chain": SimpleNamespace(links=(_link(["amd64"]), _link(disks=["amd64"])))}
 
 
-@pytest.mark.parametrize("deploys_on, forms", [(None, ["container", "disk"]), ("docker", ["container"]),
-                                               ("vms", ["disk"]), ("chain", ["container", "disk"])])
-def test_a_registration_composes_the_forms_its_deploys_boot_on_the_provider_it_names_else_every_form(
-        home, composed, monkeypatch, deploys_on, forms):
+@pytest.mark.parametrize("sandbox, forms", [(None, ["container", "disk"]), ("docker", ["container"]),
+                                            ("vms", ["disk"]), ("chain", ["container", "disk"])])
+def test_a_registration_composes_on_its_sandbox_the_forms_its_deploys_there_boot_else_every_form(
+        home, composed, monkeypatch, sandbox, forms):
     composings = []
     root = _desktop(home, monkeypatch, lambda env, pairs=None, composing=None: composings.append(composing))
-    monkeypatch.setattr(register_module, "build_sandbox_provider", _DEPLOYS_ON.__getitem__)
+    monkeypatch.setattr(register_module, "build_sandbox_provider", _SANDBOXES.__getitem__)
 
     result = CliRunner().invoke(cli, ["bundle", "register", str(root), "--yes",
-                                      *(["--deploys-on", deploys_on] if deploys_on else [])])
+                                      *(["--sandbox", sandbox] if sandbox else [])])
 
     assert result.exit_code == 0, result.output
     [used] = composings
     assert used.forms(Env.get("desk-desktop"), used.provider()) == forms
-    assert (used.sandbox_provider, used.deploys_on) == (None, _DEPLOYS_ON.get(deploys_on))
+    assert used.sandbox_provider is _SANDBOXES.get(sandbox)
 
 
 def test_a_computer_env_whose_compose_leaves_nothing_a_deploy_boots_fails_the_registration_before_its_tasks(
@@ -587,9 +587,9 @@ def test_a_registration_for_deploys_that_boot_containers_fails_on_a_failed_conta
             "disk": {"amd64": {"status": "unverified", "image": "disk", "composer": composition()}}}})
 
     root = _desktop(home, monkeypatch, compose)
-    monkeypatch.setattr(register_module, "build_sandbox_provider", _DEPLOYS_ON.__getitem__)
+    monkeypatch.setattr(register_module, "build_sandbox_provider", _SANDBOXES.__getitem__)
 
-    result = CliRunner().invoke(cli, ["bundle", "register", str(root), "--yes", "--deploys-on", "docker"])
+    result = CliRunner().invoke(cli, ["bundle", "register", str(root), "--yes", "--sandbox", "docker"])
 
     assert result.exit_code == 1 and "has no build a deploy can boot (container/amd64 failed), so" in result.output
 
