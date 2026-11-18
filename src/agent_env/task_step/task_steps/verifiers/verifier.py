@@ -19,6 +19,7 @@ from agent_env.config import get_config
 from agent_env.plugins import _requirements
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_step import RetryConfig, TaskStep, TaskStepDependency
+from agent_env.task_step.thread_work import finish_on_thread
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
 
 logger = logging.getLogger(__name__)
@@ -95,7 +96,7 @@ class VerifierTaskStep(TaskStep):
         except Exception as exc:
             self._write_grade(context, self._failed_grade(context, exc))
             raise
-        self._write_grade(context, self._grade(context, verification))
+        self._write_grade(context, await self._grade(context, verification))
         entries = verification.legacy_entries
         if entries is None:
             entries = {self.verifier_id: self._legacy_entry(verification)}
@@ -135,14 +136,14 @@ class VerifierTaskStep(TaskStep):
             "min_passing_score": data.get("min_passing_score"),
         }
 
-    def _grade(self, context: TaskStepContext, verification: Verification) -> dict[str, Any]:
+    async def _grade(self, context: TaskStepContext, verification: Verification) -> dict[str, Any]:
         if verification.skipped is not None:
             status, score = VerifierStatus.SKIPPED, 0.0
         else:
             status, score = VerifierStatus.GRADED, float(self._score(verification))
         grade = self._grade_fields(context, status, score, verification.criteria)
         grade["verifier_skip_reasoning"] = verification.skipped
-        grade.update(self._output(context, verification.output))
+        grade.update(await self._output(context, verification.output))
         return grade
 
     def _failed_grade(self, context: TaskStepContext, exc: Exception) -> dict[str, Any]:
@@ -181,16 +182,18 @@ class VerifierTaskStep(TaskStep):
             return {"results": verification.criteria, "score": None, "skipped": verification.skipped}
         return {"results": verification.criteria, "score": self._score(verification)}
 
-    def _output(self, context: TaskStepContext, output: Any) -> dict[str, Any]:
+    async def _output(self, context: TaskStepContext, output: Any) -> dict[str, Any]:
         """``verifier_output`` inline, or, over ``OUTPUT_INLINE_BYTES``, a ``verifier_output_ref`` to its copy in the
-        object store; inline with ``verifier_output_offload_error`` when that write fails, which never fails the step."""
+        object store, written on a worker thread; inline with ``verifier_output_offload_error`` when that write fails,
+        which never fails the step."""
         if output is None:
             return {}
         body = json.dumps(output).encode()
         if len(body) <= OUTPUT_INLINE_BYTES:
             return {"verifier_output": output}
         try:
-            url = _store_output(context, self.id, body)
+            url = await finish_on_thread(functools.partial(_store_output, context.instance_id, self.id, body),
+                                         f"Uploading verifier {self.id}'s output")
         except Exception as exc:
             logger.warning("verifier %s: kept its %d-byte output inline, the object store refused it: %s",
                            self.id, len(body), exc)
@@ -224,9 +227,9 @@ def _compact(value: Any) -> Any:
     return {"sha256": hashlib.sha256(body).hexdigest(), "bytes": len(body)}
 
 
-def _store_output(context: TaskStepContext, step_id: str, body: bytes) -> str:
+def _store_output(instance_id: Optional[str], step_id: str, body: bytes) -> str:
     config = get_config()
-    key = (f"{config.get_artifact_key_prefix()}verifier-outputs/instance_id={context.instance_id}/"
+    key = (f"{config.get_artifact_key_prefix()}verifier-outputs/instance_id={instance_id}/"
            f"{step_id}-{uuid.uuid4().hex}.json")
     return config.get_object_store().put(key, body, content_type="application/json")
 

@@ -3,6 +3,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import threading
 from types import SimpleNamespace
 from typing import ClassVar
 
@@ -178,9 +179,10 @@ def test_a_min_passing_score_outside_zero_to_one_is_a_config_problem(bad):
 
 class _Store:
     def __init__(self, fail=False):
-        self.fail, self.puts = fail, {}
+        self.fail, self.puts, self.threads = fail, {}, []
 
     def put(self, key, body, content_type=None):
+        self.threads.append(threading.current_thread())
         if self.fail:
             raise ConnectionError("store unreachable")
         self.puts[key] = (body, content_type)
@@ -198,7 +200,7 @@ def test_a_small_output_stays_on_the_grade():
     assert grade["verifier_output"] == {"log": "ok"} and "verifier_output_ref" not in grade
 
 
-def test_a_large_output_goes_to_the_object_store(monkeypatch):
+def test_a_large_output_goes_to_the_object_store_from_a_worker_thread(monkeypatch):
     store = _Store()
     _with_store(monkeypatch, store)
     output = {"log": "x" * (verifier_module.OUTPUT_INLINE_BYTES + 1)}
@@ -207,6 +209,7 @@ def test_a_large_output_goes_to_the_object_store(monkeypatch):
         "grades"]["check"]
 
     [(key, (body, content_type))] = store.puts.items()
+    assert store.threads != [threading.main_thread()]
     assert key.startswith("pfx/verifier-outputs/instance_id=i1/check-") and content_type == "application/json"
     assert json.loads(body) == output
     assert grade["verifier_output"] is None
