@@ -3,7 +3,7 @@ named grade under ``context.metadata["grades"]`` beside its ``verifications`` en
 (score aggregation, judge output formats, trajectory compaction and frame selection for the LLM judge)."""
 
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
-from agent_env.task_step.task_steps.verifiers.verifier import Verification, VerifierStatus, VerifierTaskStep
+from agent_env.task_step.task_steps.verifiers.verifier import Grade, Verification, VerifierStatus, VerifierTaskStep
 from agent_env.task_step.task_steps.verifiers.run_context import EnvClock, Firing, Message, Run, RunRecordUnavailable, Turn
 from agent_env.task_step.task_steps.verifiers.env_outcome_verifier import EnvOutcomeVerifierTaskStep
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep, is_rubrics_verifier
@@ -18,6 +18,7 @@ __all__ = [
     "EnvClock",
     "EnvOutcomeVerifierTaskStep",
     "Firing",
+    "Grade",
     "Message",
     "RubricsVerifierTaskStep",
     "Run",

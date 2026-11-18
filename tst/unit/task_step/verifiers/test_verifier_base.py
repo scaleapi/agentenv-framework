@@ -1,6 +1,5 @@
 """VerifierTaskStep: the named grade it writes beside a verifier's legacy entries, for each way verify can end."""
 import asyncio
-import copy
 import hashlib
 import json
 import threading
@@ -10,11 +9,13 @@ from typing import ClassVar
 import pytest
 
 from agent_env.plugins import _registration
-from agent_env.task.step_journal import _apply_forward
+from agent_env.task.step_journal import replay_context
 from agent_env.task_step.context import TaskStepContext, VerifierNotPassingError
 from agent_env.task_step.context_ops import build_context_update_ops
 from agent_env.task_step.task_step import TaskStep
-from agent_env.task_step.task_steps.verifiers import ScoreAggregator, Verification, VerifierTaskStep, aggregate_score
+from agent_env.task_step.task_steps.verifiers import (
+    Grade, ScoreAggregator, Verification, VerifierTaskStep, aggregate_score,
+)
 from agent_env.task_step.task_steps.verifiers import verifier as verifier_module
 
 
@@ -140,11 +141,25 @@ def test_legacy_entries_are_written_exactly_as_the_verifier_gives_them():
     [{"result": "yes"}, {}],
 ])
 def test_the_grade_rows_aggregate_as_the_rows_the_verifier_gave(rows):
-    graded = [verifier_module._row(i, row) for i, row in enumerate(rows)]
-
     for aggregator in ScoreAggregator:
-        assert aggregate_score(graded, aggregator) == aggregate_score(rows, aggregator)
-    assert [row["id"] for row in graded] == [str(i) for i in range(len(rows))]
+        metadata = _run(_Toy(outcome=Verification(criteria=rows), score_aggregator=aggregator)).metadata
+
+        graded = metadata["grades"]["check"]["verifier_criteria"]
+        assert aggregate_score(graded, aggregator) == metadata["verifications"]["check"]["score"]
+        assert [row["id"] for row in graded] == [str(i) for i in range(len(rows))]
+
+
+@pytest.mark.parametrize("outcome", [Verification(criteria=ROWS), Verification(skipped="nothing to judge"),
+                                     ValueError("broken"), Verification(score=1, output={"log": "ok"})])
+def test_every_grade_holds_the_fields_its_type_names(outcome):
+    context = TaskStepContext()
+    try:
+        _run(_Toy(outcome=outcome), context)
+    except ValueError:
+        pass
+
+    keys = set(context.metadata["grades"]["check"])
+    assert Grade.__required_keys__ <= keys <= Grade.__required_keys__ | Grade.__optional_keys__
 
 
 def test_settings_are_the_steps_own_fields_with_large_ones_kept_by_digest():
@@ -227,16 +242,14 @@ def test_an_output_the_store_refuses_stays_inline_and_the_step_still_passes(monk
     assert grade["verifier_output_offload_error"] == "ConnectionError: store unreachable"
 
 
-def test_the_grade_and_legacy_entry_survive_the_stored_diff():
-    pre = TaskStepContext(metadata={"verifications": {"earlier": {"results": [], "score": 1.0}}})
-    post = copy.deepcopy(pre)
-    asyncio.run(_Toy(outcome=Verification(criteria=ROWS, output={"log": "ok"}), verifier_id="vid").execute(post))
+def test_the_grade_and_legacy_entry_survive_the_step_journal():
+    post = _run(_Toy(outcome=Verification(criteria=ROWS, output={"log": "ok"}), verifier_id="vid"))
 
-    doc = {"context": pre.to_safe_dict()}
-    _apply_forward(doc, build_context_update_ops(pre, post))
+    ops = build_context_update_ops(None, post).to_journal_dict()
+    stored = replay_context([{"step_id": "check", "seq": 1, "ops": ops}], [])
 
-    assert doc["context"]["metadata"]["grades"] == post.metadata["grades"]
-    assert doc["context"]["metadata"]["verifications"] == post.metadata["verifications"]
+    assert stored["metadata"]["grades"] == post.metadata["grades"]
+    assert stored["metadata"]["verifications"] == post.metadata["verifications"]
 
 
 def test_a_verifier_must_implement_verify():

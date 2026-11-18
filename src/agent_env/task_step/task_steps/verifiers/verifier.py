@@ -13,14 +13,17 @@ from abc import abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 from importlib.metadata import packages_distributions
-from typing import Any, ClassVar, Optional
+from typing import Any, ClassVar, Optional, TypedDict
+
+from packaging.utils import canonicalize_name
 
 from agent_env.config import get_config
 from agent_env.plugins import _requirements
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_step import RetryConfig, TaskStep, TaskStepDependency
-from agent_env.task_step.thread_work import finish_on_thread
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
+from agent_env.task_step.thread_work import finish_on_thread
+from agent_env.utils.canonical import canonical_json
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +44,30 @@ class VerifierStatus(str, Enum):
     GRADED = "graded"
     SKIPPED = "skipped"
     FAILED = "failed"
+
+
+class _GradeFields(TypedDict):
+    name: str
+    score: float
+    min_passing_score: float
+    passed: bool
+    verifier_status: str
+    verifier_error_reasoning: Optional[str]
+    verifier_skip_reasoning: Optional[str]
+    verifier_output: Any
+    verifier_criteria: list[dict[str, Any]]
+    verifier_type: str
+    verifier_version: Optional[str]
+    verifier_settings: dict[str, Any]
+
+
+class Grade(_GradeFields, total=False):
+    """A verifier step's named grade, as ``context.metadata["grades"][<step id>]`` holds it. ``verifier_status`` is a
+    ``VerifierStatus`` value; each ``verifier_criteria`` row has ``id``, ``score``, ``result``, ``weight`` and
+    ``skipped``, besides any keys the verifier gave it. The two fields here are written only for a large output."""
+
+    verifier_output_ref: dict[str, Any]
+    verifier_output_offload_error: str
 
 
 @dataclass
@@ -64,7 +91,9 @@ class Verification:
 
 class VerifierTaskStep(TaskStep):
     """A step that grades a run. ``execute`` runs ``verify`` and writes the step's grade, and the legacy entries after
-    it; an exception from ``verify`` is a failed grade, raised again. Subclasses implement ``verify``, not ``execute``."""
+    it; an exception from ``verify`` is a failed grade, raised again. Subclasses implement ``verify``, not ``execute``,
+    and their ``__init__`` takes and passes on ``verifier_id``, ``score_aggregator`` and ``min_passing_score``, which
+    ``_base_from_dict`` reads for them."""
 
     DEFAULT_SCORE_AGGREGATOR: ClassVar[ScoreAggregator] = ScoreAggregator.ALL_PASS
 
@@ -94,12 +123,25 @@ class VerifierTaskStep(TaskStep):
         try:
             verification = await self.verify(context)
         except Exception as exc:
-            self._write_grade(context, self._failed_grade(context, exc))
+            self._write_grade(context, self._grade(context, VerifierStatus.FAILED, 0.0, [],
+                                                   error=f"{type(exc).__name__}: {exc}"))
             raise
-        self._write_grade(context, await self._grade(context, verification))
+        if verification.skipped is not None:
+            status, score = VerifierStatus.SKIPPED, None
+        elif verification.score is not None:
+            status, score = VerifierStatus.GRADED, verification.score
+        else:
+            status, score = VerifierStatus.GRADED, aggregate_score(verification.criteria, self.score_aggregator)
+        grade = self._grade(context, status, 0.0 if score is None else float(score), verification.criteria,
+                            skip=verification.skipped)
+        grade.update(await self._output(context, verification.output))
+        self._write_grade(context, grade)
         entries = verification.legacy_entries
         if entries is None:
-            entries = {self.verifier_id: self._legacy_entry(verification)}
+            entry = {"results": verification.criteria, "score": score}
+            if verification.skipped is not None:
+                entry["skipped"] = verification.skipped
+            entries = {self.verifier_id: entry}
         context.metadata.setdefault(VERIFICATIONS_KEY, {}).update(entries)
         if verification.raise_after is not None:
             raise verification.raise_after
@@ -136,51 +178,26 @@ class VerifierTaskStep(TaskStep):
             "min_passing_score": data.get("min_passing_score"),
         }
 
-    async def _grade(self, context: TaskStepContext, verification: Verification) -> dict[str, Any]:
-        if verification.skipped is not None:
-            status, score = VerifierStatus.SKIPPED, 0.0
-        else:
-            status, score = VerifierStatus.GRADED, float(self._score(verification))
-        grade = self._grade_fields(context, status, score, verification.criteria)
-        grade["verifier_skip_reasoning"] = verification.skipped
-        grade.update(await self._output(context, verification.output))
-        return grade
-
-    def _failed_grade(self, context: TaskStepContext, exc: Exception) -> dict[str, Any]:
-        grade = self._grade_fields(context, VerifierStatus.FAILED, 0.0, [])
-        grade["verifier_error_reasoning"] = f"{type(exc).__name__}: {exc}"
-        return grade
-
-    def _grade_fields(self, context: TaskStepContext, status: VerifierStatus, score: float,
-                      criteria: list[dict[str, Any]]) -> dict[str, Any]:
+    def _grade(self, context: TaskStepContext, status: VerifierStatus, score: float, criteria: list[dict[str, Any]],
+               *, error: Optional[str] = None, skip: Optional[str] = None) -> Grade:
         passed = status is VerifierStatus.GRADED and score >= self.min_passing_score
         rows = [_row(i, row) for i, row in enumerate(criteria)] or [{
             "id": self.id, "score": score, "result": passed, "weight": 1.0, "skipped": status is VerifierStatus.SKIPPED,
         }]
-        return {
-            "name": self.id,
-            "score": score,
-            "min_passing_score": self.min_passing_score,
-            "passed": passed,
-            "verifier_status": status.value,
-            "verifier_error_reasoning": None,
-            "verifier_skip_reasoning": None,
-            "verifier_output": None,
-            "verifier_criteria": rows,
-            "verifier_type": self.type,
-            "verifier_version": _providing_version(type(self).__module__),
-            "verifier_settings": {"scoring_rules": SCORING_RULES, **self.verifier_settings(context)},
-        }
-
-    def _score(self, verification: Verification) -> float:
-        if verification.score is not None:
-            return verification.score
-        return aggregate_score(verification.criteria, self.score_aggregator)
-
-    def _legacy_entry(self, verification: Verification) -> dict[str, Any]:
-        if verification.skipped is not None:
-            return {"results": verification.criteria, "score": None, "skipped": verification.skipped}
-        return {"results": verification.criteria, "score": self._score(verification)}
+        return Grade(
+            name=self.id,
+            score=score,
+            min_passing_score=self.min_passing_score,
+            passed=passed,
+            verifier_status=status.value,
+            verifier_error_reasoning=error,
+            verifier_skip_reasoning=skip,
+            verifier_output=None,
+            verifier_criteria=rows,
+            verifier_type=self.type,
+            verifier_version=_providing_version(type(self).__module__),
+            verifier_settings={"scoring_rules": SCORING_RULES, **self.verifier_settings(context)},
+        )
 
     async def _output(self, context: TaskStepContext, output: Any) -> dict[str, Any]:
         """``verifier_output`` inline, or, over ``OUTPUT_INLINE_BYTES``, a ``verifier_output_ref`` to its copy in the
@@ -201,7 +218,7 @@ class VerifierTaskStep(TaskStep):
         return {"verifier_output_ref": {"object_url": url, "bytes": len(body),
                                         "sha256": hashlib.sha256(body).hexdigest()}}
 
-    def _write_grade(self, context: TaskStepContext, grade: dict[str, Any]) -> None:
+    def _write_grade(self, context: TaskStepContext, grade: Grade) -> None:
         context.metadata.setdefault(GRADES_KEY, {})[self.id] = grade
         logger.info("verifier %s: %s, score %s, %s", self.id, grade["verifier_status"], grade["score"],
                     "passed" if grade["passed"] else "not passed")
@@ -221,7 +238,7 @@ def _row(index: int, row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _compact(value: Any) -> Any:
-    body = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    body = canonical_json(value)
     if len(body) <= SETTING_INLINE_BYTES:
         return value
     return {"sha256": hashlib.sha256(body).hexdigest(), "bytes": len(body)}
@@ -236,8 +253,9 @@ def _store_output(instance_id: Optional[str], step_id: str, body: bytes) -> str:
 
 @functools.cache
 def _providing_version(module: str) -> Optional[str]:
-    """The version of the installed package that holds ``module``: agentenv-framework's for agent_env's own, else that
-    of the one distribution installing its top-level package; None when none does, as for a module on the path."""
-    top = module.partition(".")[0]
-    names = [_FRAMEWORK] if top == "agent_env" else list(dict.fromkeys(packages_distributions().get(top, ())))
-    return _requirements.installed(names[0]) if len(names) == 1 else None
+    """The version of the installed package that holds ``module``: agentenv-framework's for agent_env's own; None when
+    no one package does, as for a module on the path or an editable plugin."""
+    if module.partition(".")[0] == "agent_env":
+        return _requirements.installed(_FRAMEWORK)
+    name = _requirements.distribution_holding(module, packages_distributions())
+    return _requirements.installed(canonicalize_name(name)) if name else None

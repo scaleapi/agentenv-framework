@@ -48,8 +48,8 @@ USED = (
     "agent_env.runner.store.ensure_indexes", "agent_env.runner.store.insert_run", "agent_env.runner.store.get_run",
     "agent_env.runner.store.list_runs", "agent_env.runner.store.count_runs", "agent_env.runner.store.active_runs",
     "agent_env.runner.store.set_running", "agent_env.runner.store.mark_terminal",
-    # What a verifier step returns and scores its rows with.
-    "agent_env.task_step.task_steps.verifiers.Verification", "agent_env.task_step.task_steps.verifiers.VerifierStatus",
+    # What a verifier step returns, scores its rows with and writes.
+    "agent_env.task_step.task_steps.verifiers.Verification", "agent_env.task_step.task_steps.verifiers.Grade", "agent_env.task_step.task_steps.verifiers.VerifierStatus",
     "agent_env.task_step.task_steps.verifiers.ScoreAggregator", "agent_env.task_step.task_steps.verifiers.aggregate_score",
     # What a verify script is handed of the run it grades.
     "agent_env.task_step.task_steps.verifiers.Run", "agent_env.task_step.task_steps.verifiers.Turn",

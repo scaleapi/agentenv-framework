@@ -69,7 +69,6 @@ def fake_plugins(monkeypatch, distributions=(), *, versions=None, packages=None,
         loaded=load))
     monkeypatch.setattr(requires_module, "load_failures", lambda: failures or {})
     monkeypatch.setattr(requires_module, "packages_distributions", lambda: packages or {})
-    monkeypatch.setattr(requires_module, "distribution", read)
     monkeypatch.setattr(_requirements, "installed", (versions or {}).get)
     monkeypatch.setattr(_requirements, "distribution", read)
 
