@@ -1038,19 +1038,22 @@ class Probe:
             return None if state.get("joined") else "a repeated request_id started a second recording"
 
         async def limited() -> str | None:
-            """Past ``max_concurrent``, a start is refused. A recording the probe didn't start, as a task's that records
-            while it probes, counts against the limit too, and the probe can't count those, so a refusal sooner holds
-            the limit as well."""
+            """Past ``max_concurrent``, a start is refused. Recordings the probe didn't start, as a task's that records
+            while it probes, count against the limit too, so the probe starts only what's left of it: as many as the
+            driver lists still recording beside its own, or, from a driver that doesn't list them, ``max_concurrent``."""
             most = params.get("max_concurrent")
             if not isinstance(most, int):
                 return "the card declares no max_concurrent"
-            for _ in range(most + 1):
-                try:
-                    extra = await start(f"{PROBE_ROLE}-limit-{uuid.uuid4().hex[:8]}")
-                except ExtensionCallError as e:
-                    if e.code == "limit_exceeded":
-                        return None
-                    return f"refused {e.code!r}, not 'limit_exceeded': {e.detail}"
+            others = 0
+            if "list" in (params.get("methods") or {}):
+                listed = await self.driver.invoke(COMPUTER_RECORDING, "list")
+                others = sum(r["recording_id"] not in made for r in listed["recordings"])
+            for _ in range(most - others):
+                await start(f"{PROBE_ROLE}-limit-{uuid.uuid4().hex[:8]}")
+            try:
+                extra = await start(f"{PROBE_ROLE}-limit-{uuid.uuid4().hex[:8]}")
+            except ExtensionCallError as e:
+                return None if e.code == "limit_exceeded" else f"refused {e.code!r}, not 'limit_exceeded': {e.detail}"
             return f"recording {most + 1} of at most {most} started: {extra['recording_id']}"
 
         try:

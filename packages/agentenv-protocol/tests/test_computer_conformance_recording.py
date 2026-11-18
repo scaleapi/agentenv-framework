@@ -78,21 +78,55 @@ async def test_a_limit_the_driver_doesnt_keep_fails_and_its_recordings_are_still
     assert not driver._computer.recordings.running and not (home / ".agentenv-recordings").exists()
 
 
-@pytest.mark.asyncio
-async def test_a_computer_already_recording_passes_the_recording_checks_and_keeps_its_recording(home):
-    """As a task's recording while it probes: it counts against max_concurrent, so the probe's own second start is
-    refused, and the probe ends only the recordings it started."""
-    driver = Recorder()
+async def _checks_while_recording(driver) -> tuple[dict[str, tuple[str, str]], str, list[str]]:
+    """The recording checks on a computer recording already, as a task's that records while it probes: what they
+    found, the task's recording, and what was still recording once they were done."""
     with served(driver) as url:
         connected = await Driver.connect(url, 10)
         async with connected.session() as session:
             theirs = (await connected.invoke(COMPUTER_RECORDING, "start", {"request_id": "task"}))["recording_id"]
             probe = checks.Probe(connected, session, 10)
             await probe._recording()
-            running = [rid for rid, r in driver._computer.recordings.running.items() if not r.done]
+            listed = await connected.invoke(COMPUTER_RECORDING, "list")
             await connected.invoke(COMPUTER_RECORDING, "end", {"recording_id": theirs})
-    assert {r.name: r.status for r in probe.results} == dict.fromkeys(NAMES, "passed")
-    assert running == [theirs]
+    return {r.name: (r.status, r.detail) for r in probe.results}, theirs, [r["recording_id"] for r in listed["recordings"]]
+
+
+@pytest.mark.asyncio
+async def test_a_computer_already_recording_passes_the_recording_checks_and_keeps_its_recording(home):
+    """The probe counts the recording it didn't start against max_concurrent, and ends only its own."""
+    found, theirs, still = await _checks_while_recording(Recorder())
+    assert {name: status for name, (status, _) in found.items()} == dict.fromkeys(NAMES, "passed")
+    assert still == [theirs]
+
+
+def _advertising(monkeypatch, most: int) -> None:
+    advertised = recording_module.recording_params
+    monkeypatch.setattr("agentenv_protocol.computer.card.recording_params",
+                        lambda features, streams: {**advertised(features, streams), "max_concurrent": most})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recording_already", [False, True], ids=["idle", "recording"])
+async def test_a_driver_that_refuses_short_of_the_limit_its_card_declares_fails(home, monkeypatch, recording_already):
+    class Short(FixtureDriver):
+        recording = Recording(max_concurrent=2)
+
+    _advertising(monkeypatch, 3)
+    found = (await _checks_while_recording(Short()))[0] if recording_already else await _recording_checks(Short())
+    assert found[NAMES[2]][0] == "failed" and "limit_exceeded" in found[NAMES[2]][1]
+
+
+@pytest.mark.asyncio
+async def test_from_a_driver_that_doesnt_list_its_recordings_the_probe_starts_the_whole_limit_as_before(home, monkeypatch):
+    """So a computer that's recording already fails the limit check, as it did before drivers listed them."""
+    params = Driver.params
+    monkeypatch.setattr(Driver, "params", lambda self, uri: {**params(self, uri), "methods": {
+        op: m for op, m in (params(self, uri).get("methods") or {}).items() if op != "list"}})
+    idle = await _recording_checks(Recorder())
+    recording, _, _ = await _checks_while_recording(Recorder())
+    assert idle[NAMES[2]][0] == "passed"
+    assert recording[NAMES[2]][0] == "failed" and "limit_exceeded" in recording[NAMES[2]][1]
 
 
 @pytest.mark.asyncio
