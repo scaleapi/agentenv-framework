@@ -11,6 +11,7 @@ from pathlib import Path
 from agent_env.env.bootstrap import PUBLISHED_IMAGES
 from agent_env.env.published_images import published_pinned
 from agent_env.store.image_store.registry_api import read_manifest
+from agent_env.utils.docker.build import build_image
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +32,7 @@ def pull_published_else_build(name: str, dockerfile: Path, context: Path, tag: s
     except (RuntimeError, ValueError) as e:
         logger.warning(f"Pulling {name}'s published image failed, so it's built: {e}")
     logger.info(f"Building {name} Docker image...")
-    _docker("build", "--platform", platform, "-f", str(dockerfile), "-t", tag, str(context))
+    build_image(dockerfile, context, tag, platform=platform)
 
 
 def _platform_image(pinned: str | None, platform: str) -> str | None:

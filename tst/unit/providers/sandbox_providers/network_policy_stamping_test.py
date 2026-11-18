@@ -20,6 +20,7 @@ from agent_env.providers.sandbox_providers.coreweave.provider import CoreWeaveSa
 from agent_env.providers.sandbox_providers.daytona.config import Settings as DaytonaSettings
 from agent_env.providers.sandbox_providers.daytona.provider import DaytonaSandboxProvider
 from agent_env.providers.sandbox_providers.e2b.provider import E2BSandboxProvider
+from agent_env.providers.sandbox_providers.kosa8.provider import Kosa8SandboxProvider
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
 from agent_env.providers.sandbox_providers.lume.provider import LumeSandboxProvider
 from agent_env.providers.sandbox_providers.modal_sandbox import ModalSandboxProvider
@@ -164,6 +165,12 @@ async def _agent37() -> Sandbox:
     return await provider.create_vm(exposed_ports=[], setup_for_gateway=False)
 
 
+async def _kosa8() -> Sandbox:
+    from tst.unit.providers.sandbox_providers.kosa8_fakes import API_KEY, FakeKosa8
+    provider = Kosa8SandboxProvider(api_key=API_KEY, transport=FakeKosa8().transport())
+    return await provider.create_vm(exposed_ports=[], setup_for_gateway=False)
+
+
 async def _smol_vm() -> Sandbox:
     pytest.importorskip("smol")
     from agent_env.providers.sandbox_providers.smol_vm import provider as smol_module
@@ -202,6 +209,7 @@ FACTORIES = {
     "daytona": _daytona,
     "boat": _boat,
     "agent37": _agent37,
+    "kosa8": _kosa8,
     "smol_vm": _smol_vm,
     "local": _local,
     "lume": _lume,
