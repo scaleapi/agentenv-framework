@@ -1,2 +1,4 @@
-# The image installs the newest agentenv-framework-protocol at or above this floor; a release doesn't pin it.
-agentenv-framework-protocol[agent]>=0.1.350
+# The image installs the newest agentenv-framework-protocol at or above this floor; a release doesn't pin it, so the
+# image is built again only when this folder changes. The floor is the first whose extension routes take the agent's
+# control token; raise it when the agent needs a newer protocol.
+agentenv-framework-protocol[agent]>=0.1.582
