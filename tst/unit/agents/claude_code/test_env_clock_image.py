@@ -10,6 +10,7 @@ import types
 import pytest
 
 from tst.unit.agents.claude_code.agent import AGENT_DIR, claude_bridge
+from tst.util.build_context import sent
 
 PROXY = "http://127.0.0.1:3128"
 
@@ -53,9 +54,9 @@ def test_without_the_proxy_or_an_armed_clock_the_cli_goes_out_directly_as_before
 
 def _clockpage():
     """The image's clock page writer, whose encoding libfaketime and the egress proxy read too."""
-    # Run from its source, so no __pycache__ lands in clock/, which must stay the computer base's file for file.
+    # Run from its source, so no __pycache__ lands in agent-env's sources.
     module = types.ModuleType("clockpage")
-    path = AGENT_DIR / "clock" / "clockpage.py"
+    path = sent(AGENT_DIR, "clock/clockpage.py")
     exec(compile(path.read_text(), str(path), "exec"), module.__dict__)
     return module
 
