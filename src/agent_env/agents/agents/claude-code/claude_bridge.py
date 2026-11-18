@@ -456,6 +456,30 @@ def _cli_error_text(trajectory: list[dict]) -> str | None:
     return None
 
 
+_SUBAGENT_TASK_TYPE = "local_agent"
+_FINISHED_TASK_STATUSES = frozenset({"completed", "failed"})
+
+
+def _lost_subagents(trajectory: list[dict]) -> list[str]:
+    """The background subagents a turn started that neither finished nor were stopped by the agent with TaskStop. In
+    print mode the CLI stops those still running a while after the last turn and exits 0, so their work is lost."""
+    started: dict[str, dict] = {}
+    ended: set[str] = set()
+    for event in trajectory:
+        if event.get("type") == "system":
+            if (event.get("subtype") == "task_started" and event.get("is_backgrounded")
+                    and event.get("task_type") == _SUBAGENT_TASK_TYPE):
+                started[str(event.get("task_id"))] = event
+            elif event.get("subtype") == "task_notification" and event.get("status") in _FINISHED_TASK_STATUSES:
+                ended.add(str(event.get("task_id")))
+        elif event.get("type") == "assistant":
+            for block in (event.get("message") or {}).get("content", []):
+                if block.get("type") == "tool_use" and block.get("name") == "TaskStop":
+                    ended.add(str((block.get("input") or {}).get("task_id")))
+    return [str(task.get("description") or task_id) for task_id, task in started.items()
+            if not {task_id, str(task.get("name"))} & ended]
+
+
 def _stderr_tail(stderr: str) -> str | None:
     """stderr less stack frames, for a CLI that emitted no `result` event."""
     lines = [line.strip() for line in _redact(stderr).splitlines() if line.strip() and not _STDERR_NOISE.match(line)]
@@ -834,6 +858,10 @@ async def _spawn_claude(
         detail = _cli_error_text(trajectory) or _stderr_tail(stderr.decode(errors="replace"))
         if hint := _endpoint_hint(trajectory):
             detail = f"{detail}; {hint}" if detail else hint
+        logger.error(f"claude CLI failed: {_failure_message(err, detail)}")
+    elif lost := _lost_subagents(trajectory):
+        err = "claude CLI stopped background subagents before they finished"
+        detail = "; ".join(lost)
         logger.error(f"claude CLI failed: {_failure_message(err, detail)}")
 
     # A requested JSON Schema's output is the answer, as JSON text the caller loads.
