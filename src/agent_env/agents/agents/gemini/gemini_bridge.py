@@ -9,6 +9,7 @@ event) on subsequent turns.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import contextlib
 import ipaddress
 import json
@@ -318,18 +319,29 @@ def clock_armed(page_path: str | None = None) -> bool:
     return bool(armed)  # a writer that died mid-write: the next write takes the page up; its armed flag says the most
 
 
+#: How long a CLI's start waits for its model host's addresses, once per host per process (``_GLOBAL_HOSTS``): the
+#: lookup runs on a thread of its own, so a slow resolver holds the server's loop this long at most, once.
+_RESOLVE_TIMEOUT_S = 2.0
+_GLOBAL_HOSTS: dict[str, bool] = {}
+_RESOLVER = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="model-host")
+
+
 def _global_host(host: str) -> bool:
     """Whether ``host`` is a public address, or a name every address of resolves to one: a host the egress proxy
-    reaches. A name that doesn't resolve here is taken as public, for the proxy to resolve."""
+    reaches. A name that doesn't resolve here, or not within ``_RESOLVE_TIMEOUT_S``, is taken as public, for the proxy
+    to resolve; each name's answer is kept."""
     try:
         return ipaddress.ip_address(host).is_global
     except ValueError:
         pass
-    try:
-        addresses = {info[4][0] for info in socket.getaddrinfo(host, None)}
-    except OSError:
-        return True
-    return all(ipaddress.ip_address(address.split("%")[0]).is_global for address in addresses)
+    if host not in _GLOBAL_HOSTS:
+        try:
+            infos = _RESOLVER.submit(socket.getaddrinfo, host, None).result(timeout=_RESOLVE_TIMEOUT_S)
+            addresses = {info[4][0] for info in infos}
+            _GLOBAL_HOSTS[host] = all(ipaddress.ip_address(a.split("%")[0]).is_global for a in addresses)
+        except (OSError, concurrent.futures.TimeoutError):
+            _GLOBAL_HOSTS[host] = True
+    return _GLOBAL_HOSTS[host]
 
 
 def model_direct_hosts(base_url: str | None) -> list[str]:
