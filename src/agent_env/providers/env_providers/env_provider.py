@@ -14,6 +14,7 @@ from mcp.client.streamable_http import streamable_http_client
 from agent_env.env.env import DeployedEnv
 from agent_env.env.gateway.constants import WELL_KNOWN_PATH
 from agent_env.plugins import _registration
+from agent_env.providers.env_providers.stack_layout import DEFAULT_STACK_LAYOUT, StackLayout
 from agent_env.providers.sandbox_providers.sandbox import Sandbox
 from agent_env.providers.sandbox_providers.sandbox_provider import SANDBOX_MODE_CONTAINER
 
@@ -75,6 +76,12 @@ class _SandboxEnvironmentProvider(EnvironmentProvider):
     def __init__(self):
         self._container_sandboxes: list[Sandbox] = []
         self._environment_sandboxes: dict[str, Sandbox] = {}
+        self._stack_layout: StackLayout = DEFAULT_STACK_LAYOUT
+
+    @property
+    def stack_layout(self) -> StackLayout:
+        """Where the stack this provider deployed lives in its sandbox; the default until a deploy lays out a slot."""
+        return self._stack_layout
 
     def environment_sandbox(self, environment_name: str) -> Sandbox | None:
         return self._environment_sandboxes.get(environment_name)

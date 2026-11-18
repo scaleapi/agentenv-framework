@@ -1,0 +1,322 @@
+"""A gateway stack's layout in its sandbox: the default is the one stack a sandbox has always held, a slot is one of several."""
+
+from __future__ import annotations
+
+import shlex
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from agent_env.env import snapshot_store
+from agent_env.env.envs.service_db import DB_MCP_PORT, DB_WEB_PORT, ServiceDBConfig
+from agent_env.env.gateway import AGENT_ENV_GATEWAY_MCP_PORT
+from agent_env.providers.env_providers.env_gateway_provider import (
+    EnvironmentGatewayProvider,
+    MCPServerConfig,
+    SidecarConfig,
+)
+from agent_env.providers.env_providers.stack_layout import DEFAULT_STACK_LAYOUT, StackLayout
+
+SIDECAR_HOST_PORT = 9100
+
+
+class _RecordingVm:
+    """A VM sandbox that records every command and answers the ones a gateway deploy waits on.
+
+    ``running`` holds the compose projects whose gateway is up, keyed ``None`` for the default (unnamed) project; ``docker ps``
+    lists a gateway container for each of them, as it would on a VM shared by several stacks.
+    """
+
+    type = "modal_vm"
+    mode = "vm"
+    sandbox_id = "vm-1"
+    host_ips: tuple[str, ...] = ()
+    extra_hosts: tuple[str, ...] = ()
+    ON_THIS_MACHINE = False
+
+    def __init__(self, exposed_ports: list[int], running: set[str | None]):
+        self.exposed_ports = exposed_ports
+        self.tunnel_urls = {port: f"https://tunnel-{port}" for port in exposed_ports}
+        self.running = running
+        self.calls: list[tuple] = []
+
+    def host_port(self, port: int) -> int:
+        return port
+
+    async def load_docker_images(self, images) -> None:
+        self.calls.append(("load", tuple(i.image_name for i in images)))
+
+    async def exec_script(self, script: str, *, max_retries: int = 0) -> str:
+        self.calls.append(("script", script))
+        return "cid-servicedb" if " ps -a -q " in script else ""
+
+    async def exec_with_output(self, *args: str) -> tuple[int, str, str]:
+        self.calls.append(("exec", args))
+        if args[0] == "curl":
+            return 0, "200", ""
+        if args == ("sudo", "docker", "ps"):
+            return 0, "\n".join(f"{p or 'app'}-gateway-1" for p in self.running), ""
+        if "--status" in args:
+            project = args[args.index("-p") + 1] if "-p" in args else None
+            return 0, "cid-gateway" if project in self.running else "", ""
+        if args[-2:-1] == ("-q",):
+            return 0, f"cid-{args[-1]}", ""
+        return 0, "", ""
+
+
+def _image(name: str) -> MagicMock:
+    image = MagicMock()
+    image.image_name = name
+    image.load_problem.return_value = None
+    return image
+
+
+async def _deploy(running: set[str | None] = frozenset({None}), **layout) -> tuple[_RecordingVm, object, EnvironmentGatewayProvider]:
+    """One VM gateway deploy (an MCP server, local Postgres with pgweb and db-mcp, one sidecar) with every I/O faked."""
+    vms: list[_RecordingVm] = []
+
+    async def create_vm(*, exposed_ports, **_):
+        vms.append(_RecordingVm(exposed_ports, set(running)))
+        return vms[-1]
+
+    sandbox_provider = MagicMock(ON_THIS_MACHINE=False, SUPPORTED_SANDBOX_MODES=("vm",))
+    sandbox_provider.create_vm = create_vm
+    gateway_env = MagicMock()
+    gateway_env.docker_image_artifact = _image("agent-gateway")
+    db_env = MagicMock()
+    db_env.to_config.return_value = ServiceDBConfig(db_web_image="pgweb", db_mcp_image="db-mcp")
+    db_env.db_docker_image_artifact = _image("postgres")
+    db_env.db_web_docker_image_artifact = _image("pgweb")
+    db_env.db_mcp_docker_image_artifact = _image("db-mcp")
+    config = MagicMock(default_gateway_env_id="gw-id", default_service_db_env_id="db-id")
+
+    gp = EnvironmentGatewayProvider()
+    gp._wait_for_tunnel = AsyncMock(return_value={"name": "crm"})
+    gp._refuse_tool_name_clashes = AsyncMock()
+    with patch("agent_env.env.env.Env.get", side_effect=lambda env_id, *a, **k: gateway_env if env_id == "gw-id" else db_env), \
+         patch("agent_env.config.get_config", return_value=config), \
+         patch("agent_env.providers.env_providers.env_gateway_provider.asyncio.sleep", AsyncMock()):
+        result = await gp._deploy_gateway(
+            sandbox_provider,
+            state_instance=None,
+            mcp_servers=[MCPServerConfig(image="mcp-slack", environment_name="slack")],
+            mcp_server_images=[_image("mcp-slack")],
+            sidecars=[SidecarConfig(environment_name="probe", image_artifact=_image("probe"), container_port=80, host_port=SIDECAR_HOST_PORT)],
+            mcp_server_name="crm",
+            **layout,
+        )
+    return vms[0], result, gp
+
+
+def _scripts(vm: _RecordingVm) -> list[str]:
+    return [c[1] for c in vm.calls if c[0] == "script"]
+
+
+def _written(script: str) -> tuple[str, str] | None:
+    """The path and content of a ``_write_file`` script (``printf '%s\\n' <content> > <path>``), else None."""
+    argv = shlex.split(script)
+    if argv[:2] == ["printf", "%s\\n"] and argv[3:4] == [">"]:
+        return argv[4], argv[2]
+    return None
+
+
+def _execs(vm: _RecordingVm) -> list[tuple]:
+    return [c[1] for c in vm.calls if c[0] == "exec" and c[1][0] != "curl"]
+
+
+@pytest.mark.asyncio
+async def test_default_deploy_runs_todays_commands_on_todays_paths_and_ports():
+    vm, result, _ = await _deploy()
+
+    assert vm.exposed_ports == [AGENT_ENV_GATEWAY_MCP_PORT, DB_WEB_PORT, DB_MCP_PORT, SIDECAR_HOST_PORT]
+    scripts = _scripts(vm)
+    assert scripts[0] == "mkdir -p /app"
+    assert _written(scripts[1])[0] == "/app/init-schemas.sql"
+    path, compose = _written(scripts[2])
+    assert path == "/app/docker-compose.yml"
+    assert f'"{AGENT_ENV_GATEWAY_MCP_PORT}:{AGENT_ENV_GATEWAY_MCP_PORT}"' in compose
+    assert f'"{SIDECAR_HOST_PORT}:80"' in compose
+    assert scripts[3:] == ["cd /app && docker compose up -d"]
+    execs = _execs(vm)
+    assert ("sudo", "docker", "ps") in execs
+    for service in ("gateway", "pgweb", "db-mcp"):
+        assert ("sudo", "docker", "compose", "-f", "/app/docker-compose.yml", "ps", "-a", "-q", service) in execs
+    assert not any("-p" in e or "--status" in e for e in execs)
+    assert result.gateway_url == f"https://tunnel-{AGENT_ENV_GATEWAY_MCP_PORT}"
+    assert result.db_web_url == f"https://tunnel-{DB_WEB_PORT}/"
+    assert result.db_mcp_url == f"https://tunnel-{DB_MCP_PORT}/mcp"
+
+
+@pytest.mark.asyncio
+async def test_slot_deploy_uses_its_own_dir_project_and_host_ports():
+    slot = StackLayout.for_slot(1)
+    vm, result, gp = await _deploy(running={None, "s1"}, stack_layout=slot)
+
+    shifted = [p + 2000 for p in (AGENT_ENV_GATEWAY_MCP_PORT, DB_WEB_PORT, DB_MCP_PORT, SIDECAR_HOST_PORT)]
+    assert vm.exposed_ports == shifted
+    scripts = _scripts(vm)
+    assert scripts[0] == "mkdir -p /app/s1"
+    assert _written(scripts[1])[0] == "/app/s1/init-schemas.sql"
+    path, compose = _written(scripts[2])
+    assert path == "/app/s1/docker-compose.yml"
+    assert f'"{AGENT_ENV_GATEWAY_MCP_PORT + 2000}:{AGENT_ENV_GATEWAY_MCP_PORT}"' in compose
+    assert f'"{DB_WEB_PORT + 2000}:{DB_WEB_PORT}"' in compose
+    assert f'"{SIDECAR_HOST_PORT + 2000}:80"' in compose
+    assert f"MCP_PORT={AGENT_ENV_GATEWAY_MCP_PORT}" in compose
+    assert scripts[3:] == ["cd /app/s1 && docker compose -p s1 up -d"]
+    compose_ps = ("sudo", "docker", "compose", "-f", "/app/s1/docker-compose.yml", "-p", "s1", "ps")
+    assert (*compose_ps, "--status", "running", "-q", "gateway") in _execs(vm)
+    assert (*compose_ps, "-a", "-q", "gateway") in _execs(vm)
+    assert ("sudo", "docker", "ps") not in _execs(vm)
+    assert result.gateway_url == f"https://tunnel-{AGENT_ENV_GATEWAY_MCP_PORT + 2000}"
+    assert result.db_web_url == f"https://tunnel-{DB_WEB_PORT + 2000}/"
+    assert result.db_mcp_url == f"https://tunnel-{DB_MCP_PORT + 2000}/mcp"
+    assert gp.stack_layout == slot
+
+
+@pytest.mark.asyncio
+async def test_slot_deploy_is_not_satisfied_by_another_stacks_gateway():
+    with pytest.raises(RuntimeError, match="Gateway container not running"):
+        await _deploy(running={None, "s0"}, stack_layout=StackLayout.for_slot(1))
+
+
+@pytest.mark.asyncio
+async def test_slot_deploy_on_a_vm_not_exposing_its_ports_names_the_missing_port():
+    vm = _RecordingVm([AGENT_ENV_GATEWAY_MCP_PORT, DB_WEB_PORT, DB_MCP_PORT], {"s1"})
+    with pytest.raises(RuntimeError, match=f"no tunnel for slot port {AGENT_ENV_GATEWAY_MCP_PORT + 2000}"):
+        await _deploy(stack_layout=StackLayout.for_slot(1), existing_sandbox=vm)
+
+
+@pytest.mark.asyncio
+async def test_slot_commands_after_deploy_stay_in_the_slot():
+    vm, _, gp = await _deploy(running={"s1"}, stack_layout=StackLayout.for_slot(1))
+    gp._sandbox = vm
+    vm.calls.clear()
+
+    await gp.read_trajectory(vm)
+    await gp.install_changelog_triggers("slack")
+    await gp._down_services(vm)
+
+    slot_compose = ("sudo", "docker", "compose", "-f", "/app/s1/docker-compose.yml", "-p", "s1")
+    assert _execs(vm)[0] == (*slot_compose, "ps", "-a", "-q", "gateway")
+    assert _execs(vm)[-2][: len(slot_compose) + 3] == (*slot_compose, "exec", "-T", "servicedb")
+    assert _execs(vm)[-1] == (*slot_compose, "ps", "-a", "--format", "json")
+
+
+@pytest.mark.asyncio
+async def test_slot_snapshot_uses_its_own_compose_and_scratch_files():
+    vm = _RecordingVm([], set())
+    object_store = MagicMock()
+    object_store.signed_put_url.return_value = "https://put"
+    config = MagicMock(get_object_store_for=lambda _env_id: object_store, get_artifact_key_prefix=lambda: "")
+    with patch.object(snapshot_store, "get_config", return_value=config):
+        await snapshot_store._snapshot_servicedb(vm, "env1", "uni1", lambda *a: None, layout=StackLayout.for_slot(0))
+
+    scripts = _scripts(vm)
+    assert scripts[0] == "docker compose -f /app/s0/docker-compose.yml -p s0 ps -a -q servicedb"
+    assert all("/tmp/pgdata" not in s and "/tmp/snapshot-" not in s for s in scripts)
+    assert "/tmp/s0-pgdata" in scripts[1] and "/tmp/s0-snapshot-build" in scripts[2]
+    assert scripts[-1].startswith("rm -rf /tmp/s0-snapshot-build /tmp/s0-snapshot-image.tar.gz")
+
+
+async def _snapshot_image_commands(layout: StackLayout) -> list[str]:
+    vm = _RecordingVm([], set())
+    object_store = MagicMock()
+    object_store.signed_put_url.return_value = "https://put"
+    config = MagicMock(get_object_store_for=lambda _env_id: object_store, get_artifact_key_prefix=lambda: "")
+    with patch.object(snapshot_store, "get_config", return_value=config):
+        await snapshot_store._snapshot_servicedb(vm, "env1", "uni1", lambda *a: None, layout=layout)
+    return [s for s in _scripts(vm) if s.startswith(("docker build", "docker save")) or "docker rmi" in s]
+
+
+@pytest.mark.asyncio
+async def test_default_snapshot_image_tag_is_unchanged():
+    build, save, rmi = await _snapshot_image_commands(DEFAULT_STACK_LAYOUT)
+    assert build == "docker build --platform linux/amd64 -t env-snapshot-env1-uni1 /tmp/snapshot-build"
+    assert save.startswith("docker save env-snapshot-env1-uni1 |")
+    assert rmi.endswith("docker rmi env-snapshot-env1-uni1")
+
+
+@pytest.mark.asyncio
+async def test_two_slots_snapshotting_one_env_and_universe_build_different_images():
+    s0 = await _snapshot_image_commands(StackLayout.for_slot(0))
+    s1 = await _snapshot_image_commands(StackLayout.for_slot(1))
+    assert all("env-snapshot-env1-uni1-s0" in c for c in s0)
+    assert all("env-snapshot-env1-uni1-s1" in c for c in s1)
+
+
+def test_default_layout_is_the_single_stack_paths_and_ports():
+    assert DEFAULT_STACK_LAYOUT.compose_command == "docker compose -f /app/docker-compose.yml"
+    assert DEFAULT_STACK_LAYOUT.compose_command_from_app_dir == "docker compose"
+    assert DEFAULT_STACK_LAYOUT.artifact_staging_dir == "/app/_artifact_staging"
+    assert DEFAULT_STACK_LAYOUT.scratch_path("pgdata") == "/tmp/pgdata"
+    assert DEFAULT_STACK_LAYOUT.host_port(AGENT_ENV_GATEWAY_MCP_PORT) == AGENT_ENV_GATEWAY_MCP_PORT
+
+
+def test_slots_get_disjoint_host_port_blocks_from_the_default_and_each_other():
+    ports = (AGENT_ENV_GATEWAY_MCP_PORT, DB_WEB_PORT, DB_MCP_PORT)
+    layouts = [DEFAULT_STACK_LAYOUT, *(StackLayout.for_slot(i) for i in range(8))]
+    published = [layout.host_port(p) for layout in layouts for p in ports]
+    assert len(set(published)) == len(published)
+
+
+def test_for_slot_derives_its_project_dir_scratch_and_ports_from_the_index():
+    slot = StackLayout.for_slot(3)
+    assert slot.compose_project == "s3"
+    assert slot.compose_command == "docker compose -f /app/s3/docker-compose.yml -p s3"
+    assert slot.artifact_staging_dir == "/app/s3/_artifact_staging"
+    assert slot.scratch_path("pgdata") == "/tmp/s3-pgdata"
+    assert slot.host_port(AGENT_ENV_GATEWAY_MCP_PORT) == AGENT_ENV_GATEWAY_MCP_PORT + 4000
+
+
+def test_for_slot_rejects_a_negative_index():
+    with pytest.raises(ValueError):
+        StackLayout.for_slot(-1)
+
+
+def test_slot_45_is_the_highest_whose_gateway_port_fits():
+    assert StackLayout.for_slot(45).host_port(AGENT_ENV_GATEWAY_MCP_PORT) <= 65535
+    with pytest.raises(ValueError):
+        StackLayout.for_slot(46).host_port(AGENT_ENV_GATEWAY_MCP_PORT)
+
+
+@pytest.mark.parametrize("project", ["", "S0", "-s0", "s 0", "s/0", "app"])
+def test_layout_rejects_a_bad_project_or_the_default_stacks_implicit_one(project):
+    with pytest.raises(ValueError):
+        StackLayout(app_dir="/app/x", compose_project=project)
+
+
+@pytest.mark.parametrize("app_dir", ["app", "/app/../etc", "/app/x;rm -rf /", "/app/$(id)", "/app/a b", "/app/'x'"])
+def test_layout_rejects_an_app_dir_unsafe_in_a_shell_script(app_dir):
+    with pytest.raises(ValueError):
+        StackLayout(app_dir=app_dir)
+
+
+@pytest.mark.parametrize("scratch_prefix", ["tmp/", "/tmp/$x-", "/tmp/a b-", "/tmp/x;", "/tmp/../"])
+def test_layout_rejects_a_scratch_prefix_unsafe_in_a_shell_script(scratch_prefix):
+    with pytest.raises(ValueError):
+        StackLayout(scratch_prefix=scratch_prefix)
+
+
+@pytest.mark.parametrize("offset", [-1000, 1, 999])
+def test_layout_rejects_an_offset_off_the_slot_stride(offset):
+    with pytest.raises(ValueError):
+        StackLayout(host_port_offset=offset)
+
+
+def test_host_port_rejects_a_shift_past_the_port_range():
+    with pytest.raises(ValueError):
+        StackLayout.for_slot(60).host_port(AGENT_ENV_GATEWAY_MCP_PORT)
+
+
+@pytest.mark.parametrize("changes", [
+    {"app_dir": "/app/s0"}, {"host_port_offset": 1000}, {"scratch_prefix": "/tmp/s0-"},
+])
+def test_a_layout_that_differs_from_the_default_must_name_its_project(changes):
+    with pytest.raises(ValueError, match="must name its compose project"):
+        StackLayout(**changes)
+
+
+def test_only_a_named_project_makes_a_slot():
+    assert not DEFAULT_STACK_LAYOUT.is_slot
+    assert StackLayout.for_slot(0).is_slot

@@ -41,7 +41,8 @@ from agent_env.env.envs.playwright_mcp import (
 )
 from agentenv_protocol.computer.card import COMPUTER_RECORDING
 from agentenv_protocol.types import WELL_KNOWN_PATH
-from agent_env.providers.env_providers.constants import DOCKER_COMPOSE_PATH, GATEWAY_APP_DIR, GATEWAY_SERVICE_NAME
+from agent_env.providers.env_providers.constants import GATEWAY_APP_DIR, GATEWAY_SERVICE_NAME
+from agent_env.providers.env_providers.stack_layout import DEFAULT_STACK_LAYOUT
 from agent_env.providers.sandbox_providers.local_docker.provider import LocalSandboxProvider
 from tst.integration.env.envs.playwright_mcp_local_test import PROCESSES
 from agent_env.env.snapshot_store import compute_env_fingerprint
@@ -1380,7 +1381,7 @@ async def test_gateway_with_single_website_env(slack_website_env, slack_service_
         browser = protocol_v1.find_child(result.environment_card, PLAYWRIGHT_MCP_ENVIRONMENT_NAME)
         assert browser is not None, result.environment_card.get("children_environments")
         sandbox = await LocalSandboxProvider().get_sandbox(result.sandbox_id)
-        compose = yaml.safe_load(await sandbox.exec_script(f"cat {DOCKER_COMPOSE_PATH}"))
+        compose = yaml.safe_load(await sandbox.exec_script(f"cat {DEFAULT_STACK_LAYOUT.compose_file}"))
         proxied = dict(item.split("=", 1) for item in compose["services"][GATEWAY_SERVICE_NAME]["environment"])
         assert (f"mcp-{PLAYWRIGHT_MCP_ENVIRONMENT_NAME}=http://{PLAYWRIGHT_MCP_ENVIRONMENT_NAME}:18765"
                 in proxied["REST_PROXY_URLS"].split(",")), proxied["REST_PROXY_URLS"]
