@@ -123,14 +123,20 @@ def test_a_skip_is_its_own_status_with_its_reason():
     assert metadata["verifications"]["check"] == {"results": [], "score": None, "skipped": "no graded turns"}
 
 
-def test_legacy_entries_are_written_exactly_as_the_verifier_gives_them():
-    entries = {"vid": {"format": "f", "results": ROWS, "score": 0.0, "command": "pytest"},
-               "vid-trajectory-mistakes": {"results": [], "score": 1.0}}
+def test_a_dict_outputs_keys_join_the_legacy_entry_after_its_results_and_score():
+    output = {"command": "pytest", "exit_code": 1, "stdout_head": "1 failed"}
 
-    metadata = _run(_Toy(outcome=Verification(criteria=ROWS, legacy_entries=entries), verifier_id="vid")).metadata
+    metadata = _run(_Toy(outcome=Verification(criteria=ROWS, output=output), verifier_id="vid")).metadata
 
-    assert json.dumps(metadata["verifications"]) == json.dumps(entries)
-    assert list(metadata["grades"]) == ["check"]
+    assert json.dumps(metadata["verifications"]) == json.dumps({"vid": {"results": ROWS, "score": 0.0, **output}})
+    assert metadata["grades"]["check"]["verifier_output"] == output
+
+
+def test_an_output_that_isnt_a_dict_stays_off_the_legacy_entry():
+    metadata = _run(_Toy(outcome=Verification(score=1, output="3 passed"))).metadata
+
+    assert metadata["verifications"]["check"] == {"results": [], "score": 1}
+    assert metadata["grades"]["check"]["verifier_output"] == "3 passed"
 
 
 @pytest.mark.parametrize("rows", [
@@ -220,8 +226,8 @@ def test_a_large_output_goes_to_the_object_store_from_a_worker_thread(monkeypatc
     _with_store(monkeypatch, store)
     output = {"log": "x" * (verifier_module.OUTPUT_INLINE_BYTES + 1)}
 
-    grade = _run(_Toy(outcome=Verification(score=1, output=output)), TaskStepContext(instance_id="i1")).metadata[
-        "grades"]["check"]
+    context = _run(_Toy(outcome=Verification(score=1, output=output)), TaskStepContext(instance_id="i1"))
+    grade = context.metadata["grades"]["check"]
 
     [(key, (body, content_type))] = store.puts.items()
     assert store.threads != [threading.main_thread()]
@@ -230,6 +236,7 @@ def test_a_large_output_goes_to_the_object_store_from_a_worker_thread(monkeypatc
     assert grade["verifier_output"] is None
     assert grade["verifier_output_ref"] == {"object_url": f"file:///objects/{key}", "bytes": len(body),
                                             "sha256": hashlib.sha256(body).hexdigest()}
+    assert context.metadata["verifications"]["check"]["log"] == output["log"]
 
 
 def test_an_output_the_store_refuses_stays_inline_and_the_step_still_passes(monkeypatch):

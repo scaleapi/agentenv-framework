@@ -76,21 +76,20 @@ class Verification:
 
     ``criteria``: a row per check, read for ``id``, ``score``, ``result``, ``weight`` and ``skipped``, any other keys
     kept. ``score``: the verifier's own score when it isn't the step's aggregate of the rows, which it then replaces.
-    ``output``: anything else worth keeping, such as a judge's justification or a test's log. ``legacy_entries``: the
-    ``verifications`` entries to write, by key, when they aren't ``{verifier_id: {"results", "score"}}``. ``skipped``:
-    why the verifier judged nothing. ``raise_after``: an exception the step raises once both are written, for a verdict
-    that also fails its step."""
+    ``output``: anything else worth keeping, such as a judge's justification or a test's log; a dict's keys also join
+    the step's legacy ``verifications`` entry, after its ``results`` and ``score``. ``skipped``: why the verifier judged
+    nothing. ``raise_after``: an exception the step raises once both are written, for a verdict that also fails its
+    step."""
 
     criteria: list[dict[str, Any]] = field(default_factory=list)
     score: Optional[float] = None
     output: Any = None
-    legacy_entries: Optional[dict[str, dict[str, Any]]] = None
     skipped: Optional[str] = None
     raise_after: Optional[BaseException] = None
 
 
 class VerifierTaskStep(TaskStep):
-    """A step that grades a run. ``execute`` runs ``verify`` and writes the step's grade, and the legacy entries after
+    """A step that grades a run. ``execute`` runs ``verify`` and writes the step's grade, and its legacy entry after
     it; an exception from ``verify`` is a failed grade, raised again. Subclasses implement ``verify``, not ``execute``,
     and their ``__init__`` takes and passes on ``verifier_id``, ``score_aggregator`` and ``min_passing_score``, which
     ``_base_from_dict`` reads for them."""
@@ -136,13 +135,12 @@ class VerifierTaskStep(TaskStep):
                             skip=verification.skipped)
         grade.update(await self._output(context, verification.output))
         self._write_grade(context, grade)
-        entries = verification.legacy_entries
-        if entries is None:
-            entry = {"results": verification.criteria, "score": score}
-            if verification.skipped is not None:
-                entry["skipped"] = verification.skipped
-            entries = {self.verifier_id: entry}
-        context.metadata.setdefault(VERIFICATIONS_KEY, {}).update(entries)
+        entry = {"results": verification.criteria, "score": score}
+        if verification.skipped is not None:
+            entry["skipped"] = verification.skipped
+        if isinstance(verification.output, dict):
+            entry.update(verification.output)
+        context.metadata.setdefault(VERIFICATIONS_KEY, {})[self.verifier_id] = entry
         if verification.raise_after is not None:
             raise verification.raise_after
         return context
