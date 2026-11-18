@@ -216,11 +216,11 @@ class VerifierTaskStep(TaskStep):
         """``verifier_settings`` as the grade records it, compacted; a failing one is recorded rather than raised, since a
         failed grade records settings too and must not lose the verifier's own error."""
         try:
-            settings = self.verifier_settings(context)
+            settings = {k: _compact(v) for k, v in self.verifier_settings(context).items()}
         except Exception as exc:
             logger.warning("verifier %s: its settings couldn't be read: %s", self.id, exc)
             return {"scoring_rules": SCORING_RULES, "settings_error": _capped(f"{type(exc).__name__}: {exc}")}
-        return {"scoring_rules": SCORING_RULES, **{k: _compact(v) for k, v in settings.items()}}
+        return {"scoring_rules": SCORING_RULES, **settings}
 
     async def _output(self, context: TaskStepContext, output: Any) -> dict[str, Any]:
         """``verifier_output`` inline, or, over ``OUTPUT_INLINE_BYTES``, a ``verifier_output_ref`` to its copy in the

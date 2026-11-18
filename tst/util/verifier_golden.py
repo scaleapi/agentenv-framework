@@ -1,6 +1,7 @@
 """The legacy ``verifications`` entries built-in verifiers left on main before they moved onto ``VerifierTaskStep``,
 recorded under ``tst/data/verifier_golden``: a run must leave the same entries, number types included, the same
-models record and the same error."""
+models record and the same error. Key order isn't compared: the base writes an entry's ``results`` and ``score``
+first, where the rubrics family wrote its ``format`` before them."""
 
 from __future__ import annotations
 

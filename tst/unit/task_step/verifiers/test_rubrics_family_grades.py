@@ -69,6 +69,16 @@ async def test_a_run_naming_the_steps_own_judge_model_overrides_nothing():
 
 
 @pytest.mark.asyncio
+async def test_the_judges_own_base_url_stays_out_of_its_settings():
+    step = _direct_judge(_step(criteria=_criteria(1), default_model_api_base="http://judge.example.test"),
+                         lambda ids, n: _binary(ids))
+
+    settings = (await _grade(step, _context({})))["verifier_settings"]
+
+    assert "default_model_api_base" not in settings and "judge.example.test" not in json.dumps(settings)
+
+
+@pytest.mark.asyncio
 async def test_an_agent_judge_that_takes_no_model_is_recorded_as_choosing_its_own():
     step, context = CASES["an_agent_judge_timing_out_once"]()
 

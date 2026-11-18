@@ -771,6 +771,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         the judge model the run recorded (else the one it resolves), the agent it deploys as its judge when it deploys
         one, and ``overridden``, the settings the run's overrides changed. Never a key, header or base URL."""
         settings = super().verifier_settings(context)
+        settings.pop("default_model_api_base", None)
         applied = self._run_overrides(context)
         overrides = context.metadata.get("user_overrides") or {}
         overridden = [key for key, value in applied.items() if settings.get(key) != value]

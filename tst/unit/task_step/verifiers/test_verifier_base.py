@@ -321,6 +321,20 @@ def test_settings_that_cant_be_read_are_recorded_not_raised():
         assert grade["verifier_settings"] == {"scoring_rules": 1, "settings_error": "KeyError: 'judge'"}
 
 
+def test_a_setting_that_isnt_json_is_recorded_not_raised():
+    class _Opaque(_Toy):
+        def verifier_settings(self, context):
+            return {**super().verifier_settings(context), "client": object()}
+
+    context = TaskStepContext()
+    _run(_Opaque(outcome=Verification(score=1)), context)
+
+    grade = context.metadata["grades"]["check"]
+    assert grade["verifier_status"] == "graded" and grade["score"] == 1.0
+    assert set(grade["verifier_settings"]) == {"scoring_rules", "settings_error"}
+    assert grade["verifier_settings"]["settings_error"].startswith("TypeError: ")
+
+
 def test_a_long_error_is_cut_with_its_length():
     context = TaskStepContext()
 
