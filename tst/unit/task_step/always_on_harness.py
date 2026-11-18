@@ -27,6 +27,23 @@ SOLVER = "http://solver.test"
 USER_SIM = "http://user-sim.test"
 T0 = "2026-11-09T14:00:00Z"  # Mon Nov 9, 9:00 AM in New York
 ROLE = "default"
+# A task's system prompt for the agent, as personal-assistant tasks write it: who it works for, then its memory of the
+# user's standing rules and preferences as a MEMORY.md block.
+MEMORY_PROMPT = """You are the personal assistant of Linda Murphy (linda.murphy@example.test). You can use their \
+stayncook account through the stayncook tools: stayncook is the stand-in for Airbnb, and holds their own trips, \
+wishlist and account.
+
+Your memory from earlier conversations with Linda, as your MEMORY.md file:
+```markdown
+# MEMORY.md
+
+- Linda's standing rules: just book her own flights (nonstop, never leaving before 9am, aisle seat) and restaurant \
+reservations; don't ask. Ask her first before spending more than $500 on anything else, or before paying for anyone \
+but her. Text her only when you need a decision, plus one recap at the end.
+- Linda works 9 to 6 on weekdays and is asleep by about 11:30pm; she answers texts when she can.
+- Linda's best friend is Noor Haddad; Noor's partner is Sam Rivera.
+- Linda books places to stay on stayncook and dinners on Tablefern.
+```"""
 
 Turn = Callable[[int, list[str], "Rig"], Optional[str]]
 # An agent card whose agent-config extension takes the settings the step sends.

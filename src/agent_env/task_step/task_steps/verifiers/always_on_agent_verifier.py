@@ -15,6 +15,12 @@ plain rubrics_verifier, and this verifier only an always_on step's prompt: a tas
 A run that kept no timeline has its turns staged the same way by position, one wake file a turn, so the judge never
 reads a trajectory as stored.
 
+``run_context_for_judge`` may also name ``assistant_instructions`` (not among its defaults): what the assistant was
+told before the run, the system prompt the always_on step configured it with (``stored_system_prompt``), so the judge
+can tell what it was told up front from what it had to learn. A staged run has it as a file beside the index
+(``INSTRUCTIONS_FILE``), which the files note names; otherwise it is a section of the judge's prompt. A run whose
+record doesn't keep it, or whose step sent none, has a line saying so instead; it never stops the grading.
+
 For a run of the PSI neutral harness (its trace carries ``harness.*`` labels), the judge is told whose a compaction
 summary's losses are, by who wrote it (``harness.compaction.written_by``: the assistant's own model, graded as its own,
 or the harness, not held against the assistant), and, with a per-criterion format, says for each failed criterion
@@ -39,7 +45,13 @@ from typing import Any, ClassVar, Optional
 from agent_env.providers.sandbox_providers.sandbox import into_container
 from agent_env.task_step.context import PromptResponse, TaskStepContext
 from agent_env.task_step.task_step import TaskStep
-from agent_env.task_step.task_steps.always_on import ALWAYS_ON_KEY, AlwaysOnTaskStep, render_for_judge, stored_timeline
+from agent_env.task_step.task_steps.always_on import (
+    ALWAYS_ON_KEY,
+    AlwaysOnTaskStep,
+    render_for_judge,
+    stored_system_prompt,
+    stored_timeline,
+)
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from agent_env.task_step.task_steps.verifiers.always_on_staging import (
     EVENTS_FILE,
@@ -72,6 +84,17 @@ logger = logging.getLogger(__name__)
 
 # Where the run's files go in the judge's sandbox, under a directory of the run's own.
 STAGING_DIR = "/tmp/always_on_run"
+# The run_context_for_judge part this verifier adds to rubrics_verifier's (RUN_CONTEXT_PARTS, its defaults): what the
+# assistant was told before the run. Staged as INSTRUCTIONS_FILE; in the judge's prompt, at most
+# INSTRUCTIONS_PROMPT_CHARS of it.
+ASSISTANT_INSTRUCTIONS = "assistant_instructions"
+ALWAYS_ON_RUN_CONTEXT_PARTS = (*RUN_CONTEXT_PARTS, ASSISTANT_INSTRUCTIONS)
+INSTRUCTIONS_FILE = "assistant_instructions.md"
+INSTRUCTIONS_PROMPT_CHARS = 60_000
+INSTRUCTIONS_TITLE = "What the assistant was told before the run"
+_INSTRUCTIONS_LEAD = ("Its standing instructions: the system prompt the run configured it with before its first wake, "
+                      "as sent. It knew what is written here from the start; anything else it had to learn during the "
+                      "run.")
 # Trajectories read, and files written into the judge's sandbox, at once.
 STAGING_CONCURRENCY = 8
 # The only tools of its own the judge gets: it reads and searches the files (the CLI's search is Bash's grep), and its
@@ -95,7 +118,7 @@ it), each message the user got ("message_to_user"), a nudge and its calls, and t
 ("<field>_file", such as "result_file" or "text_file") and shows its start ("<field>_preview"). Email bodies are \
 decoded (body.text). A line longer than 1,800 characters is split across lines there, nothing dropped.
 - {events}: every wake's events in one file, so "did it ever do X" is one search. {triggers}: every trigger firing, \
-fired or failed, with its pretend time and the wake it came after.
+fired or failed, with its pretend time and the wake it came after.{instructions}
 
 How to read them:
 - Don't load whole files. Search with grep -n, then Read with an offset and limit.
@@ -195,9 +218,14 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
         judge_max_turns: Optional[int] = None,
         **fields: Any,
     ):
-        """``run_context_for_judge`` defaults to every part of the run's context; the rest is rubrics_verifier's."""
+        """``run_context_for_judge`` defaults to rubrics_verifier's parts (RUN_CONTEXT_PARTS) and may also name
+        ``assistant_instructions``; the rest is rubrics_verifier's."""
         output_format = JudgeOutputFormat(output_format)
         where = f"{self.type} '{id}'"
+        parts = run_context_for_judge or list(RUN_CONTEXT_PARTS)
+        if not isinstance(parts, list) or any(p not in ALWAYS_ON_RUN_CONTEXT_PARTS for p in parts):
+            raise ValueError(f"{where}: run_context_for_judge must be a list of {list(ALWAYS_ON_RUN_CONTEXT_PARTS)}, "
+                             f"got {parts!r}")
         if use_trajectory and not use_agent_judge:
             raise ValueError(f"{where}: use_trajectory needs the agent judge (use_agent_judge): an always_on run's "
                              "wakes are staged as files for a judge that searches them, never inlined")
@@ -209,7 +237,8 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
                              "turns are not its wakes")
         super().__init__(
             id, version, use_trajectory=use_trajectory, use_agent_judge=use_agent_judge,
-            run_context_for_judge=run_context_for_judge or list(RUN_CONTEXT_PARTS), output_format=output_format,
+            run_context_for_judge=[p for p in parts if p != ASSISTANT_INSTRUCTIONS] or None,
+            output_format=output_format,
             default_model=default_model, default_model_api_base=default_model_api_base, effort=effort,
             max_thinking_tokens=max_thinking_tokens, judge_a2a_agent_id=judge_a2a_agent_id,
             judge_sandbox_type=judge_sandbox_type, judge_batch_size=judge_batch_size,
@@ -219,6 +248,8 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
             judge_max_turns=self.DEFAULT_JUDGE_MAX_TURNS if judge_max_turns is None else judge_max_turns,
             **fields,
         )
+        # Every part, this verifier's own too: rubrics_verifier renders the parts it knows and passes the others by.
+        self.run_context_for_judge = list(dict.fromkeys(parts))
 
     @classmethod
     def from_dict(cls, data: dict) -> AlwaysOnAgentVerifier:
@@ -319,15 +350,40 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
         return record
 
     async def judge_prompt_sections(self, context: TaskStepContext, prompt_response: PromptResponse) -> list[str]:
-        """The run wake by wake, from the always_on step's record of it."""
-        return [await asyncio.to_thread(render_for_judge, self._record(context, prompt_response))]
+        """What the assistant was told before the run, when ``run_context_for_judge`` names it and the run isn't staged
+        as files (a staged run has it as a file); then the run wake by wake. Both from the always_on step's record."""
+        record = self._record(context, prompt_response)
+        sections = []
+        if ASSISTANT_INSTRUCTIONS in self.run_context_for_judge and not self.use_trajectory:
+            text, why = await asyncio.to_thread(self._instructions, record)
+            sections.append(instructions_section(text, why))
+        return [*sections, await asyncio.to_thread(render_for_judge, record)]
+
+    def _instructions(self, record: dict) -> tuple[Optional[str], str]:
+        """What the assistant was told before the run (``stored_system_prompt``), else None and why the judge doesn't
+        get it: the run's record doesn't keep it, the step sent none, or it couldn't be read. Never raises."""
+        if "agent_system_prompt" not in record:
+            logger.warning("Verifier '%s': the always_on run's record doesn't keep the assistant's system prompt, so "
+                           "the judge isn't shown it", self.verifier_id)
+            return None, "The run's record doesn't keep it."
+        try:
+            text = stored_system_prompt(record)
+        except Exception as e:
+            logger.warning("Verifier '%s': the assistant's system prompt could not be read (%s: %s)", self.verifier_id,
+                           type(e).__name__, e)
+            return None, f"The run's record of it couldn't be read ({type(e).__name__}: {str(e)[:200]})."
+        if text is None:
+            why_not = record["agent_system_prompt"].get("why_not") or "no reason recorded"
+            return None, f"The always_on step sent the assistant no system prompt: {why_not}."
+        return text, ""
 
     async def stage_trajectory(self, context: TaskStepContext, prompt_response: PromptResponse,
                                run_context: Optional[Run], sandbox: Any,
                                container: Optional[str]) -> Optional[StagedTrajectory]:
         """The run as files (``stage_run``) in the judge's sandbox, each trajectory matched to its wake by the run's
-        stored timeline. Without that timeline (not kept, or unreadable), the turns are staged the same way by
-        position (``turns_by_position``). A trajectory that breaks the harness labels it carries raises
+        stored timeline, and what the assistant was told before the run (INSTRUCTIONS_FILE) when
+        ``run_context_for_judge`` names it. Without that timeline (not kept, or unreadable), the turns are staged the
+        same way by position (``turns_by_position``). A trajectory that breaks the harness labels it carries raises
         ``UngradableRunError``."""
         record = self._record(context, prompt_response)
         timeline: Optional[list[dict]] = None
@@ -352,9 +408,17 @@ class AlwaysOnAgentVerifier(RubricsVerifierTaskStep):
         _CONTEXT_LOSS_RUN.set(bool(staged.record.get("agent_labeled_trajectories"))
                               and self.output_format in _CONTEXT_LOSS_FORMATS)
         path = f"{STAGING_DIR}/{uuid.uuid4().hex[:12]}"
-        await self._write_files(sandbox, {f"{path}/{name}": text for name, text in staged.files.items()}, container)
+        files = dict(staged.files)
+        instructions = ""
+        if ASSISTANT_INSTRUCTIONS in self.run_context_for_judge:
+            told, why = await asyncio.to_thread(self._instructions, record)
+            if told is not None:
+                files[INSTRUCTIONS_FILE] = instructions_file(told)
+            instructions = instructions_note(f"{path}/{INSTRUCTIONS_FILE}" if told is not None else None, why)
+        await self._write_files(sandbox, {f"{path}/{name}": text for name, text in files.items()}, container)
         self._log_staging(staged)
-        return StagedTrajectory(path=path, prompt_note=_files_note(path, staged, context_loss=_CONTEXT_LOSS_RUN.get()),
+        return StagedTrajectory(path=path, prompt_note=_files_note(path, staged, context_loss=_CONTEXT_LOSS_RUN.get(),
+                                                                   instructions=instructions),
                                 record=staged.record)
 
     async def _read_turns(self, urls: list[str], names: dict[str, str]) -> dict[str, Optional[TurnEvents]]:
@@ -448,7 +512,9 @@ def _builtin_tool_names(card: dict) -> set[str]:
     return names
 
 
-def _files_note(path: str, staged: StagedRun, *, context_loss: bool = False) -> str:
+def _files_note(path: str, staged: StagedRun, *, context_loss: bool = False, instructions: str = "") -> str:
+    """How to read the staged run at ``path``; ``instructions`` is the line on what the assistant was told before the
+    run (``instructions_note``), when the verifier shows it."""
     r = staged.record
     wakes = sorted(name for name in staged.files if name.startswith(f"{WAKES_DIR}/wake_"))
     gaps = sorted(set(r.get("missing_trajectories", [])) | set(r.get("unreadable_trajectories", [])))
@@ -461,7 +527,32 @@ def _files_note(path: str, staged: StagedRun, *, context_loss: bool = False) -> 
                               last=f"{path}/{wakes[-1] if wakes else WAKES_DIR}", results=f"{path}/{RESULTS_DIR}",
                               events=f"{path}/{EVENTS_FILE}", triggers=f"{path}/{TRIGGERS_FILE}",
                               by_position=_BY_POSITION_NOTE if r.get("turns_by_position") else "", gaps=gap_note,
-                              harness=harness)
+                              harness=harness, instructions=instructions)
+
+
+def instructions_file(text: str) -> str:
+    """INSTRUCTIONS_FILE's contents: what the assistant was told before the run, under a heading saying so."""
+    return f"# {INSTRUCTIONS_TITLE}\n{_INSTRUCTIONS_LEAD}\n\n---\n\n{text}\n"
+
+
+def instructions_note(file: Optional[str], why: str) -> str:
+    """The files note's line on what the assistant was told before the run: the ``file`` that has it, else ``why``
+    there is none."""
+    if file is None:
+        return f"\n- {INSTRUCTIONS_TITLE} (its standing instructions) is not in the files. {why}"
+    return (f"\n- {file}: {INSTRUCTIONS_TITLE.lower()} (its standing instructions: the system prompt the run "
+            "configured it with, as sent). It knew what is written there from the start; anything else it had to "
+            "learn during the run.")
+
+
+def instructions_section(text: Optional[str], why: str) -> str:
+    """The judge prompt's section on what the assistant was told before the run: its ``text``, at most
+    INSTRUCTIONS_PROMPT_CHARS of it, else ``why`` there is none."""
+    if text is None:
+        return f"## {INSTRUCTIONS_TITLE}\n{why}"
+    cut = len(text) - INSTRUCTIONS_PROMPT_CHARS
+    shown = text if cut <= 0 else f"{text[:INSTRUCTIONS_PROMPT_CHARS]}… ({cut} more characters not shown)"
+    return f"## {INSTRUCTIONS_TITLE}\n{_INSTRUCTIONS_LEAD}\n<system_prompt>\n{shown}\n</system_prompt>"
 
 
 def turns_by_position(prompt_response: PromptResponse) -> list[dict]:

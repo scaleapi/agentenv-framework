@@ -66,7 +66,10 @@ metadata under its ``agent_name``. The ``always_on`` step names it with ``user_s
   ``user_reads_at``.
 - The run's metadata keeps a summary in ``metadata["always_on"][step_id]`` (small enough for a running job to report
   back); the full timeline goes to the object store, at the summary's ``object_url``. Its ``user_sim`` names the user
-  sim's session (``context_id``), which rate_user_satisfaction asks in once the run is over.
+  sim's session (``context_id``), which rate_user_satisfaction asks in once the run is over. Its
+  ``agent_system_prompt`` says what the agent was told before the run: the agent, whether the step sent it a system
+  prompt (``why_not`` when it didn't) and its length; the text itself is in the stored record
+  (``stored_system_prompt``).
 - An always_on_agent_verifier (``verifiers/always_on_agent_verifier.py``) grades the step's prompt from the user's chat
   and the run's context, the run wake by wake among it (``render_for_judge``), and, with use_trajectory, every wake's
   tool calls staged as files; a plain rubrics_verifier on it is refused when the task loads.
@@ -410,6 +413,7 @@ class _Run:
         self.clock_rates: list[tuple[Any, float]] = []  # (env, the task's rate) for each clock the step freezes
         self.undo: list[tuple[str, Any]] = []  # (what, coroutine function): the gateway settings to put back at the end
         self.rules_in_system_prompt = False   # whether the agent took the rules in its system prompt
+        self.agent_system_prompt: Optional[dict] = None  # what the agent was configured with, for the record
 
     async def restore(self) -> None:
         """Put back what the step changed on the gateways, latest first, so later steps of the task see the settings
@@ -599,6 +603,12 @@ class _Run:
         if desired.get("system_prompt") and not self.rules_in_system_prompt:
             logger.warning("always_on: the agent's card did not accept system_prompt, so the message_user rules go "
                            "on its first wake instead")
+        self.agent_system_prompt = {"agent_name": step.agent_name, "sent": self.rules_in_system_prompt}
+        if self.rules_in_system_prompt:
+            self.agent_system_prompt["text"] = negotiated.fields["system_prompt"]
+        else:
+            self.agent_system_prompt["why_not"] = ("the agent's card doesn't take one" if desired.get("system_prompt")
+                                                   else "the step sets none")
 
         if self.us.get("prompt_set"):  # deploy_user_sim_agent set the user sim's prompt and model at deploy
             self.user_model, self.user_model_from = self.us["model"], self.us["model_source"]
@@ -1703,6 +1713,9 @@ class _Run:
                               "scheduled_checks": self.checks, "contacts": self.contacts,
                               "time_budget_seconds": self.time_budget,
                               "wake_reserve_seconds": step.wake_reserve_seconds(self.contact_seconds)}
+        if self.agent_system_prompt is not None:
+            record["agent_system_prompt"] = {**{k: v for k, v in self.agent_system_prompt.items() if k != "text"},
+                                             "chars": len(self.agent_system_prompt.get("text") or "")}
         await self._store_timeline(record)
         ctx.metadata.setdefault(ALWAYS_ON_KEY, {})[step.id] = record
         # The graded response is the user's whole chat from the agent, each message with its pretend time; never its
@@ -1711,15 +1724,19 @@ class _Run:
                                                    for m in self.all_messages))
 
     async def _store_timeline(self, record: dict) -> None:
-        """Store the run's full record, its timeline included, and give ``record`` (what stays in the run's metadata,
-        kept small for the job's report) its ``object_url``. When it can't be stored, ``record`` keeps the last
-        ``TIMELINE_TAIL`` events instead, their bulky fields dropped."""
+        """Store the run's full record, its timeline and the agent's system prompt included, and give ``record`` (what
+        stays in the run's metadata, kept small for the job's report) its ``object_url``. When it can't be stored,
+        ``record`` keeps the last ``TIMELINE_TAIL`` events instead, their bulky fields dropped, and the system prompt's
+        text."""
         step, ctx = self.step, self.ctx
+        text = (self.agent_system_prompt or {}).get("text")
         try:
             store = get_config().get_object_store()
             key = (f"{get_config().get_artifact_key_prefix()}always_on_timeline/"
                    f"instance_id={ctx.instance_id or 'adhoc'}/{step.id}-{uuid.uuid4().hex[:8]}.json")
             full = {**record, "timeline": self.timeline}
+            if text is not None:
+                full["agent_system_prompt"] = {**record["agent_system_prompt"], "text": text}
             record["object_url"] = await asyncio.to_thread(store.put, key,
                                                            json.dumps(full, indent=1, default=str).encode(),
                                                            content_type="application/json")
@@ -1728,6 +1745,8 @@ class _Run:
             record["timeline_store_error"] = f"{type(e).__name__}: {str(e)[:300]}"
             record["timeline_tail"] = [_small({k: v for k, v in event.items() if k not in BULKY_EVENT_FIELDS})
                                        for event in self.timeline[-TIMELINE_TAIL:]]
+            if text is not None:
+                record["agent_system_prompt"]["text"] = text
 
     def _append_prompt_response(self, final_text: str) -> None:
         step, ctx = self.step, self.ctx
@@ -1758,6 +1777,20 @@ def stored_timeline(record: dict) -> list[dict]:
         return record.get("timeline_tail") or []
     url = record["object_url"]
     return json.loads(get_config().get_object_store_at(url).get(url))["timeline"]
+
+
+def stored_system_prompt(record: dict) -> Optional[str]:
+    """The system prompt the run's agent was configured with, as the step sent it (its own, then the rules), from the
+    stored record at ``record["object_url"]`` (else the record's own copy, kept when the store failed); None when the
+    step sent none (``record["agent_system_prompt"]["why_not"]`` says why). Raises KeyError for a record that doesn't
+    keep it, and the object store's error when the stored record can't be read."""
+    entry = record["agent_system_prompt"]
+    if not entry.get("sent"):
+        return None
+    if "text" in entry:
+        return entry["text"]
+    url = record["object_url"]
+    return json.loads(get_config().get_object_store_at(url).get(url))["agent_system_prompt"]["text"]
 
 
 def woke_by_text(woke_by: list[str]) -> str:

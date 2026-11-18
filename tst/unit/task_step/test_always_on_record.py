@@ -1,5 +1,5 @@
 """What the always_on step keeps in the run's metadata (a short summary, small enough for a running job to report back)
-and what it stores in full (the timeline, in the object store)."""
+and what it stores in full (the timeline and the agent's system prompt, in the object store)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import pytest
 
 from agent_env.config import get_config
 from agent_env.task_step.task_steps import always_on as ao
-from tst.unit.task_step.always_on_harness import Rig
+from tst.unit.task_step.always_on_harness import MEMORY_PROMPT, SOLVER, Rig
 
 pytestmark = pytest.mark.usefixtures("local_stores")
 
@@ -52,6 +52,61 @@ async def test_when_the_timeline_cannot_be_stored_the_record_keeps_its_last_even
     assert "object_url" not in record and record["timeline_store_error"] == "OSError: bucket gone"
     assert len(record["timeline_tail"]) == ao.TIMELINE_TAIL and record["timeline_tail"][-1]["event"] == "end"
     assert not any(set(e) & set(ao.BULKY_EVENT_FIELDS) for e in record["timeline_tail"])
+
+
+@pytest.mark.asyncio
+async def test_the_record_says_what_the_agent_was_told_before_the_run_and_stores_the_text(monkeypatch, tmp_path):
+    rig = Rig(monkeypatch, tmp_path, takes_config=True)
+    await rig.arm()
+    ctx = await rig.run(rig.step(system_prompt=MEMORY_PROMPT))
+
+    [sent] = [fields["system_prompt"] for url, fields in rig.configs if url.startswith(SOLVER)]
+    record = rig.record(ctx)
+    assert record["agent_system_prompt"] == {"agent_name": "solver", "sent": True, "chars": len(sent)}
+    assert rig.stored(ctx)["agent_system_prompt"]["text"] == sent
+    told = ao.stored_system_prompt(record)
+    assert told == sent and told.startswith(MEMORY_PROMPT) and told.endswith(f"{ao.MESSAGE_RULES} {ao.QUIET_RULE}")
+    assert "Ask her first before spending more than $500 on anything else" in told
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("takes_config,system_prompt,why_not", [
+    (False, MEMORY_PROMPT, "the agent's card doesn't take one"),
+    (True, None, "the step sets none"),
+])
+async def test_an_agent_sent_no_system_prompt_is_recorded_with_why(monkeypatch, tmp_path, takes_config, system_prompt,
+                                                                    why_not):
+    rig = Rig(monkeypatch, tmp_path, takes_config=takes_config)
+    await rig.arm()
+    ctx = await rig.run(rig.step(system_prompt=system_prompt))
+
+    record = rig.record(ctx)
+    assert record["agent_system_prompt"] == {"agent_name": "solver", "sent": False, "why_not": why_not, "chars": 0}
+    assert ao.stored_system_prompt(record) is None
+    assert "text" not in rig.stored(ctx)["agent_system_prompt"]
+
+
+@pytest.mark.asyncio
+async def test_when_the_record_cannot_be_stored_it_keeps_the_system_prompt_s_text(monkeypatch, tmp_path):
+    rig = Rig(monkeypatch, tmp_path, takes_config=True)
+    await rig.arm()
+    store = get_config().get_object_store()
+
+    def fail(*a, **kw):
+        raise OSError("bucket gone")
+
+    monkeypatch.setattr(type(store), "put", fail)
+    ctx = await rig.run(rig.step(system_prompt=MEMORY_PROMPT))
+
+    [sent] = [fields["system_prompt"] for url, fields in rig.configs if url.startswith(SOLVER)]
+    record = rig.record(ctx)
+    assert "object_url" not in record and record["agent_system_prompt"]["text"] == sent
+    assert ao.stored_system_prompt(record) == sent
+
+
+def test_a_record_that_doesn_t_keep_the_system_prompt_raises_when_it_is_asked_for():
+    with pytest.raises(KeyError):
+        ao.stored_system_prompt({"end_reason": "end_time", "object_url": "file:///nowhere/at/all.json"})
 
 
 @pytest.mark.asyncio

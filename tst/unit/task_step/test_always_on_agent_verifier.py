@@ -1,6 +1,7 @@
 """always_on_agent_verifier: an always_on step's prompt is graded from the user's chat (the response and the
-conversation) and the run's context (the trigger log, the run wake by wake with its app changes) and, with
-use_trajectory, every wake's tool calls staged as files in an agent judge's sandbox. A direct judge with the
+conversation) and the run's context (the trigger log, the run wake by wake with its app changes, and, when the task asks
+for it, what the assistant was told before the run) and, with use_trajectory, every wake's tool calls staged as files
+in an agent judge's sandbox. A direct judge with the
 trajectories, and what cites screenshots or cuts turns, is refused when the task loads, as is a plain rubrics_verifier
 on an always_on step's prompt; a plain rubrics_verifier grades any other prompt as before."""
 
@@ -21,11 +22,12 @@ from agent_env.task_step.task_steps import always_on as ao
 from agent_env.task_step.task_steps.prompt_agent import PromptAgentTaskStep
 from agent_env.task_step.task_steps.verifiers import is_rubrics_verifier
 from agent_env.task_step.task_steps.verifiers.always_on_agent_verifier import (
+    INSTRUCTIONS_FILE,
     AlwaysOnAgentVerifier,
     UngradableRunError,
 )
 from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RUN_CONTEXT_PARTS, RubricsVerifierTaskStep
-from tst.unit.task_step.always_on_harness import Rig
+from tst.unit.task_step.always_on_harness import MEMORY_PROMPT, Rig
 
 pytestmark = pytest.mark.usefixtures("local_stores")
 
@@ -52,7 +54,7 @@ def _capture(monkeypatch, verifier) -> dict:
     return captured
 
 
-async def _run(monkeypatch, tmp_path):
+async def _run(monkeypatch, tmp_path, *, system_prompt: Optional[str] = None, takes_config: bool = False):
     def agent(n, texts, rig):
         if n == 1:
             rig.message("Casa Jacarandas is $855. Book it?")
@@ -64,11 +66,12 @@ async def _run(monkeypatch, tmp_path):
         rig.quiet()
         return ""
 
-    rig = Rig(monkeypatch, tmp_path, agent=agent, answers=[{"outcome": "reply", "message": "yes please"}])
+    rig = Rig(monkeypatch, tmp_path, agent=agent, answers=[{"outcome": "reply", "message": "yes please"}],
+              takes_config=takes_config)
     await rig.arm()
     rig.keep_changelog()
     rig.triggers(rig.notify_at("sam", "2026-11-10T14:00:00Z", "Sam: shh", channel="noor 30"))
-    ctx = await rig.run(rig.step())
+    ctx = await rig.run(rig.step(system_prompt=system_prompt))
     [response] = ctx.prompt_responses
     response.target_agent_per_turn_trajectory_object_urls = [f"s3://wakes/{n}.json" for n in range(1, 4)]
     response.agent_trajectory_object_url = "s3://wakes/3.json"
@@ -260,12 +263,19 @@ class _Sandbox:
         self.files[destination_path] = content
 
 
-def _staged_run(monkeypatch, *, object_url: bool = True) -> tuple[TaskStepContext, _Sandbox, dict[str, str]]:
+def _staged_run(monkeypatch, *, object_url: bool = True,
+                system_prompt: Optional[str] = None) -> tuple[TaskStepContext, _Sandbox, dict[str, str]]:
     """A recorded always_on run's context with a deployed judge; ``sources`` serves each stored trajectory: wake 2's
-    a Claude Code turn, wake 4's a PSI neutral harness v7 wake (Claude's: a save turn, a compaction, its own turn)."""
+    a Claude Code turn, wake 4's a PSI neutral harness v7 wake (Claude's: a save turn, a compaction, its own turn).
+    The recorded run keeps no system prompt; with ``system_prompt`` it records the agent was sent that one."""
     stored = json.loads((RECORDED / "always_on_timeline.json").read_text())
     urls = [e["trajectory_url"] for e in stored["timeline"] if e["event"] == "agent_turn_end"]
+    if system_prompt is not None:
+        stored["agent_system_prompt"] = {"agent_name": "solver", "sent": True, "chars": len(system_prompt),
+                                         "text": system_prompt}
     record = {k: v for k, v in stored.items() if k != "timeline"}
+    if system_prompt is not None:
+        record["agent_system_prompt"] = {k: v for k, v in stored["agent_system_prompt"].items() if k != "text"}
     if object_url:
         record["object_url"] = get_config().get_object_store().put(
             "always_on_timeline/week.json", json.dumps(stored).encode(), content_type="application/json")
@@ -644,3 +654,136 @@ def test_the_files_note_says_whose_a_summary_s_losses_are_by_who_wrote_it():
     both = note({"assistant": 1, "harness": 1})
     assert both.index(assistant) < both.index(harness)
     assert assistant not in note({}) and harness not in note({})
+
+
+# ---- assistant_instructions: what the assistant was told before the run -------------------------------------------
+
+TOLD = "## What the assistant was told before the run"
+WITH_INSTRUCTIONS = [*RUN_CONTEXT_PARTS, "assistant_instructions"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parts", [WITH_INSTRUCTIONS, ["assistant_instructions"]])
+async def test_a_judge_asked_for_it_reads_what_the_assistant_was_told_before_the_run(monkeypatch, tmp_path, parts):
+    rig, ctx = await _run(monkeypatch, tmp_path, system_prompt=MEMORY_PROMPT, takes_config=True)
+    verifier = _verifier(run_context_for_judge=parts)
+    captured = _capture(monkeypatch, verifier)
+
+    await verifier.execute(ctx)
+
+    prompt = captured["prompt"]
+    told = prompt[prompt.index(TOLD):prompt.index("## The run, wake by wake")]
+    assert "It knew what is written here from the start; anything else it had to learn during the run." in told
+    assert f"<system_prompt>\n{MEMORY_PROMPT}\n\n{ao.MESSAGE_RULES} {ao.QUIET_RULE}\n</system_prompt>" in told
+    assert ("## Conversation" in prompt) is ("conversation" in parts)
+    assert ctx.metadata["verifications"]["rubric"]["score"] == 1
+
+
+@pytest.mark.asyncio
+async def test_by_default_the_judge_is_not_shown_what_the_assistant_was_told(monkeypatch, tmp_path):
+    rig, ctx = await _run(monkeypatch, tmp_path, system_prompt=MEMORY_PROMPT, takes_config=True)
+    verifier = _verifier()
+    captured = _capture(monkeypatch, verifier)
+
+    await verifier.execute(ctx)
+
+    assert verifier.run_context_for_judge == list(RUN_CONTEXT_PARTS) == ["conversation", "trigger_log"]
+    assert TOLD not in captured["prompt"] and "MEMORY.md" not in captured["prompt"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("record_says,why", [
+    ("nothing", "The run's record doesn't keep it."),
+    ("not sent", "The always_on step sent the assistant no system prompt: the agent's card doesn't take one."),
+    ("unreadable", "The run's record of it couldn't be read (ObjectNotFoundError: No object at "
+                   "file:///nowhere/at/all.json.)."),
+])
+async def test_without_what_the_assistant_was_told_the_judge_is_told_why_and_grades(monkeypatch, tmp_path,
+                                                                                     record_says, why):
+    rig, ctx = await _run(monkeypatch, tmp_path, system_prompt=MEMORY_PROMPT, takes_config=record_says != "not sent")
+    record = rig.record(ctx)
+    if record_says == "nothing":
+        del record["agent_system_prompt"]
+    elif record_says == "unreadable":
+        record["object_url"] = "file:///nowhere/at/all.json"
+    verifier = _verifier(run_context_for_judge=WITH_INSTRUCTIONS)
+    captured = _capture(monkeypatch, verifier)
+
+    await verifier.execute(ctx)
+
+    assert f"{TOLD}\n{why}" in captured["prompt"] and "<system_prompt>" not in captured["prompt"]
+    assert ctx.metadata["verifications"]["rubric"]["score"] == 1
+
+
+def test_a_long_system_prompt_is_cut_in_the_judge_s_prompt_and_says_so(monkeypatch):
+    from agent_env.task_step.task_steps.verifiers import always_on_agent_verifier as v
+
+    monkeypatch.setattr(v, "INSTRUCTIONS_PROMPT_CHARS", 40)
+    section = v.instructions_section(MEMORY_PROMPT, "")
+    assert f"<system_prompt>\n{MEMORY_PROMPT[:40]}… ({len(MEMORY_PROMPT) - 40} more characters not shown)\n" in section
+
+
+@pytest.mark.asyncio
+async def test_a_staged_run_has_what_the_assistant_was_told_as_a_file_the_note_names(monkeypatch):
+    ctx, sandbox, sources = _staged_run(monkeypatch, system_prompt=MEMORY_PROMPT)
+    verifier = _verifier(use_agent_judge=True, use_trajectory=True, agent_name="judge",
+                         run_context_for_judge=WITH_INSTRUCTIONS)
+    captured = _agent_judge(monkeypatch, verifier, sources)
+
+    await verifier.execute(ctx)
+
+    [root] = {path.split("/")[3] for path in sandbox.files}
+    file = f"/tmp/always_on_run/{root}/{INSTRUCTIONS_FILE}"
+    assert sandbox.files[file].startswith("# What the assistant was told before the run\nIts standing instructions: ")
+    assert sandbox.files[file].endswith(f"\n---\n\n{MEMORY_PROMPT}\n")
+    prompt = captured["prompt"]
+    note = prompt[prompt.index("## The run's files"):prompt.index("How to read them:")]
+    assert (f"- {file}: what the assistant was told before the run (its standing instructions: the system prompt the "
+            "run configured it with, as sent). It knew what is written there from the start; anything else it had to "
+            "learn during the run.") in note
+    assert TOLD not in prompt and "Ask her first before spending more than $500" not in prompt
+    assert ctx.metadata["verifications"]["rubric"]["score"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parts", [None, WITH_INSTRUCTIONS])
+async def test_a_staged_run_whose_record_doesn_t_keep_it_says_so_or_nothing_when_not_asked(monkeypatch, parts):
+    ctx, sandbox, sources = _staged_run(monkeypatch)  # recorded before the run kept its system prompt
+    verifier = _verifier(use_agent_judge=True, use_trajectory=True, agent_name="judge", run_context_for_judge=parts)
+    captured = _agent_judge(monkeypatch, verifier, sources)
+
+    await verifier.execute(ctx)
+
+    assert not any(path.endswith(INSTRUCTIONS_FILE) for path in sandbox.files)
+    missing = ("- What the assistant was told before the run (its standing instructions) is not in the files. The "
+               "run's record doesn't keep it.\n\nHow to read them:")
+    if parts is None:
+        assert "standing instructions" not in captured["prompt"]
+    else:
+        assert missing in captured["prompt"]
+    assert ctx.metadata["verifications"]["rubric"]["score"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_staged_run_not_asked_for_it_gets_no_file_though_its_record_keeps_it(monkeypatch):
+    ctx, sandbox, sources = _staged_run(monkeypatch, system_prompt=MEMORY_PROMPT)
+    verifier = _verifier(use_agent_judge=True, use_trajectory=True, agent_name="judge")
+    captured = _agent_judge(monkeypatch, verifier, sources)
+
+    await verifier.execute(ctx)
+
+    assert not any(path.endswith(INSTRUCTIONS_FILE) for path in sandbox.files)
+    assert "standing instructions" not in captured["prompt"]
+
+
+def test_assistant_instructions_is_a_part_of_this_verifier_alone_and_round_trips():
+    verifier = _verifier(run_context_for_judge=["assistant_instructions", "conversation", "assistant_instructions"])
+    assert verifier.run_context_for_judge == ["assistant_instructions", "conversation"]
+    again = AlwaysOnAgentVerifier.from_dict(verifier.to_dict())
+    assert again.run_context_for_judge == ["assistant_instructions", "conversation"]
+    assert again.to_dict() == verifier.to_dict()
+    with pytest.raises(ValueError, match="run_context_for_judge must be a list of \\['conversation', 'trigger_log', "
+                                         "'assistant_instructions'\\]"):
+        _verifier(run_context_for_judge=["conversation", "memory"])
+    with pytest.raises(ValueError, match="run_context_for_judge"):
+        _verifier(RubricsVerifierTaskStep, run_context_for_judge=["assistant_instructions"])
