@@ -39,6 +39,8 @@ from agent_env.store.document_store import expecting_version
 from agent_env.task import Task
 from agent_env.task_step.task_step import TaskStep
 from tst.unit.bundle._support import DIGEST, layout
+from tst.unit.bundle.computer_app_env_test import APP, TOML as APP_TOML
+from tst.unit.bundle.computer_driver_env_test import LINUX
 
 BOX = {"id": "box", "type": "deploy_sandbox", "sandbox_name": "box", "sandbox_mode": "vm"}
 # Not a credential: what a remote URL's user info holds in the tests that its name drops, joined in at run time.
@@ -514,9 +516,9 @@ def test_chromium_registers_into_a_shared_store_with_its_driver_and_base_compute
     assert (chromium.type, chromium.computer.id, chromium.driver.id) == ("computer_app", "ubuntu-24.04-browser", "page")
 
 
-def _desktop(home, monkeypatch, compose):
+def _desktop(home, monkeypatch, compose, extra=None):
     """A bundle of a computer env on the shipped base and driver, registered into a shared store as the hub is, under
-    their aliases, ``compose`` standing in for the composer."""
+    their aliases, ``compose`` standing in for the composer; ``extra`` replaces or adds files."""
     for module in (register_module, env_store_module):
         monkeypatch.setattr(module, "shared_store", lambda store: True)
     bases = {image.ref() for image in COMPUTER_IMAGES}
@@ -525,8 +527,26 @@ def _desktop(home, monkeypatch, compose):
                         lambda image, arches, read: computer_artifact_module._unread(arches, "no registry in a test"))
     monkeypatch.setattr(composer_module, "compose", compose)
     files = {"envs/desktop/env.toml": 'type = "computer"\ncomputer = "ubuntu-24.04"\ndriver = "reference"\n',
-             "tasks/t.json": json.dumps([{"id": "env", "type": "deploy_env", "env_id": "desktop"}])}
+             "tasks/t.json": json.dumps([{"id": "env", "type": "deploy_env", "env_id": "desktop"}]), **(extra or {})}
     return layout(home / "desk", files)
+
+
+def test_a_registration_composes_the_desktop_its_task_deploys_and_not_each_app_on_it_alone(home, composed, monkeypatch):
+    """Each app names the computer and driver it deploys on alone, so each is a computer too, which no task deploys."""
+    apps = {f"envs/{name}/{file}": text for name in ("mail", "notes") for file, text in (
+        ("env.toml", APP_TOML + 'computer = "ubuntu-24.04"\ndriver = "reference"\n'),
+        ("app.py", APP.format(supports=LINUX, skill="skill.md", linux_skill="skill-linux.md")),
+        ("requirements.txt", "agentenv-framework-protocol\n"), ("skill.md", "# Mail\n"),
+        ("skill-linux.md", "# Mail on Linux\n"))}
+    composings = []
+    root = _desktop(home, monkeypatch, lambda env, pairs=None, composing=None: composings.append(env.id), {
+        **apps, "envs/desktop/env.toml": 'type = "computer"\ncomputer = "ubuntu-24.04"\ndriver = "reference"\n'
+                                         'apps = ["mail", "notes"]\n'})
+
+    registered = register_bundle(root)
+
+    assert composings == ["desk-desktop"]
+    assert {done.write.id for done in registered.materialization.writes} >= {"desk-mail", "desk-notes", "desk-desktop"}
 
 
 def _link(containers=(), disks=()):
