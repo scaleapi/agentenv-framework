@@ -771,7 +771,7 @@ class RubricsVerifierTaskStep(VerifierTaskStep):
         applied = self._run_overrides(context)
         overrides = context.metadata.get("user_overrides") or {}
         overridden = [key for key, value in applied.items() if settings.get(key) != value]
-        if overrides.get("judge_model"):
+        if overrides.get("judge_model") and overrides["judge_model"] != self.default_model:
             overridden.append("judge_model")
         settings.update(applied)
         if settings.get("use_agent_judge") and self.agent_name is None and not self.judge_a2a_agent_id:

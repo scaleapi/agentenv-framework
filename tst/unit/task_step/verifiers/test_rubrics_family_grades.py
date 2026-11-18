@@ -60,6 +60,15 @@ async def test_a_run_without_overrides_records_the_stored_settings_and_the_model
 
 
 @pytest.mark.asyncio
+async def test_a_run_naming_the_steps_own_judge_model_overrides_nothing():
+    step = _direct_judge(_step(criteria=_criteria(1)), lambda ids, n: _binary(ids))
+
+    settings = (await _grade(step, _context({"judge_model": "judge-model"})))["verifier_settings"]
+
+    assert settings["overridden"] == [] and settings["judge_model"] == "judge-model"
+
+
+@pytest.mark.asyncio
 async def test_an_agent_judge_that_takes_no_model_is_recorded_as_choosing_its_own():
     step, context = CASES["an_agent_judge_timing_out_once"]()
 
