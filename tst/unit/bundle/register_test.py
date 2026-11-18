@@ -24,6 +24,7 @@ from agent_env.env.envs.computer.utils import composer as composer_module
 from agent_env.env.envs.computer.utils.composed import composition
 from agent_env.env.published_images import COMPUTER_IMAGES
 from agent_env.bundle.register import REGISTRATIONS, _remote_name, register_bundle
+from agent_env.bundle.importer import import_task
 from agent_env.cli import cli
 from agent_env.config import get_config
 from agent_env.config.runtime import Config
@@ -591,6 +592,22 @@ def test_a_registration_for_deploys_that_boot_containers_fails_on_a_failed_conta
     result = CliRunner().invoke(cli, ["bundle", "register", str(root), "--yes", "--sandbox", "docker"])
 
     assert result.exit_code == 1 and "has no build a deploy can boot (container/amd64 failed), so" in result.output
+
+
+def test_a_desktop_on_the_shipped_base_and_driver_exports_naming_them_by_their_aliases(home, composed, monkeypatch):
+    """As a hub's computer task exports: the base and driver it registered from the installed bundles aren't copied."""
+    def compose(env, pairs=None, composing=None):
+        env.update_metadata({**env.metadata, "composed": {"container": {
+            "amd64": {"status": "ready", "image": "desktop", "composer": composition()}}}})
+
+    register_bundle(_desktop(home, monkeypatch, compose))
+    imported = import_task("desk-t", home / "imported")
+
+    assert sorted(entity.folder for entity in imported.written) == ["envs/desk-desktop"]
+    desktop = (imported.root / "envs/desk-desktop/env.toml").read_text()
+    assert 'computer = "ubuntu-24.04"' in desktop and 'driver = "reference"' in desktop
+    assert sorted((ref.where, ref.id) for ref in imported.floating) == [
+        ("envs/desk-desktop", "reference"), ("envs/desk-desktop", "ubuntu-24.04")]
 
 
 def test_a_write_that_fails_leaves_no_pending_row(home, monkeypatch):

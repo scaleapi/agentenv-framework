@@ -20,13 +20,15 @@ from agent_env.bundle.installed import InstalledBundle
 from agent_env.bundle.materialize import materialize
 from agent_env.bundle import register as register_module
 from agent_env.bundle.plan import plan_bundle
-from agent_env.bundle.register import register_bundle
+from agent_env.bundle.register import REGISTRATIONS, register_bundle
 from agent_env.bundle.requires import Provider
 from agent_env.bundle.resolve import resolve_bundle
 from agent_env.cli import cli
 from agent_env.config import get_config
+from agent_env.env import store as env_store_module
 from agent_env.config.runtime import _DEFAULT_A2A_AGENT_ID as DEFAULT_AGENT, Config
 from agent_env.env.envs.mcp_server import MCPServerEnv
+from agent_env.env.envs.multi_env import MultiEnv
 from agent_env.eval import Eval
 from agent_env.eval.eval import EvalTask
 from agent_env.entity.scopes import FieldScope
@@ -786,8 +788,8 @@ def test_an_agent_stored_under_an_installed_alias_by_anything_else_is_written_in
 
     assert "claude-code" not in [ref.id for ref in imported.floating]
     assert [(entity.folder, entity.id, entity.version) for entity in imported.written] == [
-        ("agents/claude-code-2", "claude-code", 2 if registered_first else 1)]
-    assert _steps(imported.root, "own")[0]["a2a_agent_id"] == "claude-code-2"
+        ("agents/claude-code", "claude-code", 2 if registered_first else 1)]
+    assert _steps(imported.root, "own")[0]["a2a_agent_id"] == "claude-code"
 
 
 def test_a_folder_never_takes_an_alias_a_step_floats_so_each_version_keeps_its_own(registry, tmp_path):
@@ -814,3 +816,25 @@ def test_an_export_whose_steps_name_no_installed_alias_never_reads_the_registrat
     imported = import_task("triage", store / "triage", include_scopes=[FieldScope.USER])
 
     assert [entity.folder for entity in imported.written] == ["envs/crm-env", "artifacts/crm-data", "agents/solver"]
+
+
+def test_an_env_another_names_by_its_registered_alias_floats_and_no_folder_takes_the_alias(store, tmp_path,
+                                                                                         monkeypatch):
+    monkeypatch.setattr(env_store_module, "shared_store", lambda store: True)
+    mail = MCPServerEnv.put(id="mail", docker_image_artifact=context_image(tmp_path, "mail-image"),
+                            environment_name="mail")
+    get_config().get_document_store().insert(REGISTRATIONS, {
+        "store": "env", "id": "mail", "version": mail.version, "status": "done",
+        "bundle": "installed:agentenv-framework/mail-mcp"})
+    MCPServerEnv.put(id="team/mail", docker_image_artifact=context_image(tmp_path, "team-mail-image"),
+                     environment_name="team-mail")
+    MultiEnv.put(id="office", mcp_server_envs=[mail])
+    _task("both", [{"id": "team", "type": "deploy_env", "env_id": "team/mail"},
+                   {"id": "office", "type": "deploy_env", "env_id": "office"}])
+
+    imported = import_task("both", tmp_path / "imported")
+
+    assert sorted(entity.folder for entity in imported.written) == ["envs/mail-2", "envs/office"]
+    assert [ref.where for ref in imported.floating if ref.id == "mail"] == ["envs/office"]
+    assert tomllib.loads((imported.root / "envs/office/env.toml").read_text())["mcp_server_envs"] == ["mail"]
+    assert _steps(imported.root, "both")[0]["env_id"] == "mail-2"
