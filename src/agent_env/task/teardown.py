@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import NamedTuple, Optional
@@ -28,7 +29,9 @@ from agent_env.providers.sandbox_providers.sandbox_provider import (
     get_env_sandbox_provider,
     get_sandbox_provider,
 )
+from agent_env.store.routing import run_scope
 from agent_env.task.interrupts import tearing_down
+from agent_env.task.store import get_task_instance_store
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_steps.computer_recording import end_open_recordings, register_open_recordings
 from agent_env.task_step.task_steps.browser.recording import (end_open_browser_recordings,
@@ -39,10 +42,15 @@ logger = logging.getLogger(__name__)
 PROVIDER_CLOSE_TIMEOUT_SECONDS = 5
 
 TERMINATE_TIMEOUT_SECONDS = 120
+#: How often ``record_teardown`` tries its write, backing off from the first wait, in seconds.
+_RECORD_ATTEMPTS, _RECORD_BACKOFF_SECONDS = 3, 0.5
 
 #: ``context.metadata[TORN_DOWN_KEY]``: the ids of the sandboxes a run has terminated, since its ``deployed_*``
 #: records stay (context list fields persist additions only).
 TORN_DOWN_KEY = "torn_down_sandbox_ids"
+#: ``context.metadata[LEFT_UP_KEY]``: the ids of the sandboxes the run's last teardown left up, as a run keeps it on its
+#: instance (``record_teardown``): those it didn't reach or terminate, and those whose local folder it couldn't remove.
+LEFT_UP_KEY = "left_up_sandbox_ids"
 
 
 class RecordedSandbox(NamedTuple):
@@ -66,6 +74,13 @@ class TeardownReport:
     def skipped(cls, context: TaskStepContext) -> TeardownReport:
         """A teardown that didn't start: everything ``context`` records that's still up is left."""
         return cls(left=_pending(context, recorded_sandboxes(context)))
+
+
+def recorded_still_up(context: TaskStepContext) -> tuple[RecordedSandbox, ...]:
+    """Every sandbox ``context`` records that may still be up: not torn down, or left up by its last teardown."""
+    left = set(context.metadata.get(LEFT_UP_KEY) or [])
+    return tuple(sandbox for sandbox in recorded_sandboxes(context)
+                 if sandbox in _pending(context, [sandbox]) or sandbox.sandbox_id in left)
 
 
 def recorded_sandboxes(context: TaskStepContext) -> tuple[RecordedSandbox, ...]:
@@ -165,6 +180,28 @@ async def tear_down(context: TaskStepContext, sandboxes: Sequence[RecordedSandbo
         pass
     reached = {sandbox.sandbox_id for sandbox in terminated} | {sandbox.sandbox_id for sandbox, _ in failed}
     return TeardownReport(tuple(terminated), tuple(failed), tuple(s for s in pending if s.sandbox_id not in reached))
+
+
+def record_teardown(instance_id: str, context: TaskStepContext, report: TeardownReport, attempt_epoch: int) -> None:
+    """Keep on ``instance_id``, where its run's records go, the context its teardown ended with and what that left up
+    (``LEFT_UP_KEY``), so ``agent-env task teardown`` finds what's still up, unless a later attempt owns the instance
+    (``record_teardown_sync``). Retried, and a write that keeps failing is logged, not raised."""
+    context.metadata[LEFT_UP_KEY] = [sandbox.sandbox_id for sandbox in report.still_up]
+    for attempt in range(_RECORD_ATTEMPTS):
+        try:
+            with run_scope(instance_id):
+                get_task_instance_store().record_teardown_sync(instance_id, context, attempt_epoch)
+            return
+        except Exception as e:  # noqa: BLE001
+            if attempt + 1 == _RECORD_ATTEMPTS:
+                logger.warning("teardown: what instance %s left up wasn't recorded: %s", instance_id, _described(e))
+            else:
+                time.sleep(_RECORD_BACKOFF_SECONDS * 2 ** attempt)
+
+
+def attempt_epoch(instance_id: str) -> int:
+    """``instance_id``'s attempt epoch now, which a teardown about to start fences ``record_teardown`` with."""
+    return get_task_instance_store().get(instance_id).attempt_epoch
 
 
 async def before_teardown(context: TaskStepContext, within: float, agent_names: Optional[list[str]] = None) -> None:

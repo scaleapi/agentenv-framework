@@ -18,7 +18,6 @@ from agent_env.store.base import NotFoundError
 from agent_env.config import get_config
 from agent_env.store.document_store import DocumentStore, DuplicateKeyError, Filter, Lte, Ne, Sort, SortKey, UnknownDocumentTypeError, UpdateSpec, VersionedEntityStore, VersionedEntityStoreCache, compare_and_swap
 from agent_env.store.query import QueryBuilder, to_document_query
-from agent_env.store.routing import run_scope
 from agent_env.task.step_journal import (
     _RESERVED_STEP_IDS,
     _SCHEDULER_STEP_ID,
@@ -792,10 +791,12 @@ class TaskInstanceStore:
             ),
         )
 
-    def record_teardown_sync(self, instance_id: str, context: "TaskStepContext") -> None:
-        """Keep the context a teardown left when it didn't take everything down: what the run deployed, writes of a
-        step a signal cut short included, and what the teardown terminated, so a later one finds what's still up."""
-        self._doc_store.update(TASK_INSTANCES_COLLECTION, Filter.of(instance_id=instance_id),
+    def record_teardown_sync(self, instance_id: str, context: "TaskStepContext", attempt_epoch: int) -> None:
+        """Keep the context a run's teardown ended with: what the run deployed, writes of a step a signal cut short
+        included, and what the teardown took down and left up, unless an attempt later than ``attempt_epoch``, the
+        instance's as the teardown began, owns the instance by now."""
+        match = Filter.of(instance_id=instance_id).where("attempt_epoch", Lte(attempt_epoch))
+        self._doc_store.update(TASK_INSTANCES_COLLECTION, match,
                                UpdateSpec(set={"context": context.to_safe_dict()}, inc={"rev": 1}))
 
     def append_step_attempt_failure_sync(self, instance_id: str, failure: "StepAttemptFailure") -> None:
@@ -1005,24 +1006,6 @@ async def record_task_failure(
     )
 
 
-
-
-def record_teardown(instance_id: str, context: "TaskStepContext") -> None:
-    """Keep the context a teardown that left sandboxes up ended with (``record_teardown_sync``), where the run's
-    records go, retried like ``record_task_cancelled``, logging a write that keeps failing rather than raising."""
-    store = get_task_instance_store()
-    last_exc: BaseException | None = None
-    for attempt in range(_FAILURE_WRITE_MAX_ATTEMPTS):
-        try:
-            with run_scope(instance_id):
-                store.record_teardown_sync(instance_id, context)
-            return
-        except Exception as exc:  # noqa: BLE001
-            last_exc = exc
-            if attempt + 1 < _FAILURE_WRITE_MAX_ATTEMPTS:
-                time.sleep(_FAILURE_WRITE_BACKOFF_SECONDS * (2**attempt))
-    logger.warning("Failed to record what instance_id=%s left up after %d attempts", instance_id,
-                   _FAILURE_WRITE_MAX_ATTEMPTS, exc_info=last_exc)
 
 
 def record_task_cancelled(instance_id: str, reason: str, completed_at_utc: str, attempt_epoch: int | None = None) -> None:
