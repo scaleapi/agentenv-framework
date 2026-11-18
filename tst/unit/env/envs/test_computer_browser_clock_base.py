@@ -1,5 +1,6 @@
-"""The ubuntu-24.04-browser base on the universe clock: its copies of the clock library, the egress proxy, the root
-start and root's supervisord are ubuntu-24.04's, byte for byte, so a change to any lands in both; it starts as root,
+"""The ubuntu-24.04-browser base on the universe clock: through its image_kits.toml it takes the clock library and the
+egress proxy from image_kits, as ubuntu-24.04 does, and ubuntu-24.04's root start and root's supervisord, so a change
+to any lands in both; it starts as root,
 its init the root start; the egress proxy listens where the variable its site proxies read names, which the base sets
 to an address the stand-in site proxy doesn't hold; the stand-in keeps real time; and X has no screensaver or DPMS,
 whose timeouts would run on the universe's clock."""
@@ -17,15 +18,11 @@ import pytest
 
 import agent_env
 from agent_env.env.envs.computer.utils import site_proxy
+from tst.util.build_context import sent
 
 ARTIFACTS = Path(agent_env.__file__).parent / "computers" / "artifacts"
 DESKTOP, BROWSER = ARTIFACTS / "ubuntu-24.04", ARTIFACTS / "ubuntu-24.04-browser"
-
-
-def _files(folder: Path) -> dict[str, bytes]:
-    """The folder's files by path, but Python's caches, which importing a module there leaves."""
-    return {str(path.relative_to(folder)): path.read_bytes() for path in sorted(folder.rglob("*"))
-            if path.is_file() and "__pycache__" not in path.parts}
+KITS = Path(agent_env.__file__).parent / "image_kits"
 
 
 def _stand_in():
@@ -44,22 +41,19 @@ def _env() -> dict[str, str]:
 
 def _conf(name: str) -> configparser.ConfigParser:
     conf = configparser.ConfigParser(interpolation=None)
-    conf.read_string((BROWSER / name).read_text())
+    conf.read_string(sent(BROWSER, name).read_text())
     return conf
 
 
-@pytest.mark.parametrize("part", ["clock", "egress", "root"])
-def test_the_browser_bases_copy_is_the_desktops_byte_for_byte(part):
-    desktop, browser = _files(DESKTOP / part), _files(BROWSER / part)
+@pytest.mark.parametrize(("base", "part", "shared"), [
+    (DESKTOP, "clock", KITS / "clock"), (DESKTOP, "egress", KITS / "egress"),
+    (BROWSER, "clock", KITS / "clock"), (BROWSER, "egress", KITS / "egress"),
+    (BROWSER, "root", DESKTOP / "root"), (BROWSER, "root.conf", DESKTOP / "root.conf")])
+def test_what_the_bases_share_is_taken_from_its_one_copy(base, part, shared):
+    taken = tomllib.loads((base / "image_kits.toml").read_text())
 
-    assert sorted(browser) == sorted(desktop), f"{part}/ differs in its files: copy ubuntu-24.04/{part}/ over it"
-    assert [name for name in desktop if browser[name] != desktop[name]] == [], (
-        f"{part}/ differs from ubuntu-24.04's: copy ubuntu-24.04/{part}/ over it")
-
-
-def test_the_browser_bases_root_supervisord_is_the_desktops_byte_for_byte():
-    assert (BROWSER / "root.conf").read_bytes() == (DESKTOP / "root.conf").read_bytes(), (
-        "root.conf differs from ubuntu-24.04's: copy ubuntu-24.04/root.conf over it")
+    assert not (base / part).exists(), f"{base.name}/{part} is a copy: take it in {base.name}/image_kits.toml instead"
+    assert (KITS.parent / taken[part]).resolve() == shared.resolve()
 
 
 def test_it_starts_as_root_its_init_the_root_start_whose_supervisord_runs_the_session_as_the_session_user():
@@ -74,7 +68,7 @@ def test_it_starts_as_root_its_init_the_root_start_whose_supervisord_runs_the_se
 
 
 def test_the_egress_proxy_listens_where_the_variable_its_site_proxies_read_names():
-    named = re.search(r'ProxyEnv\s*=\s*"([^"]+)"', (BROWSER / "egress" / "main.go").read_text()).group(1)
+    named = re.search(r'ProxyEnv\s*=\s*"([^"]+)"', sent(BROWSER, "egress/main.go").read_text()).group(1)
 
     assert named == site_proxy.EGRESS_PROXY_ENV and named in _env()
     assert shlex.split(_conf("root.conf")["program:egress"]["command"]) == [

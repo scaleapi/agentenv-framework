@@ -4,9 +4,12 @@ machine's Docker daemon answers."""
 from __future__ import annotations
 
 import subprocess
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+
+from agent_env.utils.docker.context import KITS_FILE, BuildContext, extract
 
 DEFAULT_BUILD_PLATFORM = "linux/amd64"  # the remote sandbox VMs
 DOCKER_INFO_TIMEOUT_SECONDS = 10
@@ -35,7 +38,22 @@ class DockerBuildError(RuntimeError):
 def build_image(dockerfile: Path, context: Path, tag: str, *, platform: str | None,
                 build_args: Mapping[str, str] | None = None, labels: Mapping[str, str] | None = None) -> None:
     """Build ``context`` with ``dockerfile`` into the local image ``tag``, for ``platform``, or for this host's
-    platform when it's None or empty. Raises DockerBuildError, with the build's output, when it fails."""
+    platform when it's None or empty. A context that takes from agent-env's sources (``KITS_FILE``) is built as its
+    build context sends it, what it takes included. Raises DockerBuildError, with the build's output, when it fails."""
+    if not (context / KITS_FILE).is_file():
+        _build(dockerfile, context, tag, platform, build_args, labels)
+        return
+    with tempfile.TemporaryDirectory(prefix="agentenv-context-") as staged:
+        archive, assembled = Path(staged) / "context.tar.gz", Path(staged) / "context"
+        BuildContext.of(context, dockerfile).write(archive)
+        extract(archive, assembled)
+        inside = dockerfile.is_relative_to(context)
+        _build(assembled / dockerfile.relative_to(context) if inside else dockerfile, assembled, tag, platform,
+               build_args, labels)
+
+
+def _build(dockerfile: Path, context: Path, tag: str, platform: str | None, build_args: Mapping[str, str] | None,
+           labels: Mapping[str, str] | None) -> None:
     argv = ["docker", "build", *(["--platform", platform] if platform else [])]
     for name, value in (build_args or {}).items():
         argv += ["--build-arg", f"{name}={value}"]

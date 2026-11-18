@@ -21,7 +21,7 @@ import pytest
 import agent_env
 from agentenv_protocol.computer import clock as protocol_clock
 
-CLOCK = Path(agent_env.__file__).parent / "computers" / "artifacts" / "ubuntu-24.04" / "clock"
+CLOCK = Path(agent_env.__file__).parent / "image_kits" / "clock"
 FOLLOWER = CLOCK / "clock-follower"
 
 

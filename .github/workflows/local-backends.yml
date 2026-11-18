@@ -26,7 +26,7 @@ env:
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
 jobs:
-  # The base computer's egress proxy (src/agent_env/computers/artifacts/ubuntu-24.04/egress/): gofmt, go vet and its
+  # The base computer's egress proxy (src/agent_env/image_kits/egress/): gofmt, go vet and its
   # tests under the race detector, in the Go image its Dockerfile builds with, so a failing Go test fails here rather
   # than as a broken base image in the slow tier.
   egress:

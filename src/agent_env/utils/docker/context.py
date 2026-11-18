@@ -10,17 +10,21 @@ import os
 import posixpath
 import stat
 import tarfile
+import tomllib
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from modal import FilePatternMatcher
 
-from agent_env.utils.paths import LEAVINGS
+from agent_env.utils.paths import LEAVINGS, SOURCES, in_sources
 
 # Bumped when what source_digest covers changes, so a digest is never compared across meanings.
 _DIGEST_SCHEME = 1
 _READ_CHUNK_BYTES = 1 << 20
+# Names what a context takes from agent-env's own sources, and at which name: the images agent-env ships share sources
+# (``image_kits``) this way and still build from one self-contained context.
+KITS_FILE = "image_kits.toml"
 
 
 @dataclass(frozen=True)
@@ -40,7 +44,9 @@ class _Entry:
 @dataclass(frozen=True)
 class BuildContext:
     """The files ``docker build`` sends from a folder: all but what its ignore file excludes, the Dockerfile and the
-    ignore file always kept, and what the OS or Python leaves behind always dropped. A link is sent as a link, never
+    ignore file always kept, and what the OS or Python leaves behind always dropped, and what its ``image_kits.toml``
+    takes from agent-env's own sources, each at the name it gives, in place of the file itself, which says how to make
+    the context and isn't sent: a context written out and unpacked builds as it is. A link is sent as a link, never
     followed, as docker sends it. Modes are git's two: 0755 when the owner may execute, else 0644."""
 
     dockerfile: str | None  # its path in the context, None when it's outside it
@@ -63,6 +69,7 @@ class BuildContext:
         matcher = ignore_matcher(ignores.read_text(encoding="utf-8")) if ignores else None
         walk = _Walk(top, matcher, kept)
         walk.run()
+        walk.take(top / KITS_FILE)
         if walk.problems:
             raise ValueError(f"build context {root}: " + "; ".join(walk.problems))
         return cls(dockerfile=named, entries=walk.entries())
@@ -120,8 +127,8 @@ class _Walk:
         self.names: set[str] = set()
         self.problems: list[str] = []
 
-    def run(self) -> None:
-        pending = [(self.top, ())]
+    def run(self, start: Path | None = None, parts: tuple[str, ...] = ()) -> None:
+        pending = [(start or self.top, parts)]
         while pending:
             folder, parts = pending.pop()
             try:
@@ -131,7 +138,7 @@ class _Walk:
                 self.problems.append(f"{_show(parts)}: {e.strerror or e}")
                 continue
             for child in children:
-                if child.name in LEAVINGS:
+                if child.name in LEAVINGS or (not parts and child.name == KITS_FILE):
                     continue
                 child_parts = (*parts, unicodedata.normalize("NFC", child.name))
                 name = "/".join(child_parts)
@@ -150,6 +157,31 @@ class _Walk:
                     self._file(name, Path(child.path))
                 else:
                     self.problems.append(f"{name}: neither a regular file, a folder nor a link")
+
+    def take(self, declared: Path) -> None:
+        """What ``declared`` (``KITS_FILE``), when the folder has one, takes from agent-env's sources: each folder or
+        file at the name it gives, which the folder mustn't have itself."""
+        if not declared.is_file():
+            return
+        try:
+            kits = tomllib.loads(declared.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+            self.problems.append(f"{KITS_FILE}: {e}")
+            return
+        for name, source in sorted(kits.items()):
+            if name not in self.kept and self._excluded(name):
+                continue
+            path = Path(os.path.realpath(os.path.join(SOURCES, source))) if isinstance(source, str) else None
+            if path is None or not in_sources(path) or not path.exists():
+                self.problems.append(f"{KITS_FILE}: {name} = {source!r} names nothing in agent-env's sources")
+            elif name in self.names:
+                self.problems.append(f"{name}: the folder has it and {KITS_FILE} takes it too; keep one")
+            elif path.is_dir():
+                if self._claim(name):
+                    self.folders.add(name)
+                    self.run(path, (name,))
+            else:
+                self._file(name, path)
 
     def entries(self) -> tuple[_Entry, ...]:
         folders = set(self.folders)

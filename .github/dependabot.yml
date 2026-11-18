@@ -76,8 +76,7 @@ updates:
   # both.
   - package-ecosystem: "gomod"
     directories:
-      - "/src/agent_env/computers/artifacts/ubuntu-24.04/egress"
-      - "/src/agent_env/computers/artifacts/ubuntu-24.04-browser/egress"
+      - "/src/agent_env/image_kits/egress"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
