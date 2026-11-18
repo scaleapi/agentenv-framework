@@ -22,12 +22,15 @@ import logging
 import os
 import re
 import signal
+import struct
 import threading
-from collections.abc import Callable, Mapping
+import time
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 from jsonschema import Draft202012Validator, SchemaError, ValidationError
 from pydantic import BaseModel, ConfigDict, model_validator
@@ -96,6 +99,73 @@ def _context_xdg(context_id: str) -> dict[str, str]:
     return {"XDG_DATA_HOME": str(data_dir / "share"), "XDG_STATE_HOME": str(data_dir / "state")}
 
 
+#: Set by the image (root.conf) where the egress proxy runs: the CLI and the model's commands go out through it
+#: while the agent follows an armed clock.
+EGRESS_PROXY_ENV = "AGENTENV_EGRESS_PROXY"
+#: The clock page agent-env's libfaketime reads the CLI's time from (clock/clockpage.py, version 2): it keeps the last
+#: armed clock while the follower reconnects or restarts, which the follower's status doesn't say.
+CLOCK_PAGE = "/dev/shm/agentenv-clock"
+_PAGE = struct.Struct("<IIQqqdIIQQqq")  # magic version seq universe_ns anchor_ns rate armed reserved generation check ...
+_PAGE_MAGIC, _PAGE_VERSION, _MASK = 0x4B434541, 2, 0xFFFFFFFFFFFFFFFF
+_DIRECT_HOSTS = ("localhost", "127.0.0.1", "::1", "host.docker.internal")
+
+
+def clock_armed(page_path: str | None = None) -> bool:
+    """Whether the clock page holds an armed clock, so the CLI started now reads the env's time: the page itself,
+    as libfaketime reads it, retried while a write is under way (seq odd) or its check doesn't match."""
+    try:
+        with open(page_path or CLOCK_PAGE, "rb") as page:
+            for _ in range(50):
+                page.seek(0)
+                raw = page.read(_PAGE.size)
+                if len(raw) < _PAGE.size:
+                    return False
+                magic, version, seq, universe, anchor, rate, armed, _, generation, checked, mono_u, mono_a = \
+                    _PAGE.unpack(raw)
+                if magic != _PAGE_MAGIC or version != _PAGE_VERSION:
+                    return False
+                rate_bits = struct.unpack("<Q", struct.pack("<d", rate))[0]
+                expected = (seq ^ (universe & _MASK) ^ (anchor & _MASK) ^ rate_bits ^ armed ^ generation
+                            ^ (mono_u & _MASK) ^ (mono_a & _MASK) ^ 0x9E3779B97F4A7C15) & _MASK
+                if seq % 2 == 0 and checked == expected:
+                    return bool(armed)
+                time.sleep(0.001)
+    except OSError:
+        return False
+    return bool(armed)  # a writer that died mid-write: the next write takes the page up; its armed flag says the most
+
+
+def egress_env(environ: Mapping[str, str], direct: Iterable[str] = (), *, armed: bool = False) -> dict[str, str]:
+    """The egress proxy for the CLI and what it starts, where the image runs one (FD-5916) and the clock is ``armed``:
+    they read the env's time, so a client checking a live site's certificate against it would refuse the site once
+    the clock is months off, and the proxy, on real time, hands it a certificate that holds then. The env's MCP servers
+    (``direct``) are reached directly: the proxy refuses an address that isn't global, as a local or private gateway's
+    is. Unarmed, the CLI reads real time and goes out directly, as an image without the proxy does, so a model endpoint
+    or mirror at a private address keeps working. Hosts the agent was deployed to reach directly (``NO_PROXY``,
+    ``no_proxy``) stay direct."""
+    proxy = environ.get(EGRESS_PROXY_ENV)
+    if not proxy or not armed:
+        return {}
+    configured = [host.strip() for name in ("NO_PROXY", "no_proxy") for host in (environ.get(name) or "").split(",")]
+    hosts = ",".join(dict.fromkeys([*_DIRECT_HOSTS, *filter(None, configured), *filter(None, direct)]))
+    return {**{name: proxy for base in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY") for name in (base, base.lower())},
+            "NO_PROXY": hosts, "no_proxy": hosts, "NODE_USE_ENV_PROXY": "1"}
+
+
+def cli_env(context_id: str, environ: Mapping[str, str] = os.environ, *, mcp_servers: dict[str, dict] | None = None,
+            clock_armed: bool = False) -> dict[str, str]:
+    """The CLI's environment for ``context_id``: this process's, with the context's own data and state dirs. On an
+    armed clock (``clock_armed``) the CLI goes out through the egress proxy (``egress_env``), reaching the env's MCP
+    servers (``mcp_servers``), which it connects to itself, and a plain-HTTP model endpoint directly."""
+    # A model endpoint over plain HTTP has no certificate to check at the env's date, so it's reached directly, as one
+    # at a private address, which the proxy refuses, must be.
+    endpoint = urlsplit(environ.get("LITELLM_BASE_URL") or "")
+    model_host = [endpoint.hostname or ""] if endpoint.scheme == "http" else []
+    mcp_hosts = [urlsplit(str(info.get("url") or "")).hostname or "" for info in (mcp_servers or {}).values()]
+    return {**environ, **_context_xdg(context_id),
+            **egress_env(environ, [*mcp_hosts, *model_host], armed=clock_armed)}
+
+
 async def _communicate(*cmd: str, env: Mapping[str, str], timeout_s: int) -> tuple[int, bytes, bytes]:
     """Run a short CLI command to its end; one that outlives ``timeout_s`` is killed."""
     proc = await asyncio.create_subprocess_exec(
@@ -113,7 +183,7 @@ async def _communicate(*cmd: str, env: Mapping[str, str], timeout_s: int) -> tup
 
 async def export_session(context_id: str, session_id: str, timeout_s: int = _CLI_TIMEOUT_S) -> bytes:
     """`opencode export <session_id>` for the given context: the transcript JSON bytes."""
-    env = {**os.environ, **_context_xdg(context_id)}
+    env = cli_env(context_id, clock_armed=clock_armed())
     code, out, err = await _communicate("opencode", "export", session_id, env=env, timeout_s=timeout_s)
     if code != 0:
         raise RuntimeError(f"opencode export failed: {err.decode(errors='replace')[:300]}")
@@ -123,7 +193,7 @@ async def export_session(context_id: str, session_id: str, timeout_s: int = _CLI
 async def import_session(context_id: str, json_path: str, timeout_s: int = _CLI_TIMEOUT_S) -> str | None:
     """`opencode import <json_path>` into the given context's data dir: the imported session id, from
     'Imported session: <id>'."""
-    env = {**os.environ, **_context_xdg(context_id)}
+    env = cli_env(context_id, clock_armed=clock_armed())
     code, out, err = await _communicate("opencode", "import", json_path, env=env, timeout_s=timeout_s)
     if code != 0:
         raise RuntimeError(f"opencode import failed: {err.decode(errors='replace')[:300]}")
@@ -477,9 +547,8 @@ async def run_opencode(
         cmd += ["--file", path]
 
     env = {
-        **os.environ,
+        **cli_env(context_id, mcp_servers=mcp_servers, clock_armed=clock_armed()),
         "OPENCODE_CONFIG_CONTENT": json.dumps(config),
-        **_context_xdg(context_id),
     }
 
     logger.info(f"Running opencode (session={session_id}, model={model}, effort={effort}, ctx={context_id[:12]}, mcp={list((mcp_servers or {}).keys())})")

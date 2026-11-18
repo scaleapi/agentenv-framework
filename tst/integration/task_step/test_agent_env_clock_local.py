@@ -89,6 +89,7 @@ class Agent:
 AGENTS = {
     "claude-code": Agent(bridge="claude_bridge", version=("claude", "--version"), shows="(Claude Code)",
                          turn=_claude_turn),
+    "opencode": Agent(bridge="opencode_bridge", version=("opencode", "--version"), shows="1.17.18"),
 }
 
 
