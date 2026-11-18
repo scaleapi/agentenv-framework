@@ -196,6 +196,29 @@ def test_build_builds_an_image_for_its_platform_under_its_tag_with_its_source_on
     assert runs[0] == runs[1] and waits == [script._RETRY_WAITS_SECONDS[0]]
 
 
+def test_build_builds_a_base_with_a_shared_sources_toml_from_a_context_holding_what_it_takes(
+        script, monkeypatch, workflow):
+    built = []
+
+    def streamed(command):
+        context = Path(command[-1])
+        built.append((Path(command[command.index("-f") + 1]).relative_to(context).as_posix(),
+                      {path.relative_to(context).as_posix() for path in context.rglob("*") if path.is_file()}))
+        return subprocess.CompletedProcess(command, 0, "#1 DONE\n", "")
+
+    monkeypatch.setattr(script, "_streamed", streamed)
+    monkeypatch.chdir(REPO)
+    base = "src/agent_env/computers/artifacts/ubuntu-24.04"
+
+    assert _run(script, monkeypatch, "build", _gateway(name="agentenv-ubuntu-24.04", context=base,
+                                                         dockerfile=f"{base}/Dockerfile",
+                                                         repository=f"{REGISTRY}/agentenv-ubuntu-24.04"), "amd64") == 0
+
+    [(dockerfile, files)] = built
+    assert dockerfile == "Dockerfile"
+    assert {"clock/build.sh", "egress/main.go", "root/init", "shared_sources.toml"} <= files
+
+
 def test_build_makes_a_disk_form_of_its_bases_image_of_the_arch_with_that_images_config_the_tools_and_its_size(
         script, monkeypatch, workflow):
     runs, _ = _attempts(script, monkeypatch, [("pulled\n", 0), ("#1 DONE\n", 0)])
