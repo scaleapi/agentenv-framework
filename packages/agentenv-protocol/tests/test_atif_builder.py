@@ -552,3 +552,21 @@ def test_a_sub_agent_is_spawned_by_a_call_of_its_task_waiting_on_its_result_and_
     run.start_task(TurnContext(index=1, context_id="ctx", task_id="t2", inbound=["more"]))
     with pytest.raises(AtifError, match="earlier task"):
         run.native({"type": "sub", "step": "x1", "agent": "sub"})
+
+
+def test_a_file_the_sink_failed_to_take_is_handed_to_it_again():
+    taken = []
+
+    def sink(path, data):
+        if not taken:
+            taken.append(None)
+            raise OSError("disk full")
+        taken.append(path)
+
+    run = AdapterRun(adapter(), media=sink)
+    run.start_task(CTX)
+    with pytest.raises(OSError):
+        run.media(b"shot", "image/png")
+    media = run.media(b"shot", "image/png")
+    run.media(b"shot", "image/png")
+    assert taken == [None, media.path]

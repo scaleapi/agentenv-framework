@@ -46,6 +46,8 @@ _JOIN = "\n\n"
 _UNSET: Any = object()
 _KILOBYTE = 1000
 _MEGABYTE = 1_000_000
+_MS_PER_SECOND = 1000
+_US_PER_MS = 1000
 _PROMPT_PARTS = ("input", "cache_read", "cache_write")
 
 
@@ -73,7 +75,7 @@ def timestamp(value: str | datetime | None) -> str | None:
     text = (f"{moment.year:04d}-{moment.month:02d}-{moment.day:02d}T{moment.hour:02d}:{moment.minute:02d}:"
             f"{moment.second:02d}")
     if digits:
-        text += f".{moment.microsecond // 1000:03d}" if len(digits) <= 3 else f".{moment.microsecond:06d}"
+        text += f".{moment.microsecond // _US_PER_MS:03d}" if len(digits) <= 3 else f".{moment.microsecond:06d}"
     return text + "Z"
 
 
@@ -156,14 +158,14 @@ class Media:
         if self.media_type in AUDIO_TYPES:
             source: dict[str, Any] = {"media_type": self.media_type, "path": self.path}
             if self.info.get("duration_ms") is not None:
-                source["duration_sec"] = self.info["duration_ms"] / 1000
+                source["duration_sec"] = self.info["duration_ms"] / _MS_PER_SECOND
             return {"type": "audio", "source": source}
         major = self.media_type.split("/", 1)[0]
         kind = major if major in ("image", "audio", "video") else (
             "document" if self.media_type == "application/pdf" else "file")
         details = [self.path, _size(self.info["bytes"])]
         if self.info.get("duration_ms") is not None:
-            details.append(f"{round(self.info['duration_ms'] / 1000)} s")
+            details.append(f"{round(self.info['duration_ms'] / _MS_PER_SECOND)} s")
         if self.info.get("pages") is not None:
             details.append(f"{self.info['pages']} pages")
         return {"type": "text", "text": f"[{kind}: {', '.join(details)}]"}
@@ -397,11 +399,11 @@ class Document:
         extension = _EXTENSIONS.get(media_type) or mimetypes.guess_extension(media_type, strict=False) or ".bin"
         path = f"media/{digest}{extension}"
         if path not in self._stored:
-            self._stored.add(path)
             if self._sink is not None:
                 self._sink(path, bytes(data))
             else:
                 self.media[path] = bytes(data)
+            self._stored.add(path)
         details = {"sha256": digest, "bytes": len(data), **{k: v for k, v in info.items() if v is not None}}
         return Media(path, media_type, _json(details, "media details"))
 
