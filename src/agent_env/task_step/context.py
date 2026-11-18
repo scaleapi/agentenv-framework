@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import os
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -60,6 +61,31 @@ class StepContextError(RuntimeError):
 class VerifierNotPassingError(RuntimeError):
     """A verifier set to fail its task when its verdict isn't passing recorded one that isn't. Grading the same run
     again could pass it, so a runner should not retry it."""
+
+
+ERRORED_TURN_UNGRADED_ENV_VAR = "AGENT_ENV_ERRORED_TURN_UNGRADED"
+
+
+# Turn failures the agent did not cause: the platform or its model key. An ``agent_error`` stays a scored 0, since
+# the agent made the attempt and failed it.
+PLATFORM_TURN_ERROR_TYPES = frozenset({"infra_error", "model_key_budget", "model_key_auth"})
+
+
+def errored_turn_ungraded(turn_error_type: str) -> bool:
+    """Whether a verifier leaves this errored agent turn ungraded, raising ``AgentTurnError``, instead of scoring it
+    0: only behind the flag, and only for failures the agent did not cause."""
+    flag_on = os.environ.get(ERRORED_TURN_UNGRADED_ENV_VAR, "").strip().lower() in ("1", "true", "yes")
+    return flag_on and turn_error_type in PLATFORM_TURN_ERROR_TYPES
+
+
+class AgentTurnError(RuntimeError):
+    """The agent turn a verifier grades ended in an error, so it has no answer to grade. The run is ungraded, not
+    failed by the agent: a 0 would count against the agent for a failure ``turn_error_type`` may say isn't its own."""
+
+    def __init__(self, verifier_id: str, prompt_id: str, turn_error_type: str) -> None:
+        super().__init__(f"Verifier '{verifier_id}' can't grade prompt '{prompt_id}': its agent turn failed with "
+                         f"error_type={turn_error_type}")
+        self.turn_error_type = turn_error_type
 
 _REDACTED_KEYS = {
     "litellm_api_key", "judge_litellm_api_key", "usersim_api_key", "remote_tokens", "cf_access_client_secret",

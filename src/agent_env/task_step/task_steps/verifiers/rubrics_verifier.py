@@ -22,12 +22,14 @@ from agent_env.config import get_config
 from agent_env.config.model import ModelParam
 from agent_env.providers.sandbox_providers.sandbox import into_container
 from agent_env.task_step.context import (
+    AgentTurnError,
     PromptResponse,
     StepContextError,
     TaskStepContext,
     VerifierNotPassingError,
     context_path_segments,
     dual_keyed,
+    errored_turn_ungraded,
 )
 from agent_env.task_step.task_steps.verifiers.judge_utils.judge_output_format import (
     SCREENSHOT_GROUNDING,
@@ -782,6 +784,8 @@ class RubricsVerifierTaskStep(TaskStep):
         stored_response, prompt_response = prompt_response, as_of
 
         if prompt_response.error_type:
+            if errored_turn_ungraded(prompt_response.error_type):
+                raise AgentTurnError(self.verifier_id, self.prompt_id, prompt_response.error_type)
             logger.warning(f"Skipping verification '{self.verifier_id}': prompt had error_type={prompt_response.error_type}")
             self._write_skipped_entries(
                 context, "prompt_error", f"Skipped: prompt had error_type={prompt_response.error_type}")

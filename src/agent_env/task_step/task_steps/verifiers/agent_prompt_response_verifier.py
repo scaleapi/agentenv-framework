@@ -21,7 +21,7 @@ import re
 import uuid
 from typing import ClassVar, Optional
 
-from agent_env.task_step.context import StepContextError, TaskStepContext
+from agent_env.task_step.context import AgentTurnError, StepContextError, TaskStepContext, errored_turn_ungraded
 from agent_env.task_step.task_step import TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
 
@@ -84,6 +84,8 @@ class AgentPromptResponseVerifierTaskStep(TaskStep):
             raise StepContextError(f"PromptResponse with prompt_id='{self.prompt_id}' not found in context")
 
         if prompt_response.error_type:
+            if errored_turn_ungraded(prompt_response.error_type):
+                raise AgentTurnError(self.verifier_id, self.prompt_id, prompt_response.error_type)
             logger.warning(
                 f"Skipping verification '{self.verifier_id}': prompt had error_type={prompt_response.error_type}"
             )
