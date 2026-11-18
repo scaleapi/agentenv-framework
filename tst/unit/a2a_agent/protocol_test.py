@@ -98,6 +98,26 @@ def test_extension_http_error_for_a_request_without_grants_keeps_the_body():
     )
 
 
+def test_a_refused_control_token_is_named_and_logged_without_the_body(caplog):
+    response = httpx.Response(
+        401,
+        json={"detail": "this route takes the agent's control token"},
+        request=httpx.Request("GET", "https://agent.test/ext/trajectory"),
+    )
+
+    with caplog.at_level(logging.WARNING, logger=protocol.__name__), pytest.raises(httpx.HTTPStatusError) as raised:
+        raise_for_extension_status(response, operation="trajectory read", include_body=True)
+
+    assert str(raised.value) == (
+        'trajectory read failed with HTTP 401: {"detail":"this route takes the agent\'s control token"}'
+        " (the agent refused its control token: the record it was sent from has none, or another deployment's)"
+    )
+    assert [record.getMessage() for record in caplog.records] == [
+        "trajectory read failed with HTTP 401"
+        " (the agent refused its control token: the record it was sent from has none, or another deployment's)"
+    ]
+
+
 def test_sdk_success_round_trips_through_platform_parser():
     result = (
         TaskResult.builder()
