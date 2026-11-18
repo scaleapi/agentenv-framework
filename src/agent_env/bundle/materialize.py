@@ -112,8 +112,9 @@ def materialize(
     Each write gets the version it would reuse or the store's next, which another run can take first. A step
     reading what the run would write first isn't preflighted, since the store doesn't hold it yet.
 
-    Each computer env written is composed as ``composing`` says, and so is what one reused has left, as ``agent-env
-    env build`` does; ``on_progress``, when given, is told how each goes, a line at a time with its write. With
+    Each computer env written that the run or registration composes (``_composed_envs``) is composed as ``composing``
+    says, and so is what one reused has left, as ``agent-env env build`` does; any other is written uncomposed and
+    composes at its first deploy. ``on_progress``, when given, is told how each goes, a line at a time with its write. With
     ``bootable``, as a registration has it, a computer env written or reused whose compose left no build a deploy can
     boot stops it once every entity is written, before any task or eval, raising BundleError naming each such env.
 
@@ -130,10 +131,10 @@ def materialize(
     evals = [write for write in plan.writes if write.kind is BundleKind.EVAL]
     done: dict[tuple[str, str], Materialized] = {}
     left: list[str] = []
-    deployed = _deployed_envs(plan)
+    composed = _composed_envs(plan)
 
     def composes(write: Write) -> bool:
-        return deployed is None or write.id in deployed
+        return composed is None or write.id in composed
     unbootable: list[str] = []
 
     def through_ledger(write: Write, write_fn: Callable[[], int]) -> None:
@@ -384,10 +385,10 @@ def _write_env(plan: Plan, write: Write, composing: Composing = Composing(), com
                          AuthoringContext(plan.bundle_of(entry), entry, composing=composing, compose=compose)).version
 
 
-def _deployed_envs(plan: Plan) -> frozenset[str] | None:
-    """The envs ``plan``'s tasks deploy, which a run or registration of it composes: each its steps name, and each
-    those hold, but not a computer env's own, its apps and driver, which run inside it. None, every env, for a plan
-    with no tasks, which writes its envs for others to deploy, each alone."""
+def _composed_envs(plan: Plan) -> frozenset[str] | None:
+    """The envs a run or registration of ``plan`` composes: each its tasks deploy, and each those hold but not a computer
+    env's own apps and driver, which run inside it; and each it pulls in from an installed bundle, whose one write every
+    bundle shares. None, every env, for a plan with no tasks, which writes its envs for others to deploy, each alone."""
     tasks = [write.source for write in plan.writes if write.kind is BundleKind.TASK]
     if not tasks:
         return None
@@ -403,7 +404,7 @@ def _deployed_envs(plan: Plan) -> frozenset[str] | None:
         cls = get_env_registry().get(source.entry.type) if source is not None else None
         if source is not None and not (cls is not None and issubclass(cls, ComputerEnv)):
             named += [ref.id for ref in source.references if ref.kind is EntityKind.ENV]
-    return frozenset(deployed)
+    return frozenset(deployed | {env_id for env_id, source in envs.items() if source.entry in plan.origins})
 
 
 def _pinned(plan: Plan, write: Write, refs: tuple[EntityRef, ...]) -> Any:

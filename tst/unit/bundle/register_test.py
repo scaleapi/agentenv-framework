@@ -661,3 +661,17 @@ def test_a_registration_killed_after_a_write_and_before_its_row_is_done_resumes(
 
     assert {done.write.id: (done.version, done.reused) for done in resumed.materialization.writes} == {
         "triage-docs": (1, True), "triage-greeting": (1, False), "triage-t": (1, False)}
+
+
+def test_an_installed_app_a_registration_pulls_in_is_composed_though_no_task_deploys_it_alone(home, composed,
+                                                                                            monkeypatch):
+    """Every bundle shares the shared store's one write of an installed bundle's env, and a local run can't compose the
+    store's env at its first deploy, so the registration that writes it leaves it deployable."""
+    composings = []
+    root = _desktop(home, monkeypatch, lambda env, pairs=None, composing=None: composings.append(env.id), {
+        "envs/desktop/env.toml": 'type = "computer"\ncomputer = "ubuntu-24.04"\ndriver = "reference"\n'
+                                 'apps = ["chromium"]\n'})
+
+    register_bundle(root)
+
+    assert sorted(composings) == ["chromium", "desk-desktop"]
