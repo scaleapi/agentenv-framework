@@ -45,11 +45,14 @@ def _status(image, **status) -> None:
     (image / "status.json").write_text(json.dumps(status))
 
 
+EARLIER_STATUS_AGE_NS = 1_000_000_000
+
+
 def _status_from_before(image, **status) -> None:
-    """A status the follower wrote for an earlier config, a second before this one: a file's mtime on Linux moves in
-    ticks of a few milliseconds, so a config written right after a status can share its mtime."""
+    """A status the follower wrote for an earlier config, ``EARLIER_STATUS_AGE_NS`` before this one: a file's mtime on
+    Linux moves in ticks of a few milliseconds, so a config written right after a status can share its mtime."""
     _status(image, **status)
-    before = time.time_ns() - 1_000_000_000
+    before = time.time_ns() - EARLIER_STATUS_AGE_NS
     os.utime(image / "status.json", ns=(before, before))
 
 
