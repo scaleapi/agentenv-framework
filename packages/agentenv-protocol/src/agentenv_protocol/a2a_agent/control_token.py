@@ -49,13 +49,19 @@ class ControlTokenMiddleware:
         self.token = token or take_control_token()
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] == "http" and _guarded(scope["path"]):
+        if scope["type"] == "http" and _guarded(_route_path(scope)):
             if not carries_control_token(Headers(scope=scope), self.token):
                 client = scope.get("client")
                 log_refusal(scope.get("method", ""), scope["path"], client[0] if client else None)
                 await JSONResponse({"detail": REFUSAL}, status_code=401)(scope, receive, send)
                 return
         await self.app(scope, receive, send)
+
+
+def _route_path(scope: Scope) -> str:
+    """The path the app's routes match, without the prefix it is mounted under, as Starlette's router reads it."""
+    path, root = scope["path"], scope.get("root_path", "")
+    return path[len(root):] if root and path.startswith(root) else path
 
 
 def _guarded(path: str) -> bool:

@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 # Reads the SDK serves for every agent that enables the extension, so the check changes nothing on the agent.
 _READS = ((A2AAgent.EXT_MCP_CONFIG, "list"), (A2AAgent.EXT_AGENT_CONFIG, "get"))
+_REQUEST_TIMEOUT_SECONDS = 30
 
 
 class VerifyA2AControlTokenStep(TaskStep):
@@ -48,8 +49,8 @@ class VerifyA2AControlTokenStep(TaskStep):
             url = (deployed.a2a_url or deployed.api_url) + route
             try:
                 async with httpx.AsyncClient() as client:
-                    without = await client.get(url, timeout=30)
-                    with_token = await client.get(url, headers=deployed.control_headers, timeout=30)
+                    without = await client.get(url, timeout=_REQUEST_TIMEOUT_SECONDS)
+                    with_token = await client.get(url, headers=deployed.control_headers, timeout=_REQUEST_TIMEOUT_SECONDS)
                 entry["refuses_without_token"] = without.status_code == 401
                 entry["accepts_with_token"] = with_token.status_code != 401
             except httpx.HTTPError as e:

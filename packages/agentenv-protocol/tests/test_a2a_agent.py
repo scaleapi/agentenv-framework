@@ -106,7 +106,7 @@ from pydantic import BaseModel, Field, ValidationError, field_serializer
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.responses import PlainTextResponse
-from starlette.routing import Route
+from starlette.routing import Mount, Route
 from starlette.testclient import TestClient
 
 
@@ -3071,7 +3071,7 @@ def test_an_agent_with_no_token_or_not_served_keeps_its_routes_open(monkeypatch)
     assert unserved == tokenless == 200
 
 
-def test_the_middleware_guards_a_hand_served_agents_extension_routes_but_staging_and_the_peer_tools(
+def test_the_middleware_guards_a_hand_served_agents_extension_routes_where_its_app_is_mounted_but_staging_and_the_peer_tools(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv(CONTROL_TOKEN_ENV, "s3cret")
@@ -3080,10 +3080,10 @@ def test_the_middleware_guards_a_hand_served_agents_extension_routes_but_staging
         return PlainTextResponse("ok")
 
     paths = ("/ext/agent-config", "/ext/staging/abc", "/ext/peer-agents/mcp", "/health")
-    app = Starlette(routes=[Route(path, ok) for path in paths], middleware=[Middleware(ControlTokenMiddleware)])
-    with TestClient(app) as agent:
-        without = [agent.get(path).status_code for path in paths]
-        with_token = agent.get("/ext/agent-config", headers=protocol_client.control_token_headers("s3cret"))
+    agent_app = Starlette(routes=[Route(path, ok) for path in paths], middleware=[Middleware(ControlTokenMiddleware)])
+    with TestClient(Starlette(routes=[Mount("/agent", agent_app)])) as agent:
+        without = [agent.get(f"/agent{path}").status_code for path in paths]
+        with_token = agent.get("/agent/ext/agent-config", headers=protocol_client.control_token_headers("s3cret"))
         left_in_environment = CONTROL_TOKEN_ENV in os.environ
 
     assert without == [401, 200, 200, 200]
