@@ -20,7 +20,7 @@ from packaging.utils import canonicalize_name
 from agent_env.config import get_config
 from agent_env.plugins import _requirements
 from agent_env.task_step.context import TaskStepContext
-from agent_env.task_step.task_step import RetryConfig, TaskStep, TaskStepDependency
+from agent_env.task_step.task_step import RetryConfig, StepRole, TaskStep, TaskStepDependency
 from agent_env.task_step.task_steps.verifiers.scoring import ScoreAggregator, aggregate_score
 from agent_env.task_step.thread_work import finish_on_thread
 from agent_env.utils.canonical import canonical_json
@@ -97,6 +97,7 @@ class VerifierTaskStep(TaskStep):
     and their ``__init__`` takes and passes on ``verifier_id``, ``score_aggregator`` and ``min_passing_score``, which
     ``_base_from_dict`` reads for them."""
 
+    step_role = StepRole.GRADER
     DEFAULT_SCORE_AGGREGATOR: ClassVar[ScoreAggregator] = ScoreAggregator.ALL_PASS
 
     def __init__(

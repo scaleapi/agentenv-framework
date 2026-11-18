@@ -12,7 +12,7 @@ from agent_env.plugins import _registration
 from agent_env.task.step_journal import replay_context
 from agent_env.task_step.context import TaskStepContext, VerifierNotPassingError
 from agent_env.task_step.context_ops import build_context_update_ops
-from agent_env.task_step.task_step import TaskStep
+from agent_env.task_step.task_step import StepRole, TaskStep
 from agent_env.task_step.task_steps.verifiers import (
     Grade, ScoreAggregator, Verification, VerifierTaskStep, aggregate_score,
 )
@@ -274,6 +274,10 @@ def test_the_grade_and_legacy_entry_survive_the_step_journal():
 
     assert stored["metadata"]["grades"] == post.metadata["grades"]
     assert stored["metadata"]["verifications"] == post.metadata["verifications"]
+
+
+def test_a_verifier_on_the_base_is_a_grader():
+    assert _Toy.step_role is StepRole.GRADER and "step_role" not in _Toy().to_dict()
 
 
 def test_a_verifier_must_implement_verify():

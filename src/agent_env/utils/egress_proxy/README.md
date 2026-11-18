@@ -1,16 +1,17 @@
 # The egress proxy
 
 `egress` is the `ubuntu-24.04` base computer's explicit proxy, the way every session program goes out. The session's
-programs read the universe's time (the clock library in `../clock/`), so a client that checks a site's certificate with
+programs read the universe's time (the clock library in `../faketime_clock/`), so a client that checks a site's certificate with
 its own TLS, Chromium, Java or an official Node build, refuses a live site once the clock is months back or ahead. The
 proxy runs on real time and hands such a client a certificate that holds at the universe's date when it must.
 
-It is one static Go program. The base's Dockerfile builds it in a stage of its own, after `go vet` and its tests, so no
-Go toolchain is left in the image. `go.sum` pins its modules, and Dependabot's `gomod` entry keeps them current.
+It is one static Go program. Each image that runs it takes this folder through its `shared_sources.toml` (the two
+bases and the Claude Code agent image), and its Dockerfile builds it in a stage of its own, after `go vet` and its
+tests, so no Go toolchain is left in the image. `go.sum` pins its modules, and Dependabot's `gomod` entry keeps them current.
 
 ## What runs where
 
-- `egress boot` runs once, as root, in the base's init (`../start-desktop`), before root's supervisord starts:
+- `egress boot` runs once, as root, in the base's init (`computers/artifacts/ubuntu-24.04/start-desktop`), before root's supervisord starts:
   - it mints the computer's CA once, valid from 1950 to 9999 as routed sites' certificates are, its key in
     `/etc/agentenv/egress/` and readable by `agentenv-egress` alone;
   - it trusts the CA in the system store, agent-env's trust files (`/etc/agentenv/ca.pem`, `ca-bundle.pem`) and the
@@ -18,10 +19,10 @@ Go toolchain is left in the image. `go.sum` pins its modules, and Dependabot's `
   - it trusts the CA in every certifi bundle and every JDK's store an app brings, naming any that can't take it among
     its warnings, and the computer boots;
   - its report is `/var/log/agentenv-root/egress-boot.log`.
-- `egress serve` runs as `agentenv-egress` under root's supervisord (`../root.conf`), on `127.0.0.1:3128`, or where
+- `egress serve` runs as `agentenv-egress` under root's supervisord (the base's `root.conf`), on `127.0.0.1:3128`, or where
   `AGENTENV_EGRESS_PROXY` names, as a base whose own proxy holds that address does. The clock library leaves that
   user on real time.
-- The session's supervisord (`../supervisord.conf`), and a login shell through `agentenv-egress.sh`, point
+- The session's supervisord (the base's `supervisord.conf`), and a login shell through `agentenv-egress.sh`, point
   `HTTP(S)_PROXY`, `ALL_PROXY`, Java's proxy properties (`JAVA_TOOL_OPTIONS`) and Node's `fetch`
   (`NODE_USE_ENV_PROXY`) at it.
 - agent-env's own servers in the computer, the driver and its apps' servers, run on real time and send their own
@@ -34,7 +35,10 @@ Go toolchain is left in the image. `go.sum` pins its modules, and Dependabot's `
   rewritten, then bytes are relayed both ways. An upgrade keeps its `Connection` and `Upgrade` headers; any other
   request closes once answered.
 - **`CONNECT`**: the destination's name is resolved, and the connection is refused unless every address is global
-  (`notGlobal` lists the blocks that aren't). A routed site's name, in the hosts file's `# agentenv sites` block, goes
+  (`notGlobal` lists the blocks that aren't). An agent's image sets `AGENTENV_EGRESS_PRIVATE=allow` for the proxy,
+  which then reaches private networks' addresses too (RFC 1918, RFC 6598's shared space, IPv6 unique local), as the
+  agent's processes do directly anyway, so a model endpoint there is reached on real time; loopback, link-local and the
+  rest stay refused. A computer's proxy doesn't set it. A routed site's name, in the hosts file's `# agentenv sites` block, goes
   to the site proxy there. Bytes that aren't TLS, and a routed site's TLS, are relayed untouched.
 - **TLS, with the clock unarmed**: relayed untouched.
 - **TLS, with the clock armed**: each of the name's addresses is decided by its own probe, a handshake the proxy makes
@@ -62,7 +66,7 @@ the session user's reach. Its fields, each there when it applies:
 |---|---|
 | `t` | When the line was written, in seconds |
 | `client`, `method`, `host`, `port` | Who asked, how, and for what |
-| `allowed`, `dst` | `global` or `routed`, and the address dialled |
+| `allowed`, `dst` | `global`, `private` or `routed`, and the address dialled |
 | `mode` | `pass`, `splice`, `intercept`, `http`, `upgrade` or `refused` |
 | `decision` | `real`, `inside`, `outside`, `unverified`, `probe_failed`, `routed` or `not TLS` |
 | `sni`, `alpn_offered`, `alpn` | The client's server name and protocols, and the one the site picked |
