@@ -6,8 +6,9 @@ env card lists (``legacy_protocol.backing_servers``) whose own card advertises i
 An env whose card offers no set_time has no gateway clock to arm, as a computer deployed alone, and is refused
 saying to deploy it in a multi env; a record that kept no card is refused saying so.
 Then has every agent registered with the env whose card serves clock/v1 sync_time follow the clock as a computer does
-(``agent_clock``), so every program it runs reads the env's time and later clock writes can wait for it. An agent that
-can't is skipped, as every agent is until its image runs the follower, or fails the step with require_agent_clock.
+(``agent_env.a2a_agent.clock``), so every program it runs reads the env's time and later clock writes can wait for it.
+An agent that can't is skipped, as every agent is until its image runs the follower, or fails the step with
+require_agent_clock.
 Non-advertisers are skipped when tolerate_missing_sync_time (default True), and websites always. Place right
 before prompt_agent so the virtual timeline starts at agent-start; when setup needs the clock armed, arm it at rate 0
 and start it with set_env_clock_rate right before prompt_agent.
@@ -191,9 +192,9 @@ class SyncEnvClockTaskStep(TaskStep):
         return context
 
     async def _follow_agents(self, context: TaskStepContext, deployed, env_get_time_url: Optional[str]) -> list[dict]:
-        """Have every agent registered with the env follow its clock (``agent_clock.follow``): one that can't is
+        """Have every agent registered with the env follow its clock (``a2a_agent.clock.follow``): one that can't is
         reported and skipped, or fails the step under ``require_agent_clock``."""
-        from agent_env.task_step.task_steps.agent_clock import follow_in, torn_down
+        from agent_env.a2a_agent.clock import follow_in, torn_down
 
         outcomes = []
         for agent in context.deployed_agents:

@@ -547,7 +547,7 @@ class DeployAgentTaskStep(TaskStep):
             env_ids=list(self.env_ids),
         ))
         # An agent deployed while a clock is armed follows it, as sync_env_clock had every agent then.
-        from agent_env.task_step.task_steps.agent_clock import follow_armed_clocks
+        from agent_env.a2a_agent.clock import follow_armed_clocks
         await follow_armed_clocks(context, context.deployed_agents[-1])
         return context
 
