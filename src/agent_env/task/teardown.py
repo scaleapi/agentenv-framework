@@ -199,9 +199,17 @@ def record_teardown(instance_id: str, context: TaskStepContext, report: Teardown
                 time.sleep(_RECORD_BACKOFF_SECONDS * 2 ** attempt)
 
 
-def attempt_epoch(instance_id: str) -> int:
-    """``instance_id``'s attempt epoch now, which a teardown about to start fences ``record_teardown`` with."""
-    return get_task_instance_store().get(instance_id).attempt_epoch
+def attempt_epoch(instance_id: Optional[str]) -> Optional[int]:
+    """``instance_id``'s attempt epoch now, which a teardown about to start fences ``record_teardown`` with; None,
+    leaving the teardown unrecorded, when there's no instance or it can't be read, which never stops the teardown."""
+    if instance_id is None:
+        return None
+    try:
+        return get_task_instance_store().get(instance_id).attempt_epoch
+    except Exception as e:  # noqa: BLE001
+        logger.warning("teardown: instance %s couldn't be read, so what its teardown leaves won't be recorded: %s",
+                       instance_id, _described(e))
+        return None
 
 
 async def before_teardown(context: TaskStepContext, within: float, agent_names: Optional[list[str]] = None) -> None:

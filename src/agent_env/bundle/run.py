@@ -394,18 +394,6 @@ def _record_teardowns(runs: Sequence[TaskRun]) -> None:
             record_teardown(run.instance_id, run.context, run.torn_down, run.attempt_epoch)
 
 
-def _epoch(instance_id: str | None) -> int | None:
-    """``instance_id``'s attempt epoch as its teardown begins, read synchronously so no signal cuts it short; None
-    when there's no instance or it can't be read."""
-    if instance_id is None:
-        return None
-    try:
-        return attempt_epoch(instance_id)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("Couldn't read instance %s before its teardown: %s", instance_id, e)
-        return None
-
-
 def _bundle_run(plan: Plan, materialization: Materialization, runs: tuple[TaskRun, ...],
                 skipped: tuple[BundleEntry, ...]) -> BundleRun:
     by_id = {run.task.id: run for run in runs}
@@ -598,7 +586,7 @@ async def _run_all(
                     raise
                 cancelled = True
             duration = time.monotonic() - began
-            epoch = _epoch(context.instance_id)
+            epoch = attempt_epoch(context.instance_id)  # synchronous, so no signal cuts it short
             report = await settle(context, cancelled)
         finally:
             running.discard(me)

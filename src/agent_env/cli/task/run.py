@@ -288,7 +288,7 @@ def _tear_down_kept(kept) -> None:
     """Tear down what the runs kept; a Ctrl-C stops it. Counts signals afresh, so the one that got here doesn't."""
     count = sum(len(left) for _, _, left in kept)
     click.echo(f"\nTearing down {count} {'sandbox' if count == 1 else 'sandboxes'} (Ctrl-C again to stop now)")
-    epochs = [attempt_epoch(context.instance_id) if context.instance_id else None for _, context, _ in kept]
+    epochs = [attempt_epoch(context.instance_id) for _, context, _ in kept]
     with Interrupts() as stopper:
         try:
             reports = stopper.run(stopper.stopping(teardown_run(context) for _, context, _ in kept))

@@ -20,6 +20,7 @@ from agent_env.runner import store as run_store
 from agent_env.runner.runner import RunStatus
 from agent_env.task import Task
 from agent_env.task.store import get_task_instance_store, register_task_instance, seed_task_instance_context
+from agent_env.task import teardown as teardown_core
 from agent_env.task.teardown import TORN_DOWN_KEY, RecordedSandbox, TeardownReport
 from agent_env.task_step.context import DeployedSandbox
 
@@ -140,6 +141,19 @@ def test_keep_names_the_command_that_finishes_a_teardown_that_left_a_sandbox_up_
                          result.output).group(1)
     assert "Couldn't tear down sb-1: stuck" in result.output
     assert get_task_instance_store().get(instance).context["metadata"]["teardown_tried"] is True
+
+
+def test_keep_tears_down_what_it_held_though_its_instance_cant_be_read_to_record_it(monkeypatch, tmp_path, torn_down):
+    class Unreadable:
+        def get(self, instance_id):
+            raise ConnectionError("the store went away")
+
+    monkeypatch.setattr(teardown_core, "get_task_instance_store", Unreadable)
+
+    result = _invoke(monkeypatch, tmp_path, _Deploys(), "run", "--keep", signal_after=1.0)
+
+    assert result.exit_code == 0, result.output
+    assert _ids(torn_down) == ["sb-1"]
 
 
 def test_keep_still_tears_down_a_run_ctrl_c_cancels(monkeypatch, tmp_path, torn_down):
