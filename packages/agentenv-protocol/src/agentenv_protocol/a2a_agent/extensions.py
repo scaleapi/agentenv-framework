@@ -150,8 +150,9 @@ class SkillAddResponse(ExtensionResponse):
     name: str
 
 
+MAX_TRAJECTORY_FORMAT_LENGTH = 128
 #: A trajectory format id a read may name, such as ``my-cli-events/1``; the card's trajectory ``formats`` lists them.
-TrajectoryFormat = Annotated[str, Field(min_length=1, max_length=128)]
+TrajectoryFormat = Annotated[str, Field(min_length=1, max_length=MAX_TRAJECTORY_FORMAT_LENGTH)]
 
 
 class TaskTrajectoryRequest(ExtensionRequest):
@@ -1111,8 +1112,8 @@ def _configure_trajectory(*, live: bool = False, native: str | None = None) -> E
         raise TypeError("live must be a boolean")
     if native is not None and not isinstance(native, str):
         raise TypeError("native must be a format id string")
-    if native is not None and (not native.strip() or len(native) > 128):
-        raise ValueError("native must be a format id of 1 to 128 characters")
+    if native is not None and (not native.strip() or len(native) > MAX_TRAJECTORY_FORMAT_LENGTH):
+        raise ValueError(f"native must be a format id of 1 to {MAX_TRAJECTORY_FORMAT_LENGTH} characters")
     return ExtensionConfiguration(
         wire_params={"formats": [native], "native": native, "default": native} if native else {},
         options={"native": native} if native else {},
