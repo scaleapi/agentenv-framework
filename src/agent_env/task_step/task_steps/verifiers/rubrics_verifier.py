@@ -19,7 +19,8 @@ from agent_env.a2a_agent.object_transfer import (
 from agent_env.a2a_agent.a2a_agent import unwritten_local_agent
 from agent_env.a2a_agent.staging import transfer_store
 from agent_env.config import get_config
-from agent_env.config.model import ModelParam, ModelRole
+from agent_env.config.errors import ConfigError
+from agent_env.config.model import ModelParam, ModelRole, no_key_for
 from agent_env.providers.sandbox_providers.sandbox import into_container
 from agent_env.task_step.context import (
     PromptResponse,
@@ -73,6 +74,8 @@ from agent_env.task_step.task_steps.verifiers.judge_utils.trajectory_filter impo
 )
 
 logger = logging.getLogger(__name__)
+# How a judge sent to a URL other than the configured endpoint is given that URL's key.
+_JUDGE_KEY_HOW = "judge_litellm_api_key, or litellm_api_key, in the run's overrides"
 
 
 # The judge echoes each criterion's id back and results are matched by exact string.
@@ -906,15 +909,18 @@ class RubricsVerifierTaskStep(TaskStep):
                 from agent_env.config import get_config
 
                 config = get_config()
-                api_key = (
-                    config.resolve_reference(overrides.get("judge_litellm_api_key") or overrides.get("litellm_api_key"))
-                    or config.get_litellm_api_key()
-                )
+                api_key = config.resolve_reference(
+                    overrides.get("judge_litellm_api_key") or overrides.get("litellm_api_key"))
                 litellm_base_url = (
                     overrides.get("judge_litellm_base_url")
                     or overrides.get("litellm_base_url")
                     or config.get_litellm_base_url()
                 )
+                if not api_key:
+                    if not config.is_model_endpoint(litellm_base_url):
+                        raise ConfigError(f"{self.type} '{self.id}': its judge agent: "
+                                          f"{no_key_for(litellm_base_url, _JUDGE_KEY_HOW)}")
+                    api_key = config.get_litellm_api_key()
                 env_vars = {"LITELLM_API_KEY": api_key, "LITELLM_BASE_URL": litellm_base_url}
                 resolved_judge_id = self.judge_a2a_agent_id or config.get_default_a2a_agent_id()
                 try:
@@ -1352,15 +1358,11 @@ class RubricsVerifierTaskStep(TaskStep):
 
         overrides = context.metadata.get("user_overrides", {})
         config = get_config()
-        call_config = config.resolve_model_call(
-            model,
-            default_api_key=config.resolve_reference(
-                overrides.get("judge_litellm_api_key") or overrides.get("litellm_api_key")
-            ),
-            base_override=overrides.get("judge_litellm_base_url")
-            or overrides.get("litellm_base_url")
-            or self.default_model_api_base,
-        )
+        api_key = config.resolve_reference(overrides.get("judge_litellm_api_key") or overrides.get("litellm_api_key"))
+        base = overrides.get("judge_litellm_base_url") or overrides.get("litellm_base_url") or self.default_model_api_base
+        if base and not api_key and not config.is_model_endpoint(base):
+            raise ConfigError(f"{self.type} '{self.id}': {no_key_for(base, _JUDGE_KEY_HOW)}")
+        call_config = config.resolve_model_call(model, default_api_key=api_key, base_override=base)
         text_blocks: list[dict] = [{"type": "text", "text": eval_prompt}]
         cached = bool(cached_prefix) and eval_prompt.startswith(cached_prefix or "") and _caches_prompts(model)
         if cached:
