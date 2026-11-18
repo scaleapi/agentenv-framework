@@ -32,8 +32,9 @@ from agentenv_protocol.a2a_agent import (
     enable,
     extension,
 )
-from agentenv_protocol.a2a_agent import framework
-from agentenv_protocol.a2a_agent._trajectory_log import TaskTrajectories
+from agentenv_protocol import AgentEnvError
+from agentenv_protocol.a2a_agent import ContextObjectTrajectoryRequest, framework
+from agentenv_protocol.a2a_agent._trajectory_log import TaskTrajectories, TrajectoryBody
 from agentenv_protocol.a2a_agent.framework import _SdkServices
 from agentenv_protocol.a2a_agent.tasks import v1 as tasks_v1
 
@@ -150,6 +151,7 @@ def test_live_card_advertises_the_cursor_reads() -> None:
     request = extension_card["params"]["methods"]["get"]["request"]
 
     assert request == {
+        "optional": ["format"],
         "oneOf": [
             {"required": ["task_id"]},
             {"required": ["task_id", "objects"]},
@@ -163,6 +165,7 @@ def test_live_card_advertises_the_cursor_reads() -> None:
     assert card_request_accepts(request, {"task_id", "after"})
     assert card_request_accepts(request, {"task_id", "after", "limit"})
     assert card_request_accepts(request, {"context_id", "after"})
+    assert card_request_accepts(request, {"task_id", "format"})
     with pytest.raises(TypeError, match="live must be a boolean"):
         enable(TRAJECTORY_V1, live="yes")
 
@@ -210,7 +213,7 @@ def test_task_read_follows_a_running_task() -> None:
         gates.release.set()
         assert _within(5, lambda: _task_state(client, task_id) == "completed")
         final = _trajectory(client, {"task_id": task_id})
-        assert final.json() == {"trajectory": _events("hello", 3)}
+        assert final.json() == {"trajectory": _events("hello", 3), "format": "test-events/1"}
         done = _trajectory(client, {"task_id": task_id, "after": 0}).json()
         assert done["state"] == "completed"
         assert done["events"] == _events("hello", 3)
@@ -254,7 +257,8 @@ def test_a_failed_task_keeps_its_events(result: str, a2a_state: str) -> None:
         assert read["state"] == "failed"
         assert read["events"] == _events("hello", 3)
         assert _trajectory(client, {"task_id": task_id}).json() == {
-            "trajectory": _events("hello", 3)
+            "trajectory": _events("hello", 3),
+            "format": "test-events/1",
         }
 
 
@@ -317,7 +321,8 @@ def test_a_native_trajectory_is_the_final_record(caplog: pytest.LogCaptureFixtur
         assert _within(5, lambda: _task_state(client, task_id) == "completed")
 
         assert _trajectory(client, {"task_id": task_id}).json() == {
-            "trajectory": [{"native": True}]
+            "trajectory": [{"native": True}],
+            "format": "native/1",
         }
         assert _trajectory(client, {"task_id": task_id, "after": 0}).json()["events"] == [
             {"live": True}
@@ -347,7 +352,8 @@ def test_context_reads_span_turns_in_order() -> None:
         assert tail["events"] == everything[1:3]
         assert (tail["next"], tail["has_more"]) == (3, True)
         assert _trajectory(client, {"context_id": "context-1"}).json() == {
-            "trajectory": everything
+            "trajectory": everything,
+            "format": "test-events/1",
         }
 
 
@@ -447,7 +453,7 @@ def test_a_sealed_log_refuses_more_events() -> None:
         log.append({"step": 2})
     with pytest.raises(RuntimeError, match="can no longer change"):
         log.set_format("late/1")
-    assert trajectories.final("task-1") == b'[{"step":1}]'
+    assert trajectories.final("task-1") == TrajectoryBody(b'[{"step":1}]', "test-events/1")
 
 
 def test_reads_never_return_a_partial_event() -> None:
@@ -513,7 +519,7 @@ def test_eviction_drops_completed_contexts_but_never_running_ones() -> None:
     assert trajectories.task_page("running", 0, 10, 1_000) is not None
     assert trajectories.final("done-1") is None
     assert trajectories.final("done-2") is None
-    assert trajectories.final("done-3") == b"[1]"
+    assert trajectories.final("done-3") == TrajectoryBody(b"[1]", None)
 
 
 def test_the_context_whose_task_just_ended_is_kept_for_its_final_read() -> None:
@@ -526,7 +532,7 @@ def test_the_context_whose_task_just_ended_is_kept_for_its_final_read() -> None:
 
     trajectories.seal("ending", TrajectoryState.COMPLETED)
 
-    assert trajectories.final("ending") == b'[{"step":1}]'
+    assert trajectories.final("ending") == TrajectoryBody(b'[{"step":1}]', "test-events/1")
 
 
 def test_a_large_running_trajectory_warns_once(
@@ -629,6 +635,240 @@ def test_the_log_is_byte_identical_to_the_native_trajectory_it_replaces(monkeypa
             response = _trajectory(client, {"task_id": task_id, "objects": {"trajectory": grant}})
             assert response.status_code == 200, response.text
 
-    assert inline[0] == inline[1] == {"trajectory": _NATIVE_EVENTS}
+    assert inline[0] == inline[1] == {"trajectory": _NATIVE_EVENTS, "format": "test-events/1"}
     assert uploaded[0] == uploaded[1]
     assert json.loads(uploaded[1]) == _NATIVE_EVENTS
+
+
+def _grant() -> dict[str, Any]:
+    return {
+        "media_type": "application/json",
+        "max_bytes": 1_000_000,
+        "write": {
+            "kind": "http-put",
+            "url": "https://objects.example.test/write",
+            "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1))
+            .isoformat(timespec="seconds")
+            .replace("+00:00", "Z"),
+        },
+    }
+
+
+def _card_params(agent: AgentEnvAgent) -> dict[str, Any]:
+    card = agent.create_app().state.agentenv_a2a.card.model_dump(mode="json", exclude_none=True)
+    (extension_card,) = [
+        item for item in card["capabilities"]["extensions"] if item["uri"] == TRAJECTORY_V1.uri
+    ]
+    return extension_card["params"]
+
+
+def _native_agent(*, native: str | None = "test-events/1", live: bool = True) -> AgentEnvAgent:
+    @a2a_agent(identity=_IDENTITY, extensions=(enable(TRAJECTORY_V1, live=live, native=native),))
+    class Agent(AgentEnvAgent):
+        async def run(self, request: TaskRequest) -> TaskResult:
+            for event in _events(request.parts[0].text, 2):
+                request.trajectory.append(event)
+            return TaskResult.text("done")
+
+    return Agent()
+
+
+def test_a_card_declaring_native_offers_it_as_its_formats_and_default() -> None:
+    params = _card_params(_native_agent())
+
+    assert (params["formats"], params["native"], params["default"]) == (
+        ["test-events/1"],
+        "test-events/1",
+        "test-events/1",
+    )
+    assert params["methods"]["get"]["request"]["optional"] == ["format"]
+    assert not {"formats", "native", "default"} & set(_card_params(_live_agent(_Gates())))
+
+
+@pytest.mark.parametrize(
+    ("native", "error"),
+    [(1, TypeError), ("", ValueError), (" ", ValueError), ("x" * 129, ValueError)],
+)
+def test_native_must_be_a_format_id(native: Any, error: type[Exception]) -> None:
+    with pytest.raises(error, match="native must be"):
+        enable(TRAJECTORY_V1, native=native)
+
+
+def test_a_read_naming_the_native_format_or_none_is_served_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def capture_upload(_target, body: bytes):
+        return Uploaded(size_bytes=len(body))
+
+    monkeypatch.setattr(framework, "upload", capture_upload)
+    with TestClient(_native_agent().create_app()) as client:
+        task_id = _send(client, "hello", "message-1")
+        assert _within(5, lambda: _task_state(client, task_id) == "completed")
+        for named in ({}, {"format": "test-events/1"}):
+            assert _trajectory(client, {"task_id": task_id, **named}).json() == {
+                "trajectory": _events("hello", 2),
+                "format": "test-events/1",
+            }
+            assert _trajectory(client, {"context_id": "context-1", **named}).json() == {
+                "trajectory": _events("hello", 2),
+                "format": "test-events/1",
+            }
+            page = _trajectory(client, {"task_id": task_id, "after": 0, **named}).json()
+            assert (page["format"], page["events"]) == ("test-events/1", _events("hello", 2))
+            uploaded = _trajectory(
+                client, {"task_id": task_id, "objects": {"trajectory": _grant()}, **named}
+            ).json()
+            assert uploaded["format"] == "test-events/1"
+
+
+@pytest.mark.parametrize(
+    "read",
+    [
+        {"task_id": "task-1"},
+        {"task_id": "task-1", "objects": {"trajectory": "GRANT"}},
+        {"task_id": "task-1", "after": 0},
+        {"context_id": "context-1"},
+        {"context_id": "context-1", "objects": {"trajectory": "GRANT"}},
+        {"context_id": "context-1", "after": 0},
+    ],
+)
+def test_a_read_naming_a_format_the_card_does_not_offer_is_refused(read: dict[str, Any]) -> None:
+    if "objects" in read:
+        read = {**read, "objects": {"trajectory": _grant()}}
+    with TestClient(_native_agent().create_app()) as client:
+        response = _trajectory(client, {**read, "format": "atif/1"})
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "ok": False,
+        "error": {
+            "code": "format_not_offered",
+            "message": "the trajectory format 'atif/1' is not offered; this agent offers test-events/1",
+            "retryable": False,
+            "applied": "no",
+        },
+    }
+
+
+def test_a_card_without_native_refuses_every_named_format() -> None:
+    with TestClient(_live_agent(_Gates()).create_app()) as client:
+        task_id = _send(client, "hello", "message-1")
+        assert _within(5, lambda: _task_state(client, task_id) == "completed")
+        response = _trajectory(client, {"task_id": task_id, "format": "test-events/1"})
+        assert _trajectory(client, {"task_id": task_id}).json()["format"] == "test-events/1"
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "format_not_offered"
+    assert "lists no formats" in response.json()["error"]["message"]
+
+
+def test_an_unoffered_format_never_reaches_the_agents_own_handlers() -> None:
+    called: list[str] = []
+
+    @a2a_agent(identity=_IDENTITY, extensions=(enable(TRAJECTORY_V1, live=True, native="test-events/1"),))
+    class Agent(AgentEnvAgent):
+        async def run(self, request: TaskRequest) -> TaskResult:
+            return TaskResult.text("done")
+
+        @extension(TRAJECTORY_V1.get.context)
+        async def context(self, request: ContextTrajectoryRequest) -> dict[str, Any]:
+            called.append(request.format or "")
+            return {"trajectory": [], "format": "test-session/1"}
+
+        @extension(TRAJECTORY_V1.get.context_objects)
+        async def context_objects(self, request: ContextObjectTrajectoryRequest) -> dict[str, Any]:
+            raise AssertionError("not reached")
+
+    with TestClient(Agent().create_app()) as client:
+        refused = _trajectory(client, {"context_id": "context-1", "format": "atif/1"})
+        served = _trajectory(client, {"context_id": "context-1", "format": "test-events/1"})
+
+    assert refused.json()["error"]["code"] == "format_not_offered"
+    assert served.json() == {"trajectory": [], "format": "test-session/1"}
+    assert called == ["test-events/1"]
+
+
+def test_a_declared_native_format_needs_no_set_format_and_takes_no_other() -> None:
+    log = TrajectoryLog(native="test-events/1")
+    log.append({"step": 1})
+    log.set_format("test-events/1")
+    with pytest.raises(ValueError, match="'other/1' is not 'test-events/1', the native format the card declares"):
+        log.set_format("other/1")
+
+    with TestClient(_native_agent(live=False).create_app()) as client:
+        task_id = _send(client, "hello", "message-1")
+        assert _within(5, lambda: _task_state(client, task_id) == "completed")
+        assert _trajectory(client, {"task_id": task_id}).json()["format"] == "test-events/1"
+
+
+@pytest.mark.parametrize("native", [None, "pi-json-events/v1"])
+def test_a_returned_native_trajectory_keeps_its_format(native: str | None) -> None:
+    @a2a_agent(identity=_IDENTITY, extensions=(enable(TRAJECTORY_V1, native=native),))
+    class Agent(AgentEnvAgent):
+        async def run(self, request: TaskRequest) -> TaskResult:
+            return (
+                TaskResult.builder()
+                .succeeded()
+                .add_text("done")
+                .native_trajectory(format="pi-json-events/v1", payload=_NATIVE_EVENTS)
+                .build()
+            )
+
+    with TestClient(Agent().create_app()) as client:
+        task_id = _send(client, "go", "message-1")
+        assert _within(5, lambda: _task_state(client, task_id) == "completed")
+        assert _trajectory(client, {"task_id": task_id}).json() == {
+            "trajectory": _NATIVE_EVENTS,
+            "format": "pi-json-events/v1",
+        }
+
+
+def test_a_native_trajectory_in_another_format_fails_the_task(caplog: pytest.LogCaptureFixture) -> None:
+    @a2a_agent(identity=_IDENTITY, extensions=(enable(TRAJECTORY_V1, native="pi-json-events/v1"),))
+    class Agent(AgentEnvAgent):
+        async def run(self, request: TaskRequest) -> TaskResult:
+            return (
+                TaskResult.builder()
+                .succeeded()
+                .add_text("done")
+                .native_trajectory(format="pi-json-events/v2", payload=_NATIVE_EVENTS)
+                .build()
+            )
+
+    with caplog.at_level(logging.ERROR), TestClient(Agent().create_app()) as client:
+        task_id = _send(client, "go", "message-1")
+        assert _within(5, lambda: _task_state(client, task_id) == "failed")
+        assert _trajectory(client, {"task_id": task_id}).status_code == 404
+
+    assert "returned a native trajectory in 'pi-json-events/v2', not 'pi-json-events/v1'" in caplog.text
+
+
+def test_an_agent_env_error_from_an_agents_own_handler_answers_its_status_and_body() -> None:
+    @a2a_agent(identity=_IDENTITY, extensions=(enable(TRAJECTORY_V1, live=True),))
+    class Agent(AgentEnvAgent):
+        async def run(self, request: TaskRequest) -> TaskResult:
+            return TaskResult.text("done")
+
+        @extension(TRAJECTORY_V1.get.context)
+        async def context(self, request: ContextTrajectoryRequest) -> dict[str, Any]:
+            raise AgentEnvError("not_ready", "the session is still starting", retryable=True, status=409)
+
+        @extension(TRAJECTORY_V1.get.context_objects)
+        async def context_objects(self, request: ContextObjectTrajectoryRequest) -> dict[str, Any]:
+            raise RuntimeError("boom")
+
+    with TestClient(Agent().create_app()) as client:
+        typed = _trajectory(client, {"context_id": "context-1"})
+        opaque = _trajectory(client, {"context_id": "context-1", "objects": {"trajectory": _grant()}})
+
+    assert typed.status_code == 409
+    assert typed.json() == {
+        "ok": False,
+        "error": {
+            "code": "not_ready",
+            "message": "the session is still starting",
+            "retryable": True,
+            "applied": "no",
+        },
+    }
+    assert opaque.status_code == 500
+    assert "boom" not in opaque.text
+

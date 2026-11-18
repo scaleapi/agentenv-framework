@@ -572,7 +572,8 @@ async def test_sdk_trajectory_handler_uploads_portable_object(
                 "size_bytes": 19,
                 "sha256": hashlib.sha256(b'[{"type":"result"}]').hexdigest(),
             }
-        }
+        },
+        "format": None,
     }
     assert services.task_trajectories.final("task-1") is not None
 

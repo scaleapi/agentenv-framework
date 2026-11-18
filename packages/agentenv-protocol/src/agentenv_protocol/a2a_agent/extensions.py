@@ -150,12 +150,18 @@ class SkillAddResponse(ExtensionResponse):
     name: str
 
 
+#: A trajectory format id a read may name, such as ``my-cli-events/1``; the card's trajectory ``formats`` lists them.
+TrajectoryFormat = Annotated[str, Field(min_length=1, max_length=128)]
+
+
 class TaskTrajectoryRequest(ExtensionRequest):
     task_id: str
+    format: TrajectoryFormat | None = None
 
 
 class ContextTrajectoryRequest(ExtensionRequest):
     context_id: str
+    format: TrajectoryFormat | None = None
 
 
 class TrajectoryWriteObjects(ExtensionRequest):
@@ -171,11 +177,13 @@ class TrajectoryWriteObjects(ExtensionRequest):
 class TaskObjectTrajectoryRequest(ExtensionRequest):
     task_id: str
     objects: TrajectoryWriteObjects
+    format: TrajectoryFormat | None = None
 
 
 class ContextObjectTrajectoryRequest(ExtensionRequest):
     context_id: str
     objects: TrajectoryWriteObjects
+    format: TrajectoryFormat | None = None
 
 
 class TrajectoryUploadedObjects(ExtensionResponse):
@@ -204,12 +212,14 @@ class TaskEventsTrajectoryRequest(ExtensionRequest):
     task_id: str
     after: StrictInt = Field(ge=0)
     limit: StrictInt | None = Field(default=None, ge=1, le=MAX_TRAJECTORY_READ_EVENTS)
+    format: TrajectoryFormat | None = None
 
 
 class ContextEventsTrajectoryRequest(ExtensionRequest):
     context_id: str
     after: StrictInt = Field(ge=0)
     limit: StrictInt | None = Field(default=None, ge=1, le=MAX_TRAJECTORY_READ_EVENTS)
+    format: TrajectoryFormat | None = None
 
 
 class TrajectoryEventsResponse(ExtensionResponse):
@@ -1092,15 +1102,23 @@ def _configure_install(**declaration: Any) -> ExtensionConfiguration:
     return ExtensionConfiguration(wire_params=declaration)
 
 
-def _configure_trajectory(*, live: bool = False) -> ExtensionConfiguration:
+def _configure_trajectory(*, live: bool = False, native: str | None = None) -> ExtensionConfiguration:
     """``live=True`` advertises the cursor reads, which serve the framework's log while a
-    task runs, and the context reads the framework answers when the agent binds none."""
+    task runs, and the context reads the framework answers when the agent binds none.
+    ``native`` names the native log's format: the card offers it as ``formats``, ``native`` and
+    ``default``, and the log, a returned native trajectory and every read hold to it."""
     if not isinstance(live, bool):
         raise TypeError("live must be a boolean")
-    if not live:
-        return ExtensionConfiguration()
+    if native is not None and not isinstance(native, str):
+        raise TypeError("native must be a format id string")
+    if native is not None and (not native.strip() or len(native) > 128):
+        raise ValueError("native must be a format id of 1 to 128 characters")
     return ExtensionConfiguration(
-        variants={"get": {"task_events", "context_events", "context", "context_objects"}}
+        wire_params={"formats": [native], "native": native, "default": native} if native else {},
+        options={"native": native} if native else {},
+        variants=(
+            {"get": {"task_events", "context_events", "context", "context_objects"}} if live else {}
+        ),
     )
 
 

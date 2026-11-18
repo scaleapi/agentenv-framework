@@ -63,6 +63,8 @@ from .extensions import (
     enable,
 )
 from ..computer.errors import ComputerError
+from ..errors import AgentEnvError
+from ..types import error_body
 from . import clock as agent_clock
 from .control_token import REFUSAL, carries_control_token, log_guard, log_refusal, take_control_token
 from .peer_agents import PEER_MCP_PATH, PEER_MCP_SERVER_NAME, PeerAgents
@@ -518,6 +520,11 @@ def _unwrap_bound_handler(handler: Callable) -> Callable:
     return resolved
 
 
+def _agent_env_error_response(error: AgentEnvError) -> JSONResponse:
+    """An extension's ``AgentEnvError`` as its status and the body env servers answer with."""
+    return JSONResponse(error_body(**error.fields()), status_code=error.status)
+
+
 def _opaque_extension_error(stage: str) -> HTTPException:
     """Log an extension failure while keeping implementation details off the wire."""
     correlation_id = uuid.uuid4().hex
@@ -552,7 +559,11 @@ class _SdkServices:
         )
         self.mcp_servers: dict[str, dict[str, Any]] = {}
         self.cdp_endpoints: dict[str, dict[str, Any]] = {}
-        self.task_trajectories = TaskTrajectories()
+        trajectory = self._activations.get(TRAJECTORY_V1.uri)
+        native = trajectory.options.get("native") if trajectory is not None else None
+        #: What a trajectory read may name, as the card's trajectory ``formats`` lists them.
+        self.trajectory_formats: tuple[str, ...] = (native,) if native else ()
+        self.task_trajectories = TaskTrajectories(native=native)
         self._context_sessions = _BoundedContextSessions()
         self.skills: list[Mapping[str, Any]] = []
         self.identity_skills: dict[str, str] = {}
@@ -811,8 +822,8 @@ class _SdkServices:
         ):
             return self._trajectory_events(request)
         if isinstance(request, (TaskTrajectoryRequest, TaskObjectTrajectoryRequest)):
-            body = self.task_trajectories.final(request.task_id)
-            if body is None:
+            trajectory = self.task_trajectories.final(request.task_id)
+            if trajectory is None:
                 raise HTTPException(
                     status_code=404,
                     detail=(
@@ -820,19 +831,34 @@ class _SdkServices:
                     ),
                 )
         else:
-            body = self.task_trajectories.context_events(request.context_id)
-            if body is None:
+            trajectory = self.task_trajectories.context_events(request.context_id)
+            if trajectory is None:
                 raise HTTPException(
                     status_code=404, detail=f"Unknown context '{request.context_id}'"
                 )
         if isinstance(request, (TaskTrajectoryRequest, ContextTrajectoryRequest)):
-            return {"trajectory": json.loads(body)}
-        uploaded = await upload(request.objects.trajectory, body)
+            return {"trajectory": json.loads(trajectory.body), "format": trajectory.format}
+        uploaded = await upload(request.objects.trajectory, trajectory.body)
         return {
             "objects": {
                 "trajectory": uploaded.model_dump(mode="json"),
-            }
+            },
+            "format": trajectory.format,
         }
+
+    def check_trajectory_format(self, format: str | None) -> None:
+        """Refuse a trajectory read naming a format the card doesn't offer, before any handler
+        runs, the agent's own included."""
+        if format is None or format in self.trajectory_formats:
+            return
+        offered = ", ".join(self.trajectory_formats)
+        raise AgentEnvError(
+            "format_not_offered",
+            f"the trajectory format {format!r} is not offered; this agent offers {offered}"
+            if offered
+            else f"the trajectory format {format!r} is not offered; this agent's card lists no formats, "
+            "so its reads take none",
+        )
 
     def _trajectory_events(
         self, request: TaskEventsTrajectoryRequest | ContextEventsTrajectoryRequest
@@ -1205,8 +1231,12 @@ class A2AAgentApplication:
                     extension_request = None
                 else:
                     extension_request = request_model.model_validate(payload)
+                if extension_uri == TRAJECTORY_V1.uri:
+                    self.services.check_trajectory_format(extension_request.format)
             except HTTPException:
                 raise
+            except AgentEnvError as exc:
+                return _agent_env_error_response(exc)
             except ValidationError as exc:
                 raise HTTPException(
                     status_code=400, detail=_validation_error_detail(exc)
@@ -1257,6 +1287,8 @@ class A2AAgentApplication:
                 return JSONResponse(result)
             except HTTPException:
                 raise
+            except AgentEnvError as exc:
+                return _agent_env_error_response(exc)
             except TriggerError as exc:
                 raise HTTPException(
                     status_code=exc.status_code, detail=str(exc)
@@ -1353,6 +1385,7 @@ class _StandardExecutor:
                 if result.outcome is TaskOutcome.FAILED
                 else TrajectoryState.COMPLETED,
                 native=None if native is None else _encode_trajectory(native.payload),
+                native_format=None if native is None else native.format,
             )
             message = updater.new_agent_message(parts=parts)
             if result.outcome is TaskOutcome.FAILED:

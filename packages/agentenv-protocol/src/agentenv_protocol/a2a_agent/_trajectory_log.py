@@ -23,12 +23,21 @@ class _TaskRecord:
     cancel_requested: bool = False
     final_state: TrajectoryState | None = None
     native: bytes | None = None
+    native_format: str | None = None
 
     @property
     def state(self) -> TrajectoryState:
         if self.final_state is not None:
             return self.final_state
         return TrajectoryState.RUNNING if len(self.log) else TrajectoryState.PENDING
+
+
+@dataclass(frozen=True, slots=True)
+class TrajectoryBody:
+    """A whole trajectory as a JSON value's bytes, and the format it is in."""
+
+    body: bytes
+    format: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,10 +57,11 @@ class TaskTrajectories:
     positions in a context read never shift. A context with a task pending or running is
     never evicted, nor is the one whose task just ended, so its final record is readable."""
 
-    def __init__(self, max_contexts: int = MAX_CACHED_CONTEXTS) -> None:
+    def __init__(self, max_contexts: int = MAX_CACHED_CONTEXTS, *, native: str | None = None) -> None:
         if max_contexts < 1:
             raise ValueError("max_contexts must be positive")
         self._max_contexts = max_contexts
+        self._native = native
         self._tasks: dict[str, _TaskRecord] = {}
         self._contexts: OrderedDict[str, list[str]] = OrderedDict()
 
@@ -59,7 +69,7 @@ class TaskTrajectories:
         """The task's log, created ``pending`` the first time the task is seen."""
         record = self._tasks.get(task_id)
         if record is None:
-            log = TrajectoryLog()
+            log = TrajectoryLog(native=self._native)
             log._task_id = task_id
             record = self._tasks[task_id] = _TaskRecord(context_id=context_id, log=log)
             self._contexts.setdefault(context_id, []).append(task_id)
@@ -87,12 +97,23 @@ class TaskTrajectories:
             record.cancel_requested = True
 
     def seal(
-        self, task_id: str, state: TrajectoryState, *, native: bytes | None = None
+        self,
+        task_id: str,
+        state: TrajectoryState,
+        *,
+        native: bytes | None = None,
+        native_format: str | None = None,
     ) -> None:
-        """End the task's trajectory; the first seal wins."""
+        """End the task's trajectory; the first seal wins. A native trajectory in a format
+        other than the card's native one is refused before anything is recorded."""
         record = self._tasks[task_id]
         if record.final_state is not None:
             return
+        if native is not None and self._native is not None and native_format != self._native:
+            raise ValueError(
+                f"task {task_id} returned a native trajectory in {native_format!r}, "
+                f"not {self._native!r}, the native format the card declares"
+            )
         if native is not None:
             if len(record.log):
                 logger.warning(
@@ -101,29 +122,34 @@ class TaskTrajectories:
                     task_id,
                 )
             record.native = native
+            record.native_format = native_format
         record.log._sealed = True
         record.final_state = TrajectoryState.CANCELED if record.cancel_requested else state
         self._touch(record.context_id)
         self._evict(keep=record.context_id)
 
-    def final(self, task_id: str) -> bytes | None:
-        """The ended task's final trajectory as a JSON array, or None if there is none yet."""
+    def final(self, task_id: str) -> TrajectoryBody | None:
+        """The ended task's final trajectory, a returned native one or else its log as a JSON
+        array, or None if there is none yet."""
         record = self._tasks.get(task_id)
         if record is None or record.final_state is None:
             return None
         self._touch(record.context_id)
         if record.native is not None:
-            return record.native
+            return TrajectoryBody(record.native, record.native_format)
         if not len(record.log):
             return None
-        return _json_array(record.log._events)
+        return TrajectoryBody(_json_array(record.log._events), record.log.format)
 
-    def context_events(self, context_id: str) -> bytes | None:
+    def context_events(self, context_id: str) -> TrajectoryBody | None:
         """Every event of the context's tasks in order, as a JSON array."""
         records = self._context_records(context_id)
         if records is None:
             return None
-        return _json_array([event for record in records for event in record.log._events])
+        return TrajectoryBody(
+            _json_array([event for record in records for event in record.log._events]),
+            _context_format(records),
+        )
 
     def task_page(
         self, task_id: str, after: int, max_events: int, max_bytes: int
@@ -186,10 +212,7 @@ class TaskTrajectories:
             context_id=context_id,
             task_id=task_ids[current],
             state=state,
-            format=next(
-                (record.log.format for record in reversed(records) if record.log.format),
-                None,
-            ),
+            format=_context_format(records),
             events=page,
             total=sum(lengths),
         )
@@ -217,6 +240,11 @@ class TaskTrajectories:
             del self._contexts[context_id]
             for task_id in task_ids:
                 del self._tasks[task_id]
+
+
+def _context_format(records: list[_TaskRecord]) -> str | None:
+    """The most recent format any of the context's tasks set."""
+    return next((record.log.format for record in reversed(records) if record.log.format), None)
 
 
 def _page(
