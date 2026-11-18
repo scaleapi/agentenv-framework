@@ -48,6 +48,7 @@ def test_hosts_the_agent_was_deployed_to_reach_directly_stay_direct_on_an_armed_
 def test_a_model_endpoint_over_plain_http_or_at_a_private_address_is_reached_directly_on_an_armed_clock(
         monkeypatch, base_url, direct):
     resolves = {"litellm.internal": "10.1.2.3", "litellm.example.com": "93.184.216.34"}
+    monkeypatch.setattr(claude_bridge, "_GLOBAL_HOSTS", {})
     monkeypatch.setattr(claude_bridge.socket, "getaddrinfo",
                         lambda host, port: [(None, None, None, "", (resolves[host], 0))])
     env = claude_bridge.cli_env({claude_bridge.EGRESS_PROXY_ENV: PROXY, "LITELLM_BASE_URL": base_url,
@@ -102,3 +103,25 @@ def test_while_the_follower_reconnects_or_restarts_the_page_still_routes_the_cli
     page.write_bytes(_page(1))
     env = claude_bridge.cli_env({claude_bridge.EGRESS_PROXY_ENV: PROXY}, clock_armed=claude_bridge.clock_armed(str(page)))
     assert env["HTTPS_PROXY"] == PROXY
+
+
+def test_a_model_host_that_doesnt_resolve_in_time_is_left_to_the_proxy_and_asked_once(monkeypatch):
+    # A slow resolver holds a CLI's start for _RESOLVE_TIMEOUT_S at most, and only the first time.
+    import threading
+
+    asked, release = [], threading.Event()
+
+    def slow(host, port):
+        asked.append(host)
+        release.wait(5)
+        return [(None, None, None, "", ("10.1.2.3", 0))]
+
+    monkeypatch.setattr(claude_bridge, "_GLOBAL_HOSTS", {})
+    monkeypatch.setattr(claude_bridge, "_RESOLVE_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(claude_bridge.socket, "getaddrinfo", slow)
+    try:
+        assert claude_bridge.model_direct_hosts("https://slow.internal") == []
+        assert claude_bridge.model_direct_hosts("https://slow.internal") == []
+    finally:
+        release.set()
+    assert asked == ["slow.internal"]
