@@ -268,7 +268,7 @@ def cli_env(environ: Mapping[str, str], base_url: str, mcp_servers: Mapping[str,
     (mcp.json), are reached directly, and so is a model endpoint over plain HTTP, which has no certificate to check at
     the env's date and, at a private address, the proxy would refuse."""
     model_host = model_direct_hosts(base_url) if clock_armed else []
-    mcp_hosts = [urlsplit(str(entry.get("url") or "")).hostname or "" for entry in (mcp_servers or {}).values()]
+    mcp_hosts = [url.hostname for url in (urlsplit(str(entry.get("url") or "")) for entry in (mcp_servers or {}).values()) if url.hostname and url.scheme == "http"]
     return {**environ, **egress_env(environ, [*mcp_hosts, *model_host], armed=clock_armed)}
 
 
