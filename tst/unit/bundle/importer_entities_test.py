@@ -335,25 +335,29 @@ def test_a_field_naming_an_entity_it_cant_take_is_left_out_and_said_so_and_the_e
     assert _toml(imported.root, "artifacts/vireo/artifact.toml")["type"] == "environment"
 
 
-def test_an_image_its_registry_names_by_digest_is_written_pinned_to_it(home):
-    digest = "sha256:" + "c" * 64
-    image = _tarball_image(image_name="registry.example.com/crm", image_digest=digest)
+@pytest.mark.parametrize("image_name, image_digest", [
+    ("registry.example.com/crm:v1", "sha256:" + "c" * 64),
+    ("registry.example.com/crm:v1@sha256:" + "c" * 64, None),
+], ids=["digest beside", "digest in the name"])
+def test_an_image_its_registry_names_by_digest_is_written_by_the_digest_alone(home, image_name, image_digest):
+    image = _tarball_image(image_name=image_name, image_digest=image_digest)
     MCPServerEnv.put(id="crm", docker_image_artifact=image, environment_name="crm")
     _task([DEPLOY])
 
     imported = import_task("t", home / "t")
 
-    assert _toml(imported.root, "envs/crm/env.toml")["image"] == {"ref": f"registry.example.com/crm@{digest}"}
-    assert [pull.image for pull in imported.pulled] == [f"registry.example.com/crm@{digest}"]
+    pinned = "registry.example.com/crm@sha256:" + "c" * 64
+    assert _toml(imported.root, "envs/crm/env.toml")["image"] == {"ref": pinned}
+    assert [pull.image for pull in imported.pulled] == [pinned]
 
 
-def test_an_image_whose_context_cant_be_written_is_pulled_pinned_to_its_digest(home):
+def test_an_image_whose_context_cant_be_written_is_pulled_by_its_digest_alone(home):
     digest = "sha256:" + "d" * 64
     context = context_image(home, "two-dockerfiles", {"mail/Dockerfile": "FROM python\nCOPY mail/ /app/\n",
                                                        "mail/website/Dockerfile": "FROM node\n", "mail/app.py": "app\n"},
                              "mail/Dockerfile")
     image = get_artifact_store().put_document(DockerImageArtifact(
-        id="mail-image", description="no dockerfile recorded", image_name="registry.example.com/mail",
+        id="mail-image", description="no dockerfile recorded", image_name="registry.example.com/mail:v2",
         image_digest=digest, build_context_s3_url=context.build_context_object_url))
     MCPServerEnv.put(id="crm", docker_image_artifact=image, environment_name="crm")
     _task([DEPLOY])

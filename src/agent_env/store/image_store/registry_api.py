@@ -78,6 +78,13 @@ def pin_if_served(ref: str, auth: RegistryAuth | None) -> str | None:
         return None
 
 
+def by_digest(ref: str) -> str:
+    """``ref`` named by its digest alone, ``name@sha256:...``, when it gives one; else ``ref``. A tag beside the digest
+    may move later, and ``pin_digest`` refuses a ref whose tag no longer names its digest."""
+    image = _parse(ref)
+    return f"{image.name}@{image.digest}" if image.digest else ref
+
+
 def pinned_from(pinned: str, ref: str) -> bool:
     """Whether ``pinned``, a ref as ``pin_digest`` returns it, pins ``ref``: ``ref`` itself when it gives a digest, else
     the same name and tag (``latest`` when none is given) with a digest."""

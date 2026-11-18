@@ -65,7 +65,7 @@ from agent_env.plugins import ARTIFACTS, ENVS, TASK_STEPS
 from agent_env.store.base import NotFoundError
 from agent_env.store.ids import LOCAL_PREFIX, is_local_id
 from agent_env.store.image_store.oci_registry_credentials import names_registry
-from agent_env.store.image_store.registry_api import pin_digest
+from agent_env.store.image_store.registry_api import by_digest, pin_digest
 from agent_env.task.task import Task
 from agent_env.task_step.registry import get_task_step_registry
 from agent_env.utils.paths import os_reason
@@ -312,8 +312,9 @@ class _Importer:
             out.pulled.append(Pulled(out.folder, key, ref))
             return {"ref": ref}
         if names_registry(artifact.image_name):
-            out.pulled.append(Pulled(out.folder, key, artifact.pinned_name))
-            return {"ref": artifact.pinned_name}
+            ref = by_digest(artifact.pinned_name)
+            out.pulled.append(Pulled(out.folder, key, ref))
+            return {"ref": ref}
         why = (f"it's stored only as a docker save tarball, under {artifact.image_name}, which names no registry"
                if artifact.tar_gz_object_url else "it records neither a build context nor a registry to pull it from")
         self._unwritable((EntityKind.ARTIFACT, artifact.id, artifact.version), f"{out.folder}: {key}", why)
@@ -419,8 +420,8 @@ class _Importer:
             return
         if names_registry(job.artifact.image_name):
             job.toml.clear()
-            job.toml["ref"] = job.artifact.pinned_name
-            self.pulled.append(Pulled(job.folder, job.key, job.artifact.pinned_name, job.problem))
+            job.toml["ref"] = by_digest(job.artifact.pinned_name)
+            self.pulled.append(Pulled(job.folder, job.key, job.toml["ref"], job.problem))
             return
         key = (EntityKind.ARTIFACT, job.artifact.id, job.artifact.version)
         try:
