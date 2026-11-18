@@ -57,7 +57,9 @@ from .extensions import (
     TaskObjectTrajectoryRequest,
     TaskTrajectoryRequest,
     TrajectoryEventsResponse,
+    TrajectoryObjectsResponse,
     TrajectoryState,
+    TrajectoryUploadedObjects,
     TriggerDecideRequest,
     TriggerRegisterRequest,
     enable,
@@ -839,12 +841,9 @@ class _SdkServices:
         if isinstance(request, (TaskTrajectoryRequest, ContextTrajectoryRequest)):
             return {"trajectory": json.loads(trajectory.body), "format": trajectory.format}
         uploaded = await upload(request.objects.trajectory, trajectory.body)
-        return {
-            "objects": {
-                "trajectory": uploaded.model_dump(mode="json"),
-            },
-            "format": trajectory.format,
-        }
+        return TrajectoryObjectsResponse(
+            objects=TrajectoryUploadedObjects(trajectory=uploaded), format=trajectory.format
+        )
 
     def check_trajectory_format(self, format: str | None) -> None:
         """Refuse a trajectory read naming a format the card doesn't offer, before any handler
@@ -1365,6 +1364,8 @@ class _StandardExecutor:
                         result = await self._run_streaming(request, updater, event_queue)
                     else:
                         result = await self._handler(request)
+                    if isinstance(result, TaskResult) and result.native_trajectory is not None:
+                        trajectory._hold_to_native(result.native_trajectory.format)
                 except _TaskFailed as failed:
                     result = TaskResult.failure(
                         failed.error.code, failed.error.message, error_type=failed.error.error_type

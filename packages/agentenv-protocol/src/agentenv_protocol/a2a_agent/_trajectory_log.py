@@ -104,16 +104,10 @@ class TaskTrajectories:
         native: bytes | None = None,
         native_format: str | None = None,
     ) -> None:
-        """End the task's trajectory; the first seal wins. A native trajectory in a format
-        other than the card's native one is refused before anything is recorded."""
+        """End the task's trajectory; the first seal wins."""
         record = self._tasks[task_id]
         if record.final_state is not None:
             return
-        if native is not None and self._native is not None and native_format != self._native:
-            raise ValueError(
-                f"task {task_id} returned a native trajectory in {native_format!r}, "
-                f"not {self._native!r}, the native format the card declares"
-            )
         if native is not None:
             if len(record.log):
                 logger.warning(

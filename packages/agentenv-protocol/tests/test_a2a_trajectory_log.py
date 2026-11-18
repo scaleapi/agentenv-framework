@@ -615,17 +615,7 @@ def test_the_log_is_byte_identical_to_the_native_trajectory_it_replaces(monkeypa
         return Uploaded(size_bytes=len(body))
 
     monkeypatch.setattr(framework, "upload", capture_upload)
-    grant = {
-        "media_type": "application/json",
-        "max_bytes": 1_000_000,
-        "write": {
-            "kind": "http-put",
-            "url": "https://objects.example.test/write",
-            "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1))
-            .isoformat(timespec="seconds")
-            .replace("+00:00", "Z"),
-        },
-    }
+    grant = _grant()
     inline: list[Any] = []
     for agent in (Native(), Live()):
         with TestClient(agent.create_app()) as client:
@@ -790,7 +780,7 @@ def test_a_declared_native_format_needs_no_set_format_and_takes_no_other() -> No
     log = TrajectoryLog(native="test-events/1")
     log.append({"step": 1})
     log.set_format("test-events/1")
-    with pytest.raises(ValueError, match="'other/1' is not 'test-events/1', the native format the card declares"):
+    with pytest.raises(tasks_v1._TaskFailed, match="'other/1' is not 'test-events/1', the native format the card declares"):
         log.set_format("other/1")
 
     with TestClient(_native_agent(live=False).create_app()) as client:
@@ -821,10 +811,22 @@ def test_a_returned_native_trajectory_keeps_its_format(native: str | None) -> No
         }
 
 
-def test_a_native_trajectory_in_another_format_fails_the_task(caplog: pytest.LogCaptureFixture) -> None:
+def _task_error(client: TestClient, task_id: str) -> dict[str, Any]:
+    response = client.post(
+        "/a2a",
+        json={"jsonrpc": "2.0", "id": "get", "method": "tasks/get", "params": {"id": task_id}},
+    )
+    parts = response.json()["result"]["status"]["message"]["parts"]
+    return next(part["data"] for part in parts if part["kind"] == "data")
+
+
+@pytest.mark.parametrize("breaks", ["set_format", "native_trajectory"])
+def test_a_trajectory_in_another_format_fails_the_turn_as_the_agents_error(breaks: str) -> None:
     @a2a_agent(identity=_IDENTITY, extensions=(enable(TRAJECTORY_V1, native="pi-json-events/v1"),))
     class Agent(AgentEnvAgent):
         async def run(self, request: TaskRequest) -> TaskResult:
+            if breaks == "set_format":
+                request.trajectory.set_format("pi-json-events/v2")
             return (
                 TaskResult.builder()
                 .succeeded()
@@ -833,12 +835,18 @@ def test_a_native_trajectory_in_another_format_fails_the_task(caplog: pytest.Log
                 .build()
             )
 
-    with caplog.at_level(logging.ERROR), TestClient(Agent().create_app()) as client:
+    with TestClient(Agent().create_app()) as client:
         task_id = _send(client, "go", "message-1")
         assert _within(5, lambda: _task_state(client, task_id) == "failed")
         assert _trajectory(client, {"task_id": task_id}).status_code == 404
+        error = _task_error(client, task_id)
 
-    assert "returned a native trajectory in 'pi-json-events/v2', not 'pi-json-events/v1'" in caplog.text
+    assert error == {
+        "error_type": "agent_error",
+        "error_code": "framework.trajectory_format_mismatch",
+        "error_message": "the trajectory format 'pi-json-events/v2' is not 'pi-json-events/v1', "
+        "the native format the card declares",
+    }
 
 
 def test_an_agent_env_error_from_an_agents_own_handler_answers_its_status_and_body() -> None:

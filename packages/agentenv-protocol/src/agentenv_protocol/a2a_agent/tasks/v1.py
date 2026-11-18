@@ -156,7 +156,7 @@ class TrajectoryLog:
     Each event is serialized as it is appended, so an event once read never changes; append
     from one thread at a time. Unless the result carries a ``native_trajectory``, the log is
     the task's final trajectory. An agent whose card declares a ``native`` format starts with
-    that format, and no other may be set."""
+    that format, and setting or returning another fails the turn."""
 
     __slots__ = ("_events", "_size_bytes", "_format", "_native", "_sealed", "_task_id", "_warned")
 
@@ -178,10 +178,7 @@ class TrajectoryLog:
         appended, it stays."""
         if not isinstance(format, str) or not format.strip():
             raise ValueError("trajectory format must be a non-empty string")
-        if self._native is not None and format != self._native:
-            raise ValueError(
-                f"trajectory format {format!r} is not {self._native!r}, the native format the card declares"
-            )
+        self._hold_to_native(format)
         self._ensure_open()
         if self._events and format != self._format:
             raise RuntimeError("the trajectory's format cannot change once events are appended")
@@ -208,6 +205,15 @@ class TrajectoryLog:
 
     def __len__(self) -> int:
         return len(self._events)
+
+    def _hold_to_native(self, format: str) -> None:
+        """Fail the turn as the agent's error when ``format``, set or returned, isn't the native
+        format the card declares; a retry would fail the same way."""
+        if self._native is not None and format != self._native:
+            raise _TaskFailed(
+                "framework.trajectory_format_mismatch",
+                f"the trajectory format {format!r} is not {self._native!r}, the native format the card declares",
+            )
 
     def _ensure_open(self) -> None:
         if self._sealed:

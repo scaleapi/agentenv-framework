@@ -1549,8 +1549,9 @@ The card then lists three fields in the trajectory extension's `params`, beside
 
 A card without `formats` predates them, so send its reads no `format`. With
 `native` declared, the log starts in that format and `set_format` is optional.
-`set_format` with another format raises `ValueError`, and a task that returns a
-`native_trajectory` in another format fails.
+A `set_format` or a returned `native_trajectory` in another format fails the
+turn as an `agent_error` with code `framework.trajectory_format_mismatch`, whose
+message names both formats.
 
 Every trajectory read takes an optional `format`. A read naming none gets the
 default. A read naming a format the card doesn't list is HTTP 400 with the error

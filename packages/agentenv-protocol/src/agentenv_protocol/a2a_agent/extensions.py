@@ -152,7 +152,7 @@ class SkillAddResponse(ExtensionResponse):
 
 MAX_TRAJECTORY_FORMAT_LENGTH = 128
 #: A trajectory format id a read may name, such as ``my-cli-events/1``; the card's trajectory ``formats`` lists them.
-TrajectoryFormat = Annotated[str, Field(min_length=1, max_length=MAX_TRAJECTORY_FORMAT_LENGTH)]
+TrajectoryFormat = Annotated[str, Field(min_length=1, max_length=MAX_TRAJECTORY_FORMAT_LENGTH, pattern=r"\S")]
 
 
 class TaskTrajectoryRequest(ExtensionRequest):
@@ -193,6 +193,7 @@ class TrajectoryUploadedObjects(ExtensionResponse):
 
 class TrajectoryObjectsResponse(ExtensionResponse):
     objects: TrajectoryUploadedObjects
+    format: str | None = None
 
 
 class TrajectoryState(str, Enum):

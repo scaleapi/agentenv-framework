@@ -566,7 +566,7 @@ async def test_sdk_trajectory_handler_uploads_portable_object(
         )
     )
 
-    assert result == {
+    assert result.model_dump(mode="json") == {
         "objects": {
             "trajectory": {
                 "size_bytes": 19,
