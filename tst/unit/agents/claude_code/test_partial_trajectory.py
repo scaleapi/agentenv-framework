@@ -25,6 +25,7 @@ def test_agent_card_advertises_one_get_trajectory_method(app):
         "get": {
             "method": "POST",
             "request": {
+                "optional": ["format"],
                 "oneOf": [
                     {"required": ["task_id"]},
                     {"required": ["task_id", "objects"]},
@@ -195,7 +196,7 @@ def test_completed_task_returns_finalized_stream_trajectory(monkeypatch, client)
     result = client.post(TRAJECTORY_PATH, json={"task_id": task["id"]}).json()
     live = client.post(TRAJECTORY_PATH, json={"task_id": task["id"], "after": 0}).json()
 
-    assert result == {"trajectory": trajectory}
+    assert result == {"trajectory": trajectory, "format": a2a_server.TRAJECTORY_FORMAT}
     assert (live["format"], live["state"], live["events"]) == (
         a2a_server.TRAJECTORY_FORMAT, "completed", trajectory,
     )
@@ -292,4 +293,4 @@ def test_a_turn_is_readable_while_the_cli_runs_and_its_log_is_its_trajectory(app
         "running", a2a_server.TRAJECTORY_FORMAT, [_INIT],
     )
     assert (ended["events"], ended["next"], ended["has_more"]) == ([_TOOL, _DONE], 3, False)
-    assert final == {"trajectory": [_INIT, _TOOL, _DONE]}
+    assert final == {"trajectory": [_INIT, _TOOL, _DONE], "format": a2a_server.TRAJECTORY_FORMAT}

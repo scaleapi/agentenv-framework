@@ -368,7 +368,7 @@ def test_task_trajectory_keeps_legacy_response_shape(codex, monkeypatch):
             task = await codex.send(client, "go", context_id="ctx-task")
             return await client.post("/ext/trajectory", json={"task_id": task["id"]})
 
-    assert asyncio.run(exercise()).json() == {"trajectory": events}
+    assert asyncio.run(exercise()).json() == {"trajectory": events, "format": a2a_server.TRAJECTORY_FORMAT}
 
 
 def test_errors_keep_the_json_detail_body(codex):

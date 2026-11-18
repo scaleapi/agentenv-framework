@@ -131,6 +131,7 @@ def test_request_and_response_contracts(app):
     assert set(config["set"]["request"]["schema"]["properties"]) == set(config["set"]["request"]["supported"])
     assert config["get"] == {"method": "GET", "response": {"required": ["config"]}}
     assert methods["urn:agentenv:trajectory/v1"]["get"]["request"] == {
+        "optional": ["format"],
         "oneOf": [
             {"required": ["task_id"]},
             {"required": ["task_id", "objects"]},
