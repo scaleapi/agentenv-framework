@@ -343,7 +343,8 @@ async def test_a_unit_tests_verifier_that_times_out_is_a_failed_grade_beside_its
 async def test_a_unit_tests_verifiers_grade_holds_its_reward_and_names_its_env_vars_without_their_values(local_agent):
     sandbox, context = local_agent
     _as_deployed_container(sandbox, context)
-    step = _reward_step(command='test -n "$TOKEN" && echo 1 > /logs/verifier/reward.txt', env_vars={"TOKEN": "s3cret"})
+    step = _reward_step(command='mkdir -p /logs/verifier && test -n "$TOKEN" && echo 1 > /logs/verifier/reward.txt',
+                        env_vars={"TOKEN": "s3cret"})
 
     await step.execute(context)
 
