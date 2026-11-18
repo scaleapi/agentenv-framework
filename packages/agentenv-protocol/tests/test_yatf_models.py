@@ -1,6 +1,7 @@
 """yatf/1's models: each type parses as its own model, and a reader keeps what this version doesn't define."""
 import subprocess
 import sys
+from importlib.resources import files
 
 import pytest
 
@@ -109,6 +110,13 @@ def test_a_number_dumps_as_it_was_written_and_nan_is_refused():
 def test_a_number_json_cannot_write_is_refused_anywhere_in_an_event(later):
     with pytest.raises(yatf.YatfError, match="isn't a JSON number"):
         yatf.parse_event({**event("note", text="x"), "later": later})
+
+
+def test_the_spec_names_every_type_and_vocabulary_value():
+    spec = files("agentenv_protocol.yatf").joinpath("SPEC.md").read_text(encoding="utf-8")
+    names = sorted(yatf.CORE_TYPES | yatf.RESERVED_TYPES)
+    names += [value for values in yatf.VOCABULARIES.values() for value in values]
+    assert [name for name in names if f"`{name}`" not in spec] == []
 
 
 @pytest.mark.parametrize("kind,ok", [("claude-code/raw", True), ("codex/item.v2", True), ("yatf/raw", False),

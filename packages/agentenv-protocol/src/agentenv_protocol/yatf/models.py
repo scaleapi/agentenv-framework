@@ -5,17 +5,13 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Annotated, Any, ClassVar, Literal, Union
+from typing import Annotated, Any, ClassVar, Literal, Union, get_args
 
 from pydantic import BaseModel, ConfigDict, Discriminator, Tag, TypeAdapter, ValidationError, WithJsonSchema
 
 FORMAT = "yatf/1"
 SPEC_VERSION = "1.0"
 
-CORE_TYPES = frozenset({
-    "turn.start", "message", "final_response", "turn.end", "step", "reasoning", "tool_call", "tool_result", "tools",
-    "actor", "error", "attempt", "note",
-})
 #: Defined by a later 1.x together with its first producer; no 1.0 producer may write them.
 RESERVED_TYPES = frozenset({"delegation", "context", "producer", "activation", "usage.checkpoint"})
 #: An extension type is ``<namespace>/<name>``; the ``yatf`` namespace belongs to the spec.
@@ -26,7 +22,8 @@ ACTOR_KINDS = ("agent", "subagent", "user", "user_sim", "human", "peer", "trigge
 MODEL_SOURCES = ("configured", "reported", "unknown")
 ORIGIN_KINDS = ("framework", "user_sim", "trigger", "notification", "peer", "human")
 ELISION_REASONS = ("truncated", "redacted", "digest_only", "evicted", "not_captured", "not_requested")
-MEDIA_KINDS = ("image", "audio", "video", "document", "file")
+MediaKind = Literal["image", "audio", "video", "document", "file"]
+MEDIA_KINDS: tuple[str, ...] = get_args(MediaKind)
 ROLES = ("user", "assistant", "system", "developer")
 STEP_SOURCES = ("agent", "user", "system")
 COST_STATUSES = ("reported", "priced", "unpriced")
@@ -39,6 +36,15 @@ RESULT_STATUSES = ("ok", "error", "canceled", "timeout")
 TOOLS_MODES = ("replace", "add", "remove")
 TURN_STATES = ("completed", "failed", "canceled")
 ERROR_TYPES = ("agent_error", "infra_error")
+#: Every vocabulary, by the field that takes it: a later minor may add values, which a reader keeps.
+VOCABULARIES: dict[str, tuple[str, ...]] = {
+    "observer": OBSERVERS, "actor.kind": ACTOR_KINDS, "actor.model_source": MODEL_SOURCES, "origin.kind": ORIGIN_KINDS,
+    "elision.reason": ELISION_REASONS, "media part type": MEDIA_KINDS, "message.role": ROLES, "step.source": STEP_SOURCES,
+    "cost_status": COST_STATUSES, "final_metrics.basis": BASES, "reasoning.visibility": VISIBILITIES,
+    "opaque.kind": OPAQUE_KINDS, "tool kind": TOOL_KINDS, "tool_call.executor": EXECUTORS,
+    "tool_result.status": RESULT_STATUSES, "tools.mode": TOOLS_MODES, "turn.end.state": TURN_STATES,
+    "error.error_type": ERROR_TYPES,
+}
 
 
 def _vocabulary(values: tuple[str, ...]) -> WithJsonSchema:
@@ -69,19 +75,22 @@ class YatfError(ValueError):
     """A stream or event that isn't yatf/1, or an adapter that breaks the adapter contract."""
 
 
+_CLOSED = ConfigDict(extra="allow", strict=True, allow_inf_nan=False, protected_namespaces=(),
+                     json_schema_extra={"additionalProperties": False})
+_OPEN = ConfigDict({**_CLOSED, "json_schema_extra": {"additionalProperties": True}})
+
+
 class YatfModel(BaseModel):
     """Keeps fields it doesn't know through a dump (the validator reports them), while the strict schema forbids them.
     Values are taken as given, never coerced, so whatever parses dumps back exactly."""
 
-    model_config = ConfigDict(extra="allow", strict=True, allow_inf_nan=False, protected_namespaces=(),
-                              json_schema_extra={"additionalProperties": False})
+    model_config = _CLOSED
     #: Whether fields this version doesn't name are part of the model's meaning, not unknowns (V11 skips them).
     OPEN: ClassVar[bool] = False
 
 
 class _Open(YatfModel):
-    model_config = ConfigDict(extra="allow", strict=True, allow_inf_nan=False, protected_namespaces=(),
-                              json_schema_extra={"additionalProperties": True})
+    model_config = _OPEN
     OPEN: ClassVar[bool] = True
 
 
@@ -149,7 +158,7 @@ class RefPart(YatfModel):
 
 
 class MediaPart(YatfModel):
-    type: Literal["image", "audio", "video", "document", "file"]
+    type: MediaKind
     source: Source
     purpose: str | None = None
     origin: Origin | None = None
@@ -352,7 +361,7 @@ class StepEvent(Event):
 class Reasoning(Event):
     type: Literal["reasoning"]
     visibility: Visibility
-    text: str | None = None
+    text: str | None
     opaque: list[Opaque] | None = None
 
 
@@ -417,8 +426,7 @@ class Note(Event):
 class ExtensionEvent(Event):
     """A ``<namespace>/<name>`` type, such as an adapter's raw native record: readers keep it and may skip it."""
 
-    model_config = ConfigDict(extra="allow", strict=True, allow_inf_nan=False, protected_namespaces=(),
-                              json_schema_extra={"additionalProperties": True})
+    model_config = _OPEN
     OPEN: ClassVar[bool] = True
     type: Annotated[str, WithJsonSchema({"type": "string", "pattern": EXTENSION_TYPE.pattern})]
 
@@ -426,16 +434,17 @@ class ExtensionEvent(Event):
 class UnknownEvent(Event):
     """An event type this version doesn't define: readers keep it, producers may not write it."""
 
-    model_config = ConfigDict(extra="allow", strict=True, allow_inf_nan=False, protected_namespaces=(),
-                              json_schema_extra={"additionalProperties": True})
+    model_config = _OPEN
     OPEN: ClassVar[bool] = True
 
 
+#: The event types spec 1.0 defines, each by the ``type`` its model takes.
 EVENT_MODELS: dict[str, type[Event]] = {
-    "turn.start": TurnStart, "message": Message, "final_response": FinalResponse, "turn.end": TurnEnd,
-    "step": StepEvent, "reasoning": Reasoning, "tool_call": ToolCall, "tool_result": ToolResult, "tools": Tools,
-    "actor": ActorDeclared, "error": ErrorEvent, "attempt": Attempt, "note": Note,
+    get_args(model.model_fields["type"].annotation)[0]: model
+    for model in (TurnStart, Message, FinalResponse, TurnEnd, StepEvent, Reasoning, ToolCall, ToolResult, Tools,
+                  ActorDeclared, ErrorEvent, Attempt, Note)
 }
+CORE_TYPES = frozenset(EVENT_MODELS)
 
 
 def is_extension_type(kind: str) -> bool:

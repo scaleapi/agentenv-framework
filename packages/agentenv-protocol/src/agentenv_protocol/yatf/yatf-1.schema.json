@@ -1748,7 +1748,6 @@
               "type": "null"
             }
           ],
-          "default": null,
           "title": "Text"
         },
         "time": {
@@ -1795,7 +1794,8 @@
         "actor",
         "observer",
         "time",
-        "visibility"
+        "visibility",
+        "text"
       ],
       "title": "Reasoning",
       "type": "object"

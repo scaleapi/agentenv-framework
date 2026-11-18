@@ -1,5 +1,7 @@
 """yatf/1 adapters: declared with decorators, fed a context's native and aux records a turn at a time, and stamped by
 the turn they write through, so a replay of the stored records makes the same events."""
+import inspect
+
 import jsonschema
 import pytest
 
@@ -225,6 +227,13 @@ def test_extension_events_are_namespaced_outside_yatf():
         turn.message(role="assistant", content=[{"type": "text"}])
 
 
+def test_an_adapter_marks_replayed_context_as_copied():
+    turn = yatf.YatfTurn(context(), Toy.spec)
+    turn.message(role="user", step="s0", text="earlier", is_copied_context=True)
+    turn.raw({"type": "history"}, is_copied_context=True)
+    assert [event["is_copied_context"] for event in turn.events] == [True, True]
+
+
 def test_explicit_nulls_an_adapter_writes_are_kept():
     turn = yatf.YatfTurn(context(), Toy.spec)
     turn.extension("toy-events/marker", {"value": None})
@@ -253,6 +262,18 @@ def test_what_a_run_hands_out_is_a_copy():
     assert "tampered" not in run.events[0] and run.events[1]["content"][0]["text"] == "list files"
     run.events[0]["also"] = 1
     assert "also" not in run.events[0]
+
+
+@pytest.mark.parametrize("method,model", [
+    ("message", yatf.Message), ("reasoning", yatf.Reasoning), ("tool_call", yatf.ToolCall),
+    ("tool_result", yatf.ToolResult), ("step", yatf.StepEvent), ("tools", yatf.Tools), ("declare", yatf.ActorDeclared),
+    ("error", yatf.ErrorEvent), ("attempt", yatf.Attempt), ("note", yatf.Note),
+])
+def test_every_builder_method_takes_every_field_of_its_model(method, model):
+    taken = set(inspect.signature(getattr(yatf.YatfTurn, method)).parameters)
+    assert set(model.model_fields) - set(yatf.Event.model_fields) <= taken
+    settable = set(yatf.Event.model_fields) - {"seq", "id", "type", "turn", "observer", "attempt", "step"}
+    assert {"time", "actor", "derived_from", "x", "is_copied_context"} == settable <= taken
 
 
 def adapter_class(**declared):

@@ -1,54 +1,20 @@
-"""Writing a yatf/1 adapter: a class that turns an agent's native records into YATF events. It's declared with
-``@yatf_adapter``, its ``@native``, ``@aux`` and ``@finish`` methods write through a YatfTurn, and one instance serves
-an A2A context. It reads only what the run stores (the turn's context, its native records and its aux records), so an
-offline replay makes the events the agent served live."""
+"""Writing a yatf/1 adapter: a class, declared with ``@yatf_adapter``, whose ``@native``, ``@aux`` and ``@finish``
+methods turn an agent's native records into YATF events through the YatfTurn each one is handed. It reads only what the
+run stores, so an offline replay makes the events the agent served live."""
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, ClassVar, Iterable, Mapping, Sequence, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, ClassVar, Mapping, Sequence, TypeVar
 
-from pydantic import ValidationError
+from .models import Event, YatfError, is_extension_type
 
-from .models import (
-    SPEC_VERSION,
-    Actor,
-    ActorDeclared,
-    AdapterInfo,
-    Attempt,
-    DerivedFrom,
-    ErrorEvent,
-    Event,
-    ExtensionEvent,
-    FinalMetrics,
-    FinalResponse,
-    Message,
-    Metrics,
-    Note,
-    Opaque,
-    Part,
-    Reasoning,
-    StepEvent,
-    Time,
-    ToolCall,
-    ToolDef,
-    ToolResult,
-    Tools,
-    TurnEnd,
-    TurnStart,
-    YatfError,
-    dump_event,
-    is_extension_type,
-)
+if TYPE_CHECKING:
+    from .runner import YatfTurn
 
 #: A native format id: ``<name>/<version>``, as ``claude-code-stream-json/1``.
 NATIVE_FORMAT = re.compile(r"^[a-z0-9][a-z0-9._-]*/[A-Za-z0-9._-]+$")
-#: The step key of a turn's inbound message, ``in-<turn>``.
-INBOUND_STEP = "in-{turn}"
-_ENVELOPE = frozenset(Event.model_fields)
 _MISSING = object()
-_CURRENT: Any = object()
 
 A = TypeVar("A", bound="Adapter")
 
@@ -202,9 +168,8 @@ def yatf_adapter(*, native_format: str, version: str, usage_input_includes_cache
 
 
 class Adapter:
-    """Base of a yatf/1 adapter, declared with ``@yatf_adapter``. One instance serves an A2A context across its turns,
-    so state on ``self`` carries over; per-turn state resets in the ``@finish`` method. A handler may hold an event
-    back until another record places it: capture ``turn.source`` and pass it as ``derived_from`` when it's emitted."""
+    """Base of a yatf/1 adapter. One instance serves an A2A context across its turns; per-turn state resets in
+    ``@finish``. To emit an event later than its record, keep ``turn.source`` and pass it as ``derived_from``."""
 
     spec: ClassVar[AdapterSpec]
 
@@ -224,199 +189,3 @@ class Adapter:
     def normal_form(cls, records: list[Any]) -> list[Any]:
         """What the round trip compares: by default the parsed records themselves."""
         return list(records)
-
-
-@dataclass(frozen=True, kw_only=True)
-class TurnContext:
-    """What the SDK knows of a turn from A2A, written into its frame: ``turn.start`` with the declared actors (by
-    default the agent and, with an inbound message, its sender), the inbound message from ``inbound_actor``, and
-    ``turn.end``. ``actor`` is the agent's own actor id, the default for every event the adapter writes."""
-
-    index: int
-    context_id: str
-    task_id: str
-    message_id: str | None = None
-    actor: str = "agent"
-    actors: Sequence[Actor | Mapping[str, Any]] = ()
-    inbound: Sequence[Part | Mapping[str, Any]] | None = None
-    inbound_actor: str = "caller"
-    started_at: str | None = None
-    live: bool = True
-
-
-def _time(value: Any) -> Time:
-    if value is None or isinstance(value, str):
-        return Time(at=value)
-    return value if isinstance(value, Time) else Time.model_validate(value)
-
-
-def _content(content: Iterable[Any] | None, text: str | None) -> list[Any]:
-    if (content is None) == (text is None):
-        raise YatfError("give either content or text")
-    return [{"type": "text", "text": text}] if text is not None else list(content)
-
-
-class YatfTurn:
-    """Builds one turn's events. An adapter calls its methods and writes only what the native says; the turn stamps
-    ``seq``, ``id``, ``turn``, ``observer``, the actor (the agent's unless given), the attempt and ``derived_from``
-    (the record being handled, unless given). Each method returns the event it emitted. Events are kept as JSON text,
-    so what a reader is handed is a copy, and an event that isn't JSON is refused as it's written. Not thread-safe:
-    records are fed one at a time."""
-
-    def __init__(self, context: TurnContext, spec: AdapterSpec) -> None:
-        self.context = context
-        self.spec = spec
-        #: The record being handled: capture it to emit an event that comes from it later.
-        self.source: DerivedFrom | None = None
-        self._events: list[str] = []
-        self._drained = 0
-        self._calls = 0
-        self._attempt = 1
-        self._final_metrics: FinalMetrics | None = None
-
-    @property
-    def index(self) -> int:
-        return self.context.index
-
-    @property
-    def events(self) -> list[dict[str, Any]]:
-        return [json.loads(text) for text in self._events]
-
-    def message(self, *, role: str, step: str | None = None, content: Iterable[Any] | None = None,
-                text: str | None = None, time: Any = None, actor: str | None = None, derived_from: Any = _CURRENT,
-                x: Mapping[str, Any] | None = None) -> Message:
-        return self._emit(Message, "message", time, actor, derived_from, x, step=step, role=role,
-                          content=_content(content, text))
-
-    def reasoning(self, *, visibility: str, step: str | None = None, text: str | None = None,
-                  opaque: Iterable[Opaque | Mapping[str, Any]] | None = None, time: Any = None,
-                  actor: str | None = None, derived_from: Any = _CURRENT,
-                  x: Mapping[str, Any] | None = None) -> Reasoning:
-        return self._emit(Reasoning, "reasoning", time, actor, derived_from, x, ("text",), step=step,
-                          visibility=visibility, text=text, opaque=None if opaque is None else list(opaque))
-
-    def tool_call(self, *, tool_call_id: str, function_name: str, arguments: Any, step: str | None = None,
-                  kind: str | None = None, server: str | None = None, executor: str | None = None,
-                  env_id: str | None = None, arguments_raw: str | None = None, time: Any = None,
-                  actor: str | None = None, derived_from: Any = _CURRENT,
-                  x: Mapping[str, Any] | None = None) -> ToolCall:
-        return self._emit(ToolCall, "tool_call", time, actor, derived_from, x, ("arguments",), step=step,
-                          tool_call_id=tool_call_id, function_name=function_name, arguments=arguments, kind=kind,
-                          server=server, executor=executor, env_id=env_id, arguments_raw=arguments_raw)
-
-    def tool_result(self, *, source_call_id: str, status: str = "ok", content: Iterable[Any] | None = None,
-                    text: str | None = None, exit_code: int | None = None, step: str | None = None, time: Any = None,
-                    actor: str | None = None, derived_from: Any = _CURRENT,
-                    x: Mapping[str, Any] | None = None) -> ToolResult:
-        return self._emit(ToolResult, "tool_result", time, actor, derived_from, x, step=step,
-                          source_call_id=source_call_id, status=status, content=_content(content, text),
-                          exit_code=exit_code)
-
-    def step(self, *, key: str, source: str = "agent", llm_call_count: int | None = 1, model_name: str | None = None,
-             reasoning_effort: str | None = None, metrics: Metrics | Mapping[str, Any] | None = None,
-             stop_reason: str | None = None, provider_ids: Mapping[str, str] | None = None,
-             first_token_at: str | None = None, sampling: Mapping[str, Any] | None = None, time: Any = None,
-             actor: str | None = None, derived_from: Any = _CURRENT,
-             x: Mapping[str, Any] | None = None) -> StepEvent:
-        return self._emit(StepEvent, "step", time, actor, derived_from, x, step=key, source=source,
-                          llm_call_count=llm_call_count, model_name=model_name, reasoning_effort=reasoning_effort,
-                          metrics=metrics, stop_reason=stop_reason,
-                          provider_ids=None if provider_ids is None else dict(provider_ids),
-                          first_token_at=first_token_at, sampling=None if sampling is None else dict(sampling))
-
-    def tools(self, tools: Iterable[ToolDef | Mapping[str, Any]], *, mode: str = "replace", time: Any = None,
-              actor: str | None = None, derived_from: Any = _CURRENT, x: Mapping[str, Any] | None = None) -> Tools:
-        return self._emit(Tools, "tools", time, actor, derived_from, x, mode=mode, tools=list(tools))
-
-    def declare(self, declared: Actor | Mapping[str, Any], *, time: Any = None, actor: str | None = None,
-                derived_from: Any = _CURRENT, x: Mapping[str, Any] | None = None) -> ActorDeclared:
-        """Declare an actor that appears mid-turn, such as a sub-agent, before any event names it."""
-        return self._emit(ActorDeclared, "actor", time, actor, derived_from, x, declared=declared)
-
-    def error(self, *, message: str, error_type: str = "agent_error", code: str | None = None,
-              fatal: bool | None = None, step: str | None = None, time: Any = None, actor: str | None = None,
-              derived_from: Any = _CURRENT, x: Mapping[str, Any] | None = None) -> ErrorEvent:
-        return self._emit(ErrorEvent, "error", time, actor, derived_from, x, step=step, error_type=error_type,
-                          message=message, code=code, fatal=fatal)
-
-    def attempt(self, number: int, *, reason: str | None = None, time: Any = None, actor: str | None = None,
-                derived_from: Any = _CURRENT, x: Mapping[str, Any] | None = None) -> Attempt:
-        """A harness retry within the task: this event and every later one carry ``attempt`` = ``number``."""
-        self._attempt = number
-        return self._emit(Attempt, "attempt", time, actor, derived_from, x, number=number, reason=reason)
-
-    def note(self, text: str, *, time: Any = None, actor: str | None = None, derived_from: Any = _CURRENT,
-             x: Mapping[str, Any] | None = None) -> Note:
-        return self._emit(Note, "note", time, actor, derived_from, x, text=text)
-
-    def raw(self, record: Any, *, time: Any = None, actor: str | None = None,
-            derived_from: Any = _CURRENT) -> ExtensionEvent:
-        """A native record kept whole, as ``<namespace>/raw``."""
-        return self.extension(f"{self.spec.namespace}/raw", {"record": record}, time=time, actor=actor,
-                              derived_from=derived_from)
-
-    def extension(self, kind: str, body: Mapping[str, Any], *, time: Any = None, actor: str | None = None,
-                  derived_from: Any = _CURRENT, x: Mapping[str, Any] | None = None) -> ExtensionEvent:
-        """An event of the ``<namespace>/<name>`` type ``kind``, with ``body`` beside the envelope."""
-        if not is_extension_type(kind):
-            raise YatfError(f"{kind!r} isn't an extension type: <namespace>/<name>, outside the yatf namespace")
-        if clash := sorted(_ENVELOPE & set(body)):
-            raise YatfError(f"an extension body can't set envelope fields: {', '.join(clash)}")
-        return self._emit(ExtensionEvent, kind, time, actor, derived_from, x, tuple(body), **body)
-
-    def final_metrics(self, metrics: FinalMetrics | Mapping[str, Any]) -> None:
-        """The turn's totals, written into ``turn.end``."""
-        try:
-            self._final_metrics = (metrics if isinstance(metrics, FinalMetrics)
-                                   else FinalMetrics.model_validate(metrics))
-        except ValidationError as exc:
-            raise YatfError(f"final_metrics: {exc}") from exc
-
-    def _emit(self, model: type[Event], event_type: str, time: Any, actor: str | None, derived_from: Any,
-              x: Mapping[str, Any] | None, nulls: tuple[str, ...] = (), /, **body: Any) -> Any:
-        source = self.source if derived_from is _CURRENT else derived_from
-        seq = len(self._events)
-        envelope: dict[str, Any] = {"seq": seq, "id": f"{self.index}.{seq}",
-                                    "type": event_type, "turn": self.index, "actor": actor or self.context.actor,
-                                    "observer": "agent", "time": _time(time)}
-        if self._attempt > 1:
-            envelope["attempt"] = self._attempt
-        if source is not None:
-            envelope["derived_from"] = source
-        if x is not None:
-            envelope["x"] = dict(x)
-        fields = {key: value for key, value in body.items() if value is not None or key in nulls}
-        try:
-            event = model(**envelope, **fields)
-            text = json.dumps(dump_event(event), separators=(",", ":"), allow_nan=False)
-        except ValidationError as exc:
-            raise YatfError(f"{event_type} event: {exc}") from exc
-        except (TypeError, ValueError) as exc:
-            raise YatfError(f"{event_type} event isn't JSON: {exc}") from exc
-        self._events.append(text)
-        self._calls += event_type == "tool_call"
-        return event
-
-    def _start(self) -> None:
-        context = self.context
-        actors = list(context.actors) or [Actor(id=context.actor, kind="agent")] + (
-            [Actor(id=context.inbound_actor, kind="framework")] if context.inbound is not None else [])
-        self._emit(TurnStart, "turn.start", context.started_at, None, None, None, ("usage_input_includes_cache",),
-                   spec_version=SPEC_VERSION, context_id=context.context_id, task_id=context.task_id,
-                   message_id=context.message_id, native_format=self.spec.native_format, live=context.live,
-                   adapter=AdapterInfo(name=self.spec.name, version=self.spec.version,
-                                       lossy=list(self.spec.lossy) or None),
-                   usage_input_includes_cache=self.spec.usage_input_includes_cache, actors=actors)
-        if context.inbound is not None:
-            self._emit(Message, "message", context.started_at, context.inbound_actor, None, None,
-                       step=INBOUND_STEP.format(turn=self.index), role="user", content=list(context.inbound))
-
-    def _end(self, state: str, final: Sequence[Any] | None, ended_at: str | None) -> None:
-        if final is not None:
-            self._emit(FinalResponse, "final_response", ended_at, None, None, None, content=list(final))
-        self._emit(TurnEnd, "turn.end", ended_at, None, None, None, state=state, tool_call_count=self._calls,
-                   final_metrics=self._final_metrics)
-
-    def _drain(self) -> list[str]:
-        new, self._drained = self._events[self._drained:], len(self._events)
-        return new

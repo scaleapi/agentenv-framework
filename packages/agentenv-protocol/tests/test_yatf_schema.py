@@ -18,7 +18,10 @@ def example_events():
 
 
 def test_the_checked_in_schema_is_the_generated_one():
-    assert files("agentenv_protocol.yatf").joinpath(SCHEMA_FILE).read_text(encoding="utf-8") == schema_text()
+    if files("agentenv_protocol.yatf").joinpath(SCHEMA_FILE).read_text(encoding="utf-8") != schema_text():
+        pytest.fail(f"{SCHEMA_FILE} is stale, after a model change or a pydantic upgrade; regenerate it with "
+                    f"python -m agentenv_protocol.yatf schema > "
+                    f"packages/agentenv-protocol/src/agentenv_protocol/yatf/{SCHEMA_FILE}")
 
 
 def test_python_m_prints_the_schema():
