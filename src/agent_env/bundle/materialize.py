@@ -50,6 +50,10 @@ from .parse import BundleError, BundleKind
 from .plan import Plan, Write, artifact_writer, env_writer, unpinned_store_refs
 from .resolve import BuiltImage, BundleImage, ReferencedImage, build_step
 
+#: How much of each build's reason the problem naming a computer env no deploy can boot quotes: a failed build's reason
+#: holds the build's error, which can run to pages.
+_REASON_CHARS = 300
+
 
 @dataclass(frozen=True)
 class Materialized:
@@ -359,8 +363,8 @@ def _unbootable(plan: Plan, write: Write, version: int) -> str | None:
     if not records or any(record.get("status") in BUILT and not stale(record) for _, record in records):
         return None
     statuses = env.build_statuses()
-    builds = "; ".join(f"{pair} {statuses[pair]}" + (f" ({reason[:300]})" if (reason := record.get("reason")) else "")
-                       for pair, record in records)
+    quoted = {pair: f" ({record['reason'][:_REASON_CHARS]})" for pair, record in records if record.get("reason")}
+    builds = "; ".join(f"{pair} {statuses[pair]}{quoted.get(pair, '')}" for pair, _ in records)
     how = (", emulating a skipped arch or on a --sandbox that runs it natively"
            if any(record.get("status") == "skipped" for _, record in records) else "")
     return (f"{_path(plan, write)}: {write.id} v{version} has no build a deploy can boot ({builds}), so no task was "
