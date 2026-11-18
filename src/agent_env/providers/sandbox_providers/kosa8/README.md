@@ -83,10 +83,10 @@ All keys go under `[sandbox.providers.kosa8.config]`. Unknown keys are refused.
   `tunnel_urls`. It serves HTTP and WebSocket with no platform authentication, like other providers' tunnels; the
   random part is the only secret.
 - **Egress:** allow-all, or an allow list of at most 256 hostnames, `*.` wildcards and IPv4 addresses or ranges. kosa8
-  enforces it on the host, outside the VM, so one list covers `dockerd` and every container. It is applied right after
-  the sandbox is running, before anything runs in it. IPv6 entries are refused with `NetworkPolicyUnsupportedError`
-  before anything is created; a list kosa8 itself refuses (or an organization policy that does not allow it) deletes
-  the sandbox and raises the same error, so a fallback chain moves on.
+  enforces it on the host, outside the VM, so one list covers `dockerd` and every container. The list goes with the
+  create, so it is in force before kosa8 answers and the sandbox never runs more open than asked. IPv6 entries are
+  refused with `NetworkPolicyUnsupportedError` before anything is created; a list kosa8 itself refuses (or an
+  organization policy that does not allow it) fails the create with the same error, so a fallback chain moves on.
 - **Wildcards:** `*.example.com` covers every name under `example.com` but not `example.com` itself.
 - **kosa8's own hosts:** `*.kosa8labs.com` is added to every allow list, so a restricted agent can reach the
   environments it talks to.
@@ -96,7 +96,7 @@ All keys go under `[sandbox.providers.kosa8.config]`. Unknown keys are refused.
 
 ## Cleanup
 
-- A sandbox whose setup fails after it is created (boot, egress, ports, Docker readiness) is deleted.
+- A sandbox whose setup fails after it is created (boot, ports, Docker readiness) is deleted.
 - If a create fails after kosa8 may have made the sandbox, or its caller is cancelled, the provider finds it by its
   unique `agentenv-<random>` name and deletes it.
 - Whatever else happens, `ttl_s` removes the sandbox at the sandbox's `timeout`.

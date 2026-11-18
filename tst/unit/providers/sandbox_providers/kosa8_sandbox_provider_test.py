@@ -135,7 +135,6 @@ async def test_create_vm_boots_a_docker_sandbox_with_a_lifetime_and_a_public_url
                                    9000: "https://9000-00000001.kosa8labs.com"}
     assert all(preview["public"] for preview in api.previews["sbx_00000001"].values())
     assert sandbox.network_policy == NetworkPolicy()
-    assert api.requests_to("PUT", "/v1/sandboxes/sbx_00000001/egress") == []
     assert api.execs == []
 
 
@@ -154,11 +153,12 @@ async def test_create_vm_starts_docker_for_the_gateway(api):
 
 
 @pytest.mark.asyncio
-async def test_create_vm_applies_an_allow_list_with_kosa8s_hosts_and_reports_it(api):
+async def test_create_vm_creates_the_sandbox_under_an_allow_list_with_kosa8s_hosts_and_reports_it(api):
     policy = NetworkPolicy(mode=ALLOWLIST, allow_hosts=("pypi.org",), allow_cidrs=("203.0.113.0/24",))
     sandbox = await _provider(api).create_vm(network_policy=policy, setup_for_gateway=False)
-    [put] = api.requests_to("PUT", "/v1/sandboxes/sbx_00000001/egress")
-    allow = sandbox_module.json.loads(put.content)["allow"]
+    [body] = api.created
+    allow = body["egress"]["allow"]
+    assert api.requests_to("PUT", "/v1/sandboxes/sbx_00000001/egress") == []
     assert allow[0] == "pypi.org" and allow[-1] == "203.0.113.0/24"
     assert "*.kosa8labs.com" in allow and "*.boxd.sh" in allow
     assert sandbox.network_policy.restricts_egress
@@ -173,14 +173,22 @@ async def test_an_org_default_policy_is_what_the_sandbox_reports(api):
     assert sandbox.network_policy == NetworkPolicy(mode=ALLOWLIST, allow_hosts=("pypi.org",))
 
 
-@pytest.mark.parametrize("status", [400, 403, 501])
+@pytest.mark.parametrize(("status", "code"), [(400, "invalid_egress"), (403, "egress_not_allowed"), (501, "unsupported")])
 @pytest.mark.asyncio
-async def test_an_allow_list_kosa8_refuses_deletes_the_sandbox_and_is_unsupported(api, status):
-    api.egress_answer = error(status, "invalid_egress")
+async def test_a_create_kosa8_refuses_for_its_allow_list_is_unsupported(api, status, code):
+    api.create_answer = error(status, code)
     with pytest.raises(NetworkPolicyUnsupportedError, match="refused the egress allow list"):
         await _provider(api).create_vm(network_policy=NetworkPolicy(mode=ALLOWLIST, allow_hosts=("a.com",)),
                                        setup_for_gateway=False)
-    assert api.deleted == ["sbx_00000001"]
+    assert api.sandboxes == {} and api.deleted == []
+
+
+@pytest.mark.parametrize("policy", [None, NetworkPolicy(mode=ALLOWLIST, allow_hosts=("a.com",))])
+@pytest.mark.asyncio
+async def test_a_create_refused_for_anything_else_is_raised_as_is(api, policy):
+    api.create_answer = error(403, "quota_exceeded")
+    with pytest.raises(Kosa8Error, match="quota_exceeded"):
+        await _provider(api).create_vm(network_policy=policy, setup_for_gateway=False)
 
 
 @pytest.mark.asyncio

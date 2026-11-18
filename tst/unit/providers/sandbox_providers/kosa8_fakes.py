@@ -53,7 +53,6 @@ class FakeKosa8:
         self.exec_answers: list[ExecAnswer] = []
         self.exec_result: Callable[[list[str]], ExecAnswer] = lambda argv: {"exit": 0}
         self.create_answer: httpx.Response | Exception | None = None
-        self.egress_answer: httpx.Response | None = None
         self.org_default = "any"
         self.boot_polls = 1
 
@@ -105,6 +104,8 @@ class FakeKosa8:
         sandbox_id = f"sbx_{len(self.created):08d}"
         self.sandboxes[sandbox_id] = {"id": sandbox_id, "state": "creating", "name": body.get("name"),
                                       "template": "base", "polls": 0}
+        if "egress" in body:
+            self.egress[sandbox_id] = f"allow:{','.join(body['egress']['allow'])}"
         if self.create_answer is not None:
             raise self.create_answer
         return httpx.Response(202, json={"sandbox": self._view(self.sandboxes[sandbox_id]), "host_ms": 4})
@@ -124,11 +125,6 @@ class FakeKosa8:
         return httpx.Response(200, json={"sandbox": self._view(sandbox)})
 
     def _egress(self, request: httpx.Request, sandbox: dict[str, Any]) -> httpx.Response:
-        if request.method == "PUT":
-            if self.egress_answer is not None:
-                return self.egress_answer
-            body = json.loads(request.content)
-            self.egress[sandbox["id"]] = f"allow:{','.join(body['allow'])}" if body.get("allow") else "deny"
         enforced = self.egress.get(sandbox["id"], self.org_default)
         return httpx.Response(200, json={"egress": {"enforced": enforced}})
 

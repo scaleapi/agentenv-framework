@@ -183,8 +183,9 @@ class Kosa8SandboxProvider(SandboxProvider):
         env: dict[str, str] | None = None,
     ) -> Kosa8Sandbox:
         """Create a kosa8 microVM that runs Docker, with a public URL for each of ``exposed_ports``. ``timeout`` is the
-        sandbox's ``ttl_s``, its hard maximum lifetime. Sandboxes boot the configured image, so a per-call ``image`` is
-        refused rather than ignored; ``boot_mode`` and ``env`` have no kosa8 equivalent here and are ignored."""
+        sandbox's ``ttl_s``, its hard maximum lifetime. An allow list goes with the create, so it is in force before the
+        VM answers. Sandboxes boot the configured image, so a per-call ``image`` is refused rather than ignored;
+        ``boot_mode`` and ``env`` have no kosa8 equivalent here and are ignored."""
         if image is not None:
             raise ValueError("kosa8 sandboxes boot the configured Docker-capable image; a per-call image is unsupported")
         if boot_mode is not None:
@@ -215,13 +216,13 @@ class Kosa8SandboxProvider(SandboxProvider):
         }
         if self._region:
             body["region"] = self._region
-        created = await self._create(body)
+        if effective_policy.restricts_egress:
+            body["egress"] = {"allow": egress_entries(effective_policy)}
+        created = await self._create_with_policy(body)
         sandbox_id = created["id"]
         sandbox = Kosa8Sandbox(self._api, sandbox_id, tunnel_urls={}, network_policy=effective_policy)
         try:
             await self._wait_until_running(created)
-            if effective_policy.restricts_egress:
-                await self._set_egress(sandbox_id, egress_entries(effective_policy))
             sandbox.network_policy = policy_from_enforced(await self._api.enforced_egress(sandbox_id))
             sandbox.tunnel_urls = {port: await self._api.open_port(sandbox_id, port) for port in ports}
             logger.info(
@@ -235,6 +236,17 @@ class Kosa8SandboxProvider(SandboxProvider):
             # The sandbox is deleted before the create's own error or cancellation is raised.
             await _settle(self._delete_quietly(sandbox_id))
             raise
+
+    async def _create_with_policy(self, body: dict[str, Any]) -> dict[str, Any]:
+        """The create, with an allow list kosa8 refuses (an entry it can't parse, a host without egress controls, an
+        org policy that doesn't allow it) raised as a policy it can't enforce, so a fallback chain moves on."""
+        try:
+            return await self._create(body)
+        except Kosa8Error as exc:
+            if "egress" not in body or ("egress" not in exc.code and exc.status_code != 501):
+                raise
+            raise NetworkPolicyUnsupportedError(f"kosa8 refused the egress allow list {body['egress']['allow']}: "
+                                                f"{exc}") from exc
 
     async def _create(self, body: dict[str, Any]) -> dict[str, Any]:
         """Await the create. When it fails or its caller is cancelled, the sandbox it may have made anyway is deleted
@@ -279,17 +291,6 @@ class Kosa8SandboxProvider(SandboxProvider):
             await asyncio.sleep(interval)
             interval = min(interval * 1.5, longest)
             sandbox = await self._api.get_sandbox(sandbox["id"])
-
-    async def _set_egress(self, sandbox_id: str, allow: list[str]) -> None:
-        """Apply the allow list on the host, before anything runs in the sandbox. One kosa8 refuses (an entry it can't
-        parse, a host without egress controls, an org policy that doesn't allow it) is a policy it can't enforce, so a
-        fallback chain moves on."""
-        try:
-            await self._api.set_egress(sandbox_id, allow)
-        except Kosa8Error as exc:
-            if exc.status_code not in (400, 403, 501):
-                raise
-            raise NetworkPolicyUnsupportedError(f"kosa8 refused the egress allow list {allow}: {exc}") from exc
 
     async def create_sandbox(
         self,

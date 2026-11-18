@@ -162,11 +162,6 @@ class Kosa8Api:
                 raise
             logger.info("kosa8 sandbox %s was already gone at terminate", sandbox_id)
 
-    async def set_egress(self, sandbox_id: str, allow: list[str]) -> None:
-        """Let the sandbox reach only ``allow``; nothing at all when it is empty."""
-        body: dict[str, Any] = {"allow": allow} if allow else {"internet": False}
-        await self._call("PUT", f"/v1/sandboxes/{sandbox_id}/egress", json=body)
-
     async def enforced_egress(self, sandbox_id: str) -> str:
         """The policy kosa8 enforces on the sandbox, compiled: ``any``, ``deny``, ``allow:…[;deny:…]`` or
         ``block:…``. It is the org's default when the sandbox has none of its own."""
