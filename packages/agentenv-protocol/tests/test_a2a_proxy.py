@@ -593,7 +593,7 @@ def test_a_turns_usage_sums_its_recorded_calls_with_input_counting_the_cache(cli
     _proxy(client, "reply", task_id=task_id, parts=[{"kind": "text", "text": "Done."}])
 
     assert _usage(_settled(client, task_id)) == {
-        "tool_call_count": 0, "input_tokens": 120 + 123 + 50, "output_tokens": 17, "total_tokens": 127 + 132 + 51,
+        "tool_call_count": 0, "input_tokens": 120 + 123 + 100, "output_tokens": 17, "total_tokens": 127 + 132 + 101,
         "cache_read_tokens": 240, "cache_write_tokens": 30, "input_includes_cache": True}
 
 

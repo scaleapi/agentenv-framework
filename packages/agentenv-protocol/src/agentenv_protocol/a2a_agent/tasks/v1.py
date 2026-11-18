@@ -312,6 +312,10 @@ _USAGE_COUNTERS = (
 )
 
 
+def _count(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Usage:
     """Common execution metrics plus runtime-specific, JSON-shaped details. ``cache_read_tokens`` and
@@ -364,6 +368,34 @@ class Usage:
             if data.get(name) is not None
         }
         return cls(**known, provider_details=data.get("provider_details") or {})
+
+    @classmethod
+    def from_model_response(cls, usage: Mapping[str, Any]) -> "Usage":
+        """A model call's usage as its response carried it, OpenAI's way or Anthropic's, with ``input_tokens``
+        counting the cache. OpenAI's ``prompt_tokens`` counts what ``prompt_tokens_details.cached_tokens`` says was
+        cached, and so does a LiteLLM client's, which also counts ``cache_creation_input_tokens``; Anthropic's
+        ``input_tokens``, and the ``prompt_tokens`` a LiteLLM proxy sends with Anthropic's
+        ``cache_read_input_tokens`` and ``cache_creation_input_tokens`` beside it, count neither, so they're added. A
+        value that isn't a count is left out."""
+        details = usage.get("prompt_tokens_details")
+        cached = _count(details.get("cached_tokens")) if isinstance(details, Mapping) else None
+        read = cached if cached is not None else _count(usage.get("cache_read_input_tokens"))
+        write = _count(usage.get("cache_creation_input_tokens"))
+        cache = (read or 0) + (write or 0)
+        added = 0  # the cache the response's own counts leave out
+        if "prompt_tokens" in usage:
+            input_tokens = _count(usage["prompt_tokens"])
+            if input_tokens is not None and (cached is None or input_tokens < cache):
+                input_tokens, added = input_tokens + cache, cache
+        elif (input_tokens := _count(usage.get("input_tokens"))) is not None:
+            input_tokens, added = input_tokens + cache, cache
+        output = _count(usage.get("completion_tokens", usage.get("output_tokens")))
+        if (total := _count(usage.get("total_tokens"))) is not None:
+            total += added
+        elif input_tokens is not None and output is not None:
+            total = input_tokens + output
+        return cls(input_tokens=input_tokens, output_tokens=output, total_tokens=total, cache_read_tokens=read,
+                   cache_write_tokens=write, input_includes_cache=True if input_tokens is not None else None)
 
     @property
     def is_empty(self) -> bool:

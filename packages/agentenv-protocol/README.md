@@ -1399,6 +1399,15 @@ reads what `to_dict` wrote under any protocol version, a field it leaves out
 being `None` and a key it doesn't know ignored, and `TaskResult.failure(...,
 usage=...)` carries usage on a failure as `success` does.
 
+`Usage.from_model_response(usage)` reads a model call's usage as an OpenAI- or
+Anthropic-style response carries it, with `input_tokens` counting the cache
+(`input_includes_cache` true). `prompt_tokens` counts the cache when
+`prompt_tokens_details.cached_tokens` says what was cached, as OpenAI's and a
+LiteLLM client's do. Anthropic's `input_tokens` counts neither
+`cache_read_input_tokens` nor `cache_creation_input_tokens`, and neither does
+the `prompt_tokens` a LiteLLM proxy sends with those two beside it, so they are
+added, to `total_tokens` too. A value that isn't a count is left out.
+
 `run(request)` is the required execution contract. It is an ordinary method
 and needs no decorator.
 
@@ -1841,12 +1850,9 @@ operations:
   records a call, each action must be one the last recorded call made, by name and
   arguments (a `bash` call by its command alone, a whole float equal to its int), and all of
   them must run before the next `record` or the `reply`, else 409.
-  Calls to tools the turn doesn't offer aren't checked. `usage` is the call's, in
-  OpenAI's shape (`prompt_tokens`, which counts `prompt_tokens_details.cached_tokens`
-  or LiteLLM's `cache_read_input_tokens` and `cache_creation_input_tokens`) or
-  Anthropic's (`input_tokens`, which counts neither). The turn's `Usage`, on its reply
-  or its error, sums each count over the calls that gave it, with `input_tokens`
-  counting the cache (`input_includes_cache` true); a value that isn't a count is left out.
+  Calls to tools the turn doesn't offer aren't checked. `usage` is the call's, as the
+  model's response carried it, read by `Usage.from_model_response`. The turn's `Usage`, on
+  its reply or its error, sums each count over the calls that gave it.
 - `reply` (`{"token", "task_id", "parts"}`, or `"error"` in place of `"parts"`) ends the
   turn: parts complete the task, and an error fails it as `proxy.driver_error`.
 

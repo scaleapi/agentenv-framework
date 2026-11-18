@@ -64,3 +64,42 @@ def test_a_failed_result_carries_its_usage():
     result = TaskResult.failure("agent.boom", "it broke", usage=FULL)
     assert (result.outcome, result.usage) == ("failed", FULL)
     assert TaskResult.failure("agent.boom", "it broke").usage == Usage()
+
+
+# Real responses to one Claude prompt of 7,818 tokens, 7,809 of them cacheable, and one GPT prompt, recorded through
+# a LiteLLM proxy and, for the client's shape, as LiteLLM 1.83's client reads Anthropic's.
+RESPONSES = {
+    "litellm-proxy-claude-writes": ({"prompt_tokens": 9, "completion_tokens": 5, "total_tokens": 14,
+                                     "cache_creation_input_tokens": 7809, "cache_read_input_tokens": 0},
+                                    Usage(input_tokens=7818, output_tokens=5, total_tokens=7823, cache_read_tokens=0,
+                                          cache_write_tokens=7809, input_includes_cache=True)),
+    "litellm-proxy-claude-reads": ({"prompt_tokens": 9, "completion_tokens": 5, "total_tokens": 14,
+                                    "cache_creation_input_tokens": 0, "cache_read_input_tokens": 7809},
+                                   Usage(input_tokens=7818, output_tokens=5, total_tokens=7823, cache_read_tokens=7809,
+                                         cache_write_tokens=0, input_includes_cache=True)),
+    "anthropic-messages-reads": ({"input_tokens": 9, "output_tokens": 5, "cache_creation_input_tokens": 0,
+                                  "cache_read_input_tokens": 7809, "cache_creation": {"ephemeral_5m_input_tokens": 0}},
+                                 Usage(input_tokens=7818, output_tokens=5, total_tokens=7823, cache_read_tokens=7809,
+                                       cache_write_tokens=0, input_includes_cache=True)),
+    "litellm-client-claude-reads": ({"prompt_tokens": 7818, "completion_tokens": 5, "total_tokens": 7823,
+                                     "prompt_tokens_details": {"cached_tokens": 7809},
+                                     "cache_creation_input_tokens": 0, "cache_read_input_tokens": 7809},
+                                    Usage(input_tokens=7818, output_tokens=5, total_tokens=7823,
+                                          cache_read_tokens=7809, cache_write_tokens=0, input_includes_cache=True)),
+    "openai-gpt-reads": ({"prompt_tokens": 7822, "completion_tokens": 2, "total_tokens": 7824,
+                          "prompt_tokens_details": {"audio_tokens": 0, "cached_tokens": 7680}},
+                         Usage(input_tokens=7822, output_tokens=2, total_tokens=7824, cache_read_tokens=7680,
+                               input_includes_cache=True)),
+    "openai-no-details": ({"prompt_tokens": 9, "completion_tokens": 4},
+                          Usage(input_tokens=9, output_tokens=4, total_tokens=13, input_includes_cache=True)),
+    "details-below-the-cache": ({"prompt_tokens": 9, "completion_tokens": 1, "prompt_tokens_details": {"cached_tokens": 50}},
+                                Usage(input_tokens=59, output_tokens=1, total_tokens=60, cache_read_tokens=50,
+                                      input_includes_cache=True)),
+    "nothing": ({}, Usage()),
+    "unreadable": ({"prompt_tokens": "9", "completion_tokens": True, "prompt_tokens_details": "x"}, Usage()),
+}
+
+
+@pytest.mark.parametrize("response, expected", RESPONSES.values(), ids=RESPONSES.keys())
+def test_a_model_responses_usage_reads_with_input_counting_the_cache(response, expected):
+    assert Usage.from_model_response(response) == expected
