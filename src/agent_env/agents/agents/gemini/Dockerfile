@@ -1,6 +1,6 @@
-# The env's clock (FD-5916): the computer base's pieces, copied in (clock/, egress/) until the clock library image
-# (FD-5700) ships them for each libc. The egress proxy, one static Go binary, and agent-env's libfaketime and its TLS
-# shim, built for this image's libc (Debian bookworm) in stages of their own so no toolchain is left in the image.
+# The env's clock: the egress proxy, one static Go binary, and agent-env's libfaketime and its TLS shim, taken from
+# agent-env's sources as clock/ and egress/ (shared_sources.toml) and built for this image's libc (Debian bookworm) in
+# stages of their own, so no toolchain is left in the image.
 FROM public.ecr.aws/docker/library/golang:1.26.11-bookworm@sha256:dc40a13b61304647ed7e5d581d246b86413dfc29d63c6d018310feb93cd98fc0 AS egress
 COPY egress/ /egress/
 RUN cd /egress && go vet ./... && go test -count=1 ./... \
