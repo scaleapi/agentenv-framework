@@ -1182,7 +1182,7 @@ class A2AAgentApplication:
         async def invoke(request: Request) -> JSONResponse:
             if not carries_control_token(request.headers, self.control_token):
                 log_refusal(request.method, request.url.path, request.client.host if request.client else None)
-                raise HTTPException(status_code=401, detail=REFUSAL)
+                return JSONResponse({"detail": REFUSAL}, status_code=401)
             try:
                 if operation.definition.method == "GET":
                     payload = dict(request.query_params)

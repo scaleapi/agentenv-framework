@@ -634,7 +634,10 @@ def test_install_extension_is_declared_on_the_card(client: TestClient) -> None:
                  for command in install["install_commands"]]
     assert formatted[-1].endswith("c sh /opt/pydantic-ai-a2a/start.sh")
     assert all("sk-secret" not in command.splitlines()[0] for command in formatted)
-    assert "LITELLM_API_KEY='sk-secret'" in formatted[-2].splitlines()
+    [env_file] = [command for command in formatted if "LITELLM_API_KEY" in command]
+    assert "LITELLM_API_KEY='sk-secret'" in env_file.splitlines()
+    assert install["optional_params"] == ["control_token"]
+    assert formatted[-2].startswith('[ -z "${AGENTENV_CONTROL_TOKEN:-}" ] || printf')
 
 
 def test_the_installed_agent_starts_with_the_endpoint_and_trust_lines_install_wrote(tmp_path: Path) -> None:
