@@ -31,6 +31,7 @@ from agent_env.store.document_store import DocumentStore, LocalSqliteDocumentSto
 from agent_env.store.ids import local_namespace
 from agent_env.store.local_state import holding_locks
 from agent_env.task.store import TASKS_COLLECTION
+from agent_env.utils.docker.context import shared_files
 
 from .authoring import build_context_files
 from .parse import BundleKind
@@ -146,6 +147,9 @@ class Ledger:
             listing = build_context_files if built else folder_files
             for key, path in listing(self._plan.bundle_of(write.source.entry), write.source.entry).items():
                 inputs["files"][key] = _file_sha256(path) + (_mode(path) if built else "")
+            if built:
+                for key, path in shared_files(write.source.entry.path).items():
+                    inputs["files"][key] = _file_sha256(path) + _mode(path)
         if (published := self._plan.published.get(write.id)) is not None:
             inputs["published"] = published.pinned
         if write.requires:
@@ -248,10 +252,11 @@ def _tracked(write: Write) -> bool:
     """Whether the ledger can list everything ``write`` is made from. Not yet for an env type with a ``from_toml`` of
     its own, which may read its folder in ways it can't see. An artifact, a skill included, is made from its toml,
     every file in its folder (``folder_files``) and what it references; an agent or env from its
-    toml and what it references. A built image is made from its build context, ``build_context_files``, and the
-    image published for it when there is one (``Plan.published``); what the build fetches (its base image, packages)
-    isn't an input. A referenced image is made from its ref's text, so a tag
-    that moves in its registry isn't a change. An image folder's image is also made from its description."""
+    toml and what it references. A built image is made from its build context, ``build_context_files`` and what
+    its ``shared_sources.toml`` takes from agent-env's sources (``shared_files``), and the image published for it when
+    there is one (``Plan.published``); what the build fetches (its base image, packages) isn't an input. A referenced
+    image is made from its ref's text, so a tag that moves in its registry isn't a change. An image folder's image is
+    also made from its description."""
     if isinstance(write.source, BundleImage):
         return True
     if write.kind in (BundleKind.ARTIFACT, BundleKind.SKILL):

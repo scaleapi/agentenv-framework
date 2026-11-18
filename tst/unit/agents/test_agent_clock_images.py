@@ -1,21 +1,23 @@
-"""Every agent image on the env's clock (FD-5916), whichever agent it is: each folder with ``clock/`` copies the
-computer base's clock follower and egress proxy (``clock/``, ``egress/``) until the clock library image (FD-5700)
-ships them, with libfaketime's init guard after the base's patch; runs the follower and the proxy, each as its own
-user, and the A2A server as the agent's user on real time, under root's supervisord; preloads agent-env's libfaketime
-for the agent's user alone; starts as another user as it did before; and its bridge decides the CLI's proxy with the
-same ``clock_armed`` and ``egress_env`` as every other agent's."""
+"""Every agent image on the env's clock (FD-5916), whichever agent it is: each folder whose ``shared_sources.toml``
+takes the clock takes the computer bases' clock library and egress proxy from agent-env's one copy, whose libfaketime
+patch has the init guard; runs the follower and the proxy, each as its own user, and the A2A server as the agent's user
+on real time, under root's supervisord; preloads agent-env's libfaketime for the agent's user alone; starts as another
+user as it did before; and its bridge decides the CLI's proxy with the same ``clock_armed`` and ``egress_env`` as every
+other agent's."""
 
 from __future__ import annotations
 
 import ast
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
 
 AGENTS_DIR = Path(__file__).parents[3] / "src" / "agent_env" / "agents" / "agents"
-BASE = AGENTS_DIR.parents[1] / "computers" / "artifacts" / "ubuntu-24.04"
-CLOCKED = sorted(p.parent.name for p in AGENTS_DIR.glob("*/clock") if p.is_dir())
+SOURCES = AGENTS_DIR.parents[1]
+CLOCKED = sorted(p.parent.name for p in AGENTS_DIR.glob("*/shared_sources.toml")
+                 if "clock" in tomllib.loads(p.read_text()))
 PROXY = "http://127.0.0.1:3128"
 
 
@@ -24,29 +26,23 @@ def test_claude_code_follows_the_clock():
 
 
 @pytest.mark.parametrize("agent", CLOCKED)
-@pytest.mark.parametrize("folder", ["clock", "egress"])
-def test_the_clock_pieces_are_the_computer_bases_until_the_clock_library_image_ships_them(agent, folder):
-    here = AGENTS_DIR / agent / folder
-    copied = sorted(p.relative_to(here) for p in here.rglob("*") if p.is_file())
+@pytest.mark.parametrize(("part", "shared"), [("clock", "utils/faketime_clock"), ("egress", "utils/egress_proxy")])
+def test_the_clock_pieces_are_taken_from_the_one_copy_the_computer_bases_take(agent, part, shared):
+    taken = tomllib.loads((AGENTS_DIR / agent / "shared_sources.toml").read_text())
 
-    assert copied
-    assert [str(p) for p in copied if str(p) != "libfaketime.patch"
-            and (BASE / folder / p).read_bytes() != (here / p).read_bytes()] == []
+    assert taken[part] == shared
+    assert not (AGENTS_DIR / agent / part).exists(), f"{agent}/{part} is a copy: take it in shared_sources.toml instead"
 
 
-@pytest.mark.parametrize("agent", CLOCKED)
-def test_the_agents_libfaketime_patch_is_the_bases_with_the_init_guard_after_it(agent):
+def test_the_libfaketime_every_clocked_image_builds_has_the_init_guard():
     # A CLI that reads the clock while libfaketime's init runs (an allocator, as dlsym allocates) has pthread_once wait
     # on itself: Claude Code's `--version` never returned. The guard has a clock call made during the init read the
-    # kernel's clock. The base doesn't take it yet, so the agent's copy is the base's patch, then the guard.
-    base = (BASE / "clock" / "libfaketime.patch").read_text()
-    patch = (AGENTS_DIR / agent / "clock" / "libfaketime.patch").read_text()
-    guard = patch.removeprefix(base)
+    # kernel's clock.
+    patch = (SOURCES / "utils" / "faketime_clock" / "libfaketime.patch").read_text()
 
-    assert patch.startswith(base) and guard.startswith("diff -ruN a/src/libfaketime.c b/src/libfaketime.c\n")
-    assert "static __thread int ftpl_initializing = 0;" in guard
-    assert "if (ftpl_initializing) return syscall(SYS_clock_gettime, clk_id, tp);" in guard
-    assert "pthread_once(&initialized_once_control, ftpl_really_init_guarded);" in guard
+    assert "static __thread int ftpl_initializing = 0;" in patch
+    assert "if (ftpl_initializing) return syscall(SYS_clock_gettime, clk_id, tp);" in patch
+    assert "pthread_once(&initialized_once_control, ftpl_really_init_guarded);" in patch
 
 
 def _program(agent: str, name: str) -> dict[str, str]:

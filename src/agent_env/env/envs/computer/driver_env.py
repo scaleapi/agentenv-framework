@@ -22,6 +22,7 @@ from agent_env.store.ids import derive_id
 
 if TYPE_CHECKING:
     from agent_env.bundle.authoring import AuthoringContext
+    from agent_env.entity.export import ExportContext
     from agent_env.env.env import DeployedEnv
 
 #: How long reading a driver's class at put may take.
@@ -90,6 +91,20 @@ class ComputerDriverEnv(Env):
         return cls.put(id=ctx.id, module=fields["module"], files=universe, declaration=declaration,
                        install=fields["install"], port=fields.get("port", DEFAULT_PORT),
                        known_failures=fields.get("known_failures"))
+
+    def to_toml(self, out: ExportContext) -> dict:
+        """The env.toml of a folder holding the driver's files, which ``from_toml`` reads back as it."""
+        self.files.to_toml(out)
+        toml = {"type": self.type, "module": self.module}
+        if self.port != DEFAULT_PORT:
+            toml["port"] = self.port
+        if self.install:
+            toml["install"] = {key: install.model_dump(mode="json", exclude_none=True, exclude_defaults=True)
+                               for key, install in self.install.items()}
+        if self.known_failures:
+            toml["known_failures"] = {key: [failure.model_dump(mode="json", exclude_defaults=True) for failure in failures]
+                                      for key, failures in self.known_failures.items()}
+        return toml
 
     @classmethod
     def accept_toml(cls, data: dict, ctx: AuthoringContext) -> dict:
