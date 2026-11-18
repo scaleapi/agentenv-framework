@@ -785,5 +785,22 @@ def test_an_agent_stored_under_an_installed_alias_by_anything_else_is_written_in
     imported = import_task("own", tmp_path / "imported", include_scopes=[FieldScope.USER])
 
     assert "claude-code" not in [ref.id for ref in imported.floating]
+    name = "claude-code-2" if registered_first else "claude-code"
     assert [(entity.folder, entity.id, entity.version) for entity in imported.written] == [
-        ("agents/claude-code", "claude-code", 2 if registered_first else 1)]
+        (f"agents/{name}", "claude-code", 2 if registered_first else 1)]
+    assert _steps(imported.root, "own")[0]["a2a_agent_id"] == name
+
+
+def test_a_folder_never_takes_an_alias_a_step_floats_so_each_version_keeps_its_own(registry, tmp_path):
+    registry("triage", AGENT_NAMED_BY_ALIAS)
+    A2AAgent.put(id="claude-code", docker_image_artifact=context_image(tmp_path, "own-image"))
+    _task("both", [{**AGENT_NAMED_BY_ALIAS[0], "id": "own", "a2a_agent_version": 2},
+                   {**AGENT_NAMED_BY_ALIAS[0], "id": "registered", "a2a_agent_version": 1}])
+
+    imported = import_task("both", tmp_path / "imported", include_scopes=[FieldScope.USER])
+
+    steps = _steps(imported.root, "both")
+    assert [step["a2a_agent_id"] for step in steps] == ["claude-code-2", "claude-code"]
+    assert [(entity.folder, entity.version) for entity in imported.written] == [("agents/claude-code-2", 2)]
+    assert [(ref.where, ref.id) for ref in imported.floating if ref.id == "claude-code"] == [
+        ("tasks/both.json: step 'registered': a2a_agent_id", "claude-code")]

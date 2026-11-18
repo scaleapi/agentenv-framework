@@ -63,7 +63,8 @@ from agent_env.env.env import Env
 from agent_env.env.registry import get_env_registry
 from agent_env.eval import Eval
 from agent_env.plugins import ARTIFACTS, ENVS, TASK_STEPS
-from agent_env.plugins._bundles import AGENT_ALIASES, ARTIFACT_ALIASES, ENV_ALIASES, InstalledAliases, installed_aliases
+from agent_env.plugins._bundles import (AGENT_ALIASES, ARTIFACT_ALIASES, ENV_ALIASES, BundleAlias, InstalledAliases,
+                                        installed_aliases)
 from agent_env.store import Filter
 from agent_env.store.base import NotFoundError
 from agent_env.store.ids import LOCAL_PREFIX, is_local_id
@@ -75,6 +76,9 @@ from agent_env.task_step.registry import get_task_step_registry
 from agent_env.utils.paths import os_reason
 
 _ALIAS_TABLES = {EntityKind.AGENT: AGENT_ALIASES, EntityKind.ENV: ENV_ALIASES, EntityKind.ARTIFACT: ARTIFACT_ALIASES}
+# The kind of entity whose aliases a kind folder's names would shadow in a run.
+_FOLDER_KINDS = {BundleKind.AGENT.value: EntityKind.AGENT, BundleKind.ENV.value: EntityKind.ENV,
+                 BundleKind.ARTIFACT.value: EntityKind.ARTIFACT}
 # How long a name taken from an id may be, in bytes; ids are capped far above it, and a longer name helps nobody.
 _MAX_NAME_BYTES = 200
 _DOWNLOADS = 8  # objects downloaded at once
@@ -216,6 +220,7 @@ class _Importer:
         self.providers = Providers()
         self.installed: tuple[InstalledBundle, ...] | None = None
         self.aliases: dict[str, InstalledAliases] = {}  # the installed bundles' aliases, by aliases.toml table
+        self.floatable: dict[EntityKind, set[str]] = {}  # each kind's aliases a step may float (_floatable)
         if self.dest is not None:
             _check_destination(self.dest)
 
@@ -552,18 +557,34 @@ class _Importer:
         version is the one ``bundle register`` wrote from the bundle, as its ledger in the store records: a run writes
         it from the bundle too. An entity stored under the alias by anything else is the store's own."""
         table = _ALIAS_TABLES.get(kind)
-        if table is None:
+        if table is None or (claim := self._aliases(table).target(entity.id)) is None:
             return None
+        return claim.bundle if self._registered(kind, claim, entity.version) else None
+
+    def _registered(self, kind: EntityKind, claim: BundleAlias, version: int | None = None) -> bool:
+        """Whether the store's registration ledger has ``bundle register`` writing ``claim``'s alias, at ``version`` or
+        any, from the installed bundle that gives it."""
+        fields = {"store": kind.value, "id": claim.alias, "status": "done",
+                  "bundle": f"installed:{claim.bundle.id_root.removeprefix(LOCAL_PREFIX)}"}
+        if version is not None:
+            fields["version"] = version
+        return configured_store(get_config().get_document_store()).find_one(REGISTRATIONS, Filter.of(**fields)) is not None
+
+    def _floatable(self, kind: EntityKind) -> set[str]:
+        """The aliases of ``kind``, folded, that a step may name floating: those the store holds a version of that
+        ``bundle register`` wrote from the installed bundle. No folder takes one, whatever order the export runs in."""
+        if kind not in self.floatable:
+            aliases = self._aliases(_ALIAS_TABLES[kind]).aliases
+            self.floatable[kind] = {fold(alias) for alias, claim in aliases.items() if self._registered(kind, claim)}
+        return self.floatable[kind]
+
+    def _aliases(self, table: str) -> InstalledAliases:
+        """The aliases the installed bundles give in ``table``."""
         if self.installed is None:
             self.installed = installed_bundles()
         if table not in self.aliases:
             self.aliases[table] = installed_aliases(self.installed, table)
-        if (claim := self.aliases[table].target(entity.id)) is None:
-            return None
-        registered = configured_store(get_config().get_document_store()).find_one(
-            REGISTRATIONS, Filter.of(store=kind.value, id=entity.id, version=entity.version, status="done",
-                                     bundle=f"installed:{claim.bundle.id_root.removeprefix(LOCAL_PREFIX)}"))
-        return claim.bundle if registered is not None else None
+        return self.aliases[table]
 
     def _from_installed(self, site: RefSite, where: str, bundle: InstalledBundle, why: str | None = None) -> None:
         """An installed bundle's entity has no fixed version, so it isn't pinned, and a pin the store held is dropped."""
@@ -596,11 +617,14 @@ class _Importer:
                                           "default"))
 
     def _name(self, kind: str, entity_id: str) -> str:
-        """A name in the ``kind`` folder: the id's last segment made valid, numbered when taken, caselessly."""
+        """A name in the ``kind`` folder: the id's last segment made valid, numbered when taken, caselessly, or when a
+        step may name it as an installed alias, floating (``_floatable``), which a folder of that name would capture in
+        a run."""
         names = _names_of(BundleKind(kind))
+        aliases = self._floatable(_FOLDER_KINDS[kind]) if kind in _FOLDER_KINDS else set()
         base = _valid_name(entity_id.rsplit("/", 1)[-1]) or kind.removesuffix("s")
         name, n = base, 1
-        while fold(name) in self.taken[names]:
+        while fold(name) in self.taken[names] or fold(name) in aliases:
             n += 1
             name = f"{base}-{n}"
         self.taken[names].add(fold(name))
