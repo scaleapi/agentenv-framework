@@ -498,9 +498,26 @@ def test_a_run_without_its_own_key_or_url_keeps_the_platforms(no_provider_env):
     assert env["LITELLM_BASE_URL"] == env["ANTHROPIC_BASE_URL"] == "https://proxy.example"
 
 
-def test_a_run_endpoint_override_moves_the_url_too(no_provider_env):
+def test_a_run_endpoint_override_moves_the_url_with_its_own_key(no_provider_env):
+    env = _step()._merged_env(_Config(), "modal", {},
+                              {"litellm_api_key": "sk-caller", "litellm_base_url": "https://other.example"})
+    assert (env["LITELLM_API_KEY"], env["LITELLM_BASE_URL"]) == ("sk-caller", "https://other.example")
+
+
+def test_the_platforms_key_never_goes_to_a_url_the_run_chose(no_provider_env):
     env = _step()._merged_env(_Config(), "modal", {}, {"litellm_base_url": "https://other.example"})
-    assert env["LITELLM_BASE_URL"] == "https://other.example"
+    assert (env["LITELLM_API_KEY"], env["LITELLM_BASE_URL"]) == ("sk-platform", "https://proxy.example")
+
+
+def test_a_run_key_that_cannot_be_resolved_is_said_and_never_swapped_for_the_platforms(no_provider_env, caplog):
+    class _Unresolvable(_Config):
+        def resolve_reference(self, value):
+            raise KeyError(value)
+
+    with caplog.at_level("WARNING"):
+        env = _step()._merged_env(_Unresolvable(), "modal", {}, {"litellm_api_key": "env:MISSING"})
+    assert "LITELLM_API_KEY" not in env and "ANTHROPIC_API_KEY" not in env
+    assert "this run's LiteLLM key could not be resolved" in caplog.text and "MISSING" not in caplog.text
 
 
 def test_a_key_the_step_itself_sets_still_wins_over_the_runs(no_provider_env):
