@@ -49,6 +49,7 @@ tools = "both"
 [computer_settings]
 theme = "dark"
 '''
+KNOWN = '\n[[known_failures.linux]]\ncheck = "P3"\nname = "drag"\nreason = "xdotool drops the release"\n'
 APPS = {f"envs/{name}/{file}": text for name in ("mail", "notes") for file, text in (
     ("env.toml", f'{APP_TOML}build_settings = {{ edition = "pro" }}\n' if name == "mail" else APP_TOML),
     ("app.py", APP.format(supports=LINUX, skill="skill.md", linux_skill="skill-linux.md")),
@@ -58,7 +59,7 @@ OWN_FILES = {
     "artifacts/base/artifact.toml": BASE,
     "artifacts/base/container/Dockerfile": "FROM scratch\nCOPY container/start /start\n",
     "artifacts/base/container/start": "#!/bin/sh\n",
-    "envs/desk/env.toml": INSTALLED,
+    "envs/desk/env.toml": INSTALLED + KNOWN,
     "envs/desk/driver.py": DRIVER.format(supports=LINUX, buttons=("left", "right")),
     "envs/desk/linux/requirements.txt": REQUIREMENTS, "envs/desk/linux/ppa.asc": "key",
     "envs/desk/linux/setup.sh": "#!/bin/sh\n", "envs/desk/linux/profile.sh": "#!/bin/sh\n",
@@ -108,6 +109,7 @@ def test_a_computer_env_with_its_own_base_driver_and_apps_reads_back_from_the_fo
     _same(read.computer, stored.computer, "description", "arch", "os", "session", "config")
     assert read.computer.forms.container.start_as == "root"
     assert read.computer.image().dockerfile_path == "container/Dockerfile"
+    assert [failure.check for failure in stored.driver.known_failures["linux"]] == ["P3"]
     _same(read.driver, stored.driver, "module", "port", "install", "known_failures", "declaration")
     assert _files(read.driver.files) == _files(stored.driver.files)
     assert [app.environment_name for app in read.apps] == ["notes", "mail"]

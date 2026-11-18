@@ -99,10 +99,10 @@ class ComputerDriverEnv(Env):
         if self.port != DEFAULT_PORT:
             toml["port"] = self.port
         if self.install:
-            toml["install"] = {key: install.model_dump(mode="json", exclude_none=True)
+            toml["install"] = {key: install.model_dump(mode="json", exclude_none=True, exclude_defaults=True)
                                for key, install in self.install.items()}
         if self.known_failures:
-            toml["known_failures"] = {key: [failure.model_dump(mode="json", exclude_none=True) for failure in failures]
+            toml["known_failures"] = {key: [failure.model_dump(mode="json", exclude_defaults=True) for failure in failures]
                                       for key, failures in self.known_failures.items()}
         return toml
 
