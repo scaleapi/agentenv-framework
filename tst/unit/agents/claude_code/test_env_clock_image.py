@@ -37,20 +37,16 @@ def test_hosts_the_agent_was_deployed_to_reach_directly_stay_direct_on_an_armed_
 
 
 @pytest.mark.parametrize("base_url, direct", [
-    ("http://10.0.0.5:4000", True),  # plain HTTP, private: nothing to check at the env's date, and the proxy refuses it
-    ("https://10.0.0.5:4000", True),  # private, over TLS too: the proxy refuses an address that isn't public
-    ("https://[fd00::5]:4000", True),
-    ("https://litellm.internal:4000", True),  # a name that resolves to a private address
-    ("https://8.8.8.8", False),  # TLS to a public address: its certificate is checked through the proxy
-    ("https://litellm.example.com", False),  # a name that resolves to a public one
-
+    ("http://10.0.0.5:4000", True),  # plain HTTP: nothing to check at the env's date
+    # TLS, at a private address or a public one: its certificate is checked through the proxy, on real time, and the
+    # agent's proxy reaches private networks (root.conf's AGENTENV_EGRESS_PRIVATE)
+    ("https://10.0.0.5:4000", False),
+    ("https://[fd00::5]:4000", False),
+    ("https://litellm.internal:4000", False),
+    ("https://litellm.example.com", False),
 ])
-def test_a_model_endpoint_over_plain_http_or_at_a_private_address_is_reached_directly_on_an_armed_clock(
-        monkeypatch, base_url, direct):
-    resolves = {"litellm.internal": "10.1.2.3", "litellm.example.com": "93.184.216.34"}
-    monkeypatch.setattr(claude_bridge, "_GLOBAL_HOSTS", {})
-    monkeypatch.setattr(claude_bridge.socket, "getaddrinfo",
-                        lambda host, port: [(None, None, None, "", (resolves[host], 0))])
+def test_a_model_endpoint_over_plain_http_is_reached_directly_and_one_over_tls_through_the_proxy_on_an_armed_clock(
+        base_url, direct):
     env = claude_bridge.cli_env({claude_bridge.EGRESS_PROXY_ENV: PROXY, "LITELLM_BASE_URL": base_url,
                                  "LITELLM_API_KEY": "k"}, clock_armed=True)
     assert (urlsplit(base_url).hostname in env["NO_PROXY"].split(",")) is direct and env["HTTPS_PROXY"] == PROXY
@@ -104,24 +100,3 @@ def test_while_the_follower_reconnects_or_restarts_the_page_still_routes_the_cli
     env = claude_bridge.cli_env({claude_bridge.EGRESS_PROXY_ENV: PROXY}, clock_armed=claude_bridge.clock_armed(str(page)))
     assert env["HTTPS_PROXY"] == PROXY
 
-
-def test_a_model_host_that_doesnt_resolve_in_time_is_left_to_the_proxy_and_asked_once(monkeypatch):
-    # A slow resolver holds a CLI's start for _RESOLVE_TIMEOUT_S at most, and only the first time.
-    import threading
-
-    asked, release = [], threading.Event()
-
-    def slow(host, port):
-        asked.append(host)
-        release.wait(5)
-        return [(None, None, None, "", ("10.1.2.3", 0))]
-
-    monkeypatch.setattr(claude_bridge, "_GLOBAL_HOSTS", {})
-    monkeypatch.setattr(claude_bridge, "_RESOLVE_TIMEOUT_S", 0.05)
-    monkeypatch.setattr(claude_bridge.socket, "getaddrinfo", slow)
-    try:
-        assert claude_bridge.model_direct_hosts("https://slow.internal") == []
-        assert claude_bridge.model_direct_hosts("https://slow.internal") == []
-    finally:
-        release.set()
-    assert asked == ["slow.internal"]

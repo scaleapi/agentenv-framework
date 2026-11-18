@@ -236,6 +236,41 @@ func TestPlainHTTPInAbsoluteFormIsForwarded(t *testing.T) {
 	}
 }
 
+func TestAProxyThatAllowsPrivateNetworksReachesThemAndStillRefusesTheRest(t *testing.T) {
+	p := &Proxy{Routed: func() map[string]string { return nil }, PrivateNetworks: true}
+	resolving := func(addresses ...string) {
+		p.Resolve = func(context.Context, string) ([]netip.Addr, error) {
+			var out []netip.Addr
+			for _, a := range addresses {
+				out = append(out, netip.MustParseAddr(a))
+			}
+			return out, nil
+		}
+	}
+	for _, address := range []string{"10.0.0.5", "172.16.0.1", "192.168.1.1", "100.64.0.1", "fd00::5", "::ffff:10.0.0.5"} {
+		resolving(address)
+		if dst, why, err := p.destination("model.internal", 4000); err != nil || why != "private" || len(dst) != 1 {
+			t.Errorf("%s: %q %q %v", address, dst, why, err)
+		}
+	}
+	for _, address := range []string{"127.0.0.1", "::1", "0.0.0.0", "169.254.169.254", "fe80::1", "224.0.0.1",
+		"192.0.2.1"} {
+		resolving(address)
+		if _, _, err := p.destination("model.internal", 4000); err == nil {
+			t.Errorf("%s dialled", address)
+		}
+	}
+	resolving("1.1.1.1")
+	if _, why, err := p.destination("one.one.one.one", 443); err != nil || why != "global" {
+		t.Fatalf("a public name: %q %v", why, err)
+	}
+	resolving("1.1.1.1", "10.0.0.5")
+	dst, why, err := p.destination("split.example", 443)
+	if err != nil || why != "private" || strings.Join(dst, " ") != "1.1.1.1:443 10.0.0.5:443" {
+		t.Fatalf("a name with a private address: %q %q %v", dst, why, err)
+	}
+}
+
 func TestARefusedDestinationIsAnswered403(t *testing.T) {
 	s := site(t, false)
 	h := newHarness(t, s, fixedUniverse{}, true)

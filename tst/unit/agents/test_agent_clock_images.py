@@ -63,6 +63,14 @@ def test_the_follower_and_the_proxy_run_as_their_own_users_and_the_a2a_server_as
 
 
 @pytest.mark.parametrize("agent", CLOCKED)
+def test_the_agents_proxy_reaches_private_networks_where_its_model_endpoint_may_be_and_a_computers_doesnt(agent):
+    # The agent's processes reach those directly anyway; its model endpoint, over TLS, goes through the proxy.
+    assert 'AGENTENV_EGRESS_PRIVATE="allow"' in _program(agent, "egress")["environment"].split(",")
+    base = (SOURCES / "computers" / "artifacts" / "ubuntu-24.04" / "root.conf").read_text()
+    assert "AGENTENV_EGRESS_PRIVATE" not in base
+
+
+@pytest.mark.parametrize("agent", CLOCKED)
 def test_the_image_preloads_the_library_for_the_agents_user_and_the_follower_alone_reads_its_config(agent):
     dockerfile = (AGENTS_DIR / agent / "Dockerfile").read_text()
     assert "> /etc/ld.so.preload" in dockerfile and "libfaketimeMT.so.1" in dockerfile
@@ -83,7 +91,7 @@ def _clock_helpers(agent: str) -> dict[str, str]:
     """The bridge's clock helpers, as source: the one module in the agent's folder that defines ``egress_env``."""
     [module] = [p for p in (AGENTS_DIR / agent).glob("*.py") if "def egress_env(" in p.read_text()]
     tree = ast.parse(module.read_text())
-    names = {"clock_armed", "_global_host", "model_direct_hosts", "egress_env"}
+    names = {"clock_armed", "model_direct_hosts", "egress_env"}
     found = {node.name: ast.unparse(node) for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names}
     assert set(found) == names, (module, sorted(found))
     return found

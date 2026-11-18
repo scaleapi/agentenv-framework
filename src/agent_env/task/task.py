@@ -24,6 +24,7 @@ from agent_env.plugins._requirements import unmet_problems
 from agent_env.store.document_store import UnknownDocumentTypeError
 from agent_env.store.routing import run_scope
 from agent_env.task_step.preflight import pinned
+from agent_env.task.outcome import FailedStep
 from agent_env.task.teardown import env_record_ids
 from agent_env.task_step.context import ENTITY_IDS_KEY, TaskStepContext, VerifierNotPassingError, regraft_redacted_keys
 from agent_env.task_step.context_ops import ContextUpdateOps, build_context_update_ops
@@ -130,12 +131,12 @@ def substitute_seed_in_steps(steps: list["TaskStep"], seed: dict) -> list["TaskS
             return {k: _sub(v) for k, v in value.items()}
         return value
 
-    from agent_env.task_step.task_step import attach_retry_config
+    from agent_env.task_step.task_step import attach_base_fields
 
     out: list["TaskStep"] = []
     for step in steps:
         data = _sub(step.to_dict())
-        seeded = attach_retry_config(type(step).from_dict(data), data)
+        seeded = attach_base_fields(type(step).from_dict(data), data)
         if (keep := getattr(seeded, "seeded_from", None)) is not None:  # a step that keeps something as written
             keep(step)
         out.append(seeded)
@@ -463,9 +464,9 @@ class Task:
                                f"{_registration.failure_note(_registration.TASK_STEPS, step_type)}", *problems]),
                     unmet,
                 )
-            from agent_env.task_step.task_step import attach_retry_config
+            from agent_env.task_step.task_step import attach_base_fields
 
-            steps.append(attach_retry_config(step_cls.from_dict(step_dict), step_dict))
+            steps.append(attach_base_fields(step_cls.from_dict(step_dict), step_dict))
         return cls(
             id=data["id"],
             version=data.get("version"),
@@ -684,12 +685,9 @@ class Task:
             except BaseException as exc:
                 duration = time.monotonic() - started_mono
                 fatal = getattr(step, "fail_task_on_error", True)
-                context.metadata.setdefault("failed_steps", []).append({
-                    "step_id": step.id, "step_type": step.type,
-                    "error": str(exc), "error_type": type(exc).__name__,
-                    "started_at_utc": started_utc, "duration_seconds": duration,
-                    "is_fatal": fatal,
-                })
+                context.metadata.setdefault("failed_steps", []).append(FailedStep.from_exception(
+                    step, exc, started_at_utc=started_utc, duration_seconds=duration, is_fatal=fatal,
+                ).to_dict())
                 if not fatal:
                     await _heartbeat_step(step, pre_context, _store.TaskStepStatus.FAILURE, dispatch_epoch)
                 raise
