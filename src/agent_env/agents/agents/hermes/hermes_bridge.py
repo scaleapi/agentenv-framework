@@ -181,7 +181,7 @@ def cli_env(environ: Mapping[str, str], home: Path, *, events_fd: int | None = N
     if events_fd is not None:
         env[_EVENTS_FD_ENV] = str(events_fd)
     model_host = model_direct_hosts(environ.get("LITELLM_BASE_URL")) if clock_armed else []
-    mcp_hosts = [urlsplit(str(info.get("url") or "")).hostname or "" for info in (mcp_servers or {}).values()]
+    mcp_hosts = [url.hostname for url in (urlsplit(str(info.get("url") or "")) for info in (mcp_servers or {}).values()) if url.hostname and url.scheme == "http"]
     env.update(egress_env(environ, [*mcp_hosts, *model_host], armed=clock_armed))
     return env
 
