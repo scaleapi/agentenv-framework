@@ -312,8 +312,8 @@ class _Importer:
             out.pulled.append(Pulled(out.folder, key, ref))
             return {"ref": ref}
         if names_registry(artifact.image_name):
-            out.pulled.append(Pulled(out.folder, key, artifact.image_name))
-            return {"ref": artifact.image_name}
+            out.pulled.append(Pulled(out.folder, key, artifact.pinned_name))
+            return {"ref": artifact.pinned_name}
         why = (f"it's stored only as a docker save tarball, under {artifact.image_name}, which names no registry"
                if artifact.tar_gz_object_url else "it records neither a build context nor a registry to pull it from")
         self._unwritable((EntityKind.ARTIFACT, artifact.id, artifact.version), f"{out.folder}: {key}", why)
@@ -419,8 +419,8 @@ class _Importer:
             return
         if names_registry(job.artifact.image_name):
             job.toml.clear()
-            job.toml["ref"] = job.artifact.image_name
-            self.pulled.append(Pulled(job.folder, job.key, job.artifact.image_name, job.problem))
+            job.toml["ref"] = job.artifact.pinned_name
+            self.pulled.append(Pulled(job.folder, job.key, job.artifact.pinned_name, job.problem))
             return
         key = (EntityKind.ARTIFACT, job.artifact.id, job.artifact.version)
         try:
