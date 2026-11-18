@@ -63,6 +63,9 @@ const (
 	PageReads = 1000
 )
 
+// PrivateEnv set to "allow" lets the proxy reach private networks' addresses too (Proxy.PrivateNetworks).
+const PrivateEnv = "AGENTENV_EGRESS_PRIVATE"
+
 // The dates the CA and every leaf it signs are valid between: the widest a certificate carries, as routed sites'
 // (sites.UNIVERSE_FROM and UNIVERSE_UNTIL in agent-env's site routing), so they hold at any date the clock can show.
 var (

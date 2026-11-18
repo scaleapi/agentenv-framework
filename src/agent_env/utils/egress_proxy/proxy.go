@@ -35,6 +35,10 @@ type Proxy struct {
 	Dial    func(dst string) (net.Conn, error)
 	Log     func(row map[string]any)
 	probes  probes
+	// PrivateNetworks lets a destination at a private network's address (RFC 1918, RFC 6598's shared space, IPv6
+	// unique local) through as well as a global one: an agent's image sets it, whose processes reach those directly
+	// anyway, so its model endpoint is reached on real time wherever it is. A computer's proxy leaves it off.
+	PrivateNetworks bool
 }
 
 func serveForever(listen string) error {
@@ -56,8 +60,10 @@ func serveForever(listen string) error {
 	if err != nil {
 		return err
 	}
-	p := &Proxy{Leaves: leaves, Universe: universe, Roots: pool, Log: jsonLines(os.Stdout)}
-	p.Log(map[string]any{"event": "serving", "listen": listen, "uid": os.Getuid(), "pid": os.Getpid()})
+	p := &Proxy{Leaves: leaves, Universe: universe, Roots: pool, Log: jsonLines(os.Stdout),
+		PrivateNetworks: os.Getenv(PrivateEnv) == "allow"}
+	p.Log(map[string]any{"event": "serving", "listen": listen, "uid": os.Getuid(), "pid": os.Getpid(),
+		"private_networks": p.PrivateNetworks})
 	return p.Serve(ln)
 }
 
@@ -231,7 +237,8 @@ func headerName(line string) string {
 
 // destination is the addresses to dial for host:port, in the order to try them, and why they're allowed: "routed" for
 // a name the hosts file's agentenv sites block maps (the site proxy, as a client that bypasses this proxy reaches it),
-// "global" for a name whose every address is global, IPv4 first. Anything else is refused.
+// "global" for a name whose every address is global, "private" for one with an address on a private network where
+// PrivateNetworks lets those through, IPv4 first. Anything else is refused.
 func (p *Proxy) destination(host string, port int) ([]string, string, error) {
 	host = strings.TrimSuffix(strings.ToLower(strings.Trim(host, "[]")), ".")
 	routed := p.Routed
@@ -262,11 +269,16 @@ func (p *Proxy) destination(host string, port int) ([]string, string, error) {
 	}
 	var private []string
 	var v4, v6 []string
+	why := "global"
 	for _, a := range addresses {
 		a = a.Unmap()
 		dst := netip.AddrPortFrom(a, uint16(port)).String()
+		ok := allowed(a)
+		if !ok && p.PrivateNetworks && isPrivateNetwork(a) {
+			ok, why = true, "private"
+		}
 		switch {
-		case !allowed(a):
+		case !ok:
 			private = append(private, a.String())
 		case a.Is4():
 			v4 = append(v4, dst)
@@ -277,7 +289,7 @@ func (p *Proxy) destination(host string, port int) ([]string, string, error) {
 	if len(private) > 0 {
 		return nil, "", fmt.Errorf("%s:%d isn't public (%s)", host, port, strings.Join(private, ", "))
 	}
-	return append(v4, v6...), "global", nil
+	return append(v4, v6...), why, nil
 }
 
 // notGlobal are the special-purpose blocks (IANA's registries) no global address is in.
@@ -294,6 +306,20 @@ var notGlobal = func() []netip.Prefix {
 	}
 	return out
 }()
+
+// privateNetworks are the blocks a network of one's own is numbered from, which PrivateNetworks lets through.
+var privateNetworks = []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8"), netip.MustParsePrefix("172.16.0.0/12"),
+	netip.MustParsePrefix("192.168.0.0/16"), netip.MustParsePrefix("100.64.0.0/10"), netip.MustParsePrefix("fc00::/7")}
+
+func isPrivateNetwork(a netip.Addr) bool {
+	a = a.Unmap()
+	for _, block := range privateNetworks {
+		if block.Contains(a) {
+			return true
+		}
+	}
+	return false
+}
 
 func isGlobal(a netip.Addr) bool {
 	a = a.Unmap()

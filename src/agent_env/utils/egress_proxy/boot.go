@@ -31,8 +31,10 @@ type bootPaths struct {
 	NSS func(paths bootPaths) error
 }
 
+// defaultBootPaths are the computer base's. An image whose session user isn't the base's names it in
+// AGENTENV_SESSION_USER, and one with no browser to read an NSS database, an agent's, sets AGENTENV_EGRESS_NSS=off.
 func defaultBootPaths() bootPaths {
-	return bootPaths{
+	p := bootPaths{
 		Folder: Folder, PublicCA: PublicCA, Anchor: "/usr/local/share/ca-certificates/agentenv-egress.crt",
 		Bundles:      []string{"/etc/agentenv/ca.pem", "/etc/agentenv/ca-bundle.pem"},
 		UpdateTrust:  []string{"update-ca-certificates"},
@@ -41,6 +43,13 @@ func defaultBootPaths() bootPaths {
 		EgressUser:   EgressUser, SessionUser: SessionUser,
 		NSS: sessionNSS,
 	}
+	if name := os.Getenv("AGENTENV_SESSION_USER"); name != "" {
+		p.SessionUser = name
+	}
+	if os.Getenv("AGENTENV_EGRESS_NSS") == "off" {
+		p.NSS = nil
+	}
+	return p
 }
 
 // boot, as root before the session starts: the CA, minted once per computer, its key the egress user's alone, and
