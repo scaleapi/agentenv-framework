@@ -536,8 +536,10 @@ def test_a_computer_env_whose_compose_leaves_nothing_a_deploy_boots_fails_the_re
 
     assert result.exit_code == 1, result.output
     assert ("envs/desktop: desk-desktop v1 has no build a deploy can boot (container/amd64 failed (no space left on "
-            "device); container/arm64 skipped (no link runs linux/arm64 natively)); register again to compose them "
-            "again, or run agent-env env build --id desk-desktop --version 1") in result.output
+            "device); container/arm64 skipped (no link runs linux/arm64 natively)), so no task was written: register "
+            "again to compose what it left, emulating a skipped arch or on a --sandbox that runs it natively, or "
+            "compose it with agent-env env build --id desk-desktop --version 1 and then register again"
+            ) in result.output
     assert Env.get("desk-desktop").version == 1
     with pytest.raises(NotFoundError):
         Task.get("desk-t")

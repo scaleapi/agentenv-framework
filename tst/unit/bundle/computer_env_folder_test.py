@@ -131,8 +131,8 @@ def test_a_computer_env_no_deploy_could_boot_stops_its_tasks_until_composing_it_
         materialize(_plan(root), build_here=local_builds(_plan(root)), bootable=True)
     assert stopped.value.problems == (
         f"envs/desktop: {env_id} v1 has no build a deploy can boot (container/amd64 failed; container/arm64 ready, by "
-        f"another composer); register again to compose them again, or run agent-env env build --id {env_id} "
-        "--version 1",)
+        f"another composer), so no task was written: register again to compose what it left, or compose it with "
+        f"agent-env env build --id {env_id} --version 1 and then register again",)
     with pytest.raises(NotFoundError):
         Task.get(task_id)
 
