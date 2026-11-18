@@ -192,7 +192,9 @@ async def _ended(episode):
 
 
 async def _until(holds):
-    async with asyncio.timeout(5):
+    # The budget covers a cold start: the first episode in a process imports every sandbox provider's SDK (seconds)
+    # before its first turn opens. The loop returns as soon as ``holds`` does, so a passing test never waits it out.
+    async with asyncio.timeout(30):
         while not holds():
             await asyncio.sleep(0.01)
 
